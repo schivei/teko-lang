@@ -1,120 +1,120 @@
-# Arandu Language Specification Document
+# Teko Language Technical Specification
 
-## Introduction
-Arandu is a native programming language (AOT) inspired by modularity, dependency injection, traits, and meta-code. 
-The name comes from Guarani and means "wisdom," reflecting the philosophy of the language: simplicity, clarity, and power.
+## 1. Overview
+Teko is a native programming language (AOT) designed for modular, scalable, and expressive software development. It integrates directory-based namespaces, traits, dependency injection, meta-code execution, built-in testing, and benchmarking. The language emphasizes clarity, compositional design, and productivity.
 
----
+## 2. File Extensions
+- .teko → Primary source code files.
+- .meta.teko → Meta-code files (compile-time bindings, code generation, validations).
+- .test.teko → Test files (unit and integration tests).
+- .spec.teko → Specification tests (behavior-driven development).
+- .bench.teko → Benchmark files (performance and stress testing).
 
-## Philosophy
-- Native: ahead-of-time compilation, no extra runtime.
-- Modular: scope defined by directories, similar to Go.
-- Expressive: explicit keywords for inheritance, implementation, and decorator.
-- Compositional: native support for traits.
-- Segregated: meta-code and tests separated into their own extensions.
-- Productive: built-in dependency injection, no external frameworks required.
-
----
-
-## File Extensions
-- `.aru` → main source code.
-- `.arm` → meta-code (bindings, validations, code generation).
-- `.art` → tests (unit and integration).
-
-### Example Project Structure
+### Example Project Layout
 /src
    /logging
-       ILogger.aru
-       ConsoleLogger.aru
-       TimestampLogger.aru
-       Bindings.arm
-       Logger.test
+       ILogger.teko
+       ConsoleLogger.teko
+       TimestampLogger.teko
+       Bindings.meta.teko
+       Logger.test.teko
    /services
-       IService.aru
-       ServiceImpl.aru
-       CachableTrait.aru
-       Bindings.arm
-       Service.test
-   Program.aru
+       IService.teko
+       ServiceImpl.teko
+       CachableTrait.teko
+       Bindings.meta.teko
+       Service.spec.teko
+   /performance
+       CacheBench.bench.teko
+       ServiceBench.bench.teko
+   Program.teko
 
----
+## 3. Namespace and Scope
+Each directory defines a namespace automatically. Imports are directory-based: import logging, import services. .meta.teko, .test.teko, .spec.teko, and .bench.teko files inherit the namespace of their directory. No manual namespace declarations are required.
 
-## Directory Scope
-- Each folder automatically defines a namespace.
-- `.arm` and `.art` files inherit the scope of their directory.
-- Imports are simple: `import logging`, `import services`.
+## 4. Language Constructs
+Keywords: implements (interface implementation), extends (class inheritance), decorates (native decorator pipeline), trait (horizontal composition of behavior), with (apply traits to classes/structs), inject (native dependency injection). Visibility modifiers: public, private, protected, internal, package, scoped, threaded.
 
----
+### Dependency Injection
+Built-in DI container with lifetimes: singleton, scoped, threaded.
+Example:
+inject singleton ILogger logger = new TimestampLogger(new ConsoleLogger());
 
-## Core Keywords
-- `implements` → interface implementation.
-- `extends` → class inheritance.
-- `decorates` → native pipeline for the Decorator pattern.
-- `trait` → horizontal composition of behavior.
-- `with` → apply traits to classes/structs.
-- `inject` → native dependency injection.
-- Visibility modifiers: `public`, `private`, `protected`, `internal`, `package`, `scoped`, `threaded`.
+### Traits
+Traits provide reusable behavior, applied with with.
+Example:
+trait CachableTrait {
+    void Cache(string key, object value) { ... }
+}
+class ServiceImpl with CachableTrait {
+    void Process() { ... }
+}
 
----
+## 5. Build System
+teko build ./src → full build (code, meta, tests, benchmarks).
+Options: --no-test (skip tests), --meta-only (execute only meta-code), --test-only (run only tests), --bench-only (run only benchmarks), --release (optimized build for production).
 
-## Build and Execution
+teko run ./src → interpret IR without optimization.
+Options: --debug (enable debugger), --no-meta (skip meta-code), --no-test (skip tests), --no-bench (skip benchmarks), --release-map (generate binary symbol map for release debugging).
 
-### Main Build Command
-arandu build ./src
+## 6. Compilation Pipeline
+1. Parsing → parse .teko files into AST.
+2. Meta Execution → execute .meta.teko files at compile-time.
+3. Test Discovery → compile .test.teko and .spec.teko files into test binaries.
+4. Benchmark Discovery → compile .bench.teko files into benchmark binaries.
+5. IR Generation → produce intermediate representation with DI resolved.
+6. Backend → translate IR to assembly/machine code.
+7. Linker → link binary with external libraries.
+8. Test Runner → execute test binaries, report PASS/FAIL.
+9. Benchmark Runner → execute benchmarks, report performance metrics.
 
-### Options
-- `--no-test` → build without running tests.
-- `--meta-only` → execute only meta-code.
-- `--test-only` → execute only tests.
-- `--release` → optimized build for production.
+## 7. Testing
+.test.teko → unit and integration tests.
+.spec.teko → specification tests for behavior-driven development.
+Example:
+test ServiceProcess {
+    IService s = new ServiceImpl();
+    s.Process();
+    assert s.LastResult == "OK";
+}
 
-### Run Mode
-arandu run ./src
-- Executes without optimization, like an interpreter.
-- Ideal for debugging and hot reload.
-- `--debug` enables breakpoints and variable inspection.
-- `--release-map` generates a binary symbol map for release debugging (disabled by default).
+## 8. Benchmarking
+.bench.teko → performance and stress tests.
+Benchmarks measure execution time, memory usage, and throughput.
+Example:
+bench CachePerformance {
+    Cache c = new Cache();
+    measure {
+        for (int i = 0; i < 1000000; i++) {
+            c.Store("key" + i, i);
+        }
+    }
+}
 
----
+## 9. Meta-Code
+.meta.teko files executed at compile-time, used for bindings, validations, and code generation.
+Example:
+generateBindings("liblogging.so", symbols: [
+    "init_logger()",
+    "shutdown_logger()"
+]);
 
-## Compilation Pipeline
-1. Parsing → reads `.aru` files.
-2. Meta Execution → applies `.arm` files.
-3. Test Discovery → compiles `.art` files.
-4. IR Generation → produces IR with DI resolved.
-5. Backend → translates IR to assembly/machine code.
-6. Linker → generates final binary.
-7. Test Runner → executes tests.
+## 10. Debugging
+Integrated with teko run --debug. Supports breakpoints, step execution, variable inspection. Optional release symbol map with --release-map.
 
----
+## 11. LSP and IDE Integration
+Visual Studio Code → official Teko LSP extension.
+Visual Studio → plugin with advanced debugger integration.
+JetBrains IDEs → generic LSP support.
+Vim/Neovim/Emacs → LSP client integration.
 
-## LSP and IDE Support
-- Visual Studio Code → official Arandu LSP extension.
-- Visual Studio → plugin with advanced debugger support.
-- JetBrains IDEs → generic LSP integration.
-- Neovim/Vim/Emacs → LSP client integration.
+Features: syntax highlighting for all extensions, autocomplete, real-time diagnostics, refactoring tools, debugging integration, test and benchmark runner feedback inside IDE.
 
-### LSP Features
-- Syntax highlighting for `.aru`, `.arm`, `.art`.
-- Autocomplete for imports and symbols.
-- Real-time diagnostics.
-- Refactoring (rename, extract traits).
-- Debugging integrated with `run --debug`.
-- Test runner with visual feedback.
+## 12. Licensing
+Recommended: Dual License (MIT + Apache 2.0) for maximum adoption and patent protection. Alternative: GPLv3 if community protection is prioritized. Libraries may use LGPLv3 for compatibility with proprietary software.
 
----
+## 13. Benefits
+Directory-based modularity. Clear separation of code, meta, tests, and benchmarks. Expressive language constructs. Built-in dependency injection. Flexible build and run modes. Strong IDE integration. Open-source licensing aligned with modern ecosystems.
 
-## Benefits
-- Natural organization → directory-based scope.
-- Clear separation → meta and tests are segregated.
-- Expressive → explicit keywords for inheritance, traits, and decorator.
-- Productive → built-in dependency injection.
-- Flexible → optimized build or interpreted run mode.
-- Integrated → modern IDE support via LSP.
-
----
-
-## Conclusion
-Arandu is a language that unites clarity, modularity, and power. 
-With native support for dependency injection, traits, meta-code, and integrated testing, 
-it offers a complete ecosystem for modern development, combining ease of use with execution robustness.
+## 14. Conclusion
+Teko combines clarity, modularity, and execution power. With traits, meta-code, dependency injection, integrated testing, and benchmarking, it provides a complete ecosystem for modern software development, balancing simplicity with technical depth and scalability.
