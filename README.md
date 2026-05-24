@@ -48,5 +48,27 @@ bench CachePerformance {
 - teko run ./src → run in interpreted mode
 - Options: --debug, --release, --test-only, --bench-only
 
+## Bootstrap Build
+
+The initial compiler bootstrap is written in portable C and can be built from
+the repository root:
+
+```sh
+make
+```
+
+Useful targets:
+
+```sh
+make bootstrap      # build bootstrap/c/build/teko-bootstrap
+make example-core0  # compile examples/core0 to generated C, then native binary
+make check          # build and run the Core 0 smoke test
+make clean
+```
+
+CLion can open the repository as a CMake project through the root
+`CMakeLists.txt`. The main targets are `teko-bootstrap` and
+`teko_core0_smoke`.
+
 ## License
 Dual License: MIT + Apache 2.0
