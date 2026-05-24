@@ -25,7 +25,7 @@
 
 - **Arquivo + extensão** definem o tipo e sua natureza.  
 - **Backtick + número** define a quantidade de parâmetros genéricos.  
-- O compilador trata `Tipo\`1`, `Tipo\`2`, etc. como **tipos distintos**.  
+- O compilador trata `Tipo``1`, `Tipo\`2`, etc. como **tipos distintos**.  
 - Não existe sintaxe interna para declarar generics — apenas uso.  
 - Essa convenção garante clareza e evita caracteres inválidos em nomes de arquivo.  
 
