@@ -1,0 +1,101 @@
+TEKO LANGUAGE SPECIFICATION (Safe References, Weak References & Variable Ref)
+
+====================================
+1. Safe References (ref)
+====================================
+- Ponteiros seguros através da palavra-chave `ref`.
+- Sem aritmética de ponteiros, apenas referências estáticas.
+- Ciclo de vida gerenciado pelo compilador/runtime.
+- Objetos só são desalocados quando não houver mais referências ativas.
+
+Exemplo em coleções:
+map<string, MinhaEntidade ref> mapa1 = []
+map<datetimez, MinhaEntidade ref> mapa2 = []
+
+MinhaEntidade ent = MinhaEntidade(Id: "123", Nome: "Elton")
+
+mapa1[ent.Id] = ent
+mapa2[now]   = ent
+
+unset mapa1["123"]
+
+log info mapa2[now].Nome // "Elton"
+
+====================================
+2. Ref em Variáveis
+====================================
+- `ref` pode ser usado na declaração de variáveis locais.
+- Permite manter referência direta a campos ou propriedades sem duplicação.
+
+Exemplo:
+MinhaEntidade ent = MinhaEntidade(Id: "123", Nome: "Teste")
+
+ref var nome = ent.Nome // mantém referência ao campo
+
+ent.Nome = "Alterado"
+
+log info nome       // "Alterado"
+log info ent.Nome   // "Alterado"
+
+====================================
+3. Weak References (weak ref)
+====================================
+- `weak ref` é sempre nullable por definição.
+- Não impede que o objeto seja desalocado.
+- Útil para caches, observadores e estruturas temporárias.
+- Se o objeto for desalocado, a weak ref passa a ser `null`.
+
+Exemplo em cache:
+MinhaEntidade ent = MinhaEntidade(Id: "ABC", Nome: "Teste")
+
+map<string, MinhaEntidade weak ref> cache = []
+cache["ABC"] = ent
+
+unset ent
+
+if cache["ABC"] is null {
+    log info "Objeto já foi desalocado, recarregar do banco"
+}
+
+====================================
+4. Ciclo de Vida Implícito
+====================================
+- Remoção de coleções transfere ownership automaticamente.
+- Constantes e imutáveis são tratados como ponteiros internos para economizar memória.
+- Propriedades e campos sem `ref` são cópias expandidas, com ciclo de vida intrínseco ao objeto.
+- Não há necessidade de `borrow` ou `move` explícitos:
+  - Ao retirar de uma lista, ownership é transferido automaticamente.
+  - Ao final do escopo, se não houver refs, o objeto é coletado.
+
+Exemplo:
+Fila<MinhaEntidade> fila = []
+fila.push(MinhaEntidade(Id: "XYZ", Nome: "Novo"))
+
+var item = fila.pop() // ownership transfer implícito
+
+log info item.Nome // "Novo"
+// item será coletado ao final do escopo se não houver refs
+
+====================================
+5. Observadores com Weak Ref
+====================================
+MinhaEntidade ent = MinhaEntidade(Id: "ABC", Nome: "Teste")
+
+list<MinhaEntidade weak ref> observers = []
+observers.add(ent)
+
+for obs in observers {
+    if obs is not null {
+        log info $"Observador ativo: {obs.Nome}"
+    }
+}
+
+====================================
+6. Benefícios
+====================================
+- Segurança: sem riscos de memória corrompida.
+- Eficiência: constantes e imutáveis são ponteiros internos.
+- Flexibilidade: múltiplas coleções podem compartilhar objetos com `ref`.
+- Caches e observadores seguros com `weak ref`.
+- Ownership e borrow implícitos, sem necessidade de sintaxe extra.
+- Consistência: ciclo de vida controlado pelo compilador, sem GC pesado.
