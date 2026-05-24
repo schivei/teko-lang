@@ -9,12 +9,15 @@ CORE0_SOURCES := \
 	examples/core0/TokenKind.enum.teko \
 	examples/core0/main.teko
 
-.PHONY: all bootstrap example-core0 check clean
+.PHONY: all bootstrap bootstrap-test example-core0 check clean
 
 all: bootstrap
 
 bootstrap:
 	$(MAKE) -C $(BOOTSTRAP_DIR)
+
+bootstrap-test:
+	$(MAKE) -C $(BOOTSTRAP_DIR) test
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -27,7 +30,7 @@ $(CORE0_BIN): $(CORE0_C)
 
 example-core0: $(CORE0_BIN)
 
-check: example-core0
+check: bootstrap-test example-core0
 	$(CORE0_BIN)
 
 clean:

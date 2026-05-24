@@ -1,29 +1,29 @@
 #include "teko_internal.h"
 
-static int is_alpha(char c) {
+static int is_alpha(const char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-static int is_digit(char c) {
+static int is_digit(const char c) {
     return c >= '0' && c <= '9';
 }
 
-static int is_alnum(char c) {
+static int is_alnum(const char c) {
     return is_alpha(c) || is_digit(c);
 }
 
-static char peek(Lexer *lexer) {
+static char peek(const Lexer *lexer) {
     if (lexer->pos >= lexer->source->text.length) return 0;
     return lexer->source->text.data[lexer->pos];
 }
 
-static char peek_next(Lexer *lexer) {
+static char peek_next(const Lexer *lexer) {
     if (lexer->pos + 1 >= lexer->source->text.length) return 0;
     return lexer->source->text.data[lexer->pos + 1];
 }
 
 static char advance(Lexer *lexer) {
-    char c = peek(lexer);
+    const char c = peek(lexer);
     if (!c) return 0;
     lexer->pos++;
     if (c == '\n') {
@@ -35,7 +35,7 @@ static char advance(Lexer *lexer) {
     return c;
 }
 
-static Token make_token(Lexer *lexer, TokenKind kind, size_t offset, unsigned line, unsigned column) {
+static Token make_token(const Lexer *lexer, const TokenKind kind, const size_t offset, const unsigned line, const unsigned column) {
     Token token;
     token.kind = kind;
     token.offset = offset;
@@ -45,7 +45,7 @@ static Token make_token(Lexer *lexer, TokenKind kind, size_t offset, unsigned li
     return token;
 }
 
-static TokenKind keyword_kind(TekoString text) {
+static TokenKind keyword_kind(const TekoString text) {
     if (teko_string_equal_cstr(text, "fn")) return TOK_FN;
     if (teko_string_equal_cstr(text, "struct")) return TOK_STRUCT;
     if (teko_string_equal_cstr(text, "enum")) return TOK_ENUM;
@@ -68,9 +68,6 @@ void teko_lexer_init(Lexer *lexer, const TekoSource *source) {
 }
 
 Token teko_lexer_next(Lexer *lexer) {
-    size_t offset;
-    unsigned line;
-    unsigned column;
     char c;
 
     for (;;) {
@@ -96,18 +93,17 @@ Token teko_lexer_next(Lexer *lexer) {
         break;
     }
 
-    offset = lexer->pos;
-    line = lexer->line;
-    column = lexer->column;
+    size_t offset = lexer->pos;
+    unsigned line = lexer->line;
+    unsigned column = lexer->column;
     c = advance(lexer);
 
     if (!c) return make_token(lexer, TOK_EOF, offset, line, column);
     if (c == '\n') return make_token(lexer, TOK_NEWLINE, offset, line, column);
 
     if (is_alpha(c)) {
-        Token token;
         while (is_alnum(peek(lexer))) advance(lexer);
-        token = make_token(lexer, TOK_IDENTIFIER, offset, line, column);
+        Token token = make_token(lexer, TOK_IDENTIFIER, offset, line, column);
         token.kind = keyword_kind(token.text);
         return token;
     }

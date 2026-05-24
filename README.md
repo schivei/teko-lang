@@ -61,8 +61,9 @@ Useful targets:
 
 ```sh
 make bootstrap      # build bootstrap/c/build/teko-bootstrap
+make bootstrap-test # run bootstrap core tests
 make example-core0  # compile examples/core0 to generated C, then native binary
-make check          # build and run the Core 0 smoke test
+make check          # run core tests, build, and run the Core 0 smoke test
 make clean
 ```
 

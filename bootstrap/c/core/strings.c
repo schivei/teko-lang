@@ -9,15 +9,15 @@ TekoString teko_string_from_cstr(const char *text) {
     return result;
 }
 
-int teko_string_equal(TekoString a, TekoString b) {
+int teko_string_equal(const TekoString a, const TekoString b) {
     return a.length == b.length && (a.length == 0 || memcmp(a.data, b.data, a.length) == 0);
 }
 
-int teko_string_equal_cstr(TekoString a, const char *b) {
+int teko_string_equal_cstr(const TekoString a, const char *b) {
     return teko_string_equal(a, teko_string_from_cstr(b));
 }
 
-TekoString teko_string_slice(TekoString base, size_t offset, size_t length) {
+TekoString teko_string_slice(const TekoString base, size_t offset, size_t length) {
     TekoString result;
     if (offset > base.length) {
         offset = base.length;
@@ -36,7 +36,7 @@ TekoString teko_string_trim(TekoString value) {
         value.length--;
     }
     while (value.length) {
-        char c = value.data[value.length - 1];
+        const char c = value.data[value.length - 1];
         if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
             break;
         }
@@ -45,7 +45,7 @@ TekoString teko_string_trim(TekoString value) {
     return value;
 }
 
-char *teko_copy_cstr(TekoContext *ctx, TekoString value) {
+char *teko_copy_cstr(TekoContext *ctx, const TekoString value) {
     char *copy = (char *)teko_alloc(ctx, value.length + 1);
     if (!copy) {
         return 0;
@@ -57,23 +57,35 @@ char *teko_copy_cstr(TekoContext *ctx, TekoString value) {
     return copy;
 }
 
-static int ends_with(TekoString value, const char *suffix) {
-    TekoString s = teko_string_from_cstr(suffix);
+static int ends_with(const TekoString value, const char *suffix) {
+    const TekoString s = teko_string_from_cstr(suffix);
     if (value.length < s.length) {
         return 0;
     }
     return memcmp(value.data + value.length - s.length, s.data, s.length) == 0;
 }
 
-TekoSourceKind teko_source_kind_from_path(TekoString path) {
+TekoSourceKind teko_source_kind_from_path(const TekoString path) {
     if (ends_with(path, ".struct.teko")) return TEKO_SOURCE_STRUCT;
     if (ends_with(path, ".enum.teko")) return TEKO_SOURCE_ENUM;
     if (ends_with(path, ".static.teko")) return TEKO_SOURCE_STATIC;
+    if (ends_with(path, ".class.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".record.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".interface.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".iface.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".trait.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".meta.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".test.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".spec.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".bench.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".extension.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".ext.teko")) return TEKO_SOURCE_UNKNOWN;
+    if (ends_with(path, ".subtype.teko")) return TEKO_SOURCE_UNKNOWN;
     if (ends_with(path, ".teko")) return TEKO_SOURCE_TEKO;
     return TEKO_SOURCE_UNKNOWN;
 }
 
-TekoString teko_type_name_from_path(TekoString path) {
+TekoString teko_type_name_from_path(const TekoString path) {
     size_t start = path.length;
     size_t end = path.length;
     while (start > 0 && path.data[start - 1] != '/' && path.data[start - 1] != '\\') {
@@ -94,7 +106,7 @@ void sb_init(StringBuilder *sb, TekoContext *ctx) {
     sb->capacity = 0;
 }
 
-void sb_append_n(StringBuilder *sb, const char *text, size_t length) {
+void sb_append_n(StringBuilder *sb, const char *text, const size_t length) {
     if (!length) return;
     if (sb->length + length + 1 > sb->capacity) {
         size_t next = sb->capacity ? sb->capacity * 2 : 256;
@@ -111,11 +123,11 @@ void sb_append(StringBuilder *sb, const char *text) {
     sb_append_n(sb, text, strlen(text));
 }
 
-void sb_append_string(StringBuilder *sb, TekoString text) {
+void sb_append_string(StringBuilder *sb, const TekoString text) {
     sb_append_n(sb, text.data, text.length);
 }
 
-void sb_append_char(StringBuilder *sb, char c) {
+void sb_append_char(StringBuilder *sb, const char c) {
     sb_append_n(sb, &c, 1);
 }
 

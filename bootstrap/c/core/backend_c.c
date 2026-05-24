@@ -1,9 +1,8 @@
 #include "teko_internal.h"
 
-static void append_ident(StringBuilder *sb, TekoString name) {
-    size_t i;
-    for (i = 0; i < name.length; i++) {
-        char c = name.data[i];
+static void append_ident(StringBuilder *sb, const TekoString name) {
+    for (size_t i = 0; i < name.length; i++) {
+        const char c = name.data[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
             sb_append_char(sb, c);
         } else {
@@ -12,8 +11,8 @@ static void append_ident(StringBuilder *sb, TekoString name) {
     }
 }
 
-static void append_type(StringBuilder *sb, AstType type) {
-    TekoString t = teko_string_trim(type.text);
+static void append_type(StringBuilder *sb, const AstType type) {
+    const TekoString t = teko_string_trim(type.text);
     if (t.length == 0 || teko_string_equal_cstr(t, "void")) sb_append(sb, "void");
     else if (teko_string_equal_cstr(t, "bool")) sb_append(sb, "bool");
     else if (teko_string_equal_cstr(t, "byte")) sb_append(sb, "uint8_t");
@@ -34,18 +33,17 @@ static void append_type(StringBuilder *sb, AstType type) {
     }
 }
 
-static void indent(StringBuilder *sb, int level) {
-    int i;
-    for (i = 0; i < level; i++) sb_append(sb, "    ");
+static void indent(StringBuilder *sb, const int level) {
+    for (int i = 0; i < level; i++) sb_append(sb, "    ");
 }
 
-static void append_expr(StringBuilder *sb, TekoString expr) {
+static void append_expr(StringBuilder *sb, const TekoString expr) {
     sb_append_string(sb, teko_string_trim(expr));
 }
 
 static void emit_block(StringBuilder *sb, const AstBlock *block, int level);
 
-static void emit_stmt(StringBuilder *sb, const AstStmt *stmt, int level) {
+static void emit_stmt(StringBuilder *sb, const AstStmt *stmt, const int level) {
     indent(sb, level);
     if (stmt->kind == AST_STMT_RETURN) {
         sb_append(sb, "return");
@@ -85,10 +83,9 @@ static void emit_stmt(StringBuilder *sb, const AstStmt *stmt, int level) {
     }
 }
 
-static void emit_block(StringBuilder *sb, const AstBlock *block, int level) {
-    size_t i;
+static void emit_block(StringBuilder *sb, const AstBlock *block, const int level) {
     sb_append(sb, "{\n");
-    for (i = 0; i < block->count; i++) {
+    for (size_t i = 0; i < block->count; i++) {
         emit_stmt(sb, &block->items[i], level + 1);
     }
     indent(sb, level);
@@ -96,11 +93,10 @@ static void emit_block(StringBuilder *sb, const AstBlock *block, int level) {
 }
 
 static void emit_struct(StringBuilder *sb, const AstDecl *decl) {
-    size_t i;
     sb_append(sb, "typedef struct ");
     append_ident(sb, decl->name);
     sb_append(sb, " {\n");
-    for (i = 0; i < decl->field_count; i++) {
+    for (size_t i = 0; i < decl->field_count; i++) {
         sb_append(sb, "    ");
         append_type(sb, decl->fields[i].type);
         sb_append_char(sb, ' ');
@@ -113,11 +109,10 @@ static void emit_struct(StringBuilder *sb, const AstDecl *decl) {
 }
 
 static void emit_enum(StringBuilder *sb, const AstDecl *decl) {
-    size_t i;
     sb_append(sb, "typedef enum ");
     append_ident(sb, decl->name);
     sb_append(sb, " {\n");
-    for (i = 0; i < decl->variant_count; i++) {
+    for (size_t i = 0; i < decl->variant_count; i++) {
         sb_append(sb, "    ");
         append_ident(sb, decl->name);
         sb_append(sb, "_");
@@ -131,7 +126,6 @@ static void emit_enum(StringBuilder *sb, const AstDecl *decl) {
 }
 
 static void emit_function(StringBuilder *sb, const AstDecl *decl) {
-    size_t i;
     append_type(sb, decl->return_type);
     sb_append_char(sb, ' ');
     append_ident(sb, decl->name);
@@ -139,7 +133,7 @@ static void emit_function(StringBuilder *sb, const AstDecl *decl) {
     if (decl->param_count == 0) {
         sb_append(sb, "void");
     }
-    for (i = 0; i < decl->param_count; i++) {
+    for (size_t i = 0; i < decl->param_count; i++) {
         if (i) sb_append(sb, ", ");
         append_type(sb, decl->params[i].type);
         sb_append_char(sb, ' ');

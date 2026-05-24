@@ -11,6 +11,7 @@ set(TEKO_CORE0_GENERATED_C "${CMAKE_CURRENT_BINARY_DIR}/generated/core0.c")
 
 add_library(teko_bootstrap_core STATIC
     bootstrap/c/core/backend_c.c
+    bootstrap/c/core/checker.c
     bootstrap/c/core/compile.c
     bootstrap/c/core/diagnostics.c
     bootstrap/c/core/lexer.c
@@ -68,6 +69,21 @@ target_compile_options(teko-bootstrap PRIVATE
     -pedantic
 )
 
+add_executable(teko_bootstrap_core_tests
+    bootstrap/c/tests/core_tests.c
+)
+
+target_link_libraries(teko_bootstrap_core_tests
+    PRIVATE
+        teko_bootstrap_core
+)
+
+target_compile_options(teko_bootstrap_core_tests PRIVATE
+    -Wall
+    -Wextra
+    -pedantic
+)
+
 set(TEKO_CORE0_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/core0/Point.struct.teko"
     "${CMAKE_CURRENT_SOURCE_DIR}/examples/core0/TokenKind.enum.teko"
@@ -94,4 +110,5 @@ target_compile_options(teko_core0_smoke PRIVATE
 )
 
 enable_testing()
+add_test(NAME bootstrap_core_tests COMMAND teko_bootstrap_core_tests)
 add_test(NAME core0_smoke COMMAND teko_core0_smoke)

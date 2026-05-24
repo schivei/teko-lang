@@ -72,7 +72,15 @@ typedef struct AstType {
     TekoString text;
 } AstType;
 
+typedef struct AstLocation {
+    const TekoSource *source;
+    size_t offset;
+    unsigned line;
+    unsigned column;
+} AstLocation;
+
 typedef struct AstParam {
+    AstLocation location;
     TekoString name;
     AstType type;
 } AstParam;
@@ -95,6 +103,7 @@ typedef struct AstBlock {
 
 struct AstStmt {
     AstStmtKind kind;
+    AstLocation location;
     int is_mutable;
     TekoString name;
     AstType type;
@@ -105,11 +114,13 @@ struct AstStmt {
 };
 
 typedef struct AstField {
+    AstLocation location;
     TekoString name;
     AstType type;
 } AstField;
 
 typedef struct AstVariant {
+    AstLocation location;
     TekoString name;
 } AstVariant;
 
@@ -121,6 +132,8 @@ typedef enum AstDeclKind {
 
 typedef struct AstDecl {
     AstDeclKind kind;
+    const TekoSource *source;
+    AstLocation location;
     TekoString name;
     AstType return_type;
     AstParam *params;
@@ -157,7 +170,7 @@ typedef struct StringBuilder {
 
 void *teko_alloc(TekoContext *ctx, size_t size);
 void *teko_realloc(TekoContext *ctx, void *ptr, size_t size);
-void teko_free(TekoContext *ctx, void *ptr);
+void teko_free(const TekoContext *ctx, void *ptr);
 
 int teko_string_equal(TekoString a, TekoString b);
 int teko_string_equal_cstr(TekoString a, const char *b);
@@ -180,7 +193,9 @@ int teko_parse_sources(TekoContext *ctx,
                        const TekoSource *sources,
                        size_t source_count,
                        AstProgram *program);
-void teko_free_program(TekoContext *ctx, AstProgram *program);
+void teko_free_program(TekoContext *ctx, const AstProgram *program);
+
+int teko_check_program(TekoContext *ctx, const AstProgram *program);
 
 int teko_backend_emit_c(TekoContext *ctx, const AstProgram *program, TekoOutput *output);
 

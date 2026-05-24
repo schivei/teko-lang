@@ -10,42 +10,42 @@ typedef struct Parser {
     Token previous;
 } Parser;
 
-static void *grow_array(TekoContext *ctx, void *items, size_t *capacity, size_t item_size) {
-    size_t next = *capacity ? *capacity * 2 : 8;
+static void *grow_array(TekoContext *ctx, void *items, size_t *capacity, const size_t item_size) {
+    const size_t next = *capacity ? *capacity * 2 : 8;
     void *result = teko_realloc(ctx, items, next * item_size);
     if (result) *capacity = next;
     return result;
 }
 
-static void ast_program_push(TekoContext *ctx, AstProgram *program, AstDecl decl) {
+static void ast_program_push(TekoContext *ctx, AstProgram *program, const AstDecl decl) {
     if (program->decl_count == program->decl_capacity) {
         program->decls = (AstDecl *)grow_array(ctx, program->decls, &program->decl_capacity, sizeof(AstDecl));
     }
     program->decls[program->decl_count++] = decl;
 }
 
-static void ast_block_push(TekoContext *ctx, AstBlock *block, AstStmt stmt) {
+static void ast_block_push(TekoContext *ctx, AstBlock *block, const AstStmt stmt) {
     if (block->count == block->capacity) {
         block->items = (AstStmt *)grow_array(ctx, block->items, &block->capacity, sizeof(AstStmt));
     }
     block->items[block->count++] = stmt;
 }
 
-static void ast_param_push(TekoContext *ctx, AstDecl *decl, AstParam param) {
+static void ast_param_push(TekoContext *ctx, AstDecl *decl, const AstParam param) {
     if (decl->param_count == decl->param_capacity) {
         decl->params = (AstParam *)grow_array(ctx, decl->params, &decl->param_capacity, sizeof(AstParam));
     }
     decl->params[decl->param_count++] = param;
 }
 
-static void ast_field_push(TekoContext *ctx, AstDecl *decl, AstField field) {
+static void ast_field_push(TekoContext *ctx, AstDecl *decl, const AstField field) {
     if (decl->field_count == decl->field_capacity) {
         decl->fields = (AstField *)grow_array(ctx, decl->fields, &decl->field_capacity, sizeof(AstField));
     }
     decl->fields[decl->field_count++] = field;
 }
 
-static void ast_variant_push(TekoContext *ctx, AstDecl *decl, AstVariant variant) {
+static void ast_variant_push(TekoContext *ctx, AstDecl *decl, const AstVariant variant) {
     if (decl->variant_count == decl->variant_capacity) {
         decl->variants = (AstVariant *)grow_array(ctx, decl->variants, &decl->variant_capacity, sizeof(AstVariant));
     }
@@ -65,11 +65,11 @@ static void advance(Parser *parser) {
     parser->current = teko_lexer_next(&parser->lexer);
 }
 
-static int check(Parser *parser, TokenKind kind) {
+static int check(const Parser *parser, const TokenKind kind) {
     return parser->current.kind == kind;
 }
 
-static int match(Parser *parser, TokenKind kind) {
+static int match(Parser *parser, const TokenKind kind) {
     if (!check(parser, kind)) return 0;
     advance(parser);
     return 1;
@@ -80,25 +80,34 @@ static void skip_newlines(Parser *parser) {
     }
 }
 
-static int expect(Parser *parser, TokenKind kind, const char *message) {
+static int expect(Parser *parser, const TokenKind kind, const char *message) {
     if (match(parser, kind)) return 1;
     teko_add_diagnostic(parser->ctx, TEKO_DIAG_ERROR, parser->source,
                         parser->current.offset, parser->current.line, parser->current.column, message);
     return 0;
 }
 
-static TekoString source_between(Parser *parser, size_t start, size_t end) {
+static TekoString source_between(const Parser *parser, const size_t start, size_t end) {
     if (end < start) end = start;
     return teko_string_trim(teko_string_slice(parser->source->text, start, end - start));
 }
 
-static AstType parse_type_until(Parser *parser, TokenKind a, TokenKind b, TokenKind c) {
-    size_t start = parser->current.offset;
+static AstLocation token_location(const Parser *parser, const Token token) {
+    AstLocation location;
+    location.source = parser->source;
+    location.offset = token.offset;
+    location.line = token.line;
+    location.column = token.column;
+    return location;
+}
+
+static AstType parse_type_until(Parser *parser, const TokenKind a, const TokenKind b, const TokenKind c) {
+    const size_t start = parser->current.offset;
     size_t end = start;
     int depth_angle = 0;
     int depth_bracket = 0;
     while (parser->current.kind != TOK_EOF) {
-        TokenKind k = parser->current.kind;
+        const TokenKind k = parser->current.kind;
         if (depth_angle == 0 && depth_bracket == 0 && (k == a || k == b || k == c)) break;
         if (k == TOK_LT) depth_angle++;
         else if (k == TOK_GT && depth_angle > 0) depth_angle--;
@@ -114,13 +123,13 @@ static AstType parse_type_until(Parser *parser, TokenKind a, TokenKind b, TokenK
     }
 }
 
-static TekoString consume_expr_until(Parser *parser, TokenKind a, TokenKind b, TokenKind c) {
-    size_t start = parser->current.offset;
+static TekoString consume_expr_until(Parser *parser, const TokenKind a, const TokenKind b, const TokenKind c) {
+    const size_t start = parser->current.offset;
     size_t end = start;
     int paren = 0;
     int bracket = 0;
     while (parser->current.kind != TOK_EOF) {
-        TokenKind k = parser->current.kind;
+        const TokenKind k = parser->current.kind;
         if (paren == 0 && bracket == 0 && (k == a || k == b || k == c)) break;
         if (k == TOK_LPAREN) paren++;
         else if (k == TOK_RPAREN && paren > 0) paren--;
@@ -135,12 +144,12 @@ static TekoString consume_expr_until(Parser *parser, TokenKind a, TokenKind b, T
 static AstBlock parse_block(Parser *parser);
 
 static AstStmt parse_statement(Parser *parser) {
-    AstStmt stmt;
-    memset(&stmt, 0, sizeof(stmt));
+    AstStmt stmt = {0};
 
     skip_newlines(parser);
 
     if (match(parser, TOK_RETURN)) {
+        stmt.location = token_location(parser, parser->previous);
         stmt.kind = AST_STMT_RETURN;
         stmt.expr = consume_expr_until(parser, TOK_NEWLINE, TOK_SEMICOLON, TOK_RBRACE);
         match(parser, TOK_SEMICOLON);
@@ -148,6 +157,7 @@ static AstStmt parse_statement(Parser *parser) {
     }
 
     if (match(parser, TOK_IF)) {
+        stmt.location = token_location(parser, parser->previous);
         stmt.kind = AST_STMT_IF;
         stmt.condition = consume_expr_until(parser, TOK_LBRACE, TOK_EOF, TOK_EOF);
         stmt.then_block = parse_block(parser);
@@ -159,6 +169,7 @@ static AstStmt parse_statement(Parser *parser) {
     }
 
     if (match(parser, TOK_WHILE)) {
+        stmt.location = token_location(parser, parser->previous);
         stmt.kind = AST_STMT_WHILE;
         stmt.condition = consume_expr_until(parser, TOK_LBRACE, TOK_EOF, TOK_EOF);
         stmt.then_block = parse_block(parser);
@@ -166,7 +177,8 @@ static AstStmt parse_statement(Parser *parser) {
     }
 
     if (match(parser, TOK_VAR) || match(parser, TOK_LET)) {
-        Token keyword = parser->previous;
+        const Token keyword = parser->previous;
+        stmt.location = token_location(parser, keyword);
         stmt.kind = AST_STMT_LOCAL;
         stmt.is_mutable = keyword.kind == TOK_VAR;
         if (expect(parser, TOK_IDENTIFIER, "expected local name")) {
@@ -183,20 +195,20 @@ static AstStmt parse_statement(Parser *parser) {
     }
 
     stmt.kind = AST_STMT_EXPR;
+    stmt.location = token_location(parser, parser->current);
     stmt.expr = consume_expr_until(parser, TOK_NEWLINE, TOK_SEMICOLON, TOK_RBRACE);
     match(parser, TOK_SEMICOLON);
     return stmt;
 }
 
 static AstBlock parse_block(Parser *parser) {
-    AstBlock block;
-    memset(&block, 0, sizeof(block));
+    AstBlock block = {0};
     if (!expect(parser, TOK_LBRACE, "expected '{' to start block")) {
         return block;
     }
     skip_newlines(parser);
     while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
-        AstStmt stmt = parse_statement(parser);
+        const AstStmt stmt = parse_statement(parser);
         if (stmt.kind != AST_STMT_EXPR || stmt.expr.length > 0) {
             ast_block_push(parser->ctx, &block, stmt);
         }
@@ -207,19 +219,20 @@ static AstBlock parse_block(Parser *parser) {
 }
 
 static AstDecl parse_function(Parser *parser) {
-    AstDecl decl;
-    memset(&decl, 0, sizeof(decl));
+    AstDecl decl = {0};
     decl.kind = AST_DECL_FUNCTION;
+    decl.source = parser->source;
     expect(parser, TOK_FN, "expected 'fn'");
+    decl.location = token_location(parser, parser->previous);
     if (expect(parser, TOK_IDENTIFIER, "expected function name")) {
         decl.name = parser->previous.text;
     }
     expect(parser, TOK_LPAREN, "expected '(' after function name");
     skip_newlines(parser);
     while (!check(parser, TOK_RPAREN) && !check(parser, TOK_EOF)) {
-        AstParam param;
-        memset(&param, 0, sizeof(param));
+        AstParam param = {0};
         if (expect(parser, TOK_IDENTIFIER, "expected parameter name")) {
+            param.location = token_location(parser, parser->previous);
             param.name = parser->previous.text;
         }
         expect(parser, TOK_COLON, "expected ':' after parameter name");
@@ -235,21 +248,25 @@ static AstDecl parse_function(Parser *parser) {
     return decl;
 }
 
-static AstDecl make_file_decl(AstDeclKind kind, TekoString name) {
-    AstDecl decl;
-    memset(&decl, 0, sizeof(decl));
+static AstDecl make_file_decl(const AstDeclKind kind, const TekoString name, const TekoSource *source) {
+    AstDecl decl = {0};
     decl.kind = kind;
     decl.name = name;
+    decl.source = source;
+    decl.location.source = source;
+    decl.location.offset = 0;
+    decl.location.line = 1;
+    decl.location.column = 1;
     return decl;
 }
 
 static void parse_file_struct(Parser *parser, AstProgram *program) {
-    AstDecl decl = make_file_decl(AST_DECL_STRUCT, parser->source->type_name);
+    AstDecl decl = make_file_decl(AST_DECL_STRUCT, parser->source->type_name, parser->source);
     skip_newlines(parser);
     while (!check(parser, TOK_EOF)) {
-        AstField field;
-        memset(&field, 0, sizeof(field));
+        AstField field = {0};
         if (expect(parser, TOK_IDENTIFIER, "expected field name")) {
+            field.location = token_location(parser, parser->previous);
             field.name = parser->previous.text;
         }
         expect(parser, TOK_COLON, "expected ':' after field name");
@@ -261,12 +278,12 @@ static void parse_file_struct(Parser *parser, AstProgram *program) {
 }
 
 static void parse_file_enum(Parser *parser, AstProgram *program) {
-    AstDecl decl = make_file_decl(AST_DECL_ENUM, parser->source->type_name);
+    AstDecl decl = make_file_decl(AST_DECL_ENUM, parser->source->type_name, parser->source);
     skip_newlines(parser);
     while (!check(parser, TOK_EOF)) {
-        AstVariant variant;
-        memset(&variant, 0, sizeof(variant));
         if (expect(parser, TOK_IDENTIFIER, "expected enum variant")) {
+            AstVariant variant = {0};
+            variant.location = token_location(parser, parser->previous);
             variant.name = parser->previous.text;
             ast_variant_push(parser->ctx, &decl, variant);
         }
@@ -278,19 +295,22 @@ static void parse_file_enum(Parser *parser, AstProgram *program) {
 }
 
 static AstDecl parse_braced_struct(Parser *parser) {
-    AstDecl decl;
-    memset(&decl, 0, sizeof(decl));
+    AstDecl decl = {0};
     decl.kind = AST_DECL_STRUCT;
+    decl.source = parser->source;
     expect(parser, TOK_STRUCT, "expected 'struct'");
+    decl.location = token_location(parser, parser->previous);
     if (expect(parser, TOK_IDENTIFIER, "expected struct name")) {
         decl.name = parser->previous.text;
     }
     expect(parser, TOK_LBRACE, "expected '{' after struct name");
     skip_newlines(parser);
     while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
-        AstField field;
-        memset(&field, 0, sizeof(field));
-        if (expect(parser, TOK_IDENTIFIER, "expected field name")) field.name = parser->previous.text;
+        AstField field = {0};
+        if (expect(parser, TOK_IDENTIFIER, "expected field name")) {
+            field.location = token_location(parser, parser->previous);
+            field.name = parser->previous.text;
+        }
         expect(parser, TOK_COLON, "expected ':' after field name");
         field.type = parse_type_until(parser, TOK_NEWLINE, TOK_SEMICOLON, TOK_RBRACE);
         ast_field_push(parser->ctx, &decl, field);
@@ -301,17 +321,18 @@ static AstDecl parse_braced_struct(Parser *parser) {
 }
 
 static AstDecl parse_braced_enum(Parser *parser) {
-    AstDecl decl;
-    memset(&decl, 0, sizeof(decl));
+    AstDecl decl = {0};
     decl.kind = AST_DECL_ENUM;
+    decl.source = parser->source;
     expect(parser, TOK_ENUM, "expected 'enum'");
+    decl.location = token_location(parser, parser->previous);
     if (expect(parser, TOK_IDENTIFIER, "expected enum name")) decl.name = parser->previous.text;
     expect(parser, TOK_LBRACE, "expected '{' after enum name");
     skip_newlines(parser);
     while (!check(parser, TOK_RBRACE) && !check(parser, TOK_EOF)) {
-        AstVariant variant;
-        memset(&variant, 0, sizeof(variant));
         if (expect(parser, TOK_IDENTIFIER, "expected enum variant")) {
+            AstVariant variant = {0};
+            variant.location = token_location(parser, parser->previous);
             variant.name = parser->previous.text;
             ast_variant_push(parser->ctx, &decl, variant);
         }
@@ -335,17 +356,17 @@ static void parse_regular_source(Parser *parser, AstProgram *program) {
             teko_add_diagnostic(parser->ctx, TEKO_DIAG_ERROR, parser->source,
                                 parser->current.offset, parser->current.line, parser->current.column,
                                 "expected top-level declaration");
-            advance(parser);
+            while (!check(parser, TOK_NEWLINE) && !check(parser, TOK_EOF)) {
+                advance(parser);
+            }
         }
         skip_newlines(parser);
     }
 }
 
-static void check_duplicates(TekoContext *ctx, AstProgram *program) {
-    size_t i;
-    size_t j;
-    for (i = 0; i < program->decl_count; i++) {
-        for (j = i + 1; j < program->decl_count; j++) {
+static void check_duplicates(TekoContext *ctx, const AstProgram *program) {
+    for (size_t i = 0; i < program->decl_count; i++) {
+        for (size_t j = i + 1; j < program->decl_count; j++) {
             if (teko_string_equal(program->decls[i].name, program->decls[j].name)) {
                 teko_add_diagnostic(ctx, TEKO_DIAG_ERROR, 0, 0, 0, 0, "duplicate top-level declaration");
             }
@@ -355,11 +376,10 @@ static void check_duplicates(TekoContext *ctx, AstProgram *program) {
 
 int teko_parse_sources(TekoContext *ctx,
                        const TekoSource *sources,
-                       size_t source_count,
+                       const size_t source_count,
                        AstProgram *program) {
-    size_t i;
     memset(program, 0, sizeof(*program));
-    for (i = 0; i < source_count; i++) {
+    for (size_t i = 0; i < source_count; i++) {
         Parser parser;
         parser_init(&parser, ctx, &sources[i]);
         if (sources[i].kind == TEKO_SOURCE_STRUCT) {
@@ -376,18 +396,16 @@ int teko_parse_sources(TekoContext *ctx,
     return ctx->diagnostic_count == 0;
 }
 
-static void free_block(TekoContext *ctx, AstBlock *block) {
-    size_t i;
-    for (i = 0; i < block->count; i++) {
+static void free_block(TekoContext *ctx, const AstBlock *block) {
+    for (size_t i = 0; i < block->count; i++) {
         free_block(ctx, &block->items[i].then_block);
         free_block(ctx, &block->items[i].else_block);
     }
     teko_free(ctx, block->items);
 }
 
-void teko_free_program(TekoContext *ctx, AstProgram *program) {
-    size_t i;
-    for (i = 0; i < program->decl_count; i++) {
+void teko_free_program(TekoContext *ctx, const AstProgram *program) {
+    for (size_t i = 0; i < program->decl_count; i++) {
         teko_free(ctx, program->decls[i].params);
         teko_free(ctx, program->decls[i].fields);
         teko_free(ctx, program->decls[i].variants);

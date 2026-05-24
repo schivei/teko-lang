@@ -31,7 +31,7 @@ static TekoAllocator normalized_allocator(const TekoCompileOptions *options) {
 }
 
 void teko_compile_sources(const TekoSource *sources,
-                          size_t source_count,
+                          const size_t source_count,
                           const TekoCompileOptions *options,
                           TekoCompileResult *result) {
     TekoContext ctx;
@@ -45,7 +45,8 @@ void teko_compile_sources(const TekoSource *sources,
 
     if (!sources || source_count == 0) {
         teko_add_diagnostic(&ctx, TEKO_DIAG_ERROR, 0, 0, 0, 0, "no sources provided");
-    } else if (teko_parse_sources(&ctx, sources, source_count, &program)) {
+    } else if (teko_parse_sources(&ctx, sources, source_count, &program) &&
+               teko_check_program(&ctx, &program)) {
         result->outputs = (TekoOutput *)teko_alloc(&ctx, sizeof(TekoOutput));
         if (result->outputs && teko_backend_emit_c(&ctx, &program, &output)) {
             result->outputs[0] = output;
@@ -64,7 +65,7 @@ void teko_compile_sources(const TekoSource *sources,
 
 void teko_free_compile_result(const TekoCompileOptions *options,
                               TekoCompileResult *result) {
-    TekoAllocator allocator = normalized_allocator(options);
+    const TekoAllocator allocator = normalized_allocator(options);
     TekoContext ctx;
     size_t i;
     memset(&ctx, 0, sizeof(ctx));
