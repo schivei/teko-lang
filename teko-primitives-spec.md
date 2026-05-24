@@ -1,4 +1,4 @@
-# Teko Primitives Specification
+# Teko Primitives Specification (Corrigido)
 
 ## 📖 Inteiros
 - **[sbyte](ca://s?q=Detalhar_tipo_sbyte_em_Teko)** → 8 bits com sinal  
@@ -33,7 +33,7 @@
 - **[guid](ca://s?q=Detalhar_tipo_guid_em_Teko)** → identificador único global  
 
 ## ✅ Booleanos
-- **[bool](ca://s?q=Detalhar_tipo_bool_em_Teko)** → valores lógicos `true` e `false`  
+- **[bool](ca://s?q=Detalhar_tipo_bool_em_Teko)** → armazenado em **1 byte (8 bits)**, representando `true` ou `false`  
 
 ## 🔗 Ponteiros (Interop)
 - **[ptr](ca://s?q=Detalhar_tipo_ptr_em_Teko)** → ponteiro seguro para interoperabilidade externa  
@@ -42,7 +42,7 @@
 
 ---
 
-## 📖 Tabela Comparativa
+## 📖 Tabela Comparativa (Corrigida)
 
 | **Tipo** | **Categoria** | **Tamanho** | **Sinal** | **Mutabilidade** | **Exemplo de Uso** |
 |----------|---------------|-------------|-----------|------------------|--------------------|
@@ -70,7 +70,7 @@
 | datetimez| Tempo         | 64 bits+fuso| n/a       | imutável         | `let evento : datetimez = now("America/Sao_Paulo");` |
 | timespan | Tempo         | 64 bits     | n/a       | imutável         | `let duracao : timespan = evento - aniversario;` |
 | guid     | Identificador | 128 bits    | n/a       | imutável         | `let id : guid = new guid();` |
-| bool     | Booleano      | 1 bit lógico| n/a       | mutável/imutável | `let ativo : bool = true;` |
+| bool     | Booleano      | **1 byte**  | n/a       | mutável/imutável | `let ativo : bool = true;` |
 | ptr      | Ponteiro      | dependente  | n/a       | mutável/imutável | `extern fn printf(fmt: ptr<char>, ...) -> int;` |
 
 ---
