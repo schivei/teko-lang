@@ -1,0 +1,113 @@
+===============================================================================
+TEKO COMPILER MEMORANDUM & CHECKPOINT
+===============================================================================
+Data/Hora de Registro: 12 de Junho de 2026
+Autor e Diretor de Arquitetura: schivei
+Status do Projeto: Fase 6 Concluída (104%) | Fase 7 em Progresso (35%)
+Suíte de Testes Unity: 54 Tests, 0 Failures, 0 Ignored -> SUCCESS (OK)
+===============================================================================
+
+-------------------------------------------------------------------------------
+1. O QUE JÁ FOI ENTREGUE, TESTADO E HOMOLOGADO (HISTÓRICO DE CÓDIGO)
+-------------------------------------------------------------------------------
+* ARQUITETURA MULTIMOTORES (Fase 5): Todo o backend Ahead-of-Time (AOT) foi
+  segregado em subpastas por OS/CPU nativos (src/codegen/apple, linux, windows,
+  bsd_unix, bare_metal). Assinaturas limpas de 3 parâmetros (ctx, op, arg),
+  C23 estrito, eliminando números mágicos pelos enums OP_PROLOG e OP_EPILOG.
+
+* ORQUESTRADOR FINAL COM TRIPLA OTIMIZAÇÃO (Fase 6): O arquivo central
+  `src/codegen/codegen_metal.c` unificou as seguintes camadas em lote:
+    - Dead Code Elimination (DCE): Remove instruções após OP_RETURN/OP_HALT,
+      reativando o fluxo apenas via marcas de Labels (op >= 100). O gatilho de
+      zona morta foi corrigido para agir pós-emissão do encerramento, garantindo
+      que as interrupções de kernel de parada de máquina sejam cuspidas.
+    - Common Subexpression Elimination (CSE): Purga opcodes e cargas redundantes
+      consecutivas (ex: OP_ICONST idênticos).
+    - Constant Folding: Varredura preditiva local que intercepta expressões
+      matemáticas de literais estáticos em tempo de compilação (ex: 20 + 30) e
+      colapsa o resultado em um único OP_ICONST 50. Usa o byte neutro 0xCC para
+      limpar os bytes redundantes, protegendo o 0x00 do legítimo OP_HALT.
+
+* MOTOR INICIAL DO LINKER NATIVO (Fase 7 - ELF e WASM):
+    - Criado `src/codegen/tld_elf.c` e `.h` lidando com escrita direta de bytes
+      de estruturas Elf64_Ehdr e Elf64_Phdr, incluindo suporte polimórfico a
+      ELF32 (Elf32_Ehdr) para x86-32 e ARM32, acoplamento automático da seção de
+      strings .rodata, e a marca nota .note.tag (EI_OSABI = 9) para paridade e
+      reconhecimento nativo pelo kernel do FreeBSD UNIX.
+    - Criado `src/codegen/tld_elf_reloc.c` (Relocation Engine) calculando desvios
+      relativos de saltos e remendos absolutos em Little Endian.
+    - Criado `src/codegen/tld_elf_arch.c` com a matriz hexadecimal de opcodes
+      brutos de máquina (x86_64, x86, ARM64, ARM32, RISC-V 64/32, MIPS, PPC64).
+    - Criado `src/codegen/tld_wasm.c` codificando seções binárias de módulos
+      WebAssembly (.wasm) com compressão LEB128 de inteiros de tamanho variável.
+    - Parametrizado o linker para aceitar a flag `is_shared_library` alternando
+      entre imagens executáveis e bibliotecas compartilhadas (.so, .dylib, .dll).
+
+-------------------------------------------------------------------------------
+2. MAPA DE DIVAGAÇÕES E REQUISITOS FUTUROS (A VISÃO DE LONGO PRAZO)
+-------------------------------------------------------------------------------
+* ESTRUTURAÇÃO DE TESTES NATIVOS (.tkt):
+    - Mapeado o uso futuro da extensão `.tkt` para arquivos de testes.
+    - Filosofia de co-localização: arquivos de teste residirão na mesma árvore
+      do diretório do objeto testado (estilo Go), facilitando a manutenibilidade,
+      permitindo testes de escopos privados e isolando o build de release.
+
+* COBERTURA DE CÓDIGO NATIVA (Code Coverage):
+    - Mecanismo por Instrumentação de Código Assistida em tempo de Codegen.
+    - Injeção de instruções de incremento na RAM no início de cada Basic Block.
+    - Linker embutirá a seção `.teko_cov_map` associando IDs de contadores às
+      linhas físicas do código-fonte (.tks).
+    - O runtime descarregará a matriz de contadores no fim da execução em um
+      arquivo binário (.tkcov) para geração de relatórios limpos sem o uso de LLVM.
+
+* INTEROPERABILIDADE E DEPENDÊNCIAS TERCEIRAS:
+    - Manifesto (.tkp) e `TekoProjectConfig` expandidos com arrays de busca:
+      `include_paths`, `static_links` (.a, .lib, .o) e `dynamic_links` (.so, .dll).
+    - Diferenciação de Fluxo:
+        1. Dependência Nativa Teko: Varredura 100% autônoma. O linker lê os tipos
+           ricos expostos em uma seção binária customizada nossa (`.teko_meta`).
+        2. Dependência C Puro / Sistemas: Resolução via arquivos de cabeçalho (.h)
+           fornecidos em caminhos de include para inferir as assinaturas que o C
+           destrói no arquivo objeto binário bruto.
+        3. Dependência de Runtimes Gerenciados (.NET não-AOT, JVM): Fronteira
+           física intransponível estaticamente. Bloqueado no Linker; suportado
+           apenas via chamadas de carregamento dinâmico explícito e IPC em runtime
+           para não contaminar a performance das Green Threads e Arenas O(1).
+           Suporte total caso o .NET esteja compilado via Native AOT (C-ABI).
+
+* EXPANSÃO DO SDK NATIVO ORIENTADO A REDES:
+    - Rompimento total com wrappers tradicionais de C. O SDK de redes conversará
+      diretamente com as Green Threads e Canais usando primitivos assíncronos
+      ultra-velozes de kernel de cada OS (io_uring no Linux, kqueue no macOS/BSD
+      e IOCP no Windows).
+    - Suporte nativo out-of-the-box para File I/O, Sockets, TCP, UDP e parsers
+      de HTTP/1.1 e HTTP/2 embarcados direto em código de máquina.
+
+* PRIMITIVOS E DESIGN PATTERNS NA SINTAXE:
+    - Além de CQRS/Mediator e Decorators, planeja-se embutir nativamente:
+        - Circuit Breaker (Disjuntores de resiliência nativos para APIs de rede).
+        - Broadcast Channels (Event-Driven Pub-Sub nativo em nível de CPU).
+        - Repository / Data Mapper (Desserialização ultra-veloz de JSON/Protobuf
+          para Structs sem o custo de reflection em runtime).
+    - Revisão futura de gramática (LL(1)/LALR estável) e sintaxe clara de canais.
+
+-------------------------------------------------------------------------------
+3. PRÓXIMOS PASSOS E CRONOGRAMA DE RETOMADA
+-------------------------------------------------------------------------------
+Quando o trabalho for reiniciado, os objetivos cronológicos imediatos são:
+
+1. Finalizar os componentes remanescentes da Fase 7 (Engenharia do Linker):
+    - Desenvolver o Linker Mach-O Nativo da Apple (`src/codegen/tld_macho.c`),
+      mapeando comandos de carga, alinhamentos polimórficos de página de hardware
+      (4KB Intel / 16KB Apple Silicon M-Series) e o comando `LC_BUILD_VERSION`.
+    - Desenvolver o Linker PE/COFF do Windows (`src/codegen/tld_pe.c`), mapeando
+      IMAGE_DOS_HEADER ("MZ"), IMAGE_FILE_HEADER ("PE") e as Optional Headers.
+
+2. Iniciar a Fase 8 (O Runtime Nativo Embutido):
+    - Codificar os barramentos de syscalls diretas de alocação de memória virtual
+      (mmap/munmap no Unix e VirtualAlloc no Windows) para alimentar o motor
+      de sub-arenas locais O(1) de forma autônoma.
+
+===============================================================================
+[FIM DO ARQUIVO DE MEMÓRIA - STATUS: PROTEGIDO]
+===============================================================================

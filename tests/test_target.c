@@ -18,9 +18,4 @@ void test_teko_bare_metal_target_detection_and_parsing(void) {
     TekoTarget wasm_target = teko_target_parse("wasm32-unknown-wasi");
     TEST_ASSERT_EQUAL_INT(ARCH_WASM32, wasm_target.arch);
     TEST_ASSERT_EQUAL_INT(OS_WASI, wasm_target.os);
-
-    // 4. Teste para firmware bare-metal (Arduino / AVR)
-    TekoTarget avr_target = teko_target_parse("avr-unknown-none");
-    TEST_ASSERT_EQUAL_INT(ARCH_AVR, avr_target.arch);
-    TEST_ASSERT_EQUAL_INT(OS_BARE_METAL, avr_target.os);
 }

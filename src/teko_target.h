@@ -14,7 +14,6 @@ typedef enum {
     ARCH_WASM64,        // WebAssembly 64 bits (Memory-64 extension)
     ARCH_MIPS32,       // MIPS 32 bits (Roteadores e hardware de rede)
     ARCH_MIPS64,       // MIPS 64 bits
-    ARCH_AVR,           // Microcontroladores de 8/16 bits (Arduino ATmega)
     ARCH_PPC64,         // PowerPC 64 bits (Mainframes e supercomputadores)
     ARCH_UNKNOWN
 } TekoArch;

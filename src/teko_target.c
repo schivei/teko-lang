@@ -80,7 +80,6 @@ TekoTarget teko_target_parse(const char* target_str) {
     else if (strstr(target_str, "wasm32") || strstr(target_str, "wasm"))   target.arch = ARCH_WASM32;
     else if (strstr(target_str, "mips64"))  target.arch = ARCH_MIPS64;
     else if (strstr(target_str, "mips"))    target.arch = ARCH_MIPS32;
-    else if (strstr(target_str, "avr"))     target.arch = ARCH_AVR;
     else if (strstr(target_str, "powerpc") || strstr(target_str, "ppc"))  target.arch = ARCH_PPC64;
     else if (strstr(target_str, "arm"))     target.arch = ARCH_ARM32;
 
