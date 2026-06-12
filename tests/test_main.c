@@ -37,10 +37,8 @@ extern void test_teko_bare_metal_target_detection_and_parsing(void);
 extern void test_teko_cli_driver_assembly_mode_and_target_parsing(void);
 extern void test_teko_cli_driver_object_mode_win_arm64(void);
 extern void test_teko_cli_driver_default_host_fallback(void);
-
 extern void test_teko_aot_darwin_x86_64_pure_emission(void);
 extern void test_teko_aot_darwin_arm64_pure_emission(void);
-
 extern void test_teko_aot_linux_x86_64_pure_emission(void);
 extern void test_teko_aot_linux_x86_32_pure_emission(void);
 extern void test_teko_aot_linux_riscv64_pure_emission(void);
@@ -49,40 +47,34 @@ extern void test_teko_aot_linux_ppc64_pure_emission(void);
 extern void test_teko_aot_linux_mips_pure_emission(void);
 extern void test_teko_aot_linux_arm64_pure_emission(void);
 extern void test_teko_aot_linux_arm32_pure_emission(void);
-
 extern void test_teko_aot_wasm_pure_emission_integrity(void);
-
 extern void test_teko_aot_freebsd_x86_64_pure_emission(void);
 extern void test_teko_aot_freebsd_arm64_pure_emission(void);
-
 extern void test_teko_aot_windows_x86_32_pure_emission(void);
 extern void test_teko_aot_windows_x86_64_pure_emission(void);
 extern void test_teko_aot_windows_arm64_pure_emission(void);
-
 extern void test_teko_aot_escape_analysis_register_allocation(void);
 extern void test_teko_aot_dead_code_elimination_purgue(void);
 extern void test_teko_aot_common_subexpression_elimination_filter(void);
-
 extern void test_teko_aot_constant_folding_math_collapse(void);
 extern void test_teko_linker_elf64_binary_header_generation(void);
 extern void test_teko_linker_elf32_binary_header_and_class_validation(void);
 extern void test_teko_linker_elf64_relative_jmp_patch_calculation(void);
-
 extern void test_teko_linker_arch_x64_mov_encoding_integrity(void);
 extern void test_teko_linker_arch_arm64_add_encoding_integrity(void);
 extern void test_teko_linker_arch_x86_32_halt_encoding(void);
 extern void test_teko_linker_arch_arm32_mov_encoding(void);
 extern void test_teko_linker_arch_ppc64_add_encoding(void);
-
 extern void test_tld_static_dependency_injection_and_symbol_resolution(void);
-
 extern void test_teko_linker_e2e_extern_service_injection_and_elf_generation(void);
-
 extern void test_teko_linker_wasm_leb128_compression_logic(void);
-
 extern void test_teko_linker_macho_64_binary_signature_integrity(void);
-
 extern void test_teko_linker_pe_coff_multi_architecture_signatures(void);
+
+extern void test_teko_runtime_sys_allocation_and_page_recycling(void);
+extern void test_teko_runtime_scheduler_cooperative_multithreading(void);
+extern void test_teko_runtime_channels_blocking_and_signaling(void);
+extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 
 int main(void) {
     UNITY_BEGIN();
@@ -121,10 +113,8 @@ int main(void) {
     RUN_TEST(test_teko_cli_driver_assembly_mode_and_target_parsing);
     RUN_TEST(test_teko_cli_driver_object_mode_win_arm64);
     RUN_TEST(test_teko_cli_driver_default_host_fallback);
-
     RUN_TEST(test_teko_aot_darwin_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_darwin_arm64_pure_emission);
-
     RUN_TEST(test_teko_aot_linux_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_linux_x86_32_pure_emission);
     RUN_TEST(test_teko_aot_linux_riscv64_pure_emission);
@@ -133,41 +123,34 @@ int main(void) {
     RUN_TEST(test_teko_aot_linux_mips_pure_emission);
     RUN_TEST(test_teko_aot_linux_arm64_pure_emission);
     RUN_TEST(test_teko_aot_linux_arm32_pure_emission);
-
     RUN_TEST(test_teko_aot_wasm_pure_emission_integrity);
-
     RUN_TEST(test_teko_aot_freebsd_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_freebsd_arm64_pure_emission);
-
     RUN_TEST(test_teko_aot_windows_x86_32_pure_emission);
     RUN_TEST(test_teko_aot_windows_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_windows_arm64_pure_emission);
-
     RUN_TEST(test_teko_aot_escape_analysis_register_allocation);
     RUN_TEST(test_teko_aot_dead_code_elimination_purgue);
     RUN_TEST(test_teko_aot_common_subexpression_elimination_filter);
-
     RUN_TEST(test_teko_aot_constant_folding_math_collapse);
     RUN_TEST(test_teko_linker_elf64_binary_header_generation);
     RUN_TEST(test_teko_linker_elf64_relative_jmp_patch_calculation);
-
     RUN_TEST(test_teko_linker_arch_x64_mov_encoding_integrity);
     RUN_TEST(test_teko_linker_arch_arm64_add_encoding_integrity);
     RUN_TEST(test_teko_linker_arch_x86_32_halt_encoding);
     RUN_TEST(test_teko_linker_arch_arm32_mov_encoding);
     RUN_TEST(test_teko_linker_arch_ppc64_add_encoding);
-
     RUN_TEST(test_tld_static_dependency_injection_and_symbol_resolution);
-
     RUN_TEST(test_teko_linker_e2e_extern_service_injection_and_elf_generation);
-
     RUN_TEST(test_teko_linker_elf32_binary_header_and_class_validation);
-
     RUN_TEST(test_teko_linker_wasm_leb128_compression_logic);
-
     RUN_TEST(test_teko_linker_macho_64_binary_signature_integrity);
-
     RUN_TEST(test_teko_linker_pe_coff_multi_architecture_signatures);
+
+    RUN_TEST(test_teko_runtime_sys_allocation_and_page_recycling);
+    RUN_TEST(test_teko_runtime_scheduler_cooperative_multithreading);
+    RUN_TEST(test_teko_runtime_channels_blocking_and_signaling);
+    RUN_TEST(test_teko_runtime_arena_thread_isolation_and_alignment);
 
     return UNITY_END();
 }
