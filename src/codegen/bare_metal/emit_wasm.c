@@ -1,5 +1,6 @@
 #include "../codegen_metal.h"
 #include <stdio.h>
+#include <string.h>
 
 // ===========================================================================
 // WASM (WAT) emitter — Phase 10.3: cooperative concurrency with mid-function
@@ -75,8 +76,159 @@ static void emit_wasm_chan_read(FILE* f) {
     fprintf(f, "    i32.store offset=0\n");                                                               // head = (head+1) % cap
 }
 
+// ===========================================================================
+// Layer B — `--target=...-wasm-threads`: real multicore. The module imports a
+// SHARED memory and channels use the atomics proposal (memory.atomic.wait32 /
+// .notify + i32.atomic.*) instead of the cooperative scheduler. SPAWN delegates
+// to a host `teko_rt.spawn(fn_index, arg)` that starts a Web Worker /
+// worker_threads thread; that thread re-instantiates the same module against the
+// shared memory and calls the exported `teko_invoke` dispatcher. Green threads
+// are 1:1 OS threads here (opt-in parallelism on top of Layer A, not a
+// replacement). Channel cell layout: [0]=ready flag, [4]=value.
+// ===========================================================================
+static void emit_wasm_threads(MetalContext* ctx, OpCode op, int32_t arg) {
+    FILE* f = ctx->file;
+    switch (op) {
+        case OP_PROLOG:
+            fprintf(f, "(module\n");
+            fprintf(f, "  ;; --- Target: WebAssembly Text Format (wasm-threads / Layer B, Phase 10.4) ---\n");
+            fprintf(f, "  (import \"env\" \"memory\" (memory 1 1 shared))\n");
+            fprintf(f, "  (export \"memory\" (memory 0))\n");
+            fprintf(f, "  (import \"teko_rt\" \"spawn\" (func $teko_spawn (param i32 i32)))\n");
+            fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
+            fprintf(f, "  (type $task (func (param i32)))\n");
+            fprintf(f, "  (func $main (result i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
+            ctx->wasm_open = 1;
+            break;
+
+        case OP_HALT:
+            fprintf(f, "    ;; [WASM Halt]: result is $w0\n");
+            break;
+        case OP_ICONST:
+            fprintf(f, "    i32.const %d\n    local.set $w0\n", arg);
+            break;
+        case OP_SCONST:
+            fprintf(f, "    i32.const %d\n    local.set $w0\n", arg * 32);
+            break;
+        case OP_STORE:
+            fprintf(f, "    local.get $w0\n    local.set $w1\n");
+            break;
+        case OP_LOAD:
+            fprintf(f, "    local.get $w1\n    local.set $w0\n");
+            break;
+        case OP_ADD:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.add\n    local.set $w0\n");
+            break;
+        case OP_SUB:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.sub\n    local.set $w0\n");
+            break;
+        case OP_MUL:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.mul\n    local.set $w0\n");
+            break;
+        case OP_DIV:
+            fprintf(f, "    local.get $w1\n    i32.eqz\n    if (result i32)\n      i32.const -1\n    else\n");
+            fprintf(f, "      local.get $w0\n      local.get $w1\n      i32.div_s\n    end\n    local.set $w0\n");
+            break;
+        case OP_ARENA_PUSH:
+            fprintf(f, "    global.get $arena_sp\n    i32.const 1024\n    i32.add\n    global.set $arena_sp\n");
+            break;
+        case OP_ARENA_POP:
+            fprintf(f, "    global.get $arena_sp\n    i32.const 1024\n    i32.sub\n    global.set $arena_sp\n");
+            break;
+
+        case OP_CHAN_INIT:
+            // Channel cell {flag@0, value@4} in shared memory; flag starts empty.
+            fprintf(f, "    ;; [WASM-threads Channel Init]: atomic cell in shared memory\n");
+            fprintf(f, "    global.get $arena_sp\n    local.set $cp\n");
+            fprintf(f, "    local.get $cp\n    i32.const 0\n    i32.atomic.store offset=0\n");
+            fprintf(f, "    global.get $arena_sp\n    i32.const 8\n    i32.add\n    global.set $arena_sp\n");
+            break;
+
+        case OP_CHAN_PUT:
+            // Atomically publish the value, then wake one waiter.
+            fprintf(f, "    ;; [WASM-threads Channel Put]: atomic store + notify\n");
+            fprintf(f, "    local.get $cp\n    local.get $w0\n    i32.atomic.store offset=4\n");
+            fprintf(f, "    local.get $cp\n    i32.const 1\n    i32.atomic.store offset=0\n");
+            fprintf(f, "    local.get $cp\n    i32.const 1\n    memory.atomic.notify offset=0\n    drop\n");
+            break;
+
+        case OP_CHAN_GET:
+            // Block on the atomic until the flag is set, then load the value.
+            fprintf(f, "    ;; [WASM-threads Channel Get]: memory.atomic.wait32 until ready\n");
+            fprintf(f, "    (block $ready\n      (loop $spin\n");
+            fprintf(f, "        (br_if $ready (i32.eq (i32.atomic.load offset=0 (local.get $cp)) (i32.const 1)))\n");
+            fprintf(f, "        (drop (memory.atomic.wait32 offset=0 (local.get $cp) (i32.const 0) (i64.const -1)))\n");
+            fprintf(f, "        (br $spin)))\n");
+            fprintf(f, "    local.get $cp\n    i32.atomic.load offset=4\n    local.set $w0\n");
+            break;
+
+        case OP_SPAWN_ASYNC:
+            // Hand off to the host: start a real Worker for routine $w0 with arg $cp.
+            fprintf(f, "    ;; [WASM-threads Spawn]: host starts a Worker (fn=$w0, arg=$cp)\n");
+            fprintf(f, "    local.get $w0\n    local.get $cp\n    call $teko_spawn\n");
+            break;
+
+        case OP_AWAIT_INTENT:
+            fprintf(f, "    ;; [WASM-threads Await]: parallelism is real; no cooperative yield\n");
+            break;
+
+        case OP_FUNC_BEGIN:
+            if (ctx->wasm_open == 1) {
+                fprintf(f, "    local.get $w0\n  )\n");
+            } else if (ctx->wasm_open == 2) {
+                fprintf(f, "  )\n");
+            }
+            fprintf(f, "  (func $routine_%d (param $arg i32)\n", arg);
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
+            fprintf(f, "    local.get $arg\n    local.set $cp\n");
+            ctx->wasm_open = 2;
+            if (ctx->wasm_routine_count < 64) ctx->wasm_routine_ids[ctx->wasm_routine_count] = arg;
+            ctx->wasm_routine_count++;
+            break;
+
+        case OP_FUNC_END:
+            if (ctx->wasm_open == 2) {
+                fprintf(f, "  )\n");
+                ctx->wasm_open = 0;
+            }
+            break;
+
+        case OP_RETURN:
+        case OP_EPILOG: {
+            if (ctx->wasm_open == 1) {
+                fprintf(f, "    local.get $w0\n  )\n");
+            } else if (ctx->wasm_open == 2) {
+                fprintf(f, "  )\n");
+            }
+            ctx->wasm_open = 0;
+            int n = ctx->wasm_routine_count;
+            fprintf(f, "  (table %d funcref)\n", n > 0 ? n : 1);
+            if (n > 0) {
+                fprintf(f, "  (elem (i32.const 0)");
+                for (int k = 0; k < n && k < 64; k++) fprintf(f, " $routine_%d", ctx->wasm_routine_ids[k]);
+                fprintf(f, ")\n");
+            }
+            // Exported dispatcher so a host Worker can run a routine by table index.
+            fprintf(f, "  (func $teko_invoke (export \"teko_invoke\") (param $fn i32) (param $arg i32)\n");
+            fprintf(f, "    (call_indirect (type $task) (local.get $arg) (local.get $fn)))\n");
+            fprintf(f, "  (export \"main\" (func $main))\n");
+            fprintf(f, ")\n");
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
 void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
     if (!ctx || !ctx->file) return;
+    // Layer B: opt-in real multicore via `--target=...-wasm-threads`.
+    if (ctx->target.target_string[0] && strstr(ctx->target.target_string, "threads")) {
+        emit_wasm_threads(ctx, op, arg);
+        return;
+    }
     FILE* f = ctx->file;
 
     switch (op) {

@@ -233,3 +233,56 @@ void test_teko_aot_wasm_midfunction_suspension(void) {
     free(buffer);
     remove(asm_path);
 }
+
+// ====================================================================
+// 5. WASM-THREADS (LAYER B): SHARED MEMORY + ATOMICS + HOST SPAWN (Phase 10.4)
+// ====================================================================
+// With a `...-wasm-threads` target the backend emits the opt-in real-multicore
+// lowering: a shared memory import, atomic channel ops, and SPAWN delegated to a
+// host Worker. The wasm-threads CI jobs verify it runs on a real OS thread
+// (worker_threads / Web Worker), main() == 99.
+void test_teko_aot_wasm_threads_layer_b_emission(void) {
+    const char* asm_path = "output_wasm_threads_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi-threads", sizeof(target.target_string) - 1); // Layer B flag
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    // main: CHAN_INIT, ICONST 0, SPAWN_ASYNC, CHAN_GET, HALT
+    // routine 0: FUNC_BEGIN(0), ICONST 99, CHAN_PUT, FUNC_END
+    unsigned char prog[] = {
+        0x12, 0x01, 0x00, 0x00, 0x00, 0x00, 0x10, 0x14, 0x00,
+        0x40, 0x00, 0x00, 0x00, 0x00, 0x01, 0x63, 0x00, 0x00, 0x00, 0x13, 0x41
+    };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // Shared memory import (the prerequisite for the atomics proposal).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"env\" \"memory\" (memory 1 1 shared))"));
+    // Atomic channel ops: publish + wake + wait.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.atomic.store"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "memory.atomic.notify"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "memory.atomic.wait32"));
+    // SPAWN delegates to the host Worker; a dispatcher is exported for it to call.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"teko_rt\" \"spawn\""));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_spawn"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_invoke (export \"teko_invoke\")"));
+    // Layer B has no in-module cooperative scheduler (parallelism is real).
+    TEST_ASSERT_NULL(strstr(buffer, "$teko_sched_run"));
+
+    free(buffer);
+    remove(asm_path);
+}

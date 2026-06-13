@@ -120,8 +120,21 @@ The arena (`$arena_sp`) is reused for all of these allocations.
   proof `runtime/wasm/emit-demo/emit_suspend.c`: a consumer suspends at its first receive, the
   producer runs in between, the consumer resumes with its running sum intact and drains both
   values — `main() == 30`, run under Node + wasmtime + headless Chromium in CI.
-- **10.4 — `--target=wasm-threads`** (Layer B): shared memory + atomics + Web Worker host
-  glue; node `worker_threads` execution test. Opt-in parallelism.
+- **10.4 — `--target=...-wasm-threads`** (Layer B) ✅ *done*: opt-in **real multicore**. A
+  `-threads` target makes the backend emit a different module: `(import "env" "memory" (memory
+  1 1 shared))`, channels lowered to the **atomics** proposal (`i32.atomic.store`/`load`,
+  `memory.atomic.notify`/`wait32`), `SPAWN` delegated to a host `teko_rt.spawn(fn, arg)`, and an
+  exported `teko_invoke` dispatcher. The host (a small reference under `runtime/wasm/threads/`
+  for node `worker_threads`, and `runtime/wasm/browser/threads-*` for Web Workers) starts a
+  **real OS thread** that re-instantiates the module against the shared memory and runs the
+  routine; the value is handed back through the atomic channel. Green threads are 1:1 OS
+  threads here — opt-in parallelism layered on A, not a replacement (Layer A stays the default).
+  - *Executable proof:* `emit-demo/emit_threads.c` emits the shared-memory module; CI runs it
+    on a real worker_threads thread (`main() == 99`) alongside the hand-written reference
+    `samples/threads.wat` (`== 777`). `wasm-threads-node` is **gating**; `wasm-threads-browser`
+    (Web Workers, COOP/COEP, `crossOriginIsolated`) is non-blocking until it proves stable.
+  - *Layer A untouched:* Layer B is a self-contained second emitter path selected by the target
+    string; the default cooperative emitter and all its goldens are unchanged.
 
 ## 7. Risks / open decisions (need approval before the heavy increments)
 

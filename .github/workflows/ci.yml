@@ -173,3 +173,74 @@ jobs:
       - name: Run headless-browser harness (parity + crossOriginIsolated check)
         working-directory: runtime/wasm
         run: node run-browser.mjs
+
+  # ---------------------------------------------------------------------------
+  # Phase 10.4 Layer B (`--target=...-wasm-threads`): real multicore. Build the
+  # compiler, emit the shared-memory + atomics module from the backend, and run it
+  # on a REAL OS thread via node worker_threads — a spawned Worker re-instantiates
+  # the module against the shared memory and hands a value back over the atomic
+  # channel (reference=777, emitted=99). Gating: validated locally.
+  # ---------------------------------------------------------------------------
+  wasm-threads-node:
+    name: WASM-threads exec — node worker_threads (Layer B)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install toolchain (clang / ninja / WABT)
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang wabt
+      - name: Build the compiler core (Release) -> libteko_core.a
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target teko_core --parallel 4
+      - name: Emit the wasm-threads module from the Teko backend
+        run: |
+          cc -I src runtime/wasm/emit-demo/emit_threads.c build/libteko_core.a -o emit_threads
+          ./emit_threads runtime/wasm/samples/emitted_threads.wat
+      - name: Assemble the shared-memory modules (wat2wasm --enable-threads)
+        run: |
+          wat2wasm --enable-threads runtime/wasm/samples/threads.wat         -o runtime/wasm/samples/threads.wasm
+          wat2wasm --enable-threads runtime/wasm/samples/emitted_threads.wat -o runtime/wasm/samples/emitted_threads.wasm
+      - name: Run under node worker_threads (real OS threads; reference=777, emitted=99)
+        run: node runtime/wasm/threads/run-node-threads.mjs
+
+  # ---------------------------------------------------------------------------
+  # Layer B in a real browser: shared memory + atomics across Web Workers, served
+  # with COOP/COEP (crossOriginIsolated). New surface, so non-blocking until it
+  # proves stable; the gating Layer B signal is wasm-threads-node above.
+  # ---------------------------------------------------------------------------
+  wasm-threads-browser:
+    name: WASM-threads exec — headless Chromium Web Workers (Layer B, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install toolchain (clang / ninja / WABT)
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang wabt
+      - name: Build the compiler core (Release) -> libteko_core.a
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target teko_core --parallel 4
+      - name: Emit the wasm-threads module from the Teko backend
+        run: |
+          cc -I src runtime/wasm/emit-demo/emit_threads.c build/libteko_core.a -o emit_threads
+          ./emit_threads runtime/wasm/samples/emitted_threads.wat
+      - name: Assemble the shared-memory modules (wat2wasm --enable-threads)
+        run: |
+          wat2wasm --enable-threads runtime/wasm/samples/threads.wat         -o runtime/wasm/samples/threads.wasm
+          wat2wasm --enable-threads runtime/wasm/samples/emitted_threads.wat -o runtime/wasm/samples/emitted_threads.wasm
+      - name: Install harness deps + Chromium
+        working-directory: runtime/wasm
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Run headless-browser Layer B harness (Web Workers + crossOriginIsolated)
+        working-directory: runtime/wasm
+        run: node run-threads-browser.mjs
