@@ -4,7 +4,7 @@
 > Prioritization: `Priority = (Impact + Risk) × (6 − Effort)`, each axis from 1 to 5.
 > Project: the Teko language compiler in **C23** — 61 `.c` / 44 `.h`, ~10.3k LOC in `src/`; 42 test files (Unity).
 >
-> **Phase 9 outcome (2026-06-13):** items **0–8 and 10 resolved**; item **7 fully resolved** (riscv32/64 + x86_64 SysV trio + arm64 GAS trio unified into shared cores; Windows MASM/Intel emitters kept separate by design); item **9 reclassified as a roadmap feature** ("WASM concurrency backend"), to be built in a dedicated PR — the WASM MVP (real arena + honest hooks) is already delivered and nothing is broken. CI green across the full matrix (Linux x86_64/arm64, Windows x86_64/arm64, macOS arm64, + emulated Linux riscv64).
+> **Phase 9 outcome (2026-06-13):** items **0–8 and 10 resolved**; item **7 fully resolved** (riscv32/64 + x86_64 SysV trio + arm64 GAS trio unified into shared cores; Windows MASM/Intel emitters kept separate by design); item **9 promoted to a dedicated feature phase — Phase 10 ("WASM Concurrency Backend")** in `docs/plan.md`, to be built in a dedicated PR — the WASM MVP (real arena + honest hooks) is already delivered and nothing is broken. CI green across the full matrix (Linux x86_64/arm64, Windows x86_64/arm64, macOS arm64, + emulated Linux riscv64).
 
 ## Prioritized summary
 
@@ -19,7 +19,7 @@
 | 6 | ~~Scattered docs / no `ARCHITECTURE.md`~~ | Docs | 3 | 2 | 3 | **15** | ✅ Resolved 2026-06-13 |
 | 7 | ~~Near-identical emitters (duplication)~~ | Code debt | 4 | 3 | 4 | **14** | ✅ Resolved 2026-06-13 (riscv + x86_64/arm64 GAS via #10; win/x86 separate) |
 | 8 | ~~Versioned build artifacts~~ (resolved) | — | — | — | — | — | ✅ Close |
-| 9 | WASM concurrency backend (full spawn/channels) | Code/Arch | 3 | 3 | 5 | **24** | ➡️ Reclassified as ROADMAP FEATURE (own PR) — MVP delivered |
+| 9 | WASM concurrency backend (full spawn/channels) | Code/Arch | 3 | 3 | 5 | **24** | ➡️ Promoted to **Phase 10** (feature, own PR) — MVP delivered |
 | 10 | Broader emitter de-dup (x86_64 SysV trio / arm64 GAS trio) | Code debt | 3 | 2 | 4 | **10** | ✅ Resolved 2026-06-13 (win_arm64 kept separate) |
 
 ---
@@ -141,9 +141,9 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 
 `git ls-files` shows 0 files under `cmake-build-debug/` or `node_modules/`; both are already in `.gitignore`. The previous backlog item was incorrect — **close**.
 
-## 9. WASM concurrency backend — ➡️ RECLASSIFIED AS A ROADMAP FEATURE (not debt)
+## 9. WASM concurrency backend — ➡️ PROMOTED TO PHASE 10 (feature, not debt)
 
-**Not technical debt.** Nothing is broken or silently wrong: the WASM MVP (item 4) ships a **real arena allocator** plus **honest host-runtime hooks** for `OP_SPAWN_ASYNC` / `OP_CHAN_INIT` / `OP_CHAN_PUT` / `OP_AWAIT_INTENT` (`call $teko_spawn` / `$teko_chan_init` / `$teko_chan_put` / `$teko_await`, declared as `(import "teko_rt" ...)`). A *full* WASM concurrency runtime is a new capability, so it is moved out of the debt backlog and tracked as a **roadmap feature** (to be built in its own PR). See the design and trade-offs in **`docs/plan.md` → "Roadmap Feature: WASM Concurrency Backend"**.
+**Not technical debt.** Nothing is broken or silently wrong: the WASM MVP (item 4) ships a **real arena allocator** plus **honest host-runtime hooks** for `OP_SPAWN_ASYNC` / `OP_CHAN_INIT` / `OP_CHAN_PUT` / `OP_AWAIT_INTENT` (`call $teko_spawn` / `$teko_chan_init` / `$teko_chan_put` / `$teko_await`, declared as `(import "teko_rt" ...)`). A *full* WASM concurrency runtime is a new capability, so it is moved out of the debt backlog and promoted to a dedicated feature phase — **`docs/plan.md` → Phase 10: "WASM Concurrency Backend"** (to be built in its own PR), where the design and trade-offs are documented.
 
 **Why it is a feature, not a cleanup:** delivering real concurrency on WASM is an architectural decision with genuine trade-offs (single-thread cooperative scheduler vs. multicore Workers; WASM has no GA stack-switching), not a fix to something defective.
 
