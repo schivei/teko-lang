@@ -16,6 +16,7 @@ To stop the planning docs from drifting, here is the single source of truth for 
 | [`README.md`](../README.md) | Project overview, features, quick start | Canonical (user-facing) |
 | **`docs/plan.md`** (this file) | The roadmap — phases 1–19, current status | **Canonical (roadmap)** |
 | [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md) | Compiler pipeline & module/file map | **Canonical (architecture)** |
+| [`docs/PHASE10_WASM_CONCURRENCY.md`](./PHASE10_WASM_CONCURRENCY.md) | Phase 10 design & implementation plan | Canonical (feature design) |
 | [`TECH_DEBT_BACKLOG.md`](../TECH_DEBT_BACKLOG.md) | Prioritized maintenance backlog | Canonical (tech debt) |
 | [`TEKO_COMPILER_MEMORANDUM.txt`](../TEKO_COMPILER_MEMORANDUM.txt) | Owner's checkpoint memorandum; source of phases 11–18 | Reference / historical |
 | [`docs/vm_plan.md`](./vm_plan.md) | Phase 3 (VM & debugger) sprint detail | Reference / historical (phase delivered) |
@@ -298,6 +299,8 @@ See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, and file pa
 **Caveat:** WASM has **no GA stack-switching** proposal, so true green-thread context switches must be synthesized by the compiled scheduler (option 1) rather than using a native primitive.
 
 **Scope for the dedicated PR:** start with option 1 (cooperative scheduler → WASM, single thread) to honour the M:N model, then optionally layer option 2 for parallelism. Provide a minimal host `teko_rt` and an integration test under a WASM engine.
+
+**Full design, opcode lowering, host ABI, test strategy and incremental breakdown:** see [`docs/PHASE10_WASM_CONCURRENCY.md`](./PHASE10_WASM_CONCURRENCY.md).
 
 ---
 
