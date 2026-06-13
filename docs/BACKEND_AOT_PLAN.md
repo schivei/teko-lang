@@ -1,6 +1,10 @@
-# 🗺️ Engineering Plan: Leko AOT Bare-Metal Compiler (Phase 5)
+# 🗺️ Engineering Plan: Teko AOT Bare-Metal Compiler (Phase 5)
 
-This document specifies the definitive architecture of the **Ahead-of-Time (AOT)** backend for the **Leko** language. The goal is to completely eliminate the dependency on a Virtual Machine (VM) in production (*Release*) mode, transpiling the Abstract Syntax Tree (AST) and Intermediate Language (IL) directly into native (*bare-metal*) machine code specific to each combination of **Operating System and Processor Architecture**.
+> **Reference (backend spec).** Engineering spec for the Phase 5 AOT backend (target
+> matrix, ABIs, per-opcode requirements). Canonical roadmap: [`plan.md`](./plan.md);
+> architecture & file map: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+This document specifies the definitive architecture of the **Ahead-of-Time (AOT)** backend for the **Teko** language. The goal is to completely eliminate the dependency on a Virtual Machine (VM) in production (*Release*) mode, transpiling the Abstract Syntax Tree (AST) and Intermediate Language (IL) directly into native (*bare-metal*) machine code specific to each combination of **Operating System and Processor Architecture**.
 
 ---
 
@@ -20,7 +24,7 @@ To support the universality of the language without depending on heavy third-par
 
 ---
 
-## 2. Physical Requirements per Leko ISA Opcode
+## 2. Physical Requirements per Teko ISA Opcode
 
 Each architecture file segregated in the subfolders (`apple/`, `linux/`, `windows/`, `bsd_unix/`, `bare_metal/`) must implement a contiguous `switch` translating the abstract IL opcodes into real hardware register instructions:
 

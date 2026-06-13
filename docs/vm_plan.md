@@ -1,5 +1,8 @@
 # 🗺️ Incremental Execution Plan: Phase 3 - Virtual Machine & Debugger
 
+> **Reference / historical.** Original sprint plan for Phase 3 (VM & debugger), now delivered.
+> Kept for context. Canonical roadmap: [`plan.md`](./plan.md); architecture: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
 ```mermaid
 graph TD
     %% Graph Style

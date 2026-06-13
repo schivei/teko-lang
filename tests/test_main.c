@@ -1,12 +1,21 @@
 #include "unity.h"
+#include <stdio.h>
 
 void setUp(void) {}
-void tearDown(void) {}
+// Flush after every test so that, if a later test crashes (e.g. a segfault on a
+// CI runner), the log still shows every test that completed — the crashing test
+// is the next one in RUN_TEST order. On Windows a pipe'd stdout is fully buffered,
+// so without this a crash loses all output and the failing test is invisible.
+void tearDown(void) { fflush(stdout); fflush(stderr); }
 
 extern void test_string_raw_interpolation_and_arity(void);
 extern void test_async_control_flow_and_raised_catch(void);
 extern void test_concurrency_and_channel_semantics(void);
 extern void test_cqrs_handler_with_dependency_injection(void);
+extern void test_ffi_extern_struct_function_and_block_parsing(void);
+extern void test_generics_type_parameters_and_where_constraints(void);
+extern void test_extensions_methods_and_operator_overload_parsing(void);
+extern void test_codegen_aot_c_transpilation_emits_runtime_and_statements(void);
 extern void test_global_visibility_modifiers_and_service_restriction(void);
 extern void test_parser_recovery_on_syntax_error(void);
 extern void test_virtual_namespace_expansion_at_sign(void);
@@ -48,6 +57,7 @@ extern void test_teko_aot_linux_mips_pure_emission(void);
 extern void test_teko_aot_linux_arm64_pure_emission(void);
 extern void test_teko_aot_linux_arm32_pure_emission(void);
 extern void test_teko_aot_wasm_pure_emission_integrity(void);
+extern void test_teko_aot_wasm_arena_and_concurrency_hooks(void);
 extern void test_teko_aot_freebsd_x86_64_pure_emission(void);
 extern void test_teko_aot_freebsd_arm64_pure_emission(void);
 extern void test_teko_aot_windows_x86_32_pure_emission(void);
@@ -70,6 +80,7 @@ extern void test_teko_linker_e2e_extern_service_injection_and_elf_generation(voi
 extern void test_teko_linker_wasm_leb128_compression_logic(void);
 extern void test_teko_linker_macho_64_binary_signature_integrity(void);
 extern void test_teko_linker_pe_coff_multi_architecture_signatures(void);
+extern void test_codegen_emitters_arithmetic_per_target(void);
 
 extern void test_teko_runtime_sys_allocation_and_page_recycling(void);
 extern void test_teko_runtime_scheduler_cooperative_multithreading(void);
@@ -77,11 +88,20 @@ extern void test_teko_runtime_channels_blocking_and_signaling(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 
 int main(void) {
+    // Unbuffered output: stream every line live so a crash on a CI runner shows
+    // exactly how far the suite got (Windows pipes are otherwise fully buffered).
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     UNITY_BEGIN();
 
     RUN_TEST(test_string_raw_interpolation_and_arity);
     RUN_TEST(test_async_control_flow_and_raised_catch);
     RUN_TEST(test_cqrs_handler_with_dependency_injection);
+    RUN_TEST(test_ffi_extern_struct_function_and_block_parsing);
+    RUN_TEST(test_generics_type_parameters_and_where_constraints);
+    RUN_TEST(test_extensions_methods_and_operator_overload_parsing);
+    RUN_TEST(test_codegen_aot_c_transpilation_emits_runtime_and_statements);
     RUN_TEST(test_parser_recovery_on_syntax_error);
     RUN_TEST(test_global_visibility_modifiers_and_service_restriction);
     RUN_TEST(test_virtual_namespace_expansion_at_sign);
@@ -124,6 +144,7 @@ int main(void) {
     RUN_TEST(test_teko_aot_linux_arm64_pure_emission);
     RUN_TEST(test_teko_aot_linux_arm32_pure_emission);
     RUN_TEST(test_teko_aot_wasm_pure_emission_integrity);
+    RUN_TEST(test_teko_aot_wasm_arena_and_concurrency_hooks);
     RUN_TEST(test_teko_aot_freebsd_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_freebsd_arm64_pure_emission);
     RUN_TEST(test_teko_aot_windows_x86_32_pure_emission);
@@ -146,6 +167,7 @@ int main(void) {
     RUN_TEST(test_teko_linker_wasm_leb128_compression_logic);
     RUN_TEST(test_teko_linker_macho_64_binary_signature_integrity);
     RUN_TEST(test_teko_linker_pe_coff_multi_architecture_signatures);
+    RUN_TEST(test_codegen_emitters_arithmetic_per_target);
 
     RUN_TEST(test_teko_runtime_sys_allocation_and_page_recycling);
     RUN_TEST(test_teko_runtime_scheduler_cooperative_multithreading);

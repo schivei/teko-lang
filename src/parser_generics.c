@@ -91,3 +91,37 @@ void parse_generic_constraints_where(Parser* parser, GenericFunctionSignature* s
         }
     }
 }
+
+// Releases the heap-owned members of a generic function signature. Does not free
+// the signature struct itself (the caller owns it, often on the stack).
+void free_generic_function_signature_members(GenericFunctionSignature* sig) {
+    if (!sig) return;
+
+    if (sig->fn_name) {
+        free(sig->fn_name);
+        sig->fn_name = NULL;
+    }
+    if (sig->return_type) {
+        free_type_info(sig->return_type);
+        sig->return_type = NULL;
+    }
+
+    if (sig->type_parameters) {
+        for (int i = 0; i < sig->type_parameter_count; i++) {
+            free(sig->type_parameters[i]);
+        }
+        free(sig->type_parameters);
+        sig->type_parameters = NULL;
+    }
+    sig->type_parameter_count = 0;
+
+    if (sig->constraints) {
+        for (int i = 0; i < sig->constraint_count; i++) {
+            free(sig->constraints[i].type_parameter_name);
+            free(sig->constraints[i].constraint_bound);
+        }
+        free(sig->constraints);
+        sig->constraints = NULL;
+    }
+    sig->constraint_count = 0;
+}
