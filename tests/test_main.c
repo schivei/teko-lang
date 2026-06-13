@@ -1,7 +1,12 @@
 #include "unity.h"
+#include <stdio.h>
 
 void setUp(void) {}
-void tearDown(void) {}
+// Flush after every test so that, if a later test crashes (e.g. a segfault on a
+// CI runner), the log still shows every test that completed — the crashing test
+// is the next one in RUN_TEST order. On Windows a pipe'd stdout is fully buffered,
+// so without this a crash loses all output and the failing test is invisible.
+void tearDown(void) { fflush(stdout); fflush(stderr); }
 
 extern void test_string_raw_interpolation_and_arity(void);
 extern void test_async_control_flow_and_raised_catch(void);
@@ -83,6 +88,11 @@ extern void test_teko_runtime_channels_blocking_and_signaling(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 
 int main(void) {
+    // Unbuffered output: stream every line live so a crash on a CI runner shows
+    // exactly how far the suite got (Windows pipes are otherwise fully buffered).
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     UNITY_BEGIN();
 
     RUN_TEST(test_string_raw_interpolation_and_arity);
