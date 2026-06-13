@@ -51,11 +51,11 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
 }
 
 // ====================================================================
-// 2. WASM ARENA ALLOCATOR + HOST-RUNTIME CONCURRENCY HOOKS (MVP)
+// 2. WASM ARENA ALLOCATOR + IN-MODULE CHANNELS + SPAWN/AWAIT HOOKS
 // ====================================================================
-// The O(1) arena is emitted as real linear-memory bump code. The concurrency
-// opcodes are routed to honest host-runtime imports (they require the WASM
-// threads proposal to be backed for real; see TECH_DEBT_BACKLOG.md).
+// The O(1) arena is real linear-memory bump code. Phase 10.1: channels are now
+// real in-module ring buffers in linear memory (no host import); only spawn and
+// await still delegate to the host runtime (cooperative scheduler is Phase 10.2).
 void test_teko_aot_wasm_arena_and_concurrency_hooks(void) {
     const char* asm_path = "output_wasm_arena_test.wat";
 
@@ -88,11 +88,19 @@ void test_teko_aot_wasm_arena_and_concurrency_hooks(void) {
     TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.add"));
     TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.sub"));
 
-    // Honest host-runtime hooks (not silent comments) for the concurrency ops.
+    // Phase 10.1: channels are real in-module ring buffers (no host import).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.store offset=8"));   // CHAN_INIT writes cap
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.store offset=12"));  // CHAN_PUT writes buf[tail]
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.rem_u"));            // CHAN_PUT tail wrap (mod cap)
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.store offset=4"));   // CHAN_PUT advances tail
+    // The channel host imports are gone (channels are in-module now).
+    TEST_ASSERT_NULL(strstr(buffer, "call $teko_chan_init"));
+    TEST_ASSERT_NULL(strstr(buffer, "call $teko_chan_put"));
+    TEST_ASSERT_NULL(strstr(buffer, "\"chan_init\""));
+
+    // Spawn / await still delegate to honest host-runtime hooks (Phase 10.2).
     TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"teko_rt\" \"spawn\""));
     TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_spawn"));
-    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_chan_init"));
-    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_chan_put"));
     TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_await"));
 
     free(buffer);

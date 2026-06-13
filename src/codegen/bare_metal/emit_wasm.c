@@ -11,12 +11,10 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_PROLOG:
             fprintf(ctx->file, "(module\n");
             fprintf(ctx->file, "  ;; --- Target: WebAssembly Text Format (WASM Bare-Metal) ---\n");
-            // Host-provided runtime hooks. Real concurrency on WASM requires the
-            // threads proposal (shared memory + atomics + a host Worker); until
-            // then spawn/channel/await are routed to these imported functions.
+            // Host-provided runtime hooks. Channels are now implemented in-module
+            // (Phase 10.1, linear-memory ring buffers) so only spawn/await still
+            // delegate to the host (cooperative scheduler lands in 10.2).
             fprintf(ctx->file, "  (import \"teko_rt\" \"spawn\" (func $teko_spawn (param i32) (result i32)))\n");
-            fprintf(ctx->file, "  (import \"teko_rt\" \"chan_init\" (func $teko_chan_init (param i32) (result i32)))\n");
-            fprintf(ctx->file, "  (import \"teko_rt\" \"chan_put\" (func $teko_chan_put (param i32 i32) (result i32)))\n");
             fprintf(ctx->file, "  (import \"teko_rt\" \"await_intent\" (func $teko_await (param i32) (result i32)))\n");
             fprintf(ctx->file, "  (memory 1)\n");
             fprintf(ctx->file, "  (export \"memory\" (memory 0))\n");
@@ -113,18 +111,32 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         case OP_CHAN_INIT:
-            fprintf(ctx->file, "    ;; [WASM Channel Init] -> host runtime (threads proposal pending)\n");
-            fprintf(ctx->file, "    local.get $w0\n");
-            fprintf(ctx->file, "    call $teko_chan_init\n");
-            fprintf(ctx->file, "    drop\n");
+            // Phase 10.1: bump-allocate a ring-buffer channel in linear memory.
+            // Layout (i32 cells): [0]=head [4]=tail [8]=cap, then cap data slots.
+            // Channel handle (base pointer) is left in $w0.
+            fprintf(ctx->file, "    ;; [WASM Channel Init]: ring buffer in linear memory (cap 8)\n");
+            fprintf(ctx->file, "    global.get $arena_sp\n");
+            fprintf(ctx->file, "    local.set $w0\n");              // $w0 = channel base P
+            fprintf(ctx->file, "    local.get $w0\n    i32.const 0\n    i32.store offset=0\n"); // head = 0
+            fprintf(ctx->file, "    local.get $w0\n    i32.const 0\n    i32.store offset=4\n"); // tail = 0
+            fprintf(ctx->file, "    local.get $w0\n    i32.const 8\n    i32.store offset=8\n"); // cap = 8
+            fprintf(ctx->file, "    global.get $arena_sp\n    i32.const 44\n    i32.add\n    global.set $arena_sp\n"); // reserve 12 + 8*4
             break;
 
         case OP_CHAN_PUT:
-            fprintf(ctx->file, "    ;; [WASM Channel Put] -> host runtime (threads proposal pending)\n");
+            // Phase 10.1: non-blocking ring-buffer store. Channel handle in $w0,
+            // value in $w1. Writes buf[tail] then advances tail (mod cap).
+            fprintf(ctx->file, "    ;; [WASM Channel Put]: non-blocking ring-buffer store at tail\n");
+            // buf[tail] = value  -> addr = P + tail*4, with the +12 header via store offset
             fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    local.get $w0\n    i32.load offset=4\n    i32.const 4\n    i32.mul\n    i32.add\n"); // P + tail*4
             fprintf(ctx->file, "    local.get $w1\n");
-            fprintf(ctx->file, "    call $teko_chan_put\n");
-            fprintf(ctx->file, "    drop\n");
+            fprintf(ctx->file, "    i32.store offset=12\n");        // mem[P + tail*4 + 12] = value
+            // tail = (tail + 1) % cap
+            fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    local.get $w0\n    i32.load offset=4\n    i32.const 1\n    i32.add\n");
+            fprintf(ctx->file, "    local.get $w0\n    i32.load offset=8\n    i32.rem_u\n");
+            fprintf(ctx->file, "    i32.store offset=4\n");          // tail = (tail+1) % cap
             break;
 
         case OP_AWAIT_INTENT:
