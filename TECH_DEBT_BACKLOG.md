@@ -11,12 +11,13 @@
 | 0 | ~~`teko` target missing `target_include_directories` → main binary does not build~~ | Infra (blocker) | 5 | 5 | 1 | **50** | ✅ Resolved 2026-06-13 |
 | 1 | ~~FFI / generics / AOT modules with no tests~~ | Test debt | 4 | 5 | 3 | **27** | ✅ Resolved 2026-06-13 |
 | 2 | ~~No validation of codegen output per target~~ | Test debt | 4 | 4 | 3 | **24** | ✅ Resolved 2026-06-13 |
-| 3 | CI with no Windows runner (PE/COFF unexercised) | Infra | 3 | 3 | 2 | **24** | 🔴 High |
-| 4 | WASM backend with stubbed opcodes (arena/async/channels) | Code/Arch | 4 | 5 | 4 | **18** | 🟡 Medium |
+| 3 | ~~CI with no Windows runner (PE/COFF unexercised)~~ | Infra | 3 | 3 | 2 | **24** | ✅ Resolved 2026-06-13 |
+| 4 | WASM stubbed opcodes (arena/async/channels) | Code/Arch | 4 | 5 | 4 | **18** | 🟢 MVP done 2026-06-13 |
 | 5 | ~~`CMake GLOB_RECURSE` (stale builds)~~ | Infra | 2 | 2 | 1 | **20** | ✅ Resolved 2026-06-13 |
 | 6 | Scattered docs / no `ARCHITECTURE.md` | Docs | 3 | 2 | 3 | **15** | 🟡 Medium |
 | 7 | 16 near-identical emitters (duplication) | Code debt | 4 | 3 | 4 | **14** | 🟢 Low |
 | 8 | ~~Versioned build artifacts~~ (resolved) | — | — | — | — | — | ✅ Close |
+| 9 | WASM real concurrency (deferred → WASM threads proposal) | Code/Arch | 3 | 3 | 5 | **24** | ⏸️ Deferred (tracked) |
 
 ---
 
@@ -64,29 +65,31 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 
 **Files:** `src/codegen/*/emit_*.c`; `tests/codegen/test_codegen_emitters_arithmetic.c` plus the existing `test_codegen_{linux,apple,unix,windows,embedded}.c`.
 
-## 3. CI does not build or test on Windows — `24` 🔴
+## 3. CI does not build or test on Windows — `24` ✅ RESOLVED 2026-06-13
 
 **Category:** Infra debt
 
-**Situation:** `.github/workflows/ci.yml` runs only `build-linux` and `build-macos`. The project has Windows backends (`src/codegen/windows/emit_win_*.c`) and a PE/COFF emitter (`src/codegen/tld_pe.c`) that are **never exercised on a Windows runner**.
+**Situation:** `.github/workflows/ci.yml` ran only `build-linux` and `build-macos`. The project has Windows backends (`src/codegen/windows/emit_win_*.c`) and a PE/COFF emitter (`src/codegen/tld_pe.c`) that were **never exercised on a Windows runner**.
 
-**Business justification:** Toolchain differences (MSVC vs Clang, paths, line endings) and the PE path can break unnoticed. Very low cost: add a `windows-latest` job.
+**Business justification:** Toolchain differences (MSVC vs Clang, paths, line endings) and the PE path can break unnoticed.
 
-**Remediation:** Add a `build-windows` job (`windows-latest`, CMake + Ninja/MSVC) running `teko_tests`.
+**Resolution (2026-06-13):** Rewrote `ci.yml` into a `fail-fast: false` matrix over `ubuntu-latest`, `macos-latest`, and `windows-latest` (Windows via MSVC), which also drove the MSVC portability fixes (computed-goto fallback, `auto`/`nullptr` removal, portable packing, `<unistd.h>` guards). Merged via PR #1; all three OS jobs are green.
 
 **Files:** `.github/workflows/ci.yml`.
 
-## 4. WASM backend with stubbed opcodes — `18` 🟡
+## 4. WASM backend with stubbed opcodes — `18` 🟢 MVP DONE 2026-06-13
 
 **Category:** Code / Architecture debt
 
-**Situation:** In `src/codegen/bare_metal/emit_wasm.c`, the opcodes `OP_ARENA_PUSH/POP`, `OP_SPAWN_ASYNC`, `OP_CHAN_INIT/PUT`, and `OP_AWAIT_INTENT` emit **only comments** (`;; --- [WASM Arena Push] ---`), not real WASM code. Arithmetic (`OP_ADD`…) is implemented; concurrency and arena are not.
+**Situation:** In `src/codegen/bare_metal/emit_wasm.c`, the opcodes `OP_ARENA_PUSH/POP`, `OP_SPAWN_ASYNC`, `OP_CHAN_INIT/PUT`, and `OP_AWAIT_INTENT` emitted **only comments**, not real WASM code. Arithmetic was implemented; arena and concurrency were not.
 
-**Business justification:** Worse than missing — it produces a WASM module that *looks* like it compiles but runs with no arena allocation and no concurrency. The O(1) arena allocator and green threads are the language's advertised differentiator.
+**Business justification:** Worse than missing — it produced a WASM module that *looked* like it compiled but ran with no arena allocation and no concurrency. The O(1) arena allocator is the language's advertised differentiator.
 
-**Remediation:** Implement real emission (linear memory for the arena, WASM threads/atomics for async) and cover it with a runtime test. Mark explicitly as "unsupported" until then, instead of silently emitting a comment.
+**Resolution (2026-06-13) — MVP:**
+- **Arena allocator: implemented for real.** The prologue declares a mutable global `(global $arena_sp (mut i32) (i32.const 2048))` (based above the `.data` region at offset 1024); `OP_ARENA_PUSH` does an O(1) bump (`global.get`/`i32.const 1024`/`i32.add`/`global.set`) and `OP_ARENA_POP` rewinds it. Covered by `tests/codegen/test_codegen_embedded.c::test_teko_aot_wasm_arena_and_concurrency_hooks`.
+- **Concurrency ops: honest host-runtime hooks instead of silent comments.** `OP_SPAWN_ASYNC`/`OP_CHAN_INIT`/`OP_CHAN_PUT`/`OP_AWAIT_INTENT` now emit `call $teko_spawn` / `$teko_chan_init` / `$teko_chan_put` / `$teko_await`, backed by `(import "teko_rt" ...)` declarations in the prologue. Real semantics are deferred — see item 9. Also fixed a residual Portuguese comment (`Label Marcacao` → `Label marker`).
 
-**Files:** `src/codegen/bare_metal/emit_wasm.c:71+`.
+**Files:** `src/codegen/bare_metal/emit_wasm.c`; `tests/codegen/test_codegen_embedded.c`.
 
 ## 5. `CMake GLOB_RECURSE` for source collection — `20` ✅ RESOLVED 2026-06-13
 
@@ -127,6 +130,18 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 ## 8. Versioned build artifacts — ✅ RESOLVED
 
 `git ls-files` shows 0 files under `cmake-build-debug/` or `node_modules/`; both are already in `.gitignore`. The previous backlog item was incorrect — **close**.
+
+## 9. WASM real concurrency — ⏸️ DEFERRED (depends on the WASM threads proposal)
+
+**Category:** Code / Architecture debt
+
+**Situation:** The WASM MVP (item 4) routes `OP_SPAWN_ASYNC`, `OP_CHAN_INIT`, `OP_CHAN_PUT`, and `OP_AWAIT_INTENT` to imported host-runtime functions (`$teko_spawn`, `$teko_chan_init`, `$teko_chan_put`, `$teko_await`). These are honest placeholders, not a real green-thread/channel runtime.
+
+**Why deferred (technical rationale):** Genuine M:N concurrency and blocking channels cannot be expressed in standalone WAT. They require the **WASM threads proposal**: a `shared` linear memory, the atomic instruction set (`memory.atomic.wait` / `memory.atomic.notify`, `i32.atomic.*`), and a host-side spawn mechanism (e.g. a JS `Worker` that instantiates the same module against the shared memory). That is an environment/runtime concern beyond the code emitter, so it is tracked separately rather than rushed.
+
+**Remediation (future):** (1) Emit `(import "env" "memory" (memory $mem 1 1 shared))` when a `--target=wasm-threads` flag is set; (2) implement channel buffers as atomic ring buffers in shared memory with `wait`/`notify`; (3) provide the host `teko_rt` glue (Worker spawn + module re-instantiation); (4) add a runtime/integration test under a WASM engine that supports threads.
+
+**Files:** `src/codegen/bare_metal/emit_wasm.c`; future host runtime glue.
 
 ---
 

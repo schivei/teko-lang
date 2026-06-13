@@ -11,8 +11,18 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_PROLOG:
             fprintf(ctx->file, "(module\n");
             fprintf(ctx->file, "  ;; --- Target: WebAssembly Text Format (WASM Bare-Metal) ---\n");
+            // Host-provided runtime hooks. Real concurrency on WASM requires the
+            // threads proposal (shared memory + atomics + a host Worker); until
+            // then spawn/channel/await are routed to these imported functions.
+            fprintf(ctx->file, "  (import \"teko_rt\" \"spawn\" (func $teko_spawn (param i32) (result i32)))\n");
+            fprintf(ctx->file, "  (import \"teko_rt\" \"chan_init\" (func $teko_chan_init (param i32) (result i32)))\n");
+            fprintf(ctx->file, "  (import \"teko_rt\" \"chan_put\" (func $teko_chan_put (param i32 i32) (result i32)))\n");
+            fprintf(ctx->file, "  (import \"teko_rt\" \"await_intent\" (func $teko_await (param i32) (result i32)))\n");
             fprintf(ctx->file, "  (memory 1)\n");
             fprintf(ctx->file, "  (export \"memory\" (memory 0))\n");
+            // O(1) region allocator: a bump pointer into linear memory, based
+            // above the .data region (offset 1024) emitted at module close.
+            fprintf(ctx->file, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             fprintf(ctx->file, "  (func $main (result i32)\n");
             fprintf(ctx->file, "    (local $w0 i32) (local $w1 i32)\n");
             break;
@@ -71,29 +81,57 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         // 4. NATIVE ARENA ALLOCATOR (O(1) METHOD)
         // ====================================================================
         case OP_ARENA_PUSH:
-            fprintf(ctx->file, "    ;; --- [WASM Arena Push]: Frame isolation of 1024 bytes ---\n");
+            // O(1) bump: advance the arena stack pointer by one 1024-byte frame.
+            fprintf(ctx->file, "    ;; --- [WASM Arena Push]: O(1) bump of a 1024-byte frame ---\n");
+            fprintf(ctx->file, "    global.get $arena_sp\n");
+            fprintf(ctx->file, "    i32.const 1024\n");
+            fprintf(ctx->file, "    i32.add\n");
+            fprintf(ctx->file, "    global.set $arena_sp\n");
             break;
 
         case OP_ARENA_POP:
-            fprintf(ctx->file, "    ;; --- [WASM Arena Pop]: Instantaneous block cleanup ---\n");
+            // O(1) reclaim: rewind the arena stack pointer by one frame.
+            fprintf(ctx->file, "    ;; --- [WASM Arena Pop]: O(1) reclaim of the 1024-byte frame ---\n");
+            fprintf(ctx->file, "    global.get $arena_sp\n");
+            fprintf(ctx->file, "    i32.const 1024\n");
+            fprintf(ctx->file, "    i32.sub\n");
+            fprintf(ctx->file, "    global.set $arena_sp\n");
             break;
 
         // ====================================================================
         // 5. VIRTUAL WEB PARALLELISM (WASM THREADS EXTENSION)
         // ====================================================================
+        // The following require the WASM threads proposal (shared memory plus
+        // memory.atomic.wait/notify) and a host Worker to back them. Standalone
+        // WAT cannot spawn threads, so they are routed to host-runtime imports
+        // (declared in the prologue) instead of being emitted as silent comments.
         case OP_SPAWN_ASYNC:
-            fprintf(ctx->file, "    ;; --- [WASM Async Worker Spawn] ---\n");
+            fprintf(ctx->file, "    ;; [WASM Async Spawn] -> host runtime (threads proposal pending)\n");
+            fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    call $teko_spawn\n");
+            fprintf(ctx->file, "    drop\n");
             break;
 
         case OP_CHAN_INIT:
-            fprintf(ctx->file, "    ;; --- [WASM Channel Allocation in Linear Memory] ---\n");
+            fprintf(ctx->file, "    ;; [WASM Channel Init] -> host runtime (threads proposal pending)\n");
+            fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    call $teko_chan_init\n");
+            fprintf(ctx->file, "    drop\n");
             break;
 
         case OP_CHAN_PUT:
-            fprintf(ctx->file, "    ;; --- [WASM Channel Put] ---\n");
+            fprintf(ctx->file, "    ;; [WASM Channel Put] -> host runtime (threads proposal pending)\n");
+            fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    local.get $w1\n");
+            fprintf(ctx->file, "    call $teko_chan_put\n");
+            fprintf(ctx->file, "    drop\n");
             break;
 
         case OP_AWAIT_INTENT:
+            fprintf(ctx->file, "    ;; [WASM Await Intent] -> host runtime (threads proposal pending)\n");
+            fprintf(ctx->file, "    local.get $w0\n");
+            fprintf(ctx->file, "    call $teko_await\n");
+            fprintf(ctx->file, "    drop\n");
             break;
 
         // ====================================================================
@@ -119,7 +157,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         default:
             // DCE RESURRECTION: Injects the structural comment if it is a logical instruction mapped above 100
             if ((int)op >= 100) {
-                fprintf(ctx->file, "    ;; Label Marcacao: $label_%d\n", (int)op);
+                fprintf(ctx->file, "    ;; Label marker: $label_%d\n", (int)op);
             }
             break;
     }

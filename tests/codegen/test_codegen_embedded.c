@@ -49,3 +49,52 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
     free(buffer);
     remove(asm_path);
 }
+
+// ====================================================================
+// 2. WASM ARENA ALLOCATOR + HOST-RUNTIME CONCURRENCY HOOKS (MVP)
+// ====================================================================
+// The O(1) arena is emitted as real linear-memory bump code. The concurrency
+// opcodes are routed to honest host-runtime imports (they require the WASM
+// threads proposal to be backed for real; see TECH_DEBT_BACKLOG.md).
+void test_teko_aot_wasm_arena_and_concurrency_hooks(void) {
+    const char* asm_path = "output_wasm_arena_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    // ARENA_PUSH, ARENA_POP, SPAWN_ASYNC, CHAN_INIT, CHAN_PUT, AWAIT_INTENT, HALT
+    unsigned char mock[] = { 0x30, 0x31, 0x10, 0x12, 0x13, 0x11, 0x00 };
+    teko_metal_emit_program(ctx, mock, sizeof(mock));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // Real arena allocator: a mutable global bumped by 1024-byte frames.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(global $arena_sp (mut i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "global.set $arena_sp"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.const 1024"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.add"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.sub"));
+
+    // Honest host-runtime hooks (not silent comments) for the concurrency ops.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"teko_rt\" \"spawn\""));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_spawn"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_chan_init"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_chan_put"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_await"));
+
+    free(buffer);
+    remove(asm_path);
+}
