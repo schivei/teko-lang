@@ -118,6 +118,10 @@ set(TEST_SOURCES
         tests/test_type_checker.c
         tests/test_types.c
         tests/test_visibility.c
+        tests/test_ffi.c
+        tests/test_generics.c
+        tests/test_extensions.c
+        tests/test_codegen_aot.c
         tests/test_vm_arena.c
         tests/test_vm_concurrency.c
         tests/test_vm_core.c

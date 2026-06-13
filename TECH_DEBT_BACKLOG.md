@@ -9,7 +9,7 @@
 | # | Item | Category | Imp. | Risk | Eff. | Prio. | Band |
 |---|------|----------|:----:|:----:|:----:|:-----:|:----:|
 | 0 | ~~`teko` target missing `target_include_directories` → main binary does not build~~ | Infra (blocker) | 5 | 5 | 1 | **50** | ✅ Resolved 2026-06-13 |
-| 1 | FFI / generics / AOT modules with no tests | Test debt | 4 | 5 | 3 | **27** | 🔴 High |
+| 1 | ~~FFI / generics / AOT modules with no tests~~ | Test debt | 4 | 5 | 3 | **27** | ✅ Resolved 2026-06-13 |
 | 2 | No validation of codegen output per target | Test debt | 4 | 4 | 3 | **24** | 🔴 High |
 | 3 | CI with no Windows runner (PE/COFF unexercised) | Infra | 3 | 3 | 2 | **24** | 🔴 High |
 | 4 | WASM backend with stubbed opcodes (arena/async/channels) | Code/Arch | 4 | 5 | 4 | **18** | 🟡 Medium |
@@ -36,17 +36,21 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 
 **Files:** `CMakeLists.txt`.
 
-## 1. FFI / generics / AOT modules with no test coverage — `27` 🔴
+## 1. FFI / generics / AOT modules with no test coverage — `27` ✅ RESOLVED 2026-06-13
 
 **Category:** Test debt
 
-**Situation:** No test file exercises `src/parser_ffi.c` (309 LOC), `src/parser_generics.c`, `src/parser_extensions.c`, or `src/codegen_aot.c`. The suite has 42 tests, but none touch these four modules.
+**Situation:** No test file exercised `src/parser_ffi.c` (309 LOC), `src/parser_generics.c`, `src/parser_extensions.c`, or `src/codegen_aot.c`. The suite had 42 tests, but none touched these four modules.
 
 **Business justification:** FFI is the path that matches Teko types to native C pointers (`extern fn ... from "x.dylib"`) — a bug here is memory corruption or a wrong native call, not a visible compile error. `codegen_aot.c` is the entry of the AOT path (the product differentiator). These are exactly the areas where a regression passes CI and breaks on the real target.
 
-**Remediation:** `tests/test_ffi.c`, `tests/test_generics.c`, and coverage of `codegen_aot` — start with FFI (largest surface and highest risk). Cases: `extern struct` resolution, complex type matching, nested generics (`map<str, mut i32>`).
+**Resolution (2026-06-13):** Added four test files (now 75 tests total, 0 failures):
+- `tests/test_ffi.c` — `parse_extern_declaration` across all three shapes (extern struct with typed fields, extern fn with `as` alias, extern block), plus `parse_complex_type` (`ptr<ExternalStructure>`) and the `from`/`as` suffixes.
+- `tests/test_generics.c` — `parse_generic_parameters_decl` (`<T, U>`) and `parse_generic_constraints_where` (`where T : struct`). Also implemented `free_generic_function_signature_members`, which was declared in the header but never defined (latent link error once referenced).
+- `tests/test_extensions.c` — `parse_type_extension`: receiver binding, a normal method, and an inline operator overload.
+- `tests/test_codegen_aot.c` — the AOT C-transpilation backend: header/runtime emission and a `NODE_VAR_DECL` (`i32` → `int32_t`) statement, read back from the emitted file.
 
-**Files:** `src/parser_ffi.c`, `src/parser_generics.c`, `src/parser_extensions.c`, `src/codegen_aot.c`.
+**Files:** `src/parser_ffi.c`, `src/parser_generics.c`, `src/parser_extensions.c`, `src/codegen_aot.c`; new tests under `tests/`.
 
 ## 2. No validation of codegen output per target — `24` 🔴
 
