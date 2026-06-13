@@ -82,14 +82,23 @@ The arena (`$arena_sp`) is reused for all of these allocations.
   in `teko_target.c` (parsed to a flag; emission unchanged/cooperative by default); this
   design doc; a golden test pinning the *current* WASM emission as the baseline; CI job
   skeleton (wasmtime install + run the existing WASM golden). **← first increment.**
-- **10.1 — channels in linear memory** (cooperative, non-blocking first): CHAN_INIT/PUT/recv
-  as arena ring buffers. Golden + wasmtime execution test.
-- **10.2 — cooperative scheduler + real SPAWN/AWAIT:** run queue, `$teko_sched_run`,
-  `call_indirect` task dispatch, yield at await. Run-to-completion tasks.
-- **10.3 — blocking channels + mid-yield** (the hard part): state-machine/CPS lowering of
-  green-thread bodies so they can suspend mid-function. May be split further or deferred.
+- **10.1 — channels in linear memory** ✅ *done*: `emit_wasm.c` emits CHAN_INIT/PUT as real
+  arena ring buffers (no host import). Golden + harness fixture `samples/channels.wat`.
+- **10.2 — cooperative scheduler (runtime design, proven & tested)** ✅ *reference done*:
+  `samples/scheduler.wat` implements the full model — a function table of green-thread bodies,
+  a run queue in linear memory, `$sched_run` draining run-to-completion, `spawn` (enqueue
+  fn_index+arg), `call_indirect` dispatch, and **blocking channels via yield** (an empty
+  receive calls `$sched_run` re-entrantly to run a producer, then resumes — no mid-function
+  suspension). Executed under Node + wasmtime + headless Chromium in CI (`test() → 15`).
+- **10.2b — wire the scheduler into the emitter** ⏳ *needs approval (architectural)*: the
+  emitter currently produces a **single `$main` function**; real `call_indirect` spawn needs
+  the **IL/codegen to lower each `routine` body to a separate WASM function** indexed in a
+  table. That is a cross-cutting IL change (new function-boundary opcodes), not a per-opcode
+  `emit_wasm.c` tweak — so it is gated on approval, like 10.3.
+- **10.3 — mid-function suspension** (the hard part): state-machine/CPS lowering so a green
+  thread can suspend *mid-body* (not just run-to-completion). Reviewed sub-project; gated.
 - **10.4 — `--target=wasm-threads`** (Layer B): shared memory + atomics + Web Worker host
-  glue; node execution test. Opt-in parallelism.
+  glue; node `worker_threads` execution test. Opt-in parallelism.
 
 ## 7. Risks / open decisions (need approval before the heavy increments)
 

@@ -10,15 +10,19 @@ three places to guarantee behavioral parity:
   *target*. The browser run also verifies `crossOriginIsolated` (COOP/COEP), the
   prerequisite for Layer B (`--target=wasm-threads`, SharedArrayBuffer + Web Workers).
 
-The current fixture is `samples/channels.wat`, a hand-written mirror of the
-Phase 10.1 channel ring buffer emitted by `emit_wasm.c`. As later increments wire
-the full `.tks → .wasm` pipeline, the fixture is replaced by compiler output.
+Fixtures (hand-written references that mirror the compiler's intended output;
+they will be replaced by real `.tks → .wasm` output as the pipeline is wired):
+- `samples/channels.wat` — Phase 10.1 channel ring buffer (`test() → 42`).
+- `samples/scheduler.wat` — Phase 10.2 cooperative scheduler: function table of
+  green-thread bodies, run queue, `$sched_run`, `spawn` + `call_indirect`, and a
+  blocking channel via yield (`test() → 15`).
 
-## Build the fixture
+## Build the fixtures
 
 ```sh
 # needs WABT (wat2wasm). macOS: brew install wabt ; Ubuntu: apt-get install wabt
-wat2wasm samples/channels.wat -o samples/channels.wasm
+wat2wasm samples/channels.wat  -o samples/channels.wasm
+wat2wasm samples/scheduler.wat -o samples/scheduler.wasm
 ```
 
 ## Run locally
