@@ -81,6 +81,7 @@ set(CORE_SOURCES
         src/codegen/linux/emit_linux_ppc64.c
         src/codegen/linux/emit_linux_riscv32.c
         src/codegen/linux/emit_linux_riscv64.c
+        src/codegen/linux/emit_linux_riscv_common.c
         src/codegen/linux/emit_linux_x86.c
         src/codegen/linux/emit_linux_x86_64.c
         src/codegen/windows/emit_win_arm64.c
