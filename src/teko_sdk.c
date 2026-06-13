@@ -3,7 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h> // For access()
+#if defined(_WIN32)
+#  include <io.h>      // For _access() on Windows
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  define access _access
+#else
+#  include <unistd.h>  // For access()
+#endif
 
 static const VirtualSDKEntry virtual_sdk_table[] = {
     {"teko::marshall.to_ptr", "ptr"},

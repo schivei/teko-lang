@@ -2,7 +2,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#  include <io.h>      // For _access() on Windows
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  define access _access
+#else
+#  include <unistd.h>
+#endif
 
 static char* trim_quotes(const char* str) {
     if (!str) return NULL;
