@@ -18,7 +18,7 @@
 | 7 | Near-identical emitters (duplication) | Code debt | 4 | 3 | 4 | **14** | 🟢 riscv unified 2026-06-13 (broader → #10) |
 | 8 | ~~Versioned build artifacts~~ (resolved) | — | — | — | — | — | ✅ Close |
 | 9 | WASM real concurrency (deferred → WASM threads proposal) | Code/Arch | 3 | 3 | 5 | **24** | ⏸️ Deferred (tracked) |
-| 10 | Broader emitter de-dup (x86_64 SysV trio / arm64 quad) | Code debt | 3 | 2 | 4 | **10** | ⏸️ Deferred (tracked) |
+| 10 | Broader emitter de-dup (x86_64 SysV trio / arm64 GAS trio) | Code debt | 3 | 2 | 4 | **10** | ✅ Resolved 2026-06-13 (win_arm64 kept separate) |
 
 ---
 
@@ -151,17 +151,22 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 
 **Files:** `src/codegen/bare_metal/emit_wasm.c`; future host runtime glue.
 
-## 10. Broader emitter de-duplication — ⏸️ DEFERRED (structural divergence)
+## 10. Broader emitter de-duplication — `10` ✅ RESOLVED 2026-06-13 (win_arm64 kept separate)
 
 **Category:** Code debt
 
-**Situation:** After unifying the riscv32/64 pair (item 7), the remaining duplication is the shared *arithmetic* block across the x86_64 SysV trio (linux/darwin/freebsd) and the arm64 quad (linux/darwin/freebsd/windows).
+**Situation:** After unifying the riscv32/64 pair (item 7), the remaining duplication was the x86_64 SysV trio (linux/darwin/freebsd) and the arm64 quad (linux/darwin/freebsd/windows). These diverge in syscall sequences, symbol decoration (`_main`/`_pthread_create`), string-label relocation syntax (ELF `:lo12:` vs Mach-O `@PAGE`/`@PAGEOFF`), local-label tags, and comment text — beyond pure mnemonics.
 
-**Why deferred (technical rationale):** Unlike riscv32/64, these are not pure-mnemonic duplicates. They diverge in syscall sequences (`syscall`/sys_exit 60 vs `int $0x80` vs `svc`), symbol decoration (`main` vs `_main`, `pthread_create` vs `_pthread_create`), local-label tags, Windows-ARM MASM directives (`AREA |.text|, CODE`, `PROC`), and emitted comment text. A byte-identical shared core would need ~10+ string/structural parameters per family — a worse abstraction than the current explicit files, and a regression risk on the freshly-green CI (esp. Windows). The arithmetic goldens (item 2) now guard all 16 emitters against drift, so the duplication is a maintenance cost, not a correctness risk.
+**Business justification:** Duplication multiplies the cost/risk of evolving the opcode set across architectures.
 
-**Remediation (future, only if the maintenance cost grows):** extract just the family-shared arithmetic block (ADD/SUB/MUL + the div skeleton) into a helper parameterized by register-operand strings and label tag, leaving prologue/syscall/symbol concerns per-emitter; verify byte-identical output with the existing capture/diff harness.
+**Resolution (2026-06-13):** With the arithmetic goldens + full-output byte-diff harness as the safety net, the structural differences turned out to be cleanly parameterizable after all:
+- **10a — `emit_x86_64_sysv_common.{c,h}`**: unifies `emit_{linux,freebsd,darwin}_x86_64` (→ ~16-line wrappers), parameterizing banner, symbol prefix, string label, label tag, halt/exit (syscall 60 / int $0x80 exit 1 / comment-only on macOS), and two comment lines.
+- **10b — `emit_arm64_gas_common.{c,h}`**: unifies `emit_{linux,freebsd,darwin}_arm64`, additionally parameterizing the SCONST relocation style (ELF vs Mach-O).
+- Each step verified **byte-for-byte identical output for all 16 targets** + goldens + ASan/UBSan on both dispatch paths.
 
-**Files:** `src/codegen/{linux,apple,bsd_unix,windows}/emit_{x86_64,arm64,...}.c`.
+**Intentionally kept separate:** `emit_win_arm64` (Windows on ARM) uses MASM-style directives (`AREA |.text|, CODE`, `PROC`), structurally unlike the GAS trio — unifying it would genuinely worsen the abstraction. Likewise the Windows x86 emitters (`emit_win_x86`, `emit_win_x86_64`) use Intel/MASM syntax distinct from the AT&T SysV trio. These remain explicit by design; the goldens guard them.
+
+**Files:** `src/codegen/emit_x86_64_sysv_common.{c,h}`, `src/codegen/emit_arm64_gas_common.{c,h}`, and the six thin wrappers under `linux/`, `apple/`, `bsd_unix/`.
 
 ---
 
