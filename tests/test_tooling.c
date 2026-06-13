@@ -9,7 +9,7 @@
 #include <string.h>
 
 void test_teko_lsp_protocol_handshake_and_routing(void) {
-    auto server = teko_lsp_create();
+    TekoLanguageServer* server = teko_lsp_create();
     TEST_ASSERT_NOT_NULL(server);
 
     // 1. Simulates the JSON-RPC initialization payload sent by CLion/VSCode
@@ -62,7 +62,7 @@ void test_vm_intrinsic_resolution_and_execution(void) {
 
     // 2. Simulates the minimal physical environment to trigger intrinsic execution
     unsigned char mock_code[] = {0x00};
-    auto vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
+    TekoVM* vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
     TEST_ASSERT_NOT_NULL(vm);
 
     int32_t mock_args[2] = {42, 100};

@@ -9,7 +9,7 @@ void test_parser_recovery_on_syntax_error(void) {
     lexer_init(&lex, broken_src);
     Parser parser;
     parser_init(&parser, &lex);
-    const auto node = parse_statement(&parser);
+    StatementASTNode* const node = parse_statement(&parser);
     if (node) {
         free_statement_ast_node(node);
         TEST_FAIL_MESSAGE("node are not null");

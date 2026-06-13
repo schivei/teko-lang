@@ -8,7 +8,7 @@ void test_cqrs_handler_with_dependency_injection(void) {
     lexer_init(&lex, src);
     Parser parser;
     parser_init(&parser, &lex);
-    const auto node = parse_messaging_handler(&parser);
+    MessagingASTNode* const node = parse_messaging_handler(&parser);
     TEST_ASSERT_NOT_NULL(node);
     TEST_ASSERT_EQUAL_STRING("MyNotifyData", node->name);
     free_messaging_ast_node(node);

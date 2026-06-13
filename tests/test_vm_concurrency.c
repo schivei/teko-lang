@@ -5,15 +5,15 @@
 #include <stdlib.h>
 
 void test_vm_channel_blocking_and_unblocking(void) {
-    auto sched = vm_scheduler_create();
-    auto chan = teko_channel_create(1); // Channel with capacity 1
+    VMScheduler* sched = vm_scheduler_create();
+    TekoVMChannel* chan = teko_channel_create(1); // Channel with capacity 1
 
     unsigned char mock_code[] = {0x00};
-    auto vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
+    TekoVM* vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
 
     // Creates the producer and consumer Green Threads
-    auto writer = vm_scheduler_spawn(sched, 0);
-    auto reader = vm_scheduler_spawn(sched, 0);
+    GreenThread* writer = vm_scheduler_spawn(sched, 0);
+    GreenThread* reader = vm_scheduler_spawn(sched, 0);
 
     // Activates the writer in the VM
     vm_scheduler_run_next(sched, vm);

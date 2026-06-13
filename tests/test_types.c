@@ -25,7 +25,7 @@ void test_reserved_namespace_protection(void) {
     parser_init(&parser, &lex);
 
     parser.is_stdlib_compilation = false;
-    const auto illegal_node = parse_use_statement(&parser);
+    ASTNode* const illegal_node = parse_use_statement(&parser);
     if (illegal_node) {
         free_ast_node(illegal_node);
         TEST_FAIL_MESSAGE("node is not null");
@@ -36,7 +36,7 @@ void test_reserved_namespace_protection(void) {
     parser_init(&parser, &lex);
     parser.is_stdlib_compilation = true;
 
-    const auto legal_node = parse_use_statement(&parser);
+    ASTNode* const legal_node = parse_use_statement(&parser);
     if (!legal_node) {
         TEST_FAIL_MESSAGE("node is null");
     }

@@ -4,17 +4,17 @@
 #include <stdlib.h>
 
 void test_vm_scheduler_context_switching_and_spawn(void) {
-    auto sched = vm_scheduler_create();
+    VMScheduler* sched = vm_scheduler_create();
     TEST_ASSERT_NOT_NULL(sched);
 
     // Dummy bytecode to simulate two IP routes
     unsigned char mock_code[] = {0x00, 0x00, 0x00, 0x00};
-    auto vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
+    TekoVM* vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
     TEST_ASSERT_NOT_NULL(vm);
 
     // Spawns two Green Threads at different IPs
-    auto g1 = vm_scheduler_spawn(sched, 10);
-    auto g2 = vm_scheduler_spawn(sched, 20);
+    GreenThread* g1 = vm_scheduler_spawn(sched, 10);
+    GreenThread* g2 = vm_scheduler_spawn(sched, 20);
     TEST_ASSERT_EQUAL_UINT32(1, g1->id);
     TEST_ASSERT_EQUAL_UINT32(2, g2->id);
 

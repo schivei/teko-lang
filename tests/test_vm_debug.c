@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 void test_vm_debugger_breakpoint_interception_and_dap(void) {
-    auto dbg = teko_debugger_create();
+    TekoDebugger* dbg = teko_debugger_create();
     TEST_ASSERT_NOT_NULL(dbg);
 
     // 1. Feeds the linear symbol map: source line 10 = VM IP 5
@@ -26,7 +26,7 @@ void test_vm_debugger_breakpoint_interception_and_dap(void) {
 
     // 4. Simulates sending a "continue" JSON-RPC message from the IDE via DAP
     unsigned char mock_code[] = {0x00};
-    auto vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
+    TekoVM* vm = teko_vm_create(mock_code, sizeof(mock_code), NULL, 0);
 
     const char* dap_json = "{\"seq\": 2, \"type\": \"request\", \"command\": \"continue\"}";
     teko_debugger_handle_dap_message(dbg, dap_json, vm);

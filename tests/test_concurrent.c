@@ -15,7 +15,7 @@ void test_concurrency_and_channel_semantics(void) {
     type_info.base_name = strdup("chan");
     illegal_var.data.var_decl.var_type = &type_info;
 
-    const auto res_decl = validate_concurrency_variable_creation(&illegal_var);
+    const ConcurrentValidationResult res_decl = validate_concurrency_variable_creation(&illegal_var);
     TEST_ASSERT_EQUAL_INT(CONC_ERR_INVALID_DECLARATION, res_decl.error_type);
     TEST_ASSERT_NOT_NULL(res_decl.error_message);
 
@@ -23,11 +23,11 @@ void test_concurrency_and_channel_semantics(void) {
     free(illegal_var.data.var_decl.var_name);
     free(type_info.base_name);
 
-    const auto res_method_bad = validate_channel_method_access("invalidMethod");
+    const ConcurrentValidationResult res_method_bad = validate_channel_method_access("invalidMethod");
     TEST_ASSERT_EQUAL_INT(CONC_ERR_ILLEGAL_METHOD, res_method_bad.error_type);
     free_concurrent_validation_result(res_method_bad);
 
-    const auto res_method_good = validate_channel_method_access("put");
+    const ConcurrentValidationResult res_method_good = validate_channel_method_access("put");
     TEST_ASSERT_EQUAL_INT(CONC_ERR_NONE, res_method_good.error_type);
     free_concurrent_validation_result(res_method_good);
 }
