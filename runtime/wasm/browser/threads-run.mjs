@@ -13,16 +13,17 @@ function runModule(bytes) {
   return new Promise((resolve) => {
     const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
     const runner = new Worker(new URL("./threads-runner.mjs", import.meta.url), { type: "module" });
-    const timer = setTimeout(() => resolve("timeout"), 15000);
+    const producers = [];
+    const finish = (v) => { clearTimeout(timer); runner.terminate(); producers.forEach((p) => p.terminate()); resolve(v); };
+    const timer = setTimeout(() => finish("timeout"), 15000);
     runner.onmessage = (e) => {
       if (e.data.spawn) {
         const [fn, arg] = e.data.spawn;
         const prod = new Worker(new URL("./threads-producer.mjs", import.meta.url), { type: "module" });
+        producers.push(prod);
         prod.postMessage({ memory, bytes, fn, arg });
       } else if ("result" in e.data) {
-        clearTimeout(timer);
-        runner.terminate();
-        resolve(e.data.result);
+        finish(e.data.result);
       }
     };
     runner.postMessage({ memory, bytes });

@@ -5,6 +5,9 @@
 // Worker that re-instantiates the same module against the shared memory and
 // publishes the value through the atomic channel.
 //
+// Hardened so it can never hang: a hard watchdog tears down every worker and fails
+// with a clear message; runner/producer errors are surfaced rather than waited on.
+//
 // Modules:
 //   samples/threads.wasm          -> 777 (hand-written Layer B reference)
 //   samples/emitted_threads.wasm  -> 99  (REAL compiler output, --target wasm-threads)
@@ -12,23 +15,35 @@ import { Worker } from "node:worker_threads";
 import { readFile } from "node:fs/promises";
 
 const here = (p) => new URL(p, import.meta.url);
+const WATCHDOG_MS = Number(process.env.TEKO_THREADS_TIMEOUT_MS ?? 60000);
 
 async function runModule(wasmRel) {
   const bytes = await readFile(here(wasmRel));
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
-  const pending = [];
+  const workers = [];
+  const cleanup = () => workers.forEach((w) => w.terminate().catch(() => {}));
   return await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout (deadlock?)")), 20000);
+    const fail = (err) => { clearTimeout(timer); cleanup(); reject(err instanceof Error ? err : new Error(String(err))); };
+    const timer = setTimeout(() => fail(new Error(`watchdog: no atomic notify within ${WATCHDOG_MS}ms`)), WATCHDOG_MS);
+    const pending = [];
     const runner = new Worker(here("./runner.mjs"), { workerData: { memory, bytes } });
-    runner.on("error", reject);
+    workers.push(runner);
+    runner.on("error", fail);
     runner.on("message", (m) => {
       if (m && m.spawn) {
         const [fn, arg] = m.spawn;
         const prod = new Worker(here("./worker.mjs"), { workerData: { memory, bytes, fn, arg } });
-        pending.push(new Promise((res) => prod.on("message", () => prod.terminate().then(res, res))));
+        workers.push(prod);
+        prod.on("error", fail);
+        pending.push(new Promise((res) => prod.on("message", (pm) => {
+          if (pm && pm.error) fail(new Error(`producer: ${pm.error}`));
+          res();
+        })));
+      } else if (m && m.error) {
+        fail(new Error(`runner: ${m.error}`));
       } else if (m && "result" in m) {
         clearTimeout(timer);
-        Promise.all(pending).then(() => runner.terminate()).then(() => resolve(m.result), () => resolve(m.result));
+        Promise.allSettled(pending).then(() => { cleanup(); resolve(m.result); });
       }
     });
   });

@@ -10,10 +10,11 @@ const PORT = Number(process.env.PORT ?? 8093);
 const EXPECTED = { threadsRef: 777, threadsEmitted: 99 };
 const server = await startServer(PORT);
 let exitCode = 0;
+let browser;
 try {
-  const browser = await chromium.launch();
+  browser = await chromium.launch();
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/browser/threads.html`, { waitUntil: "load" });
+  await page.goto(`http://localhost:${PORT}/browser/threads.html`, { waitUntil: "load", timeout: 30000 });
   await page.waitForFunction(() => window.__tekoThreads !== undefined, { timeout: 30000 });
   const results = await page.evaluate(() => window.__tekoThreads);
   const isolated = await page.evaluate(() => window.__crossOriginIsolated);
@@ -24,11 +25,11 @@ try {
   }
   console.log(`crossOriginIsolated = ${isolated}`);
   if (isolated !== true) { console.error("FAIL: not crossOriginIsolated (COOP/COEP)"); exitCode = 1; }
-  await browser.close();
 } catch (e) {
   console.error("threads browser harness error:", e);
   exitCode = 1;
 } finally {
+  if (browser) await browser.close().catch(() => {});
   server.close();
 }
 process.exit(exitCode);

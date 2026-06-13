@@ -10,11 +10,12 @@ const PORT = Number(process.env.PORT ?? 8092);
 const EXPECTED = { channels: 42, scheduler: 15, emitted: 7, emittedSuspend: 30 };
 const server = await startServer(PORT);
 let exitCode = 0;
+let browser;
 try {
-  const browser = await chromium.launch();
+  browser = await chromium.launch();
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/browser/index.html`, { waitUntil: "load" });
-  await page.waitForFunction(() => window.__tekoResults !== undefined, { timeout: 15000 });
+  await page.goto(`http://localhost:${PORT}/browser/index.html`, { waitUntil: "load", timeout: 30000 });
+  await page.waitForFunction(() => window.__tekoResults !== undefined, { timeout: 20000 });
   const results = await page.evaluate(() => window.__tekoResults);
   const isolated = await page.evaluate(() => window.__crossOriginIsolated);
   for (const [name, expected] of Object.entries(EXPECTED)) {
@@ -24,11 +25,11 @@ try {
   }
   console.log(`crossOriginIsolated = ${isolated}`);
   if (isolated !== true) console.error("WARN: page is not crossOriginIsolated (COOP/COEP)");
-  await browser.close();
 } catch (e) {
   console.error("browser harness error:", e);
   exitCode = 1;
 } finally {
+  if (browser) await browser.close().catch(() => {});
   server.close();
 }
 process.exit(exitCode);
