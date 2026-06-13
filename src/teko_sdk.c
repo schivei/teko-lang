@@ -3,7 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h> // Para access()
+#if defined(_WIN32)
+#  include <io.h>      // For _access() on Windows
+#  ifndef F_OK
+#    define F_OK 0
+#  endif
+#  define access _access
+#else
+#  include <unistd.h>  // For access()
+#endif
 
 static const VirtualSDKEntry virtual_sdk_table[] = {
     {"teko::marshall.to_ptr", "ptr"},
@@ -16,7 +24,7 @@ static const VirtualSDKEntry virtual_sdk_table[] = {
     {"teko::strings.slice", "str"},
     {"teko::strings.from_utf8", "str"},
 
-    // NOVOS MAPEAMENTOS ADICIONADOS:
+    // NEW MAPPINGS ADDED:
     {"teko::fs.read_to_string", "str"},
     {"teko::fs.write_string", "void"},
     {"teko::fs.close", "void"},
@@ -28,10 +36,10 @@ static const VirtualSDKEntry virtual_sdk_table[] = {
     {"teko::sync.sleep_ms", "intent"},
     {"teko::sync.yield_now", "void"},
 
-    {NULL, NULL} // Sentinela de fim de tabela
+    {NULL, NULL} // End-of-table sentinel
 };
 
-// Valida fisicamente a presença da pasta segregada do SDK
+// Physically validates the presence of the SDK's segregated directory
 bool teko_sdk_verify_directory(const char* project_root) {
     char sdk_path[512];
     snprintf(sdk_path, sizeof(sdk_path), "%s/sdk/teko.tkp", project_root ? project_root : ".");

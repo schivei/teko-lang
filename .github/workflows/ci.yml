@@ -7,63 +7,45 @@ on:
     branches: [ main, master ]
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # RUNNER OPERACIONAL 1: AMBIENTE UBUNTU LINUX
-  # ---------------------------------------------------------------------------
-  build-linux:
-    name: Build & Test on Ubuntu Linux (GCC/Clang C23)
-    runs-on: ubuntu-latest
+  build-test:
+    name: Build & Test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Ubuntu Linux (Clang C23 / Ninja)
+            test_bin: ./build/teko_tests
+          - os: macos-latest
+            label: Apple macOS (AppleClang)
+            test_bin: ./build/teko_tests
+          - os: windows-latest
+            label: Windows (MSVC)
+            test_bin: .\build\Release\teko_tests.exe
 
     steps:
       - name: Checkout Repository Code
         uses: actions/checkout@v4
 
-      - name: Install Build System Dependencies
+      # --- Linux: Clang + Ninja (matches the original validated toolchain) ---
+      - name: Install Build Dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential ninja-build clang
 
-      - name: Configure Project via CMake (Clang C23 Strict)
-        run: |
-          mkdir build_linux
-          cd build_linux
-          cmake .. -G "Ninja" \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_BUILD_TYPE=Release
+      - name: Configure via CMake (Linux - Clang / Ninja, Release)
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
 
-      - name: Execute Ninja Compilation Pipeline
-        run: |
-          cd build_linux
-          ninja -j$(nproc)
+      # --- macOS & Windows: default generator (Unix Makefiles / Visual Studio MSVC) ---
+      - name: Configure via CMake (macOS / Windows - default generator, Release)
+        if: runner.os != 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Run Automated Test Suite (Unity Framework Assertions)
-        run: |
-          cd build_linux
-          ./teko_tests
-
-  # ---------------------------------------------------------------------------
-  # RUNNER OPERACIONAL 2: AMBIENTE APPLE MACOS
-  # ---------------------------------------------------------------------------
-  build-macos:
-    name: Build & Test on Apple macOS (Xcode Clang M-Series/Intel)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout Repository Code
-        uses: actions/checkout@v4
-
-      - name: Configure Project via CMake
-        run: |
-          mkdir build_macos
-          cd build_macos
-          cmake .. -DCMAKE_BUILD_TYPE=Release
-
-      - name: Execute Native Compiling Pipeline
-        run: |
-          cd build_macos
-          make -j$(sysctl -n hw.ncpu)
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel 4
 
       - name: Run Automated Test Suite (Unity Framework Assertions)
-        run: |
-          cd build_macos
-          ./teko_tests
+        run: ${{ matrix.test_bin }}
