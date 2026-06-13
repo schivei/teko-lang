@@ -7,6 +7,23 @@
 > (`TEKO_COMPILER_MEMORANDUM.txt`). The Self-Containment (Self-Hosting) milestone —
 > originally phase 9 — is the final phase, 18.
 
+## 📚 Documentation Map
+
+To stop the planning docs from drifting, here is the single source of truth for each topic. **Canonical** docs are kept current; **reference/historical** docs are preserved for context but are not maintained as living plans.
+
+| Document | Role | Status |
+|----------|------|--------|
+| [`README.md`](../README.md) | Project overview, features, quick start | Canonical (user-facing) |
+| **`docs/plan.md`** (this file) | The roadmap — phases 1–18, current status | **Canonical (roadmap)** |
+| [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md) | Compiler pipeline & module/file map | **Canonical (architecture)** |
+| [`TECH_DEBT_BACKLOG.md`](../TECH_DEBT_BACKLOG.md) | Prioritized maintenance backlog | Canonical (tech debt) |
+| [`TEKO_COMPILER_MEMORANDUM.txt`](../TEKO_COMPILER_MEMORANDUM.txt) | Owner's checkpoint memorandum; source of phases 10–17 | Reference / historical |
+| [`docs/vm_plan.md`](./vm_plan.md) | Phase 3 (VM & debugger) sprint detail | Reference / historical (phase delivered) |
+| [`docs/BACKEND_AOT_PLAN.md`](./BACKEND_AOT_PLAN.md) | Phase 5 AOT backend spec (target matrix, ABIs, per-opcode requirements) | Reference (backend spec) |
+| [`PITCH.md`](../PITCH.md) / [`PITCH-pt-br.md`](../PITCH-pt-br.md) | Marketing pitch (EN / PT-BR) | Reference |
+
+When in doubt: roadmap questions → this file; "how does the compiler work / where is X" → `ARCHITECTURE.md`; "what should we fix next" → `TECH_DEBT_BACKLOG.md`.
+
 ```mermaid
 graph TD
     %% Graph Style
@@ -249,7 +266,7 @@ To support the native features of massive M:N concurrency, blocking channels, an
 | 3 | ~~CI has no Windows runner (PE/COFF path unexercised)~~ | Infra | ✅ Resolved 2026-06-13 |
 | 4 | WASM stubbed opcodes — arena implemented; concurrency hooked + deferred (#9) | Code/Arch | 🟢 MVP done 2026-06-13 |
 | 5 | ~~`CMake GLOB_RECURSE` for source collection (stale builds)~~ | Infra | ✅ Resolved 2026-06-13 |
-| 6 | Scattered architecture docs / no `ARCHITECTURE.md` | Docs | Medium |
+| 6 | ~~Scattered architecture docs / no `ARCHITECTURE.md`~~ | Docs | ✅ Resolved 2026-06-13 |
 | 7 | 16 near-identical codegen emitters (duplication) | Code debt | Low |
 
 See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, file paths, and the phased remediation plan.

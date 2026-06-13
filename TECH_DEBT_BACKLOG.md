@@ -14,7 +14,7 @@
 | 3 | ~~CI with no Windows runner (PE/COFF unexercised)~~ | Infra | 3 | 3 | 2 | **24** | ✅ Resolved 2026-06-13 |
 | 4 | WASM stubbed opcodes (arena/async/channels) | Code/Arch | 4 | 5 | 4 | **18** | 🟢 MVP done 2026-06-13 |
 | 5 | ~~`CMake GLOB_RECURSE` (stale builds)~~ | Infra | 2 | 2 | 1 | **20** | ✅ Resolved 2026-06-13 |
-| 6 | Scattered docs / no `ARCHITECTURE.md` | Docs | 3 | 2 | 3 | **15** | 🟡 Medium |
+| 6 | ~~Scattered docs / no `ARCHITECTURE.md`~~ | Docs | 3 | 2 | 3 | **15** | ✅ Resolved 2026-06-13 |
 | 7 | 16 near-identical emitters (duplication) | Code debt | 4 | 3 | 4 | **14** | 🟢 Low |
 | 8 | ~~Versioned build artifacts~~ (resolved) | — | — | — | — | — | ✅ Close |
 | 9 | WASM real concurrency (deferred → WASM threads proposal) | Code/Arch | 3 | 3 | 5 | **24** | ⏸️ Deferred (tracked) |
@@ -103,17 +103,20 @@ Verified: the `teko` binary now builds with 0 warnings and runs (prints the AOT 
 
 **Files:** `CMakeLists.txt`.
 
-## 6. Scattered architecture documentation — `15` 🟡
+## 6. Scattered architecture documentation — `15` ✅ RESOLVED 2026-06-13
 
 **Category:** Documentation debt
 
-**Situation:** There are five overlapping planning documents (`plan.md`, `docs/plan.md`, `docs/vm_plan.md`, `docs/BACKEND_AOT_PLAN.md`, `TEKO_COMPILER_MEMORANDUM.txt`) but no single map of the `lexer → parser → semantics → IL → VM/codegen` pipeline, nor of the boundaries between `vm_*`, `codegen/*`, `tld_*`, and `teko_il`.
+**Situation:** There were several overlapping planning documents (`docs/plan.md`, `docs/vm_plan.md`, `docs/BACKEND_AOT_PLAN.md`, `TEKO_COMPILER_MEMORANDUM.txt`) but no single map of the `lexer → parser → semantics → IL → VM/codegen` pipeline, nor of the boundaries between `vm_*`, `codegen/*`, `tld_*`, and `teko_il`. (The duplicate root `plan.md` was already removed earlier.)
 
-**Business justification:** Five parallel docs drift and contradict each other; onboarding and IL evolution depend on tribal knowledge.
+**Business justification:** Parallel docs drift and contradict each other; onboarding and IL evolution depend on tribal knowledge.
 
-**Remediation:** Write `docs/ARCHITECTURE.md` with the pipeline and layers; consolidate/archive the redundant plans pointing to it.
+**Resolution (2026-06-13):**
+- Added `docs/ARCHITECTURE.md`: the canonical compiler-internals reference — full pipeline with a textual flow diagram and a stage-by-stage map of the key `src/` directories/files (frontend, semantics, IL, VM, AOT backend, the 16 emitters, the `tld` linker, tooling).
+- Added a **Documentation Map** table at the top of `docs/plan.md` declaring the single source of truth per topic (roadmap → `plan.md`; architecture → `ARCHITECTURE.md`; tech debt → this file; overview → `README.md`) and labelling `TEKO_COMPILER_MEMORANDUM.txt`, `docs/vm_plan.md`, `docs/BACKEND_AOT_PLAN.md` as reference/historical.
+- Added "reference / historical" banners to those three docs (content preserved, not deleted) and fixed a stray brand typo (`Leko` → `Teko`) in `BACKEND_AOT_PLAN.md`.
 
-**Files:** `docs/`, root (`plan.md`, `TEKO_COMPILER_MEMORANDUM.txt`).
+**Files:** `docs/ARCHITECTURE.md` (new), `docs/plan.md`, `docs/vm_plan.md`, `docs/BACKEND_AOT_PLAN.md`, `TEKO_COMPILER_MEMORANDUM.txt`.
 
 ## 7. 16 near-identical codegen emitters — `14` 🟢
 
