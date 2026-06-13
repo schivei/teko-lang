@@ -58,3 +58,39 @@ jobs:
 
       - name: Run Automated Test Suite (Unity Framework Assertions)
         run: ${{ matrix.test_bin }}
+
+  # ---------------------------------------------------------------------------
+  # riscv64 has NO native GitHub-hosted runner. We cross-compile a static
+  # riscv64 binary and run the suite under QEMU user-mode emulation (Linux only;
+  # emulating riscv on Windows/macOS is impractical). Emulation is slow, and this
+  # is extra signal rather than a gate, so the job is non-blocking for now
+  # (continue-on-error). Promote to blocking once it proves stable.
+  # ---------------------------------------------------------------------------
+  riscv64-qemu:
+    name: Build & Test (Linux riscv64 — QEMU emulated, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: Install riscv64 cross toolchain + QEMU user-mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-riscv64-linux-gnu qemu-user-static
+
+      - name: Configure via CMake (cross riscv64, static, Release)
+        run: |
+          cmake -S . -B build -G "Ninja" \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
+            -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc \
+            -DCMAKE_C_FLAGS="-static" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (cross-compile riscv64)
+        run: cmake --build build --parallel 4
+
+      - name: Run test suite under QEMU (emulated riscv64, slow)
+        run: qemu-riscv64-static ./build/teko_tests
