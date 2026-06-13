@@ -3,7 +3,7 @@
 #include <string.h>
 
 VMScheduler* vm_scheduler_create(void) {
-    auto sched = (VMScheduler*)malloc(sizeof(VMScheduler));
+    VMScheduler* sched = (VMScheduler*)malloc(sizeof(VMScheduler));
     if (!sched) return NULL;
     sched->queue_head = NULL;
     sched->queue_tail = NULL;
@@ -16,7 +16,7 @@ VMScheduler* vm_scheduler_create(void) {
 GreenThread* vm_scheduler_spawn(VMScheduler* sched, uint32_t entry_ip) {
     if (!sched) return NULL;
 
-    auto thread = (GreenThread*)malloc(sizeof(GreenThread));
+    GreenThread* thread = (GreenThread*)malloc(sizeof(GreenThread));
     if (!thread) return NULL;
 
     thread->id = sched->next_thread_id++;
@@ -43,7 +43,7 @@ void vm_scheduler_yield(VMScheduler* sched, TekoVM* main_vm) {
     if (!sched || !main_vm || !sched->current_thread) return;
 
     // 1. Saves the current physical VM context inside the active Green Thread
-    auto current = sched->current_thread;
+    GreenThread* current = sched->current_thread;
     current->ip = main_vm->ip;
     memcpy(current->registers, main_vm->registers, sizeof(main_vm->registers));
 
@@ -61,7 +61,7 @@ bool vm_scheduler_run_next(VMScheduler* sched, TekoVM* main_vm) {
 
     // Finds the first ready thread in the circular queue
     GreenThread* prev = NULL;
-    auto curr = sched->queue_head;
+    GreenThread* curr = sched->queue_head;
 
     while (curr && curr->state != THREAD_READY) {
         prev = curr;
@@ -83,9 +83,9 @@ bool vm_scheduler_run_next(VMScheduler* sched, TekoVM* main_vm) {
 
 void vm_scheduler_destroy(VMScheduler* sched) {
     if (!sched) return;
-    auto curr = sched->queue_head;
+    GreenThread* curr = sched->queue_head;
     while (curr) {
-        auto next = curr->next;
+        GreenThread* next = curr->next;
         if (curr->thread_arena) teko_arena_destroy(curr->thread_arena);
         free(curr);
         curr = next;

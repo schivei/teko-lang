@@ -17,8 +17,8 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
 }
 
 static void teko_metal_route_instruction(MetalContext* ctx, OpCode op, int32_t arg) {
-    auto os = ctx->target.os;
-    auto arch = ctx->target.arch;
+    TekoOS os = ctx->target.os;
+    TekoArch arch = ctx->target.arch;
 
     if (os == OS_MACOS_DARWIN) {
         if (arch == ARCH_APPLE_SILICON || arch == ARCH_ARM64) {

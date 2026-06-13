@@ -4,7 +4,7 @@
 #include <string.h>
 
 TekoLanguageServer* teko_lsp_create(void) {
-    auto server = (TekoLanguageServer*)malloc(sizeof(TekoLanguageServer));
+    TekoLanguageServer* server = (TekoLanguageServer*)malloc(sizeof(TekoLanguageServer));
     if (!server) return NULL;
     server->is_initialized = false;
     server->current_workspace_root = NULL;

@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 TekoDebugger* teko_debugger_create(void) {
-    auto dbg = (TekoDebugger*)malloc(sizeof(TekoDebugger));
+    TekoDebugger* dbg = (TekoDebugger*)malloc(sizeof(TekoDebugger));
     if (!dbg) return NULL;
     dbg->source_map_count = 0;
     dbg->breakpoint_count = 0;

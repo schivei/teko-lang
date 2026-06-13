@@ -183,7 +183,7 @@ TypeCheckResult check_statement_types(SymbolTableScope* scope, const StatementAS
 
 // Semantic rule for the Elvis operator: type? ?? type
 TypeCheckResult validate_elvis_operator_types(TypeInfo* left_type, TypeInfo* right_type) {
-    TypeCheckResult res = { .error_kind = TYPE_ERR_NONE, .error_message = nullptr, .resolved_type = nullptr };
+    TypeCheckResult res = { .error_kind = TYPE_ERR_NONE, .error_message = NULL, .resolved_type = NULL };
 
     if (!left_type || !right_type) return res;
 

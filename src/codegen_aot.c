@@ -66,7 +66,7 @@ void codegen_aot_emit_statement(AOTContext* ctx, const StatementASTNode* stmt) {
             emit_indent(ctx);
 
             // Transpile the block-local initialization
-            const auto init = stmt->data.for_loop.init_stmt;
+            struct StatementASTNode* const init = stmt->data.for_loop.init_stmt;
             if (init && init->type == NODE_VAR_DECL) {
                 fprintf(ctx->file, "for (int32_t %s = %s; ",
                         init->data.var_decl.var_name,

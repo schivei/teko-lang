@@ -7,7 +7,7 @@
 TekoVM* teko_vm_create(unsigned char* bytecode, uint32_t size, char** string_pool, uint32_t pool_count) {
     if (!bytecode || size == 0) return NULL;
 
-    auto vm = (TekoVM*)malloc(sizeof(TekoVM));
+    TekoVM* vm = (TekoVM*)malloc(sizeof(TekoVM));
     if (!vm) return NULL;
 
     vm->bytecode = bytecode;
@@ -49,7 +49,12 @@ static inline int32_t read_int(TekoVM* vm) {
     return val;
 }
 
-// THE HEART OF THE INTERPRETER: Ultra-high-speed loop using C23 Computed Gotos
+// THE HEART OF THE INTERPRETER: dispatch loop.
+// Fast path: computed-goto threaded dispatch (GCC/Clang "labels as values").
+// Portable path: switch-based dispatch (MSVC and any compiler lacking the
+// extension). Both are semantically identical. Define TEKO_VM_PORTABLE_DISPATCH
+// to force the portable path on a GNU compiler (useful for testing it).
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(TEKO_VM_PORTABLE_DISPATCH)
 int32_t teko_vm_execute(TekoVM* vm) {
     if (!vm || vm->bytecode_size == 0) return -1;
 
@@ -161,6 +166,103 @@ do_fallback:
 
 #undef DISPATCH
 }
+#else  // Portable switch-based dispatch (MSVC / no computed-goto support)
+int32_t teko_vm_execute(TekoVM* vm) {
+    if (!vm || vm->bytecode_size == 0) return -1;
+
+    for (;;) {
+        uint8_t op = read_byte(vm);
+        switch (op) {
+            case OP_HALT:
+                return vm->registers[0]; // Value held in register r0 as the program output
+
+            case OP_ICONST: {
+                int32_t val = read_int(vm);
+                vm->registers[1] = val; // Temporarily loads into r1
+                break;
+            }
+
+            case OP_SCONST: {
+                int32_t pool_idx = read_int(vm);
+                // Simulates runtime arena-allocation of the string literal using the contiguous Arena O(1)
+                if (pool_idx >= 0 && (uint32_t)pool_idx < vm->constant_pool_count) {
+                    char* runtime_str = (char*)teko_arena_alloc(vm->memory_arena, strlen(vm->constant_pool[pool_idx]) + 1);
+                    if (runtime_str) {
+                        strcpy(runtime_str, vm->constant_pool[pool_idx]);
+                    }
+                }
+                break;
+            }
+
+            case OP_LOAD: {
+                int32_t reg_idx = read_int(vm);
+                if (reg_idx >= 0 && reg_idx < VM_REGISTERS_COUNT) {
+                    vm->registers[0] = vm->registers[reg_idx];
+                }
+                break;
+            }
+
+            case OP_STORE: {
+                int32_t reg_idx = read_int(vm);
+                if (reg_idx >= 0 && reg_idx < VM_REGISTERS_COUNT) {
+                    vm->registers[reg_idx] = vm->registers[1]; // Saves r1 contents into the target register
+                }
+                break;
+            }
+
+            case OP_ADD:
+                vm->registers[0] = vm->registers[2] + vm->registers[3];
+                break;
+
+            case OP_SUB:
+                vm->registers[0] = vm->registers[2] - vm->registers[3];
+                break;
+
+            case OP_MUL:
+                vm->registers[0] = vm->registers[2] * vm->registers[3];
+                break;
+
+            case OP_DIV:
+                if (vm->registers[3] != 0) {
+                    vm->registers[0] = vm->registers[2] / vm->registers[3];
+                }
+                break;
+
+            case OP_SPAWN_ASYNC:
+            case OP_AWAIT_INTENT:
+            case OP_CHAN_INIT:
+            case OP_CHAN_PUT:
+                // Temporary fallback for concurrency instructions to be implemented in upcoming Sprints
+                break;
+
+            case OP_JMP: {
+                int32_t target_ip = read_int(vm);
+                vm->ip = target_ip;
+                break;
+            }
+
+            case OP_JMP_IF_FALSE: {
+                int32_t target_ip = read_int(vm);
+                if (vm->registers[0] == 0) {
+                    vm->ip = target_ip;
+                }
+                break;
+            }
+
+            case OP_RETURN:
+                if (vm->csp > 0) {
+                    vm->ip = vm->call_stack[--vm->csp].return_address;
+                    break;
+                }
+                return vm->registers[0];
+
+            default:
+                // Unknown opcode: halt gracefully instead of running off the end
+                return vm->registers[0];
+        }
+    }
+}
+#endif
 
 // Complete and thorough deallocation of the entire interpreter context
 void teko_vm_destroy(TekoVM* vm) {

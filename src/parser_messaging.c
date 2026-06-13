@@ -62,7 +62,7 @@ static void parse_message_properties(Parser* parser, MessageProperty** props, in
 
 // Entry point to parse structures: command, query, and notification
 MessagingASTNode* parse_messaging_structure(Parser* parser) {
-    auto node = (MessagingASTNode*)malloc(sizeof(MessagingASTNode));
+    MessagingASTNode* node = (MessagingASTNode*)malloc(sizeof(MessagingASTNode));
     if (!node) return NULL;
     node->name = NULL;
 
@@ -102,7 +102,7 @@ MessagingASTNode* parse_messaging_handler(Parser* parser) {
         msg_advance(parser);
     }
 
-    auto node = (MessagingASTNode*)malloc(sizeof(MessagingASTNode));
+    MessagingASTNode* node = (MessagingASTNode*)malloc(sizeof(MessagingASTNode));
     if (!node) return NULL;
 
     node->type = NODE_MSG_HANDLER;

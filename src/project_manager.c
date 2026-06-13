@@ -35,7 +35,7 @@ TekoProjectConfig* teko_project_load(const char* tkp_filepath) {
         return NULL;
     }
 
-    auto config = (TekoProjectConfig*)malloc(sizeof(TekoProjectConfig));
+    TekoProjectConfig* config = (TekoProjectConfig*)malloc(sizeof(TekoProjectConfig));
     if (!config) {
         fclose(file);
         return NULL;

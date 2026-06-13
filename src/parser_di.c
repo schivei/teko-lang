@@ -78,7 +78,7 @@ static void parse_di_methods(Parser* parser, DIMethodSignature** methods, int* c
 DIASTNode* parse_di_interface(Parser* parser, bool is_exported) {
     di_advance(parser);
 
-    auto node = (DIASTNode*)malloc(sizeof(DIASTNode));
+    DIASTNode* node = (DIASTNode*)malloc(sizeof(DIASTNode));
     if (!node) return NULL;
     node->type = NODE_DI_INTERFACE;
     node->name = NULL;
@@ -104,7 +104,7 @@ DIASTNode* parse_di_interface(Parser* parser, bool is_exported) {
 DIASTNode* parse_di_service(Parser* parser) {
     di_advance(parser);
 
-    auto node = (DIASTNode*)malloc(sizeof(DIASTNode));
+    DIASTNode* node = (DIASTNode*)malloc(sizeof(DIASTNode));
     if (!node) return NULL;
     node->type = NODE_DI_SERVICE;
     node->name = NULL;
@@ -138,7 +138,7 @@ DIASTNode* parse_di_service(Parser* parser) {
 DIASTNode* parse_di_decorator(Parser* parser) {
     di_advance(parser);
 
-    auto node = (DIASTNode*)malloc(sizeof(DIASTNode));
+    DIASTNode* node = (DIASTNode*)malloc(sizeof(DIASTNode));
     if (!node) return NULL;
     node->type = NODE_DI_DECORATOR;
     node->name = strdup("decorator");

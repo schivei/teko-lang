@@ -10,7 +10,7 @@ static void types_advance(Parser* parser) {
 
 // Initializes a clean TypeInfo structure
 static TypeInfo* create_empty_type_info() {
-    const auto info = (TypeInfo*)malloc(sizeof(TypeInfo));
+    TypeInfo* const info = (TypeInfo*)malloc(sizeof(TypeInfo));
     info->kind = NODE_TYPE_BASIC;
     info->base_name = NULL;
     info->is_nullable = false;
@@ -123,7 +123,7 @@ TypeInfo* parse_complete_type_info(Parser* parser) {
 
 // Parses standalone numeric literals
 ArbitraryTypeASTNode* parse_arbitrary_numeric_literal(Parser* parser) {
-    const auto node = (ArbitraryTypeASTNode*)malloc(sizeof(ArbitraryTypeASTNode));
+    ArbitraryTypeASTNode* const node = (ArbitraryTypeASTNode*)malloc(sizeof(ArbitraryTypeASTNode));
     node->type = NODE_ARBITRARY_LITERAL;
     node->data.numeric_literal.raw_lexeme = NULL;
     node->data.numeric_literal.is_floating_point = false;
