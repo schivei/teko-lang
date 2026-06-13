@@ -9,6 +9,8 @@ const fixtures = [
   { file: "../samples/scheduler.wasm", expected: 15, name: "scheduler", entry: "test" },
   // Real compiler output (Phase 10.2b): spawn + blocking channel -> main() == 7.
   { file: "../samples/emitted.wasm", expected: 7, name: "emitted", entry: "main" },
+  // Real compiler output (Phase 10.3): mid-function suspension -> main() == 30.
+  { file: "../samples/emitted_suspend.wasm", expected: 30, name: "emittedSuspend", entry: "main" },
 ];
 const results = {};
 let lines = [];

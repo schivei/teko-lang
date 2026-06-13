@@ -11,13 +11,19 @@ typedef struct {
     FILE* file;
     TekoTarget target;
     uint32_t label_count;
-    // Phase 10.2b WASM multi-function state (unused by the native emitters):
-    //  wasm_open      - 0 nothing open, 1 $main open, 2 a $routine_N open
-    //  routine_count  - number of green-thread functions emitted (table size)
-    //  routine_ids    - their ids, for the (elem ...) table-init at module close
+    // Phase 10.2b/10.3 WASM multi-function state (unused by the native emitters):
+    //  wasm_open       - 0 nothing open, 1 $main open, 2 a $routine_N open
+    //  routine_count   - number of green-thread functions emitted (table size)
+    //  routine_ids     - their ids, for the (elem ...) table-init at module close
+    //  routine_yields  - yield points (suspending CHAN_GETs) in the current
+    //                    routine, counted by the orchestrator before FUNC_BEGIN;
+    //                    sizes the state-machine block nest + br_table (10.3)
+    //  yield_idx       - which yield point we are emitting within the routine
     int wasm_open;
     int wasm_routine_count;
     int wasm_routine_ids[64];
+    int wasm_routine_yields;
+    int wasm_yield_idx;
 } MetalContext;
 
 // 1. APPLE ECOSYSTEM (Darwin Kernel)

@@ -109,8 +109,17 @@ The arena (`$arena_sp`) is reused for all of these allocations.
     threshold and carry their args centrally in the orchestrator, so the 16 native emitters
     and their goldens are byte-for-byte unchanged (full suite + ASan/UBSan both dispatch
     paths green).
-- **10.3 — mid-function suspension** (the hard part): state-machine/CPS lowering so a green
-  thread can suspend *mid-body* (not just run-to-completion). Reviewed sub-project; **next**.
+- **10.3 — mid-function suspension** ✅ *done*: green threads are lowered to **resumable
+  state machines**. A routine now has the ABI `(param $arg)(param $state)(param $frame)(result
+  i32)`: it `br_table`s on `$state` to the right resume point, reloads its live registers from
+  a per-task **spill frame** in linear memory, and at a blocking receive on an empty channel it
+  **spills `$w0/$w1` and returns its resume state** instead of re-entering — true suspension,
+  yielding the (native) stack back to the scheduler. The scheduler **re-enqueues** a task that
+  returns state>0 so it resumes once a producer has made progress (the orchestrator pre-scans
+  each routine to size the state machine; `$main` stays the non-suspending root). Executable
+  proof `runtime/wasm/emit-demo/emit_suspend.c`: a consumer suspends at its first receive, the
+  producer runs in between, the consumer resumes with its running sum intact and drains both
+  values — `main() == 30`, run under Node + wasmtime + headless Chromium in CI.
 - **10.4 — `--target=wasm-threads`** (Layer B): shared memory + atomics + Web Worker host
   glue; node `worker_threads` execution test. Opt-in parallelism.
 

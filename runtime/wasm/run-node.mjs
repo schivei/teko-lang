@@ -13,6 +13,7 @@ const fixtures = [
   { file: "./samples/channels.wasm", expected: 42, name: "channels (10.1)", entry: "test" },
   { file: "./samples/scheduler.wasm", expected: 15, name: "scheduler (10.2)", entry: "test" },
   { file: "./samples/emitted.wasm", expected: 7, name: "emitted spawn+channel (10.2b)", entry: "main", optional: true },
+  { file: "./samples/emitted_suspend.wasm", expected: 30, name: "emitted mid-function suspension (10.3)", entry: "main", optional: true },
 ];
 
 let failures = 0;

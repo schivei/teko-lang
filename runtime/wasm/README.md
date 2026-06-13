@@ -17,6 +17,11 @@ Fixtures:
   thread is dispatched via `call_indirect` and writes 7 into a shared channel that
   `main()` blocking-receives (`main() → 7`). This is the module the compiler emits,
   not a hand-written mirror.
+- `samples/emitted_suspend.wat` — **real compiler output (Phase 10.3)**: generated
+  by `emit-demo/emit_suspend.c`. A consumer green thread is lowered to a state
+  machine that **suspends mid-body** at a blocking receive (spilling its running
+  sum to a per-task frame), returns to the scheduler so a producer can run, then
+  **resumes** at the same point and drains two values. `main() → 30`.
 - `samples/channels.wat` — hand-written reference: Phase 10.1 channel ring buffer
   (`test() → 42`).
 - `samples/scheduler.wat` — hand-written reference: Phase 10.2 cooperative
@@ -26,15 +31,18 @@ Fixtures:
 ## Build the fixtures
 
 ```sh
-# 1. emit the compiler's real module (needs the built compiler core, libteko_core.a)
+# 1. emit the compiler's real modules (needs the built compiler core, libteko_core.a)
 cc -I ../../src emit-demo/emit_spawn_channel.c ../../build/libteko_core.a -o /tmp/emit_spawn_channel
+cc -I ../../src emit-demo/emit_suspend.c       ../../build/libteko_core.a -o /tmp/emit_suspend
 /tmp/emit_spawn_channel samples/emitted.wat
+/tmp/emit_suspend        samples/emitted_suspend.wat
 
 # 2. assemble all modules. needs WABT (wat2wasm).
 #    macOS: brew install wabt ; Ubuntu: apt-get install wabt
-wat2wasm samples/channels.wat  -o samples/channels.wasm
-wat2wasm samples/scheduler.wat -o samples/scheduler.wasm
-wat2wasm samples/emitted.wat   -o samples/emitted.wasm
+wat2wasm samples/channels.wat        -o samples/channels.wasm
+wat2wasm samples/scheduler.wat       -o samples/scheduler.wasm
+wat2wasm samples/emitted.wat         -o samples/emitted.wasm
+wat2wasm samples/emitted_suspend.wat -o samples/emitted_suspend.wasm
 ```
 
 ## Run locally
@@ -54,7 +62,8 @@ node server.mjs                   # manual: serve at http://localhost:8092 (COOP
 
 Two **gating** jobs in `.github/workflows/ci.yml`: `wasm-wasmtime` (Node +
 wasmtime) and `wasm-browser` (headless Chromium, COOP/COEP). Both build the
-compiler, emit `samples/emitted.wat` from the backend, assemble every module with
-`wat2wasm`, and assert `channels=42`, `scheduler=15`, `emitted main=7`. They were
-promoted from non-blocking once the backend stabilized (the emitter now produces
-valid, instantiable WASM that really schedules a spawned green thread).
+compiler, emit the backend's real modules, assemble every module with `wat2wasm`,
+and assert `channels=42`, `scheduler=15`, `emitted main=7`, and `emitted_suspend
+main=30` (mid-function suspension). They were promoted from non-blocking once the
+backend stabilized (the emitter now produces valid, instantiable WASM that really
+schedules and suspends green threads).

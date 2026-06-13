@@ -2,57 +2,77 @@
 #include <stdio.h>
 
 // ===========================================================================
-// WASM (WAT) emitter — Phase 10.2b: cooperative concurrency backend.
+// WASM (WAT) emitter — Phase 10.3: cooperative concurrency with mid-function
+// suspension. Green threads are compiled to state machines that can suspend in
+// the *middle* of their body (at a blocking channel receive), return control to
+// the scheduler so other tasks run, and later resume exactly where they left off
+// — WebAssembly has no stack-switching, so this is done with an explicit state
+// machine + a per-task spill frame in linear memory, not a native stack switch.
 //
-// Register model (every function declares the same three i32 locals so the
-// linear IL is stack-neutral and each function ends with exactly one value on
-// the operand stack — a hard requirement for a valid WASM module):
-//   $w0  accumulator / result
-//   $w1  scratch (second arithmetic operand, channel-receive temp)
-//   $cp  channel pointer (current channel base; also the spawn argument)
+// Register model (every function declares the same three i32 locals so the linear
+// IL is stack-neutral and each function ends with exactly one value):
+//   $w0  accumulator / result      $w1  scratch / running value      $cp  channel ptr
 //
-// Module shape:
-//   (module
-//     (memory 1) (export "memory")
-//     (global $arena_sp ...) (global $rq_head ...) (global $rq_tail ...)
-//     (type $task (func (param i32)))
-//     (func $teko_enqueue ...)        ;; append {fn_index, arg} to the run queue
-//     (func $teko_sched_run ...)      ;; drain the run queue via call_indirect
-//     (func $main (result i32) ...)   ;; entry; SPAWN enqueues, AWAIT/GET yield
-//     (func $routine_0 (param i32) ...) ...   ;; green-thread bodies
-//     (table N funcref) (elem (i32.const 0) $routine_0 ...)
-//     (export "main") (data ...))
+// Green-thread ABI:  (func $routine_N (param $arg i32) (param $state i32)
+//                                     (param $frame i32) (result i32))
+//   $arg    the channel base handed to the thread at spawn
+//   $state  resume point (0 = start); the body br_tables on it
+//   $frame  per-task spill area: [0]=$w0 [4]=$w1, preserved across suspensions
+//   result  the next state: 0 = completed, k>0 = suspended at yield point k
 //
-// Memory map (linear memory, 1 page = 64 KiB):
-//   [64 .. )   run queue: slot i at 64 + i*8 -> { fn@+0, arg@+4 }
-//   [1024]     .data ("Hello Teko")
-//   [2048 .. ) arena: channels bump-allocated here (CHAN_INIT)
+// Scheduler:  $teko_sched_run drains a run queue (16-byte slots at offset 64:
+//   {fn@0, arg@4, state@8, frame@12}); a task that returns state>0 is re-enqueued
+//   to resume later. $main is the root (not a task) and blocks re-entrantly.
+//
+// Memory map (1 page = 64 KiB): [64..) run queue · [1024] .data · [2048..) arena
+// (channels + per-task frames bump-allocated here).
 // ===========================================================================
 
+#define TEKO_WASM_FRAME_BYTES 64
+
 static void emit_wasm_scheduler_runtime(FILE* f) {
-    // Run-queue cursors and the indirect-call task signature.
     fprintf(f, "  (global $rq_head (mut i32) (i32.const 0))\n");
     fprintf(f, "  (global $rq_tail (mut i32) (i32.const 0))\n");
-    fprintf(f, "  (type $task (func (param i32)))\n");
+    fprintf(f, "  (type $task (func (param i32 i32 i32) (result i32)))\n");
 
-    // enqueue {fn_index, arg} at run-queue slot rq_tail (8-byte slots from 64).
-    fprintf(f, "  (func $teko_enqueue (param $fn i32) (param $arg i32)\n");
-    fprintf(f, "    (i32.store offset=64 (i32.mul (global.get $rq_tail) (i32.const 8)) (local.get $fn))\n");
-    fprintf(f, "    (i32.store offset=68 (i32.mul (global.get $rq_tail) (i32.const 8)) (local.get $arg))\n");
+    // enqueue {fn, arg, state, frame} into run-queue slot rq_tail (16-byte slots).
+    fprintf(f, "  (func $teko_enqueue (param $fn i32) (param $arg i32) (param $st i32) (param $fr i32) (local $b i32)\n");
+    fprintf(f, "    (local.set $b (i32.add (i32.const 64) (i32.mul (global.get $rq_tail) (i32.const 16))))\n");
+    fprintf(f, "    (i32.store offset=0  (local.get $b) (local.get $fn))\n");
+    fprintf(f, "    (i32.store offset=4  (local.get $b) (local.get $arg))\n");
+    fprintf(f, "    (i32.store offset=8  (local.get $b) (local.get $st))\n");
+    fprintf(f, "    (i32.store offset=12 (local.get $b) (local.get $fr))\n");
     fprintf(f, "    (global.set $rq_tail (i32.add (global.get $rq_tail) (i32.const 1))))\n");
 
-    // Cooperative scheduler: drain ready tasks run-to-completion. rq_head is
-    // advanced *before* the call so a task that re-enters $teko_sched_run (a
-    // blocking channel receive that yields) does not re-run itself.
-    fprintf(f, "  (func $teko_sched_run (local $f i32) (local $a i32)\n");
-    fprintf(f, "    (block $done\n");
-    fprintf(f, "      (loop $L\n");
-    fprintf(f, "        (br_if $done (i32.ge_u (global.get $rq_head) (global.get $rq_tail)))\n");
-    fprintf(f, "        (local.set $a (i32.load offset=68 (i32.mul (global.get $rq_head) (i32.const 8))))\n");
-    fprintf(f, "        (local.set $f (i32.load offset=64 (i32.mul (global.get $rq_head) (i32.const 8))))\n");
-    fprintf(f, "        (global.set $rq_head (i32.add (global.get $rq_head) (i32.const 1)))\n");
-    fprintf(f, "        (call_indirect (type $task) (local.get $a) (local.get $f))\n");
-    fprintf(f, "        (br $L))))\n");
+    // Cooperative scheduler: dispatch each ready task via call_indirect; if it
+    // returns a suspended state (>0) re-enqueue it (with the same arg+frame) so
+    // it resumes once a producer has made progress. rq_head advances *before* the
+    // call so a re-entrant scheduler call never re-runs the in-flight task.
+    fprintf(f, "  (func $teko_sched_run (local $b i32) (local $f i32) (local $a i32) (local $st i32) (local $fr i32) (local $ret i32)\n");
+    fprintf(f, "    (block $done (loop $L\n");
+    fprintf(f, "      (br_if $done (i32.ge_u (global.get $rq_head) (global.get $rq_tail)))\n");
+    fprintf(f, "      (local.set $b (i32.add (i32.const 64) (i32.mul (global.get $rq_head) (i32.const 16))))\n");
+    fprintf(f, "      (local.set $f  (i32.load offset=0  (local.get $b)))\n");
+    fprintf(f, "      (local.set $a  (i32.load offset=4  (local.get $b)))\n");
+    fprintf(f, "      (local.set $st (i32.load offset=8  (local.get $b)))\n");
+    fprintf(f, "      (local.set $fr (i32.load offset=12 (local.get $b)))\n");
+    fprintf(f, "      (global.set $rq_head (i32.add (global.get $rq_head) (i32.const 1)))\n");
+    fprintf(f, "      (local.set $ret (call_indirect (type $task) (local.get $a) (local.get $st) (local.get $fr) (local.get $f)))\n");
+    fprintf(f, "      (if (i32.gt_u (local.get $ret) (i32.const 0))\n");
+    fprintf(f, "        (then (call $teko_enqueue (local.get $f) (local.get $a) (local.get $ret) (local.get $fr))))\n");
+    fprintf(f, "      (br $L))))\n");
+}
+
+// The non-suspending half of a channel receive: read buf[head] -> $w0, advance
+// head = (head+1) % cap. Channel base is in $cp.
+static void emit_wasm_chan_read(FILE* f) {
+    fprintf(f, "    local.get $cp\n");
+    fprintf(f, "    local.get $cp\n    i32.load offset=0\n    i32.const 4\n    i32.mul\n    i32.add\n"); // cp + head*4
+    fprintf(f, "    i32.load offset=12\n    local.set $w0\n");                                            // $w0 = mem[cp+head*4+12]
+    fprintf(f, "    local.get $cp\n");
+    fprintf(f, "    local.get $cp\n    i32.load offset=0\n    i32.const 1\n    i32.add\n");
+    fprintf(f, "    local.get $cp\n    i32.load offset=8\n    i32.rem_u\n");
+    fprintf(f, "    i32.store offset=0\n");                                                               // head = (head+1) % cap
 }
 
 void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
@@ -61,15 +81,13 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
 
     switch (op) {
         // ====================================================================
-        // 1. MODULE INITIALIZATION + SCHEDULER RUNTIME + $main OPEN
+        // 1. MODULE INIT + SCHEDULER RUNTIME + $main OPEN
         // ====================================================================
         case OP_PROLOG:
             fprintf(f, "(module\n");
-            fprintf(f, "  ;; --- Target: WebAssembly Text Format (cooperative concurrency, Phase 10.2b) ---\n");
+            fprintf(f, "  ;; --- Target: WebAssembly Text Format (cooperative concurrency, Phase 10.3) ---\n");
             fprintf(f, "  (memory 1)\n");
             fprintf(f, "  (export \"memory\" (memory 0))\n");
-            // O(1) region allocator: a bump pointer into linear memory, above
-            // the .data region (1024) and the run queue (64..).
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             emit_wasm_scheduler_runtime(f);
             fprintf(f, "  (func $main (result i32)\n");
@@ -81,8 +99,6 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         // 2. LITERALS / MEMORY (accumulator model: results land in $w0)
         // ====================================================================
         case OP_HALT:
-            // No emission: the function epilogue ($main close / OP_EPILOG)
-            // provides the single result value (local.get $w0).
             fprintf(f, "    ;; [WASM Halt]: result is $w0, returned at function close\n");
             break;
 
@@ -138,86 +154,108 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         // ====================================================================
-        // 5. CHANNELS (in-module linear-memory ring buffers, Phase 10.1/10.2b)
-        //    Header (i32 cells): [0]=head [4]=tail [8]=cap, then cap data slots
-        //    at +12. The channel base lives in $cp.
+        // 5. CHANNELS (in-module linear-memory ring buffers)
+        //    Header (i32 cells): [0]=head [4]=tail [8]=cap, data slots at +12.
+        //    Channel base lives in $cp.
         // ====================================================================
         case OP_CHAN_INIT:
             fprintf(f, "    ;; [WASM Channel Init]: ring buffer in linear memory (cap 8)\n");
-            fprintf(f, "    global.get $arena_sp\n    local.set $cp\n");          // $cp = channel base
-            fprintf(f, "    local.get $cp\n    i32.const 0\n    i32.store offset=0\n");  // head = 0
-            fprintf(f, "    local.get $cp\n    i32.const 0\n    i32.store offset=4\n");  // tail = 0
-            fprintf(f, "    local.get $cp\n    i32.const 8\n    i32.store offset=8\n");  // cap  = 8
-            fprintf(f, "    global.get $arena_sp\n    i32.const 44\n    i32.add\n    global.set $arena_sp\n"); // 12 + 8*4
+            fprintf(f, "    global.get $arena_sp\n    local.set $cp\n");
+            fprintf(f, "    local.get $cp\n    i32.const 0\n    i32.store offset=0\n");
+            fprintf(f, "    local.get $cp\n    i32.const 0\n    i32.store offset=4\n");
+            fprintf(f, "    local.get $cp\n    i32.const 8\n    i32.store offset=8\n");
+            fprintf(f, "    global.get $arena_sp\n    i32.const 44\n    i32.add\n    global.set $arena_sp\n");
             break;
 
         case OP_CHAN_PUT:
-            // buf[tail] = $w0 ; tail = (tail+1) % cap. Channel base in $cp.
             fprintf(f, "    ;; [WASM Channel Put]: non-blocking ring-buffer store at tail\n");
             fprintf(f, "    local.get $cp\n");
-            fprintf(f, "    local.get $cp\n    i32.load offset=4\n    i32.const 4\n    i32.mul\n    i32.add\n"); // cp + tail*4
-            fprintf(f, "    local.get $w0\n    i32.store offset=12\n");           // mem[cp + tail*4 + 12] = $w0
+            fprintf(f, "    local.get $cp\n    i32.load offset=4\n    i32.const 4\n    i32.mul\n    i32.add\n");
+            fprintf(f, "    local.get $w0\n    i32.store offset=12\n");
             fprintf(f, "    local.get $cp\n");
             fprintf(f, "    local.get $cp\n    i32.load offset=4\n    i32.const 1\n    i32.add\n");
             fprintf(f, "    local.get $cp\n    i32.load offset=8\n    i32.rem_u\n");
-            fprintf(f, "    i32.store offset=4\n");                                // tail = (tail+1) % cap
+            fprintf(f, "    i32.store offset=4\n");
             break;
 
         case OP_CHAN_GET:
-            // Blocking receive: if empty (head==tail) yield to the scheduler so
-            // a producer can run, then read buf[head] -> $w0 ; head=(head+1)%cap.
-            fprintf(f, "    ;; [WASM Channel Get]: blocking receive via cooperative yield\n");
-            fprintf(f, "    local.get $cp\n    i32.load offset=0\n");             // head
-            fprintf(f, "    local.get $cp\n    i32.load offset=4\n");             // tail
-            fprintf(f, "    i32.eq\n    if\n      call $teko_sched_run\n    end\n"); // empty -> yield
-            fprintf(f, "    local.get $cp\n");
-            fprintf(f, "    local.get $cp\n    i32.load offset=0\n    i32.const 4\n    i32.mul\n    i32.add\n"); // cp + head*4
-            fprintf(f, "    i32.load offset=12\n    local.set $w0\n");            // $w0 = mem[cp + head*4 + 12]
-            fprintf(f, "    local.get $cp\n");
-            fprintf(f, "    local.get $cp\n    i32.load offset=0\n    i32.const 1\n    i32.add\n");
-            fprintf(f, "    local.get $cp\n    i32.load offset=8\n    i32.rem_u\n");
-            fprintf(f, "    i32.store offset=0\n");                                // head = (head+1) % cap
+            if (ctx->wasm_open == 2) {
+                // Inside a green thread: a true suspension point. Close the state
+                // block for this segment; if the channel is empty, spill the live
+                // registers and RETURN the resume state to the scheduler.
+                int k = ++ctx->wasm_yield_idx;
+                fprintf(f, "    )\n");                                          // close (block $s<k>)
+                fprintf(f, "    ;; [WASM Channel Get @ yield %d]: suspend to scheduler if empty\n", k);
+                fprintf(f, "    local.get $cp\n    i32.load offset=0\n");
+                fprintf(f, "    local.get $cp\n    i32.load offset=4\n");
+                fprintf(f, "    i32.eq\n    if\n");
+                fprintf(f, "      local.get $frame\n      local.get $w0\n      i32.store offset=0\n"); // spill $w0
+                fprintf(f, "      local.get $frame\n      local.get $w1\n      i32.store offset=4\n"); // spill $w1
+                fprintf(f, "      i32.const %d\n      return\n    end\n", k);
+                emit_wasm_chan_read(f);
+            } else {
+                // In $main (the root): block re-entrantly — drain the scheduler
+                // once, then read. $main cannot suspend (nothing to return to).
+                fprintf(f, "    ;; [WASM Channel Get]: root blocking receive (drains the scheduler)\n");
+                fprintf(f, "    local.get $cp\n    i32.load offset=0\n");
+                fprintf(f, "    local.get $cp\n    i32.load offset=4\n");
+                fprintf(f, "    i32.eq\n    if\n      call $teko_sched_run\n    end\n");
+                emit_wasm_chan_read(f);
+            }
             break;
 
         // ====================================================================
         // 6. CONCURRENCY: real cooperative spawn + yield (no host runtime)
         // ====================================================================
         case OP_SPAWN_ASYNC:
-            // Enqueue a green thread: fn_index from $w0, argument from $cp (the
-            // current channel base). The scheduler dispatches it via call_indirect.
-            fprintf(f, "    ;; [WASM Spawn]: enqueue {fn_index=$w0, arg=$cp} into the run queue\n");
-            fprintf(f, "    local.get $w0\n    local.get $cp\n    call $teko_enqueue\n");
+            // Allocate a per-task spill frame and enqueue the green thread:
+            // {fn_index=$w0, arg=$cp (channel base), state=0, frame}. The
+            // scheduler dispatches it via call_indirect.
+            fprintf(f, "    ;; [WASM Spawn]: allocate frame + enqueue {fn=$w0, arg=$cp, state=0}\n");
+            fprintf(f, "    local.get $w0\n    local.get $cp\n    i32.const 0\n    global.get $arena_sp\n    call $teko_enqueue\n");
+            fprintf(f, "    global.get $arena_sp\n    i32.const %d\n    i32.add\n    global.set $arena_sp\n", TEKO_WASM_FRAME_BYTES);
             break;
 
         case OP_AWAIT_INTENT:
-            // Cooperative yield: hand control to the scheduler to drain ready tasks.
             fprintf(f, "    ;; [WASM Await]: cooperative yield to the scheduler\n");
             fprintf(f, "    call $teko_sched_run\n");
             break;
 
         // ====================================================================
-        // 7. FUNCTION BOUNDARIES (green-thread bodies as separate functions)
+        // 7. FUNCTION BOUNDARIES (green-thread bodies as state machines)
         // ====================================================================
-        case OP_FUNC_BEGIN:
+        case OP_FUNC_BEGIN: {
             // Close whatever function is currently open, then open $routine_<id>.
             if (ctx->wasm_open == 1) {
                 fprintf(f, "    local.get $w0\n  )\n");          // close $main (result i32)
             } else if (ctx->wasm_open == 2) {
-                fprintf(f, "  )\n");                              // close previous routine
+                fprintf(f, "    i32.const 0\n  )\n");            // close previous routine (state 0)
             }
-            fprintf(f, "  (func $routine_%d (param $arg i32)\n", arg);
+            int n = ctx->wasm_routine_yields;                    // yield points in this routine
+            fprintf(f, "  (func $routine_%d (param $arg i32) (param $state i32) (param $frame i32) (result i32)\n", arg);
             fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
-            fprintf(f, "    local.get $arg\n    local.set $cp\n"); // green thread receives its channel base
+            fprintf(f, "    local.get $arg\n    local.set $cp\n");                       // channel base
+            fprintf(f, "    local.get $frame\n    i32.load offset=0\n    local.set $w0\n"); // reload spilled $w0
+            fprintf(f, "    local.get $frame\n    i32.load offset=4\n    local.set $w1\n"); // reload spilled $w1
+            // State dispatch: open (n+1) nested blocks $s_n .. $s0 and br_table on
+            // $state. Each yield point (CHAN_GET) closes one block; resuming at
+            // state k lands right at yield point k.
+            for (int k = n; k >= 0; k--) fprintf(f, "    (block $s%d\n", k);
+            fprintf(f, "    local.get $state\n    br_table");
+            for (int k = 0; k <= n; k++) fprintf(f, " $s%d", k); // plain (stack-form) instruction, no parens
+            fprintf(f, "\n");
+            fprintf(f, "    )\n");                                // close (block $s0): start segment follows
             ctx->wasm_open = 2;
             if (ctx->wasm_routine_count < 64) {
                 ctx->wasm_routine_ids[ctx->wasm_routine_count] = arg;
             }
             ctx->wasm_routine_count++;
             break;
+        }
 
         case OP_FUNC_END:
             if (ctx->wasm_open == 2) {
-                fprintf(f, "  )\n");                              // close routine (no result)
+                fprintf(f, "    i32.const 0\n  )\n");            // completed: return state 0, close routine
                 ctx->wasm_open = 0;
             }
             break;
@@ -235,15 +273,12 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
 
         case OP_RETURN:
         case OP_EPILOG: {
-            // Close any still-open function (epilogue provides $main's result).
             if (ctx->wasm_open == 1) {
                 fprintf(f, "    local.get $w0\n  )\n");
             } else if (ctx->wasm_open == 2) {
-                fprintf(f, "  )\n");
+                fprintf(f, "    i32.const 0\n  )\n");
             }
             ctx->wasm_open = 0;
-            // Function table for call_indirect spawn. Always declare a table so
-            // $teko_sched_run's call_indirect is valid even with zero routines.
             int n = ctx->wasm_routine_count;
             fprintf(f, "  (table %d funcref)\n", n > 0 ? n : 1);
             if (n > 0) {
@@ -260,7 +295,6 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         }
 
         default:
-            // DCE resurrection marker for logical instructions mapped above 100.
             if ((int)op >= 100) {
                 fprintf(f, "    ;; Label marker: $label_%d\n", (int)op);
             }

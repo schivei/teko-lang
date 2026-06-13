@@ -102,7 +102,7 @@ void test_teko_aot_wasm_arena_and_concurrency_hooks(void) {
 
     // Phase 10.2b: spawn/await are real cooperative primitives — SPAWN enqueues
     // into the in-module run queue, AWAIT yields to the in-module scheduler.
-    TEST_ASSERT_NOT_NULL(strstr(buffer, "(type $task (func (param i32)))")); // call_indirect signature
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(type $task (func (param i32 i32 i32) (result i32)))")); // (arg,state,frame)->next state
     TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_enqueue"));             // run-queue append
     TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_sched_run"));           // cooperative scheduler
     TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_enqueue"));              // SPAWN_ASYNC -> enqueue
@@ -169,6 +169,66 @@ void test_teko_aot_wasm_multifunction_spawn_lowering(void) {
     TEST_ASSERT_NOT_NULL(strstr(buffer, "(elem (i32.const 0) $routine_0)"));
     // The blocking receive yields to the scheduler when the channel is empty.
     TEST_ASSERT_NOT_NULL(strstr(buffer, "call $teko_sched_run"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
+// 4. WASM MID-FUNCTION SUSPENSION — STATE MACHINE (Phase 10.3)
+// ====================================================================
+// A green thread that blocks mid-body is lowered to a state machine: it can
+// SUSPEND at a channel receive (spill its live registers to a per-task frame and
+// return the resume state to the scheduler) and later RESUME at the same point.
+// This pins the structural shape; the wasm-emit CI job verifies it actually runs
+// (consumer suspended, producer ran in between, consumer resumed -> main() == 30).
+void test_teko_aot_wasm_midfunction_suspension(void) {
+    const char* asm_path = "output_wasm_suspend_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    // main: CHAN_INIT, ICONST 0, SPAWN_ASYNC, CHAN_GET, HALT
+    // routine 0: FUNC_BEGIN(0), CHAN_GET (yield 1), CHAN_PUT, FUNC_END
+    unsigned char prog[] = {
+        0x12,                         // OP_CHAN_INIT
+        0x01, 0x00, 0x00, 0x00, 0x00, // OP_ICONST 0
+        0x10,                         // OP_SPAWN_ASYNC
+        0x14,                         // OP_CHAN_GET
+        0x00,                         // OP_HALT
+        0x40, 0x00, 0x00, 0x00, 0x00, // OP_FUNC_BEGIN id=0
+        0x14,                         // OP_CHAN_GET (the suspension point)
+        0x13,                         // OP_CHAN_PUT
+        0x41                          // OP_FUNC_END
+    };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // Green thread is a resumable state machine: (arg, state, frame) -> next state.
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(func $routine_0 (param $arg i32) (param $state i32) (param $frame i32) (result i32)"));
+    // Entry reloads the spilled registers and dispatches on the resume state.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "br_table $s0 $s1"));     // 1 yield -> s0 (start) + s1 (resume)
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "local.get $state"));
+    // The suspension point spills $w0/$w1 to the frame and returns the state.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.store offset=0"));   // spill $w0 -> frame[0]
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.const 1\n      return")); // suspend: return resume state 1
+    // The scheduler re-enqueues a suspended task so it resumes later.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(then (call $teko_enqueue"));
 
     free(buffer);
     remove(asm_path);
