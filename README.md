@@ -1,5 +1,8 @@
 # 🌀 Teko Programming Language
 
+[![Teko Compiler Multi-Platform CI](https://github.com/schivei/teko-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/ci.yml)
+[![Teko Compiler Multi-Platform CI (main)](https://github.com/schivei/teko-lang/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/schivei/teko-lang/actions/workflows/ci.yml?query=branch%3Amain)
+
 ![teko.jpeg](docs/teko.jpeg)
 
 Teko is a high-performance, ahead-of-time (AOT) compiled, general-purpose programming language tailored for modern systems programming. It combines the raw execution speed of C, the type safety and clean architecture of modern compilers, and a zero-overhead **Region-Based Memory Management (O(1) Arenas)** to eliminate both manual `free()` errors and garbage collection pauses.
