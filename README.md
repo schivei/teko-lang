@@ -35,36 +35,40 @@ each `(OS, architecture)` pair to a dedicated emitter. There are **16 emitters**
 native families plus WebAssembly. Targets are selected by a triple passed to
 `--target` (matched by substring in `src/teko_target.c`).
 
-**Honest status — three real tiers** (the *emitted native code* is never executed;
-only the compiler itself, and the WASM modules, run):
+**Honest status — four execution kinds in CI.** The *emitted native code* is never
+run as a process; what executes is the compiler itself (on its host), the
+QEMU-emulated suite, and the WASM modules:
 
-- 🟢 **CI host** — the compiler is **built and the whole test suite is run** on this
-  OS/architecture in CI (`native.yml`). Every emitter's emission goldens run here too.
-- 🟡 **Emission only** — there is **no CI runner** for this OS/arch; the emitter is
-  validated by **golden tests** (prologue / arithmetic / syscall bytes asserted) that
-  execute on the CI hosts. The compiler is not built or run here, and the emitted
-  assembly is not assembled, linked, or executed anywhere.
-- 🔵 **Executed** — the emitted module is **built and run end-to-end** in CI with its
-  result asserted (WebAssembly only).
+- 🟢 **Native run** — the compiler is built and the whole suite is run on a **native
+  runner** for this OS/arch (`native.yml`).
+- 🟠 **Emulated run (non-native)** — the suite is built and **executed, but under
+  emulation** because there is **no native runner**: `riscv64` via **QEMU user-mode**
+  (`native.yml`, non-blocking). The tests do run — just not on real silicon.
+- 🔵 **Engine run (non-host)** — the **emitted module** is run in a WASM **engine**
+  (wasmtime / Node / headless Chromium), not on a host CPU (`wasm.yml`,
+  `wasm-threads.yml`).
+- 🟡 **Emission only** — **no runner**; the emitter is validated by **golden tests**
+  (prologue / arithmetic / syscall bytes asserted, executed on the CI hosts). Nothing
+  for this target is assembled, linked, or executed anywhere.
 
-| OS | Architecture | Emitter (`src/codegen/…`) | Backend | Tier | What is actually verified |
-|----|--------------|---------------------------|---------|------|---------------------------|
-| Linux | x86_64 | `linux/emit_linux_x86_64.c` | ELF (SysV) | 🟢 CI host | Compiler built + suite run (Clang/Ninja, `ubuntu-latest`); shares the unified x86_64-SysV emitter core |
-| Linux | arm64 / aarch64 | `linux/emit_linux_arm64.c` | ELF | 🟢 CI host | Compiler built + suite run on `ubuntu-24.04-arm`; AArch64 GAS core |
-| Linux | riscv64 | `linux/emit_linux_riscv64.c` | ELF | 🟢 CI host (QEMU) | Cross-compiled static + suite run under QEMU user-mode (non-blocking); shared riscv core |
-| macOS (Darwin) | arm64 / Apple Silicon | `apple/emit_darwin_arm64.c` | Mach-O | 🟢 CI host | Compiler built + suite run on `macos-latest` (AppleClang); Mach-O writer asserted |
-| Windows | x86_64 | `windows/emit_win_x86_64.c` | PE/COFF | 🟢 CI host | Compiler built + suite run (MSVC), **plus 20× bare-Release stress** (`sanitizers.yml`) |
-| Windows | arm64 | `windows/emit_win_arm64.c` | PE/COFF | 🟢 CI host | Compiler built + suite run on `windows-11-arm` (MSVC) |
-| macOS (Darwin) | x86_64 (Intel) | `apple/emit_darwin_x86_64.c` | Mach-O | 🟡 Emission only | Mach-O emission golden — GitHub retired the Intel macOS runners, so not built/run here |
-| Linux | x86 / i386 | `linux/emit_linux_x86.c` | ELF | 🟡 Emission only | 32-bit SysV ELF prologue/arithmetic golden; no 32-bit runner |
-| Linux | arm32 / armv7 | `linux/emit_linux_arm32.c` | ELF | 🟡 Emission only | ARM EABI emission golden; no runner |
-| Linux | riscv32 | `linux/emit_linux_riscv32.c` | ELF | 🟡 Emission only | RV32 emission golden (shared riscv core, byte-diff-verified vs RV64); no runner |
-| Linux | mips | `linux/emit_linux_mips.c` | ELF | 🟡 Emission only | MIPS emission golden; no runner |
-| Linux | ppc64 / powerpc64 | `linux/emit_linux_ppc64.c` | ELF | 🟡 Emission only | PowerPC64 emission golden; no runner |
-| Windows | x86 / i386 | `windows/emit_win_x86.c` | PE/COFF | 🟡 Emission only | 32-bit PE/COFF emission golden; no 32-bit Windows runner |
-| FreeBSD | x86_64 | `bsd_unix/emit_freebsd_x86_64.c` | ELF | 🟡 Emission only | ELF emission golden incl. the FreeBSD `PT_NOTE` ABI tag; no FreeBSD runner |
-| FreeBSD | arm64 | `bsd_unix/emit_freebsd_arm64.c` | ELF | 🟡 Emission only | AArch64 ELF emission golden (FreeBSD ABI); no runner |
-| WebAssembly | wasm32 / wasm64 | `bare_metal/emit_wasm.c` | WASM (WAT) | 🔵 Executed | Built **and run** end-to-end — see below (`wasm.yml`, `wasm-threads.yml`) |
+| OS | Architecture | Emitter (`src/codegen/…`) | Backend | Execution in CI | CI |
+|----|--------------|---------------------------|---------|-----------------|----|
+| Linux | x86_64 | `linux/emit_linux_x86_64.c` | ELF (SysV) | 🟢 Native run — `ubuntu-latest`, Clang/Ninja; unified x86_64-SysV core | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| Linux | arm64 / aarch64 | `linux/emit_linux_arm64.c` | ELF | 🟢 Native run — `ubuntu-24.04-arm`; AArch64 GAS core | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| Linux | riscv64 | `linux/emit_linux_riscv64.c` | ELF | 🟠 Emulated run — cross-compiled static, **QEMU user-mode** (non-blocking) | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| macOS (Darwin) | arm64 / Apple Silicon | `apple/emit_darwin_arm64.c` | Mach-O | 🟢 Native run — `macos-latest` (AppleClang) | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| Windows | x86_64 | `windows/emit_win_x86_64.c` | PE/COFF | 🟢 Native run — MSVC, **+ 20× stress** (`sanitizers.yml`) | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| Windows | arm64 | `windows/emit_win_arm64.c` | PE/COFF | 🟢 Native run — `windows-11-arm` (MSVC) | [![Native](https://github.com/schivei/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/native.yml) |
+| WebAssembly | wasm32 / wasm64 | `bare_metal/emit_wasm.c` | WASM (WAT) | 🔵 Engine run — wasmtime / Node / Chromium (Layer A & B) | [![A](https://github.com/schivei/teko-lang/actions/workflows/wasm.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/wasm.yml) [![B](https://github.com/schivei/teko-lang/actions/workflows/wasm-threads.yml/badge.svg)](https://github.com/schivei/teko-lang/actions/workflows/wasm-threads.yml) |
+| macOS (Darwin) | x86_64 (Intel) | `apple/emit_darwin_x86_64.c` | Mach-O | 🟡 Emission only — GitHub retired the Intel macOS runners | — |
+| Linux | x86 / i386 | `linux/emit_linux_x86.c` | ELF | 🟡 Emission only — no 32-bit runner | — |
+| Linux | arm32 / armv7 | `linux/emit_linux_arm32.c` | ELF | 🟡 Emission only — ARM EABI golden, no runner | — |
+| Linux | riscv32 | `linux/emit_linux_riscv32.c` | ELF | 🟡 Emission only — RV32 golden (shared riscv core, byte-diff vs RV64) | — |
+| Linux | mips | `linux/emit_linux_mips.c` | ELF | 🟡 Emission only — no runner | — |
+| Linux | ppc64 / powerpc64 | `linux/emit_linux_ppc64.c` | ELF | 🟡 Emission only — no runner | — |
+| Windows | x86 / i386 | `windows/emit_win_x86.c` | PE/COFF | 🟡 Emission only — no 32-bit Windows runner | — |
+| FreeBSD | x86_64 | `bsd_unix/emit_freebsd_x86_64.c` | ELF | 🟡 Emission only — incl. FreeBSD `PT_NOTE` ABI tag; no FreeBSD runner | — |
+| FreeBSD | arm64 | `bsd_unix/emit_freebsd_arm64.c` | ELF | 🟡 Emission only — AArch64 ELF (FreeBSD ABI); no runner | — |
 
 > Note: the in-memory ELF / Mach-O / PE-COFF object writers (`src/codegen/tld_*.c`) are
 > exercised by assertions on the produced bytes (e.g. the ELF e2e test verifies the
@@ -109,6 +113,25 @@ only the compiler itself, and the WASM modules, run):
   riscv32), mips, ppc64, and FreeBSD have **no host runner**, so their emitters are
   validated by emission goldens only — not by building/executing the compiler on that
   platform, nor by running the emitted native code anywhere.
+
+### Branch protection (required checks)
+
+CI is split into four workflows so each area has its own badge. Each workflow
+**always runs** but **skips its heavy jobs** on irrelevant changes (e.g. docs-only),
+decided by a `changes` job; an always-running **`gate`** job aggregates the result.
+Configure branch protection to require exactly the four **gate** checks:
+
+- `Native (hosts build & test) / gate`
+- `WASM Layer A (cooperative — wasmtime & browser) / gate`
+- `WASM Layer B (wasm-threads — worker_threads & Web Workers) / gate`
+- `Sanitizers & stress guards / gate`
+
+**Do not** require the individual heavy jobs. A workflow-level path skip (`on:
+paths:`) would leave a *required* check stuck in "Expected — waiting for status"
+**forever**, blocking the merge. The `gate` jobs carry no path filter, so they
+always report — passing when their heavy jobs succeed **or are skipped**, failing
+only on a real failure. A docs-only PR therefore passes all four gates with no heavy
+work and merges cleanly.
 
 ## 📂 Project Directory Structure
 
