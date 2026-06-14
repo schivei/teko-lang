@@ -90,8 +90,8 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
 - **Required-check phantom-block** with path filters → solved with the always-running `gate` job
   (above). Require only the gates.
 - **Roadmap:** the "WASM Concurrency Backend" was reclassified from a tech-debt item to its own
-  **Phase 10** (merged via PR #3). Browser FFI / JS-DOM interop is the **next phase** (proposed
-  Phase 11; `docs/PHASE_BROWSER_FFI.md`).
+  **Phase 10** (merged via PR #3). Browser FFI / JS-DOM interop is the **current phase**
+  (Phase 11; `docs/PHASE_BROWSER_FFI.md`).
 - **FFI today is parsed but discarded** (`parser_visibility.c`): no IL lowering, no call opcode,
   no real `.tks→.wat` driver (`main.c` uses mock bytecode). The interop phase builds that pipeline,
   starting with the string pool `(data …)` + `extern → (import …)` + `OP_CALL_IMPORT`.

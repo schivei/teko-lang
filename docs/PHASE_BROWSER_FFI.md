@@ -4,13 +4,13 @@
 > ergonomic, low-friction two-way bridge to JS/DOM. This document is the design + the
 > incremental plan; MVP-1 (foundation) is implemented first.
 
-## Proposed roadmap numbering (pending your alignment — not yet renumbered)
+## Roadmap numbering (confirmed — Phase 11; `docs/plan.md` renumbered)
 
-Insert this as a dedicated **Phase 11 — Browser FFI / JS-DOM Interop**, pushing the
-memorandum roadmap **+1**:
+This is a dedicated **Phase 11 — Browser FFI / JS-DOM Interop**; the memorandum roadmap
+was pushed **+1** in `docs/plan.md` (former Phases 11–19 → 12–20):
 
-| Now | Proposed |
-|-----|----------|
+| Was | Now |
+|-----|-----|
 | Phase 10 — WASM Concurrency Backend | Phase 10 (unchanged, merged) |
 | — | **Phase 11 — Browser FFI / JS-DOM Interop (NEW)** |
 | Phase 11 — Frontend Grammar & Lexer Extension | Phase 12 |
@@ -23,7 +23,8 @@ memorandum roadmap **+1**:
 | Phase 18 — Native Testing (`.tkt`) & Coverage | Phase 19 |
 | Phase 19 — Self-Containment (Self-Hosting) | Phase 20 |
 
-`docs/plan.md` is **not renumbered yet** — awaiting confirmation of this scheme.
+`docs/plan.md` (intro, ASCII diagram, headers, Documentation Map, cross-refs) is renumbered
+accordingly; Self-Containment is now Phase 20.
 
 ## Current state (verified in code, June 2026)
 
