@@ -95,6 +95,53 @@ void test_teko_aot_wasm_string_pool_data_segment(void) {
 }
 
 // ====================================================================
+// 1c. WASM FFI: extern → (import ...) + OP_CALL_IMPORT (Phase 11 / MVP-1)
+// ====================================================================
+// An `extern fn log(msg) from "env" as "log"` is lowered to a WASM import and an
+// OP_CALL_IMPORT call site. The run-ffi CI step proves it executes (host env.log
+// reads the pooled string back from memory).
+void test_teko_aot_wasm_ffi_import_lowering(void) {
+    const char* asm_path = "output_wasm_ffi_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "hi" };
+    static const TekoWasmImport imports[] = { { "env", "log", 1, 0 } };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 1);
+
+    // OP_SCONST 0 (&"hi"), OP_CALL_IMPORT 0 (env.log), OP_HALT
+    unsigned char prog[] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // The extern is declared as a host import with the right (ns, name, signature).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"env\" \"log\" (func $import_0 (param i32)))"));
+    // The call site lowers to a direct call of that import.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $import_0"));
+    // The argument string is in the real (data ...) pool.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(data (i32.const 1024) \"hi\\00\")"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
 // 2. WASM ARENA ALLOCATOR + IN-MODULE CHANNELS + COOPERATIVE CONCURRENCY
 // ====================================================================
 // The O(1) arena is real linear-memory bump code. Phase 10.1: channels are real

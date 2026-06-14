@@ -10,10 +10,13 @@ runners execute and assert. (Locally, `npm i wabt` gives a JS `wat2wasm` to vali
 
 ## Layout
 - `emit-demo/` — C drivers: `emit_spawn_channel.c` (→7), `emit_suspend.c` (→30),
-  `emit_multi.c` (→15), `emit_threads.c` (Layer B →99). Output `.wat` is gitignored.
+  `emit_multi.c` (→15), `emit_threads.c` (Layer B →99), `emit_ffi.c` (Browser FFI MVP-1:
+  `(import "env" "log")` + `OP_CALL_IMPORT` + pooled string). Output `.wat` is gitignored.
 - `samples/` — hand-written reference fixtures: `channels.wat` (42), `scheduler.wat` (15),
   `threads.wat` (Layer B reference, 777). `emitted*.wat`/`*.wasm` are generated/gitignored.
 - `run-node.mjs`, `run-browser.mjs` — Layer A under Node / headless Chromium.
+- `run-ffi.mjs` — Browser FFI MVP-1 proof: supplies host `env.log(ptr)`, reads the
+  NUL-terminated pooled string back from exported memory, asserts "hello from teko".
 - `threads/` (`run-node-threads.mjs`, `runner.mjs`, `worker.mjs`) — Layer B via
   `worker_threads`. `browser/threads-*.mjs` + `run-threads-browser.mjs` — Layer B via Web Workers.
 - `server.mjs` — static server with COOP/COEP (required for SharedArrayBuffer / Layer B).

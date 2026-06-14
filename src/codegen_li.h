@@ -19,6 +19,11 @@ typedef enum {
     OP_MUL = 0x07,
     OP_DIV = 0x08,
 
+    // Phase 11 (Browser FFI): call a host import declared via `extern fn … from
+    // "ns" as "name"`. Carries a 4-byte little-endian import index (into the
+    // module's import table); the WASM emitter lowers it to `call $import_<idx>`.
+    OP_CALL_IMPORT = 0x09,
+
     // Concurrency and Channels
     OP_SPAWN_ASYNC = 0x10,
     OP_AWAIT_INTENT = 0x11,

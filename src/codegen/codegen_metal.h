@@ -6,6 +6,16 @@
 #include "../teko_target.h"
 #include "../codegen_li.h"
 
+// Phase 11 (Browser FFI): a host import (from `extern fn … from "ns" as "name"`).
+// MVP-1 lowers the first parameter from $w0; n_params>1 is not yet supplied by the
+// toy IL (noted in the emitter). has_result stores the call result back into $w0.
+typedef struct {
+    const char* ns;     // import module/namespace, e.g. "env"
+    const char* name;   // imported field name, e.g. "log"
+    int n_params;       // i32 params
+    int has_result;     // 1 if the import returns an i32
+} TekoWasmImport;
+
 // Context of the contiguous bare-metal emitter
 typedef struct {
     FILE* file;
@@ -30,12 +40,22 @@ typedef struct {
     // then falls back to its legacy hardcoded data. Unused by the native emitters.
     const char** wasm_strings;
     int wasm_string_count;
+    // Phase 11 (Browser FFI): host import table (from `extern fn … from "ns" as
+    // "name"`). The WASM emitter declares `(import …)` per entry and lowers
+    // OP_CALL_IMPORT to `call $import_<idx>`. Unused by the native emitters.
+    const TekoWasmImport* wasm_imports;
+    int wasm_import_count;
 } MetalContext;
 
 // Phase 11: hand the WASM emitter the IL string pool before teko_metal_emit_program
 // so it can emit the (data ...) segment and correct OP_SCONST offsets. `strings`
 // must outlive the emit call; pass count 0 (or do not call) to keep legacy behavior.
 void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count);
+
+// Phase 11: hand the WASM emitter the host import table before teko_metal_emit_program
+// so it can declare `(import …)` and lower OP_CALL_IMPORT. `imports` must outlive the
+// emit call.
+void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, int count);
 
 // 1. APPLE ECOSYSTEM (Darwin Kernel)
 void emit_darwin_arm64(MetalContext* ctx, OpCode op, int32_t arg);

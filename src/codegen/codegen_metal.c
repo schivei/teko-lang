@@ -20,6 +20,8 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_yield_idx = 0;
     ctx->wasm_strings = NULL;
     ctx->wasm_string_count = 0;
+    ctx->wasm_imports = NULL;
+    ctx->wasm_import_count = 0;
     return ctx;
 }
 
@@ -27,6 +29,12 @@ void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count) 
     if (!ctx) return;
     ctx->wasm_strings = strings;
     ctx->wasm_string_count = (count > 0) ? count : 0;
+}
+
+void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, int count) {
+    if (!ctx) return;
+    ctx->wasm_imports = imports;
+    ctx->wasm_import_count = (count > 0) ? count : 0;
 }
 
 static void teko_metal_route_instruction(MetalContext* ctx, OpCode op, int32_t arg) {
@@ -92,7 +100,7 @@ static int count_routine_yields(const unsigned char* il, uint32_t start, uint32_
         if (op == OP_FUNC_END) break;
         if (op == OP_CHAN_GET) yields++;
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
-            op == OP_FUNC_BEGIN) p += 5;
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT) p += 5;
         else p += 1;
     }
     return yields;
@@ -149,7 +157,7 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
         }
 
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
-            op == OP_FUNC_BEGIN) scan += 5;
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT) scan += 5;
         else scan += 1;
     }
 
@@ -166,7 +174,7 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
         }
 
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
-            op == OP_FUNC_BEGIN) {
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT) {
             arg = read_le_int32(local_il, current_op_index + 1);
             i += 4;
         }
@@ -206,7 +214,7 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 }
             }
             else if (op == OP_STORE || op == OP_LOAD || op == OP_SPAWN_ASYNC ||
-                     op == OP_CHAN_INIT || op == OP_CHAN_GET) {
+                     op == OP_CHAN_INIT || op == OP_CHAN_GET || op == OP_CALL_IMPORT) {
                 last_arith_op = (OpCode)0;
             }
         }

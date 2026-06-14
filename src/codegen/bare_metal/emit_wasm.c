@@ -55,6 +55,19 @@ static void emit_wat_escaped(FILE* f, const char* s) {
     }
 }
 
+// Phase 11: declare the host import table — one `(import "ns" "name" (func …))`
+// per FFI entry, named $import_<idx> so OP_CALL_IMPORT can call it by name.
+static void emit_wasm_imports(MetalContext* ctx) {
+    FILE* f = ctx->file;
+    for (int i = 0; i < ctx->wasm_import_count; i++) {
+        const TekoWasmImport* im = &ctx->wasm_imports[i];
+        fprintf(f, "  (import \"%s\" \"%s\" (func $import_%d", im->ns, im->name, i);
+        for (int p = 0; p < im->n_params; p++) fprintf(f, " (param i32)");
+        if (im->has_result) fprintf(f, " (result i32)");
+        fprintf(f, "))\n");
+    }
+}
+
 static void emit_wasm_scheduler_runtime(FILE* f) {
     fprintf(f, "  (global $rq_head (mut i32) (i32.const 0))\n");
     fprintf(f, "  (global $rq_tail (mut i32) (i32.const 0))\n");
@@ -276,6 +289,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_PROLOG:
             fprintf(f, "(module\n");
             fprintf(f, "  ;; --- Target: WebAssembly Text Format (cooperative concurrency, Phase 10.3) ---\n");
+            emit_wasm_imports(ctx);            // Phase 11 FFI host imports — must precede definitions
             fprintf(f, "  (memory 1)\n");
             fprintf(f, "  (export \"memory\" (memory 0))\n");
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
@@ -401,6 +415,22 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 emit_wasm_chan_read(f);
             }
             break;
+
+        // ====================================================================
+        // 5b. FFI: call a host import (Phase 11)
+        // ====================================================================
+        case OP_CALL_IMPORT: {
+            // Call $import_<arg>. MVP accumulator ABI: the first i32 param (if any)
+            // comes from $w0; a result is stored back into $w0. (n_params>1 is not
+            // yet supplied by the toy IL — single-arg imports only for now.)
+            int np = (arg >= 0 && arg < ctx->wasm_import_count) ? ctx->wasm_imports[arg].n_params : 0;
+            int hr = (arg >= 0 && arg < ctx->wasm_import_count) ? ctx->wasm_imports[arg].has_result : 0;
+            fprintf(f, "    ;; [WASM FFI]: call import #%d\n", arg);
+            if (np >= 1) fprintf(f, "    local.get $w0\n");
+            fprintf(f, "    call $import_%d\n", arg);
+            if (hr) fprintf(f, "    local.set $w0\n");
+            break;
+        }
 
         // ====================================================================
         // 6. CONCURRENCY: real cooperative spawn + yield (no host runtime)
