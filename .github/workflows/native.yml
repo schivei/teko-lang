@@ -1,0 +1,98 @@
+name: Native (hosts build & test)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Native GitHub-hosted runners (free for public repos) ---
+          - os: ubuntu-latest
+            label: Linux x86_64 (Clang C23 / Ninja)
+            test_bin: ./build/teko_tests
+          - os: ubuntu-24.04-arm
+            label: Linux arm64 (Clang C23 / Ninja)
+            test_bin: ./build/teko_tests
+          # macOS is arm64-only here: GitHub is retiring the Intel (macos-13)
+          # standard runners, so no macOS x86_64 job.
+          - os: macos-latest
+            label: macOS arm64 / Apple Silicon (AppleClang)
+            test_bin: ./build/teko_tests
+          - os: windows-latest
+            label: Windows x86_64 (MSVC)
+            test_bin: .\build\Release\teko_tests.exe
+          - os: windows-11-arm
+            label: Windows arm64 (MSVC)
+            test_bin: .\build\Release\teko_tests.exe
+
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+
+      # --- Linux: Clang + Ninja (matches the original validated toolchain) ---
+      - name: Install Build Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # The hosted image ships third-party apt sources (microsoft/azure) that
+          # intermittently 403 and break `apt-get update`; we only need Ubuntu repos.
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential ninja-build clang
+
+      - name: Configure via CMake (Linux - Clang / Ninja, Release)
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
+
+      # --- macOS & Windows: default generator (Unix Makefiles / Visual Studio MSVC) ---
+      - name: Configure via CMake (macOS / Windows - default generator, Release)
+        if: runner.os != 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Run Automated Test Suite (Unity Framework Assertions)
+        run: ${{ matrix.test_bin }}
+
+  # ---------------------------------------------------------------------------
+  # riscv64 has NO native GitHub-hosted runner. We cross-compile a static riscv64
+  # binary and run the suite under QEMU user-mode emulation (Linux only). Emulation
+  # is slow and extra signal rather than a gate, so it is non-blocking for now.
+  # ---------------------------------------------------------------------------
+  riscv64-qemu:
+    name: Build & Test (Linux riscv64 — QEMU emulated, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: Install riscv64 cross toolchain + QEMU user-mode
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-riscv64-linux-gnu qemu-user-static
+
+      - name: Configure via CMake (cross riscv64, static, Release)
+        run: |
+          cmake -S . -B build -G "Ninja" \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
+            -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc \
+            -DCMAKE_C_FLAGS="-static" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (cross-compile riscv64)
+        run: cmake --build build --parallel 4
+
+      - name: Run test suite under QEMU (emulated riscv64, slow)
+        run: qemu-riscv64-static ./build/teko_tests

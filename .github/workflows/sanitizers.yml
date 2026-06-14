@@ -1,0 +1,82 @@
+name: Sanitizers & stress guards
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Release + AddressSanitizer + UndefinedBehaviorSanitizer on BOTH VM dispatch
+  # paths: the default computed-goto path and the portable `switch` fallback
+  # (-DTEKO_VM_PORTABLE_DISPATCH, the path MSVC uses). Catches heap overflow /
+  # use-after-free / UB on every commit.
+  asan-ubsan:
+    name: ASan + UBSan (both dispatch paths)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+      - name: Default dispatch (computed-goto) — ASan/UBSan
+        run: |
+          cmake -S . -B build-asan -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --target teko_tests --parallel 4
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./build-asan/teko_tests
+      - name: Portable switch dispatch — ASan/UBSan
+        run: |
+          cmake -S . -B build-asan-portable -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -DTEKO_VM_PORTABLE_DISPATCH"
+          cmake --build build-asan-portable --target teko_tests --parallel 4
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./build-asan-portable/teko_tests
+
+  # ThreadSanitizer regression guard. The intermittent Windows crash was an
+  # uninitialized-pointer free, invisible to ASan/UBSan/heap+stack poisoning but a
+  # DETERMINISTIC SEGV under TSan. Run the suite under TSan so this class of bug
+  # (and real data races) fails CI deterministically.
+  tsan:
+    name: ThreadSanitizer (Linux Clang) — uninit/race regression guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+      - name: Configure + build with ThreadSanitizer
+        run: |
+          cmake -S . -B build-tsan -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          cmake --build build-tsan --target teko_tests --parallel 4
+      - name: Run suite under TSan
+        run: TSAN_OPTIONS=halt_on_error=1 ./build-tsan/teko_tests
+
+  # Direct proof the intermittent Windows x86_64 crash is gone: run the bare
+  # Release suite 20x (the bug hit ~50% of single runs).
+  windows-stress:
+    name: Windows x86_64 stress — bare Release suite 20x
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+      - name: Configure + build (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release; cmake --build build --config Release --parallel 4
+      - name: Run the suite 20x (must be green every time)
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 20; $i++) {
+            Write-Host "===== run $i / 20 ====="
+            & .\build\Release\teko_tests.exe
+            if ($LASTEXITCODE -ne 0) { Write-Host "!!! run $i FAILED exit $LASTEXITCODE"; exit 1 }
+          }
+          Write-Host "20/20 clean"
