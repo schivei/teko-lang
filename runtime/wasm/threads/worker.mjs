@@ -19,7 +19,12 @@ try {
   instance.exports.teko_invoke(fn, arg);
   // The channel lives at byte `arg` (flag) / `arg`+4 (value) => i32 indices.
   const flagIdx = arg >> 2;
-  parentPort.postMessage({ log: `[producer] after invoke: flag i32[${flagIdx}]=${Atomics.load(i32, flagIdx)} value i32[${flagIdx + 1}]=${Atomics.load(i32, flagIdx + 1)}` });
+  // Backup wake from JS: Atomics.notify and the wasm memory.atomic.wait32 share
+  // the SAME futex on the SAB, so this wakes the waiter even if the wasm-side
+  // memory.atomic.notify does not cross instances on this runner. The count is
+  // the decisive diagnostic: >0 means a waiter was parked at this exact index.
+  const woke = Atomics.notify(i32, flagIdx, 1);
+  parentPort.postMessage({ log: `[producer] after invoke: flag i32[${flagIdx}]=${Atomics.load(i32, flagIdx)} value i32[${flagIdx + 1}]=${Atomics.load(i32, flagIdx + 1)} | JS Atomics.notify woke=${woke}` });
   parentPort.postMessage({ done: true });
 } catch (e) {
   parentPort.postMessage({ error: String((e && e.stack) || e) });
