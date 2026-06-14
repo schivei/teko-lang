@@ -51,6 +51,50 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
 }
 
 // ====================================================================
+// 1b. WASM STRING CONSTANT POOL → REAL (data ...) SEGMENT (Phase 11 / MVP-1)
+// ====================================================================
+// The IL string pool is threaded through MetalContext and laid out as a real
+// (data ...) segment; OP_SCONST resolves to the true byte offset (not a placeholder).
+void test_teko_aot_wasm_string_pool_data_segment(void) {
+    const char* asm_path = "output_wasm_strpool_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "hello", "world" };
+    teko_metal_set_strings(ctx, strings, 2);
+
+    // OP_SCONST 1 (-> &"world"), OP_HALT
+    unsigned char prog[] = { 0x02, 0x01, 0x00, 0x00, 0x00, 0x00 };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // The whole pool is emitted as one NUL-terminated (data ...) segment at base 1024.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(data (i32.const 1024) \"hello\\00world\\00\")"));
+    // OP_SCONST 1 resolves to the true offset of "world": 1024 + len("hello") + 1 = 1030.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.const 1030"));
+    // The legacy placeholder is gone once a real pool is provided.
+    TEST_ASSERT_NULL(strstr(buffer, "Hello Teko"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
 // 2. WASM ARENA ALLOCATOR + IN-MODULE CHANNELS + COOPERATIVE CONCURRENCY
 // ====================================================================
 // The O(1) arena is real linear-memory bump code. Phase 10.1: channels are real

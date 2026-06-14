@@ -18,7 +18,15 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     memset(ctx->wasm_routine_ids, 0, sizeof(ctx->wasm_routine_ids));
     ctx->wasm_routine_yields = 0;
     ctx->wasm_yield_idx = 0;
+    ctx->wasm_strings = NULL;
+    ctx->wasm_string_count = 0;
     return ctx;
+}
+
+void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count) {
+    if (!ctx) return;
+    ctx->wasm_strings = strings;
+    ctx->wasm_string_count = (count > 0) ? count : 0;
 }
 
 static void teko_metal_route_instruction(MetalContext* ctx, OpCode op, int32_t arg) {

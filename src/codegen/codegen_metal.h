@@ -24,7 +24,18 @@ typedef struct {
     int wasm_routine_ids[64];
     int wasm_routine_yields;
     int wasm_yield_idx;
+    // Phase 11 (Browser FFI): the IL string constant pool, threaded in so the WASM
+    // emitter can lay it out as a real (data ...) segment and resolve OP_SCONST to a
+    // true byte offset (instead of a placeholder). NULL/0 when unset — the emitter
+    // then falls back to its legacy hardcoded data. Unused by the native emitters.
+    const char** wasm_strings;
+    int wasm_string_count;
 } MetalContext;
+
+// Phase 11: hand the WASM emitter the IL string pool before teko_metal_emit_program
+// so it can emit the (data ...) segment and correct OP_SCONST offsets. `strings`
+// must outlive the emit call; pass count 0 (or do not call) to keep legacy behavior.
+void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count);
 
 // 1. APPLE ECOSYSTEM (Darwin Kernel)
 void emit_darwin_arm64(MetalContext* ctx, OpCode op, int32_t arg);

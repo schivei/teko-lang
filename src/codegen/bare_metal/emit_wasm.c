@@ -30,6 +30,30 @@
 // ===========================================================================
 
 #define TEKO_WASM_FRAME_BYTES 64
+// Linear-memory base for the string constant pool (the [1024..2048) .data region,
+// below the arena at 2048 and above the run queue at 64).
+#define TEKO_WASM_DATA_BASE 1024
+
+// Phase 11: byte offset of constant-pool string `idx` within the packed (data ...)
+// segment (each string is NUL-terminated, laid out in order from TEKO_WASM_DATA_BASE).
+static int teko_wasm_string_offset(const MetalContext* ctx, int idx) {
+    int off = TEKO_WASM_DATA_BASE;
+    for (int j = 0; j < idx && j < ctx->wasm_string_count; j++) {
+        off += (int)strlen(ctx->wasm_strings[j]) + 1; // +1 for the NUL
+    }
+    return off;
+}
+
+// Emit a C string as WAT data bytes (no surrounding quotes): printable ASCII
+// verbatim, `"`/`\` escaped, everything else as \HH.
+static void emit_wat_escaped(FILE* f, const char* s) {
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+        unsigned char c = *p;
+        if (c == '"' || c == '\\') fprintf(f, "\\%c", c);
+        else if (c >= 0x20 && c <= 0x7e) fputc((int)c, f);
+        else fprintf(f, "\\%02X", c);
+    }
+}
 
 static void emit_wasm_scheduler_runtime(FILE* f) {
     fprintf(f, "  (global $rq_head (mut i32) (i32.const 0))\n");
@@ -273,7 +297,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         case OP_SCONST:
-            fprintf(f, "    i32.const %d ;; Offset of Constant Pool in Linear Memory\n    local.set $w0\n", arg * 32);
+            // $w0 = byte offset of the constant-pool string in linear memory. With a
+            // real pool (Phase 11) this is the true packed offset; without one we keep
+            // the legacy placeholder so pool-less programs still emit.
+            if (arg >= 0 && arg < ctx->wasm_string_count) {
+                fprintf(f, "    i32.const %d ;; &pool[%d] (\"%.16s\")\n    local.set $w0\n",
+                        teko_wasm_string_offset(ctx, arg), arg, ctx->wasm_strings[arg]);
+            } else {
+                fprintf(f, "    i32.const %d ;; Offset of Constant Pool in Linear Memory\n    local.set $w0\n", arg * 32);
+            }
             break;
 
         case OP_STORE:
@@ -455,7 +487,19 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, ")\n");
             }
             fprintf(f, "  (export \"main\" (func $main))\n");
-            fprintf(f, "  (data (i32.const 1024) \"Hello Teko\\00\")\n");
+            // String constant pool → a real (data ...) segment: each pool string laid
+            // out NUL-terminated from TEKO_WASM_DATA_BASE (matches OP_SCONST offsets).
+            // Falls back to the legacy placeholder when no pool was provided.
+            if (ctx->wasm_string_count > 0 && ctx->wasm_strings) {
+                fprintf(f, "  (data (i32.const %d) \"", TEKO_WASM_DATA_BASE);
+                for (int k = 0; k < ctx->wasm_string_count; k++) {
+                    emit_wat_escaped(f, ctx->wasm_strings[k]);
+                    fprintf(f, "\\00");
+                }
+                fprintf(f, "\")\n");
+            } else {
+                fprintf(f, "  (data (i32.const 1024) \"Hello Teko\\00\")\n");
+            }
             fprintf(f, ")\n");
             break;
         }
