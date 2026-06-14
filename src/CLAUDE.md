@@ -29,8 +29,12 @@ type/semantic (`semantic_*`) → **IL bytecode** (`codegen_li.c/.h`, `BytecodeBu
   imports stage args via `OP_SETARG` and MVP-2 adds a `dom.*` namespace with an
   auto-generated `.glue.mjs` (`teko_metal_emit_dom_glue`, in `emit_wasm.c`). MVP-3 adds
   JS→Teko callbacks: a `dom.on` import + an exported `teko_invoke(fn,arg)` dispatcher that
-  `call_indirect`s a table slot. The parser→IL wiring for real `.tks` source is the
-  remaining Browser FFI work.
+  `call_indirect`s a table slot. MVP-4 adds a real freeing allocator
+  (`emit_wasm_heap_runtime`: free-list first-fit + coalescing `teko_alloc`/`teko_free`/
+  `teko_reset` over `[16384..65536)`), `teko_invoke2(fn,a0,a1)` for `(ptr,len)` payloads, an
+  auto-generated ergonomic facade (`teko_metal_emit_facade` → `<mod>.mjs`), and `dom.on_value`
+  rich event payloads. The parser→IL wiring for real `.tks` source is the remaining
+  (out-of-phase) Browser FFI work.
 - The IL CSE in `codegen_metal.c` must invalidate its ICONST reuse cache after any op that
   clobbers `$w0` (`SCONST`/`LOAD`/`CHAN_GET`/`CALL_IMPORT`); `STORE`/`SETARG` are cache-safe
   (they read `$w0` or write `$w1`). Eliminating a const across a `$w0`-clobber is a bug.

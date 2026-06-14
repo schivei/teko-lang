@@ -97,15 +97,31 @@ accordingly; Self-Containment is now Phase 20.
   - Executable proof: `emit-demo/emit_events.c` registers a click listener whose Teko
     handler sets the text; `run-events.mjs` (Playwright) clicks `#count` and asserts
     `"0" → "clicked!"`. Golden `test_teko_aot_wasm_event_callback_lowering`.
-- **MVP-4 — real allocator + ergonomic facades. 🚧 in progress (closes Phase 11).**
-  - A real linear-memory allocator exported as `teko_alloc(len)→ptr` / `teko_free(ptr)`
-    (distinct from the non-freeing bump arena) — unblocks materializing JS data in wasm.
-  - JS→Teko strings: `TextEncoder` → `teko_alloc` → copy bytes → pass `(ptr,len)`; proven
-    with a round-trip.
-  - Richer event payload (builds on MVP-3): a callback can receive target data
-    materialized via the allocator, not just the handle.
-  - Auto-generated ergonomic facade `<mod>.mjs` wrapping exports+glue so a dev calls
-    `mod.greet("world")` with the JS string marshalled automatically (alloc+write+call).
+- **MVP-4 — real allocator + ergonomic facades. ✅ delivered (closes Phase 11).**
+  - **Real allocator** (`emit_wasm_heap_runtime`): an implicit free-list over the heap
+    region `[16384..65536)` — 8-byte block headers `{size, free}`, `teko_alloc` first-fit
+    + split, `teko_free` mark + **forward-coalescing** sweep, `teko_reset` bulk reclaim.
+    Exported `teko_alloc`/`teko_free`/`teko_reset`; lazily initialized; OOM→0; one page.
+    *Strategy chosen: free-list first-fit + coalescing (real per-object free) plus a
+    `teko_reset` region path. Size-class segregation is a possible future optimization;
+    a growable/unified arena+heap and a `(memory)` grow path are deferred.*
+  - **JS→Teko strings:** glue/facade `TextEncoder` → `teko_alloc` → copy → `(ptr,len)`.
+    `teko_invoke2(fn, a0, a1)` delivers both to the callee (`$w0`,`$w1`).
+  - **Ergonomic facade** (`teko_metal_emit_facade` → `<mod>.mjs`): `async instantiate(bytes)`
+    wires glue+module and returns `mod.<name>(str)` that marshals the JS string and
+    dispatches the Teko routine. No dev boilerplate. Proof: `emit_alloc.c` +
+    `run-facade.mjs` — `mod.showMessage("hello from JS via alloc")` → `#out`.
+  - **Rich event payload** (`dom.on_value`): the listener marshals the event target's
+    `.value` via the allocator and calls back with `(ptr,len)`. Proof: `emit_richevent.c`
+    + `run-richevent.mjs` — typing into `#inp` mirrors into `#echo`.
+  - Allocator stress: `run-alloc.mjs` (range/overlap/reuse/coalesce/double-free/reset/OOM).
+    Goldens: `…heap_allocator_runtime`, `…facade_and_rich_event_lowering`. Suite 87/87;
+    ASan+UBSan (both paths) + TSan clean; Layer A fixtures 42/15/7/30/15 (500×).
+
+**Phase 11 is complete** — MVP-1a/1b/2/3/4 all ✅, CI-green on `feat/browser-ffi-interop`
+(PR #4). The Browser FFI backend is fully exercised via the emit-demos; the only remaining
+Browser-FFI-adjacent work (real `.tks` frontend lowering, below) is independent and
+explicitly out of this phase's scope.
 
 ### Deferred beyond Phase 11 (not required to close it)
 - **Frontend `.tks` lowering (gated).** Lower the parsed `extern` AST → import table + a

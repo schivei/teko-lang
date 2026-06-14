@@ -369,6 +369,74 @@ void test_teko_aot_wasm_heap_allocator_runtime(void) {
 }
 
 // ====================================================================
+// 1g. WASM ergonomic facade + on_value rich-event glue (Phase 11 / MVP-4)
+// ====================================================================
+// The auto-generated facade lets a dev call mod.greet("x") with the JS string
+// marshalled (alloc+write) and dispatched via teko_invoke2; dom.on_value marshals
+// an event target's value through the allocator. This golden pins both generators.
+void test_teko_aot_wasm_facade_and_rich_event_lowering(void) {
+    const char* asm_path    = "output_wasm_facade_test.wat";
+    const char* glue_path   = "output_wasm_facade_test.glue.mjs";
+    const char* facade_path = "output_wasm_facade_test.mjs";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "out" };
+    static const TekoWasmImport imports[] = {
+        { "dom", "setText",  3, 0 }, // #0
+        { "dom", "on_value", 4, 0 }, // #1 (rich event)
+    };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 2);
+
+    unsigned char prog[] = { 0x00 }; // OP_HALT (facade calls routines directly)
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+
+    int grc = teko_metal_emit_dom_glue(ctx, glue_path);
+    TekoWasmFacadeEntry facade[] = { { "greet", 0 } };
+    int frc = teko_metal_emit_facade(ctx, facade_path, "./output_wasm_facade_test.glue.mjs", facade, 1);
+    teko_metal_close(ctx);
+    TEST_ASSERT_EQUAL_INT(0, grc);
+    TEST_ASSERT_EQUAL_INT(0, frc);
+
+    // --- glue: allocator-backed marshalling + on_value rich event ---
+    FILE* gf = fopen(glue_path, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* glue = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(glue);
+    memset(glue, 0, 8192);
+    size_t gb = fread(glue, 1, 8191, gf); glue[gb] = '\0'; fclose(gf);
+    TEST_ASSERT_NOT_NULL(strstr(glue, "getInstance().exports.teko_alloc"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "const invoke2 = (fn, a, b) => getInstance().exports.teko_invoke2"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "on_value:"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "const a = allocStr(v); invoke2(fn, a[0], a[1])"));
+    free(glue);
+
+    // --- facade: instantiate + a string-marshalling method bound to teko_invoke2 ---
+    FILE* ff = fopen(facade_path, "r");
+    TEST_ASSERT_NOT_NULL(ff);
+    char* fac = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(fac);
+    memset(fac, 0, 8192);
+    size_t fb = fread(fac, 1, 8191, ff); fac[fb] = '\0'; fclose(ff);
+    TEST_ASSERT_NOT_NULL(strstr(fac, "import { makeTekoDomImports } from \"./output_wasm_facade_test.glue.mjs\""));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "export async function instantiate(wasmBytes)"));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "const p = instance.exports.teko_alloc(b.length)"));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "greet: (s) => { const a = allocStr(s); return instance.exports.teko_invoke2(0, a[0], a[1]); }"));
+    free(fac);
+
+    remove(asm_path);
+    remove(glue_path);
+    remove(facade_path);
+}
+
+// ====================================================================
 // 2. WASM ARENA ALLOCATOR + IN-MODULE CHANNELS + COOPERATIVE CONCURRENCY
 // ====================================================================
 // The O(1) arena is real linear-memory bump code. Phase 10.1: channels are real

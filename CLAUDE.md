@@ -92,12 +92,18 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
 - **Roadmap:** the "WASM Concurrency Backend" was reclassified from a tech-debt item to its own
   **Phase 10** (merged via PR #3). Browser FFI / JS-DOM interop is the **current phase**
   (Phase 11; `docs/PHASE_BROWSER_FFI.md`).
-- **FFI today is parsed but discarded** (`parser_visibility.c`): no IL lowering, no call opcode,
-  no real `.tks→.wat` driver (`main.c` uses mock bytecode). The interop phase builds that pipeline,
-  starting with the string pool `(data …)` + `extern → (import …)` + `OP_CALL_IMPORT`.
+- **Browser FFI backend is built; the `.tks` frontend is not.** The WASM backend now lowers the
+  full Browser FFI surface (imports, DOM, events, allocator, facade) and is exercised via the
+  `emit-demo/*.c` drivers. The real `.tks→.wat` driver (`main.c` uses mock bytecode) +
+  parser→IL lowering of `extern`/`@dom` (FFI is still parsed-but-discarded in
+  `parser_visibility.c`) is **out of Phase 11 scope** — a separate, later effort.
 
 ## Current state / next
-Phase 10 (WASM concurrency, Layers A & B) is **merged and CI-green**. Active work:
-**Browser FFI / JS-DOM interop** (branch `feat/browser-ffi-interop`), MVP-1 = string-pool data
-segment + `extern fn → (import …)` + `OP_CALL_IMPORT`, proven via an emit-demo. DOM/events MVPs
-are gated behind explicit approval.
+Phase 10 (WASM concurrency, Layers A & B) is **merged and CI-green**. **Phase 11 (Browser FFI /
+JS-DOM interop) is complete and CI-green** on branch `feat/browser-ffi-interop` (PR #4, awaiting
+human merge): MVP-1a string pool `(data …)`, MVP-1b `extern → (import …)` + `OP_CALL_IMPORT`,
+MVP-2 DOM (`dom.*` multi-arg imports + `OP_SETARG` + auto-generated `.glue.mjs`), MVP-3 JS→Teko
+events (`dom.on` + exported `teko_invoke`), MVP-4 real freeing allocator
+(`teko_alloc`/`teko_free`/`teko_reset`, free-list + coalescing) + `teko_invoke2` + JS→Teko
+strings + ergonomic facade (`<mod>.mjs`) + rich event payload (`dom.on_value`). All proven via
+emit-demos under Node + headless Chromium (Playwright). See `docs/PHASE_BROWSER_FFI.md`.

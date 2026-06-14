@@ -317,8 +317,9 @@ See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, and file pa
 **Incremental plan** — status (detail in [`docs/PHASE_BROWSER_FFI.md`](./PHASE_BROWSER_FFI.md)):
 **MVP-1a** ✅ string-pool `(data …)` + `OP_SCONST` offsets · **MVP-1b** ✅ `extern → (import)` +
 `OP_CALL_IMPORT` · **MVP-2** ✅ DOM (`dom.*` multi-arg imports + auto-generated glue) ·
-**MVP-3** ✅ JS→Teko events (`dom.on` + exported `teko_invoke`) · **MVP-4** 🚧 real allocator
-(`teko_alloc`/`teko_free`) + JS→Teko strings + ergonomic facade (closes the phase).
+**MVP-3** ✅ JS→Teko events (`dom.on` + exported `teko_invoke`) · **MVP-4** ✅ real allocator
+(`teko_alloc`/`teko_free`/`teko_reset` free-list + coalescing) + JS→Teko strings + ergonomic
+facade (`<mod>.mjs`) + rich event payload (`dom.on_value`). **Phase 11 complete, CI-green.**
 
 ---
 

@@ -66,6 +66,22 @@ void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, in
 // namespace are ignored. Call after teko_metal_set_imports.
 int teko_metal_emit_dom_glue(MetalContext* ctx, const char* path);
 
+// Phase 11 (Browser FFI MVP-4): one ergonomic facade method — `name` calls Teko
+// table slot `fn_index` via teko_invoke2 with a single JS string arg marshalled
+// automatically (alloc + write + call). (MVP supports the one-string-arg shape.)
+typedef struct {
+    const char* name;   // facade method name, e.g. "showMessage"
+    int fn_index;       // Teko callback routine's table slot
+} TekoWasmFacadeEntry;
+
+// Phase 11 (Browser FFI MVP-4): write an auto-generated ergonomic facade module to
+// `path`. It imports the glue module `glue_module` (a sibling path, e.g.
+// "./foo.glue.mjs"), exposes `async instantiate(wasmBytes)`, and returns an object
+// whose `entries[i].name(str)` marshals the JS string into wasm memory via the real
+// allocator and invokes the Teko routine — no dev boilerplate. Returns 0 on success.
+int teko_metal_emit_facade(MetalContext* ctx, const char* path, const char* glue_module,
+                           const TekoWasmFacadeEntry* entries, int count);
+
 // 1. APPLE ECOSYSTEM (Darwin Kernel)
 void emit_darwin_arm64(MetalContext* ctx, OpCode op, int32_t arg);
 void emit_darwin_x86_64(MetalContext* ctx, OpCode op, int32_t arg);

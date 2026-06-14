@@ -13,7 +13,9 @@ runners execute and assert. (Locally, `npm i wabt` gives a JS `wat2wasm` to vali
   `emit_multi.c` (→15), `emit_threads.c` (Layer B →99), `emit_ffi.c` (Browser FFI MVP-1:
   `(import "env" "log")` + `OP_CALL_IMPORT` + pooled string), `emit_dom.c` (MVP-2: multi-arg
   `dom.*` imports + `OP_SETARG` + auto-generated `.glue.mjs`), `emit_events.c` (MVP-3:
-  `dom.on` + exported `teko_invoke` callback dispatcher). Output `.wat`/`.glue.mjs` gitignored.
+  `dom.on` + exported `teko_invoke` callback dispatcher), `emit_alloc.c` (MVP-4: facade
+  `<mod>.mjs` + JS→Teko strings via `teko_alloc`), `emit_richevent.c` (MVP-4: `dom.on_value`
+  rich event payload). Output `.wat`/`.glue.mjs`/`.mjs` gitignored.
 - `samples/` — hand-written reference fixtures: `channels.wat` (42), `scheduler.wat` (15),
   `threads.wat` (Layer B reference, 777). `emitted*.wat`/`*.wasm` are generated/gitignored.
 - `run-node.mjs`, `run-browser.mjs` — Layer A under Node / headless Chromium.
@@ -28,6 +30,15 @@ runners execute and assert. (Locally, `npm i wabt` gives a JS `wat2wasm` to vali
   `#count` and the glue calls `exports.teko_invoke(fn, handle)`, dispatching the Teko
   callback that sets the text (`"0" → "clicked!"`). The glue is now
   `makeTekoDomImports(getMemory, getInstance)` — the 2nd thunk exposes `teko_invoke`.
+- `run-alloc.mjs` — MVP-4 allocator stress on `emitted.wasm`'s exported
+  `teko_alloc`/`teko_free`/`teko_reset` (range/overlap/reuse/coalesce/double-free/reset/OOM).
+- `run-facade.mjs` + `browser/facade.html` + `browser/facade-run.mjs` — MVP-4 facade +
+  JS→Teko string: the auto-generated `emitted_alloc.mjs` exposes `mod.showMessage(str)`,
+  which `teko_alloc`s the JS string, copies bytes, and dispatches the Teko routine → `#out`.
+- `run-richevent.mjs` + `browser/richevent.html` + `browser/richevent-run.mjs` — MVP-4 rich
+  event: `dom.on_value` marshals the input's value via the allocator → `teko_invoke2(fn,
+  ptr,len)` → Teko mirrors it to `#echo`. Exports: `teko_alloc/teko_free/teko_reset/
+  teko_invoke2` are emitted in every Layer A module.
 - `threads/` (`run-node-threads.mjs`, `runner.mjs`, `worker.mjs`) — Layer B via
   `worker_threads`. `browser/threads-*.mjs` + `run-threads-browser.mjs` — Layer B via Web Workers.
 - `server.mjs` — static server with COOP/COEP (required for SharedArrayBuffer / Layer B).
