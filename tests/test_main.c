@@ -1,5 +1,9 @@
 #include "unity.h"
 #include <stdio.h>
+#if defined(_MSC_VER)
+#include <stdlib.h>   // _set_error_mode, _OUT_TO_STDERR
+#include <crtdbg.h>   // _CrtSetReportMode / _CrtSetReportFile (/RTC1 + assert routing)
+#endif
 
 void setUp(void) {}
 // Flush after every test so that, if a later test crashes (e.g. a segfault on a
@@ -58,6 +62,10 @@ extern void test_teko_aot_linux_arm64_pure_emission(void);
 extern void test_teko_aot_linux_arm32_pure_emission(void);
 extern void test_teko_aot_wasm_pure_emission_integrity(void);
 extern void test_teko_aot_wasm_arena_and_concurrency_hooks(void);
+extern void test_teko_aot_wasm_multifunction_spawn_lowering(void);
+extern void test_teko_aot_wasm_midfunction_suspension(void);
+extern void test_teko_aot_wasm_threads_layer_b_emission(void);
+extern void test_teko_aot_wasm_multispawn_contention(void);
 extern void test_teko_aot_freebsd_x86_64_pure_emission(void);
 extern void test_teko_aot_freebsd_arm64_pure_emission(void);
 extern void test_teko_aot_windows_x86_32_pure_emission(void);
@@ -92,6 +100,18 @@ int main(void) {
     // exactly how far the suite got (Windows pipes are otherwise fully buffered).
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+#if defined(_MSC_VER)
+    // CI diagnostics: route the MSVC CRT error/assert and runtime-check (/RTC1)
+    // reports to stderr instead of a GUI message box, so a /RTC "used without
+    // being initialized" failure prints its file:line and aborts non-interactively
+    // on a headless runner (otherwise it would hang waiting on a dialog).
+    _set_error_mode(_OUT_TO_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
 
     UNITY_BEGIN();
 
@@ -145,6 +165,10 @@ int main(void) {
     RUN_TEST(test_teko_aot_linux_arm32_pure_emission);
     RUN_TEST(test_teko_aot_wasm_pure_emission_integrity);
     RUN_TEST(test_teko_aot_wasm_arena_and_concurrency_hooks);
+    RUN_TEST(test_teko_aot_wasm_multifunction_spawn_lowering);
+    RUN_TEST(test_teko_aot_wasm_midfunction_suspension);
+    RUN_TEST(test_teko_aot_wasm_threads_layer_b_emission);
+    RUN_TEST(test_teko_aot_wasm_multispawn_contention);
     RUN_TEST(test_teko_aot_freebsd_x86_64_pure_emission);
     RUN_TEST(test_teko_aot_freebsd_arm64_pure_emission);
     RUN_TEST(test_teko_aot_windows_x86_32_pure_emission);

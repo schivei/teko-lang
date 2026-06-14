@@ -13,6 +13,11 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->file = f;
     ctx->target = target;
     ctx->label_count = 0;
+    ctx->wasm_open = 0;
+    ctx->wasm_routine_count = 0;
+    memset(ctx->wasm_routine_ids, 0, sizeof(ctx->wasm_routine_ids));
+    ctx->wasm_routine_yields = 0;
+    ctx->wasm_yield_idx = 0;
     return ctx;
 }
 
@@ -67,6 +72,24 @@ static int32_t read_le_int32(const unsigned char* bytecode, uint32_t index) {
            (bytecode[index + 3] << 24);
 }
 
+// Count the suspension points (blocking OP_CHAN_GET) in the routine body that
+// begins just after an OP_FUNC_BEGIN at `start`, up to its OP_FUNC_END. The WASM
+// emitter needs this count up front to size the state-machine block nest and the
+// br_table that dispatches a resumed green thread to the right yield point (10.3).
+static int count_routine_yields(const unsigned char* il, uint32_t start, uint32_t size) {
+    int yields = 0;
+    uint32_t p = start;
+    while (p < size) {
+        OpCode op = (OpCode)il[p];
+        if (op == OP_FUNC_END) break;
+        if (op == OP_CHAN_GET) yields++;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN) p += 5;
+        else p += 1;
+    }
+    return yields;
+}
+
 static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* bytecode, uint32_t size) {
     uint32_t i = 0;
     bool dead_code_zone = false;
@@ -117,7 +140,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
             }
         }
 
-        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE) scan += 5;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN) scan += 5;
         else scan += 1;
     }
 
@@ -133,15 +157,26 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
             continue;
         }
 
-        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE) {
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN) {
             arg = read_le_int32(local_il, current_op_index + 1);
             i += 4;
         }
 
-        if ((int)op >= 100) {
+        // Function boundaries start a fresh emission context, exactly like a
+        // label target: a routine body after $main's HALT must not inherit
+        // $main's dead-code zone, and CSE/const accumulators reset per function.
+        if ((int)op >= 100 || op == OP_FUNC_BEGIN || op == OP_FUNC_END) {
             dead_code_zone = false;
             accum_has_value = false;
             last_arith_op = (OpCode)0;
+        }
+
+        // Hand the emitter the yield count for the routine it is about to open,
+        // so it can size the state-machine dispatch (10.3 mid-function suspension).
+        if (op == OP_FUNC_BEGIN) {
+            ctx->wasm_routine_yields = count_routine_yields(local_il, i, size);
+            ctx->wasm_yield_idx = 0;
         }
 
         if (!dead_code_zone) {
@@ -162,7 +197,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                     accum_has_value = false;
                 }
             }
-            else if (op == OP_STORE || op == OP_LOAD || op == OP_SPAWN_ASYNC || op == OP_CHAN_INIT) {
+            else if (op == OP_STORE || op == OP_LOAD || op == OP_SPAWN_ASYNC ||
+                     op == OP_CHAN_INIT || op == OP_CHAN_GET) {
                 last_arith_op = (OpCode)0;
             }
         }
