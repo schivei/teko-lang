@@ -142,6 +142,94 @@ void test_teko_aot_wasm_ffi_import_lowering(void) {
 }
 
 // ====================================================================
+// 1d. WASM DOM FFI: multi-param dom.* imports + OP_SETARG + glue (Phase 11 / MVP-2)
+// ====================================================================
+// A multi-argument host import (e.g. dom.setText(handle, ptr, len)) is fed by
+// OP_SETARG staging slots ($a0..) plus the accumulator ($w0) for the last arg.
+// The run-dom Playwright step proves it drives the real DOM via auto-generated
+// glue; this golden pins the emission shape (imports + staging + call sites + the
+// generated glue methods).
+void test_teko_aot_wasm_dom_import_lowering(void) {
+    const char* asm_path  = "output_wasm_dom_test.wat";
+    const char* glue_path = "output_wasm_dom_test.glue.mjs";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "span" };
+    static const TekoWasmImport imports[] = {
+        { "dom", "createElement", 2, 1 }, // (ptr,len) -> handle : #0
+        { "dom", "setText",       3, 0 }, // (handle,ptr,len)    : #1
+    };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 2);
+
+    // SCONST 0 -> SETARG 0 -> ICONST 4 -> CALL_IMPORT 0 (createElement) -> HALT
+    unsigned char prog[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0
+        0x0A, 0x00, 0x00, 0x00, 0x00, // OP_SETARG 0
+        0x01, 0x04, 0x00, 0x00, 0x00, // OP_ICONST 4
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0
+        0x00                          // OP_HALT
+    };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+
+    int glue_rc = teko_metal_emit_dom_glue(ctx, glue_path);
+    teko_metal_close(ctx);
+    TEST_ASSERT_EQUAL_INT(0, glue_rc);
+
+    // --- assert the emitted WAT ---
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // Multi-param imports carry one (param i32) per arg, result only when declared.
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(import \"dom\" \"createElement\" (func $import_0 (param i32) (param i32) (result i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(import \"dom\" \"setText\" (func $import_1 (param i32) (param i32) (param i32)))"));
+    // $main gains the import-arg staging locals.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(local $a0 i32) (local $a1 i32) (local $a2 i32)"));
+    // OP_SETARG stages the accumulator into $a0; the 2-param call pushes $a0 then $w0.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "local.set $a0"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "local.get $a0\n    local.get $w0\n    call $import_0"));
+    free(buffer);
+
+    // --- assert the auto-generated glue ---
+    FILE* gf = fopen(glue_path, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* glue = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(glue);
+    memset(glue, 0, 8192);
+    size_t gbytes = fread(glue, 1, 8191, gf);
+    glue[gbytes] = '\0';
+    fclose(gf);
+
+    TEST_ASSERT_NOT_NULL(strstr(glue, "export function makeTekoDomImports(getMemory)"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "new Uint8Array(getMemory().buffer, p >>> 0, n >>> 0)"));
+    // Only the two declared imports get glue methods (createElement + setText);
+    // unused vocabulary (appendChild/getElementById) is not emitted.
+    TEST_ASSERT_NOT_NULL(strstr(glue, "createElement:"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "setText:"));
+    TEST_ASSERT_NULL(strstr(glue, "appendChild:"));
+    TEST_ASSERT_NULL(strstr(glue, "getElementById:"));
+    free(glue);
+
+    remove(asm_path);
+    remove(glue_path);
+}
+
+// ====================================================================
 // 2. WASM ARENA ALLOCATOR + IN-MODULE CHANNELS + COOPERATIVE CONCURRENCY
 // ====================================================================
 // The O(1) arena is real linear-memory bump code. Phase 10.1: channels are real

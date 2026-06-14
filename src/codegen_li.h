@@ -24,6 +24,13 @@ typedef enum {
     // module's import table); the WASM emitter lowers it to `call $import_<idx>`.
     OP_CALL_IMPORT = 0x09,
 
+    // Phase 11 (Browser FFI MVP-2): stage an argument for a multi-param host
+    // import. Carries a 4-byte little-endian arg-slot index; the WASM emitter
+    // copies the accumulator ($w0) into staging local $a<slot>. OP_CALL_IMPORT
+    // then pushes $a0..$a(n-2) followed by $w0 (the last arg stays in the
+    // accumulator), so an N-param import needs N-1 preceding OP_SETARGs.
+    OP_SETARG = 0x0A,
+
     // Concurrency and Channels
     OP_SPAWN_ASYNC = 0x10,
     OP_AWAIT_INTENT = 0x11,

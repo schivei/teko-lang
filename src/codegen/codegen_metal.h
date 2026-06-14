@@ -7,8 +7,9 @@
 #include "../codegen_li.h"
 
 // Phase 11 (Browser FFI): a host import (from `extern fn … from "ns" as "name"`).
-// MVP-1 lowers the first parameter from $w0; n_params>1 is not yet supplied by the
-// toy IL (noted in the emitter). has_result stores the call result back into $w0.
+// Params 0..n_params-2 are staged via OP_SETARG into $a0..$a(n-2); the last param
+// comes from the accumulator $w0 (MVP-2). has_result stores the call result back
+// into $w0. The `ns` doubles as the glue group ("dom" imports get DOM marshalling).
 typedef struct {
     const char* ns;     // import module/namespace, e.g. "env"
     const char* name;   // imported field name, e.g. "log"
@@ -56,6 +57,14 @@ void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count);
 // so it can declare `(import …)` and lower OP_CALL_IMPORT. `imports` must outlive the
 // emit call.
 void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, int count);
+
+// Phase 11 (Browser FFI MVP-2): write an auto-generated JS glue module to `path`
+// that implements the `dom.*` host imports currently set on `ctx` (via
+// teko_metal_set_imports) — (ptr,len) string marshalling over the module's linear
+// memory plus an i32->Element handle table. No dev boilerplate. Returns 0 on
+// success, non-zero if the file cannot be opened. Imports outside the "dom"
+// namespace are ignored. Call after teko_metal_set_imports.
+int teko_metal_emit_dom_glue(MetalContext* ctx, const char* path);
 
 // 1. APPLE ECOSYSTEM (Darwin Kernel)
 void emit_darwin_arm64(MetalContext* ctx, OpCode op, int32_t arg);

@@ -54,20 +54,35 @@ accordingly; Self-Containment is now Phase 20.
 
 ## Incremental plan
 
-- **MVP-1 — foundation (this PR).** ← *in progress*
-  - String pool → real `(data …)` segment; `OP_SCONST` → correct offset (thread the
-    pool through `MetalContext`).
-  - `OP_CALL_IMPORT` + an import table in `MetalContext`; emit `(import "ns" "name"
-    (func …))` in the prologue and `call $import_N` at the call site.
-  - Executable proof: an `emit-demo` builds IL that imports a host `log` and calls it;
-    Node/wasmtime capture the call. Golden tests pin the `(import …)` and `(data …)`.
-  - Native emitters (the 16) must not regress; the new opcode is below the native label
+- **MVP-1 — foundation. ✅ delivered.**
+  - String pool → real `(data …)` segment; `OP_SCONST` → correct offset (the pool is
+    threaded through `MetalContext`). *(commit `6fed9c6`)*
+  - `OP_CALL_IMPORT` (`0x09`) + an import table in `MetalContext`; emit `(import "ns"
+    "name" (func …))` in the prologue (before any definition) and `call $import_N` at the
+    call site. *(commit `54a3a37`)*
+  - Executable proof: `emit-demo/emit_ffi.c` imports a host `env.log` and calls it;
+    `run-ffi.mjs` reads the pooled string back from memory (CI: "hello from teko").
+    Goldens pin the `(import …)` and `(data …)`.
+  - Native emitters (the 16) did not regress; the new opcode is below the native label
     threshold and ignored by them.
+- **MVP-2 — DOM. ✅ delivered.**
+  - Multi-param imports: `OP_SETARG` (`0x0A`) stages args into `$a0..$a2`; `OP_CALL_IMPORT`
+    pushes `$a0..$a(n-2)` then `$w0` (last arg = accumulator). Single-arg (MVP-1) unchanged.
+  - `dom` import namespace + an **auto-generated** `<mod>.glue.mjs`
+    (`teko_metal_emit_dom_glue`): `(ptr,len)` string marshalling via `TextDecoder` over
+    linear memory + an `i32 → Element` handle table. **No dev boilerplate.**
+  - **Minimal, honest DOM vocabulary** (everything MVP-2 covers — nothing more):
+    `createElement(tag) → handle`, `getElementById(id) → handle`, `setText(handle, text)`,
+    `appendChild(parent, child)`. The glue only emits methods the module actually imports.
+  - Direction: **Teko → JS only** (strings read out of memory). Writing JS strings *back*
+    into memory needs a real allocator — deliberately deferred (see MVP-4 / Decisions).
+  - Executable proof: `emit-demo/emit_dom.c` builds a `<span>"hello from teko"` and appends
+    it to `#out`; `run-dom.mjs` (Playwright, COOP/COEP) asserts `#out > span` textContent.
+    Golden `test_teko_aot_wasm_dom_import_lowering` pins the imports, the `$a*` staging, the
+    call shape, and the generated glue.
 - **MVP-1b — frontend lowering (gated).** Lower the parsed `extern` AST → import table
   + a call-expression IL path so a real `.tks` (once a source driver exists) emits the
   import automatically. Needs the call-expression IL path, which does not exist yet.
-- **MVP-2 — DOM (gated).** `dom` import namespace + JS handle table + auto-generated
-  glue; a Playwright test that creates/updates a DOM element from Teko.
 - **MVP-3 — events/callbacks (gated).** JS→Teko via the function table (listeners).
 - **MVP-4 — ergonomic facades (gated).** Generated JS facade + Teko-side `string`
   ergonomics; a real allocator (the bump arena does not free).
