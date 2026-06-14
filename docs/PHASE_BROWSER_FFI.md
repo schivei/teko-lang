@@ -54,12 +54,13 @@ accordingly; Self-Containment is now Phase 20.
 
 ## Incremental plan
 
-- **MVP-1 — foundation. ✅ delivered.**
+- **MVP-1a — string pool. ✅ delivered.** *(commit `6fed9c6`)*
   - String pool → real `(data …)` segment; `OP_SCONST` → correct offset (the pool is
-    threaded through `MetalContext`). *(commit `6fed9c6`)*
+    threaded through `MetalContext`). JS reads `(ptr,len)` via `TextDecoder`.
+- **MVP-1b — host imports. ✅ delivered.** *(commit `54a3a37`)*
   - `OP_CALL_IMPORT` (`0x09`) + an import table in `MetalContext`; emit `(import "ns"
     "name" (func …))` in the prologue (before any definition) and `call $import_N` at the
-    call site. *(commit `54a3a37`)*
+    call site.
   - Executable proof: `emit-demo/emit_ffi.c` imports a host `env.log` and calls it;
     `run-ffi.mjs` reads the pooled string back from memory (CI: "hello from teko").
     Goldens pin the `(import …)` and `(data …)`.
@@ -96,11 +97,22 @@ accordingly; Self-Containment is now Phase 20.
   - Executable proof: `emit-demo/emit_events.c` registers a click listener whose Teko
     handler sets the text; `run-events.mjs` (Playwright) clicks `#count` and asserts
     `"0" → "clicked!"`. Golden `test_teko_aot_wasm_event_callback_lowering`.
-- **MVP-1b — frontend lowering (gated).** Lower the parsed `extern` AST → import table
-  + a call-expression IL path so a real `.tks` (once a source driver exists) emits the
-  import automatically. Needs the call-expression IL path, which does not exist yet.
-- **MVP-4 — ergonomic facades (gated).** Generated JS facade + Teko-side `string`
-  ergonomics; a real allocator (the bump arena does not free).
+- **MVP-4 — real allocator + ergonomic facades. 🚧 in progress (closes Phase 11).**
+  - A real linear-memory allocator exported as `teko_alloc(len)→ptr` / `teko_free(ptr)`
+    (distinct from the non-freeing bump arena) — unblocks materializing JS data in wasm.
+  - JS→Teko strings: `TextEncoder` → `teko_alloc` → copy bytes → pass `(ptr,len)`; proven
+    with a round-trip.
+  - Richer event payload (builds on MVP-3): a callback can receive target data
+    materialized via the allocator, not just the handle.
+  - Auto-generated ergonomic facade `<mod>.mjs` wrapping exports+glue so a dev calls
+    `mod.greet("world")` with the JS string marshalled automatically (alloc+write+call).
 
-Discipline: 1 increment per commit; Release + ASan/UBSan on both dispatch paths; native
-emitter goldens unchanged; the 4 CI workflows green; patient watcher; no merge/force-push.
+### Deferred beyond Phase 11 (not required to close it)
+- **Frontend `.tks` lowering (gated).** Lower the parsed `extern` AST → import table + a
+  call-expression IL path so a real `.tks` (once a source driver exists) emits the import
+  automatically. Needs the call-expression IL path, which does not exist yet. (Independent
+  of the Browser FFI backend, which is fully exercised via the emit-demos.)
+
+Discipline: 1 increment per commit; Release + ASan/UBSan on both dispatch paths (TSan for
+the allocator); native emitter goldens unchanged; the 4 CI workflows green; patient
+watcher; no merge/force-push.

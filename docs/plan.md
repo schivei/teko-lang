@@ -314,7 +314,11 @@ See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, and file pa
 
 *New dedicated phase. When targeting browser WASM, give Teko an ergonomic two-way bridge to JS/DOM. `extern fn … from "ns" as "name"` lowers to a WASM `(import "ns" "name" (func …))` via a new `OP_CALL_IMPORT`; the string constant pool is emitted as a real `(data …)` segment (today `OP_SCONST` is a placeholder); DOM/JS access goes through auto-generated host glue — string marshalling (`(ptr,len)` over linear memory), DOM-node handles (a JS handle table), and events (a Teko function-table index registered as a listener). FFI is currently **parsed but discarded** (`parser_visibility.c`); this phase builds the lowering pipeline.*
 
-**Incremental plan** (MVP-1 = string-pool data segment + `extern → (import)` + `OP_CALL_IMPORT`, foundation first; DOM/events/facade MVPs gated): see [`docs/PHASE_BROWSER_FFI.md`](./PHASE_BROWSER_FFI.md).
+**Incremental plan** — status (detail in [`docs/PHASE_BROWSER_FFI.md`](./PHASE_BROWSER_FFI.md)):
+**MVP-1a** ✅ string-pool `(data …)` + `OP_SCONST` offsets · **MVP-1b** ✅ `extern → (import)` +
+`OP_CALL_IMPORT` · **MVP-2** ✅ DOM (`dom.*` multi-arg imports + auto-generated glue) ·
+**MVP-3** ✅ JS→Teko events (`dom.on` + exported `teko_invoke`) · **MVP-4** 🚧 real allocator
+(`teko_alloc`/`teko_free`) + JS→Teko strings + ergonomic facade (closes the phase).
 
 ---
 
