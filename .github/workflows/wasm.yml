@@ -6,12 +6,30 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# See native.yml for the path-filter + always-running `gate` rationale (required
+# checks must never be skipped at the workflow level, or the PR blocks forever).
 jobs:
-  # Build the compiler, emit REAL spawn/suspend/multi modules from the Teko
-  # backend (emit-demo) + the hand-written references, and run them under a
-  # standalone engine and a headless browser for behavioral parity.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.f.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            run:
+              - 'src/**'
+              - 'CMakeLists.txt'
+              - 'runtime/wasm/**'
+              - '.github/workflows/wasm.yml'
+
   wasm-wasmtime:
     name: WASM exec — emitter + references under Node + wasmtime
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -54,6 +72,8 @@ jobs:
 
   wasm-browser:
     name: WASM exec — headless Chromium, COOP/COEP
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -94,3 +114,17 @@ jobs:
       - name: Run headless-browser harness (parity + crossOriginIsolated check)
         working-directory: runtime/wasm
         run: node run-browser.mjs
+
+  gate:
+    name: gate
+    needs: [ wasm-wasmtime, wasm-browser ]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate result
+        run: |
+          echo "results: ${{ join(needs.*.result, ',') }}"
+          if echo "${{ join(needs.*.result, ',') }}" | grep -qE 'failure|cancelled'; then
+            echo "A required job failed."; exit 1
+          fi
+          echo "gate OK"
