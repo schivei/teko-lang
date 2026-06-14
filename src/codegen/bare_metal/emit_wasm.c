@@ -33,6 +33,12 @@
 // Linear-memory base for the string constant pool (the [1024..2048) .data region,
 // below the arena at 2048 and above the run queue at 64).
 #define TEKO_WASM_DATA_BASE 1024
+// Phase 11 MVP-4: the real freeing allocator's heap region. Fixed partition above
+// the cooperative bump arena (which starts at 2048 and grows up) so the two never
+// alias for the FFI demos. The page is 64 KiB ((memory 1)); the heap is the top
+// [16384..65536). A growable/unified arena+heap is future work (documented).
+#define TEKO_WASM_HEAP_BASE 16384
+#define TEKO_WASM_HEAP_END  65536
 
 // Phase 11: byte offset of constant-pool string `idx` within the packed (data ...)
 // segment (each string is NUL-terminated, laid out in order from TEKO_WASM_DATA_BASE).
@@ -168,6 +174,87 @@ static void emit_wasm_scheduler_runtime(FILE* f) {
     fprintf(f, "    global.get $arena_sp\n");                                             // frame ptr
     fprintf(f, "    local.get $fn\n");
     fprintf(f, "    call_indirect (type $task))\n");
+
+    // Phase 11 (Browser FFI MVP-4): two-argument JS->Teko entry. Marshalled data
+    // (e.g. a string materialized via teko_alloc) reaches the callee as
+    // $w0=a0, $w1=a1 (frame[0]=a0, frame[4]=a1 — the routine reloads both). Used by
+    // the ergonomic facade (mod.greet(str) -> teko_invoke2(fn, ptr, len)) and rich
+    // event payloads. Returns the routine's result.
+    fprintf(f, "  (func $teko_invoke2 (export \"teko_invoke2\") (param $fn i32) (param $a0 i32) (param $a1 i32) (result i32)\n");
+    fprintf(f, "    global.get $arena_sp\n    local.get $a0\n    i32.store offset=0\n");   // frame[0] = a0
+    fprintf(f, "    global.get $arena_sp\n    local.get $a1\n    i32.store offset=4\n");   // frame[4] = a1
+    fprintf(f, "    local.get $a0\n");                                                     // routine $arg (-> $cp)
+    fprintf(f, "    i32.const 0\n");                                                       // state = 0
+    fprintf(f, "    global.get $arena_sp\n");                                              // frame ptr
+    fprintf(f, "    local.get $fn\n");
+    fprintf(f, "    call_indirect (type $task))\n");
+}
+
+// Phase 11 MVP-4: a real freeing allocator in linear memory — distinct from the
+// non-freeing cooperative bump arena. An implicit free-list over the heap region
+// [HEAP_BASE..HEAP_END): each block is an 8-byte header { [0]=payload size,
+// [4]=free flag } followed by its payload. teko_alloc is first-fit with splitting;
+// teko_free marks the block and runs a forward-coalescing pass (merging adjacent
+// free blocks) so repeated alloc/free does not fragment the heap into dust.
+// teko_reset bulk-reclaims the whole region. Lazily initialized as one big free
+// block on first use. Exported for the host (JS materializes data here) and usable
+// from Teko. Bounds: stays within the single (memory 1) page; OOM returns 0.
+static void emit_wasm_heap_runtime(FILE* f) {
+    fprintf(f, "  (global $heap_inited (mut i32) (i32.const 0))\n");
+
+    // Lazy init: one free block spanning the whole heap region.
+    fprintf(f, "  (func $teko_heap_init\n");
+    fprintf(f, "    (if (i32.eqz (global.get $heap_inited)) (then\n");
+    fprintf(f, "      (i32.store offset=0 (i32.const %d) (i32.const %d))\n",
+            TEKO_WASM_HEAP_BASE, TEKO_WASM_HEAP_END - TEKO_WASM_HEAP_BASE - 8); // size
+    fprintf(f, "      (i32.store offset=4 (i32.const %d) (i32.const 1))\n", TEKO_WASM_HEAP_BASE); // free
+    fprintf(f, "      (global.set $heap_inited (i32.const 1)))))\n");
+
+    // teko_alloc(n): first-fit; align n up to 8; split the block if the remainder
+    // can hold a header + a minimal (8-byte) payload. Returns the payload ptr, or 0.
+    fprintf(f, "  (func $teko_alloc (export \"teko_alloc\") (param $n i32) (result i32)\n");
+    fprintf(f, "    (local $cur i32) (local $sz i32) (local $nb i32)\n");
+    fprintf(f, "    call $teko_heap_init\n");
+    fprintf(f, "    (local.set $n (i32.and (i32.add (local.get $n) (i32.const 7)) (i32.const -8)))\n");
+    fprintf(f, "    (local.set $cur (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
+    fprintf(f, "    (block $done (loop $L\n");
+    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (local.set $sz (i32.load offset=0 (local.get $cur)))\n");
+    fprintf(f, "      (if (i32.and (i32.load offset=4 (local.get $cur)) (i32.ge_u (local.get $sz) (local.get $n))) (then\n");
+    fprintf(f, "        (if (i32.ge_u (local.get $sz) (i32.add (local.get $n) (i32.const 16))) (then\n");
+    fprintf(f, "          (local.set $nb (i32.add (i32.add (local.get $cur) (i32.const 8)) (local.get $n)))\n");
+    fprintf(f, "          (i32.store offset=0 (local.get $nb) (i32.sub (i32.sub (local.get $sz) (local.get $n)) (i32.const 8)))\n");
+    fprintf(f, "          (i32.store offset=4 (local.get $nb) (i32.const 1))\n");
+    fprintf(f, "          (i32.store offset=0 (local.get $cur) (local.get $n))))\n");
+    fprintf(f, "        (i32.store offset=4 (local.get $cur) (i32.const 0))\n");
+    fprintf(f, "        (return (i32.add (local.get $cur) (i32.const 8)))))\n");
+    fprintf(f, "      (local.set $cur (i32.add (i32.add (local.get $cur) (i32.const 8)) (local.get $sz)))\n");
+    fprintf(f, "      (br $L)))\n");
+    fprintf(f, "    (i32.const 0))\n"); // OOM
+
+    // teko_free(ptr): mark free, then a single forward-coalescing sweep from base.
+    fprintf(f, "  (func $teko_free (export \"teko_free\") (param $ptr i32)\n");
+    fprintf(f, "    (local $cur i32) (local $sz i32) (local $nxt i32)\n");
+    fprintf(f, "    (if (i32.eqz (local.get $ptr)) (then (return)))\n");
+    fprintf(f, "    (i32.store offset=4 (i32.sub (local.get $ptr) (i32.const 8)) (i32.const 1))\n");
+    fprintf(f, "    (local.set $cur (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
+    fprintf(f, "    (block $done (loop $L\n");
+    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (local.set $sz (i32.load offset=0 (local.get $cur)))\n");
+    fprintf(f, "      (local.set $nxt (i32.add (i32.add (local.get $cur) (i32.const 8)) (local.get $sz)))\n");
+    // Guard the load of the next header behind the bounds check (i32.and is eager).
+    fprintf(f, "      (if (i32.and (i32.load offset=4 (local.get $cur)) (i32.lt_u (local.get $nxt) (i32.const %d))) (then\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "        (if (i32.load offset=4 (local.get $nxt)) (then\n");
+    fprintf(f, "          (i32.store offset=0 (local.get $cur)\n");
+    fprintf(f, "            (i32.add (i32.add (local.get $sz) (i32.const 8)) (i32.load offset=0 (local.get $nxt))))\n");
+    fprintf(f, "          (br $L)))))\n");                                  // merged: retry at same $cur
+    fprintf(f, "      (local.set $cur (local.get $nxt))\n");
+    fprintf(f, "      (br $L))))\n");
+
+    // teko_reset(): bulk-reclaim the whole heap (region reset, the cheap path).
+    fprintf(f, "  (func $teko_reset (export \"teko_reset\")\n");
+    fprintf(f, "    (global.set $heap_inited (i32.const 0))\n");
+    fprintf(f, "    (call $teko_heap_init))\n");
 }
 
 // The non-suspending half of a channel receive: read buf[head] -> $w0, advance
@@ -363,6 +450,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (export \"memory\" (memory 0))\n");
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             emit_wasm_scheduler_runtime(f);
+            emit_wasm_heap_runtime(f);         // Phase 11 MVP-4: real freeing allocator
             fprintf(f, "  (func $main (result i32)\n");
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).

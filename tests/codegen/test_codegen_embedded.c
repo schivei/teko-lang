@@ -31,11 +31,13 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
     FILE* file = fopen(asm_path, "r");
     TEST_ASSERT_NOT_NULL(file);
 
-    char* buffer = (char*)malloc(4096);
+    // The module now carries the cooperative + heap-allocator runtimes, so the WAT
+    // text exceeds 4 KiB; read enough to reach the trailing (data ...) segment.
+    char* buffer = (char*)malloc(16384);
     TEST_ASSERT_NOT_NULL(buffer);
-    memset(buffer, 0, 4096);
+    memset(buffer, 0, 16384);
 
-    size_t bytes = fread(buffer, 1, 4095, file);
+    size_t bytes = fread(buffer, 1, 16383, file);
     buffer[bytes] = '\0';
     fclose(file);
 
@@ -320,6 +322,50 @@ void test_teko_aot_wasm_event_callback_lowering(void) {
 
     remove(asm_path);
     remove(glue_path);
+}
+
+// ====================================================================
+// 1f. WASM real allocator + teko_invoke2 (Phase 11 / MVP-4)
+// ====================================================================
+// Every Layer A module now carries a real freeing allocator (teko_alloc/teko_free
+// + teko_reset coalescing free-list) and a 2-arg JS->Teko dispatcher (teko_invoke2),
+// all exported. The run-alloc stress test proves behavior; this golden pins that the
+// runtime + exports are emitted (and that the heap region is initialized).
+void test_teko_aot_wasm_heap_allocator_runtime(void) {
+    const char* asm_path = "output_wasm_heap_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    // A trivial program is enough — the allocator runtime is part of the prologue.
+    unsigned char prog[] = { 0x01, 0x07, 0x00, 0x00, 0x00, 0x00 }; // ICONST 7, HALT
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(global $heap_inited (mut i32) (i32.const 0))"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_alloc (export \"teko_alloc\") (param $n i32) (result i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_free (export \"teko_free\") (param $ptr i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_reset (export \"teko_reset\")"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_invoke2 (export \"teko_invoke2\")"));
+    // The heap is initialized to one block spanning [16384..65536) (size 49144).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(i32.store offset=0 (i32.const 16384) (i32.const 49144))"));
+
+    free(buffer);
+    remove(asm_path);
 }
 
 // ====================================================================
