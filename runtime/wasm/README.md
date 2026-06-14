@@ -67,11 +67,13 @@ node server.mjs                   # manual: serve at http://localhost:8092 (COOP
 ## Layer B (wasm-threads) — real multicore
 
 `threads/run-node-threads.mjs` runs the shared-memory + atomics modules on real
-`node:worker_threads` OS threads: main() blocks on `memory.atomic.wait32` while a
-spawned Worker re-instantiates the module against the same shared memory and
-publishes via `teko_invoke` + atomic store/notify (`threads.wasm → 777`,
-`emitted_threads.wasm → 99`). `browser/threads-*` + `run-threads-browser.mjs` do
-the same across Web Workers under COOP/COEP (`crossOriginIsolated`).
+`node:worker_threads` OS threads: a spawned Worker re-instantiates the module
+against the same shared memory and publishes via `teko_invoke` + atomic store,
+while the consumer busy-polls the flag with `i32.atomic.load` (`threads.wasm → 777`,
+`emitted_threads.wasm → 99`). The receive is **notify-free**: `memory.atomic.wait32`/
+`notify` never makes progress across instances on the GitHub runner, but plain
+shared atomics do. `browser/threads-*` + `run-threads-browser.mjs` do the same
+across Web Workers under COOP/COEP (`crossOriginIsolated`).
 
 ```sh
 node threads/run-node-threads.mjs   # real worker_threads hand-off
@@ -80,10 +82,10 @@ node run-threads-browser.mjs        # headless Chromium Web Workers (needs npm i
 
 ## CI
 
-Gating jobs in `.github/workflows/ci.yml`: `wasm-wasmtime` (Node + wasmtime),
-`wasm-browser` (headless Chromium, COOP/COEP), and `wasm-threads-node` (Layer B,
-real `worker_threads`). They build the compiler, emit the backend's real modules,
-assemble with `wat2wasm`, and assert `channels=42`, `scheduler=15`, `emitted=7`,
-`emitted_suspend=30`, and Layer B `threads=777` / `emitted_threads=99`. The
-`wasm-threads-browser` job (Web Workers in Chromium) is non-blocking until it
-proves stable.
+All gating in `.github/workflows/ci.yml`: `wasm-wasmtime` (Node + wasmtime),
+`wasm-browser` (headless Chromium, COOP/COEP), `wasm-threads-node` (Layer B, real
+`worker_threads`), and `wasm-threads-browser` (Layer B, real Web Workers). They
+build the compiler, emit the backend's real modules, assemble with `wat2wasm`, and
+assert `channels=42`, `scheduler=15`, `emitted=7`, `emitted_suspend=30`, and Layer
+B `threads=777` / `emitted_threads=99`. Every wasm/browser job carries a
+`timeout-minutes` backstop so a hang fails fast.

@@ -1,12 +1,17 @@
 // Phase 10.4 Layer B harness (node worker_threads): genuine multicore. main()
-// runs inside a runner Worker (blocking on memory.atomic.wait32 is only safe off
-// the main thread, and keeps the main thread free to bootstrap workers). The
-// runner's SPAWN is brokered here on the main thread, which starts a REAL producer
-// Worker that re-instantiates the same module against the shared memory and
-// publishes the value through the atomic channel.
+// runs inside a runner Worker (it busy-polls the channel flag; doing that on the
+// main thread would peg it and starve worker bootstrap). The runner's SPAWN is
+// brokered here on the main thread, which starts a REAL producer Worker that
+// re-instantiates the same module against the shared memory and publishes the
+// value through the atomic channel.
 //
-// Hardened so it can never hang: a hard watchdog tears down every worker and fails
-// with a clear message; runner/producer errors are surfaced rather than waited on.
+// Layer B deliberately does NOT use memory.atomic.wait32/notify: that primitive
+// was observed to never make progress across instances on the GitHub runner. The
+// receive busy-polls with i32.atomic.load instead — shared-memory visibility is
+// guaranteed, so no wakeup mechanism is needed for correctness.
+//
+// Hardened so it can never hang: a watchdog tears down every worker and fails with
+// a clear message; runner/producer errors are surfaced rather than waited on.
 //
 // Modules:
 //   samples/threads.wasm          -> 777 (hand-written Layer B reference)
@@ -15,7 +20,7 @@ import { Worker } from "node:worker_threads";
 import { readFile } from "node:fs/promises";
 
 const here = (p) => new URL(p, import.meta.url);
-const WATCHDOG_MS = Number(process.env.TEKO_THREADS_TIMEOUT_MS ?? 60000);
+const WATCHDOG_MS = Number(process.env.TEKO_THREADS_TIMEOUT_MS ?? 30000);
 
 async function runModule(wasmRel) {
   const bytes = await readFile(here(wasmRel));
@@ -26,26 +31,18 @@ async function runModule(wasmRel) {
     const fail = (err) => { clearTimeout(timer); cleanup(); reject(err instanceof Error ? err : new Error(String(err))); };
     const timer = setTimeout(() => fail(new Error(`watchdog: no progress within ${WATCHDOG_MS}ms`)), WATCHDOG_MS);
     const pending = [];
-    // Diagnostic third party: watch the shared memory's channel cell over time.
-    // Channel base is 2048 (arena start) => flag at i32[512].
-    const observer = new Worker(here("./observer.mjs"), { workerData: { memory, flagIdx: 2048 >> 2 } });
-    workers.push(observer);
-    observer.on("message", (m) => { if (m && m.log) console.log(m.log); });
     const runner = new Worker(here("./runner.mjs"), { workerData: { memory, bytes } });
     workers.push(runner);
     runner.on("error", fail);
     runner.on("message", (m) => {
-      if (m && m.log) {
-        console.log(m.log);
-      } else if (m && m.spawn) {
+      if (m && m.spawn) {
         const [fn, arg] = m.spawn;
         const prod = new Worker(here("./worker.mjs"), { workerData: { memory, bytes, fn, arg } });
         workers.push(prod);
         prod.on("error", fail);
         pending.push(new Promise((res) => prod.on("message", (pm) => {
-          if (pm && pm.log) { console.log(pm.log); return; }
           if (pm && pm.error) fail(new Error(`producer: ${pm.error}`));
-          if (pm && pm.done) res();
+          res();
         })));
       } else if (m && m.error) {
         fail(new Error(`runner: ${m.error}`));

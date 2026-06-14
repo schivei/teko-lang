@@ -131,8 +131,14 @@ The arena (`$arena_sp`) is reused for all of these allocations.
   threads here — opt-in parallelism layered on A, not a replacement (Layer A stays the default).
   - *Executable proof:* `emit-demo/emit_threads.c` emits the shared-memory module; CI runs it
     on a real worker_threads thread (`main() == 99`) alongside the hand-written reference
-    `samples/threads.wat` (`== 777`). `wasm-threads-node` is **gating**; `wasm-threads-browser`
-    (Web Workers, COOP/COEP, `crossOriginIsolated`) is non-blocking until it proves stable.
+    `samples/threads.wat` (`== 777`). Both `wasm-threads-node` and `wasm-threads-browser`
+    (Web Workers, COOP/COEP, `crossOriginIsolated`) are **gating**.
+  - *Channel receive is notify-free:* the consumer **busy-polls the flag with `i32.atomic.load`**
+    rather than `memory.atomic.wait32`/`notify`. On the GitHub-hosted node-20 `worker_threads`
+    runner the wait/notify primitive never makes progress across instances (the waiter is never
+    woken — diagnosed with a cross-worker sentinel: the shared memory and the producer's store
+    are both visible, only the wakeup is lost), whereas plain shared-memory atomic loads are
+    reliable. Busy-poll is correctness-first for the MVP; a production scheduler would back off.
   - *Layer A untouched:* Layer B is a self-contained second emitter path selected by the target
     string; the default cooperative emitter and all its goldens are unchanged.
 
