@@ -174,3 +174,20 @@ constant-time, all KAT-verified). Suite 127/127.
   known-answer vectors.
 
 The RSA bignum layer remains a later documented decision (before 13.3b RSA).
+
+## Progress — 13.4 (Memory-hard KDF)
+- **scrypt** — `teko_crypto_scrypt.c` (Salsa20/8 + BlockMix + ROMix on PBKDF2), RFC 7914
+  §12 KATs. ✅
+- **BLAKE2b** — `teko_crypto_blake2b.c` (RFC 7693), the hash Argon2 mandates; standalone
+  KATs (empty/"abc"/keyed/256-bit/streaming). ✅
+- **Argon2d / Argon2i / Argon2id** — `teko_crypto_argon2.c` (RFC 9106, v0x13): H0, the
+  variable-length H', the compression G (P over rows then columns, modified GB with the
+  low-half multiply), data-independent address blocks (i/id) and data-dependent indexing
+  (d/id), segment fill, final XOR + tag. RFC 9106 §5 KATs for all three variants. ✅
+
+**13.4 status: complete.** Suite 133/133.
+
+## Next: 13.3b — Asymmetric
+X25519 + Ed25519 (Curve25519, fixed-field — most viable native) first, then ECDSA/ECDH
+P-256/P-384, then **RSA last** (needs the multi-precision bignum layer — a documented
+decision at that point: Montgomery multiplication, modexp, constant-time posture).

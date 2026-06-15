@@ -143,6 +143,9 @@ extern void test_teko_crypto_aes_gcm_case4(void);
 extern void test_teko_crypto_scrypt_rfc7914_vectors(void);
 extern void test_teko_crypto_blake2b_known_answer_vectors(void);
 extern void test_teko_crypto_blake2b_streaming_matches_oneshot(void);
+extern void test_teko_crypto_argon2_rfc9106_vectors(void);
+extern void test_teko_crypto_argon2i_rfc9106_vector(void);
+extern void test_teko_crypto_argon2id_rfc9106_vector(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -296,6 +299,9 @@ int main(void) {
     RUN_TEST(test_teko_crypto_scrypt_rfc7914_vectors);
     RUN_TEST(test_teko_crypto_blake2b_known_answer_vectors);
     RUN_TEST(test_teko_crypto_blake2b_streaming_matches_oneshot);
+    RUN_TEST(test_teko_crypto_argon2_rfc9106_vectors);
+    RUN_TEST(test_teko_crypto_argon2i_rfc9106_vector);
+    RUN_TEST(test_teko_crypto_argon2id_rfc9106_vector);
 
     return UNITY_END();
 }
