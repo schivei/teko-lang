@@ -325,6 +325,9 @@ static int codec_id_for(const char* lex) {
     // runtime which returns a pointer to the lowercase hex digest. (hash.sha512 = id 5,
     // wired in the next increment alongside its i64 WAT runtime.)
     if (strcmp(lex, "hash.sha256") == 0) return 4;
+    // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
+    if (strcmp(lex, "hash.md5") == 0) return 6;
+    if (strcmp(lex, "hash.sha1") == 0) return 7;
     return -1;
 }
 

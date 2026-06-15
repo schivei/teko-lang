@@ -383,6 +383,13 @@ KAT tests — never a dead token.
 - **13.1 — Hashes & MAC.** SHA-256, SHA-512, SHA-3 (Keccak/SHAKE), BLAKE3, and HMAC over
   them. *Foundational* — KDFs, signatures, and AEAD all depend on these. Pure,
   deterministic, KAT-friendly → **most viable native; built first.**
+- **13.legacy — Legacy hashes (owner add-on).** **MD5** (RFC 1321) + **SHA-1** (FIPS 180),
+  native C + KATs, exposed on the `hash` surface (`hash.md5`/`hash.sha1`) with `.tks` proof.
+  ⚠️ **LEGACY / INSECURE — interop/compat only, never for security** (both are collision-broken).
+- **13.uuid — UUID/GUID (owner add-on).** Native primitive (token + grammar + functional):
+  **v4** (CSPRNG), **v7** (time-ordered), **v5** (SHA-1), **v3** (MD5), **nil** + canonical
+  parse/format. KAT the deterministic forms (RFC 4122/9562); structure/version/variant +
+  uniqueness for the random ones. (Sequenced after MD5/SHA-1, which v3/v5 depend on.)
 - **13.2 — Symmetric / AEAD.** AES-128/192/256 in **CBC / CTR / GCM**, and
   **ChaCha20-Poly1305** (RFC 8439). ChaCha20-Poly1305 is the easiest (no hardware dep,
   portable). AES is viable in software (constant-time/bitsliced); GCM needs GF(2^128)

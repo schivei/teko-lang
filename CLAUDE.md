@@ -106,6 +106,12 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   WAT per primitive — that would be a second implementation of each algorithm); only
   `hash.sha256` has a WASM lowering so far (in-module, FIPS-validated). `hash.sha512`/`sha3`/
   `blake3` + `random`/HKDF/PBKDF2 stay reserved-with-target on the WASM surface until then.
+- **Legacy hashes MD5 + SHA-1 are LEGACY/INSECURE (decision).** Provided as native C
+  runtimes (`teko_crypto_md5.c`/`teko_crypto_sha1.c`) + KATs and on the `hash` surface
+  (`hash.md5`/`hash.sha1`, in-module WASM, `.tks`-proven) **only** for backward-compat/interop
+  (UUID v3/v5, legacy checksums/protocols) — **never** for security (both are collision-broken).
+  Documented in the headers + design doc. Security uses → SHA-256/SHA-3/BLAKE3. UUID/GUID
+  (nil/v3/v4/v5/v7 + parse/format) is a native Phase 13 primitive built on these + the CSPRNG.
 - **Serialization = static per-type generators, no runtime reflection (decision).** (De)serialization
   is generated at compile time as a specialized, monomorphized (de)serializer **per concrete type**,
   emitted directly — Go-style generated marshalers, never a runtime reflective walker — consistent with

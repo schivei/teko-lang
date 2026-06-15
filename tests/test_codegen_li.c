@@ -502,6 +502,51 @@ void test_frontend_interop_hash_sha256(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 13 (legacy): hash.md5 / hash.sha1 lower to OP_CALL_RUNTIME ids 6 / 7 and the bridge
+// emits the in-module MD5 + SHA-1 WAT runtimes.
+void test_frontend_interop_hash_legacy(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(hash.md5(\"abc\"));\n"
+        "emit(hash.sha1(\"abc\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_hash);
+
+    int saw_md5 = 0, saw_sha1 = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            int id = (int)buffer->code[i + 1];
+            if (id == 6) saw_md5 = 1;
+            if (id == 7) saw_sha1 = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(saw_md5);
+    TEST_ASSERT_TRUE(saw_sha1);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_hash_legacy.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(131072);
+    memset(out, 0, 131072);
+    size_t n = fread(out, 1, 131071, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_md5_hex (export \"teko_md5_hex\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_sha1_hex (export \"teko_sha1_hex\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_md5_hex"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sha1_hex"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 11 (Browser FFI frontend FE-A): import table dedup + interop emit helpers.
 // Models the IL a parser would emit for `log("hi")` where
 // `extern fn log(msg) from "env" as "log"`: SCONST &"hi" -> CALL_IMPORT #0 -> HALT.

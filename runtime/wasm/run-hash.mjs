@@ -26,9 +26,11 @@ const expected = [
   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", // SHA-256("abc")
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256("")
   "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592", // SHA-256("The quick brown fox jumps over the lazy dog")
+  "900150983cd24fb0d6963f7d28e17f72",                                 // MD5("abc") (legacy)
+  "a9993e364706816aba3e25717850c26c9cd0d89d",                         // SHA-1("abc") (legacy)
 ];
 if (JSON.stringify(got) === JSON.stringify(expected)) {
-  console.log(`OK   sha256: ${got.length} FIPS 180-4 vectors matched (native in-module, no host crypto)`);
+  console.log(`OK   hash: ${got.length} vectors matched — SHA-256 (FIPS) + legacy MD5/SHA-1 (native in-module, no host crypto)`);
   process.exit(0);
 } else {
   console.error(`FAIL sha256: got ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`);

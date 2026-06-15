@@ -27,6 +27,19 @@ incrementally with its own unit KATs (mul/inverse/modexp round-trips) **before**
 curves, so subtle bugs are localized early. Anchor every step on authoritative vectors:
 NIST CAVP (ECDSA/ECDH P-256/P-384) and the RSA test vectors (FIPS 186 / RFC 8017 / Wycheproof).
 
+## Legacy hashes & UUID (owner-requested add-ons — part of Phase 13)
+- **Legacy hashes — MD5 (RFC 1321) + SHA-1 (FIPS 180).** Native C runtimes + KATs, and
+  **exposed on the `hash` surface** (`hash.md5(...)`, `hash.sha1(...)`) with in-module WASM
+  lowering and **executable `.tks` proof** (`run-hash.mjs`). ⚠️ **LEGACY / INSECURE** — MD5
+  and SHA-1 are cryptographically broken (collisions); they are provided **only** for
+  backward-compat/interop (e.g. UUID v3/v5, legacy checksums/protocols), **never** for
+  security (signatures, password hashing, integrity vs. an adversary). The headers and the
+  CLAUDE.md Decisions log say so explicitly. Security uses → SHA-256/SHA-3/BLAKE3.
+- **UUID/GUID (planned in this phase).** Native primitive — token + grammar + functional
+  `.tks` surface: **v4** (CSPRNG), **v7** (time-ordered), **v5** (SHA-1), **v3** (MD5),
+  **nil**, plus canonical parse/format (8-4-4-4-12, validation). KATs for the deterministic
+  forms (RFC 4122/9562) and structure/version/variant + uniqueness for the random ones.
+
 ## Surface (Teko keywords — reserved in Phase 12, lowered here)
 `crypto`, `hash`, `encrypt`/`decrypt`, `sign`/`verify`, plus `encode`/`decode` interop with
 the Phase 12 base codecs (`base64`/`base32`/`hex`). Each primitive lands with **grammar +
