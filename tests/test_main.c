@@ -125,6 +125,10 @@ extern void test_teko_delayed_releases_in_time_order(void);
 extern void test_teko_delayed_same_time_is_fifo(void);
 extern void test_teko_delayed_capacity_and_close(void);
 extern void test_teko_delayed_badarg(void);
+extern void test_teko_broadcast_fanout_all_see_all(void);
+extern void test_teko_broadcast_subscribe_is_future_only(void);
+extern void test_teko_broadcast_lag_and_close(void);
+extern void test_teko_broadcast_badarg(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 extern void test_teko_crypto_md5_rfc1321_vectors(void);
 extern void test_teko_crypto_md5_streaming_matches_oneshot(void);
@@ -326,6 +330,10 @@ int main(void) {
     RUN_TEST(test_teko_delayed_same_time_is_fifo);
     RUN_TEST(test_teko_delayed_capacity_and_close);
     RUN_TEST(test_teko_delayed_badarg);
+    RUN_TEST(test_teko_broadcast_fanout_all_see_all);
+    RUN_TEST(test_teko_broadcast_subscribe_is_future_only);
+    RUN_TEST(test_teko_broadcast_lag_and_close);
+    RUN_TEST(test_teko_broadcast_badarg);
     RUN_TEST(test_teko_runtime_arena_thread_isolation_and_alignment);
 
     RUN_TEST(test_teko_crypto_md5_rfc1321_vectors);
