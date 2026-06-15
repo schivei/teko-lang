@@ -9,7 +9,7 @@ what's done, the **exact reusable pattern** for the channel sub-blocks, and the 
 - **14.A `routines`** — DONE, CI-green.
 - **14.B `duplex chan`** — DONE, CI-green.
 - **14.C `delayed chan`** — DONE, CI-green.
-- **14.D `broadcast chan`** — TODO. Owner decision: build on `pub`/`subscribe` (no `broadcast` keyword).
+- **14.D `broadcast chan`** — DONE, CI-green (built as `broadcast.*` dotted-ident, reusing the pattern).
 - **14.E `shared` block + `atomic`** — TODO. Owner decision: coarse whole-block lock. *Largest/most
   novel; do its own scoped sub-plan; a genuine scope-fork would be reported, not decided solo.*
 - **14.F `circuit` + `retry`** — TODO (exp/log backoff, attempts/timeout, fallback).

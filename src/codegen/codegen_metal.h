@@ -81,6 +81,9 @@ typedef struct {
     // Phase 14 (14.C): 1 when the program uses a delayed-channel op (OP_DELAYED_*). Same
     // reactor-import + shared-memory wiring as wasm_emit_duplex.
     int wasm_emit_delayed;
+    // Phase 14 (14.D): 1 when the program uses a broadcast op (OP_BCAST_*). Same reactor-import
+    // + shared-memory wiring as wasm_emit_duplex/delayed.
+    int wasm_emit_bcast;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -112,6 +115,7 @@ void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_spawn(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_delayed(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_bcast(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

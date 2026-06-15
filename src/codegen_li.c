@@ -29,6 +29,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_spawn = 0;
     buffer->uses_duplex = 0;
     buffer->uses_delayed = 0;
+    buffer->uses_bcast = 0;
 
     return buffer;
 }
@@ -197,6 +198,12 @@ void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op) {
 void codegen_li_emit_delayed(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_delayed = 1; // backends link/import the delayed-channel C runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_bcast(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_bcast = 1; // backends link/import the broadcast C runtime
     emit_byte(buffer, (unsigned char)op);
 }
 

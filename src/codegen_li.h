@@ -89,6 +89,14 @@ typedef enum {
     OP_DELAYED_POLL    = 0x4B, // poll(handle) -> status (non-consuming)
     OP_DELAYED_CLOSE   = 0x4C, // close(handle) -> 0
 
+    // Phase 14 (14.D): broadcast (non-destructive 1:N pub-sub) channel ops.
+    OP_BCAST_OPEN      = 0x4D, // open(capacity) -> handle
+    OP_BCAST_SUBSCRIBE = 0x4E, // subscribe(handle) -> subscriber id
+    OP_BCAST_PUBLISH   = 0x4F, // publish(handle, value) -> status
+    OP_BCAST_RECV      = 0x50, // recv(handle, sub_id) -> value
+    OP_BCAST_POLL      = 0x51, // poll(handle, sub_id) -> status (non-consuming)
+    OP_BCAST_CLOSE     = 0x52, // close(handle) -> 0
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -158,6 +166,9 @@ typedef struct {
     // Phase 14 (14.C): 1 if the program uses a `delayed.*` timed-channel op (OP_DELAYED_*).
     // Same backend wiring as uses_duplex (native teko_rt link / WASM reactor import).
     int uses_delayed;
+    // Phase 14 (14.D): 1 if the program uses a `broadcast.*` pub-sub op (OP_BCAST_*). Same
+    // backend wiring as uses_duplex/uses_delayed.
+    int uses_bcast;
     // Phase 14 (14.A): 1 if the program fires background tasks via a `routines { … }`
     // block (lowered to OP_SPAWN_ASYNC). The backends then ensure the cooperative
     // scheduler is drained before the program exits: WASM emits `call $teko_sched_run`
@@ -199,6 +210,8 @@ void codegen_li_emit_spawn_async(BytecodeBuffer* buffer);
 void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op);
 // Phase 14 (14.C): emit a delayed-channel op (one of OP_DELAYED_*); sets buffer->uses_delayed.
 void codegen_li_emit_delayed(BytecodeBuffer* buffer, OpCode op);
+// Phase 14 (14.D): emit a broadcast op (one of OP_BCAST_*); sets buffer->uses_bcast.
+void codegen_li_emit_bcast(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

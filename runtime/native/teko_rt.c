@@ -19,6 +19,7 @@
 #include "teko_uuid.h"
 #include "teko_duplex.h"
 #include "teko_delayed.h"
+#include "teko_broadcast.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +97,29 @@ long teko_rt_delayed_poll(long handle) {
 }
 long teko_rt_delayed_close(long handle) {
     teko_delayed_close((TekoDelayed*)(intptr_t)handle);
+    return 0;
+}
+
+// Phase 14 (14.D) — broadcast (1:N pub-sub) channel surface wrappers (OP_BCAST_* lower to these).
+long teko_rt_bcast_open(long capacity) {
+    return (long)(intptr_t)teko_broadcast_open((uint32_t)capacity);
+}
+long teko_rt_bcast_subscribe(long handle) {
+    return (long)teko_broadcast_subscribe((TekoBroadcast*)(intptr_t)handle);
+}
+long teko_rt_bcast_publish(long handle, long value) {
+    return (long)teko_broadcast_publish((TekoBroadcast*)(intptr_t)handle, (int32_t)value);
+}
+long teko_rt_bcast_recv(long handle, long sub_id) {
+    int32_t v = 0;
+    (void)teko_broadcast_recv((TekoBroadcast*)(intptr_t)handle, (int)sub_id, &v);
+    return (long)v; // value (0 when empty/closed/lagged — callers probe via broadcast.poll)
+}
+long teko_rt_bcast_poll(long handle, long sub_id) {
+    return (long)teko_broadcast_poll((TekoBroadcast*)(intptr_t)handle, (int)sub_id);
+}
+long teko_rt_bcast_close(long handle) {
+    teko_broadcast_close((TekoBroadcast*)(intptr_t)handle);
     return 0;
 }
 

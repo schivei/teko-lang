@@ -93,6 +93,15 @@ check delayed.tks "$(cat <<'EXP'
 30
 EXP
 )"
+# Phase 14 (14.D): broadcast (non-destructive 1:N pub-sub) — one publisher, two subscribers;
+# each value is written once but BOTH subscribers read it independently (10,20 / 10,20).
+check broadcast.tks "$(cat <<'EXP'
+10
+20
+10
+20
+EXP
+)"
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 

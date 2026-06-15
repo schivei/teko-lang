@@ -138,4 +138,12 @@ long teko_rt_delayed_recv(long handle);
 long teko_rt_delayed_poll(long handle);
 long teko_rt_delayed_close(long handle);
 
+// Phase 14 (14.D) — broadcast (1:N pub-sub) channel surface wrappers (OP_BCAST_* lower to these).
+long teko_rt_bcast_open(long capacity);
+long teko_rt_bcast_subscribe(long handle);
+long teko_rt_bcast_publish(long handle, long value);
+long teko_rt_bcast_recv(long handle, long sub_id);
+long teko_rt_bcast_poll(long handle, long sub_id);
+long teko_rt_bcast_close(long handle);
+
 #endif // TEKO_RT_H

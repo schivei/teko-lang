@@ -212,4 +212,9 @@ logical clock (`delayed.advance` ticks it), released in delivery-time order — 
 `src/runtime/teko_delayed.c` (4 KATs) → dedicated `OP_DELAYED_*` (`delayed.*`) → native
 `teko_rt_delayed_*` + WASM reactor. Proofs `runtime/native/samples/delayed.tks` +
 `runtime/wasm/run-delayed.mjs`. Suite 179/179.
-Remaining 14.D–14.F: `broadcast` chan (`pub`/`subscribe`), `shared`+`atomic`, `circuit`+`retry`.
+Sub-block **14.D `broadcast chan` is DONE** on both targets: non-destructive 1:N pub-sub (ring +
+per-subscriber cursors; publish-once/read-by-all) — C runtime `src/runtime/teko_broadcast.c`
+(4 KATs) → dedicated `OP_BCAST_*` (`broadcast.*` dotted-ident) → native `teko_rt_bcast_*` + WASM
+reactor. Proofs `runtime/native/samples/broadcast.tks` + `runtime/wasm/run-broadcast.mjs`. Suite 184/184.
+Remaining 14.E–14.F: `shared`+`atomic` (coarse whole-block lock), `circuit`+`retry`. Continuation
+guide: `docs/HANDOFF_PHASE14.md`.

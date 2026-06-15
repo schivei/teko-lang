@@ -1155,10 +1155,20 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_poll\" (func $delayed_poll (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_close\" (func $delayed_close (param i32) (result i32)))\n");
             }
-            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed) is in play
-            // it is host-owned and SHARED (imported from env), so both modules address the same
-            // bytes. Re-export it either way so harnesses can read results via exports.memory.
-            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed) {
+            // Phase 14 (14.D): broadcast (1:N pub-sub) entry points, also from the reactor.
+            if (ctx->wasm_emit_bcast) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_open\" (func $bcast_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_subscribe\" (func $bcast_subscribe (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_publish\" (func $bcast_publish (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_recv\" (func $bcast_recv (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_poll\" (func $bcast_poll (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_close\" (func $bcast_close (param i32) (result i32)))\n");
+            }
+            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast)
+            // is in play it is host-owned and SHARED (imported from env), so both modules address
+            // the same bytes. Re-export it either way so harnesses can read results.
+            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
+                ctx->wasm_emit_bcast) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1288,6 +1298,24 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                              (op == OP_DELAYED_POLL)    ? "delayed_poll" : "delayed_close";
             int ar = (op == OP_DELAYED_SEND) ? 3 :
                      (op == OP_DELAYED_ADVANCE) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 14 (14.D): broadcast pub-sub ops — imported reactor calls, same ABI.
+        case OP_BCAST_OPEN:
+        case OP_BCAST_SUBSCRIBE:
+        case OP_BCAST_PUBLISH:
+        case OP_BCAST_RECV:
+        case OP_BCAST_POLL:
+        case OP_BCAST_CLOSE: {
+            const char* fn = (op == OP_BCAST_OPEN)      ? "bcast_open" :
+                             (op == OP_BCAST_SUBSCRIBE) ? "bcast_subscribe" :
+                             (op == OP_BCAST_PUBLISH)   ? "bcast_publish" :
+                             (op == OP_BCAST_RECV)      ? "bcast_recv" :
+                             (op == OP_BCAST_POLL)      ? "bcast_poll" : "bcast_close";
+            int ar = (op == OP_BCAST_PUBLISH || op == OP_BCAST_RECV || op == OP_BCAST_POLL) ? 2 : 1;
             for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
             fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;

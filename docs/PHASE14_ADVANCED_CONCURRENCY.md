@@ -184,7 +184,17 @@ merge/force-push** (the human merges).
   `OP_DELAYED_OPEN/SEND/ADVANCE/RECV/POLL/CLOSE` (`delayed.*` dotted-identifier). Native →
   `teko_rt_delayed_*`; WASM → reactor imports (same C runtime). Proofs
   `runtime/native/samples/delayed.tks` (1/10/20/30) + `runtime/wasm/run-delayed.mjs`. CI-wired.
-- **14.D–14.F** — not started (`broadcast` chan via `pub`/`subscribe`, `shared`+`atomic`,
-  `circuit`+`retry`).
+- **14.D — `broadcast chan` (non-destructive 1:N pub-sub)** — ✅ done on both targets. Runtime
+  `src/runtime/teko_broadcast.{h,c}` (4 Unity KATs): a bounded overwriting ring keyed by a
+  monotonic write sequence + one read cursor per subscriber; `publish` writes once, each
+  subscriber reads independently (all N see every value), future-only subscription, structured
+  LAGGED/EMPTY/CLOSED. Surface uses `broadcast.*` dotted-identifiers (owner decision was
+  pub/subscribe; `broadcast` is not a keyword so it folds like `duplex.`/`delayed.` and reuses
+  the pattern verbatim — `pub`/`subscribe` keyword spellings remain available as future sugar).
+  Dedicated `OP_BCAST_OPEN/SUBSCRIBE/PUBLISH/RECV/POLL/CLOSE`; native → `teko_rt_bcast_*`, WASM →
+  reactor imports. Proofs `runtime/native/samples/broadcast.tks` (10/20/10/20) +
+  `runtime/wasm/run-broadcast.mjs`. CI-wired.
+- **14.E–14.F** — not started (`shared`+`atomic` [coarse whole-block lock], `circuit`+`retry`).
+  See `docs/HANDOFF_PHASE14.md`.
 </content>
 </invoke>

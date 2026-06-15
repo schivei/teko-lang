@@ -50,6 +50,8 @@ int codegen_li_emit_wasm(const BytecodeBuffer* buffer, const char* wat_path,
     teko_metal_set_emit_duplex(ctx, buffer->uses_duplex);
     // Phase 14 (14.C): import the delayed-channel entry points from the reactor + share memory.
     teko_metal_set_emit_delayed(ctx, buffer->uses_delayed);
+    // Phase 14 (14.D): import the broadcast entry points from the reactor + share memory.
+    teko_metal_set_emit_bcast(ctx, buffer->uses_bcast);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
 

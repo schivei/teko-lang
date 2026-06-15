@@ -540,6 +540,46 @@ static void lower_delayed_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx
     codegen_li_emit_delayed(b, (OpCode)op);              // $w0 = delayed op result
 }
 
+// --- broadcast (non-destructive 1:N pub-sub) channels (Phase 14, 14.D) -----------
+// `broadcast.open/subscribe/publish/recv/poll/close(args)`. `broadcast` is NOT a keyword, so
+// the lexer folds `broadcast.open` into one IDENTIFIER — same dotted-identifier path as
+// duplex/delayed, lowering to the dedicated OP_BCAST_*.
+static int bcast_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "broadcast.open")      == 0) { op = OP_BCAST_OPEN;      a = 1; }
+    else if (strcmp(lex, "broadcast.subscribe") == 0) { op = OP_BCAST_SUBSCRIBE; a = 1; }
+    else if (strcmp(lex, "broadcast.publish")   == 0) { op = OP_BCAST_PUBLISH;   a = 2; }
+    else if (strcmp(lex, "broadcast.recv")      == 0) { op = OP_BCAST_RECV;      a = 2; }
+    else if (strcmp(lex, "broadcast.poll")      == 0) { op = OP_BCAST_POLL;      a = 2; }
+    else if (strcmp(lex, "broadcast.close")     == 0) { op = OP_BCAST_CLOSE;     a = 1; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_bcast_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           bcast_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_bcast_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = bcast_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_BCAST_OPEN; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_bcast(b, (OpCode)op);                // $w0 = broadcast op result
+}
+
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners
 // below so the `fn` token INSIDE `extern fn …` is not mistaken for a handler.
 static void skip_extern_decl(Parser* p) {
@@ -692,6 +732,9 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
             } else if (is_delayed_head(&p)) {
                 lower_delayed_call(buffer, &p, &ctx); // delayed op inside a routine (14.C)
                 if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
+            } else if (is_bcast_head(&p)) {
+                lower_bcast_call(buffer, &p, &ctx); // broadcast op inside a routine (14.D)
+                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
             } else if (lower_routine_extern_call(buffer, &p, binds, nb)) {
                 // consumed a plain extern call (e.g. emit("…"))
             } else {
@@ -776,6 +819,8 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                 lower_duplex_call(buffer, &parser, &top_ctx);     // 14.B: handle/value -> $w0
             } else if (is_delayed_head(&parser)) {
                 lower_delayed_call(buffer, &parser, &top_ctx);    // 14.C: handle/value -> $w0
+            } else if (is_bcast_head(&parser)) {
+                lower_bcast_call(buffer, &parser, &top_ctx);      // 14.D: handle/value -> $w0
             } else {
                 // Integer expression (P12-E): literals, locals, parens, + - * / % and
                 // comparisons. Temps live above the named locals ($v{nlocals}+).
@@ -854,6 +899,10 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
         } else if (is_delayed_head(&parser)) {
             // Top-level delayed statement: delayed.send/advance/close/… ( args ).
             lower_delayed_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (is_bcast_head(&parser)) {
+            // Top-level broadcast statement: broadcast.publish/close/… ( args ).
+            lower_bcast_call(buffer, &parser, &top_ctx);
             if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_LPAREN) {

@@ -94,6 +94,23 @@ const char* teko_native_delayed_symbol(OpCode op, int* out_arity) {
     return sym;
 }
 
+// Phase 14 (14.D): OP_BCAST_* -> teko_rt_bcast_* symbol + arity (mirrors the WASM reactor).
+const char* teko_native_bcast_symbol(OpCode op, int* out_arity) {
+    int arity = 1;
+    const char* sym = NULL;
+    switch (op) {
+        case OP_BCAST_OPEN:      sym = "teko_rt_bcast_open";      arity = 1; break; // (capacity)
+        case OP_BCAST_SUBSCRIBE: sym = "teko_rt_bcast_subscribe"; arity = 1; break; // (handle)
+        case OP_BCAST_PUBLISH:   sym = "teko_rt_bcast_publish";   arity = 2; break; // (handle, value)
+        case OP_BCAST_RECV:      sym = "teko_rt_bcast_recv";      arity = 2; break; // (handle, sub_id)
+        case OP_BCAST_POLL:      sym = "teko_rt_bcast_poll";      arity = 2; break; // (handle, sub_id)
+        case OP_BCAST_CLOSE:     sym = "teko_rt_bcast_close";     arity = 1; break; // (handle)
+        default: break;
+    }
+    if (out_arity) *out_arity = arity;
+    return sym;
+}
+
 // --- helpers ---------------------------------------------------------------------
 static int is_macho(const MetalContext* ctx) { return ctx->target.os == OS_MACOS_DARWIN; }
 static int is_arm64(const MetalContext* ctx) {
@@ -404,6 +421,19 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_DELAYED_CLOSE: {
             int arity = 1;
             const char* sym = teko_native_delayed_symbol(op, &arity);
+            if (sym) emit_call(ctx, sym, arity);
+            break;
+        }
+
+        // Phase 14 (14.D): broadcast pub-sub ops -> teko_rt_bcast_* runtime calls.
+        case OP_BCAST_OPEN:
+        case OP_BCAST_SUBSCRIBE:
+        case OP_BCAST_PUBLISH:
+        case OP_BCAST_RECV:
+        case OP_BCAST_POLL:
+        case OP_BCAST_CLOSE: {
+            int arity = 1;
+            const char* sym = teko_native_bcast_symbol(op, &arity);
             if (sym) emit_call(ctx, sym, arity);
             break;
         }

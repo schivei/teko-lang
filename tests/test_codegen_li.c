@@ -805,3 +805,60 @@ void test_frontend_interop_delayed_lowering(void) {
 
     codegen_li_free_context(buffer);
 }
+
+// Phase 14 (14.D): `broadcast.*` dotted-identifier calls lower to OP_BCAST_*, set uses_bcast,
+// and (on WASM) import the reactor entry points over shared memory.
+void test_frontend_interop_broadcast_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let b = broadcast.open(8);\n"
+        "let s = broadcast.subscribe(b);\n"
+        "broadcast.publish(b, 10);\n"
+        "let a = broadcast.recv(b, s);\n"
+        "emit_int(a);\n"
+        "let p = broadcast.poll(b, s);\n"
+        "broadcast.close(b);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_bcast);
+    int n_open=0,n_sub=0,n_pub=0,n_recv=0,n_poll=0,n_close=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_BCAST_OPEN:      n_open++;  break;
+            case OP_BCAST_SUBSCRIBE: n_sub++;   break;
+            case OP_BCAST_PUBLISH:   n_pub++;   break;
+            case OP_BCAST_RECV:      n_recv++;  break;
+            case OP_BCAST_POLL:      n_poll++;  break;
+            case OP_BCAST_CLOSE:     n_close++; break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_open);
+    TEST_ASSERT_EQUAL_INT(1, n_sub);
+    TEST_ASSERT_EQUAL_INT(1, n_pub);
+    TEST_ASSERT_EQUAL_INT(1, n_recv);
+    TEST_ASSERT_EQUAL_INT(1, n_poll);
+    TEST_ASSERT_EQUAL_INT(1, n_close);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_broadcast.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_bcast_subscribe\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $bcast_publish"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
