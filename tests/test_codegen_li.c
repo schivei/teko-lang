@@ -1,6 +1,7 @@
 #include "unity.h"
 #include "codegen_li.h"
 #include "codegen_li_wasm.h"
+#include "frontend_interop.h"
 #include "teko_target.h"
 #include "parser_statements.h"
 #include <stdio.h>
@@ -83,6 +84,56 @@ void test_codegen_li_to_wasm_bridge(void) {
 
     free(out);
     remove(wat);
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-C): compile REAL Teko source (extern + call)
+// to IL via the interop frontend, and through the bridge to WASM — proving
+// source -> IL -> WASM, not an emit-demo.
+void test_frontend_interop_extern_call_to_il(void) {
+    const char* src =
+        "extern fn log(msg: str) from \"env\" as \"log\";\n"
+        "log(\"hello from source\");\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // The extern was consumed into the import table (ns=from, name=as).
+    TEST_ASSERT_EQUAL_INT(1, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("env", buffer->imports[0].ns);
+    TEST_ASSERT_EQUAL_STRING("log", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_INT(1, buffer->imports[0].n_params);
+
+    // The call pooled its string and lowered to SCONST -> CALL_IMPORT -> HALT.
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_add_string_constant(buffer, "hello from source")); // already pooled at 0
+    const unsigned char expected[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0
+        0x00                          // OP_HALT
+    };
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    // Through the bridge: a real .wat with the import, call, and data segment.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_src.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"log\" (func $import_0 (param i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $import_0"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(data (i32.const 1024) \"hello from source\\00\")"));
+    free(out);
+    remove(wat);
+
     codegen_li_free_context(buffer);
 }
 
