@@ -22,6 +22,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h> // GetSystemTimeAsFileTime (no POSIX clock_gettime on MSVC)
+#endif
 
 #define TEKO_RT_KDF_MAX_OUT 1024 // bound variable-length output buffers (KDF/XOF) to a sane size
 
@@ -533,15 +536,29 @@ char* teko_rt_uuid_v4(int ignored) {
     return teko_rt_uuid_str(u);
 }
 
-char* teko_rt_uuid_v7(int ignored) {
-    (void)ignored;
-    uint64_t unix_ms;
+// Current Unix time in milliseconds, portably across the host toolchains.
+static uint64_t teko_rt_unix_ms(void) {
+#if defined(_WIN32)
+    // FILETIME is 100ns ticks since 1601-01-01; 116444736000000000 ticks to the Unix epoch.
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return (uint64_t)((u.QuadPart - 116444736000000000ULL) / 10000ULL);
+#elif defined(CLOCK_REALTIME)
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
-        unix_ms = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000l);
-    else
-        unix_ms = (uint64_t)time(NULL) * 1000ull;
+        return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000l);
+    return (uint64_t)time(NULL) * 1000ull;
+#else
+    return (uint64_t)time(NULL) * 1000ull;
+#endif
+}
+
+char* teko_rt_uuid_v7(int ignored) {
+    (void)ignored;
     uint8_t u[TEKO_UUID_LEN];
-    if (teko_uuid_v7(u, unix_ms) != 0) return NULL;
+    if (teko_uuid_v7(u, teko_rt_unix_ms()) != 0) return NULL;
     return teko_rt_uuid_str(u);
 }

@@ -1,5 +1,57 @@
 # Hand-off — Native Runner + Full Crypto Language Surface (then WASM follow-ups)
 
+## ⇒ NEXT SESSION COLD-START: Sub-phase C "big step" — compile the C crypto runtime → wasm32
+**Everything below is DONE and CI-green; this is the one substantial remaining piece.** State at
+hand-off: native runner + full native crypto surface DONE (A.1, B.1–B.10); WASM `random.bytes`
+(C.1) and `uuid.v4/v7` (C.2) DONE via host imports. Branch `feat/phase-13-native-crypto` (PR #6),
+single owner, tree clean, all 4 gates green.
+
+**The remaining problem:** every other crypto runtime id (4-40 — hashes beyond sha256, HMAC,
+AEAD, Ed25519/X25519, ECDSA, RSA) still emits `unreachable` on the WASM target
+(`emit_wasm.c` `OP_CALL_RUNTIME` default = reserved-with-target). The decision (CLAUDE.md) is
+**NOT** to hand-emit WAT per primitive (that's a second implementation of each algorithm) — instead
+**compile the single C runtime (`src/runtime/teko_crypto_*.c`) to wasm32 and have the emitted
+module use it**, so WASM lowers to the SAME source of truth as native.
+
+**Recommended approach (investigate + decide first — this is a design step):**
+1. **Build the crypto C → wasm32.** `clang --target=wasm32 -nostdlib -ffreestanding -O2 -c` the
+   `TEKO_CRYPTO_SOURCES` (already a CMake var, reused by `teko_core`/`teko_rt`). They are
+   portable C23, no libc *except* `memcpy/memset/malloc` and (CSPRNG) entropy. Provide a tiny
+   freestanding shim: `memcpy/memset/memmove` (trivial), and route `malloc`/`free` to the
+   module's existing bump allocator (`$teko_alloc`) — or compile a minimal `walloc`-style heap.
+   CSPRNG entropy → the `env.teko_random` host import already wired (C.1).
+2. **Link/compose with the emitted module.** Two options to evaluate: (a) `wasm-ld` the crypto
+   `.o` set + the teko-emitted module's `.o` into one module (requires emitting the teko module
+   as an object, not just WAT — bigger change); or (b) keep the crypto as a SECOND wasm module
+   imported by the teko module (multi-module instantiation in the harness) — simpler to wire,
+   needs a shared `memory`. **(b) is likely the smaller first step**; the hex-at-surface ABI means
+   the boundary is just `(ptr,len) -> (ptr)` string calls.
+3. **ABI on WASM = same hex-at-surface.** Reuse `teko_rt_*`-shaped entry points (they already take
+   `const char*` hex and return `char*` hex). Compile thin `teko_rt_*` wrappers to wasm32 too, so
+   the WASM dispatch becomes `call $teko_rt_<id>` exactly like native — then `emit_wasm.c`
+   `OP_CALL_RUNTIME` maps ids 4-40 to those imported symbols (mirror `teko_native_runtime_symbol`).
+4. **Multi-arg on WASM.** Declare the `$a0..$aN` staging locals and have the WASM `OP_CALL_RUNTIME`
+   marshal staging slots → call args (mirror what `emit_native_hosted`/`emit_call` do; today the
+   WASM dispatch only passes `$w0`). Needed for HMAC/AEAD/sign/verify (arity 2-4).
+5. **Proofs.** One executable `.tks` per group under Node (reuse the B.* KAT vectors), wired into
+   `wasm.yml`. Same hex inputs/outputs as the native proofs → copy the expected strings.
+   Increment per group (hash family, HMAC, AEAD, signatures, RSA), 4 gates green each.
+
+**Pitfalls:** the teko module's bump allocator (`$teko_alloc`, range [16384..65536)) vs the crypto
+C's `malloc` must share ONE linear memory and not collide — decide the heap model up front. RSA
+needs sizable scratch (2048-bit bignums) — ensure the heap is big enough (grow `(memory N)`).
+Keep every op stack-neutral (accumulator model) or the module won't instantiate.
+
+**Key files:** `src/codegen/bare_metal/emit_wasm.c` (`OP_CALL_RUNTIME` dispatch ~L1117, the
+`unreachable` default; `emit_wasm_imports`; the runtime emitters), `src/codegen_li_wasm.c` (bridge
++ the `teko_metal_set_emit_*` calls), `CMakeLists.txt` (`TEKO_CRYPTO_SOURCES`), `runtime/wasm/run-*.mjs`
+(harness pattern — see `run-uuid-rng.mjs`/`run-random.mjs` for the host-import shape), `wasm.yml`.
+The native dispatch table `teko_native_runtime_symbol` (`src/codegen/emit_native_hosted.c`) is the
+id→symbol map to mirror. The native `teko_rt_*` wrappers (`runtime/native/teko_rt.c`) are the exact
+ABI to recompile for wasm32.
+
+---
+
 ## Progress log (update as sub-phases land)
 - **Sub-phase A, step 1 — native runner foundation: DONE.** A real `teko build
   <f>.tks --target=<native>` path now compiles real source through
