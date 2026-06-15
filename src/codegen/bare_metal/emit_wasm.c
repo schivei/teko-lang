@@ -1146,10 +1146,19 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_poll\" (func $duplex_poll (param i32) (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_close\" (func $duplex_close (param i32) (result i32)))\n");
             }
-            // Memory: module-owned by default; when a reactor (crypto or duplex) is in play it
-            // is host-owned and SHARED (imported from env), so both modules address the same
+            // Phase 14 (14.C): delayed (timed) channel entry points, also from the reactor.
+            if (ctx->wasm_emit_delayed) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_open\" (func $delayed_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_send\" (func $delayed_send (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_advance\" (func $delayed_advance (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_recv\" (func $delayed_recv (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_poll\" (func $delayed_poll (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_close\" (func $delayed_close (param i32) (result i32)))\n");
+            }
+            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed) is in play
+            // it is host-owned and SHARED (imported from env), so both modules address the same
             // bytes. Re-export it either way so harnesses can read results via exports.memory.
-            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex) {
+            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1260,6 +1269,25 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                              (op == OP_DUPLEX_POLL) ? "duplex_poll" : "duplex_close";
             int ar = (op == OP_DUPLEX_SEND) ? 3 :
                      (op == OP_DUPLEX_RECV || op == OP_DUPLEX_POLL) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 14 (14.C): delayed (timed) channel ops — imported reactor calls, same ABI.
+        case OP_DELAYED_OPEN:
+        case OP_DELAYED_SEND:
+        case OP_DELAYED_ADVANCE:
+        case OP_DELAYED_RECV:
+        case OP_DELAYED_POLL:
+        case OP_DELAYED_CLOSE: {
+            const char* fn = (op == OP_DELAYED_OPEN)    ? "delayed_open" :
+                             (op == OP_DELAYED_SEND)    ? "delayed_send" :
+                             (op == OP_DELAYED_ADVANCE) ? "delayed_advance" :
+                             (op == OP_DELAYED_RECV)    ? "delayed_recv" :
+                             (op == OP_DELAYED_POLL)    ? "delayed_poll" : "delayed_close";
+            int ar = (op == OP_DELAYED_SEND) ? 3 :
+                     (op == OP_DELAYED_ADVANCE) ? 2 : 1;
             for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
             fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;

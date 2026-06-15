@@ -176,6 +176,15 @@ merge/force-push** (the human merges).
   - **Decision:** the duplex handle is an opaque register-width integer (native pointer / WASM
     reactor-heap pointer); `duplex.poll` gives non-blocking structured status without an in-band
     sentinel; `emit_int`/`env.log_int` surface i32 results in the proofs.
-- **14.C–14.F** — not started (`delayed`/`broadcast` channels, `shared`+`atomic`, `circuit`+`retry`).
+- **14.C — `delayed chan` (timed/timestamped)** — ✅ done on both targets (executable `.tks`
+  proof each). Runtime `src/runtime/teko_delayed.{h,c}` (4 Unity KATs): each message is stamped
+  with a delivery time on a **logical clock** (advanced via `delayed.advance` — deterministic,
+  clock-source-agnostic, models the Timer Queue); `recv` releases the earliest-due message in
+  delivery-time order (stable FIFO on ties); non-blocking structured statuses. Surface: dedicated
+  `OP_DELAYED_OPEN/SEND/ADVANCE/RECV/POLL/CLOSE` (`delayed.*` dotted-identifier). Native →
+  `teko_rt_delayed_*`; WASM → reactor imports (same C runtime). Proofs
+  `runtime/native/samples/delayed.tks` (1/10/20/30) + `runtime/wasm/run-delayed.mjs`. CI-wired.
+- **14.D–14.F** — not started (`broadcast` chan via `pub`/`subscribe`, `shared`+`atomic`,
+  `circuit`+`retry`).
 </content>
 </invoke>

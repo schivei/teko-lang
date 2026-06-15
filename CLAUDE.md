@@ -207,4 +207,9 @@ via dedicated **OP_DUPLEX_*** opcodes (`duplex.open/send/recv/poll/close`, a dot
 surface — bare `duplex` stays the keyword). Native lowers to `teko_rt_duplex_*`; WASM compiles
 the SAME C runtime into the reactor and imports it (pure i32 handle/value/status, shared
 memory). Proofs `runtime/native/samples/duplex.tks` + `runtime/wasm/run-duplex.mjs`. Suite 174/174.
-Remaining 14.C–14.F: `delayed`/`broadcast` channels, `shared`+`atomic`, `circuit`+`retry`.
+Sub-block **14.C `delayed chan` is DONE** on both targets: timed/timestamped messages on a
+logical clock (`delayed.advance` ticks it), released in delivery-time order — C runtime
+`src/runtime/teko_delayed.c` (4 KATs) → dedicated `OP_DELAYED_*` (`delayed.*`) → native
+`teko_rt_delayed_*` + WASM reactor. Proofs `runtime/native/samples/delayed.tks` +
+`runtime/wasm/run-delayed.mjs`. Suite 179/179.
+Remaining 14.D–14.F: `broadcast` chan (`pub`/`subscribe`), `shared`+`atomic`, `circuit`+`retry`.

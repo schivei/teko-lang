@@ -47,7 +47,8 @@ CFLAGS=(--target=wasm32 -O2 -ffreestanding -nostdlib
 
 # Sources: the whole crypto runtime + UUID + the teko_rt_* hex-at-surface wrappers + shim.
 SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/teko_uuid.c"
-      "$ROOT/src/runtime/teko_duplex.c") # Phase 14: duplex channel runtime (source of truth)
+      "$ROOT/src/runtime/teko_duplex.c"   # Phase 14: duplex channel runtime (source of truth)
+      "$ROOT/src/runtime/teko_delayed.c") # Phase 14: delayed (timed) channel runtime
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()
@@ -73,7 +74,10 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          teko_rt_rsa_oaep_encrypt teko_rt_rsa_oaep_decrypt
          # Phase 14 (14.B): duplex channel ops (OP_DUPLEX_* import these from the reactor).
          teko_rt_duplex_open teko_rt_duplex_send teko_rt_duplex_recv
-         teko_rt_duplex_poll teko_rt_duplex_close)
+         teko_rt_duplex_poll teko_rt_duplex_close
+         # Phase 14 (14.C): delayed (timed) channel ops (OP_DELAYED_* import these).
+         teko_rt_delayed_open teko_rt_delayed_send teko_rt_delayed_advance
+         teko_rt_delayed_recv teko_rt_delayed_poll teko_rt_delayed_close)
 LDEXPORTS=(); for e in "${EXPORTS[@]}"; do LDEXPORTS+=("--export=$e"); done
 
 # Layout: keep the whole reactor image (data + shadow stack + heap) ABOVE Teko's

@@ -784,6 +784,24 @@ void test_frontend_interop_delayed_lowering(void) {
     TEST_ASSERT_EQUAL_INT(1, n_recv);
     TEST_ASSERT_EQUAL_INT(1, n_poll);
     TEST_ASSERT_EQUAL_INT(1, n_close);
-    // (The WASM emission of these opcodes is asserted once the reactor lowering lands, 14.C.3.)
+
+    // Through the WASM bridge: the delayed ops import the reactor entry points + share memory.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_delayed.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_delayed_open\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $delayed_advance"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
     codegen_li_free_context(buffer);
 }
