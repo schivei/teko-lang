@@ -35,6 +35,24 @@
   single-arg today) — `emit_native_hosted` already marshals N args via OP_SETARG staging — to
   wire HMAC (key,msg), SHAKE (msg,len), then AEAD (`encrypt`/`decrypt`), `sign`/`verify`, RSA,
   ECDH, KDF/RNG.
+- **Sub-phase B, step 3 — multi-arg runtime lowering + HMAC: DONE.** `lower_base_codec` now
+  reads `runtime_arity(id)` args, staging args 0..n-2 via `OP_SETARG` and leaving the last in
+  `$w0` (same convention as `OP_CALL_IMPORT`); nested codec args still work because staging is
+  consumed synchronously at each call. First multi-arg surface: `hmac.sha256/384/512(hexKey,
+  msg)` (ids 17/18/19, arity 2) → `teko_rt_hmac_*`, which hex-decodes the key (new
+  `teko_rt_from_hex`) and MACs the message. Proven by `runtime/native/samples/hmac.tks`
+  against RFC 4231 Test Case 2 on macOS arm64 + Linux x86_64/arm64. **This unblocks every
+  remaining multi-arg surface.** ⚠️ Note for Sub-phase C: a multi-arg `OP_CALL_RUNTIME` on the
+  *WASM* target currently emits `OP_SETARG` (→ `$a` locals) before an `unreachable` — fine as a
+  reserved trap, but the WASM emitter must declare/handle those staging locals when it gains
+  real multi-arg runtime lowering.
+- **Sub-phase B — REMAINING:** SHAKE (msg,len), AEAD `encrypt`/`decrypt` (ChaCha20-Poly1305,
+  AES-GCM: key/nonce/aad/msg → ct‖tag and inverse with tag rejection), `sign`/`verify`
+  (Ed25519, ECDSA P-256/384, RSA-PSS), RSA-OAEP, X25519/ECDH, KDF (HKDF/PBKDF2), RNG
+  (`random.bytes`). Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol`
+  entry + `teko_rt_*` wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`.
+  The 3+ arg AEAD calls need staging slots 0..2 — already supported (8 staging slots).
+  Multi-value returns (ct‖tag) pack into one hex string per the ABI decision.
 
 > **Status:** owner-approved next work. Same PR/branch as Phase 13:
 > `feat/phase-13-native-crypto` (PR #6). The Phase 13 crypto **runtime** is complete and

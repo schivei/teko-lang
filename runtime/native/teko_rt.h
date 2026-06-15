@@ -35,4 +35,11 @@ char* teko_rt_sha3_512_hex(const char* msg); // id 12 — SHA3-512
 char* teko_rt_blake3_hex(const char* msg);   // id 15 — BLAKE3 (32-byte default output)
 char* teko_rt_blake2b_hex(const char* msg);  // id 16 — BLAKE2b (64-byte default output)
 
+// HMAC (OP_CALL_RUNTIME ids 17/18/19, arity 2). Per the hex-at-surface ABI the key is a
+// hex string (decoded to bytes here); the message is raw bytes. Returns a fresh lowercase
+// hex MAC string, or NULL on a malformed key.
+char* teko_rt_hmac_sha256(const char* key_hex, const char* msg);
+char* teko_rt_hmac_sha384(const char* key_hex, const char* msg);
+char* teko_rt_hmac_sha512(const char* key_hex, const char* msg);
+
 #endif // TEKO_RT_H

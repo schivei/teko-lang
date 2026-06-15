@@ -333,6 +333,10 @@ static int codec_id_for(const char* lex) {
     if (strcmp(lex, "hash.sha3_512") == 0) return 12;
     if (strcmp(lex, "hash.blake3") == 0) return 15;
     if (strcmp(lex, "hash.blake2b") == 0) return 16;
+    // HMAC (two args: hex key, message) — Phase 13 native surface, ids 17-19.
+    if (strcmp(lex, "hmac.sha256") == 0) return 17;
+    if (strcmp(lex, "hmac.sha384") == 0) return 18;
+    if (strcmp(lex, "hmac.sha512") == 0) return 19;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;
@@ -346,6 +350,16 @@ static int is_codec_head(const Parser* p) {
     return p->current_token.type == TOKEN_IDENTIFIER &&
            codec_id_for(p->current_token.lexeme) >= 0 &&
            p->peek_token.type == TOKEN_LPAREN;
+}
+
+// Arg count of a runtime primitive (OP_CALL_RUNTIME id). Most are single-arg (codecs,
+// hashes); HMAC takes (hexKey, msg). Multi-arg calls stage args 0..n-2 via OP_SETARG and
+// leave the last in $w0 — the same convention OP_CALL_IMPORT uses.
+static int runtime_arity(int id) {
+    switch (id) {
+        case 17: case 18: case 19: return 2; // hmac.sha256/384/512
+        default: return 1;
+    }
 }
 
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // recursive
@@ -372,11 +386,20 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
     int id = codec_id_for(p->current_token.lexeme);      // current = "base64.encode" etc.
     if (id < 0) id = 0;
+    int arity = runtime_arity(id);
     fe_advance(p);                                       // consume the dotted identifier
     if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
-    lower_codec_value(b, p, ctx);                        // arg ptr -> $w0
+    // Lower each arg to $w0; stage args 0..n-2 into $a<i> via OP_SETARG, leave the last
+    // in $w0. emit_native_hosted marshals staging slots + $w0 into the ABI arg registers.
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
-    codegen_li_emit_call_runtime(b, id);                 // $w0 = codec($w0); sets uses_codec/uses_hash by id
+    codegen_li_emit_call_runtime(b, id);                 // $w0 = rt(args); sets uses_codec/uses_hash by id
 }
 
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners

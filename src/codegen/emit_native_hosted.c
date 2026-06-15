@@ -24,6 +24,9 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 12: sym = "teko_rt_sha3_512_hex"; break;
         case 15: sym = "teko_rt_blake3_hex";   break;
         case 16: sym = "teko_rt_blake2b_hex";  break;
+        case 17: sym = "teko_rt_hmac_sha256";  arity = 2; break; // (hexKey, msg)
+        case 18: sym = "teko_rt_hmac_sha384";  arity = 2; break;
+        case 19: sym = "teko_rt_hmac_sha512";  arity = 2; break;
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;

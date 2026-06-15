@@ -49,4 +49,13 @@ ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792d
 EXP
 )"
 
+# HMAC (multi-arg runtime lowering). RFC 4231 Test Case 2: key "Jefe" (4a656665),
+# data "what do ya want for nothing?" — HMAC-SHA-256/384/512.
+check hmac.tks "$(cat <<'EXP'
+5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649
+164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737
+EXP
+)"
+
 echo "All native runner proofs passed."
