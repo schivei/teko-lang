@@ -52,6 +52,29 @@ typedef struct {
     // Phase 12 (P12-G): 1 to emit the base64/hex codec runtime (only when the program
     // uses it). Unused by the native emitters.
     int wasm_emit_codecs;
+    // Phase 13 (13.1): 1 to emit the in-module SHA hash runtime (only when the program
+    // calls hash.sha256/.sha512). Unused by the native emitters.
+    int wasm_emit_hash;
+    // Phase 13 (Sub-phase C): 1 to declare the host entropy import (env.teko_random) + the
+    // in-module CSPRNG hex wrapper (only when the program calls random.bytes). Native
+    // emitters ignore this (they link the C CSPRNG into the binary via teko_rt).
+    int wasm_emit_random;
+    // Phase 13 (Sub-phase C): 1 to declare the host entropy + time imports (env.teko_random,
+    // env.teko_now) + the self-contained in-module uuid.v4/v7 runtime. Native emitters ignore
+    // this (they link the C uuid runtime + CSPRNG into the binary via teko_rt).
+    int wasm_emit_uuid_rng;
+    // Phase 13 (Sub-phase C, "big step"): 1 to import the compiled-C crypto reactor
+    // (crypto.wasm) — declare its teko_rt_* entry points from the "crypto" module and
+    // share one linear memory with it (memory imported from env instead of module-owned).
+    // Set when the program uses a crypto primitive beyond the in-module hash/uuid set
+    // (ids 5,10-40). Native emitters ignore this (they link the same C runtime directly).
+    int wasm_emit_crypto_ext;
+    // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
+    // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
+    // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
+    // wasm_strings / wasm_imports / wasm_local_count fields above are reused as the
+    // generic IL string pool / import table / local count for this path too.
+    int hosted;
 } MetalContext;
 
 // Phase 11: hand the WASM emitter the IL string pool before teko_metal_emit_program
@@ -70,6 +93,13 @@ void teko_metal_set_local_count(MetalContext* ctx, int count);
 
 // Phase 12 (P12-G): request the base64/hex codec runtime functions be emitted.
 void teko_metal_set_emit_codecs(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_hash(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_random(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_uuid_rng(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled);
+
+// Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
+void teko_metal_set_hosted(MetalContext* ctx, int enabled);
 
 // Phase 11 (Browser FFI MVP-2): write an auto-generated JS glue module to `path`
 // that implements the `dom.*` host imports currently set on `ctx` (via

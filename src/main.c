@@ -10,6 +10,7 @@
 #include "codegen_li.h"
 #include "codegen_li_wasm.h"
 #include "frontend_interop.h"
+#include "teko_target.h"
 
 // Read an entire file into a NUL-terminated heap string (caller frees). NULL on error.
 static char* read_file_to_string(const char* path) {
@@ -72,6 +73,97 @@ static int compile_wasm_source(const char* input_path, const char* out_wat) {
     return rc;
 }
 
+// Phase 13 (native runner): real .tks -> IL -> hosted native assembly -> system `cc`
+// assemble+link against teko_rt -> a runnable executable. This replaces the mock
+// bytecode on the native path for the host arches (x86_64 / arm64, ELF & Mach-O).
+// `target_str` selects the target ("host"/"native" => detect host); `rt_lib` is the
+// path to libteko_rt.a (default "libteko_rt.a"); `stop_at_assembly` halts after the .s.
+static int compile_native_source(const char* input_path, const char* out_path,
+                                 const char* target_str, const char* rt_lib,
+                                 bool stop_at_assembly) {
+    char* source = read_file_to_string(input_path);
+    if (!source) {
+        fprintf(stderr, "[Teko Native]: cannot read source %s\n", input_path);
+        return 1;
+    }
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    if (!buffer) { free(source); return 1; }
+
+    if (teko_compile_interop(source, buffer) != 0) {
+        fprintf(stderr, "[Teko Native]: frontend failed on %s\n", input_path);
+        codegen_li_free_context(buffer);
+        free(source);
+        return 1;
+    }
+
+    TekoTarget target;
+    if (!target_str || strcmp(target_str, "host") == 0 || strcmp(target_str, "native") == 0) {
+        target = teko_target_detect_host();
+    } else {
+        target = teko_target_parse(target_str);
+    }
+
+    // Derive the executable and .s paths. exe = -o value, else "<input w/o .tks>".
+    char exe_buf[512];
+    if (!out_path) {
+        size_t il = strlen(input_path);
+        if (il > 4 && strcmp(input_path + il - 4, ".tks") == 0)
+            snprintf(exe_buf, sizeof(exe_buf), "%.*s", (int)(il - 4), input_path);
+        else
+            snprintf(exe_buf, sizeof(exe_buf), "%s.out", input_path);
+        out_path = exe_buf;
+    }
+    char asm_path[600];
+    snprintf(asm_path, sizeof(asm_path), "%s.s", out_path);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    if (!ctx) { codegen_li_free_context(buffer); free(source); return 1; }
+
+    teko_metal_set_hosted(ctx, 1);
+    teko_metal_set_strings(ctx, (const char**)buffer->pool.strings, buffer->pool.count);
+
+    TekoWasmImport* wimports = NULL;
+    if (buffer->import_count > 0) {
+        wimports = (TekoWasmImport*)malloc(sizeof(TekoWasmImport) * buffer->import_count);
+        if (wimports) {
+            for (int i = 0; i < buffer->import_count; i++) {
+                wimports[i].ns = buffer->imports[i].ns;
+                wimports[i].name = buffer->imports[i].name;
+                wimports[i].n_params = buffer->imports[i].n_params;
+                wimports[i].has_result = buffer->imports[i].has_result;
+            }
+            teko_metal_set_imports(ctx, wimports, buffer->import_count);
+        }
+    }
+    teko_metal_set_local_count(ctx, buffer->local_count);
+
+    teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
+    teko_metal_close(ctx);
+    codegen_li_free_context(buffer);
+    free(source);
+    free(wimports);
+
+    printf("[Teko Native]: emitted hosted assembly: %s\n", asm_path);
+    if (stop_at_assembly) {
+        printf("[Teko Pipeline]: Pipeline halted by -S flag. Finishing.\n");
+        return 0;
+    }
+
+    // Assemble + link with the system C toolchain against the teko_rt archive.
+    const char* lib = rt_lib ? rt_lib : "libteko_rt.a";
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "cc \"%s\" \"%s\" -o \"%s\"", asm_path, lib, out_path);
+    printf("[Teko Native]: linking: %s\n", cmd);
+    int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "[Teko Native]: link failed (cc exit %d)\n", rc);
+        return 1;
+    }
+    printf("[Teko Native]: produced executable: %s\n", out_path);
+    return 0;
+}
+
 static uint16_t get_linker_elf_machine(TekoArch arch) {
     switch (arch) {
         case ARCH_X86_64: return 62;
@@ -100,6 +192,8 @@ int main(int argc, char** argv) {
     bool target_wasm = false;
     const char* out_path = NULL;
     const char* input_path = NULL;
+    const char* target_str = NULL;  // value of --target= (NULL => default project path)
+    const char* rt_lib = NULL;      // value of --rt-lib= (path to libteko_rt.a)
 
     // Robust arg scan: the input is the first positional that is neither the
     // optional `build` subcommand, a flag, nor a flag's value.
@@ -107,9 +201,11 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "-S") == 0) { stop_at_assembly = true; continue; }
         if (strcmp(argv[i], "-c") == 0) { stop_at_object = true; continue; }
         if (strncmp(argv[i], "--target=", 9) == 0) {
-            if (strncmp(argv[i] + 9, "wasm", 4) == 0) target_wasm = true;
+            target_str = argv[i] + 9;
+            if (strstr(target_str, "wasm") != NULL) target_wasm = true;
             continue;
         }
+        if (strncmp(argv[i], "--rt-lib=", 9) == 0) { rt_lib = argv[i] + 9; continue; }
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) { out_path = argv[++i]; continue; }
         if (strcmp(argv[i], "build") == 0) continue; // optional subcommand
         if (argv[i][0] == '-') continue;             // unknown flag
@@ -138,6 +234,17 @@ int main(int argc, char** argv) {
         }
         printf("[Teko Pipeline]: WASM target — compiling Teko source directly.\n");
         int rc = compile_wasm_source(input_path, out_path);
+        if (rc == 0) printf("\n[Compilation Pipeline Executed Successfully].\n");
+        return rc;
+    }
+
+    // ====================================================================
+    // NATIVE TARGET: real .tks -> IL -> hosted assembly -> cc -> executable
+    // (Phase 13 native runner). Triggered by an explicit --target=<native>.
+    // ====================================================================
+    if (target_str != NULL) {
+        printf("[Teko Pipeline]: Native target '%s' — compiling Teko source directly.\n", target_str);
+        int rc = compile_native_source(input_path, out_path, target_str, rt_lib, stop_at_assembly);
         if (rc == 0) printf("\n[Compilation Pipeline Executed Successfully].\n");
         return rc;
     }

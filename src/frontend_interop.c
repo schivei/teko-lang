@@ -319,6 +319,68 @@ static int codec_id_for(const char* lex) {
     if (strcmp(lex, "base64.decode") == 0) return 1;
     if (strcmp(lex, "hex.encode") == 0) return 2;
     if (strcmp(lex, "hex.decode") == 0) return 3;
+    // Phase 13 (13.1): native hash primitives. Same dotted-identifier lowering as the
+    // base codecs — `hash.sha256(x)` takes a string/local/nested value, lowers it to a
+    // NUL-terminated pointer in $w0, then OP_CALL_RUNTIME invokes the in-module SHA-256
+    // runtime which returns a pointer to the lowercase hex digest. (hash.sha512 = id 5,
+    // wired in the next increment alongside its i64 WAT runtime.)
+    if (strcmp(lex, "hash.sha256") == 0) return 4;
+    // Phase 13 native runner — rest of the fixed-size hash family (native surface; the
+    // WASM lowering of these is deferred to Sub-phase C, where the WASM emitter traps).
+    if (strcmp(lex, "hash.sha512") == 0) return 5;
+    if (strcmp(lex, "hash.sha384") == 0) return 10;
+    if (strcmp(lex, "hash.sha3_256") == 0) return 11;
+    if (strcmp(lex, "hash.sha3_512") == 0) return 12;
+    if (strcmp(lex, "hash.blake3") == 0) return 15;
+    if (strcmp(lex, "hash.blake2b") == 0) return 16;
+    // HMAC (two args: hex key, message) — Phase 13 native surface, ids 17-19.
+    if (strcmp(lex, "hmac.sha256") == 0) return 17;
+    if (strcmp(lex, "hmac.sha384") == 0) return 18;
+    if (strcmp(lex, "hmac.sha512") == 0) return 19;
+    // AEAD (four args: hex key, nonce, aad, plaintext|cipher‖tag) — ids 20-23.
+    // seal -> (ct‖tag) hex; open -> plaintext hex, or "REJECT" on auth failure.
+    if (strcmp(lex, "crypto.aes_gcm_seal") == 0) return 20;
+    if (strcmp(lex, "crypto.aes_gcm_open") == 0) return 21;
+    if (strcmp(lex, "crypto.chacha20poly1305_seal") == 0) return 22;
+    if (strcmp(lex, "crypto.chacha20poly1305_open") == 0) return 23;
+    // Signatures — Ed25519 (ids 24/25). sign(seedHex, msgHex) -> sigHex;
+    // verify(pubHex, msgHex, sigHex) -> "1" (valid) | "0" (invalid).
+    if (strcmp(lex, "crypto.ed25519_sign") == 0) return 24;
+    if (strcmp(lex, "crypto.ed25519_verify") == 0) return 25;
+    // Key exchange — X25519 (RFC 7748). x25519(scalarHex, uHex) -> sharedHex. id 26.
+    if (strcmp(lex, "crypto.x25519") == 0) return 26;
+    // KDF — HKDF / PBKDF2 over SHA-256. Hex inputs + integer length/iteration args. ids 27/28.
+    // hkdf_sha256(ikmHex, saltHex, infoHex, len); pbkdf2_sha256(passHex, saltHex, iters, len).
+    if (strcmp(lex, "kdf.hkdf_sha256") == 0) return 27;
+    if (strcmp(lex, "kdf.pbkdf2_sha256") == 0) return 28;
+    // ECDSA over the NIST P-curves (RFC 6979 deterministic). sign(privHex, hashHex) -> r‖s hex;
+    // verify(pubHex, hashHex, sigHex) -> "1"/"0". The hash is the message digest. ids 29-32.
+    if (strcmp(lex, "crypto.ecdsa_p256_sign") == 0) return 29;
+    if (strcmp(lex, "crypto.ecdsa_p256_verify") == 0) return 30;
+    if (strcmp(lex, "crypto.ecdsa_p384_sign") == 0) return 31;
+    if (strcmp(lex, "crypto.ecdsa_p384_verify") == 0) return 32;
+    // SHAKE128/256 XOF (msg + output length). ids 33/34.
+    if (strcmp(lex, "hash.shake128") == 0) return 33;
+    if (strcmp(lex, "hash.shake256") == 0) return 34;
+    // RSA (RFC 8017) — keys are big-endian hex (modulus n, exponent e/d), SHA-256 + MGF1.
+    // PSS sign/verify (salt_len=hLen, random salt); OAEP encrypt/decrypt (random seed, empty
+    // label). ids 37-40. sign->sigHex; verify->"1"/"0"; encrypt->ctHex; decrypt->msgHex|REJECT.
+    if (strcmp(lex, "crypto.rsa_pss_sign") == 0) return 37;
+    if (strcmp(lex, "crypto.rsa_pss_verify") == 0) return 38;
+    if (strcmp(lex, "crypto.rsa_oaep_encrypt") == 0) return 39;
+    if (strcmp(lex, "crypto.rsa_oaep_decrypt") == 0) return 40;
+    // CSPRNG — random.bytes(n) -> n random bytes as hex. id 41.
+    if (strcmp(lex, "random.bytes") == 0) return 41;
+    // UUID v4 (random) / v7 (time-ordered + random) -> canonical UUID string. ids 42/43.
+    // No surface args (entropy/time come from the runtime/host); the lowered $w0 is ignored.
+    if (strcmp(lex, "uuid.v4") == 0) return 42;
+    if (strcmp(lex, "uuid.v7") == 0) return 43;
+    // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
+    if (strcmp(lex, "hash.md5") == 0) return 6;
+    if (strcmp(lex, "hash.sha1") == 0) return 7;
+    // UUID name-based generators (deterministic; DNS namespace) — ids 8/9.
+    if (strcmp(lex, "uuid.v3") == 0) return 8;
+    if (strcmp(lex, "uuid.v5") == 0) return 9;
     return -1;
 }
 
@@ -328,14 +390,43 @@ static int is_codec_head(const Parser* p) {
            p->peek_token.type == TOKEN_LPAREN;
 }
 
+// Arg count of a runtime primitive (OP_CALL_RUNTIME id). Most are single-arg (codecs,
+// hashes); HMAC takes (hexKey, msg). Multi-arg calls stage args 0..n-2 via OP_SETARG and
+// leave the last in $w0 — the same convention OP_CALL_IMPORT uses.
+static int runtime_arity(int id) {
+    switch (id) {
+        case 17: case 18: case 19: return 2; // hmac.sha256/384/512
+        case 20: case 21: case 22: case 23: return 4; // AEAD: key, nonce, aad, msg/ct‖tag
+        case 24: return 2; // ed25519_sign(seed, msg)
+        case 25: return 3; // ed25519_verify(pub, msg, sig)
+        case 26: return 2; // x25519(scalar, u)
+        case 27: return 4; // hkdf_sha256(ikm, salt, info, len)
+        case 28: return 4; // pbkdf2_sha256(pass, salt, iters, len)
+        case 29: case 31: return 2; // ecdsa_p256/p384_sign(priv, hash)
+        case 30: case 32: return 3; // ecdsa_p256/p384_verify(pub, hash, sig)
+        case 33: case 34: return 2; // shake128/256(msg, out_len)
+        case 37: return 3; // rsa_pss_sign(n, d, mhash)
+        case 38: return 4; // rsa_pss_verify(n, e, mhash, sig)
+        case 39: return 3; // rsa_oaep_encrypt(n, e, msg)
+        case 40: return 3; // rsa_oaep_decrypt(n, d, ct)
+        default: return 1;
+    }
+}
+
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // recursive
 
-// Lower a codec argument (string literal / named local / nested codec) to $w0 = ptr.
+// Lower a codec argument (string literal / int literal / named local / nested codec) to
+// $w0. Strings/hex-strings become pointers; integer literals become immediates (e.g. the
+// KDF length / iteration count). The hosted emitter marshals $w0 into the ABI arg register
+// regardless of whether it is a pointer or an integer.
 static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
     if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
         char* s = strip_quotes(p->current_token.lexeme);
         codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, s));
         free(s);
+        fe_advance(p);
+    } else if (p->current_token.type == TOKEN_LIT_INT) {
+        codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
@@ -352,12 +443,20 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
     int id = codec_id_for(p->current_token.lexeme);      // current = "base64.encode" etc.
     if (id < 0) id = 0;
+    int arity = runtime_arity(id);
     fe_advance(p);                                       // consume the dotted identifier
     if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
-    lower_codec_value(b, p, ctx);                        // arg ptr -> $w0
+    // Lower each arg to $w0; stage args 0..n-2 into $a<i> via OP_SETARG, leave the last
+    // in $w0. emit_native_hosted marshals staging slots + $w0 into the ABI arg registers.
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
-    codegen_li_emit_call_runtime(b, id);                 // $w0 = codec($w0)
-    b->uses_codec = 1;
+    codegen_li_emit_call_runtime(b, id);                 // $w0 = rt(args); sets uses_codec/uses_hash by id
 }
 
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners

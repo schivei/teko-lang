@@ -17,6 +17,43 @@ FetchContent_MakeAvailable(unity)
 #    Listed explicitly on purpose: GLOB_RECURSE does not re-trigger CMake when files
 #    are added/removed, which causes stale builds. When you add a new .c file under
 #    src/, add it to this list.
+
+# Native cryptography (Phase 13) — embedded runtime primitives, the single source of
+# truth. Shared between teko_core (compiler + KAT suite) and teko_rt (the archive linked
+# into produced native binaries via the hosted runner). When you add a crypto .c, add it
+# here once.
+set(TEKO_CRYPTO_SOURCES
+        src/runtime/teko_crypto_sha2.c
+        src/runtime/teko_crypto_md5.c
+        src/runtime/teko_crypto_sha1.c
+        src/runtime/teko_crypto_sha512.c
+        src/runtime/teko_crypto_hmac.c
+        src/runtime/teko_crypto_sha3.c
+        src/runtime/teko_crypto_blake3.c
+        src/runtime/teko_crypto_random.c
+        src/runtime/teko_crypto_hkdf.c
+        src/runtime/teko_crypto_pbkdf2.c
+        src/runtime/teko_crypto_chacha20.c
+        src/runtime/teko_crypto_poly1305.c
+        src/runtime/teko_crypto_chachapoly.c
+        src/runtime/teko_crypto_aes.c
+        src/runtime/teko_crypto_aes_modes.c
+        src/runtime/teko_crypto_aes_gcm.c
+        src/runtime/teko_crypto_scrypt.c
+        src/runtime/teko_crypto_blake2b.c
+        src/runtime/teko_crypto_argon2.c
+        src/runtime/teko_crypto_fe25519.c
+        src/runtime/teko_crypto_x25519.c
+        src/runtime/teko_crypto_ed25519.c
+        src/runtime/teko_uuid.c
+        src/runtime/teko_crypto_bn.c
+        src/runtime/teko_crypto_ec.c
+        src/runtime/teko_crypto_ecc.c
+        src/runtime/teko_crypto_p256.c
+        src/runtime/teko_crypto_p384.c
+        src/runtime/teko_crypto_rsa.c
+)
+
 set(CORE_SOURCES
         # Frontend: lexer + parser modules
         src/lexer.c
@@ -55,6 +92,8 @@ set(CORE_SOURCES
         src/runtime/teko_channel.c
         src/runtime/teko_mem_sys.c
         src/runtime/teko_thread.c
+        # Native cryptography (Phase 13) — embedded runtime primitives (shared list)
+        ${TEKO_CRYPTO_SOURCES}
         # Tooling: target detection, SDK, LSP, project manager
         src/teko_target.c
         src/teko_sdk.c
@@ -66,6 +105,8 @@ set(CORE_SOURCES
         # Shared per-family emitter cores (de-duplicated)
         src/codegen/emit_x86_64_sysv_common.c
         src/codegen/emit_arm64_gas_common.c
+        # Phase 13 native runner: libc-hosted, assemble-able host-arch emitter
+        src/codegen/emit_native_hosted.c
         # Native static linker (tld): object/executable format writers
         src/codegen/tld_elf.c
         src/codegen/tld_elf_arch.c
@@ -104,6 +145,17 @@ target_include_directories(teko_core PRIVATE src)
 add_executable(teko src/main.c)
 target_link_libraries(teko PRIVATE teko_core)
 target_include_directories(teko PRIVATE src)
+
+# 2b. TARGET: teko_rt — the native runtime archive linked into produced executables.
+#     A `teko build --target=<native>` binary links against libteko_rt.a; it carries
+#     the surface ABI shims (teko_rt_emit, and the crypto wrappers added in Sub-phase B)
+#     over the portable C crypto runtime (the single source of truth). Self-contained so
+#     produced binaries need nothing else.
+add_library(teko_rt STATIC runtime/native/teko_rt.c ${TEKO_CRYPTO_SOURCES})
+target_include_directories(teko_rt PRIVATE runtime/native src/runtime src)
+if (WIN32)
+    target_link_libraries(teko_rt PRIVATE bcrypt) # CSPRNG: BCryptGenRandom
+endif()
 
 # 3. TARGET 2: The Isolated Test Suite (Test Entry Point).
 #    Also listed explicitly. When you add a new test .c file, add it here.
@@ -156,7 +208,40 @@ set(TEST_SOURCES
         tests/runtime/test_runtime_channel.c
         tests/runtime/test_runtime_mem.c
         tests/runtime/test_runtime_thread.c
+        tests/runtime/test_crypto_sha2.c
+        tests/runtime/test_crypto_md5.c
+        tests/runtime/test_crypto_sha1.c
+        tests/runtime/test_crypto_sha512.c
+        tests/runtime/test_crypto_hmac.c
+        tests/runtime/test_crypto_sha3.c
+        tests/runtime/test_crypto_blake3.c
+        tests/runtime/test_crypto_random.c
+        tests/runtime/test_crypto_hkdf.c
+        tests/runtime/test_crypto_pbkdf2.c
+        tests/runtime/test_crypto_chacha20.c
+        tests/runtime/test_crypto_poly1305.c
+        tests/runtime/test_crypto_chachapoly.c
+        tests/runtime/test_crypto_aes.c
+        tests/runtime/test_crypto_aes_modes.c
+        tests/runtime/test_crypto_aes_gcm.c
+        tests/runtime/test_crypto_scrypt.c
+        tests/runtime/test_crypto_blake2b.c
+        tests/runtime/test_crypto_argon2.c
+        tests/runtime/test_crypto_x25519.c
+        tests/runtime/test_crypto_ed25519.c
+        tests/runtime/test_uuid.c
+        tests/runtime/test_crypto_bn.c
+        tests/runtime/test_crypto_p256.c
+        tests/runtime/test_crypto_p384.c
+        tests/runtime/test_crypto_rsa.c
 )
 add_executable(teko_tests ${TEST_SOURCES})
 target_link_libraries(teko_tests PRIVATE teko_core unity)
 target_include_directories(teko_tests PRIVATE src)
+
+# Phase 13.3a: the native CSPRNG uses BCryptGenRandom on Windows (bcrypt.lib). Other
+# platforms route to arc4random_buf / getrandom / /dev/urandom (no extra link needed).
+if (WIN32)
+    target_link_libraries(teko PRIVATE bcrypt)
+    target_link_libraries(teko_tests PRIVATE bcrypt)
+endif()

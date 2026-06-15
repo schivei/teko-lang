@@ -453,6 +453,146 @@ void test_frontend_interop_base_encoding(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 13.1: hash.sha256(x) lowers like a codec — OP_CALL_RUNTIME id 4 — and the
+// bridge emits the in-module SHA-256 runtime + the shared common helpers, gated on
+// buffer->uses_hash (not uses_codec, so codec-free programs stay lean).
+void test_frontend_interop_hash_sha256(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(hash.sha256(\"abc\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Hash flag set; codec flag untouched (no base64/hex used here).
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_hash);
+    TEST_ASSERT_EQUAL_INT(0, buffer->uses_codec);
+
+    int n_runtime = 0, saw_sha256 = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            n_runtime++;
+            int id = (int)buffer->code[i + 1]; // 4-byte LE arg; low byte is the id
+            if (id == 4) saw_sha256 = 1;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_runtime);
+    TEST_ASSERT_TRUE(saw_sha256);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_hash.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_sha256_hex (export \"teko_sha256_hex\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sha256_hex"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_strlen"));   // shared common runtime
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_hexc"));     // shared common runtime
+    TEST_ASSERT_NULL(strstr(out, "$teko_base64_encode"));      // codec runtime omitted
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 13 (legacy): hash.md5 / hash.sha1 lower to OP_CALL_RUNTIME ids 6 / 7 and the bridge
+// emits the in-module MD5 + SHA-1 WAT runtimes.
+void test_frontend_interop_hash_legacy(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(hash.md5(\"abc\"));\n"
+        "emit(hash.sha1(\"abc\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_hash);
+
+    int saw_md5 = 0, saw_sha1 = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            int id = (int)buffer->code[i + 1];
+            if (id == 6) saw_md5 = 1;
+            if (id == 7) saw_sha1 = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(saw_md5);
+    TEST_ASSERT_TRUE(saw_sha1);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_hash_legacy.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(131072);
+    memset(out, 0, 131072);
+    size_t n = fread(out, 1, 131071, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_md5_hex (export \"teko_md5_hex\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_sha1_hex (export \"teko_sha1_hex\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_md5_hex"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sha1_hex"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 13: uuid.v3 / uuid.v5 lower to OP_CALL_RUNTIME ids 8 / 9 and the bridge emits the
+// in-module UUID runtime (built on the MD5/SHA-1 raw cores + the fmt helper).
+void test_frontend_interop_uuid(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(uuid.v5(\"python.org\"));\n"
+        "emit(uuid.v3(\"python.org\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_hash);
+
+    int saw_v3 = 0, saw_v5 = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            int id = (int)buffer->code[i + 1];
+            if (id == 8) saw_v3 = 1;
+            if (id == 9) saw_v5 = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(saw_v3);
+    TEST_ASSERT_TRUE(saw_v5);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_uuid.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(262144);
+    memset(out, 0, 262144);
+    size_t n = fread(out, 1, 262143, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_uuid_v5 (export \"teko_uuid_v5\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_uuid_v3 (export \"teko_uuid_v3\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_uuid_fmt"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_sha1_raw"));   // raw cores feed UUID
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_md5_raw"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 11 (Browser FFI frontend FE-A): import table dedup + interop emit helpers.
 // Models the IL a parser would emit for `log("hi")` where
 // `extern fn log(msg) from "env" as "log"`: SCONST &"hi" -> CALL_IMPORT #0 -> HALT.

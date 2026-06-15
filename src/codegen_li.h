@@ -113,6 +113,24 @@ typedef struct {
     // Phase 12 (P12-G): 1 if the program calls a base64/hex codec, so the backend emits
     // the codec runtime functions (otherwise omitted, keeping lean modules lean).
     int uses_codec;
+    // Phase 13 (13.1): 1 if the program calls a hash primitive (hash.sha256/.sha512), so
+    // the backend emits the in-module SHA runtime (otherwise omitted).
+    int uses_hash;
+    // Phase 13 (Sub-phase C): 1 if the program calls `random.bytes` (id 41), so the WASM
+    // backend declares the host entropy import (env.teko_random) + the in-module CSPRNG
+    // hex wrapper. Native targets ignore this (they link the C CSPRNG via teko_rt).
+    int uses_random;
+    // Phase 13 (Sub-phase C): 1 if the program calls `uuid.v4`/`uuid.v7` (ids 42/43), so the
+    // WASM backend declares the host entropy import (env.teko_random) + time import
+    // (env.teko_now) and the self-contained v4/v7 runtime. Native targets ignore this.
+    int uses_uuid_rng;
+    // Phase 13 (Sub-phase C, "big step"): 1 if the program calls a crypto primitive whose
+    // WASM lowering is the compiled C runtime reactor (ids 5,10-40 — every hash/HMAC/AEAD/
+    // KDF/signature beyond the in-module sha256/md5/sha1/uuid set). The WASM backend then
+    // imports the reactor's teko_rt_* entry points from the "crypto" module and shares one
+    // linear memory with it (imported from env). Native targets ignore this (they link the
+    // same C runtime directly via libteko_rt.a).
+    int uses_crypto_ext;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter

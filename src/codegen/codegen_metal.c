@@ -1,4 +1,5 @@
 #include "codegen_metal.h"
+#include "emit_native_hosted.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -24,6 +25,11 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_import_count = 0;
     ctx->wasm_local_count = 0;
     ctx->wasm_emit_codecs = 0;
+    ctx->wasm_emit_hash = 0;
+    ctx->wasm_emit_random = 0;
+    ctx->wasm_emit_uuid_rng = 0;
+    ctx->wasm_emit_crypto_ext = 0;
+    ctx->hosted = 0;
     return ctx;
 }
 
@@ -49,9 +55,41 @@ void teko_metal_set_emit_codecs(MetalContext* ctx, int enabled) {
     ctx->wasm_emit_codecs = enabled ? 1 : 0;
 }
 
+void teko_metal_set_emit_hash(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_hash = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_random(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_random = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_uuid_rng(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_uuid_rng = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_crypto_ext = enabled ? 1 : 0;
+}
+
+void teko_metal_set_hosted(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->hosted = enabled ? 1 : 0;
+}
+
 static void teko_metal_route_instruction(MetalContext* ctx, OpCode op, int32_t arg) {
     TekoOS os = ctx->target.os;
     TekoArch arch = ctx->target.arch;
+
+    // Phase 13 native runner: the libc-hosted, assemble-able path for the host arches.
+    if (ctx->hosted &&
+        (arch == ARCH_X86_64 || arch == ARCH_ARM64 || arch == ARCH_APPLE_SILICON)) {
+        emit_native_hosted(ctx, op, arg);
+        return;
+    }
 
     if (os == OS_MACOS_DARWIN) {
         if (arch == ARCH_APPLE_SILICON || arch == ARCH_ARM64) {
