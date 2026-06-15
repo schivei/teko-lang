@@ -12,6 +12,8 @@
 #include "teko_crypto_x25519.h"
 #include "teko_crypto_hkdf.h"
 #include "teko_crypto_pbkdf2.h"
+#include "teko_crypto_p256.h"
+#include "teko_crypto_p384.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -339,4 +341,60 @@ char* teko_rt_pbkdf2_sha256(const char* pass_hex, const char* salt_hex,
     }
     free(pass); free(salt);
     return out;
+}
+
+// --- ECDSA over NIST P-256 / P-384 -----------------------------------------------
+// Boolean surface result: a fresh "1"/"0" string.
+static char* teko_rt_bool(int ok) {
+    char* s = (char*)malloc(2);
+    if (s) { s[0] = ok ? '1' : '0'; s[1] = '\0'; }
+    return s;
+}
+
+char* teko_rt_ecdsa_p256_sign(const char* priv_hex, const char* hash_hex) {
+    size_t pl = 0, hl = 0;
+    uint8_t* priv = teko_rt_from_hex(priv_hex, &pl);
+    uint8_t* hash = teko_rt_from_hex(hash_hex, &hl);
+    char* out = NULL;
+    if (priv && hash && pl == 32) {
+        uint8_t sig[64];
+        if (teko_p256_ecdsa_sign(priv, hash, hl, sig) == 0) out = teko_rt_to_hex(sig, 64);
+    }
+    free(priv); free(hash);
+    return out;
+}
+
+char* teko_rt_ecdsa_p256_verify(const char* pub_hex, const char* hash_hex, const char* sig_hex) {
+    size_t pl = 0, hl = 0, sl = 0;
+    uint8_t* pub = teko_rt_from_hex(pub_hex, &pl);
+    uint8_t* hash = teko_rt_from_hex(hash_hex, &hl);
+    uint8_t* sig = teko_rt_from_hex(sig_hex, &sl);
+    int ok = (pub && hash && sig && pl == 64 && sl == 64 &&
+              teko_p256_ecdsa_verify(pub, hash, hl, sig) == 0);
+    free(pub); free(hash); free(sig);
+    return teko_rt_bool(ok);
+}
+
+char* teko_rt_ecdsa_p384_sign(const char* priv_hex, const char* hash_hex) {
+    size_t pl = 0, hl = 0;
+    uint8_t* priv = teko_rt_from_hex(priv_hex, &pl);
+    uint8_t* hash = teko_rt_from_hex(hash_hex, &hl);
+    char* out = NULL;
+    if (priv && hash && pl == 48) {
+        uint8_t sig[96];
+        if (teko_p384_ecdsa_sign(priv, hash, hl, sig) == 0) out = teko_rt_to_hex(sig, 96);
+    }
+    free(priv); free(hash);
+    return out;
+}
+
+char* teko_rt_ecdsa_p384_verify(const char* pub_hex, const char* hash_hex, const char* sig_hex) {
+    size_t pl = 0, hl = 0, sl = 0;
+    uint8_t* pub = teko_rt_from_hex(pub_hex, &pl);
+    uint8_t* hash = teko_rt_from_hex(hash_hex, &hl);
+    uint8_t* sig = teko_rt_from_hex(sig_hex, &sl);
+    int ok = (pub && hash && sig && pl == 96 && sl == 96 &&
+              teko_p384_ecdsa_verify(pub, hash, hl, sig) == 0);
+    free(pub); free(hash); free(sig);
+    return teko_rt_bool(ok);
 }

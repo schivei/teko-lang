@@ -36,6 +36,10 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 26: sym = "teko_rt_x25519";         arity = 2; break; // (scalar, u)
         case 27: sym = "teko_rt_hkdf_sha256";    arity = 4; break; // (ikm, salt, info, len)
         case 28: sym = "teko_rt_pbkdf2_sha256";  arity = 4; break; // (pass, salt, iters, len)
+        case 29: sym = "teko_rt_ecdsa_p256_sign";   arity = 2; break; // (priv, hash)
+        case 30: sym = "teko_rt_ecdsa_p256_verify"; arity = 3; break; // (pub, hash, sig)
+        case 31: sym = "teko_rt_ecdsa_p384_sign";   arity = 2; break;
+        case 32: sym = "teko_rt_ecdsa_p384_verify"; arity = 3; break;
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;

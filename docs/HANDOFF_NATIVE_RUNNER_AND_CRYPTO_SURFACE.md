@@ -70,8 +70,17 @@
   pointer. Output capped at 1024 bytes. Proven by `runtime/native/samples/kdf.tks` against RFC
   5869 HKDF Test Case 1 and the suite's PBKDF2-HMAC-SHA256 vector, on macOS arm64 + Linux
   x86_64/arm64. (sha512 KDF variants are an easy follow-up: ids + wrappers, same pattern.)
-- **Sub-phase B — REMAINING:** SHAKE (msg,len), ECDSA P-256/384 sign/verify, RSA-PSS
-  sign/verify, RSA-OAEP encrypt/decrypt, RNG (`random.bytes`).
+- **Sub-phase B, step 8 — ECDSA P-256/P-384 sign/verify native surface: DONE.**
+  `crypto.ecdsa_p256_sign/verify` (ids 29/30) and `crypto.ecdsa_p384_sign/verify` (31/32).
+  sign(privHex, hashHex) → r‖s hex (RFC 6979 deterministic); verify(pubHex, hashHex, sigHex) →
+  `"1"`/`"0"`. The hash is the message digest (SHA-256 / SHA-384). Proven by
+  `runtime/native/samples/sign_ecdsa.tks` against RFC 6979 A.2.5 (P-256) and A.2.6 (P-384) for
+  "sample": deterministic signature reproduced exactly, valid→1, tampered→0, on macOS arm64 +
+  Linux x86_64/arm64.
+- **Sub-phase B — REMAINING:** SHAKE (msg,len), RSA-PSS sign/verify, RSA-OAEP encrypt/decrypt,
+  RNG (`random.bytes`). RSA needs the key encoding the `teko_crypto_rsa` KATs use (check
+  `teko_crypto_rsa.h` + `tests/runtime/test_crypto_rsa.c` for the modulus/exponent + message
+  shapes); RNG output is non-deterministic so its proof asserts length/format, not an exact KAT.
   Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol` entry + `teko_rt_*`
   wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`. The established
   pattern (see AEAD/HMAC/Ed25519) scales directly; 8 staging slots cover all current arities.

@@ -93,4 +93,16 @@ check kdf.tks "$(cat <<'EXP'
 EXP
 )"
 
+# ECDSA P-256 (RFC 6979 A.2.5) and P-384 (A.2.6), message "sample": deterministic sig,
+# valid verify (1), tampered verify (0).
+check sign_ecdsa.tks "$(cat <<'EXP'
+efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8
+1
+0
+94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8
+1
+0
+EXP
+)"
+
 echo "All native runner proofs passed."

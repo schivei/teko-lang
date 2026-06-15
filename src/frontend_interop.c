@@ -353,6 +353,12 @@ static int codec_id_for(const char* lex) {
     // hkdf_sha256(ikmHex, saltHex, infoHex, len); pbkdf2_sha256(passHex, saltHex, iters, len).
     if (strcmp(lex, "kdf.hkdf_sha256") == 0) return 27;
     if (strcmp(lex, "kdf.pbkdf2_sha256") == 0) return 28;
+    // ECDSA over the NIST P-curves (RFC 6979 deterministic). sign(privHex, hashHex) -> r‖s hex;
+    // verify(pubHex, hashHex, sigHex) -> "1"/"0". The hash is the message digest. ids 29-32.
+    if (strcmp(lex, "crypto.ecdsa_p256_sign") == 0) return 29;
+    if (strcmp(lex, "crypto.ecdsa_p256_verify") == 0) return 30;
+    if (strcmp(lex, "crypto.ecdsa_p384_sign") == 0) return 31;
+    if (strcmp(lex, "crypto.ecdsa_p384_verify") == 0) return 32;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;
@@ -380,6 +386,8 @@ static int runtime_arity(int id) {
         case 26: return 2; // x25519(scalar, u)
         case 27: return 4; // hkdf_sha256(ikm, salt, info, len)
         case 28: return 4; // pbkdf2_sha256(pass, salt, iters, len)
+        case 29: case 31: return 2; // ecdsa_p256/p384_sign(priv, hash)
+        case 30: case 32: return 3; // ecdsa_p256/p384_verify(pub, hash, sig)
         default: return 1;
     }
 }

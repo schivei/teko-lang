@@ -76,4 +76,13 @@ char* teko_rt_hkdf_sha256(const char* ikm_hex, const char* salt_hex,
 char* teko_rt_pbkdf2_sha256(const char* pass_hex, const char* salt_hex,
                             int iterations, int dk_len);
 
+// ECDSA over NIST P-256 / P-384 (ids 29-32, RFC 6979 deterministic). sign takes the private
+// scalar (32/48 bytes) + a message-digest hash, returns the r‖s signature (64/96 bytes) as
+// hex. verify takes the uncompressed public key (X‖Y, 64/96 bytes), the hash, and the
+// signature; returns "1" if valid, "0" otherwise.
+char* teko_rt_ecdsa_p256_sign(const char* priv_hex, const char* hash_hex);
+char* teko_rt_ecdsa_p256_verify(const char* pub_hex, const char* hash_hex, const char* sig_hex);
+char* teko_rt_ecdsa_p384_sign(const char* priv_hex, const char* hash_hex);
+char* teko_rt_ecdsa_p384_verify(const char* pub_hex, const char* hash_hex, const char* sig_hex);
+
 #endif // TEKO_RT_H
