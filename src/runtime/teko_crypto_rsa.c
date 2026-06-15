@@ -2,6 +2,7 @@
 
 #include "teko_crypto_rsa.h"
 #include "teko_crypto_bn.h"
+#include "teko_crypto_random.h"
 
 #include <string.h>
 
@@ -77,4 +78,64 @@ int teko_rsa_pkcs1v15_verify(const uint8_t* n, size_t nlen, const uint8_t* e, si
     // got = sig^e mod n; valid iff got == EM.
     if (teko_bn_modexp(n, nlen, sig, siglen, e, elen, got) != 0) return -1;
     return (memcmp(got, em, nlen) == 0) ? 0 : -1;
+}
+
+// ----------------------------- PKCS#1 v1.5 encryption -----------------------------------
+
+int teko_rsa_pkcs1v15_encrypt_seeded(const uint8_t* n, size_t nlen, const uint8_t* e,
+                                     size_t elen, const uint8_t* msg, size_t msg_len,
+                                     const uint8_t* ps, size_t ps_len, uint8_t* ct) {
+    uint8_t em[RSA_MAX_BYTES];
+    size_t i;
+    if (!n || !e || !msg || !ps || !ct) return -1;
+    if (nlen == 0u || nlen > RSA_MAX_BYTES) return -1;
+    if (msg_len + 11u > nlen) return -1;                 // mLen <= k - 11
+    if (ps_len != nlen - msg_len - 3u) return -1;
+    for (i = 0; i < ps_len; ++i) if (ps[i] == 0x00) return -1; // PS must be nonzero
+
+    em[0] = 0x00;
+    em[1] = 0x02;
+    memcpy(em + 2, ps, ps_len);
+    em[2 + ps_len] = 0x00;
+    memcpy(em + 3 + ps_len, msg, msg_len);
+    return teko_bn_modexp(n, nlen, em, nlen, e, elen, ct);
+}
+
+int teko_rsa_pkcs1v15_encrypt(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                              const uint8_t* msg, size_t msg_len, uint8_t* ct) {
+    uint8_t ps[RSA_MAX_BYTES];
+    size_t ps_len, i;
+    if (nlen == 0u || nlen > RSA_MAX_BYTES) return -1;
+    if (msg_len + 11u > nlen) return -1;
+    ps_len = nlen - msg_len - 3u;
+    // Fill PS with nonzero random bytes (resample any zero byte).
+    for (i = 0; i < ps_len; ++i) {
+        uint8_t b = 0x00;
+        do {
+            if (teko_csprng_bytes(&b, 1u) != 0) return -1;
+        } while (b == 0x00);
+        ps[i] = b;
+    }
+    return teko_rsa_pkcs1v15_encrypt_seeded(n, nlen, e, elen, msg, msg_len, ps, ps_len, ct);
+}
+
+int teko_rsa_pkcs1v15_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                              const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len) {
+    uint8_t em[RSA_MAX_BYTES];
+    size_t i, sep;
+    if (!n || !d || !ct || !out || !out_len) return -1;
+    if (nlen == 0u || nlen > RSA_MAX_BYTES || ct_len != nlen) return -1;
+    if (teko_bn_modexp(n, nlen, ct, ct_len, d, dlen, em) != 0) return -1;
+
+    // EM = 00 || 02 || PS(>=8 nonzero) || 00 || M.
+    if (em[0] != 0x00 || em[1] != 0x02) return -1;
+    sep = 0u;
+    for (i = 2u; i < nlen; ++i) {
+        if (em[i] == 0x00) { sep = i; break; }
+    }
+    if (sep == 0u) return -1;          // no separator
+    if (sep < 10u) return -1;          // PS shorter than 8 bytes
+    *out_len = nlen - sep - 1u;
+    memcpy(out, em + sep + 1u, *out_len);
+    return 0;
 }

@@ -72,3 +72,34 @@ void test_teko_rsa_pkcs1v15_sha256_kat(void) {
     TEST_ASSERT_EQUAL_INT(-1, teko_rsa_pkcs1v15_verify(n, nlen, e, elen, TEKO_RSA_SHA256,
                                                        hash, 32u, sig, 128u));
 }
+
+// PKCS#1 v1.5 encryption: seeded encrypt -> decrypt round-trip (deterministic), plus the
+// CSPRNG-padded public path. Uses the same 1024-bit FIPS key (n,e,d).
+void test_teko_rsa_pkcs1v15_encrypt_roundtrip(void) {
+    uint8_t n[128], e[8], d[128];
+    uint8_t ps[128], ct[128], rec[128];
+    size_t nlen, elen, dlen, rec_len, i;
+    const uint8_t msg[11] = { 'h','e','l','l','o',' ','r','s','a','!','!' };
+    size_t ps_len;
+
+    nlen = hexb(RSA1024_N, n);
+    elen = hexb(RSA1024_E, e);
+    dlen = hexb(RSA1024_D, d);
+
+    // Seeded (deterministic) path: PS = 0x01..0x01 (all nonzero).
+    ps_len = nlen - sizeof(msg) - 3u;
+    for (i = 0; i < ps_len; ++i) ps[i] = 0x01;
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pkcs1v15_encrypt_seeded(n, nlen, e, elen, msg,
+                                                              sizeof(msg), ps, ps_len, ct));
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pkcs1v15_decrypt(n, nlen, d, dlen, ct, nlen,
+                                                       rec, &rec_len));
+    TEST_ASSERT_EQUAL_UINT(sizeof(msg), rec_len);
+    TEST_ASSERT_EQUAL_MEMORY(msg, rec, sizeof(msg));
+
+    // CSPRNG-padded public path round-trips too (ct differs run to run; plaintext recovers).
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pkcs1v15_encrypt(n, nlen, e, elen, msg, sizeof(msg), ct));
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pkcs1v15_decrypt(n, nlen, d, dlen, ct, nlen,
+                                                       rec, &rec_len));
+    TEST_ASSERT_EQUAL_UINT(sizeof(msg), rec_len);
+    TEST_ASSERT_EQUAL_MEMORY(msg, rec, sizeof(msg));
+}

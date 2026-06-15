@@ -37,4 +37,23 @@ int teko_rsa_pkcs1v15_verify(const uint8_t* n, size_t nlen, const uint8_t* e, si
                              TekoRsaHash h, const uint8_t* hash, size_t hash_len,
                              const uint8_t* sig, size_t siglen);
 
+// --- PKCS#1 v1.5 encryption (EME-PKCS1-v1_5) -------------------------------------------
+// LEGACY padding (Bleichenbacher padding-oracle prone); provided for interop. Prefer OAEP.
+
+// ct = (00 || 02 || PS || 00 || M)^e mod n, PS = nonzero random padding from the CSPRNG.
+// ct must hold nlen bytes; requires msg_len <= nlen - 11. Returns 0/-1.
+int teko_rsa_pkcs1v15_encrypt(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                              const uint8_t* msg, size_t msg_len, uint8_t* ct);
+
+// Same, but PS is supplied by the caller (ps_len must equal nlen - msg_len - 3, all nonzero).
+// Used for deterministic KAT/round-trip testing. Returns 0/-1.
+int teko_rsa_pkcs1v15_encrypt_seeded(const uint8_t* n, size_t nlen, const uint8_t* e,
+                                     size_t elen, const uint8_t* msg, size_t msg_len,
+                                     const uint8_t* ps, size_t ps_len, uint8_t* ct);
+
+// Decrypt EME-PKCS1-v1_5: out receives the recovered message (caller buffer >= nlen), *out_len
+// is set to the message length. Returns 0 on valid padding, -1 otherwise.
+int teko_rsa_pkcs1v15_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                              const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len);
+
 #endif // TEKO_CRYPTO_RSA_H
