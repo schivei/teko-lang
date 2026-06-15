@@ -84,6 +84,7 @@ void teko_metal_set_local_count(MetalContext* ctx, int count);
 // Phase 12 (P12-G): request the base64/hex codec runtime functions be emitted.
 void teko_metal_set_emit_codecs(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_hash(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_random(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

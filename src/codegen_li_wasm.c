@@ -36,6 +36,8 @@ int codegen_li_emit_wasm(const BytecodeBuffer* buffer, const char* wat_path,
     teko_metal_set_emit_codecs(ctx, buffer->uses_codec);
     // Phase 13 (13.1): emit the in-module SHA hash runtime only if the program uses it.
     teko_metal_set_emit_hash(ctx, buffer->uses_hash);
+    // Phase 13 (Sub-phase C): declare the host entropy import + CSPRNG wrapper only if used.
+    teko_metal_set_emit_random(ctx, buffer->uses_random);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
 

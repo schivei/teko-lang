@@ -822,6 +822,37 @@ static void emit_wasm_uuid_runtime(FILE* f) {
     fprintf(f, "    (call $teko_uuid_fmt (local.get $dig)))\n");
 }
 
+// Phase 13 (Sub-phase C): CSPRNG on the WASM surface via a host entropy import.
+// frontend lowers `random.bytes(n)` -> OP_CALL_RUNTIME id 41; the accumulator holds n.
+// We can't run the constant-time C CSPRNG in-module yet (that is the deferred "compile the
+// C crypto runtime -> wasm32" step), so entropy comes from the embedder through the
+// `env.teko_random(ptr, len)` import (Node: crypto.randomFillSync; browser: crypto
+// .getRandomValues) — the SAME host-import shape used for dom.*. We allocate n bytes, ask the
+// host to fill them, then lowercase-hex-encode in-module (no dependency on the codec runtime,
+// which a random-only program does not emit). Returns a NUL-terminated hex string pointer.
+static void emit_wasm_random_runtime(FILE* f) {
+    fprintf(f, "  (func $teko_random_hex (param $n i32) (result i32)\n");
+    fprintf(f, "    (local $buf i32) (local $out i32) (local $i i32) (local $b i32) (local $h i32)\n");
+    fprintf(f, "    (if (i32.le_s (local.get $n) (i32.const 0)) (then (return (i32.const 0))))\n");
+    fprintf(f, "    (local.set $buf (call $teko_alloc (local.get $n)))\n");
+    fprintf(f, "    (call $teko_random (local.get $buf) (local.get $n))\n");
+    fprintf(f, "    (local.set $out (call $teko_alloc (i32.add (i32.mul (local.get $n) (i32.const 2)) (i32.const 1))))\n");
+    fprintf(f, "    (local.set $i (i32.const 0))\n");
+    fprintf(f, "    (block $done (loop $loop\n");
+    fprintf(f, "      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n");
+    fprintf(f, "      (local.set $b (i32.load8_u (i32.add (local.get $buf) (local.get $i))))\n");
+    fprintf(f, "      (local.set $h (i32.shr_u (local.get $b) (i32.const 4)))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 2)))\n");
+    fprintf(f, "        (i32.add (local.get $h) (select (i32.const 48) (i32.const 87) (i32.lt_u (local.get $h) (i32.const 10)))))\n");
+    fprintf(f, "      (local.set $h (i32.and (local.get $b) (i32.const 15)))\n");
+    fprintf(f, "      (i32.store8 (i32.add (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 2))) (i32.const 1))\n");
+    fprintf(f, "        (i32.add (local.get $h) (select (i32.const 48) (i32.const 87) (i32.lt_u (local.get $h) (i32.const 10)))))\n");
+    fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n");
+    fprintf(f, "      (br $loop)))\n");
+    fprintf(f, "    (i32.store8 (i32.add (local.get $out) (i32.mul (local.get $n) (i32.const 2))) (i32.const 0))\n");
+    fprintf(f, "    (local.get $out))\n");
+}
+
 // The non-suspending half of a channel receive: read buf[head] -> $w0, advance
 // head = (head+1) % cap. Channel base is in $cp.
 static void emit_wasm_chan_read(FILE* f) {
@@ -1011,6 +1042,9 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "(module\n");
             fprintf(f, "  ;; --- Target: WebAssembly Text Format (cooperative concurrency, Phase 10.3) ---\n");
             emit_wasm_imports(ctx);            // Phase 11 FFI host imports — must precede definitions
+            if (ctx->wasm_emit_random) {       // Phase 13 Sub-phase C: host entropy import (must precede memory)
+                fprintf(f, "  (import \"env\" \"teko_random\" (func $teko_random (param i32 i32)))\n");
+            }
             fprintf(f, "  (memory 1)\n");
             fprintf(f, "  (export \"memory\" (memory 0))\n");
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
@@ -1024,6 +1058,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 emit_wasm_sha1_runtime(f);    // Phase 13 legacy SHA-1
                 emit_wasm_uuid_runtime(f);    // Phase 13 UUID v3/v5 (name-based)
             }
+            if (ctx->wasm_emit_random) emit_wasm_random_runtime(f); // Phase 13 Sub-phase C CSPRNG
             fprintf(f, "  (func $main (result i32)\n");
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).
@@ -1079,6 +1114,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             else if (arg == 7) fn = "teko_sha1_hex";   // Phase 13 legacy
             else if (arg == 8) fn = "teko_uuid_v3";    // Phase 13 UUID (name-based)
             else if (arg == 9) fn = "teko_uuid_v5";
+            else if (arg == 41) fn = "teko_random_hex"; // Phase 13 Sub-phase C CSPRNG (host entropy)
             if (fn) {
                 fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             } else {

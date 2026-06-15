@@ -96,11 +96,20 @@
   X25519 ECDH, KDF (HKDF/PBKDF2), CSPRNG, UUID — each lowering to the single C runtime via
   `OP_CALL_RUNTIME` → `teko_rt_*`, each with an executable `.tks` KAT in `runtime/native/run-native.sh`
   (run on macOS arm64 + Linux x86_64/arm64 in `native.yml`). No dead tokens on the native surface.
-- **REMAINING — Sub-phase C (WASM substrate):** the whole native surface (runtime ids 5,10-41)
-  currently traps (`unreachable`) on the WASM target (reserved-with-target). Wire (a) host
-  entropy/time imports → `random`/`uuid.v4`/`v7` on WASM, then (b) compile the C crypto runtime
-  → wasm32 + import so WASM lowers to the SAME single implementation (and declare the `$a`
-  staging locals for multi-arg `OP_CALL_RUNTIME`). Executable proofs in the Node/Chromium harness.
+- **Sub-phase C, step 1 — WASM CSPRNG via host entropy import: DONE.** `random.bytes(n)` (id 41)
+  now lowers on the WASM target to an in-module `$teko_random_hex` wrapper that allocates n bytes
+  via `$teko_alloc`, calls a host import `env.teko_random(ptr, len)` for entropy (Node
+  `crypto.randomFillSync` / browser `crypto.getRandomValues`), and hex-encodes in-module (no codec
+  runtime dependency — gated by `uses_random` → `teko_metal_set_emit_random`). Proven by
+  `runtime/wasm/samples/random.tks` + `runtime/wasm/run-random.mjs` (the host fills a deterministic
+  counter pattern so the emitted hex is an exact KAT of the (ptr,len) ABI + in-module hex encode),
+  wired into `wasm.yml`. (The id no longer traps on WASM; the C-runtime-→-wasm32 step below will
+  give the *real* CSPRNG, but the host-import path is the correct entropy source on WASM regardless.)
+- **REMAINING — Sub-phase C (WASM substrate):** (a) host time import → `uuid.v4`/`v7` on WASM;
+  (b) the rest of the surface (hashes/HMAC/AEAD/asymmetric, ids 5,10-40) still traps
+  (`unreachable`) on WASM — compile the C crypto runtime → wasm32 + import so WASM lowers to the
+  SAME single implementation (and declare the `$a` staging locals for multi-arg `OP_CALL_RUNTIME`).
+  Executable proofs in the Node/Chromium harness.
   Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol` entry + `teko_rt_*`
   wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`. The established
   pattern (see AEAD/HMAC/Ed25519) scales directly; 8 staging slots cover all current arities.
