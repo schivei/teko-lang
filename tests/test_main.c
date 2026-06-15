@@ -14,6 +14,7 @@ void tearDown(void) { fflush(stdout); fflush(stderr); }
 
 extern void test_string_raw_interpolation_and_arity(void);
 extern void test_phase12_reserved_keywords(void);
+extern void test_phase12_literal_suffixes(void);
 extern void test_async_control_flow_and_raised_catch(void);
 extern void test_concurrency_and_channel_semantics(void);
 extern void test_cqrs_handler_with_dependency_injection(void);
@@ -129,6 +130,7 @@ int main(void) {
 
     RUN_TEST(test_string_raw_interpolation_and_arity);
     RUN_TEST(test_phase12_reserved_keywords);
+    RUN_TEST(test_phase12_literal_suffixes);
     RUN_TEST(test_async_control_flow_and_raised_catch);
     RUN_TEST(test_cqrs_handler_with_dependency_injection);
     RUN_TEST(test_ffi_extern_struct_function_and_block_parsing);

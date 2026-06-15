@@ -50,9 +50,11 @@ foundational pieces unblock a *real* expression frontend and belong early in Pha
   spilling intermediates to named temporaries.
 
 ## Increment plan (status filled in as we go)
-1. **P12-A** keyword tokens + sentinel fix — *bounded, safe.*
-2. **P12-B** native literal suffixes (time/data/bandwidth) — *bounded, safe.*
-3. **P12-C** AST node scaffolding for the new surfaces — *medium.*
+1. **P12-A** keyword tokens + sentinel fix — ✅ done (`TOKEN_*` + `keywords[]`; `required` fixed).
+2. **P12-B** native literal suffixes (time/data/bandwidth) — ✅ done (`Token.literal_unit`,
+   longest-match in `lex_number`, suffix excluded from the lexeme, non-units rewound).
+3. **P12-C** AST node scaffolding for the new surfaces — *medium; extend the existing split
+   AST (no rewrite). Reported before landing.*
 4. **P12-D..** the carried-over frontend gaps (locals → expressions → nested handles) —
    *foundational, larger; sequenced after the bounded parts and reported before landing.*
 

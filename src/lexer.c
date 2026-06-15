@@ -153,6 +153,17 @@ static Token lex_char(Lexer* lexer) {
     return token;
 }
 
+// Phase 12 — native literal unit suffixes. The whole trailing [a-z]+ run after a
+// number is matched as one unit (so the match is longest by construction: "ms" wins
+// over "m", "kbps" over "kb"); a run that matches no unit is NOT consumed (rewound),
+// leaving it to be lexed as a separate identifier — preserving prior behavior.
+static const struct { const char* s; LiteralUnit u; } literal_units[] = {
+    {"ms", LIT_UNIT_MS}, {"s", LIT_UNIT_S}, {"m", LIT_UNIT_M}, {"h", LIT_UNIT_H}, {"d", LIT_UNIT_D},
+    {"b", LIT_UNIT_B}, {"kb", LIT_UNIT_KB}, {"mb", LIT_UNIT_MB}, {"gb", LIT_UNIT_GB},
+    {"kbps", LIT_UNIT_KBPS}, {"mbps", LIT_UNIT_MBPS}, {"gbps", LIT_UNIT_GBPS},
+    {NULL, LIT_UNIT_NONE}
+};
+
 static Token lex_number(Lexer* lexer) {
     int start_pos = lexer->cursor;
     bool is_float = false;
@@ -165,8 +176,27 @@ static Token lex_number(Lexer* lexer) {
         while (isdigit(peek(lexer)) || peek(lexer) == '_') advance(lexer);
     }
 
-    int length = lexer->cursor - start_pos;
-    Token token = {is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT, create_lexeme(&lexer->source[start_pos], length), lexer->line};
+    int length = lexer->cursor - start_pos; // numeric text length (excludes any suffix)
+
+    // Optional unit suffix: scan the maximal trailing alpha run and match it whole.
+    LiteralUnit unit = LIT_UNIT_NONE;
+    int suffix_start = lexer->cursor;
+    while (isalpha(peek(lexer))) advance(lexer);
+    int suffix_len = lexer->cursor - suffix_start;
+    if (suffix_len > 0) {
+        char suffix[8];
+        if (suffix_len < (int)sizeof(suffix)) {
+            memcpy(suffix, &lexer->source[suffix_start], suffix_len);
+            suffix[suffix_len] = '\0';
+            for (int i = 0; literal_units[i].s != NULL; i++) {
+                if (strcmp(suffix, literal_units[i].s) == 0) { unit = literal_units[i].u; break; }
+            }
+        }
+        if (unit == LIT_UNIT_NONE) lexer->cursor = suffix_start; // not a unit — rewind
+    }
+
+    Token token = {is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT,
+                   create_lexeme(&lexer->source[start_pos], length), lexer->line, unit};
     return token;
 }
 
@@ -186,6 +216,7 @@ static Token lex_identifier(Lexer* lexer, bool is_macro) {
     Token token;
     token.lexeme = create_lexeme(&lexer->source[start_pos], length);
     token.line = lexer->line;
+    token.literal_unit = LIT_UNIT_NONE;
 
     if (is_macro) {
         token.type = TOKEN_MACRO_IDENT;

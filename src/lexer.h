@@ -102,10 +102,24 @@ typedef enum {
 } TokenType;
 
 // Structure representing a Token
+// Phase 12 — native literal unit suffixes, captured in the lexer at zero runtime
+// cost. Time (ms/s/m/h/d), data (b/kb/mb/gb), and socket bandwidth (kbps/mbps/gbps).
+// LIT_UNIT_NONE means the literal carried no unit suffix.
+typedef enum {
+    LIT_UNIT_NONE = 0,
+    // Time
+    LIT_UNIT_MS, LIT_UNIT_S, LIT_UNIT_M, LIT_UNIT_H, LIT_UNIT_D,
+    // Data
+    LIT_UNIT_B, LIT_UNIT_KB, LIT_UNIT_MB, LIT_UNIT_GB,
+    // Bandwidth
+    LIT_UNIT_KBPS, LIT_UNIT_MBPS, LIT_UNIT_GBPS
+} LiteralUnit;
+
 typedef struct {
     TokenType type;
     char* lexeme;
     int line;
+    LiteralUnit literal_unit; // set for LIT_INT/LIT_FLOAT when a unit suffix is present
 } Token;
 
 // Lexer state

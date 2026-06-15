@@ -10,6 +10,13 @@ static TokenType tok1(const char* src) {
     return t.type;
 }
 
+// Lex the first token of `src` and return the whole token.
+static Token first(const char* src) {
+    Lexer lex;
+    lexer_init(&lex, src);
+    return lexer_next_token(&lex);
+}
+
 // Phase 12 P12-A: the reserved keyword matrix lexes to dedicated tokens, and the
 // keywords[] sentinel-ordering bug is fixed (so `required` is matched again).
 void test_phase12_reserved_keywords(void) {
@@ -70,4 +77,48 @@ void test_phase12_reserved_keywords(void) {
     TEST_ASSERT_EQUAL_INT(TOKEN_FN, tok1("fn"));
     TEST_ASSERT_EQUAL_INT(TOKEN_RETURN, tok1("return"));
     TEST_ASSERT_EQUAL_INT(TOKEN_IDENTIFIER, tok1("not_a_keyword_xyz"));
+}
+
+// Phase 12 P12-B: native literal unit suffixes, longest-match, lexeme excludes suffix.
+void test_phase12_literal_suffixes(void) {
+    Token t;
+
+    // Time
+    t = first("500ms"); TEST_ASSERT_EQUAL_INT(TOKEN_LIT_INT, t.type);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_MS, t.literal_unit);
+    TEST_ASSERT_EQUAL_STRING("500", t.lexeme);          // suffix not in lexeme
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_S, first("5s").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_M, first("2m").literal_unit);   // minutes, not "ms"
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_H, first("1h").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_D, first("7d").literal_unit);
+
+    // Data — longest-match: "kb"/"mb"/"gb" win over "b"
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_B, first("8b").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_KB, first("3kb").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_MB, first("2mb").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_GB, first("1gb").literal_unit);
+
+    // Bandwidth — longest-match: "kbps" wins over "kb"
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_KBPS, first("10kbps").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_MBPS, first("20mbps").literal_unit);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_GBPS, first("1gbps").literal_unit);
+
+    // Float carries a unit too.
+    t = first("1.5s"); TEST_ASSERT_EQUAL_INT(TOKEN_LIT_FLOAT, t.type);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_S, t.literal_unit);
+    TEST_ASSERT_EQUAL_STRING("1.5", t.lexeme);
+
+    // Bare number → no unit.
+    t = first("42"); TEST_ASSERT_EQUAL_INT(LIT_UNIT_NONE, t.literal_unit);
+
+    // A non-unit trailing run is NOT consumed: the number lexes unit-less and the
+    // run becomes a separate identifier token.
+    Lexer lex; lexer_init(&lex, "5xyz");
+    Token n = lexer_next_token(&lex);
+    TEST_ASSERT_EQUAL_INT(TOKEN_LIT_INT, n.type);
+    TEST_ASSERT_EQUAL_INT(LIT_UNIT_NONE, n.literal_unit);
+    TEST_ASSERT_EQUAL_STRING("5", n.lexeme);
+    Token id = lexer_next_token(&lex);
+    TEST_ASSERT_EQUAL_INT(TOKEN_IDENTIFIER, id.type);
+    TEST_ASSERT_EQUAL_STRING("xyz", id.lexeme);
 }
