@@ -6,6 +6,17 @@
 #include "../teko_target.h"
 #include "../codegen_li.h"
 
+// Phase 11 (Browser FFI): a host import (from `extern fn … from "ns" as "name"`).
+// Params 0..n_params-2 are staged via OP_SETARG into $a0..$a(n-2); the last param
+// comes from the accumulator $w0 (MVP-2). has_result stores the call result back
+// into $w0. The `ns` doubles as the glue group ("dom" imports get DOM marshalling).
+typedef struct {
+    const char* ns;     // import module/namespace, e.g. "env"
+    const char* name;   // imported field name, e.g. "log"
+    int n_params;       // i32 params
+    int has_result;     // 1 if the import returns an i32
+} TekoWasmImport;
+
 // Context of the contiguous bare-metal emitter
 typedef struct {
     FILE* file;
@@ -24,7 +35,52 @@ typedef struct {
     int wasm_routine_ids[64];
     int wasm_routine_yields;
     int wasm_yield_idx;
+    // Phase 11 (Browser FFI): the IL string constant pool, threaded in so the WASM
+    // emitter can lay it out as a real (data ...) segment and resolve OP_SCONST to a
+    // true byte offset (instead of a placeholder). NULL/0 when unset — the emitter
+    // then falls back to its legacy hardcoded data. Unused by the native emitters.
+    const char** wasm_strings;
+    int wasm_string_count;
+    // Phase 11 (Browser FFI): host import table (from `extern fn … from "ns" as
+    // "name"`). The WASM emitter declares `(import …)` per entry and lowers
+    // OP_CALL_IMPORT to `call $import_<idx>`. Unused by the native emitters.
+    const TekoWasmImport* wasm_imports;
+    int wasm_import_count;
 } MetalContext;
+
+// Phase 11: hand the WASM emitter the IL string pool before teko_metal_emit_program
+// so it can emit the (data ...) segment and correct OP_SCONST offsets. `strings`
+// must outlive the emit call; pass count 0 (or do not call) to keep legacy behavior.
+void teko_metal_set_strings(MetalContext* ctx, const char** strings, int count);
+
+// Phase 11: hand the WASM emitter the host import table before teko_metal_emit_program
+// so it can declare `(import …)` and lower OP_CALL_IMPORT. `imports` must outlive the
+// emit call.
+void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, int count);
+
+// Phase 11 (Browser FFI MVP-2): write an auto-generated JS glue module to `path`
+// that implements the `dom.*` host imports currently set on `ctx` (via
+// teko_metal_set_imports) — (ptr,len) string marshalling over the module's linear
+// memory plus an i32->Element handle table. No dev boilerplate. Returns 0 on
+// success, non-zero if the file cannot be opened. Imports outside the "dom"
+// namespace are ignored. Call after teko_metal_set_imports.
+int teko_metal_emit_dom_glue(MetalContext* ctx, const char* path);
+
+// Phase 11 (Browser FFI MVP-4): one ergonomic facade method — `name` calls Teko
+// table slot `fn_index` via teko_invoke2 with a single JS string arg marshalled
+// automatically (alloc + write + call). (MVP supports the one-string-arg shape.)
+typedef struct {
+    const char* name;   // facade method name, e.g. "showMessage"
+    int fn_index;       // Teko callback routine's table slot
+} TekoWasmFacadeEntry;
+
+// Phase 11 (Browser FFI MVP-4): write an auto-generated ergonomic facade module to
+// `path`. It imports the glue module `glue_module` (a sibling path, e.g.
+// "./foo.glue.mjs"), exposes `async instantiate(wasmBytes)`, and returns an object
+// whose `entries[i].name(str)` marshals the JS string into wasm memory via the real
+// allocator and invokes the Teko routine — no dev boilerplate. Returns 0 on success.
+int teko_metal_emit_facade(MetalContext* ctx, const char* path, const char* glue_module,
+                           const TekoWasmFacadeEntry* entries, int count);
 
 // 1. APPLE ECOSYSTEM (Darwin Kernel)
 void emit_darwin_arm64(MetalContext* ctx, OpCode op, int32_t arg);

@@ -1,11 +1,12 @@
 # 🗺️ Technology Tree Plan: The Teko Language
 
-> Action plan updated on 2026-06-13. Phases 1–8 reflect work already delivered/in
+> Action plan updated on 2026-06-14. Phases 1–8 reflect work already delivered/in
 > progress. Phase 9 is the Technical Debt Resolution hardening track (from
 > `TECH_DEBT_BACKLOG.md`). Phase 10 is the WASM Concurrency Backend feature
-> (planned, to be built in a dedicated PR). Phases 11–18 were derived from the
+> (delivered — merged via PR #3). Phase 11 is the Browser FFI / JS-DOM Interop
+> feature (current; `docs/PHASE_BROWSER_FFI.md`). Phases 12–19 were derived from the
 > project owner's roadmap memorandum (`TEKO_COMPILER_MEMORANDUM.txt`). The
-> Self-Containment (Self-Hosting) milestone is the final phase, 19.
+> Self-Containment (Self-Hosting) milestone is the final phase, 20.
 
 ## 📚 Documentation Map
 
@@ -14,11 +15,12 @@ To stop the planning docs from drifting, here is the single source of truth for 
 | Document | Role | Status |
 |----------|------|--------|
 | [`README.md`](../README.md) | Project overview, features, quick start | Canonical (user-facing) |
-| **`docs/plan.md`** (this file) | The roadmap — phases 1–19, current status | **Canonical (roadmap)** |
+| **`docs/plan.md`** (this file) | The roadmap — phases 1–20, current status | **Canonical (roadmap)** |
 | [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md) | Compiler pipeline & module/file map | **Canonical (architecture)** |
-| [`docs/PHASE10_WASM_CONCURRENCY.md`](./PHASE10_WASM_CONCURRENCY.md) | Phase 10 design & implementation plan | Canonical (feature design) |
+| [`docs/PHASE10_WASM_CONCURRENCY.md`](./PHASE10_WASM_CONCURRENCY.md) | Phase 10 design & implementation (delivered) | Canonical (feature design) |
+| [`docs/PHASE_BROWSER_FFI.md`](./PHASE_BROWSER_FFI.md) | Phase 11 design & plan (Browser FFI / JS-DOM interop) | Canonical (feature design) |
 | [`TECH_DEBT_BACKLOG.md`](../TECH_DEBT_BACKLOG.md) | Prioritized maintenance backlog | Canonical (tech debt) |
-| [`TEKO_COMPILER_MEMORANDUM.txt`](../TEKO_COMPILER_MEMORANDUM.txt) | Owner's checkpoint memorandum; source of phases 11–18 | Reference / historical |
+| [`TEKO_COMPILER_MEMORANDUM.txt`](../TEKO_COMPILER_MEMORANDUM.txt) | Owner's checkpoint memorandum; source of phases 12–19 | Reference / historical |
 | [`docs/vm_plan.md`](./vm_plan.md) | Phase 3 (VM & debugger) sprint detail | Reference / historical (phase delivered) |
 | [`docs/BACKEND_AOT_PLAN.md`](./BACKEND_AOT_PLAN.md) | Phase 5 AOT backend spec (target matrix, ABIs, per-opcode requirements) | Reference (backend spec) |
 | [`PITCH.md`](../PITCH.md) / [`PITCH-pt-br.md`](../PITCH-pt-br.md) | Marketing pitch (EN / PT-BR) | Reference |
@@ -199,16 +201,20 @@ This document establishes the definitive technical roadmap for the final develop
 └──────────────┬───────────────┘
                ▼
 ┌──────────────────────────────┐
-│  PHASE 10: WASM CONCURRENCY   │ ➔ Full spawn/channels backend (feature — planned, own PR)
+│  PHASE 10: WASM CONCURRENCY   │ ➔ Cooperative + wasm-threads backend (delivered — PR #3)
 └──────────────┬───────────────┘
                ▼
 ┌──────────────────────────────┐
-│  PHASES 11–18: LANG SURFACE   │ ➔ Grammar, Concurrency, OOP, Optionals, Web/Crypto,
+│  PHASE 11: BROWSER FFI/JS-DOM │ ➔ extern→imports, string-pool data, JS/DOM interop (current)
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│  PHASES 12–19: LANG SURFACE   │ ➔ Grammar, Concurrency, OOP, Optionals, Web/Crypto,
 │  (from the Memorandum roadmap)│   Parsers/Templates, Interop, Native Testing
 └──────────────┬───────────────┘
                ▼
 ┌──────────────────────────────┐
-│  PHASE 19: SELF-CONTAINMENT   │ ➔ Compiler Bootstrapping (Rewrite from C to Teko)
+│  PHASE 20: SELF-CONTAINMENT   │ ➔ Compiler Bootstrapping (Rewrite from C to Teko)
 └──────────────────────────────┘
 ```
 
@@ -255,7 +261,7 @@ To support the native features of massive M:N concurrency, blocking channels, an
 ---
 
 ## 🧹 PHASE 9: Technical Debt Resolution
-*Promoted to the first post-runtime phase: harden what is already built before expanding the language surface in Phases 11–18. Source: `TECH_DEBT_BACKLOG.md`. To be tackled continuously alongside the feature phases. Priority = (Impact + Risk) × (6 − Effort).*
+*Promoted to the first post-runtime phase: harden what is already built before expanding the language surface in Phases 12–19. Source: `TECH_DEBT_BACKLOG.md`. To be tackled continuously alongside the feature phases. Priority = (Impact + Risk) × (6 − Effort).*
 
 > ✅ **Build blocker RESOLVED 2026-06-13:** the `teko` executable target in `CMakeLists.txt`
 > was missing `target_include_directories(teko PRIVATE src)` (only `teko_core` and `teko_tests`
@@ -274,18 +280,18 @@ To support the native features of massive M:N concurrency, blocking channels, an
 | 6 | ~~Scattered architecture docs / no `ARCHITECTURE.md`~~ | Docs | ✅ Resolved 2026-06-13 |
 | 7 | ~~Near-identical codegen emitters (duplication)~~ | Code debt | ✅ Resolved 2026-06-13 — riscv32/64 + x86_64 SysV trio + arm64 GAS trio unified into shared parameterized cores; win_arm64 + Windows x86 kept separate by design (MASM/Intel ≠ AT&T-GAS) |
 | 8 | ~~Versioned build artifacts~~ | — | ✅ Closed (was a false positive) |
-| 9 | WASM concurrency backend (full spawn/channels) | Code/Arch | ➡️ Promoted to **Phase 10** (feature, own PR) — MVP already delivered |
+| 9 | WASM concurrency backend (full spawn/channels) | Code/Arch | ✅ Delivered as **Phase 10** — merged (PR #3): cooperative Layer A + wasm-threads Layer B |
 | 10 | ~~Broader emitter de-dup (x86_64 SysV / arm64 GAS)~~ | Code debt | ✅ Resolved 2026-06-13 (win_arm64 separate) |
 
-**Phase 9 status (2026-06-13):** items **0–8 and 10 resolved**; item **7 fully resolved** (riscv32/64 + x86_64 SysV trio + arm64 GAS trio unified into shared cores, Windows MASM/Intel emitters kept separate by design); item **9 promoted to its own feature phase, Phase 10** (below), to be implemented in a dedicated PR. CI is green across the full matrix: native Linux x86_64/arm64, Windows x86_64/arm64, macOS arm64, plus emulated Linux riscv64 (QEMU, non-blocking).
+**Phase 9 status (2026-06-13):** items **0–8 and 10 resolved**; item **7 fully resolved** (riscv32/64 + x86_64 SysV trio + arm64 GAS trio unified into shared cores, Windows MASM/Intel emitters kept separate by design); item **9 delivered as its own feature phase, Phase 10** (below), now **merged via PR #3**. CI is green across the full matrix: native Linux x86_64/arm64, Windows x86_64/arm64, macOS arm64, plus emulated Linux riscv64 (QEMU, non-blocking).
 
 See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, and file paths.
 
 ---
 
-## 🧪 PHASE 10: WASM Concurrency Backend — *Feature (planned, dedicated PR; not started)*
+## 🧪 PHASE 10: WASM Concurrency Backend — *Delivered (merged via PR #3)*
 
-*Promoted from tech-debt item #9. This is a new capability, not a fix — the current WASM MVP is complete and nothing is broken.*
+*Promoted from tech-debt item #9. **Delivered:** Layer A (cooperative M:N — run queue, `call_indirect`, linear-memory channels, mid-function suspension via a `br_table` state machine) and Layer B (`--target=…-wasm-threads` — shared memory + atomics + Web Workers / `worker_threads`). Emitter output is executed end-to-end in CI (Node/wasmtime/Chromium). The design/options below are kept as historical record; see the canonical design doc for the as-built detail.*
 
 **Already delivered (MVP, in this branch):** a real O(1) arena allocator emitted as linear-memory bump code, plus **honest host-runtime hooks** for the concurrency opcodes (`call $teko_spawn` / `$teko_chan_init` / `$teko_chan_put` / `$teko_await`, declared via `(import "teko_rt" ...)`). The emitted module is valid and self-consistent; the concurrency ops simply delegate to a host runtime that does not exist yet.
 
@@ -304,13 +310,28 @@ See `TECH_DEBT_BACKLOG.md` for full scoring, business justification, and file pa
 
 ---
 
-# 🧬 Roadmap from the Memorandum (Phases 11–18)
+## 🌉 PHASE 11: Browser FFI / JS-DOM Interop — *Feature (current; branch `feat/browser-ffi-interop`, PR #4)*
+
+*New dedicated phase. When targeting browser WASM, give Teko an ergonomic two-way bridge to JS/DOM. `extern fn … from "ns" as "name"` lowers to a WASM `(import "ns" "name" (func …))` via a new `OP_CALL_IMPORT`; the string constant pool is emitted as a real `(data …)` segment (today `OP_SCONST` is a placeholder); DOM/JS access goes through auto-generated host glue — string marshalling (`(ptr,len)` over linear memory), DOM-node handles (a JS handle table), and events (a Teko function-table index registered as a listener). FFI is currently **parsed but discarded** (`parser_visibility.c`); this phase builds the lowering pipeline.*
+
+**Incremental plan** — status (detail in [`docs/PHASE_BROWSER_FFI.md`](./PHASE_BROWSER_FFI.md)):
+**MVP-1a** ✅ string-pool `(data …)` + `OP_SCONST` offsets · **MVP-1b** ✅ `extern → (import)` +
+`OP_CALL_IMPORT` · **MVP-2** ✅ DOM (`dom.*` multi-arg imports + auto-generated glue) ·
+**MVP-3** ✅ JS→Teko events (`dom.on` + exported `teko_invoke`) · **MVP-4** ✅ real allocator
+(`teko_alloc`/`teko_free`/`teko_reset` free-list + coalescing) + JS→Teko strings + ergonomic
+facade (`<mod>.mjs`) + rich event payload (`dom.on_value`). **FE-A..F** ✅ wire a real
+`.tks → IL → WASM` frontend (`teko build … --target=wasm`, no mock): `extern`, `@dom`/`@js`
+intrinsics, strings, and `fn` event handlers compile from source. **Phase 11 complete, CI-green.**
+
+---
+
+# 🧬 Roadmap from the Memorandum (Phases 12–19)
 
 These phases were lifted from the project owner's roadmap memorandum (`TEKO_COMPILER_MEMORANDUM.txt`, Sections 2–4 — the long-term conceptual requirements, the reserved keyword matrix, and the immediate next steps). They expand the **language surface** that sits on top of the now-validated backend/runtime, and must land before the Self-Hosting milestone.
 
 ---
 
-## 🔤 PHASE 11: Frontend Grammar & Lexer Extension
+## 🔤 PHASE 12: Frontend Grammar & Lexer Extension
 *The immediate next step from the memorandum: get every new token, AST node, and literal form into the frontend so the feature phases below have a grammar to compile against.*
 
 ### 1. Reserved Keyword Matrix (Lexer Tokens)
@@ -329,7 +350,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🧵 PHASE 12: Advanced Concurrency, Signaling & Duplex Channels
+## 🧵 PHASE 13: Advanced Concurrency, Signaling & Duplex Channels
 *Native concurrency primitives beyond the base M:N scheduler delivered in Phase 8.*
 
 *   `routines`: Fire pure background tasks and executions at the runtime level.
@@ -344,7 +365,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🧱 PHASE 13: Bare-Metal Object-Oriented Paradigm
+## 🧱 PHASE 14: Bare-Metal Object-Oriented Paradigm
 *Object orientation with zero runtime reflection overhead.*
 
 *   Support for Concrete, Generic (`<T>` via monomorphization), and Abstract classes.
@@ -354,7 +375,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🎯 PHASE 14: Zero-Overhead Optionals & Compile-Time Metaprogramming
+## 🎯 PHASE 15: Zero-Overhead Optionals & Compile-Time Metaprogramming
 
 *   Nullability `?T` via packed Value Types. The Elvis operator (`??`) compiles directly to hardware conditional instructions (`je`/`cbz`).
 *   `comptime`: Code execution at build time. Metaprogramming happens during compilation.
@@ -363,7 +384,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🌐 PHASE 15: Native Networking, Web Architecture & Cryptography
+## 🌐 PHASE 16: Native Networking, Web Architecture & Cryptography
 *Comprehensive networking from OSI Layer 4 to Layer 7, plus the native web keyword surface and hardware-accelerated cryptography.*
 
 ### 1. Networking Stack
@@ -379,7 +400,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🧩 PHASE 16: Enterprise Parsers & Embedded Template Compiler
+## 🧩 PHASE 17: Enterprise Parsers & Embedded Template Compiler
 
 *   Linear O(1), reflection-free execution: `parse.json`, `parse.csv`, `parse.xml`.
 *   Native Template Engine integrated via rich String Literals: `html"""..."""`.
@@ -387,7 +408,7 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🔗 PHASE 17: Interoperability & Rich Metadata (`.teko_meta`)
+## 🔗 PHASE 18: Interoperability & Rich Metadata (`.teko_meta`)
 
 *   Lookup via `include_paths`, `static_links`, and `dynamic_links` in the `.tkp`.
 *   Teko modules embed rich type metadata in the `.teko_meta` section.
@@ -396,18 +417,18 @@ Inject the full token table the Lexer and Parser must mandatorily process:
 
 ---
 
-## 🧪 PHASE 18: Native Testing (`.tkt`) & Code Coverage
+## 🧪 PHASE 19: Native Testing (`.tkt`) & Code Coverage
 
 *   `.tkt` extension for co-located test files (same tree as the object under test). The release build ignores these files automatically.
 *   Native Code Coverage via codegen-assisted instrumentation, injecting counters into RAM at the start of each Basic Block. The linker embeds the `.teko_cov_map` section associating counters with code lines. The runtime dumps the counters at process end in a binary format (`.tkcov`).
 
 ---
 
-# 🔄 Final Milestone (Phase 19)
+# 🔄 Final Milestone (Phase 20)
 
 ---
 
-## 🔄 PHASE 19: Self-Containment (Self-Hosting / Bootstrapping)
+## 🔄 PHASE 20: Self-Containment (Self-Hosting / Bootstrapping)
 *The final step that crowns the industrial maturity of a systems programming language: using the language itself to compile itself.*
 
 ### 1. Translating the Compiler Modules from C to Teko

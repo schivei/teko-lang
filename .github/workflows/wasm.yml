@@ -41,18 +41,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang wabt
           curl https://wasmtime.dev/install.sh -sSf | bash
-      - name: Build the compiler core (Release) -> libteko_core.a
+      - name: Build the compiler core + teko driver (Release)
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target teko_core --parallel 4
+          cmake --build build --target teko_core teko --parallel 4
       - name: Emit real concurrency modules from the Teko backend
         run: |
           cc -I src runtime/wasm/emit-demo/emit_spawn_channel.c build/libteko_core.a -o emit_spawn_channel
           cc -I src runtime/wasm/emit-demo/emit_suspend.c       build/libteko_core.a -o emit_suspend
           cc -I src runtime/wasm/emit-demo/emit_multi.c         build/libteko_core.a -o emit_multi
+          cc -I src runtime/wasm/emit-demo/emit_ffi.c           build/libteko_core.a -o emit_ffi
           ./emit_spawn_channel runtime/wasm/samples/emitted.wat
           ./emit_suspend        runtime/wasm/samples/emitted_suspend.wat
           ./emit_multi          runtime/wasm/samples/emitted_multi.wat
+          ./emit_ffi            runtime/wasm/samples/emitted_ffi.wat
+      - name: Compile a REAL .tks to WASM with the teko binary (no emit-demo, no mock)
+        run: ./build/teko build runtime/wasm/samples/hello.tks --target=wasm -o runtime/wasm/samples/hello.wat
       - name: Assemble all modules (wat2wasm)
         run: |
           wat2wasm runtime/wasm/samples/channels.wat        -o runtime/wasm/samples/channels.wasm
@@ -60,8 +64,16 @@ jobs:
           wat2wasm runtime/wasm/samples/emitted.wat         -o runtime/wasm/samples/emitted.wasm
           wat2wasm runtime/wasm/samples/emitted_suspend.wat -o runtime/wasm/samples/emitted_suspend.wasm
           wat2wasm runtime/wasm/samples/emitted_multi.wat   -o runtime/wasm/samples/emitted_multi.wasm
+          wat2wasm runtime/wasm/samples/emitted_ffi.wat     -o runtime/wasm/samples/emitted_ffi.wasm
+          wat2wasm runtime/wasm/samples/hello.wat           -o runtime/wasm/samples/hello.wasm
       - name: Run under Node (channels=42, scheduler=15, emitted=7, suspend=30, multi=15)
         run: node runtime/wasm/run-node.mjs
+      - name: Run Browser-FFI proof under Node (host env.log reads pooled string)
+        run: node runtime/wasm/run-ffi.mjs
+      - name: Run SOURCE→WASM proof under Node (teko-compiled hello.tks)
+        run: node runtime/wasm/run-source.mjs
+      - name: Run allocator stress under Node (alloc/free/coalesce/double-free/reset)
+        run: node runtime/wasm/run-alloc.mjs
       - name: Run under wasmtime
         run: |
           ~/.wasmtime/bin/wasmtime run --invoke test runtime/wasm/samples/channels.wasm
@@ -87,18 +99,30 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang wabt
-      - name: Build the compiler core (Release) -> libteko_core.a
+      - name: Build the compiler core + teko driver (Release)
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target teko_core --parallel 4
+          cmake --build build --target teko_core teko --parallel 4
       - name: Emit real concurrency modules from the Teko backend
         run: |
           cc -I src runtime/wasm/emit-demo/emit_spawn_channel.c build/libteko_core.a -o emit_spawn_channel
           cc -I src runtime/wasm/emit-demo/emit_suspend.c       build/libteko_core.a -o emit_suspend
           cc -I src runtime/wasm/emit-demo/emit_multi.c         build/libteko_core.a -o emit_multi
+          cc -I src runtime/wasm/emit-demo/emit_dom.c           build/libteko_core.a -o emit_dom
+          cc -I src runtime/wasm/emit-demo/emit_events.c        build/libteko_core.a -o emit_events
+          cc -I src runtime/wasm/emit-demo/emit_alloc.c         build/libteko_core.a -o emit_alloc
+          cc -I src runtime/wasm/emit-demo/emit_richevent.c     build/libteko_core.a -o emit_richevent
           ./emit_spawn_channel runtime/wasm/samples/emitted.wat
           ./emit_suspend        runtime/wasm/samples/emitted_suspend.wat
           ./emit_multi          runtime/wasm/samples/emitted_multi.wat
+          ./emit_dom            runtime/wasm/samples/emitted_dom.wat runtime/wasm/samples/emitted_dom.glue.mjs
+          ./emit_events         runtime/wasm/samples/emitted_events.wat runtime/wasm/samples/emitted_events.glue.mjs
+          ./emit_alloc          runtime/wasm/samples/emitted_alloc.wat runtime/wasm/samples/emitted_alloc.glue.mjs runtime/wasm/samples/emitted_alloc.mjs
+          ./emit_richevent      runtime/wasm/samples/emitted_richevent.wat runtime/wasm/samples/emitted_richevent.glue.mjs
+      - name: Compile REAL @dom + event-handler .tks to WASM with the teko binary
+        run: |
+          ./build/teko build runtime/wasm/samples/dom.tks    --target=wasm -o runtime/wasm/samples/dom.wat
+          ./build/teko build runtime/wasm/samples/events.tks --target=wasm -o runtime/wasm/samples/events.wat
       - name: Assemble all modules (wat2wasm)
         run: |
           wat2wasm runtime/wasm/samples/channels.wat        -o runtime/wasm/samples/channels.wasm
@@ -106,6 +130,12 @@ jobs:
           wat2wasm runtime/wasm/samples/emitted.wat         -o runtime/wasm/samples/emitted.wasm
           wat2wasm runtime/wasm/samples/emitted_suspend.wat -o runtime/wasm/samples/emitted_suspend.wasm
           wat2wasm runtime/wasm/samples/emitted_multi.wat   -o runtime/wasm/samples/emitted_multi.wasm
+          wat2wasm runtime/wasm/samples/emitted_dom.wat     -o runtime/wasm/samples/emitted_dom.wasm
+          wat2wasm runtime/wasm/samples/emitted_events.wat  -o runtime/wasm/samples/emitted_events.wasm
+          wat2wasm runtime/wasm/samples/emitted_alloc.wat   -o runtime/wasm/samples/emitted_alloc.wasm
+          wat2wasm runtime/wasm/samples/emitted_richevent.wat -o runtime/wasm/samples/emitted_richevent.wasm
+          wat2wasm runtime/wasm/samples/dom.wat               -o runtime/wasm/samples/dom.wasm
+          wat2wasm runtime/wasm/samples/events.wat            -o runtime/wasm/samples/events.wasm
       - name: Install harness deps + Chromium
         working-directory: runtime/wasm
         run: |
@@ -114,6 +144,24 @@ jobs:
       - name: Run headless-browser harness (parity + crossOriginIsolated check)
         working-directory: runtime/wasm
         run: node run-browser.mjs
+      - name: Run Browser-FFI DOM proof (Teko drives the DOM via auto-generated glue)
+        working-directory: runtime/wasm
+        run: node run-dom.mjs
+      - name: Run @dom-from-source proof (teko-compiled dom.tks drives the DOM)
+        working-directory: runtime/wasm
+        run: node run-dom-source.mjs
+      - name: Run event-handler-from-source proof (teko-compiled events.tks)
+        working-directory: runtime/wasm
+        run: node run-events-source.mjs
+      - name: Run Browser-FFI events proof (click -> Teko callback via teko_invoke)
+        working-directory: runtime/wasm
+        run: node run-events.mjs
+      - name: Run Browser-FFI facade proof (mod.showMessage marshals JS string via alloc)
+        working-directory: runtime/wasm
+        run: node run-facade.mjs
+      - name: Run Browser-FFI rich-event proof (typed value -> Teko via allocator)
+        working-directory: runtime/wasm
+        run: node run-richevent.mjs
 
   gate:
     name: gate

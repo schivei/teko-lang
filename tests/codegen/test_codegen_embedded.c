@@ -31,11 +31,13 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
     FILE* file = fopen(asm_path, "r");
     TEST_ASSERT_NOT_NULL(file);
 
-    char* buffer = (char*)malloc(4096);
+    // The module now carries the cooperative + heap-allocator runtimes, so the WAT
+    // text exceeds 4 KiB; read enough to reach the trailing (data ...) segment.
+    char* buffer = (char*)malloc(16384);
     TEST_ASSERT_NOT_NULL(buffer);
-    memset(buffer, 0, 4096);
+    memset(buffer, 0, 16384);
 
-    size_t bytes = fread(buffer, 1, 4095, file);
+    size_t bytes = fread(buffer, 1, 16383, file);
     buffer[bytes] = '\0';
     fclose(file);
 
@@ -48,6 +50,390 @@ void test_teko_aot_wasm_pure_emission_integrity(void) {
 
     free(buffer);
     remove(asm_path);
+}
+
+// ====================================================================
+// 1b. WASM STRING CONSTANT POOL → REAL (data ...) SEGMENT (Phase 11 / MVP-1)
+// ====================================================================
+// The IL string pool is threaded through MetalContext and laid out as a real
+// (data ...) segment; OP_SCONST resolves to the true byte offset (not a placeholder).
+void test_teko_aot_wasm_string_pool_data_segment(void) {
+    const char* asm_path = "output_wasm_strpool_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "hello", "world" };
+    teko_metal_set_strings(ctx, strings, 2);
+
+    // OP_SCONST 1 (-> &"world"), OP_HALT
+    unsigned char prog[] = { 0x02, 0x01, 0x00, 0x00, 0x00, 0x00 };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // The whole pool is emitted as one NUL-terminated (data ...) segment at base 1024.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(data (i32.const 1024) \"hello\\00world\\00\")"));
+    // OP_SCONST 1 resolves to the true offset of "world": 1024 + len("hello") + 1 = 1030.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "i32.const 1030"));
+    // The legacy placeholder is gone once a real pool is provided.
+    TEST_ASSERT_NULL(strstr(buffer, "Hello Teko"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
+// 1c. WASM FFI: extern → (import ...) + OP_CALL_IMPORT (Phase 11 / MVP-1)
+// ====================================================================
+// An `extern fn log(msg) from "env" as "log"` is lowered to a WASM import and an
+// OP_CALL_IMPORT call site. The run-ffi CI step proves it executes (host env.log
+// reads the pooled string back from memory).
+void test_teko_aot_wasm_ffi_import_lowering(void) {
+    const char* asm_path = "output_wasm_ffi_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "hi" };
+    static const TekoWasmImport imports[] = { { "env", "log", 1, 0 } };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 1);
+
+    // OP_SCONST 0 (&"hi"), OP_CALL_IMPORT 0 (env.log), OP_HALT
+    unsigned char prog[] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // The extern is declared as a host import with the right (ns, name, signature).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(import \"env\" \"log\" (func $import_0 (param i32)))"));
+    // The call site lowers to a direct call of that import.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call $import_0"));
+    // The argument string is in the real (data ...) pool.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(data (i32.const 1024) \"hi\\00\")"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
+// 1d. WASM DOM FFI: multi-param dom.* imports + OP_SETARG + glue (Phase 11 / MVP-2)
+// ====================================================================
+// A multi-argument host import (e.g. dom.setText(handle, ptr, len)) is fed by
+// OP_SETARG staging slots ($a0..) plus the accumulator ($w0) for the last arg.
+// The run-dom Playwright step proves it drives the real DOM via auto-generated
+// glue; this golden pins the emission shape (imports + staging + call sites + the
+// generated glue methods).
+void test_teko_aot_wasm_dom_import_lowering(void) {
+    const char* asm_path  = "output_wasm_dom_test.wat";
+    const char* glue_path = "output_wasm_dom_test.glue.mjs";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "span" };
+    static const TekoWasmImport imports[] = {
+        { "dom", "createElement", 2, 1 }, // (ptr,len) -> handle : #0
+        { "dom", "setText",       3, 0 }, // (handle,ptr,len)    : #1
+    };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 2);
+
+    // SCONST 0 -> SETARG 0 -> ICONST 4 -> CALL_IMPORT 0 (createElement) -> HALT
+    unsigned char prog[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0
+        0x0A, 0x00, 0x00, 0x00, 0x00, // OP_SETARG 0
+        0x01, 0x04, 0x00, 0x00, 0x00, // OP_ICONST 4
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0
+        0x00                          // OP_HALT
+    };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+
+    int glue_rc = teko_metal_emit_dom_glue(ctx, glue_path);
+    teko_metal_close(ctx);
+    TEST_ASSERT_EQUAL_INT(0, glue_rc);
+
+    // --- assert the emitted WAT ---
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    // Multi-param imports carry one (param i32) per arg, result only when declared.
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(import \"dom\" \"createElement\" (func $import_0 (param i32) (param i32) (result i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(import \"dom\" \"setText\" (func $import_1 (param i32) (param i32) (param i32)))"));
+    // $main gains the import-arg staging locals.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(local $a0 i32) (local $a1 i32) (local $a2 i32)"));
+    // OP_SETARG stages the accumulator into $a0; the 2-param call pushes $a0 then $w0.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "local.set $a0"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "local.get $a0\n    local.get $w0\n    call $import_0"));
+    free(buffer);
+
+    // --- assert the auto-generated glue ---
+    FILE* gf = fopen(glue_path, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* glue = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(glue);
+    memset(glue, 0, 8192);
+    size_t gbytes = fread(glue, 1, 8191, gf);
+    glue[gbytes] = '\0';
+    fclose(gf);
+
+    TEST_ASSERT_NOT_NULL(strstr(glue, "export function makeTekoDomImports(getMemory, getInstance)"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "new Uint8Array(getMemory().buffer, p >>> 0, n >>> 0)"));
+    // Only the two declared imports get glue methods (createElement + setText);
+    // unused vocabulary (appendChild/getElementById) is not emitted.
+    TEST_ASSERT_NOT_NULL(strstr(glue, "createElement:"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "setText:"));
+    TEST_ASSERT_NULL(strstr(glue, "appendChild:"));
+    TEST_ASSERT_NULL(strstr(glue, "getElementById:"));
+    free(glue);
+
+    remove(asm_path);
+    remove(glue_path);
+}
+
+// ====================================================================
+// 1e. WASM DOM EVENTS: JS→Teko callbacks (dom.on + teko_invoke) (Phase 11 / MVP-3)
+// ====================================================================
+// `dom.on(handle, "click", fn_index)` registers a DOM listener; when it fires the
+// glue calls the exported teko_invoke(fn_index, handle), which dispatches the Teko
+// callback routine via call_indirect. The run-events Playwright step proves the
+// round-trip; this golden pins the dom.on import, the exported teko_invoke
+// dispatcher, the staging locals inside the callback routine, and the glue
+// listener wiring.
+void test_teko_aot_wasm_event_callback_lowering(void) {
+    const char* asm_path  = "output_wasm_events_test.wat";
+    const char* glue_path = "output_wasm_events_test.glue.mjs";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "click", "hit" };
+    static const TekoWasmImport imports[] = {
+        { "dom", "on",      4, 0 }, // (handle,ptr,len,fn) : #0
+        { "dom", "setText", 3, 0 }, // (handle,ptr,len)    : #1
+    };
+    teko_metal_set_strings(ctx, strings, 2);
+    teko_metal_set_imports(ctx, imports, 2);
+
+    // $main: on(handle=0, "click", fn=0); then a callback routine 0: setText(arg,"hit").
+    unsigned char prog[] = {
+        0x0A, 0x00, 0x00, 0x00, 0x00, // OP_SETARG 0  (handle in $a0; $w0 garbage ok for golden)
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0  ("click")
+        0x0A, 0x01, 0x00, 0x00, 0x00, // OP_SETARG 1  (ptr)
+        0x01, 0x05, 0x00, 0x00, 0x00, // OP_ICONST 5  (len)
+        0x0A, 0x02, 0x00, 0x00, 0x00, // OP_SETARG 2  (len)
+        0x01, 0x00, 0x00, 0x00, 0x00, // OP_ICONST 0  (fn index)
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0 (on)
+        0x00,                         // OP_HALT
+        0x40, 0x00, 0x00, 0x00, 0x00, // OP_FUNC_BEGIN 0 (callback)
+        0x0A, 0x00, 0x00, 0x00, 0x00, // OP_SETARG 0 (arg handle)
+        0x02, 0x01, 0x00, 0x00, 0x00, // OP_SCONST 1 ("hit")
+        0x0A, 0x01, 0x00, 0x00, 0x00, // OP_SETARG 1 (ptr)
+        0x01, 0x03, 0x00, 0x00, 0x00, // OP_ICONST 3 (len)
+        0x09, 0x01, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 1 (setText)
+        0x41                          // OP_FUNC_END
+    };
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+
+    int glue_rc = teko_metal_emit_dom_glue(ctx, glue_path);
+    teko_metal_close(ctx);
+    TEST_ASSERT_EQUAL_INT(0, glue_rc);
+
+    // --- assert the emitted WAT ---
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    TEST_ASSERT_NOT_NULL(strstr(buffer,
+        "(import \"dom\" \"on\" (func $import_0 (param i32) (param i32) (param i32) (param i32)))"));
+    // The exported JS->Teko dispatcher and its call_indirect.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_invoke (export \"teko_invoke\")"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "call_indirect (type $task)"));
+    // The callback routine carries the import-arg staging locals too.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $routine_0"));
+    char* routine = strstr(buffer, "(func $routine_0");
+    TEST_ASSERT_NOT_NULL(strstr(routine, "(local $a0 i32) (local $a1 i32) (local $a2 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(routine, "call $import_1")); // setText inside the callback
+    free(buffer);
+
+    // --- assert the auto-generated glue wires the listener to teko_invoke ---
+    FILE* gf = fopen(glue_path, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* glue = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(glue);
+    memset(glue, 0, 8192);
+    size_t gbytes = fread(glue, 1, 8191, gf);
+    glue[gbytes] = '\0';
+    fclose(gf);
+
+    TEST_ASSERT_NOT_NULL(strstr(glue, "getInstance().exports.teko_invoke"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "addEventListener(str(p, n), () => invoke(fn, h))"));
+    free(glue);
+
+    remove(asm_path);
+    remove(glue_path);
+}
+
+// ====================================================================
+// 1f. WASM real allocator + teko_invoke2 (Phase 11 / MVP-4)
+// ====================================================================
+// Every Layer A module now carries a real freeing allocator (teko_alloc/teko_free
+// + teko_reset coalescing free-list) and a 2-arg JS->Teko dispatcher (teko_invoke2),
+// all exported. The run-alloc stress test proves behavior; this golden pins that the
+// runtime + exports are emitted (and that the heap region is initialized).
+void test_teko_aot_wasm_heap_allocator_runtime(void) {
+    const char* asm_path = "output_wasm_heap_test.wat";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    // A trivial program is enough — the allocator runtime is part of the prologue.
+    unsigned char prog[] = { 0x01, 0x07, 0x00, 0x00, 0x00, 0x00 }; // ICONST 7, HALT
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+    teko_metal_close(ctx);
+
+    FILE* file = fopen(asm_path, "r");
+    TEST_ASSERT_NOT_NULL(file);
+    char* buffer = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memset(buffer, 0, 8192);
+    size_t bytes = fread(buffer, 1, 8191, file);
+    buffer[bytes] = '\0';
+    fclose(file);
+
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(global $heap_inited (mut i32) (i32.const 0))"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_alloc (export \"teko_alloc\") (param $n i32) (result i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_free (export \"teko_free\") (param $ptr i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_reset (export \"teko_reset\")"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(func $teko_invoke2 (export \"teko_invoke2\")"));
+    // The heap is initialized to one block spanning [16384..65536) (size 49144).
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "(i32.store offset=0 (i32.const 16384) (i32.const 49144))"));
+
+    free(buffer);
+    remove(asm_path);
+}
+
+// ====================================================================
+// 1g. WASM ergonomic facade + on_value rich-event glue (Phase 11 / MVP-4)
+// ====================================================================
+// The auto-generated facade lets a dev call mod.greet("x") with the JS string
+// marshalled (alloc+write) and dispatched via teko_invoke2; dom.on_value marshals
+// an event target's value through the allocator. This golden pins both generators.
+void test_teko_aot_wasm_facade_and_rich_event_lowering(void) {
+    const char* asm_path    = "output_wasm_facade_test.wat";
+    const char* glue_path   = "output_wasm_facade_test.glue.mjs";
+    const char* facade_path = "output_wasm_facade_test.mjs";
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    MetalContext* ctx = teko_metal_create(asm_path, target);
+    TEST_ASSERT_NOT_NULL(ctx);
+
+    static const char* strings[] = { "out" };
+    static const TekoWasmImport imports[] = {
+        { "dom", "setText",  3, 0 }, // #0
+        { "dom", "on_value", 4, 0 }, // #1 (rich event)
+    };
+    teko_metal_set_strings(ctx, strings, 1);
+    teko_metal_set_imports(ctx, imports, 2);
+
+    unsigned char prog[] = { 0x00 }; // OP_HALT (facade calls routines directly)
+    teko_metal_emit_program(ctx, prog, sizeof(prog));
+
+    int grc = teko_metal_emit_dom_glue(ctx, glue_path);
+    TekoWasmFacadeEntry facade[] = { { "greet", 0 } };
+    int frc = teko_metal_emit_facade(ctx, facade_path, "./output_wasm_facade_test.glue.mjs", facade, 1);
+    teko_metal_close(ctx);
+    TEST_ASSERT_EQUAL_INT(0, grc);
+    TEST_ASSERT_EQUAL_INT(0, frc);
+
+    // --- glue: allocator-backed marshalling + on_value rich event ---
+    FILE* gf = fopen(glue_path, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* glue = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(glue);
+    memset(glue, 0, 8192);
+    size_t gb = fread(glue, 1, 8191, gf); glue[gb] = '\0'; fclose(gf);
+    TEST_ASSERT_NOT_NULL(strstr(glue, "getInstance().exports.teko_alloc"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "const invoke2 = (fn, a, b) => getInstance().exports.teko_invoke2"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "on_value:"));
+    TEST_ASSERT_NOT_NULL(strstr(glue, "const a = allocStr(v); invoke2(fn, a[0], a[1])"));
+    free(glue);
+
+    // --- facade: instantiate + a string-marshalling method bound to teko_invoke2 ---
+    FILE* ff = fopen(facade_path, "r");
+    TEST_ASSERT_NOT_NULL(ff);
+    char* fac = (char*)malloc(8192);
+    TEST_ASSERT_NOT_NULL(fac);
+    memset(fac, 0, 8192);
+    size_t fb = fread(fac, 1, 8191, ff); fac[fb] = '\0'; fclose(ff);
+    TEST_ASSERT_NOT_NULL(strstr(fac, "import { makeTekoDomImports } from \"./output_wasm_facade_test.glue.mjs\""));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "export async function instantiate(wasmBytes)"));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "const p = instance.exports.teko_alloc(b.length)"));
+    TEST_ASSERT_NOT_NULL(strstr(fac, "greet: (s) => { const a = allocStr(s); return instance.exports.teko_invoke2(0, a[0], a[1]); }"));
+    free(fac);
+
+    remove(asm_path);
+    remove(glue_path);
+    remove(facade_path);
 }
 
 // ====================================================================

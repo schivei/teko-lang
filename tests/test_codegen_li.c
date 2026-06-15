@@ -1,6 +1,10 @@
 #include "unity.h"
 #include "codegen_li.h"
+#include "codegen_li_wasm.h"
+#include "frontend_interop.h"
+#include "teko_target.h"
 #include "parser_statements.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,5 +44,256 @@ void test_bytecode_emission_and_constant_pooling(void) {
     // Cleanup
     free(stmt.data.var_decl.var_name);
     free(stmt.data.var_decl.initializer_raw);
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-B): bridge a frontend IL BytecodeBuffer to the
+// WASM backend (codegen_li_emit_wasm) and assert the emitted .wat carries the import,
+// the call site, and the string pool data segment — IL -> WASM without a parser.
+void test_codegen_li_to_wasm_bridge(void) {
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+
+    int imp = codegen_li_add_import(buffer, "env", "log", 1, 0);
+    int s = codegen_li_add_string_constant(buffer, "hi");
+    codegen_li_emit_sconst(buffer, s);
+    codegen_li_emit_call_import(buffer, imp);
+    codegen_li_emit_halt(buffer);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+
+    const char* wat = "output_li_wasm_bridge.wat";
+    int rc = codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    TEST_ASSERT_NOT_NULL(out);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f);
+    out[n] = '\0';
+    fclose(f);
+
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"log\" (func $import_0 (param i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $import_0"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(data (i32.const 1024) \"hi\\00\")"));
+
+    free(out);
+    remove(wat);
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-C): compile REAL Teko source (extern + call)
+// to IL via the interop frontend, and through the bridge to WASM — proving
+// source -> IL -> WASM, not an emit-demo.
+void test_frontend_interop_extern_call_to_il(void) {
+    const char* src =
+        "extern fn log(msg: str) from \"env\" as \"log\";\n"
+        "log(\"hello from source\");\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // The extern was consumed into the import table (ns=from, name=as).
+    TEST_ASSERT_EQUAL_INT(1, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("env", buffer->imports[0].ns);
+    TEST_ASSERT_EQUAL_STRING("log", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_INT(1, buffer->imports[0].n_params);
+
+    // The call pooled its string and lowered to SCONST -> CALL_IMPORT -> HALT.
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_add_string_constant(buffer, "hello from source")); // already pooled at 0
+    const unsigned char expected[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0
+        0x00                          // OP_HALT
+    };
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    // Through the bridge: a real .wat with the import, call, and data segment.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_src.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"log\" (func $import_0 (param i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $import_0"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(data (i32.const 1024) \"hello from source\\00\")"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-E): @dom intrinsics from real source. A nested
+// `@dom.getElementById("out")` feeds `@dom.setText(…, "…")`; strings expand to
+// (ptr,len). Asserts the auto-registered dom.* imports + the lowered IL shape.
+void test_frontend_interop_dom_intrinsics(void) {
+    const char* src =
+        "@dom.setText(@dom.getElementById(\"out\"), \"hi there\");\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Two dom imports auto-registered: getElementById (2 params, result) then setText
+    // (3 params, no result).
+    TEST_ASSERT_EQUAL_INT(2, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("dom", buffer->imports[0].ns);
+    TEST_ASSERT_EQUAL_STRING("getElementById", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_INT(2, buffer->imports[0].n_params);
+    TEST_ASSERT_EQUAL_INT(1, buffer->imports[0].has_result);
+    TEST_ASSERT_EQUAL_STRING("setText", buffer->imports[1].name);
+    TEST_ASSERT_EQUAL_INT(3, buffer->imports[1].n_params);
+    TEST_ASSERT_EQUAL_INT(0, buffer->imports[1].has_result);
+
+    // IL: getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0;
+    //     setText(handle,"hi there") -> SETARG0(handle), SCONST"hi there", SETARG1,
+    //     ICONST8, CALL_IMPORT1; HALT.
+    const unsigned char expected[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // SCONST 0 ("out")
+        0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0
+        0x01, 0x03, 0x00, 0x00, 0x00, // ICONST 3
+        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById)
+        0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0 (handle -> a0)
+        0x02, 0x01, 0x00, 0x00, 0x00, // SCONST 1 ("hi there")
+        0x0A, 0x01, 0x00, 0x00, 0x00, // SETARG 1 (ptr -> a1)
+        0x01, 0x08, 0x00, 0x00, 0x00, // ICONST 8 (len)
+        0x09, 0x01, 0x00, 0x00, 0x00, // CALL_IMPORT 1 (setText)
+        0x00                          // HALT
+    };
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-F): event handlers from source. A `fn` handler
+// becomes a table routine; @dom.on(elem, "click", handler) registers it (the handler
+// name resolves to its table slot). Asserts imports, the main-level on() call with the
+// fn-ref, and the routine body (param stash/load + setText).
+void test_frontend_interop_event_handler(void) {
+    const char* src =
+        "fn onClick(target) {\n"
+        "  @dom.setText(target, \"hit\");\n"
+        "}\n"
+        "@dom.on(@dom.getElementById(\"count\"), \"click\", onClick);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // dom imports: getElementById (#0), on (#1), setText (#2).
+    TEST_ASSERT_EQUAL_INT(3, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("getElementById", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_STRING("on", buffer->imports[1].name);
+    TEST_ASSERT_EQUAL_INT(4, buffer->imports[1].n_params);
+    TEST_ASSERT_EQUAL_STRING("setText", buffer->imports[2].name);
+
+    // The IL must contain a function boundary (the handler routine) and the handler's
+    // table slot (0) referenced as an immediate by the on() call.
+    int saw_func_begin = 0, saw_func_end = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_FUNC_BEGIN) saw_func_begin = 1;
+        if (buffer->code[i] == OP_FUNC_END) saw_func_end = 1;
+    }
+    TEST_ASSERT_TRUE(saw_func_begin);
+    TEST_ASSERT_TRUE(saw_func_end);
+
+    // Through the bridge: the module exports teko_invoke (JS->Teko) and a table, plus
+    // the dom.on import and a $routine_0 with a setText call.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_events_src.wat";
+    const char* glue = "output_events_src.glue.mjs";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, glue, NULL, NULL, NULL, 0));
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(32768);
+    memset(out, 0, 32768);
+    size_t n = fread(out, 1, 32767, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"dom\" \"on\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_invoke (export \"teko_invoke\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $routine_0"));
+    char* routine = strstr(out, "(func $routine_0");
+    TEST_ASSERT_NOT_NULL(strstr(routine, "call $import_2")); // setText inside the handler
+    free(out);
+    remove(wat);
+
+    // The glue exposes the dom.on listener wiring (addEventListener -> teko_invoke).
+    FILE* gf = fopen(glue, "r");
+    TEST_ASSERT_NOT_NULL(gf);
+    char* g = (char*)malloc(8192);
+    memset(g, 0, 8192);
+    size_t gn = fread(g, 1, 8191, gf); g[gn] = '\0'; fclose(gf);
+    TEST_ASSERT_NOT_NULL(strstr(g, "addEventListener(str(p, n), () => invoke(fn, h))"));
+    free(g);
+    remove(glue);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 11 (Browser FFI frontend FE-A): import table dedup + interop emit helpers.
+// Models the IL a parser would emit for `log("hi")` where
+// `extern fn log(msg) from "env" as "log"`: SCONST &"hi" -> CALL_IMPORT #0 -> HALT.
+void test_codegen_li_import_table_and_interop_emit(void) {
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+
+    // Import table dedup by (ns, name).
+    int i0 = codegen_li_add_import(buffer, "env", "log", 1, 0);
+    int i1 = codegen_li_add_import(buffer, "env", "log", 1, 0); // duplicate
+    int i2 = codegen_li_add_import(buffer, "dom", "setText", 3, 0);
+    TEST_ASSERT_EQUAL_INT(0, i0);
+    TEST_ASSERT_EQUAL_INT(0, i1);
+    TEST_ASSERT_EQUAL_INT(1, i2);
+    TEST_ASSERT_EQUAL_INT(2, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("env", buffer->imports[0].ns);
+    TEST_ASSERT_EQUAL_STRING("log", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_INT(1, buffer->imports[0].n_params);
+    TEST_ASSERT_EQUAL_INT(0, buffer->imports[0].has_result);
+
+    // Emit: SCONST &"hi" (pool 0) -> CALL_IMPORT #0 -> HALT.
+    int s = codegen_li_add_string_constant(buffer, "hi");
+    TEST_ASSERT_EQUAL_INT(0, s);
+    codegen_li_emit_sconst(buffer, s);
+    codegen_li_emit_call_import(buffer, i0);
+    codegen_li_emit_halt(buffer);
+
+    // Expected bytes: 0x02 00000000 | 0x09 00000000 | 0x00
+    TEST_ASSERT_EQUAL_INT(11, buffer->size);
+    const unsigned char expected[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // OP_SCONST 0
+        0x09, 0x00, 0x00, 0x00, 0x00, // OP_CALL_IMPORT 0
+        0x00                          // OP_HALT
+    };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    // setarg/iconst/func_begin/func_end helpers emit the right opcodes too.
+    int before = buffer->size;
+    codegen_li_emit_setarg(buffer, 2);
+    TEST_ASSERT_EQUAL_UINT8(OP_SETARG, buffer->code[before]);
+    TEST_ASSERT_EQUAL_UINT8(2, buffer->code[before + 1]);
+    int b2 = buffer->size;
+    codegen_li_emit_func_begin(buffer, 0);
+    codegen_li_emit_func_end(buffer);
+    TEST_ASSERT_EQUAL_UINT8(OP_FUNC_BEGIN, buffer->code[b2]);
+    TEST_ASSERT_EQUAL_UINT8(OP_FUNC_END, buffer->code[b2 + 5]);
+
     codegen_li_free_context(buffer);
 }
