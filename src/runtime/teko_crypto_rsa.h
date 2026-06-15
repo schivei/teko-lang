@@ -78,4 +78,24 @@ int teko_rsa_oaep_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_
                           TekoRsaHash h, const uint8_t* label, size_t label_len,
                           const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len);
 
+// --- PSS (EMSA-PSS, RFC 8017 §9.1) -----------------------------------------------------
+// `h` selects both the message hash and MGF1 hash. `mhash` is the message digest (mhash_len
+// must equal hLen). salt_len is the PSS salt length (e.g. hLen, or 0 for deterministic).
+
+// sig = RSASP1(EMSA-PSS-ENCODE(mhash, random salt of salt_len)). sig holds nlen bytes.
+int teko_rsa_pss_sign(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                      TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                      size_t salt_len, uint8_t* sig);
+
+// Same with a caller-supplied salt (salt_len bytes) — for deterministic testing.
+int teko_rsa_pss_sign_seeded(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                             TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                             const uint8_t* salt, size_t salt_len, uint8_t* sig);
+
+// Returns 0 iff sig is a valid PSS signature of `mhash` under (n, e) with the given
+// salt_len; -1 otherwise.
+int teko_rsa_pss_verify(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                        TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                        size_t salt_len, const uint8_t* sig, size_t siglen);
+
 #endif // TEKO_CRYPTO_RSA_H

@@ -275,3 +275,134 @@ int teko_rsa_oaep_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_
     memcpy(out, db + one_idx + 1u, *out_len);
     return 0;
 }
+
+// ----------------------------------- PSS -----------------------------------------------
+
+// Bit length of the big-endian integer n (nlen bytes).
+static size_t rsa_bitlen(const uint8_t* n, size_t nlen) {
+    size_t i;
+    for (i = 0; i < nlen; ++i) {
+        if (n[i] != 0u) {
+            unsigned b = n[i];
+            size_t bits = (nlen - i) * 8u;
+            while ((b & 0x80u) == 0u) { bits--; b = (unsigned)(b << 1); }
+            return bits;
+        }
+    }
+    return 0u;
+}
+
+// Build EM (emLen bytes) per EMSA-PSS-ENCODE for the given salt.
+static int rsa_pss_encode(TekoRsaHash h, const uint8_t* mhash, size_t hLen,
+                          const uint8_t* salt, size_t sLen,
+                          size_t emBits, size_t emLen, uint8_t* em) {
+    uint8_t mprime[8 + RSA_MAX_HASH + RSA_MAX_BYTES];
+    uint8_t hh[RSA_MAX_HASH];
+    uint8_t dbmask[RSA_MAX_BYTES];
+    size_t dblen, ps_len, i, zero_bits;
+
+    if (emLen < hLen + sLen + 2u) return -1;
+    // M' = (00)x8 || mHash || salt ; H = Hash(M')
+    memset(mprime, 0, 8u);
+    memcpy(mprime + 8, mhash, hLen);
+    memcpy(mprime + 8 + hLen, salt, sLen);
+    rsa_hash(h, mprime, 8u + hLen + sLen, hh);
+
+    dblen = emLen - hLen - 1u;
+    ps_len = emLen - sLen - hLen - 2u;
+    // DB = PS(0) || 0x01 || salt
+    memset(em, 0, dblen);
+    em[ps_len] = 0x01;
+    memcpy(em + ps_len + 1u, salt, sLen);
+    // maskedDB = DB xor MGF1(H, dblen)
+    if (rsa_mgf1(h, hh, hLen, dbmask, dblen) != 0) return -1;
+    for (i = 0; i < dblen; ++i) em[i] ^= dbmask[i];
+    // Clear the leftmost 8*emLen - emBits bits of the first byte.
+    zero_bits = 8u * emLen - emBits;
+    em[0] &= (uint8_t)(0xFFu >> zero_bits);
+    // EM = maskedDB || H || 0xbc
+    memcpy(em + dblen, hh, hLen);
+    em[emLen - 1u] = 0xbc;
+    return 0;
+}
+
+int teko_rsa_pss_sign_seeded(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                             TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                             const uint8_t* salt, size_t salt_len, uint8_t* sig) {
+    size_t hLen = teko_rsa_hash_len(h);
+    size_t modBits, emBits, emLen;
+    uint8_t em[RSA_MAX_BYTES];
+    if (!n || !d || !mhash || !sig || hLen == 0u) return -1;
+    if (nlen == 0u || nlen > RSA_MAX_BYTES || mhash_len != hLen) return -1;
+    if (salt_len > 0u && !salt) return -1;
+    modBits = rsa_bitlen(n, nlen);
+    if (modBits == 0u) return -1;
+    emBits = modBits - 1u;
+    emLen = (emBits + 7u) / 8u;
+    if (rsa_pss_encode(h, mhash, hLen, salt, salt_len, emBits, emLen, em) != 0) return -1;
+    return teko_bn_modexp(n, nlen, em, emLen, d, dlen, sig);
+}
+
+int teko_rsa_pss_sign(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                      TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                      size_t salt_len, uint8_t* sig) {
+    uint8_t salt[RSA_MAX_BYTES];
+    if (salt_len > RSA_MAX_BYTES) return -1;
+    if (salt_len > 0u && teko_csprng_bytes(salt, salt_len) != 0) return -1;
+    return teko_rsa_pss_sign_seeded(n, nlen, d, dlen, h, mhash, mhash_len, salt, salt_len, sig);
+}
+
+int teko_rsa_pss_verify(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                        TekoRsaHash h, const uint8_t* mhash, size_t mhash_len,
+                        size_t salt_len, const uint8_t* sig, size_t siglen) {
+    size_t hLen = teko_rsa_hash_len(h);
+    size_t modBits, emBits, emLen, dblen, ps_len, i, zero_bits;
+    uint8_t got[RSA_MAX_BYTES];
+    uint8_t db[RSA_MAX_BYTES];
+    uint8_t dbmask[RSA_MAX_BYTES];
+    uint8_t hh[RSA_MAX_HASH];
+    uint8_t hprime[RSA_MAX_HASH];
+    uint8_t mprime[8 + RSA_MAX_HASH + RSA_MAX_BYTES];
+    const uint8_t* em;
+    uint8_t bad;
+
+    if (!n || !e || !mhash || !sig || hLen == 0u) return -1;
+    if (nlen == 0u || nlen > RSA_MAX_BYTES || siglen != nlen || mhash_len != hLen) return -1;
+    modBits = rsa_bitlen(n, nlen);
+    if (modBits == 0u) return -1;
+    emBits = modBits - 1u;
+    emLen = (emBits + 7u) / 8u;
+    if (emLen < hLen + salt_len + 2u) return -1;
+
+    if (teko_bn_modexp(n, nlen, sig, siglen, e, elen, got) != 0) return -1;
+    // EM = trailing emLen bytes of the nlen-byte result; any leading bytes must be zero.
+    if (emLen > nlen) return -1;
+    for (i = 0; i < nlen - emLen; ++i) if (got[i] != 0u) return -1;
+    em = got + (nlen - emLen);
+
+    if (em[emLen - 1u] != 0xbc) return -1;
+    dblen = emLen - hLen - 1u;
+    zero_bits = 8u * emLen - emBits;
+    // The leftmost zero_bits bits of maskedDB[0] must be zero.
+    if (zero_bits != 0u && (em[0] >> (8u - zero_bits)) != 0u) return -1;
+
+    // DB = maskedDB xor MGF1(H, dblen); clear top bits.
+    memcpy(hh, em + dblen, hLen);
+    if (rsa_mgf1(h, hh, hLen, dbmask, dblen) != 0) return -1;
+    for (i = 0; i < dblen; ++i) db[i] = (uint8_t)(em[i] ^ dbmask[i]);
+    db[0] &= (uint8_t)(0xFFu >> zero_bits);
+
+    // DB must be PS(0)*  || 0x01 || salt.
+    ps_len = emLen - hLen - salt_len - 2u;
+    bad = 0u;
+    for (i = 0; i < ps_len; ++i) bad |= db[i];
+    if (db[ps_len] != 0x01) bad |= 0xFFu;
+    if (bad != 0u) return -1;
+
+    // H' = Hash((00)x8 || mHash || salt); accept iff H' == H.
+    memset(mprime, 0, 8u);
+    memcpy(mprime + 8, mhash, hLen);
+    memcpy(mprime + 8 + hLen, db + ps_len + 1u, salt_len);
+    rsa_hash(h, mprime, 8u + hLen + salt_len, hprime);
+    return (memcmp(hprime, hh, hLen) == 0) ? 0 : -1;
+}

@@ -176,3 +176,44 @@ void test_teko_rsa_oaep_sha256_kat(void) {
         TEST_ASSERT_EQUAL_MEMORY(m, rec, sizeof(m));
     }
 }
+
+// Project Wycheproof rsa_pss_2048_sha256_mgf1_32 (SHA-256, MGF1-SHA-256, sLen=32). Same
+// 2048-bit modulus as the OAEP key (so OAEP_D is its private exponent) — verify a real
+// signature (tcId 1, empty message) and a sign->verify round-trip with a random salt.
+void test_teko_rsa_pss_sha256_kat(void) {
+    uint8_t n[256], e[8], d[256], sig[256], mhash[32];
+    size_t nlen, elen, dlen;
+    nlen = hexb(OAEP_N, n);
+    elen = hexb(OAEP_E, e);
+    dlen = hexb(OAEP_D, d);
+
+    teko_sha256((const uint8_t*)"", 0u, mhash); // tcId 1 message is empty
+
+    hexb("4f01e0c12b08625ecac89a69231906edf826380f37c959a96690d046316d68ff"
+         "ce9d5c471694fcebfc6b45534864689256e4fc81c78e583f675d0c94b4496474"
+         "51e81beff01a11a516d5e5ce3f1a910437cb8a3a5096b19fb15f4524a35b23d89"
+         "cdba12cf5b71aac1047b28c562df7c5542c34ce23a182cf7e0e231934b172947"
+         "99d44877a1d68ef1b8f073619b7618e6b7c22db20030d98cf591ffc3d4da5f586"
+         "13ecd5ecfc3b40a1d02f40891ca43695cd4c088b05a8054c89c595a47e274816"
+         "f35384226f74459ee63e25a1bfc03c360490552ec38343f8ace502f065303b00"
+         "bc0ec320711b211fde92e57feb9013c3609342495ec0d7cabdec21e54acc38", sig);
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pss_verify(n, nlen, e, elen, TEKO_RSA_SHA256,
+                                                 mhash, 32u, 32u, sig, 256u));
+    // Tamper: flipped signature byte must be rejected.
+    sig[100] ^= 0x01;
+    TEST_ASSERT_EQUAL_INT(-1, teko_rsa_pss_verify(n, nlen, e, elen, TEKO_RSA_SHA256,
+                                                  mhash, 32u, 32u, sig, 256u));
+
+    // Sign -> verify round-trip (random salt, sLen=32) over a non-empty digest.
+    teko_sha256((const uint8_t*)"pss round trip", 14u, mhash);
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pss_sign(n, nlen, d, dlen, TEKO_RSA_SHA256,
+                                               mhash, 32u, 32u, sig));
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pss_verify(n, nlen, e, elen, TEKO_RSA_SHA256,
+                                                 mhash, 32u, 32u, sig, 256u));
+
+    // Deterministic salt-length-0 round-trip too.
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pss_sign(n, nlen, d, dlen, TEKO_RSA_SHA256,
+                                               mhash, 32u, 0u, sig));
+    TEST_ASSERT_EQUAL_INT(0, teko_rsa_pss_verify(n, nlen, e, elen, TEKO_RSA_SHA256,
+                                                 mhash, 32u, 0u, sig, 256u));
+}
