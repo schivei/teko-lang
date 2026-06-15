@@ -167,6 +167,9 @@ extern void test_teko_bn_modexp_identity(void);
 extern void test_teko_bn_fieldops_smallmod(void);
 extern void test_teko_bn_fieldops_montmul_vs_modexp(void);
 extern void test_teko_bn_fieldops_addsub_and_select(void);
+extern void test_teko_p256_ecdh_cavp_count0(void);
+extern void test_teko_p256_ecdh_cavp_count1(void);
+extern void test_teko_p256_ecdh_rejects_offcurve(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -344,6 +347,9 @@ int main(void) {
     RUN_TEST(test_teko_bn_fieldops_smallmod);
     RUN_TEST(test_teko_bn_fieldops_montmul_vs_modexp);
     RUN_TEST(test_teko_bn_fieldops_addsub_and_select);
+    RUN_TEST(test_teko_p256_ecdh_cavp_count0);
+    RUN_TEST(test_teko_p256_ecdh_cavp_count1);
+    RUN_TEST(test_teko_p256_ecdh_rejects_offcurve);
 
     return UNITY_END();
 }
