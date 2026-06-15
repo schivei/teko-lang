@@ -23,6 +23,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->local_count = 0;
     buffer->uses_codec = 0;
     buffer->uses_hash = 0;
+    buffer->uses_random = 0;
 
     return buffer;
 }
@@ -140,7 +141,11 @@ void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
     if (!buffer) return;
     // Flag which runtime block the backend must emit: ids 0-3 are the base64/hex
     // codecs (Phase 12-G); ids >= 4 are the SHA hash primitives (Phase 13.1).
-    if (codec_id >= 4) buffer->uses_hash = 1;
+    // id 41 = random.bytes: a CSPRNG that needs a host entropy import on WASM (its own
+    // runtime block), not the SHA family — flag it separately so hash-free programs that
+    // only use randomness don't drag in the hash runtime.
+    if (codec_id == 41) buffer->uses_random = 1;
+    else if (codec_id >= 4) buffer->uses_hash = 1;
     else buffer->uses_codec = 1;
     emit_byte(buffer, OP_CALL_RUNTIME);
     emit_int(buffer, codec_id);

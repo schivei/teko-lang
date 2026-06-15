@@ -369,6 +369,8 @@ static int codec_id_for(const char* lex) {
     if (strcmp(lex, "crypto.rsa_pss_verify") == 0) return 38;
     if (strcmp(lex, "crypto.rsa_oaep_encrypt") == 0) return 39;
     if (strcmp(lex, "crypto.rsa_oaep_decrypt") == 0) return 40;
+    // CSPRNG — random.bytes(n) -> n random bytes as hex. id 41.
+    if (strcmp(lex, "random.bytes") == 0) return 41;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;

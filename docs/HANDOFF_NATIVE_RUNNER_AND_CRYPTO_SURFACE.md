@@ -86,11 +86,21 @@
   the deterministic outcomes — PSS sign→verify (1), wrong-message verify (0), OAEP
   encrypt→decrypt round-trip recovering the exact plaintext — with the 2048-bit key `let`-bound;
   the crypto math is KAT-pinned in the Unity suite. Proven on macOS arm64 + Linux x86_64/arm64.
-- **Sub-phase B — REMAINING:** RNG (`random.bytes(n)`) only. Output is non-deterministic, so its
-  proof should assert length/format (2·n hex chars) and that two calls differ, not an exact KAT.
-  Then **Sub-phase C** (WASM substrate) remains: the whole native surface (ids 5,10-40) currently
-  traps (`unreachable`) on WASM — wire host entropy/time + compile the C runtime → wasm32 so WASM
-  lowers to the same single implementation.
+- **Sub-phase B, step 10 — CSPRNG native surface: DONE.** `random.bytes(n)` (id 41, arity 1) →
+  n cryptographically-secure random bytes as hex. Output is non-deterministic, so
+  `runtime/native/samples/random.tks` + the harness `check_random` assert the format (two
+  64-hex-char draws) and that the two draws differ, on macOS arm64 + Linux x86_64/arm64.
+- **Sub-phase B — COMPLETE.** The full crypto **language surface** is now functional natively:
+  hashes (sha256/384/512, sha3_256/512, shake128/256, blake3, blake2b, legacy md5/sha1), HMAC,
+  AEAD (AES-GCM + ChaCha20-Poly1305), signatures (Ed25519, ECDSA P-256/384, RSA-PSS), RSA-OAEP,
+  X25519 ECDH, KDF (HKDF/PBKDF2), CSPRNG, UUID — each lowering to the single C runtime via
+  `OP_CALL_RUNTIME` → `teko_rt_*`, each with an executable `.tks` KAT in `runtime/native/run-native.sh`
+  (run on macOS arm64 + Linux x86_64/arm64 in `native.yml`). No dead tokens on the native surface.
+- **REMAINING — Sub-phase C (WASM substrate):** the whole native surface (runtime ids 5,10-41)
+  currently traps (`unreachable`) on the WASM target (reserved-with-target). Wire (a) host
+  entropy/time imports → `random`/`uuid.v4`/`v7` on WASM, then (b) compile the C crypto runtime
+  → wasm32 + import so WASM lowers to the SAME single implementation (and declare the `$a`
+  staging locals for multi-arg `OP_CALL_RUNTIME`). Executable proofs in the Node/Chromium harness.
   Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol` entry + `teko_rt_*`
   wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`. The established
   pattern (see AEAD/HMAC/Ed25519) scales directly; 8 staging slots cover all current arities.

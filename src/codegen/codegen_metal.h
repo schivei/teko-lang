@@ -55,6 +55,10 @@ typedef struct {
     // Phase 13 (13.1): 1 to emit the in-module SHA hash runtime (only when the program
     // calls hash.sha256/.sha512). Unused by the native emitters.
     int wasm_emit_hash;
+    // Phase 13 (Sub-phase C): 1 to declare the host entropy import (env.teko_random) + the
+    // in-module CSPRNG hex wrapper (only when the program calls random.bytes). Native
+    // emitters ignore this (they link the C CSPRNG into the binary via teko_rt).
+    int wasm_emit_random;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The

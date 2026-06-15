@@ -100,4 +100,8 @@ char* teko_rt_rsa_pss_verify(const char* n_hex, const char* e_hex,
 char* teko_rt_rsa_oaep_encrypt(const char* n_hex, const char* e_hex, const char* msg_hex);
 char* teko_rt_rsa_oaep_decrypt(const char* n_hex, const char* d_hex, const char* ct_hex);
 
+// CSPRNG (id 41). random.bytes(n) -> n cryptographically-secure random bytes as hex.
+// Returns NULL on n <= 0 or n > 1024.
+char* teko_rt_random_bytes(int n);
+
 #endif // TEKO_RT_H

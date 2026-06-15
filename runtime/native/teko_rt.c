@@ -15,6 +15,7 @@
 #include "teko_crypto_p256.h"
 #include "teko_crypto_p384.h"
 #include "teko_crypto_rsa.h"
+#include "teko_crypto_random.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -499,5 +500,16 @@ char* teko_rt_rsa_oaep_decrypt(const char* n_hex, const char* d_hex, const char*
         }
     }
     free(n); free(d); free(ct);
+    return out;
+}
+
+// --- CSPRNG ----------------------------------------------------------------------
+char* teko_rt_random_bytes(int n) {
+    if (n <= 0 || n > TEKO_RT_KDF_MAX_OUT) return NULL;
+    uint8_t* buf = (uint8_t*)malloc((size_t)n);
+    if (!buf) return NULL;
+    char* out = NULL;
+    if (teko_csprng_bytes(buf, (size_t)n) == 0) out = teko_rt_to_hex(buf, (size_t)n);
+    free(buf);
     return out;
 }

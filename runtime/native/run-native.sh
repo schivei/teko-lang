@@ -33,6 +33,21 @@ check() {
   echo "OK: $base -> [$got]"
 }
 
+# CSPRNG: non-deterministic, so assert format (two 64-hex-char lines) + that they differ.
+check_random() {
+  local sample="$1" exe got l1 l2
+  exe="$TMP/$(basename "$sample" .tks)"
+  echo "--- $sample (random) ---"
+  "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$("$exe")" || fail "$sample exited non-zero"
+  l1="$(printf '%s\n' "$got" | sed -n 1p)"; l2="$(printf '%s\n' "$got" | sed -n 2p)"
+  printf '%s' "$l1" | grep -Eq '^[0-9a-f]{64}$' || fail "random line1 not 64 hex: [$l1]"
+  printf '%s' "$l2" | grep -Eq '^[0-9a-f]{64}$' || fail "random line2 not 64 hex: [$l2]"
+  [ "$l1" != "$l2" ] || fail "random: two draws were identical"
+  echo "OK: random -> two distinct 32-byte draws"
+}
+
 check hello.tks "hello from teko native"
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -120,5 +135,7 @@ check rsa.tks "$(cat <<'EXP'
 48656c6c6f2c2052534121
 EXP
 )"
+
+check_random random.tks
 
 echo "All native runner proofs passed."

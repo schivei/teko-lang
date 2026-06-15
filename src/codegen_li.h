@@ -116,6 +116,10 @@ typedef struct {
     // Phase 13 (13.1): 1 if the program calls a hash primitive (hash.sha256/.sha512), so
     // the backend emits the in-module SHA runtime (otherwise omitted).
     int uses_hash;
+    // Phase 13 (Sub-phase C): 1 if the program calls `random.bytes` (id 41), so the WASM
+    // backend declares the host entropy import (env.teko_random) + the in-module CSPRNG
+    // hex wrapper. Native targets ignore this (they link the C CSPRNG via teko_rt).
+    int uses_random;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
