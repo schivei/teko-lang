@@ -40,6 +40,10 @@ static KeywordMap keywords[] = {
     {"parse", TOKEN_PARSE}, {"json", TOKEN_JSON}, {"csv", TOKEN_CSV}, {"xml", TOKEN_XML},
     {"html", TOKEN_HTML}, {"bundle", TOKEN_BUNDLE}, {"minify", TOKEN_MINIFY},
     {"crypto", TOKEN_CRYPTO}, {"hash", TOKEN_HASH}, {"encrypt", TOKEN_ENCRYPT},
+    // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
+    {"decrypt", TOKEN_DECRYPT},
+    {"encode", TOKEN_ENCODE}, {"decode", TOKEN_DECODE},
+    {"base64", TOKEN_BASE64}, {"base32", TOKEN_BASE32}, {"hex", TOKEN_HEX},
     // Core:
     {"comptime", TOKEN_COMPTIME}, {"soa", TOKEN_SOA},
     {NULL, TOKEN_UNKNOWN}, // sentinel — MUST be last (the lookup loop stops here)

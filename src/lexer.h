@@ -32,6 +32,10 @@ typedef enum {
     // Tooling:
     TOKEN_PARSE, TOKEN_JSON, TOKEN_CSV, TOKEN_XML, TOKEN_HTML,
     TOKEN_BUNDLE, TOKEN_MINIFY, TOKEN_CRYPTO, TOKEN_HASH, TOKEN_ENCRYPT,
+    // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
+    TOKEN_DECRYPT,                                   // counterpart of ENCRYPT (crypto phase)
+    TOKEN_ENCODE, TOKEN_DECODE,                      // base transform ops (functional: block C)
+    TOKEN_BASE64, TOKEN_BASE32, TOKEN_HEX,           // base namespaces
     // Core:
     TOKEN_COMPTIME, TOKEN_SOA,
 

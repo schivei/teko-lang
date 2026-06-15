@@ -22,9 +22,27 @@ The full token table the lexer must recognize, grouped (per the roadmap):
 Each becomes a `TOKEN_*` and a row in `keywords[]` (`src/lexer.c`). Purely additive —
 recognition only; no parser action yet beyond not erroring.
 
-> **Latent bug to fix here:** `keywords[]` currently has its `{NULL, …}` sentinel
-> *before* `{"required", TOKEN_REQD}`, so the lookup loop stops early and `required`
-> is never matched. The sentinel must be last.
+> **Latent bug fixed here:** `keywords[]` had its `{NULL, …}` sentinel *before*
+> `{"required", TOKEN_REQD}`, so the lookup loop stopped early and `required` was never
+> matched. The sentinel is now last.
+
+### 1A. Symmetry audit (counterpart/missing tokens)
+A pass over the matrix for transform pairs without a counterpart:
+- **Added** (P12 1A): `decrypt` (counterpart of `encrypt`; reserved → crypto phase) and
+  the base-encoding surface `encode` / `decode` / `base64` / `base32` / `hex` (made
+  functional in block C).
+- **Listed, not added** (no immediate function; await sign-off, then add with grammar):
+  `serialize`/`stringify` (counterpart of `parse`), `sign`/`verify` (crypto-gated),
+  `compress`/`decompress` (not on roadmap), HTTP `patch`/`head`/`options` (REST set
+  completeness, Phase 16).
+
+### Governing rule (from this point on)
+**No token ships "dead."** Every new token must come with grammar + functional logic +
+an executable test, **or** be explicitly marked *reserved — lowering in Phase X* in the
+status table below. The existing recognition-only keywords are all **reserved**:
+resilience/concurrency/OOP → Phases 13–14; web → Phase 16; comptime/soa → Phase 15;
+crypto (`crypto`/`hash`/`encrypt`/`decrypt`/`sign`/`verify`) → crypto phase (14/16). The
+base-encoding set is the first group to become **functional** within Phase 12 (block C).
 
 ### 2. Native literal suffixes (zero runtime cost, captured in the lexer)
 - **Time:** `ms`, `s`, `m`, `h`, `d`
@@ -50,13 +68,19 @@ foundational pieces unblock a *real* expression frontend and belong early in Pha
   spilling intermediates to named temporaries.
 
 ## Increment plan (status filled in as we go)
-1. **P12-A** keyword tokens + sentinel fix — ✅ done (`TOKEN_*` + `keywords[]`; `required` fixed).
-2. **P12-B** native literal suffixes (time/data/bandwidth) — ✅ done (`Token.literal_unit`,
-   longest-match in `lex_number`, suffix excluded from the lexeme, non-units rewound).
-3. **P12-C** AST node scaffolding for the new surfaces — *medium; extend the existing split
-   AST (no rewrite). Reported before landing.*
-4. **P12-D..** the carried-over frontend gaps (locals → expressions → nested handles) —
-   *foundational, larger; sequenced after the bounded parts and reported before landing.*
+1. **P12-A** keyword tokens + sentinel fix — ✅ done.
+2. **P12-B** native literal suffixes (time/data/bandwidth) — ✅ done.
+3. **P12-1A** symmetry audit — ✅ done (`decrypt` + base-encoding tokens added; others listed).
+4. **Foundational frontend (D → E → F)** — `let`/`mut` named locals → general expressions
+   (Pratt) → multiple nested handle args. *Prerequisite for expressing/calling any feature
+   (e.g. `let s = base64.encode(x)`). Larger; plan reported before landing.*
+5. **Base encoding (functional)** — real `base64`/`hex` encode+decode (runtime/intrinsic +
+   grammar + executable round-trip test against known vectors). The first clean functional
+   win; deterministic, no external deps.
+6. **Crypto (`encrypt`/`decrypt`) — GATED.** Needs a real cipher; scope (AES-256-GCM /
+   ChaCha20-Poly1305 / …) to be proposed and signed off — likely its own phase (roadmap
+   Phase 14/16), not this PR.
+7. **P12-C** AST node scaffolding for remaining surfaces — *extend the split AST, no rewrite.*
 
 Discipline (per `CLAUDE.md`): 1 increment per commit; ASan/UBSan on both dispatch paths +
 TSan; the 16 native emitter goldens never regress; 4 CI gates green; docs/CLAUDE.md kept

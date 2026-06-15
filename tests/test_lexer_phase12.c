@@ -73,6 +73,14 @@ void test_phase12_reserved_keywords(void) {
     TEST_ASSERT_EQUAL_INT(TOKEN_COMPTIME, tok1("comptime"));
     TEST_ASSERT_EQUAL_INT(TOKEN_SOA, tok1("soa"));
 
+    // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
+    TEST_ASSERT_EQUAL_INT(TOKEN_DECRYPT, tok1("decrypt"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_ENCODE, tok1("encode"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_DECODE, tok1("decode"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_BASE64, tok1("base64"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_BASE32, tok1("base32"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_HEX, tok1("hex"));
+
     // Pre-existing keywords still resolve, and a non-keyword stays an identifier.
     TEST_ASSERT_EQUAL_INT(TOKEN_FN, tok1("fn"));
     TEST_ASSERT_EQUAL_INT(TOKEN_RETURN, tok1("return"));
