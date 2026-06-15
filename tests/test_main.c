@@ -128,6 +128,8 @@ extern void test_teko_crypto_hkdf_rfc5869_vectors(void);
 extern void test_teko_crypto_hkdf_sha512_structural(void);
 extern void test_teko_crypto_pbkdf2_sha256_rfc7914_vectors(void);
 extern void test_teko_crypto_pbkdf2_sha512_structural(void);
+extern void test_teko_crypto_chacha20_rfc8439_encrypt(void);
+extern void test_teko_crypto_chacha20_rfc8439_block(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -266,6 +268,8 @@ int main(void) {
     RUN_TEST(test_teko_crypto_hkdf_sha512_structural);
     RUN_TEST(test_teko_crypto_pbkdf2_sha256_rfc7914_vectors);
     RUN_TEST(test_teko_crypto_pbkdf2_sha512_structural);
+    RUN_TEST(test_teko_crypto_chacha20_rfc8439_encrypt);
+    RUN_TEST(test_teko_crypto_chacha20_rfc8439_block);
 
     return UNITY_END();
 }
