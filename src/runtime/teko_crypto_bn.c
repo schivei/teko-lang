@@ -298,6 +298,13 @@ void teko_mont_sub(const TekoMont* mont, uint32_t* out,
     teko_bn_cselect(out, tmp, t, n, mask);
 }
 
+void teko_mont_reduce_once(const TekoMont* mont, uint32_t* v) {
+    uint32_t tmp[TEKO_BN_MAX_LIMBS];
+    uint32_t borrow = teko_bn_sub(tmp, v, mont->m, mont->n); // tmp = v - m
+    uint32_t mask = teko_bn_mask1(borrow ^ 1u);              // v >= m  <=>  no borrow
+    teko_bn_cselect(v, tmp, v, mont->n, mask);
+}
+
 void teko_mont_to(const TekoMont* mont, uint32_t* out, const uint32_t* a) {
     teko_bn_montmul(out, a, mont->rr, mont->m, mont->n, mont->n0);
 }

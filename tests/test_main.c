@@ -170,6 +170,8 @@ extern void test_teko_bn_fieldops_addsub_and_select(void);
 extern void test_teko_p256_ecdh_cavp_count0(void);
 extern void test_teko_p256_ecdh_cavp_count1(void);
 extern void test_teko_p256_ecdh_rejects_offcurve(void);
+extern void test_teko_p256_ecdsa_rfc6979_sample(void);
+extern void test_teko_p256_ecdsa_rfc6979_test(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -350,6 +352,8 @@ int main(void) {
     RUN_TEST(test_teko_p256_ecdh_cavp_count0);
     RUN_TEST(test_teko_p256_ecdh_cavp_count1);
     RUN_TEST(test_teko_p256_ecdh_rejects_offcurve);
+    RUN_TEST(test_teko_p256_ecdsa_rfc6979_sample);
+    RUN_TEST(test_teko_p256_ecdsa_rfc6979_test);
 
     return UNITY_END();
 }

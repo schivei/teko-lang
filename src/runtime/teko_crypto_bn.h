@@ -64,6 +64,10 @@ void teko_mont_to(const TekoMont* mont, uint32_t* out, const uint32_t* a);
 // out = a * R^{-1} mod m  (Montgomery form a  ->  ordinary residue).
 void teko_mont_from(const TekoMont* mont, uint32_t* out, const uint32_t* a);
 
+// If v >= m, subtract m once (constant-time). Assumes v < 2*m (n limbs). Used to reduce a
+// value just above the modulus (e.g. a scalar in [0, 2n) -> [0, n)) without a division.
+void teko_mont_reduce_once(const TekoMont* mont, uint32_t* v);
+
 // Constant-time conditional copy: out = (mask ? a : b), per limb. mask must be 0 or
 // 0xFFFFFFFF (use teko_bn_mask1 to broadcast a 0/1 flag). out may alias a or b.
 void teko_bn_cselect(uint32_t* out, const uint32_t* a, const uint32_t* b,
