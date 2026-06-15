@@ -49,6 +49,9 @@ typedef struct {
     // Phase 12 (Frontend Grammar): number of named local variables ($v0..$v{n-1}) to
     // declare in $main. 0 = none (legacy/emit-demo programs). Unused by native emitters.
     int wasm_local_count;
+    // Phase 12 (P12-G): 1 to emit the base64/hex codec runtime (only when the program
+    // uses it). Unused by the native emitters.
+    int wasm_emit_codecs;
 } MetalContext;
 
 // Phase 11: hand the WASM emitter the IL string pool before teko_metal_emit_program
@@ -64,6 +67,9 @@ void teko_metal_set_imports(MetalContext* ctx, const TekoWasmImport* imports, in
 // Phase 12: declare `count` named local i32 variables ($v0..$v{count-1}) in $main.
 // Call before teko_metal_emit_program; 0 (or not calling) keeps the legacy behavior.
 void teko_metal_set_local_count(MetalContext* ctx, int count);
+
+// Phase 12 (P12-G): request the base64/hex codec runtime functions be emitted.
+void teko_metal_set_emit_codecs(MetalContext* ctx, int enabled);
 
 // Phase 11 (Browser FFI MVP-2): write an auto-generated JS glue module to `path`
 // that implements the `dom.*` host imports currently set on `ctx` (via

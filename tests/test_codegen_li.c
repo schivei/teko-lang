@@ -402,6 +402,57 @@ void test_frontend_interop_expressions(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 12 (P12-G): base64/hex encode+decode are functional. The frontend lowers
+// base64.encode/.decode and hex.encode/.decode to OP_CALL_RUNTIME against the native
+// codec runtime; this golden pins the lowering + that the codec runtime is emitted.
+void test_frontend_interop_base_encoding(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(base64.encode(\"Man\"));\n"
+        "emit(hex.decode(\"4d616e\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_codec);
+
+    // Two OP_CALL_RUNTIME ops: codec id 0 (base64 encode) and 3 (hex decode).
+    int n_runtime = 0, saw_b64e = 0, saw_hexd = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            n_runtime++;
+            int id = (int)buffer->code[i + 1]; // 4-byte LE arg; low byte is the id
+            if (id == 0) saw_b64e = 1;
+            if (id == 3) saw_hexd = 1;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(2, n_runtime);
+    TEST_ASSERT_TRUE(saw_b64e);
+    TEST_ASSERT_TRUE(saw_hexd);
+
+    // Through the bridge: the native codec runtime + the calls are emitted.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_codec.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(32768);
+    memset(out, 0, 32768);
+    size_t n = fread(out, 1, 32767, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_base64_encode (export \"teko_base64_encode\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_hex_decode (export \"teko_hex_decode\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_base64_encode"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_hex_decode"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 11 (Browser FFI frontend FE-A): import table dedup + interop emit helpers.
 // Models the IL a parser would emit for `log("hi")` where
 // `extern fn log(msg) from "env" as "log"`: SCONST &"hi" -> CALL_IMPORT #0 -> HALT.

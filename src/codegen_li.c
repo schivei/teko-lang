@@ -21,6 +21,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->imports = (TekoILImport*)malloc(sizeof(TekoILImport) * buffer->import_capacity);
 
     buffer->local_count = 0;
+    buffer->uses_codec = 0;
 
     return buffer;
 }
@@ -132,6 +133,12 @@ void codegen_li_emit_load_local(BytecodeBuffer* buffer, int slot) {
 void codegen_li_emit_binop(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     emit_byte(buffer, (unsigned char)op); // single-byte: ADD/SUB/MUL/DIV/MOD/EQ/NE/LT/LE/GT/GE
+}
+
+void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
+    if (!buffer) return;
+    emit_byte(buffer, OP_CALL_RUNTIME);
+    emit_int(buffer, codec_id);
 }
 
 void codegen_li_emit_call_import(BytecodeBuffer* buffer, int import_index) {

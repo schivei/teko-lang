@@ -40,6 +40,7 @@ extern void test_frontend_interop_event_handler(void);
 extern void test_frontend_interop_named_locals(void);
 extern void test_frontend_interop_expressions(void);
 extern void test_frontend_interop_nested_handle_args(void);
+extern void test_frontend_interop_base_encoding(void);
 extern void test_di_lifetime_arena_assignment(void);
 extern void test_escape_analysis_region_promotion(void);
 extern void test_implicit_precision_coercion_for_arbitrary_types(void);
@@ -159,6 +160,7 @@ int main(void) {
     RUN_TEST(test_frontend_interop_named_locals);
     RUN_TEST(test_frontend_interop_expressions);
     RUN_TEST(test_frontend_interop_nested_handle_args);
+    RUN_TEST(test_frontend_interop_base_encoding);
     RUN_TEST(test_di_lifetime_arena_assignment);
     RUN_TEST(test_escape_analysis_region_promotion);
     RUN_TEST(test_implicit_precision_coercion_for_arbitrary_types);

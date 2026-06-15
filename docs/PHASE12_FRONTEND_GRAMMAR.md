@@ -94,9 +94,21 @@ foundational pieces unblock a *real* expression frontend and belong early in Pha
      in `$main` and handler bodies (routines now declare the `$v` file too). Proven:
      `appendChild(getElementById("out"), createElement("span"))` builds a `<span>` under
      `#out` (golden + Playwright `run-nested.mjs`).
-5. **Base encoding (functional)** — real `base64`/`hex` encode+decode (runtime/intrinsic +
-   grammar + executable round-trip test against known vectors). The first clean functional
-   win; deterministic, no external deps.
+5. **Base encoding (functional). ✅ done (P12-G).** Native in-module WAT codec runtime
+   (`$teko_base64_encode/decode`, `$teko_hex_encode/decode` + `$teko_strlen`) — reads a
+   NUL-terminated input, materializes the result via `teko_alloc`, returns a NUL-terminated
+   output; no external deps. Grammar: `base64.encode/.decode`, `hex.encode/.decode` (a
+   single dotted identifier, like `@dom.x`) → `OP_CALL_RUNTIME`; arg is a string literal,
+   named local, or nested codec call. Emitted on-demand (only when used). Proven by the
+   `teko` binary: `base64.encode("Man")="TWFu"`, `hex.encode("Man")="4d616e"`,
+   `base64.decode("TWFu")="Man"`, and the nested round-trip `decode(encode(x))==x`
+   (RFC 4648). Golden `test_frontend_interop_base_encoding` + Node `run-codec.mjs`.
+
+**Phase 12 is functionally complete** on the surface we defined: reserved keyword matrix +
+literal suffixes (lexer), the real `.tks → IL → WASM` foundational frontend (named locals,
+integer expressions, nested args), and functional base encoding. Cryptography (Phase 13),
+serialization (Phase 18), and web verbs (Phase 17) remain **reserved tokens with a target
+phase** — not dead, not implemented here.
 6. **Crypto (`encrypt`/`decrypt`) — GATED.** Needs a real cipher; scope (AES-256-GCM /
    ChaCha20-Poly1305 / …) to be proposed and signed off — likely its own phase (roadmap
    Phase 14/16), not this PR.

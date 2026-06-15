@@ -29,6 +29,12 @@ typedef enum {
     OP_GT = 0x17,
     OP_GE = 0x18,
 
+    // Phase 12 (P12-G): call a native base-encoding codec runtime function. 4-byte LE
+    // codec id: 0 = base64 encode, 1 = base64 decode, 2 = hex encode, 3 = hex decode.
+    // Takes the input pointer in $w0 (NUL-terminated), returns the output pointer
+    // (NUL-terminated, allocated via teko_alloc) in $w0.
+    OP_CALL_RUNTIME = 0x19,
+
     // Phase 11 (Browser FFI): call a host import declared via `extern fn … from
     // "ns" as "name"`. Carries a 4-byte little-endian import index (into the
     // module's import table); the WASM emitter lowers it to `call $import_<idx>`.
@@ -104,6 +110,9 @@ typedef struct {
     // Phase 12: count of named local variables ($v0..$v{local_count-1}) the program
     // uses in $main; threaded to the WASM emitter so it declares them at function open.
     int local_count;
+    // Phase 12 (P12-G): 1 if the program calls a base64/hex codec, so the backend emits
+    // the codec runtime functions (otherwise omitted, keeping lean modules lean).
+    int uses_codec;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
@@ -127,6 +136,7 @@ void codegen_li_emit_load(BytecodeBuffer* buffer);  // $w0 <- $w1
 void codegen_li_emit_store_local(BytecodeBuffer* buffer, int slot); // $vslot <- $w0
 void codegen_li_emit_load_local(BytecodeBuffer* buffer, int slot);  // $w0 <- $vslot
 void codegen_li_emit_binop(BytecodeBuffer* buffer, OpCode op);       // $w0 = $w0 <op> $w1
+void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id); // $w0 = codec($w0)
 void codegen_li_emit_setarg(BytecodeBuffer* buffer, int slot);
 void codegen_li_emit_call_import(BytecodeBuffer* buffer, int import_index);
 void codegen_li_emit_func_begin(BytecodeBuffer* buffer, int routine_id);

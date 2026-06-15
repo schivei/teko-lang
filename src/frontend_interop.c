@@ -304,6 +304,62 @@ static void eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
     }
 }
 
+// --- base-encoding codecs (P12-G) -----------------------------------------------
+// `base64.encode(x)` / `.decode`, `hex.encode/.decode`. Lexes as
+// <TOKEN_BASE64|TOKEN_HEX> TOKEN_DOT <TOKEN_ENCODE|TOKEN_DECODE> '(' arg ')'. The arg is
+// a string literal, a named local, or a nested codec call; it is lowered to a pointer
+// in $w0, then OP_CALL_RUNTIME invokes the native codec (result pointer -> $w0).
+// The lexer folds `base64.encode` into a single dotted identifier (the same rule that
+// makes `@marshall.to_ptr` one macro token), so a codec call is an IDENTIFIER whose
+// lexeme is "<base64|hex>.<encode|decode>" followed by '('. Returns the codec id
+// (0=b64e,1=b64d,2=hexe,3=hexd) or -1.
+static int codec_id_for(const char* lex) {
+    if (!lex) return -1;
+    if (strcmp(lex, "base64.encode") == 0) return 0;
+    if (strcmp(lex, "base64.decode") == 0) return 1;
+    if (strcmp(lex, "hex.encode") == 0) return 2;
+    if (strcmp(lex, "hex.decode") == 0) return 3;
+    return -1;
+}
+
+static int is_codec_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           codec_id_for(p->current_token.lexeme) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // recursive
+
+// Lower a codec argument (string literal / named local / nested codec) to $w0 = ptr.
+static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
+        char* s = strip_quotes(p->current_token.lexeme);
+        codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, s));
+        free(s);
+        fe_advance(p);
+    } else if (is_codec_head(p)) {
+        lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
+    } else if (p->current_token.type == TOKEN_IDENTIFIER) {
+        int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
+        if (s >= 0) codegen_li_emit_load_local(b, s);
+        else codegen_li_emit_iconst(b, 0);
+        fe_advance(p);
+    } else {
+        codegen_li_emit_iconst(b, 0); // unsupported arg in this subset
+    }
+}
+
+static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int id = codec_id_for(p->current_token.lexeme);      // current = "base64.encode" etc.
+    if (id < 0) id = 0;
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    lower_codec_value(b, p, ctx);                        // arg ptr -> $w0
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_call_runtime(b, id);                 // $w0 = codec($w0)
+    b->uses_codec = 1;
+}
+
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners
 // below so the `fn` token INSIDE `extern fn …` is not mistaken for a handler.
 static void skip_extern_decl(Parser* p) {
@@ -482,6 +538,8 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                        is_dom_macro(parser.current_token.lexeme) &&
                        parser.peek_token.type == TOKEN_LPAREN) {
                 lower_intrinsic_call(buffer, &parser, &top_ctx); // result handle -> $w0
+            } else if (is_codec_head(&parser)) {
+                lower_base_codec(buffer, &parser, &top_ctx);      // P12-G: result ptr -> $w0
             } else {
                 // Integer expression (P12-E): literals, locals, parens, + - * / % and
                 // comparisons. Temps live above the named locals ($v{nlocals}+).
@@ -526,9 +584,20 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
             CallArg args[16];
             int nargs = 0;
+            int temps_used = 0; // codec-arg results spilled to temp locals
             while (parser.current_token.type != TOKEN_RPAREN &&
                    parser.current_token.type != TOKEN_EOF) {
-                if (nargs < 16 &&
+                if (nargs < 16 && is_codec_head(&parser)) {
+                    // base64/hex codec call as an argument (P12-G): lower eagerly and
+                    // spill the result pointer to a temp local, then pass the local.
+                    lower_base_codec(buffer, &parser, &top_ctx); // $w0 = result ptr
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
+                } else if (nargs < 16 &&
                     (parser.current_token.type == TOKEN_LIT_STR ||
                      parser.current_token.type == TOKEN_STRING_LIT)) {
                     args[nargs].is_string = 1;
@@ -565,6 +634,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
             int idx = bind_lookup(binds, nb, callee);
             if (idx >= 0) lower_call(buffer, idx, args, nargs);
+            ta.next_temp -= temps_used; // free codec-arg temps
 
             for (int i = 0; i < nargs; i++) if (args[i].sval) free(args[i].sval);
             free(callee);
