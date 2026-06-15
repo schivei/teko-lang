@@ -81,6 +81,16 @@ void test_phase12_reserved_keywords(void) {
     TEST_ASSERT_EQUAL_INT(TOKEN_BASE32, tok1("base32"));
     TEST_ASSERT_EQUAL_INT(TOKEN_HEX, tok1("hex"));
 
+    // Reserved-with-target tokens (no dead tokens): sign/verify → Phase 13,
+    // serialize/stringify → Phase 18, patch/head/options → Phase 17.
+    TEST_ASSERT_EQUAL_INT(TOKEN_SIGN, tok1("sign"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_VERIFY, tok1("verify"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_SERIALIZE, tok1("serialize"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_STRINGIFY, tok1("stringify"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_PATCH, tok1("patch"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_HEAD, tok1("head"));
+    TEST_ASSERT_EQUAL_INT(TOKEN_OPTIONS, tok1("options"));
+
     // Pre-existing keywords still resolve, and a non-keyword stays an identifier.
     TEST_ASSERT_EQUAL_INT(TOKEN_FN, tok1("fn"));
     TEST_ASSERT_EQUAL_INT(TOKEN_RETURN, tok1("return"));

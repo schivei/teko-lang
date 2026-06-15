@@ -31,10 +31,10 @@ A pass over the matrix for transform pairs without a counterpart:
 - **Added** (P12 1A): `decrypt` (counterpart of `encrypt`; reserved → crypto phase) and
   the base-encoding surface `encode` / `decode` / `base64` / `base32` / `hex` (made
   functional in block C).
-- **Listed, not added** (no immediate function; await sign-off, then add with grammar):
-  `serialize`/`stringify` (counterpart of `parse`), `sign`/`verify` (crypto-gated),
-  `compress`/`decompress` (not on roadmap), HTTP `patch`/`head`/`options` (REST set
-  completeness, Phase 16).
+- **Added as reserved-with-target** (no dead tokens): `sign`/`verify` → **Phase 13**
+  (crypto); `serialize`/`stringify` → **Phase 18** (parsers; static per-type generators,
+  Go-style, no runtime reflection); HTTP `patch`/`head`/`options` → **Phase 17** (web).
+- **Skipped:** `compress`/`decompress` — not on the roadmap, no target phase to reserve to.
 
 ### Governing rule (from this point on)
 **No token ships "dead."** Every new token must come with grammar + functional logic +

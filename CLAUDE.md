@@ -95,6 +95,11 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   **Phase 12** (Frontend Grammar & Lexer Extension) is the **current phase** (PR #5;
   `docs/PHASE12_FRONTEND_GRAMMAR.md`). **Phase 13 = Native Cryptography** (dedicated, planned —
   symmetric + asymmetric, owner-requested); the old 13–20 shifted to 14–21 (Self-Hosting = 21).
+- **Serialization = static per-type generators, no runtime reflection (decision).** (De)serialization
+  is generated at compile time as a specialized, monomorphized (de)serializer **per concrete type**,
+  emitted directly — Go-style generated marshalers, never a runtime reflective walker — consistent with
+  the language's zero-runtime-reflection ethos. `serialize`/`stringify` (and `parse.json`/`.csv`/`.xml`)
+  lower this way in **Phase 18** (Enterprise Parsers); the tokens are reserved in Phase 12 with that destination.
 - **Browser FFI backend AND a real `.tks` frontend are built.** The WASM backend lowers the
   full Browser FFI surface (imports, DOM, events, allocator, facade), and the frontend now
   compiles real source for it: `teko build <f>.tks --target=wasm` lexes/parses/lowers the

@@ -373,37 +373,45 @@ matters and test-vector-driven proof (NIST/RFC KATs + round-trips). This phase o
 cryptography moved out of the old "Networking, Web & Cryptography" phase (now Phase 17,
 Networking & Web), which consumes these primitives for TLS 1.3.*
 
-**Surface (Teko keywords):** `crypto`, `hash`, `encrypt`/`decrypt`, `sign`/`verify`
-(to be added), `encode`/`decode` interop with Phase 12 base codecs. Each lands with
-grammar + functional logic + executable KAT tests — never a dead token.
+**Goal:** the **maximum** practical coverage of symmetric **and** asymmetric ciphers,
+all native. **Surface (Teko keywords):** `crypto`, `hash`, `encrypt`/`decrypt`,
+`sign`/`verify` (reserved in Phase 12, lowered here), `encode`/`decode` interop with the
+Phase 12 base codecs. Each primitive lands with grammar + functional logic + executable
+KAT tests — never a dead token.
 
-### Sub-phases (proposed order — easiest/foundational first)
-- **13.1 — Hashes & MAC primitives.** SHA-256, SHA-512, SHA-3 (Keccak), BLAKE3, and
-  HMAC over them. Foundational (KDFs, signatures, AEAD all depend on these). Pure,
-  deterministic, KAT-friendly → *most viable native, do first.*
-- **13.2 — Symmetric / AEAD.** ChaCha20-Poly1305 (RFC 8439) first (no hardware dep,
-  portable), then AES-128/192/256 in CTR / CBC / GCM. AES is viable in software
-  (T-tables or, preferably, bitsliced/constant-time); AES-NI/hardware acceleration is a
-  later optimization, not a correctness requirement.
-- **13.3 — KDF / utility & CSPRNG.** HKDF, PBKDF2 (cheap once HMAC exists), then the
-  memory-hard scrypt / Argon2 (harder). A platform CSPRNG (`getrandom`/`BCryptGenRandom`/
-  `arc4random` + WASM host import). Sequenced before asymmetric (key generation needs it).
-- **13.4 — Asymmetric.** Curve25519 family first — **X25519** (key exchange) and
-  **Ed25519** (signatures): fixed-field, well-specified, no big-int-asymmetry headaches →
-  *most viable native asymmetric.* Then NIST curves **ECDSA/ECDH P-256/P-384**. **RSA**
-  (PKCS#1 v1.5, OAEP, PSS) last — needs a bignum (multi-precision) layer, which is the
-  largest/hardest native piece.
+### Sub-phases (coverage + viability)
+- **13.1 — Hashes & MAC.** SHA-256, SHA-512, SHA-3 (Keccak/SHAKE), BLAKE3, and HMAC over
+  them. *Foundational* — KDFs, signatures, and AEAD all depend on these. Pure,
+  deterministic, KAT-friendly → **most viable native; built first.**
+- **13.2 — Symmetric / AEAD.** AES-128/192/256 in **CBC / CTR / GCM**, and
+  **ChaCha20-Poly1305** (RFC 8439). ChaCha20-Poly1305 is the easiest (no hardware dep,
+  portable). AES is viable in software (constant-time/bitsliced); GCM needs GF(2^128)
+  carryless multiply. *AES-NI/PCLMUL hardware acceleration is a later optimization, not a
+  correctness requirement.*
+- **13.3 — Asymmetric.** **RSA** (OAEP, PSS — and PKCS#1 v1.5 for interop), **Ed25519**
+  (signatures), **X25519** (key exchange), and **ECDSA / ECDH P-256 / P-384**. Curve25519
+  (X25519/Ed25519) is the *most viable native asymmetric* (fixed-field, no bignum). The
+  NIST P-curves need modular field + point arithmetic; **RSA is the hardest** — it needs a
+  full multi-precision bignum (Montgomery mul, modexp) + careful padding.
+- **13.4 — KDF / utility & CSPRNG.** HKDF, PBKDF2 (cheap once HMAC exists), the memory-hard
+  **scrypt / Argon2** (harder), and a platform **CSPRNG** (`getrandom` / `BCryptGenRandom` /
+  `arc4random` + a WASM host import).
 
-### Viability notes (native, no libs)
-- **Most viable / do early:** SHA-2/SHA-3/BLAKE3, HMAC, HKDF/PBKDF2, ChaCha20-Poly1305,
-  X25519, Ed25519 — all fixed-width, KAT-verifiable, no bignum.
-- **Harder:** AES constant-time (bitslicing) + GCM (GF(2^128) car­ryless mul), P-256/P-384
+### Build order vs. numbering
+The numbering above is the conceptual grouping. The *implementation* order follows
+dependencies: **13.1 hashes → CSPRNG + HKDF/PBKDF2 (from 13.4) → 13.2 symmetric/AEAD →
+13.3 asymmetric (X25519/Ed25519 first, then P-curves, RSA last)**, with scrypt/Argon2 and
+RSA — the heaviest pieces — sequenced toward the end.
+
+### Viability summary (native, no libs)
+- **Most viable / early:** SHA-2/SHA-3/BLAKE3, HMAC, HKDF/PBKDF2, ChaCha20-Poly1305,
+  X25519, Ed25519, CSPRNG — fixed-width, KAT-verifiable, no bignum.
+- **Harder:** AES constant-time + GCM (GF(2^128) carryless mul), ECDSA/ECDH P-256/P-384
   (modular field + point arithmetic), scrypt/Argon2 (memory-hard).
-- **Hardest:** RSA — requires a full multi-precision bignum (Montgomery mul, modexp) and
-  careful padding; gate as the final sub-phase.
+- **Hardest:** RSA (OAEP/PSS) — full multi-precision bignum; gate as the final piece.
 
-*Effort: large, multi-increment, spanning several sub-phases. Implementation begins only
-after Phase 12 is complete and the cipher coverage below is signed off.*
+*Effort: large, multi-increment, spanning all four sub-phases. Implementation begins only
+after Phase 12 is complete.*
 
 ---
 
@@ -459,6 +467,15 @@ after Phase 12 is complete and the cipher coverage below is signed off.*
 *   Linear O(1), reflection-free execution: `parse.json`, `parse.csv`, `parse.xml`.
 *   Native Template Engine integrated via rich String Literals: `html"""..."""`.
 *   Integrated Bundler and Minifier at compile time: `bundle()` and `minify` commands optimize and embed static CSS/JS/Assets into the `.rodata` section.
+
+> **Design decision — static per-type (de)serializers (Go-style, no runtime reflection).**
+> Serialization/deserialization is **generated at compile time as a specialized
+> (de)serializer per concrete type, emitted directly** — no runtime reflection, consistent
+> with the language's zero-runtime-reflection ethos. The `serialize` / `stringify` tokens
+> (and `parse.json`/`.csv`/`.xml`) lower in this phase following this model: for each type
+> that crosses a (de)serialization boundary, the compiler emits a dedicated, monomorphized
+> encode/decode routine (akin to Go's generated marshalers / `easyjson`), not a generic
+> reflective walker. `serialize`/`stringify` are reserved in Phase 12 with this destination.
 
 ---
 

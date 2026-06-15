@@ -29,13 +29,16 @@ typedef enum {
     // Web:
     TOKEN_API, TOKEN_MIDDLEWARE, TOKEN_GET, TOKEN_POST, TOKEN_PUT,
     TOKEN_DELETE, TOKEN_RPC, TOKEN_WEBSOCKET,
+    TOKEN_PATCH, TOKEN_HEAD, TOKEN_OPTIONS,          // REST verb completeness (reserved → Phase 17)
     // Tooling:
     TOKEN_PARSE, TOKEN_JSON, TOKEN_CSV, TOKEN_XML, TOKEN_HTML,
     TOKEN_BUNDLE, TOKEN_MINIFY, TOKEN_CRYPTO, TOKEN_HASH, TOKEN_ENCRYPT,
     // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
-    TOKEN_DECRYPT,                                   // counterpart of ENCRYPT (crypto phase)
-    TOKEN_ENCODE, TOKEN_DECODE,                      // base transform ops (functional: block C)
+    TOKEN_DECRYPT,                                   // counterpart of ENCRYPT (reserved → Phase 13)
+    TOKEN_ENCODE, TOKEN_DECODE,                      // base transform ops (functional in Phase 12)
     TOKEN_BASE64, TOKEN_BASE32, TOKEN_HEX,           // base namespaces
+    TOKEN_SIGN, TOKEN_VERIFY,                         // signatures (reserved → Phase 13 crypto)
+    TOKEN_SERIALIZE, TOKEN_STRINGIFY,                // (reserved → Phase 18, static per-type serializers)
     // Core:
     TOKEN_COMPTIME, TOKEN_SOA,
 

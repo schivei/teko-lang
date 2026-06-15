@@ -36,6 +36,7 @@ static KeywordMap keywords[] = {
     {"api", TOKEN_API}, {"middleware", TOKEN_MIDDLEWARE}, {"get", TOKEN_GET},
     {"post", TOKEN_POST}, {"put", TOKEN_PUT}, {"delete", TOKEN_DELETE},
     {"rpc", TOKEN_RPC}, {"websocket", TOKEN_WEBSOCKET},
+    {"patch", TOKEN_PATCH}, {"head", TOKEN_HEAD}, {"options", TOKEN_OPTIONS}, // reserved → Phase 17
     // Tooling:
     {"parse", TOKEN_PARSE}, {"json", TOKEN_JSON}, {"csv", TOKEN_CSV}, {"xml", TOKEN_XML},
     {"html", TOKEN_HTML}, {"bundle", TOKEN_BUNDLE}, {"minify", TOKEN_MINIFY},
@@ -44,6 +45,8 @@ static KeywordMap keywords[] = {
     {"decrypt", TOKEN_DECRYPT},
     {"encode", TOKEN_ENCODE}, {"decode", TOKEN_DECODE},
     {"base64", TOKEN_BASE64}, {"base32", TOKEN_BASE32}, {"hex", TOKEN_HEX},
+    {"sign", TOKEN_SIGN}, {"verify", TOKEN_VERIFY},                       // reserved → Phase 13
+    {"serialize", TOKEN_SERIALIZE}, {"stringify", TOKEN_STRINGIFY},       // reserved → Phase 18
     // Core:
     {"comptime", TOKEN_COMPTIME}, {"soa", TOKEN_SOA},
     {NULL, TOKEN_UNKNOWN}, // sentinel — MUST be last (the lookup loop stops here)
