@@ -99,10 +99,18 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
 - **Phase 13 (Native Cryptography) decisions.** Every primitive is **portable C23 in the
   embedded native runtime** (`src/runtime/teko_crypto_*.c`) — the single source of truth,
   KAT-tested in the Unity suite against NIST/RFC vectors; it is *intended* to be linked into
-  native targets and is the reference for WASM lowering. ⚠️ **The native backend is currently
-  emission-only ("no runner") and links no external C runtime** — the `--target=<native>`
-  build encodes mock bytecode and never executes; wiring the crypto *language surface* needs a
-  real native runner built first. See `docs/HANDOFF_NATIVE_RUNNER_AND_CRYPTO_SURFACE.md`.
+  native targets and is the reference for WASM lowering. **Native runner — Sub-phase A step 1
+  landed:** `teko build <f>.tks --target=<native>` now compiles real source through a
+  **libc-hosted, assemble-able** emitter (`src/codegen/emit_native_hosted.c`, gated by
+  `MetalContext.hosted` so the 16 freestanding goldens are untouched) and drives the system
+  `cc` to assemble + link the **`teko_rt`** archive (`runtime/native/teko_rt.c`) into a
+  **runnable** executable — proven by `runtime/native/samples/hello.tks` (`emit(...)` →
+  `OP_CALL_IMPORT` → `teko_rt_emit`; runs on macOS arm64 + Linux x86_64/arm64; harness
+  `runtime/native/run-native.sh` in `native.yml`). The legacy freestanding `--target` path that
+  encoded **mock bytecode** still backs non-host/bare-metal arches; the Windows (PE-COFF)
+  native runner is future work. The crypto *language surface* now builds on this runner
+  (native `OP_CALL_RUNTIME` lowering + `teko_rt_*` wrappers). See
+  `docs/HANDOFF_NATIVE_RUNNER_AND_CRYPTO_SURFACE.md`.
   **Constant-time AES = table-free GF(2⁸) arithmetic
   S-box** (field-inverse-by-exponentiation `x^254` over a branchless `gmul` + affine bitwise
   map); **no lookup tables, no secret-dependent branches/indexing** (cache-timing-immune).

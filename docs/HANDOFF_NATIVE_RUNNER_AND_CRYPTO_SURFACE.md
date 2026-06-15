@@ -1,6 +1,23 @@
 # Hand-off — Native Runner + Full Crypto Language Surface (then WASM follow-ups)
 
-> **Status:** owner-approved next work, **not started**. Same PR/branch as Phase 13:
+## Progress log (update as sub-phases land)
+- **Sub-phase A, step 1 — native runner foundation: DONE.** A real `teko build
+  <f>.tks --target=<native>` path now compiles real source through
+  `teko_compile_interop` → IL → a **libc-hosted, assemble-able** emitter
+  (`src/codegen/emit_native_hosted.c`, selected by `MetalContext.hosted`) → the system
+  `cc` assembles + links against the new **`teko_rt`** archive (`runtime/native/teko_rt.c`,
+  `libteko_rt.a`) → a **runnable** executable. Proven by `runtime/native/samples/hello.tks`:
+  `emit("hello from teko native")` lowers to `OP_CALL_IMPORT` → SysV/AAPCS call into
+  `teko_rt_emit` and prints natively on **macOS arm64** (local) and **Linux x86_64/arm64**
+  (CI). Harness: `runtime/native/run-native.sh` (compile→link→run→assert), wired into
+  `native.yml` for the Unix hosts. The 16 freestanding goldens are **untouched** (the
+  hosted path is gated, not a rewrite of the metal emitters). Windows (PE-COFF + link.exe)
+  native runner remains future work. **Next:** step 2 — native `OP_CALL_RUNTIME` lowering
+  is already emitted by `emit_native_hosted` (dispatch table mirrors the WASM emitter); the
+  remaining work is the `teko_rt_*` crypto wrappers + executable `.tks` KATs (`hash.sha256`
+  first).
+
+> **Status:** owner-approved next work. Same PR/branch as Phase 13:
 > `feat/phase-13-native-crypto` (PR #6). The Phase 13 crypto **runtime** is complete and
 > CI-green (167/167, all four gates); this document is the cold-start brief for the *next*
 > session, which the owner asked to run fresh and dedicated to the native backend.

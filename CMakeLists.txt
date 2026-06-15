@@ -96,6 +96,8 @@ set(CORE_SOURCES
         # Shared per-family emitter cores (de-duplicated)
         src/codegen/emit_x86_64_sysv_common.c
         src/codegen/emit_arm64_gas_common.c
+        # Phase 13 native runner: libc-hosted, assemble-able host-arch emitter
+        src/codegen/emit_native_hosted.c
         # Native static linker (tld): object/executable format writers
         src/codegen/tld_elf.c
         src/codegen/tld_elf_arch.c
@@ -134,6 +136,14 @@ target_include_directories(teko_core PRIVATE src)
 add_executable(teko src/main.c)
 target_link_libraries(teko PRIVATE teko_core)
 target_include_directories(teko PRIVATE src)
+
+# 2b. TARGET: teko_rt — the native runtime archive linked into produced executables.
+#     A `teko build --target=<native>` binary links against libteko_rt.a; it carries
+#     the surface ABI shims (teko_rt_emit, and the crypto wrappers added in Sub-phase B)
+#     over the portable C crypto runtime (the single source of truth). Self-contained so
+#     produced binaries need nothing else.
+add_library(teko_rt STATIC runtime/native/teko_rt.c)
+target_include_directories(teko_rt PRIVATE runtime/native src/runtime)
 
 # 3. TARGET 2: The Isolated Test Suite (Test Entry Point).
 #    Also listed explicitly. When you add a new test .c file, add it here.
