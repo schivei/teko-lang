@@ -143,7 +143,26 @@ hand-emission. Until then `hash.sha512`/`sha3`/`blake3` and `random`/HKDF/PBKDF2
 **reserved-with-target** on the WASM surface (no dead tokens: they are not exposed in `.tks`
 for the WASM target yet; the native C runtimes are fully KAT-tested).
 
-## Next: 13.2 — Symmetric / AEAD
-ChaCha20-Poly1305 (RFC 8439) first (no hardware dep), then AES-128/192/256 CTR/CBC/GCM.
-**Owner gate before AES:** confirm the constant-time AES strategy (bitsliced vs.
-table-free). The RSA bignum layer remains a later gate (before 13.3b RSA).
+## Progress — 13.2 (Symmetric / AEAD)
+- **ChaCha20** — `teko_crypto_chacha20.c`, RFC 8439 §2.3.2/§2.4.2 KATs. ✅
+- **Poly1305** — `teko_crypto_poly1305.c`, 26-bit-limb (MSVC-safe, no `__int128`),
+  constant-time final reduction, RFC 8439 §2.5.2 KAT. ✅
+- **ChaCha20-Poly1305 AEAD** — `teko_crypto_chachapoly.c`, RFC 8439 §2.8.2 KAT +
+  constant-time tag verify + tamper-rejection tests. ✅
+- **AES-128/192/256 (CTR/CBC/GCM)** — in progress (decision below).
+
+### DECISION (owner pre-approved): constant-time AES strategy
+**Table-free GF(2⁸) arithmetic S-box**, not T-tables and not full bitslicing:
+- SubBytes computes the AES S-box per byte as `affine(inv(x))`, where `inv(x) = x^254` in
+  GF(2⁸) via a **fixed addition chain** of a constant-time carryless multiply (`gmul`, 8
+  fixed iterations, mask-based reduction — no branches), and the affine map is bitwise
+  rotates + XOR. The inverse S-box is `inv(invaffine(x))`.
+- **No lookup tables and no secret-dependent branches or indexing** anywhere in the cipher
+  → immune to cache-timing side channels by construction. MSVC-safe, portable, from-scratch.
+- **Trade-off:** slower than T-table or AES-NI implementations. Per the phase plan, **AES-NI
+  / hardware acceleration is an explicit future optimization, not a correctness gate.** A
+  hardware-accelerated path can later be selected at runtime without changing the API.
+- Correctness validated by FIPS-197 (single-block) + NIST SP 800-38A (CTR/CBC) + NIST GCM
+  known-answer vectors.
+
+The RSA bignum layer remains a later documented decision (before 13.3b RSA).

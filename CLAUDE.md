@@ -95,6 +95,17 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   **Phase 12** (Frontend Grammar & Lexer Extension) is the **current phase** (PR #5;
   `docs/PHASE12_FRONTEND_GRAMMAR.md`). **Phase 13 = Native Cryptography** (dedicated, planned —
   symmetric + asymmetric, owner-requested); the old 13–20 shifted to 14–21 (Self-Hosting = 21).
+- **Phase 13 (Native Cryptography) decisions.** Every primitive is **portable C23 in the
+  embedded native runtime** (`src/runtime/teko_crypto_*.c`) — the single source of truth,
+  KAT-tested in the Unity suite against NIST/RFC vectors; the native targets link it, and it
+  is the reference for WASM lowering. **Constant-time AES = table-free GF(2⁸) arithmetic
+  S-box** (field-inverse-by-exponentiation `x^254` over a branchless `gmul` + affine bitwise
+  map); **no lookup tables, no secret-dependent branches/indexing** (cache-timing-immune).
+  AES-NI/hardware accel is a future optimization, **not** a correctness gate. **WASM crypto
+  lowering is deferred** to a "compile the C runtime → wasm32 + import" step (NOT hand-emitted
+  WAT per primitive — that would be a second implementation of each algorithm); only
+  `hash.sha256` has a WASM lowering so far (in-module, FIPS-validated). `hash.sha512`/`sha3`/
+  `blake3` + `random`/HKDF/PBKDF2 stay reserved-with-target on the WASM surface until then.
 - **Serialization = static per-type generators, no runtime reflection (decision).** (De)serialization
   is generated at compile time as a specialized, monomorphized (de)serializer **per concrete type**,
   emitted directly — Go-style generated marshalers, never a runtime reflective walker — consistent with
