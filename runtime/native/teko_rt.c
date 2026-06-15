@@ -5,6 +5,9 @@
 #include "teko_crypto_blake3.h"
 #include "teko_crypto_blake2b.h"
 #include "teko_crypto_hmac.h"
+#include "teko_crypto_aes.h"
+#include "teko_crypto_aes_gcm.h"
+#include "teko_crypto_chachapoly.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -143,4 +146,103 @@ char* teko_rt_hmac_sha512(const char* key_hex, const char* msg) {
     teko_hmac_sha512(key, klen, (const uint8_t*)(msg ? msg : ""), msg ? strlen(msg) : 0, mac);
     free(key);
     return teko_rt_to_hex(mac, TEKO_SHA512_DIGEST_LEN);
+}
+
+// --- AEAD ------------------------------------------------------------------------
+// The "open" sentinel for a tag-verification failure or malformed input.
+#define TEKO_RT_AEAD_TAG_LEN 16u
+static char* teko_rt_reject(void) {
+    char* s = (char*)malloc(7);
+    if (s) memcpy(s, "REJECT", 7);
+    return s;
+}
+
+char* teko_rt_aes_gcm_seal(const char* key_hex, const char* nonce_hex,
+                           const char* aad_hex, const char* pt_hex) {
+    size_t kl = 0, nl = 0, al = 0, pl = 0;
+    uint8_t* k = teko_rt_from_hex(key_hex, &kl);
+    uint8_t* n = teko_rt_from_hex(nonce_hex, &nl);
+    uint8_t* a = teko_rt_from_hex(aad_hex, &al);
+    uint8_t* p = teko_rt_from_hex(pt_hex, &pl);
+    char* out = NULL;
+    TekoAesKey key;
+    if (k && n && a && p && teko_aes_init(&key, k, kl) == 0) {
+        uint8_t* ctt = (uint8_t*)malloc(pl + TEKO_RT_AEAD_TAG_LEN);
+        if (ctt) {
+            teko_aes_gcm_encrypt(&key, n, nl, a, al, p, pl, ctt, ctt + pl, TEKO_RT_AEAD_TAG_LEN);
+            out = teko_rt_to_hex(ctt, pl + TEKO_RT_AEAD_TAG_LEN);
+            free(ctt);
+        }
+    }
+    free(k); free(n); free(a); free(p);
+    return out;
+}
+
+char* teko_rt_aes_gcm_open(const char* key_hex, const char* nonce_hex,
+                           const char* aad_hex, const char* ct_tag_hex) {
+    size_t kl = 0, nl = 0, al = 0, cl = 0;
+    uint8_t* k = teko_rt_from_hex(key_hex, &kl);
+    uint8_t* n = teko_rt_from_hex(nonce_hex, &nl);
+    uint8_t* a = teko_rt_from_hex(aad_hex, &al);
+    uint8_t* ct = teko_rt_from_hex(ct_tag_hex, &cl);
+    char* out = NULL;
+    TekoAesKey key;
+    if (!k || !n || !a || !ct || cl < TEKO_RT_AEAD_TAG_LEN || teko_aes_init(&key, k, kl) != 0) {
+        out = teko_rt_reject();
+    } else {
+        size_t ctlen = cl - TEKO_RT_AEAD_TAG_LEN;
+        uint8_t* pt = (uint8_t*)malloc(ctlen ? ctlen : 1);
+        if (pt) {
+            int rc = teko_aes_gcm_decrypt(&key, n, nl, a, al, ct, ctlen,
+                                          ct + ctlen, TEKO_RT_AEAD_TAG_LEN, pt);
+            out = (rc == 0) ? teko_rt_to_hex(pt, ctlen) : teko_rt_reject();
+            free(pt);
+        }
+    }
+    free(k); free(n); free(a); free(ct);
+    return out;
+}
+
+char* teko_rt_chacha20poly1305_seal(const char* key_hex, const char* nonce_hex,
+                                    const char* aad_hex, const char* pt_hex) {
+    size_t kl = 0, nl = 0, al = 0, pl = 0;
+    uint8_t* k = teko_rt_from_hex(key_hex, &kl);
+    uint8_t* n = teko_rt_from_hex(nonce_hex, &nl);
+    uint8_t* a = teko_rt_from_hex(aad_hex, &al);
+    uint8_t* p = teko_rt_from_hex(pt_hex, &pl);
+    char* out = NULL;
+    if (k && n && a && p && kl == TEKO_CHACHAPOLY_KEY_LEN && nl == TEKO_CHACHAPOLY_NONCE_LEN) {
+        uint8_t* ctt = (uint8_t*)malloc(pl + TEKO_CHACHAPOLY_TAG_LEN);
+        if (ctt) {
+            teko_chacha20poly1305_encrypt(k, n, a, al, p, pl, ctt, ctt + pl);
+            out = teko_rt_to_hex(ctt, pl + TEKO_CHACHAPOLY_TAG_LEN);
+            free(ctt);
+        }
+    }
+    free(k); free(n); free(a); free(p);
+    return out;
+}
+
+char* teko_rt_chacha20poly1305_open(const char* key_hex, const char* nonce_hex,
+                                    const char* aad_hex, const char* ct_tag_hex) {
+    size_t kl = 0, nl = 0, al = 0, cl = 0;
+    uint8_t* k = teko_rt_from_hex(key_hex, &kl);
+    uint8_t* n = teko_rt_from_hex(nonce_hex, &nl);
+    uint8_t* a = teko_rt_from_hex(aad_hex, &al);
+    uint8_t* ct = teko_rt_from_hex(ct_tag_hex, &cl);
+    char* out = NULL;
+    if (!k || !n || !a || !ct || kl != TEKO_CHACHAPOLY_KEY_LEN ||
+        nl != TEKO_CHACHAPOLY_NONCE_LEN || cl < TEKO_CHACHAPOLY_TAG_LEN) {
+        out = teko_rt_reject();
+    } else {
+        size_t ctlen = cl - TEKO_CHACHAPOLY_TAG_LEN;
+        uint8_t* pt = (uint8_t*)malloc(ctlen ? ctlen : 1);
+        if (pt) {
+            int rc = teko_chacha20poly1305_decrypt(k, n, a, al, ct, ctlen, ct + ctlen, pt);
+            out = (rc == 0) ? teko_rt_to_hex(pt, ctlen) : teko_rt_reject();
+            free(pt);
+        }
+    }
+    free(k); free(n); free(a); free(ct);
+    return out;
 }

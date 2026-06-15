@@ -337,6 +337,12 @@ static int codec_id_for(const char* lex) {
     if (strcmp(lex, "hmac.sha256") == 0) return 17;
     if (strcmp(lex, "hmac.sha384") == 0) return 18;
     if (strcmp(lex, "hmac.sha512") == 0) return 19;
+    // AEAD (four args: hex key, nonce, aad, plaintext|cipher‖tag) — ids 20-23.
+    // seal -> (ct‖tag) hex; open -> plaintext hex, or "REJECT" on auth failure.
+    if (strcmp(lex, "crypto.aes_gcm_seal") == 0) return 20;
+    if (strcmp(lex, "crypto.aes_gcm_open") == 0) return 21;
+    if (strcmp(lex, "crypto.chacha20poly1305_seal") == 0) return 22;
+    if (strcmp(lex, "crypto.chacha20poly1305_open") == 0) return 23;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;
@@ -358,6 +364,7 @@ static int is_codec_head(const Parser* p) {
 static int runtime_arity(int id) {
     switch (id) {
         case 17: case 18: case 19: return 2; // hmac.sha256/384/512
+        case 20: case 21: case 22: case 23: return 4; // AEAD: key, nonce, aad, msg/ct‖tag
         default: return 1;
     }
 }

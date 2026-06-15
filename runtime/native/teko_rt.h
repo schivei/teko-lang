@@ -42,4 +42,19 @@ char* teko_rt_hmac_sha256(const char* key_hex, const char* msg);
 char* teko_rt_hmac_sha384(const char* key_hex, const char* msg);
 char* teko_rt_hmac_sha512(const char* key_hex, const char* msg);
 
+// AEAD (OP_CALL_RUNTIME ids 20-23, arity 4). All inputs are hex (key/nonce/aad/plaintext or
+// cipher‖tag). seal returns the ciphertext concatenated with the 16-byte tag, as one hex
+// string (the multi-value return packed per the ABI decision). open verifies the tag and
+// returns the plaintext hex on success, or the literal "REJECT" on authentication failure
+// or malformed input. AES key length (16/24/32) is inferred from the key; ChaCha needs a
+// 32-byte key + 12-byte nonce.
+char* teko_rt_aes_gcm_seal(const char* key_hex, const char* nonce_hex,
+                           const char* aad_hex, const char* pt_hex);
+char* teko_rt_aes_gcm_open(const char* key_hex, const char* nonce_hex,
+                           const char* aad_hex, const char* ct_tag_hex);
+char* teko_rt_chacha20poly1305_seal(const char* key_hex, const char* nonce_hex,
+                                    const char* aad_hex, const char* pt_hex);
+char* teko_rt_chacha20poly1305_open(const char* key_hex, const char* nonce_hex,
+                                    const char* aad_hex, const char* ct_tag_hex);
+
 #endif // TEKO_RT_H

@@ -46,13 +46,20 @@
   *WASM* target currently emits `OP_SETARG` (→ `$a` locals) before an `unreachable` — fine as a
   reserved trap, but the WASM emitter must declare/handle those staging locals when it gains
   real multi-arg runtime lowering.
-- **Sub-phase B — REMAINING:** SHAKE (msg,len), AEAD `encrypt`/`decrypt` (ChaCha20-Poly1305,
-  AES-GCM: key/nonce/aad/msg → ct‖tag and inverse with tag rejection), `sign`/`verify`
-  (Ed25519, ECDSA P-256/384, RSA-PSS), RSA-OAEP, X25519/ECDH, KDF (HKDF/PBKDF2), RNG
-  (`random.bytes`). Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol`
-  entry + `teko_rt_*` wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`.
-  The 3+ arg AEAD calls need staging slots 0..2 — already supported (8 staging slots).
-  Multi-value returns (ct‖tag) pack into one hex string per the ABI decision.
+- **Sub-phase B, step 4 — AEAD `encrypt`/`decrypt` native surface: DONE.** `crypto.aes_gcm_seal/
+  open` (ids 20/21) and `crypto.chacha20poly1305_seal/open` (22/23), all 4-arg
+  (key,nonce,aad,msg‖ct‖tag — all hex). seal returns ct‖tag packed into one hex string
+  (multi-value return per the ABI decision); open verifies the tag and returns the plaintext
+  hex or the literal `"REJECT"` on auth failure / malformed input. Proven by
+  `runtime/native/samples/aead.tks`: AES-GCM (NIST Test Case 3) + ChaCha20-Poly1305 (RFC 8439
+  §2.8.2) seal→ct‖tag, open round-trip→pt, and a tamper→REJECT, on macOS arm64 + Linux
+  x86_64/arm64. The 4-arg SysV/AAPCS staging is verified. AES key length inferred from the key
+  (128/192/256); tag fixed 16 bytes.
+- **Sub-phase B — REMAINING:** SHAKE (msg,len), `sign`/`verify` (Ed25519, ECDSA P-256/384,
+  RSA-PSS), RSA-OAEP, X25519/ECDH, KDF (HKDF/PBKDF2), RNG (`random.bytes`). Each: `codec_id_for`
+  id + `runtime_arity` + `teko_native_runtime_symbol` entry + `teko_rt_*` wrapper
+  (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`. The established pattern (see
+  AEAD/HMAC) scales directly; 8 staging slots cover all current arities.
 
 > **Status:** owner-approved next work. Same PR/branch as Phase 13:
 > `feat/phase-13-native-crypto` (PR #6). The Phase 13 crypto **runtime** is complete and
