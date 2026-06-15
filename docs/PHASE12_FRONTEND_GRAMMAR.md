@@ -88,7 +88,12 @@ foundational pieces unblock a *real* expression frontend and belong early in Pha
      accumulator model. *Scope: integer only; float and `&&`/`||` short-circuit deferred.
      Expressions are wired in `let` initializers; call-argument expressions are a small
      follow-up (args today take literals/locals).*
-   - **P12-F — multiple nested handle args** (next): spill intermediates to named locals.
+   - **P12-F — multiple nested handle args. ✅ done.** Lifts the Phase-11 "one leading
+     nested call" limit: a nested `@dom.…()` arg in any position is lowered eagerly and its
+     result handle spilled to a fresh temp local, then loaded back during arg staging. Works
+     in `$main` and handler bodies (routines now declare the `$v` file too). Proven:
+     `appendChild(getElementById("out"), createElement("span"))` builds a `<span>` under
+     `#out` (golden + Playwright `run-nested.mjs`).
 5. **Base encoding (functional)** — real `base64`/`hex` encode+decode (runtime/intrinsic +
    grammar + executable round-trip test against known vectors). The first clean functional
    win; deterministic, no external deps.

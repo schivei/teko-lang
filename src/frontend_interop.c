@@ -118,21 +118,29 @@ static int intrinsic_has_result(const char* method) {
             strcmp(method, "createElement") == 0) ? 1 : 0;
 }
 
+// Temp-local allocator (P12-E/F): named-local slots ($v) double as expression and
+// nested-arg spill temps. next_temp = next free slot; hw = high-water for the count
+// the backend must declare.
+typedef struct { int next_temp; int hw; } TempAlloc;
+
 // Lowering context threaded through @dom calls: the current handler param name (an
-// identifier arg matching it loads the event arg from $w1) and the handler name->table
-// slot map (an identifier arg matching one is a function reference -> its table index).
+// identifier arg matching it loads the event arg from $w1), the handler name->table
+// slot map (an identifier arg matching one is a function reference -> its table index),
+// the named-local table, and the temp allocator (for nested-arg spills, P12-F).
 typedef struct {
     const char* param_name; // current handler param, or NULL at top level
     ImportBinding* fns;      // handler name -> table slot (idx = slot)
     int nfns;
     ImportBinding* locals;   // Phase 12: named local -> slot (idx = $v slot)
     int nlocals;
+    TempAlloc* ta;           // P12-F: temp-local allocator for nested-arg spills
 } LowerCtx;
 
 // A flat "producer" (one wasm param). kind: 0=ICONST payload, 1=SCONST pool idx,
 // 2=LOAD the handler param ($w0 <- $w1), 3=LOAD_LOCAL payload (a named local).
 typedef struct { int kind; int payload; } Prod;
 
+static int is_dom_macro(const char* lexeme); // defined below
 static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerCtx* ctx); // recursive
 
 static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerCtx* ctx) {
@@ -155,19 +163,24 @@ static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerC
     if (p->current_token.type != TOKEN_LPAREN) return;
     fe_advance(p); // consume '('
 
-    // Optional leading nested intrinsic call as arg0 (its result -> $w0).
-    int has_nested = 0;
-    if (p->current_token.type == TOKEN_MACRO_IDENT) {
-        lower_intrinsic_call(buffer, p, ctx); // emits inner; result in $w0
-        has_nested = 1;
-        if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
-    }
-
-    // Collect the remaining args, expanded to flat producers (string -> ptr+len).
+    // Collect args as flat producers (string -> ptr+len). A nested `@dom.…()` arg in
+    // ANY position (P12-F) is lowered eagerly and its result spilled to a fresh temp
+    // local; the producer then LOAD_LOCALs it during staging. So multiple nested handle
+    // args work (e.g. appendChild(getElementById(…), createElement(…))).
     Prod prods[32];
     int np = 0;
+    int temps_used = 0;
     while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
-        if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) && np + 2 <= 32) {
+        if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
+            np + 1 <= 32) {
+            lower_intrinsic_call(buffer, p, ctx);              // inner result -> $w0
+            int t = (ctx && ctx->ta) ? ctx->ta->next_temp++ : 0;
+            if (ctx && ctx->ta && ctx->ta->next_temp > ctx->ta->hw) ctx->ta->hw = ctx->ta->next_temp;
+            codegen_li_emit_store_local(buffer, t);            // park the handle in a temp
+            prods[np].kind = 3; prods[np].payload = t; np++;   // producer: LOAD_LOCAL temp
+            temps_used++;
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        } else if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) && np + 2 <= 32) {
             char* s = strip_quotes(p->current_token.lexeme);
             int idx = codegen_li_add_string_constant(buffer, s);
             int len = (int)strlen(s);
@@ -200,25 +213,21 @@ static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerC
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 
-    int total = (has_nested ? 1 : 0) + np;
-
-    // Stage the nested result (param 0) unless it is the only/last param.
-    if (has_nested && total > 1) codegen_li_emit_setarg(buffer, 0);
-
-    // Emit the producers at absolute slots [has_nested .. total-1]; the last param
-    // stays in $w0.
+    // Emit the producers at slots [0..np-1]; the last param stays in $w0.
     for (int k = 0; k < np; k++) {
-        int slot = (has_nested ? 1 : 0) + k;
         switch (prods[k].kind) {
             case 1: codegen_li_emit_sconst(buffer, prods[k].payload); break;
             case 2: codegen_li_emit_load(buffer); break;
             case 3: codegen_li_emit_load_local(buffer, prods[k].payload); break;
             default: codegen_li_emit_iconst(buffer, prods[k].payload); break;
         }
-        if (slot < total - 1) codegen_li_emit_setarg(buffer, slot);
+        if (k < np - 1) codegen_li_emit_setarg(buffer, k);
     }
 
-    int import_index = codegen_li_add_import(buffer, ns, method, total, intrinsic_has_result(method));
+    // Free the nested-arg temps reserved for this call.
+    if (ctx && ctx->ta) ctx->ta->next_temp -= temps_used;
+
+    int import_index = codegen_li_add_import(buffer, ns, method, np, intrinsic_has_result(method));
     codegen_li_emit_call_import(buffer, import_index);
 }
 
@@ -233,8 +242,6 @@ static int is_dom_macro(const char* lexeme) {
 // live in the same $v file as named locals (P12-D); `hw` tracks the high-water so the
 // backend declares enough locals. Scope: int literals, named locals, parentheses, and
 // `+ - * / % == != < <= > >=` (left-assoc). Float / `&&`/`||` are future work.
-typedef struct { int next_temp; int hw; } TempAlloc;
-
 static int p12_tok_prec(TokenType t) {
     switch (t) {
         case TOKEN_MUL: case TOKEN_DIV: case TOKEN_MOD: return 3;
@@ -346,7 +353,7 @@ static void collect_functions(const char* source, ImportBinding** fns, int* nfns
 // invoked via teko_invoke(slot, event_arg): on entry $w0 = the arg, which we stash to
 // $w1 so `param` references (LOAD) survive across the body's @dom calls.
 static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
-                                  ImportBinding* fns, int nfns) {
+                                  ImportBinding* fns, int nfns, TempAlloc* ta) {
     Lexer lx; lexer_init(&lx, source);
     Parser p; parser_init(&p, &lx);
 
@@ -388,6 +395,8 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         ctx.nfns = nfns;
         ctx.locals = NULL; // $main's named locals are a different WASM scope
         ctx.nlocals = 0;
+        ctx.ta = ta;       // nested-arg spill temps (routine has no named locals)
+        ta->next_temp = 0; // a routine's $v file starts fresh
 
         int depth = 1;
         while (p.current_token.type != TOKEN_EOF && depth > 0) {
@@ -430,10 +439,14 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     top_ctx.param_name = NULL;
     top_ctx.fns = fns; top_ctx.nfns = nfns;
     top_ctx.locals = NULL; top_ctx.nlocals = 0; // refreshed before each use below
+    top_ctx.ta = &ta;
 
     while (parser.current_token.type != TOKEN_EOF) {
-        // Keep the top-level lowering context's local view current.
+        // Keep the top-level lowering context's local view current, and start temp
+        // slots above the named locals so spills never clobber a `let` binding.
         top_ctx.locals = locals; top_ctx.nlocals = nlocals;
+        ta.next_temp = nlocals;
+        if (nlocals > ta.hw) ta.hw = nlocals;
 
         if ((parser.current_token.type == TOKEN_LET || parser.current_token.type == TOKEN_MUT) &&
             parser.peek_token.type == TOKEN_IDENTIFIER) {
@@ -562,12 +575,13 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
     codegen_li_emit_halt(buffer); // close main
 
-    // Phase 12: tell the backend how many $v locals to declare in $main — named
-    // locals plus the expression-temp high-water.
-    buffer->local_count = (ta.hw > nlocals) ? ta.hw : nlocals;
-
     // Emit handler bodies as table routines (after main), so @dom.on references resolve.
-    emit_handler_routines(source, buffer, fns, nfns);
+    // (May raise the temp high-water for nested args inside handler bodies.)
+    emit_handler_routines(source, buffer, fns, nfns, &ta);
+
+    // Phase 12: how many $v locals to declare per function — named locals plus the
+    // expression/nested-arg temp high-water (across $main and the handler routines).
+    buffer->local_count = (ta.hw > nlocals) ? ta.hw : nlocals;
 
     for (int i = 0; i < nb; i++) free(binds[i].name);
     free(binds);

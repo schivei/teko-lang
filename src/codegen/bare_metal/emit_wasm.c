@@ -736,6 +736,11 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // Import-arg staging slots (Phase 11): a callback routine invoked via
             // $teko_invoke calls dom.* imports just like $main, so it needs $a0..$a2.
             fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            // Phase 12 (P12-F): named-local file ($v) for nested-arg spill temps inside
+            // a handler body (same module-global count as $main; harmless if unused).
+            for (int v = 0; v < ctx->wasm_local_count; v++) {
+                fprintf(f, "    (local $v%d i32)\n", v);
+            }
             fprintf(f, "    local.get $arg\n    local.set $cp\n");                       // channel base
             fprintf(f, "    local.get $frame\n    i32.load offset=0\n    local.set $w0\n"); // reload spilled $w0
             fprintf(f, "    local.get $frame\n    i32.load offset=4\n    local.set $w1\n"); // reload spilled $w1

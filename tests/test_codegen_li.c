@@ -159,14 +159,20 @@ void test_frontend_interop_dom_intrinsics(void) {
     TEST_ASSERT_EQUAL_INT(3, buffer->imports[1].n_params);
     TEST_ASSERT_EQUAL_INT(0, buffer->imports[1].has_result);
 
-    // IL: getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0;
-    //     setText(handle,"hi there") -> SETARG0(handle), SCONST"hi there", SETARG1,
-    //     ICONST8, CALL_IMPORT1; HALT.
+    // IL (P12-F generalized nesting): the nested getElementById is lowered first and
+    // its handle spilled to a temp local ($v0); setText then loads it back during arg
+    // staging. So:
+    //   getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0
+    //   STORE_LOCAL 0                              (park handle)
+    //   setText: LOAD_LOCAL0, SETARG0, SCONST"hi there", SETARG1, ICONST8, CALL_IMPORT1
+    //   HALT
     const unsigned char expected[] = {
         0x02, 0x00, 0x00, 0x00, 0x00, // SCONST 0 ("out")
         0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0
         0x01, 0x03, 0x00, 0x00, 0x00, // ICONST 3
-        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById)
+        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById) -> $w0 = handle
+        0x0C, 0x00, 0x00, 0x00, 0x00, // STORE_LOCAL 0 (park handle in temp $v0)
+        0x0B, 0x00, 0x00, 0x00, 0x00, // LOAD_LOCAL 0 (handle)
         0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0 (handle -> a0)
         0x02, 0x01, 0x00, 0x00, 0x00, // SCONST 1 ("hi there")
         0x0A, 0x01, 0x00, 0x00, 0x00, // SETARG 1 (ptr -> a1)
@@ -176,6 +182,58 @@ void test_frontend_interop_dom_intrinsics(void) {
     };
     TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+    // The nested-arg spill reserved one temp local.
+    TEST_ASSERT_TRUE(buffer->local_count >= 1);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 12 (P12-F): MULTIPLE nested handle args (lifts the Phase-11 one-leading-nested
+// limit). appendChild(getElementById(…), createElement(…)) — each nested result is
+// spilled to its own temp local, then both load back during staging.
+void test_frontend_interop_nested_handle_args(void) {
+    const char* src =
+        "@dom.appendChild(@dom.getElementById(\"out\"), @dom.createElement(\"span\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Three dom imports auto-registered.
+    TEST_ASSERT_EQUAL_INT(3, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("getElementById", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_STRING("createElement", buffer->imports[1].name);
+    TEST_ASSERT_EQUAL_STRING("appendChild", buffer->imports[2].name);
+
+    // Two nested results => at least two temp locals.
+    TEST_ASSERT_TRUE(buffer->local_count >= 2);
+
+    // Two STORE_LOCALs (one per nested result) and (≥2) LOAD_LOCALs to stage them.
+    int n_store_local = 0, n_load_local = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_STORE_LOCAL) n_store_local++;
+        if (buffer->code[i] == OP_LOAD_LOCAL) n_load_local++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, n_store_local);
+    TEST_ASSERT_TRUE(n_load_local >= 2);
+
+    // Through the bridge: distinct temps $v0 and $v1 declared, appendChild call present.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_nested.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v0 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v1 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $import_2"));
+    free(out);
+    remove(wat);
 
     codegen_li_free_context(buffer);
 }
