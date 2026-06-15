@@ -200,4 +200,11 @@ Sub-block **14.A `routines` (background tasks) is DONE** on both targets (no dea
   calls (not only `@dom`). Blocking/suspending rendezvous between routines is 14.B+ work.
 - 167/167 → 168/168 (added `test_frontend_interop_routines_spawn`); ASan/UBSan both dispatch
   paths + TSan green; 16 native goldens + all crypto native/WASM proofs intact.
-Remaining 14.B–14.F: `duplex`/`delayed`/`broadcast` channels, `shared`+`atomic`, `circuit`+`retry`.
+Sub-block **14.B `duplex chan` is DONE** on both targets: a symmetric full-duplex channel
+(two isolated rings + OPEN/CLOSED/DROPPED state machine, structured non-blocking statuses) as
+a C runtime source of truth (`src/runtime/teko_duplex.c`, 6 Unity KATs) wired to the language
+via dedicated **OP_DUPLEX_*** opcodes (`duplex.open/send/recv/poll/close`, a dotted-identifier
+surface — bare `duplex` stays the keyword). Native lowers to `teko_rt_duplex_*`; WASM compiles
+the SAME C runtime into the reactor and imports it (pure i32 handle/value/status, shared
+memory). Proofs `runtime/native/samples/duplex.tks` + `runtime/wasm/run-duplex.mjs`. Suite 174/174.
+Remaining 14.C–14.F: `delayed`/`broadcast` channels, `shared`+`atomic`, `circuit`+`retry`.

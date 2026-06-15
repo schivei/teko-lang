@@ -46,6 +46,8 @@ int codegen_li_emit_wasm(const BytecodeBuffer* buffer, const char* wat_path,
     // Phase 14 (14.A): drain the cooperative scheduler at $main close when the program
     // fires background tasks (`routines { … }`), so the spawned routines run before exit.
     teko_metal_set_emit_spawn(ctx, buffer->uses_spawn);
+    // Phase 14 (14.B): import the duplex entry points from the runtime reactor + share memory.
+    teko_metal_set_emit_duplex(ctx, buffer->uses_duplex);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
 

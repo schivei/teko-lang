@@ -74,6 +74,10 @@ typedef struct {
     // run before exit; the native runner emits the routine function-pointer table + a
     // `teko_rt_run` drain at HALT. Spawn-free programs are byte-identical (flag stays 0).
     int wasm_emit_spawn;
+    // Phase 14 (14.B): 1 when the program uses a duplex channel op (OP_DUPLEX_*). The WASM
+    // backend then imports the duplex entry points (teko_rt_duplex_*) from the runtime reactor
+    // and shares its linear memory (same mechanism as wasm_emit_crypto_ext). Native ignores it.
+    int wasm_emit_duplex;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -103,6 +107,7 @@ void teko_metal_set_emit_random(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_uuid_rng(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_spawn(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

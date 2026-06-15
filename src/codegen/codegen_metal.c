@@ -30,6 +30,7 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_emit_uuid_rng = 0;
     ctx->wasm_emit_crypto_ext = 0;
     ctx->wasm_emit_spawn = 0;
+    ctx->wasm_emit_duplex = 0;
     ctx->hosted = 0;
     return ctx;
 }
@@ -79,6 +80,11 @@ void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled) {
 void teko_metal_set_emit_spawn(MetalContext* ctx, int enabled) {
     if (!ctx) return;
     ctx->wasm_emit_spawn = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_duplex = enabled ? 1 : 0;
 }
 
 void teko_metal_set_hosted(MetalContext* ctx, int enabled) {

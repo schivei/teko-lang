@@ -1136,10 +1136,20 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                     fprintf(f, " (result i32)))\n");
                 }
             }
-            // Memory: module-owned by default; when the crypto reactor is in play it is
-            // host-owned and SHARED (imported from env), so both modules address the same
+            // Phase 14 (14.B): duplex channel entry points come from the SAME runtime reactor
+            // (namespace "crypto"). Pure i32-in/i32-out (handle/value/status) — no shared-memory
+            // marshalling like the crypto hex strings. Imported only when the program uses them.
+            if (ctx->wasm_emit_duplex) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_open\" (func $duplex_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_send\" (func $duplex_send (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_recv\" (func $duplex_recv (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_poll\" (func $duplex_poll (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_close\" (func $duplex_close (param i32) (result i32)))\n");
+            }
+            // Memory: module-owned by default; when a reactor (crypto or duplex) is in play it
+            // is host-owned and SHARED (imported from env), so both modules address the same
             // bytes. Re-export it either way so harnesses can read results via exports.memory.
-            if (ctx->wasm_emit_crypto_ext) {
+            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1233,6 +1243,25 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 // wrong on the WASM surface.
                 fprintf(f, "    unreachable ;; crypto runtime id %d not lowered to WASM\n", arg);
             }
+            break;
+        }
+
+        // Phase 14 (14.B): duplex channel ops — call the reactor's imported teko_rt_duplex_*.
+        // Multi-arg ABI mirrors OP_CALL_IMPORT: args 0..n-2 from staging slots $a0.. (set by
+        // OP_SETARG), the last from $w0; the i32 result (handle/value/status) lands in $w0.
+        case OP_DUPLEX_OPEN:
+        case OP_DUPLEX_SEND:
+        case OP_DUPLEX_RECV:
+        case OP_DUPLEX_POLL:
+        case OP_DUPLEX_CLOSE: {
+            const char* fn = (op == OP_DUPLEX_OPEN) ? "duplex_open" :
+                             (op == OP_DUPLEX_SEND) ? "duplex_send" :
+                             (op == OP_DUPLEX_RECV) ? "duplex_recv" :
+                             (op == OP_DUPLEX_POLL) ? "duplex_poll" : "duplex_close";
+            int ar = (op == OP_DUPLEX_SEND) ? 3 :
+                     (op == OP_DUPLEX_RECV || op == OP_DUPLEX_POLL) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;
         }
 

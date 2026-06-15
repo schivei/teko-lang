@@ -725,5 +725,25 @@ void test_frontend_interop_duplex_lowering(void) {
     TEST_ASSERT_EQUAL_INT(1, n_recv);
     TEST_ASSERT_EQUAL_INT(1, n_poll);
     TEST_ASSERT_EQUAL_INT(1, n_close);
+
+    // Through the WASM bridge: the duplex ops import the reactor entry points + share memory.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_duplex.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_duplex_open\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $duplex_send"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $duplex_poll"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\"")); // shared with the reactor
+    free(out);
+    remove(wat);
+
     codegen_li_free_context(buffer);
 }

@@ -158,6 +158,24 @@ merge/force-push** (the human merges).
     `runtime/native/samples/routines.tks` in `run-native.sh`.
   - **Semantics (MVP):** run-to-completion cooperative tasks, drained at program exit (an
     implicit join-at-exit). Blocking/suspending rendezvous between routines is 14.B+ work.
-- **14.B–14.F** — not started.
+- **14.B — `duplex chan` (bidirectional + close/drop signaling)** — ✅ done. A symmetric
+  full-duplex channel with two isolated rings + a close/drop state machine, live on BOTH
+  targets (executable `.tks` proof on each):
+  - **Runtime (source of truth):** `src/runtime/teko_duplex.{h,c}` — OPEN/CLOSED/DROPPED state
+    machine, per-direction rings, non-blocking ops returning a structured `TekoDuplexStatus`
+    (OK/EMPTY/FULL/CLOSED/DROPPED), graceful drain-after-close, terminal drop. 6 Unity KATs.
+  - **Surface:** dedicated `OP_DUPLEX_OPEN/SEND/RECV/POLL/CLOSE` opcodes (owner decision). The
+    lexer folds `duplex.open` into a dotted IDENTIFIER (bare `duplex` stays the keyword), so the
+    frontend reuses the dotted-identifier call path; a `uses_duplex` flag gates the backends.
+  - **Native:** opcodes → `teko_rt_duplex_*` over the linked C runtime (`teko_rt_sched`-style).
+    Proof `runtime/native/samples/duplex.tks` (bidirectional + structured CLOSED).
+  - **WASM:** the SAME C runtime is compiled into the runtime reactor (`teko_duplex.c` added to
+    `build-crypto-reactor.sh`); opcodes → imported `teko_rt_duplex_*`, shared linear memory.
+    Pure i32-in/i32-out (handle/value/status) — no hex marshalling. Proof
+    `runtime/wasm/run-duplex.mjs` (same values as native). Both wired into CI.
+  - **Decision:** the duplex handle is an opaque register-width integer (native pointer / WASM
+    reactor-heap pointer); `duplex.poll` gives non-blocking structured status without an in-band
+    sentinel; `emit_int`/`env.log_int` surface i32 results in the proofs.
+- **14.C–14.F** — not started (`delayed`/`broadcast` channels, `shared`+`atomic`, `circuit`+`retry`).
 </content>
 </invoke>
