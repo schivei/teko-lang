@@ -132,6 +132,8 @@ extern void test_teko_crypto_chacha20_rfc8439_encrypt(void);
 extern void test_teko_crypto_chacha20_rfc8439_block(void);
 extern void test_teko_crypto_poly1305_rfc8439_vector(void);
 extern void test_teko_crypto_poly1305_streaming_matches_oneshot(void);
+extern void test_teko_crypto_chachapoly_rfc8439_aead(void);
+extern void test_teko_crypto_chachapoly_rejects_tampering(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -274,6 +276,8 @@ int main(void) {
     RUN_TEST(test_teko_crypto_chacha20_rfc8439_block);
     RUN_TEST(test_teko_crypto_poly1305_rfc8439_vector);
     RUN_TEST(test_teko_crypto_poly1305_streaming_matches_oneshot);
+    RUN_TEST(test_teko_crypto_chachapoly_rfc8439_aead);
+    RUN_TEST(test_teko_crypto_chachapoly_rejects_tampering);
 
     return UNITY_END();
 }
