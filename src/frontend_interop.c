@@ -99,6 +99,102 @@ static void lower_call(BytecodeBuffer* buffer, int import_index, CallArg* args, 
     codegen_li_emit_call_import(buffer, import_index);
 }
 
+// --- @dom/@js intrinsics (FE-E) -------------------------------------------------
+// A `@dom.method(args)` / `@js.method(args)` call auto-registers a host import in the
+// `dom`/`js` namespace and lowers like an extern call, with two refinements:
+//   • a string argument expands to TWO wasm params (ptr, len) — the (ptr,len) ABI the
+//     dom.* glue marshals — so n_params is computed from the args, and
+//   • the FIRST argument may be a nested `@dom.…()` call (its result handle feeds the
+//     outer call), which covers e.g. setText(getElementById("out"), "…").
+// Only the leading arg may be nested (one level of staging-slot reuse is safe); other
+// args must be string/int literals. The call result (a handle, when any) lands in $w0.
+
+// Which dom/js intrinsics return a value (an i32 handle).
+static int intrinsic_has_result(const char* method) {
+    return (strcmp(method, "getElementById") == 0 ||
+            strcmp(method, "createElement") == 0) ? 1 : 0;
+}
+
+// A flat literal "producer" (one wasm param): a pooled string ptr, a string length,
+// or an integer immediate.
+typedef struct { int is_sconst; int payload; } Prod; // is_sconst: 1=SCONST pool idx, 0=ICONST val
+
+static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p); // recursive
+
+static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p) {
+    // current token is the MACRO_IDENT, e.g. "@dom.setText". Split into ns + method.
+    char full[128];
+    strncpy(full, p->current_token.lexeme, sizeof(full) - 1);
+    full[sizeof(full) - 1] = '\0';
+    char* dot = strchr(full, '.');
+    if (full[0] != '@' || !dot) { fe_advance(p); return; }
+    char ns[32];
+    size_t nslen = (size_t)(dot - (full + 1));
+    if (nslen >= sizeof(ns)) nslen = sizeof(ns) - 1;
+    memcpy(ns, full + 1, nslen);
+    ns[nslen] = '\0';
+    char method[96];
+    strncpy(method, dot + 1, sizeof(method) - 1);
+    method[sizeof(method) - 1] = '\0';
+
+    fe_advance(p); // consume the macro ident
+    if (p->current_token.type != TOKEN_LPAREN) return;
+    fe_advance(p); // consume '('
+
+    // Optional leading nested intrinsic call as arg0 (its result -> $w0).
+    int has_nested = 0;
+    if (p->current_token.type == TOKEN_MACRO_IDENT) {
+        lower_intrinsic_call(buffer, p); // emits inner; result in $w0
+        has_nested = 1;
+        if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+    }
+
+    // Collect the remaining literal args, expanded to flat producers (string -> ptr+len).
+    Prod prods[32];
+    int np = 0;
+    while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
+        if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) && np + 2 <= 32) {
+            char* s = strip_quotes(p->current_token.lexeme);
+            int idx = codegen_li_add_string_constant(buffer, s);
+            int len = (int)strlen(s);
+            free(s);
+            prods[np].is_sconst = 1; prods[np].payload = idx; np++;   // ptr
+            prods[np].is_sconst = 0; prods[np].payload = len; np++;   // len
+            fe_advance(p);
+        } else if (p->current_token.type == TOKEN_LIT_INT && np + 1 <= 32) {
+            prods[np].is_sconst = 0; prods[np].payload = atoi(p->current_token.lexeme); np++;
+            fe_advance(p);
+        } else if (p->current_token.type == TOKEN_COMMA) {
+            fe_advance(p);
+        } else {
+            fe_advance(p); // skip unsupported tokens in this subset
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+
+    int total = (has_nested ? 1 : 0) + np;
+
+    // Stage the nested result (param 0) unless it is the only/last param.
+    if (has_nested && total > 1) codegen_li_emit_setarg(buffer, 0);
+
+    // Emit the literal producers at absolute slots [has_nested .. total-1]; the last
+    // param stays in $w0.
+    for (int k = 0; k < np; k++) {
+        int slot = (has_nested ? 1 : 0) + k;
+        if (prods[k].is_sconst) codegen_li_emit_sconst(buffer, prods[k].payload);
+        else codegen_li_emit_iconst(buffer, prods[k].payload);
+        if (slot < total - 1) codegen_li_emit_setarg(buffer, slot);
+    }
+
+    int import_index = codegen_li_add_import(buffer, ns, method, total, intrinsic_has_result(method));
+    codegen_li_emit_call_import(buffer, import_index);
+}
+
+static int is_dom_macro(const char* lexeme) {
+    return lexeme && (strncmp(lexeme, "@dom.", 5) == 0 || strncmp(lexeme, "@js.", 4) == 0);
+}
+
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     if (!source || !buffer) return 1;
 
@@ -117,6 +213,11 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                 register_extern(buffer, node, &binds, &nb, &capb);
                 free_ffi_ast_node(node);
             }
+        } else if (parser.current_token.type == TOKEN_MACRO_IDENT &&
+                   is_dom_macro(parser.current_token.lexeme) &&
+                   parser.peek_token.type == TOKEN_LPAREN) {
+            // Top-level @dom/@js intrinsic call statement.
+            lower_intrinsic_call(buffer, &parser);
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_LPAREN) {
             // Top-level call statement: NAME ( arg, … )

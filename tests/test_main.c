@@ -33,6 +33,7 @@ extern void test_bytecode_emission_and_constant_pooling(void);
 extern void test_codegen_li_import_table_and_interop_emit(void);
 extern void test_codegen_li_to_wasm_bridge(void);
 extern void test_frontend_interop_extern_call_to_il(void);
+extern void test_frontend_interop_dom_intrinsics(void);
 extern void test_di_lifetime_arena_assignment(void);
 extern void test_escape_analysis_region_promotion(void);
 extern void test_implicit_precision_coercion_for_arbitrary_types(void);
@@ -145,6 +146,7 @@ int main(void) {
     RUN_TEST(test_codegen_li_import_table_and_interop_emit);
     RUN_TEST(test_codegen_li_to_wasm_bridge);
     RUN_TEST(test_frontend_interop_extern_call_to_il);
+    RUN_TEST(test_frontend_interop_dom_intrinsics);
     RUN_TEST(test_di_lifetime_arena_assignment);
     RUN_TEST(test_escape_analysis_region_promotion);
     RUN_TEST(test_implicit_precision_coercion_for_arbitrary_types);

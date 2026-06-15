@@ -137,6 +137,49 @@ void test_frontend_interop_extern_call_to_il(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 11 (Browser FFI frontend FE-E): @dom intrinsics from real source. A nested
+// `@dom.getElementById("out")` feeds `@dom.setText(…, "…")`; strings expand to
+// (ptr,len). Asserts the auto-registered dom.* imports + the lowered IL shape.
+void test_frontend_interop_dom_intrinsics(void) {
+    const char* src =
+        "@dom.setText(@dom.getElementById(\"out\"), \"hi there\");\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Two dom imports auto-registered: getElementById (2 params, result) then setText
+    // (3 params, no result).
+    TEST_ASSERT_EQUAL_INT(2, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("dom", buffer->imports[0].ns);
+    TEST_ASSERT_EQUAL_STRING("getElementById", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_INT(2, buffer->imports[0].n_params);
+    TEST_ASSERT_EQUAL_INT(1, buffer->imports[0].has_result);
+    TEST_ASSERT_EQUAL_STRING("setText", buffer->imports[1].name);
+    TEST_ASSERT_EQUAL_INT(3, buffer->imports[1].n_params);
+    TEST_ASSERT_EQUAL_INT(0, buffer->imports[1].has_result);
+
+    // IL: getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0;
+    //     setText(handle,"hi there") -> SETARG0(handle), SCONST"hi there", SETARG1,
+    //     ICONST8, CALL_IMPORT1; HALT.
+    const unsigned char expected[] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, // SCONST 0 ("out")
+        0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0
+        0x01, 0x03, 0x00, 0x00, 0x00, // ICONST 3
+        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById)
+        0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0 (handle -> a0)
+        0x02, 0x01, 0x00, 0x00, 0x00, // SCONST 1 ("hi there")
+        0x0A, 0x01, 0x00, 0x00, 0x00, // SETARG 1 (ptr -> a1)
+        0x01, 0x08, 0x00, 0x00, 0x00, // ICONST 8 (len)
+        0x09, 0x01, 0x00, 0x00, 0x00, // CALL_IMPORT 1 (setText)
+        0x00                          // HALT
+    };
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 11 (Browser FFI frontend FE-A): import table dedup + interop emit helpers.
 // Models the IL a parser would emit for `log("hi")` where
 // `extern fn log(msg) from "env" as "log"`: SCONST &"hi" -> CALL_IMPORT #0 -> HALT.

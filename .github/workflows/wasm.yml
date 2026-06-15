@@ -99,10 +99,10 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang wabt
-      - name: Build the compiler core (Release) -> libteko_core.a
+      - name: Build the compiler core + teko driver (Release)
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target teko_core --parallel 4
+          cmake --build build --target teko_core teko --parallel 4
       - name: Emit real concurrency modules from the Teko backend
         run: |
           cc -I src runtime/wasm/emit-demo/emit_spawn_channel.c build/libteko_core.a -o emit_spawn_channel
@@ -119,6 +119,8 @@ jobs:
           ./emit_events         runtime/wasm/samples/emitted_events.wat runtime/wasm/samples/emitted_events.glue.mjs
           ./emit_alloc          runtime/wasm/samples/emitted_alloc.wat runtime/wasm/samples/emitted_alloc.glue.mjs runtime/wasm/samples/emitted_alloc.mjs
           ./emit_richevent      runtime/wasm/samples/emitted_richevent.wat runtime/wasm/samples/emitted_richevent.glue.mjs
+      - name: Compile a REAL @dom .tks to WASM with the teko binary (source → DOM)
+        run: ./build/teko build runtime/wasm/samples/dom.tks --target=wasm -o runtime/wasm/samples/dom.wat
       - name: Assemble all modules (wat2wasm)
         run: |
           wat2wasm runtime/wasm/samples/channels.wat        -o runtime/wasm/samples/channels.wasm
@@ -130,6 +132,7 @@ jobs:
           wat2wasm runtime/wasm/samples/emitted_events.wat  -o runtime/wasm/samples/emitted_events.wasm
           wat2wasm runtime/wasm/samples/emitted_alloc.wat   -o runtime/wasm/samples/emitted_alloc.wasm
           wat2wasm runtime/wasm/samples/emitted_richevent.wat -o runtime/wasm/samples/emitted_richevent.wasm
+          wat2wasm runtime/wasm/samples/dom.wat               -o runtime/wasm/samples/dom.wasm
       - name: Install harness deps + Chromium
         working-directory: runtime/wasm
         run: |
@@ -141,6 +144,9 @@ jobs:
       - name: Run Browser-FFI DOM proof (Teko drives the DOM via auto-generated glue)
         working-directory: runtime/wasm
         run: node run-dom.mjs
+      - name: Run @dom-from-source proof (teko-compiled dom.tks drives the DOM)
+        working-directory: runtime/wasm
+        run: node run-dom-source.mjs
       - name: Run Browser-FFI events proof (click -> Teko callback via teko_invoke)
         working-directory: runtime/wasm
         run: node run-events.mjs
