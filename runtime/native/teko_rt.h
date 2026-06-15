@@ -68,4 +68,12 @@ char* teko_rt_ed25519_verify(const char* pub_hex, const char* msg_hex, const cha
 // secret as hex. Both inputs must be 32 bytes; returns NULL on a malformed length.
 char* teko_rt_x25519(const char* scalar_hex, const char* u_hex);
 
+// KDF — HKDF-SHA-256 / PBKDF2-HMAC-SHA-256 (ids 27/28). Hex inputs; the last one/two args
+// are integers (output length, and for PBKDF2 the iteration count). Returns the derived key
+// as hex, or NULL on malformed input or an out-of-range length (capped at 1024 bytes).
+char* teko_rt_hkdf_sha256(const char* ikm_hex, const char* salt_hex,
+                          const char* info_hex, int out_len);
+char* teko_rt_pbkdf2_sha256(const char* pass_hex, const char* salt_hex,
+                            int iterations, int dk_len);
+
 #endif // TEKO_RT_H

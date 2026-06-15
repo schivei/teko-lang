@@ -349,6 +349,10 @@ static int codec_id_for(const char* lex) {
     if (strcmp(lex, "crypto.ed25519_verify") == 0) return 25;
     // Key exchange — X25519 (RFC 7748). x25519(scalarHex, uHex) -> sharedHex. id 26.
     if (strcmp(lex, "crypto.x25519") == 0) return 26;
+    // KDF — HKDF / PBKDF2 over SHA-256. Hex inputs + integer length/iteration args. ids 27/28.
+    // hkdf_sha256(ikmHex, saltHex, infoHex, len); pbkdf2_sha256(passHex, saltHex, iters, len).
+    if (strcmp(lex, "kdf.hkdf_sha256") == 0) return 27;
+    if (strcmp(lex, "kdf.pbkdf2_sha256") == 0) return 28;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;
@@ -374,18 +378,26 @@ static int runtime_arity(int id) {
         case 24: return 2; // ed25519_sign(seed, msg)
         case 25: return 3; // ed25519_verify(pub, msg, sig)
         case 26: return 2; // x25519(scalar, u)
+        case 27: return 4; // hkdf_sha256(ikm, salt, info, len)
+        case 28: return 4; // pbkdf2_sha256(pass, salt, iters, len)
         default: return 1;
     }
 }
 
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // recursive
 
-// Lower a codec argument (string literal / named local / nested codec) to $w0 = ptr.
+// Lower a codec argument (string literal / int literal / named local / nested codec) to
+// $w0. Strings/hex-strings become pointers; integer literals become immediates (e.g. the
+// KDF length / iteration count). The hosted emitter marshals $w0 into the ABI arg register
+// regardless of whether it is a pointer or an integer.
 static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
     if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
         char* s = strip_quotes(p->current_token.lexeme);
         codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, s));
         free(s);
+        fe_advance(p);
+    } else if (p->current_token.type == TOKEN_LIT_INT) {
+        codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))

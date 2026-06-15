@@ -10,6 +10,8 @@
 #include "teko_crypto_chachapoly.h"
 #include "teko_crypto_ed25519.h"
 #include "teko_crypto_x25519.h"
+#include "teko_crypto_hkdf.h"
+#include "teko_crypto_pbkdf2.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -293,5 +295,48 @@ char* teko_rt_x25519(const char* scalar_hex, const char* u_hex) {
         out = teko_rt_to_hex(shared, TEKO_X25519_LEN);
     }
     free(scalar); free(u);
+    return out;
+}
+
+// --- KDF: HKDF-SHA-256 / PBKDF2-HMAC-SHA-256 -------------------------------------
+#define TEKO_RT_KDF_MAX_OUT 1024 // bound the output buffer to a sane size
+
+char* teko_rt_hkdf_sha256(const char* ikm_hex, const char* salt_hex,
+                          const char* info_hex, int out_len) {
+    if (out_len <= 0 || out_len > TEKO_RT_KDF_MAX_OUT) return NULL;
+    size_t il = 0, sl = 0, fl = 0;
+    uint8_t* ikm = teko_rt_from_hex(ikm_hex, &il);
+    uint8_t* salt = teko_rt_from_hex(salt_hex, &sl);
+    uint8_t* info = teko_rt_from_hex(info_hex, &fl);
+    char* out = NULL;
+    if (ikm && salt && info) {
+        uint8_t* okm = (uint8_t*)malloc((size_t)out_len);
+        if (okm) {
+            if (teko_hkdf_sha256(salt, sl, ikm, il, info, fl, okm, (size_t)out_len) == 0)
+                out = teko_rt_to_hex(okm, (size_t)out_len);
+            free(okm);
+        }
+    }
+    free(ikm); free(salt); free(info);
+    return out;
+}
+
+char* teko_rt_pbkdf2_sha256(const char* pass_hex, const char* salt_hex,
+                            int iterations, int dk_len) {
+    if (iterations <= 0 || dk_len <= 0 || dk_len > TEKO_RT_KDF_MAX_OUT) return NULL;
+    size_t pl = 0, sl = 0;
+    uint8_t* pass = teko_rt_from_hex(pass_hex, &pl);
+    uint8_t* salt = teko_rt_from_hex(salt_hex, &sl);
+    char* out = NULL;
+    if (pass && salt) {
+        uint8_t* dk = (uint8_t*)malloc((size_t)dk_len);
+        if (dk) {
+            if (teko_pbkdf2_hmac_sha256(pass, pl, salt, sl, (uint32_t)iterations,
+                                        dk, (size_t)dk_len) == 0)
+                out = teko_rt_to_hex(dk, (size_t)dk_len);
+            free(dk);
+        }
+    }
+    free(pass); free(salt);
     return out;
 }

@@ -63,8 +63,15 @@
 - **Sub-phase B, step 6 — X25519 ECDH native surface: DONE.** `crypto.x25519(scalarHex, uHex)`
   (id 26, arity 2) → 32-byte shared-secret hex. Proven by `runtime/native/samples/x25519.tks`
   against RFC 7748 §5 vectors 1 & 2 on macOS arm64 + Linux x86_64/arm64.
+- **Sub-phase B, step 7 — KDF native surface (HKDF + PBKDF2): DONE.** `kdf.hkdf_sha256(ikmHex,
+  saltHex, infoHex, len)` (id 27) and `kdf.pbkdf2_sha256(passHex, saltHex, iters, len)` (id 28),
+  both arity 4. **`lower_codec_value` now accepts integer-literal args** (ICONST immediates) for
+  the length/iteration parameters — the hosted emitter marshals an int in $w0 the same as a
+  pointer. Output capped at 1024 bytes. Proven by `runtime/native/samples/kdf.tks` against RFC
+  5869 HKDF Test Case 1 and the suite's PBKDF2-HMAC-SHA256 vector, on macOS arm64 + Linux
+  x86_64/arm64. (sha512 KDF variants are an easy follow-up: ids + wrappers, same pattern.)
 - **Sub-phase B — REMAINING:** SHAKE (msg,len), ECDSA P-256/384 sign/verify, RSA-PSS
-  sign/verify, RSA-OAEP encrypt/decrypt, KDF (HKDF/PBKDF2), RNG (`random.bytes`).
+  sign/verify, RSA-OAEP encrypt/decrypt, RNG (`random.bytes`).
   Each: `codec_id_for` id + `runtime_arity` + `teko_native_runtime_symbol` entry + `teko_rt_*`
   wrapper (hex-at-surface) + an executable `.tks` KAT in `run-native.sh`. The established
   pattern (see AEAD/HMAC/Ed25519) scales directly; 8 staging slots cover all current arities.
