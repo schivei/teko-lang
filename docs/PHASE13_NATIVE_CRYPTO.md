@@ -149,7 +149,15 @@ for the WASM target yet; the native C runtimes are fully KAT-tested).
   constant-time final reduction, RFC 8439 §2.5.2 KAT. ✅
 - **ChaCha20-Poly1305 AEAD** — `teko_crypto_chachapoly.c`, RFC 8439 §2.8.2 KAT +
   constant-time tag verify + tamper-rejection tests. ✅
-- **AES-128/192/256 (CTR/CBC/GCM)** — in progress (decision below).
+- **AES-128/192/256 core** — `teko_crypto_aes.c`, constant-time (decision below), FIPS-197
+  block KATs (128/192/256) + decrypt round-trip. ✅
+- **AES-CTR + AES-CBC** — `teko_crypto_aes_modes.c`, NIST SP 800-38A F.5.1/F.2.1 KATs. ✅
+- **AES-GCM** — `teko_crypto_aes_gcm.c`, constant-time bit-by-bit GHASH (GF(2¹²⁸), no
+  tables), McGrew–Viega/NIST test cases 3 (no AAD) & 4 (AAD + partial block) + tamper
+  rejection; handles 96-bit and general IV lengths. ✅
+
+**13.2 status: complete** (ChaCha20-Poly1305 + AES-128/192/256 CTR/CBC/GCM, all
+constant-time, all KAT-verified). Suite 127/127.
 
 ### DECISION (owner pre-approved): constant-time AES strategy
 **Table-free GF(2⁸) arithmetic S-box**, not T-tables and not full bitslicing:

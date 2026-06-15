@@ -138,6 +138,8 @@ extern void test_teko_crypto_aes_fips197_blocks(void);
 extern void test_teko_crypto_aes128_nist_vector(void);
 extern void test_teko_crypto_aes_ctr_nist_vector(void);
 extern void test_teko_crypto_aes_cbc_nist_vector(void);
+extern void test_teko_crypto_aes_gcm_case3(void);
+extern void test_teko_crypto_aes_gcm_case4(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -286,6 +288,8 @@ int main(void) {
     RUN_TEST(test_teko_crypto_aes128_nist_vector);
     RUN_TEST(test_teko_crypto_aes_ctr_nist_vector);
     RUN_TEST(test_teko_crypto_aes_cbc_nist_vector);
+    RUN_TEST(test_teko_crypto_aes_gcm_case3);
+    RUN_TEST(test_teko_crypto_aes_gcm_case4);
 
     return UNITY_END();
 }

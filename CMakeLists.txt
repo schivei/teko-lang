@@ -69,6 +69,7 @@ set(CORE_SOURCES
         src/runtime/teko_crypto_chachapoly.c
         src/runtime/teko_crypto_aes.c
         src/runtime/teko_crypto_aes_modes.c
+        src/runtime/teko_crypto_aes_gcm.c
         # Tooling: target detection, SDK, LSP, project manager
         src/teko_target.c
         src/teko_sdk.c
@@ -183,6 +184,7 @@ set(TEST_SOURCES
         tests/runtime/test_crypto_chachapoly.c
         tests/runtime/test_crypto_aes.c
         tests/runtime/test_crypto_aes_modes.c
+        tests/runtime/test_crypto_aes_gcm.c
 )
 add_executable(teko_tests ${TEST_SOURCES})
 target_link_libraries(teko_tests PRIVATE teko_core unity)
