@@ -114,6 +114,8 @@ extern void test_teko_runtime_channels_blocking_and_signaling(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 extern void test_teko_crypto_md5_rfc1321_vectors(void);
 extern void test_teko_crypto_md5_streaming_matches_oneshot(void);
+extern void test_teko_crypto_sha1_fips180_vectors(void);
+extern void test_teko_crypto_sha1_streaming_matches_oneshot(void);
 extern void test_teko_crypto_sha256_known_answer_vectors(void);
 extern void test_teko_crypto_sha256_streaming_matches_oneshot(void);
 extern void test_teko_crypto_sha512_known_answer_vectors(void);
@@ -276,6 +278,8 @@ int main(void) {
 
     RUN_TEST(test_teko_crypto_md5_rfc1321_vectors);
     RUN_TEST(test_teko_crypto_md5_streaming_matches_oneshot);
+    RUN_TEST(test_teko_crypto_sha1_fips180_vectors);
+    RUN_TEST(test_teko_crypto_sha1_streaming_matches_oneshot);
     RUN_TEST(test_teko_crypto_sha256_known_answer_vectors);
     RUN_TEST(test_teko_crypto_sha256_streaming_matches_oneshot);
     RUN_TEST(test_teko_crypto_sha512_known_answer_vectors);

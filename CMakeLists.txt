@@ -58,6 +58,7 @@ set(CORE_SOURCES
         # Native cryptography (Phase 13) — embedded runtime primitives
         src/runtime/teko_crypto_sha2.c
         src/runtime/teko_crypto_md5.c
+        src/runtime/teko_crypto_sha1.c
         src/runtime/teko_crypto_sha512.c
         src/runtime/teko_crypto_hmac.c
         src/runtime/teko_crypto_sha3.c
@@ -180,6 +181,7 @@ set(TEST_SOURCES
         tests/runtime/test_runtime_thread.c
         tests/runtime/test_crypto_sha2.c
         tests/runtime/test_crypto_md5.c
+        tests/runtime/test_crypto_sha1.c
         tests/runtime/test_crypto_sha512.c
         tests/runtime/test_crypto_hmac.c
         tests/runtime/test_crypto_sha3.c
