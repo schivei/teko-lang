@@ -159,14 +159,20 @@ void test_frontend_interop_dom_intrinsics(void) {
     TEST_ASSERT_EQUAL_INT(3, buffer->imports[1].n_params);
     TEST_ASSERT_EQUAL_INT(0, buffer->imports[1].has_result);
 
-    // IL: getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0;
-    //     setText(handle,"hi there") -> SETARG0(handle), SCONST"hi there", SETARG1,
-    //     ICONST8, CALL_IMPORT1; HALT.
+    // IL (P12-F generalized nesting): the nested getElementById is lowered first and
+    // its handle spilled to a temp local ($v0); setText then loads it back during arg
+    // staging. So:
+    //   getElementById("out") -> SCONST"out", SETARG0, ICONST3, CALL_IMPORT0
+    //   STORE_LOCAL 0                              (park handle)
+    //   setText: LOAD_LOCAL0, SETARG0, SCONST"hi there", SETARG1, ICONST8, CALL_IMPORT1
+    //   HALT
     const unsigned char expected[] = {
         0x02, 0x00, 0x00, 0x00, 0x00, // SCONST 0 ("out")
         0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0
         0x01, 0x03, 0x00, 0x00, 0x00, // ICONST 3
-        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById)
+        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (getElementById) -> $w0 = handle
+        0x0C, 0x00, 0x00, 0x00, 0x00, // STORE_LOCAL 0 (park handle in temp $v0)
+        0x0B, 0x00, 0x00, 0x00, 0x00, // LOAD_LOCAL 0 (handle)
         0x0A, 0x00, 0x00, 0x00, 0x00, // SETARG 0 (handle -> a0)
         0x02, 0x01, 0x00, 0x00, 0x00, // SCONST 1 ("hi there")
         0x0A, 0x01, 0x00, 0x00, 0x00, // SETARG 1 (ptr -> a1)
@@ -176,6 +182,58 @@ void test_frontend_interop_dom_intrinsics(void) {
     };
     TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+    // The nested-arg spill reserved one temp local.
+    TEST_ASSERT_TRUE(buffer->local_count >= 1);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 12 (P12-F): MULTIPLE nested handle args (lifts the Phase-11 one-leading-nested
+// limit). appendChild(getElementById(…), createElement(…)) — each nested result is
+// spilled to its own temp local, then both load back during staging.
+void test_frontend_interop_nested_handle_args(void) {
+    const char* src =
+        "@dom.appendChild(@dom.getElementById(\"out\"), @dom.createElement(\"span\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Three dom imports auto-registered.
+    TEST_ASSERT_EQUAL_INT(3, buffer->import_count);
+    TEST_ASSERT_EQUAL_STRING("getElementById", buffer->imports[0].name);
+    TEST_ASSERT_EQUAL_STRING("createElement", buffer->imports[1].name);
+    TEST_ASSERT_EQUAL_STRING("appendChild", buffer->imports[2].name);
+
+    // Two nested results => at least two temp locals.
+    TEST_ASSERT_TRUE(buffer->local_count >= 2);
+
+    // Two STORE_LOCALs (one per nested result) and (≥2) LOAD_LOCALs to stage them.
+    int n_store_local = 0, n_load_local = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_STORE_LOCAL) n_store_local++;
+        if (buffer->code[i] == OP_LOAD_LOCAL) n_load_local++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, n_store_local);
+    TEST_ASSERT_TRUE(n_load_local >= 2);
+
+    // Through the bridge: distinct temps $v0 and $v1 declared, appendChild call present.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_nested.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v0 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v1 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $import_2"));
+    free(out);
+    remove(wat);
 
     codegen_li_free_context(buffer);
 }
@@ -244,6 +302,153 @@ void test_frontend_interop_event_handler(void) {
     TEST_ASSERT_NOT_NULL(strstr(g, "addEventListener(str(p, n), () => invoke(fn, h))"));
     free(g);
     remove(glue);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 12 (P12-D): named local variables. `let x = 42; sink(x)` lowers the binding
+// to a named local ($v0) via STORE_LOCAL and reads it back via LOAD_LOCAL.
+void test_frontend_interop_named_locals(void) {
+    const char* src =
+        "extern fn sink(n) from \"env\" as \"sink\";\n"
+        "let x = 42;\n"
+        "sink(x);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // One named local declared.
+    TEST_ASSERT_EQUAL_INT(1, buffer->local_count);
+
+    // IL: ICONST 42 -> STORE_LOCAL 0 -> (call: LOAD_LOCAL 0 -> CALL_IMPORT 0) -> HALT.
+    const unsigned char expected[] = {
+        0x01, 0x2A, 0x00, 0x00, 0x00, // ICONST 42
+        0x0C, 0x00, 0x00, 0x00, 0x00, // STORE_LOCAL 0
+        0x0B, 0x00, 0x00, 0x00, 0x00, // LOAD_LOCAL 0
+        0x09, 0x00, 0x00, 0x00, 0x00, // CALL_IMPORT 0 (sink)
+        0x00                          // HALT
+    };
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), buffer->size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, buffer->code, sizeof(expected));
+
+    // Through the bridge: $main declares $v0 and uses local.set/get $v0.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_locals.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v0 i32)"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "local.set $v0"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "local.get $v0"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 12 (P12-E): integer expressions in `let` initializers. `(6*7)%50` lowers via
+// the Pratt parser spilling operands to temp locals; result stored to the named local.
+void test_frontend_interop_expressions(void) {
+    const char* src =
+        "extern fn sink(n) from \"env\" as \"sink\";\n"
+        "let r = (6 * 7) % 50;\n"
+        "sink(r);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // r is $v0; the expression uses at least one temp local above it.
+    TEST_ASSERT_TRUE(buffer->local_count >= 2);
+
+    // The IL contains MUL and MOD opcodes, and STORE_LOCAL/LOAD_LOCAL spills.
+    int saw_mul = 0, saw_mod = 0, saw_store_local = 0, saw_load_local = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_MUL) saw_mul = 1;
+        if (buffer->code[i] == OP_MOD) saw_mod = 1;
+        if (buffer->code[i] == OP_STORE_LOCAL) saw_store_local = 1;
+        if (buffer->code[i] == OP_LOAD_LOCAL) saw_load_local = 1;
+    }
+    TEST_ASSERT_TRUE(saw_mul);
+    TEST_ASSERT_TRUE(saw_mod);
+    TEST_ASSERT_TRUE(saw_store_local);
+    TEST_ASSERT_TRUE(saw_load_local);
+
+    // Through the bridge: the WAT carries the arithmetic + guarded modulo + temp locals.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_expr.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(16384);
+    memset(out, 0, 16384);
+    size_t n = fread(out, 1, 16383, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "i32.mul"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "i32.rem_s"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(local $v1 i32)")); // a temp above $v0
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 12 (P12-G): base64/hex encode+decode are functional. The frontend lowers
+// base64.encode/.decode and hex.encode/.decode to OP_CALL_RUNTIME against the native
+// codec runtime; this golden pins the lowering + that the codec runtime is emitted.
+void test_frontend_interop_base_encoding(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(base64.encode(\"Man\"));\n"
+        "emit(hex.decode(\"4d616e\"));\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_codec);
+
+    // Two OP_CALL_RUNTIME ops: codec id 0 (base64 encode) and 3 (hex decode).
+    int n_runtime = 0, saw_b64e = 0, saw_hexd = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            n_runtime++;
+            int id = (int)buffer->code[i + 1]; // 4-byte LE arg; low byte is the id
+            if (id == 0) saw_b64e = 1;
+            if (id == 3) saw_hexd = 1;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(2, n_runtime);
+    TEST_ASSERT_TRUE(saw_b64e);
+    TEST_ASSERT_TRUE(saw_hexd);
+
+    // Through the bridge: the native codec runtime + the calls are emitted.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_codec.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(32768);
+    memset(out, 0, 32768);
+    size_t n = fread(out, 1, 32767, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_base64_encode (export \"teko_base64_encode\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $teko_hex_decode (export \"teko_hex_decode\")"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_base64_encode"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_hex_decode"));
+    free(out);
+    remove(wat);
 
     codegen_li_free_context(buffer);
 }

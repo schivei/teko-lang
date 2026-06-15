@@ -21,7 +21,35 @@ static KeywordMap keywords[] = {
     {"decorates", TOKEN_DECORATES}, {"extend", TOKEN_EXTEND}, {"command", TOKEN_COMMAND},
     {"handler", TOKEN_HANDLER}, {"notification", TOKEN_NOTIFICATION}, {"with", TOKEN_WITH},
     {"query", TOKEN_QUERY}, {"operator", TOKEN_OPERATOR}, {"pub", TOKEN_PUB},
-    {NULL, TOKEN_UNKNOWN}, {"required", TOKEN_REQD},
+    {"required", TOKEN_REQD},
+    // Phase 12 — reserved keyword matrix.
+    // Resilience:
+    {"circuit", TOKEN_CIRCUIT}, {"fallback", TOKEN_FALLBACK}, {"delayed", TOKEN_DELAYED},
+    {"retry", TOKEN_RETRY}, {"exponential", TOKEN_EXPONENTIAL}, {"logarithmic", TOKEN_LOGARITHMIC},
+    {"attempts", TOKEN_ATTEMPTS}, {"timeout", TOKEN_TIMEOUT},
+    // OOP & concurrency:
+    {"class", TOKEN_CLASS}, {"abstract", TOKEN_ABSTRACT}, {"trait", TOKEN_TRAIT},
+    {"event", TOKEN_EVENT}, {"raise", TOKEN_RAISE}, {"subscribe", TOKEN_SUBSCRIBE},
+    {"fanout", TOKEN_FANOUT}, {"fire_and_forget", TOKEN_FIRE_AND_FORGET}, {"shared", TOKEN_SHARED},
+    {"atomic", TOKEN_ATOMIC}, {"routines", TOKEN_ROUTINES}, {"duplex", TOKEN_DUPLEX},
+    // Web:
+    {"api", TOKEN_API}, {"middleware", TOKEN_MIDDLEWARE}, {"get", TOKEN_GET},
+    {"post", TOKEN_POST}, {"put", TOKEN_PUT}, {"delete", TOKEN_DELETE},
+    {"rpc", TOKEN_RPC}, {"websocket", TOKEN_WEBSOCKET},
+    {"patch", TOKEN_PATCH}, {"head", TOKEN_HEAD}, {"options", TOKEN_OPTIONS}, // reserved → Phase 17
+    // Tooling:
+    {"parse", TOKEN_PARSE}, {"json", TOKEN_JSON}, {"csv", TOKEN_CSV}, {"xml", TOKEN_XML},
+    {"html", TOKEN_HTML}, {"bundle", TOKEN_BUNDLE}, {"minify", TOKEN_MINIFY},
+    {"crypto", TOKEN_CRYPTO}, {"hash", TOKEN_HASH}, {"encrypt", TOKEN_ENCRYPT},
+    // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
+    {"decrypt", TOKEN_DECRYPT},
+    {"encode", TOKEN_ENCODE}, {"decode", TOKEN_DECODE},
+    {"base64", TOKEN_BASE64}, {"base32", TOKEN_BASE32}, {"hex", TOKEN_HEX},
+    {"sign", TOKEN_SIGN}, {"verify", TOKEN_VERIFY},                       // reserved → Phase 13
+    {"serialize", TOKEN_SERIALIZE}, {"stringify", TOKEN_STRINGIFY},       // reserved → Phase 18
+    // Core:
+    {"comptime", TOKEN_COMPTIME}, {"soa", TOKEN_SOA},
+    {NULL, TOKEN_UNKNOWN}, // sentinel — MUST be last (the lookup loop stops here)
 };
 
 // Initializes the lexer
@@ -132,6 +160,17 @@ static Token lex_char(Lexer* lexer) {
     return token;
 }
 
+// Phase 12 — native literal unit suffixes. The whole trailing [a-z]+ run after a
+// number is matched as one unit (so the match is longest by construction: "ms" wins
+// over "m", "kbps" over "kb"); a run that matches no unit is NOT consumed (rewound),
+// leaving it to be lexed as a separate identifier — preserving prior behavior.
+static const struct { const char* s; LiteralUnit u; } literal_units[] = {
+    {"ms", LIT_UNIT_MS}, {"s", LIT_UNIT_S}, {"m", LIT_UNIT_M}, {"h", LIT_UNIT_H}, {"d", LIT_UNIT_D},
+    {"b", LIT_UNIT_B}, {"kb", LIT_UNIT_KB}, {"mb", LIT_UNIT_MB}, {"gb", LIT_UNIT_GB},
+    {"kbps", LIT_UNIT_KBPS}, {"mbps", LIT_UNIT_MBPS}, {"gbps", LIT_UNIT_GBPS},
+    {NULL, LIT_UNIT_NONE}
+};
+
 static Token lex_number(Lexer* lexer) {
     int start_pos = lexer->cursor;
     bool is_float = false;
@@ -144,8 +183,27 @@ static Token lex_number(Lexer* lexer) {
         while (isdigit(peek(lexer)) || peek(lexer) == '_') advance(lexer);
     }
 
-    int length = lexer->cursor - start_pos;
-    Token token = {is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT, create_lexeme(&lexer->source[start_pos], length), lexer->line};
+    int length = lexer->cursor - start_pos; // numeric text length (excludes any suffix)
+
+    // Optional unit suffix: scan the maximal trailing alpha run and match it whole.
+    LiteralUnit unit = LIT_UNIT_NONE;
+    int suffix_start = lexer->cursor;
+    while (isalpha(peek(lexer))) advance(lexer);
+    int suffix_len = lexer->cursor - suffix_start;
+    if (suffix_len > 0) {
+        char suffix[8];
+        if (suffix_len < (int)sizeof(suffix)) {
+            memcpy(suffix, &lexer->source[suffix_start], suffix_len);
+            suffix[suffix_len] = '\0';
+            for (int i = 0; literal_units[i].s != NULL; i++) {
+                if (strcmp(suffix, literal_units[i].s) == 0) { unit = literal_units[i].u; break; }
+            }
+        }
+        if (unit == LIT_UNIT_NONE) lexer->cursor = suffix_start; // not a unit — rewind
+    }
+
+    Token token = {is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT,
+                   create_lexeme(&lexer->source[start_pos], length), lexer->line, unit};
     return token;
 }
 
@@ -165,6 +223,7 @@ static Token lex_identifier(Lexer* lexer, bool is_macro) {
     Token token;
     token.lexeme = create_lexeme(&lexer->source[start_pos], length);
     token.line = lexer->line;
+    token.literal_unit = LIT_UNIT_NONE;
 
     if (is_macro) {
         token.type = TOKEN_MACRO_IDENT;

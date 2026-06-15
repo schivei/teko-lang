@@ -17,6 +17,31 @@ typedef enum {
     TOKEN_COMMAND, TOKEN_HANDLER, TOKEN_NOTIFICATION, TOKEN_WITH, TOKEN_QUERY,
     TOKEN_OPERATOR, TOKEN_PUB, TOKEN_REQD,
 
+    // Phase 12 — reserved keyword matrix (recognition only; lowering lands in the
+    // respective feature phases 13–16).
+    // Resilience:
+    TOKEN_CIRCUIT, TOKEN_FALLBACK, TOKEN_DELAYED, TOKEN_RETRY,
+    TOKEN_EXPONENTIAL, TOKEN_LOGARITHMIC, TOKEN_ATTEMPTS, TOKEN_TIMEOUT,
+    // OOP & concurrency:
+    TOKEN_CLASS, TOKEN_ABSTRACT, TOKEN_TRAIT, TOKEN_EVENT, TOKEN_RAISE,
+    TOKEN_SUBSCRIBE, TOKEN_FANOUT, TOKEN_FIRE_AND_FORGET, TOKEN_SHARED,
+    TOKEN_ATOMIC, TOKEN_ROUTINES, TOKEN_DUPLEX,
+    // Web:
+    TOKEN_API, TOKEN_MIDDLEWARE, TOKEN_GET, TOKEN_POST, TOKEN_PUT,
+    TOKEN_DELETE, TOKEN_RPC, TOKEN_WEBSOCKET,
+    TOKEN_PATCH, TOKEN_HEAD, TOKEN_OPTIONS,          // REST verb completeness (reserved → Phase 17)
+    // Tooling:
+    TOKEN_PARSE, TOKEN_JSON, TOKEN_CSV, TOKEN_XML, TOKEN_HTML,
+    TOKEN_BUNDLE, TOKEN_MINIFY, TOKEN_CRYPTO, TOKEN_HASH, TOKEN_ENCRYPT,
+    // Symmetry audit (P12 1A): crypto counterpart + base-encoding surface.
+    TOKEN_DECRYPT,                                   // counterpart of ENCRYPT (reserved → Phase 13)
+    TOKEN_ENCODE, TOKEN_DECODE,                      // base transform ops (functional in Phase 12)
+    TOKEN_BASE64, TOKEN_BASE32, TOKEN_HEX,           // base namespaces
+    TOKEN_SIGN, TOKEN_VERIFY,                         // signatures (reserved → Phase 13 crypto)
+    TOKEN_SERIALIZE, TOKEN_STRINGIFY,                // (reserved → Phase 18, static per-type serializers)
+    // Core:
+    TOKEN_COMPTIME, TOKEN_SOA,
+
     TOKEN_STRING_LIT,       // common "text" or traditional """multiline"""
     TOKEN_STRING_INTERPOLATED,    // common `text {expr}` or interpolated ```multiline```
     TOKEN_STRING_RAW_LIT,         // $"text" or $"""multiline""" (ignores escapes)
@@ -84,10 +109,24 @@ typedef enum {
 } TokenType;
 
 // Structure representing a Token
+// Phase 12 — native literal unit suffixes, captured in the lexer at zero runtime
+// cost. Time (ms/s/m/h/d), data (b/kb/mb/gb), and socket bandwidth (kbps/mbps/gbps).
+// LIT_UNIT_NONE means the literal carried no unit suffix.
+typedef enum {
+    LIT_UNIT_NONE = 0,
+    // Time
+    LIT_UNIT_MS, LIT_UNIT_S, LIT_UNIT_M, LIT_UNIT_H, LIT_UNIT_D,
+    // Data
+    LIT_UNIT_B, LIT_UNIT_KB, LIT_UNIT_MB, LIT_UNIT_GB,
+    // Bandwidth
+    LIT_UNIT_KBPS, LIT_UNIT_MBPS, LIT_UNIT_GBPS
+} LiteralUnit;
+
 typedef struct {
     TokenType type;
     char* lexeme;
     int line;
+    LiteralUnit literal_unit; // set for LIT_INT/LIT_FLOAT when a unit suffix is present
 } Token;
 
 // Lexer state

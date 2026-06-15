@@ -81,14 +81,17 @@ static void register_extern(BytecodeBuffer* buffer, const FFIASTNode* node,
     }
 }
 
-// A literal call argument.
-typedef struct { int is_string; char* sval; int ival; } CallArg;
+// A call argument: a string literal, an int literal, or a named local (Phase 12).
+typedef struct { int is_string; char* sval; int ival; int is_local; int slot; } CallArg;
 
 // Lower a resolved call: args 0..n-2 staged via OP_SETARG, the last left in $w0,
-// then OP_CALL_IMPORT. String args are pooled; int args are immediates.
+// then OP_CALL_IMPORT. String args are pooled; int args are immediates; local args
+// load from their named slot.
 static void lower_call(BytecodeBuffer* buffer, int import_index, CallArg* args, int n) {
     for (int i = 0; i < n; i++) {
-        if (args[i].is_string) {
+        if (args[i].is_local) {
+            codegen_li_emit_load_local(buffer, args[i].slot);
+        } else if (args[i].is_string) {
             int s = codegen_li_add_string_constant(buffer, args[i].sval);
             codegen_li_emit_sconst(buffer, s);
         } else {
@@ -115,19 +118,29 @@ static int intrinsic_has_result(const char* method) {
             strcmp(method, "createElement") == 0) ? 1 : 0;
 }
 
+// Temp-local allocator (P12-E/F): named-local slots ($v) double as expression and
+// nested-arg spill temps. next_temp = next free slot; hw = high-water for the count
+// the backend must declare.
+typedef struct { int next_temp; int hw; } TempAlloc;
+
 // Lowering context threaded through @dom calls: the current handler param name (an
-// identifier arg matching it loads the event arg from $w1) and the handler name->table
-// slot map (an identifier arg matching one is a function reference -> its table index).
+// identifier arg matching it loads the event arg from $w1), the handler name->table
+// slot map (an identifier arg matching one is a function reference -> its table index),
+// the named-local table, and the temp allocator (for nested-arg spills, P12-F).
 typedef struct {
     const char* param_name; // current handler param, or NULL at top level
     ImportBinding* fns;      // handler name -> table slot (idx = slot)
     int nfns;
+    ImportBinding* locals;   // Phase 12: named local -> slot (idx = $v slot)
+    int nlocals;
+    TempAlloc* ta;           // P12-F: temp-local allocator for nested-arg spills
 } LowerCtx;
 
 // A flat "producer" (one wasm param). kind: 0=ICONST payload, 1=SCONST pool idx,
-// 2=LOAD the handler param ($w0 <- $w1, no payload).
+// 2=LOAD the handler param ($w0 <- $w1), 3=LOAD_LOCAL payload (a named local).
 typedef struct { int kind; int payload; } Prod;
 
+static int is_dom_macro(const char* lexeme); // defined below
 static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerCtx* ctx); // recursive
 
 static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerCtx* ctx) {
@@ -150,19 +163,24 @@ static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerC
     if (p->current_token.type != TOKEN_LPAREN) return;
     fe_advance(p); // consume '('
 
-    // Optional leading nested intrinsic call as arg0 (its result -> $w0).
-    int has_nested = 0;
-    if (p->current_token.type == TOKEN_MACRO_IDENT) {
-        lower_intrinsic_call(buffer, p, ctx); // emits inner; result in $w0
-        has_nested = 1;
-        if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
-    }
-
-    // Collect the remaining args, expanded to flat producers (string -> ptr+len).
+    // Collect args as flat producers (string -> ptr+len). A nested `@dom.…()` arg in
+    // ANY position (P12-F) is lowered eagerly and its result spilled to a fresh temp
+    // local; the producer then LOAD_LOCALs it during staging. So multiple nested handle
+    // args work (e.g. appendChild(getElementById(…), createElement(…))).
     Prod prods[32];
     int np = 0;
+    int temps_used = 0;
     while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
-        if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) && np + 2 <= 32) {
+        if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
+            np + 1 <= 32) {
+            lower_intrinsic_call(buffer, p, ctx);              // inner result -> $w0
+            int t = (ctx && ctx->ta) ? ctx->ta->next_temp++ : 0;
+            if (ctx && ctx->ta && ctx->ta->next_temp > ctx->ta->hw) ctx->ta->hw = ctx->ta->next_temp;
+            codegen_li_emit_store_local(buffer, t);            // park the handle in a temp
+            prods[np].kind = 3; prods[np].payload = t; np++;   // producer: LOAD_LOCAL temp
+            temps_used++;
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        } else if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) && np + 2 <= 32) {
             char* s = strip_quotes(p->current_token.lexeme);
             int idx = codegen_li_add_string_constant(buffer, s);
             int len = (int)strlen(s);
@@ -175,8 +193,11 @@ static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerC
             fe_advance(p);
         } else if (p->current_token.type == TOKEN_IDENTIFIER && np + 1 <= 32) {
             const char* id = p->current_token.lexeme;
+            int lslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, id) : -1;
             if (ctx && ctx->param_name && strcmp(id, ctx->param_name) == 0) {
                 prods[np].kind = 2; prods[np].payload = 0; np++;            // LOAD handler param
+            } else if (lslot >= 0) {
+                prods[np].kind = 3; prods[np].payload = lslot; np++;        // LOAD_LOCAL (named local)
             } else {
                 int slot = ctx ? bind_lookup(ctx->fns, ctx->nfns, id) : -1;
                 if (slot >= 0) { prods[np].kind = 0; prods[np].payload = slot; np++; } // fn ref -> ICONST slot
@@ -192,29 +213,151 @@ static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerC
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 
-    int total = (has_nested ? 1 : 0) + np;
-
-    // Stage the nested result (param 0) unless it is the only/last param.
-    if (has_nested && total > 1) codegen_li_emit_setarg(buffer, 0);
-
-    // Emit the producers at absolute slots [has_nested .. total-1]; the last param
-    // stays in $w0.
+    // Emit the producers at slots [0..np-1]; the last param stays in $w0.
     for (int k = 0; k < np; k++) {
-        int slot = (has_nested ? 1 : 0) + k;
         switch (prods[k].kind) {
             case 1: codegen_li_emit_sconst(buffer, prods[k].payload); break;
             case 2: codegen_li_emit_load(buffer); break;
+            case 3: codegen_li_emit_load_local(buffer, prods[k].payload); break;
             default: codegen_li_emit_iconst(buffer, prods[k].payload); break;
         }
-        if (slot < total - 1) codegen_li_emit_setarg(buffer, slot);
+        if (k < np - 1) codegen_li_emit_setarg(buffer, k);
     }
 
-    int import_index = codegen_li_add_import(buffer, ns, method, total, intrinsic_has_result(method));
+    // Free the nested-arg temps reserved for this call.
+    if (ctx && ctx->ta) ctx->ta->next_temp -= temps_used;
+
+    int import_index = codegen_li_add_import(buffer, ns, method, np, intrinsic_has_result(method));
     codegen_li_emit_call_import(buffer, import_index);
 }
 
 static int is_dom_macro(const char* lexeme) {
     return lexeme && (strncmp(lexeme, "@dom.", 5) == 0 || strncmp(lexeme, "@js.", 4) == 0);
+}
+
+// --- integer expression parser (FE P12-E) ---------------------------------------
+// A precedence-climbing (Pratt) parser for integer arithmetic + comparisons. Each
+// binary node spills its left operand to a fresh temporary named-local so arbitrary
+// nesting works in the accumulator model: result lands in $w0. Operand/temp slots
+// live in the same $v file as named locals (P12-D); `hw` tracks the high-water so the
+// backend declares enough locals. Scope: int literals, named locals, parentheses, and
+// `+ - * / % == != < <= > >=` (left-assoc). Float / `&&`/`||` are future work.
+static int p12_tok_prec(TokenType t) {
+    switch (t) {
+        case TOKEN_MUL: case TOKEN_DIV: case TOKEN_MOD: return 3;
+        case TOKEN_PLUS: case TOKEN_MINUS: return 2;
+        case TOKEN_EQ: case TOKEN_NE: case TOKEN_LT:
+        case TOKEN_LE: case TOKEN_GT: case TOKEN_GE: return 1;
+        default: return 0;
+    }
+}
+
+static OpCode p12_tok_op(TokenType t) {
+    switch (t) {
+        case TOKEN_PLUS:  return OP_ADD; case TOKEN_MINUS: return OP_SUB;
+        case TOKEN_MUL:   return OP_MUL; case TOKEN_DIV:   return OP_DIV;
+        case TOKEN_MOD:   return OP_MOD;
+        case TOKEN_EQ:    return OP_EQ;  case TOKEN_NE:    return OP_NE;
+        case TOKEN_LT:    return OP_LT;  case TOKEN_LE:    return OP_LE;
+        case TOKEN_GT:    return OP_GT;  case TOKEN_GE:    return OP_GE;
+        default:          return OP_ADD;
+    }
+}
+
+static void eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
+                           int min_prec, TempAlloc* ta);
+
+static void eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
+    if (p->current_token.type == TOKEN_LIT_INT) {
+        codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
+        fe_advance(p);
+    } else if (p->current_token.type == TOKEN_LPAREN) {
+        fe_advance(p);
+        eval_expr_prec(b, p, ctx, 1, ta);
+        if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    } else if (p->current_token.type == TOKEN_IDENTIFIER) {
+        int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
+        if (s >= 0) codegen_li_emit_load_local(b, s);
+        else codegen_li_emit_iconst(b, 0); // unknown identifier in this subset → 0
+        fe_advance(p);
+    } else {
+        codegen_li_emit_iconst(b, 0); // empty/unsupported primary → 0
+    }
+}
+
+static void eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
+                           int min_prec, TempAlloc* ta) {
+    eval_primary(b, p, ctx, ta); // left operand → $w0
+    while (p12_tok_prec(p->current_token.type) >= min_prec &&
+           p12_tok_prec(p->current_token.type) > 0) {
+        int prec = p12_tok_prec(p->current_token.type);
+        OpCode op = p12_tok_op(p->current_token.type);
+        fe_advance(p); // consume the operator
+        int t = ta->next_temp++;
+        if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+        codegen_li_emit_store_local(b, t);        // temp = left
+        eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 (left-associative)
+        codegen_li_emit_store(b);                 // $w1 = right
+        codegen_li_emit_load_local(b, t);         // $w0 = left
+        codegen_li_emit_binop(b, op);             // $w0 = left <op> right
+        ta->next_temp--;                          // free temp
+    }
+}
+
+// --- base-encoding codecs (P12-G) -----------------------------------------------
+// `base64.encode(x)` / `.decode`, `hex.encode/.decode`. Lexes as
+// <TOKEN_BASE64|TOKEN_HEX> TOKEN_DOT <TOKEN_ENCODE|TOKEN_DECODE> '(' arg ')'. The arg is
+// a string literal, a named local, or a nested codec call; it is lowered to a pointer
+// in $w0, then OP_CALL_RUNTIME invokes the native codec (result pointer -> $w0).
+// The lexer folds `base64.encode` into a single dotted identifier (the same rule that
+// makes `@marshall.to_ptr` one macro token), so a codec call is an IDENTIFIER whose
+// lexeme is "<base64|hex>.<encode|decode>" followed by '('. Returns the codec id
+// (0=b64e,1=b64d,2=hexe,3=hexd) or -1.
+static int codec_id_for(const char* lex) {
+    if (!lex) return -1;
+    if (strcmp(lex, "base64.encode") == 0) return 0;
+    if (strcmp(lex, "base64.decode") == 0) return 1;
+    if (strcmp(lex, "hex.encode") == 0) return 2;
+    if (strcmp(lex, "hex.decode") == 0) return 3;
+    return -1;
+}
+
+static int is_codec_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           codec_id_for(p->current_token.lexeme) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // recursive
+
+// Lower a codec argument (string literal / named local / nested codec) to $w0 = ptr.
+static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
+        char* s = strip_quotes(p->current_token.lexeme);
+        codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, s));
+        free(s);
+        fe_advance(p);
+    } else if (is_codec_head(p)) {
+        lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
+    } else if (p->current_token.type == TOKEN_IDENTIFIER) {
+        int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
+        if (s >= 0) codegen_li_emit_load_local(b, s);
+        else codegen_li_emit_iconst(b, 0);
+        fe_advance(p);
+    } else {
+        codegen_li_emit_iconst(b, 0); // unsupported arg in this subset
+    }
+}
+
+static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int id = codec_id_for(p->current_token.lexeme);      // current = "base64.encode" etc.
+    if (id < 0) id = 0;
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    lower_codec_value(b, p, ctx);                        // arg ptr -> $w0
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_call_runtime(b, id);                 // $w0 = codec($w0)
+    b->uses_codec = 1;
 }
 
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners
@@ -266,7 +409,7 @@ static void collect_functions(const char* source, ImportBinding** fns, int* nfns
 // invoked via teko_invoke(slot, event_arg): on entry $w0 = the arg, which we stash to
 // $w1 so `param` references (LOAD) survive across the body's @dom calls.
 static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
-                                  ImportBinding* fns, int nfns) {
+                                  ImportBinding* fns, int nfns, TempAlloc* ta) {
     Lexer lx; lexer_init(&lx, source);
     Parser p; parser_init(&p, &lx);
 
@@ -306,6 +449,10 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         ctx.param_name = param[0] ? param : NULL;
         ctx.fns = fns;
         ctx.nfns = nfns;
+        ctx.locals = NULL; // $main's named locals are a different WASM scope
+        ctx.nlocals = 0;
+        ctx.ta = ta;       // nested-arg spill temps (routine has no named locals)
+        ta->next_temp = 0; // a routine's $v file starts fresh
 
         int depth = 1;
         while (p.current_token.type != TOKEN_EOF && depth > 0) {
@@ -339,10 +486,70 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     ImportBinding* fns = NULL;
     int nfns = 0, capfns = 0;
     collect_functions(source, &fns, &nfns, &capfns);
-    LowerCtx top_ctx; top_ctx.param_name = NULL; top_ctx.fns = fns; top_ctx.nfns = nfns;
+
+    // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.
+    ImportBinding* locals = NULL;
+    int nlocals = 0, caplocals = 0;
+    TempAlloc ta; ta.next_temp = 0; ta.hw = 0; // expression-temp allocator (P12-E)
+    LowerCtx top_ctx;
+    top_ctx.param_name = NULL;
+    top_ctx.fns = fns; top_ctx.nfns = nfns;
+    top_ctx.locals = NULL; top_ctx.nlocals = 0; // refreshed before each use below
+    top_ctx.ta = &ta;
 
     while (parser.current_token.type != TOKEN_EOF) {
-        if (parser.current_token.type == TOKEN_EXTERN) {
+        // Keep the top-level lowering context's local view current, and start temp
+        // slots above the named locals so spills never clobber a `let` binding.
+        top_ctx.locals = locals; top_ctx.nlocals = nlocals;
+        ta.next_temp = nlocals;
+        if (nlocals > ta.hw) ta.hw = nlocals;
+
+        if ((parser.current_token.type == TOKEN_LET || parser.current_token.type == TOKEN_MUT) &&
+            parser.peek_token.type == TOKEN_IDENTIFIER) {
+            // `let`/`mut NAME [: type] = <initializer>` — a named local binding.
+            fe_advance(&parser); // consume let/mut
+            char lname[96];
+            strncpy(lname, parser.current_token.lexeme, sizeof(lname) - 1);
+            lname[sizeof(lname) - 1] = '\0';
+            fe_advance(&parser); // consume NAME
+            if (parser.current_token.type == TOKEN_COLON) { // optional ': type'
+                fe_advance(&parser);
+                while (parser.current_token.type != TOKEN_ASSIGN &&
+                       parser.current_token.type != TOKEN_QUICK_ASSIGN &&
+                       parser.current_token.type != TOKEN_SEMICOLON &&
+                       parser.current_token.type != TOKEN_EOF) fe_advance(&parser);
+            }
+            if (parser.current_token.type == TOKEN_ASSIGN ||
+                parser.current_token.type == TOKEN_QUICK_ASSIGN) fe_advance(&parser);
+
+            // Assign (or reuse) this name's slot.
+            int s = bind_lookup(locals, nlocals, lname);
+            if (s < 0) { s = nlocals; bind_add(&locals, &nlocals, &caplocals, lname, s); }
+            top_ctx.locals = locals; top_ctx.nlocals = nlocals;
+
+            // Lower the initializer into $w0.
+            if (parser.current_token.type == TOKEN_LIT_STR ||
+                parser.current_token.type == TOKEN_STRING_LIT) {
+                char* sv = strip_quotes(parser.current_token.lexeme);
+                codegen_li_emit_sconst(buffer, codegen_li_add_string_constant(buffer, sv));
+                free(sv);
+                fe_advance(&parser);
+            } else if (parser.current_token.type == TOKEN_MACRO_IDENT &&
+                       is_dom_macro(parser.current_token.lexeme) &&
+                       parser.peek_token.type == TOKEN_LPAREN) {
+                lower_intrinsic_call(buffer, &parser, &top_ctx); // result handle -> $w0
+            } else if (is_codec_head(&parser)) {
+                lower_base_codec(buffer, &parser, &top_ctx);      // P12-G: result ptr -> $w0
+            } else {
+                // Integer expression (P12-E): literals, locals, parens, + - * / % and
+                // comparisons. Temps live above the named locals ($v{nlocals}+).
+                ta.next_temp = nlocals;
+                if (nlocals > ta.hw) ta.hw = nlocals;
+                eval_expr_prec(buffer, &parser, &top_ctx, 1, &ta);
+            }
+            codegen_li_emit_store_local(buffer, s); // $vs = $w0
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_EXTERN) {
             FFIASTNode* node = parse_extern_declaration(&parser);
             if (node) {
                 register_extern(buffer, node, &binds, &nb, &capb);
@@ -377,20 +584,43 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
             CallArg args[16];
             int nargs = 0;
+            int temps_used = 0; // codec-arg results spilled to temp locals
             while (parser.current_token.type != TOKEN_RPAREN &&
                    parser.current_token.type != TOKEN_EOF) {
-                if (nargs < 16 &&
+                if (nargs < 16 && is_codec_head(&parser)) {
+                    // base64/hex codec call as an argument (P12-G): lower eagerly and
+                    // spill the result pointer to a temp local, then pass the local.
+                    lower_base_codec(buffer, &parser, &top_ctx); // $w0 = result ptr
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
+                } else if (nargs < 16 &&
                     (parser.current_token.type == TOKEN_LIT_STR ||
                      parser.current_token.type == TOKEN_STRING_LIT)) {
                     args[nargs].is_string = 1;
                     args[nargs].sval = strip_quotes(parser.current_token.lexeme);
                     args[nargs].ival = 0;
+                    args[nargs].is_local = 0; args[nargs].slot = 0;
                     nargs++;
                     fe_advance(&parser);
                 } else if (nargs < 16 && parser.current_token.type == TOKEN_LIT_INT) {
                     args[nargs].is_string = 0;
                     args[nargs].sval = NULL;
                     args[nargs].ival = atoi(parser.current_token.lexeme);
+                    args[nargs].is_local = 0; args[nargs].slot = 0;
+                    nargs++;
+                    fe_advance(&parser);
+                } else if (nargs < 16 && parser.current_token.type == TOKEN_IDENTIFIER &&
+                           bind_lookup(locals, nlocals, parser.current_token.lexeme) >= 0) {
+                    // A named local passed as a call argument (Phase 12).
+                    args[nargs].is_string = 0;
+                    args[nargs].sval = NULL;
+                    args[nargs].ival = 0;
+                    args[nargs].is_local = 1;
+                    args[nargs].slot = bind_lookup(locals, nlocals, parser.current_token.lexeme);
                     nargs++;
                     fe_advance(&parser);
                 } else if (parser.current_token.type == TOKEN_COMMA) {
@@ -404,6 +634,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
             int idx = bind_lookup(binds, nb, callee);
             if (idx >= 0) lower_call(buffer, idx, args, nargs);
+            ta.next_temp -= temps_used; // free codec-arg temps
 
             for (int i = 0; i < nargs; i++) if (args[i].sval) free(args[i].sval);
             free(callee);
@@ -415,11 +646,18 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     codegen_li_emit_halt(buffer); // close main
 
     // Emit handler bodies as table routines (after main), so @dom.on references resolve.
-    emit_handler_routines(source, buffer, fns, nfns);
+    // (May raise the temp high-water for nested args inside handler bodies.)
+    emit_handler_routines(source, buffer, fns, nfns, &ta);
+
+    // Phase 12: how many $v locals to declare per function — named locals plus the
+    // expression/nested-arg temp high-water (across $main and the handler routines).
+    buffer->local_count = (ta.hw > nlocals) ? ta.hw : nlocals;
 
     for (int i = 0; i < nb; i++) free(binds[i].name);
     free(binds);
     for (int i = 0; i < nfns; i++) free(fns[i].name);
     free(fns);
+    for (int i = 0; i < nlocals; i++) free(locals[i].name);
+    free(locals);
     return 0;
 }

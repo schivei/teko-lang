@@ -13,6 +13,8 @@ void setUp(void) {}
 void tearDown(void) { fflush(stdout); fflush(stderr); }
 
 extern void test_string_raw_interpolation_and_arity(void);
+extern void test_phase12_reserved_keywords(void);
+extern void test_phase12_literal_suffixes(void);
 extern void test_async_control_flow_and_raised_catch(void);
 extern void test_concurrency_and_channel_semantics(void);
 extern void test_cqrs_handler_with_dependency_injection(void);
@@ -35,6 +37,10 @@ extern void test_codegen_li_to_wasm_bridge(void);
 extern void test_frontend_interop_extern_call_to_il(void);
 extern void test_frontend_interop_dom_intrinsics(void);
 extern void test_frontend_interop_event_handler(void);
+extern void test_frontend_interop_named_locals(void);
+extern void test_frontend_interop_expressions(void);
+extern void test_frontend_interop_nested_handle_args(void);
+extern void test_frontend_interop_base_encoding(void);
 extern void test_di_lifetime_arena_assignment(void);
 extern void test_escape_analysis_region_promotion(void);
 extern void test_implicit_precision_coercion_for_arbitrary_types(void);
@@ -127,6 +133,8 @@ int main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_string_raw_interpolation_and_arity);
+    RUN_TEST(test_phase12_reserved_keywords);
+    RUN_TEST(test_phase12_literal_suffixes);
     RUN_TEST(test_async_control_flow_and_raised_catch);
     RUN_TEST(test_cqrs_handler_with_dependency_injection);
     RUN_TEST(test_ffi_extern_struct_function_and_block_parsing);
@@ -149,6 +157,10 @@ int main(void) {
     RUN_TEST(test_frontend_interop_extern_call_to_il);
     RUN_TEST(test_frontend_interop_dom_intrinsics);
     RUN_TEST(test_frontend_interop_event_handler);
+    RUN_TEST(test_frontend_interop_named_locals);
+    RUN_TEST(test_frontend_interop_expressions);
+    RUN_TEST(test_frontend_interop_nested_handle_args);
+    RUN_TEST(test_frontend_interop_base_encoding);
     RUN_TEST(test_di_lifetime_arena_assignment);
     RUN_TEST(test_escape_analysis_region_promotion);
     RUN_TEST(test_implicit_precision_coercion_for_arbitrary_types);

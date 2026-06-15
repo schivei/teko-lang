@@ -321,6 +321,101 @@ static void emit_wasm_heap_runtime(FILE* f) {
     fprintf(f, "    (call $teko_heap_init))\n");
 }
 
+// Phase 12 (P12-G): native base64/hex codec runtime. Pure in-module functions (no host
+// imports, no external deps) that take a NUL-terminated input pointer, allocate the
+// output via teko_alloc, and return a NUL-terminated output pointer. Verified against
+// RFC 4648 vectors + round-trips. The frontend lowers base64.encode/.decode and
+// hex.encode/.decode to OP_CALL_RUNTIME -> these functions.
+static void emit_wasm_codec_runtime(FILE* f) {
+    // strlen
+    fprintf(f, "  (func $teko_strlen (param $p i32) (result i32) (local $n i32)\n");
+    fprintf(f, "    (block $d (loop $L\n");
+    fprintf(f, "      (br_if $d (i32.eqz (i32.load8_u (i32.add (local.get $p) (local.get $n)))))\n");
+    fprintf(f, "      (local.set $n (i32.add (local.get $n) (i32.const 1))) (br $L)))\n");
+    fprintf(f, "    (local.get $n))\n");
+    // 6-bit value -> base64 ASCII (flat if/return style — easy to balance)
+    fprintf(f, "  (func $teko_b64_enc6 (param $v i32) (result i32)\n");
+    fprintf(f, "    (if (i32.lt_u (local.get $v) (i32.const 26)) (then (return (i32.add (local.get $v) (i32.const 65)))))\n");
+    fprintf(f, "    (if (i32.lt_u (local.get $v) (i32.const 52)) (then (return (i32.add (local.get $v) (i32.const 71)))))\n");
+    fprintf(f, "    (if (i32.lt_u (local.get $v) (i32.const 62)) (then (return (i32.sub (local.get $v) (i32.const 4)))))\n");
+    fprintf(f, "    (if (i32.eq (local.get $v) (i32.const 62)) (then (return (i32.const 43))))\n");
+    fprintf(f, "    (i32.const 47))\n");
+    // base64 ASCII -> 6-bit value
+    fprintf(f, "  (func $teko_b64_dec6 (param $c i32) (result i32)\n");
+    fprintf(f, "    (if (i32.and (i32.ge_u (local.get $c) (i32.const 65)) (i32.le_u (local.get $c) (i32.const 90))) (then (return (i32.sub (local.get $c) (i32.const 65)))))\n");
+    fprintf(f, "    (if (i32.and (i32.ge_u (local.get $c) (i32.const 97)) (i32.le_u (local.get $c) (i32.const 122))) (then (return (i32.sub (local.get $c) (i32.const 71)))))\n");
+    fprintf(f, "    (if (i32.and (i32.ge_u (local.get $c) (i32.const 48)) (i32.le_u (local.get $c) (i32.const 57))) (then (return (i32.add (local.get $c) (i32.const 4)))))\n");
+    fprintf(f, "    (if (i32.eq (local.get $c) (i32.const 43)) (then (return (i32.const 62))))\n");
+    fprintf(f, "    (i32.const 63))\n");
+    // nibble -> hex ascii; hex ascii -> nibble
+    fprintf(f, "  (func $teko_hexc (param $v i32) (result i32)\n");
+    fprintf(f, "    (if (i32.lt_u (local.get $v) (i32.const 10)) (then (return (i32.add (local.get $v) (i32.const 48)))))\n");
+    fprintf(f, "    (i32.add (local.get $v) (i32.const 87)))\n");
+    fprintf(f, "  (func $teko_hexv (param $c i32) (result i32)\n");
+    fprintf(f, "    (if (i32.and (i32.ge_u (local.get $c) (i32.const 48)) (i32.le_u (local.get $c) (i32.const 57))) (then (return (i32.sub (local.get $c) (i32.const 48)))))\n");
+    fprintf(f, "    (if (i32.and (i32.ge_u (local.get $c) (i32.const 97)) (i32.le_u (local.get $c) (i32.const 102))) (then (return (i32.sub (local.get $c) (i32.const 87)))))\n");
+    fprintf(f, "    (i32.sub (local.get $c) (i32.const 55)))\n");
+    // base64 encode
+    fprintf(f, "  (func $teko_base64_encode (export \"teko_base64_encode\") (param $in i32) (result i32)\n");
+    fprintf(f, "    (local $len i32) (local $out i32) (local $i i32) (local $o i32) (local $b0 i32) (local $b1 i32) (local $b2 i32)\n");
+    fprintf(f, "    (local.set $len (call $teko_strlen (local.get $in)))\n");
+    fprintf(f, "    (local.set $out (call $teko_alloc (i32.add (i32.mul (i32.div_u (i32.add (local.get $len) (i32.const 2)) (i32.const 3)) (i32.const 4)) (i32.const 1))))\n");
+    fprintf(f, "    (block $d (loop $L\n");
+    fprintf(f, "      (br_if $d (i32.ge_u (local.get $i) (local.get $len)))\n");
+    fprintf(f, "      (local.set $b0 (i32.load8_u (i32.add (local.get $in) (local.get $i))))\n");
+    fprintf(f, "      (local.set $b1 (if (result i32) (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $len)) (then (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 1))))) (else (i32.const 0))))\n");
+    fprintf(f, "      (local.set $b2 (if (result i32) (i32.lt_u (i32.add (local.get $i) (i32.const 2)) (local.get $len)) (then (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 2))))) (else (i32.const 0))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (local.get $o)) (call $teko_b64_enc6 (i32.and (i32.shr_u (local.get $b0) (i32.const 2)) (i32.const 63))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.add (local.get $o) (i32.const 1))) (call $teko_b64_enc6 (i32.and (i32.or (i32.shl (local.get $b0) (i32.const 4)) (i32.shr_u (local.get $b1) (i32.const 4))) (i32.const 63))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.add (local.get $o) (i32.const 2))) (if (result i32) (i32.lt_u (i32.add (local.get $i) (i32.const 1)) (local.get $len)) (then (call $teko_b64_enc6 (i32.and (i32.or (i32.shl (local.get $b1) (i32.const 2)) (i32.shr_u (local.get $b2) (i32.const 6))) (i32.const 63)))) (else (i32.const 61))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.add (local.get $o) (i32.const 3))) (if (result i32) (i32.lt_u (i32.add (local.get $i) (i32.const 2)) (local.get $len)) (then (call $teko_b64_enc6 (i32.and (local.get $b2) (i32.const 63)))) (else (i32.const 61))))\n");
+    fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 3))) (local.set $o (i32.add (local.get $o) (i32.const 4))) (br $L)))\n");
+    fprintf(f, "    (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.const 0)) (local.get $out))\n");
+    // base64 decode
+    fprintf(f, "  (func $teko_base64_decode (export \"teko_base64_decode\") (param $in i32) (result i32)\n");
+    fprintf(f, "    (local $len i32) (local $out i32) (local $i i32) (local $o i32) (local $c0 i32) (local $c1 i32) (local $c2 i32) (local $c3 i32)\n");
+    fprintf(f, "    (local.set $len (call $teko_strlen (local.get $in)))\n");
+    fprintf(f, "    (local.set $out (call $teko_alloc (i32.add (i32.mul (i32.div_u (local.get $len) (i32.const 4)) (i32.const 3)) (i32.const 1))))\n");
+    fprintf(f, "    (block $d (loop $L\n");
+    fprintf(f, "      (br_if $d (i32.gt_u (i32.add (local.get $i) (i32.const 4)) (local.get $len)))\n");
+    fprintf(f, "      (local.set $c0 (call $teko_b64_dec6 (i32.load8_u (i32.add (local.get $in) (local.get $i)))))\n");
+    fprintf(f, "      (local.set $c1 (call $teko_b64_dec6 (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 1))))))\n");
+    fprintf(f, "      (local.set $c2 (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 2)))))\n");
+    fprintf(f, "      (local.set $c3 (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 3)))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.and (i32.or (i32.shl (local.get $c0) (i32.const 2)) (i32.shr_u (local.get $c1) (i32.const 4))) (i32.const 255)))\n");
+    fprintf(f, "      (local.set $o (i32.add (local.get $o) (i32.const 1)))\n");
+    fprintf(f, "      (if (i32.ne (local.get $c2) (i32.const 61)) (then\n");
+    fprintf(f, "        (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.and (i32.or (i32.shl (local.get $c1) (i32.const 4)) (i32.shr_u (call $teko_b64_dec6 (local.get $c2)) (i32.const 2))) (i32.const 255)))\n");
+    fprintf(f, "        (local.set $o (i32.add (local.get $o) (i32.const 1)))))\n");
+    fprintf(f, "      (if (i32.ne (local.get $c3) (i32.const 61)) (then\n");
+    fprintf(f, "        (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.and (i32.or (i32.shl (call $teko_b64_dec6 (local.get $c2)) (i32.const 6)) (call $teko_b64_dec6 (local.get $c3))) (i32.const 255)))\n");
+    fprintf(f, "        (local.set $o (i32.add (local.get $o) (i32.const 1)))))\n");
+    fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 4))) (br $L)))\n");
+    fprintf(f, "    (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.const 0)) (local.get $out))\n");
+    // hex encode
+    fprintf(f, "  (func $teko_hex_encode (export \"teko_hex_encode\") (param $in i32) (result i32)\n");
+    fprintf(f, "    (local $len i32) (local $out i32) (local $i i32) (local $b i32)\n");
+    fprintf(f, "    (local.set $len (call $teko_strlen (local.get $in)))\n");
+    fprintf(f, "    (local.set $out (call $teko_alloc (i32.add (i32.mul (local.get $len) (i32.const 2)) (i32.const 1))))\n");
+    fprintf(f, "    (block $d (loop $L\n");
+    fprintf(f, "      (br_if $d (i32.ge_u (local.get $i) (local.get $len)))\n");
+    fprintf(f, "      (local.set $b (i32.load8_u (i32.add (local.get $in) (local.get $i))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.mul (local.get $i) (i32.const 2))) (call $teko_hexc (i32.shr_u (local.get $b) (i32.const 4))))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (i32.add (i32.mul (local.get $i) (i32.const 2)) (i32.const 1))) (call $teko_hexc (i32.and (local.get $b) (i32.const 15))))\n");
+    fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $L)))\n");
+    fprintf(f, "    (i32.store8 (i32.add (local.get $out) (i32.mul (local.get $len) (i32.const 2))) (i32.const 0)) (local.get $out))\n");
+    // hex decode
+    fprintf(f, "  (func $teko_hex_decode (export \"teko_hex_decode\") (param $in i32) (result i32)\n");
+    fprintf(f, "    (local $len i32) (local $out i32) (local $i i32) (local $o i32)\n");
+    fprintf(f, "    (local.set $len (call $teko_strlen (local.get $in)))\n");
+    fprintf(f, "    (local.set $out (call $teko_alloc (i32.add (i32.div_u (local.get $len) (i32.const 2)) (i32.const 1))))\n");
+    fprintf(f, "    (block $d (loop $L\n");
+    fprintf(f, "      (br_if $d (i32.gt_u (i32.add (local.get $i) (i32.const 2)) (local.get $len)))\n");
+    fprintf(f, "      (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.and (i32.or (i32.shl (call $teko_hexv (i32.load8_u (i32.add (local.get $in) (local.get $i)))) (i32.const 4)) (call $teko_hexv (i32.load8_u (i32.add (local.get $in) (i32.add (local.get $i) (i32.const 1)))))) (i32.const 255)))\n");
+    fprintf(f, "      (local.set $o (i32.add (local.get $o) (i32.const 1))) (local.set $i (i32.add (local.get $i) (i32.const 2))) (br $L)))\n");
+    fprintf(f, "    (i32.store8 (i32.add (local.get $out) (local.get $o)) (i32.const 0)) (local.get $out))\n");
+}
+
 // The non-suspending half of a channel receive: read buf[head] -> $w0, advance
 // head = (head+1) % cap. Channel base is in $cp.
 static void emit_wasm_chan_read(FILE* f) {
@@ -515,11 +610,16 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             emit_wasm_scheduler_runtime(f);
             emit_wasm_heap_runtime(f);         // Phase 11 MVP-4: real freeing allocator
+            if (ctx->wasm_emit_codecs) emit_wasm_codec_runtime(f); // Phase 12 P12-G
             fprintf(f, "  (func $main (result i32)\n");
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).
             fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
             fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            // Phase 12: named local variables ($v0..$v{n-1}) for `let`/`mut` bindings.
+            for (int v = 0; v < ctx->wasm_local_count; v++) {
+                fprintf(f, "    (local $v%d i32)\n", v);
+            }
             ctx->wasm_open = 1;
             break;
 
@@ -554,6 +654,25 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    local.get $w1\n    local.set $w0\n");
             break;
 
+        // Phase 12 (P12-G): native base-encoding codec. $w0 = codec($w0).
+        case OP_CALL_RUNTIME: {
+            const char* fn = "teko_base64_encode";
+            if (arg == 1) fn = "teko_base64_decode";
+            else if (arg == 2) fn = "teko_hex_encode";
+            else if (arg == 3) fn = "teko_hex_decode";
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 12: named local variables ($v0..$vN).
+        case OP_STORE_LOCAL:
+            fprintf(f, "    local.get $w0\n    local.set $v%d\n", arg);
+            break;
+
+        case OP_LOAD_LOCAL:
+            fprintf(f, "    local.get $v%d\n    local.set $w0\n", arg);
+            break;
+
         // ====================================================================
         // 3. ARITHMETIC ($w0 = $w0 <op> $w1)
         // ====================================================================
@@ -574,6 +693,32 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "      i32.const -1\n    else\n");
             fprintf(f, "      local.get $w0\n      local.get $w1\n      i32.div_s\n    end\n");
             fprintf(f, "    local.set $w0\n");
+            break;
+
+        // Phase 12 (P12-E): integer modulo + comparisons ($w0 = $w0 <op> $w1).
+        case OP_MOD: // guard divide-by-zero (→ 0), like OP_DIV
+            fprintf(f, "    local.get $w1\n    i32.eqz\n    if (result i32)\n");
+            fprintf(f, "      i32.const 0\n    else\n");
+            fprintf(f, "      local.get $w0\n      local.get $w1\n      i32.rem_s\n    end\n");
+            fprintf(f, "    local.set $w0\n");
+            break;
+        case OP_EQ:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.eq\n    local.set $w0\n");
+            break;
+        case OP_NE:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.ne\n    local.set $w0\n");
+            break;
+        case OP_LT:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.lt_s\n    local.set $w0\n");
+            break;
+        case OP_LE:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.le_s\n    local.set $w0\n");
+            break;
+        case OP_GT:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.gt_s\n    local.set $w0\n");
+            break;
+        case OP_GE:
+            fprintf(f, "    local.get $w0\n    local.get $w1\n    i32.ge_s\n    local.set $w0\n");
             break;
 
         // ====================================================================
@@ -697,6 +842,11 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // Import-arg staging slots (Phase 11): a callback routine invoked via
             // $teko_invoke calls dom.* imports just like $main, so it needs $a0..$a2.
             fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            // Phase 12 (P12-F): named-local file ($v) for nested-arg spill temps inside
+            // a handler body (same module-global count as $main; harmless if unused).
+            for (int v = 0; v < ctx->wasm_local_count; v++) {
+                fprintf(f, "    (local $v%d i32)\n", v);
+            }
             fprintf(f, "    local.get $arg\n    local.set $cp\n");                       // channel base
             fprintf(f, "    local.get $frame\n    i32.load offset=0\n    local.set $w0\n"); // reload spilled $w0
             fprintf(f, "    local.get $frame\n    i32.load offset=4\n    local.set $w1\n"); // reload spilled $w1

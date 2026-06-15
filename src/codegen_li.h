@@ -19,6 +19,22 @@ typedef enum {
     OP_MUL = 0x07,
     OP_DIV = 0x08,
 
+    // Phase 12 (P12-E): integer modulo + comparisons ($w0 = $w0 <op> $w1, result
+    // 0/1 for comparisons). Single-byte ops like ADD/SUB/MUL/DIV.
+    OP_MOD = 0x0D,
+    OP_EQ = 0x0E,
+    OP_NE = 0x0F,
+    OP_LT = 0x15,
+    OP_LE = 0x16,
+    OP_GT = 0x17,
+    OP_GE = 0x18,
+
+    // Phase 12 (P12-G): call a native base-encoding codec runtime function. 4-byte LE
+    // codec id: 0 = base64 encode, 1 = base64 decode, 2 = hex encode, 3 = hex decode.
+    // Takes the input pointer in $w0 (NUL-terminated), returns the output pointer
+    // (NUL-terminated, allocated via teko_alloc) in $w0.
+    OP_CALL_RUNTIME = 0x19,
+
     // Phase 11 (Browser FFI): call a host import declared via `extern fn … from
     // "ns" as "name"`. Carries a 4-byte little-endian import index (into the
     // module's import table); the WASM emitter lowers it to `call $import_<idx>`.
@@ -30,6 +46,14 @@ typedef enum {
     // then pushes $a0..$a(n-2) followed by $w0 (the last arg stays in the
     // accumulator), so an N-param import needs N-1 preceding OP_SETARGs.
     OP_SETARG = 0x0A,
+
+    // Phase 12 (Frontend Grammar): named local variables. Each carries a 4-byte
+    // little-endian slot index into the function's named-local file ($v0..$vN). The
+    // WASM emitter declares the locals at function open and lowers:
+    //   OP_STORE_LOCAL n  →  local.set $vn   (from the accumulator $w0)
+    //   OP_LOAD_LOCAL  n  →  local.get $vn → $w0
+    OP_LOAD_LOCAL = 0x0B,
+    OP_STORE_LOCAL = 0x0C,
 
     // Concurrency and Channels
     OP_SPAWN_ASYNC = 0x10,
@@ -83,6 +107,12 @@ typedef struct {
     TekoILImport* imports;
     int import_count;
     int import_capacity;
+    // Phase 12: count of named local variables ($v0..$v{local_count-1}) the program
+    // uses in $main; threaded to the WASM emitter so it declares them at function open.
+    int local_count;
+    // Phase 12 (P12-G): 1 if the program calls a base64/hex codec, so the backend emits
+    // the codec runtime functions (otherwise omitted, keeping lean modules lean).
+    int uses_codec;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
@@ -103,6 +133,10 @@ void codegen_li_emit_iconst(BytecodeBuffer* buffer, int value);
 void codegen_li_emit_sconst(BytecodeBuffer* buffer, int pool_index);
 void codegen_li_emit_store(BytecodeBuffer* buffer); // $w1 <- $w0
 void codegen_li_emit_load(BytecodeBuffer* buffer);  // $w0 <- $w1
+void codegen_li_emit_store_local(BytecodeBuffer* buffer, int slot); // $vslot <- $w0
+void codegen_li_emit_load_local(BytecodeBuffer* buffer, int slot);  // $w0 <- $vslot
+void codegen_li_emit_binop(BytecodeBuffer* buffer, OpCode op);       // $w0 = $w0 <op> $w1
+void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id); // $w0 = codec($w0)
 void codegen_li_emit_setarg(BytecodeBuffer* buffer, int slot);
 void codegen_li_emit_call_import(BytecodeBuffer* buffer, int import_index);
 void codegen_li_emit_func_begin(BytecodeBuffer* buffer, int routine_id);
