@@ -6,6 +6,27 @@
 > vectors (NIST / RFC KATs) + round-trips. Phase 17 (Networking & Web) later consumes these
 > primitives for TLS 1.3. See `docs/plan.md` → "PHASE 13: Native Cryptography".
 
+## ▶ RESUME POINT (for the next session — same branch/PR #6)
+Done & CI-green: **13.1, 13.1 `hash.sha256` wiring, 13.3a, 13.2, 13.4, and the Curve25519
+block (X25519 + Ed25519)**. 20 crypto runtime modules; suite **137/137**; every increment
+ASan+UBSan (both dispatch paths) + TSan clean; all four CI gates green. Head at hand-off:
+`51b2a0b`.
+
+**Remaining (in order):** ECDH/ECDSA **P-256** → **P-384** → **RSA** (PKCS#1 v1.5 / OAEP /
+PSS). These need the bignum layer below.
+
+### DECISION TO DOCUMENT & IMPLEMENT FIRST — the bignum layer (owner pre-approved)
+Build a shared **fixed-capacity, little-endian 32-bit-limb multi-precision integer** module
+(`teko_crypto_bn`, 64-bit accumulators — **MSVC-safe, no `__int128`**) with **Montgomery
+(CIOS) multiplication** and **runtime-derived R²/n′ constants** (so no hand-transcribed
+magic constants). Used by P-256, P-384, and RSA. Secret-dependent operations use
+**constant-time conditional select** (no data-dependent branches/indexing). Curve point math
+uses the **Renes–Costello–Batina complete (exception-free) formulas** for the prime-order
+NIST curves; ECDSA nonces via **RFC 6979** (HMAC-SHA-256, already available). Build it
+incrementally with its own unit KATs (mul/inverse/modexp round-trips) **before** layering the
+curves, so subtle bugs are localized early. Anchor every step on authoritative vectors:
+NIST CAVP (ECDSA/ECDH P-256/P-384) and the RSA test vectors (FIPS 186 / RFC 8017 / Wycheproof).
+
 ## Surface (Teko keywords — reserved in Phase 12, lowered here)
 `crypto`, `hash`, `encrypt`/`decrypt`, `sign`/`verify`, plus `encode`/`decode` interop with
 the Phase 12 base codecs (`base64`/`base32`/`hex`). Each primitive lands with **grammar +
