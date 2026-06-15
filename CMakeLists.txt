@@ -73,6 +73,7 @@ set(CORE_SOURCES
         src/runtime/teko_crypto_scrypt.c
         src/runtime/teko_crypto_blake2b.c
         src/runtime/teko_crypto_argon2.c
+        src/runtime/teko_crypto_fe25519.c
         src/runtime/teko_crypto_x25519.c
         # Tooling: target detection, SDK, LSP, project manager
         src/teko_target.c
