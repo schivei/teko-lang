@@ -84,6 +84,7 @@ set(CORE_SOURCES
         src/runtime/teko_crypto_ecc.c
         src/runtime/teko_crypto_p256.c
         src/runtime/teko_crypto_p384.c
+        src/runtime/teko_crypto_rsa.c
         # Tooling: target detection, SDK, LSP, project manager
         src/teko_target.c
         src/teko_sdk.c
@@ -210,6 +211,7 @@ set(TEST_SOURCES
         tests/runtime/test_crypto_bn.c
         tests/runtime/test_crypto_p256.c
         tests/runtime/test_crypto_p384.c
+        tests/runtime/test_crypto_rsa.c
 )
 add_executable(teko_tests ${TEST_SOURCES})
 target_link_libraries(teko_tests PRIVATE teko_core unity)

@@ -176,6 +176,7 @@ extern void test_teko_p384_ecdh_cavp_count0(void);
 extern void test_teko_p384_ecdsa_rfc6979_sample(void);
 extern void test_teko_p384_ecdsa_rfc6979_test(void);
 extern void test_teko_p384_ecdh_rejects_offcurve(void);
+extern void test_teko_rsa_pkcs1v15_sha256_kat(void);
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -362,6 +363,7 @@ int main(void) {
     RUN_TEST(test_teko_p384_ecdsa_rfc6979_sample);
     RUN_TEST(test_teko_p384_ecdsa_rfc6979_test);
     RUN_TEST(test_teko_p384_ecdh_rejects_offcurve);
+    RUN_TEST(test_teko_rsa_pkcs1v15_sha256_kat);
 
     return UNITY_END();
 }
