@@ -3,10 +3,48 @@
 #include "teko_crypto_rsa.h"
 #include "teko_crypto_bn.h"
 #include "teko_crypto_random.h"
+#include "teko_crypto_sha2.h"
+#include "teko_crypto_sha512.h"
 
 #include <string.h>
 
 #define RSA_MAX_BYTES (TEKO_BN_MAX_LIMBS * 4)  // matches the bignum modulus ceiling
+#define RSA_MAX_HASH  64u
+
+// Dispatch a one-shot hash over the supported set.
+static void rsa_hash(TekoRsaHash h, const uint8_t* data, size_t len, uint8_t* out) {
+    switch (h) {
+        case TEKO_RSA_SHA384: teko_sha384(data, len, out); break;
+        case TEKO_RSA_SHA512: teko_sha512(data, len, out); break;
+        case TEKO_RSA_SHA256:
+        default:              teko_sha256(data, len, out); break;
+    }
+}
+
+// MGF1 (RFC 8017 B.2.1): mask[0..masklen) = T = H(seed || I2OSP(0,4)) || H(seed || ..1..) ...
+static int rsa_mgf1(TekoRsaHash h, const uint8_t* seed, size_t seedlen,
+                    uint8_t* mask, size_t masklen) {
+    size_t hLen = teko_rsa_hash_len(h);
+    uint8_t buf[RSA_MAX_BYTES + 4];
+    uint8_t dig[RSA_MAX_HASH];
+    size_t done = 0u;
+    uint32_t counter = 0u;
+    if (seedlen + 4u > sizeof buf) return -1;
+    memcpy(buf, seed, seedlen);
+    while (done < masklen) {
+        size_t take;
+        buf[seedlen + 0] = (uint8_t)(counter >> 24);
+        buf[seedlen + 1] = (uint8_t)(counter >> 16);
+        buf[seedlen + 2] = (uint8_t)(counter >> 8);
+        buf[seedlen + 3] = (uint8_t)(counter);
+        rsa_hash(h, buf, seedlen + 4u, dig);
+        take = (masklen - done < hLen) ? (masklen - done) : hLen;
+        memcpy(mask + done, dig, take);
+        done += take;
+        counter++;
+    }
+    return 0;
+}
 
 size_t teko_rsa_hash_len(TekoRsaHash h) {
     switch (h) {
@@ -137,5 +175,103 @@ int teko_rsa_pkcs1v15_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, s
     if (sep < 10u) return -1;          // PS shorter than 8 bytes
     *out_len = nlen - sep - 1u;
     memcpy(out, em + sep + 1u, *out_len);
+    return 0;
+}
+
+// ----------------------------------- OAEP ----------------------------------------------
+
+int teko_rsa_oaep_encrypt_seeded(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                                 TekoRsaHash h, const uint8_t* label, size_t label_len,
+                                 const uint8_t* msg, size_t msg_len,
+                                 const uint8_t* seed, size_t seed_len, uint8_t* ct) {
+    size_t hLen = teko_rsa_hash_len(h);
+    size_t k = nlen, dblen, ps_len, i;
+    uint8_t em[RSA_MAX_BYTES];
+    uint8_t db[RSA_MAX_BYTES];
+    uint8_t mask[RSA_MAX_BYTES];
+    uint8_t seedmask[RSA_MAX_HASH];
+    uint8_t lhash[RSA_MAX_HASH];
+
+    if (!n || !e || !msg || !seed || !ct || hLen == 0u) return -1;
+    if (k == 0u || k > RSA_MAX_BYTES) return -1;
+    if (seed_len != hLen) return -1;
+    if (k < 2u * hLen + 2u) return -1;
+    if (msg_len > k - 2u * hLen - 2u) return -1;
+
+    rsa_hash(h, label, label_len, lhash);
+    dblen = k - hLen - 1u;
+    ps_len = k - msg_len - 2u * hLen - 2u;
+    memcpy(db, lhash, hLen);
+    memset(db + hLen, 0, ps_len);
+    db[hLen + ps_len] = 0x01;
+    memcpy(db + hLen + ps_len + 1u, msg, msg_len);
+
+    // maskedDB = DB xor MGF1(seed, dblen)
+    if (rsa_mgf1(h, seed, hLen, mask, dblen) != 0) return -1;
+    for (i = 0; i < dblen; ++i) db[i] ^= mask[i];
+    // maskedSeed = seed xor MGF1(maskedDB, hLen)
+    if (rsa_mgf1(h, db, dblen, seedmask, hLen) != 0) return -1;
+
+    em[0] = 0x00;
+    for (i = 0; i < hLen; ++i) em[1 + i] = (uint8_t)(seed[i] ^ seedmask[i]);
+    memcpy(em + 1 + hLen, db, dblen);
+    return teko_bn_modexp(n, nlen, em, k, e, elen, ct);
+}
+
+int teko_rsa_oaep_encrypt(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                          TekoRsaHash h, const uint8_t* label, size_t label_len,
+                          const uint8_t* msg, size_t msg_len, uint8_t* ct) {
+    uint8_t seed[RSA_MAX_HASH];
+    size_t hLen = teko_rsa_hash_len(h);
+    if (hLen == 0u) return -1;
+    if (teko_csprng_bytes(seed, hLen) != 0) return -1;
+    return teko_rsa_oaep_encrypt_seeded(n, nlen, e, elen, h, label, label_len,
+                                        msg, msg_len, seed, hLen, ct);
+}
+
+int teko_rsa_oaep_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                          TekoRsaHash h, const uint8_t* label, size_t label_len,
+                          const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len) {
+    size_t hLen = teko_rsa_hash_len(h);
+    size_t k = nlen, dblen, i, one_idx;
+    uint8_t em[RSA_MAX_BYTES];
+    uint8_t db[RSA_MAX_BYTES];
+    uint8_t mask[RSA_MAX_BYTES];
+    uint8_t seed[RSA_MAX_HASH];
+    uint8_t seedmask[RSA_MAX_HASH];
+    uint8_t lhash[RSA_MAX_HASH];
+    uint8_t bad, found;
+
+    if (!n || !d || !ct || !out || !out_len || hLen == 0u) return -1;
+    if (k == 0u || k > RSA_MAX_BYTES || ct_len != k) return -1;
+    if (k < 2u * hLen + 2u) return -1;
+    if (teko_bn_modexp(n, nlen, ct, ct_len, d, dlen, em) != 0) return -1;
+
+    dblen = k - hLen - 1u;
+    rsa_hash(h, label, label_len, lhash);
+
+    // seed = maskedSeed xor MGF1(maskedDB, hLen); DB = maskedDB xor MGF1(seed, dblen).
+    if (rsa_mgf1(h, em + 1 + hLen, dblen, seedmask, hLen) != 0) return -1;
+    for (i = 0; i < hLen; ++i) seed[i] = (uint8_t)(em[1 + i] ^ seedmask[i]);
+    if (rsa_mgf1(h, seed, hLen, mask, dblen) != 0) return -1;
+    memcpy(db, em + 1 + hLen, dblen);
+    for (i = 0; i < dblen; ++i) db[i] ^= mask[i];
+
+    // Checks: Y==0, lHash' == lHash, then 0x00* 0x01 separator. Accumulate without early-out.
+    bad = em[0];
+    for (i = 0; i < hLen; ++i) bad |= (uint8_t)(db[i] ^ lhash[i]);
+
+    found = 0u;
+    one_idx = 0u;
+    for (i = hLen; i < dblen; ++i) {
+        uint8_t is_one = (uint8_t)((db[i] == 0x01) ? 1u : 0u);
+        uint8_t is_zero = (uint8_t)((db[i] == 0x00) ? 1u : 0u);
+        if (!found && is_one) { found = 1u; one_idx = i; }
+        else if (!found && !is_zero) { bad |= 0xFFu; } // nonzero before the 0x01 -> invalid
+    }
+    if (bad != 0u || !found) return -1;
+
+    *out_len = dblen - (one_idx + 1u);
+    memcpy(out, db + one_idx + 1u, *out_len);
     return 0;
 }

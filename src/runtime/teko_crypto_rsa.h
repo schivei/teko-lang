@@ -56,4 +56,26 @@ int teko_rsa_pkcs1v15_encrypt_seeded(const uint8_t* n, size_t nlen, const uint8_
 int teko_rsa_pkcs1v15_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
                               const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len);
 
+// --- OAEP (EME-OAEP, RFC 8017 §7.1) ----------------------------------------------------
+// `h` selects both the OAEP hash and the MGF1 hash (the common matched-hash configuration).
+// `label` may be NULL when label_len == 0.
+
+// ct = RSAEP(EME-OAEP-ENCODE(msg, label, random seed)). ct holds nlen bytes. Requires
+// msg_len <= nlen - 2*hLen - 2. Returns 0/-1.
+int teko_rsa_oaep_encrypt(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                          TekoRsaHash h, const uint8_t* label, size_t label_len,
+                          const uint8_t* msg, size_t msg_len, uint8_t* ct);
+
+// Same with a caller-supplied seed (seed_len must equal hLen) — for deterministic testing.
+int teko_rsa_oaep_encrypt_seeded(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
+                                 TekoRsaHash h, const uint8_t* label, size_t label_len,
+                                 const uint8_t* msg, size_t msg_len,
+                                 const uint8_t* seed, size_t seed_len, uint8_t* ct);
+
+// Decrypt EME-OAEP: out receives the message (buffer >= nlen), *out_len set. Returns 0 on
+// success, -1 on any decoding error.
+int teko_rsa_oaep_decrypt(const uint8_t* n, size_t nlen, const uint8_t* d, size_t dlen,
+                          TekoRsaHash h, const uint8_t* label, size_t label_len,
+                          const uint8_t* ct, size_t ct_len, uint8_t* out, size_t* out_len);
+
 #endif // TEKO_CRYPTO_RSA_H
