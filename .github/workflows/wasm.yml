@@ -40,7 +40,15 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang wabt
-          curl https://wasmtime.dev/install.sh -sSf | bash
+          # The wasmtime installer downloads a release tarball and can flake on the network
+          # (seen: ~/.wasmtime/bin/wasmtime missing -> later exit 127). Retry, then verify the
+          # binary actually landed so a failed install fails THIS step with a clear message.
+          for i in 1 2 3; do
+            curl -sSfL https://wasmtime.dev/install.sh | bash && break
+            echo "wasmtime install attempt $i failed; retrying in 5s"; sleep 5
+          done
+          test -x "$HOME/.wasmtime/bin/wasmtime" || { echo "::error::wasmtime install failed after retries"; exit 1; }
+          "$HOME/.wasmtime/bin/wasmtime" --version
       - name: Build the compiler core + teko driver (Release)
         run: |
           cmake -S . -B build -G "Ninja" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
