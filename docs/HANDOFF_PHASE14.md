@@ -93,13 +93,23 @@ it. (14.F's routine-trampoline alternative avoids loop-IL, but the 14.H samples 
      routine-body control flow (loops inside `fn`/routines) is NOT wired yet** — wire it in 14.H if
      the capstone needs loops inside a routine (give emit_handler_routines a LowerEnv + per-routine
      locals table and dispatch via lower_one_stmt). Proofs `controlflow.tks` native + WASM (10,5).
-  3. **14.F surface** — `retry { } fallback { }` / `circuit` block grammar (see "▶ 14.F STATUS";
-     easy once the foundation exists, or use the routine-trampoline) — makes the remaining keyword
-     tokens live; closes 14.F.
-  4. **14.H — real `.tks` samples** (capstone: functions + threads + loops + channels + waiters).
-  Owner recommended decisions (pre-noted): loop keywords `loop`/`while`+`break`; timespans canonical
-  in ms; adopt timespan literals in 14.C/14.F delay args. Phase 14 leaves draft only when 14.F
-  surface + 14.G + 14.H all land with `.tks` proofs (no dead tokens) and all 4 gates are green.
+  3. ~~**14.F surface**~~ ✅ DONE (commit `d45fc88`; all 4 gates green; suite 198/198). The
+     `retry (attempts N, [timeout T,] exponential|logarithmic, base B) { body } fallback { fb }`
+     and `circuit cb { body } fallback { fb }` blocks lower via the control-flow foundation (option
+     B, not the routine-trampoline): a should_continue-gated attempt loop for retry; circuit_allow
+     guard + circuit_record for circuit, with `circuit(threshold K, cooldown C)` as a breaker
+     constructor (let-init). Opcodes `OP_RETRY_NEW/SHOULD_CONTINUE/NEXT_DELAY` (0x62-0x64) +
+     `OP_CIRCUIT_NEW/ALLOW/RECORD` (0x65-0x67) → native `teko_rt_retry_*`/`teko_rt_circuit_*`
+     (teko_rt.c wrappers over teko_retry.c) / WASM reactor imports (teko_retry.c added to the
+     reactor SRCS + EXPORTS). All 7 reserved tokens live. Proof `resilience.tks` native + WASM.
+  4. ~~**14.H — real `.tks` capstone**~~ ✅ DONE (commit `32cb44d`; suite 199/199). Enabler:
+     routine bodies now lower via the shared block-body dispatcher (loops inside a `fn` task).
+     Proof `capstone.tks` native + WASM → [15,6,1,2,3,42].
+
+**▶▶ PHASE 14 IS COMPLETE — all sub-blocks (14.A–14.H) + control-flow foundation done, all 4 CI
+gates green, no dead tokens (executable `.tks` proof per surface, native AND WASM). Ready to leave
+draft (the human merges — no merge/force-push from the agent).** Suite 199/199; ASan+UBSan (both
+dispatch paths) + TSan green; 16 native goldens intact.
 - **Before starting:** `git fetch && git checkout feat/phase-14-advanced-concurrency && git pull --ff-only`,
   rebuild (`cmake --build build`), run `./build/teko_tests` (expect 194/194), then follow the
   sub-plans below. The channel sub-blocks (14.B/C/D) are the copy-me template; 14.E/14.F/14.G are NOT
@@ -115,7 +125,10 @@ it. (14.F's routine-trampoline alternative avoids loop-IL, but the 14.H samples 
 - **14.D `broadcast chan`** — DONE, CI-green (built as `broadcast.*` dotted-ident, reusing the pattern).
 - **14.E `shared` block + `atomic`** — DONE, CI-green (coarse global lock + atomic cells; new
   `shared { }` block grammar; portable atomics without <stdatomic.h>).
-- **14.F `circuit` + `retry`** — TODO (exp/log backoff, attempts/timeout, fallback).
+- **14.F `circuit` + `retry`** — DONE, CI-green (policy runtime 14.F.1 + the block surface).
+- **Control-flow foundation** — DONE, CI-green (while/loop/if/break/continue + reassignment).
+- **14.G `await`/`wait` waiters** — DONE, CI-green.
+- **14.H real `.tks` capstone** — DONE, CI-green. **PHASE 14 COMPLETE.**
 
 Owner granted standing autonomy across all sub-blocks with the non-negotiable bars (1
 increment/commit; ASan+UBSan both dispatch paths + TSan; 16 native goldens; 4 CI gates green;

@@ -221,10 +221,29 @@ critical section (NEW block grammar → `OP_SHARED_ENTER/LEAVE`) + `atomic.*` ce
 — C runtime `src/runtime/teko_shared.c` (3 KATs; portable atomics without `<stdatomic.h>` —
 `__atomic`/`_Interlocked`/plain-wasm, MSVC-safe + TSan-clean) called directly (register-width
 ABI). Proofs `runtime/native/samples/shared.tks` + `runtime/wasm/run-shared.mjs`. Suite 188/188.
-**14.F `circuit`+`retry`: policy runtime DONE, surface pending.** `src/runtime/teko_retry.c`
-(6 KATs) is the source of truth (exp/log backoff, attempts+timeout→fallback rule, breaker
-CLOSED/OPEN/HALF_OPEN). The `retry { } fallback { }` / `circuit` BLOCK grammar that makes the
-`fallback`/`exponential`/`logarithmic`/`attempts`/`timeout` keyword tokens live is the only
-remaining Phase 14 work — large/design-heavy, handed off with a recommended routine-trampoline
-lowering in `docs/HANDOFF_PHASE14.md`. So Phase 14 = 5.5 of 6 sub-blocks (14.A–14.E complete +
-CI-green; 14.F runtime complete). Continuation guide: `docs/HANDOFF_PHASE14.md`.
+Sub-block **14.F `circuit`+`retry` is DONE** on both targets. `src/runtime/teko_retry.c` (6 KATs:
+exp/log backoff, attempts+timeout→fallback rule, breaker CLOSED/OPEN/HALF_OPEN) is the source of
+truth; the `retry (attempts N, [timeout T,] exponential|logarithmic, base B) { } fallback { }` and
+`circuit cb { } fallback { }` BLOCK grammar drives it via the control-flow foundation (a
+should_continue-gated attempt loop; circuit_allow guard + record; `circuit(threshold, cooldown)`
+breaker constructor). Opcodes `OP_RETRY_*`/`OP_CIRCUIT_*` (0x62-0x67) → native
+`teko_rt_retry_*`/`teko_rt_circuit_*` / WASM reactor imports (teko_retry.c added to the reactor).
+All 7 reserved tokens (retry/fallback/attempts/timeout/exponential/logarithmic/circuit) are LIVE.
+Proofs `runtime/native/samples/resilience.tks` + `runtime/wasm/run-resilience.mjs`.
+Sub-block **control-flow foundation is DONE**: `while`/`loop`/`if`/`break`/`continue` + local
+reassignment lower from source (structured `OP_LOOP_*`/`OP_IF_*`/`OP_BREAK*` 0x5B-0x61; native asm
+labels + WASM `(block (loop))`/`(if end)`). A shared block-body dispatcher is reused by loop/if AND
+routine bodies (loops inside a background `fn`). Proofs `controlflow.tks` native + WASM.
+Sub-block **14.G `await`/`wait` timespan waiters is DONE**: `wait <ts>;` (sync sleep,
+`teko_rt_sleep_ms` / `env.teko_sleep`) + `await <ts>;` (cooperative timed yield, `teko_rt_await_ms`
+/ `env.teko_await` + `$teko_sched_run`); opcodes `OP_WAIT` 0x59 / `OP_AWAIT_FOR` 0x5A; timespan
+literals normalize to canonical ms at compile time (adopted in channel delay args). Proofs
+`waiters.tks` native + WASM.
+Sub-block **14.H real `.tks` capstone is DONE**: one program combining functions + a background
+routine with a LOOP + main loops + atomic (14.E) + delayed channel (14.C) + await/wait (14.G) →
+[15,6,1,2,3,42]. Proofs `capstone.tks` native + WASM.
+**PHASE 14 IS COMPLETE** — 14.A–14.H + control-flow foundation all done & CI-green on all four
+gates; no dead tokens (every reserved concurrency/resilience keyword is live with an executable
+`.tks` proof on native AND WASM). Suite 199/199; ASan/UBSan (both dispatch paths) + TSan green; 16
+native goldens intact. **Ready to leave draft** (PR #7; the human merges — no merge/force-push from
+the agent). Continuation/history: `docs/HANDOFF_PHASE14.md`.

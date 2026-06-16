@@ -205,13 +205,17 @@ merge/force-push** (the human merges).
   `runtime/native/samples/shared.tks` (8/10) + `runtime/wasm/run-shared.mjs`. CI-wired. *Coarse
   single global lock + no nested blocks is the MVP; per-block locks + real wasm-threads atomics
   are future refinements, not a correctness gate.*
-- **14.F — `circuit` + `retry`** — *runtime done, surface pending*. `src/runtime/teko_retry.{h,c}`
-  (6 Unity KATs) is the policy source of truth: exponential/logarithmic backoff, the
-  `attempts`+`timeout`→`fallback` incremental-relative-time rule, and the circuit breaker
-  CLOSED/OPEN/HALF_OPEN machine. The `retry { } fallback { }` / `circuit` BLOCK grammar that drives
-  it (and makes the `fallback`/`exponential`/`logarithmic`/`attempts`/`timeout` keyword tokens
-  live) is the remaining work — a recommended routine-trampoline lowering is specced in
-  `docs/HANDOFF_PHASE14.md` (large/design-heavy → handed off).
+- **14.F — `circuit` + `retry`** — ✅ done on both targets. The `teko_retry.{h,c}` policy runtime
+  (6 KATs: exp/log backoff, attempts+timeout→fallback rule, CLOSED/OPEN/HALF_OPEN breaker) is the
+  source of truth (14.F.1); the `retry (attempts N, [timeout T,] exponential|logarithmic, base B)
+  { body } fallback { fb }` and `circuit cb { body } fallback { fb }` BLOCK grammar now drives it
+  via the **control-flow foundation** (a should_continue-gated attempt loop; circuit_allow guard +
+  circuit_record). `circuit(threshold K, cooldown C)` is a breaker constructor (let-init). All 7
+  reserved tokens are now LIVE (retry/fallback/attempts/timeout/exponential/logarithmic/circuit).
+  Opcodes `OP_RETRY_NEW/SHOULD_CONTINUE/NEXT_DELAY` (0x62-0x64) + `OP_CIRCUIT_NEW/ALLOW/RECORD`
+  (0x65-0x67) → native `teko_rt_retry_*`/`teko_rt_circuit_*`, WASM reactor imports. Proofs
+  `runtime/native/samples/resilience.tks` + `runtime/wasm/run-resilience.mjs`
+  ([3,777,2,555,1,444,3,2,5]). Suite 198/198.
 - **14.G — Timespan waiters: `await` (async) + `wait` (sync)** — ✅ done on both targets
   (executable `.tks` proof each). `wait <ts>;` = synchronous sleep (native `teko_rt_sleep_ms`
   real nanosleep/Win Sleep; WASM `env.teko_sleep` host import). `await <ts>;` = cooperative timed
@@ -224,8 +228,22 @@ merge/force-push** (the human merges).
   `runtime/wasm/run-waiters.mjs` (order 1,2,3 + host saw normalized await=5/wait=10 ms). Suite
   196/196. *MVP: native tasks are run-to-completion, so `await` is a cooperative yield + logical
   clock advance (WASM Layer A mirrors it), not real timer suspension — future work.*
-- **14.H — Real `.tks` samples (functions, threads, loops)** — *planned* (owner, 2026-06-16). The
-  capstone: real programs combining named functions, routines/threads (incl. a Layer-B threads
-  sample), channels, `await`/`wait`, and **loops**. Requires the shared **control-flow emission
-  foundation** (loops + branches: native asm labels + WASM structured block/loop) — which also
-  unblocks the 14.F `retry { }` surface. Plan + sequencing in `docs/HANDOFF_PHASE14.md`.
+- **Control-flow foundation** — ✅ done on both targets. `while (cond) { }`, `loop { }`,
+  `if (cond) { }`, `break;`, `continue;` + local reassignment lower from source. Structured IL
+  opcodes `OP_LOOP_BEGIN/END` (0x5B/0x5C), `OP_BREAK` (0x5D), `OP_CONTINUE` (0x5E),
+  `OP_BREAK_IF_FALSE` (0x5F), `OP_IF_BEGIN/END` (0x60/0x61) — native local asm labels
+  (`.Lcont_/.Lbrk_/.Lendif_`) + a loop-id/if-id stack; WASM structured `(block $brk (loop $cont))`
+  + `(if … end)`. A shared block-body dispatcher (`lower_one_stmt`/`lower_block`) is reused by
+  loop/if bodies AND routine bodies (so a background `fn` worker can loop). Proofs
+  `runtime/native/samples/controlflow.tks` + `runtime/wasm/run-controlflow.mjs` ([10,5]).
+- **14.H — Real `.tks` capstone samples** — ✅ done on both targets. One program combining named
+  functions, a background routine with a LOOP inside it (14.A + control flow), main `while` loops +
+  reassignment, an atomic accumulator (14.E), a delayed channel (14.C), and the `await`/`wait`
+  waiters (14.G) → `[15, 6, 1, 2, 3, 42]`. Proofs `runtime/native/samples/capstone.tks` +
+  `runtime/wasm/run-capstone.mjs` (reactor + in-module scheduler + host waiters). Suite 199/199.
+  *(A dedicated Layer-B `--target=wasm-threads` thread sample remains covered by the Phase-10
+  threads proof; the capstone targets Layer A.)*
+
+**Phase 14 is COMPLETE** — all sub-blocks (14.A–14.H) + the control-flow foundation are done and
+CI-green on all four gates; no dead tokens (every reserved concurrency/resilience keyword is live
+with an executable `.tks` proof on native AND WASM). Ready to leave draft.
