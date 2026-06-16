@@ -263,6 +263,16 @@ EXP
 # Fail-loud: decimal.parse("abc") aborts non-zero (exit 70 + stderr) — no silent zero. WASM traps on
 # the same value (run-decimal-surface.mjs), so the behavior is identical on both targets.
 check_fail decimal_fail.tks "before" "decimal.parse: invalid decimal"
+# Phase 18 (18.A): Zero-Overhead Optionals — `?T` nullability + `null` + the Elvis `??`. An optional
+# local is compacted (payload slot + a hidden 1-word present companion); `a ?? d` branches on the
+# present flag via OP_IF (→ native je/cbz), choosing the payload when present else the default. No new
+# IL/runtime (reuses OP_IF + load/store-local). Byte-identical to the WASM proof (run-optionals.mjs).
+check optionals.tks "$(cat <<'EXP'
+b = 7
+d = 5
+e = 5
+EXP
+)"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

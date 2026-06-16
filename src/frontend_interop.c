@@ -465,6 +465,50 @@ static int localdec_get(const char* n) {
     for (int i = 0; i < g_nlocaldec; i++) if (strcmp(g_localdec[i], n) == 0) return 1;
     return 0;
 }
+// Phase 18 (18.A): OPTIONAL named locals — a `let x: ?T = …` reference is FAT (like the 15.B
+// trait local): the payload rides in the local's own $v slot (an int/string/handle in $w0), and a
+// hidden COMPANION slot `x#opt` holds the 1-word PRESENT flag (1 = a value, 0 = null). The model is
+// compacted + zero-overhead — no boxing/heap, just one extra integer slot. The Elvis operator
+// `x ?? d` reads the present flag and branches via OP_IF (→ native `je`/arm64 `cbz`/WASM `(if)`),
+// exactly the hardware-conditional the memorandum asks for. Per-function scope, reset alongside the
+// other local registries. `base_vt` is the payload's value-type (VT_INT for the MVP; VT_STR works
+// incidentally — both flow through $w0; float/decimal optional payloads are future work).
+typedef struct { char name[96]; int present_slot; int base_vt; } OptLocal;
+static OptLocal g_localopt[TEKO_MAX_LOCALCLS];
+static int g_nlocalopt;
+static void localopt_reset(void) { g_nlocalopt = 0; }
+static void localopt_set(const char* n, int present_slot, int base_vt) {
+    for (int i = 0; i < g_nlocalopt; i++)
+        if (strcmp(g_localopt[i].name, n) == 0) {     // already optional — refresh
+            g_localopt[i].present_slot = present_slot; g_localopt[i].base_vt = base_vt; return;
+        }
+    if (g_nlocalopt < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localopt[g_nlocalopt].name, n, 95); g_localopt[g_nlocalopt].name[95] = '\0';
+        g_localopt[g_nlocalopt].present_slot = present_slot;
+        g_localopt[g_nlocalopt].base_vt = base_vt; g_nlocalopt++;
+    }
+}
+// Return the present-companion slot of optional local `n`, or -1 if `n` is not optional.
+static int localopt_present_slot(const char* n) {
+    if (!n || !n[0]) return -1;
+    for (int i = 0; i < g_nlocalopt; i++) if (strcmp(g_localopt[i].name, n) == 0) return g_localopt[i].present_slot;
+    return -1;
+}
+static int localopt_base_vt(const char* n) {
+    if (!n || !n[0]) return TEKO_VT_INT;
+    for (int i = 0; i < g_nlocalopt; i++) if (strcmp(g_localopt[i].name, n) == 0) return g_localopt[i].base_vt;
+    return TEKO_VT_INT;
+}
+// Phase 18 (18.A): set by eval_primary to describe the OPTIONALITY of the primary it just lowered,
+// so eval_expr_prec's Elvis (`??`) can recover the left operand's present flag:
+//   -1 = not optional (a plain value → treated as always-present);
+//   -2 = the `null` literal (present = 0, a compile-time constant);
+//   >=0 = the present-companion slot of an optional local.
+static int g_prim_present_slot = -1;
+// Phase 18 (18.A): set by eval_primary's `null` case (cleared by lower_init_value before each
+// initializer) so lower_let_stmt / lower_reassign know a `let x: ?T = null;` is the null state and
+// emit present = 0 (vs present = 1 for any other initializer).
+static int g_last_init_is_null = 0;
 // Split a dotted lexeme "base.member" into its two parts. Returns 1 on success (a dot present).
 static int dotted_split(const char* lex, char* base, char* member) {
     const char* dot = lex ? strchr(lex, '.') : NULL;
@@ -707,7 +751,17 @@ static int lower_member_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
 }
 
 static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
-    if (p->current_token.type == TOKEN_LIT_INT) {
+    g_prim_present_slot = -1; // Phase 18 (18.A): default — this primary is not an optional reference
+    if (p->current_token.type == TOKEN_NULL) {
+        // Phase 18 (18.A): the `null` literal — the empty optional. Payload = 0 in $w0; the present
+        // descriptor is the literal-null sentinel (-2) so an Elvis `null ?? d` resolves to `d`, and
+        // a `let x: ?T = null;` binding records present = 0 (via g_last_init_is_null).
+        codegen_li_emit_iconst(b, 0);
+        g_prim_present_slot = -2;
+        g_last_init_is_null = 1;
+        fe_advance(p);
+        return TEKO_VT_INT;
+    } else if (p->current_token.type == TOKEN_LIT_INT) {
         codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
         fe_advance(p);
         return TEKO_VT_INT;
@@ -779,6 +833,17 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         int isflt = localflt_get(p->current_token.lexeme); // Phase 17: a float-typed local?
         int isdec = localdec_get(p->current_token.lexeme); // Phase 17.F.3: a decimal-typed local?
         int ci = localcls_get(p->current_token.lexeme); // Phase 16.D: a class-instance local?
+        int opt_present = localopt_present_slot(p->current_token.lexeme); // Phase 18: optional?
+        if (s >= 0 && opt_present >= 0) {
+            // Phase 18 (18.A): an OPTIONAL local read — load the payload into $w0 (a bare read
+            // assumes present; `??`/`?.` are the safe accessors) and expose its present-companion slot
+            // so a following Elvis can branch on it. The payload value-type is the optional's base.
+            codegen_li_emit_load_local(b, s);
+            g_prim_present_slot = opt_present;
+            int bvt = localopt_base_vt(p->current_token.lexeme);
+            fe_advance(p);
+            return bvt;
+        }
         if (s >= 0 && isflt) {
             // Phase 17 (17.A): a float local reads through the float accumulator ($f0), not $w0.
             codegen_li_emit_fload_local(b, s);
@@ -805,6 +870,7 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
 static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
                           int min_prec, TempAlloc* ta) {
     int vt_l = eval_primary(b, p, ctx, ta); // left operand → $w0
+    int left_present_slot = g_prim_present_slot; // Phase 18 (18.A): the left operand's optionality
     while (p12_tok_prec(p->current_token.type) >= min_prec &&
            p12_tok_prec(p->current_token.type) > 0) {
         int prec = p12_tok_prec(p->current_token.type);
@@ -898,6 +964,35 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
             vt_l = TEKO_VT_INT;
         }
         ta->next_temp--;                               // free temp
+    }
+    // Phase 18 (18.A): the ELVIS operator `lhs ?? rhs` — LOWEST precedence (handled here, not in the
+    // prec table, so it never collides with arithmetic/compare folding). `min_prec <= 1` keeps it out
+    // of a higher-precedence right-operand sub-expression, so `a ?? b ?? c` is right-associative.
+    // Lowering (zero-overhead, reuses existing opcodes — no new IL): the LHS payload is already in
+    // $w0; spill it + its present flag, evaluate the RHS as the default, then conditionally overwrite
+    // with the payload when present. The OP_IF_BEGIN test on the present flag lowers to a hardware
+    // conditional branch (`je`/`cbz`/WASM `(if)`).
+    if (p->current_token.type == TOKEN_ELVIS && min_prec <= 1) {
+        int payload_t = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+        codegen_li_emit_store_local(b, payload_t);            // payload_t = lhs payload (from $w0)
+        int present_t = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+        if (left_present_slot == -2)     codegen_li_emit_iconst(b, 0);                  // literal null
+        else if (left_present_slot >= 0) codegen_li_emit_load_local(b, left_present_slot); // companion
+        else                             codegen_li_emit_iconst(b, 1);                  // non-optional
+        codegen_li_emit_store_local(b, present_t);            // present_t = lhs present flag
+        int result_t = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+        fe_advance(p);                                        // consume `??`
+        int vt_r = eval_expr_prec(b, p, ctx, 1, ta);          // rhs (right-assoc) → $w0 (the default)
+        codegen_li_emit_store_local(b, result_t);             // result_t = default (rhs)
+        codegen_li_emit_load_local(b, present_t);             // $w0 = present flag
+        codegen_li_emit_cf(b, OP_IF_BEGIN);                   // if present != 0 …
+        codegen_li_emit_load_local(b, payload_t);             //   $w0 = payload
+        codegen_li_emit_store_local(b, result_t);             //   result_t = payload
+        codegen_li_emit_cf(b, OP_IF_END);
+        codegen_li_emit_load_local(b, result_t);              // $w0 = result (present ? payload : default)
+        ta->next_temp -= 3;                                   // free payload_t, present_t, result_t
+        g_prim_present_slot = -1;                             // the Elvis result is a plain value
+        vt_l = vt_r;                                          // result type = the default/payload type
     }
     return vt_l;
 }
@@ -1579,6 +1674,7 @@ static int  lower_trait_dispatch(BytecodeBuffer* b, Parser* p, LowerEnv* env);  
 static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     LowerCtx* ctx = env->ctx;
     g_last_init_vt = TEKO_VT_INT; // Phase 16 (16.B): default; the string-yielding cases set VT_STR
+    g_last_init_is_null = 0;      // Phase 18 (18.A): set iff the initializer is the `null` literal
     if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) &&
         p12_tok_prec(p->peek_token.type) == 0 && !strlit_is_interp(p->current_token.lexeme)) {
         // A LONE, NON-interpolated string literal. `"a" + x` and `"{x}"` fall through to
@@ -1653,9 +1749,13 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     fe_advance(p); // NAME
     // Phase 15.B: capture the FIRST identifier of a `: Type` annotation — a trait name makes this a
     // dynamically-dispatched (fat) reference; anything else is a plain local.
+    // Phase 18 (18.A): a leading `?` in the annotation (`let x: ?int`) marks the local OPTIONAL — it
+    // carries a hidden present companion (emitted below). The `?` is consumed before the type name.
     char annot[96]; annot[0] = '\0';
+    int is_optional = 0;
     if (p->current_token.type == TOKEN_COLON) {
         fe_advance(p);
+        if (p->current_token.type == TOKEN_QUESTION) { is_optional = 1; fe_advance(p); } // `?T`
         if (p->current_token.type == TOKEN_IDENTIFIER) {
             strncpy(annot, p->current_token.lexeme, sizeof(annot) - 1); annot[sizeof(annot) - 1] = '\0';
         }
@@ -1702,6 +1802,18 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localflt_set(lname, g_last_init_vt == TEKO_VT_FLOAT);
     // Phase 17.F.3: remember a decimal-typed local so `lname` routes through the 256-byte $d0 slot.
     localdec_set(lname, g_last_init_vt == TEKO_VT_DECIMAL);
+    // Phase 18 (18.A): an OPTIONAL local (`let x: ?T = …`) carries a hidden present companion slot
+    // `x#opt` set to 0 when the initializer is `null`, else 1 (compile-time constant — runtime-null
+    // propagation arrives with the `?.` safe-navigation in 18.B). The payload was stored above; the
+    // base value-type is the initializer's (VT_INT for the MVP). Register so `x` reads optional + a
+    // following `??` recovers the present flag.
+    if (is_optional) {
+        char oname[120]; snprintf(oname, sizeof(oname), "%s#opt", lname);
+        int present_slot = env_alloc_local(env, oname);
+        codegen_li_emit_iconst(b, g_last_init_is_null ? 0 : 1);
+        codegen_li_emit_store_local(b, present_slot);
+        localopt_set(lname, present_slot, g_last_init_vt);
+    }
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 }
 
@@ -1739,6 +1851,13 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localflt_set(nm, g_last_init_vt == TEKO_VT_FLOAT);
     // Phase 17.F.3: keep the local's decimal-typed-ness in sync with its new value.
     localdec_set(nm, g_last_init_vt == TEKO_VT_DECIMAL);
+    // Phase 18 (18.A): if `nm` is an optional local, refresh its present companion from the new
+    // initializer (`x = null;` → present 0, else 1), so a later `x ?? d` branches correctly.
+    int oslot = localopt_present_slot(nm);
+    if (oslot >= 0) {
+        codegen_li_emit_iconst(b, g_last_init_is_null ? 0 : 1);
+        codegen_li_emit_store_local(b, oslot);
+    }
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     return 1;
 }
@@ -2855,7 +2974,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -2910,7 +3029,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -2942,7 +3061,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -2974,7 +3093,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.

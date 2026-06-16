@@ -44,7 +44,20 @@ in `lower_let_stmt` currently only captures a leading *identifier*).
 
 ## Sub-blocks (dependency order — one increment per commit, report at each close with CI green)
 
-### 18.A — Optionals value model + `null` + Elvis `??`  *(headline)*
+### 18.A — Optionals value model + `null` + Elvis `??`  *(headline)*  — ✅ DONE
+**Status (DONE, locally green both targets).** Implemented in `src/frontend_interop.c`: a new
+`g_localopt` registry (name → {present_slot, base_vt}); the `null` literal + an optional-local read
+in `eval_primary` (exposing the present descriptor via `g_prim_present_slot`: -1 plain / -2 literal
+null / ≥0 companion slot); Elvis `??` lowered in `eval_expr_prec` as a lowest-precedence,
+right-associative `default → conditional-overwrite` over `OP_IF_BEGIN/END` + load/store-local +
+iconst (**no new opcode/runtime**); `let x: ?T` detection + the present companion (`x#opt`) emitted
+in `lower_let_stmt`, kept in sync by `lower_reassign`. Proof `optionals.tks` (native + WASM,
+byte-identical) → `b = 7`, `d = 5`, `e = 5` (incl. a right-assoc `c ?? a ?? 9` chain). Suite
+246/246; ASan/UBSan both dispatch paths + TSan clean; 16 goldens intact; optional-free output
+byte-identical (every new path is gated on a `null`/`?`/`??` actually appearing). MVP payload =
+int (string works incidentally via `$w0`); float/decimal optional payloads + runtime-null are 18.B+.
+
+
 - **Value model (compacted, zero-overhead).** An optional local `?T` = the payload in its
   natural slot (`$w0`/`$vN` for int, the string slot, etc.) **+ a hidden 1-byte/word "present"
   companion local** (0 = null, 1 = present), exactly the 15.B fat-local pattern. No heap, no boxing.
