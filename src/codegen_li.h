@@ -182,6 +182,34 @@ typedef enum {
     OP_VTABLE_SET = 0x6F, // vtable_set(type_id, method_id, slot) -> 0
     OP_VTABLE_GET = 0x70, // vtable_get(type_id, method_id) -> slot
 
+    // Phase 17 (17.A): f64 VALUE MODEL — a PARALLEL float accumulator ($f0/$f1, native xmm0/xmm1
+    // or d0/d1, WASM (local $f0 f64)/(local $f1 f64)) alongside the integer $w0/$w1. Float opcodes
+    // are purely ADDITIVE and only handled by the hosted (emit_native_hosted.c) and WASM
+    // (emit_wasm.c) paths + the codegen_metal.c dispatch — the 16 freestanding emitter goldens
+    // never see a float opcode, so their byte streams stay byte-identical. The integer path is
+    // untouched. OP_FCONST carries a 4-byte LITTLE-ENDIAN index into the float-constant pool (NOT a
+    // 64-bit immediate); the pool (threaded to the backend via teko_metal_set_floats) holds the
+    // f64 bit patterns, mirroring the string pool. The compares write $w0 (i32 0/1 → VT_INT); the
+    // arith/move ops touch $f0/$f1 only (native scratch r11/x9, NOT rax/rbx, so $w0 is preserved).
+    OP_FCONST       = 0x71, // 4-byte pool index: $f0 = float_pool[idx]
+    OP_FADD         = 0x72, // $f0 = $f0 + $f1
+    OP_FSUB         = 0x73, // $f0 = $f0 - $f1
+    OP_FMUL         = 0x74, // $f0 = $f0 * $f1
+    OP_FDIV         = 0x75, // $f0 = $f0 / $f1 (IEEE; inf/nan are defined, no zero guard)
+    // 0x76 = OP_FMOD reserved for 17.B (do NOT emit yet).
+    OP_FEQ          = 0x77, // $w0 = ($f0 == $f1) ? 1 : 0  (result i32 → VT_INT)
+    OP_FNE          = 0x78, // $w0 = ($f0 != $f1) ? 1 : 0
+    OP_FLT          = 0x79, // $w0 = ($f0 <  $f1) ? 1 : 0
+    OP_FLE          = 0x7A, // $w0 = ($f0 <= $f1) ? 1 : 0
+    OP_FGT          = 0x7B, // $w0 = ($f0 >  $f1) ? 1 : 0
+    OP_FGE          = 0x7C, // $w0 = ($f0 >= $f1) ? 1 : 0
+    OP_FSTORE       = 0x7D, // $f1 = $f0  (scratch spill; mirrors OP_STORE)
+    OP_FLOAD        = 0x7E, // $f0 = $f1  (mirrors OP_LOAD)
+    OP_FSTORE_LOCAL = 0x7F, // 4-byte slot: $fv<slot> = $f0
+    OP_FLOAD_LOCAL  = 0x80, // 4-byte slot: $f0 = $fv<slot>
+    OP_I2F          = 0x81, // $f0 = (double)$w0  ($w0 unchanged) — int→float promotion
+    // 0x82 = OP_F2I reserved for 17.B (do NOT emit yet).
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -282,12 +310,23 @@ typedef struct {
     // Phase 15 (15.B): 1 if the program uses a static-vtable op (OP_VTABLE_*) — i.e. abstract/trait
     // dynamic dispatch. Native links teko_rt_vtable_*; WASM imports from the reactor + shared memory.
     int uses_vtable;
+    // Phase 17 (17.A): the float-constant pool — f64 bit patterns indexed by OP_FCONST's 4-byte
+    // arg. Mirrors the string pool (codegen_li_add_float_constant dedups by bit-equality). Threaded
+    // to the backend via teko_metal_set_floats. `uses_float` is 1 once any float opcode is emitted,
+    // gating the WASM `(local $f0/$f1/$fvN f64)` declarations (non-float modules stay byte-identical).
+    double* floats;
+    int float_count;
+    int float_capacity;
+    int uses_float;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
 BytecodeBuffer* codegen_li_create_context(void);
 void codegen_li_emit_statement(BytecodeBuffer* buffer, const StatementASTNode* stmt);
 int codegen_li_add_string_constant(BytecodeBuffer* buffer, const char* str);
+// Phase 17 (17.A): add an f64 constant to the float pool (deduped by exact bit-equality) and
+// return its index — the 4-byte arg for OP_FCONST. Mirrors codegen_li_add_string_constant.
+int codegen_li_add_float_constant(BytecodeBuffer* buffer, double value);
 void codegen_li_write_to_file(const BytecodeBuffer* buffer, const char* filename);
 void codegen_li_free_context(BytecodeBuffer* buffer);
 
@@ -342,6 +381,14 @@ void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_call_func(BytecodeBuffer* buffer, int argc);
 // Phase 15 (15.B): emit a static-vtable op (OP_VTABLE_SET/GET); sets buffer->uses_vtable.
 void codegen_li_emit_vtable(BytecodeBuffer* buffer, OpCode op);
+// Phase 17 (17.A): float value-model emit helpers. Each sets buffer->uses_float.
+//  - emit_fconst: add `v` to the float pool, emit OP_FCONST <idx> (loads pool[idx] → $f0).
+//  - emit_funop: a single-byte float op (OP_FADD..OP_FGE, OP_FSTORE, OP_FLOAD, OP_I2F).
+//  - emit_fstore_local / emit_fload_local: $fv<slot> <- $f0 / $f0 <- $fv<slot> (4-byte slot).
+void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v);
+void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op);
+void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot);
+void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

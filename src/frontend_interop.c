@@ -358,6 +358,15 @@ static int localcls_get(const char* n) {
 // reflection (the slot / field layout are compile-time constants).
 #define TEKO_VT_OBJ_BASE 2
 
+// Phase 17 (17.A): a float-typed expression result — the value lives in the PARALLEL float
+// accumulator $f0 (NOT $w0). Encoded as a HIGH SENTINEL (not 2/3) so it never collides with
+// TEKO_VT_OBJ_BASE + class_index (an object-typed result of an arbitrary class). This keeps every
+// existing `>= TEKO_VT_OBJ_BASE` / `vt - TEKO_VT_OBJ_BASE` site (eval_primary's object case,
+// coerce_to_string_in_w0) UNCHANGED — float is checked by exact equality before those range tests.
+// (Float→string formatting does not exist until 17.D; a VT_FLOAT reaching a concat is a no-op for
+// now, see coerce_to_string_in_w0.)
+#define TEKO_VT_FLOAT (1 << 20)
+
 // Phase 16: the value-type a runtime primitive (OP_CALL_RUNTIME id) leaves in $w0. Almost all
 // codec/convert/hash/format ids return a string POINTER (VT_STR); the CHECKED parsers (16.F) return
 // an integer (VT_INT) — so `"n=" + convert.parse_int(s)` concatenates correctly (the int is then
@@ -392,6 +401,28 @@ static void localstr_set(const char* n, int is_str) {
 static int localstr_get(const char* n) {
     if (!n || !n[0]) return 0;
     for (int i = 0; i < g_nlocalstr; i++) if (strcmp(g_localstr[i], n) == 0) return 1;
+    return 0;
+}
+// Phase 17 (17.A): names of FLOAT-typed named locals (so `f` reads as VT_FLOAT and routes through
+// the float accumulator). Per-function scope, reset alongside g_localstr/g_localcls. Mirrors the
+// localstr registry exactly (set membership, demote-on-reassign via tombstone).
+static char g_localflt[TEKO_MAX_LOCALCLS][96];
+static int  g_nlocalflt;
+static void localflt_reset(void) { g_nlocalflt = 0; }
+static void localflt_set(const char* n, int is_flt) {
+    for (int i = 0; i < g_nlocalflt; i++)
+        if (strcmp(g_localflt[i], n) == 0) {
+            if (!is_flt) { g_localflt[i][0] = g_localflt[i][1] = '\0'; } // demote (tombstone)
+            return;
+        }
+    if (is_flt && g_nlocalflt < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localflt[g_nlocalflt], n, 95); g_localflt[g_nlocalflt][95] = '\0';
+        g_nlocalflt++;
+    }
+}
+static int localflt_get(const char* n) {
+    if (!n || !n[0]) return 0;
+    for (int i = 0; i < g_nlocalflt; i++) if (strcmp(g_localflt[i], n) == 0) return 1;
     return 0;
 }
 // Split a dotted lexeme "base.member" into its two parts. Returns 1 on success (a dot present).
@@ -543,6 +574,24 @@ static OpCode p12_tok_op(TokenType t) {
     }
 }
 
+// Phase 17 (17.A): map a binary operator token to its FLOAT opcode (parallel to p12_tok_op). Arith
+// (+ - * /) → OP_F*; compares (== != < <= > >=) → OP_F* compare (result i32 → VT_INT).
+static OpCode p12_tok_fop(TokenType t) {
+    switch (t) {
+        case TOKEN_PLUS:  return OP_FADD; case TOKEN_MINUS: return OP_FSUB;
+        case TOKEN_MUL:   return OP_FMUL; case TOKEN_DIV:   return OP_FDIV;
+        case TOKEN_EQ:    return OP_FEQ;  case TOKEN_NE:    return OP_FNE;
+        case TOKEN_LT:    return OP_FLT;  case TOKEN_LE:    return OP_FLE;
+        case TOKEN_GT:    return OP_FGT;  case TOKEN_GE:    return OP_FGE;
+        default:          return OP_FADD; // (TOKEN_MOD has no float form in 17.A — FMOD is 17.B)
+    }
+}
+// Phase 17 (17.A): a comparison operator yields an i32 0/1 (VT_INT) regardless of operand types.
+static int is_compare_tok(TokenType t) {
+    return t == TOKEN_EQ || t == TOKEN_NE || t == TOKEN_LT ||
+           t == TOKEN_LE || t == TOKEN_GT || t == TOKEN_GE;
+}
+
 // Phase 16 (16.B): the expression evaluators now RETURN the result's value-type (TEKO_VT_*), so a
 // binary `+` with a string operand lowers to culture-invariant concatenation (auto-`to_string`).
 static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
@@ -598,6 +647,18 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
         fe_advance(p);
         return TEKO_VT_INT;
+    } else if (p->current_token.type == TOKEN_LIT_FLOAT) {
+        // Phase 17 (17.A): a float literal (`3.14`, `2.0`, `0.5`). The lexer emits TOKEN_LIT_FLOAT
+        // ONLY for a `<digits>.<digits>` form (a `.`-fraction; `2.` and `1e9`/`f`-suffix are NOT
+        // lexed as floats — see lex_number). strtod the lexeme (digit-separator `_` stripped first,
+        // since the lexeme may keep them) → OP_FCONST → $f0. Value-type is VT_FLOAT.
+        char buf[64]; int j = 0;
+        const char* lx = p->current_token.lexeme;
+        for (int k = 0; lx[k] && j < (int)sizeof(buf) - 1; k++) if (lx[k] != '_') buf[j++] = lx[k];
+        buf[j] = '\0';
+        codegen_li_emit_fconst(b, strtod(buf, NULL));
+        fe_advance(p);
+        return TEKO_VT_FLOAT;
     } else if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
         if (strlit_is_interp(p->current_token.lexeme)) {
             // Phase 16 (16.C): an interpolated literal `"…{expr}…"` -> concat of chunks + holes.
@@ -627,7 +688,14 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
     } else if (p->current_token.type == TOKEN_IDENTIFIER) {
         int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
         int isstr = localstr_get(p->current_token.lexeme);
+        int isflt = localflt_get(p->current_token.lexeme); // Phase 17: a float-typed local?
         int ci = localcls_get(p->current_token.lexeme); // Phase 16.D: a class-instance local?
+        if (s >= 0 && isflt) {
+            // Phase 17 (17.A): a float local reads through the float accumulator ($f0), not $w0.
+            codegen_li_emit_fload_local(b, s);
+            fe_advance(p);
+            return TEKO_VT_FLOAT;
+        }
         if (s >= 0) codegen_li_emit_load_local(b, s);   // $w0 = value (int / string ptr / handle)
         else codegen_li_emit_iconst(b, 0); // unknown identifier in this subset → 0
         fe_advance(p);
@@ -650,12 +718,19 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
         fe_advance(p); // consume the operator
         int t = ta->next_temp++;
         if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
-        codegen_li_emit_store_local(b, t);            // temp = left (raw value)
-        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 (left-associative)
+        // Phase 17 (17.A): spill the LEFT operand with the type-appropriate store — a float operand
+        // lives in $f0 (FSTORE_LOCAL to a float slot), an int/ptr operand in $w0 (STORE_LOCAL). The
+        // temp slot `t` is one frame slot; on native it is reused as either type (a slot has one
+        // type per use), on WASM $fvN / $vN are parallel local files.
+        if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, t); // temp = left (float)
+        else                       codegen_li_emit_store_local(b, t);  // temp = left (raw value)
+        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 / $f0 (left-associative)
         if (optok == TOKEN_PLUS && (vt_l == TEKO_VT_STR || vt_r == TEKO_VT_STR)) {
             // Phase 16 (16.B): a `+` with a string operand is culture-invariant CONCATENATION with
             // auto-`to_string`. Right is in $w0 — convert it to a string if it is an int (id 49),
             // stash it, then build the left string and call str_concat (id 52, arg0=left, $w0=right).
+            // NOTE (17.A): a FLOAT operand of a string `+` has no formatter yet (17.D) — see
+            // coerce_to_string_in_w0; the 17.A proof never concatenates a float, so this is inert.
             coerce_to_string_in_w0(b, ctx, vt_r);      // $w0 = to_string(right) (int/object/string)
             int t2 = ta->next_temp++;
             if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
@@ -667,6 +742,26 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
             codegen_li_emit_call_runtime(b, 52);       // $w0 = str_concat(left, right)
             ta->next_temp--;                           // free temp2
             vt_l = TEKO_VT_STR;
+        } else if (vt_l == TEKO_VT_FLOAT || vt_r == TEKO_VT_FLOAT) {
+            // Phase 17 (17.A): float arithmetic / comparison. Promote any int operand to f64 (I2F),
+            // bring left into $f0 and right into $f1, then emit the float op. Arith ops (+ - * /)
+            // produce VT_FLOAT; compares (== != < <= > >=) produce an i32 0/1 in $w0 (VT_INT).
+            // Right is currently in $f0 (if it was float) or $w0 (if it was int) — move it to $f1.
+            if (vt_r == TEKO_VT_FLOAT) {
+                codegen_li_emit_funop(b, OP_FSTORE);   // $f1 = $f0 (right)
+            } else {
+                codegen_li_emit_funop(b, OP_I2F);      // $f0 = (double)$w0 (right)
+                codegen_li_emit_funop(b, OP_FSTORE);   // $f1 = $f0 (right)
+            }
+            // Left was spilled in temp `t` — reload to $f0, promoting if it was an int.
+            if (vt_l == TEKO_VT_FLOAT) {
+                codegen_li_emit_fload_local(b, t);     // $f0 = left (float)
+            } else {
+                codegen_li_emit_load_local(b, t);      // $w0 = left (int)
+                codegen_li_emit_funop(b, OP_I2F);      // $f0 = (double)$w0
+            }
+            codegen_li_emit_funop(b, p12_tok_fop(optok)); // $f0 = left <op> right  (or $w0 for compares)
+            vt_l = is_compare_tok(optok) ? TEKO_VT_INT : TEKO_VT_FLOAT;
         } else {
             codegen_li_emit_store(b);                  // $w1 = right
             codegen_li_emit_load_local(b, t);          // $w0 = left
@@ -810,6 +905,14 @@ static void emit_object_to_string(BytecodeBuffer* b, const LowerCtx* ctx, int ci
 
 static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int vt) {
     if (vt == TEKO_VT_STR) return;                            // already a string pointer
+    if (vt == TEKO_VT_FLOAT) {
+        // Phase 17 (17.A): float→string formatting (convert.float_to_str, id 50) does not exist
+        // until 17.D — the freestanding shortest-round-trip formatter is the large 17.C step. The
+        // 17.A proof never concatenates a float, so this branch is never reached in practice; leave
+        // it a deliberate no-op (must not fall through to the int id-49 path on a $f0 value).
+        // TODO(17.D): emit `convert.float_to_str` (id 50) once the formatter lands.
+        return;
+    }
     if (vt >= TEKO_VT_OBJ_BASE) { emit_object_to_string(b, ctx, vt - TEKO_VT_OBJ_BASE); return; }
     codegen_li_emit_call_runtime(b, 49);                      // VT_INT → culture-invariant decimal
 }
@@ -1336,7 +1439,10 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     env_sync(env);
     lower_init_value(b, p, env);
     int rhs_class = g_last_inst_class[0] ? class_find(g_last_inst_class) : rhs_local_class;
-    codegen_li_emit_store_local(b, s);
+    // Phase 17 (17.A): a float initializer lives in the float accumulator ($f0) — store it to the
+    // float local file (FSTORE_LOCAL), and record the local so `lname` reads back as VT_FLOAT.
+    if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, s);
+    else                                 codegen_li_emit_store_local(b, s);
     if (annot_trait >= 0) {
         // Phase 15.B: a FAT trait-typed reference — its concrete type_id (from the RHS) rides in a
         // hidden tid slot as a compile-time constant; `lname.method()` dispatches dynamically.
@@ -1350,6 +1456,8 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     }
     // Phase 16 (16.B): remember a string-typed local so `s` reads as VT_STR in a later concat.
     localstr_set(lname, g_last_init_vt == TEKO_VT_STR);
+    // Phase 17 (17.A): remember a float-typed local so `lname` routes through the float accumulator.
+    localflt_set(lname, g_last_init_vt == TEKO_VT_FLOAT);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 }
 
@@ -1372,13 +1480,17 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         : -1;
     env_sync(env);
     lower_init_value(b, p, env);
-    codegen_li_emit_store_local(b, slot);
+    // Phase 17 (17.A): keep the store type-correct on reassignment (float → FSTORE_LOCAL).
+    if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, slot);
+    else                                 codegen_li_emit_store_local(b, slot);
     if (tl >= 0) {
         codegen_li_emit_iconst(b, rhs_class >= 0 ? class_type_id(rhs_class) : -1);
         codegen_li_emit_store_local(b, g_traitlocal[tl].tid_slot);
     }
     // Phase 16 (16.B): keep the local's string-typed-ness in sync with its new value.
     localstr_set(nm, g_last_init_vt == TEKO_VT_STR);
+    // Phase 17 (17.A): keep the local's float-typed-ness in sync with its new value.
+    localflt_set(nm, g_last_init_vt == TEKO_VT_FLOAT);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     return 1;
 }
@@ -2495,7 +2607,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -2550,7 +2662,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -2582,7 +2694,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -2614,7 +2726,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.

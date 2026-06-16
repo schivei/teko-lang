@@ -1242,6 +1242,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
             }
+            // Phase 17 (17.A): the PARALLEL float accumulator ($f0/$f1) + a float local file
+            // ($fv0..$fv{n-1}) — declared only when the program uses floats so float-free modules
+            // stay byte-identical. $fvN mirrors $vN (a slot has one type; native reuses the slot).
+            if (ctx->wasm_emit_float) {
+                fprintf(f, "    (local $f0 f64) (local $f1 f64)\n");
+                for (int v = 0; v < ctx->wasm_local_count; v++) {
+                    fprintf(f, "    (local $fv%d f64)\n", v);
+                }
+            }
             ctx->wasm_open = 1;
             break;
 
@@ -1541,6 +1550,34 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         // ====================================================================
+        // 3b. Phase 17 (17.A): f64 VALUE MODEL — the parallel float accumulator ($f0/$f1) and the
+        // float local file ($fv0..). Every op is stack-neutral. The arith/move ops touch $f0/$f1
+        // only; the compares write $w0 (i32 0/1). float_pool[arg] is printed at %.17g so the WAT
+        // round-trips the EXACT double.
+        // ====================================================================
+        case OP_FCONST: {
+            double d = (ctx->float_pool && arg >= 0 && arg < ctx->float_count)
+                       ? ctx->float_pool[arg] : 0.0;
+            fprintf(f, "    f64.const %.17g\n    local.set $f0\n", d);
+            break;
+        }
+        case OP_FADD: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.add\n    local.set $f0\n"); break;
+        case OP_FSUB: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.sub\n    local.set $f0\n"); break;
+        case OP_FMUL: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.mul\n    local.set $f0\n"); break;
+        case OP_FDIV: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.div\n    local.set $f0\n"); break;
+        case OP_FEQ:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.eq\n    local.set $w0\n"); break;
+        case OP_FNE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.ne\n    local.set $w0\n"); break;
+        case OP_FLT:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.lt\n    local.set $w0\n"); break;
+        case OP_FLE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.le\n    local.set $w0\n"); break;
+        case OP_FGT:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.gt\n    local.set $w0\n"); break;
+        case OP_FGE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.ge\n    local.set $w0\n"); break;
+        case OP_FSTORE: fprintf(f, "    local.get $f0\n    local.set $f1\n"); break; // $f1 = $f0
+        case OP_FLOAD:  fprintf(f, "    local.get $f1\n    local.set $f0\n"); break; // $f0 = $f1
+        case OP_FSTORE_LOCAL: fprintf(f, "    local.get $f0\n    local.set $fv%d\n", arg); break;
+        case OP_FLOAD_LOCAL:  fprintf(f, "    local.get $fv%d\n    local.set $f0\n", arg); break;
+        case OP_I2F: fprintf(f, "    local.get $w0\n    f64.convert_i32_s\n    local.set $f0\n"); break;
+
+        // ====================================================================
         // 4. NATIVE ARENA ALLOCATOR (O(1) bump)
         // ====================================================================
         case OP_ARENA_PUSH:
@@ -1714,6 +1751,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // a handler body (same module-global count as $main; harmless if unused).
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
+            }
+            // Phase 17 (17.A): a routine body may also use floats (e.g. a method computing on f64
+            // locals). Declare the float accumulator + local file here too, gated identically so
+            // float-free routines stay byte-identical. Consistent with the $w0/$w1 declaration.
+            if (ctx->wasm_emit_float) {
+                fprintf(f, "    (local $f0 f64) (local $f1 f64)\n");
+                for (int v = 0; v < ctx->wasm_local_count; v++) {
+                    fprintf(f, "    (local $fv%d f64)\n", v);
+                }
             }
             fprintf(f, "    local.get $arg\n    local.set $cp\n");                       // channel base
             fprintf(f, "    local.get $frame\n    i32.load offset=0\n    local.set $w0\n"); // reload spilled $w0

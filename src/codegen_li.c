@@ -37,6 +37,12 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_object = 0;
     buffer->uses_vtable = 0;
 
+    // Phase 17 (17.A): the float-constant pool starts empty; uses_float gates the WASM float locals.
+    buffer->float_capacity = 8;
+    buffer->float_count = 0;
+    buffer->floats = (double*)malloc(sizeof(double) * buffer->float_capacity);
+    buffer->uses_float = 0;
+
     return buffer;
 }
 
@@ -75,6 +81,27 @@ int codegen_li_add_string_constant(BytecodeBuffer* buffer, const char* str) {
 
     buffer->pool.strings[buffer->pool.count] = strdup(str);
     return buffer->pool.count++;
+}
+
+// Phase 17 (17.A): add an f64 to the float pool (deduped by EXACT bit-equality so -0.0 and 0.0 are
+// distinct, NaN payloads preserved), returning its index — the 4-byte arg for OP_FCONST.
+int codegen_li_add_float_constant(BytecodeBuffer* buffer, double value) {
+    if (!buffer) return -1;
+
+    unsigned char vb[8];
+    memcpy(vb, &value, 8); // read the value's bit pattern without aliasing UB
+    for (int i = 0; i < buffer->float_count; i++) {
+        unsigned char eb[8];
+        memcpy(eb, &buffer->floats[i], 8);
+        if (memcmp(vb, eb, 8) == 0) return i; // exact bit-equal constant already pooled
+    }
+
+    if (buffer->float_count >= buffer->float_capacity) {
+        buffer->float_capacity *= 2;
+        buffer->floats = (double*)realloc(buffer->floats, sizeof(double) * buffer->float_capacity);
+    }
+    buffer->floats[buffer->float_count] = value;
+    return buffer->float_count++;
 }
 
 // Registers a host import (deduped by ns+name); returns its table index.
@@ -275,6 +302,36 @@ void codegen_li_emit_vtable(BytecodeBuffer* buffer, OpCode op) {
     emit_byte(buffer, (unsigned char)op);
 }
 
+// Phase 17 (17.A): float value-model emit helpers. Each sets uses_float so the WASM backend
+// declares the parallel float accumulator locals ($f0/$f1/$fvN); the integer path stays untouched.
+void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    int idx = codegen_li_add_float_constant(buffer, v);
+    emit_byte(buffer, OP_FCONST);
+    emit_int(buffer, idx); // 4-byte pool index (NOT the 64-bit immediate)
+}
+
+void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: FADD..FGE / FSTORE / FLOAD / I2F
+}
+
+void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_FSTORE_LOCAL);
+    emit_int(buffer, slot);
+}
+
+void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_FLOAD_LOCAL);
+    emit_int(buffer, slot);
+}
+
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {
     if (!buffer) return;
     emit_byte(buffer, OP_HALT);
@@ -392,5 +449,6 @@ void codegen_li_free_context(BytecodeBuffer* buffer) {
         if (buffer->imports[i].name) free(buffer->imports[i].name);
     }
     free(buffer->imports);
+    free(buffer->floats); // Phase 17 (17.A): the float-constant pool
     free(buffer);
 }

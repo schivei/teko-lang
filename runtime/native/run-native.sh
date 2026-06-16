@@ -186,6 +186,16 @@ false
 EXP
 )"
 check_fail parse_fail.tks "before" "convert.parse_int: invalid integer"
+# Phase 17 (17.A): the f64 VALUE MODEL — float literals, a float local, float arithmetic + mixed
+# int→float promotion, and float comparisons, carried through a PARALLEL float accumulator (xmm/d
+# on native), additive to the integer path. No float formatter yet (17.C/D), so each comparison's
+# 0/1 result is observed via convert.int_to_str (id 49). Byte-identical to the WASM proof.
+check float.tks "$(cat <<'EXP'
+a = 0
+b = 1
+c = 1
+EXP
+)"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

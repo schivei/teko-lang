@@ -141,6 +141,11 @@ static int compile_native_source(const char* input_path, const char* out_path,
     // $main exit when the program fires background tasks (`routines { … }`). Spawn-free
     // programs leave the flag 0 → emitted assembly is byte-identical to before Phase 14.
     teko_metal_set_emit_spawn(ctx, buffer->uses_spawn);
+    // Phase 17 (17.A): hand the hosted native emitter the float-constant pool (OP_FCONST's index
+    // space) + the uses_float flag. Float-free programs leave uses_float 0 → emitted assembly
+    // byte-identical to before Phase 17.
+    teko_metal_set_floats(ctx, buffer->floats, buffer->float_count);
+    teko_metal_set_emit_float(ctx, buffer->uses_float);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
     teko_metal_close(ctx);

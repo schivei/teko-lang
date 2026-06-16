@@ -115,6 +115,13 @@ typedef struct {
     int cf_loop_sp;
     int cf_if_stack[64];
     int cf_if_sp;
+    // Phase 17 (17.A): the float-constant pool (f64 bit patterns), threaded in so the hosted
+    // native + WASM emitters resolve OP_FCONST's 4-byte index to the actual double. NULL/0 when
+    // unset (non-float programs). wasm_emit_float gates the WASM `(local $f0/$f1/$fvN f64)`
+    // declarations — off keeps non-float modules byte-identical. Unused by the freestanding emitters.
+    const double* float_pool;
+    int float_count;
+    int wasm_emit_float;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -153,6 +160,11 @@ void teko_metal_set_emit_await(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_retry(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_object(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_vtable(MetalContext* ctx, int enabled);
+
+// Phase 17 (17.A): hand the backend the float-constant pool (OP_FCONST's index space). `floats`
+// must outlive teko_metal_emit_program. teko_metal_set_emit_float gates the WASM float locals.
+void teko_metal_set_floats(MetalContext* ctx, const double* floats, int count);
+void teko_metal_set_emit_float(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

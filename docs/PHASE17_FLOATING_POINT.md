@@ -123,4 +123,37 @@ surface, native + WASM); **no merge / force-push** — the human merges.
 
 ## Status
 **Phase opened.** Plan/scope above; branch + draft PR up; `docs/plan.md` + `CLAUDE.md` renumbered
-(Phase 17 inserted; old 17–22 → 18–23). Implementation begins at **17.A** (f64 value model).
+(Phase 17 inserted; old 17–22 → 18–23).
+
+Sub-block **17.A (f64 value model) is DONE** on both targets (locally green). Float literals
+(`3.14`/`2.0`/`0.5` — the lexer emits `TOKEN_LIT_FLOAT` only for a `<digits>.<digits>` fraction;
+`e`/`E` exponents and the `f` suffix are not lexed as floats, so they are out of scope here),
+float locals, float arithmetic (`+ - * /`), float comparisons (`== != < <= > >=`), and mixed
+int→float promotion (`OP_I2F`) are carried end to end through a PARALLEL float accumulator,
+purely additive to the integer path:
+- **IL opcodes** `OP_FCONST` (0x71, 4-byte float-pool index — NOT a 64-bit immediate) + `OP_FADD/
+  FSUB/FMUL/FDIV` + `OP_FEQ..FGE` + `OP_FSTORE/FLOAD/FSTORE_LOCAL/FLOAD_LOCAL` + `OP_I2F`
+  (0x72–0x81; `0x76`=FMOD / `0x82`=F2I reserved for 17.B, NOT emitted). A **float-constant pool**
+  (`BytecodeBuffer.floats`, dedup by bit-equality) mirrors the string pool; `uses_float` gates the
+  WASM float locals.
+- **Native (`emit_native_hosted.c`):** `$f0/$f1` = `xmm0/xmm1` (x86_64) / `d0/d1` (arm64); float
+  locals reuse the integer frame slots (`movsd` / `str d`/`ldr d`); FCONST scratch is `r11`/`x9`
+  (never `$w0`/`$w1`); compares via `ucomisd`+`set{a,ae,e,ne}` (NaN-correct with `setnp`/`setp`) /
+  `fcmp`+`cset`.
+- **WASM (`emit_wasm.c`):** `(local $f0 f64)/(local $f1 f64)` + a `$fvN` float local file declared
+  at every function open, gated by `wasm_emit_float` (float-free modules byte-identical); ops lower
+  to `f64.const/add/sub/mul/div`, `f64.{eq,ne,lt,le,gt,ge}` (→ `$w0`), `f64.convert_i32_s`. FCONST
+  prints `%.17g` so the WAT round-trips the exact double.
+- **Frontend (`frontend_interop.c`):** `TEKO_VT_FLOAT` (a high sentinel `1<<20`, chosen so it never
+  collides with `TEKO_VT_OBJ_BASE + class_index` — every existing `>= OBJ_BASE` site is untouched);
+  a `g_localflt` registry parallel to `g_localstr`; `eval_expr_prec` promotes/spills per operand
+  type and emits the float op; `let`/reassignment store floats via `FSTORE_LOCAL`. A `VT_FLOAT`
+  operand reaching a string concat is a deliberate no-op (float→string is 17.D).
+- **Proof:** `runtime/{native,wasm}/samples/float.tks` → `a = 0` / `b = 1` / `c = 1` (float
+  arithmetic + mixed promotion + comparisons, each 0/1 result observed via `convert.int_to_str`
+  id 49 — no float formatter yet). Native (`run-native.sh`) and WASM (`run-float.mjs`,
+  reactor-backed) outputs are BYTE-FOR-BYTE identical.
+
+Verification: suite 232/232; ASan/UBSan (both dispatch paths) + TSan clean; the 16 native goldens
++ all float-free native/WASM output byte-identical (integer path untouched). Implementation
+continues at **17.B** (checked int↔float casts).

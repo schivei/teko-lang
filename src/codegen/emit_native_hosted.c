@@ -736,6 +736,90 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
         }
 
+        // ============================================================================
+        // Phase 17 (17.A): f64 VALUE MODEL — a parallel float accumulator. $f0=xmm0/d0,
+        // $f1=xmm1/d1 (both caller-saved; no float expression spans a call in the hosted
+        // subset). Float locals reuse the EXISTING integer frame slots (one type per slot),
+        // accessed with movsd / str d / ldr d. FCONST's scratch GPR is r11 (x86) / x9 (arm64)
+        // — NEVER $w0(rax/x0) or $w1(rbx/x19) — so the integer accumulator is preserved.
+        // ============================================================================
+        case OP_FCONST: {
+            // Load the 64-bit bit pattern of float_pool[arg] into $f0.
+            uint64_t u = 0;
+            if (ctx->float_pool && arg >= 0 && arg < ctx->float_count) {
+                double d = ctx->float_pool[arg];
+                memcpy(&u, &d, 8); // read the f64 bit pattern (no aliasing UB)
+            }
+            if (arm) {
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(u & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((u >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((u >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((u >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d0, x9\n");
+            } else {
+                fprintf(f, "    movabsq $%llu, %%r11\n", (unsigned long long)u);
+                fprintf(f, "    movq %%r11, %%xmm0\n");
+            }
+            break;
+        }
+        case OP_FADD: fprintf(f, arm ? "    fadd d0, d0, d1\n" : "    addsd %%xmm1, %%xmm0\n"); break;
+        case OP_FSUB: fprintf(f, arm ? "    fsub d0, d0, d1\n" : "    subsd %%xmm1, %%xmm0\n"); break;
+        case OP_FMUL: fprintf(f, arm ? "    fmul d0, d0, d1\n" : "    mulsd %%xmm1, %%xmm0\n"); break;
+        case OP_FDIV: fprintf(f, arm ? "    fdiv d0, d0, d1\n" : "    divsd %%xmm1, %%xmm0\n"); break;
+
+        // Float compares: $w0 = ($f0 <cmp> $f1) ? 1 : 0. x86 `ucomisd %xmm1,%xmm0` sets CF/ZF/PF
+        // from the unsigned-style float comparison of xmm0 vs xmm1; the seta/setae/setb/setbe family
+        // reads them. ucomisd raises the parity flag on unordered (NaN): for ==, NaN must yield 0
+        // (a NaN compares-equal only via the false path) so we AND with `setnp`; for !=, NaN yields 1
+        // so we OR with `setp`. arm64 `fcmp d0,d1` + cset with the standard (unordered-aware) CCs.
+        case OP_FEQ: case OP_FNE: case OP_FLT: case OP_FLE: case OP_FGT: case OP_FGE: {
+            if (arm) {
+                const char* cc = (op == OP_FEQ) ? "eq" : (op == OP_FNE) ? "ne" :
+                                 (op == OP_FLT) ? "mi" : (op == OP_FLE) ? "ls" :
+                                 (op == OP_FGT) ? "gt" : "ge";
+                // AArch64 fcmp: mi=LT, ls=LE, gt=GT, ge=GE, eq=EQ, ne=NE — all NaN-correct
+                // (NaN sets C=1,Z=0,N=0,V=1; mi/ls/gt/ge/eq are false, ne is true under that flag set).
+                fprintf(f, "    fcmp d0, d1\n    cset w0, %s\n", cc);
+            } else {
+                if (op == OP_FEQ) {
+                    fprintf(f, "    ucomisd %%xmm1, %%xmm0\n");
+                    fprintf(f, "    sete %%al\n    setnp %%cl\n    andb %%cl, %%al\n    movzbl %%al, %%eax\n");
+                } else if (op == OP_FNE) {
+                    fprintf(f, "    ucomisd %%xmm1, %%xmm0\n");
+                    fprintf(f, "    setne %%al\n    setp %%cl\n    orb %%cl, %%al\n    movzbl %%al, %%eax\n");
+                } else {
+                    // Ordered LT/LE/GT/GE: use the carry/zero flags. seta = CF=0&ZF=0 (>), setae = CF=0
+                    // (>=); for < and <= swap operands so the same a/ae flags express them. NaN sets
+                    // CF=1 → a/ae are false → result 0, the correct ordered-compare-with-NaN answer.
+                    const char* setcc; const char* xa; const char* xb;
+                    if (op == OP_FGT)      { setcc = "seta";  xa = "%xmm1"; xb = "%xmm0"; } // f0 >  f1
+                    else if (op == OP_FGE) { setcc = "setae"; xa = "%xmm1"; xb = "%xmm0"; } // f0 >= f1
+                    else if (op == OP_FLT) { setcc = "seta";  xa = "%xmm0"; xb = "%xmm1"; } // f1 >  f0
+                    else                   { setcc = "setae"; xa = "%xmm0"; xb = "%xmm1"; } // f1 >= f0  (FLE)
+                    fprintf(f, "    ucomisd %s, %s\n", xa, xb);
+                    fprintf(f, "    %s %%al\n    movzbl %%al, %%eax\n", setcc);
+                }
+            }
+            break;
+        }
+
+        case OP_FSTORE: fprintf(f, arm ? "    fmov d1, d0\n" : "    movapd %%xmm0, %%xmm1\n"); break; // $f1 = $f0
+        case OP_FLOAD:  fprintf(f, arm ? "    fmov d0, d1\n" : "    movapd %%xmm1, %%xmm0\n"); break; // $f0 = $f1
+
+        case OP_FSTORE_LOCAL:
+            if (arm) fprintf(f, "    str d0, [x29, #%d]\n", local_off_arm(arg));
+            else     fprintf(f, "    movsd %%xmm0, %d(%%rbp)\n", local_off_x86(arg));
+            break;
+        case OP_FLOAD_LOCAL:
+            if (arm) fprintf(f, "    ldr d0, [x29, #%d]\n", local_off_arm(arg));
+            else     fprintf(f, "    movsd %d(%%rbp), %%xmm0\n", local_off_x86(arg));
+            break;
+
+        case OP_I2F: // $f0 = (double)$w0  (register-width signed int → double)
+            if (arm) fprintf(f, "    scvtf d0, x0\n");
+            else     fprintf(f, "    cvtsi2sdq %%rax, %%xmm0\n");
+            break;
+
         default:
             break; // unsupported opcode in the hosted subset (straight-line surface)
     }

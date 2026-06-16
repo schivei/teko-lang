@@ -63,6 +63,10 @@ int codegen_li_emit_wasm(const BytecodeBuffer* buffer, const char* wat_path,
     teko_metal_set_emit_object(ctx, buffer->uses_object);
     // Phase 15 (15.B): import the static-vtable dispatch entry points from the reactor + share memory.
     teko_metal_set_emit_vtable(ctx, buffer->uses_vtable);
+    // Phase 17 (17.A): hand the WASM emitter the float-constant pool + uses_float flag (the latter
+    // gates the `(local $f0/$f1/$fvN f64)` declarations — float-free modules stay byte-identical).
+    teko_metal_set_floats(ctx, buffer->floats, buffer->float_count);
+    teko_metal_set_emit_float(ctx, buffer->uses_float);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
 
