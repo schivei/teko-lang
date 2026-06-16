@@ -271,8 +271,19 @@ merge/force-push** (the human merges).
   deterministic (time passed in); the wrappers supply the real clock. Time tests assert LOWER
   BOUNDS on real elapsed + ordering (tolerant, fast, non-flaky), never exact counters.
 
+- **Wall-clock / timezone surface (owner ask)** — ✅ OS-sourced CIVIL time, distinct from the
+  monotonic clock (that's elapsed/deadlines; this is wall-clock). `time.now_unix()` (epoch seconds
+  as a decimal string — the user can do time math on it), `time.now_local()`/`time.now_utc()`,
+  `time.format_local(epoch)`/`time.format_utc(epoch)` → ISO-8601, **system-local zone + DST by
+  default**. `src/runtime/teko_time.c` is the portable formatter (single source of truth, KAT-able,
+  reactor-safe); the OS supplies the current timestamp + DST-correct local offset (native
+  `time()`+`localtime`; WASM reactor imports `env.teko_now_unix`/`env.teko_tz_offset`). Surface =
+  OP_CALL_RUNTIME ids 44-48 (string-returning, reactor-backed on WASM like crypto). Proofs
+  `time.tks` native (run-native.sh `check_time`) + WASM (`run-time.mjs`, stubbed host clock →
+  deterministic). KATs `tests/runtime/test_time.c`.
+
 **Phase 14 is COMPLETE** — all sub-blocks (14.A–14.I) + the control-flow foundation are done and
 CI-green on all four gates; no dead tokens (every reserved concurrency/resilience keyword is live
 with an executable `.tks` proof on native AND WASM); routines support real concurrent
-producer/consumer via Go-style arguments; and all timing runs on the real monotonic clock. Ready
-to leave draft.
+producer/consumer via Go-style arguments; all timing runs on the real monotonic clock; and an
+OS-backed wall-clock/timezone surface (system-local + DST) is in place. Ready to leave draft.

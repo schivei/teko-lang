@@ -257,9 +257,14 @@ untouched. Proof `producer_consumer.tks` native + WASM → 15.
 MONOTONIC ns clock** (`teko_rt_now_ns` = CLOCK_MONOTONIC / QueryPerformanceCounter; WASM imports
 `env.teko_now_ns`), replacing the logical clock — keeping cooperative NON-BLOCKING scheduling (only
 the time source changed). Runtimes stay clock-agnostic + KAT-deterministic (time passed in); time
-tests assert real-elapsed lower bounds + ordering (no exact counters). **Pending (owner, not yet
-done): a wall-clock/timezone surface** — current timestamp + TZ-aware conversion via the OS
-(system TZ + DST default, user time-calc allowed); see `docs/HANDOFF_PHASE14.md`.
+tests assert real-elapsed lower bounds + ordering (no exact counters).
+**Wall-clock / timezone surface is DONE** (owner ask): OS-sourced CIVIL time (distinct from the
+monotonic clock) — `time.now_unix()` (epoch secs as a decimal string, user can do math),
+`time.now_local()`/`now_utc()`, `time.format_local(epoch)`/`format_utc(epoch)` → ISO-8601, system
+local zone + DST by default. `src/runtime/teko_time.c` = portable formatter (source of truth,
+KAT-able); the OS supplies the timestamp + DST-correct local offset (native `time()`+`localtime`;
+WASM reactor imports `env.teko_now_unix`/`env.teko_tz_offset`). Surface = OP_CALL_RUNTIME ids 44-48
+(reactor-backed on WASM). Proofs `time.tks` native + WASM (`run-time.mjs`, stubbed clock).
 **PHASE 14 IS COMPLETE** — 14.A–14.I + control-flow foundation all done & CI-green on all four
 gates; no dead tokens (every reserved concurrency/resilience keyword is live with an executable
 `.tks` proof on native AND WASM); routines support real producer/consumer via Go-style args; all

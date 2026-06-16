@@ -71,15 +71,16 @@ it. (14.F's routine-trampoline alternative avoids loop-IL, but the 14.H samples 
    elapsed/cooldown). Runtimes stay clock-agnostic (time passed in → KAT-deterministic); the
    wrappers supply the real clock. Time tests assert real-elapsed LOWER BOUNDS + ordering (tolerant,
    fast, non-flaky), never exact counters. All reactor harnesses now pass `env.teko_now_ns`.
-2. **Wall-clock + timezone surface — PENDING (owner ask).** Fetching a current timestamp or doing
-   a timezone conversion must also go through the OS: use the system local time + timezone as the
-   default, honor DST, but still let the user apply time calculations. This is a NEW date/time
-   language surface (distinct from the monotonic clock above — that's for elapsed/deadlines; this is
-   wall-clock civil time). Design sketch: an OS-backed `time.*` surface — `time.now()` (Unix epoch
-   from CLOCK_REALTIME / time(); WASM host import), local/UTC breakdown via `localtime_r`/`gmtime_r`
-   (OS tz database → DST), field accessors + formatting, and arithmetic on epoch values. Implement
-   as portable C runtime (source of truth, KATs with a fixed epoch for determinism) → native
-   `teko_rt_time_*` + WASM reactor/host imports → `.tks` proofs both targets. NOT yet started.
+2. **Wall-clock + timezone surface — DONE** (commit `737fcb9`; owner chose the string-based shape).
+   OS-sourced civil time, distinct from the monotonic clock. `time.now_unix()` (epoch seconds as a
+   decimal string — user can do math on it), `time.now_local()`/`time.now_utc()`,
+   `time.format_local(epoch)`/`time.format_utc(epoch)` → ISO-8601, system-local + DST by default.
+   `src/runtime/teko_time.c` is the portable FORMATTER (source of truth, KAT-able, reactor-safe);
+   the two platform facts (current timestamp + DST-correct local offset) come from the OS — native
+   `time()`+`localtime` (offset via field-difference, MSVC-safe), WASM reactor imports
+   `env.teko_now_unix`/`env.teko_tz_offset`. Surface = OP_CALL_RUNTIME ids 44-48 (reactor-backed on
+   WASM, like crypto). Proofs `time.tks` native (run-native.sh `check_time`, TZ=UTC) + WASM
+   (`run-time.mjs`, stubbed host clock → deterministic). KATs `tests/runtime/test_time.c`.
 
 ## ▶ RESUME POINT (read first) — for a FRESH session on this same branch/PR
 - **Branch:** `feat/phase-14-advanced-concurrency` (PR #7, draft); resume from its latest commit
