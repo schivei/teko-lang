@@ -918,3 +918,36 @@ void test_frontend_interop_shared_lowering(void) {
 
     codegen_li_free_context(buffer);
 }
+
+// Phase 14 (14.G): timespan literals carrying a time-unit suffix normalize to canonical
+// milliseconds at compile time, so the integer-only channel/delay runtimes stay unchanged.
+// `2s` → ICONST 2000, `1m` → 60000, `500ms` → 500; a unit-less value passes through.
+static int il_has_iconst(const BytecodeBuffer* b, int value) {
+    for (int i = 0; i + 4 < b->size; i++) {
+        if (b->code[i] == OP_ICONST) {
+            int v = (int)((unsigned)b->code[i+1] | ((unsigned)b->code[i+2] << 8) |
+                          ((unsigned)b->code[i+3] << 16) | ((unsigned)b->code[i+4] << 24));
+            if (v == value) return 1;
+        }
+    }
+    return 0;
+}
+
+void test_frontend_interop_timespan_normalization(void) {
+    const char* src =
+        "let d = delayed.open(8);\n"
+        "delayed.send(d, 7, 2s);\n"     // 2s   -> 2000 ms; value 7 unchanged
+        "delayed.send(d, 8, 500ms);\n"  // 500ms-> 500 ms
+        "delayed.send(d, 9, 1m);\n";    // 1m   -> 60000 ms
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 2000));  // 2s normalized
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 500));   // 500ms
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 60000)); // 1m
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 7));     // unit-less value unchanged
+
+    codegen_li_free_context(buffer);
+}

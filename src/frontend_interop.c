@@ -28,6 +28,23 @@ static char* strip_quotes(const char* s) {
     return strdup(s);
 }
 
+// Phase 14 (14.G): normalize an integer literal token carrying an optional unit suffix to its
+// canonical integer value. TIME units fold to milliseconds (ms/s/m/h/d) — the canonical timespan
+// the runtimes use; other units (data/bandwidth) and unit-less literals pass through unchanged.
+// The lexer stores the numeric text in `lexeme` (suffix excluded) and the unit in `literal_unit`,
+// so e.g. `2s` → lexeme "2" + LIT_UNIT_S → 2000. Used for channel delay args and `wait`/`await`.
+static long literal_canonical_value(const Token* t) {
+    long v = (long)atoi(t->lexeme);
+    switch (t->literal_unit) {
+        case LIT_UNIT_MS: return v;
+        case LIT_UNIT_S:  return v * 1000L;
+        case LIT_UNIT_M:  return v * 60000L;
+        case LIT_UNIT_H:  return v * 3600000L;
+        case LIT_UNIT_D:  return v * 86400000L;
+        default:          return v; // ms-less / data / bandwidth literals are unchanged
+    }
+}
+
 // Teko-visible callee name -> import-table index.
 typedef struct { char* name; int idx; } ImportBinding;
 
@@ -426,7 +443,9 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
         free(s);
         fe_advance(p);
     } else if (p->current_token.type == TOKEN_LIT_INT) {
-        codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
+        // Phase 14 (14.G): a timespan literal arg (e.g. `delayed.send(d, v, 2s)`) normalizes to
+        // canonical milliseconds at compile time, so the runtimes stay integer-only and unchanged.
+        codegen_li_emit_iconst(b, (int)literal_canonical_value(&p->current_token));
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
