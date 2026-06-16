@@ -33,6 +33,24 @@ check() {
   echo "OK: $base -> [$got]"
 }
 
+# Real-time waiters: assert exact stdout AND a LOWER BOUND on real wall-clock elapsed (the time
+# base is the real monotonic clock, so we assert >= min_ms with tolerance, not an exact duration).
+# Timed via perl Time::HiRes (portable; macOS `date` lacks %N).
+check_timed() {
+  local sample="$1" expected="$2" min_ms="$3"
+  local base exe got ms
+  base="$(basename "$sample" .tks)"
+  exe="$TMP/$base"
+  echo "--- $sample (timed >= ${min_ms}ms) ---"
+  "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$("$exe")" || fail "$base exited non-zero"
+  [ "$got" = "$expected" ] || fail "$base: expected [$expected], got [$got]"
+  ms="$(perl -MTime::HiRes=time -e 'my $t=time; system("$ARGV[0] >/dev/null 2>&1"); printf "%.0f", (time-$t)*1000' "$exe")"
+  [ "$ms" -ge "$min_ms" ] || fail "$base: real elapsed ${ms}ms < ${min_ms}ms (real-time wait not honored)"
+  echo "OK: $base -> [$got] in ~${ms}ms (>= ${min_ms}ms real)"
+}
+
 # CSPRNG: non-deterministic, so assert format (two 64-hex-char lines) + that they differ.
 check_random() {
   local sample="$1" exe got l1 l2
@@ -109,15 +127,16 @@ check shared.tks "$(cat <<'EXP'
 10
 EXP
 )"
-# Phase 14 (14.G): timespan waiters — `await 5ms;` cooperatively drains the run queue so the
-# queued worker runs AT the await (output 1,2,3, not 1,3,2-at-exit); `wait 10ms;` is a real sync
-# sleep. Lowers to teko_rt_await_ms / teko_rt_sleep_ms; 5ms/10ms normalize to canonical ms.
-check waiters.tks "$(cat <<'EXP'
+# Phase 14 (real-time clock): timespan waiters — `await 5ms;` cooperatively drains the run queue so
+# the queued worker runs AT the await (output 1,2,3); `wait 10ms;` waits on the REAL monotonic clock.
+# Lowers to teko_rt_await_ns / teko_rt_wait_ns. Assert order + real elapsed >= 12ms (await 5 + wait
+# 10 ≈ 15ms; lower bound with tolerance — the time source is real, so no exact duration).
+check_timed waiters.tks "$(cat <<'EXP'
 1
 2
 3
 EXP
-)"
+)" 12
 
 # Phase 14 (control-flow foundation): structured loops + branches lowered from source — a
 # while-loop sums 0..4 = 10; a loop{}+if+break/continue counts to 5. Lowers to OP_LOOP_*/OP_IF_*.

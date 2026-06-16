@@ -545,8 +545,8 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         // sleep (teko_rt_sleep_ms, always linked); `await` is a cooperative yield that drains the
         // run queue (teko_rt_await_ms, in the scheduler TU — emit_await sets uses_spawn so the
         // routine table the scheduler walks is emitted). Both take ms in arg0, return void.
-        case OP_WAIT:      emit_call(ctx, "teko_rt_sleep_ms", 1); break;
-        case OP_AWAIT_FOR: emit_call(ctx, "teko_rt_await_ms", 1); break;
+        case OP_WAIT:      emit_call(ctx, "teko_rt_wait_ns", 1); break;  // real-time cooperative wait
+        case OP_AWAIT_FOR: emit_call(ctx, "teko_rt_await_ns", 1); break; // real-time wait + drain
 
         // Phase 14 (14.F): resilience policy ops -> teko_rt_retry_*/teko_rt_circuit_* runtime calls.
         case OP_RETRY_NEW:

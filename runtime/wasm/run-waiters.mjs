@@ -1,37 +1,37 @@
-// Phase 14 (14.G) — timespan waiters (`wait`/`await`) on the WASM target. The teko binary
-// compiles samples/waiters.tks to a module whose OP_WAIT/OP_AWAIT_FOR lower to the host imports
-// env.teko_sleep / env.teko_await (the ms delay, already unit-normalized to canonical
-// milliseconds at compile time) plus a cooperative scheduler drain ($teko_sched_run) for await.
-// This host captures those calls and asserts: (1) the await drained the queued worker AT the
-// await point (output order 1,2,3 — not the at-exit 1,3,2), and (2) the host observed the exact
-// normalized ms (await 5ms -> 5, wait 10ms -> 10). No reactor: the module owns its memory.
+// Phase 14 (real-time clock) — timespan waiters (`wait`/`await`) on the WASM target. The teko
+// binary compiles samples/waiters.tks to a module whose OP_WAIT/OP_AWAIT_FOR read the host
+// MONOTONIC ns clock (env.teko_now_ns) and spin cooperatively until the real deadline — `await`
+// also drains the in-module scheduler ($teko_sched_run). Because the time source is REAL (not a
+// logical clock), this asserts a LOWER BOUND on real elapsed time + the cooperative interleave
+// order — not exact counters (the clock is non-deterministic). No reactor: the module owns memory.
+//
+// teko_now_ns = process.hrtime.bigint() (real ns). The sample: routines{worker}; log 1; await 5ms
+// (drains -> worker logs 2); log 3; wait 10ms. So order is [1,2,3] and real elapsed >= ~15ms.
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 
 const out = [];
-const sleeps = [];
-const awaits = [];
 const env = {
+  teko_now_ns: () => process.hrtime.bigint(), // real monotonic nanoseconds
   log_int: (n) => { out.push(n | 0); },
-  teko_sleep: (ms) => { sleeps.push(ms | 0); }, // record (no real sleep — deterministic)
-  teko_await: (ms) => { awaits.push(ms | 0); },
 };
 
+const t0 = process.hrtime.bigint();
 const sample = await readFile(here("./samples/waiters.wasm"));
 const teko = await WebAssembly.instantiate(sample, { env });
 teko.instance.exports.main();
+const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
 
-const okOrder  = JSON.stringify(out) === JSON.stringify([1, 2, 3]);
-const okAwait  = JSON.stringify(awaits) === JSON.stringify([5]);   // 5ms normalized
-const okSleep  = JSON.stringify(sleeps) === JSON.stringify([10]);  // 10ms normalized
-if (okOrder && okAwait && okSleep) {
-  console.log(`OK   waiters(wasm): await drained worker (order ${JSON.stringify(out)}), ` +
-              `await=${JSON.stringify(awaits)}ms wait=${JSON.stringify(sleeps)}ms (normalized)`);
+const okOrder = JSON.stringify(out) === JSON.stringify([1, 2, 3]); // await drained the worker
+const okTime  = elapsedMs >= 12; // await 5ms + wait 10ms ≈ 15ms; lower bound 12ms (clock tolerance)
+if (okOrder && okTime) {
+  console.log(`OK   waiters(wasm): real-time await+wait, order ${JSON.stringify(out)}, ` +
+              `elapsed ${elapsedMs.toFixed(1)}ms (>= 12ms, real monotonic clock)`);
   process.exit(0);
 } else {
   console.error(`FAIL waiters(wasm): out=${JSON.stringify(out)} (want [1,2,3]), ` +
-                `awaits=${JSON.stringify(awaits)} (want [5]), sleeps=${JSON.stringify(sleeps)} (want [10])`);
+                `elapsed=${elapsedMs.toFixed(1)}ms (want >= 12ms)`);
   process.exit(1);
 }

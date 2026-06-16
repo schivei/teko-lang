@@ -85,15 +85,15 @@ void teko_rt_run(void) {
     }
 }
 
-// Phase 14 (14.G): `await <ts>;` — a cooperative timed yield (OP_AWAIT_FOR; ms in arg0). It
-// advances a logical clock by `ms` (deterministic deadline ordering, the 14.C timer-queue idea)
-// and drains the run queue, so a routine that `await`s lets already-queued background tasks run
-// at that point. MVP semantics: native tasks are run-to-completion, so `await` is a cooperative
-// "let others run" yield rather than real timer suspension — the WASM Layer A path mirrors it via
-// $teko_sched_run. Real timer-based suspension is future work. The logical clock is exposed for
-// later timer-ordered scheduling; today it just records elapsed awaited time.
-static long teko_rt_logical_now = 0;
-void teko_rt_await_ms(long ms) {
-    if (ms > 0) teko_rt_logical_now += ms;
-    teko_rt_run(); // cooperative drain: queued routines run at the await point
+// Phase 14 (14.G): `await <ts>;` — a cooperative REAL-TIME timed yield (OP_AWAIT_FOR; ms in arg0).
+// It drains the run queue (so queued background tasks run at the await point) and returns only once
+// the real MONOTONIC clock has advanced by at least `ms` ms. Cooperative + non-blocking: the OS
+// thread is never blocked in the kernel — it keeps draining the scheduler and re-checks the real
+// clock (owner decision: cooperative scheduling, real time source). Compare teko_rt_wait_ns, which
+// waits the same real span WITHOUT draining the queue.
+void teko_rt_await_ns(long ms) {
+    long long deadline = teko_rt_now_ns() + (ms > 0 ? (long long)ms * 1000000LL : 0);
+    do {
+        teko_rt_run(); // cooperative drain: queued routines run at the await point
+    } while (teko_rt_now_ns() < deadline);
 }

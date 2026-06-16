@@ -14,8 +14,7 @@ const out = [];
 const env = {
   memory,
   teko_random: (ptr, len) => { const u = new Uint8Array(memory.buffer); for (let i = 0; i < (len >>> 0); i++) u[(ptr >>> 0) + i] = 0; },
-  teko_sleep: () => {},
-  teko_await: () => {},
+  teko_now_ns: () => process.hrtime.bigint(), // real monotonic ns — the await's time base
   log_int: (n) => { out.push(n | 0); },
 };
 

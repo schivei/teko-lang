@@ -956,7 +956,7 @@ static void emit_wasm_threads(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             fprintf(f, "  (type $task (func (param i32)))\n");
             fprintf(f, "  (func $main (result i32)\n");
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32) (local $tdl i64)\n");
             ctx->wasm_open = 1;
             break;
 
@@ -1052,7 +1052,7 @@ static void emit_wasm_threads(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  )\n");
             }
             fprintf(f, "  (func $routine_%d (param $arg i32)\n", arg);
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32) (local $tdl i64)\n");
             fprintf(f, "    local.get $arg\n    local.set $cp\n");
             ctx->wasm_open = 2;
             if (ctx->wasm_routine_count < 64) ctx->wasm_routine_ids[ctx->wasm_routine_count] = arg;
@@ -1184,14 +1184,13 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_allow\" (func $circuit_allow (param i32) (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_record\" (func $circuit_record (param i32) (param i32) (param i32) (result i32)))\n");
             }
-            // Phase 14 (14.G): timespan waiters use host imports (NOT the reactor). `wait` sleeps
-            // synchronously via env.teko_sleep(ms); `await` records the ms via env.teko_await(ms)
-            // then drains the in-module scheduler ($teko_sched_run) — a cooperative timed yield.
-            if (ctx->wasm_emit_wait) {
-                fprintf(f, "  (import \"env\" \"teko_sleep\" (func $teko_sleep (param i32)))\n");
-            }
-            if (ctx->wasm_emit_await) {
-                fprintf(f, "  (import \"env\" \"teko_await\" (func $teko_await (param i32)))\n");
+            // Phase 14 (real-time clock): timespan waiters read the host MONOTONIC ns clock
+            // (env.teko_now_ns) and spin cooperatively until the real deadline — `wait` just spins,
+            // `await` also drains the in-module scheduler ($teko_sched_run). Non-blocking: the
+            // module re-checks the real clock rather than blocking the host thread. (Node:
+            // process.hrtime.bigint() — real ns; browser: performance.now()*1e6, coarsened.)
+            if (ctx->wasm_emit_wait || ctx->wasm_emit_await) {
+                fprintf(f, "  (import \"env\" \"teko_now_ns\" (func $teko_now_ns (result i64)))\n");
             }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
@@ -1219,7 +1218,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (func $main (result i32)\n");
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $tdl i64)\n");
             fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");
             // Phase 12: named local variables ($v0..$v{n-1}) for `let`/`mut` bindings.
             for (int v = 0; v < ctx->wasm_local_count; v++) {
@@ -1368,16 +1367,21 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_store\n");
             break;
 
-        // Phase 14 (14.G): timespan waiters. The ms delay is in $w0. `wait` calls the host sleep
-        // import (synchronous on the host); `await` records the ms via the host import then drains
-        // the cooperative scheduler so queued background tasks run at the await point. Stack-neutral:
-        // each host import takes one i32 and returns nothing; $teko_sched_run is nullary.
+        // Phase 14 (real-time clock): timespan waiters. The ms delay is in $w0. Compute a real ns
+        // deadline (now + ms*1e6) in the i64 local $tdl, then spin until the real MONOTONIC clock
+        // reaches it — `await` also drains the scheduler each turn so queued tasks run. Cooperative
+        // + non-blocking (re-checks the host clock; never blocks). Stack-neutral.
         case OP_WAIT:
-            fprintf(f, "    local.get $w0\n    call $teko_sleep\n");
+        case OP_AWAIT_FOR: {
+            int id = ctx->cf_id_next++; // unique block/loop labels
+            fprintf(f, "    local.get $w0\n    i64.extend_i32_u\n    i64.const 1000000\n    i64.mul\n");
+            fprintf(f, "    call $teko_now_ns\n    i64.add\n    local.set $tdl\n"); // deadline
+            fprintf(f, "    (block $waitd_%d (loop $waitl_%d\n", id, id);
+            if (op == OP_AWAIT_FOR) fprintf(f, "      call $teko_sched_run\n");    // cooperative drain
+            fprintf(f, "      call $teko_now_ns\n      local.get $tdl\n      i64.ge_u\n      br_if $waitd_%d\n", id);
+            fprintf(f, "      br $waitl_%d))\n", id);
             break;
-        case OP_AWAIT_FOR:
-            fprintf(f, "    local.get $w0\n    call $teko_await\n    call $teko_sched_run\n");
-            break;
+        }
 
         // Phase 14 (control-flow foundation): structured loops + branches. A loop is a block
         // (break target $brk_N) wrapping a loop (continue/back-edge target $cont_N); `if` uses the
@@ -1634,7 +1638,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             }
             int n = ctx->wasm_routine_yields;                    // yield points in this routine
             fprintf(f, "  (func $routine_%d (param $arg i32) (param $state i32) (param $frame i32) (result i32)\n", arg);
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $tdl i64)\n");
             // Import-arg staging slots (Phase 11): a callback routine invoked via
             // $teko_invoke calls dom.* imports just like $main, so it needs $a0..$a2.
             fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");

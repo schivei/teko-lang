@@ -127,12 +127,18 @@ void teko_rt_run(void);
 void teko_rt_spawn_setarg(long idx, long val);
 void teko_rt_spawn_args(long slot);
 
-// Phase 14 (14.G) — timespan waiters. teko_rt_sleep_ms (in teko_rt.c, always linked) is a real
-// synchronous sleep for `ms` milliseconds (`wait <ts>;` → OP_WAIT). teko_rt_await_ms (in the
-// scheduler TU teko_rt_sched.c) is a cooperative timed yield (`await <ts>;` → OP_AWAIT_FOR): it
-// advances a logical clock by `ms` and drains the run queue so queued background tasks run.
-void teko_rt_sleep_ms(long ms);
-void teko_rt_await_ms(long ms);
+// Phase 14 (real-time clock) — a portable MONOTONIC nanosecond clock; the time base for the
+// cooperative waiters/delays/timeouts. Native: CLOCK_MONOTONIC / QueryPerformanceCounter; WASM:
+// imports env.teko_now_ns. Only differences are meaningful (arbitrary epoch).
+long long teko_rt_now_ns(void);
+
+// Phase 14 (14.G) — timespan waiters (real time, cooperative, non-blocking). teko_rt_wait_ns
+// (`wait <ts>;` → OP_WAIT, in teko_rt.c) spins on the real clock until `ms` ms have elapsed.
+// teko_rt_await_ns (`await <ts>;` → OP_AWAIT_FOR, in the scheduler TU) ALSO drains the run queue
+// while waiting so queued background tasks run. Both honor the real monotonic clock; neither
+// blocks the OS thread in the kernel.
+void teko_rt_wait_ns(long ms);
+void teko_rt_await_ns(long ms);
 
 // Phase 14 (14.B) — duplex channel surface wrappers (OP_DUPLEX_* lower to these). The handle
 // is a TekoDuplex* carried as a register-width integer; values/statuses are i32 at the surface.

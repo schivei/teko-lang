@@ -969,10 +969,11 @@ void test_frontend_interop_waiters_lowering(void) {
     char* out = (char*)malloc(65536);
     memset(out, 0, 65536);
     size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
-    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_sleep\" (func $teko_sleep (param i32)))"));
-    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_await\" (func $teko_await (param i32)))"));
-    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sleep"));
-    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_await"));
+    // Real-time clock: waiters import the host monotonic ns clock and spin to a real deadline.
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_now_ns\" (func $teko_now_ns (result i64)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_now_ns"));   // deadline read + spin check
+    TEST_ASSERT_NOT_NULL(strstr(out, "i64.ge_u"));            // real-time deadline comparison
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sched_run")); // await drains the scheduler
     free(out);
     remove(wat);
 

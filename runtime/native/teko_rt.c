@@ -38,6 +38,38 @@
 
 #define TEKO_RT_KDF_MAX_OUT 1024 // bound variable-length output buffers (KDF/XOF) to a sane size
 
+// Phase 14 (real-time clock): a portable MONOTONIC nanosecond clock — the time base for the
+// cooperative waiters/delays/timeouts (it replaced the old logical clock). Native uses
+// CLOCK_MONOTONIC (POSIX/macOS, monotonic — NOT realtime) / QueryPerformanceCounter (Windows/MSVC);
+// WASM imports env.teko_now_ns (Node: process.hrtime.bigint() — real ns; browser:
+// performance.now()*1e6, best-effort — the browser clamps/coarsens performance.now() for security,
+// so sub-ms resolution is not guaranteed there; see the run-*.mjs harnesses). Returns a 64-bit ns
+// count from an arbitrary epoch — only DIFFERENCES are meaningful (deadlines/elapsed).
+#if defined(__wasm__)
+__attribute__((import_module("env"), import_name("teko_now_ns")))
+extern long long teko_rt_host_now_ns(void);
+long long teko_rt_now_ns(void) { return teko_rt_host_now_ns(); }
+#elif defined(_WIN32)
+long long teko_rt_now_ns(void) {
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    long long f = freq.QuadPart ? freq.QuadPart : 1;
+    long long sec = cnt.QuadPart / f, rem = cnt.QuadPart % f;
+    return sec * 1000000000LL + (rem * 1000000000LL) / f; // ns, overflow-safe
+}
+#else
+long long teko_rt_now_ns(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts); // fallback if monotonic is unavailable
+#endif
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+#endif
+
 // See teko_rt.h. This translation unit is compiled into the static archive
 // `libteko_rt.a`, which the native runner links into every produced executable.
 // Crypto wrappers (Sub-phase B) are added alongside this print primitive; they call
@@ -54,20 +86,16 @@ void teko_rt_emit_int(long n) {
     printf("%ld\n", n);
 }
 
-// Phase 14 (14.G): `wait <ts>;` — synchronous sleep for `ms` canonical milliseconds (the
-// frontend already folded any unit suffix to ms). Real nanosleep on POSIX, Sleep on Win32.
-// A non-positive delay is a no-op. The OS thread genuinely blocks (unlike `await`, which is a
-// cooperative yield). Lowered from OP_WAIT (ms in arg0).
-void teko_rt_sleep_ms(long ms) {
+// Phase 14 (14.G): `wait <ts>;` — a SYNCHRONOUS real-time wait for `ms` canonical milliseconds (the
+// frontend folded any unit suffix to ms). It returns only once the real MONOTONIC clock has
+// advanced by at least the requested span — checked cooperatively against the ns clock, WITHOUT
+// blocking the OS thread in the kernel (owner decision: non-blocking cooperative scheduling; the
+// time source is real). A non-positive delay is a no-op. `await` (teko_rt_await_ns) is the variant
+// that also drains the run queue while waiting. Lowered from OP_WAIT (ms in arg0).
+void teko_rt_wait_ns(long ms) {
     if (ms <= 0) return;
-#if defined(_WIN32)
-    Sleep((DWORD)ms);
-#else
-    struct timespec ts;
-    ts.tv_sec  = (time_t)(ms / 1000);
-    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
-    nanosleep(&ts, NULL);
-#endif
+    long long deadline = teko_rt_now_ns() + (long long)ms * 1000000LL;
+    while (teko_rt_now_ns() < deadline) { /* cooperative spin on the real clock — no kernel block */ }
 }
 #endif
 
