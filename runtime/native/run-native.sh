@@ -33,6 +33,43 @@ check() {
   echo "OK: $base -> [$got]"
 }
 
+# Real-time waiters: assert exact stdout AND a LOWER BOUND on real wall-clock elapsed (the time
+# base is the real monotonic clock, so we assert >= min_ms with tolerance, not an exact duration).
+# Timed via perl Time::HiRes (portable; macOS `date` lacks %N).
+check_timed() {
+  local sample="$1" expected="$2" min_ms="$3"
+  local base exe got ms
+  base="$(basename "$sample" .tks)"
+  exe="$TMP/$base"
+  echo "--- $sample (timed >= ${min_ms}ms) ---"
+  "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$("$exe")" || fail "$base exited non-zero"
+  [ "$got" = "$expected" ] || fail "$base: expected [$expected], got [$got]"
+  ms="$(perl -MTime::HiRes=time -e 'my $t=time; system("$ARGV[0] >/dev/null 2>&1"); printf "%.0f", (time-$t)*1000' "$exe")"
+  [ "$ms" -ge "$min_ms" ] || fail "$base: real elapsed ${ms}ms < ${min_ms}ms (real-time wait not honored)"
+  echo "OK: $base -> [$got] in ~${ms}ms (>= ${min_ms}ms real)"
+}
+
+# Wall-clock / timezone surface: format_* of a fixed epoch is deterministic (run under TZ=UTC);
+# now_* are real OS time, so pattern-check them. Asserts the OS-sourced civil-time surface works.
+check_time() {
+  local sample="time.tks" exe got l1 l2 l3 l4
+  exe="$TMP/time"
+  echo "--- $sample (wall-clock/timezone, TZ=UTC) ---"
+  TZ=UTC "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$(TZ=UTC "$exe")" || fail "time exited non-zero"
+  l1="$(printf '%s\n' "$got" | sed -n 1p)"; l2="$(printf '%s\n' "$got" | sed -n 2p)"
+  l3="$(printf '%s\n' "$got" | sed -n 3p)"; l4="$(printf '%s\n' "$got" | sed -n 4p)"
+  [ "$l1" = "2001-09-09T01:46:40Z" ] || fail "time.format_utc: [$l1]"
+  [ "$l2" = "2001-09-09T01:46:40Z" ] || fail "time.format_local (TZ=UTC): [$l2]"
+  printf '%s' "$l3" | grep -Eq '^[0-9]+$' || fail "time.now_unix not digits: [$l3]"
+  printf '%s' "$l4" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+    || fail "time.now_utc not ISO-8601 UTC: [$l4]"
+  echo "OK: time -> format_utc/local fixed + now_unix [$l3] + now_utc [$l4]"
+}
+
 # CSPRNG: non-deterministic, so assert format (two 64-hex-char lines) + that they differ.
 check_random() {
   local sample="$1" exe got l1 l2
@@ -65,6 +102,103 @@ check_uuid() {
 }
 
 check hello.tks "hello from teko native"
+# Phase 14 (14.A): `routines { worker(); worker(); }` fires two background tasks. The native
+# scheduler (teko_rt_run) drains them at $main exit, so they run AFTER main's body — the two
+# "worker ran" lines follow "main start"/"main end", proving deferred (not inline) execution.
+check routines.tks "$(cat <<'EXP'
+main start
+main end
+worker ran
+worker ran
+EXP
+)"
+# Phase 14 (14.B): duplex channel — bidirectional (0->1 then 1->0) + a structured CLOSED
+# status (3) from poll() after close, instead of blocking. Lowers to OP_DUPLEX_* -> teko_rt.
+check duplex.tks "$(cat <<'EXP'
+111
+222
+3
+EXP
+)"
+# Phase 14 (14.C, real-time clock): delayed (timed) channel on the REAL monotonic clock. Sent out
+# of deadline order (10@2ms, 20@6ms, 30@4ms), they are poll-drained in real-deadline order
+# (10,30,20) — timing-robust (recv returns the earliest-due). Last is due at 6ms, so real elapsed
+# >= ~5ms. Lowers to OP_DELAYED_* -> teko_rt_delayed_* (the wrapper reads teko_rt_now_ns).
+check_timed delayed.tks "$(cat <<'EXP'
+10
+30
+20
+EXP
+)" 5
+# Phase 14 (14.D): broadcast (non-destructive 1:N pub-sub) — one publisher, two subscribers;
+# each value is written once but BOTH subscribers read it independently (10,20 / 10,20).
+check broadcast.tks "$(cat <<'EXP'
+10
+20
+10
+20
+EXP
+)"
+# Phase 14 (14.E): shared memory — a `shared { }` coarse-locked block with `atomic.*` cells.
+# Atomic accumulation (5+3 inside the block = 8, then +2 = 10). Lowers to teko_shared_*/teko_atomic_*.
+check shared.tks "$(cat <<'EXP'
+8
+10
+EXP
+)"
+# Phase 14 (real-time clock): timespan waiters — `await 5ms;` cooperatively drains the run queue so
+# the queued worker runs AT the await (output 1,2,3); `wait 10ms;` waits on the REAL monotonic clock.
+# Lowers to teko_rt_await_ns / teko_rt_wait_ns. Assert order + real elapsed >= 12ms (await 5 + wait
+# 10 ≈ 15ms; lower bound with tolerance — the time source is real, so no exact duration).
+check_timed waiters.tks "$(cat <<'EXP'
+1
+2
+3
+EXP
+)" 12
+
+# Phase 14 (control-flow foundation): structured loops + branches lowered from source — a
+# while-loop sums 0..4 = 10; a loop{}+if+break/continue counts to 5. Lowers to OP_LOOP_*/OP_IF_*.
+check controlflow.tks "$(cat <<'EXP'
+10
+5
+EXP
+)"
+
+# Phase 14 (14.F): resilience — retry { } fallback { } + circuit cb { } fallback { } driving the
+# teko_retry C policy. succeed-on-3rd (3); exhaust->fallback (777, t2=2); timeout->fallback
+# (555, tt=1); logarithmic (444, lg=3); breaker trips after 2 failures (ran=2, fallback=5).
+check resilience.tks "$(cat <<'EXP'
+3
+777
+2
+555
+1
+444
+3
+2
+5
+EXP
+)"
+
+# Phase 14 capstone (14.H): the whole phase in one program — atomic accumulator (15), delayed
+# channel drain (6), a background routine with a LOOP inside it run at an `await` (1,2,3), and a
+# final marker after `wait` (42). Combines functions + routines + loops + channels + waiters.
+check capstone.tks "$(cat <<'EXP'
+15
+6
+1
+2
+3
+42
+EXP
+)"
+
+# Phase 14 (14.I): real concurrent producer/consumer — a background routine takes MULTIPLE args
+# (Go-style: a shared channel handle + a count), fills the channel; the consumer drains it with a
+# poll loop until EMPTY. Proves routine argument passing + handle sharing. 1+2+3+4+5 = 15.
+check producer_consumer.tks "15"
+
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
@@ -154,5 +288,6 @@ EXP
 
 check_random random.tks
 check_uuid uuid_rng.tks
+check_time
 
 echo "All native runner proofs passed."

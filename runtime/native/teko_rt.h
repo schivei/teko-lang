@@ -20,6 +20,10 @@
 // top-level `emit("…")` to this. Writes the string followed by a newline to stdout.
 void teko_rt_emit(const char* s);
 
+// Print an integer followed by a newline (Phase 14 — concurrency proofs surface i32 results
+// such as channel values and structured statuses). `extern fn emit_int(n) … as "teko_rt_emit_int"`.
+void teko_rt_emit_int(long n);
+
 // Hash surface (OP_CALL_RUNTIME id 4). `hash.sha256(msg)` hashes the raw bytes of the
 // NUL-terminated message and returns a freshly-allocated lowercase hex digest string
 // (caller-owned; short-lived programs leak it like the WASM bump allocator does). This
@@ -110,5 +114,76 @@ char* teko_rt_random_bytes(int n);
 // current Unix-ms clock.
 char* teko_rt_uuid_v4(int ignored);
 char* teko_rt_uuid_v7(int ignored);
+
+// Phase 14 (14.A) — cooperative scheduler for `routines` (background tasks). Implemented in
+// the separate TU teko_rt_sched.c (linked only when a binary uses routines). teko_rt_spawn
+// enqueues the routine at function-table `slot` with `arg` (lowered from OP_SPAWN_ASYNC);
+// teko_rt_run drains the queue to completion (called at `$main` exit). See teko_rt_sched.c.
+void teko_rt_spawn(long slot, long arg);
+void teko_rt_run(void);
+// Phase 14 (14.I) — multi-argument routine spawn (Go-style). teko_rt_spawn_setarg stages the
+// idx-th argument; teko_rt_spawn_args(slot) enqueues the routine with the staged argument vector.
+// The routine receives a pointer to its vector and reads args[i] (OP_LOAD_SPAWN_ARG).
+void teko_rt_spawn_setarg(long idx, long val);
+void teko_rt_spawn_args(long slot);
+
+// Phase 14 (real-time clock) — a portable MONOTONIC nanosecond clock; the time base for the
+// cooperative waiters/delays/timeouts. Native: CLOCK_MONOTONIC / QueryPerformanceCounter; WASM:
+// imports env.teko_now_ns. Only differences are meaningful (arbitrary epoch).
+long long teko_rt_now_ns(void);
+
+// Phase 14 (14.G) — timespan waiters (real time, cooperative, non-blocking). teko_rt_wait_ns
+// (`wait <ts>;` → OP_WAIT, in teko_rt.c) spins on the real clock until `ms` ms have elapsed.
+// teko_rt_await_ns (`await <ts>;` → OP_AWAIT_FOR, in the scheduler TU) ALSO drains the run queue
+// while waiting so queued background tasks run. Both honor the real monotonic clock; neither
+// blocks the OS thread in the kernel.
+void teko_rt_wait_ns(long ms);
+void teko_rt_await_ns(long ms);
+
+// Phase 14 (14.B) — duplex channel surface wrappers (OP_DUPLEX_* lower to these). The handle
+// is a TekoDuplex* carried as a register-width integer; values/statuses are i32 at the surface.
+long teko_rt_duplex_open(long capacity);
+long teko_rt_duplex_send(long handle, long endpoint, long value);
+long teko_rt_duplex_recv(long handle, long endpoint);
+long teko_rt_duplex_poll(long handle, long endpoint);
+long teko_rt_duplex_close(long handle);
+
+// Phase 14 (14.C) — delayed (timed) channel surface wrappers (OP_DELAYED_* lower to these). The
+// time base is the real MONOTONIC clock (the wrappers call teko_rt_now_ns); a message is due once
+// REAL time has advanced by its `delay` ms — there is no logical `advance` (owner decision).
+long teko_rt_delayed_open(long capacity);
+long teko_rt_delayed_send(long handle, long value, long delay_ms);
+long teko_rt_delayed_recv(long handle);
+long teko_rt_delayed_poll(long handle);
+long teko_rt_delayed_close(long handle);
+
+// Phase 14 (14.D) — broadcast (1:N pub-sub) channel surface wrappers (OP_BCAST_* lower to these).
+long teko_rt_bcast_open(long capacity);
+long teko_rt_bcast_subscribe(long handle);
+long teko_rt_bcast_publish(long handle, long value);
+long teko_rt_bcast_recv(long handle, long sub_id);
+long teko_rt_bcast_poll(long handle, long sub_id);
+long teko_rt_bcast_close(long handle);
+
+// Phase 14 (14.F) — resilience policy surface wrappers (OP_RETRY_*/OP_CIRCUIT_* lower to these).
+// Handles are TekoRetry*/TekoCircuit* as register-width integers; counts/times are i32 (ms).
+// Time-driven by the real monotonic clock (the wrappers read teko_rt_now_ns): should_continue and
+// circuit allow/record take NO logical time arg — they consult the real clock internally.
+long teko_rt_retry_new(long attempts, long timeout, long mode, long base);
+long teko_rt_retry_should_continue(long handle, long attempt);
+long teko_rt_retry_next_delay(long handle, long attempt);
+long teko_rt_circuit_new(long threshold, long cooldown);
+long teko_rt_circuit_allow(long handle);
+long teko_rt_circuit_record(long handle, long ok);
+
+// Phase 14 (wall-clock / timezone surface) — OS-sourced civil time (system-local + DST default;
+// the user can do time math on the decimal-string epoch). String-returning, like the crypto
+// surface (OP_CALL_RUNTIME ids). Native uses time()/localtime; WASM the reactor imports the host
+// env.teko_now_unix / env.teko_tz_offset; the portable teko_time_* formatter is shared.
+char* teko_rt_time_now_unix(int ignored);          // epoch seconds as a decimal string
+char* teko_rt_time_now_utc(int ignored);           // "now" ISO-8601 UTC
+char* teko_rt_time_now_local(int ignored);         // "now" ISO-8601 system-local (DST-correct)
+char* teko_rt_time_format_utc(const char* epoch);  // a user epoch -> ISO-8601 UTC
+char* teko_rt_time_format_local(const char* epoch); // a user epoch -> ISO-8601 system-local
 
 #endif // TEKO_RT_H

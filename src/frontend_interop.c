@@ -2,6 +2,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "parser_ffi.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,6 +27,23 @@ static char* strip_quotes(const char* s) {
         }
     }
     return strdup(s);
+}
+
+// Phase 14 (14.G): normalize an integer literal token carrying an optional unit suffix to its
+// canonical integer value. TIME units fold to milliseconds (ms/s/m/h/d) — the canonical timespan
+// the runtimes use; other units (data/bandwidth) and unit-less literals pass through unchanged.
+// The lexer stores the numeric text in `lexeme` (suffix excluded) and the unit in `literal_unit`,
+// so e.g. `2s` → lexeme "2" + LIT_UNIT_S → 2000. Used for channel delay args and `wait`/`await`.
+static long literal_canonical_value(const Token* t) {
+    long v = (long)atoi(t->lexeme);
+    switch (t->literal_unit) {
+        case LIT_UNIT_MS: return v;
+        case LIT_UNIT_S:  return v * 1000L;
+        case LIT_UNIT_M:  return v * 60000L;
+        case LIT_UNIT_H:  return v * 3600000L;
+        case LIT_UNIT_D:  return v * 86400000L;
+        default:          return v; // ms-less / data / bandwidth literals are unchanged
+    }
 }
 
 // Teko-visible callee name -> import-table index.
@@ -375,6 +393,14 @@ static int codec_id_for(const char* lex) {
     // No surface args (entropy/time come from the runtime/host); the lowered $w0 is ignored.
     if (strcmp(lex, "uuid.v4") == 0) return 42;
     if (strcmp(lex, "uuid.v7") == 0) return 43;
+    // Phase 14 (wall-clock / timezone surface) — OS-sourced civil time, string-returning like the
+    // crypto ids. now_* ignore their arg (time/zone from the OS); format_* take a decimal epoch
+    // string. ids 44-48 (reactor-backed on WASM, where now/offset come from host imports).
+    if (strcmp(lex, "time.now_unix")     == 0) return 44;
+    if (strcmp(lex, "time.now_local")    == 0) return 45;
+    if (strcmp(lex, "time.now_utc")      == 0) return 46;
+    if (strcmp(lex, "time.format_local") == 0) return 47;
+    if (strcmp(lex, "time.format_utc")   == 0) return 48;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;
@@ -426,7 +452,9 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
         free(s);
         fe_advance(p);
     } else if (p->current_token.type == TOKEN_LIT_INT) {
-        codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
+        // Phase 14 (14.G): a timespan literal arg (e.g. `delayed.send(d, v, 2s)`) normalizes to
+        // canonical milliseconds at compile time, so the runtimes stay integer-only and unchanged.
+        codegen_li_emit_iconst(b, (int)literal_canonical_value(&p->current_token));
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
@@ -457,6 +485,631 @@ static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
     }
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
     codegen_li_emit_call_runtime(b, id);                 // $w0 = rt(args); sets uses_codec/uses_hash by id
+}
+
+// --- duplex channels (Phase 14, 14.B) -------------------------------------------
+// `duplex.open/send/recv/poll/close(args)`. The lexer folds `duplex.open` into ONE dotted
+// IDENTIFIER (bare `duplex` stays the keyword), so this reuses the dotted-identifier call
+// path — but lowers to the dedicated OP_DUPLEX_* opcodes (not OP_CALL_RUNTIME). Args are
+// int literals (capacity / endpoint / value) or named locals (the channel handle); they are
+// lowered with lower_codec_value, staged via OP_SETARG (0..n-2) with the last left in $w0.
+// The result (handle / value / status) lands in $w0. Returns the opcode, or -1.
+static int duplex_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "duplex.open")  == 0) { op = OP_DUPLEX_OPEN;  a = 1; }
+    else if (strcmp(lex, "duplex.send")  == 0) { op = OP_DUPLEX_SEND;  a = 3; }
+    else if (strcmp(lex, "duplex.recv")  == 0) { op = OP_DUPLEX_RECV;  a = 2; }
+    else if (strcmp(lex, "duplex.poll")  == 0) { op = OP_DUPLEX_POLL;  a = 2; }
+    else if (strcmp(lex, "duplex.close") == 0) { op = OP_DUPLEX_CLOSE; a = 1; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_duplex_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           duplex_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_duplex_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = duplex_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_DUPLEX_OPEN; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_duplex(b, (OpCode)op);               // $w0 = duplex op result
+}
+
+// --- delayed (timed) channels (Phase 14, 14.C) ----------------------------------
+// `delayed.open/send/advance/recv/poll/close(args)` — same dotted-identifier surface as duplex
+// (the lexer folds `delayed.open` into one IDENTIFIER), lowering to the dedicated OP_DELAYED_*.
+static int delayed_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "delayed.open")    == 0) { op = OP_DELAYED_OPEN;    a = 1; }
+    else if (strcmp(lex, "delayed.send")    == 0) { op = OP_DELAYED_SEND;    a = 3; }
+    else if (strcmp(lex, "delayed.recv")    == 0) { op = OP_DELAYED_RECV;    a = 1; }
+    else if (strcmp(lex, "delayed.poll")    == 0) { op = OP_DELAYED_POLL;    a = 1; }
+    else if (strcmp(lex, "delayed.close")   == 0) { op = OP_DELAYED_CLOSE;   a = 1; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_delayed_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           delayed_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_delayed_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = delayed_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_DELAYED_OPEN; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_delayed(b, (OpCode)op);              // $w0 = delayed op result
+}
+
+// --- broadcast (non-destructive 1:N pub-sub) channels (Phase 14, 14.D) -----------
+// `broadcast.open/subscribe/publish/recv/poll/close(args)`. `broadcast` is NOT a keyword, so
+// the lexer folds `broadcast.open` into one IDENTIFIER — same dotted-identifier path as
+// duplex/delayed, lowering to the dedicated OP_BCAST_*.
+static int bcast_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "broadcast.open")      == 0) { op = OP_BCAST_OPEN;      a = 1; }
+    else if (strcmp(lex, "broadcast.subscribe") == 0) { op = OP_BCAST_SUBSCRIBE; a = 1; }
+    else if (strcmp(lex, "broadcast.publish")   == 0) { op = OP_BCAST_PUBLISH;   a = 2; }
+    else if (strcmp(lex, "broadcast.recv")      == 0) { op = OP_BCAST_RECV;      a = 2; }
+    else if (strcmp(lex, "broadcast.poll")      == 0) { op = OP_BCAST_POLL;      a = 2; }
+    else if (strcmp(lex, "broadcast.close")     == 0) { op = OP_BCAST_CLOSE;     a = 1; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_bcast_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           bcast_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_bcast_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = bcast_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_BCAST_OPEN; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_bcast(b, (OpCode)op);                // $w0 = broadcast op result
+}
+
+// --- shared memory: `atomic.*` ops + the `shared { }` block (Phase 14, 14.E) ----
+// `atomic.cell/add/load/store(args)` — `atomic` is a keyword, but the lexer folds `atomic.cell`
+// into one IDENTIFIER (bare `atomic` stays the keyword), so this reuses the dotted-identifier
+// path, lowering to OP_ATOMIC_*.
+static int atomic_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "atomic.cell")  == 0) { op = OP_ATOMIC_CELL;  a = 1; }
+    else if (strcmp(lex, "atomic.add")   == 0) { op = OP_ATOMIC_ADD;   a = 2; }
+    else if (strcmp(lex, "atomic.load")  == 0) { op = OP_ATOMIC_LOAD;  a = 1; }
+    else if (strcmp(lex, "atomic.store") == 0) { op = OP_ATOMIC_STORE; a = 2; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_atomic_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           atomic_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_atomic_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = atomic_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_ATOMIC_LOAD; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local handle)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_shared(b, (OpCode)op);               // $w0 = atomic op result
+}
+
+// --- timespan waiters: `wait <ts>;` / `await <ts>;` (Phase 14, 14.G) -------------
+// `wait` is a SYNCHRONOUS sleep; `await` is a cooperative timed yield. The timespan operand is
+// lowered to canonical milliseconds in $w0, then OP_WAIT / OP_AWAIT_FOR fires. A literal operand
+// (e.g. `2s`) is unit-normalized at compile time; a named local or parenthesized expression is
+// assumed to already be in ms. Current token is TOKEN_WAIT / TOKEN_AWAIT.
+static void lower_wait_await(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, int is_await) {
+    fe_advance(p); // consume 'wait' / 'await'
+    if (p->current_token.type == TOKEN_LIT_INT) {
+        codegen_li_emit_iconst(b, (int)literal_canonical_value(&p->current_token)); // ms in $w0
+        fe_advance(p);
+    } else if (ctx && ctx->ta) {
+        eval_expr_prec(b, p, ctx, 1, ctx->ta); // named local / int expression (already ms) -> $w0
+    } else {
+        codegen_li_emit_iconst(b, 0);
+    }
+    if (is_await) codegen_li_emit_await(b);
+    else          codegen_li_emit_wait(b);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+}
+
+// --- control-flow foundation: structured loops + branches (Phase 14) -------------
+// `while (cond) { … }`, `loop { … }`, `if (cond) { … }`, `break;`, `continue;`, lowered to the
+// structured OP_LOOP_*/OP_IF_*/OP_BREAK* opcodes (native asm labels / WASM block+loop). A block
+// body reuses the same single-statement dispatcher (lower_one_stmt) as the top level, so loops
+// compose with let/reassignment/calls/channels/waiters and with each other (nesting).
+//
+// LowerEnv threads the MUTABLE named-local table (grown by `let` inside a body) + the read-only
+// fn/extern bindings + the expression-lowering context, so a `let`/reassignment inside a loop
+// allocates real $v slots and the ctx's local view stays current after a realloc.
+typedef struct {
+    ImportBinding** locals; int* nlocals; int* caplocals; // mutable named-local table
+    ImportBinding** binds;  int* nb;                       // extern import bindings (read)
+    LowerCtx* ctx;                                         // expression context (locals view + ta)
+} LowerEnv;
+
+static void lower_block(BytecodeBuffer* b, Parser* p, LowerEnv* env);   // fwd (mutual recursion)
+static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env); // fwd
+static void lower_retry_block(BytecodeBuffer* b, Parser* p, LowerEnv* env);   // fwd (14.F)
+static void lower_circuit_block(BytecodeBuffer* b, Parser* p, LowerEnv* env); // fwd (14.F)
+
+// Allocate a fresh hidden named local ($v slot) and return its slot index. Used by the resilience
+// lowering for its synthetic state (policy/attempt/elapsed/flags). Refreshes the ctx local view.
+static int env_alloc_local(LowerEnv* env, const char* name) {
+    int s = *env->nlocals;
+    bind_add(env->locals, env->nlocals, env->caplocals, name, s);
+    env->ctx->locals = *env->locals; env->ctx->nlocals = *env->nlocals;
+    if (*env->nlocals > env->ctx->ta->hw) env->ctx->ta->hw = *env->nlocals;
+    return s;
+}
+
+// local = constant.
+static void emit_set_local_const(BytecodeBuffer* b, int slot, int v) {
+    codegen_li_emit_iconst(b, v);
+    codegen_li_emit_store_local(b, slot);
+}
+// local = local + ($w0)  ($w0 holds the delta on entry).
+static void emit_local_add_w0(BytecodeBuffer* b, int slot) {
+    codegen_li_emit_store(b);            // $w1 = delta
+    codegen_li_emit_load_local(b, slot); // $w0 = local
+    codegen_li_emit_binop(b, OP_ADD);    // $w0 = local + delta
+    codegen_li_emit_store_local(b, slot);
+}
+// $w0 = (local == 0).
+static void emit_local_is_zero(BytecodeBuffer* b, int slot) {
+    codegen_li_emit_iconst(b, 0);        // $w0 = 0
+    codegen_li_emit_store(b);            // $w1 = 0
+    codegen_li_emit_load_local(b, slot); // $w0 = local
+    codegen_li_emit_binop(b, OP_EQ);     // $w0 = (local == 0)
+}
+
+// Refresh the expression context's local view + position the temp allocator above the named
+// locals (so spills never clobber a binding). Call before lowering any expression in a body.
+static void env_sync(LowerEnv* env) {
+    env->ctx->locals = *env->locals;
+    env->ctx->nlocals = *env->nlocals;
+    env->ctx->ta->next_temp = *env->nlocals;
+    if (*env->nlocals > env->ctx->ta->hw) env->ctx->ta->hw = *env->nlocals;
+}
+
+// Lower an initializer / RHS value into $w0: string literal, @dom/@js intrinsic, codec/hash/crypto,
+// duplex/delayed/broadcast/atomic op, or an integer expression (literals/locals/parens/arith/cmp).
+static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    LowerCtx* ctx = env->ctx;
+    if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
+        char* sv = strip_quotes(p->current_token.lexeme);
+        codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, sv));
+        free(sv); fe_advance(p);
+    } else if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
+               p->peek_token.type == TOKEN_LPAREN) {
+        lower_intrinsic_call(b, p, ctx);
+    } else if (is_codec_head(p))   { lower_base_codec(b, p, ctx); }
+    else if (is_duplex_head(p))    { lower_duplex_call(b, p, ctx); }
+    else if (is_delayed_head(p))   { lower_delayed_call(b, p, ctx); }
+    else if (is_bcast_head(p))     { lower_bcast_call(b, p, ctx); }
+    else if (is_atomic_head(p))    { lower_atomic_call(b, p, ctx); }
+    else if (p->current_token.type == TOKEN_CIRCUIT && p->peek_token.type == TOKEN_LPAREN) {
+        // `circuit(threshold K, cooldown C)` breaker constructor as a let-initializer (14.F):
+        // parse the header, emit OP_CIRCUIT_NEW -> handle in $w0.
+        fe_advance(p); // 'circuit'
+        int threshold = 1, cooldown = 0;
+        if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+        while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
+            if (p->current_token.type == TOKEN_IDENTIFIER &&
+                strcmp(p->current_token.lexeme, "threshold") == 0) {
+                fe_advance(p);
+                if (p->current_token.type == TOKEN_LIT_INT) {
+                    threshold = (int)literal_canonical_value(&p->current_token); fe_advance(p);
+                }
+            } else if (p->current_token.type == TOKEN_IDENTIFIER &&
+                       strcmp(p->current_token.lexeme, "cooldown") == 0) {
+                fe_advance(p);
+                if (p->current_token.type == TOKEN_LIT_INT) {
+                    cooldown = (int)literal_canonical_value(&p->current_token); fe_advance(p);
+                }
+            } else {
+                fe_advance(p);
+            }
+        }
+        if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+        codegen_li_emit_iconst(b, threshold); codegen_li_emit_setarg(b, 0);
+        codegen_li_emit_iconst(b, cooldown);  // last arg in $w0
+        codegen_li_emit_retry(b, OP_CIRCUIT_NEW); // $w0 = breaker handle
+    }
+    else { env_sync(env); eval_expr_prec(b, p, ctx, 1, ctx->ta); } // integer expression -> $w0
+}
+
+// `let`/`mut NAME [: type] = <init>;` inside a body — allocate (or reuse) a $v slot, lower the
+// initializer, store it. Refreshes the ctx local view (bind_add may realloc the table).
+static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    fe_advance(p); // let/mut
+    char lname[96];
+    strncpy(lname, p->current_token.lexeme, sizeof(lname) - 1); lname[sizeof(lname) - 1] = '\0';
+    fe_advance(p); // NAME
+    if (p->current_token.type == TOKEN_COLON) {
+        fe_advance(p);
+        while (p->current_token.type != TOKEN_ASSIGN && p->current_token.type != TOKEN_QUICK_ASSIGN &&
+               p->current_token.type != TOKEN_SEMICOLON && p->current_token.type != TOKEN_EOF)
+            fe_advance(p);
+    }
+    if (p->current_token.type == TOKEN_ASSIGN || p->current_token.type == TOKEN_QUICK_ASSIGN)
+        fe_advance(p);
+    int s = bind_lookup(*env->locals, *env->nlocals, lname);
+    if (s < 0) { s = *env->nlocals; bind_add(env->locals, env->nlocals, env->caplocals, lname, s); }
+    env_sync(env);
+    lower_init_value(b, p, env);
+    codegen_li_emit_store_local(b, s);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+}
+
+// `NAME = <expr>;` reassignment of an existing named local. Returns 1 if it consumed the
+// statement, 0 if NAME is not a known local (so the caller tries other forms).
+static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_ASSIGN) return 0;
+    int slot = bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme);
+    if (slot < 0) return 0;
+    fe_advance(p); // NAME
+    fe_advance(p); // '='
+    env_sync(env);
+    lower_init_value(b, p, env);
+    codegen_li_emit_store_local(b, slot);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    return 1;
+}
+
+// `NAME(arg, …);` extern call inside a body. Args may be string/int literals or named locals
+// (loaded from their slot), staged via OP_SETARG with the last left in $w0. Returns 1 if it
+// resolved NAME to a registered import, else 0 (caller skips the token).
+static int lower_call_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
+    int idx = bind_lookup(*env->binds, *env->nb, p->current_token.lexeme);
+    if (idx < 0) return 0;
+    fe_advance(p); // NAME
+    fe_advance(p); // '('
+    CallArg args[16];
+    int nargs = 0;
+    while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
+        if (nargs < 16 && (p->current_token.type == TOKEN_LIT_STR ||
+                           p->current_token.type == TOKEN_STRING_LIT)) {
+            args[nargs].is_string = 1; args[nargs].sval = strip_quotes(p->current_token.lexeme);
+            args[nargs].ival = 0; args[nargs].is_local = 0; args[nargs].slot = 0;
+            nargs++; fe_advance(p);
+        } else if (nargs < 16 && p->current_token.type == TOKEN_LIT_INT) {
+            args[nargs].is_string = 0; args[nargs].sval = NULL;
+            args[nargs].ival = (int)literal_canonical_value(&p->current_token);
+            args[nargs].is_local = 0; args[nargs].slot = 0;
+            nargs++; fe_advance(p);
+        } else if (nargs < 16 && p->current_token.type == TOKEN_IDENTIFIER &&
+                   bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme) >= 0) {
+            args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+            args[nargs].is_local = 1;
+            args[nargs].slot = bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme);
+            nargs++; fe_advance(p);
+        } else if (p->current_token.type == TOKEN_COMMA) {
+            fe_advance(p);
+        } else {
+            fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    lower_call(b, idx, args, nargs);
+    for (int i = 0; i < nargs; i++) if (args[i].sval) free(args[i].sval);
+    return 1;
+}
+
+// `while (cond) { body }` — LOOP_BEGIN; <cond→$w0>; BREAK_IF_FALSE; body; LOOP_END.
+static void lower_while(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    fe_advance(p); // 'while'
+    codegen_li_emit_cf(b, OP_LOOP_BEGIN);
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    env_sync(env);
+    eval_expr_prec(b, p, env->ctx, 1, env->ctx->ta); // condition -> $w0
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_cf(b, OP_BREAK_IF_FALSE);
+    lower_block(b, p, env);
+    codegen_li_emit_cf(b, OP_LOOP_END);
+}
+
+// `loop { body }` — an infinite loop exited only by `break` (LOOP_BEGIN; body; LOOP_END).
+static void lower_loop(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    fe_advance(p); // 'loop'
+    codegen_li_emit_cf(b, OP_LOOP_BEGIN);
+    lower_block(b, p, env);
+    codegen_li_emit_cf(b, OP_LOOP_END);
+}
+
+// `if (cond) { body }` — enter the body iff cond is non-zero (<cond→$w0>; IF_BEGIN; body; IF_END).
+static void lower_if(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    fe_advance(p); // 'if'
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    env_sync(env);
+    eval_expr_prec(b, p, env->ctx, 1, env->ctx->ta); // condition -> $w0
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    lower_block(b, p, env);
+    codegen_li_emit_cf(b, OP_IF_END);
+}
+
+// Dispatch ONE statement inside a body. Always makes progress (advances at least one token).
+static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    LowerCtx* ctx = env->ctx;
+    if ((p->current_token.type == TOKEN_LET || p->current_token.type == TOKEN_MUT) &&
+        p->peek_token.type == TOKEN_IDENTIFIER) {
+        lower_let_stmt(b, p, env);
+    } else if (p->current_token.type == TOKEN_WHILE) {
+        lower_while(b, p, env);
+    } else if (p->current_token.type == TOKEN_LOOP) {
+        lower_loop(b, p, env);
+    } else if (p->current_token.type == TOKEN_IF) {
+        lower_if(b, p, env);
+    } else if (p->current_token.type == TOKEN_BREAK) {
+        fe_advance(p); codegen_li_emit_cf(b, OP_BREAK);
+        if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (p->current_token.type == TOKEN_CONTINUE) {
+        fe_advance(p); codegen_li_emit_cf(b, OP_CONTINUE);
+        if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (p->current_token.type == TOKEN_WAIT || p->current_token.type == TOKEN_AWAIT) {
+        env_sync(env);
+        lower_wait_await(b, p, ctx, p->current_token.type == TOKEN_AWAIT);
+    } else if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
+               p->peek_token.type == TOKEN_LPAREN) {
+        lower_intrinsic_call(b, p, ctx);
+    } else if (is_duplex_head(p)) {
+        lower_duplex_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (is_delayed_head(p)) {
+        lower_delayed_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (is_bcast_head(p)) {
+        lower_bcast_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (is_atomic_head(p)) {
+        lower_atomic_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (p->current_token.type == TOKEN_RETRY) {
+        lower_retry_block(b, p, env);     // 14.F: retry { } fallback { }
+    } else if (p->current_token.type == TOKEN_CIRCUIT &&
+               p->peek_token.type == TOKEN_IDENTIFIER) {
+        lower_circuit_block(b, p, env);   // 14.F: circuit cb { } fallback { }
+    } else if (lower_reassign(b, p, env)) {
+        /* NAME = expr; consumed */
+    } else if (lower_call_stmt(b, p, env)) {
+        /* NAME(args); consumed */
+    } else if (p->current_token.type == TOKEN_LIT_INT || p->current_token.type == TOKEN_LPAREN ||
+               p->current_token.type == TOKEN_IDENTIFIER) {
+        // Bare expression statement (e.g. a retry/circuit body's trailing ok/fail expression):
+        // evaluate it into $w0 so the enclosing block's result is the last expression.
+        env_sync(env);
+        eval_expr_prec(b, p, ctx, 1, ctx->ta);
+        if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else {
+        fe_advance(p); // skip anything else in this subset (always progress)
+    }
+}
+
+// Lower a `{ … }` block body: statements until the matching `}`.
+static void lower_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type == TOKEN_LBRACE) fe_advance(p);
+    while (p->current_token.type != TOKEN_RBRACE && p->current_token.type != TOKEN_EOF) {
+        lower_one_stmt(b, p, env);
+    }
+    if (p->current_token.type == TOKEN_RBRACE) fe_advance(p);
+}
+
+// Skip a `{ … }` block without lowering it (consume the matched braces). Used when a fallback
+// block is absent or when a body must be parsed but not emitted on a given path.
+static void skip_brace_block(Parser* p) {
+    if (p->current_token.type != TOKEN_LBRACE) return;
+    int depth = 0;
+    while (p->current_token.type != TOKEN_EOF) {
+        if (p->current_token.type == TOKEN_LBRACE) { depth++; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_RBRACE) { depth--; fe_advance(p); if (depth == 0) break; }
+        else fe_advance(p);
+    }
+}
+
+// `retry (attempts N, [timeout T,] exponential|logarithmic, base B) { body } [fallback { fb }]`
+// (Phase 14, 14.F). Drives the teko_retry C policy through the control-flow foundation: a loop
+// gated by teko_retry_should_continue runs the body each attempt; the body's trailing expression
+// is its ok/fail result (non-zero = success). On success it breaks; when the policy gives up it
+// runs `fallback`. Backoff (teko_retry_next_delay) accumulates `elapsed` for the timeout rule.
+static void lower_retry_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    static int uid = 0; int id = uid++;
+    fe_advance(p); // 'retry'
+    int attempts = 3, timeout = 0, mode = 0, base = 1;
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF &&
+           p->current_token.type != TOKEN_LBRACE) {
+        if (p->current_token.type == TOKEN_ATTEMPTS) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { attempts = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else if (p->current_token.type == TOKEN_TIMEOUT) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { timeout = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else if (p->current_token.type == TOKEN_EXPONENTIAL) { mode = 0; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_LOGARITHMIC) { mode = 1; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_IDENTIFIER && strcmp(p->current_token.lexeme, "base") == 0) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { base = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else { fe_advance(p); }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+
+    char nm[64];
+    snprintf(nm, sizeof(nm), "__retry_pol_%d", id);  int s_pol  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_att_%d", id);  int s_att  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_ok_%d",  id);  int s_ok   = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_suc_%d", id);  int s_suc  = env_alloc_local(env, nm);
+
+    // policy = retry_new(attempts, timeout, mode, base) — records its real start instant.
+    codegen_li_emit_iconst(b, attempts); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_iconst(b, timeout);  codegen_li_emit_setarg(b, 1);
+    codegen_li_emit_iconst(b, mode);     codegen_li_emit_setarg(b, 2);
+    codegen_li_emit_iconst(b, base);     // last arg in $w0
+    codegen_li_emit_retry(b, OP_RETRY_NEW);
+    codegen_li_emit_store_local(b, s_pol);
+    emit_set_local_const(b, s_att, 0); // attempt = 0
+    emit_set_local_const(b, s_suc, 0); // succeeded = 0
+
+    codegen_li_emit_cf(b, OP_LOOP_BEGIN);
+    //   if (should_continue(policy, attempt) == 0) break — the policy reads REAL elapsed internally
+    codegen_li_emit_load_local(b, s_pol); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_att); // last in $w0
+    codegen_li_emit_retry(b, OP_RETRY_SHOULD_CONTINUE); // $w0 = 0/1
+    codegen_li_emit_cf(b, OP_BREAK_IF_FALSE);
+    //   body -> $w0 (ok/fail); ok = $w0
+    lower_block(b, p, env);
+    codegen_li_emit_store_local(b, s_ok);
+    //   if (ok) { succeeded = 1; break }
+    codegen_li_emit_load_local(b, s_ok);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    emit_set_local_const(b, s_suc, 1);
+    codegen_li_emit_cf(b, OP_BREAK);
+    codegen_li_emit_cf(b, OP_IF_END);
+    //   back off for next_delay(policy, attempt) ms on the REAL clock (accumulates real elapsed,
+    //   which drives the timeout budget); then attempt += 1.
+    codegen_li_emit_load_local(b, s_pol); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_att); // last in $w0
+    codegen_li_emit_retry(b, OP_RETRY_NEXT_DELAY); // $w0 = delay ms
+    codegen_li_emit_wait(b);                        // real-time backoff wait
+    codegen_li_emit_iconst(b, 1);
+    emit_local_add_w0(b, s_att);
+    codegen_li_emit_cf(b, OP_LOOP_END);
+
+    // fallback (optional): if (!succeeded) { fb }
+    if (p->current_token.type == TOKEN_FALLBACK) {
+        fe_advance(p); // 'fallback'
+        emit_local_is_zero(b, s_suc);     // $w0 = (succeeded == 0)
+        codegen_li_emit_cf(b, OP_IF_BEGIN);
+        lower_block(b, p, env);
+        codegen_li_emit_cf(b, OP_IF_END);
+    }
+}
+
+// `circuit <breaker> { body } [fallback { fb }]` (Phase 14, 14.F). `breaker` is a named local
+// created by `let cb = circuit(threshold K, cooldown C);`. Guards the body with
+// teko_circuit_allow; records the outcome (teko_circuit_record); runs `fallback` when the call
+// was short-circuited (breaker OPEN) OR the body failed. `failed` starts 1 (assume fallback) and
+// is cleared only on an allowed, successful call — so the single-parse fallback emits once.
+static void lower_circuit_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    static int uid = 0; int id = uid++;
+    fe_advance(p); // 'circuit'
+    int cb = -1;
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        cb = bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme);
+        fe_advance(p); // breaker name
+    }
+    char nm[64];
+    snprintf(nm, sizeof(nm), "__circ_allowed_%d", id); int s_allowed = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__circ_failed_%d",  id); int s_failed  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__circ_ok_%d",      id); int s_ok      = env_alloc_local(env, nm);
+
+    if (cb < 0) { // unknown breaker: parse-and-skip the blocks so we still consume the tokens
+        skip_brace_block(p);
+        if (p->current_token.type == TOKEN_FALLBACK) { fe_advance(p); skip_brace_block(p); }
+        return;
+    }
+
+    emit_set_local_const(b, s_failed, 1); // assume failed (fallback) until proven otherwise
+    // allowed = circuit_allow(cb) — the breaker consults the REAL clock for its cooldown internally
+    codegen_li_emit_load_local(b, cb); // handle in $w0
+    codegen_li_emit_retry(b, OP_CIRCUIT_ALLOW); // $w0 = 0/1
+    codegen_li_emit_store_local(b, s_allowed);
+    //   if (allowed) { body -> ok; record(cb, ok); if (ok) failed = 0 }
+    codegen_li_emit_load_local(b, s_allowed);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    lower_block(b, p, env);                 // body -> $w0
+    codegen_li_emit_store_local(b, s_ok);
+    codegen_li_emit_load_local(b, cb);  codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_ok); // ok in $w0
+    codegen_li_emit_retry(b, OP_CIRCUIT_RECORD);
+    codegen_li_emit_load_local(b, s_ok);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    emit_set_local_const(b, s_failed, 0); // success -> no fallback
+    codegen_li_emit_cf(b, OP_IF_END);
+    codegen_li_emit_cf(b, OP_IF_END);
+    // fallback (optional): if (failed) { fb }  (covers OPEN fail-fast + body failure)
+    if (p->current_token.type == TOKEN_FALLBACK) {
+        fe_advance(p);
+        codegen_li_emit_load_local(b, s_failed);
+        codegen_li_emit_cf(b, OP_IF_BEGIN);
+        lower_block(b, p, env);
+        codegen_li_emit_cf(b, OP_IF_END);
+    }
+}
+
+static int lower_routine_extern_call(BytecodeBuffer* buffer, Parser* p,
+                                     ImportBinding* binds, int nb); // defined below
+
+// `shared { … }` — the compiler injects a coarse lock around the block: emit OP_SHARED_ENTER,
+// lower the enclosed statements (atomic/channel ops + extern calls in this subset), emit
+// OP_SHARED_LEAVE at the matching `}`. Named-local declarations inside the block are future work.
+static void lower_shared_block(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
+                               ImportBinding* binds, int nb) {
+    fe_advance(p);                                       // consume 'shared'
+    if (p->current_token.type == TOKEN_LBRACE) fe_advance(p);
+    codegen_li_emit_shared(b, OP_SHARED_ENTER);
+    int depth = 1;
+    while (p->current_token.type != TOKEN_EOF && depth > 0) {
+        if (p->current_token.type == TOKEN_LBRACE) { depth++; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_RBRACE) { depth--; fe_advance(p); }
+        else if (is_atomic_head(p)) { lower_atomic_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_duplex_head(p)) { lower_duplex_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_delayed_head(p)){ lower_delayed_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_bcast_head(p))  { lower_bcast_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (lower_routine_extern_call(b, p, binds, nb)) { /* extern call (e.g. emit_int) */ }
+        else fe_advance(p);
+    }
+    codegen_li_emit_shared(b, OP_SHARED_LEAVE);
 }
 
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners
@@ -504,11 +1157,53 @@ static void collect_functions(const char* source, ImportBinding** fns, int* nfns
     }
 }
 
+// Phase 14 (14.A): lower a plain `NAME(arg, …)` extern call inside a routine/handler
+// body. Current token is the callee IDENTIFIER (peek == '('); the callee must resolve to
+// a registered import (e.g. `emit`). Args are string/int literals in this subset (enough
+// to drive `emit("…")` from a background routine); other arg forms are skipped. Returns 1
+// if it consumed a call, 0 if the current token was not a resolvable extern call.
+static int lower_routine_extern_call(BytecodeBuffer* buffer, Parser* p,
+                                     ImportBinding* binds, int nb) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN)
+        return 0;
+    int idx = bind_lookup(binds, nb, p->current_token.lexeme);
+    if (idx < 0) return 0;
+    fe_advance(p); // consume NAME
+    fe_advance(p); // consume '('
+    CallArg args[16];
+    int nargs = 0;
+    while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
+        if (nargs < 16 && (p->current_token.type == TOKEN_LIT_STR ||
+                           p->current_token.type == TOKEN_STRING_LIT)) {
+            args[nargs].is_string = 1; args[nargs].sval = strip_quotes(p->current_token.lexeme);
+            args[nargs].ival = 0; args[nargs].is_local = 0; args[nargs].slot = 0;
+            nargs++; fe_advance(p);
+        } else if (nargs < 16 && p->current_token.type == TOKEN_LIT_INT) {
+            args[nargs].is_string = 0; args[nargs].sval = NULL;
+            args[nargs].ival = atoi(p->current_token.lexeme);
+            args[nargs].is_local = 0; args[nargs].slot = 0;
+            nargs++; fe_advance(p);
+        } else if (p->current_token.type == TOKEN_COMMA) {
+            fe_advance(p);
+        } else {
+            fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    lower_call(buffer, idx, args, nargs);
+    for (int i = 0; i < nargs; i++) if (args[i].sval) free(args[i].sval);
+    return 1;
+}
+
 // Routine pass: emit each `fn NAME(param) { body }` as a table routine. The handler is
 // invoked via teko_invoke(slot, event_arg): on entry $w0 = the arg, which we stash to
-// $w1 so `param` references (LOAD) survive across the body's @dom calls.
+// $w1 so `param` references (LOAD) survive across the body's @dom calls. Phase 14: a body
+// may also contain plain extern calls (e.g. `emit("…")`) so a `routines`-fired background
+// task can do real work; `binds` resolves those callees.
 static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
-                                  ImportBinding* fns, int nfns, TempAlloc* ta) {
+                                  ImportBinding* fns, int nfns,
+                                  ImportBinding* binds, int nb, TempAlloc* ta) {
     Lexer lx; lexer_init(&lx, source);
     Parser p; parser_init(&p, &lx);
 
@@ -524,16 +1219,20 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         int slot = bind_lookup(fns, nfns, fn_name);
         fe_advance(&p); // consume name
 
-        // Parameter list: capture the single event param name (if any).
-        char param[96]; param[0] = '\0';
+        // Parameter list: capture ALL param names (Phase 14.I), skipping `: type` annotations.
+        char params[8][96]; int nparams = 0;
         if (p.current_token.type == TOKEN_LPAREN) {
             fe_advance(&p);
-            if (p.current_token.type == TOKEN_IDENTIFIER) {
-                strncpy(param, p.current_token.lexeme, sizeof(param) - 1);
-                param[sizeof(param) - 1] = '\0';
-            }
+            int expect_name = 1; // a param name follows '(' or ','
             while (p.current_token.type != TOKEN_RPAREN && p.current_token.type != TOKEN_EOF) {
-                fe_advance(&p); // skip rest of params / types
+                if (expect_name && p.current_token.type == TOKEN_IDENTIFIER && nparams < 8) {
+                    strncpy(params[nparams], p.current_token.lexeme, 95);
+                    params[nparams][95] = '\0';
+                    nparams++; expect_name = 0;
+                } else if (p.current_token.type == TOKEN_COMMA) {
+                    expect_name = 1;
+                }
+                fe_advance(&p); // skip type tokens / colons / the captured name
             }
             if (p.current_token.type == TOKEN_RPAREN) fe_advance(&p);
         }
@@ -542,29 +1241,44 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
 
         codegen_li_emit_func_begin(buffer, slot >= 0 ? slot : 0);
-        if (param[0]) codegen_li_emit_store(buffer); // $w1 = event arg
+        // On entry $w0 = the spawn-args pointer (native) / arg0 reloaded from the frame (WASM).
+        if (nparams > 0) codegen_li_emit_store(buffer); // $w1 = arg0 (WASM @dom event-param access)
 
         LowerCtx ctx;
-        ctx.param_name = param[0] ? param : NULL;
+        ctx.param_name = nparams > 0 ? params[0] : NULL;
         ctx.fns = fns;
         ctx.nfns = nfns;
-        ctx.locals = NULL; // $main's named locals are a different WASM scope
+        ctx.locals = NULL; // refreshed by the routine's own local table below
         ctx.nlocals = 0;
-        ctx.ta = ta;       // nested-arg spill temps (routine has no named locals)
+        ctx.ta = ta;       // nested-arg spill temps + expression temps
         ta->next_temp = 0; // a routine's $v file starts fresh
 
-        int depth = 1;
-        while (p.current_token.type != TOKEN_EOF && depth > 0) {
-            if (p.current_token.type == TOKEN_LBRACE) { depth++; fe_advance(&p); }
-            else if (p.current_token.type == TOKEN_RBRACE) { depth--; fe_advance(&p); }
-            else if (p.current_token.type == TOKEN_MACRO_IDENT &&
-                     is_dom_macro(p.current_token.lexeme) &&
-                     p.peek_token.type == TOKEN_LPAREN) {
-                lower_intrinsic_call(buffer, &p, &ctx);
-            } else {
-                fe_advance(&p);
-            }
+        // A routine body is lowered with the SAME shared statement dispatcher as $main and the
+        // control-flow blocks, so loops/branches/let/reassignment/channels/waiters compose inside
+        // a background task (14.H worker loops). The routine gets its OWN named-local table ($v
+        // slots overlap $main's — separate function scopes; local_count = the max via ta->hw).
+        ImportBinding* rlocals = NULL; int rnlocals = 0, rcaplocals = 0;
+        LowerEnv renv;
+        renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
+        renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
+
+        // Phase 14 (14.I): bind each param to a named local read from the spawn arguments
+        // (OP_LOAD_SPAWN_ARG i), so the body uses them as values — e.g. channel handles shared with
+        // the producer/consumer. (@dom event handlers also keep the $w1/param_name path above,
+        // which takes precedence in lower_intrinsic_call, so they are unaffected.)
+        for (int pi = 0; pi < nparams; pi++) {
+            int ps = env_alloc_local(&renv, params[pi]);
+            codegen_li_emit_load_spawn_arg(buffer, pi); // $w0 = args[pi]
+            codegen_li_emit_store_local(buffer, ps);    // slot = args[pi]
         }
+
+        while (p.current_token.type != TOKEN_RBRACE && p.current_token.type != TOKEN_EOF) {
+            lower_one_stmt(buffer, &p, &renv);
+        }
+        if (p.current_token.type == TOKEN_RBRACE) fe_advance(&p);
+
+        for (int i = 0; i < rnlocals; i++) free(rlocals[i].name);
+        free(rlocals);
         codegen_li_emit_func_end(buffer);
     }
 }
@@ -596,6 +1310,12 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     top_ctx.locals = NULL; top_ctx.nlocals = 0; // refreshed before each use below
     top_ctx.ta = &ta;
 
+    // Control-flow foundation: a mutable lowering environment shared with the block-body
+    // statement dispatcher (lower_block / lower_one_stmt) for `while`/`loop`/`if` bodies.
+    LowerEnv top_env;
+    top_env.locals = &locals; top_env.nlocals = &nlocals; top_env.caplocals = &caplocals;
+    top_env.binds = &binds; top_env.nb = &nb; top_env.ctx = &top_ctx;
+
     while (parser.current_token.type != TOKEN_EOF) {
         // Keep the top-level lowering context's local view current, and start temp
         // slots above the named locals so spills never clobber a `let` binding.
@@ -605,49 +1325,63 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
         if ((parser.current_token.type == TOKEN_LET || parser.current_token.type == TOKEN_MUT) &&
             parser.peek_token.type == TOKEN_IDENTIFIER) {
-            // `let`/`mut NAME [: type] = <initializer>` — a named local binding.
-            fe_advance(&parser); // consume let/mut
-            char lname[96];
-            strncpy(lname, parser.current_token.lexeme, sizeof(lname) - 1);
-            lname[sizeof(lname) - 1] = '\0';
-            fe_advance(&parser); // consume NAME
-            if (parser.current_token.type == TOKEN_COLON) { // optional ': type'
-                fe_advance(&parser);
-                while (parser.current_token.type != TOKEN_ASSIGN &&
-                       parser.current_token.type != TOKEN_QUICK_ASSIGN &&
-                       parser.current_token.type != TOKEN_SEMICOLON &&
-                       parser.current_token.type != TOKEN_EOF) fe_advance(&parser);
+            // `let`/`mut NAME [: type] = <initializer>` — a named local binding. Shared with block
+            // bodies (lower_let_stmt → lower_init_value), so `let cb = circuit(...)` works here too.
+            lower_let_stmt(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_ROUTINES) {
+            // Phase 14 (14.A): `routines { foo(); bar(); }` — fire each enclosed call as a
+            // background task. Each `NAME(…)` resolves to a top-level `fn NAME`'s table slot
+            // (collect_functions assigned it); we lower `ICONST slot; OP_SPAWN_ASYNC`, which
+            // enqueues the routine on the cooperative scheduler. The runtime drains the queue
+            // before the program exits (WASM `$teko_sched_run` at $main close / native
+            // `teko_rt_run` at HALT). Args are ignored in this MVP (fire pure tasks).
+            fe_advance(&parser); // consume 'routines'
+            if (parser.current_token.type == TOKEN_LBRACE) {
+                fe_advance(&parser); // consume '{'
+                int depth = 1;
+                while (parser.current_token.type != TOKEN_EOF && depth > 0) {
+                    if (parser.current_token.type == TOKEN_LBRACE) { depth++; fe_advance(&parser); }
+                    else if (parser.current_token.type == TOKEN_RBRACE) { depth--; fe_advance(&parser); }
+                    else if (parser.current_token.type == TOKEN_IDENTIFIER &&
+                             parser.peek_token.type == TOKEN_LPAREN) {
+                        int slot = bind_lookup(fns, nfns, parser.current_token.lexeme);
+                        fe_advance(&parser); // NAME
+                        fe_advance(&parser); // '('
+                        // Phase 14 (14.I): collect ALL arguments (Go-style) — named-local handles
+                        // or int literals — staging each into $a<i>; then OP_SPAWN_ASYNC_ARGS argc
+                        // passes the whole vector to the task. No args -> legacy OP_SPAWN_ASYNC
+                        // (byte-identical for arg-less routines programs).
+                        int argc = 0;
+                        while (parser.current_token.type != TOKEN_RPAREN &&
+                               parser.current_token.type != TOKEN_EOF && argc < 8) {
+                            if (parser.current_token.type == TOKEN_IDENTIFIER) {
+                                int s = bind_lookup(locals, nlocals, parser.current_token.lexeme);
+                                if (s >= 0) { codegen_li_emit_load_local(buffer, s); }
+                                else        { codegen_li_emit_iconst(buffer, 0); }
+                                codegen_li_emit_setarg(buffer, argc++);
+                                fe_advance(&parser);
+                            } else if (parser.current_token.type == TOKEN_LIT_INT) {
+                                codegen_li_emit_iconst(buffer, (int)literal_canonical_value(&parser.current_token));
+                                codegen_li_emit_setarg(buffer, argc++);
+                                fe_advance(&parser);
+                            } else if (parser.current_token.type == TOKEN_COMMA) {
+                                fe_advance(&parser);
+                            } else {
+                                fe_advance(&parser);
+                            }
+                        }
+                        if (parser.current_token.type == TOKEN_RPAREN) fe_advance(&parser);
+                        if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+                        if (slot >= 0) {
+                            codegen_li_emit_iconst(buffer, slot);  // $w0 = routine table slot
+                            if (argc > 0) codegen_li_emit_spawn_async_args(buffer, argc);
+                            else          codegen_li_emit_spawn_async(buffer);
+                        }
+                    } else {
+                        fe_advance(&parser);
+                    }
+                }
             }
-            if (parser.current_token.type == TOKEN_ASSIGN ||
-                parser.current_token.type == TOKEN_QUICK_ASSIGN) fe_advance(&parser);
-
-            // Assign (or reuse) this name's slot.
-            int s = bind_lookup(locals, nlocals, lname);
-            if (s < 0) { s = nlocals; bind_add(&locals, &nlocals, &caplocals, lname, s); }
-            top_ctx.locals = locals; top_ctx.nlocals = nlocals;
-
-            // Lower the initializer into $w0.
-            if (parser.current_token.type == TOKEN_LIT_STR ||
-                parser.current_token.type == TOKEN_STRING_LIT) {
-                char* sv = strip_quotes(parser.current_token.lexeme);
-                codegen_li_emit_sconst(buffer, codegen_li_add_string_constant(buffer, sv));
-                free(sv);
-                fe_advance(&parser);
-            } else if (parser.current_token.type == TOKEN_MACRO_IDENT &&
-                       is_dom_macro(parser.current_token.lexeme) &&
-                       parser.peek_token.type == TOKEN_LPAREN) {
-                lower_intrinsic_call(buffer, &parser, &top_ctx); // result handle -> $w0
-            } else if (is_codec_head(&parser)) {
-                lower_base_codec(buffer, &parser, &top_ctx);      // P12-G: result ptr -> $w0
-            } else {
-                // Integer expression (P12-E): literals, locals, parens, + - * / % and
-                // comparisons. Temps live above the named locals ($v{nlocals}+).
-                ta.next_temp = nlocals;
-                if (nlocals > ta.hw) ta.hw = nlocals;
-                eval_expr_prec(buffer, &parser, &top_ctx, 1, &ta);
-            }
-            codegen_li_emit_store_local(buffer, s); // $vs = $w0
-            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
         } else if (parser.current_token.type == TOKEN_EXTERN) {
             FFIASTNode* node = parse_extern_declaration(&parser);
             if (node) {
@@ -674,6 +1408,53 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                    parser.peek_token.type == TOKEN_LPAREN) {
             // Top-level @dom/@js intrinsic call statement.
             lower_intrinsic_call(buffer, &parser, &top_ctx);
+        } else if (is_duplex_head(&parser)) {
+            // Top-level duplex statement: duplex.send/close/… ( args )  (result discarded).
+            lower_duplex_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (is_delayed_head(&parser)) {
+            // Top-level delayed statement: delayed.send/advance/close/… ( args ).
+            lower_delayed_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (is_bcast_head(&parser)) {
+            // Top-level broadcast statement: broadcast.publish/close/… ( args ).
+            lower_bcast_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (is_atomic_head(&parser)) {
+            // Top-level atomic statement: atomic.add/store/… ( args ).
+            lower_atomic_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_WAIT ||
+                   parser.current_token.type == TOKEN_AWAIT) {
+            // Phase 14 (14.G): top-level `wait <ts>;` / `await <ts>;` timespan waiter.
+            lower_wait_await(buffer, &parser, &top_ctx,
+                             parser.current_token.type == TOKEN_AWAIT);
+        } else if (parser.current_token.type == TOKEN_WHILE) {
+            lower_while(buffer, &parser, &top_env);   // control-flow foundation
+        } else if (parser.current_token.type == TOKEN_LOOP) {
+            lower_loop(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_IF) {
+            lower_if(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_BREAK) {
+            fe_advance(&parser); codegen_li_emit_cf(buffer, OP_BREAK);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_CONTINUE) {
+            fe_advance(&parser); codegen_li_emit_cf(buffer, OP_CONTINUE);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_RETRY) {
+            lower_retry_block(buffer, &parser, &top_env);     // 14.F retry { } fallback { }
+        } else if (parser.current_token.type == TOKEN_CIRCUIT &&
+                   parser.peek_token.type == TOKEN_IDENTIFIER) {
+            lower_circuit_block(buffer, &parser, &top_env);   // 14.F circuit cb { } fallback { }
+        } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
+                   parser.peek_token.type == TOKEN_ASSIGN &&
+                   bind_lookup(locals, nlocals, parser.current_token.lexeme) >= 0) {
+            // Top-level reassignment of an existing named local: `NAME = expr;`.
+            lower_reassign(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_SHARED &&
+                   parser.peek_token.type == TOKEN_LBRACE) {
+            // Phase 14 (14.E): `shared { … }` — coarse-locked critical section.
+            lower_shared_block(buffer, &parser, &top_ctx, binds, nb);
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_LPAREN) {
             // Top-level call statement: NAME ( arg, … )
@@ -746,7 +1527,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
     // Emit handler bodies as table routines (after main), so @dom.on references resolve.
     // (May raise the temp high-water for nested args inside handler bodies.)
-    emit_handler_routines(source, buffer, fns, nfns, &ta);
+    emit_handler_routines(source, buffer, fns, nfns, binds, nb, &ta);
 
     // Phase 12: how many $v locals to declare per function — named locals plus the
     // expression/nested-arg temp high-water (across $main and the handler routines).

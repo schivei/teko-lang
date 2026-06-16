@@ -26,6 +26,14 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_random = 0;
     buffer->uses_uuid_rng = 0;
     buffer->uses_crypto_ext = 0;
+    buffer->uses_spawn = 0;
+    buffer->uses_duplex = 0;
+    buffer->uses_delayed = 0;
+    buffer->uses_bcast = 0;
+    buffer->uses_shared = 0;
+    buffer->uses_wait = 0;
+    buffer->uses_await = 0;
+    buffer->uses_retry = 0;
 
     return buffer;
 }
@@ -177,6 +185,73 @@ void codegen_li_emit_func_begin(BytecodeBuffer* buffer, int routine_id) {
 void codegen_li_emit_func_end(BytecodeBuffer* buffer) {
     if (!buffer) return;
     emit_byte(buffer, OP_FUNC_END);
+}
+
+void codegen_li_emit_spawn_async(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_spawn = 1; // backends drain the scheduler before program exit
+    emit_byte(buffer, OP_SPAWN_ASYNC);
+}
+
+void codegen_li_emit_spawn_async_args(BytecodeBuffer* buffer, int argc) {
+    if (!buffer) return;
+    buffer->uses_spawn = 1; // backends drain the scheduler + emit the routine table
+    emit_byte(buffer, OP_SPAWN_ASYNC_ARGS);
+    emit_int(buffer, argc);
+}
+
+void codegen_li_emit_load_spawn_arg(BytecodeBuffer* buffer, int idx) {
+    if (!buffer) return;
+    emit_byte(buffer, OP_LOAD_SPAWN_ARG);
+    emit_int(buffer, idx);
+}
+
+void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_duplex = 1; // backends link/import the duplex C runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_delayed(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_delayed = 1; // backends link/import the delayed-channel C runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_bcast(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_bcast = 1; // backends link/import the broadcast C runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_shared(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_shared = 1; // backends link/import the teko_shared runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_wait(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_wait = 1; // WASM declares env.teko_sleep; native links teko_rt_sleep_ms
+    emit_byte(buffer, OP_WAIT);
+}
+
+void codegen_li_emit_await(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_await = 1; // WASM declares env.teko_await + drains the scheduler
+    buffer->uses_spawn = 1; // native: emit the routine table the scheduler TU drains through
+    emit_byte(buffer, OP_AWAIT_FOR);
+}
+
+void codegen_li_emit_cf(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    emit_byte(buffer, (unsigned char)op); // single-byte structured control-flow opcode
+}
+
+void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_retry = 1; // backends link/import the teko_retry policy runtime
+    emit_byte(buffer, (unsigned char)op);
 }
 
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {

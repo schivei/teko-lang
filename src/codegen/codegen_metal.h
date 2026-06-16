@@ -69,6 +69,43 @@ typedef struct {
     // Set when the program uses a crypto primitive beyond the in-module hash/uuid set
     // (ids 5,10-40). Native emitters ignore this (they link the same C runtime directly).
     int wasm_emit_crypto_ext;
+    // Phase 14 (14.A): 1 when the program fires background tasks (`routines { … }` →
+    // OP_SPAWN_ASYNC). WASM emits `call $teko_sched_run` at $main close so spawned routines
+    // run before exit; the native runner emits the routine function-pointer table + a
+    // `teko_rt_run` drain at HALT. Spawn-free programs are byte-identical (flag stays 0).
+    int wasm_emit_spawn;
+    // Phase 14 (14.B): 1 when the program uses a duplex channel op (OP_DUPLEX_*). The WASM
+    // backend then imports the duplex entry points (teko_rt_duplex_*) from the runtime reactor
+    // and shares its linear memory (same mechanism as wasm_emit_crypto_ext). Native ignores it.
+    int wasm_emit_duplex;
+    // Phase 14 (14.C): 1 when the program uses a delayed-channel op (OP_DELAYED_*). Same
+    // reactor-import + shared-memory wiring as wasm_emit_duplex.
+    int wasm_emit_delayed;
+    // Phase 14 (14.D): 1 when the program uses a broadcast op (OP_BCAST_*). Same reactor-import
+    // + shared-memory wiring as wasm_emit_duplex/delayed.
+    int wasm_emit_bcast;
+    // Phase 14 (14.E): 1 when the program uses a `shared { }` block / `atomic.*` op. Imports the
+    // teko_shared_*/teko_atomic_* entry points from the reactor + shares memory.
+    int wasm_emit_shared;
+    // Phase 14 (14.G): 1 when the program uses `wait <ts>;` (OP_WAIT) → declare the host sleep
+    // import (env.teko_sleep). Native ignores it (links teko_rt_sleep_ms unconditionally).
+    int wasm_emit_wait;
+    // Phase 14 (14.G): 1 when the program uses `await <ts>;` (OP_AWAIT_FOR) → declare the host
+    // import (env.teko_await) and drain $teko_sched_run. Native ignores it (links teko_rt_await_ms).
+    int wasm_emit_await;
+    // Phase 14 (14.F): 1 when the program uses a `retry`/`circuit` resilience block (OP_RETRY_*/
+    // OP_CIRCUIT_*). The WASM backend imports the teko_rt_retry_*/teko_rt_circuit_* entry points
+    // from the runtime reactor + shares its linear memory (same wiring as the channel families).
+    int wasm_emit_retry;
+    // Phase 14 (control-flow foundation): structured loop/if lowering state, shared by the native
+    // hosted emitter and the WASM emitter. cf_id_next assigns a fresh monotonic id to each
+    // LOOP_BEGIN/IF_BEGIN; cf_loop_stack/cf_if_stack track the active (nesting) ids so
+    // BREAK/CONTINUE/BREAK_IF_FALSE/LOOP_END and IF_END resolve to the innermost construct.
+    int cf_id_next;
+    int cf_loop_stack[64];
+    int cf_loop_sp;
+    int cf_if_stack[64];
+    int cf_if_sp;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -97,6 +134,14 @@ void teko_metal_set_emit_hash(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_random(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_uuid_rng(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_spawn(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_delayed(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_bcast(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_shared(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_wait(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_await(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_retry(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

@@ -19,6 +19,7 @@ static int wasm_is_crypto_ext_id(int id) {
         case 29: case 30: case 31: case 32:                         // ECDSA
         case 33: case 34:                                           // SHAKE
         case 37: case 38: case 39: case 40:                         // RSA
+        case 44: case 45: case 46: case 47: case 48:               // wall-clock / timezone surface
             return 1;
         default: return 0;
     }
@@ -956,7 +957,7 @@ static void emit_wasm_threads(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             fprintf(f, "  (type $task (func (param i32)))\n");
             fprintf(f, "  (func $main (result i32)\n");
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32) (local $tdl i64)\n");
             ctx->wasm_open = 1;
             break;
 
@@ -1052,7 +1053,7 @@ static void emit_wasm_threads(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  )\n");
             }
             fprintf(f, "  (func $routine_%d (param $arg i32)\n", arg);
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $spins i32) (local $tdl i64)\n");
             fprintf(f, "    local.get $arg\n    local.set $cp\n");
             ctx->wasm_open = 2;
             if (ctx->wasm_routine_count < 64) ctx->wasm_routine_ids[ctx->wasm_routine_count] = arg;
@@ -1125,7 +1126,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // Teko's [0..65536) region (link --global-base=65536), so the allocators never
             // alias. Declare an import per reactor-backed id (all imports must precede defs).
             if (ctx->wasm_emit_crypto_ext) {
-                for (int id = 0; id <= 40; id++) {
+                for (int id = 0; id <= 48; id++) {
                     int ar = 1;
                     const char* sym;
                     if (!wasm_is_crypto_ext_id(id)) continue;
@@ -1136,10 +1137,66 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                     fprintf(f, " (result i32)))\n");
                 }
             }
-            // Memory: module-owned by default; when the crypto reactor is in play it is
-            // host-owned and SHARED (imported from env), so both modules address the same
-            // bytes. Re-export it either way so harnesses can read results via exports.memory.
-            if (ctx->wasm_emit_crypto_ext) {
+            // Phase 14 (14.B): duplex channel entry points come from the SAME runtime reactor
+            // (namespace "crypto"). Pure i32-in/i32-out (handle/value/status) — no shared-memory
+            // marshalling like the crypto hex strings. Imported only when the program uses them.
+            if (ctx->wasm_emit_duplex) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_open\" (func $duplex_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_send\" (func $duplex_send (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_recv\" (func $duplex_recv (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_poll\" (func $duplex_poll (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_close\" (func $duplex_close (param i32) (result i32)))\n");
+            }
+            // Phase 14 (14.C): delayed (timed) channel entry points, also from the reactor.
+            if (ctx->wasm_emit_delayed) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_open\" (func $delayed_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_send\" (func $delayed_send (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_recv\" (func $delayed_recv (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_poll\" (func $delayed_poll (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_close\" (func $delayed_close (param i32) (result i32)))\n");
+            }
+            // Phase 14 (14.D): broadcast (1:N pub-sub) entry points, also from the reactor.
+            if (ctx->wasm_emit_bcast) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_open\" (func $bcast_open (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_subscribe\" (func $bcast_subscribe (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_publish\" (func $bcast_publish (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_recv\" (func $bcast_recv (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_poll\" (func $bcast_poll (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_close\" (func $bcast_close (param i32) (result i32)))\n");
+            }
+            // Phase 14 (14.E): shared-memory entry points, also from the reactor. enter/leave and
+            // store return void (no result); cell/add/load return an i32 (handle/value).
+            if (ctx->wasm_emit_shared) {
+                fprintf(f, "  (import \"crypto\" \"teko_shared_enter\" (func $shared_enter))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_shared_leave\" (func $shared_leave))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_cell\" (func $atomic_cell (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_add\" (func $atomic_add (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_load\" (func $atomic_load (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_store\" (func $atomic_store (param i32) (param i32)))\n");
+            }
+            // Phase 14 (14.F): resilience policy entry points, also from the runtime reactor.
+            // Pure i32 (handle/count/time) — the teko_retry C policy is the shared source of truth.
+            if (ctx->wasm_emit_retry) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_new\" (func $retry_new (param i32) (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_should_continue\" (func $retry_should_continue (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_next_delay\" (func $retry_next_delay (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_new\" (func $circuit_new (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_allow\" (func $circuit_allow (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_record\" (func $circuit_record (param i32) (param i32) (result i32)))\n");
+            }
+            // Phase 14 (real-time clock): timespan waiters read the host MONOTONIC ns clock
+            // (env.teko_now_ns) and spin cooperatively until the real deadline — `wait` just spins,
+            // `await` also drains the in-module scheduler ($teko_sched_run). Non-blocking: the
+            // module re-checks the real clock rather than blocking the host thread. (Node:
+            // process.hrtime.bigint() — real ns; browser: performance.now()*1e6, coarsened.)
+            if (ctx->wasm_emit_wait || ctx->wasm_emit_await) {
+                fprintf(f, "  (import \"env\" \"teko_now_ns\" (func $teko_now_ns (result i64)))\n");
+            }
+            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
+            // shared) is in play it is host-owned and SHARED (imported from env), so both modules
+            // address the same bytes. Re-export it either way so harnesses can read results.
+            if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
+                ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1161,8 +1218,8 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (func $main (result i32)\n");
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
-            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $tdl i64)\n");
+            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");
             // Phase 12: named local variables ($v0..$v{n-1}) for `let`/`mut` bindings.
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
@@ -1233,6 +1290,152 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 // wrong on the WASM surface.
                 fprintf(f, "    unreachable ;; crypto runtime id %d not lowered to WASM\n", arg);
             }
+            break;
+        }
+
+        // Phase 14 (14.B): duplex channel ops — call the reactor's imported teko_rt_duplex_*.
+        // Multi-arg ABI mirrors OP_CALL_IMPORT: args 0..n-2 from staging slots $a0.. (set by
+        // OP_SETARG), the last from $w0; the i32 result (handle/value/status) lands in $w0.
+        case OP_DUPLEX_OPEN:
+        case OP_DUPLEX_SEND:
+        case OP_DUPLEX_RECV:
+        case OP_DUPLEX_POLL:
+        case OP_DUPLEX_CLOSE: {
+            const char* fn = (op == OP_DUPLEX_OPEN) ? "duplex_open" :
+                             (op == OP_DUPLEX_SEND) ? "duplex_send" :
+                             (op == OP_DUPLEX_RECV) ? "duplex_recv" :
+                             (op == OP_DUPLEX_POLL) ? "duplex_poll" : "duplex_close";
+            int ar = (op == OP_DUPLEX_SEND) ? 3 :
+                     (op == OP_DUPLEX_RECV || op == OP_DUPLEX_POLL) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 14 (14.C): delayed (timed) channel ops — imported reactor calls, same ABI.
+        case OP_DELAYED_OPEN:
+        case OP_DELAYED_SEND:
+        case OP_DELAYED_RECV:
+        case OP_DELAYED_POLL:
+        case OP_DELAYED_CLOSE: {
+            const char* fn = (op == OP_DELAYED_OPEN)    ? "delayed_open" :
+                             (op == OP_DELAYED_SEND)    ? "delayed_send" :
+                             (op == OP_DELAYED_RECV)    ? "delayed_recv" :
+                             (op == OP_DELAYED_POLL)    ? "delayed_poll" : "delayed_close";
+            int ar = (op == OP_DELAYED_SEND) ? 3 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 14 (14.D): broadcast pub-sub ops — imported reactor calls, same ABI.
+        case OP_BCAST_OPEN:
+        case OP_BCAST_SUBSCRIBE:
+        case OP_BCAST_PUBLISH:
+        case OP_BCAST_RECV:
+        case OP_BCAST_POLL:
+        case OP_BCAST_CLOSE: {
+            const char* fn = (op == OP_BCAST_OPEN)      ? "bcast_open" :
+                             (op == OP_BCAST_SUBSCRIBE) ? "bcast_subscribe" :
+                             (op == OP_BCAST_PUBLISH)   ? "bcast_publish" :
+                             (op == OP_BCAST_RECV)      ? "bcast_recv" :
+                             (op == OP_BCAST_POLL)      ? "bcast_poll" : "bcast_close";
+            int ar = (op == OP_BCAST_PUBLISH || op == OP_BCAST_RECV || op == OP_BCAST_POLL) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 14 (14.E): shared-block lock + atomic cell ops (imported from the reactor).
+        // enter/leave are nullary void; store is 2-arg void (no result → no local.set); cell/load
+        // are 1-arg→i32; add is 2-arg→i32.
+        case OP_SHARED_ENTER: fprintf(f, "    call $shared_enter\n"); break;
+        case OP_SHARED_LEAVE: fprintf(f, "    call $shared_leave\n"); break;
+        case OP_ATOMIC_CELL:
+            fprintf(f, "    local.get $w0\n    call $atomic_cell\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_LOAD:
+            fprintf(f, "    local.get $w0\n    call $atomic_load\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_ADD:
+            fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_add\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_STORE:
+            fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_store\n");
+            break;
+
+        // Phase 14 (real-time clock): timespan waiters. The ms delay is in $w0. Compute a real ns
+        // deadline (now + ms*1e6) in the i64 local $tdl, then spin until the real MONOTONIC clock
+        // reaches it — `await` also drains the scheduler each turn so queued tasks run. Cooperative
+        // + non-blocking (re-checks the host clock; never blocks). Stack-neutral.
+        case OP_WAIT:
+        case OP_AWAIT_FOR: {
+            int id = ctx->cf_id_next++; // unique block/loop labels
+            fprintf(f, "    local.get $w0\n    i64.extend_i32_u\n    i64.const 1000000\n    i64.mul\n");
+            fprintf(f, "    call $teko_now_ns\n    i64.add\n    local.set $tdl\n"); // deadline
+            fprintf(f, "    (block $waitd_%d (loop $waitl_%d\n", id, id);
+            if (op == OP_AWAIT_FOR) fprintf(f, "      call $teko_sched_run\n");    // cooperative drain
+            fprintf(f, "      call $teko_now_ns\n      local.get $tdl\n      i64.ge_u\n      br_if $waitd_%d\n", id);
+            fprintf(f, "      br $waitl_%d))\n", id);
+            break;
+        }
+
+        // Phase 14 (control-flow foundation): structured loops + branches. A loop is a block
+        // (break target $brk_N) wrapping a loop (continue/back-edge target $cont_N); `if` uses the
+        // native WASM (if … end) form. Conditions arrive in $w0. Bodies are stack-neutral (the
+        // accumulator model), so the unreachable tail after a br validates fine.
+        case OP_LOOP_BEGIN: {
+            int id = ctx->cf_id_next++;
+            if (ctx->cf_loop_sp < 64) ctx->cf_loop_stack[ctx->cf_loop_sp++] = id;
+            fprintf(f, "    (block $brk_%d (loop $cont_%d\n", id, id);
+            break;
+        }
+        case OP_LOOP_END: {
+            int id = (ctx->cf_loop_sp > 0) ? ctx->cf_loop_stack[--ctx->cf_loop_sp] : 0;
+            fprintf(f, "    br $cont_%d))\n", id); // back-edge, close loop, close block
+            break;
+        }
+        case OP_BREAK: {
+            int id = (ctx->cf_loop_sp > 0) ? ctx->cf_loop_stack[ctx->cf_loop_sp - 1] : 0;
+            fprintf(f, "    br $brk_%d\n", id);
+            break;
+        }
+        case OP_CONTINUE: {
+            int id = (ctx->cf_loop_sp > 0) ? ctx->cf_loop_stack[ctx->cf_loop_sp - 1] : 0;
+            fprintf(f, "    br $cont_%d\n", id);
+            break;
+        }
+        case OP_BREAK_IF_FALSE: {
+            int id = (ctx->cf_loop_sp > 0) ? ctx->cf_loop_stack[ctx->cf_loop_sp - 1] : 0;
+            fprintf(f, "    local.get $w0\n    i32.eqz\n    br_if $brk_%d\n", id);
+            break;
+        }
+        case OP_IF_BEGIN:
+            fprintf(f, "    local.get $w0\n    if\n");
+            break;
+        case OP_IF_END:
+            fprintf(f, "    end\n");
+            break;
+
+        // Phase 14 (14.F): resilience policy ops — imported reactor calls, same staging ABI as the
+        // channel families (args 0..n-2 from $a0.., the last from $w0; i32 result in $w0).
+        case OP_RETRY_NEW:
+        case OP_RETRY_SHOULD_CONTINUE:
+        case OP_RETRY_NEXT_DELAY:
+        case OP_CIRCUIT_NEW:
+        case OP_CIRCUIT_ALLOW:
+        case OP_CIRCUIT_RECORD: {
+            const char* fn = (op == OP_RETRY_NEW)             ? "retry_new" :
+                             (op == OP_RETRY_SHOULD_CONTINUE) ? "retry_should_continue" :
+                             (op == OP_RETRY_NEXT_DELAY)      ? "retry_next_delay" :
+                             (op == OP_CIRCUIT_NEW)           ? "circuit_new" :
+                             (op == OP_CIRCUIT_ALLOW)         ? "circuit_allow" : "circuit_record";
+            // Real-clock arities: should_continue(handle,attempt)=2, next_delay(handle,attempt)=2,
+            // circuit_new(threshold,cooldown)=2, circuit_record(handle,ok)=2, circuit_allow(handle)=1.
+            int ar = (op == OP_RETRY_NEW) ? 4 :
+                     (op == OP_CIRCUIT_ALLOW) ? 1 : 2;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;
         }
 
@@ -1393,6 +1596,25 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    global.get $arena_sp\n    i32.const %d\n    i32.add\n    global.set $arena_sp\n", TEKO_WASM_FRAME_BYTES);
             break;
 
+        // Phase 14 (14.I): fire a routine with `arg` (=argc) staged arguments (Go-style — pass any
+        // variables, e.g. shared channel handles). Copy the staged args $a0..$a(argc-1) into the
+        // task's spill frame (frame[4*i]), then enqueue {fn=$w0, arg=frame[0], frame}. The channel
+        // lives in shared/reactor memory, so the int handles are all the task needs to address it.
+        case OP_SPAWN_ASYNC_ARGS: {
+            int argc = arg;
+            fprintf(f, "    ;; [WASM Spawn+args]: stage %d arg(s) into the task frame; enqueue\n", argc);
+            for (int k = 0; k < argc; k++)
+                fprintf(f, "    global.get $arena_sp\n    local.get $a%d\n    i32.store offset=%d\n", k, 4 * k);
+            fprintf(f, "    local.get $w0\n    global.get $arena_sp\n    i32.load offset=0\n    i32.const 0\n    global.get $arena_sp\n    call $teko_enqueue\n");
+            fprintf(f, "    global.get $arena_sp\n    i32.const %d\n    i32.add\n    global.set $arena_sp\n", TEKO_WASM_FRAME_BYTES);
+            break;
+        }
+
+        // Phase 14 (14.I): in a routine, $w0 = the idx-th spawn argument (from the task frame).
+        case OP_LOAD_SPAWN_ARG:
+            fprintf(f, "    local.get $frame\n    i32.load offset=%d\n    local.set $w0\n", 4 * arg);
+            break;
+
         case OP_AWAIT_INTENT:
             fprintf(f, "    ;; [WASM Await]: cooperative yield to the scheduler\n");
             fprintf(f, "    call $teko_sched_run\n");
@@ -1404,16 +1626,19 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_FUNC_BEGIN: {
             // Close whatever function is currently open, then open $routine_<id>.
             if (ctx->wasm_open == 1) {
+                // Phase 14: a `routines`-bearing program drains the cooperative scheduler
+                // before $main returns, so fired background tasks run to completion.
+                if (ctx->wasm_emit_spawn) fprintf(f, "    call $teko_sched_run\n");
                 fprintf(f, "    local.get $w0\n  )\n");          // close $main (result i32)
             } else if (ctx->wasm_open == 2) {
                 fprintf(f, "    i32.const 0\n  )\n");            // close previous routine (state 0)
             }
             int n = ctx->wasm_routine_yields;                    // yield points in this routine
             fprintf(f, "  (func $routine_%d (param $arg i32) (param $state i32) (param $frame i32) (result i32)\n", arg);
-            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
+            fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32) (local $tdl i64)\n");
             // Import-arg staging slots (Phase 11): a callback routine invoked via
             // $teko_invoke calls dom.* imports just like $main, so it needs $a0..$a2.
-            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");
             // Phase 12 (P12-F): named-local file ($v) for nested-arg spill temps inside
             // a handler body (same module-global count as $main; harmless if unused).
             for (int v = 0; v < ctx->wasm_local_count; v++) {
@@ -1459,6 +1684,9 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_RETURN:
         case OP_EPILOG: {
             if (ctx->wasm_open == 1) {
+                // Phase 14: drain the scheduler before $main returns (routines programs
+                // with no trailing routine table still close $main here).
+                if (ctx->wasm_emit_spawn) fprintf(f, "    call $teko_sched_run\n");
                 fprintf(f, "    local.get $w0\n  )\n");
             } else if (ctx->wasm_open == 2) {
                 fprintf(f, "    i32.const 0\n  )\n");

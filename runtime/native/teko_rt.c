@@ -17,6 +17,11 @@
 #include "teko_crypto_rsa.h"
 #include "teko_crypto_random.h"
 #include "teko_uuid.h"
+#include "teko_duplex.h"
+#include "teko_delayed.h"
+#include "teko_broadcast.h"
+#include "teko_retry.h"
+#include "teko_time.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +39,38 @@
 
 #define TEKO_RT_KDF_MAX_OUT 1024 // bound variable-length output buffers (KDF/XOF) to a sane size
 
+// Phase 14 (real-time clock): a portable MONOTONIC nanosecond clock — the time base for the
+// cooperative waiters/delays/timeouts (it replaced the old logical clock). Native uses
+// CLOCK_MONOTONIC (POSIX/macOS, monotonic — NOT realtime) / QueryPerformanceCounter (Windows/MSVC);
+// WASM imports env.teko_now_ns (Node: process.hrtime.bigint() — real ns; browser:
+// performance.now()*1e6, best-effort — the browser clamps/coarsens performance.now() for security,
+// so sub-ms resolution is not guaranteed there; see the run-*.mjs harnesses). Returns a 64-bit ns
+// count from an arbitrary epoch — only DIFFERENCES are meaningful (deadlines/elapsed).
+#if defined(__wasm__)
+__attribute__((import_module("env"), import_name("teko_now_ns")))
+extern long long teko_rt_host_now_ns(void);
+long long teko_rt_now_ns(void) { return teko_rt_host_now_ns(); }
+#elif defined(_WIN32)
+long long teko_rt_now_ns(void) {
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    long long f = freq.QuadPart ? freq.QuadPart : 1;
+    long long sec = cnt.QuadPart / f, rem = cnt.QuadPart % f;
+    return sec * 1000000000LL + (rem * 1000000000LL) / f; // ns, overflow-safe
+}
+#else
+long long teko_rt_now_ns(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts); // fallback if monotonic is unavailable
+#endif
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+#endif
+
 // See teko_rt.h. This translation unit is compiled into the static archive
 // `libteko_rt.a`, which the native runner links into every produced executable.
 // Crypto wrappers (Sub-phase B) are added alongside this print primitive; they call
@@ -44,7 +81,173 @@
 void teko_rt_emit(const char* s) {
     puts(s ? s : "");
 }
+// Phase 14: print an integer (one per line) — lets concurrency proofs surface i32 results
+// (channel values, statuses) the same way teko_rt_emit surfaces strings.
+void teko_rt_emit_int(long n) {
+    printf("%ld\n", n);
+}
+
+// Phase 14 (14.G): `wait <ts>;` — a SYNCHRONOUS real-time wait for `ms` canonical milliseconds (the
+// frontend folded any unit suffix to ms). It returns only once the real MONOTONIC clock has
+// advanced by at least the requested span — checked cooperatively against the ns clock, WITHOUT
+// blocking the OS thread in the kernel (owner decision: non-blocking cooperative scheduling; the
+// time source is real). A non-positive delay is a no-op. `await` (teko_rt_await_ns) is the variant
+// that also drains the run queue while waiting. Lowered from OP_WAIT (ms in arg0).
+void teko_rt_wait_ns(long ms) {
+    if (ms <= 0) return;
+    long long deadline = teko_rt_now_ns() + (long long)ms * 1000000LL;
+    while (teko_rt_now_ns() < deadline) { /* cooperative spin on the real clock — no kernel block */ }
+}
 #endif
+
+// Phase 14 (14.B) — duplex channel surface wrappers. The OP_DUPLEX_* opcodes lower to these
+// (SysV/AAPCS calls); the duplex C runtime (src/runtime/teko_duplex.c) is the source of truth.
+// The handle is the TekoDuplex* carried through the surface as a register-width integer; all
+// values/statuses are i32 at the .tks level. Available on every target (native + wasm reactor).
+long teko_rt_duplex_open(long capacity) {
+    return (long)(intptr_t)teko_duplex_open((uint32_t)capacity);
+}
+long teko_rt_duplex_send(long handle, long endpoint, long value) {
+    return (long)teko_duplex_send((TekoDuplex*)(intptr_t)handle, (int)endpoint, (int32_t)value);
+}
+long teko_rt_duplex_recv(long handle, long endpoint) {
+    int32_t v = 0;
+    (void)teko_duplex_recv((TekoDuplex*)(intptr_t)handle, (int)endpoint, &v);
+    return (long)v; // value (0 when empty/closed — callers probe status via duplex.poll)
+}
+long teko_rt_duplex_poll(long handle, long endpoint) {
+    return (long)teko_duplex_poll((TekoDuplex*)(intptr_t)handle, (int)endpoint);
+}
+long teko_rt_duplex_close(long handle) {
+    teko_duplex_close((TekoDuplex*)(intptr_t)handle);
+    return 0;
+}
+
+// Phase 14 (14.C) — delayed (timed) channel surface wrappers (OP_DELAYED_* lower to these).
+long teko_rt_delayed_open(long capacity) {
+    return (long)(intptr_t)teko_delayed_open((uint32_t)capacity);
+}
+// Phase 14 (real-time clock): the delay is canonical ms (i32 surface); the deadline math is real
+// ns. The wrapper reads the real MONOTONIC clock (teko_rt_now_ns) and passes it to the runtime, so
+// a message becomes due once REAL time has advanced by `delay` ms — no logical `advance` tick.
+long teko_rt_delayed_send(long handle, long value, long delay_ms) {
+    return (long)teko_delayed_send((TekoDelayed*)(intptr_t)handle, (int32_t)value,
+                                   (uint64_t)(long long)delay_ms * 1000000ULL,
+                                   (uint64_t)teko_rt_now_ns());
+}
+long teko_rt_delayed_recv(long handle) {
+    int32_t v = 0;
+    (void)teko_delayed_recv((TekoDelayed*)(intptr_t)handle, &v, (uint64_t)teko_rt_now_ns());
+    return (long)v; // earliest-due value (0 when none due — callers probe via delayed.poll)
+}
+long teko_rt_delayed_poll(long handle) {
+    return (long)teko_delayed_poll((TekoDelayed*)(intptr_t)handle, (uint64_t)teko_rt_now_ns());
+}
+long teko_rt_delayed_close(long handle) {
+    teko_delayed_close((TekoDelayed*)(intptr_t)handle);
+    return 0;
+}
+
+// Phase 14 (14.D) — broadcast (1:N pub-sub) channel surface wrappers (OP_BCAST_* lower to these).
+long teko_rt_bcast_open(long capacity) {
+    return (long)(intptr_t)teko_broadcast_open((uint32_t)capacity);
+}
+long teko_rt_bcast_subscribe(long handle) {
+    return (long)teko_broadcast_subscribe((TekoBroadcast*)(intptr_t)handle);
+}
+long teko_rt_bcast_publish(long handle, long value) {
+    return (long)teko_broadcast_publish((TekoBroadcast*)(intptr_t)handle, (int32_t)value);
+}
+long teko_rt_bcast_recv(long handle, long sub_id) {
+    int32_t v = 0;
+    (void)teko_broadcast_recv((TekoBroadcast*)(intptr_t)handle, (int)sub_id, &v);
+    return (long)v; // value (0 when empty/closed/lagged — callers probe via broadcast.poll)
+}
+long teko_rt_bcast_poll(long handle, long sub_id) {
+    return (long)teko_broadcast_poll((TekoBroadcast*)(intptr_t)handle, (int)sub_id);
+}
+long teko_rt_bcast_close(long handle) {
+    teko_broadcast_close((TekoBroadcast*)(intptr_t)handle);
+    return 0;
+}
+
+// Phase 14 (14.F) — resilience policy surface wrappers (OP_RETRY_*/OP_CIRCUIT_* lower to these).
+// The handle is a TekoRetry*/TekoCircuit* carried as a register-width integer; the time/count
+// args are i32 at the surface (ms fit in i32 for the MVP — the teko_retry C policy is the single
+// source of truth). mode: 0 = exponential, non-zero = logarithmic.
+// Phase 14 (real-time clock): the policy units are canonical ms; the timeout/cooldown are driven
+// by the REAL monotonic clock (teko_rt_now_ns, read as ms). The wrappers record the start instant
+// and supply real `now`/`elapsed` so the surface ops don't carry a logical time argument.
+static long teko_rt_now_ms(void) { return (long)(teko_rt_now_ns() / 1000000LL); }
+long teko_rt_retry_new(long attempts, long timeout, long mode, long base) {
+    TekoRetry* r = teko_retry_new((int)attempts, (uint64_t)(unsigned long)timeout,
+        mode ? TEKO_BACKOFF_LOGARITHMIC : TEKO_BACKOFF_EXPONENTIAL, (uint64_t)(unsigned long)base);
+    teko_retry_mark_start(r, (uint64_t)teko_rt_now_ms());
+    return (long)(intptr_t)r;
+}
+long teko_rt_retry_should_continue(long handle, long attempt) {
+    return teko_retry_should_continue_rt((const TekoRetry*)(intptr_t)handle, (int)attempt,
+                                         (uint64_t)teko_rt_now_ms());
+}
+long teko_rt_retry_next_delay(long handle, long attempt) {
+    return (long)teko_retry_next_delay((const TekoRetry*)(intptr_t)handle, (int)attempt);
+}
+long teko_rt_circuit_new(long threshold, long cooldown) {
+    return (long)(intptr_t)teko_circuit_new((int)threshold, (uint64_t)(unsigned long)cooldown);
+}
+long teko_rt_circuit_allow(long handle) {
+    return teko_circuit_allow((TekoCircuit*)(intptr_t)handle, (uint64_t)teko_rt_now_ms());
+}
+long teko_rt_circuit_record(long handle, long ok) {
+    teko_circuit_record((TekoCircuit*)(intptr_t)handle, (int)ok, (uint64_t)teko_rt_now_ms());
+    return 0;
+}
+
+// Phase 14 (wall-clock / timezone surface) — the platform facts behind the civil-time surface: the
+// current Unix timestamp and the DST-correct local UTC offset for an instant, sourced from the OS
+// (native time()/localtime; WASM host imports env.teko_now_unix / env.teko_tz_offset). The portable
+// teko_time_* formatter (the source of truth) turns these into the ISO-8601 strings.
+#if defined(__wasm__)
+__attribute__((import_module("env"), import_name("teko_now_unix")))
+extern long long teko_rt_host_now_unix(void);
+__attribute__((import_module("env"), import_name("teko_tz_offset")))
+extern int teko_rt_host_tz_offset(long long epoch_s);
+static long long teko_rt_time_now_s(void) { return teko_rt_host_now_unix(); }
+static long teko_rt_time_offset(long long epoch_s) { return (long)teko_rt_host_tz_offset(epoch_s); }
+#else
+static long long teko_rt_time_now_s(void) { return (long long)time(NULL); }
+static long teko_rt_time_offset(long long epoch_s) {
+    time_t t = (time_t)epoch_s;
+    struct tm lt;
+#if defined(_WIN32)
+    localtime_s(&lt, &t);
+#else
+    localtime_r(&t, &lt);
+#endif
+    // localtime gave DST-adjusted LOCAL fields; expressing them as "seconds if they were UTC" and
+    // subtracting the true epoch yields the local offset (DST included) without non-portable APIs.
+    long long lsec = teko_time_days_from_civil(lt.tm_year + 1900, (unsigned)(lt.tm_mon + 1),
+                                               (unsigned)lt.tm_mday) * 86400LL
+                   + (long long)lt.tm_hour * 3600 + (long long)lt.tm_min * 60 + lt.tm_sec;
+    return (long)(lsec - epoch_s);
+}
+#endif
+
+// `time.now_unix()` -> current Unix epoch seconds as a decimal string (the int arg is ignored).
+char* teko_rt_time_now_unix(int ignored)  { (void)ignored; return teko_time_epoch_str(teko_rt_time_now_s()); }
+// `time.now_utc()` / `time.now_local()` -> ISO-8601 of "now" in UTC / system-local (DST-correct).
+char* teko_rt_time_now_utc(int ignored)   { (void)ignored; return teko_time_format(teko_rt_time_now_s(), 0); }
+char* teko_rt_time_now_local(int ignored) {
+    (void)ignored; long long e = teko_rt_time_now_s();
+    return teko_time_format(e, teko_rt_time_offset(e));
+}
+// `time.format_utc(epoch)` / `time.format_local(epoch)` -> ISO-8601 of a user epoch (decimal
+// string -> the user can do time math on it), UTC / system-local.
+char* teko_rt_time_format_utc(const char* epoch_str)   { return teko_time_format(teko_time_parse(epoch_str), 0); }
+char* teko_rt_time_format_local(const char* epoch_str) {
+    long long e = teko_time_parse(epoch_str);
+    return teko_time_format(e, teko_rt_time_offset(e));
+}
 
 // Decode a hex string into a fresh byte buffer (caller frees via free). Sets *out_len.
 // Returns NULL on odd length or a non-hex digit. An empty string decodes to a 0-length

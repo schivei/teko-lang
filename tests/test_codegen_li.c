@@ -642,3 +642,602 @@ void test_codegen_li_import_table_and_interop_emit(void) {
 
     codegen_li_free_context(buffer);
 }
+
+// Phase 14 (14.A): a `routines { … }` block fires each enclosed call as a background task.
+// The frontend lowers it to ICONST <slot> + OP_SPAWN_ASYNC (per call), sets uses_spawn, and
+// emits the named `fn` as a table routine. The WASM bridge then drains the cooperative
+// scheduler at $main close (`call $teko_sched_run`) so the tasks run before exit.
+void test_frontend_interop_routines_spawn(void) {
+    const char* src =
+        "extern fn log(msg: str) from \"env\" as \"log\";\n"
+        "fn worker() { log(\"worker ran\"); }\n"
+        "log(\"main start\");\n"
+        "routines { worker(); worker(); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    // Firing a routine sets the spawn flag and lowers to OP_SPAWN_ASYNC + a table routine.
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn);
+    int spawns = 0, func_begins = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_SPAWN_ASYNC) spawns++;
+        else if (buffer->code[i] == OP_FUNC_BEGIN) func_begins++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, spawns);       // two worker() calls fired
+    TEST_ASSERT_EQUAL_INT(1, func_begins);  // one `fn worker` emitted as a routine
+
+    // Through the WASM bridge: the routine body, the scheduler drain at $main close, and a
+    // function table with the routine must all be present.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_routines.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $routine_0"));        // worker lowered to a routine
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_enqueue"));      // spawn enqueues the task
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sched_run"));    // drained before $main returns
+    TEST_ASSERT_NOT_NULL(strstr(out, "(elem (i32.const 0) $routine_0"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.B): `duplex.*` dotted-identifier calls lower to the dedicated OP_DUPLEX_*
+// opcodes (not OP_CALL_RUNTIME), set uses_duplex, and stage multi-arg ops via OP_SETARG.
+void test_frontend_interop_duplex_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let h = duplex.open(4);\n"
+        "duplex.send(h, 0, 111);\n"
+        "let a = duplex.recv(h, 1);\n"
+        "emit_int(a);\n"
+        "duplex.close(h);\n"
+        "let s = duplex.poll(h, 1);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_duplex);
+    int n_open = 0, n_send = 0, n_recv = 0, n_poll = 0, n_close = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_DUPLEX_OPEN:  n_open++;  break;
+            case OP_DUPLEX_SEND:  n_send++;  break;
+            case OP_DUPLEX_RECV:  n_recv++;  break;
+            case OP_DUPLEX_POLL:  n_poll++;  break;
+            case OP_DUPLEX_CLOSE: n_close++; break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_open);
+    TEST_ASSERT_EQUAL_INT(1, n_send);
+    TEST_ASSERT_EQUAL_INT(1, n_recv);
+    TEST_ASSERT_EQUAL_INT(1, n_poll);
+    TEST_ASSERT_EQUAL_INT(1, n_close);
+
+    // Through the WASM bridge: the duplex ops import the reactor entry points + share memory.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_duplex.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_duplex_open\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $duplex_send"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $duplex_poll"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\"")); // shared with the reactor
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.C): `delayed.*` dotted-identifier calls lower to the dedicated OP_DELAYED_*
+// opcodes, set uses_delayed, and (on WASM) import the reactor entry points over shared memory.
+void test_frontend_interop_delayed_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let d = delayed.open(8);\n"
+        "delayed.send(d, 10, 10);\n"
+        "let a = delayed.recv(d);\n"
+        "emit_int(a);\n"
+        "let p = delayed.poll(d);\n"
+        "delayed.close(d);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_delayed);
+    int n_open = 0, n_send = 0, n_recv = 0, n_poll = 0, n_close = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_DELAYED_OPEN:    n_open++;  break;
+            case OP_DELAYED_SEND:    n_send++;  break;
+            case OP_DELAYED_RECV:    n_recv++;  break;
+            case OP_DELAYED_POLL:    n_poll++;  break;
+            case OP_DELAYED_CLOSE:   n_close++; break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_open);
+    TEST_ASSERT_EQUAL_INT(1, n_send);
+    TEST_ASSERT_EQUAL_INT(1, n_recv);
+    TEST_ASSERT_EQUAL_INT(1, n_poll);
+    TEST_ASSERT_EQUAL_INT(1, n_close);
+
+    // Through the WASM bridge: the delayed ops import the reactor entry points + share memory.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_delayed.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_delayed_open\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $delayed_recv"));
+    TEST_ASSERT_NULL(strstr(out, "delayed_advance")); // logical advance removed (real-time clock)
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.D): `broadcast.*` dotted-identifier calls lower to OP_BCAST_*, set uses_bcast,
+// and (on WASM) import the reactor entry points over shared memory.
+void test_frontend_interop_broadcast_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let b = broadcast.open(8);\n"
+        "let s = broadcast.subscribe(b);\n"
+        "broadcast.publish(b, 10);\n"
+        "let a = broadcast.recv(b, s);\n"
+        "emit_int(a);\n"
+        "let p = broadcast.poll(b, s);\n"
+        "broadcast.close(b);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_bcast);
+    int n_open=0,n_sub=0,n_pub=0,n_recv=0,n_poll=0,n_close=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_BCAST_OPEN:      n_open++;  break;
+            case OP_BCAST_SUBSCRIBE: n_sub++;   break;
+            case OP_BCAST_PUBLISH:   n_pub++;   break;
+            case OP_BCAST_RECV:      n_recv++;  break;
+            case OP_BCAST_POLL:      n_poll++;  break;
+            case OP_BCAST_CLOSE:     n_close++; break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_open);
+    TEST_ASSERT_EQUAL_INT(1, n_sub);
+    TEST_ASSERT_EQUAL_INT(1, n_pub);
+    TEST_ASSERT_EQUAL_INT(1, n_recv);
+    TEST_ASSERT_EQUAL_INT(1, n_poll);
+    TEST_ASSERT_EQUAL_INT(1, n_close);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_broadcast.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_bcast_subscribe\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $bcast_publish"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.E): a `shared { }` block injects OP_SHARED_ENTER/LEAVE around its body; `atomic.*`
+// lower to OP_ATOMIC_*. Sets uses_shared; WASM imports the reactor entry points over shared memory.
+void test_frontend_interop_shared_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let c = atomic.cell(0);\n"
+        "shared {\n"
+        "  atomic.add(c, 5);\n"
+        "  atomic.add(c, 3);\n"
+        "}\n"
+        "let v = atomic.load(c);\n"
+        "emit_int(v);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_shared);
+    int n_enter=0,n_leave=0,n_cell=0,n_add=0,n_load=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_SHARED_ENTER: n_enter++; break;
+            case OP_SHARED_LEAVE: n_leave++; break;
+            case OP_ATOMIC_CELL:  n_cell++;  break;
+            case OP_ATOMIC_ADD:   n_add++;   break;
+            case OP_ATOMIC_LOAD:  n_load++;  break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_enter);  // one shared block
+    TEST_ASSERT_EQUAL_INT(1, n_leave);
+    TEST_ASSERT_EQUAL_INT(1, n_cell);
+    TEST_ASSERT_EQUAL_INT(2, n_add);    // two atomic.add inside the block
+    TEST_ASSERT_EQUAL_INT(1, n_load);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_shared.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_atomic_add\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $shared_enter"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $shared_leave"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.G): timespan literals carrying a time-unit suffix normalize to canonical
+// milliseconds at compile time, so the integer-only channel/delay runtimes stay unchanged.
+// `2s` → ICONST 2000, `1m` → 60000, `500ms` → 500; a unit-less value passes through.
+static int il_has_iconst(const BytecodeBuffer* b, int value) {
+    for (int i = 0; i + 4 < b->size; i++) {
+        if (b->code[i] == OP_ICONST) {
+            int v = (int)((unsigned)b->code[i+1] | ((unsigned)b->code[i+2] << 8) |
+                          ((unsigned)b->code[i+3] << 16) | ((unsigned)b->code[i+4] << 24));
+            if (v == value) return 1;
+        }
+    }
+    return 0;
+}
+
+// Phase 14 (14.G): `wait <ts>;` / `await <ts>;` lower to OP_WAIT / OP_AWAIT_FOR with the timespan
+// normalized to canonical ms in the preceding ICONST. await sets uses_await + uses_spawn; wait
+// sets uses_wait. On WASM the host sleep/await imports are declared + (await) the scheduler drains.
+void test_frontend_interop_waiters_lowering(void) {
+    const char* src =
+        "wait 2s;\n"     // 2s   -> ICONST 2000 ; OP_WAIT
+        "await 5ms;\n";  // 5ms  -> ICONST 5    ; OP_AWAIT_FOR
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_wait);
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_await);
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn); // await emits the native routine table
+    int n_wait = 0, n_await = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_WAIT) n_wait++;
+        if (buffer->code[i] == OP_AWAIT_FOR) n_await++;
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_wait);
+    TEST_ASSERT_EQUAL_INT(1, n_await);
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 2000)); // 2s normalized for wait
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 5));    // 5ms for await
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_waiters.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    // Real-time clock: waiters import the host monotonic ns clock and spin to a real deadline.
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_now_ns\" (func $teko_now_ns (result i64)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_now_ns"));   // deadline read + spin check
+    TEST_ASSERT_NOT_NULL(strstr(out, "i64.ge_u"));            // real-time deadline comparison
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sched_run")); // await drains the scheduler
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (control-flow foundation): `while`/`loop`/`if`/`break`/`continue` + reassignment lower
+// to the structured OP_LOOP_*/OP_IF_*/OP_BREAK* opcodes; on WASM to (block $brk (loop $cont …)) +
+// (if … end). Pins the opcode set in the IL and the structured forms in the emitted .wat.
+void test_frontend_interop_controlflow_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let i = 0;\n"
+        "while (i < 3) { i = i + 1; }\n"
+        "loop { if (i >= 5) { break; } i = i + 1; }\n"
+        "emit_int(i);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    int n_lbeg=0,n_lend=0,n_break=0,n_bif=0,n_ifb=0,n_ife=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_LOOP_BEGIN:     n_lbeg++;  break;
+            case OP_LOOP_END:       n_lend++;  break;
+            case OP_BREAK:          n_break++; break;
+            case OP_BREAK_IF_FALSE: n_bif++;   break;
+            case OP_IF_BEGIN:       n_ifb++;   break;
+            case OP_IF_END:         n_ife++;   break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(2, n_lbeg);   // while + loop
+    TEST_ASSERT_EQUAL_INT(2, n_lend);
+    TEST_ASSERT_EQUAL_INT(1, n_bif);    // while condition
+    TEST_ASSERT_EQUAL_INT(1, n_break);  // break inside loop
+    TEST_ASSERT_EQUAL_INT(1, n_ifb);    // if
+    TEST_ASSERT_EQUAL_INT(1, n_ife);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_controlflow.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(block $brk_0 (loop $cont_0"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "br_if $brk_0"));   // while condition test
+    TEST_ASSERT_NOT_NULL(strstr(out, "br $cont_0"));     // back-edge
+    TEST_ASSERT_NOT_NULL(strstr(out, "br $brk_1"));      // break in the second loop
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.H capstone enabler): a routine body can now contain control flow + named locals
+// (the shared block-body dispatcher), so a background `fn` worker can run a `while` loop. Pins a
+// loop (OP_LOOP_BEGIN) emitted inside a routine function (after the OP_FUNC_BEGIN), with the
+// routine fired via `routines { }` (OP_SPAWN_ASYNC).
+void test_frontend_interop_routine_loop(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "fn worker() { let w = 0; while (w < 3) { w = w + 1; emit_int(w); } }\n"
+        "routines { worker(); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn);
+
+    // Find the routine's OP_FUNC_BEGIN, then assert an OP_LOOP_BEGIN follows it (a loop inside
+    // the routine body). Walk opcodes honoring 4-byte-arg ops so arg bytes aren't misread.
+    int func_at = -1, loop_after_func = 0;
+    for (int i = 0; i < buffer->size; ) {
+        unsigned char op = buffer->code[i];
+        if (op == OP_FUNC_BEGIN) func_at = i;
+        if (op == OP_LOOP_BEGIN && func_at >= 0) loop_after_func = 1;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME) i += 5;
+        else i += 1;
+    }
+    TEST_ASSERT_TRUE(func_at >= 0);     // worker emitted as a routine function
+    TEST_ASSERT_TRUE(loop_after_func);  // with a while-loop inside it
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (wall-clock / timezone surface): time.* lower to OP_CALL_RUNTIME with ids 44-48 and are
+// reactor-backed on WASM (uses_crypto_ext); the emitted module imports teko_rt_time_* and shares
+// memory. Output strings, like the crypto surface.
+void test_frontend_interop_time_lowering(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(time.format_utc(\"1000000000\"));\n"
+        "let n = time.now_unix();\n"
+        "emit(n);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_crypto_ext); // reactor-backed time ids
+
+    int has44 = 0, has48 = 0;
+    for (int i = 0; i + 4 < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            int id = (int)((unsigned)buffer->code[i+1] | ((unsigned)buffer->code[i+2] << 8) |
+                           ((unsigned)buffer->code[i+3] << 16) | ((unsigned)buffer->code[i+4] << 24));
+            if (id == 44) has44 = 1;
+            if (id == 48) has48 = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has44); // time.now_unix
+    TEST_ASSERT_TRUE(has48); // time.format_utc
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_time.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_time_format_utc\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_time_now_unix\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $crypto_48"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.I): `routines { worker(a, b); }` passes N arguments (Go-style) — each staged via
+// OP_SETARG, then OP_SPAWN_ASYNC_ARGS argc. The routine `fn worker(a, b)` binds each param from
+// OP_LOAD_SPAWN_ARG i. Pins the multi-arg spawn + per-param load in the IL, and the WASM frame ops.
+void test_frontend_interop_routine_args(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "fn worker(a, b) { let s = a + b; emit_int(s); }\n"
+        "let x = 3;\n"
+        "let y = 4;\n"
+        "routines { worker(x, y); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn);
+
+    int n_spawn_args = 0, spawn_argc = -1, n_load0 = 0, n_load1 = 0;
+    for (int i = 0; i + 4 < buffer->size; ) {
+        unsigned char op = buffer->code[i];
+        int a = (int)((unsigned)buffer->code[i+1] | ((unsigned)buffer->code[i+2] << 8) |
+                      ((unsigned)buffer->code[i+3] << 16) | ((unsigned)buffer->code[i+4] << 24));
+        if (op == OP_SPAWN_ASYNC_ARGS) { n_spawn_args++; spawn_argc = a; }
+        if (op == OP_LOAD_SPAWN_ARG && a == 0) n_load0++;
+        if (op == OP_LOAD_SPAWN_ARG && a == 1) n_load1++;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
+            op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG) i += 5;
+        else i += 1;
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_spawn_args);   // one multi-arg spawn
+    TEST_ASSERT_EQUAL_INT(2, spawn_argc);     // worker(x, y) -> argc 2
+    TEST_ASSERT_EQUAL_INT(1, n_load0);        // param a <- arg 0
+    TEST_ASSERT_EQUAL_INT(1, n_load1);        // param b <- arg 1
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_routineargs.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_enqueue"));  // spawn-with-args enqueues a task
+    TEST_ASSERT_NOT_NULL(strstr(out, "local.get $frame"));    // param bound from the task frame
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+// Phase 14 (14.F): the `retry { } fallback { }` and `circuit cb { } fallback { }` blocks lower to
+// the policy opcodes OP_RETRY_*/OP_CIRCUIT_* (driving the teko_retry C runtime) wrapped in the
+// control-flow foundation; set uses_retry; on WASM import the reactor policy entry points.
+void test_frontend_interop_resilience_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let t = 0;\n"
+        "retry (attempts 3, exponential, base 1) { t = t + 1; t >= 2; } fallback { emit_int(9); }\n"
+        "let cb = circuit(threshold 2, cooldown 50);\n" // 50 avoids the 0x62-0x67 opcode byte range
+        "circuit cb { 0; } fallback { emit_int(8); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_retry);
+    int n_rnew=0,n_sc=0,n_nd=0,n_cnew=0,n_callow=0,n_crec=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_RETRY_NEW:             n_rnew++;   break;
+            case OP_RETRY_SHOULD_CONTINUE: n_sc++;     break;
+            case OP_RETRY_NEXT_DELAY:      n_nd++;     break;
+            case OP_CIRCUIT_NEW:           n_cnew++;   break;
+            case OP_CIRCUIT_ALLOW:         n_callow++; break;
+            case OP_CIRCUIT_RECORD:        n_crec++;   break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_rnew);    // one retry policy
+    TEST_ASSERT_EQUAL_INT(1, n_sc);      // the should-continue gate
+    TEST_ASSERT_EQUAL_INT(1, n_nd);      // the backoff next-delay
+    TEST_ASSERT_EQUAL_INT(1, n_cnew);    // the circuit constructor
+    TEST_ASSERT_EQUAL_INT(1, n_callow);  // the breaker guard
+    TEST_ASSERT_EQUAL_INT(1, n_crec);    // the outcome record
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_resilience.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_retry_new\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $retry_should_continue"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $circuit_allow"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
+void test_frontend_interop_timespan_normalization(void) {
+    const char* src =
+        "let d = delayed.open(8);\n"
+        "delayed.send(d, 7, 2s);\n"     // 2s   -> 2000 ms; value 7 unchanged
+        "delayed.send(d, 8, 500ms);\n"  // 500ms-> 500 ms
+        "delayed.send(d, 9, 1m);\n";    // 1m   -> 60000 ms
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 2000));  // 2s normalized
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 500));   // 500ms
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 60000)); // 1m
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 7));     // unit-less value unchanged
+
+    codegen_li_free_context(buffer);
+}

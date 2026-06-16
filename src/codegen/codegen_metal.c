@@ -29,6 +29,17 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_emit_random = 0;
     ctx->wasm_emit_uuid_rng = 0;
     ctx->wasm_emit_crypto_ext = 0;
+    ctx->wasm_emit_spawn = 0;
+    ctx->wasm_emit_duplex = 0;
+    ctx->wasm_emit_delayed = 0;
+    ctx->wasm_emit_bcast = 0;
+    ctx->wasm_emit_shared = 0;
+    ctx->wasm_emit_wait = 0;
+    ctx->wasm_emit_await = 0;
+    ctx->wasm_emit_retry = 0;
+    ctx->cf_id_next = 0;
+    ctx->cf_loop_sp = 0;
+    ctx->cf_if_sp = 0;
     ctx->hosted = 0;
     return ctx;
 }
@@ -73,6 +84,46 @@ void teko_metal_set_emit_uuid_rng(MetalContext* ctx, int enabled) {
 void teko_metal_set_emit_crypto_ext(MetalContext* ctx, int enabled) {
     if (!ctx) return;
     ctx->wasm_emit_crypto_ext = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_spawn(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_spawn = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_duplex = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_delayed(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_delayed = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_bcast(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_bcast = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_shared(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_shared = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_wait(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_wait = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_await(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_await = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_retry(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_retry = enabled ? 1 : 0;
 }
 
 void teko_metal_set_hosted(MetalContext* ctx, int enabled) {
@@ -151,7 +202,8 @@ static int count_routine_yields(const unsigned char* il, uint32_t start, uint32_
         if (op == OP_CHAN_GET) yields++;
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
-            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME) p += 5;
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
+            op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG) p += 5;
         else p += 1;
     }
     return yields;
@@ -209,7 +261,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
 
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
-            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME) scan += 5;
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
+            op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG) scan += 5;
         else scan += 1;
     }
 
@@ -227,7 +280,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
 
         if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
-            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME) {
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
+            op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG) {
             arg = read_le_int32(local_il, current_op_index + 1);
             i += 4;
         }
@@ -268,10 +322,25 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                     accum_has_value = false;
                 }
             }
-            else if (op == OP_STORE || op == OP_LOAD || op == OP_SPAWN_ASYNC ||
+            else if (op == OP_STORE || op == OP_LOAD || op == OP_SPAWN_ASYNC || op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG ||
                      op == OP_CHAN_INIT || op == OP_CHAN_GET || op == OP_CALL_IMPORT ||
                      op == OP_SETARG || op == OP_STORE_LOCAL || op == OP_LOAD_LOCAL ||
-                     op == OP_CALL_RUNTIME) {
+                     op == OP_CALL_RUNTIME ||
+                     op == OP_DUPLEX_OPEN || op == OP_DUPLEX_SEND || op == OP_DUPLEX_RECV ||
+                     op == OP_DUPLEX_POLL || op == OP_DUPLEX_CLOSE ||
+                     op == OP_DELAYED_OPEN || op == OP_DELAYED_SEND || op == OP_DELAYED_ADVANCE ||
+                     op == OP_DELAYED_RECV || op == OP_DELAYED_POLL || op == OP_DELAYED_CLOSE ||
+                     op == OP_BCAST_OPEN || op == OP_BCAST_SUBSCRIBE || op == OP_BCAST_PUBLISH ||
+                     op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE ||
+                     op == OP_SHARED_ENTER || op == OP_SHARED_LEAVE || op == OP_ATOMIC_CELL ||
+                     op == OP_ATOMIC_ADD || op == OP_ATOMIC_LOAD || op == OP_ATOMIC_STORE ||
+                     op == OP_WAIT || op == OP_AWAIT_FOR ||
+                     op == OP_LOOP_BEGIN || op == OP_LOOP_END || op == OP_BREAK ||
+                     op == OP_CONTINUE || op == OP_BREAK_IF_FALSE ||
+                     op == OP_IF_BEGIN || op == OP_IF_END ||
+                     op == OP_RETRY_NEW || op == OP_RETRY_SHOULD_CONTINUE ||
+                     op == OP_RETRY_NEXT_DELAY || op == OP_CIRCUIT_NEW ||
+                     op == OP_CIRCUIT_ALLOW || op == OP_CIRCUIT_RECORD) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -280,8 +349,33 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
             // matches a stale accum_last_value gets wrongly skipped while $w0 in
             // fact holds a string ptr / load / call result. (SETARG/STORE/STORE_LOCAL
             // only read $w0 or write elsewhere, so they leave the cache intact.)
+            // Phase 14: OP_SPAWN_ASYNC lowers to a runtime `call` on the native runner
+            // (teko_rt_spawn), which clobbers the accumulator register ($w0/rax) — so it
+            // must invalidate the cache too, exactly like CALL_IMPORT/CALL_RUNTIME. (On
+            // WASM $w0 is a local that survives the call, but the cache reset is harmless
+            // there — it only re-emits a redundant `local.set $w0`.) Without this, two
+            // consecutive `routines { f(); f(); }` spawns of the same slot elide the second
+            // ICONST and the second spawn reads the clobbered register → wrong slot.
+            // Phase 14: OP_DUPLEX_* also lower to runtime `call`s (teko_rt_duplex_*) that
+            // clobber $w0 with the handle/value/status result — same rule as the calls above.
             if (op == OP_SCONST || op == OP_LOAD || op == OP_CHAN_GET ||
-                op == OP_CALL_IMPORT || op == OP_LOAD_LOCAL || op == OP_CALL_RUNTIME) {
+                op == OP_CALL_IMPORT || op == OP_LOAD_LOCAL || op == OP_CALL_RUNTIME ||
+                op == OP_SPAWN_ASYNC || op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG ||
+                op == OP_DUPLEX_OPEN || op == OP_DUPLEX_SEND || op == OP_DUPLEX_RECV ||
+                op == OP_DUPLEX_POLL || op == OP_DUPLEX_CLOSE ||
+                op == OP_DELAYED_OPEN || op == OP_DELAYED_SEND || op == OP_DELAYED_ADVANCE ||
+                op == OP_DELAYED_RECV || op == OP_DELAYED_POLL || op == OP_DELAYED_CLOSE ||
+                op == OP_BCAST_OPEN || op == OP_BCAST_SUBSCRIBE || op == OP_BCAST_PUBLISH ||
+                op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE ||
+                op == OP_SHARED_ENTER || op == OP_SHARED_LEAVE || op == OP_ATOMIC_CELL ||
+                op == OP_ATOMIC_ADD || op == OP_ATOMIC_LOAD || op == OP_ATOMIC_STORE ||
+                op == OP_WAIT || op == OP_AWAIT_FOR ||
+                op == OP_LOOP_BEGIN || op == OP_LOOP_END || op == OP_BREAK ||
+                op == OP_CONTINUE || op == OP_BREAK_IF_FALSE ||
+                op == OP_IF_BEGIN || op == OP_IF_END ||
+                op == OP_RETRY_NEW || op == OP_RETRY_SHOULD_CONTINUE ||
+                op == OP_RETRY_NEXT_DELAY || op == OP_CIRCUIT_NEW ||
+                op == OP_CIRCUIT_ALLOW || op == OP_CIRCUIT_RECORD) {
                 accum_has_value = false;
             }
         }
