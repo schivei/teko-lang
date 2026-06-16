@@ -343,6 +343,9 @@ locals tracked, extern call args accept expressions; proofs `concat.tks` → `x 
 items/count: 42/n=42` (byte-identical). Sub-block **16.C is DONE** (locally green): string
 INTERPOLATION — a `"…{expr}…"` literal interpolates each hole (auto-`to_string`, re-lexed through a
 sub-parser sharing the ctx), `{{`/`}}` escape; proofs `interp.tks` → `x = 42/42 items, 42
-total/sum = 50/count: 42/braces { } kept/[42]`. Order: 16.A ✅ → 16.B ✅ → 16.C ✅ → 16.D user-type
-`to_string` dispatch + synth default → 16.E explicit-format → 16.F checked inter-type conversions
-(+ a float-formatting step).
+total/sum = 50/count: 42/braces { } kept/[42]`. Sub-block **16.D is DONE** (locally green): a class
+instance in a concat/`"{…}"` hole dispatches its (own/inherited) `to_string` via `OP_CALL_FUNC`
+(Phase-15 hook), else the synthesized default `ClassName(fields)`; value-type model gains
+`TEKO_VT_OBJ_BASE`; proofs `tostring.tks` → `temp is T=25/[T=25]/point = Point(3, 4)/p=Point(3, 4)`.
+Order: 16.A ✅ → 16.B ✅ → 16.C ✅ → 16.D ✅ → 16.E explicit-format → 16.F checked inter-type
+conversions (+ a float-formatting step).

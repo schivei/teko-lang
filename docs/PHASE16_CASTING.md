@@ -101,10 +101,20 @@ surface; integer/float values are marshalled as their canonical string form into
     escape a literal brace. The separate full-AST backtick interpolation subsystem
     (`parser_string.c`, `TOKEN_STRING_INTERPOLATED`) is unchanged; this is the interop-frontend
     lowering path. No existing sample has a brace-bearing string literal (no regression).
-- **16.D — User-defined-type `to_string` in concat/interpolation.** Concrete receiver →
-  `OP_CALL_FUNC` to the `to_string` slot; abstract/trait receiver → vtable slot. When absent,
-  synthesize the culture-invariant default (per-type field-walk generator). **MEDIUM** (reuses the
-  Phase-15 method/vtable resolution; the hook is already in place).
+- **16.D — User-defined-type `to_string` in concat/interpolation. ✅ DONE & locally green both
+  targets.** The value-type model gains `TEKO_VT_OBJ_BASE + class_index`; `eval_primary` returns it
+  for a class-typed local. `coerce_to_string_in_w0(vt)` centralizes operand→string (int via id 49,
+  string unchanged, object via `emit_object_to_string`), used by both the `+` concat branch and the
+  interpolation holes. `emit_object_to_string` dispatches `class_method_idx(ci,"to_string")` via
+  `OP_CALL_FUNC` (self=arg0, the Phase-15 hook) when the class defines/inherits one, else synthesizes
+  the culture-invariant default `ClassName(field0, field1, …)` (each field rendered via the integer
+  `to_string`). Proofs `runtime/{native,wasm}/samples/tostring.tks` → `temp is T=25 / [T=25] /
+  point = Point(3, 4) / p=Point(3, 4)` (byte-identical).
+  - **Scope note:** dispatch is via concrete static `OP_CALL_FUNC` (the common case + proof). A
+    *trait-typed* (fat) reference used directly in a concat would dispatch via the runtime vtable
+    (`vtable_get(tid_slot, methodid)`); that auto-coerce needs a `VT_TRAIT` encoding carrying the
+    tid slot and is a small follow-on — explicit `g.to_string()` already works via the trait-dispatch
+    path. Synthesized-default fields are rendered as integers (per-field typing is a follow-on).
 - **16.E — Explicit-format spec.** Radix (hex/oct/bin), float precision, grouped digits, custom
   masks via a format string (ids 56/57+). **BOUNDED–MEDIUM.**
 - **16.F — Checked inter-type conversions.** Primitive casts that fail loudly (narrowing range
