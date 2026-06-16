@@ -112,6 +112,15 @@ proof is wanted first; default order is A → B → C → D.
 Proofs: `runtime/native/samples/class.tks` → `7`, `70`; `runtime/wasm/samples/class.tks`
 (`run-class.mjs`) → `[7,70]`. Suite 213/213; all four gates' local equivalents green.
 
+**Method signatures mirror function signatures (owner decision).** A method carries a COMPLETE
+signature with a return type (`fn sum(self): i32`), may be GENERIC (`fn scale<T>(self, k): i32`),
+and may be `async` (returns `intent<>`). The frontend parses all three forms (a leading `async` is
+consumed; a balanced `<…>` generic clause is skipped before the param list; the `: ReturnType` is
+skipped to the body). In this MVP a generic method binds + lowers exactly like a concrete one (the
+value model is uniform i32) and an `async` method lowers synchronously — **per-type
+monomorphization is 15.C; full `intent<>`/`await` async-method semantics are a dedicated later
+sub-block.** The proofs use the complete-signature convention (incl. a generic method).
+
 **Next: 15.B (abstract classes + traits)** — compile-time static vtables, the local→type table
 generalized beyond `self`/instantiation, trait composition (union of method tables; collision =
 compile error). Then 15.C (generics, the deep one) and 15.D (events).
