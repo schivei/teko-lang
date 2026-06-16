@@ -42,6 +42,7 @@ extern void test_frontend_interop_delayed_lowering(void);
 extern void test_frontend_interop_broadcast_lowering(void);
 extern void test_frontend_interop_shared_lowering(void);
 extern void test_frontend_interop_timespan_normalization(void);
+extern void test_codegen_li_object_family(void);
 extern void test_frontend_interop_waiters_lowering(void);
 extern void test_frontend_interop_controlflow_lowering(void);
 extern void test_frontend_interop_resilience_lowering(void);
@@ -274,6 +275,7 @@ int main(void) {
     RUN_TEST(test_frontend_interop_broadcast_lowering);
     RUN_TEST(test_frontend_interop_shared_lowering);
     RUN_TEST(test_frontend_interop_timespan_normalization);
+    RUN_TEST(test_codegen_li_object_family);
     RUN_TEST(test_frontend_interop_waiters_lowering);
     RUN_TEST(test_frontend_interop_controlflow_lowering);
     RUN_TEST(test_frontend_interop_resilience_lowering);

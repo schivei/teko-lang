@@ -150,6 +150,18 @@ typedef enum {
     OP_CIRCUIT_ALLOW        = 0x66, // circuit_allow(handle, now) -> 0/1
     OP_CIRCUIT_RECORD       = 0x67, // circuit_record(handle, ok, now) -> 0
 
+    // Phase 15 (15.A): object model ops — the `class` surface's instance store. A dedicated
+    // opcode family (owner pattern, like the Phase 14 channel families): each lowers to a
+    // teko_rt_object_* call on the native runner and to the wasm32 runtime-reactor import on
+    // WASM (the teko_object C runtime is the single source of truth). Args are staged via
+    // OP_SETARG (0..n-2) with the last in the accumulator ($w0), exactly like OP_CALL_RUNTIME;
+    // a result (handle / value) lands in $w0. ZERO RUNTIME REFLECTION: field indices are
+    // compile-time constants the frontend emits — there is no runtime name lookup or type tag.
+    OP_OBJ_NEW  = 0x6A, // obj_new(nfields) -> handle
+    OP_OBJ_SET  = 0x6B, // obj_set(handle, idx, value) -> 0
+    OP_OBJ_GET  = 0x6C, // obj_get(handle, idx) -> value
+    OP_OBJ_FREE = 0x6D, // obj_free(handle) -> 0
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -242,6 +254,11 @@ typedef struct {
     // OP_CIRCUIT_*). Native links teko_rt_retry_*/teko_rt_circuit_*; WASM imports them from the
     // runtime reactor + shares linear memory (same wiring as the channel families).
     int uses_retry;
+    // Phase 15 (15.A): 1 if the program uses an object op (OP_OBJ_*) — i.e. instantiates a
+    // `class`. Native links teko_rt_object_*; WASM imports them from the runtime reactor +
+    // shares linear memory (same wiring as the channel families). Object-free programs stay
+    // byte-identical.
+    int uses_object;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
@@ -295,6 +312,8 @@ void codegen_li_emit_await(BytecodeBuffer* buffer);
 void codegen_li_emit_cf(BytecodeBuffer* buffer, OpCode op);
 // Phase 14 (14.F): emit a resilience policy op (OP_RETRY_*/OP_CIRCUIT_*); sets buffer->uses_retry.
 void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op);
+// Phase 15 (15.A): emit an object op (one of OP_OBJ_*); sets buffer->uses_object.
+void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

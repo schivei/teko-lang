@@ -186,4 +186,13 @@ char* teko_rt_time_now_local(int ignored);         // "now" ISO-8601 system-loca
 char* teko_rt_time_format_utc(const char* epoch);  // a user epoch -> ISO-8601 UTC
 char* teko_rt_time_format_local(const char* epoch); // a user epoch -> ISO-8601 system-local
 
+// Phase 15 (15.A) — object model surface wrappers (OP_OBJ_* lower to these). The handle is a
+// TekoObject* as a register-width integer; field cells are register-width. The teko_object C
+// runtime (src/runtime/teko_object.c) is the source of truth (linked natively, compiled into the
+// wasm32 reactor). Field indices are compile-time constants — zero runtime reflection.
+long teko_rt_object_new(long nfields);                 // -> handle
+long teko_rt_object_set(long handle, long idx, long value); // -> 0
+long teko_rt_object_get(long handle, long idx);        // -> value
+long teko_rt_object_free(long handle);                 // -> 0
+
 #endif // TEKO_RT_H

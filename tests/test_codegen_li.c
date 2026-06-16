@@ -1241,3 +1241,70 @@ void test_frontend_interop_timespan_normalization(void) {
 
     codegen_li_free_context(buffer);
 }
+
+// Phase 15 (15.A): the object model IL family (OP_OBJ_*) lowers to teko_rt_object_* reactor
+// imports on WASM. Hand-build the IL for `obj = new(2); obj.f0 = 42; x = obj.f0` (the lowering
+// the `class` frontend will emit), and assert (1) the opcodes + uses_object flag, and (2) the
+// emitted .wat carries the reactor imports, the shared-memory import, and the call sites.
+void test_codegen_li_object_family(void) {
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    buffer->local_count = 2; // $v0 = handle, $v1 = read-back value
+
+    // obj = new(2)
+    codegen_li_emit_iconst(buffer, 2);
+    codegen_li_emit_object(buffer, OP_OBJ_NEW);     // $w0 = handle
+    codegen_li_emit_store_local(buffer, 0);         // $v0 = handle
+    // obj.f0 = 42   -> object_set(handle, 0, 42)
+    codegen_li_emit_load_local(buffer, 0);          // $w0 = handle
+    codegen_li_emit_setarg(buffer, 0);              // $a0 = handle
+    codegen_li_emit_iconst(buffer, 0);              // $w0 = idx 0
+    codegen_li_emit_setarg(buffer, 1);              // $a1 = idx
+    codegen_li_emit_iconst(buffer, 42);             // $w0 = value
+    codegen_li_emit_object(buffer, OP_OBJ_SET);     // object_set -> $w0 = 0
+    // x = obj.f0    -> object_get(handle, 0)
+    codegen_li_emit_load_local(buffer, 0);          // $w0 = handle
+    codegen_li_emit_setarg(buffer, 0);              // $a0 = handle
+    codegen_li_emit_iconst(buffer, 0);              // $w0 = idx 0
+    codegen_li_emit_object(buffer, OP_OBJ_GET);     // object_get -> $w0 = value
+    codegen_li_emit_store_local(buffer, 1);         // $v1 = value
+    codegen_li_emit_halt(buffer);
+
+    // The emit helper flips the runtime-link flag, so backends import/link teko_object.
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_object);
+    // The three object opcodes are present in the byte stream.
+    int saw_new = 0, saw_set = 0, saw_get = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == (unsigned char)OP_OBJ_NEW) saw_new = 1;
+        if (buffer->code[i] == (unsigned char)OP_OBJ_SET) saw_set = 1;
+        if (buffer->code[i] == (unsigned char)OP_OBJ_GET) saw_get = 1;
+    }
+    TEST_ASSERT_TRUE(saw_new && saw_set && saw_get);
+
+    // Through the bridge: a real .wat importing the reactor entry points + shared memory.
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_object_family.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    TEST_ASSERT_NOT_NULL(out);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_object_new\" (func $object_new (param i32) (result i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_object_set\" (func $object_set (param i32) (param i32) (param i32) (result i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_object_get\" (func $object_get (param i32) (param i32) (result i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\" (memory 1))")); // host-owned shared memory
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $object_new"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $object_set"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $object_get"));
+
+    free(out);
+    remove(wat);
+    codegen_li_free_context(buffer);
+}

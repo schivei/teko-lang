@@ -152,6 +152,23 @@ const char* teko_native_retry_symbol(OpCode op, int* out_arity) {
     return sym;
 }
 
+// Phase 15 (15.A): OP_OBJ_* -> teko_rt_object_* symbol + arity (mirrors the WASM reactor import
+// table). The teko_object C runtime is the single source of truth; these wrappers adapt the
+// integer-handle ABI onto it (linked from libteko_rt.a).
+const char* teko_native_object_symbol(OpCode op, int* out_arity) {
+    int arity = 1;
+    const char* sym = NULL;
+    switch (op) {
+        case OP_OBJ_NEW:  sym = "teko_rt_object_new";  arity = 1; break; // (nfields)
+        case OP_OBJ_SET:  sym = "teko_rt_object_set";  arity = 3; break; // (handle, idx, value)
+        case OP_OBJ_GET:  sym = "teko_rt_object_get";  arity = 2; break; // (handle, idx)
+        case OP_OBJ_FREE: sym = "teko_rt_object_free"; arity = 1; break; // (handle)
+        default: break;
+    }
+    if (out_arity) *out_arity = arity;
+    return sym;
+}
+
 // --- helpers ---------------------------------------------------------------------
 static int is_macho(const MetalContext* ctx) { return ctx->target.os == OS_MACOS_DARWIN; }
 static int is_arm64(const MetalContext* ctx) {
@@ -561,6 +578,18 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_CIRCUIT_RECORD: {
             int arity = 1;
             const char* sym = teko_native_retry_symbol(op, &arity);
+            if (sym) emit_call(ctx, sym, arity);
+            break;
+        }
+
+        // Phase 15 (15.A): object model ops -> teko_rt_object_* runtime calls (the `class`
+        // instance store; staging slots + $w0 marshalled by emit_call, like OP_CALL_RUNTIME).
+        case OP_OBJ_NEW:
+        case OP_OBJ_SET:
+        case OP_OBJ_GET:
+        case OP_OBJ_FREE: {
+            int arity = 1;
+            const char* sym = teko_native_object_symbol(op, &arity);
             if (sym) emit_call(ctx, sym, arity);
             break;
         }

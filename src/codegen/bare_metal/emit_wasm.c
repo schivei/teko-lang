@@ -1147,6 +1147,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_poll\" (func $duplex_poll (param i32) (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_duplex_close\" (func $duplex_close (param i32) (result i32)))\n");
             }
+            // Phase 15 (15.A): object instance-store entry points come from the SAME runtime
+            // reactor (namespace "crypto"). Pure i32-in/i32-out (handle/value) over the shared
+            // linear memory. Imported only when the program instantiates a `class`.
+            if (ctx->wasm_emit_object) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_object_new\" (func $object_new (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_object_set\" (func $object_set (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_object_get\" (func $object_get (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_object_free\" (func $object_free (param i32) (result i32)))\n");
+            }
             // Phase 14 (14.C): delayed (timed) channel entry points, also from the reactor.
             if (ctx->wasm_emit_delayed) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_open\" (func $delayed_open (param i32) (result i32)))\n");
@@ -1196,7 +1205,8 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
             // address the same bytes. Re-export it either way so harnesses can read results.
             if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
-                ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry) {
+                ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry ||
+                ctx->wasm_emit_object) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1307,6 +1317,22 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                              (op == OP_DUPLEX_POLL) ? "duplex_poll" : "duplex_close";
             int ar = (op == OP_DUPLEX_SEND) ? 3 :
                      (op == OP_DUPLEX_RECV || op == OP_DUPLEX_POLL) ? 2 : 1;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
+
+        // Phase 15 (15.A): object model ops — call the reactor's imported teko_rt_object_*.
+        // Same multi-arg ABI as OP_DUPLEX_*: args 0..n-2 from staging slots $a0.. (OP_SETARG),
+        // the last from $w0; the i32 result (handle/value) lands in $w0.
+        case OP_OBJ_NEW:
+        case OP_OBJ_SET:
+        case OP_OBJ_GET:
+        case OP_OBJ_FREE: {
+            const char* fn = (op == OP_OBJ_NEW) ? "object_new" :
+                             (op == OP_OBJ_SET) ? "object_set" :
+                             (op == OP_OBJ_GET) ? "object_get" : "object_free";
+            int ar = (op == OP_OBJ_SET) ? 3 : (op == OP_OBJ_GET) ? 2 : 1;
             for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
             fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;

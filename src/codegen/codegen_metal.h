@@ -97,6 +97,11 @@ typedef struct {
     // OP_CIRCUIT_*). The WASM backend imports the teko_rt_retry_*/teko_rt_circuit_* entry points
     // from the runtime reactor + shares its linear memory (same wiring as the channel families).
     int wasm_emit_retry;
+    // Phase 15 (15.A): 1 when the program uses an object op (OP_OBJ_*) — i.e. instantiates a
+    // `class`. The WASM backend imports the teko_rt_object_* entry points from the runtime
+    // reactor + shares its linear memory (same wiring as the channel families). Native ignores
+    // it (links teko_rt_object_* via libteko_rt.a).
+    int wasm_emit_object;
     // Phase 14 (control-flow foundation): structured loop/if lowering state, shared by the native
     // hosted emitter and the WASM emitter. cf_id_next assigns a fresh monotonic id to each
     // LOOP_BEGIN/IF_BEGIN; cf_loop_stack/cf_if_stack track the active (nesting) ids so
@@ -142,6 +147,7 @@ void teko_metal_set_emit_shared(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_wait(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_await(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_retry(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_object(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

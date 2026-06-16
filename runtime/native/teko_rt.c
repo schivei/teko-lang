@@ -22,6 +22,7 @@
 #include "teko_broadcast.h"
 #include "teko_retry.h"
 #include "teko_time.h"
+#include "teko_object.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -776,5 +777,25 @@ char* teko_rt_uuid_v7(int ignored) {
     uint8_t u[TEKO_UUID_LEN];
     if (teko_uuid_v7(u, teko_rt_unix_ms()) != 0) return NULL;
     return teko_rt_uuid_str(u);
+}
+
+// Phase 15 (15.A) — object model surface wrappers. The OP_OBJ_* opcodes lower to these
+// (SysV/AAPCS calls); the teko_object C runtime (src/runtime/teko_object.c) is the source of
+// truth. The handle is the TekoObject* carried through the surface as a register-width integer;
+// field cells are register-width (a field may hold another object's handle). Available on every
+// target (native + the wasm32 reactor).
+long teko_rt_object_new(long nfields) {
+    return (long)(intptr_t)teko_object_new((int)nfields);
+}
+long teko_rt_object_set(long handle, long idx, long value) {
+    teko_object_set((TekoObject*)(intptr_t)handle, (int)idx, value);
+    return 0;
+}
+long teko_rt_object_get(long handle, long idx) {
+    return teko_object_get((TekoObject*)(intptr_t)handle, (int)idx);
+}
+long teko_rt_object_free(long handle) {
+    teko_object_free((TekoObject*)(intptr_t)handle);
+    return 0;
 }
 #endif // !__wasm__ (CSPRNG / UUID v4-v7 tail)
