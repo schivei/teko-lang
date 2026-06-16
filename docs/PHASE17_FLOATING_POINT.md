@@ -155,5 +155,22 @@ purely additive to the integer path:
   reactor-backed) outputs are BYTE-FOR-BYTE identical.
 
 Verification: suite 232/232; ASan/UBSan (both dispatch paths) + TSan clean; the 16 native goldens
-+ all float-free native/WASM output byte-identical (integer path untouched). Implementation
++ all float-free native/WASM output byte-identical (integer path untouched). **All four CI gates
+GREEN** on PR #10 (incl. Windows MSVC x86_64 **and** arm64 — the f64/ABI concern is cleared; the
+hosted `xmm`/`movabsq` path is not compiled on the freestanding Windows runner, and the MSVC-compiled
+compiler C — float pool + `memcpy`'d bit pattern, no aliasing UB — is clean). Implementation
 continues at **17.B** (checked int↔float casts).
+
+## Reserved — future exact base-10 `decimal` type (Phase 17.F, pending owner decision)
+Owner design note: an EXACT base-10 `decimal` (C#-`decimal` / SQL `DECIMAL` style, 128-bit — exact
+for money, distinct from the binary f64 here) will probably be added; final placement (17.F in this
+phase vs. its own phase) is the owner's call. To make that decision **zero-cost and future-proof**,
+17.A RESERVES — without implementing — the encoding so an approval never renumbers anything:
+- **Value-type slot** `TEKO_VT_DECIMAL = (1 << 21)` (its own high sentinel, in `frontend_interop.c`).
+- **Opcode byte range `0x83–0x96`** reserved CONTIGUOUSLY right after the float ops (`codegen_li.h`),
+  mirroring the float layout: `OP_DCONST` (0x83), `OP_DADD/DSUB/DMUL/DDIV/DMOD` (0x84–0x88),
+  `OP_DEQ..DGE` (0x89–0x8E), `OP_DSTORE/DLOAD/DSTORE_LOCAL/DLOAD_LOCAL` (0x8F–0x92), and the
+  conversions `OP_I2D/D2I/F2D/D2F` (0x93–0x96). Next free opcode range starts at `0x97`.
+These are claimed **only as documentation/comments** (exactly like the `0x76`/`0x82` float
+reservations) — **no enum constants, no emitted opcodes, no live token** (no dead-token gate trip),
+**no orphan reference**.

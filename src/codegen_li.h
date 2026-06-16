@@ -210,6 +210,20 @@ typedef enum {
     OP_I2F          = 0x81, // $f0 = (double)$w0  ($w0 unchanged) — int→float promotion
     // 0x82 = OP_F2I reserved for 17.B (do NOT emit yet).
 
+    // Phase 17.F (RESERVED — owner design note, pending final decision): an EXACT base-10
+    // `decimal` type (C#-decimal / SQL DECIMAL style, 128-bit — exact for money, distinct from the
+    // binary f64 above). The opcode byte range 0x83–0x96 is RESERVED CONTIGUOUSLY for it now (zero
+    // cost, future-proof: if `decimal` is approved we add the enum constants + lowering WITHOUT
+    // renumbering any float/integer opcode). These are NOT emitted, NOT enum constants, and have NO
+    // live token (no dead-token gate trip) — they are claimed only as documentation, exactly like
+    // the 0x76/0x82 float reservations above. Mirrors the float layout:
+    //   0x83 = OP_DCONST        (4-byte decimal-pool index; $d0 = decimal_pool[idx])
+    //   0x84 = OP_DADD   0x85 = OP_DSUB   0x86 = OP_DMUL   0x87 = OP_DDIV   0x88 = OP_DMOD
+    //   0x89 = OP_DEQ    0x8A = OP_DNE    0x8B = OP_DLT    0x8C = OP_DLE    0x8D = OP_DGT  0x8E = OP_DGE
+    //   0x8F = OP_DSTORE 0x90 = OP_DLOAD  0x91 = OP_DSTORE_LOCAL  0x92 = OP_DLOAD_LOCAL
+    //   0x93 = OP_I2D    0x94 = OP_D2I    0x95 = OP_F2D    0x96 = OP_D2F
+    // The next free contiguous opcode range therefore starts at 0x97.
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
