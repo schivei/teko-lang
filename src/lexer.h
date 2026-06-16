@@ -59,6 +59,7 @@ typedef enum {
     TOKEN_MACRO_IDENT,       // e.g.: @marshall.to_ptr
     TOKEN_LIT_INT,           // e.g.: 1, 3_000, 255
     TOKEN_LIT_FLOAT,         // e.g.: 1.2
+    TOKEN_LIT_DECIMAL,       // Phase 17.F.3: e.g.: 9.99dec, 1000dec (exact base-10 `decimal` literal)
     TOKEN_LIT_STR,           // e.g.: "World"
     TOKEN_LIT_CHAR,          // e.g.: 'a'
     TOKEN_LIT_MULTILINE_STR, // e.g.: """...\n..."""

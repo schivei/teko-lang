@@ -55,13 +55,24 @@ SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/te
       "$ROOT/src/runtime/teko_time.c"      # Phase 14: civil time formatter (wall-clock/timezone)
       "$ROOT/src/runtime/teko_object.c"    # Phase 15: object instance store (class field cells)
       "$ROOT/src/runtime/teko_vtable.c"    # Phase 15.B: static vtable (abstract/trait dispatch)
-      "$ROOT/src/runtime/teko_convert.c")  # Phase 16: culture-invariant conversion runtime
+      "$ROOT/src/runtime/teko_convert.c"   # Phase 16: culture-invariant conversion runtime
+      "$ROOT/src/runtime/teko_convert_f64.c" # Phase 17.C: Ryu f64->string (17.D EXPORTS teko_rt_float_to_string)
+      "$ROOT/src/runtime/teko_decimal.c") # Phase 17.F.1: exact base-10 decimal core (17.F.3 EXPORTS the teko_rt_decimal_* wrappers)
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()
 for f in "${SRCS[@]}"; do
   o="$WORK/$(basename "$f").o"
-  "$CLANG" "${CFLAGS[@]}" -c "$f" -o "$o"
+  # Phase 17.F.3: teko_decimal.c's hand-rolled 64x64->128 umul64 (NO __int128 in the source) is
+  # folded by a recent clang's 128-bit-multiply IDIOM RECOGNIZER (an -O2+ pass) into a `__multi3`
+  # builtin call, which wasm-ld can't resolve (no compiler-rt) — and providing __multi3 would
+  # reintroduce __int128. That idiom pass does NOT run at -O1, so compile JUST this file at -O1
+  # (trailing -O1 overrides the -O2 in CFLAGS): the object stays 64-bit-limb-only and self-contained
+  # on every clang version, with negligible perf cost for the decimal ops. (Older Linux clang never
+  # folded it even at -O2; -O1 makes it robust across toolchains.)
+  extra=""
+  case "$(basename "$f")" in teko_decimal.c) extra="-O1" ;; esac
+  "$CLANG" "${CFLAGS[@]}" $extra -c "$f" -o "$o"
   OBJS+=("$o")
 done
 
@@ -103,10 +114,23 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          teko_rt_vtable_set teko_rt_vtable_get
          # Phase 16 (16.A): culture-invariant conversion surface (OP_CALL_RUNTIME ids 49/51/52).
          teko_rt_int_to_string teko_rt_bool_to_string teko_rt_str_concat
+         # Phase 17.D: float->string (id 50; the f64-arg reactor entry, (double)->char*).
+         teko_rt_float_to_string
          # Phase 16.E: explicit integer formats (ids 56/57/58).
          teko_rt_to_radix teko_rt_pad teko_rt_group
+         # Phase 17.E: checked string->f64 (id 54; the f64-RESULT reactor entry, (char*)->double;
+         # traps on malformed/overflow input via teko_rt_die's __builtin_trap).
+         teko_rt_parse_float
          # Phase 16.F: checked parse (ids 53/55; traps on malformed input).
-         teko_rt_parse_int teko_rt_parse_bool)
+         teko_rt_parse_int teko_rt_parse_bool
+         # Phase 17.F.3: 256-byte decimal value-model ops (OP_D* import these; by-pointer ABI over
+         # the SHARED linear memory — i32 slot offsets — exactly like the crypto hex-string ABI).
+         teko_rt_decimal_add teko_rt_decimal_sub teko_rt_decimal_mul
+         teko_rt_decimal_div teko_rt_decimal_mod teko_rt_decimal_cmp
+         # Phase 17.F.4: int/float ↔ decimal casts + the decimal.to_string/parse surface (ids 59/60).
+         teko_rt_decimal_from_i32 teko_rt_decimal_from_f64
+         teko_rt_decimal_to_i32 teko_rt_decimal_to_f64
+         teko_rt_decimal_to_string teko_rt_decimal_parse)
 LDEXPORTS=(); for e in "${EXPORTS[@]}"; do LDEXPORTS+=("--export=$e"); done
 
 # Layout: keep the whole reactor image (data + shadow stack + heap) ABOVE Teko's

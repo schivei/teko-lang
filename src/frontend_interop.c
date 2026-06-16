@@ -2,6 +2,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "parser_ffi.h"
+#include "runtime/teko_decimal.h" // Phase 17.F.3: dec-literal parse -> 256-byte decimal-pool blob
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -358,11 +359,36 @@ static int localcls_get(const char* n) {
 // reflection (the slot / field layout are compile-time constants).
 #define TEKO_VT_OBJ_BASE 2
 
+// Phase 17 (17.A): a float-typed expression result — the value lives in the PARALLEL float
+// accumulator $f0 (NOT $w0). Encoded as a HIGH SENTINEL (not 2/3) so it never collides with
+// TEKO_VT_OBJ_BASE + class_index (an object-typed result of an arbitrary class). This keeps every
+// existing `>= TEKO_VT_OBJ_BASE` / `vt - TEKO_VT_OBJ_BASE` site (eval_primary's object case,
+// coerce_to_string_in_w0) UNCHANGED — float is checked by exact equality before those range tests.
+// (Float→string formatting does not exist until 17.D; a VT_FLOAT reaching a concat is a no-op for
+// now, see coerce_to_string_in_w0.)
+#define TEKO_VT_FLOAT (1 << 20)
+// Phase 17.F (RESERVED — owner-APPROVED, implemented after 17.A–17.E): the value-type sentinel for
+// the EXACT base-10 `decimal` type — a FIXED-WIDTH 256-BYTE value (~8B metadata: sign + decimal
+// scale/exponent; ~248B base-10 coefficient → ~590 digits, ~38 fractional places; banker's rounding;
+// distinct from the binary f64 above; see codegen_li.h's reserved 0x83–0x96 opcode range). 256B does
+// NOT fit a register → it flows via memory-slot $d0/$d1 + teko_rt_decimal_* calls. Its OWN high
+// sentinel so 17.F never has to renumber VT_FLOAT/VT_OBJ_BASE. NOT used yet (no live token, no
+// emission) — claimed only to keep the encoding stable until 17.F goes live.
+#define TEKO_VT_DECIMAL (1 << 21)
+
 // Phase 16: the value-type a runtime primitive (OP_CALL_RUNTIME id) leaves in $w0. Almost all
 // codec/convert/hash/format ids return a string POINTER (VT_STR); the CHECKED parsers (16.F) return
 // an integer (VT_INT) — so `"n=" + convert.parse_int(s)` concatenates correctly (the int is then
 // auto-`to_string`'d), not treated as a pointer.
 static int runtime_result_vt(int id) {
+    // Phase 17.E — parse_float (id 54) leaves a `double` in the float accumulator $f0 (VT_FLOAT), so
+    // `convert.parse_float(s) + 1.0` is FLOAT arithmetic and `"x=" + convert.parse_float(s)`
+    // auto-`to_string`s through id 50 — exactly the inverse of id 50's f64-arg surface.
+    if (id == 54) return TEKO_VT_FLOAT;
+    // Phase 17.F.4 — decimal.parse (id 60) leaves the 256-byte decimal value in the $d0 slot
+    // (VT_DECIMAL), so `decimal.parse(s) + 1.00dec` is decimal arithmetic and `"x=" + decimal.parse(s)`
+    // auto-`to_string`s through id 59. decimal.to_string (id 59) returns a string (VT_STR, the default).
+    if (id == 60) return TEKO_VT_DECIMAL;
     return (id == 53 || id == 55) ? TEKO_VT_INT : TEKO_VT_STR; // parse_int / parse_bool
 }
 static int codec_id_for(const char* lex); // fwd (defined with the codec surface below)
@@ -392,6 +418,51 @@ static void localstr_set(const char* n, int is_str) {
 static int localstr_get(const char* n) {
     if (!n || !n[0]) return 0;
     for (int i = 0; i < g_nlocalstr; i++) if (strcmp(g_localstr[i], n) == 0) return 1;
+    return 0;
+}
+// Phase 17 (17.A): names of FLOAT-typed named locals (so `f` reads as VT_FLOAT and routes through
+// the float accumulator). Per-function scope, reset alongside g_localstr/g_localcls. Mirrors the
+// localstr registry exactly (set membership, demote-on-reassign via tombstone).
+static char g_localflt[TEKO_MAX_LOCALCLS][96];
+static int  g_nlocalflt;
+static void localflt_reset(void) { g_nlocalflt = 0; }
+static void localflt_set(const char* n, int is_flt) {
+    for (int i = 0; i < g_nlocalflt; i++)
+        if (strcmp(g_localflt[i], n) == 0) {
+            if (!is_flt) { g_localflt[i][0] = g_localflt[i][1] = '\0'; } // demote (tombstone)
+            return;
+        }
+    if (is_flt && g_nlocalflt < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localflt[g_nlocalflt], n, 95); g_localflt[g_nlocalflt][95] = '\0';
+        g_nlocalflt++;
+    }
+}
+static int localflt_get(const char* n) {
+    if (!n || !n[0]) return 0;
+    for (int i = 0; i < g_nlocalflt; i++) if (strcmp(g_localflt[i], n) == 0) return 1;
+    return 0;
+}
+// Phase 17.F.3: names of DECIMAL-typed named locals (so `d` reads as VT_DECIMAL and routes through
+// the 256-byte decimal memory-slot accumulator $d0). Per-function scope, reset alongside
+// g_localstr/g_localflt/g_localcls. Mirrors the localflt registry exactly (set membership,
+// demote-on-reassign via tombstone).
+static char g_localdec[TEKO_MAX_LOCALCLS][96];
+static int  g_nlocaldec;
+static void localdec_reset(void) { g_nlocaldec = 0; }
+static void localdec_set(const char* n, int is_dec) {
+    for (int i = 0; i < g_nlocaldec; i++)
+        if (strcmp(g_localdec[i], n) == 0) {
+            if (!is_dec) { g_localdec[i][0] = g_localdec[i][1] = '\0'; } // demote (tombstone)
+            return;
+        }
+    if (is_dec && g_nlocaldec < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localdec[g_nlocaldec], n, 95); g_localdec[g_nlocaldec][95] = '\0';
+        g_nlocaldec++;
+    }
+}
+static int localdec_get(const char* n) {
+    if (!n || !n[0]) return 0;
+    for (int i = 0; i < g_nlocaldec; i++) if (strcmp(g_localdec[i], n) == 0) return 1;
     return 0;
 }
 // Split a dotted lexeme "base.member" into its two parts. Returns 1 on success (a dot present).
@@ -543,6 +614,38 @@ static OpCode p12_tok_op(TokenType t) {
     }
 }
 
+// Phase 17 (17.A): map a binary operator token to its FLOAT opcode (parallel to p12_tok_op). Arith
+// (+ - * /) → OP_F*; compares (== != < <= > >=) → OP_F* compare (result i32 → VT_INT).
+static OpCode p12_tok_fop(TokenType t) {
+    switch (t) {
+        case TOKEN_PLUS:  return OP_FADD; case TOKEN_MINUS: return OP_FSUB;
+        case TOKEN_MUL:   return OP_FMUL; case TOKEN_DIV:   return OP_FDIV;
+        case TOKEN_MOD:   return OP_FMOD; // Phase 17 (17.B): float `%` (fmod, remainder toward zero)
+        case TOKEN_EQ:    return OP_FEQ;  case TOKEN_NE:    return OP_FNE;
+        case TOKEN_LT:    return OP_FLT;  case TOKEN_LE:    return OP_FLE;
+        case TOKEN_GT:    return OP_FGT;  case TOKEN_GE:    return OP_FGE;
+        default:          return OP_FADD; // (unreachable for the routed binary float operators)
+    }
+}
+// Phase 17 (17.A): a comparison operator yields an i32 0/1 (VT_INT) regardless of operand types.
+static int is_compare_tok(TokenType t) {
+    return t == TOKEN_EQ || t == TOKEN_NE || t == TOKEN_LT ||
+           t == TOKEN_LE || t == TOKEN_GT || t == TOKEN_GE;
+}
+// Phase 17.F.3: map a binary operator token to its DECIMAL opcode (parallel to p12_tok_fop). Arith
+// (+ - * / %) → OP_D*; compares (== != < <= > >=) → OP_D* compare (result i32 → VT_INT).
+static OpCode p12_tok_dop(TokenType t) {
+    switch (t) {
+        case TOKEN_PLUS:  return OP_DADD; case TOKEN_MINUS: return OP_DSUB;
+        case TOKEN_MUL:   return OP_DMUL; case TOKEN_DIV:   return OP_DDIV;
+        case TOKEN_MOD:   return OP_DMOD; // Python Decimal.__mod__
+        case TOKEN_EQ:    return OP_DEQ;  case TOKEN_NE:    return OP_DNE;
+        case TOKEN_LT:    return OP_DLT;  case TOKEN_LE:    return OP_DLE;
+        case TOKEN_GT:    return OP_DGT;  case TOKEN_GE:    return OP_DGE;
+        default:          return OP_DADD; // (unreachable for the routed binary decimal operators)
+    }
+}
+
 // Phase 16 (16.B): the expression evaluators now RETURN the result's value-type (TEKO_VT_*), so a
 // binary `+` with a string operand lowers to culture-invariant concatenation (auto-`to_string`).
 static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
@@ -550,6 +653,16 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
 static int is_codec_head(const Parser* p);   // fwd (defined with the codec surface below)
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 static int lower_interp_string(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd (16.C)
+// Phase 17 (17.B): `convert.to_int` / `convert.to_float` — direct-opcode checked int↔float casts
+// whose argument is a full EXPRESSION (not a codec literal/local), so they take a dedicated path
+// (NOT codec_id_for / lower_base_codec). is_floatcast_head claims the dotted ident BEFORE the codec
+// check; lower_floatcast evaluates the inner expr and emits OP_F2I (to_int) / OP_I2F (to_float),
+// returning the result value-type (VT_INT / VT_FLOAT).
+static int is_floatcast_head(const Parser* p); // fwd (defined below)
+static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
+// Phase 17.F.4: the decimal.to_string / decimal.parse surface (ids 59/60).
+static int is_decimalsurf_head(const Parser* p); // fwd
+static int lower_decimalsurf(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 // Phase 16 (16.D): coerce the operand VALUE in $w0 (per its value-type `vt`) to a string pointer in
 // $w0 — int via to_string (id 49), string unchanged, object via its to_string / synthesized default.
 static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int vt); // fwd (16.D)
@@ -598,6 +711,34 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         codegen_li_emit_iconst(b, atoi(p->current_token.lexeme));
         fe_advance(p);
         return TEKO_VT_INT;
+    } else if (p->current_token.type == TOKEN_LIT_FLOAT) {
+        // Phase 17 (17.A): a float literal (`3.14`, `2.0`, `0.5`). The lexer emits TOKEN_LIT_FLOAT
+        // ONLY for a `<digits>.<digits>` form (a `.`-fraction; `2.` and `1e9`/`f`-suffix are NOT
+        // lexed as floats — see lex_number). strtod the lexeme (digit-separator `_` stripped first,
+        // since the lexeme may keep them) → OP_FCONST → $f0. Value-type is VT_FLOAT.
+        char buf[64]; int j = 0;
+        const char* lx = p->current_token.lexeme;
+        for (int k = 0; lx[k] && j < (int)sizeof(buf) - 1; k++) if (lx[k] != '_') buf[j++] = lx[k];
+        buf[j] = '\0';
+        codegen_li_emit_fconst(b, strtod(buf, NULL));
+        fe_advance(p);
+        return TEKO_VT_FLOAT;
+    } else if (p->current_token.type == TOKEN_LIT_DECIMAL) {
+        // Phase 17.F.3: a `dec` literal (`9.99dec`, `1000dec`). The lexer already stripped the `dec`
+        // suffix, so the lexeme is the bare number; parse it through the EXACT 17.F.2 decimal core
+        // (teko_decimal_parse — culture-invariant, banker's-rounded) into a 256-byte value, pool it,
+        // and emit OP_DCONST. Digit separators `_` are stripped first (the lexeme may keep them).
+        // A parse failure (only on >1984-bit coefficient — the grammar already vetted the digits)
+        // canonicalizes to zero; that is a degenerate compile-time literal, not a runtime fail.
+        char buf[128]; int j = 0;
+        const char* lx = p->current_token.lexeme;
+        for (int k = 0; lx[k] && j < (int)sizeof(buf) - 1; k++) if (lx[k] != '_') buf[j++] = lx[k];
+        buf[j] = '\0';
+        teko_decimal dv;
+        if (!teko_decimal_parse(buf, &dv)) teko_decimal_zero(&dv);
+        codegen_li_emit_dconst(b, (const unsigned char*)&dv);
+        fe_advance(p);
+        return TEKO_VT_DECIMAL;
     } else if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
         if (strlit_is_interp(p->current_token.lexeme)) {
             // Phase 16 (16.C): an interpolated literal `"…{expr}…"` -> concat of chunks + holes.
@@ -609,6 +750,14 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, sv));
         free(sv); fe_advance(p);
         return TEKO_VT_STR;
+    } else if (is_floatcast_head(p)) {
+        // Phase 17 (17.B): `convert.to_int(<expr>)` / `convert.to_float(<expr>)` — checked int↔float
+        // casts. Claimed BEFORE the codec check so the dotted ident is not mistaken for a codec call.
+        return lower_floatcast(b, p, ctx);
+    } else if (is_decimalsurf_head(p)) {
+        // Phase 17.F.4: `decimal.to_string(<decimal>)` (id 59, VT_STR) / `decimal.parse(<string>)`
+        // (id 60, VT_DECIMAL). Same pre-codec claim as the floatcast head.
+        return lower_decimalsurf(b, p, ctx);
     } else if (is_codec_head(p)) {
         // Phase 16 (16.B/16.F): a codec / convert / hash call primary — most return a string pointer
         // (VT_STR); the checked parsers return an int (VT_INT). So `"n=" + convert.parse_int(s)`
@@ -627,7 +776,21 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
     } else if (p->current_token.type == TOKEN_IDENTIFIER) {
         int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
         int isstr = localstr_get(p->current_token.lexeme);
+        int isflt = localflt_get(p->current_token.lexeme); // Phase 17: a float-typed local?
+        int isdec = localdec_get(p->current_token.lexeme); // Phase 17.F.3: a decimal-typed local?
         int ci = localcls_get(p->current_token.lexeme); // Phase 16.D: a class-instance local?
+        if (s >= 0 && isflt) {
+            // Phase 17 (17.A): a float local reads through the float accumulator ($f0), not $w0.
+            codegen_li_emit_fload_local(b, s);
+            fe_advance(p);
+            return TEKO_VT_FLOAT;
+        }
+        if (s >= 0 && isdec) {
+            // Phase 17.F.3: a decimal local reads through the 256-byte decimal slot ($d0), not $w0.
+            codegen_li_emit_dload_local(b, s);
+            fe_advance(p);
+            return TEKO_VT_DECIMAL;
+        }
         if (s >= 0) codegen_li_emit_load_local(b, s);   // $w0 = value (int / string ptr / handle)
         else codegen_li_emit_iconst(b, 0); // unknown identifier in this subset → 0
         fe_advance(p);
@@ -650,23 +813,84 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
         fe_advance(p); // consume the operator
         int t = ta->next_temp++;
         if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
-        codegen_li_emit_store_local(b, t);            // temp = left (raw value)
-        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 (left-associative)
+        // Phase 17 (17.A): spill the LEFT operand with the type-appropriate store — a float operand
+        // lives in $f0 (FSTORE_LOCAL to a float slot), an int/ptr operand in $w0 (STORE_LOCAL). The
+        // temp slot `t` is one frame slot; on native it is reused as either type (a slot has one
+        // type per use), on WASM $fvN / $vN are parallel local files.
+        // Phase 17.F.3: a decimal operand lives in the 256-byte $d0 slot — spill it to a decimal temp
+        // slot (DSTORE_LOCAL); a float to $fvN; an int/ptr to $vN.
+        if (vt_l == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, t); // temp = left (decimal)
+        else if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, t); // temp = left (float)
+        else                            codegen_li_emit_store_local(b, t);  // temp = left (raw value)
+        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 / $f0 / $d0 (left-assoc)
         if (optok == TOKEN_PLUS && (vt_l == TEKO_VT_STR || vt_r == TEKO_VT_STR)) {
             // Phase 16 (16.B): a `+` with a string operand is culture-invariant CONCATENATION with
             // auto-`to_string`. Right is in $w0 — convert it to a string if it is an int (id 49),
             // stash it, then build the left string and call str_concat (id 52, arg0=left, $w0=right).
-            coerce_to_string_in_w0(b, ctx, vt_r);      // $w0 = to_string(right) (int/object/string)
+            // Phase 17.D: a FLOAT operand auto-converts via id 50 (which reads $f0). For the RIGHT
+            // operand this works as-is — it was just evaluated into $f0 (coerce(FLOAT) reads it).
+            coerce_to_string_in_w0(b, ctx, vt_r);      // $w0 = to_string(right) (int/float/object/string)
             int t2 = ta->next_temp++;
             if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
             codegen_li_emit_store_local(b, t2);        // temp2 = right (string ptr)
-            codegen_li_emit_load_local(b, t);          // $w0 = left (raw)
+            // Phase 17.D: the LEFT operand was spilled to temp `t` with the type-appropriate store
+            // (FSTORE_LOCAL for a float, STORE_LOCAL otherwise). Reload it with the matching load so a
+            // float value reaches $f0 (where coerce(FLOAT)→id 50 reads it), not the integer $w0.
+            // Phase 17.F.4: a LEFT decimal operand was spilled to temp `t` with DSTORE_LOCAL — reload
+            // it into $d0 (DLOAD_LOCAL) so coerce(DECIMAL)→id 59 reads it, exactly as the float case
+            // reloads $f0. A float left reloads $f0; everything else reloads the raw $w0.
+            if (vt_l == TEKO_VT_DECIMAL)    codegen_li_emit_dload_local(b, t); // $d0 = left (decimal)
+            else if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fload_local(b, t); // $f0 = left (float)
+            else                            codegen_li_emit_load_local(b, t);  // $w0 = left (raw)
             coerce_to_string_in_w0(b, ctx, vt_l);      // $w0 = to_string(left)
             codegen_li_emit_setarg(b, 0);              // $a0 = left string
             codegen_li_emit_load_local(b, t2);         // $w0 = right string
             codegen_li_emit_call_runtime(b, 52);       // $w0 = str_concat(left, right)
             ta->next_temp--;                           // free temp2
             vt_l = TEKO_VT_STR;
+        } else if (vt_l == TEKO_VT_DECIMAL || vt_r == TEKO_VT_DECIMAL) {
+            // Phase 17.F.3/17.F.4: decimal arithmetic / comparison. With BOTH operands decimal this is
+            // the exact-decimal path; 17.F.4 adds MIXED int/float + decimal PROMOTION (the non-decimal
+            // operand is widened to decimal via I2D/F2D — exactly like the float branch promotes ints).
+            // Step 1 — RIGHT operand → $d1. The right was just evaluated into $d0 (decimal) / $f0
+            // (float) / $w0 (int); promote a non-decimal right to $d0 (I2D/F2D), then DSTORE → $d1.
+            if (vt_r == TEKO_VT_FLOAT)        codegen_li_emit_dcast(b, OP_F2D); // $d0 = (decimal)$f0
+            else if (vt_r != TEKO_VT_DECIMAL) codegen_li_emit_dcast(b, OP_I2D); // $d0 = (decimal)$w0
+            codegen_li_emit_dunop(b, OP_DSTORE);   // $d1 = $d0 (right, now decimal)
+            // Step 2 — LEFT operand → $d0. Reload from temp `t` with the matching load (a decimal left
+            // was DSTORE_LOCAL'd; a float was FSTORE_LOCAL'd; an int was STORE_LOCAL'd), then promote
+            // a non-decimal left to $d0 (I2D reads $w0, F2D reads $f0).
+            if (vt_l == TEKO_VT_DECIMAL) {
+                codegen_li_emit_dload_local(b, t);                   // $d0 = left (decimal)
+            } else if (vt_l == TEKO_VT_FLOAT) {
+                codegen_li_emit_fload_local(b, t);                   // $f0 = left (float)
+                codegen_li_emit_dcast(b, OP_F2D);                    // $d0 = (decimal)$f0
+            } else {
+                codegen_li_emit_load_local(b, t);                    // $w0 = left (int)
+                codegen_li_emit_dcast(b, OP_I2D);                    // $d0 = (decimal)$w0
+            }
+            codegen_li_emit_dunop(b, p12_tok_dop(optok)); // $d0 = left <op> right  (or $w0 for compares)
+            vt_l = is_compare_tok(optok) ? TEKO_VT_INT : TEKO_VT_DECIMAL;
+        } else if (vt_l == TEKO_VT_FLOAT || vt_r == TEKO_VT_FLOAT) {
+            // Phase 17 (17.A): float arithmetic / comparison. Promote any int operand to f64 (I2F),
+            // bring left into $f0 and right into $f1, then emit the float op. Arith ops (+ - * /)
+            // produce VT_FLOAT; compares (== != < <= > >=) produce an i32 0/1 in $w0 (VT_INT).
+            // Right is currently in $f0 (if it was float) or $w0 (if it was int) — move it to $f1.
+            if (vt_r == TEKO_VT_FLOAT) {
+                codegen_li_emit_funop(b, OP_FSTORE);   // $f1 = $f0 (right)
+            } else {
+                codegen_li_emit_funop(b, OP_I2F);      // $f0 = (double)$w0 (right)
+                codegen_li_emit_funop(b, OP_FSTORE);   // $f1 = $f0 (right)
+            }
+            // Left was spilled in temp `t` — reload to $f0, promoting if it was an int.
+            if (vt_l == TEKO_VT_FLOAT) {
+                codegen_li_emit_fload_local(b, t);     // $f0 = left (float)
+            } else {
+                codegen_li_emit_load_local(b, t);      // $w0 = left (int)
+                codegen_li_emit_funop(b, OP_I2F);      // $f0 = (double)$w0
+            }
+            codegen_li_emit_funop(b, p12_tok_fop(optok)); // $f0 = left <op> right  (or $w0 for compares)
+            vt_l = is_compare_tok(optok) ? TEKO_VT_INT : TEKO_VT_FLOAT;
         } else {
             codegen_li_emit_store(b);                  // $w1 = right
             codegen_li_emit_load_local(b, t);          // $w0 = left
@@ -810,6 +1034,24 @@ static void emit_object_to_string(BytecodeBuffer* b, const LowerCtx* ctx, int ci
 
 static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int vt) {
     if (vt == TEKO_VT_STR) return;                            // already a string pointer
+    if (vt == TEKO_VT_FLOAT) {
+        // Phase 17 (17.D): float→string. UNLIKE int/string/object (whose value is in $w0), a VT_FLOAT
+        // operand's value lives in the PARALLEL float accumulator $f0 — the caller guarantees it is
+        // there at this point (a freshly-evaluated float expr leaves $f0; a left-float concat operand
+        // is reloaded via FLOAD_LOCAL before coercing). id 50 (teko_rt_float_to_string, the 17.C Ryu
+        // shortest-round-trip formatter) reads $f0 and leaves the char* result in $w0 (VT_STR).
+        codegen_li_emit_call_runtime(b, 50);
+        return;
+    }
+    if (vt == TEKO_VT_DECIMAL) {
+        // Phase 17.F.4: decimal→string. Like a VT_FLOAT, the value does NOT live in $w0 — it is in the
+        // 256-byte $d0 slot, which the caller guarantees holds the operand at this point (a freshly-
+        // evaluated decimal expr leaves $d0; a left-decimal concat operand is reloaded via
+        // DLOAD_LOCAL before coercing — see eval_expr_prec). id 59 (decimal.to_string) reads &$d0 and
+        // leaves the char* in $w0 (VT_STR). This is what makes `"x = " + d` and `"{d}"` work.
+        codegen_li_emit_call_runtime(b, 59);
+        return;
+    }
     if (vt >= TEKO_VT_OBJ_BASE) { emit_object_to_string(b, ctx, vt - TEKO_VT_OBJ_BASE); return; }
     codegen_li_emit_call_runtime(b, 49);                      // VT_INT → culture-invariant decimal
 }
@@ -914,6 +1156,7 @@ static int codec_id_for(const char* lex) {
     // Phase 16.F — CHECKED parse (string -> primitive; fail-loud on malformed input).
     if (strcmp(lex, "convert.parse_int") == 0)   return 53; // (str) -> i32
     if (strcmp(lex, "convert.parse_bool") == 0)  return 55; // (str) -> 0/1
+    if (strcmp(lex, "convert.parse_float") == 0) return 54; // (str) -> f64 (checked, fail-loud)
     return -1;
 }
 
@@ -1037,6 +1280,97 @@ static void lower_duplex_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
     }
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
     codegen_li_emit_duplex(b, (OpCode)op);               // $w0 = duplex op result
+}
+
+// --- Phase 17 (17.B): checked int↔float casts (convert.to_int / convert.to_float) ---------------
+// These are NOT codec calls: their argument is a full EXPRESSION (a float or int sub-expression),
+// so they bypass codec_id_for / lower_base_codec (which emit OP_CALL_RUNTIME over a literal/local
+// arg). Instead the inner expression is eval'd via eval_expr_prec (leaving its result in $w0 for an
+// int or $f0 for a float), then the conversion opcode is emitted:
+//   convert.to_int(<expr>)   -> if the expr is VT_FLOAT, OP_F2I (CHECKED, fail-loud) -> i32 in $w0;
+//                               an int expr is already in $w0 (no-op). Result VT_INT.
+//   convert.to_float(<expr>) -> if the expr is NOT VT_FLOAT (an int in $w0), OP_I2F -> $f0; a float
+//                               expr is already in $f0 (no-op). Result VT_FLOAT.
+// Phase 17.D adds `convert.float_to_str(<expr>)` to this SAME dotted-head machinery (so every
+// is_floatcast_head call site — eval_primary, lower_init_value, the call-arg path — picks it up):
+//   convert.float_to_str(<expr>) -> eval the inner expr; promote an int operand with OP_I2F (-> $f0);
+//                               then emit id 50 (reads $f0) -> char* in $w0. Result VT_STR.
+static int is_floatcast_head(const Parser* p) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
+    const char* lx = p->current_token.lexeme;
+    return strcmp(lx, "convert.to_int") == 0 || strcmp(lx, "convert.to_float") == 0 ||
+           strcmp(lx, "convert.float_to_str") == 0 ||
+           // Phase 17.F.4 — `convert.to_decimal(<int|float>)` lowers to OP_I2D/OP_F2D; `to_int`/
+           // `to_float` of a decimal arg add the OP_D2I/OP_D2F branch (handled inside lower_floatcast).
+           strcmp(lx, "convert.to_decimal") == 0;
+}
+static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int to_int = (strcmp(p->current_token.lexeme, "convert.to_int") == 0);
+    int to_str = (strcmp(p->current_token.lexeme, "convert.float_to_str") == 0);
+    int to_dec = (strcmp(p->current_token.lexeme, "convert.to_decimal") == 0);
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    // The inner expression -> $w0 (int) / $f0 (float) / $d0 (decimal). ctx->ta is the temp allocator.
+    int vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (to_dec) {
+        // Phase 17.F.4 — to_decimal: int -> OP_I2D ($w0 -> $d0); float -> OP_F2D ($f0 -> $d0); an
+        // already-decimal expr is a no-op (stays in $d0). Result VT_DECIMAL.
+        if (vt == TEKO_VT_FLOAT)        codegen_li_emit_dcast(b, OP_F2D);
+        else if (vt != TEKO_VT_DECIMAL) codegen_li_emit_dcast(b, OP_I2D);
+        return TEKO_VT_DECIMAL;
+    }
+    if (to_str) {
+        // Phase 17.D: float->string surface. Promote an int operand to f64 first ($f0); a float
+        // expr is already in $f0. id 50 (the 17.C Ryu formatter) reads $f0 -> char* in $w0 (VT_STR).
+        // A decimal arg here would have no f64 home; route it to its own to_string (id 59) instead.
+        if (vt == TEKO_VT_DECIMAL) { codegen_li_emit_call_runtime(b, 59); return TEKO_VT_STR; }
+        if (vt != TEKO_VT_FLOAT) codegen_li_emit_funop(b, OP_I2F); // $f0 = (double)$w0
+        codegen_li_emit_call_runtime(b, 50);
+        return TEKO_VT_STR;
+    } else if (to_int) {
+        // Phase 17.F.4 — a decimal arg lowers to OP_D2I (checked, truncate toward zero).
+        if (vt == TEKO_VT_DECIMAL) codegen_li_emit_dcast(b, OP_D2I);  // $w0 = (i32)$d0 (checked)
+        else if (vt == TEKO_VT_FLOAT) codegen_li_emit_f2i(b);         // $w0 = (i32)trunc($f0) (checked)
+        // else: an int expression is already in $w0 — to_int is a no-op.
+        return TEKO_VT_INT;
+    } else {
+        // convert.to_float: a decimal arg lowers to OP_D2F (decimal -> f64 via shortest string).
+        if (vt == TEKO_VT_DECIMAL) codegen_li_emit_dcast(b, OP_D2F); // $f0 = (f64)$d0
+        else if (vt != TEKO_VT_FLOAT) codegen_li_emit_funop(b, OP_I2F); // $f0 = (double)$w0
+        // else: a float expression is already in $f0 — to_float is a no-op.
+        return TEKO_VT_FLOAT;
+    }
+}
+
+// --- Phase 17.F.4: the `decimal.to_string` / `decimal.parse` language surface ---------------------
+// `decimal.to_string(<decimal expr>)` -> id 59 (reads the decimal value from $d0, returns a culture-
+// invariant `.`-decimal string in $w0, VT_STR). `decimal.parse(<string expr>)` -> id 60 (reads a
+// string ptr from $w0, writes the parsed 256-byte decimal into $d0, VT_DECIMAL; CHECKED/fail-loud).
+// Claimed via the dotted-identifier head, same machinery as the floatcast (eval_primary / init).
+static int is_decimalsurf_head(const Parser* p) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
+    const char* lx = p->current_token.lexeme;
+    return strcmp(lx, "decimal.to_string") == 0 || strcmp(lx, "decimal.parse") == 0;
+}
+static int lower_decimalsurf(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int to_str = (strcmp(p->current_token.lexeme, "decimal.to_string") == 0);
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    int vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);      // inner expr -> $w0 / $f0 / $d0
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (to_str) {
+        // decimal.to_string: promote a non-decimal arg to decimal first (so `decimal.to_string(42)`
+        // and `decimal.to_string(3.14)` work), then emit id 59 (reads $d0).
+        if (vt == TEKO_VT_FLOAT)        codegen_li_emit_dcast(b, OP_F2D);
+        else if (vt != TEKO_VT_DECIMAL) codegen_li_emit_dcast(b, OP_I2D);
+        codegen_li_emit_call_runtime(b, 59);             // $w0 = decimal.to_string($d0)
+        return TEKO_VT_STR;
+    } else {
+        // decimal.parse: the arg must be a string in $w0 (id 60 writes the result into $d0).
+        codegen_li_emit_call_runtime(b, 60);             // $d0 = decimal.parse($w0) (checked)
+        return TEKO_VT_DECIMAL;
+    }
 }
 
 // --- delayed (timed) channels (Phase 14, 14.C) ----------------------------------
@@ -1264,6 +1598,15 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     } else if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
                p->peek_token.type == TOKEN_LPAREN) {
         lower_intrinsic_call(b, p, ctx);
+    } else if (is_floatcast_head(p) || is_decimalsurf_head(p)) {
+        // Phase 17 (17.B): `let f = convert.to_float(3);` / `let n = convert.to_int(7.9);` —
+        // Phase 17.F.4: `let d = convert.to_decimal(42);`, `let s = decimal.to_string(d);`,
+        // `let d = decimal.parse(s);`. Route through eval_expr_prec (NOT the bare lower_*cast) so a
+        // TRAILING binary operator is also consumed — e.g. `let g = convert.to_decimal(n) + total;`
+        // (mixed promotion). eval_primary already claims both heads; the returned VT (after any `+`)
+        // is recorded in g_last_init_vt so the binding reads back as the right type.
+        env_sync(env);
+        g_last_init_vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);
     } else if (is_codec_head(p))   { int id = codec_id_for(p->current_token.lexeme);
                                      lower_base_codec(b, p, ctx); g_last_init_vt = runtime_result_vt(id); }
     else if (is_duplex_head(p))    { lower_duplex_call(b, p, ctx); }
@@ -1336,7 +1679,12 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     env_sync(env);
     lower_init_value(b, p, env);
     int rhs_class = g_last_inst_class[0] ? class_find(g_last_inst_class) : rhs_local_class;
-    codegen_li_emit_store_local(b, s);
+    // Phase 17 (17.A / 17.F.3): a float initializer lives in $f0 (FSTORE_LOCAL), a decimal in the
+    // 256-byte $d0 slot (DSTORE_LOCAL); both record the local so `lname` reads back with the right
+    // value-type. An int/ptr stays in $w0 (STORE_LOCAL).
+    if (g_last_init_vt == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, s);
+    else if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, s);
+    else                                      codegen_li_emit_store_local(b, s);
     if (annot_trait >= 0) {
         // Phase 15.B: a FAT trait-typed reference — its concrete type_id (from the RHS) rides in a
         // hidden tid slot as a compile-time constant; `lname.method()` dispatches dynamically.
@@ -1350,6 +1698,10 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     }
     // Phase 16 (16.B): remember a string-typed local so `s` reads as VT_STR in a later concat.
     localstr_set(lname, g_last_init_vt == TEKO_VT_STR);
+    // Phase 17 (17.A): remember a float-typed local so `lname` routes through the float accumulator.
+    localflt_set(lname, g_last_init_vt == TEKO_VT_FLOAT);
+    // Phase 17.F.3: remember a decimal-typed local so `lname` routes through the 256-byte $d0 slot.
+    localdec_set(lname, g_last_init_vt == TEKO_VT_DECIMAL);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 }
 
@@ -1372,13 +1724,21 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         : -1;
     env_sync(env);
     lower_init_value(b, p, env);
-    codegen_li_emit_store_local(b, slot);
+    // Phase 17 (17.A / 17.F.3): keep the store type-correct on reassignment (decimal → DSTORE_LOCAL,
+    // float → FSTORE_LOCAL, else STORE_LOCAL).
+    if (g_last_init_vt == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, slot);
+    else if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, slot);
+    else                                      codegen_li_emit_store_local(b, slot);
     if (tl >= 0) {
         codegen_li_emit_iconst(b, rhs_class >= 0 ? class_type_id(rhs_class) : -1);
         codegen_li_emit_store_local(b, g_traitlocal[tl].tid_slot);
     }
     // Phase 16 (16.B): keep the local's string-typed-ness in sync with its new value.
     localstr_set(nm, g_last_init_vt == TEKO_VT_STR);
+    // Phase 17 (17.A): keep the local's float-typed-ness in sync with its new value.
+    localflt_set(nm, g_last_init_vt == TEKO_VT_FLOAT);
+    // Phase 17.F.3: keep the local's decimal-typed-ness in sync with its new value.
+    localdec_set(nm, g_last_init_vt == TEKO_VT_DECIMAL);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     return 1;
 }
@@ -2495,7 +2855,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -2550,7 +2910,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -2582,7 +2942,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -2614,7 +2974,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.
@@ -2873,6 +3233,32 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                                                           &args[nargs], &temps_used)) {
                     // Phase 16.B: an expression argument (e.g. `"x = " + n`) — evaluated + spilled.
                     nargs++;
+                } else if (nargs < 16 && is_floatcast_head(&parser) &&
+                           (strcmp(parser.current_token.lexeme, "convert.to_int") == 0 ||
+                            strcmp(parser.current_token.lexeme, "convert.float_to_str") == 0)) {
+                    // Phase 17 (17.B/17.D): a bare `convert.to_int(<expr>)` (checked i32 in $w0) OR
+                    // `convert.float_to_str(<expr>)` (char* in $w0) call argument — both leave their
+                    // result in $w0, spilled to a temp like the codec case. (to_float yields $f0, not
+                    // passable as a value arg in this subset — reach it via an expression arg.)
+                    lower_floatcast(buffer, &parser, &top_ctx); // $w0 = result (i32 / char*)
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
+                } else if (nargs < 16 && is_decimalsurf_head(&parser) &&
+                           strcmp(parser.current_token.lexeme, "decimal.to_string") == 0) {
+                    // Phase 17.F.4: a bare `decimal.to_string(<expr>)` call arg leaves a char* in $w0
+                    // (passable), spilled to a temp like the codec case. (decimal.parse yields a value
+                    // in $d0, not passable as a value arg in this subset — reach it via an expr arg.)
+                    lower_decimalsurf(buffer, &parser, &top_ctx); // $w0 = char* (decimal string)
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
                 } else if (nargs < 16 && is_codec_head(&parser)) {
                     // base64/hex codec call as an argument (P12-G): lower eagerly and
                     // spill the result pointer to a temp local, then pass the local.

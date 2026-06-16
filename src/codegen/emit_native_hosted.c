@@ -57,6 +57,10 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 48: sym = "teko_rt_time_format_utc";  arity = 1; break; // (epoch str)
         // Phase 16 (Casting / Conversions & Parsing) — culture-invariant conversion surface.
         case 49: sym = "teko_rt_int_to_string";    arity = 1; break; // (i32) -> decimal str
+        // Phase 17.D — float->string. id 50 is the ONLY f64-ARG runtime id: the value rides in the
+        // FP-arg register (xmm0/d0 = $f0), NOT $w0, so OP_CALL_RUNTIME special-cases it to a BARE
+        // call (no $w0->arg-reg marshal). arity 1 only describes the result-marshalling (char*->$w0).
+        case 50: sym = "teko_rt_float_to_string";  arity = 1; break; // (f64) -> shortest `.`-decimal
         case 51: sym = "teko_rt_bool_to_string";   arity = 1; break; // (0/1) -> "true"/"false"
         case 52: sym = "teko_rt_str_concat";       arity = 2; break; // (a, b) -> a‖b
         case 56: sym = "teko_rt_to_radix";         arity = 2; break; // (v, radix) -> base str
@@ -64,6 +68,16 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 58: sym = "teko_rt_group";            arity = 1; break; // (v) -> "1,000,000"
         case 53: sym = "teko_rt_parse_int";        arity = 1; break; // (str) -> i32 (checked)
         case 55: sym = "teko_rt_parse_bool";       arity = 1; break; // (str) -> 0/1 (checked)
+        // Phase 17.E — string->f64. id 54 is the INVERSE of id 50's ABI: the arg is a STRING (i32 ptr
+        // in $w0 -> rdi/x0 via the normal emit_call marshal), and the `double` result is returned in
+        // xmm0/d0 (= $f0) AUTOMATICALLY by the SysV/AAPCS ABI. So unlike id 50 it needs NO special
+        // emission — the generic `emit_call(sym, 1)` is correct (rax/$w0 is clobbered but unused; the
+        // frontend reads the result from $f0 as VT_FLOAT).
+        case 54: sym = "teko_rt_parse_float";      arity = 1; break; // (str) -> f64 (checked)
+        // Phase 17.F.4 — decimal language surface (by-pointer ABI; OP_CALL_RUNTIME special-cases the
+        // emission, but the symbol/arity feed the WASM import declaration).
+        case 59: sym = "teko_rt_decimal_to_string"; arity = 1; break; // (&decimal) -> str
+        case 60: sym = "teko_rt_decimal_parse";     arity = 1; break; // (str, &decimal) checked
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;
@@ -203,15 +217,31 @@ static const char* sym_prefix(const MetalContext* ctx) { return is_macho(ctx) ? 
 static int frame_locals(const MetalContext* ctx) {
     return ctx->wasm_local_count > 0 ? ctx->wasm_local_count : 0;
 }
+// Phase 17.F.3: the 256-byte decimal value-model slots. The decimal accumulator $d0/$d1 (slots
+// 0/1) + one 256-byte decimal-local slot per integer-local slot index (slots 2..2+frame_locals-1,
+// the $dvN file parallel to $vN — a slot has one type per use, like floats). Only present when the
+// program uses decimals (wasm_emit_decimal), so decimal-free frames stay byte-identical. 256 is
+// 16-aligned, so the region keeps every existing alignment invariant unchanged.
+#define TEKO_HOSTED_DECIMAL_BYTES 256
+// Slot layout: $d0=0, $d1=1, a CMP-scratch i32 sink slot=2, then per-local slots 3..3+nlocals-1.
+#define TEKO_HOSTED_DECIMAL_SCRATCH 2
+static int decimal_slot_count(const MetalContext* ctx) {
+    return ctx->wasm_emit_decimal ? (3 + frame_locals(ctx)) : 0; // $d0,$d1,cmp-scratch + per-local
+}
+static int decimal_region_bytes(const MetalContext* ctx) {
+    return decimal_slot_count(ctx) * TEKO_HOSTED_DECIMAL_BYTES;
+}
 static int frame_size_x86(const MetalContext* ctx) {
     int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS + 1; // +1 = the spawn-args pointer slot
     int f = 8 + 8 * slots;        // first slot at rbp-16 (rbx occupies rbp-8)
+    f += decimal_region_bytes(ctx); // Phase 17.F.3: 256-byte decimal slots below the GPR slots
     if (f % 16 != 8) f += 8;      // after `push rbp; push rbx`, sub F keeps rsp%16==0 iff F%16==8
     return f;
 }
 static int frame_size_arm(const MetalContext* ctx) {
     int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS + 1; // +1 = the spawn-args pointer slot
     int f = 32 + 8 * slots;       // saved x29/x30/x19 occupy 0/8/16
+    f += decimal_region_bytes(ctx); // Phase 17.F.3: 256-byte decimal slots above the GPR slots
     return (f + 15) & ~15;        // 16-aligned for stp/AAPCS
 }
 static int local_off_x86(int n) { return -(16 + 8 * n); }
@@ -221,6 +251,19 @@ static int stage_off_x86(const MetalContext* ctx, int i) {
 static int local_off_arm(int n) { return 32 + 8 * n; }
 static int stage_off_arm(const MetalContext* ctx, int i) {
     return 32 + 8 * frame_locals(ctx) + 8 * i;
+}
+// Phase 17.F.3: rbp/x29-relative byte offset of the START (lowest address) of decimal slot `k`
+// ($d0=0, $d1=1, decimal-local n = 2+n). x86 stacks DOWN: the GPR slots end at the anchor below;
+// the decimal region runs further negative. arm stacks UP from x29: decimal slots sit above the
+// GPR area. `lea`/`add` this offset into an ABI arg register to pass &slot by pointer.
+static int hosted_gpr_anchor(const MetalContext* ctx) {
+    return 16 + 8 * (frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS + 1); // one past the last GPR slot
+}
+static int decimal_slot_off_x86(const MetalContext* ctx, int k) {
+    return -(hosted_gpr_anchor(ctx) + TEKO_HOSTED_DECIMAL_BYTES * (k + 1));
+}
+static int decimal_slot_off_arm(const MetalContext* ctx, int k) {
+    return hosted_gpr_anchor(ctx) + TEKO_HOSTED_DECIMAL_BYTES * k;
 }
 // Phase 14 (14.I): the reserved slot holding the routine's spawn-args pointer (one past the stage
 // slots), so OP_LOAD_SPAWN_ARG can read args[idx] anywhere in the body (callee-saved across calls).
@@ -271,8 +314,20 @@ static void emit_frame_enter(MetalContext* ctx) {
     FILE* f = ctx->file;
     if (is_arm64(ctx)) {
         int fr = frame_size_arm(ctx);
-        fprintf(f, "    stp x29, x30, [sp, #-%d]!\n", fr);
-        fprintf(f, "    mov x29, sp\n");
+        // Phase 17.F.3: the decimal frame region can push `fr` past the `stp …, [sp, #-imm]!`
+        // pre-index range (±504, multiple of 8). For a large frame, allocate the stack with a
+        // separate `sub sp` (12-bit imm, optionally shifted — emit two subs above 4095) and store
+        // the saved pair at [sp, #0]. Small frames keep the original single pre-indexed `stp`
+        // (byte-identical to before 17.F.3 when the program is decimal-free).
+        if (fr <= 504) {
+            fprintf(f, "    stp x29, x30, [sp, #-%d]!\n", fr);
+            fprintf(f, "    mov x29, sp\n");
+        } else {
+            if (fr > 4095) fprintf(f, "    sub sp, sp, #%d, lsl #12\n", fr >> 12);
+            fprintf(f, "    sub sp, sp, #%d\n", fr & 0xFFF);
+            fprintf(f, "    stp x29, x30, [sp]\n");
+            fprintf(f, "    mov x29, sp\n");
+        }
         fprintf(f, "    str x19, [x29, #16]\n");
     } else {
         int fr = frame_size_x86(ctx);
@@ -289,7 +344,14 @@ static void emit_frame_leave(MetalContext* ctx) {
     if (is_arm64(ctx)) {
         int fr = frame_size_arm(ctx);
         fprintf(f, "    ldr x19, [x29, #16]\n");
-        fprintf(f, "    ldp x29, x30, [sp], #%d\n", fr);
+        // Phase 17.F.3: mirror the prologue's large-frame split (see emit_frame_enter).
+        if (fr <= 504) {
+            fprintf(f, "    ldp x29, x30, [sp], #%d\n", fr);
+        } else {
+            fprintf(f, "    ldp x29, x30, [sp]\n");
+            fprintf(f, "    add sp, sp, #%d\n", fr & 0xFFF);
+            if (fr > 4095) fprintf(f, "    add sp, sp, #%d, lsl #12\n", fr >> 12);
+        }
         fprintf(f, "    ret\n");
     } else {
         int fr = frame_size_x86(ctx);
@@ -328,6 +390,44 @@ static void emit_routine_table(MetalContext* ctx) {
     fprintf(f, "    .quad %d\n", n);
 }
 
+// Phase 17.F.3: inline 256-byte copy between two decimal STACK slots (a decimal is a 256-byte
+// VALUE TYPE — copy on store/assign). Uses ONLY scratch registers (x86 r8/r9/r10/r11; arm64
+// x9/x10/x11/x12) so it never clobbers $w0/$w1 (rax/rbx, x0/x19) — the integer accumulator and the
+// CSE invariant survive (DCONST/DSTORE/DLOAD are pure CSE barriers, not $w0-cache resets). 256/8 = 32
+// quad copies via a counted loop. `src_k`/`dst_k` are decimal slot indices ($d0=0, $d1=1, dvN=2+n).
+static void emit_decimal_slot_copy(MetalContext* ctx, int dst_k, int src_k) {
+    FILE* f = ctx->file;
+    int arm = is_arm64(ctx);
+    int id = ctx->cf_id_next++;
+    if (arm) {
+        fprintf(f, "    add x9, x29, #%d\n", decimal_slot_off_arm(ctx, src_k));   // src
+        fprintf(f, "    add x10, x29, #%d\n", decimal_slot_off_arm(ctx, dst_k));  // dst
+        fprintf(f, "    mov w11, #32\n");
+        fprintf(f, ".Ldcpy_%d:\n", id);
+        fprintf(f, "    ldr x12, [x9], #8\n    str x12, [x10], #8\n");
+        fprintf(f, "    subs w11, w11, #1\n    b.ne .Ldcpy_%d\n", id);
+    } else {
+        fprintf(f, "    leaq %d(%%rbp), %%r11\n", decimal_slot_off_x86(ctx, src_k)); // src
+        fprintf(f, "    leaq %d(%%rbp), %%r10\n", decimal_slot_off_x86(ctx, dst_k)); // dst
+        fprintf(f, "    movl $32, %%r8d\n");
+        fprintf(f, ".Ldcpy_%d:\n", id);
+        fprintf(f, "    movq (%%r11), %%r9\n    movq %%r9, (%%r10)\n");
+        fprintf(f, "    addq $8, %%r11\n    addq $8, %%r10\n");
+        fprintf(f, "    decl %%r8d\n    jnz .Ldcpy_%d\n", id);
+    }
+}
+
+// Phase 17.F.3: load &(decimal slot `k`) into ABI arg register `argreg` (0=rdi/x0, 1=rsi/x1,
+// 2=rdx/x2) — the by-pointer ABI for the teko_rt_decimal_* calls. Scratch-free (only the arg reg).
+static void emit_decimal_slot_addr(MetalContext* ctx, int argreg, int k) {
+    FILE* f = ctx->file;
+    if (is_arm64(ctx)) fprintf(f, "    add x%d, x29, #%d\n", argreg, decimal_slot_off_arm(ctx, k));
+    else {
+        static const char* R[3] = { "%rdi", "%rsi", "%rdx" };
+        fprintf(f, "    leaq %d(%%rbp), %s\n", decimal_slot_off_x86(ctx, k), R[argreg]);
+    }
+}
+
 // --- the emitter -----------------------------------------------------------------
 void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
     if (!ctx || !ctx->file) return;
@@ -351,6 +451,24 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
                 for (int i = 0; i < ctx->wasm_string_count; i++) {
                     fprintf(f, ".L_str_%d:\n", i);
                     emit_asciz(f, ctx->wasm_strings[i] ? ctx->wasm_strings[i] : "");
+                }
+                fprintf(f, "\n");
+            }
+            // Phase 17.F.3: the decimal-constant pool -> read-only data, one 256-byte blob per
+            // OP_DCONST index (.L_dec_<idx>), 8-byte aligned (teko_decimal is _Alignof 8). DCONST
+            // copies 256 bytes from here into the $d0 stack slot. Emitted only when the program uses
+            // decimals (wasm_emit_decimal) so decimal-free output stays byte-identical.
+            if (ctx->wasm_emit_decimal && ctx->decimal_count > 0 && ctx->decimal_pool) {
+                if (is_macho(ctx)) fprintf(f, "    .section __TEXT,__const\n");
+                else               fprintf(f, "    .section .rodata\n");
+                fprintf(f, "    .p2align 3\n");
+                for (int i = 0; i < ctx->decimal_count; i++) {
+                    const unsigned char* blob = ctx->decimal_pool + (size_t)256 * i;
+                    fprintf(f, ".L_dec_%d:\n", i);
+                    for (int b = 0; b < 256; b++) {
+                        if ((b & 15) == 0) fprintf(f, "    .byte ");
+                        fprintf(f, "%u%s", (unsigned)blob[b], ((b & 15) == 15 || b == 255) ? "\n" : ",");
+                    }
                 }
                 fprintf(f, "\n");
             }
@@ -560,7 +678,32 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_CALL_RUNTIME: {
             int arity = 1;
             const char* sym = teko_native_runtime_symbol(arg, &arity);
-            if (sym) emit_call(ctx, sym, arity);
+            // Phase 17.D — id 50 (teko_rt_float_to_string) is the f64-ARG runtime call: the double
+            // is ALREADY in xmm0/d0 (= $f0) per the SysV/AAPCS FP-arg convention (the frontend
+            // guarantees $f0 holds the value before the call), so emit a BARE call — emit_call would
+            // wrongly marshal the integer $w0 into the first GP-arg register. The char* result lands
+            // in rax/x0 = $w0, exactly like the other to_string ids.
+            if (arg == 50) emit_call_noarg(ctx, "teko_rt_float_to_string");
+            else if (arg == 59) {
+                // Phase 17.F.4 — decimal.to_string: the decimal value is in the $d0 slot (NOT $w0),
+                // so pass &$d0 as the first GP arg; the char* result lands in rax/x0 = $w0 (VT_STR).
+                emit_decimal_slot_addr(ctx, 0, 0);    // rdi/x0 = &$d0
+                if (arm) fprintf(f, "    bl %steko_rt_decimal_to_string\n", pre);
+                else     fprintf(f, "    call %steko_rt_decimal_to_string%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            } else if (arg == 60) {
+                // Phase 17.F.4 — decimal.parse: the string ptr is in $w0 (arg0); the result decimal
+                // is written into the $d0 slot (arg1 = &$d0). Checked/fail-loud inside the wrapper.
+                if (arm) {
+                    // x0 already holds the string ptr (= $w0). arg1 = x1 = &$d0.
+                    emit_decimal_slot_addr(ctx, 1, 0);
+                    fprintf(f, "    bl %steko_rt_decimal_parse\n", pre);
+                } else {
+                    fprintf(f, "    movq %%rax, %%rdi\n");  // rdi = string ptr (arg0)
+                    emit_decimal_slot_addr(ctx, 1, 0);      // rsi = &$d0 (arg1)
+                    fprintf(f, "    call %steko_rt_decimal_parse%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+                }
+            }
+            else if (sym) emit_call(ctx, sym, arity);
             break;
         }
 
@@ -735,6 +878,273 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             }
             break;
         }
+
+        // ============================================================================
+        // Phase 17 (17.A): f64 VALUE MODEL — a parallel float accumulator. $f0=xmm0/d0,
+        // $f1=xmm1/d1 (both caller-saved; no float expression spans a call in the hosted
+        // subset). Float locals reuse the EXISTING integer frame slots (one type per slot),
+        // accessed with movsd / str d / ldr d. FCONST's scratch GPR is r11 (x86) / x9 (arm64)
+        // — NEVER $w0(rax/x0) or $w1(rbx/x19) — so the integer accumulator is preserved.
+        // ============================================================================
+        case OP_FCONST: {
+            // Load the 64-bit bit pattern of float_pool[arg] into $f0.
+            uint64_t u = 0;
+            if (ctx->float_pool && arg >= 0 && arg < ctx->float_count) {
+                double d = ctx->float_pool[arg];
+                memcpy(&u, &d, 8); // read the f64 bit pattern (no aliasing UB)
+            }
+            if (arm) {
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(u & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((u >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((u >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((u >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d0, x9\n");
+            } else {
+                fprintf(f, "    movabsq $%llu, %%r11\n", (unsigned long long)u);
+                fprintf(f, "    movq %%r11, %%xmm0\n");
+            }
+            break;
+        }
+        case OP_FADD: fprintf(f, arm ? "    fadd d0, d0, d1\n" : "    addsd %%xmm1, %%xmm0\n"); break;
+        case OP_FSUB: fprintf(f, arm ? "    fsub d0, d0, d1\n" : "    subsd %%xmm1, %%xmm0\n"); break;
+        case OP_FMUL: fprintf(f, arm ? "    fmul d0, d0, d1\n" : "    mulsd %%xmm1, %%xmm0\n"); break;
+        case OP_FDIV: fprintf(f, arm ? "    fdiv d0, d0, d1\n" : "    divsd %%xmm1, %%xmm0\n"); break;
+
+        // Float compares: $w0 = ($f0 <cmp> $f1) ? 1 : 0. x86 `ucomisd %xmm1,%xmm0` sets CF/ZF/PF
+        // from the unsigned-style float comparison of xmm0 vs xmm1; the seta/setae/setb/setbe family
+        // reads them. ucomisd raises the parity flag on unordered (NaN): for ==, NaN must yield 0
+        // (a NaN compares-equal only via the false path) so we AND with `setnp`; for !=, NaN yields 1
+        // so we OR with `setp`. arm64 `fcmp d0,d1` + cset with the standard (unordered-aware) CCs.
+        case OP_FEQ: case OP_FNE: case OP_FLT: case OP_FLE: case OP_FGT: case OP_FGE: {
+            if (arm) {
+                const char* cc = (op == OP_FEQ) ? "eq" : (op == OP_FNE) ? "ne" :
+                                 (op == OP_FLT) ? "mi" : (op == OP_FLE) ? "ls" :
+                                 (op == OP_FGT) ? "gt" : "ge";
+                // AArch64 fcmp: mi=LT, ls=LE, gt=GT, ge=GE, eq=EQ, ne=NE — all NaN-correct
+                // (NaN sets C=1,Z=0,N=0,V=1; mi/ls/gt/ge/eq are false, ne is true under that flag set).
+                fprintf(f, "    fcmp d0, d1\n    cset w0, %s\n", cc);
+            } else {
+                if (op == OP_FEQ) {
+                    fprintf(f, "    ucomisd %%xmm1, %%xmm0\n");
+                    fprintf(f, "    sete %%al\n    setnp %%cl\n    andb %%cl, %%al\n    movzbl %%al, %%eax\n");
+                } else if (op == OP_FNE) {
+                    fprintf(f, "    ucomisd %%xmm1, %%xmm0\n");
+                    fprintf(f, "    setne %%al\n    setp %%cl\n    orb %%cl, %%al\n    movzbl %%al, %%eax\n");
+                } else {
+                    // Ordered LT/LE/GT/GE: use the carry/zero flags. seta = CF=0&ZF=0 (>), setae = CF=0
+                    // (>=); for < and <= swap operands so the same a/ae flags express them. NaN sets
+                    // CF=1 → a/ae are false → result 0, the correct ordered-compare-with-NaN answer.
+                    const char* setcc; const char* xa; const char* xb;
+                    if (op == OP_FGT)      { setcc = "seta";  xa = "%xmm1"; xb = "%xmm0"; } // f0 >  f1
+                    else if (op == OP_FGE) { setcc = "setae"; xa = "%xmm1"; xb = "%xmm0"; } // f0 >= f1
+                    else if (op == OP_FLT) { setcc = "seta";  xa = "%xmm0"; xb = "%xmm1"; } // f1 >  f0
+                    else                   { setcc = "setae"; xa = "%xmm0"; xb = "%xmm1"; } // f1 >= f0  (FLE)
+                    fprintf(f, "    ucomisd %s, %s\n", xa, xb);
+                    fprintf(f, "    %s %%al\n    movzbl %%al, %%eax\n", setcc);
+                }
+            }
+            break;
+        }
+
+        case OP_FSTORE: fprintf(f, arm ? "    fmov d1, d0\n" : "    movapd %%xmm0, %%xmm1\n"); break; // $f1 = $f0
+        case OP_FLOAD:  fprintf(f, arm ? "    fmov d0, d1\n" : "    movapd %%xmm1, %%xmm0\n"); break; // $f0 = $f1
+
+        case OP_FSTORE_LOCAL:
+            if (arm) fprintf(f, "    str d0, [x29, #%d]\n", local_off_arm(arg));
+            else     fprintf(f, "    movsd %%xmm0, %d(%%rbp)\n", local_off_x86(arg));
+            break;
+        case OP_FLOAD_LOCAL:
+            if (arm) fprintf(f, "    ldr d0, [x29, #%d]\n", local_off_arm(arg));
+            else     fprintf(f, "    movsd %d(%%rbp), %%xmm0\n", local_off_x86(arg));
+            break;
+
+        case OP_I2F: // $f0 = (double)$w0  (register-width signed int → double)
+            if (arm) fprintf(f, "    scvtf d0, x0\n");
+            else     fprintf(f, "    cvtsi2sdq %%rax, %%xmm0\n");
+            break;
+
+        // Phase 17 (17.B): float modulo `%` = IEEE remainder toward zero, INLINE as
+        // `$f0 - trunc($f0/$f1)*$f1` — the EXACT same op sequence the WASM emitter uses
+        // (f64.div / f64.trunc / f64.mul / f64.sub), so native and WASM are byte-identical for every
+        // reachable input. Inlining (vs `call fmod`) keeps the hosted runner free of a libm
+        // dependency — Linux `cc` does not auto-link libm, and the wasm32 reactor has no libm either,
+        // so a libm call would be an asymmetric, non-portable dependency. SSE2-only: truncation is a
+        // `cvttsd2si`→`cvtsi2sdq` round-trip through the FCONST scratch GPR `r11` (NOT $w0/rax, so the
+        // op leaves the integer accumulator intact — it stays a pure CSE barrier, no $w0 clobber); the
+        // round-trip is exact for the |$f0/$f1| < 2^53 range the `.`-form float grammar can reach.
+        // xmm2 / d2 are scratch (outside the $f0/$f1 accumulator). $f0 receives the result.
+        case OP_FMOD:
+            if (arm) {
+                fprintf(f, "    fdiv d2, d0, d1\n");   // d2 = a/b
+                fprintf(f, "    frintz d2, d2\n");      // d2 = trunc(a/b) toward zero
+                fprintf(f, "    fmul d2, d2, d1\n");    // d2 = trunc(a/b)*b
+                fprintf(f, "    fsub d0, d0, d2\n");    // d0 = a - trunc(a/b)*b
+            } else {
+                fprintf(f, "    movapd %%xmm0, %%xmm2\n");   // xmm2 = a
+                fprintf(f, "    divsd %%xmm1, %%xmm0\n");    // xmm0 = a/b
+                fprintf(f, "    cvttsd2si %%xmm0, %%r11\n"); // r11 = trunc(a/b) (toward zero)
+                fprintf(f, "    cvtsi2sdq %%r11, %%xmm0\n"); // xmm0 = (double)trunc(a/b)
+                fprintf(f, "    mulsd %%xmm1, %%xmm0\n");    // xmm0 = trunc(a/b)*b
+                fprintf(f, "    subsd %%xmm0, %%xmm2\n");    // xmm2 = a - trunc(a/b)*b
+                fprintf(f, "    movapd %%xmm2, %%xmm0\n");   // $f0 = result
+            }
+            break;
+
+        // Phase 17 (17.B): CHECKED float->int (truncate toward zero), FAIL-LOUD. cvttsd2si/fcvtzs do
+        // NOT trap (they return a sentinel on overflow), so emit an explicit NaN + i32-range guard
+        // matched to WASM's `i32.trunc_f64_s` valid OPEN interval: -2147483649.0 < $f0 < 2147483648.0
+        // (and not NaN). A value outside it `call`s teko_rt_f2i_fail (the SAME exit-70 + stderr
+        // fail-loud path 16.F uses), so a value that traps on WASM also aborts here. The scratch
+        // GPR is r11/x9 (materialize the bound, NEVER $w0/$w1); the bound goes in $f1=xmm1/d1
+        // (clobbering $f1 is fine — F2I consumes $f0 to produce an int and we never read $f1 after).
+        case OP_F2I: {
+            int id = ctx->cf_id_next++;
+            uint64_t hi = 0, lo = 0; // 2147483648.0 ; -2147483649.0
+            double dhi = 2147483648.0, dlo = -2147483649.0;
+            memcpy(&hi, &dhi, 8); memcpy(&lo, &dlo, 8);
+            if (arm) {
+                // NaN: fcmp d0,d0 sets V (unordered) -> b.vs die.
+                fprintf(f, "    fcmp d0, d0\n    b.vs .Lf2idie_%d\n", id);
+                // upper: d1 = 2147483648.0 ; if d0 >= d1 -> die.
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(hi & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((hi >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((hi >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((hi >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d1, x9\n    fcmp d0, d1\n    b.ge .Lf2idie_%d\n", id);
+                // lower: d1 = -2147483649.0 ; if d0 <= d1 -> die.
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(lo & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((lo >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((lo >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((lo >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d1, x9\n    fcmp d0, d1\n    b.le .Lf2idie_%d\n", id);
+                fprintf(f, "    fcvtzs w0, d0\n");
+                fprintf(f, "    b .Lf2iok_%d\n", id);
+                fprintf(f, ".Lf2idie_%d:\n    bl %steko_rt_f2i_fail\n", id, pre);
+                fprintf(f, ".Lf2iok_%d:\n", id);
+            } else {
+                // NaN: ucomisd %xmm0,%xmm0 sets PF (unordered) -> jp die.
+                fprintf(f, "    ucomisd %%xmm0, %%xmm0\n    jp .Lf2idie_%d\n", id);
+                // upper: xmm1 = 2147483648.0 ; ucomisd %xmm1,%xmm0 -> jae die (x >= 2^31).
+                fprintf(f, "    movabsq $%llu, %%r11\n    movq %%r11, %%xmm1\n", (unsigned long long)hi);
+                fprintf(f, "    ucomisd %%xmm1, %%xmm0\n    jae .Lf2idie_%d\n", id);
+                // lower: xmm1 = -2147483649.0 ; ucomisd %xmm1,%xmm0 -> jbe die (x <= -(2^31+1)).
+                fprintf(f, "    movabsq $%llu, %%r11\n    movq %%r11, %%xmm1\n", (unsigned long long)lo);
+                fprintf(f, "    ucomisd %%xmm1, %%xmm0\n    jbe .Lf2idie_%d\n", id);
+                fprintf(f, "    cvttsd2si %%xmm0, %%eax\n");
+                fprintf(f, "    jmp .Lf2iok_%d\n", id);
+                fprintf(f, ".Lf2idie_%d:\n    call %steko_rt_f2i_fail%s\n", id, pre, is_macho(ctx) ? "" : "@PLT");
+                fprintf(f, ".Lf2iok_%d:\n", id);
+            }
+            break;
+        }
+
+        // ============================================================================
+        // Phase 17.F.3: the 256-byte `decimal` VALUE MODEL. $d0/$d1 (+ a cmp-scratch sink + the $dvN
+        // local file) are 256-byte STACK slots; a decimal flows ONLY by pointer (lea &slot -> ABI arg
+        // reg). The arith ops call teko_rt_decimal_*(&$d0,&$d1,&$d0) (fail-loud on overflow/divzero);
+        // the compares call teko_rt_decimal_cmp(&$d0,&$d1,&scratch) then map -1/0/+1 -> the i32 0/1
+        // each compare wants in $w0(rax/x0). DCONST/DSTORE/DLOAD/D*_LOCAL are 256-byte copies that use
+        // ONLY scratch regs, so the integer accumulator $w0/$w1 is preserved (pure CSE barriers).
+        // The decimal-local frontend slot `n` maps to decimal slot 3+n (0/1/2 = $d0/$d1/cmp-scratch).
+        // ============================================================================
+        case OP_DCONST: {
+            // $d0 = decimal_pool[arg]: copy 256 B from the .L_dec_<arg> rodata blob into slot 0.
+            int id = ctx->cf_id_next++;
+            if (arm) {
+                if (is_macho(ctx)) {
+                    fprintf(f, "    adrp x9, .L_dec_%d@PAGE\n    add x9, x9, .L_dec_%d@PAGEOFF\n", arg, arg);
+                } else {
+                    fprintf(f, "    adrp x9, .L_dec_%d\n    add x9, x9, :lo12:.L_dec_%d\n", arg, arg);
+                }
+                fprintf(f, "    add x10, x29, #%d\n", decimal_slot_off_arm(ctx, 0));
+                fprintf(f, "    mov w11, #32\n");
+                fprintf(f, ".Ldcpy_%d:\n    ldr x12, [x9], #8\n    str x12, [x10], #8\n", id);
+                fprintf(f, "    subs w11, w11, #1\n    b.ne .Ldcpy_%d\n", id);
+            } else {
+                fprintf(f, "    leaq .L_dec_%d(%%rip), %%r11\n", arg);
+                fprintf(f, "    leaq %d(%%rbp), %%r10\n", decimal_slot_off_x86(ctx, 0));
+                fprintf(f, "    movl $32, %%r8d\n");
+                fprintf(f, ".Ldcpy_%d:\n    movq (%%r11), %%r9\n    movq %%r9, (%%r10)\n", id);
+                fprintf(f, "    addq $8, %%r11\n    addq $8, %%r10\n");
+                fprintf(f, "    decl %%r8d\n    jnz .Ldcpy_%d\n", id);
+            }
+            break;
+        }
+        case OP_DADD: case OP_DSUB: case OP_DMUL: case OP_DDIV: case OP_DMOD: {
+            const char* sym = (op == OP_DADD) ? "teko_rt_decimal_add" :
+                              (op == OP_DSUB) ? "teko_rt_decimal_sub" :
+                              (op == OP_DMUL) ? "teko_rt_decimal_mul" :
+                              (op == OP_DDIV) ? "teko_rt_decimal_div" : "teko_rt_decimal_mod";
+            emit_decimal_slot_addr(ctx, 0, 0); // arg0 = &$d0  (a)
+            emit_decimal_slot_addr(ctx, 1, 1); // arg1 = &$d1  (b)
+            emit_decimal_slot_addr(ctx, 2, 0); // arg2 = &$d0  (out, in place)
+            if (arm) fprintf(f, "    bl %s%s\n", pre, sym);
+            else     fprintf(f, "    call %s%s%s\n", pre, sym, is_macho(ctx) ? "" : "@PLT");
+            break;
+        }
+        case OP_DEQ: case OP_DNE: case OP_DLT: case OP_DLE: case OP_DGT: case OP_DGE: {
+            // teko_rt_decimal_cmp(&$d0,&$d1,&scratch) writes -1/0/+1 to scratch; map to the i32 0/1.
+            emit_decimal_slot_addr(ctx, 0, 0); // &$d0 (a)
+            emit_decimal_slot_addr(ctx, 1, 1); // &$d1 (b)
+            emit_decimal_slot_addr(ctx, 2, TEKO_HOSTED_DECIMAL_SCRATCH); // &scratch (out i32)
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_cmp\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_cmp%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            // Reload the tri-state (-1/0/+1) and turn it into the requested boolean in $w0.
+            if (arm) {
+                fprintf(f, "    add x9, x29, #%d\n    ldr w9, [x9]\n", decimal_slot_off_arm(ctx, TEKO_HOSTED_DECIMAL_SCRATCH));
+                fprintf(f, "    cmp w9, #0\n");
+                const char* cc = (op == OP_DEQ) ? "eq" : (op == OP_DNE) ? "ne" :
+                                 (op == OP_DLT) ? "lt" : (op == OP_DLE) ? "le" :
+                                 (op == OP_DGT) ? "gt" : "ge";
+                fprintf(f, "    cset w0, %s\n", cc);
+            } else {
+                fprintf(f, "    movl %d(%%rbp), %%r11d\n", decimal_slot_off_x86(ctx, TEKO_HOSTED_DECIMAL_SCRATCH));
+                fprintf(f, "    cmpl $0, %%r11d\n");
+                const char* cc = (op == OP_DEQ) ? "sete" : (op == OP_DNE) ? "setne" :
+                                 (op == OP_DLT) ? "setl" : (op == OP_DLE) ? "setle" :
+                                 (op == OP_DGT) ? "setg" : "setge";
+                fprintf(f, "    %s %%al\n    movzbl %%al, %%eax\n", cc);
+            }
+            break;
+        }
+        case OP_DSTORE: emit_decimal_slot_copy(ctx, 1, 0); break; // $d1 = $d0
+        case OP_DLOAD:  emit_decimal_slot_copy(ctx, 0, 1); break; // $d0 = $d1
+        case OP_DSTORE_LOCAL: emit_decimal_slot_copy(ctx, 3 + arg, 0); break; // $dv<arg> = $d0
+        case OP_DLOAD_LOCAL:  emit_decimal_slot_copy(ctx, 0, 3 + arg); break; // $d0 = $dv<arg>
+
+        // Phase 17.F.4: int/float ↔ decimal CASTS. I2D/F2D write &$d0; D2I/D2F read &$d0 and return a
+        // register value. The decimal value flows ONLY by pointer (lea &$d0 -> the GP arg reg). I2D
+        // takes the int from $w0 (rax/x0); F2D takes the double from $f0 (xmm0/d0 = the FP arg reg);
+        // D2I returns the checked i32 in rax/eax = $w0; D2F returns the double in xmm0/d0 = $f0.
+        case OP_I2D: // teko_rt_decimal_from_i32(int v=$w0, &$d0)
+            if (arm) {
+                // x0 already holds the int (= $w0). The pointer is arg1 = x1.
+                emit_decimal_slot_addr(ctx, 1, 0);   // x1 = &$d0
+                fprintf(f, "    bl %steko_rt_decimal_from_i32\n", pre);
+            } else {
+                fprintf(f, "    movl %%eax, %%edi\n"); // edi = int (arg0)  [movl zero-extends rdi]
+                emit_decimal_slot_addr(ctx, 1, 0);    // rsi = &$d0 (arg1)
+                fprintf(f, "    call %steko_rt_decimal_from_i32%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            }
+            break;
+        case OP_F2D: // teko_rt_decimal_from_f64(double v=$f0, &$d0)
+            // The double is already in xmm0/d0 (= $f0) per the FP-arg ABI; the pointer is GP arg0.
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0 (arg1 in C; first GP reg)
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_from_f64\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_from_f64%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            break;
+        case OP_D2I: // $w0 = teko_rt_decimal_to_i32(&$d0)  (checked, fail-loud)
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_to_i32\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_to_i32%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            // result i32 already in eax/w0 (= $w0).
+            break;
+        case OP_D2F: // $f0 = teko_rt_decimal_to_f64(&$d0)
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_to_f64\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_to_f64%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            // result double already in xmm0/d0 (= $f0).
+            break;
 
         default:
             break; // unsupported opcode in the hosted subset (straight-line surface)

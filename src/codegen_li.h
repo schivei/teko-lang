@@ -182,6 +182,95 @@ typedef enum {
     OP_VTABLE_SET = 0x6F, // vtable_set(type_id, method_id, slot) -> 0
     OP_VTABLE_GET = 0x70, // vtable_get(type_id, method_id) -> slot
 
+    // Phase 17 (17.A): f64 VALUE MODEL — a PARALLEL float accumulator ($f0/$f1, native xmm0/xmm1
+    // or d0/d1, WASM (local $f0 f64)/(local $f1 f64)) alongside the integer $w0/$w1. Float opcodes
+    // are purely ADDITIVE and only handled by the hosted (emit_native_hosted.c) and WASM
+    // (emit_wasm.c) paths + the codegen_metal.c dispatch — the 16 freestanding emitter goldens
+    // never see a float opcode, so their byte streams stay byte-identical. The integer path is
+    // untouched. OP_FCONST carries a 4-byte LITTLE-ENDIAN index into the float-constant pool (NOT a
+    // 64-bit immediate); the pool (threaded to the backend via teko_metal_set_floats) holds the
+    // f64 bit patterns, mirroring the string pool. The compares write $w0 (i32 0/1 → VT_INT); the
+    // arith/move ops touch $f0/$f1 only (native scratch r11/x9, NOT rax/rbx, so $w0 is preserved).
+    OP_FCONST       = 0x71, // 4-byte pool index: $f0 = float_pool[idx]
+    OP_FADD         = 0x72, // $f0 = $f0 + $f1
+    OP_FSUB         = 0x73, // $f0 = $f0 - $f1
+    OP_FMUL         = 0x74, // $f0 = $f0 * $f1
+    OP_FDIV         = 0x75, // $f0 = $f0 / $f1 (IEEE; inf/nan are defined, no zero guard)
+    // Phase 17 (17.B): float modulo `%`. $f0 = fmod($f0, $f1) = $f0 - trunc($f0/$f1)*$f1 (IEEE
+    // remainder toward zero). Native is libc-hosted -> `call fmod` (xmm0,xmm1 -> xmm0 / d0,d1 -> d0);
+    // WASM has no f64.rem so it inlines `a - trunc(a/b)*b`. Stack-neutral; touches $f0/$f1 only.
+    OP_FMOD         = 0x76, // $f0 = fmod($f0, $f1)
+    OP_FEQ          = 0x77, // $w0 = ($f0 == $f1) ? 1 : 0  (result i32 → VT_INT)
+    OP_FNE          = 0x78, // $w0 = ($f0 != $f1) ? 1 : 0
+    OP_FLT          = 0x79, // $w0 = ($f0 <  $f1) ? 1 : 0
+    OP_FLE          = 0x7A, // $w0 = ($f0 <= $f1) ? 1 : 0
+    OP_FGT          = 0x7B, // $w0 = ($f0 >  $f1) ? 1 : 0
+    OP_FGE          = 0x7C, // $w0 = ($f0 >= $f1) ? 1 : 0
+    OP_FSTORE       = 0x7D, // $f1 = $f0  (scratch spill; mirrors OP_STORE)
+    OP_FLOAD        = 0x7E, // $f0 = $f1  (mirrors OP_LOAD)
+    OP_FSTORE_LOCAL = 0x7F, // 4-byte slot: $fv<slot> = $f0
+    OP_FLOAD_LOCAL  = 0x80, // 4-byte slot: $f0 = $fv<slot>
+    OP_I2F          = 0x81, // $f0 = (double)$w0  ($w0 unchanged) — int→float promotion
+    // Phase 17 (17.B): CHECKED float->int (truncate toward zero), FAIL-LOUD. The int model is
+    // i32-range ($w0 is i32 on WASM; matches parse_int). WASM lowers to `i32.trunc_f64_s`, which
+    // TRAPS on NaN/±Inf/out-of-i32-range (automatic fail-loud, like 16.F's __builtin_trap). Native
+    // `cvttsd2si` does NOT trap, so the hosted emitter emits an explicit NaN + i32-range guard
+    // (matched to i32.trunc_f64_s's valid open interval -2147483649.0 < x < 2147483648.0) that
+    // `call`s teko_rt_f2i_fail (the SAME exit-70 + stderr fail-loud path 16.F uses) — so a value
+    // that traps on WASM also aborts on native. Result i32 in $w0 (clobbers $w0 with a non-const).
+    OP_F2I          = 0x82, // $w0 = (i32)trunc($f0)  (checked, fail-loud)
+
+    // Phase 17.F.3 (LIVE): the EXACT base-10 `decimal` VALUE MODEL — a SEPARATE 256-byte memory-slot
+    // accumulator ($d0/$d1) alongside the integer $w0/$w1 and the f64 $f0/$f1. A decimal does NOT fit
+    // a register, so it flows by POINTER into 256-byte slots: native = two stack slots + a decimal
+    // frame region ($dvN); WASM = fixed 256-byte regions carved out of linear memory (gated on
+    // wasm_emit_decimal so decimal-free modules stay byte-identical). The arith/move ops touch
+    // $d0/$d1/$dvN only (native scratch GPRs, NOT $w0/$w1 — the integer accumulator is preserved);
+    // the COMPARES write an i32 0/1 to $w0 (→ VT_INT). OP_DCONST carries a 4-byte LITTLE-ENDIAN index
+    // into a NEW decimal-constant pool (256-byte blobs, threaded via teko_metal_set_decimals), exactly
+    // as OP_FCONST indexes the float pool. The arith ops call teko_rt_decimal_* (fail-loud on
+    // overflow/divzero); compares call teko_rt_decimal_cmp and map -1/0/+1 → 0/1. The 16 freestanding
+    // emitter goldens never see a decimal opcode, so their byte streams stay byte-identical. The casts
+    // 0x93–0x96 (OP_I2D/D2I/F2D/D2F) + the decimal.to_string/parse surface remain RESERVED for 17.F.4.
+    OP_DCONST       = 0x83, // 4-byte pool index: $d0 = decimal_pool[idx] (256-byte copy)
+    OP_DADD         = 0x84, // $d0 = $d0 + $d1   (teko_rt_decimal_add; fail-loud on overflow)
+    OP_DSUB         = 0x85, // $d0 = $d0 - $d1
+    OP_DMUL         = 0x86, // $d0 = $d0 * $d1
+    OP_DDIV         = 0x87, // $d0 = $d0 / $d1   (fail-loud on divide-by-zero)
+    OP_DMOD         = 0x88, // $d0 = $d0 % $d1   (Python Decimal.__mod__; fail-loud on modulo-by-zero)
+    OP_DEQ          = 0x89, // $w0 = ($d0 == $d1) ? 1 : 0   (result i32 → VT_INT)
+    OP_DNE          = 0x8A, // $w0 = ($d0 != $d1) ? 1 : 0
+    OP_DLT          = 0x8B, // $w0 = ($d0 <  $d1) ? 1 : 0
+    OP_DLE          = 0x8C, // $w0 = ($d0 <= $d1) ? 1 : 0
+    OP_DGT          = 0x8D, // $w0 = ($d0 >  $d1) ? 1 : 0
+    OP_DGE          = 0x8E, // $w0 = ($d0 >= $d1) ? 1 : 0
+    OP_DSTORE       = 0x8F, // $d1 = $d0   (256-byte memcpy; scratch spill, mirrors OP_STORE/OP_FSTORE)
+    OP_DLOAD        = 0x90, // $d0 = $d1   (256-byte memcpy)
+    OP_DSTORE_LOCAL = 0x91, // 4-byte slot: $dv<slot> = $d0  (256-byte memcpy)
+    OP_DLOAD_LOCAL  = 0x92, // 4-byte slot: $d0 = $dv<slot>  (256-byte memcpy)
+
+    // Phase 17.F.4 (LIVE): int/float ↔ decimal CASTS. Each is single-byte and flows the decimal value
+    // by pointer through the $d0 slot. The casts call the teko_rt_decimal_* cast wrappers; F2D/D2F
+    // bridge through the shortest-string form (both sides correctly-rounded), I2D builds the
+    // coefficient from the int, D2I truncates toward zero (matches OP_F2I) and is CHECKED/fail-loud on
+    // i32-range overflow. Gated on uses_decimal so decimal-free output stays byte-identical.
+    OP_I2D          = 0x93, // $d0 = (decimal)$w0   (int -> decimal, scale 0; cannot fail)
+    OP_D2I          = 0x94, // $w0 = (i32)$d0       (decimal -> i32, truncate, checked fail-loud)
+    OP_F2D          = 0x95, // $d0 = (decimal)$f0   (f64 -> decimal via shortest string)
+    OP_D2F          = 0x96, // $f0 = (f64)$d0       (decimal -> f64 via shortest string)
+
+    // Phase 17.F (RESERVED — owner-APPROVED, implemented after 17.A–17.E): an EXACT base-10
+    // `decimal` type — a FIXED-WIDTH 256-BYTE value (~8B metadata: sign + decimal scale/exponent;
+    // ~248B base-10 coefficient → ~590 significant digits, fraction ~128 bits ≈ ~38 places), banker's
+    // rounding (round-half-to-even) default; exact for money, distinct from the binary f64 above.
+    // Self-contained 64-bit-limb arithmetic (no heap/__int128/libc). 256B does NOT fit a register, so
+    // it flows via memory-slot $d0/$d1 + teko_rt_decimal_* calls (channel/object model, not the f64
+    // register accumulator). 0x83–0x92 are now LIVE enum constants (above; promoted by 17.F.3, the
+    // way 0x76/0x82 were promoted by 17.B). The CASTS 0x93–0x96 remain RESERVED for 17.F.4 (NOT
+    // emitted, NO enum constants, NO live token — documentation/reservation only):
+    //   0x93 = OP_I2D    0x94 = OP_D2I    0x95 = OP_F2D    0x96 = OP_D2F
+    // The next free contiguous opcode range therefore starts at 0x97.
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -282,12 +371,36 @@ typedef struct {
     // Phase 15 (15.B): 1 if the program uses a static-vtable op (OP_VTABLE_*) — i.e. abstract/trait
     // dynamic dispatch. Native links teko_rt_vtable_*; WASM imports from the reactor + shared memory.
     int uses_vtable;
+    // Phase 17 (17.A): the float-constant pool — f64 bit patterns indexed by OP_FCONST's 4-byte
+    // arg. Mirrors the string pool (codegen_li_add_float_constant dedups by bit-equality). Threaded
+    // to the backend via teko_metal_set_floats. `uses_float` is 1 once any float opcode is emitted,
+    // gating the WASM `(local $f0/$f1/$fvN f64)` declarations (non-float modules stay byte-identical).
+    double* floats;
+    int float_count;
+    int float_capacity;
+    int uses_float;
+    // Phase 17.F.3: the decimal-constant pool — 256-byte `teko_decimal` blobs (NOT a register-
+    // width value), indexed by OP_DCONST's 4-byte arg. Mirrors the float pool, but each entry is a
+    // 256-byte blob (codegen_li_add_decimal_constant dedups by 256-byte memcmp). Threaded to the
+    // backend via teko_metal_set_decimals. `uses_decimal` is 1 once any decimal opcode is emitted,
+    // gating the WASM decimal linear-memory region + reactor imports and the native decimal frame
+    // region (decimal-free modules stay byte-identical). `decimals` is `decimal_count * 256` bytes.
+    unsigned char* decimals;
+    int decimal_count;
+    int decimal_capacity;
+    int uses_decimal;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
 BytecodeBuffer* codegen_li_create_context(void);
 void codegen_li_emit_statement(BytecodeBuffer* buffer, const StatementASTNode* stmt);
 int codegen_li_add_string_constant(BytecodeBuffer* buffer, const char* str);
+// Phase 17 (17.A): add an f64 constant to the float pool (deduped by exact bit-equality) and
+// return its index — the 4-byte arg for OP_FCONST. Mirrors codegen_li_add_string_constant.
+int codegen_li_add_float_constant(BytecodeBuffer* buffer, double value);
+// Phase 17.F.3: add a 256-byte decimal constant (deduped by 256-byte memcmp) and return its index
+// — the 4-byte arg for OP_DCONST. `blob` points to a 256-byte teko_decimal value (by pointer).
+int codegen_li_add_decimal_constant(BytecodeBuffer* buffer, const unsigned char* blob);
 void codegen_li_write_to_file(const BytecodeBuffer* buffer, const char* filename);
 void codegen_li_free_context(BytecodeBuffer* buffer);
 
@@ -342,6 +455,28 @@ void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_call_func(BytecodeBuffer* buffer, int argc);
 // Phase 15 (15.B): emit a static-vtable op (OP_VTABLE_SET/GET); sets buffer->uses_vtable.
 void codegen_li_emit_vtable(BytecodeBuffer* buffer, OpCode op);
+// Phase 17 (17.A): float value-model emit helpers. Each sets buffer->uses_float.
+//  - emit_fconst: add `v` to the float pool, emit OP_FCONST <idx> (loads pool[idx] → $f0).
+//  - emit_funop: a single-byte float op (OP_FADD..OP_FGE, OP_FSTORE, OP_FLOAD, OP_I2F).
+//  - emit_fstore_local / emit_fload_local: $fv<slot> <- $f0 / $f0 <- $fv<slot> (4-byte slot).
+void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v);
+void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op);
+void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot);
+void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot);
+// Phase 17 (17.B): emit OP_F2I (single-byte, CHECKED float->int; fail-loud). Sets uses_float so the
+// WASM backend declares the float accumulator locals even if the program only down-casts a float.
+void codegen_li_emit_f2i(BytecodeBuffer* buffer);
+// Phase 17.F.3: decimal value-model emit helpers. Each sets buffer->uses_decimal.
+//  - emit_dconst: add the 256-byte `blob` to the decimal pool, emit OP_DCONST <idx> ($d0 = pool[idx]).
+//  - emit_dunop: a single-byte decimal op (OP_DADD..OP_DGE, OP_DSTORE, OP_DLOAD).
+//  - emit_dstore_local / emit_dload_local: $dv<slot> <- $d0 / $d0 <- $dv<slot> (4-byte slot).
+void codegen_li_emit_dconst(BytecodeBuffer* buffer, const unsigned char* blob);
+void codegen_li_emit_dunop(BytecodeBuffer* buffer, OpCode op);
+void codegen_li_emit_dstore_local(BytecodeBuffer* buffer, int slot);
+void codegen_li_emit_dload_local(BytecodeBuffer* buffer, int slot);
+// Phase 17.F.4: emit an int/float↔decimal cast opcode (OP_I2D/OP_F2D/OP_D2I/OP_D2F). Sets
+// uses_decimal (and uses_float for OP_F2D/OP_D2F). Mirrors codegen_li_emit_f2i for the float side.
+void codegen_li_emit_dcast(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

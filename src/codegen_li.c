@@ -37,6 +37,19 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_object = 0;
     buffer->uses_vtable = 0;
 
+    // Phase 17 (17.A): the float-constant pool starts empty; uses_float gates the WASM float locals.
+    buffer->float_capacity = 8;
+    buffer->float_count = 0;
+    buffer->floats = (double*)malloc(sizeof(double) * buffer->float_capacity);
+    buffer->uses_float = 0;
+
+    // Phase 17.F.3: the decimal-constant pool (256-byte blobs) starts empty; uses_decimal gates the
+    // WASM decimal linear-memory region + reactor imports and the native decimal frame region.
+    buffer->decimal_capacity = 4;
+    buffer->decimal_count = 0;
+    buffer->decimals = (unsigned char*)malloc((size_t)256 * buffer->decimal_capacity);
+    buffer->uses_decimal = 0;
+
     return buffer;
 }
 
@@ -75,6 +88,44 @@ int codegen_li_add_string_constant(BytecodeBuffer* buffer, const char* str) {
 
     buffer->pool.strings[buffer->pool.count] = strdup(str);
     return buffer->pool.count++;
+}
+
+// Phase 17 (17.A): add an f64 to the float pool (deduped by EXACT bit-equality so -0.0 and 0.0 are
+// distinct, NaN payloads preserved), returning its index — the 4-byte arg for OP_FCONST.
+int codegen_li_add_float_constant(BytecodeBuffer* buffer, double value) {
+    if (!buffer) return -1;
+
+    unsigned char vb[8];
+    memcpy(vb, &value, 8); // read the value's bit pattern without aliasing UB
+    for (int i = 0; i < buffer->float_count; i++) {
+        unsigned char eb[8];
+        memcpy(eb, &buffer->floats[i], 8);
+        if (memcmp(vb, eb, 8) == 0) return i; // exact bit-equal constant already pooled
+    }
+
+    if (buffer->float_count >= buffer->float_capacity) {
+        buffer->float_capacity *= 2;
+        buffer->floats = (double*)realloc(buffer->floats, sizeof(double) * buffer->float_capacity);
+    }
+    buffer->floats[buffer->float_count] = value;
+    return buffer->float_count++;
+}
+
+// Phase 17.F.3: add a 256-byte decimal constant to the decimal pool (deduped by 256-byte memcmp),
+// returning its index — the 4-byte arg for OP_DCONST. `blob` is a teko_decimal value (by pointer).
+int codegen_li_add_decimal_constant(BytecodeBuffer* buffer, const unsigned char* blob) {
+    if (!buffer || !blob) return -1;
+
+    for (int i = 0; i < buffer->decimal_count; i++) {
+        if (memcmp(blob, buffer->decimals + (size_t)256 * i, 256) == 0) return i; // already pooled
+    }
+
+    if (buffer->decimal_count >= buffer->decimal_capacity) {
+        buffer->decimal_capacity *= 2;
+        buffer->decimals = (unsigned char*)realloc(buffer->decimals, (size_t)256 * buffer->decimal_capacity);
+    }
+    memcpy(buffer->decimals + (size_t)256 * buffer->decimal_count, blob, 256);
+    return buffer->decimal_count++;
 }
 
 // Registers a host import (deduped by ns+name); returns its table index.
@@ -168,6 +219,16 @@ void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
              codec_id == 8 || codec_id == 9) buffer->uses_hash = 1;       // in-module set
     else if (codec_id >= 4) buffer->uses_crypto_ext = 1;                  // reactor set
     else buffer->uses_codec = 1;
+    // Phase 17.D/17.E — id 50 (float->string, reads $f0) and id 54 (parse_float, WRITES $f0) are the
+    // two f64-ABI runtime calls: both touch the float accumulator, so the WASM float locals MUST be
+    // declared. Set uses_float (id 54 may be the SOLE float op in a module — e.g. a parse that only
+    // feeds an int via convert.to_int — so this is the load-bearing flag, not merely defensive).
+    if (codec_id == 50 || codec_id == 54) buffer->uses_float = 1;
+    // Phase 17.F.4 — ids 59 (decimal.to_string) and 60 (decimal.parse) touch the 256-byte decimal
+    // accumulator $d0 (by pointer), so the decimal frame region / WASM linear-memory slots + the
+    // reactor teko_rt_decimal_* imports MUST be emitted. Set uses_decimal (id 59 may be the SOLE
+    // decimal op in a module — e.g. an auto-to_string of a parsed decimal — so this is load-bearing).
+    if (codec_id == 59 || codec_id == 60) buffer->uses_decimal = 1;
     emit_byte(buffer, OP_CALL_RUNTIME);
     emit_int(buffer, codec_id);
 }
@@ -273,6 +334,86 @@ void codegen_li_emit_vtable(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_vtable = 1; // backends link/import the teko_vtable static-dispatch runtime
     emit_byte(buffer, (unsigned char)op);
+}
+
+// Phase 17 (17.A): float value-model emit helpers. Each sets uses_float so the WASM backend
+// declares the parallel float accumulator locals ($f0/$f1/$fvN); the integer path stays untouched.
+void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    int idx = codegen_li_add_float_constant(buffer, v);
+    emit_byte(buffer, OP_FCONST);
+    emit_int(buffer, idx); // 4-byte pool index (NOT the 64-bit immediate)
+}
+
+void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: FADD..FGE / FMOD / FSTORE / FLOAD / I2F
+}
+
+// Phase 17 (17.B): emit OP_F2I — CHECKED float->int (truncate toward zero, fail-loud on
+// NaN/±Inf/out-of-i32-range). Single-byte; sets uses_float so the float accumulator locals are
+// declared on WASM even when the program only reads $f0 to produce an int.
+void codegen_li_emit_f2i(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_F2I);
+}
+
+void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_FSTORE_LOCAL);
+    emit_int(buffer, slot);
+}
+
+void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_FLOAD_LOCAL);
+    emit_int(buffer, slot);
+}
+
+// Phase 17.F.3: decimal value-model emit helpers. Each sets uses_decimal (gates the WASM decimal
+// linear-memory region + reactor imports / the native decimal frame region). Mirrors the float set.
+void codegen_li_emit_dconst(BytecodeBuffer* buffer, const unsigned char* blob) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    int idx = codegen_li_add_decimal_constant(buffer, blob);
+    emit_byte(buffer, OP_DCONST);
+    emit_int(buffer, idx); // 4-byte decimal-pool index
+}
+
+void codegen_li_emit_dunop(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: DADD..DGE / DSTORE / DLOAD
+}
+
+void codegen_li_emit_dstore_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, OP_DSTORE_LOCAL);
+    emit_int(buffer, slot);
+}
+
+void codegen_li_emit_dload_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, OP_DLOAD_LOCAL);
+    emit_int(buffer, slot);
+}
+
+// Phase 17.F.4: emit a single-byte int/float↔decimal CAST opcode (OP_I2D/F2D/D2I/D2F). Sets
+// uses_decimal so the decimal frame region / WASM slots + the teko_rt_decimal_* casts exist. I2D
+// also reads $w0 / F2D reads $f0 / D2I writes $w0 / D2F writes $f0 — the backends marshal those.
+void codegen_li_emit_dcast(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    // OP_F2D/OP_D2F also touch the float accumulator $f0, so the WASM float locals must exist.
+    if (op == OP_F2D || op == OP_D2F) buffer->uses_float = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: OP_I2D / OP_F2D / OP_D2I / OP_D2F
 }
 
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {
@@ -392,5 +533,7 @@ void codegen_li_free_context(BytecodeBuffer* buffer) {
         if (buffer->imports[i].name) free(buffer->imports[i].name);
     }
     free(buffer->imports);
+    free(buffer->floats); // Phase 17 (17.A): the float-constant pool
+    free(buffer->decimals); // Phase 17.F.3: the decimal-constant pool (256-byte blobs)
     free(buffer);
 }

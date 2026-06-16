@@ -186,6 +186,83 @@ false
 EXP
 )"
 check_fail parse_fail.tks "before" "convert.parse_int: invalid integer"
+# Phase 17 (17.A): the f64 VALUE MODEL — float literals, a float local, float arithmetic + mixed
+# int→float promotion, and float comparisons, carried through a PARALLEL float accumulator (xmm/d
+# on native), additive to the integer path. No float formatter yet (17.C/D), so each comparison's
+# 0/1 result is observed via convert.int_to_str (id 49). Byte-identical to the WASM proof.
+check float.tks "$(cat <<'EXP'
+a = 0
+b = 1
+c = 1
+EXP
+)"
+# Phase 17 (17.B): checked int↔float casts (convert.to_int / convert.to_float) + float modulo (`%`).
+# to_float promotes int→f64 (OP_I2F); to_int truncates toward zero with a CHECKED fail-loud guard
+# (OP_F2I); `%` on floats is OP_FMOD (inline a-trunc(a/b)*b — no libm). Byte-identical to the WASM proof (run-cast.mjs).
+check cast.tks "$(cat <<'EXP'
+a = 1
+n = 7
+m = 1
+EXP
+)"
+# Phase 17 (17.B) FAIL-LOUD: convert.to_int(3e9) is > INT32_MAX (outside i32.trunc_f64_s's range), so
+# it does NOT silently truncate/wrap — the emitted inline guard calls teko_rt_f2i_fail (exit 70 +
+# stderr diag). WASM traps on the same value (run-cast.mjs), so the behavior is identical on both.
+check_fail cast_fail.tks "before" "convert.to_int: float out of i32 range"
+# Phase 17 (17.D): convert.float_to_str (id 50, the f64-ARG runtime call) + auto-`to_string` for
+# floats in `+` concat (right- AND left-float) and `"{…}"` interpolation (a float hole + a float
+# EXPRESSION hole). The value rides the FP-arg register (xmm0/d0 = $f0), not $w0; the formatter is
+# the 17.C Ryu shortest-round-trip core. Byte-identical to the WASM proof (run-floatstr.mjs).
+check floatstr.tks "$(cat <<'EXP'
+f = 3.14
+0.1
+pi~ 3.14, dbl 6.28
+2.5
+3.14 = pi
+EXP
+)"
+# Phase 17 (17.E): CHECKED `convert.parse_float` (id 54, str->f64, fail-loud). The INVERSE of id 50:
+# string arg in $w0, parsed double in $f0 (VT_FLOAT). The parser is the freestanding correctly-rounded
+# teko_convert_parse_f64 (same C as the reactor) — parse->format round-trips. Byte-identical to WASM
+# (run-parsefloat.mjs). `parsefloat_fail` proves fail-loud: malformed input aborts non-zero (not 0.0).
+check parsefloat.tks "$(cat <<'EXP'
+3.14
+got 0.5
+3.0
+EXP
+)"
+check_fail parsefloat_fail.tks "before" "convert.parse_float: invalid float"
+# Phase 17.F.3: the 256-byte EXACT base-10 `decimal` VALUE MODEL — `dec` literals, a decimal local,
+# decimal arithmetic (`+`), and decimal comparisons (`== <`), carried through a SEPARATE 256-byte
+# memory-slot accumulator ($d0/$d1, native stack slots passed BY POINTER to teko_rt_decimal_*),
+# additive to the integer + f64 paths. No decimal formatter yet (17.F.4), so each comparison's 0/1
+# result is observed via convert.int_to_str (id 49). The exactness is the point: 9.99 + 0.01 ==
+# 10.00 holds in base-10 (it does NOT in binary f64). Byte-identical to the WASM proof (run-decimal.mjs).
+check decimal.tks "$(cat <<'EXP'
+eq = 1
+lt = 1
+EXP
+)"
+# Phase 17.F.4: the decimal LANGUAGE SURFACE + casts + auto-`to_string`. `decimal.to_string` (id 59)
+# renders a decimal; `decimal.parse` (id 60, checked) parses one; `convert.to_decimal`/`to_int`/
+# `to_float` cast int/float ↔ decimal (OP_I2D/F2D/D2I/D2F); a decimal in `+` concat / `"{…}"`
+# interpolation auto-`to_string`s via id 59; mixed `int + decimal` promotes the int (I2D). 10.00 is
+# 9.99+0.01 exact in base-10; D2I truncates toward zero (int 10). Byte-identical to the WASM proof
+# (run-decimal-surface.mjs).
+check decimal_surface.tks "$(cat <<'EXP'
+10.00
+total = 10.00
+[10.00]
+3.50
+grand = 15.00
+bumped = 13.00
+2.5
+int 10
+EXP
+)"
+# Fail-loud: decimal.parse("abc") aborts non-zero (exit 70 + stderr) — no silent zero. WASM traps on
+# the same value (run-decimal-surface.mjs), so the behavior is identical on both targets.
+check_fail decimal_fail.tks "before" "decimal.parse: invalid decimal"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

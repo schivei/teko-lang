@@ -25,6 +25,7 @@
 #include "teko_object.h"
 #include "teko_vtable.h"
 #include "teko_convert.h"
+#include "teko_decimal.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -817,6 +818,10 @@ long teko_rt_vtable_get(long type_id, long method_id) {
 // teko_convert.c is the source of truth (linked natively, compiled into the wasm32 reactor). The
 // value-carrying params are i32 to match the accumulator/reactor ABI; the full i64 core is KAT'd.
 char* teko_rt_int_to_string(int v)  { return teko_convert_i64_to_string((long long)v); }
+// Phase 17.D — float->string (id 50). The 17.C Ryu shortest-round-trip formatter is the source of
+// truth (src/runtime/teko_convert_f64.c, linked natively, compiled into the wasm32 reactor). This
+// is the ONLY conversion wrapper whose value param is a `double` (the f64-arg ABI; see teko_rt.h).
+char* teko_rt_float_to_string(double v) { return teko_convert_f64_to_string(v); }
 char* teko_rt_bool_to_string(int v) { return teko_convert_bool_to_string(v); }
 char* teko_rt_str_concat(const char* a, const char* b) { return teko_convert_str_concat(a, b); }
 // Phase 16.E — explicit integer formats.
@@ -844,4 +849,95 @@ int teko_rt_parse_bool(const char* s) {
     int v;
     if (!teko_convert_parse_bool(s, &v)) teko_rt_die("convert.parse_bool: invalid boolean");
     return v;
+}
+// Phase 17.E — CHECKED string -> f64 (id 54). The INVERSE of id 50's f64-arg ABI: the arg is a
+// string ($w0 -> rdi/x0), the result is a `double` returned in xmm0/d0 (= $f0). A malformed or
+// out-of-range (±Inf) input FAILS LOUDLY via the SAME teko_rt_die path as parse_int/parse_bool
+// (exit 70 + stderr native; __builtin_trap in the wasm reactor). The correctly-rounded freestanding
+// parser is the 17.E teko_convert_parse_f64 (src/runtime/teko_convert_f64.c) — the SAME C source
+// compiled into the wasm32 reactor, so native and WASM agree bit-for-bit.
+double teko_rt_parse_float(const char* s) {
+    double v;
+    if (!teko_convert_parse_f64(s, &v)) teko_rt_die("convert.parse_float: invalid float");
+    return v;
+}
+
+// Phase 17 (17.B) — CHECKED float->int (OP_F2I) FAIL-LOUD landing pad. The hosted emitter emits an
+// inline NaN + i32-range guard (matched to WASM's i32.trunc_f64_s valid open interval) and `call`s
+// this when the float cannot be represented as an i32 — so a value that traps on WASM also aborts
+// non-zero here, via the SAME exit-70 + stderr path the 16.F parsers use. No arguments (the guard
+// already decided); never returns.
+void teko_rt_f2i_fail(void) {
+    teko_rt_die("convert.to_int: float out of i32 range or not finite");
+}
+
+// Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers. The opcode family
+// (OP_DADD/DSUB/DMUL/DDIV/DMOD/DEQ..DGE) lowers to these; the args are ALWAYS pointers into a
+// 256-byte decimal slot (native stack/frame, WASM linear memory — the same shared-memory pointer
+// ABI as the crypto hex strings). Each wraps the 17.F.1 core and FAILS LOUD on the core's 0 return
+// (overflow / divide-by-zero) via teko_rt_die — native exit 70 + stderr, wasm32 reactor
+// __builtin_trap — exactly the 16.F checked-parser posture (no NaN/Inf; decimal is always finite).
+void teko_rt_decimal_add(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_add(a, b, out)) teko_rt_die("decimal: add overflow");
+}
+void teko_rt_decimal_sub(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_sub(a, b, out)) teko_rt_die("decimal: sub overflow");
+}
+void teko_rt_decimal_mul(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_mul(a, b, out)) teko_rt_die("decimal: mul overflow");
+}
+void teko_rt_decimal_div(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_div(a, b, out)) teko_rt_die("decimal: divide by zero or overflow");
+}
+void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_mod(a, b, out)) teko_rt_die("decimal: modulo by zero or overflow");
+}
+// Compare: writes -1 / 0 / +1 to *out_lt_eq_gt (the core cannot fail — always-finite operands).
+// The emitter maps that tri-state to the i32 0/1 boolean each OP_DEQ..DGE wants in $w0.
+void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt) {
+    (void)teko_decimal_cmp(a, b, out_lt_eq_gt);
+}
+
+// Phase 17.F.4 — checked int/float ↔ decimal CAST wrappers. F2D/D2F bridge through the
+// shortest-string form (teko_convert_f64_to_string / teko_convert_parse_f64) — both sides are
+// correctly-rounded, so the cast is clean — reusing the 17.C/17.E cores rather than a fresh path.
+void teko_rt_decimal_from_i32(int v, teko_decimal* out) {
+    (void)teko_decimal_from_i32(v, out); // cannot fail (|v| fits well within 1984 bits)
+}
+void teko_rt_decimal_from_f64(double v, teko_decimal* out) {
+    // f64 -> shortest `.`-decimal -> exact decimal. Non-finite (NaN/Inf) has no finite decimal
+    // form and the shortest-string renderer yields "NaN"/"Infinity", which teko_decimal_parse
+    // rejects -> fail-loud (decimal is always finite). A normal finite double round-trips exactly.
+    char* s = teko_convert_f64_to_string(v);
+    if (!s) { teko_rt_die("convert.to_decimal: out of memory"); return; }
+    int ok = teko_decimal_parse(s, out);
+    free(s);
+    if (!ok) teko_rt_die("convert.to_decimal: value not representable as a finite decimal");
+}
+int teko_rt_decimal_to_i32(const teko_decimal* d) {
+    int v;
+    if (!teko_decimal_to_i32(d, &v)) teko_rt_die("convert.to_int: decimal out of i32 range");
+    return v;
+}
+double teko_rt_decimal_to_f64(const teko_decimal* d) {
+    // decimal -> exact plain `.`-decimal string -> correctly-rounded f64 (round-to-nearest-even).
+    char* s = teko_decimal_to_string(d);
+    if (!s) { teko_rt_die("convert.to_float: out of memory"); return 0.0; }
+    double v = 0.0;
+    int ok = teko_convert_parse_f64(s, &v);
+    free(s);
+    // The plain-decimal string is always a valid finite number; a parse failure would only be a
+    // magnitude beyond DBL_MAX (overflow to ±Inf). Fail loud rather than return Inf silently.
+    if (!ok) teko_rt_die("convert.to_float: decimal magnitude overflows f64");
+    return v;
+}
+
+// Phase 17.F.4 — decimal language surface (ids 59/60).
+char* teko_rt_decimal_to_string(const teko_decimal* d) {
+    char* s = teko_decimal_to_string(d);
+    if (!s) teko_rt_die("decimal.to_string: out of memory");
+    return s;
+}
+void teko_rt_decimal_parse(const char* s, teko_decimal* out) {
+    if (!teko_decimal_parse(s, out)) teko_rt_die("decimal.parse: invalid decimal");
 }

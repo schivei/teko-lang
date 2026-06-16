@@ -1,6 +1,9 @@
 #ifndef TEKO_RT_H
 #define TEKO_RT_H
 
+// Phase 17.F.3: the 256-byte `decimal` value type (the by-pointer ABI the OP_D* opcodes lower to).
+#include "teko_decimal.h"
+
 // Teko native runtime ABI (Phase 13 — native runner / crypto language surface).
 //
 // This is the thin C shim that a `teko build --target=<native>` executable links
@@ -212,6 +215,11 @@ long teko_rt_vtable_get(long type_id, long method_id);            // -> slot (-1
 // wasm32 reactor). The value-carrying params are i32 to match the accumulator/reactor ABI ($w0 is
 // i32 on WASM); the full-range i64 core is exercised directly by the Unity KATs.
 char* teko_rt_int_to_string(int v);                    // id 49: signed decimal
+// Phase 17.D — float->string (shortest round-trip culture-invariant `.`-decimal, the 17.C Ryu
+// core). Unlike every other OP_CALL_RUNTIME id, the value-carrying param is a `double` (id 50 is
+// the ONLY f64-ARG runtime call): the emitter passes it in the FP-arg register (xmm0/d0 = $f0) /
+// the f64 reactor param, not the i32 accumulator ($w0).
+char* teko_rt_float_to_string(double v);               // id 50: f64 -> shortest `.`-decimal
 char* teko_rt_bool_to_string(int v);                   // id 51: "true"/"false"
 char* teko_rt_str_concat(const char* a, const char* b); // id 52: a ‖ b
 // Phase 16.E — explicit integer formats (developer-supplied spec).
@@ -221,5 +229,42 @@ char* teko_rt_group(int v);                            // id 58: thousands group
 // Phase 16.F — CHECKED parse (fail-loud: aborts native / traps wasm on malformed input).
 int teko_rt_parse_int(const char* s);                  // id 53: string -> i32 (checked)
 int teko_rt_parse_bool(const char* s);                 // id 55: "true"/"false" -> 0/1 (checked)
+// Phase 17.E — CHECKED string -> f64 (id 54). The INVERSE of id 50's f64-arg ABI: a string arg
+// (i32 ptr in $w0) -> a `double` RESULT (returned in xmm0/d0 = $f0). Malformed/overflow (±Inf)
+// fails loudly via the same path as the 16.F parsers. The ONLY runtime id with an f64 *result*.
+double teko_rt_parse_float(const char* s);             // id 54: string -> f64 (checked, fail-loud)
+// Phase 17.B — CHECKED float->int (OP_F2I) fail-loud landing pad (called by the emitted inline
+// NaN/i32-range guard; aborts non-zero with a stderr diagnostic, like the 16.F parsers). No return.
+void teko_rt_f2i_fail(void);
+
+// Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers (the by-pointer ABI the
+// OP_DADD/DSUB/DMUL/DDIV/DMOD/DEQ..DGE opcodes lower to). Each takes pointers into 256-byte decimal
+// slots (native stack/frame, WASM linear memory) and FAILS LOUD on overflow / divide-by-zero
+// (the 17.F.1 core's 0 return) via teko_rt_die — exit 70 native / __builtin_trap in the reactor.
+// cmp writes -1/0/+1 to *out_lt_eq_gt (the emitter maps it to the i32 0/1 boolean each compare wants).
+void teko_rt_decimal_add(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_sub(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_mul(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_div(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt);
+
+// Phase 17.F.4 — checked int/float ↔ decimal CAST wrappers (the by-pointer ABI the OP_I2D/F2D/D2I/
+// D2F opcodes lower to). I2D/F2D write the result into a 256-byte decimal slot (&out); D2I/D2F read
+// one and return a register value. F2D/D2F bridge through the shortest-string form (both sides are
+// correctly-rounded). D2I TRUNCATES toward zero (matches OP_F2I) and FAILS LOUD only on i32-range
+// overflow (teko_rt_die — exit 70 native / __builtin_trap reactor). I2D cannot fail.
+void   teko_rt_decimal_from_i32(int v, teko_decimal* out);     // OP_I2D: int -> decimal (scale 0)
+void   teko_rt_decimal_from_f64(double v, teko_decimal* out);  // OP_F2D: f64 -> decimal (string bridge)
+int    teko_rt_decimal_to_i32(const teko_decimal* d);          // OP_D2I: decimal -> i32 (checked, trunc)
+double teko_rt_decimal_to_f64(const teko_decimal* d);          // OP_D2F: decimal -> f64 (string bridge)
+
+// Phase 17.F.4 — decimal language surface (OP_CALL_RUNTIME ids 59/60).
+// id 59 = decimal.to_string: a 256-byte decimal (by &ptr) -> a fresh culture-invariant `.`-decimal
+//          string (the 17.F.2 scale-preserving formatter). Result char* in $w0 (VT_STR).
+// id 60 = decimal.parse: a NUL-terminated string ($w0) -> a 256-byte decimal (written to &out =
+//          $d0). CHECKED/fail-loud (teko_rt_die) on malformed input / coefficient overflow.
+char* teko_rt_decimal_to_string(const teko_decimal* d);        // id 59: decimal -> string
+void  teko_rt_decimal_parse(const char* s, teko_decimal* out); // id 60: string -> decimal (checked)
 
 #endif // TEKO_RT_H

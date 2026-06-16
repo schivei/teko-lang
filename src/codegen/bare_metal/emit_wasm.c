@@ -21,6 +21,8 @@ static int wasm_is_crypto_ext_id(int id) {
         case 37: case 38: case 39: case 40:                         // RSA
         case 44: case 45: case 46: case 47: case 48:               // wall-clock / timezone surface
         case 49: case 51: case 52:                                  // Phase 16 conversion surface
+        case 50:                                                    // Phase 17.D float->string (f64-arg)
+        case 54:                                                    // Phase 17.E parse_float (f64-result)
         case 53: case 55:                                           // Phase 16.F checked parse
         case 56: case 57: case 58:                                  // Phase 16.E explicit formats
             return 1;
@@ -65,6 +67,41 @@ static int wasm_is_crypto_ext_id(int id) {
 // [16384..65536). A growable/unified arena+heap is future work (documented).
 #define TEKO_WASM_HEAP_BASE 16384
 #define TEKO_WASM_HEAP_END  65536
+
+// Phase 17.F.3: the 256-byte decimal value model needs fixed 256-byte regions in Teko's linear
+// memory (a decimal does NOT fit a wasm local). Carve them from the TOP of the heap, gated on
+// wasm_emit_decimal so decimal-free modules keep the full [16384..65536) heap and stay
+// byte-identical. Layout (top-down, all within Teko's [0..65536) window — the reactor's image lives
+// ABOVE 65536, so no alias): the decimal-constant pool (decimal_count * 256, a (data ...) segment),
+// then $d0/$d1, a cmp-scratch sink, and the $dvN local file (wasm_local_count slots). The heap's
+// upper bound shrinks to the decimal region's base, keeping the bump arena / free-list intact.
+#define TEKO_WASM_DECIMAL_BYTES 256
+static int teko_wasm_decimal_slot_count(const MetalContext* ctx) {
+    // $d0 + $d1 + cmp-scratch + one slot per named local (parallel to $vN).
+    return ctx->wasm_emit_decimal ? (3 + ctx->wasm_local_count) : 0;
+}
+static int teko_wasm_decimal_region_bytes(const MetalContext* ctx) {
+    if (!ctx->wasm_emit_decimal) return 0;
+    return (ctx->decimal_count + teko_wasm_decimal_slot_count(ctx)) * TEKO_WASM_DECIMAL_BYTES;
+}
+// Base (lowest) byte offset of the whole decimal region; also the (shrunken) heap upper bound.
+static int teko_wasm_decimal_region_base(const MetalContext* ctx) {
+    return TEKO_WASM_HEAP_END - teko_wasm_decimal_region_bytes(ctx);
+}
+static int teko_wasm_heap_end(const MetalContext* ctx) {
+    return ctx->wasm_emit_decimal ? teko_wasm_decimal_region_base(ctx) : TEKO_WASM_HEAP_END;
+}
+// Byte offset of decimal-constant pool entry `idx` (256-byte blob).
+static int teko_wasm_decimal_pool_off(const MetalContext* ctx, int idx) {
+    return teko_wasm_decimal_region_base(ctx) + TEKO_WASM_DECIMAL_BYTES * idx;
+}
+// Byte offset of decimal SLOT `k` ($d0=0, $d1=1, cmp-scratch=2, local n = 3+n) — laid out right
+// after the pool.
+static int teko_wasm_decimal_slot_off(const MetalContext* ctx, int k) {
+    return teko_wasm_decimal_region_base(ctx)
+         + TEKO_WASM_DECIMAL_BYTES * (ctx->decimal_count + k);
+}
+#define TEKO_WASM_DECIMAL_SCRATCH 2
 
 // Phase 11: byte offset of constant-pool string `idx` within the packed (data ...)
 // segment (each string is NUL-terminated, laid out in order from TEKO_WASM_DATA_BASE).
@@ -269,14 +306,18 @@ static void emit_wasm_scheduler_runtime(FILE* f) {
 // teko_reset bulk-reclaims the whole region. Lazily initialized as one big free
 // block on first use. Exported for the host (JS materializes data here) and usable
 // from Teko. Bounds: stays within the single (memory 1) page; OOM returns 0.
-static void emit_wasm_heap_runtime(FILE* f) {
+static void emit_wasm_heap_runtime(MetalContext* ctx, FILE* f) {
+    // Phase 17.F.3: the heap's upper bound shrinks to the decimal region's base when the program
+    // uses decimals (the region is carved from the heap top); otherwise it is the full HEAP_END, so
+    // decimal-free modules emit a byte-identical allocator.
+    const int heap_end = teko_wasm_heap_end(ctx);
     fprintf(f, "  (global $heap_inited (mut i32) (i32.const 0))\n");
 
     // Lazy init: one free block spanning the whole heap region.
     fprintf(f, "  (func $teko_heap_init\n");
     fprintf(f, "    (if (i32.eqz (global.get $heap_inited)) (then\n");
     fprintf(f, "      (i32.store offset=0 (i32.const %d) (i32.const %d))\n",
-            TEKO_WASM_HEAP_BASE, TEKO_WASM_HEAP_END - TEKO_WASM_HEAP_BASE - 8); // size
+            TEKO_WASM_HEAP_BASE, heap_end - TEKO_WASM_HEAP_BASE - 8); // size
     fprintf(f, "      (i32.store offset=4 (i32.const %d) (i32.const 1))\n", TEKO_WASM_HEAP_BASE); // free
     fprintf(f, "      (global.set $heap_inited (i32.const 1)))))\n");
 
@@ -288,7 +329,7 @@ static void emit_wasm_heap_runtime(FILE* f) {
     fprintf(f, "    (local.set $n (i32.and (i32.add (local.get $n) (i32.const 7)) (i32.const -8)))\n");
     fprintf(f, "    (local.set $cur (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
     fprintf(f, "    (block $done (loop $L\n");
-    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", heap_end);
     fprintf(f, "      (local.set $sz (i32.load offset=0 (local.get $cur)))\n");
     fprintf(f, "      (if (i32.and (i32.load offset=4 (local.get $cur)) (i32.ge_u (local.get $sz) (local.get $n))) (then\n");
     fprintf(f, "        (if (i32.ge_u (local.get $sz) (i32.add (local.get $n) (i32.const 16))) (then\n");
@@ -312,11 +353,11 @@ static void emit_wasm_heap_runtime(FILE* f) {
     fprintf(f, "    (if (i32.eqz (local.get $ptr)) (then (return)))\n");
     fprintf(f, "    (local.set $tgt (i32.sub (local.get $ptr) (i32.const 8)))\n");
     fprintf(f, "    (if (i32.or (i32.lt_u (local.get $tgt) (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
-    fprintf(f, "                (i32.ge_u (local.get $tgt) (i32.const %d))) (then (return)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "                (i32.ge_u (local.get $tgt) (i32.const %d))) (then (return)))\n", heap_end);
     // Validate $tgt is a real block boundary that is currently used.
     fprintf(f, "    (local.set $cur (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
     fprintf(f, "    (block $v (loop $V\n");
-    fprintf(f, "      (br_if $v (i32.ge_u (local.get $cur) (i32.const %d)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (br_if $v (i32.ge_u (local.get $cur) (i32.const %d)))\n", heap_end);
     fprintf(f, "      (br_if $v (i32.gt_u (local.get $cur) (local.get $tgt)))\n");   // stepped past → invalid
     fprintf(f, "      (if (i32.eq (local.get $cur) (local.get $tgt)) (then\n");
     fprintf(f, "        (if (i32.eqz (i32.load offset=4 (local.get $cur))) (then\n"); // used → free it
@@ -329,11 +370,11 @@ static void emit_wasm_heap_runtime(FILE* f) {
     // Forward-coalescing sweep.
     fprintf(f, "    (local.set $cur (i32.const %d))\n", TEKO_WASM_HEAP_BASE);
     fprintf(f, "    (block $done (loop $L\n");
-    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (br_if $done (i32.ge_u (local.get $cur) (i32.const %d)))\n", heap_end);
     fprintf(f, "      (local.set $sz (i32.load offset=0 (local.get $cur)))\n");
     fprintf(f, "      (local.set $nxt (i32.add (i32.add (local.get $cur) (i32.const 8)) (local.get $sz)))\n");
     // Guard the load of the next header behind the bounds check (i32.and is eager).
-    fprintf(f, "      (if (i32.and (i32.load offset=4 (local.get $cur)) (i32.lt_u (local.get $nxt) (i32.const %d))) (then\n", TEKO_WASM_HEAP_END);
+    fprintf(f, "      (if (i32.and (i32.load offset=4 (local.get $cur)) (i32.lt_u (local.get $nxt) (i32.const %d))) (then\n", heap_end);
     fprintf(f, "        (if (i32.load offset=4 (local.get $nxt)) (then\n");
     fprintf(f, "          (i32.store offset=0 (local.get $cur)\n");
     fprintf(f, "            (i32.add (i32.add (local.get $sz) (i32.const 8)) (i32.load offset=0 (local.get $nxt))))\n");
@@ -1135,6 +1176,31 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                     if (!wasm_is_crypto_ext_id(id)) continue;
                     sym = teko_native_runtime_symbol(id, &ar);
                     if (!sym) continue;
+                    // Phase 17.D — id 50 (teko_rt_float_to_string) is the ONLY non-i32 reactor
+                    // import: its single value arg is an f64 (the reactor entry really is
+                    // `(double)->char*`). Declare `(param f64) (result i32)` — getting this wrong
+                    // (e.g. `(param i32)`) makes the module fail to instantiate against the reactor.
+                    // Gate it on wasm_emit_float (set IFF a float op / id 50 is emitted) so a
+                    // float-free crypto-ext module (e.g. convert.tks) stays BYTE-IDENTICAL — this is
+                    // the only crypto-ext id whose import is conditional, mirroring the float-local
+                    // gate, because id 50 is the only one that can never appear without a float.
+                    if (id == 50) {
+                        if (!ctx->wasm_emit_float) continue;
+                        fprintf(f, "  (import \"crypto\" \"%s\" (func $crypto_%d (param f64) (result i32)))\n",
+                                sym, id);
+                        continue;
+                    }
+                    // Phase 17.E — id 54 (teko_rt_parse_float) is the INVERSE non-i32 reactor import:
+                    // a string arg (i32 ptr) -> an f64 RESULT, so `(param i32) (result f64)`. Like id
+                    // 50 it is gated on wasm_emit_float (it can never appear without a float result)
+                    // so a float-free crypto-ext module stays BYTE-IDENTICAL. Getting the result type
+                    // wrong (e.g. `(result i32)`) makes the module fail to instantiate against the reactor.
+                    if (id == 54) {
+                        if (!ctx->wasm_emit_float) continue;
+                        fprintf(f, "  (import \"crypto\" \"%s\" (func $crypto_%d (param i32) (result f64)))\n",
+                                sym, id);
+                        continue;
+                    }
                     fprintf(f, "  (import \"crypto\" \"%s\" (func $crypto_%d", sym, id);
                     for (int p = 0; p < ar; p++) fprintf(f, " (param i32)");
                     fprintf(f, " (result i32)))\n");
@@ -1209,12 +1275,35 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             if (ctx->wasm_emit_wait || ctx->wasm_emit_await) {
                 fprintf(f, "  (import \"env\" \"teko_now_ns\" (func $teko_now_ns (result i64)))\n");
             }
+            // Phase 17.F.3: the 256-byte decimal value-model ops import the reactor's teko_rt_decimal_*
+            // wrappers (namespace "crypto") — the by-pointer ABI over the SHARED linear memory: each
+            // arg is an i32 slot OFFSET into Teko's [0..65536) window (exactly like the crypto hex
+            // strings). Imported only when the program uses decimals (decimal-free modules stay
+            // byte-identical). add/sub/mul/div/mod take (&a,&b,&out)->void; cmp takes (&a,&b,&out_i32).
+            if (ctx->wasm_emit_decimal) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_add\" (func $decimal_add (param i32) (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_sub\" (func $decimal_sub (param i32) (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_mul\" (func $decimal_mul (param i32) (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_div\" (func $decimal_div (param i32) (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_mod\" (func $decimal_mod (param i32) (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_cmp\" (func $decimal_cmp (param i32) (param i32) (param i32)))\n");
+                // Phase 17.F.4 — int/float ↔ decimal CASTS + the decimal.to_string/parse surface
+                // (ids 59/60). from_i32/from_f64/parse write into a 256-byte slot (&out); to_i32/
+                // to_f64 read one and return an i32/f64; to_string returns a char* (i32 ptr in the
+                // shared memory). from_f64/to_f64 are the only decimal imports touching f64.
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_from_i32\" (func $decimal_from_i32 (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_from_f64\" (func $decimal_from_f64 (param f64) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_i32\" (func $decimal_to_i32 (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_f64\" (func $decimal_to_f64 (param i32) (result f64)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_string\" (func $decimal_to_string (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_parse\" (func $decimal_parse (param i32) (param i32)))\n");
+            }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
             // address the same bytes. Re-export it either way so harnesses can read results.
             if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
                 ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry ||
-                ctx->wasm_emit_object || ctx->wasm_emit_vtable) {
+                ctx->wasm_emit_object || ctx->wasm_emit_vtable || ctx->wasm_emit_decimal) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1222,7 +1311,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "  (export \"memory\" (memory 0))\n");
             fprintf(f, "  (global $arena_sp (mut i32) (i32.const 2048))\n");
             emit_wasm_scheduler_runtime(f);
-            emit_wasm_heap_runtime(f);         // Phase 11 MVP-4: real freeing allocator
+            emit_wasm_heap_runtime(ctx, f);    // Phase 11 MVP-4: real freeing allocator (17.F.3: heap top shrinks for decimals)
             if (ctx->wasm_emit_codecs || ctx->wasm_emit_hash) emit_wasm_runtime_common(f);
             if (ctx->wasm_emit_codecs) emit_wasm_codec_runtime(f); // Phase 12 P12-G
             if (ctx->wasm_emit_hash) {
@@ -1241,6 +1330,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // Phase 12: named local variables ($v0..$v{n-1}) for `let`/`mut` bindings.
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
+            }
+            // Phase 17 (17.A): the PARALLEL float accumulator ($f0/$f1) + a float local file
+            // ($fv0..$fv{n-1}) — declared only when the program uses floats so float-free modules
+            // stay byte-identical. $fvN mirrors $vN (a slot has one type; native reuses the slot).
+            if (ctx->wasm_emit_float) {
+                fprintf(f, "    (local $f0 f64) (local $f1 f64)\n");
+                for (int v = 0; v < ctx->wasm_local_count; v++) {
+                    fprintf(f, "    (local $fv%d f64)\n", v);
+                }
             }
             ctx->wasm_open = 1;
             break;
@@ -1293,6 +1391,27 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             else if (arg == 43) fn = "teko_uuid_v7";    // Phase 13 Sub-phase C uuid v7 (host time+entropy)
             if (fn) {
                 fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            } else if (arg == 50) {
+                // Phase 17.D — float->string: the f64-ARG runtime call. The value lives in the
+                // float accumulator $f0 (not $w0); push it as the f64 import param and store the
+                // resulting char* pointer into $w0 (VT_STR). Stack-neutral.
+                fprintf(f, "    local.get $f0\n    call $crypto_50\n    local.set $w0\n");
+            } else if (arg == 54) {
+                // Phase 17.E — string->f64: the f64-RESULT runtime call (the INVERSE of id 50). The
+                // string ptr arg lives in the integer accumulator $w0; push it as the i32 import
+                // param and store the resulting `f64` into the float accumulator $f0 (VT_FLOAT).
+                // Stack-neutral.
+                fprintf(f, "    local.get $w0\n    call $crypto_54\n    local.set $f0\n");
+            } else if (arg == 59) {
+                // Phase 17.F.4 — decimal.to_string: the decimal value is in the $d0 slot (NOT $w0),
+                // so pass &$d0 as the i32 pointer; the char* result lands in $w0 (VT_STR).
+                fprintf(f, "    i32.const %d\n    call $decimal_to_string\n    local.set $w0\n",
+                        teko_wasm_decimal_slot_off(ctx, 0));
+            } else if (arg == 60) {
+                // Phase 17.F.4 — decimal.parse: the string ptr is in $w0 (arg0); the result decimal
+                // is written into the $d0 slot (arg1 = &$d0). Checked/fail-loud (reactor traps).
+                fprintf(f, "    local.get $w0\n    i32.const %d\n    call $decimal_parse\n",
+                        teko_wasm_decimal_slot_off(ctx, 0));
             } else if (wasm_is_crypto_ext_id(arg)) {
                 // Reactor-backed crypto: call the imported teko_rt_* entry point. Multi-arg
                 // ABI mirrors OP_CALL_IMPORT — args 0..n-2 come from the staging slots
@@ -1541,6 +1660,120 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         // ====================================================================
+        // 3b. Phase 17 (17.A): f64 VALUE MODEL — the parallel float accumulator ($f0/$f1) and the
+        // float local file ($fv0..). Every op is stack-neutral. The arith/move ops touch $f0/$f1
+        // only; the compares write $w0 (i32 0/1). float_pool[arg] is printed at %.17g so the WAT
+        // round-trips the EXACT double.
+        // ====================================================================
+        case OP_FCONST: {
+            double d = (ctx->float_pool && arg >= 0 && arg < ctx->float_count)
+                       ? ctx->float_pool[arg] : 0.0;
+            fprintf(f, "    f64.const %.17g\n    local.set $f0\n", d);
+            break;
+        }
+        case OP_FADD: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.add\n    local.set $f0\n"); break;
+        case OP_FSUB: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.sub\n    local.set $f0\n"); break;
+        case OP_FMUL: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.mul\n    local.set $f0\n"); break;
+        case OP_FDIV: fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.div\n    local.set $f0\n"); break;
+        case OP_FEQ:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.eq\n    local.set $w0\n"); break;
+        case OP_FNE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.ne\n    local.set $w0\n"); break;
+        case OP_FLT:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.lt\n    local.set $w0\n"); break;
+        case OP_FLE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.le\n    local.set $w0\n"); break;
+        case OP_FGT:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.gt\n    local.set $w0\n"); break;
+        case OP_FGE:  fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.ge\n    local.set $w0\n"); break;
+        case OP_FSTORE: fprintf(f, "    local.get $f0\n    local.set $f1\n"); break; // $f1 = $f0
+        case OP_FLOAD:  fprintf(f, "    local.get $f1\n    local.set $f0\n"); break; // $f0 = $f1
+        case OP_FSTORE_LOCAL: fprintf(f, "    local.get $f0\n    local.set $fv%d\n", arg); break;
+        case OP_FLOAD_LOCAL:  fprintf(f, "    local.get $fv%d\n    local.set $f0\n", arg); break;
+        case OP_I2F: fprintf(f, "    local.get $w0\n    f64.convert_i32_s\n    local.set $f0\n"); break;
+        // Phase 17 (17.B): float modulo `%`. WASM has no f64.rem, so inline the IEEE remainder
+        // toward zero: $f0 = $f0 - trunc($f0/$f1)*$f1. Stack-neutral (one f64 pushed, set to $f0).
+        case OP_FMOD:
+            fprintf(f, "    local.get $f0\n");                                  // a
+            fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.div\n    f64.trunc\n"); // trunc(a/b)
+            fprintf(f, "    local.get $f1\n    f64.mul\n");                      // trunc(a/b)*b
+            fprintf(f, "    f64.sub\n    local.set $f0\n");                      // a - trunc(a/b)*b
+            break;
+        // Phase 17 (17.B): CHECKED float->int. i32.trunc_f64_s TRAPS on NaN/±Inf/out-of-i32-range
+        // (a WebAssembly.RuntimeError the host sees), so it is fail-loud automatically — no guard
+        // needed, and the trap boundary is exactly the open interval the native guard matches.
+        case OP_F2I: fprintf(f, "    local.get $f0\n    i32.trunc_f64_s\n    local.set $w0\n"); break;
+
+        // ====================================================================
+        // 3c. Phase 17.F.3: the 256-byte `decimal` VALUE MODEL. $d0/$d1 (+ a cmp-scratch + the $dvN
+        // local file) are fixed 256-byte regions in Teko's linear memory (a decimal does NOT fit a
+        // wasm local). The move ops are `memory.copy` (stack-neutral: 3 i32 pushed, consumed); the
+        // arith/compare ops `call` the reactor's teko_rt_decimal_* over the SHARED memory, passing
+        // i32 slot OFFSETS by pointer (exactly the crypto hex-string ABI). Compares write the i32
+        // tri-state to the cmp-scratch slot, which we reload and map to the 0/1 boolean in $w0. The
+        // decimal-local frontend slot `n` maps to decimal slot 3+n (0/1/2 = $d0/$d1/cmp-scratch).
+        // ====================================================================
+        case OP_DCONST: // $d0 = decimal_pool[arg]: memory.copy 256 B from the pool offset to $d0.
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
+                    teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_pool_off(ctx, arg));
+            break;
+        case OP_DADD: case OP_DSUB: case OP_DMUL: case OP_DDIV: case OP_DMOD: {
+            const char* fn = (op == OP_DADD) ? "$decimal_add" : (op == OP_DSUB) ? "$decimal_sub" :
+                             (op == OP_DMUL) ? "$decimal_mul" : (op == OP_DDIV) ? "$decimal_div" :
+                             "$decimal_mod";
+            // call teko_rt_decimal_*(&$d0, &$d1, &$d0)  (in-place out)
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const %d\n    call %s\n",
+                    teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_slot_off(ctx, 1),
+                    teko_wasm_decimal_slot_off(ctx, 0), fn);
+            break;
+        }
+        case OP_DEQ: case OP_DNE: case OP_DLT: case OP_DLE: case OP_DGT: case OP_DGE: {
+            // teko_rt_decimal_cmp(&$d0,&$d1,&scratch); reload the -1/0/+1 tri-state; map to 0/1 in $w0.
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const %d\n    call $decimal_cmp\n",
+                    teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_slot_off(ctx, 1),
+                    teko_wasm_decimal_slot_off(ctx, TEKO_WASM_DECIMAL_SCRATCH));
+            fprintf(f, "    i32.const %d\n    i32.load\n    i32.const 0\n",
+                    teko_wasm_decimal_slot_off(ctx, TEKO_WASM_DECIMAL_SCRATCH));
+            const char* cmp = (op == OP_DEQ) ? "i32.eq" : (op == OP_DNE) ? "i32.ne" :
+                              (op == OP_DLT) ? "i32.lt_s" : (op == OP_DLE) ? "i32.le_s" :
+                              (op == OP_DGT) ? "i32.gt_s" : "i32.ge_s";
+            fprintf(f, "    %s\n    local.set $w0\n", cmp);
+            break;
+        }
+        case OP_DSTORE: // $d1 = $d0
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
+                    teko_wasm_decimal_slot_off(ctx, 1), teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_DLOAD: // $d0 = $d1
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
+                    teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_slot_off(ctx, 1));
+            break;
+        case OP_DSTORE_LOCAL: // $dv<arg> = $d0
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
+                    teko_wasm_decimal_slot_off(ctx, 3 + arg), teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_DLOAD_LOCAL: // $d0 = $dv<arg>
+            fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
+                    teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_slot_off(ctx, 3 + arg));
+            break;
+
+        // Phase 17.F.4: int/float ↔ decimal CASTS. The decimal value rides the $d0 slot (passed by
+        // i32 offset/pointer over the shared memory); I2D consumes the int $w0, F2D the f64 $f0; D2I
+        // produces the checked i32 in $w0, D2F the f64 in $f0. The reactor wrappers do the work
+        // (F2D/D2F bridge through the shortest string; D2I truncates + traps on i32 overflow).
+        case OP_I2D: // teko_rt_decimal_from_i32($w0, &$d0)
+            fprintf(f, "    local.get $w0\n    i32.const %d\n    call $decimal_from_i32\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_F2D: // teko_rt_decimal_from_f64($f0, &$d0)
+            fprintf(f, "    local.get $f0\n    i32.const %d\n    call $decimal_from_f64\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_D2I: // $w0 = teko_rt_decimal_to_i32(&$d0)  (checked; traps on i32 overflow)
+            fprintf(f, "    i32.const %d\n    call $decimal_to_i32\n    local.set $w0\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_D2F: // $f0 = teko_rt_decimal_to_f64(&$d0)
+            fprintf(f, "    i32.const %d\n    call $decimal_to_f64\n    local.set $f0\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+
+        // ====================================================================
         // 4. NATIVE ARENA ALLOCATOR (O(1) bump)
         // ====================================================================
         case OP_ARENA_PUSH:
@@ -1715,6 +1948,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
             }
+            // Phase 17 (17.A): a routine body may also use floats (e.g. a method computing on f64
+            // locals). Declare the float accumulator + local file here too, gated identically so
+            // float-free routines stay byte-identical. Consistent with the $w0/$w1 declaration.
+            if (ctx->wasm_emit_float) {
+                fprintf(f, "    (local $f0 f64) (local $f1 f64)\n");
+                for (int v = 0; v < ctx->wasm_local_count; v++) {
+                    fprintf(f, "    (local $fv%d f64)\n", v);
+                }
+            }
             fprintf(f, "    local.get $arg\n    local.set $cp\n");                       // channel base
             fprintf(f, "    local.get $frame\n    i32.load offset=0\n    local.set $w0\n"); // reload spilled $w0
             fprintf(f, "    local.get $frame\n    i32.load offset=4\n    local.set $w1\n"); // reload spilled $w1
@@ -1789,6 +2031,16 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "\")\n");
             } else {
                 fprintf(f, "  (data (i32.const 1024) \"Hello Teko\\00\")\n");
+            }
+            // Phase 17.F.3: the decimal-constant pool → a (data ...) segment, one 256-byte blob per
+            // OP_DCONST index laid out from the decimal region base (gated on wasm_emit_decimal so
+            // decimal-free modules stay byte-identical). DCONST memory.copy's 256 B from here to $d0.
+            if (ctx->wasm_emit_decimal && ctx->decimal_count > 0 && ctx->decimal_pool) {
+                fprintf(f, "  (data (i32.const %d) \"", teko_wasm_decimal_pool_off(ctx, 0));
+                for (int k = 0; k < ctx->decimal_count * 256; k++) {
+                    fprintf(f, "\\%02X", (unsigned)ctx->decimal_pool[k]);
+                }
+                fprintf(f, "\")\n");
             }
             fprintf(f, ")\n");
             break;
