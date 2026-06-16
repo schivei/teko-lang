@@ -285,6 +285,19 @@ c = -1
 d = -1
 EXP
 )"
+# Phase 18 (18.C): `defer <stmt>;` — scope-closing registration, run in LIFO (reverse) order at $main
+# close. The frontend captures each deferred statement's source and re-lexes + lowers it just before
+# OP_HALT; deferred statements may reference locals (still live) incl. auto-to_string concat. No new
+# IL/runtime (the statements lower to ordinary IL, relocated to scope end). Byte-identical to WASM
+# (run-defer.mjs): immediate start/middle/end, then LIFO "last registered" then "deferred n = 42".
+check defer.tks "$(cat <<'EXP'
+start
+middle
+end
+last registered
+deferred n = 42
+EXP
+)"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

@@ -99,7 +99,20 @@ goldens intact. **Pre-existing bug found + filed as tech debt** (NOT 18.B): a me
   fallback after a `?.` chain. Byte-identical.
 - Risk: low–medium (builds on 18.A + the 15.A/B object surface).
 
-### 18.C — `defer` (LIFO scope-exit)
+### 18.C — `defer` (LIFO scope-exit)  — ✅ DONE
+**Status (DONE, locally green both targets).** `defer <stmt>;` makes `TOKEN_DEFER` LIVE. The
+top-level loop captures each deferred statement's SOURCE (`defer_capture` rebuilds it from its
+tokens — re-lexable, like a 16.C interpolation hole — into a LIFO stack `g_defer`); at `$main` close
+the stack is DRAINED IN REVERSE through the normal dispatcher (`lower_one_stmt`) just before
+`OP_HALT`. Deferred statements may reference locals (still live at scope exit) incl. auto-`to_string`
+concat. No new opcode/runtime — the statements lower to ordinary IL, relocated to scope end;
+defer-free programs are byte-identical. Proof `defer.tks` (native + WASM, byte-identical) →
+`start`/`middle`/`end` (immediate), then LIFO `last registered`, `deferred n = 42` (captures `n`).
+Suite 246/246; ASan/UBSan both paths + TSan clean; 16 goldens intact. **MVP scope = `$main`
+(program-exit) defers** — `defer` inside a `fn`/method/block body (scope-local drain) is a documented
+follow-up.
+
+
 - **`defer <stmt>;`** registers a statement to run when the enclosing scope closes, in **reverse
   registration order** (LIFO). MVP scope = the `$main` body and `fn`/method/routine bodies (the
   block-body dispatcher already exists). Frontend collects deferred statement spans per scope and

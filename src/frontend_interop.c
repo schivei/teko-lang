@@ -509,6 +509,41 @@ static int g_prim_present_slot = -1;
 // initializer) so lower_let_stmt / lower_reassign know a `let x: ?T = null;` is the null state and
 // emit present = 0 (vs present = 1 for any other initializer).
 static int g_last_init_is_null = 0;
+
+// Phase 18 (18.C): `defer <stmt>;` — registration of a scope-closing statement, run in LIFO order at
+// scope exit. MVP scope = the `$main` body: each deferred statement's SOURCE is captured (rebuilt
+// from its tokens — the lexeme of a string literal keeps its quotes, a dotted ident is one token —
+// re-lexable, exactly like a 16.C interpolation hole) and pushed here; at `$main` close (before
+// OP_HALT) the stack is DRAINED IN REVERSE through the normal statement dispatcher (lower_one_stmt).
+// No new opcode/runtime — the deferred statements lower to ordinary IL, just relocated to scope end.
+#define TEKO_MAX_DEFERS 256
+static char g_defer[TEKO_MAX_DEFERS][1024];
+static int  g_ndefer;
+static void defer_reset(void) { g_ndefer = 0; }
+// Capture the deferred statement at the parser (current token is just past `defer`) as a re-lexable
+// source string, advancing past the terminating `;`. Pushes onto the LIFO stack.
+static void defer_capture(Parser* p) {
+    char buf[1024]; int n = 0; int depth = 0;
+    while (p->current_token.type != TOKEN_EOF) {
+        if (p->current_token.type == TOKEN_SEMICOLON && depth == 0) { fe_advance(p); break; }
+        if (p->current_token.type == TOKEN_LPAREN || p->current_token.type == TOKEN_LBRACE ||
+            p->current_token.type == TOKEN_LBRACKET) depth++;
+        if (p->current_token.type == TOKEN_RPAREN || p->current_token.type == TOKEN_RBRACE ||
+            p->current_token.type == TOKEN_RBRACKET) { if (depth > 0) depth--; }
+        const char* lx = p->current_token.lexeme ? p->current_token.lexeme : "";
+        int ln = (int)strlen(lx);
+        if (n + ln + 2 < (int)sizeof(buf)) {
+            memcpy(buf + n, lx, ln); n += ln; buf[n++] = ' '; // space-join keeps tokens separable
+        }
+        fe_advance(p);
+    }
+    buf[n] = '\0';
+    if (g_ndefer < TEKO_MAX_DEFERS) {
+        strncpy(g_defer[g_ndefer], buf, sizeof(g_defer[0]) - 1);
+        g_defer[g_ndefer][sizeof(g_defer[0]) - 1] = '\0';
+        g_ndefer++;
+    }
+}
 // Split a dotted lexeme "base.member" into its two parts. Returns 1 on success (a dot present).
 static int dotted_split(const char* lex, char* base, char* member) {
     const char* dot = lex ? strchr(lex, '.') : NULL;
@@ -3198,6 +3233,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     // The mapping is fixed at compile time; teko_vtable_set self-resets on its first call. Programs
     // with no trait-implementing class emit nothing here → byte-identical to 15.A.
     traitlocal_reset();
+    defer_reset(); // Phase 18 (18.C): no defers carried over from a prior compile
     {
         int any_dispatch = 0;
         for (int ci = 0; ci < g_nclass; ci++) if (g_class[ci].ntraits > 0) { any_dispatch = 1; break; }
@@ -3227,6 +3263,11 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // `let`/`mut NAME [: type] = <initializer>` — a named local binding. Shared with block
             // bodies (lower_let_stmt → lower_init_value), so `let cb = circuit(...)` works here too.
             lower_let_stmt(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_DEFER) {
+            // Phase 18 (18.C): `defer <stmt>;` — register a scope-closing statement (LIFO at `$main`
+            // close). Capture its source now; it is re-lexed + lowered after the loop, before OP_HALT.
+            fe_advance(&parser); // consume `defer`
+            defer_capture(&parser);
         } else if (parser.current_token.type == TOKEN_EVENT) {
             // Phase 15.D: `event E;` — a compile-time declaration (registered in collect_events);
             // emits no code. Skip to the statement end.
@@ -3512,6 +3553,18 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
         } else {
             fe_advance(&parser);
         }
+    }
+
+    // Phase 18 (18.C): drain the `defer` stack at `$main` close — re-lex + lower each captured
+    // statement IN REVERSE (LIFO) through the normal statement dispatcher, just before OP_HALT. The
+    // top-level locals are still live here, so a deferred `emit(x)` / `obj.method()` resolves. Defer-
+    // free programs push nothing, so their byte stream is unchanged.
+    for (int di = g_ndefer - 1; di >= 0; di--) {
+        top_ctx.locals = locals; top_ctx.nlocals = nlocals;
+        ta.next_temp = nlocals; if (nlocals > ta.hw) ta.hw = nlocals;
+        Lexer dlx; lexer_init(&dlx, g_defer[di]);
+        Parser dp;  parser_init(&dp, &dlx);
+        lower_one_stmt(buffer, &dp, &top_env);
     }
 
     codegen_li_emit_halt(buffer); // close main
