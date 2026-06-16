@@ -121,9 +121,36 @@ value model is uniform i32) and an `async` method lowers synchronously — **per
 monomorphization is 15.C; full `intent<>`/`await` async-method semantics are a dedicated later
 sub-block.** The proofs use the complete-signature convention (incl. a generic method).
 
-**Next: 15.B (abstract classes + traits)** — compile-time static vtables, the local→type table
-generalized beyond `self`/instantiation, trait composition (union of method tables; collision =
-compile error). Then 15.C (generics, the deep one) and 15.D (events).
+**15.B (abstract classes + traits) is DONE** on both targets — dynamic dispatch through a
+**compile-time static vtable**, trait composition with **collision = compile error**, `to_string`
+dispatched through the vtable like any method. Four increments:
+1. `teko_vtable.c` runtime (`vtable[type_id][method_id] → routine slot`, -1 unset sentinel) +
+   `OP_VTABLE_SET/GET` (0x6F/0x70), native `teko_rt_vtable_*` + WASM reactor import. 4 KATs.
+2. `trait NAME { fn m(self): T; }` registry + `class C : T1, T2` implements clause + `abstract`
+   modifier + bodyless (abstract, slot -1) methods + a global method-id space. **Collision =
+   compile error** (`check_oop_collisions` → `teko_compile_interop` returns non-zero, emits nothing;
+   a class override resolves it).
+3. **Fat trait-typed locals** (`let g: Trait = c;` → instance-handle slot + a hidden type-id slot
+   holding the concrete type_id as a compile-time constant; object layout unchanged, 15.A
+   byte-identical). Vtable populated at `$main` start (`vtable_set` per bodied method). Dynamic
+   dispatch `g.method()` → `vtable_get(type_id, method_id)` → `OP_CALL_FUNC`. Reassigning `g`
+   updates its type-id slot.
+4. WASM proof + a **nesting-safe `OP_CALL_FUNC`** (stack-disciplined `$callfp` frame: reserve
+   before the call, restore after — so a method calling its own/another method works on WASM).
+
+Proofs: `runtime/{native,wasm}/samples/traits.tks` → `12, 112, 9, 209` (a `Shape`-typed reference
+dispatches `area()`/`to_string()` to `Circle` then, after reassignment, `Square`; `to_string` via
+the same vtable). Suite 221/221.
+
+**Decision (15.B):** dynamic dispatch = a runtime-stored static vtable (compile-time-populated,
+C++ vptr / Go itab model) + fat trait-typed locals carrying the type-id as a compile-time constant.
+This keeps the object layout untouched (no per-object vptr), so concrete-class programs stay
+byte-identical to 15.A. Collision rule: a class composing two traits that both declare a method name
+without overriding it is a hard compile error. An inline branch-chain "vtable" was rejected in favor
+of the indexed runtime table (O(1), faithful to "vtable").
+
+**Next: 15.C (generics — real per-type monomorphization, the deep one), then 15.D (events:
+`event`/`raise`/`subscribe` + `fanout`/`fire_and_forget` on the Phase-14 concurrency runtime).**
 
 ## The `to_string` convention hook (for Phase 16's auto-conversion)
 

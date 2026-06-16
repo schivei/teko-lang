@@ -294,6 +294,20 @@ on both targets (LIVE token, executable `.tks` proofs):
 - Proofs: `runtime/{native,wasm}/samples/class.tks` → `7`,`70` (native run-native.sh /
   WASM run-class.mjs `[7,70]`). Suite 213/213; ASan/UBSan (both paths) + TSan green; 16 goldens
   intact; existing routine WASM proofs still pass after the FUNC_END spill.
-- **Next:** 15.B (abstract + `trait` via compile-time static vtables), 15.C (generics `<T>` —
-  monomorphization, the deep one), 15.D (`event`/`raise`/`subscribe` + `fanout`/`fire_and_forget`
-  on the Phase-14 spawn runtime). The human merges — no merge/force-push from the agent.
+Sub-block **15.B `abstract` + `trait` is DONE** on both targets — dynamic dispatch via a
+**compile-time static vtable**, trait composition with **collision = compile error**, `to_string`
+dispatched through the vtable like any method (the Phase-16 hook). Runtime `src/runtime/teko_vtable.c`
+(`vtable[type_id][method_id] → routine slot`) → `OP_VTABLE_SET/GET` (0x6F/0x70) → native
+`teko_rt_vtable_*` + WASM reactor import. Frontend: `trait`/`abstract` grammar + `class C : T1,T2`
+implements clause + bodyless (abstract, slot -1) methods + a global method-id space;
+**fat trait-typed locals** (`let g: Trait = c` = instance-handle slot + a hidden type-id slot
+holding the concrete type_id as a compile-time constant — object layout UNCHANGED, 15.A
+byte-identical); vtable populated at `$main` start; `g.method()` → `vtable_get` → `OP_CALL_FUNC`.
+Decision: indexed runtime vtable (not an inline branch chain); collision = two composed traits
+declaring the same method without a class override. WASM needed a **nesting-safe `OP_CALL_FUNC`**
+(stack-disciplined `$callfp` frame) so a method calling its own/another method works. Proofs
+`runtime/{native,wasm}/samples/traits.tks` → `12,112,9,209`. Suite 200→221; ASan/UBSan (both paths)
++ TSan green; 16 goldens intact; existing class/routines/producer/capstone WASM proofs intact.
+- **Next:** 15.C (generics `<T>` — real per-type monomorphization, the deep one), 15.D
+  (`event`/`raise`/`subscribe` + `fanout`/`fire_and_forget` on the Phase-14 spawn runtime). The
+  human merges — no merge/force-push from the agent.
