@@ -225,6 +225,21 @@ static int dotted_split(const char* lex, char* base, char* member) {
     return 1;
 }
 
+// Phase 15 (15.A): skip a generic type-parameter clause `<T, U, …>` (balanced angle brackets,
+// nesting tolerated) between a method/fn name and its `(` param list. Methods mirror functions:
+// they may be GENERIC. The value model is uniform i32, so a generic method binds its params and
+// lowers exactly like a non-generic one in this MVP; per-type monomorphization (substituting T)
+// is Phase 15.C. Leaves the parser on the token after the matching `>` (typically `(`).
+static void skip_generic_clause(Parser* p) {
+    if (p->current_token.type != TOKEN_LT) return;
+    int d = 0;
+    while (p->current_token.type != TOKEN_EOF) {
+        if (p->current_token.type == TOKEN_LT) { d++; fe_advance(p); continue; }
+        if (p->current_token.type == TOKEN_GT) { d--; fe_advance(p); if (d <= 0) break; continue; }
+        fe_advance(p);
+    }
+}
+
 static int is_dom_macro(const char* lexeme); // defined below
 static void lower_intrinsic_call(BytecodeBuffer* buffer, Parser* p, const LowerCtx* ctx); // recursive
 
@@ -1410,6 +1425,11 @@ static void collect_classes(const char* source, int base_slot) {
                 if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
                 continue;
             }
+            // Methods mirror functions: an optional leading `async` (the method returns intent<>),
+            // an optional generic clause `<T>` after the name, and a `: ReturnType` before the body.
+            if (depth == 1 && p.current_token.type == TOKEN_ASYNC && p.peek_token.type == TOKEN_FN) {
+                fe_advance(&p); // consume 'async' (async method — intent<> return; MVP body is synchronous)
+            }
             if (depth == 1 && p.current_token.type == TOKEN_FN && p.peek_token.type == TOKEN_IDENTIFIER) {
                 fe_advance(&p); // 'fn'
                 int mi = c->nmethods;
@@ -1421,6 +1441,7 @@ static void collect_classes(const char* source, int base_slot) {
                 }
                 slot++; // every method consumes a routine slot, even if the table is full
                 fe_advance(&p); // method name
+                skip_generic_clause(&p); // optional `<T>` generic params (uniform i32 model; 15.C)
                 if (p.current_token.type == TOKEN_LPAREN) {
                     fe_advance(&p);
                     int expect = 1; // a param name follows '(' or ','
@@ -1628,11 +1649,12 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
             if (!(depth == 1 && p.current_token.type == TOKEN_FN &&
                   p.peek_token.type == TOKEN_IDENTIFIER)) { fe_advance(&p); continue; }
 
-            fe_advance(&p); // 'fn'
+            fe_advance(&p); // 'fn'  (an `async fn` reaches here with its `async` already skipped above)
             char mname[96]; strncpy(mname, p.current_token.lexeme, 95); mname[95] = '\0';
             int midx = class_method_idx(ci, mname);
             int slot = (ci >= 0 && midx >= 0) ? g_class[ci].method_slot[midx] : 0;
             fe_advance(&p); // method name
+            skip_generic_clause(&p); // optional `<T>` generic params (uniform i32 model; 15.C)
 
             char params[8][96]; int nparams = 0;
             if (p.current_token.type == TOKEN_LPAREN) {

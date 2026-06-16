@@ -1367,18 +1367,26 @@ void test_codegen_li_call_func_sync(void) {
 // (instantiation), OP_OBJ_SET (field writes), OP_OBJ_GET (field reads in the method), OP_CALL_FUNC
 // (static method dispatch), plus uses_object/uses_spawn and a method body emitted as a routine.
 void test_frontend_interop_class_concrete(void) {
+    // Methods mirror functions: COMPLETE signature with a return type, and may be GENERIC (`<T>`)
+    // or `async` (returns intent<>). The frontend must parse all three forms and still bind params
+    // + resolve members correctly (the `<T>` clause is skipped — uniform i32 model; 15.C adds
+    // per-type monomorphization; async parses, full intent/await semantics are a later sub-block).
     const char* src =
         "extern fn emit_int(n) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
         "class Point {\n"
         "  let x;\n"
         "  let y;\n"
-        "  fn sum(self) { return self.x + self.y; }\n"
+        "  fn sum(self): i32 { return self.x + self.y; }\n"
+        "  fn scale<T>(self, k): i32 { return (self.x + self.y) * k; }\n"
+        "  async fn deferred(self): intent<i32> { return self.x + 1; }\n"
         "}\n"
         "let p = Point();\n"
         "p.x = 3;\n"
         "p.y = 4;\n"
         "let s = p.sum();\n"
-        "emit_int(s);\n";
+        "emit_int(s);\n"
+        "let t = p.scale(10);\n"
+        "emit_int(t);\n";
 
     BytecodeBuffer* buffer = codegen_li_create_context();
     TEST_ASSERT_NOT_NULL(buffer);
