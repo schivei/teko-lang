@@ -121,6 +121,14 @@ check traits.tks "$(cat <<'EXP'
 209
 EXP
 )"
+# Phase 15 (15.C): generics via real per-type MONOMORPHIZATION. Factory<T> is specialized per
+# instantiation (Factory$Circle/Factory$Square); inside make(), T() instantiates the concrete type
+# and t.tag() statically dispatches — resolved at compile time, no runtime type param. 11, 22.
+check generics.tks "$(cat <<'EXP'
+11
+22
+EXP
+)"
 # Phase 14 (14.A): `routines { worker(); worker(); }` fires two background tasks. The native
 # scheduler (teko_rt_run) drains them at $main exit, so they run AFTER main's body — the two
 # "worker ran" lines follow "main start"/"main end", proving deferred (not inline) execution.

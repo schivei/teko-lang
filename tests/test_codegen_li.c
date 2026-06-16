@@ -1582,3 +1582,46 @@ void test_frontend_interop_trait_dynamic_dispatch(void) {
     remove(wat);
     codegen_li_free_context(buffer);
 }
+
+// Phase 15 (15.C): generics via real per-type MONOMORPHIZATION. `Factory<T>` instantiated at two
+// concrete types generates two SPECIALIZED method bodies (Factory$Circle.make, Factory$Square.make),
+// each with `T()` substituted. Assert it compiles, lowers OBJ_NEW + CALL_FUNC, and the .wat carries
+// FOUR routines (Circle.tag, Square.tag, and the two specialized makes) — proving two distinct
+// specializations were emitted, not one shared generic body.
+void test_frontend_interop_generics_monomorphization(void) {
+    const char* src =
+        "extern fn emit_int(n) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "class Circle { let r; fn tag(self): i32 { return 11; } }\n"
+        "class Square { let s; fn tag(self): i32 { return 22; } }\n"
+        "class Factory<T> { let d; fn make(self): i32 { let t = T(); let r = t.tag(); return r; } }\n"
+        "let fc = Factory<Circle>(); let a = fc.make(); emit_int(a);\n"
+        "let fs = Factory<Square>(); let b = fs.make(); emit_int(b);\n";
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_object);
+    int saw_new = 0, saw_call = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == (unsigned char)OP_OBJ_NEW)  saw_new = 1;
+        if (buffer->code[i] == (unsigned char)OP_CALL_FUNC) saw_call = 1;
+    }
+    TEST_ASSERT_TRUE(saw_new && saw_call);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32; target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_generics.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(131072);
+    TEST_ASSERT_NOT_NULL(out);
+    memset(out, 0, 131072);
+    size_t n = fread(out, 1, 131071, f); out[n] = '\0'; fclose(f);
+    // Circle.tag=$routine_0, Square.tag=$routine_1, Factory$Circle.make=$routine_2,
+    // Factory$Square.make=$routine_3 — the 4th routine proves two distinct specializations.
+    TEST_ASSERT_NOT_NULL(strstr(out, "(func $routine_3"));
+    free(out);
+    remove(wat);
+    codegen_li_free_context(buffer);
+}

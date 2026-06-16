@@ -49,6 +49,7 @@ extern void test_frontend_interop_class_concrete(void);
 extern void test_frontend_interop_trait_grammar(void);
 extern void test_frontend_interop_trait_collision(void);
 extern void test_frontend_interop_trait_dynamic_dispatch(void);
+extern void test_frontend_interop_generics_monomorphization(void);
 extern void test_frontend_interop_waiters_lowering(void);
 extern void test_frontend_interop_controlflow_lowering(void);
 extern void test_frontend_interop_resilience_lowering(void);
@@ -292,6 +293,7 @@ int main(void) {
     RUN_TEST(test_frontend_interop_trait_grammar);
     RUN_TEST(test_frontend_interop_trait_collision);
     RUN_TEST(test_frontend_interop_trait_dynamic_dispatch);
+    RUN_TEST(test_frontend_interop_generics_monomorphization);
     RUN_TEST(test_frontend_interop_waiters_lowering);
     RUN_TEST(test_frontend_interop_controlflow_lowering);
     RUN_TEST(test_frontend_interop_resilience_lowering);
