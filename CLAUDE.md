@@ -242,8 +242,18 @@ literals normalize to canonical ms at compile time (adopted in channel delay arg
 Sub-block **14.H real `.tks` capstone is DONE**: one program combining functions + a background
 routine with a LOOP + main loops + atomic (14.E) + delayed channel (14.C) + await/wait (14.G) →
 [15,6,1,2,3,42]. Proofs `capstone.tks` native + WASM.
-**PHASE 14 IS COMPLETE** — 14.A–14.H + control-flow foundation all done & CI-green on all four
+Sub-block **14.I `routines` ARGUMENTS (Go-style) is DONE** (owner follow-up): a `routines {
+worker(a, b, …); }` task takes arbitrary args; `fn worker(a, b)` binds each param. Opcodes
+`OP_SPAWN_ASYNC_ARGS` (0x68, argc — args staged in `$a0..`) + `OP_LOAD_SPAWN_ARG` (0x69, idx).
+Native: per-task arg vector in `teko_rt_sched` + an args-pointer routine ABI; WASM: args in the task
+spill frame. This enables a **real concurrent producer/consumer**: a producer task and a consumer
+share a channel by passing its handle (the channel's backing store lives in the runtime), and the
+consumer drains with a structured **poll** loop (`poll → if ready recv else stop/await`) — no
+blocking-recv/`select` needed. The Phase-10 `OP_SPAWN_ASYNC` (in-module channel `arg=$cp`) is
+untouched. Proof `producer_consumer.tks` native + WASM → 15.
+**PHASE 14 IS COMPLETE** — 14.A–14.I + control-flow foundation all done & CI-green on all four
 gates; no dead tokens (every reserved concurrency/resilience keyword is live with an executable
-`.tks` proof on native AND WASM). Suite 199/199; ASan/UBSan (both dispatch paths) + TSan green; 16
-native goldens intact. **Ready to leave draft** (PR #7; the human merges — no merge/force-push from
-the agent). Continuation/history: `docs/HANDOFF_PHASE14.md`.
+`.tks` proof on native AND WASM); routines support real producer/consumer via Go-style args. Suite
+200/200; ASan/UBSan (both dispatch paths) + TSan green; 16 native goldens intact. **Ready to leave
+draft** (PR #7; the human merges — no merge/force-push from the agent). Continuation/history:
+`docs/HANDOFF_PHASE14.md`.

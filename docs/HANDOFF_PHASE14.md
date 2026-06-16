@@ -106,10 +106,19 @@ it. (14.F's routine-trampoline alternative avoids loop-IL, but the 14.H samples 
      routine bodies now lower via the shared block-body dispatcher (loops inside a `fn` task).
      Proof `capstone.tks` native + WASM → [15,6,1,2,3,42].
 
-**▶▶ PHASE 14 IS COMPLETE — all sub-blocks (14.A–14.H) + control-flow foundation done, all 4 CI
-gates green, no dead tokens (executable `.tks` proof per surface, native AND WASM). Ready to leave
-draft (the human merges — no merge/force-push from the agent).** Suite 199/199; ASan+UBSan (both
-dispatch paths) + TSan green; 16 native goldens intact.
+  5. **14.I — Routine arguments (Go-style)** ✅ DONE (owner follow-up; commit `fc3b848`; suite
+     200/200). `routines { worker(a, b, …); }` passes arbitrary args; `fn worker(a, b)` binds each
+     param from the spawn args. Opcodes `OP_SPAWN_ASYNC_ARGS` (0x68, argc) + `OP_LOAD_SPAWN_ARG`
+     (0x69, idx). Native: per-task arg vector in `teko_rt_sched` + args-ptr routine ABI; WASM: args
+     in the task spill frame. Enables a real producer-task ↔ consumer (share a channel handle; the
+     consumer poll-drains — no blocking-recv/`select` needed). Phase-10 `OP_SPAWN_ASYNC` untouched.
+     Proof `producer_consumer.tks` native + WASM → 15.
+
+**▶▶ PHASE 14 IS COMPLETE — all sub-blocks (14.A–14.I) + control-flow foundation done, all 4 CI
+gates green, no dead tokens (executable `.tks` proof per surface, native AND WASM), routines
+support real concurrent producer/consumer via Go-style args. Ready to leave draft (the human
+merges — no merge/force-push from the agent).** Suite 200/200; ASan+UBSan (both dispatch paths) +
+TSan green; 16 native goldens intact.
 - **Before starting:** `git fetch && git checkout feat/phase-14-advanced-concurrency && git pull --ff-only`,
   rebuild (`cmake --build build`), run `./build/teko_tests` (expect 194/194), then follow the
   sub-plans below. The channel sub-blocks (14.B/C/D) are the copy-me template; 14.E/14.F/14.G are NOT

@@ -244,6 +244,21 @@ merge/force-push** (the human merges).
   *(A dedicated Layer-B `--target=wasm-threads` thread sample remains covered by the Phase-10
   threads proof; the capstone targets Layer A.)*
 
-**Phase 14 is COMPLETE** — all sub-blocks (14.A–14.H) + the control-flow foundation are done and
+- **14.I — Routine arguments (Go-style) + real producer/consumer** — ✅ done on both targets
+  (owner follow-up). A `routines { worker(a, b, …); }` task now takes **arbitrary arguments** —
+  passed by staging each into `$a0..$a(N-1)` (OP_SETARG) then `OP_SPAWN_ASYNC_ARGS argc`; the
+  routine binds each `fn` param from `OP_LOAD_SPAWN_ARG i`. The channel's backing store already
+  lives in the runtime (native heap / WASM reactor), so passing the **handle** (an int) is enough
+  for a producer task and a consumer to share a channel — no blocking-recv/`select` needed: the
+  structured **poll** + the control-flow foundation express a real consumer drain loop
+  (`poll → if ready recv else stop/await`). Native: per-task arg vector in `teko_rt_sched`
+  (`teko_rt_spawn_setarg`/`_args`), routine ABI passes an args pointer. WASM: args copied into the
+  task spill frame, read via `$frame`. The Phase-10 `OP_SPAWN_ASYNC` (in-module-channel `arg=$cp`)
+  is untouched. Proofs `runtime/native/samples/producer_consumer.tks` +
+  `runtime/wasm/run-producer-consumer.mjs` (producer task given `(channel, count)` fills it; the
+  consumer poll-drains → 15). Suite 200/200.
+
+**Phase 14 is COMPLETE** — all sub-blocks (14.A–14.I) + the control-flow foundation are done and
 CI-green on all four gates; no dead tokens (every reserved concurrency/resilience keyword is live
-with an executable `.tks` proof on native AND WASM). Ready to leave draft.
+with an executable `.tks` proof on native AND WASM), and routines support real concurrent
+producer/consumer via Go-style arguments. Ready to leave draft.
