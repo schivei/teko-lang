@@ -224,6 +224,11 @@ void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
     // declared. Set uses_float (id 54 may be the SOLE float op in a module — e.g. a parse that only
     // feeds an int via convert.to_int — so this is the load-bearing flag, not merely defensive).
     if (codec_id == 50 || codec_id == 54) buffer->uses_float = 1;
+    // Phase 17.F.4 — ids 59 (decimal.to_string) and 60 (decimal.parse) touch the 256-byte decimal
+    // accumulator $d0 (by pointer), so the decimal frame region / WASM linear-memory slots + the
+    // reactor teko_rt_decimal_* imports MUST be emitted. Set uses_decimal (id 59 may be the SOLE
+    // decimal op in a module — e.g. an auto-to_string of a parsed decimal — so this is load-bearing).
+    if (codec_id == 59 || codec_id == 60) buffer->uses_decimal = 1;
     emit_byte(buffer, OP_CALL_RUNTIME);
     emit_int(buffer, codec_id);
 }
@@ -398,6 +403,17 @@ void codegen_li_emit_dload_local(BytecodeBuffer* buffer, int slot) {
     buffer->uses_decimal = 1;
     emit_byte(buffer, OP_DLOAD_LOCAL);
     emit_int(buffer, slot);
+}
+
+// Phase 17.F.4: emit a single-byte int/float↔decimal CAST opcode (OP_I2D/F2D/D2I/D2F). Sets
+// uses_decimal so the decimal frame region / WASM slots + the teko_rt_decimal_* casts exist. I2D
+// also reads $w0 / F2D reads $f0 / D2I writes $w0 / D2F writes $f0 — the backends marshal those.
+void codegen_li_emit_dcast(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    // OP_F2D/OP_D2F also touch the float accumulator $f0, so the WASM float locals must exist.
+    if (op == OP_F2D || op == OP_D2F) buffer->uses_float = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: OP_I2D / OP_F2D / OP_D2I / OP_D2F
 }
 
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {

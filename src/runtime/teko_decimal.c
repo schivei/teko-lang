@@ -826,3 +826,61 @@ int teko_decimal_parse(const char* s, teko_decimal* out) {
     // (2) Coefficient must fit 1984 bits; dec_store handles the check + zero-sign canonicalize.
     return dec_store((uint8_t)(sign ? 1 : 0), (uint8_t)scale, x, BN_WIDE, out);
 }
+
+// ----------------------------------------------------------------------------------------
+// 17.F.4 — checked int/float ↔ decimal cast cores.
+// ----------------------------------------------------------------------------------------
+
+int teko_decimal_from_i32(int v, teko_decimal* out) {
+    // Build the magnitude digit string (INT32_MIN-safe: widen to int64 before negating so
+    // -2147483648 negates without UB), then store at scale 0. The magnitude is <= 10 digits,
+    // far below 1984 bits — dec_store cannot fail here.
+    long long w = (long long)v;
+    int sign = (w < 0) ? 1 : 0;
+    unsigned long long mag = (w < 0) ? (unsigned long long)(-w) : (unsigned long long)w;
+    char digits[24];
+    int t = 0;
+    if (mag == 0) { digits[t++] = '0'; }
+    else { while (mag > 0) { digits[t++] = (char)('0' + (int)(mag % 10ull)); mag /= 10ull; } }
+    // Reverse into MSB-first order.
+    char ds[24];
+    int n = 0;
+    for (int i = t - 1; i >= 0; i--) ds[n++] = digits[i];
+    ds[n] = '\0';
+    return teko_decimal_from_components((uint8_t)sign, 0u, ds, out);
+}
+
+int teko_decimal_to_i32(const teko_decimal* d, int* out) {
+    // TRUNCATE toward zero: drop the `scale` low decimal digits of the coefficient, then map the
+    // remaining integer magnitude (+ sign) to a signed i32, range-checking against the i32 bounds.
+    // The check is on the truncated integer, so a value like 3.99 -> 3 (in range) succeeds; only an
+    // |integer-part| that does not fit i32 fails. We compute the integer magnitude exactly in a wide
+    // bignum (no double round-trip) so the range check is exact even for huge coefficients.
+    uint64_t x[BN_WIDE];
+    dec_load(d, x, BN_WIDE);
+    int scale = (int)d->scale;
+    if (scale > 0) {
+        // integer magnitude = floor(coeff / 10^scale)  (truncation toward zero on the magnitude).
+        uint64_t div[BN_WIDE];
+        for (int i = 0; i < BN_WIDE; i++) div[i] = 0;
+        div[0] = 1;
+        if (!bn_mul_pow10(div, scale, BN_WIDE)) { return 0; } // 10^scale overflow (cannot for scale<=38)
+        uint64_t q[BN_WIDE], r[BN_WIDE];
+        bn_divmod(x, BN_WIDE, div, BN_WIDE, q, r);
+        for (int i = 0; i < BN_WIDE; i++) x[i] = q[i];
+    }
+    // x now holds the truncated integer magnitude. It must fit the signed-i32 range: magnitude
+    // <= 2147483647 for non-negative, <= 2147483648 for negative (INT32_MIN).
+    int neg = (!bn_is_zero(x, BN_WIDE) && d->sign) ? 1 : 0;
+    // Reject any limb above the low one (magnitude >= 2^64 certainly out of range).
+    for (int i = 1; i < BN_WIDE; i++) if (x[i] != 0) return 0;
+    uint64_t mag = x[0];
+    if (neg) {
+        if (mag > 2147483648ull) return 0;
+        *out = (int)(-(long long)mag);
+    } else {
+        if (mag > 2147483647ull) return 0;
+        *out = (int)mag;
+    }
+    return 1;
+}

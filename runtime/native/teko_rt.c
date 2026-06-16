@@ -897,3 +897,47 @@ void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_deci
 void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt) {
     (void)teko_decimal_cmp(a, b, out_lt_eq_gt);
 }
+
+// Phase 17.F.4 — checked int/float ↔ decimal CAST wrappers. F2D/D2F bridge through the
+// shortest-string form (teko_convert_f64_to_string / teko_convert_parse_f64) — both sides are
+// correctly-rounded, so the cast is clean — reusing the 17.C/17.E cores rather than a fresh path.
+void teko_rt_decimal_from_i32(int v, teko_decimal* out) {
+    (void)teko_decimal_from_i32(v, out); // cannot fail (|v| fits well within 1984 bits)
+}
+void teko_rt_decimal_from_f64(double v, teko_decimal* out) {
+    // f64 -> shortest `.`-decimal -> exact decimal. Non-finite (NaN/Inf) has no finite decimal
+    // form and the shortest-string renderer yields "NaN"/"Infinity", which teko_decimal_parse
+    // rejects -> fail-loud (decimal is always finite). A normal finite double round-trips exactly.
+    char* s = teko_convert_f64_to_string(v);
+    if (!s) { teko_rt_die("convert.to_decimal: out of memory"); return; }
+    int ok = teko_decimal_parse(s, out);
+    free(s);
+    if (!ok) teko_rt_die("convert.to_decimal: value not representable as a finite decimal");
+}
+int teko_rt_decimal_to_i32(const teko_decimal* d) {
+    int v;
+    if (!teko_decimal_to_i32(d, &v)) teko_rt_die("convert.to_int: decimal out of i32 range");
+    return v;
+}
+double teko_rt_decimal_to_f64(const teko_decimal* d) {
+    // decimal -> exact plain `.`-decimal string -> correctly-rounded f64 (round-to-nearest-even).
+    char* s = teko_decimal_to_string(d);
+    if (!s) { teko_rt_die("convert.to_float: out of memory"); return 0.0; }
+    double v = 0.0;
+    int ok = teko_convert_parse_f64(s, &v);
+    free(s);
+    // The plain-decimal string is always a valid finite number; a parse failure would only be a
+    // magnitude beyond DBL_MAX (overflow to ±Inf). Fail loud rather than return Inf silently.
+    if (!ok) teko_rt_die("convert.to_float: decimal magnitude overflows f64");
+    return v;
+}
+
+// Phase 17.F.4 — decimal language surface (ids 59/60).
+char* teko_rt_decimal_to_string(const teko_decimal* d) {
+    char* s = teko_decimal_to_string(d);
+    if (!s) teko_rt_die("decimal.to_string: out of memory");
+    return s;
+}
+void teko_rt_decimal_parse(const char* s, teko_decimal* out) {
+    if (!teko_decimal_parse(s, out)) teko_rt_die("decimal.parse: invalid decimal");
+}

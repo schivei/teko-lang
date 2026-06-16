@@ -1287,6 +1287,16 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_div\" (func $decimal_div (param i32) (param i32) (param i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_mod\" (func $decimal_mod (param i32) (param i32) (param i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_cmp\" (func $decimal_cmp (param i32) (param i32) (param i32)))\n");
+                // Phase 17.F.4 — int/float ↔ decimal CASTS + the decimal.to_string/parse surface
+                // (ids 59/60). from_i32/from_f64/parse write into a 256-byte slot (&out); to_i32/
+                // to_f64 read one and return an i32/f64; to_string returns a char* (i32 ptr in the
+                // shared memory). from_f64/to_f64 are the only decimal imports touching f64.
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_from_i32\" (func $decimal_from_i32 (param i32) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_from_f64\" (func $decimal_from_f64 (param f64) (param i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_i32\" (func $decimal_to_i32 (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_f64\" (func $decimal_to_f64 (param i32) (result f64)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_to_string\" (func $decimal_to_string (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_decimal_parse\" (func $decimal_parse (param i32) (param i32)))\n");
             }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
@@ -1392,6 +1402,16 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 // param and store the resulting `f64` into the float accumulator $f0 (VT_FLOAT).
                 // Stack-neutral.
                 fprintf(f, "    local.get $w0\n    call $crypto_54\n    local.set $f0\n");
+            } else if (arg == 59) {
+                // Phase 17.F.4 — decimal.to_string: the decimal value is in the $d0 slot (NOT $w0),
+                // so pass &$d0 as the i32 pointer; the char* result lands in $w0 (VT_STR).
+                fprintf(f, "    i32.const %d\n    call $decimal_to_string\n    local.set $w0\n",
+                        teko_wasm_decimal_slot_off(ctx, 0));
+            } else if (arg == 60) {
+                // Phase 17.F.4 — decimal.parse: the string ptr is in $w0 (arg0); the result decimal
+                // is written into the $d0 slot (arg1 = &$d0). Checked/fail-loud (reactor traps).
+                fprintf(f, "    local.get $w0\n    i32.const %d\n    call $decimal_parse\n",
+                        teko_wasm_decimal_slot_off(ctx, 0));
             } else if (wasm_is_crypto_ext_id(arg)) {
                 // Reactor-backed crypto: call the imported teko_rt_* entry point. Multi-arg
                 // ABI mirrors OP_CALL_IMPORT — args 0..n-2 come from the staging slots
@@ -1730,6 +1750,27 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_DLOAD_LOCAL: // $d0 = $dv<arg>
             fprintf(f, "    i32.const %d\n    i32.const %d\n    i32.const 256\n    memory.copy\n",
                     teko_wasm_decimal_slot_off(ctx, 0), teko_wasm_decimal_slot_off(ctx, 3 + arg));
+            break;
+
+        // Phase 17.F.4: int/float ↔ decimal CASTS. The decimal value rides the $d0 slot (passed by
+        // i32 offset/pointer over the shared memory); I2D consumes the int $w0, F2D the f64 $f0; D2I
+        // produces the checked i32 in $w0, D2F the f64 in $f0. The reactor wrappers do the work
+        // (F2D/D2F bridge through the shortest string; D2I truncates + traps on i32 overflow).
+        case OP_I2D: // teko_rt_decimal_from_i32($w0, &$d0)
+            fprintf(f, "    local.get $w0\n    i32.const %d\n    call $decimal_from_i32\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_F2D: // teko_rt_decimal_from_f64($f0, &$d0)
+            fprintf(f, "    local.get $f0\n    i32.const %d\n    call $decimal_from_f64\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_D2I: // $w0 = teko_rt_decimal_to_i32(&$d0)  (checked; traps on i32 overflow)
+            fprintf(f, "    i32.const %d\n    call $decimal_to_i32\n    local.set $w0\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
+            break;
+        case OP_D2F: // $f0 = teko_rt_decimal_to_f64(&$d0)
+            fprintf(f, "    i32.const %d\n    call $decimal_to_f64\n    local.set $f0\n",
+                    teko_wasm_decimal_slot_off(ctx, 0));
             break;
 
         // ====================================================================

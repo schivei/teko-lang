@@ -76,4 +76,14 @@ char* teko_decimal_to_string(const teko_decimal* d);
 // success, 0 fail-loud on malformed input / coefficient overflow. On failure *out is zeroed.
 int teko_decimal_parse(const char* s, teko_decimal* out);
 
+// --- 17.F.4: checked int/float ↔ decimal cast cores -------------------------------------
+// I2D — exact: a signed 32-bit int -> decimal (scale 0). The int's magnitude is well within
+// 1984 bits, so this CANNOT fail; returns 1, writes *out. (INT32_MIN-safe.)
+int teko_decimal_from_i32(int v, teko_decimal* out);
+// D2I — checked decimal -> i32, TRUNCATING toward zero (matches the float->int OP_F2I posture:
+// the fractional part is dropped, not an error). Returns 1 + writes *out on success; returns 0
+// (and leaves *out unchanged) ONLY when the truncated integer is out of the signed-i32 range
+// [-2147483648, 2147483647]. The wrapper turns 0 into a fail-loud teko_rt_die.
+int teko_decimal_to_i32(const teko_decimal* d, int* out);
+
 #endif // TEKO_DECIMAL_H

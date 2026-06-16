@@ -74,6 +74,10 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         // emission — the generic `emit_call(sym, 1)` is correct (rax/$w0 is clobbered but unused; the
         // frontend reads the result from $f0 as VT_FLOAT).
         case 54: sym = "teko_rt_parse_float";      arity = 1; break; // (str) -> f64 (checked)
+        // Phase 17.F.4 — decimal language surface (by-pointer ABI; OP_CALL_RUNTIME special-cases the
+        // emission, but the symbol/arity feed the WASM import declaration).
+        case 59: sym = "teko_rt_decimal_to_string"; arity = 1; break; // (&decimal) -> str
+        case 60: sym = "teko_rt_decimal_parse";     arity = 1; break; // (str, &decimal) checked
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;
@@ -680,6 +684,25 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             // wrongly marshal the integer $w0 into the first GP-arg register. The char* result lands
             // in rax/x0 = $w0, exactly like the other to_string ids.
             if (arg == 50) emit_call_noarg(ctx, "teko_rt_float_to_string");
+            else if (arg == 59) {
+                // Phase 17.F.4 — decimal.to_string: the decimal value is in the $d0 slot (NOT $w0),
+                // so pass &$d0 as the first GP arg; the char* result lands in rax/x0 = $w0 (VT_STR).
+                emit_decimal_slot_addr(ctx, 0, 0);    // rdi/x0 = &$d0
+                if (arm) fprintf(f, "    bl %steko_rt_decimal_to_string\n", pre);
+                else     fprintf(f, "    call %steko_rt_decimal_to_string%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            } else if (arg == 60) {
+                // Phase 17.F.4 — decimal.parse: the string ptr is in $w0 (arg0); the result decimal
+                // is written into the $d0 slot (arg1 = &$d0). Checked/fail-loud inside the wrapper.
+                if (arm) {
+                    // x0 already holds the string ptr (= $w0). arg1 = x1 = &$d0.
+                    emit_decimal_slot_addr(ctx, 1, 0);
+                    fprintf(f, "    bl %steko_rt_decimal_parse\n", pre);
+                } else {
+                    fprintf(f, "    movq %%rax, %%rdi\n");  // rdi = string ptr (arg0)
+                    emit_decimal_slot_addr(ctx, 1, 0);      // rsi = &$d0 (arg1)
+                    fprintf(f, "    call %steko_rt_decimal_parse%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+                }
+            }
             else if (sym) emit_call(ctx, sym, arity);
             break;
         }
@@ -1088,6 +1111,40 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_DLOAD:  emit_decimal_slot_copy(ctx, 0, 1); break; // $d0 = $d1
         case OP_DSTORE_LOCAL: emit_decimal_slot_copy(ctx, 3 + arg, 0); break; // $dv<arg> = $d0
         case OP_DLOAD_LOCAL:  emit_decimal_slot_copy(ctx, 0, 3 + arg); break; // $d0 = $dv<arg>
+
+        // Phase 17.F.4: int/float ↔ decimal CASTS. I2D/F2D write &$d0; D2I/D2F read &$d0 and return a
+        // register value. The decimal value flows ONLY by pointer (lea &$d0 -> the GP arg reg). I2D
+        // takes the int from $w0 (rax/x0); F2D takes the double from $f0 (xmm0/d0 = the FP arg reg);
+        // D2I returns the checked i32 in rax/eax = $w0; D2F returns the double in xmm0/d0 = $f0.
+        case OP_I2D: // teko_rt_decimal_from_i32(int v=$w0, &$d0)
+            if (arm) {
+                // x0 already holds the int (= $w0). The pointer is arg1 = x1.
+                emit_decimal_slot_addr(ctx, 1, 0);   // x1 = &$d0
+                fprintf(f, "    bl %steko_rt_decimal_from_i32\n", pre);
+            } else {
+                fprintf(f, "    movl %%eax, %%edi\n"); // edi = int (arg0)  [movl zero-extends rdi]
+                emit_decimal_slot_addr(ctx, 1, 0);    // rsi = &$d0 (arg1)
+                fprintf(f, "    call %steko_rt_decimal_from_i32%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            }
+            break;
+        case OP_F2D: // teko_rt_decimal_from_f64(double v=$f0, &$d0)
+            // The double is already in xmm0/d0 (= $f0) per the FP-arg ABI; the pointer is GP arg0.
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0 (arg1 in C; first GP reg)
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_from_f64\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_from_f64%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            break;
+        case OP_D2I: // $w0 = teko_rt_decimal_to_i32(&$d0)  (checked, fail-loud)
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_to_i32\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_to_i32%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            // result i32 already in eax/w0 (= $w0).
+            break;
+        case OP_D2F: // $f0 = teko_rt_decimal_to_f64(&$d0)
+            emit_decimal_slot_addr(ctx, 0, 0);        // rdi/x0 = &$d0
+            if (arm) fprintf(f, "    bl %steko_rt_decimal_to_f64\n", pre);
+            else     fprintf(f, "    call %steko_rt_decimal_to_f64%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            // result double already in xmm0/d0 (= $f0).
+            break;
 
         default:
             break; // unsupported opcode in the hosted subset (straight-line surface)

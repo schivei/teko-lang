@@ -473,5 +473,53 @@ float-free/decimal-free native+WASM output stay BYTE-IDENTICAL (every decimal em
   **NO `__int128`/`__multi3`/libc anywhere** in the decimal runtime OR the reactor (the `-O1`-per-file
   build keeps the 64-bit-limb arithmetic self-contained).
 
-Next: **17.F.4** (checked casts `OP_I2D/D2I/F2D/D2F` 0x93–0x96 + `convert.to_decimal/to_int/to_float`
-mixed promotion + `decimal.to_string`/`parse` surface (ids 59/60) + auto-`to_string` for decimal).
+### Status — 17.F.4 (checked int/float↔decimal casts + the `decimal.to_string`/`parse` surface + auto-`to_string`) is DONE
+The FINAL decimal piece, closing 17.F and **Phase 17**. The casts `0x93–0x96` are now LIVE and the
+decimal language surface (ids 59/60) + auto-`to_string` for decimal in concat/interpolation +
+mixed int/float+decimal promotion all work, byte-identical native vs WASM. All decimal emission stays
+gated on `uses_decimal`/`wasm_emit_decimal` so the 16 freestanding goldens + every float-free/
+decimal-free native+WASM module stay byte-identical.
+- **Cast cores (`src/runtime/teko_decimal.c`):** `teko_decimal_from_i32` (int→decimal, scale 0, cannot
+  fail) and `teko_decimal_to_i32` (decimal→i32, **TRUNCATE toward zero** — matching the float→int
+  `OP_F2I` posture — CHECKED fail-loud ONLY on i32-range overflow). F2D/D2F use the **shortest-string
+  bridge** (`teko_convert_f64_to_string`→`teko_decimal_parse` and `teko_decimal_to_string`→
+  `teko_convert_parse_f64`) — both sides are correctly-rounded, so the cast is clean and reuses the
+  17.C/17.E cores. **+2 KATs** (`test_teko_decimal_from_i32`, `test_teko_decimal_to_i32`: trunc-toward-
+  zero, INT32 edges, out-of-range→fail).
+- **D2I non-integer policy (decided + documented):** a fractional decimal **truncates toward zero**
+  (3.99→3, -3.99→-3), NOT an error — consistent with `OP_F2I`. The CHECK is on the truncated integer:
+  it fails loud (native exit 70 / WASM trap) only when |integer part| exceeds i32 range.
+- **Opcodes `OP_I2D/D2I/F2D/D2F` (0x93–0x96) LIVE** (`codegen_li.h`; `codegen_li_emit_dcast`). Native
+  (`emit_native_hosted.c`): inline by-pointer ABI (`lea &$d0`→arg reg) to the `teko_rt_decimal_*` cast
+  wrappers; I2D from `$w0`, F2D from `$f0`, D2I→`$w0`, D2F→`$f0`. WASM (`emit_wasm.c`): `call` the
+  reactor `$decimal_from_i32/from_f64/to_i32/to_f64`. codegen_metal CSE: all four are integer barriers;
+  D2I also resets the `$w0` ICONST cache (like `OP_F2I`).
+- **Surface ids 59 (`decimal.to_string`) / 60 (`decimal.parse`, checked)** — by-pointer ABI like the
+  17.F.3 decimal calls; native special-cases them in `OP_CALL_RUNTIME` (id 59 `lea &$d0`→arg0→char* in
+  `$w0`; id 60 string `$w0`→arg0 + `&$d0`→arg1), WASM calls `$decimal_to_string`/`$decimal_parse`.
+  `runtime_result_vt`: 59→VT_STR, 60→VT_DECIMAL. Reactor EXPORTS + WASM imports added.
+- **Frontend (`frontend_interop.c`):** `convert.to_decimal` joins the floatcast head (→I2D/F2D);
+  `convert.to_int`/`to_float` accept a decimal arg (→D2I/D2F); a new `decimal.to_string`/`parse` head
+  (`is_decimalsurf_head`/`lower_decimalsurf`) wired at eval_primary + lower_init_value + the top-level
+  call-arg path. `coerce_to_string_in_w0(VT_DECIMAL)` now emits id 59 (and the `+`-concat reloads a
+  left-decimal operand via DLOAD_LOCAL before coercing — the 17.D float pattern). **Mixed int/float +
+  decimal promotion** (the 17.F.3 deferral): when either `+ - * / % == …` operand is VT_DECIMAL, the
+  non-decimal one is widened via I2D/F2D. `lower_init_value` routes the cast/surface heads through
+  `eval_expr_prec` so a TRAILING operator (`let g = convert.to_decimal(n) + total;`) is consumed.
+- **Proofs:** `runtime/{native,wasm}/samples/decimal_surface.tks` → `10.00` / `total = 10.00` /
+  `[10.00]` / `3.50` / `grand = 15.00` / `bumped = 13.00` / `2.5` / `int 10` — `decimal.to_string` of
+  arithmetic, parse round-trip, auto-`to_string` in concat + interpolation, mixed `int + decimal` via
+  `to_decimal` (both operand orders), float→decimal→string, decimal→i32. BYTE-IDENTICAL native
+  (run-native.sh) vs WASM (run-decimal-surface.mjs). `decimal_fail.tks` → emits `before` then native-
+  aborts exit 70 / WASM-traps on `decimal.parse("abc")`.
+- **Verification:** suite **246/246**; ASan+UBSan clean on BOTH dispatch paths; TSan clean; native +
+  WASM proofs byte-identical (happy + fail-loud); 16 native goldens + all float-free/decimal-free
+  native+WASM output byte-identical; existing float/crypto/duplex WASM proofs intact; **NO
+  `__int128`/`__multi3`/libc** anywhere in the decimal runtime OR the reactor (confirmed by grepping the
+  reactor object — the `-O1`-per-file build keeps the 64-bit-limb arithmetic self-contained).
+
+## Phase 17 is COMPLETE
+17.A–17.E (the f64 core) + 17.F.1–17.F.4 (the 256-byte exact base-10 `decimal`: runtime core,
+parse/format, value model, and now casts + surface + auto-`to_string`) are all DONE & locally green.
+Every reserved float/decimal token is LIVE with an executable `.tks` proof on native AND WASM (no dead
+tokens); all four CI gates green; the closing float gap from Phase 16 is fully closed.

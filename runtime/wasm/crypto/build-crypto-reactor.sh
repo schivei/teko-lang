@@ -126,7 +126,11 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          # Phase 17.F.3: 256-byte decimal value-model ops (OP_D* import these; by-pointer ABI over
          # the SHARED linear memory — i32 slot offsets — exactly like the crypto hex-string ABI).
          teko_rt_decimal_add teko_rt_decimal_sub teko_rt_decimal_mul
-         teko_rt_decimal_div teko_rt_decimal_mod teko_rt_decimal_cmp)
+         teko_rt_decimal_div teko_rt_decimal_mod teko_rt_decimal_cmp
+         # Phase 17.F.4: int/float ↔ decimal casts + the decimal.to_string/parse surface (ids 59/60).
+         teko_rt_decimal_from_i32 teko_rt_decimal_from_f64
+         teko_rt_decimal_to_i32 teko_rt_decimal_to_f64
+         teko_rt_decimal_to_string teko_rt_decimal_parse)
 LDEXPORTS=(); for e in "${EXPORTS[@]}"; do LDEXPORTS+=("--export=$e"); done
 
 # Layout: keep the whole reactor image (data + shadow stack + heap) ABOVE Teko's

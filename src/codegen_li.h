@@ -248,7 +248,16 @@ typedef enum {
     OP_DLOAD        = 0x90, // $d0 = $d1   (256-byte memcpy)
     OP_DSTORE_LOCAL = 0x91, // 4-byte slot: $dv<slot> = $d0  (256-byte memcpy)
     OP_DLOAD_LOCAL  = 0x92, // 4-byte slot: $d0 = $dv<slot>  (256-byte memcpy)
-    // 0x93 = OP_I2D / 0x94 = OP_D2I / 0x95 = OP_F2D / 0x96 = OP_D2F reserved for 17.F.4 (do NOT emit).
+
+    // Phase 17.F.4 (LIVE): int/float ↔ decimal CASTS. Each is single-byte and flows the decimal value
+    // by pointer through the $d0 slot. The casts call the teko_rt_decimal_* cast wrappers; F2D/D2F
+    // bridge through the shortest-string form (both sides correctly-rounded), I2D builds the
+    // coefficient from the int, D2I truncates toward zero (matches OP_F2I) and is CHECKED/fail-loud on
+    // i32-range overflow. Gated on uses_decimal so decimal-free output stays byte-identical.
+    OP_I2D          = 0x93, // $d0 = (decimal)$w0   (int -> decimal, scale 0; cannot fail)
+    OP_D2I          = 0x94, // $w0 = (i32)$d0       (decimal -> i32, truncate, checked fail-loud)
+    OP_F2D          = 0x95, // $d0 = (decimal)$f0   (f64 -> decimal via shortest string)
+    OP_D2F          = 0x96, // $f0 = (f64)$d0       (decimal -> f64 via shortest string)
 
     // Phase 17.F (RESERVED — owner-APPROVED, implemented after 17.A–17.E): an EXACT base-10
     // `decimal` type — a FIXED-WIDTH 256-BYTE value (~8B metadata: sign + decimal scale/exponent;
@@ -465,6 +474,9 @@ void codegen_li_emit_dconst(BytecodeBuffer* buffer, const unsigned char* blob);
 void codegen_li_emit_dunop(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_dstore_local(BytecodeBuffer* buffer, int slot);
 void codegen_li_emit_dload_local(BytecodeBuffer* buffer, int slot);
+// Phase 17.F.4: emit an int/float↔decimal cast opcode (OP_I2D/OP_F2D/OP_D2I/OP_D2F). Sets
+// uses_decimal (and uses_float for OP_F2D/OP_D2F). Mirrors codegen_li_emit_f2i for the float side.
+void codegen_li_emit_dcast(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

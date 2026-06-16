@@ -166,3 +166,58 @@ void test_teko_decimal_roundtrips(void) {
         free(s);
     }
 }
+
+// 17.F.4 — I2D: int -> decimal (scale 0). Verify via the formatter (exact, scale-preserving) and a
+// round-trip through D2I. INT32_MIN/MAX edges included (the magnitude-build is INT64-widened).
+void test_teko_decimal_from_i32(void) {
+    struct { int v; const char* s; } cases[] = {
+        { 0, "0" }, { 1, "1" }, { -1, "-1" }, { 42, "42" }, { -42, "-42" },
+        { 1000000, "1000000" }, { 2147483647, "2147483647" },
+        { -2147483647, "-2147483647" }, { -2147483648, "-2147483648" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        teko_decimal d;
+        TEST_ASSERT_EQUAL_INT(1, teko_decimal_from_i32(cases[i].v, &d));
+        TEST_ASSERT_EQUAL_UINT(0, (unsigned)d.scale);
+        char* s = teko_decimal_to_string(&d);
+        TEST_ASSERT_EQUAL_STRING(cases[i].s, s);
+        free(s);
+        // I2D then D2I is the identity for an in-range integer.
+        int back = 999;
+        TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &back));
+        TEST_ASSERT_EQUAL_INT(cases[i].v, back);
+    }
+}
+
+// 17.F.4 — D2I: decimal -> i32, TRUNCATE toward zero, CHECKED on i32-range overflow only.
+void test_teko_decimal_to_i32(void) {
+    teko_decimal d; int out;
+    // Truncation toward zero (fractional part dropped, NOT an error).
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("3.99", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(3, out);
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("-3.99", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(-3, out); // toward zero, not floor
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("0.5", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(0, out);
+    // Exact integer at the i32 edges.
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("2147483647", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(2147483647, out);
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("-2147483648", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT((-2147483647 - 1), out);
+    // Out-of-range -> fail (checked), even with a fractional part that truncates above the edge.
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("2147483648", &d));
+    TEST_ASSERT_EQUAL_INT(0, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("-2147483649", &d));
+    TEST_ASSERT_EQUAL_INT(0, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("99999999999999999999.5", &d));
+    TEST_ASSERT_EQUAL_INT(0, teko_decimal_to_i32(&d, &out));
+    // A value whose truncation lands back in range (2147483647.9 -> 2147483647) succeeds.
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_parse("2147483647.9", &d));
+    TEST_ASSERT_EQUAL_INT(1, teko_decimal_to_i32(&d, &out));
+    TEST_ASSERT_EQUAL_INT(2147483647, out);
+}

@@ -410,7 +410,11 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                      op == OP_DDIV || op == OP_DMOD || op == OP_DEQ || op == OP_DNE ||
                      op == OP_DLT || op == OP_DLE || op == OP_DGT || op == OP_DGE ||
                      op == OP_DSTORE || op == OP_DLOAD || op == OP_DSTORE_LOCAL ||
-                     op == OP_DLOAD_LOCAL) {
+                     op == OP_DLOAD_LOCAL ||
+                     // Phase 17.F.4: the int/float↔decimal CASTS are also integer-CSE barriers. I2D/
+                     // F2D/D2F write $d0/$f0 only (barrier suffices); OP_D2I writes $w0 with a
+                     // non-const i32, so it is ALSO a $w0-cache reset below (like OP_F2I).
+                     op == OP_I2D || op == OP_F2D || op == OP_D2I || op == OP_D2F) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -463,7 +467,12 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 // so they invalidate the ICONST reuse cache exactly like a float compare. (DCONST/
                 // DADD/etc. touch $d0/$d1/$dvN only — no $w0 clobber — so they stay out of this set.)
                 op == OP_DEQ || op == OP_DNE || op == OP_DLT ||
-                op == OP_DLE || op == OP_DGT || op == OP_DGE) {
+                op == OP_DLE || op == OP_DGT || op == OP_DGE ||
+                // Phase 17.F.4: OP_D2I writes $w0 with the (non-constant) checked i32 result, so it
+                // invalidates the ICONST reuse cache exactly like OP_F2I / a decimal compare. (I2D/
+                // F2D/D2F write $d0/$f0 — no $w0 clobber — so they stay out of this set.) The decimal
+                // surface ids 59/60 ride OP_CALL_RUNTIME, already in the reset set above.
+                op == OP_D2I) {
                 accum_has_value = false;
             }
         }

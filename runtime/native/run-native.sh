@@ -243,6 +243,26 @@ eq = 1
 lt = 1
 EXP
 )"
+# Phase 17.F.4: the decimal LANGUAGE SURFACE + casts + auto-`to_string`. `decimal.to_string` (id 59)
+# renders a decimal; `decimal.parse` (id 60, checked) parses one; `convert.to_decimal`/`to_int`/
+# `to_float` cast int/float ↔ decimal (OP_I2D/F2D/D2I/D2F); a decimal in `+` concat / `"{…}"`
+# interpolation auto-`to_string`s via id 59; mixed `int + decimal` promotes the int (I2D). 10.00 is
+# 9.99+0.01 exact in base-10; D2I truncates toward zero (int 10). Byte-identical to the WASM proof
+# (run-decimal-surface.mjs).
+check decimal_surface.tks "$(cat <<'EXP'
+10.00
+total = 10.00
+[10.00]
+3.50
+grand = 15.00
+bumped = 13.00
+2.5
+int 10
+EXP
+)"
+# Fail-loud: decimal.parse("abc") aborts non-zero (exit 70 + stderr) — no silent zero. WASM traps on
+# the same value (run-decimal-surface.mjs), so the behavior is identical on both targets.
+check_fail decimal_fail.tks "before" "decimal.parse: invalid decimal"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

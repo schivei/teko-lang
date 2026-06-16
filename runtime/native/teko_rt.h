@@ -249,4 +249,22 @@ void teko_rt_decimal_div(const teko_decimal* a, const teko_decimal* b, teko_deci
 void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
 void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt);
 
+// Phase 17.F.4 — checked int/float ↔ decimal CAST wrappers (the by-pointer ABI the OP_I2D/F2D/D2I/
+// D2F opcodes lower to). I2D/F2D write the result into a 256-byte decimal slot (&out); D2I/D2F read
+// one and return a register value. F2D/D2F bridge through the shortest-string form (both sides are
+// correctly-rounded). D2I TRUNCATES toward zero (matches OP_F2I) and FAILS LOUD only on i32-range
+// overflow (teko_rt_die — exit 70 native / __builtin_trap reactor). I2D cannot fail.
+void   teko_rt_decimal_from_i32(int v, teko_decimal* out);     // OP_I2D: int -> decimal (scale 0)
+void   teko_rt_decimal_from_f64(double v, teko_decimal* out);  // OP_F2D: f64 -> decimal (string bridge)
+int    teko_rt_decimal_to_i32(const teko_decimal* d);          // OP_D2I: decimal -> i32 (checked, trunc)
+double teko_rt_decimal_to_f64(const teko_decimal* d);          // OP_D2F: decimal -> f64 (string bridge)
+
+// Phase 17.F.4 — decimal language surface (OP_CALL_RUNTIME ids 59/60).
+// id 59 = decimal.to_string: a 256-byte decimal (by &ptr) -> a fresh culture-invariant `.`-decimal
+//          string (the 17.F.2 scale-preserving formatter). Result char* in $w0 (VT_STR).
+// id 60 = decimal.parse: a NUL-terminated string ($w0) -> a 256-byte decimal (written to &out =
+//          $d0). CHECKED/fail-loud (teko_rt_die) on malformed input / coefficient overflow.
+char* teko_rt_decimal_to_string(const teko_decimal* d);        // id 59: decimal -> string
+void  teko_rt_decimal_parse(const char* s, teko_decimal* out); // id 60: string -> decimal (checked)
+
 #endif // TEKO_RT_H

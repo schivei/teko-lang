@@ -190,6 +190,8 @@ extern void test_teko_decimal_kat_vectors(void);
 extern void test_teko_decimal_format_kats(void);
 extern void test_teko_decimal_parse_kats(void);
 extern void test_teko_decimal_roundtrips(void);
+extern void test_teko_decimal_from_i32(void);
+extern void test_teko_decimal_to_i32(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 extern void test_teko_crypto_md5_rfc1321_vectors(void);
 extern void test_teko_crypto_md5_streaming_matches_oneshot(void);
@@ -456,6 +458,8 @@ int main(void) {
     RUN_TEST(test_teko_decimal_format_kats);
     RUN_TEST(test_teko_decimal_parse_kats);
     RUN_TEST(test_teko_decimal_roundtrips);
+    RUN_TEST(test_teko_decimal_from_i32);
+    RUN_TEST(test_teko_decimal_to_i32);
     RUN_TEST(test_teko_runtime_arena_thread_isolation_and_alignment);
 
     RUN_TEST(test_teko_crypto_md5_rfc1321_vectors);
