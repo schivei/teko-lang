@@ -87,6 +87,12 @@ typedef struct {
     // Phase 14 (14.E): 1 when the program uses a `shared { }` block / `atomic.*` op. Imports the
     // teko_shared_*/teko_atomic_* entry points from the reactor + shares memory.
     int wasm_emit_shared;
+    // Phase 14 (14.G): 1 when the program uses `wait <ts>;` (OP_WAIT) → declare the host sleep
+    // import (env.teko_sleep). Native ignores it (links teko_rt_sleep_ms unconditionally).
+    int wasm_emit_wait;
+    // Phase 14 (14.G): 1 when the program uses `await <ts>;` (OP_AWAIT_FOR) → declare the host
+    // import (env.teko_await) and drain $teko_sched_run. Native ignores it (links teko_rt_await_ms).
+    int wasm_emit_await;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -120,6 +126,8 @@ void teko_metal_set_emit_duplex(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_delayed(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_bcast(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_shared(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_wait(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_await(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

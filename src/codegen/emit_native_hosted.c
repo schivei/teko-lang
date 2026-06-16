@@ -469,6 +469,13 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
         }
 
+        // Phase 14 (14.G): timespan waiters. The ms delay is in $w0. `wait` is a real synchronous
+        // sleep (teko_rt_sleep_ms, always linked); `await` is a cooperative yield that drains the
+        // run queue (teko_rt_await_ms, in the scheduler TU — emit_await sets uses_spawn so the
+        // routine table the scheduler walks is emitted). Both take ms in arg0, return void.
+        case OP_WAIT:      emit_call(ctx, "teko_rt_sleep_ms", 1); break;
+        case OP_AWAIT_FOR: emit_call(ctx, "teko_rt_await_ms", 1); break;
+
         // Integer ALU ($w0 = $w0 <op> $w1). Pointers use x; arithmetic uses w.
         case OP_ADD: fprintf(f, arm ? "    add w0, w0, w19\n"  : "    addl %%ebx, %%eax\n"); break;
         case OP_SUB: fprintf(f, arm ? "    sub w0, w0, w19\n"  : "    subl %%ebx, %%eax\n"); break;

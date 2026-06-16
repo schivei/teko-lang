@@ -1174,6 +1174,15 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_atomic_load\" (func $atomic_load (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_atomic_store\" (func $atomic_store (param i32) (param i32)))\n");
             }
+            // Phase 14 (14.G): timespan waiters use host imports (NOT the reactor). `wait` sleeps
+            // synchronously via env.teko_sleep(ms); `await` records the ms via env.teko_await(ms)
+            // then drains the in-module scheduler ($teko_sched_run) — a cooperative timed yield.
+            if (ctx->wasm_emit_wait) {
+                fprintf(f, "  (import \"env\" \"teko_sleep\" (func $teko_sleep (param i32)))\n");
+            }
+            if (ctx->wasm_emit_await) {
+                fprintf(f, "  (import \"env\" \"teko_await\" (func $teko_await (param i32)))\n");
+            }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
             // address the same bytes. Re-export it either way so harnesses can read results.
@@ -1347,6 +1356,17 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
         case OP_ATOMIC_STORE:
             fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_store\n");
+            break;
+
+        // Phase 14 (14.G): timespan waiters. The ms delay is in $w0. `wait` calls the host sleep
+        // import (synchronous on the host); `await` records the ms via the host import then drains
+        // the cooperative scheduler so queued background tasks run at the await point. Stack-neutral:
+        // each host import takes one i32 and returns nothing; $teko_sched_run is nullary.
+        case OP_WAIT:
+            fprintf(f, "    local.get $w0\n    call $teko_sleep\n");
+            break;
+        case OP_AWAIT_FOR:
+            fprintf(f, "    local.get $w0\n    call $teko_await\n    call $teko_sched_run\n");
             break;
 
         // Phase 12: named local variables ($v0..$vN).

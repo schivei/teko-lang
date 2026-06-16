@@ -107,6 +107,14 @@ typedef enum {
     OP_ATOMIC_LOAD   = 0x57, // atomic.load(handle) -> value
     OP_ATOMIC_STORE  = 0x58, // atomic.store(handle, value) -> 0
 
+    // Phase 14 (14.G): timespan waiters. The delay (canonical ms) is computed into $w0 before
+    // the op. Single-byte (no IL arg). OP_WAIT is a SYNCHRONOUS sleep (native teko_rt_sleep_ms /
+    // WASM env.teko_sleep host import); OP_AWAIT_FOR is a cooperative timed yield that lets queued
+    // background tasks run (native teko_rt_await_ms drains the run queue; WASM records the ms via
+    // env.teko_await then drains $teko_sched_run). Both clobber $w0 (a runtime call).
+    OP_WAIT      = 0x59, // wait(ms)  — block the current thread for ms
+    OP_AWAIT_FOR = 0x5A, // await(ms) — cooperative yield with an ms deadline
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -188,6 +196,13 @@ typedef struct {
     // at $main close; the native runner calls `teko_rt_run` at HALT and emits the
     // routine function-pointer table. Spawn-free programs stay byte-identical.
     int uses_spawn;
+    // Phase 14 (14.G): 1 if the program uses `wait <ts>;` (OP_WAIT). The WASM backend declares
+    // the host sleep import (env.teko_sleep); native links teko_rt_sleep_ms (always present).
+    int uses_wait;
+    // Phase 14 (14.G): 1 if the program uses `await <ts>;` (OP_AWAIT_FOR). The WASM backend
+    // declares the host import (env.teko_await) + drains $teko_sched_run; native links
+    // teko_rt_await_ms (in the scheduler TU) — also sets uses_spawn so the routine table exists.
+    int uses_await;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
@@ -227,6 +242,10 @@ void codegen_li_emit_delayed(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_bcast(BytecodeBuffer* buffer, OpCode op);
 // Phase 14 (14.E): emit a shared/atomic op (OP_SHARED_*/OP_ATOMIC_*); sets buffer->uses_shared.
 void codegen_li_emit_shared(BytecodeBuffer* buffer, OpCode op);
+// Phase 14 (14.G): emit OP_WAIT (sync sleep); sets buffer->uses_wait.
+void codegen_li_emit_wait(BytecodeBuffer* buffer);
+// Phase 14 (14.G): emit OP_AWAIT_FOR (cooperative timed yield); sets uses_await + uses_spawn.
+void codegen_li_emit_await(BytecodeBuffer* buffer);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

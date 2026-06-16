@@ -109,6 +109,16 @@ check shared.tks "$(cat <<'EXP'
 10
 EXP
 )"
+# Phase 14 (14.G): timespan waiters — `await 5ms;` cooperatively drains the run queue so the
+# queued worker runs AT the await (output 1,2,3, not 1,3,2-at-exit); `wait 10ms;` is a real sync
+# sleep. Lowers to teko_rt_await_ms / teko_rt_sleep_ms; 5ms/10ms normalize to canonical ms.
+check waiters.tks "$(cat <<'EXP'
+1
+2
+3
+EXP
+)"
+
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 

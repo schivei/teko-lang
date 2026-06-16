@@ -32,6 +32,7 @@ static KeywordMap keywords[] = {
     {"event", TOKEN_EVENT}, {"raise", TOKEN_RAISE}, {"subscribe", TOKEN_SUBSCRIBE},
     {"fanout", TOKEN_FANOUT}, {"fire_and_forget", TOKEN_FIRE_AND_FORGET}, {"shared", TOKEN_SHARED},
     {"atomic", TOKEN_ATOMIC}, {"routines", TOKEN_ROUTINES}, {"duplex", TOKEN_DUPLEX},
+    {"wait", TOKEN_WAIT}, {"await", TOKEN_AWAIT},   // Phase 14 (14.G) timespan waiters
     // Web:
     {"api", TOKEN_API}, {"middleware", TOKEN_MIDDLEWARE}, {"get", TOKEN_GET},
     {"post", TOKEN_POST}, {"put", TOKEN_PUT}, {"delete", TOKEN_DELETE},

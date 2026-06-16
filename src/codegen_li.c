@@ -31,6 +31,8 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_delayed = 0;
     buffer->uses_bcast = 0;
     buffer->uses_shared = 0;
+    buffer->uses_wait = 0;
+    buffer->uses_await = 0;
 
     return buffer;
 }
@@ -212,6 +214,19 @@ void codegen_li_emit_shared(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_shared = 1; // backends link/import the teko_shared runtime
     emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_wait(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_wait = 1; // WASM declares env.teko_sleep; native links teko_rt_sleep_ms
+    emit_byte(buffer, OP_WAIT);
+}
+
+void codegen_li_emit_await(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_await = 1; // WASM declares env.teko_await + drains the scheduler
+    buffer->uses_spawn = 1; // native: emit the routine table the scheduler TU drains through
+    emit_byte(buffer, OP_AWAIT_FOR);
 }
 
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {

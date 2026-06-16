@@ -637,6 +637,26 @@ static void lower_atomic_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
     codegen_li_emit_shared(b, (OpCode)op);               // $w0 = atomic op result
 }
 
+// --- timespan waiters: `wait <ts>;` / `await <ts>;` (Phase 14, 14.G) -------------
+// `wait` is a SYNCHRONOUS sleep; `await` is a cooperative timed yield. The timespan operand is
+// lowered to canonical milliseconds in $w0, then OP_WAIT / OP_AWAIT_FOR fires. A literal operand
+// (e.g. `2s`) is unit-normalized at compile time; a named local or parenthesized expression is
+// assumed to already be in ms. Current token is TOKEN_WAIT / TOKEN_AWAIT.
+static void lower_wait_await(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, int is_await) {
+    fe_advance(p); // consume 'wait' / 'await'
+    if (p->current_token.type == TOKEN_LIT_INT) {
+        codegen_li_emit_iconst(b, (int)literal_canonical_value(&p->current_token)); // ms in $w0
+        fe_advance(p);
+    } else if (ctx && ctx->ta) {
+        eval_expr_prec(b, p, ctx, 1, ctx->ta); // named local / int expression (already ms) -> $w0
+    } else {
+        codegen_li_emit_iconst(b, 0);
+    }
+    if (is_await) codegen_li_emit_await(b);
+    else          codegen_li_emit_wait(b);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+}
+
 static int lower_routine_extern_call(BytecodeBuffer* buffer, Parser* p,
                                      ImportBinding* binds, int nb); // defined below
 
@@ -820,6 +840,8 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
             } else if (is_atomic_head(&p)) {
                 lower_atomic_call(buffer, &p, &ctx); // atomic op inside a routine (14.E)
                 if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
+            } else if (p.current_token.type == TOKEN_WAIT || p.current_token.type == TOKEN_AWAIT) {
+                lower_wait_await(buffer, &p, &ctx, p.current_token.type == TOKEN_AWAIT); // 14.G
             } else if (lower_routine_extern_call(buffer, &p, binds, nb)) {
                 // consumed a plain extern call (e.g. emit("…"))
             } else {
@@ -995,6 +1017,11 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // Top-level atomic statement: atomic.add/store/… ( args ).
             lower_atomic_call(buffer, &parser, &top_ctx);
             if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_WAIT ||
+                   parser.current_token.type == TOKEN_AWAIT) {
+            // Phase 14 (14.G): top-level `wait <ts>;` / `await <ts>;` timespan waiter.
+            lower_wait_await(buffer, &parser, &top_ctx,
+                             parser.current_token.type == TOKEN_AWAIT);
         } else if (parser.current_token.type == TOKEN_SHARED &&
                    parser.peek_token.type == TOKEN_LBRACE) {
             // Phase 14 (14.E): `shared { … }` — coarse-locked critical section.

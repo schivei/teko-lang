@@ -52,6 +52,22 @@ void teko_rt_emit(const char* s) {
 void teko_rt_emit_int(long n) {
     printf("%ld\n", n);
 }
+
+// Phase 14 (14.G): `wait <ts>;` — synchronous sleep for `ms` canonical milliseconds (the
+// frontend already folded any unit suffix to ms). Real nanosleep on POSIX, Sleep on Win32.
+// A non-positive delay is a no-op. The OS thread genuinely blocks (unlike `await`, which is a
+// cooperative yield). Lowered from OP_WAIT (ms in arg0).
+void teko_rt_sleep_ms(long ms) {
+    if (ms <= 0) return;
+#if defined(_WIN32)
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
+    nanosleep(&ts, NULL);
+#endif
+}
 #endif
 
 // Phase 14 (14.B) — duplex channel surface wrappers. The OP_DUPLEX_* opcodes lower to these

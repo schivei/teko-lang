@@ -933,6 +933,52 @@ static int il_has_iconst(const BytecodeBuffer* b, int value) {
     return 0;
 }
 
+// Phase 14 (14.G): `wait <ts>;` / `await <ts>;` lower to OP_WAIT / OP_AWAIT_FOR with the timespan
+// normalized to canonical ms in the preceding ICONST. await sets uses_await + uses_spawn; wait
+// sets uses_wait. On WASM the host sleep/await imports are declared + (await) the scheduler drains.
+void test_frontend_interop_waiters_lowering(void) {
+    const char* src =
+        "wait 2s;\n"     // 2s   -> ICONST 2000 ; OP_WAIT
+        "await 5ms;\n";  // 5ms  -> ICONST 5    ; OP_AWAIT_FOR
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_wait);
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_await);
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn); // await emits the native routine table
+    int n_wait = 0, n_await = 0;
+    for (int i = 0; i < buffer->size; i++) {
+        if (buffer->code[i] == OP_WAIT) n_wait++;
+        if (buffer->code[i] == OP_AWAIT_FOR) n_await++;
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_wait);
+    TEST_ASSERT_EQUAL_INT(1, n_await);
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 2000)); // 2s normalized for wait
+    TEST_ASSERT_TRUE(il_has_iconst(buffer, 5));    // 5ms for await
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_waiters.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_sleep\" (func $teko_sleep (param i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"teko_await\" (func $teko_await (param i32)))"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_sleep"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_await"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 void test_frontend_interop_timespan_normalization(void) {
     const char* src =
         "let d = delayed.open(8);\n"
