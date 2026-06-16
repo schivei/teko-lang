@@ -97,6 +97,16 @@ typedef enum {
     OP_BCAST_POLL      = 0x51, // poll(handle, sub_id) -> status (non-consuming)
     OP_BCAST_CLOSE     = 0x52, // close(handle) -> 0
 
+    // Phase 14 (14.E): automated shared memory — a `shared { }` block injects a coarse lock
+    // (ENTER/LEAVE wrap the body), and `atomic.*` cells provide lock-free RMW counters. These
+    // lower to direct teko_shared_*/teko_atomic_* calls (register-width ABI, no rt wrapper).
+    OP_SHARED_ENTER  = 0x53, // acquire the coarse block lock
+    OP_SHARED_LEAVE  = 0x54, // release the coarse block lock
+    OP_ATOMIC_CELL   = 0x55, // atomic.cell(initial) -> handle
+    OP_ATOMIC_ADD    = 0x56, // atomic.add(handle, delta) -> new value
+    OP_ATOMIC_LOAD   = 0x57, // atomic.load(handle) -> value
+    OP_ATOMIC_STORE  = 0x58, // atomic.store(handle, value) -> 0
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -169,6 +179,9 @@ typedef struct {
     // Phase 14 (14.D): 1 if the program uses a `broadcast.*` pub-sub op (OP_BCAST_*). Same
     // backend wiring as uses_duplex/uses_delayed.
     int uses_bcast;
+    // Phase 14 (14.E): 1 if the program uses a `shared { }` block or an `atomic.*` op
+    // (OP_SHARED_*/OP_ATOMIC_*). Backends link/import the teko_shared runtime.
+    int uses_shared;
     // Phase 14 (14.A): 1 if the program fires background tasks via a `routines { … }`
     // block (lowered to OP_SPAWN_ASYNC). The backends then ensure the cooperative
     // scheduler is drained before the program exits: WASM emits `call $teko_sched_run`
@@ -212,6 +225,8 @@ void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_delayed(BytecodeBuffer* buffer, OpCode op);
 // Phase 14 (14.D): emit a broadcast op (one of OP_BCAST_*); sets buffer->uses_bcast.
 void codegen_li_emit_bcast(BytecodeBuffer* buffer, OpCode op);
+// Phase 14 (14.E): emit a shared/atomic op (OP_SHARED_*/OP_ATOMIC_*); sets buffer->uses_shared.
+void codegen_li_emit_shared(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

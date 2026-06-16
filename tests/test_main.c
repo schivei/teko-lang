@@ -40,6 +40,7 @@ extern void test_frontend_interop_routines_spawn(void);
 extern void test_frontend_interop_duplex_lowering(void);
 extern void test_frontend_interop_delayed_lowering(void);
 extern void test_frontend_interop_broadcast_lowering(void);
+extern void test_frontend_interop_shared_lowering(void);
 extern void test_frontend_interop_event_handler(void);
 extern void test_frontend_interop_named_locals(void);
 extern void test_frontend_interop_expressions(void);
@@ -249,6 +250,7 @@ int main(void) {
     RUN_TEST(test_frontend_interop_duplex_lowering);
     RUN_TEST(test_frontend_interop_delayed_lowering);
     RUN_TEST(test_frontend_interop_broadcast_lowering);
+    RUN_TEST(test_frontend_interop_shared_lowering);
     RUN_TEST(test_frontend_interop_event_handler);
     RUN_TEST(test_frontend_interop_named_locals);
     RUN_TEST(test_frontend_interop_expressions);

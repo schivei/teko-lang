@@ -33,6 +33,7 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_emit_duplex = 0;
     ctx->wasm_emit_delayed = 0;
     ctx->wasm_emit_bcast = 0;
+    ctx->wasm_emit_shared = 0;
     ctx->hosted = 0;
     return ctx;
 }
@@ -97,6 +98,11 @@ void teko_metal_set_emit_delayed(MetalContext* ctx, int enabled) {
 void teko_metal_set_emit_bcast(MetalContext* ctx, int enabled) {
     if (!ctx) return;
     ctx->wasm_emit_bcast = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_shared(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_shared = enabled ? 1 : 0;
 }
 
 void teko_metal_set_hosted(MetalContext* ctx, int enabled) {
@@ -301,7 +307,9 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                      op == OP_DELAYED_OPEN || op == OP_DELAYED_SEND || op == OP_DELAYED_ADVANCE ||
                      op == OP_DELAYED_RECV || op == OP_DELAYED_POLL || op == OP_DELAYED_CLOSE ||
                      op == OP_BCAST_OPEN || op == OP_BCAST_SUBSCRIBE || op == OP_BCAST_PUBLISH ||
-                     op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE) {
+                     op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE ||
+                     op == OP_SHARED_ENTER || op == OP_SHARED_LEAVE || op == OP_ATOMIC_CELL ||
+                     op == OP_ATOMIC_ADD || op == OP_ATOMIC_LOAD || op == OP_ATOMIC_STORE) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -327,7 +335,9 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 op == OP_DELAYED_OPEN || op == OP_DELAYED_SEND || op == OP_DELAYED_ADVANCE ||
                 op == OP_DELAYED_RECV || op == OP_DELAYED_POLL || op == OP_DELAYED_CLOSE ||
                 op == OP_BCAST_OPEN || op == OP_BCAST_SUBSCRIBE || op == OP_BCAST_PUBLISH ||
-                op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE) {
+                op == OP_BCAST_RECV || op == OP_BCAST_POLL || op == OP_BCAST_CLOSE ||
+                op == OP_SHARED_ENTER || op == OP_SHARED_LEAVE || op == OP_ATOMIC_CELL ||
+                op == OP_ATOMIC_ADD || op == OP_ATOMIC_LOAD || op == OP_ATOMIC_STORE) {
                 accum_has_value = false;
             }
         }

@@ -580,6 +580,69 @@ static void lower_bcast_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
     codegen_li_emit_bcast(b, (OpCode)op);                // $w0 = broadcast op result
 }
 
+// --- shared memory: `atomic.*` ops + the `shared { }` block (Phase 14, 14.E) ----
+// `atomic.cell/add/load/store(args)` — `atomic` is a keyword, but the lexer folds `atomic.cell`
+// into one IDENTIFIER (bare `atomic` stays the keyword), so this reuses the dotted-identifier
+// path, lowering to OP_ATOMIC_*.
+static int atomic_op_for(const char* lex, int* arity) {
+    int a = 1; int op = -1;
+    if (!lex) return -1;
+    if      (strcmp(lex, "atomic.cell")  == 0) { op = OP_ATOMIC_CELL;  a = 1; }
+    else if (strcmp(lex, "atomic.add")   == 0) { op = OP_ATOMIC_ADD;   a = 2; }
+    else if (strcmp(lex, "atomic.load")  == 0) { op = OP_ATOMIC_LOAD;  a = 1; }
+    else if (strcmp(lex, "atomic.store") == 0) { op = OP_ATOMIC_STORE; a = 2; }
+    if (op >= 0 && arity) *arity = a;
+    return op;
+}
+
+static int is_atomic_head(const Parser* p) {
+    return p->current_token.type == TOKEN_IDENTIFIER &&
+           atomic_op_for(p->current_token.lexeme, NULL) >= 0 &&
+           p->peek_token.type == TOKEN_LPAREN;
+}
+
+static void lower_atomic_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int arity = 1;
+    int op = atomic_op_for(p->current_token.lexeme, &arity);
+    if (op < 0) { op = OP_ATOMIC_LOAD; arity = 1; }
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    for (int i = 0; i < arity; i++) {
+        lower_codec_value(b, p, ctx);                    // arg i -> $w0 (int / named local handle)
+        if (i < arity - 1) {
+            codegen_li_emit_setarg(b, i);
+            if (p->current_token.type == TOKEN_COMMA) fe_advance(p);
+        }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_shared(b, (OpCode)op);               // $w0 = atomic op result
+}
+
+static int lower_routine_extern_call(BytecodeBuffer* buffer, Parser* p,
+                                     ImportBinding* binds, int nb); // defined below
+
+// `shared { … }` — the compiler injects a coarse lock around the block: emit OP_SHARED_ENTER,
+// lower the enclosed statements (atomic/channel ops + extern calls in this subset), emit
+// OP_SHARED_LEAVE at the matching `}`. Named-local declarations inside the block are future work.
+static void lower_shared_block(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
+                               ImportBinding* binds, int nb) {
+    fe_advance(p);                                       // consume 'shared'
+    if (p->current_token.type == TOKEN_LBRACE) fe_advance(p);
+    codegen_li_emit_shared(b, OP_SHARED_ENTER);
+    int depth = 1;
+    while (p->current_token.type != TOKEN_EOF && depth > 0) {
+        if (p->current_token.type == TOKEN_LBRACE) { depth++; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_RBRACE) { depth--; fe_advance(p); }
+        else if (is_atomic_head(p)) { lower_atomic_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_duplex_head(p)) { lower_duplex_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_delayed_head(p)){ lower_delayed_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (is_bcast_head(p))  { lower_bcast_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p); }
+        else if (lower_routine_extern_call(b, p, binds, nb)) { /* extern call (e.g. emit_int) */ }
+        else fe_advance(p);
+    }
+    codegen_li_emit_shared(b, OP_SHARED_LEAVE);
+}
+
 // Skip a whole `extern …;` / `extern { … }` declaration. Needed by the fn scanners
 // below so the `fn` token INSIDE `extern fn …` is not mistaken for a handler.
 static void skip_extern_decl(Parser* p) {
@@ -735,6 +798,9 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
             } else if (is_bcast_head(&p)) {
                 lower_bcast_call(buffer, &p, &ctx); // broadcast op inside a routine (14.D)
                 if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
+            } else if (is_atomic_head(&p)) {
+                lower_atomic_call(buffer, &p, &ctx); // atomic op inside a routine (14.E)
+                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
             } else if (lower_routine_extern_call(buffer, &p, binds, nb)) {
                 // consumed a plain extern call (e.g. emit("…"))
             } else {
@@ -821,6 +887,8 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                 lower_delayed_call(buffer, &parser, &top_ctx);    // 14.C: handle/value -> $w0
             } else if (is_bcast_head(&parser)) {
                 lower_bcast_call(buffer, &parser, &top_ctx);      // 14.D: handle/value -> $w0
+            } else if (is_atomic_head(&parser)) {
+                lower_atomic_call(buffer, &parser, &top_ctx);     // 14.E: handle/value -> $w0
             } else {
                 // Integer expression (P12-E): literals, locals, parens, + - * / % and
                 // comparisons. Temps live above the named locals ($v{nlocals}+).
@@ -904,6 +972,14 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // Top-level broadcast statement: broadcast.publish/close/… ( args ).
             lower_bcast_call(buffer, &parser, &top_ctx);
             if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (is_atomic_head(&parser)) {
+            // Top-level atomic statement: atomic.add/store/… ( args ).
+            lower_atomic_call(buffer, &parser, &top_ctx);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_SHARED &&
+                   parser.peek_token.type == TOKEN_LBRACE) {
+            // Phase 14 (14.E): `shared { … }` — coarse-locked critical section.
+            lower_shared_block(buffer, &parser, &top_ctx, binds, nb);
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_LPAREN) {
             // Top-level call statement: NAME ( arg, … )

@@ -216,5 +216,10 @@ Sub-block **14.D `broadcast chan` is DONE** on both targets: non-destructive 1:N
 per-subscriber cursors; publish-once/read-by-all) — C runtime `src/runtime/teko_broadcast.c`
 (4 KATs) → dedicated `OP_BCAST_*` (`broadcast.*` dotted-ident) → native `teko_rt_bcast_*` + WASM
 reactor. Proofs `runtime/native/samples/broadcast.tks` + `runtime/wasm/run-broadcast.mjs`. Suite 184/184.
-Remaining 14.E–14.F: `shared`+`atomic` (coarse whole-block lock), `circuit`+`retry`. Continuation
-guide: `docs/HANDOFF_PHASE14.md`.
+Sub-block **14.E `shared` block + `atomic` is DONE** on both targets: a `shared { }` coarse-locked
+critical section (NEW block grammar → `OP_SHARED_ENTER/LEAVE`) + `atomic.*` cells (`OP_ATOMIC_*`)
+— C runtime `src/runtime/teko_shared.c` (3 KATs; portable atomics without `<stdatomic.h>` —
+`__atomic`/`_Interlocked`/plain-wasm, MSVC-safe + TSan-clean) called directly (register-width
+ABI). Proofs `runtime/native/samples/shared.tks` + `runtime/wasm/run-shared.mjs`. Suite 188/188.
+Remaining **14.F**: `circuit`+`retry` (backoff/attempts/timeout/fallback). Continuation guide:
+`docs/HANDOFF_PHASE14.md`.

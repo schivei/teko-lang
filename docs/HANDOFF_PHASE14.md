@@ -24,8 +24,8 @@ what's done, the **exact reusable pattern** for the channel sub-blocks, and the 
 - **14.B `duplex chan`** — DONE, CI-green.
 - **14.C `delayed chan`** — DONE, CI-green.
 - **14.D `broadcast chan`** — DONE, CI-green (built as `broadcast.*` dotted-ident, reusing the pattern).
-- **14.E `shared` block + `atomic`** — TODO. Owner decision: coarse whole-block lock. *Largest/most
-  novel; do its own scoped sub-plan; a genuine scope-fork would be reported, not decided solo.*
+- **14.E `shared` block + `atomic`** — DONE, CI-green (coarse global lock + atomic cells; new
+  `shared { }` block grammar; portable atomics without <stdatomic.h>).
 - **14.F `circuit` + `retry`** — TODO (exp/log backoff, attempts/timeout, fallback).
 
 Owner granted standing autonomy across all sub-blocks with the non-negotiable bars (1

@@ -194,7 +194,17 @@ merge/force-push** (the human merges).
   Dedicated `OP_BCAST_OPEN/SUBSCRIBE/PUBLISH/RECV/POLL/CLOSE`; native → `teko_rt_bcast_*`, WASM →
   reactor imports. Proofs `runtime/native/samples/broadcast.tks` (10/20/10/20) +
   `runtime/wasm/run-broadcast.mjs`. CI-wired.
-- **14.E–14.F** — not started (`shared`+`atomic` [coarse whole-block lock], `circuit`+`retry`).
-  See `docs/HANDOFF_PHASE14.md`.
+- **14.E — `shared` block + `atomic`** — ✅ done on both targets. Runtime `src/runtime/teko_shared.{h,c}`
+  (3 Unity KATs): a global **coarse spinlock** (`teko_shared_enter/leave` — owner decision: one
+  whole-block lock) + an atomic integer cell (`cell/add/load/store`). Portable atomics WITHOUT
+  `<stdatomic.h>` (clang/gcc `__atomic` builtins; `_Interlocked*` on MSVC; plain ops on the
+  single-threaded wasm32 reactor) → MSVC-safe + TSan-clean. NEW `shared { … }` **block grammar**
+  injects `OP_SHARED_ENTER/LEAVE` around the body; `atomic.*` is a dotted-identifier surface →
+  `OP_ATOMIC_*`. The C functions use a register-width ABI so the backends call them directly (no
+  rt wrapper). Native links teko_shared; WASM imports it from the reactor. Proofs
+  `runtime/native/samples/shared.tks` (8/10) + `runtime/wasm/run-shared.mjs`. CI-wired. *Coarse
+  single global lock + no nested blocks is the MVP; per-block locks + real wasm-threads atomics
+  are future refinements, not a correctness gate.*
+- **14.F** — not started (`circuit`+`retry`). See `docs/HANDOFF_PHASE14.md`.
 </content>
 </invoke>

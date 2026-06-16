@@ -862,3 +862,59 @@ void test_frontend_interop_broadcast_lowering(void) {
 
     codegen_li_free_context(buffer);
 }
+
+// Phase 14 (14.E): a `shared { }` block injects OP_SHARED_ENTER/LEAVE around its body; `atomic.*`
+// lower to OP_ATOMIC_*. Sets uses_shared; WASM imports the reactor entry points over shared memory.
+void test_frontend_interop_shared_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let c = atomic.cell(0);\n"
+        "shared {\n"
+        "  atomic.add(c, 5);\n"
+        "  atomic.add(c, 3);\n"
+        "}\n"
+        "let v = atomic.load(c);\n"
+        "emit_int(v);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_shared);
+    int n_enter=0,n_leave=0,n_cell=0,n_add=0,n_load=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_SHARED_ENTER: n_enter++; break;
+            case OP_SHARED_LEAVE: n_leave++; break;
+            case OP_ATOMIC_CELL:  n_cell++;  break;
+            case OP_ATOMIC_ADD:   n_add++;   break;
+            case OP_ATOMIC_LOAD:  n_load++;  break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_enter);  // one shared block
+    TEST_ASSERT_EQUAL_INT(1, n_leave);
+    TEST_ASSERT_EQUAL_INT(1, n_cell);
+    TEST_ASSERT_EQUAL_INT(2, n_add);    // two atomic.add inside the block
+    TEST_ASSERT_EQUAL_INT(1, n_load);
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_shared.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_atomic_add\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $shared_enter"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $shared_leave"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}

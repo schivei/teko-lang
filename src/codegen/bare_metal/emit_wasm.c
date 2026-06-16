@@ -1164,11 +1164,21 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_poll\" (func $bcast_poll (param i32) (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_bcast_close\" (func $bcast_close (param i32) (result i32)))\n");
             }
-            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast)
-            // is in play it is host-owned and SHARED (imported from env), so both modules address
-            // the same bytes. Re-export it either way so harnesses can read results.
+            // Phase 14 (14.E): shared-memory entry points, also from the reactor. enter/leave and
+            // store return void (no result); cell/add/load return an i32 (handle/value).
+            if (ctx->wasm_emit_shared) {
+                fprintf(f, "  (import \"crypto\" \"teko_shared_enter\" (func $shared_enter))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_shared_leave\" (func $shared_leave))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_cell\" (func $atomic_cell (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_add\" (func $atomic_add (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_load\" (func $atomic_load (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_atomic_store\" (func $atomic_store (param i32) (param i32)))\n");
+            }
+            // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
+            // shared) is in play it is host-owned and SHARED (imported from env), so both modules
+            // address the same bytes. Re-export it either way so harnesses can read results.
             if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
-                ctx->wasm_emit_bcast) {
+                ctx->wasm_emit_bcast || ctx->wasm_emit_shared) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1320,6 +1330,24 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;
         }
+
+        // Phase 14 (14.E): shared-block lock + atomic cell ops (imported from the reactor).
+        // enter/leave are nullary void; store is 2-arg void (no result → no local.set); cell/load
+        // are 1-arg→i32; add is 2-arg→i32.
+        case OP_SHARED_ENTER: fprintf(f, "    call $shared_enter\n"); break;
+        case OP_SHARED_LEAVE: fprintf(f, "    call $shared_leave\n"); break;
+        case OP_ATOMIC_CELL:
+            fprintf(f, "    local.get $w0\n    call $atomic_cell\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_LOAD:
+            fprintf(f, "    local.get $w0\n    call $atomic_load\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_ADD:
+            fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_add\n    local.set $w0\n");
+            break;
+        case OP_ATOMIC_STORE:
+            fprintf(f, "    local.get $a0\n    local.get $w0\n    call $atomic_store\n");
+            break;
 
         // Phase 12: named local variables ($v0..$vN).
         case OP_STORE_LOCAL:

@@ -102,6 +102,13 @@ check broadcast.tks "$(cat <<'EXP'
 20
 EXP
 )"
+# Phase 14 (14.E): shared memory — a `shared { }` coarse-locked block with `atomic.*` cells.
+# Atomic accumulation (5+3 inside the block = 8, then +2 = 10). Lowers to teko_shared_*/teko_atomic_*.
+check shared.tks "$(cat <<'EXP'
+8
+10
+EXP
+)"
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 

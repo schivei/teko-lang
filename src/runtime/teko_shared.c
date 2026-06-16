@@ -5,7 +5,17 @@
 // (no <stdatomic.h>, for MSVC safety): clang/gcc __atomic builtins elsewhere (incl. wasm32),
 // MSVC Interlocked intrinsics on Windows.
 
-#if defined(_MSC_VER)
+#if defined(__wasm__)
+// The wasm32 reactor backs Layer A, a SINGLE-THREADED cooperative scheduler, so plain ops are
+// correct (and __atomic SEQ_CST builtins would need the wasm atomics feature / unresolved
+// libcalls in the freestanding reactor). The wasm *threaded* target would use the atomics
+// proposal — a future refinement, not a correctness gate here (same posture as Layer A channels).
+#define TK_ADD64(p, d) ((*(p)) += (long long)(d), *(p))
+#define TK_LOAD64(p)   (*(p))
+#define TK_STORE64(p, v) ((void)(*(p) = (long long)(v)))
+#define TK_TAS8(p)     ((*(p)) ? 1 : ((*(p)) = 1, 0)) // returns previous (0=free)
+#define TK_CLR8(p)     ((void)(*(p) = 0))
+#elif defined(_MSC_VER)
 #include <intrin.h>
 // _InterlockedExchangeAdd64 returns the PREVIOUS value; add delta back for fetch-add-new.
 #define TK_ADD64(p, d) (_InterlockedExchangeAdd64((volatile long long*)(p), (long long)(d)) + (long long)(d))

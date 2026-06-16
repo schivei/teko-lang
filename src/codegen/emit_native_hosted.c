@@ -111,6 +111,24 @@ const char* teko_native_bcast_symbol(OpCode op, int* out_arity) {
     return sym;
 }
 
+// Phase 14 (14.E): OP_SHARED_*/OP_ATOMIC_* -> teko_shared_*/teko_atomic_* symbol + arity. These
+// C functions already use the register-width ABI, so they are called directly (no rt wrapper).
+const char* teko_native_shared_symbol(OpCode op, int* out_arity) {
+    int arity = 0;
+    const char* sym = NULL;
+    switch (op) {
+        case OP_SHARED_ENTER: sym = "teko_shared_enter"; arity = 0; break;
+        case OP_SHARED_LEAVE: sym = "teko_shared_leave"; arity = 0; break;
+        case OP_ATOMIC_CELL:  sym = "teko_atomic_cell";  arity = 1; break; // (initial)
+        case OP_ATOMIC_ADD:   sym = "teko_atomic_add";   arity = 2; break; // (handle, delta)
+        case OP_ATOMIC_LOAD:  sym = "teko_atomic_load";  arity = 1; break; // (handle)
+        case OP_ATOMIC_STORE: sym = "teko_atomic_store"; arity = 2; break; // (handle, value)
+        default: break;
+    }
+    if (out_arity) *out_arity = arity;
+    return sym;
+}
+
 // --- helpers ---------------------------------------------------------------------
 static int is_macho(const MetalContext* ctx) { return ctx->target.os == OS_MACOS_DARWIN; }
 static int is_arm64(const MetalContext* ctx) {
@@ -434,6 +452,19 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_BCAST_CLOSE: {
             int arity = 1;
             const char* sym = teko_native_bcast_symbol(op, &arity);
+            if (sym) emit_call(ctx, sym, arity);
+            break;
+        }
+
+        // Phase 14 (14.E): shared-block lock + atomic cell ops -> teko_shared_*/teko_atomic_*.
+        case OP_SHARED_ENTER:
+        case OP_SHARED_LEAVE:
+        case OP_ATOMIC_CELL:
+        case OP_ATOMIC_ADD:
+        case OP_ATOMIC_LOAD:
+        case OP_ATOMIC_STORE: {
+            int arity = 0;
+            const char* sym = teko_native_shared_symbol(op, &arity);
             if (sym) emit_call(ctx, sym, arity);
             break;
         }
