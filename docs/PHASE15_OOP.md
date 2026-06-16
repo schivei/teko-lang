@@ -149,8 +149,24 @@ byte-identical to 15.A. Collision rule: a class composing two traits that both d
 without overriding it is a hard compile error. An inline branch-chain "vtable" was rejected in favor
 of the indexed runtime table (O(1), faithful to "vtable").
 
-**Next: 15.C (generics — real per-type monomorphization, the deep one), then 15.D (events:
-`event`/`raise`/`subscribe` + `fanout`/`fire_and_forget` on the Phase-14 concurrency runtime).**
+**15.C (generics — real per-type monomorphization) is DONE** on both targets. A generic
+`class Box<T>` is specialized into one concrete `Box$Arg` per instantiation (the type parameter
+substituted at compile time — zero runtime cost, no runtime type parameter). `collect_generics`
+discovers templates + instantiations; `collect_classes` clones a concrete instance per type-arg
+(method-slots deferred so mono instances slot after all non-generic classes — dense table);
+`emit_mono_routines` re-lexes the template body per instance with the type-param substitution active
+(`g_subst`: `T` → `Arg`), so `T()` instantiates `Arg` and a `T`-typed local is `Arg`-typed
+(`resolve_type_name`). Instantiation lowering handles `Class()`, `T()`, and `Box<Arg>()` (→
+`Box$Arg`). Proof `runtime/{native,wasm}/samples/generics.tks` → `11, 22` (`Factory<Circle>` /
+`Factory<Square>` each specialize `make()` so `T()` makes the right type, `t.tag()` static-dispatches).
+Suite 222/222.
+
+**Decision (15.C):** monomorphization re-lexes the generic template body per concrete type-arg with
+a name-substitution (`T`→`Arg`) — never a runtime type parameter. The uniform-i32 placeholder of
+15.A is replaced for instantiated generics; an un-instantiated generic template emits no code.
+
+**Next: 15.D (events: `event`/`raise`/`subscribe` + `fanout`/`fire_and_forget` on the Phase-14
+concurrency runtime).** That closes Phase 15.
 
 ## The `to_string` convention hook (for Phase 16's auto-conversion)
 
