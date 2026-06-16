@@ -94,6 +94,28 @@ blocks all build on, and it establishes the object runtime + the synchronous-cal
 15.D (events) is independent and could be pulled forward as an early win if a concurrency
 proof is wanted first; default order is A → B → C → D.
 
+## Status
+
+**15.A (concrete classes) is DONE** on both targets — the `class` token is LIVE with executable
+`.tks` proofs (native + WASM), zero runtime reflection. Delivered in four increments:
+1. `teko_object.c` runtime (handle-based register-width field-cell store) + 5 KATs.
+2. `OP_OBJ_NEW/SET/GET/FREE` family — native `teko_rt_object_*` + WASM reactor import, both
+   backends, CSE-safe, flag-gated (object-free programs byte-identical).
+3. `OP_CALL_FUNC` — the synchronous table-call primitive (method dispatch): native `teko_rt_call`
+   (routine fn typedef widened to return `long`); WASM `call_indirect` + a `FUNC_END` `$w0`→`frame[0]`
+   spill so a sync caller reads the result.
+4. Frontend `class` grammar — `collect_classes` layout/method pre-pass, member access via the
+   dotted-identifier lexeme (`obj.field` read/write → `OP_OBJ_GET/SET`, `obj.method(args)` →
+   `OP_CALL_FUNC` static dispatch with `self`=arg0), `ClassName()` instantiation → `OP_OBJ_NEW`,
+   `emit_method_routines` (method bodies as table routines, `self` bound + class-scoped), `return`.
+
+Proofs: `runtime/native/samples/class.tks` → `7`, `70`; `runtime/wasm/samples/class.tks`
+(`run-class.mjs`) → `[7,70]`. Suite 213/213; all four gates' local equivalents green.
+
+**Next: 15.B (abstract classes + traits)** — compile-time static vtables, the local→type table
+generalized beyond `self`/instantiation, trait composition (union of method tables; collision =
+compile error). Then 15.C (generics, the deep one) and 15.D (events).
+
 ## Discipline (unchanged, non-negotiable)
 One increment per commit; build + suite; **ASan + UBSan on BOTH dispatch paths + TSan**
 clean each commit; the **16 native emitter goldens never regress**; all four CI gates

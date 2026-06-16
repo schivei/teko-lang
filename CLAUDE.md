@@ -271,3 +271,27 @@ gates; no dead tokens (every reserved concurrency/resilience keyword is live wit
 timing on the real monotonic clock. Suite 200/200; ASan/UBSan (both dispatch paths) + TSan green;
 16 native goldens intact. **Ready to leave draft** (PR #7; the human merges — no merge/force-push
 from the agent). Continuation/history: `docs/HANDOFF_PHASE14.md`.
+
+**Phase 15 (Bare-Metal Object-Oriented Paradigm) is IN PROGRESS** on `feat/phase-15-oop` (PR #8,
+draft) — `docs/PHASE15_OOP.md`. Object orientation with **zero runtime reflection** (compile-time
+field indices + method slots; no RTTI/attribute bags). Sub-block **15.A `class` (concrete) is DONE**
+on both targets (LIVE token, executable `.tks` proofs):
+- **Object model** = a handle-based register-width field-cell store (`src/runtime/teko_object.c`, 5
+  KATs) — the Phase-14 "C runtime = source of truth → opcode family → native `teko_rt_*` + WASM
+  reactor → `.tks` proof" pattern. Opcodes `OP_OBJ_NEW/SET/GET/FREE` (0x6A-0x6D); native
+  `teko_rt_object_*`, WASM reactor import (`teko_object.c` added to the reactor + EXPORTS).
+- **Methods** = function-table routines taking `self`; **static dispatch** via a NEW synchronous
+  table-call primitive `OP_CALL_FUNC` (0x6E) — native `teko_rt_call` (routine fn typedef widened
+  `void→long`; the body's last `$w0` survives `ret`), WASM `call_indirect (type $task)` + a
+  `FUNC_END` `$w0`→`frame[0]` spill so the caller reads the result. Sets `uses_spawn`.
+- **Frontend** (`frontend_interop.c`): `collect_classes` layout/method pre-pass (method slots
+  continue after `nfns`, dense table); member access via the **dotted-identifier lexeme**
+  (`obj.field` read/write, `obj.method(args)` static call with `self`=arg0); `ClassName()`
+  instantiation → `OP_OBJ_NEW`; `emit_method_routines` (bodies as routines, `self` class-bound);
+  `return <expr>;`. Decision: `routines`/methods share the routine table + scheduler TU.
+- Proofs: `runtime/{native,wasm}/samples/class.tks` → `7`,`70` (native run-native.sh /
+  WASM run-class.mjs `[7,70]`). Suite 213/213; ASan/UBSan (both paths) + TSan green; 16 goldens
+  intact; existing routine WASM proofs still pass after the FUNC_END spill.
+- **Next:** 15.B (abstract + `trait` via compile-time static vtables), 15.C (generics `<T>` —
+  monomorphization, the deep one), 15.D (`event`/`raise`/`subscribe` + `fanout`/`fire_and_forget`
+  on the Phase-14 spawn runtime). The human merges — no merge/force-push from the agent.
