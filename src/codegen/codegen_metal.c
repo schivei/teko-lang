@@ -36,6 +36,7 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->wasm_emit_shared = 0;
     ctx->wasm_emit_wait = 0;
     ctx->wasm_emit_await = 0;
+    ctx->wasm_emit_retry = 0;
     ctx->cf_id_next = 0;
     ctx->cf_loop_sp = 0;
     ctx->cf_if_sp = 0;
@@ -118,6 +119,11 @@ void teko_metal_set_emit_wait(MetalContext* ctx, int enabled) {
 void teko_metal_set_emit_await(MetalContext* ctx, int enabled) {
     if (!ctx) return;
     ctx->wasm_emit_await = enabled ? 1 : 0;
+}
+
+void teko_metal_set_emit_retry(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_retry = enabled ? 1 : 0;
 }
 
 void teko_metal_set_hosted(MetalContext* ctx, int enabled) {
@@ -328,7 +334,10 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                      op == OP_WAIT || op == OP_AWAIT_FOR ||
                      op == OP_LOOP_BEGIN || op == OP_LOOP_END || op == OP_BREAK ||
                      op == OP_CONTINUE || op == OP_BREAK_IF_FALSE ||
-                     op == OP_IF_BEGIN || op == OP_IF_END) {
+                     op == OP_IF_BEGIN || op == OP_IF_END ||
+                     op == OP_RETRY_NEW || op == OP_RETRY_SHOULD_CONTINUE ||
+                     op == OP_RETRY_NEXT_DELAY || op == OP_CIRCUIT_NEW ||
+                     op == OP_CIRCUIT_ALLOW || op == OP_CIRCUIT_RECORD) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -360,7 +369,10 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 op == OP_WAIT || op == OP_AWAIT_FOR ||
                 op == OP_LOOP_BEGIN || op == OP_LOOP_END || op == OP_BREAK ||
                 op == OP_CONTINUE || op == OP_BREAK_IF_FALSE ||
-                op == OP_IF_BEGIN || op == OP_IF_END) {
+                op == OP_IF_BEGIN || op == OP_IF_END ||
+                op == OP_RETRY_NEW || op == OP_RETRY_SHOULD_CONTINUE ||
+                op == OP_RETRY_NEXT_DELAY || op == OP_CIRCUIT_NEW ||
+                op == OP_CIRCUIT_ALLOW || op == OP_CIRCUIT_RECORD) {
                 accum_has_value = false;
             }
         }

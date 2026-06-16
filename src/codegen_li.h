@@ -130,6 +130,18 @@ typedef enum {
     OP_IF_BEGIN       = 0x60, // enter the if-body iff $w0 != 0 (else skip to IF_END)
     OP_IF_END         = 0x61, // close the if-body
 
+    // Phase 14 (14.F): resilience policy ops — the `retry { } fallback { }` / `circuit { }` block
+    // grammar drives the teko_retry C policy runtime (the single source of truth) through these.
+    // Same dedicated-opcode + teko_rt_retry_*/teko_rt_circuit_* (native) / reactor-import (WASM)
+    // lowering as the channel families; args staged via OP_SETARG with the last in $w0; the result
+    // (handle / decision / delay) lands in $w0. They are $w0-clobbering runtime calls (CSE sets).
+    OP_RETRY_NEW            = 0x62, // retry_new(attempts, timeout, mode, base) -> handle
+    OP_RETRY_SHOULD_CONTINUE= 0x63, // should_continue(handle, attempt, elapsed) -> 0/1
+    OP_RETRY_NEXT_DELAY     = 0x64, // next_delay(handle, attempt) -> ms
+    OP_CIRCUIT_NEW          = 0x65, // circuit_new(threshold, cooldown) -> handle
+    OP_CIRCUIT_ALLOW        = 0x66, // circuit_allow(handle, now) -> 0/1
+    OP_CIRCUIT_RECORD       = 0x67, // circuit_record(handle, ok, now) -> 0
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -218,6 +230,10 @@ typedef struct {
     // declares the host import (env.teko_await) + drains $teko_sched_run; native links
     // teko_rt_await_ms (in the scheduler TU) — also sets uses_spawn so the routine table exists.
     int uses_await;
+    // Phase 14 (14.F): 1 if the program uses a `retry`/`circuit` resilience block (OP_RETRY_*/
+    // OP_CIRCUIT_*). Native links teko_rt_retry_*/teko_rt_circuit_*; WASM imports them from the
+    // runtime reactor + shares linear memory (same wiring as the channel families).
+    int uses_retry;
 } BytecodeBuffer;
 
 // Public functions of the IL Bytecode Emitter
@@ -264,6 +280,8 @@ void codegen_li_emit_await(BytecodeBuffer* buffer);
 // Phase 14 (control-flow foundation): emit a single-byte structured control-flow opcode
 // (OP_LOOP_BEGIN/END, OP_BREAK[_IF_FALSE], OP_CONTINUE, OP_IF_BEGIN/END).
 void codegen_li_emit_cf(BytecodeBuffer* buffer, OpCode op);
+// Phase 14 (14.F): emit a resilience policy op (OP_RETRY_*/OP_CIRCUIT_*); sets buffer->uses_retry.
+void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

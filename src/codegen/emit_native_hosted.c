@@ -129,6 +129,24 @@ const char* teko_native_shared_symbol(OpCode op, int* out_arity) {
     return sym;
 }
 
+// Phase 14 (14.F): OP_RETRY_*/OP_CIRCUIT_* -> teko_rt_retry_*/teko_rt_circuit_* symbol + arity
+// (mirrors the WASM reactor import table). The teko_retry C policy runtime is the source of truth.
+const char* teko_native_retry_symbol(OpCode op, int* out_arity) {
+    int arity = 1;
+    const char* sym = NULL;
+    switch (op) {
+        case OP_RETRY_NEW:             sym = "teko_rt_retry_new";             arity = 4; break;
+        case OP_RETRY_SHOULD_CONTINUE: sym = "teko_rt_retry_should_continue"; arity = 3; break;
+        case OP_RETRY_NEXT_DELAY:      sym = "teko_rt_retry_next_delay";      arity = 2; break;
+        case OP_CIRCUIT_NEW:           sym = "teko_rt_circuit_new";           arity = 2; break;
+        case OP_CIRCUIT_ALLOW:         sym = "teko_rt_circuit_allow";         arity = 2; break;
+        case OP_CIRCUIT_RECORD:        sym = "teko_rt_circuit_record";        arity = 3; break;
+        default: break;
+    }
+    if (out_arity) *out_arity = arity;
+    return sym;
+}
+
 // --- helpers ---------------------------------------------------------------------
 static int is_macho(const MetalContext* ctx) { return ctx->target.os == OS_MACOS_DARWIN; }
 static int is_arm64(const MetalContext* ctx) {
@@ -475,6 +493,19 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         // routine table the scheduler walks is emitted). Both take ms in arg0, return void.
         case OP_WAIT:      emit_call(ctx, "teko_rt_sleep_ms", 1); break;
         case OP_AWAIT_FOR: emit_call(ctx, "teko_rt_await_ms", 1); break;
+
+        // Phase 14 (14.F): resilience policy ops -> teko_rt_retry_*/teko_rt_circuit_* runtime calls.
+        case OP_RETRY_NEW:
+        case OP_RETRY_SHOULD_CONTINUE:
+        case OP_RETRY_NEXT_DELAY:
+        case OP_CIRCUIT_NEW:
+        case OP_CIRCUIT_ALLOW:
+        case OP_CIRCUIT_RECORD: {
+            int arity = 1;
+            const char* sym = teko_native_retry_symbol(op, &arity);
+            if (sym) emit_call(ctx, sym, arity);
+            break;
+        }
 
         // Phase 14 (control-flow foundation): structured loops + branches via local asm labels.
         // The loop top is `.Lcont_<id>` (continue target) and the exit is `.Lbrk_<id>` (break

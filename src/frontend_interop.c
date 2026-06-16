@@ -2,6 +2,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "parser_ffi.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -674,6 +675,38 @@ typedef struct {
 
 static void lower_block(BytecodeBuffer* b, Parser* p, LowerEnv* env);   // fwd (mutual recursion)
 static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env); // fwd
+static void lower_retry_block(BytecodeBuffer* b, Parser* p, LowerEnv* env);   // fwd (14.F)
+static void lower_circuit_block(BytecodeBuffer* b, Parser* p, LowerEnv* env); // fwd (14.F)
+
+// Allocate a fresh hidden named local ($v slot) and return its slot index. Used by the resilience
+// lowering for its synthetic state (policy/attempt/elapsed/flags). Refreshes the ctx local view.
+static int env_alloc_local(LowerEnv* env, const char* name) {
+    int s = *env->nlocals;
+    bind_add(env->locals, env->nlocals, env->caplocals, name, s);
+    env->ctx->locals = *env->locals; env->ctx->nlocals = *env->nlocals;
+    if (*env->nlocals > env->ctx->ta->hw) env->ctx->ta->hw = *env->nlocals;
+    return s;
+}
+
+// local = constant.
+static void emit_set_local_const(BytecodeBuffer* b, int slot, int v) {
+    codegen_li_emit_iconst(b, v);
+    codegen_li_emit_store_local(b, slot);
+}
+// local = local + ($w0)  ($w0 holds the delta on entry).
+static void emit_local_add_w0(BytecodeBuffer* b, int slot) {
+    codegen_li_emit_store(b);            // $w1 = delta
+    codegen_li_emit_load_local(b, slot); // $w0 = local
+    codegen_li_emit_binop(b, OP_ADD);    // $w0 = local + delta
+    codegen_li_emit_store_local(b, slot);
+}
+// $w0 = (local == 0).
+static void emit_local_is_zero(BytecodeBuffer* b, int slot) {
+    codegen_li_emit_iconst(b, 0);        // $w0 = 0
+    codegen_li_emit_store(b);            // $w1 = 0
+    codegen_li_emit_load_local(b, slot); // $w0 = local
+    codegen_li_emit_binop(b, OP_EQ);     // $w0 = (local == 0)
+}
 
 // Refresh the expression context's local view + position the temp allocator above the named
 // locals (so spills never clobber a binding). Call before lowering any expression in a body.
@@ -700,6 +733,34 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     else if (is_delayed_head(p))   { lower_delayed_call(b, p, ctx); }
     else if (is_bcast_head(p))     { lower_bcast_call(b, p, ctx); }
     else if (is_atomic_head(p))    { lower_atomic_call(b, p, ctx); }
+    else if (p->current_token.type == TOKEN_CIRCUIT && p->peek_token.type == TOKEN_LPAREN) {
+        // `circuit(threshold K, cooldown C)` breaker constructor as a let-initializer (14.F):
+        // parse the header, emit OP_CIRCUIT_NEW -> handle in $w0.
+        fe_advance(p); // 'circuit'
+        int threshold = 1, cooldown = 0;
+        if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+        while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF) {
+            if (p->current_token.type == TOKEN_IDENTIFIER &&
+                strcmp(p->current_token.lexeme, "threshold") == 0) {
+                fe_advance(p);
+                if (p->current_token.type == TOKEN_LIT_INT) {
+                    threshold = (int)literal_canonical_value(&p->current_token); fe_advance(p);
+                }
+            } else if (p->current_token.type == TOKEN_IDENTIFIER &&
+                       strcmp(p->current_token.lexeme, "cooldown") == 0) {
+                fe_advance(p);
+                if (p->current_token.type == TOKEN_LIT_INT) {
+                    cooldown = (int)literal_canonical_value(&p->current_token); fe_advance(p);
+                }
+            } else {
+                fe_advance(p);
+            }
+        }
+        if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+        codegen_li_emit_iconst(b, threshold); codegen_li_emit_setarg(b, 0);
+        codegen_li_emit_iconst(b, cooldown);  // last arg in $w0
+        codegen_li_emit_retry(b, OP_CIRCUIT_NEW); // $w0 = breaker handle
+    }
     else { env_sync(env); eval_expr_prec(b, p, ctx, 1, ctx->ta); } // integer expression -> $w0
 }
 
@@ -847,10 +908,22 @@ static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         lower_bcast_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     } else if (is_atomic_head(p)) {
         lower_atomic_call(b, p, ctx); if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    } else if (p->current_token.type == TOKEN_RETRY) {
+        lower_retry_block(b, p, env);     // 14.F: retry { } fallback { }
+    } else if (p->current_token.type == TOKEN_CIRCUIT &&
+               p->peek_token.type == TOKEN_IDENTIFIER) {
+        lower_circuit_block(b, p, env);   // 14.F: circuit cb { } fallback { }
     } else if (lower_reassign(b, p, env)) {
         /* NAME = expr; consumed */
     } else if (lower_call_stmt(b, p, env)) {
         /* NAME(args); consumed */
+    } else if (p->current_token.type == TOKEN_LIT_INT || p->current_token.type == TOKEN_LPAREN ||
+               p->current_token.type == TOKEN_IDENTIFIER) {
+        // Bare expression statement (e.g. a retry/circuit body's trailing ok/fail expression):
+        // evaluate it into $w0 so the enclosing block's result is the last expression.
+        env_sync(env);
+        eval_expr_prec(b, p, ctx, 1, ctx->ta);
+        if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     } else {
         fe_advance(p); // skip anything else in this subset (always progress)
     }
@@ -863,6 +936,153 @@ static void lower_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         lower_one_stmt(b, p, env);
     }
     if (p->current_token.type == TOKEN_RBRACE) fe_advance(p);
+}
+
+// Skip a `{ … }` block without lowering it (consume the matched braces). Used when a fallback
+// block is absent or when a body must be parsed but not emitted on a given path.
+static void skip_brace_block(Parser* p) {
+    if (p->current_token.type != TOKEN_LBRACE) return;
+    int depth = 0;
+    while (p->current_token.type != TOKEN_EOF) {
+        if (p->current_token.type == TOKEN_LBRACE) { depth++; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_RBRACE) { depth--; fe_advance(p); if (depth == 0) break; }
+        else fe_advance(p);
+    }
+}
+
+// `retry (attempts N, [timeout T,] exponential|logarithmic, base B) { body } [fallback { fb }]`
+// (Phase 14, 14.F). Drives the teko_retry C policy through the control-flow foundation: a loop
+// gated by teko_retry_should_continue runs the body each attempt; the body's trailing expression
+// is its ok/fail result (non-zero = success). On success it breaks; when the policy gives up it
+// runs `fallback`. Backoff (teko_retry_next_delay) accumulates `elapsed` for the timeout rule.
+static void lower_retry_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    static int uid = 0; int id = uid++;
+    fe_advance(p); // 'retry'
+    int attempts = 3, timeout = 0, mode = 0, base = 1;
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    while (p->current_token.type != TOKEN_RPAREN && p->current_token.type != TOKEN_EOF &&
+           p->current_token.type != TOKEN_LBRACE) {
+        if (p->current_token.type == TOKEN_ATTEMPTS) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { attempts = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else if (p->current_token.type == TOKEN_TIMEOUT) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { timeout = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else if (p->current_token.type == TOKEN_EXPONENTIAL) { mode = 0; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_LOGARITHMIC) { mode = 1; fe_advance(p); }
+        else if (p->current_token.type == TOKEN_IDENTIFIER && strcmp(p->current_token.lexeme, "base") == 0) {
+            fe_advance(p);
+            if (p->current_token.type == TOKEN_LIT_INT) { base = (int)literal_canonical_value(&p->current_token); fe_advance(p); }
+        } else { fe_advance(p); }
+    }
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+
+    char nm[64];
+    snprintf(nm, sizeof(nm), "__retry_pol_%d", id);  int s_pol  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_att_%d", id);  int s_att  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_ela_%d", id);  int s_ela  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_ok_%d",  id);  int s_ok   = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__retry_suc_%d", id);  int s_suc  = env_alloc_local(env, nm);
+
+    // policy = retry_new(attempts, timeout, mode, base)
+    codegen_li_emit_iconst(b, attempts); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_iconst(b, timeout);  codegen_li_emit_setarg(b, 1);
+    codegen_li_emit_iconst(b, mode);     codegen_li_emit_setarg(b, 2);
+    codegen_li_emit_iconst(b, base);     // last arg in $w0
+    codegen_li_emit_retry(b, OP_RETRY_NEW);
+    codegen_li_emit_store_local(b, s_pol);
+    emit_set_local_const(b, s_att, 0); // attempt = 0
+    emit_set_local_const(b, s_ela, 0); // elapsed = 0
+    emit_set_local_const(b, s_suc, 0); // succeeded = 0
+
+    codegen_li_emit_cf(b, OP_LOOP_BEGIN);
+    //   if (should_continue(policy, attempt, elapsed) == 0) break  (give up -> exit, succeeded=0)
+    codegen_li_emit_load_local(b, s_pol); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_att); codegen_li_emit_setarg(b, 1);
+    codegen_li_emit_load_local(b, s_ela); // last in $w0
+    codegen_li_emit_retry(b, OP_RETRY_SHOULD_CONTINUE); // $w0 = 0/1
+    codegen_li_emit_cf(b, OP_BREAK_IF_FALSE);
+    //   body -> $w0 (ok/fail); ok = $w0
+    lower_block(b, p, env);
+    codegen_li_emit_store_local(b, s_ok);
+    //   if (ok) { succeeded = 1; break }
+    codegen_li_emit_load_local(b, s_ok);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    emit_set_local_const(b, s_suc, 1);
+    codegen_li_emit_cf(b, OP_BREAK);
+    codegen_li_emit_cf(b, OP_IF_END);
+    //   elapsed += next_delay(policy, attempt)
+    codegen_li_emit_load_local(b, s_pol); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_att); // last in $w0
+    codegen_li_emit_retry(b, OP_RETRY_NEXT_DELAY); // $w0 = delay
+    emit_local_add_w0(b, s_ela);
+    //   attempt += 1
+    codegen_li_emit_iconst(b, 1);
+    emit_local_add_w0(b, s_att);
+    codegen_li_emit_cf(b, OP_LOOP_END);
+
+    // fallback (optional): if (!succeeded) { fb }
+    if (p->current_token.type == TOKEN_FALLBACK) {
+        fe_advance(p); // 'fallback'
+        emit_local_is_zero(b, s_suc);     // $w0 = (succeeded == 0)
+        codegen_li_emit_cf(b, OP_IF_BEGIN);
+        lower_block(b, p, env);
+        codegen_li_emit_cf(b, OP_IF_END);
+    }
+}
+
+// `circuit <breaker> { body } [fallback { fb }]` (Phase 14, 14.F). `breaker` is a named local
+// created by `let cb = circuit(threshold K, cooldown C);`. Guards the body with
+// teko_circuit_allow; records the outcome (teko_circuit_record); runs `fallback` when the call
+// was short-circuited (breaker OPEN) OR the body failed. `failed` starts 1 (assume fallback) and
+// is cleared only on an allowed, successful call — so the single-parse fallback emits once.
+static void lower_circuit_block(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    static int uid = 0; int id = uid++;
+    fe_advance(p); // 'circuit'
+    int cb = -1;
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        cb = bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme);
+        fe_advance(p); // breaker name
+    }
+    char nm[64];
+    snprintf(nm, sizeof(nm), "__circ_allowed_%d", id); int s_allowed = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__circ_failed_%d",  id); int s_failed  = env_alloc_local(env, nm);
+    snprintf(nm, sizeof(nm), "__circ_ok_%d",      id); int s_ok      = env_alloc_local(env, nm);
+
+    if (cb < 0) { // unknown breaker: parse-and-skip the blocks so we still consume the tokens
+        skip_brace_block(p);
+        if (p->current_token.type == TOKEN_FALLBACK) { fe_advance(p); skip_brace_block(p); }
+        return;
+    }
+
+    emit_set_local_const(b, s_failed, 1); // assume failed (fallback) until proven otherwise
+    // allowed = circuit_allow(cb, 0)
+    codegen_li_emit_load_local(b, cb); codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_iconst(b, 0); // now = 0 (logical clock MVP)
+    codegen_li_emit_retry(b, OP_CIRCUIT_ALLOW); // $w0 = 0/1
+    codegen_li_emit_store_local(b, s_allowed);
+    //   if (allowed) { body -> ok; record(cb, ok, 0); if (ok) failed = 0 }
+    codegen_li_emit_load_local(b, s_allowed);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    lower_block(b, p, env);                 // body -> $w0
+    codegen_li_emit_store_local(b, s_ok);
+    codegen_li_emit_load_local(b, cb);  codegen_li_emit_setarg(b, 0);
+    codegen_li_emit_load_local(b, s_ok); codegen_li_emit_setarg(b, 1);
+    codegen_li_emit_iconst(b, 0);       // now = 0
+    codegen_li_emit_retry(b, OP_CIRCUIT_RECORD);
+    codegen_li_emit_load_local(b, s_ok);
+    codegen_li_emit_cf(b, OP_IF_BEGIN);
+    emit_set_local_const(b, s_failed, 0); // success -> no fallback
+    codegen_li_emit_cf(b, OP_IF_END);
+    codegen_li_emit_cf(b, OP_IF_END);
+    // fallback (optional): if (failed) { fb }  (covers OPEN fail-fast + body failure)
+    if (p->current_token.type == TOKEN_FALLBACK) {
+        fe_advance(p);
+        codegen_li_emit_load_local(b, s_failed);
+        codegen_li_emit_cf(b, OP_IF_BEGIN);
+        lower_block(b, p, env);
+        codegen_li_emit_cf(b, OP_IF_END);
+    }
 }
 
 static int lower_routine_extern_call(BytecodeBuffer* buffer, Parser* p,
@@ -1102,57 +1322,9 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
 
         if ((parser.current_token.type == TOKEN_LET || parser.current_token.type == TOKEN_MUT) &&
             parser.peek_token.type == TOKEN_IDENTIFIER) {
-            // `let`/`mut NAME [: type] = <initializer>` — a named local binding.
-            fe_advance(&parser); // consume let/mut
-            char lname[96];
-            strncpy(lname, parser.current_token.lexeme, sizeof(lname) - 1);
-            lname[sizeof(lname) - 1] = '\0';
-            fe_advance(&parser); // consume NAME
-            if (parser.current_token.type == TOKEN_COLON) { // optional ': type'
-                fe_advance(&parser);
-                while (parser.current_token.type != TOKEN_ASSIGN &&
-                       parser.current_token.type != TOKEN_QUICK_ASSIGN &&
-                       parser.current_token.type != TOKEN_SEMICOLON &&
-                       parser.current_token.type != TOKEN_EOF) fe_advance(&parser);
-            }
-            if (parser.current_token.type == TOKEN_ASSIGN ||
-                parser.current_token.type == TOKEN_QUICK_ASSIGN) fe_advance(&parser);
-
-            // Assign (or reuse) this name's slot.
-            int s = bind_lookup(locals, nlocals, lname);
-            if (s < 0) { s = nlocals; bind_add(&locals, &nlocals, &caplocals, lname, s); }
-            top_ctx.locals = locals; top_ctx.nlocals = nlocals;
-
-            // Lower the initializer into $w0.
-            if (parser.current_token.type == TOKEN_LIT_STR ||
-                parser.current_token.type == TOKEN_STRING_LIT) {
-                char* sv = strip_quotes(parser.current_token.lexeme);
-                codegen_li_emit_sconst(buffer, codegen_li_add_string_constant(buffer, sv));
-                free(sv);
-                fe_advance(&parser);
-            } else if (parser.current_token.type == TOKEN_MACRO_IDENT &&
-                       is_dom_macro(parser.current_token.lexeme) &&
-                       parser.peek_token.type == TOKEN_LPAREN) {
-                lower_intrinsic_call(buffer, &parser, &top_ctx); // result handle -> $w0
-            } else if (is_codec_head(&parser)) {
-                lower_base_codec(buffer, &parser, &top_ctx);      // P12-G: result ptr -> $w0
-            } else if (is_duplex_head(&parser)) {
-                lower_duplex_call(buffer, &parser, &top_ctx);     // 14.B: handle/value -> $w0
-            } else if (is_delayed_head(&parser)) {
-                lower_delayed_call(buffer, &parser, &top_ctx);    // 14.C: handle/value -> $w0
-            } else if (is_bcast_head(&parser)) {
-                lower_bcast_call(buffer, &parser, &top_ctx);      // 14.D: handle/value -> $w0
-            } else if (is_atomic_head(&parser)) {
-                lower_atomic_call(buffer, &parser, &top_ctx);     // 14.E: handle/value -> $w0
-            } else {
-                // Integer expression (P12-E): literals, locals, parens, + - * / % and
-                // comparisons. Temps live above the named locals ($v{nlocals}+).
-                ta.next_temp = nlocals;
-                if (nlocals > ta.hw) ta.hw = nlocals;
-                eval_expr_prec(buffer, &parser, &top_ctx, 1, &ta);
-            }
-            codegen_li_emit_store_local(buffer, s); // $vs = $w0
-            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+            // `let`/`mut NAME [: type] = <initializer>` — a named local binding. Shared with block
+            // bodies (lower_let_stmt → lower_init_value), so `let cb = circuit(...)` works here too.
+            lower_let_stmt(buffer, &parser, &top_env);
         } else if (parser.current_token.type == TOKEN_ROUTINES) {
             // Phase 14 (14.A): `routines { foo(); bar(); }` — fire each enclosed call as a
             // background task. Each `NAME(…)` resolves to a top-level `fn NAME`'s table slot
@@ -1248,6 +1420,11 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
         } else if (parser.current_token.type == TOKEN_CONTINUE) {
             fe_advance(&parser); codegen_li_emit_cf(buffer, OP_CONTINUE);
             if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_RETRY) {
+            lower_retry_block(buffer, &parser, &top_env);     // 14.F retry { } fallback { }
+        } else if (parser.current_token.type == TOKEN_CIRCUIT &&
+                   parser.peek_token.type == TOKEN_IDENTIFIER) {
+            lower_circuit_block(buffer, &parser, &top_env);   // 14.F circuit cb { } fallback { }
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_ASSIGN &&
                    bind_lookup(locals, nlocals, parser.current_token.lexeme) >= 0) {

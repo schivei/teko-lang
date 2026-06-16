@@ -33,6 +33,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_shared = 0;
     buffer->uses_wait = 0;
     buffer->uses_await = 0;
+    buffer->uses_retry = 0;
 
     return buffer;
 }
@@ -232,6 +233,12 @@ void codegen_li_emit_await(BytecodeBuffer* buffer) {
 void codegen_li_emit_cf(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     emit_byte(buffer, (unsigned char)op); // single-byte structured control-flow opcode
+}
+
+void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_retry = 1; // backends link/import the teko_retry policy runtime
+    emit_byte(buffer, (unsigned char)op);
 }
 
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {

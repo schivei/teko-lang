@@ -1174,6 +1174,16 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_atomic_load\" (func $atomic_load (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_atomic_store\" (func $atomic_store (param i32) (param i32)))\n");
             }
+            // Phase 14 (14.F): resilience policy entry points, also from the runtime reactor.
+            // Pure i32 (handle/count/time) — the teko_retry C policy is the shared source of truth.
+            if (ctx->wasm_emit_retry) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_new\" (func $retry_new (param i32) (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_should_continue\" (func $retry_should_continue (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_retry_next_delay\" (func $retry_next_delay (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_new\" (func $circuit_new (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_allow\" (func $circuit_allow (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_circuit_record\" (func $circuit_record (param i32) (param i32) (param i32) (result i32)))\n");
+            }
             // Phase 14 (14.G): timespan waiters use host imports (NOT the reactor). `wait` sleeps
             // synchronously via env.teko_sleep(ms); `await` records the ms via env.teko_await(ms)
             // then drains the in-module scheduler ($teko_sched_run) — a cooperative timed yield.
@@ -1187,7 +1197,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
             // address the same bytes. Re-export it either way so harnesses can read results.
             if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
-                ctx->wasm_emit_bcast || ctx->wasm_emit_shared) {
+                ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1405,6 +1415,28 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_IF_END:
             fprintf(f, "    end\n");
             break;
+
+        // Phase 14 (14.F): resilience policy ops — imported reactor calls, same staging ABI as the
+        // channel families (args 0..n-2 from $a0.., the last from $w0; i32 result in $w0).
+        case OP_RETRY_NEW:
+        case OP_RETRY_SHOULD_CONTINUE:
+        case OP_RETRY_NEXT_DELAY:
+        case OP_CIRCUIT_NEW:
+        case OP_CIRCUIT_ALLOW:
+        case OP_CIRCUIT_RECORD: {
+            const char* fn = (op == OP_RETRY_NEW)             ? "retry_new" :
+                             (op == OP_RETRY_SHOULD_CONTINUE) ? "retry_should_continue" :
+                             (op == OP_RETRY_NEXT_DELAY)      ? "retry_next_delay" :
+                             (op == OP_CIRCUIT_NEW)           ? "circuit_new" :
+                             (op == OP_CIRCUIT_ALLOW)         ? "circuit_allow" : "circuit_record";
+            int ar = (op == OP_RETRY_NEW) ? 4 :
+                     (op == OP_RETRY_SHOULD_CONTINUE || op == OP_CIRCUIT_RECORD) ? 3 :
+                     (op == OP_RETRY_NEXT_DELAY) ? 2 :
+                     (op == OP_CIRCUIT_NEW || op == OP_CIRCUIT_ALLOW) ? 2 : 2;
+            for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
+            fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            break;
+        }
 
         // Phase 12: named local variables ($v0..$vN).
         case OP_STORE_LOCAL:

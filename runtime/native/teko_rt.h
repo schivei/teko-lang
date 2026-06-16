@@ -153,4 +153,13 @@ long teko_rt_bcast_recv(long handle, long sub_id);
 long teko_rt_bcast_poll(long handle, long sub_id);
 long teko_rt_bcast_close(long handle);
 
+// Phase 14 (14.F) — resilience policy surface wrappers (OP_RETRY_*/OP_CIRCUIT_* lower to these).
+// Handles are TekoRetry*/TekoCircuit* as register-width integers; counts/times are i32 (ms).
+long teko_rt_retry_new(long attempts, long timeout, long mode, long base);
+long teko_rt_retry_should_continue(long handle, long attempt, long elapsed);
+long teko_rt_retry_next_delay(long handle, long attempt);
+long teko_rt_circuit_new(long threshold, long cooldown);
+long teko_rt_circuit_allow(long handle, long now);
+long teko_rt_circuit_record(long handle, long ok, long now);
+
 #endif // TEKO_RT_H

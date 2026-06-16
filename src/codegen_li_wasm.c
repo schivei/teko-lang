@@ -57,6 +57,8 @@ int codegen_li_emit_wasm(const BytecodeBuffer* buffer, const char* wat_path,
     // Phase 14 (14.G): declare the host sleep/await imports for `wait`/`await` waiters.
     teko_metal_set_emit_wait(ctx, buffer->uses_wait);
     teko_metal_set_emit_await(ctx, buffer->uses_await);
+    // Phase 14 (14.F): import the retry/circuit policy entry points from the reactor + share memory.
+    teko_metal_set_emit_retry(ctx, buffer->uses_retry);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
 

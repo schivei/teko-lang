@@ -1034,6 +1034,62 @@ void test_frontend_interop_controlflow_lowering(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 14 (14.F): the `retry { } fallback { }` and `circuit cb { } fallback { }` blocks lower to
+// the policy opcodes OP_RETRY_*/OP_CIRCUIT_* (driving the teko_retry C runtime) wrapped in the
+// control-flow foundation; set uses_retry; on WASM import the reactor policy entry points.
+void test_frontend_interop_resilience_lowering(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "let t = 0;\n"
+        "retry (attempts 3, exponential, base 1) { t = t + 1; t >= 2; } fallback { emit_int(9); }\n"
+        "let cb = circuit(threshold 2, cooldown 50);\n" // 50 avoids the 0x62-0x67 opcode byte range
+        "circuit cb { 0; } fallback { emit_int(8); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_retry);
+    int n_rnew=0,n_sc=0,n_nd=0,n_cnew=0,n_callow=0,n_crec=0;
+    for (int i = 0; i < buffer->size; i++) {
+        switch (buffer->code[i]) {
+            case OP_RETRY_NEW:             n_rnew++;   break;
+            case OP_RETRY_SHOULD_CONTINUE: n_sc++;     break;
+            case OP_RETRY_NEXT_DELAY:      n_nd++;     break;
+            case OP_CIRCUIT_NEW:           n_cnew++;   break;
+            case OP_CIRCUIT_ALLOW:         n_callow++; break;
+            case OP_CIRCUIT_RECORD:        n_crec++;   break;
+            default: break;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_rnew);    // one retry policy
+    TEST_ASSERT_EQUAL_INT(1, n_sc);      // the should-continue gate
+    TEST_ASSERT_EQUAL_INT(1, n_nd);      // the backoff next-delay
+    TEST_ASSERT_EQUAL_INT(1, n_cnew);    // the circuit constructor
+    TEST_ASSERT_EQUAL_INT(1, n_callow);  // the breaker guard
+    TEST_ASSERT_EQUAL_INT(1, n_crec);    // the outcome record
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_resilience.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_retry_new\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $retry_should_continue"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $circuit_allow"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"env\" \"memory\""));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 void test_frontend_interop_timespan_normalization(void) {
     const char* src =
         "let d = delayed.open(8);\n"

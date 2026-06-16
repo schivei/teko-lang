@@ -20,6 +20,7 @@
 #include "teko_duplex.h"
 #include "teko_delayed.h"
 #include "teko_broadcast.h"
+#include "teko_retry.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,6 +137,32 @@ long teko_rt_bcast_poll(long handle, long sub_id) {
 }
 long teko_rt_bcast_close(long handle) {
     teko_broadcast_close((TekoBroadcast*)(intptr_t)handle);
+    return 0;
+}
+
+// Phase 14 (14.F) — resilience policy surface wrappers (OP_RETRY_*/OP_CIRCUIT_* lower to these).
+// The handle is a TekoRetry*/TekoCircuit* carried as a register-width integer; the time/count
+// args are i32 at the surface (ms fit in i32 for the MVP — the teko_retry C policy is the single
+// source of truth). mode: 0 = exponential, non-zero = logarithmic.
+long teko_rt_retry_new(long attempts, long timeout, long mode, long base) {
+    return (long)(intptr_t)teko_retry_new((int)attempts, (uint64_t)(unsigned long)timeout,
+        mode ? TEKO_BACKOFF_LOGARITHMIC : TEKO_BACKOFF_EXPONENTIAL, (uint64_t)(unsigned long)base);
+}
+long teko_rt_retry_should_continue(long handle, long attempt, long elapsed) {
+    return teko_retry_should_continue((const TekoRetry*)(intptr_t)handle, (int)attempt,
+                                      (uint64_t)(unsigned long)elapsed);
+}
+long teko_rt_retry_next_delay(long handle, long attempt) {
+    return (long)teko_retry_next_delay((const TekoRetry*)(intptr_t)handle, (int)attempt);
+}
+long teko_rt_circuit_new(long threshold, long cooldown) {
+    return (long)(intptr_t)teko_circuit_new((int)threshold, (uint64_t)(unsigned long)cooldown);
+}
+long teko_rt_circuit_allow(long handle, long now) {
+    return teko_circuit_allow((TekoCircuit*)(intptr_t)handle, (uint64_t)(unsigned long)now);
+}
+long teko_rt_circuit_record(long handle, long ok, long now) {
+    teko_circuit_record((TekoCircuit*)(intptr_t)handle, (int)ok, (uint64_t)(unsigned long)now);
     return 0;
 }
 

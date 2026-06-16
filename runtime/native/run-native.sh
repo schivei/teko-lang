@@ -127,6 +127,22 @@ check controlflow.tks "$(cat <<'EXP'
 EXP
 )"
 
+# Phase 14 (14.F): resilience — retry { } fallback { } + circuit cb { } fallback { } driving the
+# teko_retry C policy. succeed-on-3rd (3); exhaust->fallback (777, t2=2); timeout->fallback
+# (555, tt=1); logarithmic (444, lg=3); breaker trips after 2 failures (ran=2, fallback=5).
+check resilience.tks "$(cat <<'EXP'
+3
+777
+2
+555
+1
+444
+3
+2
+5
+EXP
+)"
+
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
