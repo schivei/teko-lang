@@ -1067,6 +1067,60 @@ void test_frontend_interop_routine_loop(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 14 (14.I): `routines { worker(a, b); }` passes N arguments (Go-style) — each staged via
+// OP_SETARG, then OP_SPAWN_ASYNC_ARGS argc. The routine `fn worker(a, b)` binds each param from
+// OP_LOAD_SPAWN_ARG i. Pins the multi-arg spawn + per-param load in the IL, and the WASM frame ops.
+void test_frontend_interop_routine_args(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "fn worker(a, b) { let s = a + b; emit_int(s); }\n"
+        "let x = 3;\n"
+        "let y = 4;\n"
+        "routines { worker(x, y); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn);
+
+    int n_spawn_args = 0, spawn_argc = -1, n_load0 = 0, n_load1 = 0;
+    for (int i = 0; i + 4 < buffer->size; ) {
+        unsigned char op = buffer->code[i];
+        int a = (int)((unsigned)buffer->code[i+1] | ((unsigned)buffer->code[i+2] << 8) |
+                      ((unsigned)buffer->code[i+3] << 16) | ((unsigned)buffer->code[i+4] << 24));
+        if (op == OP_SPAWN_ASYNC_ARGS) { n_spawn_args++; spawn_argc = a; }
+        if (op == OP_LOAD_SPAWN_ARG && a == 0) n_load0++;
+        if (op == OP_LOAD_SPAWN_ARG && a == 1) n_load1++;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
+            op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG) i += 5;
+        else i += 1;
+    }
+    TEST_ASSERT_EQUAL_INT(1, n_spawn_args);   // one multi-arg spawn
+    TEST_ASSERT_EQUAL_INT(2, spawn_argc);     // worker(x, y) -> argc 2
+    TEST_ASSERT_EQUAL_INT(1, n_load0);        // param a <- arg 0
+    TEST_ASSERT_EQUAL_INT(1, n_load1);        // param b <- arg 1
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_routineargs.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $teko_enqueue"));  // spawn-with-args enqueues a task
+    TEST_ASSERT_NOT_NULL(strstr(out, "local.get $frame"));    // param bound from the task frame
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 14 (14.F): the `retry { } fallback { }` and `circuit cb { } fallback { }` blocks lower to
 // the policy opcodes OP_RETRY_*/OP_CIRCUIT_* (driving the teko_retry C runtime) wrapped in the
 // control-flow foundation; set uses_retry; on WASM import the reactor policy entry points.

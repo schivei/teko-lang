@@ -20,6 +20,7 @@
 // channel rendezvous between routines is later Phase 14 work (14.B duplex etc.).
 
 #include "teko_rt.h"
+#include <stdint.h>
 
 typedef void (*teko_routine_fn)(long);
 
@@ -30,21 +31,44 @@ extern teko_routine_fn teko_routine_table[];
 extern long teko_routine_count;
 
 #define TEKO_RT_RUNQ_CAP 1024 // bounded run queue (matches the WASM run-queue spirit)
+#define TEKO_RT_MAX_ARGS 8    // Phase 14 (14.I): max routine arguments per spawn
 
 static long teko_rt_rq_slot[TEKO_RT_RUNQ_CAP];
-static long teko_rt_rq_arg[TEKO_RT_RUNQ_CAP];
+static long teko_rt_rq_args[TEKO_RT_RUNQ_CAP][TEKO_RT_MAX_ARGS]; // per-task argument vector
 static int  teko_rt_rq_head = 0;
 static int  teko_rt_rq_tail = 0;
 
-// Enqueue a background task: the routine at table slot `slot`, invoked with `arg`.
-// Lowered from OP_SPAWN_ASYNC (slot in the accumulator). Silently drops if the bounded
-// queue is full (a hard cap mirroring the WASM emitter's fixed run-queue region).
+// Phase 14 (14.I): the routine ABI is teko_routine_<slot>(long args), where `args` is a pointer
+// to this task's argument vector; the routine reads args[i] (OP_LOAD_SPAWN_ARG). Each spawn passes
+// a pointer to the queue entry's row, so arguments survive until the task runs.
+
+// Enqueue a background task with no arguments (or one legacy ignored value): the routine at table
+// slot `slot`. Lowered from OP_SPAWN_ASYNC. `arg` is stored as args[0] for any 1-arg legacy use.
 void teko_rt_spawn(long slot, long arg) {
     if (teko_rt_rq_tail < TEKO_RT_RUNQ_CAP) {
         teko_rt_rq_slot[teko_rt_rq_tail] = slot;
-        teko_rt_rq_arg[teko_rt_rq_tail] = arg;
+        teko_rt_rq_args[teko_rt_rq_tail][0] = arg;
         teko_rt_rq_tail++;
     }
+}
+
+// Phase 14 (14.I): stage the idx-th argument for the NEXT teko_rt_spawn_args call (Go-style
+// multi-arg routine spawn, lowered from OP_SPAWN_ASYNC_ARGS). Bounded by TEKO_RT_MAX_ARGS.
+static long teko_rt_pending_args[TEKO_RT_MAX_ARGS];
+void teko_rt_spawn_setarg(long idx, long val) {
+    if (idx >= 0 && idx < TEKO_RT_MAX_ARGS) teko_rt_pending_args[idx] = val;
+}
+
+// Enqueue the routine at `slot` with the arguments staged via teko_rt_spawn_setarg. Copies the
+// pending vector into the task's row so concurrent/nested spawns don't clobber it.
+void teko_rt_spawn_args(long slot) {
+    if (teko_rt_rq_tail < TEKO_RT_RUNQ_CAP) {
+        teko_rt_rq_slot[teko_rt_rq_tail] = slot;
+        for (int i = 0; i < TEKO_RT_MAX_ARGS; i++)
+            teko_rt_rq_args[teko_rt_rq_tail][i] = teko_rt_pending_args[i];
+        teko_rt_rq_tail++;
+    }
+    for (int i = 0; i < TEKO_RT_MAX_ARGS; i++) teko_rt_pending_args[i] = 0; // reset for the next spawn
 }
 
 // Drain the run queue to completion. Called at `$main`'s exit so fired routines run
@@ -53,10 +77,10 @@ void teko_rt_spawn(long slot, long arg) {
 void teko_rt_run(void) {
     while (teko_rt_rq_head < teko_rt_rq_tail) {
         long slot = teko_rt_rq_slot[teko_rt_rq_head];
-        long arg  = teko_rt_rq_arg[teko_rt_rq_head];
+        long* args = teko_rt_rq_args[teko_rt_rq_head]; // task's argument vector (read via args[i])
         teko_rt_rq_head++;
         if (slot >= 0 && slot < teko_routine_count && teko_routine_table[slot]) {
-            teko_routine_table[slot](arg);
+            teko_routine_table[slot]((long)(intptr_t)args);
         }
     }
 }

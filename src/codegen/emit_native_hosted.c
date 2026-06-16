@@ -159,13 +159,13 @@ static int frame_locals(const MetalContext* ctx) {
     return ctx->wasm_local_count > 0 ? ctx->wasm_local_count : 0;
 }
 static int frame_size_x86(const MetalContext* ctx) {
-    int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS;
+    int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS + 1; // +1 = the spawn-args pointer slot
     int f = 8 + 8 * slots;        // first slot at rbp-16 (rbx occupies rbp-8)
     if (f % 16 != 8) f += 8;      // after `push rbp; push rbx`, sub F keeps rsp%16==0 iff F%16==8
     return f;
 }
 static int frame_size_arm(const MetalContext* ctx) {
-    int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS;
+    int slots = frame_locals(ctx) + TEKO_HOSTED_STAGE_SLOTS + 1; // +1 = the spawn-args pointer slot
     int f = 32 + 8 * slots;       // saved x29/x30/x19 occupy 0/8/16
     return (f + 15) & ~15;        // 16-aligned for stp/AAPCS
 }
@@ -177,6 +177,10 @@ static int local_off_arm(int n) { return 32 + 8 * n; }
 static int stage_off_arm(const MetalContext* ctx, int i) {
     return 32 + 8 * frame_locals(ctx) + 8 * i;
 }
+// Phase 14 (14.I): the reserved slot holding the routine's spawn-args pointer (one past the stage
+// slots), so OP_LOAD_SPAWN_ARG can read args[idx] anywhere in the body (callee-saved across calls).
+static int argsptr_off_x86(const MetalContext* ctx) { return stage_off_x86(ctx, TEKO_HOSTED_STAGE_SLOTS); }
+static int argsptr_off_arm(const MetalContext* ctx) { return stage_off_arm(ctx, TEKO_HOSTED_STAGE_SLOTS); }
 
 // Emit one C string into the active data section as an escaped .asciz directive.
 static void emit_asciz(FILE* f, const char* s) {
@@ -327,16 +331,23 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             break;
 
         // Phase 14 (14.A): green-thread body boundaries. Each routine is emitted as a
-        // separate native function `teko_routine_<slot>(long arg)` AFTER $main returns, so
+        // separate native function `teko_routine_<slot>(long args)` AFTER $main returns, so
         // FUNC_BEGIN first closes the open function (main → ret, or the previous routine),
-        // then opens the new one. The arg lands in $w0 on entry (x0 already; rdi→rax on x86).
+        // then opens the new one. On entry the arg register holds the spawn-args pointer (Phase
+        // 14.I); save it to the reserved frame slot so OP_LOAD_SPAWN_ARG can read args[idx] in the
+        // body. $w0 also gets it (legacy: arg-less/single-arg routines that ignore it).
         case OP_FUNC_BEGIN:
             if (ctx->wasm_open == 1)      emit_frame_leave(ctx); // close $main
             else if (ctx->wasm_open == 2) emit_frame_leave(ctx); // close previous routine
             fprintf(f, "\n    .p2align %d\n", arm ? 2 : 4);
             fprintf(f, "%steko_routine_%d:\n", pre, arg);
             emit_frame_enter(ctx);
-            if (!arm) fprintf(f, "    movq %%rdi, %%rax\n"); // $w0 = spawn arg (x0 already on arm)
+            if (arm) {
+                fprintf(f, "    str x0, [x29, #%d]\n", argsptr_off_arm(ctx)); // save spawn-args ptr
+            } else {
+                fprintf(f, "    movq %%rdi, %d(%%rbp)\n", argsptr_off_x86(ctx)); // save spawn-args ptr
+                fprintf(f, "    movq %%rdi, %%rax\n");                            // $w0 = args ptr (legacy)
+            }
             if (ctx->wasm_routine_count < 64)
                 ctx->wasm_routine_ids[ctx->wasm_routine_count] = arg;
             ctx->wasm_routine_count++;
@@ -365,6 +376,49 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "    movq %%rax, %%rdi\n");  // slot
                 fprintf(f, "    xorl %%esi, %%esi\n");  // arg = 0
                 fprintf(f, "    call %steko_rt_spawn%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            }
+            break;
+
+        // Phase 14 (14.I): fire a routine with `arg` (=argc) staged arguments. Push each staged
+        // arg (stage slot i) into the scheduler's pending-args buffer via teko_rt_spawn_setarg(i,v),
+        // then teko_rt_spawn_args(slot=$w0) captures them + enqueues. The task receives an args
+        // pointer it reads with OP_LOAD_SPAWN_ARG.
+        case OP_SPAWN_ASYNC_ARGS: {
+            int argc = arg;
+            // Preserve the slot ($w0) in the callee-saved $w1 across the setarg calls (each clobbers
+            // the accumulator register), then restore it for teko_rt_spawn_args.
+            if (arm) fprintf(f, "    mov x19, x0\n");
+            else     fprintf(f, "    movq %%rax, %%rbx\n");
+            for (int k = 0; k < argc; k++) {
+                if (arm) {
+                    fprintf(f, "    mov x0, #%d\n", k);
+                    fprintf(f, "    ldr x1, [x29, #%d]\n", stage_off_arm(ctx, k));
+                    fprintf(f, "    bl %steko_rt_spawn_setarg\n", pre);
+                } else {
+                    fprintf(f, "    movl $%d, %%edi\n", k);
+                    fprintf(f, "    movq %d(%%rbp), %%rsi\n", stage_off_x86(ctx, k));
+                    fprintf(f, "    call %steko_rt_spawn_setarg%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+                }
+            }
+            if (arm) {
+                fprintf(f, "    mov x0, x19\n");                  // slot
+                fprintf(f, "    bl %steko_rt_spawn_args\n", pre);
+            } else {
+                fprintf(f, "    movq %%rbx, %%rdi\n");            // slot
+                fprintf(f, "    call %steko_rt_spawn_args%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            }
+            break;
+        }
+
+        // Phase 14 (14.I): in a routine, $w0 = the idx-th spawn argument (args pointer is in the
+        // reserved frame slot; each arg is a register-width long).
+        case OP_LOAD_SPAWN_ARG:
+            if (arm) {
+                fprintf(f, "    ldr x1, [x29, #%d]\n", argsptr_off_arm(ctx)); // args ptr
+                fprintf(f, "    ldr x0, [x1, #%d]\n", 8 * arg);               // args[idx]
+            } else {
+                fprintf(f, "    movq %d(%%rbp), %%rcx\n", argsptr_off_x86(ctx)); // args ptr
+                fprintf(f, "    movq %d(%%rcx), %%rax\n", 8 * arg);             // args[idx]
             }
             break;
 

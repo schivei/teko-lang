@@ -121,6 +121,11 @@ char* teko_rt_uuid_v7(int ignored);
 // teko_rt_run drains the queue to completion (called at `$main` exit). See teko_rt_sched.c.
 void teko_rt_spawn(long slot, long arg);
 void teko_rt_run(void);
+// Phase 14 (14.I) — multi-argument routine spawn (Go-style). teko_rt_spawn_setarg stages the
+// idx-th argument; teko_rt_spawn_args(slot) enqueues the routine with the staged argument vector.
+// The routine receives a pointer to its vector and reads args[i] (OP_LOAD_SPAWN_ARG).
+void teko_rt_spawn_setarg(long idx, long val);
+void teko_rt_spawn_args(long slot);
 
 // Phase 14 (14.G) — timespan waiters. teko_rt_sleep_ms (in teko_rt.c, always linked) is a real
 // synchronous sleep for `ms` milliseconds (`wait <ts>;` → OP_WAIT). teko_rt_await_ms (in the

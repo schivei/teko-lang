@@ -1220,7 +1220,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             // $w0 accumulator, $w1 scratch, $cp channel ptr, $a0..$a2 import-arg
             // staging slots (Phase 11 multi-param imports — see OP_SETARG).
             fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
-            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");
             // Phase 12: named local variables ($v0..$v{n-1}) for `let`/`mut` bindings.
             for (int v = 0; v < ctx->wasm_local_count; v++) {
                 fprintf(f, "    (local $v%d i32)\n", v);
@@ -1595,6 +1595,25 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    global.get $arena_sp\n    i32.const %d\n    i32.add\n    global.set $arena_sp\n", TEKO_WASM_FRAME_BYTES);
             break;
 
+        // Phase 14 (14.I): fire a routine with `arg` (=argc) staged arguments (Go-style — pass any
+        // variables, e.g. shared channel handles). Copy the staged args $a0..$a(argc-1) into the
+        // task's spill frame (frame[4*i]), then enqueue {fn=$w0, arg=frame[0], frame}. The channel
+        // lives in shared/reactor memory, so the int handles are all the task needs to address it.
+        case OP_SPAWN_ASYNC_ARGS: {
+            int argc = arg;
+            fprintf(f, "    ;; [WASM Spawn+args]: stage %d arg(s) into the task frame; enqueue\n", argc);
+            for (int k = 0; k < argc; k++)
+                fprintf(f, "    global.get $arena_sp\n    local.get $a%d\n    i32.store offset=%d\n", k, 4 * k);
+            fprintf(f, "    local.get $w0\n    global.get $arena_sp\n    i32.load offset=0\n    i32.const 0\n    global.get $arena_sp\n    call $teko_enqueue\n");
+            fprintf(f, "    global.get $arena_sp\n    i32.const %d\n    i32.add\n    global.set $arena_sp\n", TEKO_WASM_FRAME_BYTES);
+            break;
+        }
+
+        // Phase 14 (14.I): in a routine, $w0 = the idx-th spawn argument (from the task frame).
+        case OP_LOAD_SPAWN_ARG:
+            fprintf(f, "    local.get $frame\n    i32.load offset=%d\n    local.set $w0\n", 4 * arg);
+            break;
+
         case OP_AWAIT_INTENT:
             fprintf(f, "    ;; [WASM Await]: cooperative yield to the scheduler\n");
             fprintf(f, "    call $teko_sched_run\n");
@@ -1618,7 +1637,7 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    (local $w0 i32) (local $w1 i32) (local $cp i32)\n");
             // Import-arg staging slots (Phase 11): a callback routine invoked via
             // $teko_invoke calls dom.* imports just like $main, so it needs $a0..$a2.
-            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32)\n");
+            fprintf(f, "    (local $a0 i32) (local $a1 i32) (local $a2 i32) (local $a3 i32) (local $a4 i32) (local $a5 i32) (local $a6 i32) (local $a7 i32)\n");
             // Phase 12 (P12-F): named-local file ($v) for nested-arg spill temps inside
             // a handler body (same module-global count as $main; harmless if unused).
             for (int v = 0; v < ctx->wasm_local_count; v++) {

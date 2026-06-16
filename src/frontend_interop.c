@@ -1217,16 +1217,20 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         int slot = bind_lookup(fns, nfns, fn_name);
         fe_advance(&p); // consume name
 
-        // Parameter list: capture the single event param name (if any).
-        char param[96]; param[0] = '\0';
+        // Parameter list: capture ALL param names (Phase 14.I), skipping `: type` annotations.
+        char params[8][96]; int nparams = 0;
         if (p.current_token.type == TOKEN_LPAREN) {
             fe_advance(&p);
-            if (p.current_token.type == TOKEN_IDENTIFIER) {
-                strncpy(param, p.current_token.lexeme, sizeof(param) - 1);
-                param[sizeof(param) - 1] = '\0';
-            }
+            int expect_name = 1; // a param name follows '(' or ','
             while (p.current_token.type != TOKEN_RPAREN && p.current_token.type != TOKEN_EOF) {
-                fe_advance(&p); // skip rest of params / types
+                if (expect_name && p.current_token.type == TOKEN_IDENTIFIER && nparams < 8) {
+                    strncpy(params[nparams], p.current_token.lexeme, 95);
+                    params[nparams][95] = '\0';
+                    nparams++; expect_name = 0;
+                } else if (p.current_token.type == TOKEN_COMMA) {
+                    expect_name = 1;
+                }
+                fe_advance(&p); // skip type tokens / colons / the captured name
             }
             if (p.current_token.type == TOKEN_RPAREN) fe_advance(&p);
         }
@@ -1235,10 +1239,11 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
 
         codegen_li_emit_func_begin(buffer, slot >= 0 ? slot : 0);
-        if (param[0]) codegen_li_emit_store(buffer); // $w1 = event arg
+        // On entry $w0 = the spawn-args pointer (native) / arg0 reloaded from the frame (WASM).
+        if (nparams > 0) codegen_li_emit_store(buffer); // $w1 = arg0 (WASM @dom event-param access)
 
         LowerCtx ctx;
-        ctx.param_name = param[0] ? param : NULL;
+        ctx.param_name = nparams > 0 ? params[0] : NULL;
         ctx.fns = fns;
         ctx.nfns = nfns;
         ctx.locals = NULL; // refreshed by the routine's own local table below
@@ -1254,6 +1259,16 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         LowerEnv renv;
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
+
+        // Phase 14 (14.I): bind each param to a named local read from the spawn arguments
+        // (OP_LOAD_SPAWN_ARG i), so the body uses them as values — e.g. channel handles shared with
+        // the producer/consumer. (@dom event handlers also keep the $w1/param_name path above,
+        // which takes precedence in lower_intrinsic_call, so they are unaffected.)
+        for (int pi = 0; pi < nparams; pi++) {
+            int ps = env_alloc_local(&renv, params[pi]);
+            codegen_li_emit_load_spawn_arg(buffer, pi); // $w0 = args[pi]
+            codegen_li_emit_store_local(buffer, ps);    // slot = args[pi]
+        }
 
         while (p.current_token.type != TOKEN_RBRACE && p.current_token.type != TOKEN_EOF) {
             lower_one_stmt(buffer, &p, &renv);
@@ -1328,19 +1343,37 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                     else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                              parser.peek_token.type == TOKEN_LPAREN) {
                         int slot = bind_lookup(fns, nfns, parser.current_token.lexeme);
-                        // Skip `NAME ( … )` entirely; spawn the resolved routine slot.
                         fe_advance(&parser); // NAME
                         fe_advance(&parser); // '('
-                        int pdepth = 1;
-                        while (parser.current_token.type != TOKEN_EOF && pdepth > 0) {
-                            if (parser.current_token.type == TOKEN_LPAREN) pdepth++;
-                            else if (parser.current_token.type == TOKEN_RPAREN) pdepth--;
-                            fe_advance(&parser);
+                        // Phase 14 (14.I): collect ALL arguments (Go-style) — named-local handles
+                        // or int literals — staging each into $a<i>; then OP_SPAWN_ASYNC_ARGS argc
+                        // passes the whole vector to the task. No args -> legacy OP_SPAWN_ASYNC
+                        // (byte-identical for arg-less routines programs).
+                        int argc = 0;
+                        while (parser.current_token.type != TOKEN_RPAREN &&
+                               parser.current_token.type != TOKEN_EOF && argc < 8) {
+                            if (parser.current_token.type == TOKEN_IDENTIFIER) {
+                                int s = bind_lookup(locals, nlocals, parser.current_token.lexeme);
+                                if (s >= 0) { codegen_li_emit_load_local(buffer, s); }
+                                else        { codegen_li_emit_iconst(buffer, 0); }
+                                codegen_li_emit_setarg(buffer, argc++);
+                                fe_advance(&parser);
+                            } else if (parser.current_token.type == TOKEN_LIT_INT) {
+                                codegen_li_emit_iconst(buffer, (int)literal_canonical_value(&parser.current_token));
+                                codegen_li_emit_setarg(buffer, argc++);
+                                fe_advance(&parser);
+                            } else if (parser.current_token.type == TOKEN_COMMA) {
+                                fe_advance(&parser);
+                            } else {
+                                fe_advance(&parser);
+                            }
                         }
+                        if (parser.current_token.type == TOKEN_RPAREN) fe_advance(&parser);
                         if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
                         if (slot >= 0) {
-                            codegen_li_emit_iconst(buffer, slot);
-                            codegen_li_emit_spawn_async(buffer);
+                            codegen_li_emit_iconst(buffer, slot);  // $w0 = routine table slot
+                            if (argc > 0) codegen_li_emit_spawn_async_args(buffer, argc);
+                            else          codegen_li_emit_spawn_async(buffer);
                         }
                     } else {
                         fe_advance(&parser);

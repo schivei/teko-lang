@@ -57,6 +57,14 @@ typedef enum {
 
     // Concurrency and Channels
     OP_SPAWN_ASYNC = 0x10,
+    // Phase 14 (14.I): fire a routine with N arguments (Go-style — pass any variables, e.g. shared
+    // channel handles). The args are staged into the import-arg slots $a0..$a(N-1) via OP_SETARG,
+    // then OP_SPAWN_ASYNC_ARGS (4-byte argc) copies them into the spawned task's spill frame and
+    // enqueues {fn=$w0, frame}. Distinct from OP_SPAWN_ASYNC (Phase-10 in-module channel spawn,
+    // arg=$cp), which stays byte-identical. Inside the routine, OP_LOAD_SPAWN_ARG (4-byte idx)
+    // reads the idx-th passed argument into $w0 (the frontend binds each `fn` param from it).
+    OP_SPAWN_ASYNC_ARGS = 0x68, // 4-byte argc: fire slot=$w0 with $a0..$a(argc-1)
+    OP_LOAD_SPAWN_ARG   = 0x69, // 4-byte idx: $w0 = the idx-th spawn argument
     OP_AWAIT_INTENT = 0x11,
     OP_CHAN_INIT = 0x12,
     OP_CHAN_PUT = 0x13,
@@ -265,6 +273,11 @@ void codegen_li_emit_func_end(BytecodeBuffer* buffer);
 // Phase 14 (14.A): fire the routine whose table slot is in $w0 as a background task.
 // Sets buffer->uses_spawn so the backends drain the scheduler before program exit.
 void codegen_li_emit_spawn_async(BytecodeBuffer* buffer);
+// Phase 14 (14.I): fire the routine in $w0 with `argc` args staged in $a0..$a(argc-1)
+// (OP_SPAWN_ASYNC_ARGS); sets buffer->uses_spawn. Used by `routines { worker(a, b, …); }`.
+void codegen_li_emit_spawn_async_args(BytecodeBuffer* buffer, int argc);
+// Phase 14 (14.I): in a routine body, load the idx-th passed spawn argument into $w0.
+void codegen_li_emit_load_spawn_arg(BytecodeBuffer* buffer, int idx);
 // Phase 14 (14.B): emit a duplex op (one of OP_DUPLEX_*); sets buffer->uses_duplex.
 void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op);
 // Phase 14 (14.C): emit a delayed-channel op (one of OP_DELAYED_*); sets buffer->uses_delayed.

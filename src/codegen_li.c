@@ -193,6 +193,19 @@ void codegen_li_emit_spawn_async(BytecodeBuffer* buffer) {
     emit_byte(buffer, OP_SPAWN_ASYNC);
 }
 
+void codegen_li_emit_spawn_async_args(BytecodeBuffer* buffer, int argc) {
+    if (!buffer) return;
+    buffer->uses_spawn = 1; // backends drain the scheduler + emit the routine table
+    emit_byte(buffer, OP_SPAWN_ASYNC_ARGS);
+    emit_int(buffer, argc);
+}
+
+void codegen_li_emit_load_spawn_arg(BytecodeBuffer* buffer, int idx) {
+    if (!buffer) return;
+    emit_byte(buffer, OP_LOAD_SPAWN_ARG);
+    emit_int(buffer, idx);
+}
+
 void codegen_li_emit_duplex(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_duplex = 1; // backends link/import the duplex C runtime

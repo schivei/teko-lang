@@ -156,6 +156,11 @@ check capstone.tks "$(cat <<'EXP'
 EXP
 )"
 
+# Phase 14 (14.I): real concurrent producer/consumer — a background routine takes MULTIPLE args
+# (Go-style: a shared channel handle + a count), fills the channel; the consumer drains it with a
+# poll loop until EMPTY. Proves routine argument passing + handle sharing. 1+2+3+4+5 = 15.
+check producer_consumer.tks "15"
+
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
