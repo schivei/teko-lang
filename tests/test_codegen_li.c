@@ -1034,6 +1034,39 @@ void test_frontend_interop_controlflow_lowering(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 14 (14.H capstone enabler): a routine body can now contain control flow + named locals
+// (the shared block-body dispatcher), so a background `fn` worker can run a `while` loop. Pins a
+// loop (OP_LOOP_BEGIN) emitted inside a routine function (after the OP_FUNC_BEGIN), with the
+// routine fired via `routines { }` (OP_SPAWN_ASYNC).
+void test_frontend_interop_routine_loop(void) {
+    const char* src =
+        "extern fn emit_int(n: i32) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "fn worker() { let w = 0; while (w < 3) { w = w + 1; emit_int(w); } }\n"
+        "routines { worker(); }\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn);
+
+    // Find the routine's OP_FUNC_BEGIN, then assert an OP_LOOP_BEGIN follows it (a loop inside
+    // the routine body). Walk opcodes honoring 4-byte-arg ops so arg bytes aren't misread.
+    int func_at = -1, loop_after_func = 0;
+    for (int i = 0; i < buffer->size; ) {
+        unsigned char op = buffer->code[i];
+        if (op == OP_FUNC_BEGIN) func_at = i;
+        if (op == OP_LOOP_BEGIN && func_at >= 0) loop_after_func = 1;
+        if (op == OP_ICONST || op == OP_SCONST || op == OP_JMP || op == OP_JMP_IF_FALSE ||
+            op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
+            op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME) i += 5;
+        else i += 1;
+    }
+    TEST_ASSERT_TRUE(func_at >= 0);     // worker emitted as a routine function
+    TEST_ASSERT_TRUE(loop_after_func);  // with a while-loop inside it
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 14 (14.F): the `retry { } fallback { }` and `circuit cb { } fallback { }` blocks lower to
 // the policy opcodes OP_RETRY_*/OP_CIRCUIT_* (driving the teko_retry C runtime) wrapped in the
 // control-flow foundation; set uses_retry; on WASM import the reactor policy entry points.

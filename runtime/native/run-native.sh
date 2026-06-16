@@ -143,6 +143,19 @@ check resilience.tks "$(cat <<'EXP'
 EXP
 )"
 
+# Phase 14 capstone (14.H): the whole phase in one program — atomic accumulator (15), delayed
+# channel drain (6), a background routine with a LOOP inside it run at an `await` (1,2,3), and a
+# final marker after `wait` (42). Combines functions + routines + loops + channels + waiters.
+check capstone.tks "$(cat <<'EXP'
+15
+6
+1
+2
+3
+42
+EXP
+)"
+
 # FIPS 180-4 SHA-256("abc") known-answer vector.
 check hash_sha256.tks "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 

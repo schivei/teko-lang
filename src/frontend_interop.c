@@ -1241,41 +1241,27 @@ static void emit_handler_routines(const char* source, BytecodeBuffer* buffer,
         ctx.param_name = param[0] ? param : NULL;
         ctx.fns = fns;
         ctx.nfns = nfns;
-        ctx.locals = NULL; // $main's named locals are a different WASM scope
+        ctx.locals = NULL; // refreshed by the routine's own local table below
         ctx.nlocals = 0;
-        ctx.ta = ta;       // nested-arg spill temps (routine has no named locals)
+        ctx.ta = ta;       // nested-arg spill temps + expression temps
         ta->next_temp = 0; // a routine's $v file starts fresh
 
-        int depth = 1;
-        while (p.current_token.type != TOKEN_EOF && depth > 0) {
-            if (p.current_token.type == TOKEN_LBRACE) { depth++; fe_advance(&p); }
-            else if (p.current_token.type == TOKEN_RBRACE) { depth--; fe_advance(&p); }
-            else if (p.current_token.type == TOKEN_MACRO_IDENT &&
-                     is_dom_macro(p.current_token.lexeme) &&
-                     p.peek_token.type == TOKEN_LPAREN) {
-                lower_intrinsic_call(buffer, &p, &ctx);
-            } else if (is_codec_head(&p)) {
-                lower_base_codec(buffer, &p, &ctx); // hash/crypto/codec inside a routine
-            } else if (is_duplex_head(&p)) {
-                lower_duplex_call(buffer, &p, &ctx); // duplex op inside a routine (14.B)
-                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
-            } else if (is_delayed_head(&p)) {
-                lower_delayed_call(buffer, &p, &ctx); // delayed op inside a routine (14.C)
-                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
-            } else if (is_bcast_head(&p)) {
-                lower_bcast_call(buffer, &p, &ctx); // broadcast op inside a routine (14.D)
-                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
-            } else if (is_atomic_head(&p)) {
-                lower_atomic_call(buffer, &p, &ctx); // atomic op inside a routine (14.E)
-                if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
-            } else if (p.current_token.type == TOKEN_WAIT || p.current_token.type == TOKEN_AWAIT) {
-                lower_wait_await(buffer, &p, &ctx, p.current_token.type == TOKEN_AWAIT); // 14.G
-            } else if (lower_routine_extern_call(buffer, &p, binds, nb)) {
-                // consumed a plain extern call (e.g. emit("…"))
-            } else {
-                fe_advance(&p);
-            }
+        // A routine body is lowered with the SAME shared statement dispatcher as $main and the
+        // control-flow blocks, so loops/branches/let/reassignment/channels/waiters compose inside
+        // a background task (14.H worker loops). The routine gets its OWN named-local table ($v
+        // slots overlap $main's — separate function scopes; local_count = the max via ta->hw).
+        ImportBinding* rlocals = NULL; int rnlocals = 0, rcaplocals = 0;
+        LowerEnv renv;
+        renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
+        renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
+
+        while (p.current_token.type != TOKEN_RBRACE && p.current_token.type != TOKEN_EOF) {
+            lower_one_stmt(buffer, &p, &renv);
         }
+        if (p.current_token.type == TOKEN_RBRACE) fe_advance(&p);
+
+        for (int i = 0; i < rnlocals; i++) free(rlocals[i].name);
+        free(rlocals);
         codegen_li_emit_func_end(buffer);
     }
 }
