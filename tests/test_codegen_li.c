@@ -1625,3 +1625,29 @@ void test_frontend_interop_generics_monomorphization(void) {
     remove(wat);
     codegen_li_free_context(buffer);
 }
+
+// Phase 15 (15.D): event subsystem. `event`/`subscribe`/`raise` — `raise Ping(5)` fan-outs to the
+// two subscribers (fanout + fire_and_forget) by SPAWNING each handler (compile-time-static
+// subscriber set). Assert it compiles, sets uses_spawn, and lowers TWO spawns (one per subscriber)
+// with the staged arg — i.e. the fan-out is materialized at compile time.
+void test_frontend_interop_event_fanout(void) {
+    const char* src =
+        "extern fn emit_int(n) from \"teko_rt\" as \"teko_rt_emit_int\";\n"
+        "event Ping;\n"
+        "fn onA(n) { let r = n + 10; emit_int(r); }\n"
+        "fn onB(n) { let r = n + 20; emit_int(r); }\n"
+        "subscribe Ping with onA fanout;\n"
+        "subscribe Ping with onB fire_and_forget;\n"
+        "emit_int(1);\n"
+        "raise Ping(5);\n"
+        "emit_int(2);\n";
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_spawn); // raise -> spawn over the cooperative scheduler
+    int nspawn = 0;
+    for (int i = 0; i < buffer->size; i++)
+        if (buffer->code[i] == (unsigned char)OP_SPAWN_ASYNC_ARGS) nspawn++;
+    TEST_ASSERT_EQUAL_INT(2, nspawn); // one spawn per subscriber (fan-out materialized at compile time)
+    codegen_li_free_context(buffer);
+}

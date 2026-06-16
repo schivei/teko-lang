@@ -1700,6 +1700,81 @@ static void check_oop_collisions(void) {
     }
 }
 
+// ---- Phase 15 (15.D): event subsystem ------------------------------------------------------
+// `event E;` declares an event; `subscribe E with H [fanout|fire_and_forget];` registers a handler
+// (a top-level `fn`) + a delivery mode AT SUBSCRIPTION TIME; `raise E(args);` fan-outs to every
+// subscriber. Subscriptions are STATIC (compile-time), so the subscriber set per event is known at
+// compile time — `raise` lowers to a spawn of each handler over the Phase-14 cooperative scheduler
+// (drained at program exit). `fanout` = parallel green threads (real parallelism on Layer B / wasm
+// -threads); `fire_and_forget` = enqueue, no result tracked. Both spawn in the cooperative MVP.
+#define TEKO_MAX_EVENTS      64
+#define TEKO_EVENT_MAX_SUBS  16
+typedef struct {
+    char name[96];
+    int  handler_slot[TEKO_EVENT_MAX_SUBS]; // routine table slot of each subscribed handler
+    int  mode[TEKO_EVENT_MAX_SUBS];         // 0 = fanout, 1 = fire_and_forget
+    int  nsubs;
+} EventInfo;
+static EventInfo g_event[TEKO_MAX_EVENTS];
+static int g_nevent;
+static int event_find(const char* n) {
+    for (int i = 0; i < g_nevent; i++) if (strcmp(g_event[i].name, n) == 0) return i;
+    return -1;
+}
+static int event_find_or_add(const char* n) {
+    int e = event_find(n);
+    if (e >= 0) return e;
+    if (g_nevent < TEKO_MAX_EVENTS) {
+        memset(&g_event[g_nevent], 0, sizeof(g_event[g_nevent]));
+        strncpy(g_event[g_nevent].name, n, 95); g_event[g_nevent].name[95] = '\0';
+        return g_nevent++;
+    }
+    return -1;
+}
+static void event_add_sub(int ei, int slot, int mode) {
+    if (ei < 0 || ei >= g_nevent || slot < 0) return;
+    EventInfo* e = &g_event[ei];
+    if (e->nsubs < TEKO_EVENT_MAX_SUBS) { e->handler_slot[e->nsubs] = slot; e->mode[e->nsubs] = mode; e->nsubs++; }
+}
+
+// Phase 15 (15.D): pre-pass that builds the event registry — `event E;` declarations and
+// `subscribe E with H [fanout|fire_and_forget];` registrations (H resolves to a top-level fn slot).
+// Parsing is permissive: after `subscribe`, the first identifier is the event, an identifier that
+// resolves to a known fn is the handler, and FANOUT/FIRE_AND_FORGET sets the mode (any connector
+// word like `with` is simply skipped).
+static void collect_events(const char* source, ImportBinding* fns, int nfns) {
+    g_nevent = 0;
+    Lexer lx; lexer_init(&lx, source);
+    Parser p; parser_init(&p, &lx);
+    while (p.current_token.type != TOKEN_EOF) {
+        if (p.current_token.type == TOKEN_EVENT && p.peek_token.type == TOKEN_IDENTIFIER) {
+            fe_advance(&p); // 'event'
+            event_find_or_add(p.current_token.lexeme);
+            fe_advance(&p); // event name
+            continue;
+        }
+        if (p.current_token.type == TOKEN_SUBSCRIBE) {
+            fe_advance(&p); // 'subscribe'
+            char ename[96] = ""; int slot = -1, mode = 0;
+            if (p.current_token.type == TOKEN_IDENTIFIER) {
+                strncpy(ename, p.current_token.lexeme, 95); ename[95] = '\0'; fe_advance(&p);
+            }
+            while (p.current_token.type != TOKEN_SEMICOLON && p.current_token.type != TOKEN_EOF) {
+                if (p.current_token.type == TOKEN_IDENTIFIER) {
+                    int s = bind_lookup(fns, nfns, p.current_token.lexeme);
+                    if (s >= 0) slot = s; // an identifier resolving to a fn is the handler
+                } else if (p.current_token.type == TOKEN_FANOUT) mode = 0;
+                else if (p.current_token.type == TOKEN_FIRE_AND_FORGET) mode = 1;
+                fe_advance(&p);
+            }
+            if (p.current_token.type == TOKEN_SEMICOLON) fe_advance(&p);
+            if (ename[0] && slot >= 0) event_add_sub(event_find_or_add(ename), slot, mode);
+            continue;
+        }
+        fe_advance(&p);
+    }
+}
+
 // Phase 15 (15.C): discover generic class templates + their concrete instantiations.
 // Pass 1: every `class NAME <` is a generic template (record NAME). Pass 2: every use
 // `Tmpl < Arg >` (where Tmpl is a template and the `<` is NOT the declaration's own clause —
@@ -2215,6 +2290,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     g_subst_param[0] = '\0'; g_subst_arg[0] = '\0'; // no active monomorphization substitution
     collect_traits(source);
     collect_generics(source); // Phase 15.C: discover generic templates + their concrete instantiations
+    collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
     localcls_reset();
@@ -2271,6 +2347,60 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // `let`/`mut NAME [: type] = <initializer>` — a named local binding. Shared with block
             // bodies (lower_let_stmt → lower_init_value), so `let cb = circuit(...)` works here too.
             lower_let_stmt(buffer, &parser, &top_env);
+        } else if (parser.current_token.type == TOKEN_EVENT) {
+            // Phase 15.D: `event E;` — a compile-time declaration (registered in collect_events);
+            // emits no code. Skip to the statement end.
+            while (parser.current_token.type != TOKEN_SEMICOLON && parser.current_token.type != TOKEN_EOF)
+                fe_advance(&parser);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_SUBSCRIBE) {
+            // Phase 15.D: `subscribe E with H [fanout|fire_and_forget];` — registered statically in
+            // collect_events; emits no code at the subscription site.
+            while (parser.current_token.type != TOKEN_SEMICOLON && parser.current_token.type != TOKEN_EOF)
+                fe_advance(&parser);
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+        } else if (parser.current_token.type == TOKEN_RAISE &&
+                   parser.peek_token.type == TOKEN_IDENTIFIER) {
+            // Phase 15.D: `raise E(args);` — fan-out to every subscriber of E. The subscriber set is
+            // compile-time static; each handler is spawned over the Phase-14 cooperative scheduler
+            // (drained at program exit, so handlers run AFTER the raise site — deferred fan-out).
+            // Args are parsed once (int literals / named locals) and RE-STAGED per subscriber (a
+            // spawn consumes the staged args). fanout + fire_and_forget both spawn in the MVP.
+            fe_advance(&parser); // 'raise'
+            int ei = event_find(parser.current_token.lexeme);
+            fe_advance(&parser); // event name
+            // Parse the args once.
+            int ev_is_local[8]; int ev_val[8]; int ev_argc = 0;
+            if (parser.current_token.type == TOKEN_LPAREN) {
+                fe_advance(&parser);
+                while (parser.current_token.type != TOKEN_RPAREN &&
+                       parser.current_token.type != TOKEN_EOF && ev_argc < 8) {
+                    if (parser.current_token.type == TOKEN_LIT_INT) {
+                        ev_is_local[ev_argc] = 0; ev_val[ev_argc] = (int)literal_canonical_value(&parser.current_token);
+                        ev_argc++; fe_advance(&parser);
+                    } else if (parser.current_token.type == TOKEN_IDENTIFIER) {
+                        int s = bind_lookup(locals, nlocals, parser.current_token.lexeme);
+                        ev_is_local[ev_argc] = (s >= 0) ? 1 : 0; ev_val[ev_argc] = (s >= 0) ? s : 0;
+                        ev_argc++; fe_advance(&parser);
+                    } else if (parser.current_token.type == TOKEN_COMMA) {
+                        fe_advance(&parser);
+                    } else fe_advance(&parser);
+                }
+                if (parser.current_token.type == TOKEN_RPAREN) fe_advance(&parser);
+            }
+            if (parser.current_token.type == TOKEN_SEMICOLON) fe_advance(&parser);
+            if (ei >= 0) {
+                for (int si = 0; si < g_event[ei].nsubs; si++) {
+                    for (int ai = 0; ai < ev_argc; ai++) {
+                        if (ev_is_local[ai]) codegen_li_emit_load_local(buffer, ev_val[ai]);
+                        else                 codegen_li_emit_iconst(buffer, ev_val[ai]);
+                        codegen_li_emit_setarg(buffer, ai);
+                    }
+                    codegen_li_emit_iconst(buffer, g_event[ei].handler_slot[si]); // $w0 = handler slot
+                    if (ev_argc > 0) codegen_li_emit_spawn_async_args(buffer, ev_argc);
+                    else             codegen_li_emit_spawn_async(buffer);
+                }
+            }
         } else if (parser.current_token.type == TOKEN_ROUTINES) {
             // Phase 14 (14.A): `routines { foo(); bar(); }` — fire each enclosed call as a
             // background task. Each `NAME(…)` resolves to a top-level `fn NAME`'s table slot

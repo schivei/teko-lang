@@ -129,6 +129,16 @@ check generics.tks "$(cat <<'EXP'
 22
 EXP
 )"
+# Phase 15 (15.D): event subsystem — `event`/`subscribe`/`raise` with fanout + fire_and_forget.
+# `raise Ping(5)` fan-outs to both subscribers, spawned over the cooperative scheduler + drained at
+# exit, so handlers run AFTER the main body (deferred). 1, 2 (main), then 15 (onA), 25 (onB).
+check eventbus.tks "$(cat <<'EXP'
+1
+2
+15
+25
+EXP
+)"
 # Phase 14 (14.A): `routines { worker(); worker(); }` fires two background tasks. The native
 # scheduler (teko_rt_run) drains them at $main exit, so they run AFTER main's body — the two
 # "worker ran" lines follow "main start"/"main end", proving deferred (not inline) execution.
