@@ -209,6 +209,17 @@ long teko_rt_object_free(long handle);                 // -> 0
 long teko_rt_vtable_set(long type_id, long method_id, long slot); // -> 0
 long teko_rt_vtable_get(long type_id, long method_id);            // -> slot (-1 if unset)
 
+// Phase 18 (18.E.1) — FIXED-size CONTIGUOUS array surface wrappers (OP_ARR_* lower to these). The
+// teko_array C runtime (src/runtime/teko_array.c) is the source of truth; the handle is a TekoArray*
+// as a register-width integer, element cells are register-width. UNLIKE the object store, the
+// get/set wrappers are CHECKED, FAIL-LOUD: an out-of-range index aborts via teko_rt_die (native
+// exit 70 + stderr "array: index out of bounds"; wasm32 reactor __builtin_trap), the SAME posture
+// as the checked decimal/cast/parse surface — NOT a defensive no-op.
+long teko_rt_array_new(long n);              // -> handle (n zero-initialized cells)
+long teko_rt_array_get(long handle, long i); // -> cell value (fail-loud on OOB)
+long teko_rt_array_set(long handle, long i, long value); // -> 0 (fail-loud on OOB)
+long teko_rt_array_len(long handle);         // -> length (O(1) metadata)
+
 // Phase 16 (Casting / Type Conversions & Parsing) — culture-invariant conversion surface
 // (OP_CALL_RUNTIME ids 49/51/52). String-returning, like the crypto/time surface; the teko_convert
 // C runtime (src/runtime/teko_convert.c) is the source of truth (linked natively, compiled into the

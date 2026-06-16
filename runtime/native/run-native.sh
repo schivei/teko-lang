@@ -263,6 +263,18 @@ EXP
 # Fail-loud: decimal.parse("abc") aborts non-zero (exit 70 + stderr) — no silent zero. WASM traps on
 # the same value (run-decimal-surface.mjs), so the behavior is identical on both targets.
 check_fail decimal_fail.tks "before" "decimal.parse: invalid decimal"
+# Phase 18 (18.E.1): the FIXED-size CONTIGUOUS `array` substrate — literal build, index read/write,
+# and `.len` (O(1) metadata). Byte-identical to the WASM proof (run-arrays.mjs). The array store is
+# the SAME teko_array.c source of truth (linked here, compiled into the wasm32 reactor there).
+check arrays.tks "$(cat <<'EXP'
+a[1] = 20
+a[0] = 99
+len = 3
+EXP
+)"
+# Fail-loud: an out-of-range index aborts non-zero (exit 70 + stderr) — no silent zero / corruption.
+# WASM traps on the same access (run-arrays-fail.mjs), identical behavior on both targets.
+check_fail arrays_fail.tks "before" "array: index out of bounds"
 # Phase 18 (18.A): Zero-Overhead Optionals — `?T` nullability + `null` + the Elvis `??`. An optional
 # local is compacted (payload slot + a hidden 1-word present companion); `a ?? d` branches on the
 # present flag via OP_IF (→ native je/cbz), choosing the payload when present else the default. No new

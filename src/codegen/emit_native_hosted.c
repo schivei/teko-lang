@@ -192,6 +192,23 @@ const char* teko_native_object_symbol(OpCode op, int* out_arity) {
     return sym;
 }
 
+// Phase 18 (18.E.1): OP_ARR_* -> teko_rt_array_* symbol + arity (mirrors the WASM reactor import
+// table). The teko_array C runtime is the single source of truth (linked from libteko_rt.a); the
+// get/set wrappers are CHECKED FAIL-LOUD on an out-of-range index (the wrapper aborts).
+const char* teko_native_array_symbol(OpCode op, int* out_arity) {
+    int arity = 1;
+    const char* sym = NULL;
+    switch (op) {
+        case OP_ARR_NEW: sym = "teko_rt_array_new"; arity = 1; break; // (n)
+        case OP_ARR_GET: sym = "teko_rt_array_get"; arity = 2; break; // (handle, idx)
+        case OP_ARR_SET: sym = "teko_rt_array_set"; arity = 3; break; // (handle, idx, value)
+        case OP_ARR_LEN: sym = "teko_rt_array_len"; arity = 1; break; // (handle)
+        default: break;
+    }
+    if (out_arity) *out_arity = arity;
+    return sym;
+}
+
 // Phase 15 (15.B): OP_VTABLE_* -> teko_rt_vtable_* symbol + arity (mirrors the WASM reactor import
 // table). The teko_vtable C runtime is the single source of truth (linked from libteko_rt.a).
 const char* teko_native_vtable_symbol(OpCode op, int* out_arity) {
@@ -786,6 +803,19 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_OBJ_FREE: {
             int arity = 1;
             const char* sym = teko_native_object_symbol(op, &arity);
+            if (sym) emit_call(ctx, sym, arity);
+            break;
+        }
+
+        // Phase 18 (18.E.1): fixed-size array ops -> teko_rt_array_* runtime calls (the `array`
+        // store; staging slots + $w0 marshalled by emit_call, like OP_OBJ_*). get/set are CHECKED
+        // FAIL-LOUD: the wrapper aborts (exit 70 + stderr) on an out-of-range index.
+        case OP_ARR_NEW:
+        case OP_ARR_GET:
+        case OP_ARR_SET:
+        case OP_ARR_LEN: {
+            int arity = 1;
+            const char* sym = teko_native_array_symbol(op, &arity);
             if (sym) emit_call(ctx, sym, arity);
             break;
         }

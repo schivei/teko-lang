@@ -24,6 +24,7 @@
 #include "teko_time.h"
 #include "teko_object.h"
 #include "teko_vtable.h"
+#include "teko_array.h"
 #include "teko_convert.h"
 #include "teko_decimal.h"
 #include <stdint.h>
@@ -869,6 +870,29 @@ double teko_rt_parse_float(const char* s) {
 // already decided); never returns.
 void teko_rt_f2i_fail(void) {
     teko_rt_die("convert.to_int: float out of i32 range or not finite");
+}
+
+// Phase 18 (18.E.1) — FIXED-size CONTIGUOUS array surface wrappers (OP_ARR_* lower to these). The
+// teko_array C runtime (src/runtime/teko_array.c) is the source of truth. UNLIKE the object store,
+// get/set are CHECKED FAIL-LOUD: an out-of-range index aborts via teko_rt_die (the SAME exit-70 +
+// stderr path / wasm __builtin_trap the 16.F/17 checked surface uses), NOT a defensive no-op. Placed
+// AFTER teko_rt_die (a static) so it is in scope. Available on every target (native + wasm reactor).
+long teko_rt_array_new(long n) {
+    return (long)(intptr_t)teko_array_new((int)n);
+}
+long teko_rt_array_get(long handle, long i) {
+    intptr_t v = 0;
+    if (!teko_array_get((const TekoArray*)(intptr_t)handle, (int)i, &v))
+        teko_rt_die("array: index out of bounds");
+    return (long)v;
+}
+long teko_rt_array_set(long handle, long i, long value) {
+    if (!teko_array_set((TekoArray*)(intptr_t)handle, (int)i, (intptr_t)value))
+        teko_rt_die("array: index out of bounds");
+    return 0;
+}
+long teko_rt_array_len(long handle) {
+    return (long)teko_array_len((const TekoArray*)(intptr_t)handle);
 }
 
 // Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers. The opcode family

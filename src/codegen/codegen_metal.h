@@ -106,6 +106,11 @@ typedef struct {
     // dynamic dispatch. WASM imports teko_rt_vtable_* from the reactor + shares memory; native
     // links them via libteko_rt.a.
     int wasm_emit_vtable;
+    // Phase 18 (18.E.1): 1 when the program uses a fixed-size array op (OP_ARR_*). The WASM backend
+    // imports the teko_rt_array_* entry points from the runtime reactor + shares its linear memory
+    // (same wiring as OP_OBJ_*). Native ignores it (links teko_rt_array_* via libteko_rt.a). Gating
+    // ALL array emission on this keeps array-free output byte-identical (the 16 freestanding goldens).
+    int wasm_emit_array;
     // Phase 14 (control-flow foundation): structured loop/if lowering state, shared by the native
     // hosted emitter and the WASM emitter. cf_id_next assigns a fresh monotonic id to each
     // LOOP_BEGIN/IF_BEGIN; cf_loop_stack/cf_if_stack track the active (nesting) ids so
@@ -168,6 +173,7 @@ void teko_metal_set_emit_await(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_retry(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_object(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_vtable(MetalContext* ctx, int enabled);
+void teko_metal_set_emit_array(MetalContext* ctx, int enabled);
 
 // Phase 17 (17.A): hand the backend the float-constant pool (OP_FCONST's index space). `floats`
 // must outlive teko_metal_emit_program. teko_metal_set_emit_float gates the WASM float locals.

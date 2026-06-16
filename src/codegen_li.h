@@ -271,6 +271,16 @@ typedef enum {
     //   0x93 = OP_I2D    0x94 = OP_D2I    0x95 = OP_F2D    0x96 = OP_D2F
     // The next free contiguous opcode range therefore starts at 0x97.
 
+    // Phase 18 (18.E.1): FIXED-size CONTIGUOUS array ops — a runtime-call family like OP_OBJ_*. The
+    // args are staged in $a0.. (OP_SETARG) with the last in $w0; the result (handle / value / len)
+    // lands in $w0. Lower to teko_rt_array_* (native) / the wasm32 reactor import. UNLIKE OP_OBJ_*,
+    // get/set are CHECKED FAIL-LOUD on an out-of-range index (native exit 70 / WASM trap). Gated on
+    // uses_array so array-free output (incl. the 16 freestanding goldens) stays byte-identical.
+    OP_ARR_NEW = 0x97, // arr_new(n) -> handle (n zero-initialized cells)
+    OP_ARR_GET = 0x98, // arr_get(handle, idx) -> value  (fail-loud on OOB)
+    OP_ARR_SET = 0x99, // arr_set(handle, idx, value) -> 0  (fail-loud on OOB)
+    OP_ARR_LEN = 0x9A, // arr_len(handle) -> length (O(1) metadata)
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -371,6 +381,11 @@ typedef struct {
     // Phase 15 (15.B): 1 if the program uses a static-vtable op (OP_VTABLE_*) — i.e. abstract/trait
     // dynamic dispatch. Native links teko_rt_vtable_*; WASM imports from the reactor + shared memory.
     int uses_vtable;
+    // Phase 18 (18.E.1): 1 if the program uses a fixed-size array op (OP_ARR_*). Native links
+    // teko_rt_array_*; WASM imports them from the runtime reactor + shares linear memory (same
+    // wiring as OP_OBJ_*). Array-free programs (incl. the 16 freestanding goldens) stay
+    // byte-identical.
+    int uses_array;
     // Phase 17 (17.A): the float-constant pool — f64 bit patterns indexed by OP_FCONST's 4-byte
     // arg. Mirrors the string pool (codegen_li_add_float_constant dedups by bit-equality). Threaded
     // to the backend via teko_metal_set_floats. `uses_float` is 1 once any float opcode is emitted,
@@ -450,6 +465,8 @@ void codegen_li_emit_cf(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op);
 // Phase 15 (15.A): emit an object op (one of OP_OBJ_*); sets buffer->uses_object.
 void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op);
+// Phase 18 (18.E.1): emit a fixed-size array op (one of OP_ARR_*); sets buffer->uses_array.
+void codegen_li_emit_array(BytecodeBuffer* buffer, OpCode op);
 // Phase 15 (15.A): synchronously call the routine in $w0 with `argc` args staged in $a0..$a(argc-1)
 // (OP_CALL_FUNC); the result lands in $w0. Sets buffer->uses_spawn (routine table + scheduler).
 void codegen_li_emit_call_func(BytecodeBuffer* buffer, int argc);

@@ -38,7 +38,20 @@ reactor), like every prior runtime.
 
 ## Sub-blocks (dependency order — one increment per commit, report at each close with CI green)
 
-### 18.E.1 — `array` substrate (fixed, contiguous, checked, O(1) len)
+### 18.E.1 — `array` substrate (fixed, contiguous, checked, O(1) len)  — ✅ DONE
+**Status (DONE, locally green both targets).** `src/runtime/teko_array.{c,h}` (handle store, O(1)
+len metadata in the header, `intptr_t` cells — Windows LLP64-safe; bounds-RETURNING get/set);
+`teko_rt_array_*` wrappers fail-loud on OOB (native exit 70 + stderr `array: index out of bounds`,
+WASM `__builtin_trap`); opcodes `OP_ARR_NEW/GET/SET/LEN` (0x97–0x9A) mirroring `OP_OBJ_*` (both CSE
+sets, native `call teko_rt_array_*`, WASM reactor import gated on `wasm_emit_array`); reactor
+SRCS+EXPORTS; CMake; frontend `g_localarr` + array literal `[…]` + index r/w `a[i]` (eval_primary +
+lower_codec_value + statement dispatch) + `a.len`. Proof `arrays.tks` (native + WASM byte-identical)
+→ `a[1] = 20`, `a[0] = 99`, `len = 3`; `arrays_fail.tks` → fail-loud (native exit 70 / WASM trap).
+Suite 246/246; ASan/UBSan both paths + TSan clean; native 50 OK/0 FAIL; 16 goldens byte-identical;
+existing WASM proofs (decimal/class/optionals) intact after the reactor rebuild. Element cells are
+register-width i64 (ints/handles); typed numeric element arrays for SIMD land in 18.E.2/.4.
+
+
 - C runtime `src/runtime/teko_array.c` (handle store, `teko_object.c` pattern): `alloc(n)→handle`,
   `get(h,i)`, `set(h,i,v)`, `len(h)` (O(1) metadata). **Bounds-checked**: get/set out-of-range →
   fail (wrapper `teko_rt_die` native exit 70 / WASM trap). Register-width i64 cells for the MVP

@@ -35,6 +35,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_await = 0;
     buffer->uses_retry = 0;
     buffer->uses_object = 0;
+    buffer->uses_array = 0;
     buffer->uses_vtable = 0;
 
     // Phase 17 (17.A): the float-constant pool starts empty; uses_float gates the WASM float locals.
@@ -320,6 +321,12 @@ void codegen_li_emit_retry(BytecodeBuffer* buffer, OpCode op) {
 void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_object = 1; // backends link/import the teko_object instance-store runtime
+    emit_byte(buffer, (unsigned char)op);
+}
+
+void codegen_li_emit_array(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_array = 1; // backends link/import the teko_array fixed-size-array runtime
     emit_byte(buffer, (unsigned char)op);
 }
 

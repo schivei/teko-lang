@@ -499,6 +499,30 @@ static int localopt_base_vt(const char* n) {
     for (int i = 0; i < g_nlocalopt; i++) if (strcmp(g_localopt[i].name, n) == 0) return g_localopt[i].base_vt;
     return TEKO_VT_INT;
 }
+// Phase 18 (18.E.1): names of ARRAY-typed named locals. An array local's $w0 value IS its handle
+// (so it reads as a plain VT_INT integer — passable to functions, storable), but it is tracked here
+// so `a[i]` index read/write and `a.len` resolve to OP_ARR_* against the handle. Per-function scope,
+// reset alongside the other local registries. Mirrors the localstr/localflt registries (set
+// membership, demote-on-reassign via tombstone).
+static char g_localarr[TEKO_MAX_LOCALCLS][96];
+static int  g_nlocalarr;
+static void localarr_reset(void) { g_nlocalarr = 0; }
+static void localarr_set(const char* n, int is_arr) {
+    for (int i = 0; i < g_nlocalarr; i++)
+        if (strcmp(g_localarr[i], n) == 0) {
+            if (!is_arr) { g_localarr[i][0] = g_localarr[i][1] = '\0'; } // demote (tombstone)
+            return;
+        }
+    if (is_arr && g_nlocalarr < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localarr[g_nlocalarr], n, 95); g_localarr[g_nlocalarr][95] = '\0';
+        g_nlocalarr++;
+    }
+}
+static int localarr_get(const char* n) {
+    if (!n || !n[0]) return 0;
+    for (int i = 0; i < g_nlocalarr; i++) if (strcmp(g_localarr[i], n) == 0) return 1;
+    return 0;
+}
 // Phase 18 (18.A): set by eval_primary to describe the OPTIONALITY of the primary it just lowered,
 // so eval_expr_prec's Elvis (`??`) can recover the left operand's present flag:
 //   -1 = not optional (a plain value → treated as always-present);
@@ -509,6 +533,10 @@ static int g_prim_present_slot = -1;
 // initializer) so lower_let_stmt / lower_reassign know a `let x: ?T = null;` is the null state and
 // emit present = 0 (vs present = 1 for any other initializer).
 static int g_last_init_is_null = 0;
+// Phase 18 (18.E.1): set by lower_array_literal (via lower_init_value's expr path) so lower_let_stmt /
+// lower_reassign remember an ARRAY-typed local (so a later `a[i]`/`a.len` resolves to OP_ARR_*).
+// Cleared at the top of lower_init_value before each initializer.
+static int g_last_init_is_array = 0;
 
 // Phase 18 (18.C): `defer <stmt>;` — registration of a scope-closing statement, run in LIFO order at
 // scope exit. MVP scope = the `$main` body: each deferred statement's SOURCE is captured (rebuilt
@@ -835,6 +863,16 @@ static int lower_member_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
     if (p->current_token.type != TOKEN_IDENTIFIER) return 0;
     char base[96], member[96];
     if (!dotted_split(p->current_token.lexeme, base, member)) return 0;
+    // Phase 18 (18.E.1): `a.len` on an array local -> OP_ARR_LEN (O(1) metadata) -> $w0. Claimed
+    // BEFORE the class-field path (an array local is never a class local, so no ambiguity).
+    if (localarr_get(base) && strcmp(member, "len") == 0) {
+        int hslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, base) : -1;
+        if (hslot < 0) return 0;
+        codegen_li_emit_load_local(b, hslot);  // $w0 = handle
+        codegen_li_emit_array(b, OP_ARR_LEN);  // $w0 = length
+        fe_advance(p);
+        return 1;
+    }
     int ci = localcls_get(base);
     if (ci < 0) return 0;
     int fidx = class_field_idx(ci, member);
@@ -849,9 +887,87 @@ static int lower_member_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
     return 1;
 }
 
+// Phase 18 (18.E.1): an ARRAY LITERAL `[e0, e1, …]` as a primary / initializer. Mirrors the
+// object-new arg convention: ARR_NEW(n) -> handle in $w0, spill the handle to a temp, then for each
+// element i stage (handle, i) into $a0/$a1, evaluate the element into $w0, OP_ARR_SET; finally
+// reload the handle into $w0 so the whole literal evaluates to the array handle (a VT_INT value).
+// Current token is the `[`. Consumes through the matching `]`. Returns the handle in $w0.
+// (eval_expr_prec is forward-declared above; it is the element/index evaluator.)
+static void lower_array_literal(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
+    g_last_init_is_array = 1; // mark so a `let a = [...]` binding records the array local
+    fe_advance(p); // consume '['
+    // Pre-scan to count the elements (ARR_NEW needs the exact length FIRST). The real parser shares a
+    // heap Lexer* with everything else, so we snapshot the lexer STATE (source/cursor/line are plain
+    // values) into a LOCAL lexer + a local parser pointing at it, and scan that — leaving the real
+    // parser/lexer untouched. Count top-level commas + 1 (unless the list is empty); brackets/parens
+    // may nest in an element, so track depth. (Lexemes lex'd during the scan leak, consistent with
+    // fe_advance's existing token-overwrite — this is a compile-once tool.)
+    Lexer scan_lx = *p->lexer;            // value snapshot of the lexer position
+    Parser scan = *p;                     // copy all fields (is_stdlib_compilation etc.)…
+    scan.lexer = &scan_lx;                // …then redirect to the LOCAL lexer snapshot
+    int n = 0, depth = 0, seen = 0;
+    while (scan.current_token.type != TOKEN_EOF) {
+        TokenType t = scan.current_token.type;
+        if (depth == 0 && t == TOKEN_RBRACKET) break;
+        if (t == TOKEN_LBRACKET || t == TOKEN_LPAREN) depth++;
+        else if (t == TOKEN_RBRACKET || t == TOKEN_RPAREN) { if (depth > 0) depth--; }
+        else if (depth == 0 && t == TOKEN_COMMA) { n++; }
+        else if (depth == 0) seen = 1;
+        fe_advance(&scan);
+    }
+    if (seen) n++; // element_count = top-level commas + 1 when non-empty
+    // ARR_NEW(n) -> handle; park it in a temp (it is reloaded between every element SET).
+    codegen_li_emit_iconst(b, n);
+    codegen_li_emit_array(b, OP_ARR_NEW); // $w0 = handle
+    int ht = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+    codegen_li_emit_store_local(b, ht);   // temp = handle
+    int i = 0;
+    while (p->current_token.type != TOKEN_RBRACKET && p->current_token.type != TOKEN_EOF) {
+        if (p->current_token.type == TOKEN_COMMA) { fe_advance(p); continue; }
+        // value FIRST into a scratch temp (an element expr may itself use $a0 via a member/index read)
+        int vt = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+        eval_expr_prec(b, p, ctx, 1, ta);  // element -> $w0
+        codegen_li_emit_store_local(b, vt);
+        codegen_li_emit_load_local(b, ht); codegen_li_emit_setarg(b, 0); // $a0 = handle
+        codegen_li_emit_iconst(b, i);      codegen_li_emit_setarg(b, 1); // $a1 = index
+        codegen_li_emit_load_local(b, vt); // $w0 = element value
+        codegen_li_emit_array(b, OP_ARR_SET);
+        ta->next_temp--;                   // free the element scratch
+        i++;
+    }
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    codegen_li_emit_load_local(b, ht);     // $w0 = the array handle (the literal's value)
+    ta->next_temp--;                       // free the handle temp
+}
+
+// Phase 18 (18.E.1): an INDEX READ `a[i]` as a primary -> OP_ARR_GET(handle, idx) -> $w0. `a` is an
+// array local (current token), peek is `[`. Stage handle=$a0, evaluate the index -> $w0, OP_ARR_GET.
+// Consumes `a [ <idx> ]`. Returns 1 if consumed. Out-of-range traps fail-loud in the runtime.
+static int lower_array_index_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    if (!localarr_get(p->current_token.lexeme)) return 0;
+    int hslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
+    if (hslot < 0) return 0;
+    fe_advance(p); // consume the array name
+    fe_advance(p); // consume '['
+    codegen_li_emit_load_local(b, hslot);  // $w0 = handle
+    codegen_li_emit_setarg(b, 0);          // $a0 = handle
+    eval_expr_prec(b, p, ctx, 1, ta);      // index -> $w0
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    codegen_li_emit_array(b, OP_ARR_GET);  // $w0 = element value
+    return 1;
+}
+
 static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
     g_prim_present_slot = -1; // Phase 18 (18.A): default — this primary is not an optional reference
-    if (p->current_token.type == TOKEN_NULL) {
+    if (p->current_token.type == TOKEN_LBRACKET) {
+        // Phase 18 (18.E.1): an ARRAY LITERAL `[e0, e1, …]` -> ARR_NEW + per-element SET -> handle.
+        lower_array_literal(b, p, ctx, ta);
+        return TEKO_VT_INT; // an array handle reads as a plain integer value
+    } else if (lower_array_index_read(b, p, ctx, ta)) {
+        // Phase 18 (18.E.1): an INDEX READ `a[i]` on an array local -> OP_ARR_GET -> $w0.
+        return TEKO_VT_INT;
+    } else if (p->current_token.type == TOKEN_NULL) {
         // Phase 18 (18.A): the `null` literal — the empty optional. Payload = 0 in $w0; the present
         // descriptor is the literal-null sentinel (-2) so an Elvis `null ?? d` resolves to `d`, and
         // a `let x: ?T = null;` binding records present = 0 (via g_last_init_is_null).
@@ -1417,6 +1533,10 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
+    } else if (lower_array_index_read(b, p, ctx, ctx ? ctx->ta : NULL)) {
+        // Phase 18 (18.E.1): an array index READ `a[i]` as a codec/call argument -> OP_ARR_GET.
+    } else if (lower_member_read(b, p, ctx)) {
+        // Phase 18 (18.E.1): an array `.len` (or a class field) as a codec/call argument.
     } else if (p->current_token.type == TOKEN_IDENTIFIER) {
         long cv;
         if (comptime_find(p->current_token.lexeme, &cv)) {
@@ -1791,6 +1911,7 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     LowerCtx* ctx = env->ctx;
     g_last_init_vt = TEKO_VT_INT; // Phase 16 (16.B): default; the string-yielding cases set VT_STR
     g_last_init_is_null = 0;      // Phase 18 (18.A): set iff the initializer is the `null` literal
+    g_last_init_is_array = 0;     // Phase 18 (18.E.1): set iff the initializer is an array literal
     if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) &&
         p12_tok_prec(p->peek_token.type) == 0 && !strlit_is_interp(p->current_token.lexeme)) {
         // A LONE, NON-interpolated string literal. `"a" + x` and `"{x}"` fall through to
@@ -1924,6 +2045,9 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localflt_set(lname, g_last_init_vt == TEKO_VT_FLOAT);
     // Phase 17.F.3: remember a decimal-typed local so `lname` routes through the 256-byte $d0 slot.
     localdec_set(lname, g_last_init_vt == TEKO_VT_DECIMAL);
+    // Phase 18 (18.E.1): remember an array-typed local (handle in $w0, VT_INT) so a later
+    // `lname[i]` / `lname.len` resolves to OP_ARR_*. The handle was STORE_LOCAL'd above (VT_INT).
+    localarr_set(lname, g_last_init_is_array);
     // Phase 18 (18.A): an OPTIONAL local (`let x: ?T = …`) carries a hidden present companion slot
     // `x#opt` set to 0 when the initializer is `null`, else 1 (compile-time constant — runtime-null
     // propagation arrives with the `?.` safe-navigation in 18.B). The payload was stored above; the
@@ -1973,6 +2097,8 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localflt_set(nm, g_last_init_vt == TEKO_VT_FLOAT);
     // Phase 17.F.3: keep the local's decimal-typed-ness in sync with its new value.
     localdec_set(nm, g_last_init_vt == TEKO_VT_DECIMAL);
+    // Phase 18 (18.E.1): keep the local's array-typed-ness in sync (a reassign to a new `[...]`).
+    localarr_set(nm, g_last_init_is_array);
     // Phase 18 (18.A): if `nm` is an optional local, refresh its present companion from the new
     // initializer (`x = null;` → present 0, else 1), so a later `x ?? d` branches correctly.
     int oslot = localopt_present_slot(nm);
@@ -2225,6 +2351,43 @@ static int lower_member_write(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     return 1;
 }
 
+// Phase 18 (18.E.1): `a[i] = <expr>;` INDEX WRITE -> OP_ARR_SET(handle, idx, value). `a` is an array
+// local (current token), peek is `[`. Mirrors lower_member_write's ordering: the index AND value are
+// evaluated into temps FIRST (each may itself stage $a0 via an index/member read), then handle=$a0 /
+// index=$a1 are staged and the value (in $w0) is set. Out-of-range traps fail-loud in the runtime.
+// Returns 1 if consumed, 0 if `a` is not an array local (so the caller tries other statement forms).
+static int lower_array_index_write(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    if (!localarr_get(p->current_token.lexeme)) return 0;
+    int hslot = bind_lookup(*env->locals, *env->nlocals, p->current_token.lexeme);
+    if (hslot < 0) return 0;
+    fe_advance(p); // consume the array name
+    fe_advance(p); // consume '['
+    // Park the index + value in HIDDEN NAMED LOCALS (permanent $v slots), not temps: lower_init_value
+    // re-syncs the temp allocator internally (resetting next_temp), which would clobber a temp
+    // reservation made before it. Named locals sit below the temp region and survive that re-sync.
+    static int g_arrset_seq = 0;
+    char inm[120], vnm[120];
+    snprintf(inm, sizeof(inm), "__arrset_i_%d", g_arrset_seq);
+    snprintf(vnm, sizeof(vnm), "__arrset_v_%d", g_arrset_seq);
+    g_arrset_seq++;
+    int it = env_alloc_local(env, inm);
+    int vt = env_alloc_local(env, vnm);
+    env_sync(env);
+    eval_expr_prec(b, p, env->ctx, 1, env->ctx->ta);    // index -> $w0
+    codegen_li_emit_store_local(b, it);                 // it = index
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    if (p->current_token.type == TOKEN_ASSIGN) fe_advance(p);
+    lower_init_value(b, p, env);                        // value -> $w0 (may use $a0 via reads)
+    codegen_li_emit_store_local(b, vt);                 // vt = value
+    codegen_li_emit_load_local(b, hslot); codegen_li_emit_setarg(b, 0); // $a0 = handle
+    codegen_li_emit_load_local(b, it);    codegen_li_emit_setarg(b, 1); // $a1 = index
+    codegen_li_emit_load_local(b, vt);                  // $w0 = value
+    codegen_li_emit_array(b, OP_ARR_SET);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    return 1;
+}
+
 // Phase 15 (15.A): a class member STATEMENT — `obj.field = expr;`, `obj.method(args);` (result
 // discarded). Returns 1 if consumed. Shared by the top-level loop and the block dispatcher.
 // Phase 15 (15.B): DYNAMIC dispatch `g.method(args)` where `g` is a FAT trait-typed local. Resolves
@@ -2369,6 +2532,8 @@ static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     } else if (p->current_token.type == TOKEN_CIRCUIT &&
                p->peek_token.type == TOKEN_IDENTIFIER) {
         lower_circuit_block(b, p, env);   // 14.F: circuit cb { } fallback { }
+    } else if (lower_array_index_write(b, p, env)) {
+        /* Phase 18 (18.E.1): a[i] = expr; consumed */
     } else if (lower_member_stmt(b, p, env)) {
         /* Phase 15: obj.field = expr; / obj.method(args); consumed */
     } else if (lower_reassign(b, p, env)) {
@@ -3161,7 +3326,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -3216,7 +3381,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -3248,7 +3413,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -3280,7 +3445,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.
@@ -3478,6 +3643,11 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // layout/contracts were pre-collected, and method bodies are emitted after $main
             // (emit_method_routines). Keyword-generic brace skip.
             skip_class_decl(&parser);
+        } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
+                   parser.peek_token.type == TOKEN_LBRACKET &&
+                   localarr_get(parser.current_token.lexeme) &&
+                   lower_array_index_write(buffer, &parser, &top_env)) {
+            // Phase 18 (18.E.1): top-level `a[i] = expr;` index write on an array local.
         } else if (lower_member_stmt(buffer, &parser, &top_env)) {
             // Phase 15 (15.A): top-level `obj.field = expr;` / `obj.method(args);`.
         } else if (parser.current_token.type == TOKEN_FN) {
