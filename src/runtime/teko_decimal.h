@@ -59,4 +59,21 @@ void teko_decimal_zero(teko_decimal* out);
 int  teko_decimal_from_components(uint8_t sign, uint8_t scale, const char* digits,
                                   teko_decimal* out);
 
+// --- 17.F.2: culture-invariant parse / format (plain `.`-decimal, NO exponent) ---------
+// Format: render the value as a culture-invariant plain `.`-decimal string, SCALE-PRESERVING
+// (the decimal scale is significant): coeff=150,scale=2 -> "1.50"; scale=0 -> "150";
+// coeff=5,scale=3 -> "0.005"; negative -> a leading '-'; zero at scale s -> "0" (s==0) or
+// "0." + s zeros (s>0). NO exponent notation (decimal is exact). The buffer is malloc'd and
+// NUL-terminated; the caller owns it. Returns NULL only on OOM.
+char* teko_decimal_to_string(const teko_decimal* d);
+
+// Parse: a bare plain-decimal string -> teko_decimal (the `dec` suffix is stripped by the
+// LEXER in 17.F.3, so this core takes the bare number). Grammar: optional leading/trailing
+// ASCII whitespace, optional '+'/'-', one or more digits, optional '.' followed by one or
+// more fractional digits. NO exponent (`1e3` is rejected). Semantics MATCH the arithmetic
+// core: compute the exact value, then (1) if it has > 38 fractional digits, round to scale 38
+// round-half-to-even; (2) if the coefficient does not fit 1984 bits -> fail. Returns 1 on
+// success, 0 fail-loud on malformed input / coefficient overflow. On failure *out is zeroed.
+int teko_decimal_parse(const char* s, teko_decimal* out);
+
 #endif // TEKO_DECIMAL_H

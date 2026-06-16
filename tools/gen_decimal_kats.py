@@ -161,12 +161,67 @@ def oracle(op, a, b):
         return (False, None)
     return (True, Op(sgn, scale, coeff))
 
+# --- 17.F.2 scale-preserving plain `.`-decimal canonicalization ----------------------
+# Render a (sign, scale, coeff) triple to the EXACT plain `.`-decimal, scale-preserving form
+# the C teko_decimal_to_string produces. Python's str(Decimal) can emit scientific notation
+# (e.g. '1E+3') and its own scale; we NEVER use it — we build the string ourselves from the
+# (sign, scale, coeff) the C stores, so C and oracle agree byte-for-byte.
+#   scale==0          -> integer digits (no point); coeff==0 -> "0"
+#   scale>0           -> integer part '.' fractional part; the last `scale` digits are the
+#                        fraction, left-padded with '0' when len(digits) <= scale
+#                        (coeff=5,scale=3 -> "0.005"); coeff=0,scale=s -> "0." + s zeros
+#   negative (coeff!=0) -> leading '-'  (zero is always '+', no leading '-')
+def canon_string(sign, scale, coeff):
+    digits = str(coeff)  # decimal digits, no leading zeros (coeff>=0); "0" for zero
+    is_zero = (coeff == 0)
+    neg = (sign == 1 and not is_zero)
+    pre = '-' if neg else ''
+    if scale == 0:
+        return pre + digits
+    if len(digits) <= scale:
+        frac = digits.rjust(scale, '0')
+        return pre + '0.' + frac
+    int_part = digits[:len(digits) - scale]
+    frac = digits[len(digits) - scale:]
+    return pre + int_part + '.' + frac
+
 # --- vector construction -------------------------------------------------------------
 VECTORS = []  # list of (op, Op a, Op b, expect_ok, result-Op-or-None)
+FMT_VECTORS = []   # list of (Op d, expected_string)              -- format KATs
+PARSE_VECTORS = [] # list of (input_string, expect_ok, Op-or-None)-- parse KATs
 
 def add_case(op, a, b):
     ok, res = oracle(op, a, b)
     VECTORS.append((op, a, b, ok, res))
+
+# Add a format KAT for `d`; the expected string is the C-canonical scale-preserving form.
+def add_fmt(d):
+    FMT_VECTORS.append((d, canon_string(d.sign, d.scale, d.coeff)))
+
+# Add a parse KAT. If expect_ok, the expected Op is computed under the parse semantics:
+# build the exact coefficient at `scale` frac digits, then round to 38 if scale>38, then the
+# 1984-bit fit check (overflow -> expect_fail override). Pass the raw (sign, scale, coeff) the
+# string denotes (BEFORE reduction); this helper applies the same reductions the C does.
+def add_parse_ok(s, sign, scale, coeff):
+    # Apply reduction (1): >38 frac digits -> round-half-even to scale 38.
+    if scale > MAX_SCALE:
+        drop = scale - MAX_SCALE
+        val = Decimal(coeff)
+        q = Decimal(1)
+        with localcontext() as ctx:
+            ctx.prec = 10000
+            # round coeff / 10^drop to nearest even integer
+            scaled = (val / (Decimal(10) ** drop)).quantize(q, rounding=ROUND_HALF_EVEN)
+        coeff = int(scaled)
+        scale = MAX_SCALE
+    # Reduction (2): 1984-bit fit.
+    if coeff >= COEFF_MAX:
+        PARSE_VECTORS.append((s, False, None))
+        return
+    PARSE_VECTORS.append((s, True, Op(sign, scale, coeff)))
+
+def add_parse_fail(s):
+    PARSE_VECTORS.append((s, False, None))
 
 def main():
     rng = LCG(0x1F2E3D4C5B6A7988)
@@ -262,6 +317,86 @@ def main():
         for d in (3, 7, 9, 11, 13, 17, 23):
             add_case(OP_DIV, Op(0, 0, n), Op(0, 0, d))
 
+    # ===== 17.F.2 FORMAT KATs (256B -> expected scale-preserving plain `.`-decimal) =====
+    fmt_fixed = [
+        Op(0, 2, 150),    # "1.50"  trailing-zero preservation
+        Op(0, 0, 150),    # "150"   scale 0
+        Op(0, 3, 5),      # "0.005" leading-zero fraction
+        Op(1, 1, 5),      # "-0.5"  negative
+        Op(0, 0, 100),    # "100"
+        Op(0, 0, 0),      # "0"     scale-0 zero
+        Op(0, 3, 0),      # "0.000" scale-3 zero
+        Op(0, 38, 0),     # "0." + 38 zeros
+        Op(1, 0, 0),      # "-0" canonicalizes to "0" (sign dropped for zero)
+        Op(0, 2, 12345),  # "123.45"
+        Op(1, 2, 12345),  # "-123.45"
+        Op(0, 1, 10),     # "1.0"
+        Op(0, 38, 1),     # "0." + 37 zeros + "1"
+        Op(0, 38, 12345), # 5 sig frac digits, padded to scale 38
+        Op(0, 5, 100000), # "1.00000"
+        Op(1, 4, 30000),  # "-3.0000"
+        Op(0, 0, 7),      # "7"
+    ]
+    for d in fmt_fixed:
+        add_fmt(d)
+    # Every scale 0..38 with a fixed nonzero coefficient (exercise padding + point insertion).
+    for sc in range(0, MAX_SCALE + 1):
+        add_fmt(Op(0, sc, 123456789))
+        add_fmt(Op(1, sc, 1))            # tiny coeff at each scale (max leading-zero padding)
+    # A ~590-digit integer (scale 0) and the same digits at scale 38.
+    big = int(rng.digits(590))
+    add_fmt(Op(0, 0, big))
+    add_fmt(Op(1, 38, big))
+    # Random round-trip seeds (format then parse-back, checked below).
+    for _ in range(40):
+        nd = 1 + rng.below(50)
+        add_fmt(Op(rng.below(2), rng.below(MAX_SCALE + 1), int(rng.digits(nd))))
+
+    # ===== 17.F.2 PARSE KATs (string -> expect_ok + expected 256B) =====
+    # Valid forms (string, sign, frac-scale, coeff) — coeff is the integer of ALL digits.
+    add_parse_ok("0", 0, 0, 0)
+    add_parse_ok("150", 0, 0, 150)
+    add_parse_ok("1.50", 0, 2, 150)
+    add_parse_ok("0.005", 0, 3, 5)
+    add_parse_ok("-0.5", 1, 1, 5)
+    add_parse_ok("+42", 0, 0, 42)
+    add_parse_ok("+0.25", 0, 2, 25)
+    add_parse_ok("-123.45", 1, 2, 12345)
+    add_parse_ok("123.45", 0, 2, 12345)
+    add_parse_ok("  7  ", 0, 0, 7)          # surrounding whitespace
+    add_parse_ok("\t-3.0000\n", 1, 4, 30000) # ws + trailing-zero fraction
+    add_parse_ok("100", 0, 0, 100)
+    add_parse_ok("1.0", 0, 1, 10)
+    add_parse_ok("0.000", 0, 3, 0)           # all-zero fraction
+    add_parse_ok("0.00000000000000000000000000000000000001", 0, 38, 1) # 38 frac digits exact
+    add_parse_ok("00123", 0, 0, 123)         # leading zeros in integer part
+    add_parse_ok("000.5", 0, 1, 5)           # leading zeros + fraction
+    # 590-digit integer (valid, < 2^1984 ~ 597 digits).
+    big_s = rng.digits(590).lstrip('0') or '0'
+    add_parse_ok(big_s, 0, 0, int(big_s))
+    # >38 fractional digits -> rounds to scale 38 (expect_ok with the rounded 256B).
+    # 40 frac digits, last two ".._25" round-half-to-even on the 39th/40th dropped digits.
+    s40 = "0." + ("1" * 38) + "25"           # 40 frac digits
+    add_parse_ok(s40, 0, 40, int("1" * 38 + "25"))
+    s39 = "1." + ("0" * 38) + "5"            # 39 frac, dropped '5' exact tie -> to even (0 stays)
+    add_parse_ok(s39, 0, 39, int("1" + "0" * 38 + "5"))
+
+    # Reject forms.
+    for bad in ["", ".", "1.2.3", "abc", "1 2", "1e3", "1E3", "1.5e2", "+", "-", "+.", "-.",
+                ".5x", "5.", "1..2", "0x1F", "1,000", " ", "12 34", "+-5", "1.2 3"]:
+        add_parse_fail(bad)
+    # >597-digit integer -> coefficient overflow (>= 2^1984) -> expect_fail.
+    over = rng.digits(620).lstrip('0') or '0'
+    if int(over) < COEFF_MAX:           # ensure it truly overflows (620 digits always does)
+        over = "9" * 620
+    add_parse_fail(over)
+
+    # Round-trips: parse(format(d)) == d for every format vector (added as parse KATs whose
+    # input is the canonical string and whose expected Op is d itself — already reduced/valid).
+    for (d, sstr) in FMT_VECTORS:
+        # d came from Op(...) with scale<=38 and coeff<COEFF_MAX, so it's a valid parse target.
+        PARSE_VECTORS.append((sstr, True, d))
+
     emit()
 
 def emit():
@@ -299,10 +434,68 @@ def emit():
         out.write("  { %d, %s, %s, %d, %s, \"%s\" },\n" %
                   (op, barr(ae), barr(be), 1 if ok else 0, barr(re), label))
     out.write("};\n\n")
-    out.write("#define TEKO_DECIMAL_KAT_COUNT (sizeof(TEKO_DECIMAL_KATS)/sizeof(TEKO_DECIMAL_KATS[0]))\n")
+    out.write("#define TEKO_DECIMAL_KAT_COUNT (sizeof(TEKO_DECIMAL_KATS)/sizeof(TEKO_DECIMAL_KATS[0]))\n\n")
+
+    # C string literal escaping for the parse inputs (whitespace, quotes, backslash, non-print).
+    def cstr(s):
+        r = ['"']
+        for ch in s:
+            o = ord(ch)
+            if ch == '\\': r.append('\\\\')
+            elif ch == '"': r.append('\\"')
+            elif ch == '\t': r.append('\\t')
+            elif ch == '\n': r.append('\\n')
+            elif ch == '\r': r.append('\\r')
+            elif ch == '\f': r.append('\\f')
+            elif ch == '\v': r.append('\\v')
+            elif 32 <= o < 127: r.append(ch)
+            else: r.append('\\x%02x' % o)
+        r.append('"')
+        return ''.join(r)
+
+    # ----- 17.F.2 FORMAT vectors: {256B input -> expected scale-preserving string} -----
+    out.write("// 17.F.2 — FORMAT KATs: teko_decimal_to_string(d) == str (scale-preserving plain\n")
+    out.write("// `.`-decimal; the expected string is built by the generator, NEVER Python str()).\n")
+    out.write("typedef struct {\n")
+    out.write("    uint8_t     d[256];\n")
+    out.write("    const char* str;     // expected NUL-terminated output\n")
+    out.write("} teko_decimal_fmt_kat;\n\n")
+    out.write("static const teko_decimal_fmt_kat TEKO_DECIMAL_FMT_KATS[] = {\n")
+    for (d, sstr) in FMT_VECTORS:
+        out.write("  { %s, %s },\n" % (barr(d.encode()), cstr(sstr)))
+    out.write("};\n")
+    out.write("#define TEKO_DECIMAL_FMT_KAT_COUNT "
+              "(sizeof(TEKO_DECIMAL_FMT_KATS)/sizeof(TEKO_DECIMAL_FMT_KATS[0]))\n\n")
+
+    # ----- 17.F.2 PARSE vectors: {string -> expect_ok + expected 256B} -----
+    out.write("// 17.F.2 — PARSE KATs: teko_decimal_parse(str,&out) ok-flag == expect_ok AND (on ok)\n")
+    out.write("// memcmp(out, result, 256) == 0. Includes reject forms + >38-frac rounding + round-trips.\n")
+    out.write("typedef struct {\n")
+    out.write("    const char* str;\n")
+    out.write("    int         expect_ok;\n")
+    out.write("    uint8_t     result[256]; // expected encoding when expect_ok (else zeros)\n")
+    out.write("} teko_decimal_parse_kat;\n\n")
+    out.write("static const teko_decimal_parse_kat TEKO_DECIMAL_PARSE_KATS[] = {\n")
+    n_pok = 0
+    n_pfail = 0
+    for (sstr, ok, res) in PARSE_VECTORS:
+        if ok:
+            re = res.encode()
+            n_pok += 1
+        else:
+            re = bytes(256)
+            n_pfail += 1
+        out.write("  { %s, %d, %s },\n" % (cstr(sstr), 1 if ok else 0, barr(re)))
+    out.write("};\n")
+    out.write("#define TEKO_DECIMAL_PARSE_KAT_COUNT "
+              "(sizeof(TEKO_DECIMAL_PARSE_KATS)/sizeof(TEKO_DECIMAL_PARSE_KATS[0]))\n\n")
+
     out.write("#endif // TEKO_DECIMAL_KAT_VECTORS_H\n")
-    sys.stderr.write("generated %d vectors (%d ok, %d expect_fail)\n" %
+    sys.stderr.write("generated %d arith vectors (%d ok, %d expect_fail)\n" %
                      (len(VECTORS), n_ok, n_fail))
+    sys.stderr.write("generated %d format vectors\n" % len(FMT_VECTORS))
+    sys.stderr.write("generated %d parse vectors (%d ok, %d expect_fail)\n" %
+                     (len(PARSE_VECTORS), n_pok, n_pfail))
 
 if __name__ == "__main__":
     main()

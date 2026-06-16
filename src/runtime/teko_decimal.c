@@ -1,11 +1,14 @@
 // =====================================================================================
-// teko_decimal.c — Phase 17.F.1: the 256-byte exact base-10 `decimal` runtime core.
+// teko_decimal.c — Phase 17.F: the 256-byte exact base-10 `decimal` runtime core.
+//   17.F.1: self-contained 64-bit-limb arithmetic (add/sub/mul/div/mod/compare).
+//   17.F.2: culture-invariant parse / format (plain `.`-decimal, scale-preserving, checked).
 //
-// The single C source of truth for Teko's exact base-10 decimal type: self-contained
-// 64-bit-limb arithmetic (add/sub/mul/div/mod/compare) with banker's rounding, no libc
-// beyond mem* and NO __int128 / libm / snprintf / malloc. Compiles unchanged on the
-// native libc targets, the Windows MSVC gate, and --target=wasm32 -ffreestanding -nostdlib.
-// KAT-tested in the Unity suite against a Python `decimal` oracle (tools/gen_decimal_kats.py).
+// The single C source of truth for Teko's exact base-10 decimal type, with banker's
+// rounding. No libc beyond mem*/strlen and malloc (ONLY teko_decimal_to_string allocates its
+// output buffer — the wasm32 reactor's libc_shim provides the symbol). NO __int128 / libm /
+// snprintf / strtod / setlocale. Compiles unchanged on the native libc targets, the Windows
+// MSVC gate, and --target=wasm32 -ffreestanding -nostdlib. KAT-tested in the Unity suite
+// against a Python `decimal` oracle (tools/gen_decimal_kats.py).
 //
 // -------------------------------------------------------------------------------------
 // VALUE MODEL (owner-LOCKED — see teko_decimal.h):
@@ -68,7 +71,8 @@
 #include "teko_decimal.h"
 
 #include <stdint.h>
-#include <string.h>  // memcpy, memset, memcmp
+#include <stdlib.h>  // malloc (native libc; the wasm32 reactor's libc_shim provides the symbol)
+#include <string.h>  // memcpy, memset, memcmp, strlen
 
 // Wide working width for big-integer temporaries. The widest exact product we form is
 // COEFF_a * COEFF_b (31 + 31 = 62 limbs); div scales a 31-limb numerator by up to
@@ -659,4 +663,166 @@ int teko_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_e
     if (sa) c = -c;
     *out_lt_eq_gt = c;
     return 1;
+}
+
+// ----------------------------------------------------------------------------------------
+// 17.F.2 — culture-invariant parse / format (plain `.`-decimal, scale-preserving, NO exponent).
+// ----------------------------------------------------------------------------------------
+
+// Emit the decimal digits of x[N] (LE, base 2^64) into `buf` MOST-significant first, via
+// repeated divmod by 10^9 chunks. Returns the number of digits written. A zero coefficient
+// writes a single '0'. `buf` must be large enough (caller sizes generously: ~600 digits).
+static int bn_to_decimal_digits(const uint64_t* x, int n, char* buf) {
+    uint64_t cur[BN_WIDE];
+    for (int i = 0; i < n && i < BN_WIDE; i++) cur[i] = x[i];
+    for (int i = n; i < BN_WIDE; i++) cur[i] = 0;
+    if (bn_is_zero(cur, BN_WIDE)) { buf[0] = '0'; return 1; }
+
+    // Collect base-10^9 chunks LOW-first, then expand to digits HIGH-first.
+    // Each chunk is < 10^9 (fits a uint32-ish range; stored in uint64). The number of chunks
+    // is bounded by ceil(1984/ (~29.9 bits per chunk)) ~ 67; cap generously.
+    uint32_t chunks[80];
+    int nchunks = 0;
+    const uint64_t CHUNK = 1000000000ull; // 10^9
+    while (!bn_is_zero(cur, BN_WIDE)) {
+        uint64_t q[BN_WIDE];
+        uint64_t rem = bn_divmod_small(cur, CHUNK, q, BN_WIDE);
+        chunks[nchunks++] = (uint32_t)rem;
+        for (int i = 0; i < BN_WIDE; i++) cur[i] = q[i];
+    }
+    // Most-significant chunk first, without leading zeros; following chunks zero-padded to 9.
+    int pos = 0;
+    {
+        uint32_t hi = chunks[nchunks - 1];
+        char tmp[10];
+        int t = 0;
+        if (hi == 0) { tmp[t++] = '0'; }
+        else { while (hi > 0) { tmp[t++] = (char)('0' + (hi % 10u)); hi /= 10u; } }
+        for (int i = t - 1; i >= 0; i--) buf[pos++] = tmp[i];
+    }
+    for (int c = nchunks - 2; c >= 0; c--) {
+        uint32_t v = chunks[c];
+        for (int d = 8; d >= 0; d--) {
+            uint32_t pw = 1u;
+            for (int e = 0; e < d; e++) pw *= 10u;
+            buf[pos++] = (char)('0' + ((v / pw) % 10u));
+        }
+    }
+    return pos;
+}
+
+char* teko_decimal_to_string(const teko_decimal* d) {
+    // Coefficient -> decimal digit string (MSB first).
+    char digits[640];
+    uint64_t coeff[TEKO_DECIMAL_LIMBS];
+    for (int i = 0; i < TEKO_DECIMAL_LIMBS; i++) coeff[i] = d->limb[i];
+    int ndig = bn_to_decimal_digits(coeff, TEKO_DECIMAL_LIMBS, digits);
+    int scale = (int)d->scale;
+    int is_zero = (ndig == 1 && digits[0] == '0');
+    int neg = (!is_zero && d->sign) ? 1 : 0;
+
+    // Worst case: '-' + ~600 int digits + '.' + 38 frac + NUL. 700 is generous.
+    char* out = (char*)malloc(700);
+    if (!out) return (char*)0;
+    int p = 0;
+    if (neg) out[p++] = '-';
+
+    if (scale == 0) {
+        // Pure integer: emit the digits as-is.
+        for (int i = 0; i < ndig; i++) out[p++] = digits[i];
+        out[p] = '\0';
+        return out;
+    }
+
+    // Fractional present. The last `scale` digits of the coefficient are fractional; the rest
+    // is the integer part. Left-pad the integer part with '0' when ndig <= scale.
+    int int_len = ndig - scale; // may be <= 0
+    if (int_len <= 0) {
+        out[p++] = '0';
+        out[p++] = '.';
+        for (int i = 0; i < -int_len; i++) out[p++] = '0'; // leading zeros after the point
+        for (int i = 0; i < ndig; i++) out[p++] = digits[i];
+    } else {
+        for (int i = 0; i < int_len; i++) out[p++] = digits[i];
+        out[p++] = '.';
+        for (int i = int_len; i < ndig; i++) out[p++] = digits[i];
+    }
+    out[p] = '\0';
+    return out;
+}
+
+static int dec_is_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+int teko_decimal_parse(const char* s, teko_decimal* out) {
+    teko_decimal_zero(out);
+    if (!s) return 0;
+    const char* p = s;
+
+    // Optional leading whitespace.
+    while (*p && dec_is_ws(*p)) p++;
+
+    // Optional sign.
+    int sign = 0;
+    if (*p == '+' || *p == '-') { sign = (*p == '-') ? 1 : 0; p++; }
+
+    // Integer digits (>= 1 required overall, possibly split with the fraction). We build the
+    // coefficient in a wide buffer via coeff = coeff*10 + digit, counting fractional digits.
+    uint64_t x[BN_WIDE];
+    for (int i = 0; i < BN_WIDE; i++) x[i] = 0;
+    int any_digit = 0;
+    int frac_digits = 0;
+
+    // Integer part.
+    while (*p >= '0' && *p <= '9') {
+        any_digit = 1;
+        uint64_t carry = bn_mul_small(x, 10, BN_WIDE);
+        if (carry != 0) return 0; // overflowed the wide buffer -> way past 1984 bits
+        uint64_t one[BN_WIDE];
+        for (int i = 0; i < BN_WIDE; i++) one[i] = 0;
+        one[0] = (uint64_t)(*p - '0');
+        bn_add(x, one, x, BN_WIDE);
+        p++;
+    }
+
+    // Optional fraction: '.' then >= 1 digit.
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            any_digit = 1;
+            frac_digits++;
+            uint64_t carry = bn_mul_small(x, 10, BN_WIDE);
+            if (carry != 0) return 0;
+            uint64_t one[BN_WIDE];
+            for (int i = 0; i < BN_WIDE; i++) one[i] = 0;
+            one[0] = (uint64_t)(*p - '0');
+            bn_add(x, one, x, BN_WIDE);
+            p++;
+        }
+        // A lone '.' with no fractional digit, OR a '.' with no preceding/following digit at
+        // all, is malformed. We require >= 1 fractional digit after a dot.
+        if (frac_digits == 0) return 0;
+    }
+
+    // Must have at least one digit somewhere; reject "", "+", "-", ".", "+.".
+    if (!any_digit) return 0;
+
+    // Optional trailing whitespace, then EOF — reject any other trailing garbage (NO exponent).
+    while (*p && dec_is_ws(*p)) p++;
+    if (*p != '\0') return 0;
+
+    // Apply the arithmetic-core reductions, IN ORDER:
+    // (1) If > 38 fractional digits, banker's-round to scale 38 (drop the excess low digits).
+    int scale = frac_digits;
+    if (scale > TEKO_DECIMAL_MAX_SCALE) {
+        int drop = scale - TEKO_DECIMAL_MAX_SCALE;
+        uint64_t rounded[BN_WIDE];
+        bn_round_drop_decimals(x, drop, 0, rounded, BN_WIDE);
+        for (int i = 0; i < BN_WIDE; i++) x[i] = rounded[i];
+        scale = TEKO_DECIMAL_MAX_SCALE;
+    }
+
+    // (2) Coefficient must fit 1984 bits; dec_store handles the check + zero-sign canonicalize.
+    return dec_store((uint8_t)(sign ? 1 : 0), (uint8_t)scale, x, BN_WIDE, out);
 }

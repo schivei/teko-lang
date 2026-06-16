@@ -94,3 +94,75 @@ void test_teko_decimal_kat_vectors(void) {
         }
     }
 }
+
+#include <stdlib.h>  // free
+
+// 17.F.2 — FORMAT: teko_decimal_to_string(d) must equal the scale-preserving plain `.`-decimal
+// string the generator built (NEVER Python str() — see the canonicalization in the generator).
+void test_teko_decimal_format_kats(void) {
+    char msg[256];
+    for (size_t i = 0; i < TEKO_DECIMAL_FMT_KAT_COUNT; i++) {
+        const teko_decimal_fmt_kat* k = &TEKO_DECIMAL_FMT_KATS[i];
+        teko_decimal d;
+        memcpy(&d, k->d, 256);
+        char* got = teko_decimal_to_string(&d);
+        TEST_ASSERT_NOT_NULL_MESSAGE(got, "to_string returned NULL (OOM)");
+        if (strcmp(got, k->str) != 0) {
+            snprintf(msg, sizeof(msg), "fmt #%zu: expected \"%s\" got \"%s\"", i, k->str, got);
+            free(got);
+            TEST_FAIL_MESSAGE(msg);
+        }
+        free(got);
+    }
+}
+
+// 17.F.2 — PARSE: ok-flag must match expect_ok AND (on ok) the 256-byte encoding must match.
+void test_teko_decimal_parse_kats(void) {
+    char msg[256];
+    for (size_t i = 0; i < TEKO_DECIMAL_PARSE_KAT_COUNT; i++) {
+        const teko_decimal_parse_kat* k = &TEKO_DECIMAL_PARSE_KATS[i];
+        teko_decimal out;
+        memset(&out, 0xCD, sizeof(out)); // poison so a no-write is caught
+        int ok = teko_decimal_parse(k->str, &out);
+        snprintf(msg, sizeof(msg), "parse #%zu \"%s\": ok-flag", i, k->str);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(k->expect_ok, ok, msg);
+        if (k->expect_ok) {
+            if (memcmp(&out, k->result, 256) != 0) {
+                snprintf(msg, sizeof(msg), "parse #%zu \"%s\": result bytes differ", i, k->str);
+                TEST_FAIL_MESSAGE(msg);
+            }
+        } else {
+            // On failure *out must be left zeroed (the wrapper turns 0 into teko_rt_die).
+            teko_decimal z; teko_decimal_zero(&z);
+            if (memcmp(&out, &z, 256) != 0) {
+                snprintf(msg, sizeof(msg), "parse #%zu \"%s\": *out not zeroed on fail", i, k->str);
+                TEST_FAIL_MESSAGE(msg);
+            }
+        }
+    }
+}
+
+// 17.F.2 — explicit ROUND-TRIPS over the format set: parse(format(d)) == d (256B memcmp), and
+// format(parse(s)) == s over the canonical strings. (The generator also folds these into the
+// format/parse tables; this test makes the property explicit and self-checking.)
+void test_teko_decimal_roundtrips(void) {
+    char msg[256];
+    for (size_t i = 0; i < TEKO_DECIMAL_FMT_KAT_COUNT; i++) {
+        const teko_decimal_fmt_kat* k = &TEKO_DECIMAL_FMT_KATS[i];
+        teko_decimal d, back;
+        memcpy(&d, k->d, 256);
+        char* s = teko_decimal_to_string(&d);
+        TEST_ASSERT_NOT_NULL(s);
+        // format(d) must equal the canonical string...
+        TEST_ASSERT_EQUAL_STRING(k->str, s);
+        // ...and parse(format(d)) must reproduce d byte-for-byte.
+        memset(&back, 0xCD, sizeof(back));
+        int ok = teko_decimal_parse(s, &back);
+        if (!ok || memcmp(&back, &d, 256) != 0) {
+            snprintf(msg, sizeof(msg), "roundtrip #%zu \"%s\": parse(format(d)) != d", i, s);
+            free(s);
+            TEST_FAIL_MESSAGE(msg);
+        }
+        free(s);
+    }
+}

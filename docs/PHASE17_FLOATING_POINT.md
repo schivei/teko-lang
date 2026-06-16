@@ -376,8 +376,46 @@ opcode file was touched, so the 16 native goldens and all prior native/WASM proo
   confirmed; 16 native goldens + all prior proofs byte-identical; no `__int128`/libm/`snprintf`/`malloc`
   in `teko_decimal.c`.
 
-Next: **17.F.2** (decimal parse/format core, reusing the 17.C/17.E patterns) → **17.F.3/.4** (the
-opcodes + language surface + checked casts). 17.F.1 is the source of truth those build on.
+### Status — 17.F.2 (the decimal parse + format CORE) is DONE
+Runtime + KATs only (NO language surface / opcodes / frontend — those are 17.F.3/.4; this mirrors
+the parse/format cores that landed without surface in 16.A/17.C/17.E). Additive: NO emitter/frontend/
+opcode file was touched, so the 16 native goldens and all prior native/WASM proofs are byte-identical.
+- **Format** `char* teko_decimal_to_string(const teko_decimal* d)` (in `teko_decimal.c`) — the
+  culture-invariant plain `.`-decimal, **SCALE-PRESERVING** (the scale is significant): coeff=150,
+  scale=2 → `"1.50"`; scale=0 → `"150"`; coeff=5,scale=3 → `"0.005"` (leading-zero fraction);
+  negative → leading `-`; zero at scale s → `"0"` (s==0) or `"0."`+s zeros. **NO exponent notation.**
+  Built by a new `bn_to_decimal_digits` (binary-bignum coefficient → decimal digits via repeated
+  `bn_divmod_small` by 10^9 chunks, MSB-first), then the point inserted `scale` digits from the
+  right with left-`'0'` padding. malloc'd 700-byte buffer (worst case ≈ `'-'` + ~597 int + `'.'` +
+  38 frac + NUL); the wasm32 reactor's `libc_shim` provides `malloc`. Returns NULL only on OOM.
+- **Parse** `int teko_decimal_parse(const char* s, teko_decimal* out)` — grammar: optional
+  leading/trailing ASCII whitespace, optional `+`/`-`, ≥1 digit, optional `.`+≥1 frac digit; **NO
+  exponent** (`1e3`/`1E3`/`1.5e2` rejected). Coefficient built via `coeff = coeff*10 + digit`
+  (`bn_mul_small`+`bn_add`), scale = #frac digits. **Semantics MATCH the arithmetic core:** compute
+  exact, then (1) >38 frac digits → round to scale 38 round-half-to-even (`bn_round_drop_decimals`);
+  (2) coeff ≥ 2^1984 → fail. Returns 1 ok / 0 fail-loud (malformed `""`/`.`/`1.2.3`/`abc`/`1 2`/`5.`/
+  exponent / overflow); on failure `*out` is zeroed (the wrapper turns 0 into `teko_rt_die`).
+- **No forbidden libc:** only `mem*`/`strlen`/`malloc`; NO `__int128`/`snprintf`/`strtod`/`setlocale`/
+  libm. wasm32 `--target=wasm32 -ffreestanding -nostdlib` compile + the full crypto-reactor link
+  confirmed (the new functions link against the shim's `malloc`).
+- **KATs** `tools/gen_decimal_kats.py` extended (committed) → regenerated
+  `tests/runtime/teko_decimal_kat_vectors.h` (committed) with TWO new tables. **CRITICAL:** the
+  generator builds the expected string itself via a scale-preserving `canon_string` (it NEVER uses
+  Python `str(Decimal)`, which can emit `1E+3`/its own scale) so C and oracle agree byte-for-byte.
+  **137 format vectors** {256B → string} (scales 0–38, negatives, ±0 at various scales, `0.005`,
+  `1.50` trailing-zero preservation, ~590-digit integer) + **179 parse vectors** {string →
+  expect_ok + 256B} (valid `+`-signed/whitespace/no-frac/all-frac forms, reject `""`/`.`/`1.2.3`/
+  `abc`/`1 2`/`1e3`/`5.`/…, a 40-frac-digit input that ROUNDS to scale 38 → expect_ok, a 620-digit
+  integer → expect_fail, plus a round-trip `parse(format(d))==d` for every format vector).
+  `tests/runtime/test_decimal.c` gains `test_teko_decimal_format_kats` (strcmp), `…parse_kats`
+  (ok-flag + 256B memcmp + zeroed-on-fail), `…roundtrips` (format==canon ∧ parse(format(d))==d);
+  registered in `tests/test_main.c`.
+- **Verification:** suite **244/244** (241 + the 3 new KAT runners); ASan+UBSan clean on BOTH
+  dispatch paths; TSan clean; wasm32 freestanding compile + reactor link confirmed; 16 native
+  goldens + all prior proofs byte-identical; no `__int128`/`snprintf`/`strtod`/`setlocale`/libm.
+
+Next: **17.F.3/.4** (the
+opcodes + language surface + checked casts). 17.F.1/.2 are the source of truth those build on.
 
 **Decimal literal suffix = `dec`** (owner correction, applies in 17.F.3): e.g. `9.99dec`, `1000dec`.
 NOT `m` — `m` collides with the Phase-14 time-range minutes suffix (`5m`). The lexer recognizes a
