@@ -51,7 +51,8 @@ SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/te
       "$ROOT/src/runtime/teko_delayed.c"   # Phase 14: delayed (timed) channel runtime
       "$ROOT/src/runtime/teko_broadcast.c" # Phase 14: broadcast (1:N pub-sub) channel runtime
       "$ROOT/src/runtime/teko_shared.c"    # Phase 14: shared memory (coarse lock + atomic cells)
-      "$ROOT/src/runtime/teko_retry.c")    # Phase 14: resilience policy (retry/circuit)
+      "$ROOT/src/runtime/teko_retry.c"     # Phase 14: resilience policy (retry/circuit)
+      "$ROOT/src/runtime/teko_time.c")     # Phase 14: civil time formatter (wall-clock/timezone)
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()
@@ -89,7 +90,10 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          teko_atomic_cell teko_atomic_add teko_atomic_load teko_atomic_store
          # Phase 14 (14.F): resilience policy ops (OP_RETRY_*/OP_CIRCUIT_* import these).
          teko_rt_retry_new teko_rt_retry_should_continue teko_rt_retry_next_delay
-         teko_rt_circuit_new teko_rt_circuit_allow teko_rt_circuit_record)
+         teko_rt_circuit_new teko_rt_circuit_allow teko_rt_circuit_record
+         # Phase 14 (wall-clock / timezone surface): OS-sourced civil time (ids 44-48).
+         teko_rt_time_now_unix teko_rt_time_now_local teko_rt_time_now_utc
+         teko_rt_time_format_local teko_rt_time_format_utc)
 LDEXPORTS=(); for e in "${EXPORTS[@]}"; do LDEXPORTS+=("--export=$e"); done
 
 # Layout: keep the whole reactor image (data + shadow stack + heap) ABOVE Teko's

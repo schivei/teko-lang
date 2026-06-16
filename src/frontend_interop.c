@@ -393,6 +393,14 @@ static int codec_id_for(const char* lex) {
     // No surface args (entropy/time come from the runtime/host); the lowered $w0 is ignored.
     if (strcmp(lex, "uuid.v4") == 0) return 42;
     if (strcmp(lex, "uuid.v7") == 0) return 43;
+    // Phase 14 (wall-clock / timezone surface) — OS-sourced civil time, string-returning like the
+    // crypto ids. now_* ignore their arg (time/zone from the OS); format_* take a decimal epoch
+    // string. ids 44-48 (reactor-backed on WASM, where now/offset come from host imports).
+    if (strcmp(lex, "time.now_unix")     == 0) return 44;
+    if (strcmp(lex, "time.now_local")    == 0) return 45;
+    if (strcmp(lex, "time.now_utc")      == 0) return 46;
+    if (strcmp(lex, "time.format_local") == 0) return 47;
+    if (strcmp(lex, "time.format_utc")   == 0) return 48;
     // Legacy hashes (insecure — interop only): in-module WAT runtimes, ids 6/7.
     if (strcmp(lex, "hash.md5") == 0) return 6;
     if (strcmp(lex, "hash.sha1") == 0) return 7;

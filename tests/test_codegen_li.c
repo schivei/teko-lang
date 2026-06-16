@@ -1066,6 +1066,53 @@ void test_frontend_interop_routine_loop(void) {
     codegen_li_free_context(buffer);
 }
 
+// Phase 14 (wall-clock / timezone surface): time.* lower to OP_CALL_RUNTIME with ids 44-48 and are
+// reactor-backed on WASM (uses_crypto_ext); the emitted module imports teko_rt_time_* and shares
+// memory. Output strings, like the crypto surface.
+void test_frontend_interop_time_lowering(void) {
+    const char* src =
+        "extern fn emit(s) from \"env\" as \"emit\";\n"
+        "emit(time.format_utc(\"1000000000\"));\n"
+        "let n = time.now_unix();\n"
+        "emit(n);\n";
+
+    BytecodeBuffer* buffer = codegen_li_create_context();
+    TEST_ASSERT_NOT_NULL(buffer);
+    TEST_ASSERT_EQUAL_INT(0, teko_compile_interop(src, buffer));
+    TEST_ASSERT_EQUAL_INT(1, buffer->uses_crypto_ext); // reactor-backed time ids
+
+    int has44 = 0, has48 = 0;
+    for (int i = 0; i + 4 < buffer->size; i++) {
+        if (buffer->code[i] == OP_CALL_RUNTIME) {
+            int id = (int)((unsigned)buffer->code[i+1] | ((unsigned)buffer->code[i+2] << 8) |
+                           ((unsigned)buffer->code[i+3] << 16) | ((unsigned)buffer->code[i+4] << 24));
+            if (id == 44) has44 = 1;
+            if (id == 48) has48 = 1;
+        }
+    }
+    TEST_ASSERT_TRUE(has44); // time.now_unix
+    TEST_ASSERT_TRUE(has48); // time.format_utc
+
+    TekoTarget target;
+    target.arch = ARCH_WASM32;
+    target.os = OS_WASI;
+    strncpy(target.target_string, "wasm32-wasi", sizeof(target.target_string) - 1);
+    const char* wat = "output_interop_time.wat";
+    TEST_ASSERT_EQUAL_INT(0, codegen_li_emit_wasm(buffer, wat, target, NULL, NULL, NULL, NULL, 0));
+    FILE* f = fopen(wat, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    char* out = (char*)malloc(65536);
+    memset(out, 0, 65536);
+    size_t n = fread(out, 1, 65535, f); out[n] = '\0'; fclose(f);
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_time_format_utc\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "(import \"crypto\" \"teko_rt_time_now_unix\""));
+    TEST_ASSERT_NOT_NULL(strstr(out, "call $crypto_48"));
+    free(out);
+    remove(wat);
+
+    codegen_li_free_context(buffer);
+}
+
 // Phase 14 (14.I): `routines { worker(a, b); }` passes N arguments (Go-style) — each staged via
 // OP_SETARG, then OP_SPAWN_ASYNC_ARGS argc. The routine `fn worker(a, b)` binds each param from
 // OP_LOAD_SPAWN_ARG i. Pins the multi-arg spawn + per-param load in the IL, and the WASM frame ops.

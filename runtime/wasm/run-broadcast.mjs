@@ -13,6 +13,7 @@ const out = [];
 const env = {
   memory,
   teko_now_ns: () => process.hrtime.bigint(), // reactor delayed/retry clock (real ns)
+  teko_now_unix: () => 1000000000n, teko_tz_offset: () => 0, // reactor civil-time host clock (stubbed)
   teko_random: (ptr, len) => { // reactor (crypto) import; unused by broadcast — stub
     const u = new Uint8Array(memory.buffer);
     for (let i = 0; i < (len >>> 0); i++) u[(ptr >>> 0) + i] = 0;

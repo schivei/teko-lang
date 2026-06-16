@@ -49,6 +49,12 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 41: sym = "teko_rt_random_bytes";     arity = 1; break; // (n)
         case 42: sym = "teko_rt_uuid_v4";          arity = 1; break; // ignored arg
         case 43: sym = "teko_rt_uuid_v7";          arity = 1; break; // ignored arg
+        // Phase 14 (wall-clock / timezone surface) — OS-sourced civil time (string-returning).
+        case 44: sym = "teko_rt_time_now_unix";    arity = 1; break; // ignored arg
+        case 45: sym = "teko_rt_time_now_local";   arity = 1; break; // ignored arg
+        case 46: sym = "teko_rt_time_now_utc";     arity = 1; break; // ignored arg
+        case 47: sym = "teko_rt_time_format_local"; arity = 1; break; // (epoch str)
+        case 48: sym = "teko_rt_time_format_utc";  arity = 1; break; // (epoch str)
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;

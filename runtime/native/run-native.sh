@@ -51,6 +51,25 @@ check_timed() {
   echo "OK: $base -> [$got] in ~${ms}ms (>= ${min_ms}ms real)"
 }
 
+# Wall-clock / timezone surface: format_* of a fixed epoch is deterministic (run under TZ=UTC);
+# now_* are real OS time, so pattern-check them. Asserts the OS-sourced civil-time surface works.
+check_time() {
+  local sample="time.tks" exe got l1 l2 l3 l4
+  exe="$TMP/time"
+  echo "--- $sample (wall-clock/timezone, TZ=UTC) ---"
+  TZ=UTC "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$(TZ=UTC "$exe")" || fail "time exited non-zero"
+  l1="$(printf '%s\n' "$got" | sed -n 1p)"; l2="$(printf '%s\n' "$got" | sed -n 2p)"
+  l3="$(printf '%s\n' "$got" | sed -n 3p)"; l4="$(printf '%s\n' "$got" | sed -n 4p)"
+  [ "$l1" = "2001-09-09T01:46:40Z" ] || fail "time.format_utc: [$l1]"
+  [ "$l2" = "2001-09-09T01:46:40Z" ] || fail "time.format_local (TZ=UTC): [$l2]"
+  printf '%s' "$l3" | grep -Eq '^[0-9]+$' || fail "time.now_unix not digits: [$l3]"
+  printf '%s' "$l4" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+    || fail "time.now_utc not ISO-8601 UTC: [$l4]"
+  echo "OK: time -> format_utc/local fixed + now_unix [$l3] + now_utc [$l4]"
+}
+
 # CSPRNG: non-deterministic, so assert format (two 64-hex-char lines) + that they differ.
 check_random() {
   local sample="$1" exe got l1 l2
@@ -269,5 +288,6 @@ EXP
 
 check_random random.tks
 check_uuid uuid_rng.tks
+check_time
 
 echo "All native runner proofs passed."

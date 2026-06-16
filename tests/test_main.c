@@ -47,6 +47,7 @@ extern void test_frontend_interop_controlflow_lowering(void);
 extern void test_frontend_interop_resilience_lowering(void);
 extern void test_frontend_interop_routine_loop(void);
 extern void test_frontend_interop_routine_args(void);
+extern void test_frontend_interop_time_lowering(void);
 extern void test_frontend_interop_event_handler(void);
 extern void test_frontend_interop_named_locals(void);
 extern void test_frontend_interop_expressions(void);
@@ -146,6 +147,10 @@ extern void test_teko_retry_attempts_limit(void);
 extern void test_teko_retry_timeout_branches_to_fallback(void);
 extern void test_teko_circuit_breaker_transitions(void);
 extern void test_teko_retry_badarg(void);
+extern void test_teko_time_format_utc(void);
+extern void test_teko_time_format_offset(void);
+extern void test_teko_time_days_from_civil_roundtrip(void);
+extern void test_teko_time_epoch_str_and_parse(void);
 extern void test_teko_runtime_arena_thread_isolation_and_alignment(void);
 extern void test_teko_crypto_md5_rfc1321_vectors(void);
 extern void test_teko_crypto_md5_streaming_matches_oneshot(void);
@@ -269,6 +274,7 @@ int main(void) {
     RUN_TEST(test_frontend_interop_resilience_lowering);
     RUN_TEST(test_frontend_interop_routine_loop);
     RUN_TEST(test_frontend_interop_routine_args);
+    RUN_TEST(test_frontend_interop_time_lowering);
     RUN_TEST(test_frontend_interop_event_handler);
     RUN_TEST(test_frontend_interop_named_locals);
     RUN_TEST(test_frontend_interop_expressions);
@@ -368,6 +374,10 @@ int main(void) {
     RUN_TEST(test_teko_retry_timeout_branches_to_fallback);
     RUN_TEST(test_teko_circuit_breaker_transitions);
     RUN_TEST(test_teko_retry_badarg);
+    RUN_TEST(test_teko_time_format_utc);
+    RUN_TEST(test_teko_time_format_offset);
+    RUN_TEST(test_teko_time_days_from_civil_roundtrip);
+    RUN_TEST(test_teko_time_epoch_str_and_parse);
     RUN_TEST(test_teko_runtime_arena_thread_isolation_and_alignment);
 
     RUN_TEST(test_teko_crypto_md5_rfc1321_vectors);

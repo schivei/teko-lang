@@ -21,6 +21,7 @@
 #include "teko_delayed.h"
 #include "teko_broadcast.h"
 #include "teko_retry.h"
+#include "teko_time.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -200,6 +201,52 @@ long teko_rt_circuit_allow(long handle) {
 long teko_rt_circuit_record(long handle, long ok) {
     teko_circuit_record((TekoCircuit*)(intptr_t)handle, (int)ok, (uint64_t)teko_rt_now_ms());
     return 0;
+}
+
+// Phase 14 (wall-clock / timezone surface) — the platform facts behind the civil-time surface: the
+// current Unix timestamp and the DST-correct local UTC offset for an instant, sourced from the OS
+// (native time()/localtime; WASM host imports env.teko_now_unix / env.teko_tz_offset). The portable
+// teko_time_* formatter (the source of truth) turns these into the ISO-8601 strings.
+#if defined(__wasm__)
+__attribute__((import_module("env"), import_name("teko_now_unix")))
+extern long long teko_rt_host_now_unix(void);
+__attribute__((import_module("env"), import_name("teko_tz_offset")))
+extern int teko_rt_host_tz_offset(long long epoch_s);
+static long long teko_rt_time_now_s(void) { return teko_rt_host_now_unix(); }
+static long teko_rt_time_offset(long long epoch_s) { return (long)teko_rt_host_tz_offset(epoch_s); }
+#else
+static long long teko_rt_time_now_s(void) { return (long long)time(NULL); }
+static long teko_rt_time_offset(long long epoch_s) {
+    time_t t = (time_t)epoch_s;
+    struct tm lt;
+#if defined(_WIN32)
+    localtime_s(&lt, &t);
+#else
+    localtime_r(&t, &lt);
+#endif
+    // localtime gave DST-adjusted LOCAL fields; expressing them as "seconds if they were UTC" and
+    // subtracting the true epoch yields the local offset (DST included) without non-portable APIs.
+    long long lsec = teko_time_days_from_civil(lt.tm_year + 1900, (unsigned)(lt.tm_mon + 1),
+                                               (unsigned)lt.tm_mday) * 86400LL
+                   + (long long)lt.tm_hour * 3600 + (long long)lt.tm_min * 60 + lt.tm_sec;
+    return (long)(lsec - epoch_s);
+}
+#endif
+
+// `time.now_unix()` -> current Unix epoch seconds as a decimal string (the int arg is ignored).
+char* teko_rt_time_now_unix(int ignored)  { (void)ignored; return teko_time_epoch_str(teko_rt_time_now_s()); }
+// `time.now_utc()` / `time.now_local()` -> ISO-8601 of "now" in UTC / system-local (DST-correct).
+char* teko_rt_time_now_utc(int ignored)   { (void)ignored; return teko_time_format(teko_rt_time_now_s(), 0); }
+char* teko_rt_time_now_local(int ignored) {
+    (void)ignored; long long e = teko_rt_time_now_s();
+    return teko_time_format(e, teko_rt_time_offset(e));
+}
+// `time.format_utc(epoch)` / `time.format_local(epoch)` -> ISO-8601 of a user epoch (decimal
+// string -> the user can do time math on it), UTC / system-local.
+char* teko_rt_time_format_utc(const char* epoch_str)   { return teko_time_format(teko_time_parse(epoch_str), 0); }
+char* teko_rt_time_format_local(const char* epoch_str) {
+    long long e = teko_time_parse(epoch_str);
+    return teko_time_format(e, teko_rt_time_offset(e));
 }
 
 // Decode a hex string into a fresh byte buffer (caller frees via free). Sets *out_len.

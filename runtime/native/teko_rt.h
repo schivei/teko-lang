@@ -176,4 +176,14 @@ long teko_rt_circuit_new(long threshold, long cooldown);
 long teko_rt_circuit_allow(long handle);
 long teko_rt_circuit_record(long handle, long ok);
 
+// Phase 14 (wall-clock / timezone surface) — OS-sourced civil time (system-local + DST default;
+// the user can do time math on the decimal-string epoch). String-returning, like the crypto
+// surface (OP_CALL_RUNTIME ids). Native uses time()/localtime; WASM the reactor imports the host
+// env.teko_now_unix / env.teko_tz_offset; the portable teko_time_* formatter is shared.
+char* teko_rt_time_now_unix(int ignored);          // epoch seconds as a decimal string
+char* teko_rt_time_now_utc(int ignored);           // "now" ISO-8601 UTC
+char* teko_rt_time_now_local(int ignored);         // "now" ISO-8601 system-local (DST-correct)
+char* teko_rt_time_format_utc(const char* epoch);  // a user epoch -> ISO-8601 UTC
+char* teko_rt_time_format_local(const char* epoch); // a user epoch -> ISO-8601 system-local
+
 #endif // TEKO_RT_H
