@@ -221,9 +221,12 @@ typedef enum {
     OP_F2I          = 0x82, // $w0 = (i32)trunc($f0)  (checked, fail-loud)
 
     // Phase 17.F (RESERVED — owner-APPROVED, implemented after 17.A–17.E): an EXACT base-10
-    // `decimal` type — C# System.Decimal semantics: 128-bit / 16 bytes (96-bit coefficient + sign +
-    // scale 0–28), banker's rounding (round-half-to-even) default; exact for money, distinct from the
-    // binary f64 above. The opcode byte range 0x83–0x96 is RESERVED CONTIGUOUSLY for it now (zero
+    // `decimal` type — a FIXED-WIDTH 256-BYTE value (~8B metadata: sign + decimal scale/exponent;
+    // ~248B base-10 coefficient → ~590 significant digits, fraction ~128 bits ≈ ~38 places), banker's
+    // rounding (round-half-to-even) default; exact for money, distinct from the binary f64 above.
+    // Self-contained 64-bit-limb arithmetic (no heap/__int128/libc). 256B does NOT fit a register, so
+    // it flows via memory-slot $d0/$d1 + teko_rt_decimal_* calls (channel/object model, not the f64
+    // register accumulator). The opcode byte range 0x83–0x96 is RESERVED CONTIGUOUSLY for it now (zero
     // cost, future-proof: 17.F adds the enum constants + lowering WITHOUT
     // renumbering any float/integer opcode). These are NOT emitted, NOT enum constants, and have NO
     // live token (no dead-token gate trip) — they are claimed only as documentation/reservation

@@ -367,10 +367,12 @@ static int localcls_get(const char* n) {
 // now, see coerce_to_string_in_w0.)
 #define TEKO_VT_FLOAT (1 << 20)
 // Phase 17.F (RESERVED — owner-APPROVED, implemented after 17.A–17.E): the value-type sentinel for
-// the EXACT base-10 `decimal` type (C# System.Decimal: 128-bit, 96-bit coeff + sign + scale 0–28,
-// banker's rounding; distinct from the binary f64 above; see codegen_li.h's reserved 0x83–0x96 opcode
-// range). Its OWN high sentinel so 17.F never has to renumber VT_FLOAT/VT_OBJ_BASE. NOT used yet (no
-// live token, no emission) — claimed only to keep the encoding stable until 17.F goes live.
+// the EXACT base-10 `decimal` type — a FIXED-WIDTH 256-BYTE value (~8B metadata: sign + decimal
+// scale/exponent; ~248B base-10 coefficient → ~590 digits, ~38 fractional places; banker's rounding;
+// distinct from the binary f64 above; see codegen_li.h's reserved 0x83–0x96 opcode range). 256B does
+// NOT fit a register → it flows via memory-slot $d0/$d1 + teko_rt_decimal_* calls. Its OWN high
+// sentinel so 17.F never has to renumber VT_FLOAT/VT_OBJ_BASE. NOT used yet (no live token, no
+// emission) — claimed only to keep the encoding stable until 17.F goes live.
 #define TEKO_VT_DECIMAL (1 << 21)
 
 // Phase 16: the value-type a runtime primitive (OP_CALL_RUNTIME id) leaves in $w0. Almost all

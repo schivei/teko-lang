@@ -313,16 +313,21 @@ Next is **17.F** (the owner-approved exact base-10 `decimal`) — a sub-block pl
 own-PR recommendation is reported to the owner BEFORE implementing.
 
 ## Phase 17.F — exact base-10 `decimal` type (owner-APPROVED; implemented AFTER 17.A–17.E)
-**Owner decision: APPROVED, C#-`System.Decimal` semantics.** An EXACT base-10 `decimal`, **128-bit /
-16 bytes** = a **96-bit coefficient + sign + scale 0–28** (base-10), distinct from the binary f64 —
-exact for money. **Banker's rounding (round-half-to-even) by default**, matching C# `System.Decimal`.
-Self-contained 128-bit base-10 arithmetic (**no libc, no `__int128` — 64-bit limb pairs**), a decimal
-formatter + parser reusing the 17.C/17.E infra, checked fail-loud casts, ONE KAT-tested C runtime →
-native + WASM reactor (byte-identical), `.tks` proofs on both targets. **Sequenced AFTER the f64 core
-(17.A–17.E) closes.** Because it is large, before implementing 17.F a sub-block plan + diff-size
-estimate is reported to the owner, with a recommendation on whether it warrants its own PR (same
-phase). The opcodes/value-type reserved below **go live in 17.F**. The reservation (made in 17.A) so
-an approval never renumbers anything:
+**Owner decision: APPROVED — a FIXED-WIDTH 256-BYTE base-10 value type** (NOT C# `System.Decimal`;
+the earlier "128-bit/16-byte" note was superseded by the owner's envelope update). **256 bytes /
+2048 bits**, no heap, no dynamic bignum, no `__int128`/libc. Target layout: **~8 bytes metadata**
+(sign + decimal scale/exponent) + **~248 bytes base-10 coefficient** → **~590 significant digits**,
+with the fractional part bounded to **~128 bits ≈ ~38 decimal places**. **Banker's rounding
+(round-half-to-even) by default.** Self-contained arithmetic over **64-bit limb arrays** (31×u64
+coefficient; no `__int128`), a decimal formatter + parser reusing the 17.C/17.E patterns, checked
+fail-loud casts, ONE KAT-tested C runtime → native + WASM reactor (byte-identical), `.tks` proofs on
+both targets. Because 256 bytes does NOT fit a register, decimal flows via the **memory-slot
+`$d0/$d1` + `teko_rt_decimal_*` runtime-call model** (the channel/object family pattern, NOT the f64
+register accumulator). **Sequenced AFTER the f64 core (17.A–17.E) closes;** recommended as its **own
+PR** (large — est. ~2,500–3,500 LOC). KAT oracle = Python `decimal` at high precision with
+`ROUND_HALF_EVEN` (a committed generator script emits the reference vectors + 256-byte encodings).
+The opcodes/value-type reserved below **go live in 17.F**. The reservation (made in 17.A) so the
+approval never renumbers anything:
 - **Value-type slot** `TEKO_VT_DECIMAL = (1 << 21)` (its own high sentinel, in `frontend_interop.c`).
 - **Opcode byte range `0x83–0x96`** reserved CONTIGUOUSLY right after the float ops (`codegen_li.h`),
   mirroring the float layout: `OP_DCONST` (0x83), `OP_DADD/DSUB/DMUL/DDIV/DMOD` (0x84–0x88),
