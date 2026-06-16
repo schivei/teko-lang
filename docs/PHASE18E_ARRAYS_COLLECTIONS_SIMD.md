@@ -94,7 +94,23 @@ native+WASM.
   control-flow foundation: LOOP_BEGIN/IF/BREAK).
 - Proof `list.tks` + `foreach.tks` (native + WASM, byte-identical): append/grow, index, len, iterate-sum.
 
-### 18.E.3 — AoS↔SoA layout for arrays-of-struct
+### 18.E.3 — AoS↔SoA layout for arrays-of-struct  — ✅ DONE
+**Status (DONE, locally green both targets).** Frontend-only (reuses the iarray + object runtimes;
+NO new opcode/runtime/SIMD → SoA/AoS-free output byte-identical). **SoA** `let s = soa Class[N];`
+allocates k contiguous typed-i32 arrays (`OP_IARR_NEW` ×k), each field handle parked in a hidden
+local `s#f<idx>` (`g_localsoa` registry); `s[i].field` r/w → `OP_IARR_GET/SET` on the field run;
+`s.len` → N; **`s.field` whole-run accessor** (no index) → the contiguous i32[] handle, and
+`let col = s.field;` records `col` as a real iarray local aliasing the SAME run (write-through, `.len`,
+`[i]`, `for…in` all work) — **this is the 18.E.4 SIMD hook**. **AoS** `let a = [Point(),…];` (i64
+array of object handles) + `a[i].field` index-then-member (`OP_ARR_GET`→`OP_OBJ_GET`) r/w (`g_localaos`).
+Supporting fix (additive, verified): `eval_primary` gained an `is_instantiation_head` branch so
+`ClassName()` works in expression position (needed for the array literal). Proofs `soa.tks`
+(`s[1].x=20`/`s[2].y=3`/`len=3`/`sum_x=60`/`col.len=3`/`col[1]=20`) + `aos.tks` (`a[1].x=20`/`a[2].y=3`/
+`len=3`/`sum_x=60` — same logical result, AoS layout), byte-identical native+WASM. Suite 246/246;
+ASan/UBSan both paths + TSan clean; native 57 OK/0 FAIL; 16 goldens byte-identical; instantiation-path
+proofs (class/generics/traits/method_arg) intact.
+
+
 - `soa Class[N]` (TOKEN_SOA): a structure-of-arrays collection = **k field-arrays of N** (one
   contiguous `array` per class field) vs AoS (default: an `array` of object handles). `s[i].f` →
   `field_array[f]` at `i`; `s[i].f = v` writes it. The k contiguous field runs are what 18.E.4

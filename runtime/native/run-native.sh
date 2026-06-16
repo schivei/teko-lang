@@ -291,6 +291,30 @@ EXP
 # Fail-loud: an out-of-range index on a typed `i32[]` aborts non-zero (exit 70 + stderr). WASM traps on
 # the same access (run-iarray-fail.mjs), identical behavior on both targets.
 check_fail iarray_fail.tks "before" "iarray: index out of bounds"
+# Phase 18 (18.E.3): SoA (structure-of-arrays) layout — `soa Point[N]` = k CONTIGUOUS typed-i32 field
+# runs; `s[i].field` r/w, `s.len`, and the whole-run accessor `s.field` (the i32[] SIMD hook, usable as
+# a typed array). FRONTEND-only over the iarray runtime (NO new opcode/runtime) — byte-identical to the
+# WASM proof (run-soa.mjs).
+check soa.tks "$(cat <<'EXP'
+s[1].x = 20
+s[2].y = 3
+len = 3
+sum_x = 60
+col.len = 3
+col[1] = 20
+EXP
+)"
+# Phase 18 (18.E.3): AoS (array-of-objects) layout, the contrast to SoA — `[Point(), …]` is an `array`
+# of object handles, `a[i].field` is index-then-member (ARR_GET then OBJ_GET; fields interleaved per
+# object). Same logical result as SoA (sum of x = 60), AoS layout. Byte-identical to the WASM proof
+# (run-aos.mjs).
+check aos.tks "$(cat <<'EXP'
+a[1].x = 20
+a[2].y = 3
+len = 3
+sum_x = 60
+EXP
+)"
 # Phase 18 (18.A): Zero-Overhead Optionals — `?T` nullability + `null` + the Elvis `??`. An optional
 # local is compacted (payload slot + a hidden 1-word present companion); `a ?? d` branches on the
 # present flag via OP_IF (→ native je/cbz), choosing the payload when present else the default. No new

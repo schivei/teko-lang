@@ -571,6 +571,58 @@ static void emit_arr_op(BytecodeBuffer* b, OpCode op) {
 }
 // Phase 18 (18.E.2): true if `n` is ANY array local (plain i64 or typed i32) — used by `for x in a`.
 static int localanyarr_get(const char* n) { return localarr_get(n) || localiarr_get(n); }
+
+// Phase 18 (18.E.3): SoA (structure-of-arrays) locals. `let s = soa Point[N];` allocates k CONTIGUOUS
+// typed-i32 arrays (one per class field of Point), each handle parked in a HIDDEN named local
+// `s#f<idx>` (the fat-local pattern, like 15.B's `g#tid` / 18.A's `x#opt`). This registry records the
+// SoA local's name, its element class `ci`, and N, so `s[i].field` read/write resolves
+// `field`→its index, loads the iarray handle `s#f<idx>`, and dispatches OP_IARR_GET/SET; `s.len` is N;
+// and the whole-run accessor `s.field` yields the contiguous i32[] handle (the 18.E.4 SIMD hook). The
+// per-field handle SLOT is recovered by name (bind_lookup `s#f<idx>`), so this registry needs no slot
+// vector. Per-function scope; reset alongside the other local registries (the 4 sites).
+typedef struct { char name[96]; int ci; int n; } LocalSoa;
+static LocalSoa g_localsoa[TEKO_MAX_LOCALCLS];
+static int g_nlocalsoa;
+static void localsoa_reset(void) { g_nlocalsoa = 0; }
+static void localsoa_set(const char* n, int ci, int len) {
+    for (int i = 0; i < g_nlocalsoa; i++)
+        if (strcmp(g_localsoa[i].name, n) == 0) { g_localsoa[i].ci = ci; g_localsoa[i].n = len; return; }
+    if (g_nlocalsoa < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localsoa[g_nlocalsoa].name, n, 95); g_localsoa[g_nlocalsoa].name[95] = '\0';
+        g_localsoa[g_nlocalsoa].ci = ci; g_localsoa[g_nlocalsoa].n = len; g_nlocalsoa++;
+    }
+}
+// Return the SoA registry index for local `n`, or -1. (The caller reads .ci / .n off g_localsoa[idx].)
+static int localsoa_find(const char* n) {
+    if (!n || !n[0]) return -1;
+    for (int i = 0; i < g_nlocalsoa; i++) if (strcmp(g_localsoa[i].name, n) == 0) return i;
+    return -1;
+}
+
+// Phase 18 (18.E.3): AoS (array-of-objects) element-class tracking. `let a = [Point(), Point(), …];`
+// builds an i64 `array` (g_localarr) of OBJECT HANDLES; this companion registry records the ELEMENT
+// CLASS so `a[i].field` (index-then-member) resolves the field index at compile time. A single-class
+// element array (the element class is inferred from the literal's `ClassName()` elements). The handle
+// itself stays a plain array local (byte-identical literal lowering); only the field RESOLUTION uses
+// this. Reset with the other registries.
+typedef struct { char name[96]; int ci; } LocalAos;
+static LocalAos g_localaos[TEKO_MAX_LOCALCLS];
+static int g_nlocalaos;
+static void localaos_reset(void) { g_nlocalaos = 0; }
+static void localaos_set(const char* n, int ci) {
+    for (int i = 0; i < g_nlocalaos; i++)
+        if (strcmp(g_localaos[i].name, n) == 0) { g_localaos[i].ci = ci; return; }
+    if (g_nlocalaos < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localaos[g_nlocalaos].name, n, 95); g_localaos[g_nlocalaos].name[95] = '\0';
+        g_localaos[g_nlocalaos].ci = ci; g_nlocalaos++;
+    }
+}
+// Return the AoS element class for array local `n`, or -1 (not an AoS-of-class array).
+static int localaos_get(const char* n) {
+    if (!n || !n[0]) return -1;
+    for (int i = 0; i < g_nlocalaos; i++) if (strcmp(g_localaos[i].name, n) == 0) return g_localaos[i].ci;
+    return -1;
+}
 // Phase 18 (18.A): set by eval_primary to describe the OPTIONALITY of the primary it just lowered,
 // so eval_expr_prec's Elvis (`??`) can recover the left operand's present flag:
 //   -1 = not optional (a plain value → treated as always-present);
@@ -592,6 +644,17 @@ static int g_force_iarray_literal = 0;
 // Phase 18 (18.E.2): set by lower_array_literal when it lowered a TYPED i32 packed array, so
 // lower_let_stmt records the local in g_localiarr (vs g_localarr). Cleared in lower_init_value.
 static int g_last_init_is_iarray = 0;
+// Phase 18 (18.E.3): set by lower_member_read when it lowered the SoA WHOLE-RUN accessor `s.field`
+// (the field-run i32[] handle in $w0 — the SIMD hook). lower_let_stmt reads it so `let col = s.field;`
+// records `col` as an iarray local (g_localiarr) referencing the SAME contiguous packed-i32 handle, so
+// `col[i]` / `col.len` (and later `simd.*`) consume it exactly like any typed `i32[]` local. Cleared
+// in lower_init_value before each initializer.
+static int g_last_member_read_is_iarray = 0;
+// Phase 18 (18.E.3): set by lower_array_literal to the element class index when an i64 array literal's
+// elements are all `ClassName()` instantiations of one class (an AoS array-of-objects), else -1. The
+// let binding records it in g_localaos so a later `a[i].field` resolves the field index at compile
+// time. Cleared in lower_init_value before each initializer. A single-class element array (the MVP).
+static int g_last_init_aos_class = -1;
 
 // Phase 18 (18.C): `defer <stmt>;` — registration of a scope-closing statement, run in LIFO order at
 // scope exit. MVP scope = the `$main` body: each deferred statement's SOURCE is captured (rebuilt
@@ -871,6 +934,7 @@ static OpCode p12_tok_dop(TokenType t) {
 // binary `+` with a string operand lowers to culture-invariant concatenation (auto-`to_string`).
 static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
                           int min_prec, TempAlloc* ta);
+static void lower_instantiation(BytecodeBuffer* b, Parser* p); // fwd (18.E.3: AoS object literals)
 static int is_codec_head(const Parser* p);   // fwd (defined with the codec surface below)
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 static int lower_interp_string(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd (16.C)
@@ -965,6 +1029,29 @@ static int lower_member_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
         fe_advance(p);
         return 1;
     }
+    // Phase 18 (18.E.3): a SoA member read with NO index — `s.len` (the element count N) or the
+    // WHOLE-RUN accessor `s.field` (the contiguous packed-i32 field-run handle — the 18.E.4 SIMD hook).
+    {
+        int si = localsoa_find(base);
+        if (si >= 0) {
+            if (strcmp(member, "len") == 0) {
+                codegen_li_emit_iconst(b, g_localsoa[si].n);   // $w0 = N (compile-time constant)
+                fe_advance(p);
+                return 1;
+            }
+            int fidx = class_field_idx(g_localsoa[si].ci, member);
+            if (fidx >= 0) {
+                // `s.field` -> the field-run handle (a usable i32[] — `let col = s.field` makes `col`
+                // an iarray local; `col[i]`/`col.len`/`simd.*` then operate on this contiguous run).
+                char fnm[120]; snprintf(fnm, sizeof(fnm), "%s#f%d", base, fidx);
+                int fslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, fnm) : -1;
+                if (fslot >= 0) codegen_li_emit_load_local(b, fslot); else codegen_li_emit_iconst(b, 0);
+                g_last_member_read_is_iarray = 1; // signal the let binding to track `col` as i32[]
+                fe_advance(p);
+                return 1;
+            }
+        }
+    }
     int ci = localcls_get(base);
     if (ci < 0) return 0;
     int fidx = class_field_idx(ci, member);
@@ -994,6 +1081,13 @@ static void lower_array_literal(BytecodeBuffer* b, Parser* p, const LowerCtx* ct
     OpCode op_set = typed ? OP_IARR_SET : OP_ARR_SET;
     if (typed) g_last_init_is_iarray = 1; else g_last_init_is_array = 1; // mark for the let binding
     fe_advance(p); // consume '['
+    // Phase 18 (18.E.3): an AoS array-of-objects — the FIRST element is `ClassName()`. Record the
+    // element class so the let binding tracks it (g_localaos) and `a[i].field` resolves the field
+    // index at compile time. Only the plain i64 array carries object handles (a typed i32[] cannot).
+    if (!typed && p->current_token.type == TOKEN_IDENTIFIER && p->peek_token.type == TOKEN_LPAREN) {
+        int ec = class_find(p->current_token.lexeme);
+        if (ec >= 0) g_last_init_aos_class = ec;
+    }
     // Pre-scan to count the elements (ARR_NEW needs the exact length FIRST). The real parser shares a
     // heap Lexer* with everything else, so we snapshot the lexer STATE (source/cursor/line are plain
     // values) into a LOCAL lexer + a local parser pointing at it, and scan that — leaving the real
@@ -1057,12 +1151,96 @@ static int lower_array_index_read(BytecodeBuffer* b, Parser* p, const LowerCtx* 
     return 1;
 }
 
+// Phase 18 (18.E.3): a SoA INDEX-then-FIELD READ `s[i].field` -> OP_IARR_GET(field-run handle, i).
+// `s` is a SoA local (current token), peek is `[`. The k field runs are contiguous packed-i32 arrays
+// (one per class field); `field` resolves to its compile-time index, whose run handle lives in the
+// hidden local `s#f<idx>`. Stage handle=$a0, evaluate the index into $w0, OP_IARR_GET. Consumes
+// `s [ <idx> ] . field`. Returns 1 if consumed (the base is a SoA local + the member is a field of its
+// element class), 0 otherwise. Out-of-range traps fail-loud (the packed-array runtime).
+static int lower_soa_index_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    int si = localsoa_find(p->current_token.lexeme);
+    if (si < 0) return 0;
+    char base[96]; strncpy(base, p->current_token.lexeme, 95); base[95] = '\0';
+    int ci = g_localsoa[si].ci;
+    fe_advance(p); // consume the SoA name
+    fe_advance(p); // consume '['
+    // Evaluate the index into a temp FIRST (it may itself stage $a0 via a member/index read), then
+    // stage the field-run handle as $a0 and reload the index. (After we resolve the field name below.)
+    int it = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+    eval_expr_prec(b, p, ctx, 1, ta);          // index -> $w0
+    codegen_li_emit_store_local(b, it);        // it = index
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    if (p->current_token.type == TOKEN_DOT) fe_advance(p); // '.'
+    int fidx = -1;
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        fidx = class_field_idx(ci, p->current_token.lexeme);
+        fe_advance(p);                         // consume the field name
+    }
+    if (fidx < 0) fidx = 0;
+    char fnm[120]; snprintf(fnm, sizeof(fnm), "%s#f%d", base, fidx);
+    int fslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, fnm) : -1;
+    if (fslot >= 0) codegen_li_emit_load_local(b, fslot); else codegen_li_emit_iconst(b, 0);
+    codegen_li_emit_setarg(b, 0);              // $a0 = field-run handle
+    codegen_li_emit_load_local(b, it);         // $w0 = index
+    codegen_li_emit_iarray(b, OP_IARR_GET);    // $w0 = field cell at i
+    ta->next_temp--;                           // free the index temp
+    return 1;
+}
+
+// Phase 18 (18.E.3): an AoS INDEX-then-FIELD READ `a[i].field` -> OP_ARR_GET(a, i)=handle then
+// OP_OBJ_GET(handle, field_idx). `a` is an i64 `array` of object handles whose ELEMENT CLASS is known
+// (g_localaos, recorded when the literal was all `ClassName()` instances). The fields are NOT
+// contiguous (interleaved per object) — the AoS contrast to SoA. Consumes `a [ <idx> ] . field`.
+// Returns 1 if consumed. Out-of-range on the array traps fail-loud (the array runtime).
+static int lower_aos_index_read(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    int ci = localaos_get(p->current_token.lexeme);
+    if (ci < 0) return 0;
+    char base[96]; strncpy(base, p->current_token.lexeme, 95); base[95] = '\0';
+    int hslot = ctx ? bind_lookup(ctx->locals, ctx->nlocals, base) : -1;
+    if (hslot < 0) return 0;
+    fe_advance(p); // consume the array name
+    fe_advance(p); // consume '['
+    // index into a temp first (may stage $a0), then ARR_GET(handle, i) -> object handle.
+    int it = ta->next_temp++; if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
+    eval_expr_prec(b, p, ctx, 1, ta);          // index -> $w0
+    codegen_li_emit_store_local(b, it);        // it = index
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    codegen_li_emit_load_local(b, hslot); codegen_li_emit_setarg(b, 0); // $a0 = array handle
+    codegen_li_emit_load_local(b, it);                                  // $w0 = index
+    codegen_li_emit_array(b, OP_ARR_GET);      // $w0 = element (object handle)
+    codegen_li_emit_setarg(b, 0);              // $a0 = object handle
+    int fidx = -1;
+    if (p->current_token.type == TOKEN_DOT) fe_advance(p); // '.'
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        fidx = class_field_idx(ci, p->current_token.lexeme);
+        fe_advance(p);                         // consume the field name
+    }
+    codegen_li_emit_iconst(b, fidx >= 0 ? fidx : 0); // $w0 = field index
+    codegen_li_emit_object(b, OP_OBJ_GET);     // $w0 = field value (interleaved per object — AoS)
+    ta->next_temp--;
+    return 1;
+}
+
 static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempAlloc* ta) {
     g_prim_present_slot = -1; // Phase 18 (18.A): default — this primary is not an optional reference
     if (p->current_token.type == TOKEN_LBRACKET) {
         // Phase 18 (18.E.1): an ARRAY LITERAL `[e0, e1, …]` -> ARR_NEW + per-element SET -> handle.
         lower_array_literal(b, p, ctx, ta);
         return TEKO_VT_INT; // an array handle reads as a plain integer value
+    } else if (is_instantiation_head(p)) {
+        // Phase 18 (18.E.3): a `ClassName()` instantiation as a sub-expression (e.g. an AoS array-of-
+        // objects element `[Point(), …]`) -> OP_OBJ_NEW -> the object handle in $w0 (a VT_INT value).
+        lower_instantiation(b, p);
+        return TEKO_VT_INT;
+    } else if (lower_soa_index_read(b, p, ctx, ta)) {
+        // Phase 18 (18.E.3): a SoA INDEX-then-FIELD READ `s[i].field` -> OP_IARR_GET on the field run.
+        return TEKO_VT_INT;
+    } else if (lower_aos_index_read(b, p, ctx, ta)) {
+        // Phase 18 (18.E.3): an AoS INDEX-then-FIELD READ `a[i].field` -> ARR_GET then OBJ_GET. Claimed
+        // BEFORE the plain index read (which would consume `a[i]` alone, orphaning `.field`).
+        return TEKO_VT_INT;
     } else if (lower_array_index_read(b, p, ctx, ta)) {
         // Phase 18 (18.E.1): an INDEX READ `a[i]` on an array local -> OP_ARR_GET -> $w0.
         return TEKO_VT_INT;
@@ -1210,6 +1388,10 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
     int left_present_slot = g_prim_present_slot; // Phase 18 (18.A): the left operand's optionality
     while (p12_tok_prec(p->current_token.type) >= min_prec &&
            p12_tok_prec(p->current_token.type) > 0) {
+        // Phase 18 (18.E.3): once an operator is applied, a `s.field` left operand is no longer the
+        // raw field-run handle (it has been combined arithmetically) — so the WHOLE-RUN i32[] signal
+        // is void. `let col = s.field;` (no operator) is the only form that records `col` as i32[].
+        g_last_member_read_is_iarray = 0;
         int prec = p12_tok_prec(p->current_token.type);
         TokenType optok = p->current_token.type;
         OpCode op = p12_tok_op(optok);
@@ -1643,6 +1825,10 @@ static void lower_codec_value(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
         fe_advance(p);
     } else if (is_codec_head(p)) {
         lower_base_codec(b, p, ctx); // nested: base64.decode(base64.encode(x))
+    } else if (lower_soa_index_read(b, p, ctx, ctx ? ctx->ta : NULL)) {
+        // Phase 18 (18.E.3): a SoA `s[i].field` read as a codec/call argument -> OP_IARR_GET.
+    } else if (lower_aos_index_read(b, p, ctx, ctx ? ctx->ta : NULL)) {
+        // Phase 18 (18.E.3): an AoS `a[i].field` read as a codec/call argument -> ARR_GET then OBJ_GET.
     } else if (lower_array_index_read(b, p, ctx, ctx ? ctx->ta : NULL)) {
         // Phase 18 (18.E.1): an array index READ `a[i]` as a codec/call argument -> OP_ARR_GET.
     } else if (is_member_call_head(p) && lower_member_call(b, p, ctx)) {
@@ -2029,6 +2215,8 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     g_last_init_is_null = 0;      // Phase 18 (18.A): set iff the initializer is the `null` literal
     g_last_init_is_array = 0;     // Phase 18 (18.E.1): set iff the initializer is an array literal
     g_last_init_is_iarray = 0;    // Phase 18 (18.E.2): set iff it is a TYPED i32 packed-array literal
+    g_last_member_read_is_iarray = 0; // Phase 18 (18.E.3): set iff the initializer is a `s.field` run accessor
+    g_last_init_aos_class = -1;       // Phase 18 (18.E.3): set iff the initializer is an AoS object-array literal
     if ((p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) &&
         p12_tok_prec(p->peek_token.type) == 0 && !strlit_is_interp(p->current_token.lexeme)) {
         // A LONE, NON-interpolated string literal. `"a" + x` and `"{x}"` fall through to
@@ -2090,6 +2278,48 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     else { env_sync(env); g_last_init_vt = eval_expr_prec(b, p, ctx, 1, ctx->ta); } // expr -> $w0 (VT tracked)
 }
 
+// Phase 18 (18.E.3): true iff the upcoming initializer is a `soa Class[N]` construction (current
+// token is TOKEN_SOA, peek a known class name). A pure predicate; no consumption.
+static int is_soa_init_head(const Parser* p) {
+    if (!p || p->current_token.type != TOKEN_SOA) return 0;
+    if (p->peek_token.type != TOKEN_IDENTIFIER) return 0;
+    return class_find(p->peek_token.lexeme) >= 0;
+}
+
+// Phase 18 (18.E.3): lower a `soa Class[N]` construction. For a class with k fields, allocate k
+// CONTIGUOUS typed-i32 arrays of length N (OP_IARR_NEW), each handle stored into a HIDDEN named local
+// `<lname>#f<idx>` (so the per-field run is reachable by name). The SoA local `<lname>` itself carries
+// no $w0 value — it is a pure compile-time grouping (registered in g_localsoa). Consumes
+// `soa Class [ N ]`. Returns 1 on success. (env_alloc_local refreshes the ctx local view each time.)
+static int lower_soa_init(BytecodeBuffer* b, Parser* p, LowerEnv* env, const char* lname) {
+    if (p->current_token.type != TOKEN_SOA) return 0;
+    fe_advance(p); // consume 'soa'
+    if (p->current_token.type != TOKEN_IDENTIFIER) return 0;
+    int ci = class_find(p->current_token.lexeme);
+    if (ci < 0) return 0;
+    fe_advance(p); // consume the class name
+    int n = 0;
+    if (p->current_token.type == TOKEN_LBRACKET) {
+        fe_advance(p); // '['
+        if (p->current_token.type == TOKEN_LIT_INT) {
+            n = (int)literal_canonical_value(&p->current_token);
+            fe_advance(p);
+        }
+        if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    }
+    int k = g_class[ci].nfields;
+    // Allocate one packed-i32 array of length N per field; park each handle in `<lname>#f<idx>`.
+    for (int f = 0; f < k; f++) {
+        char fnm[120]; snprintf(fnm, sizeof(fnm), "%s#f%d", lname, f);
+        int fslot = env_alloc_local(env, fnm);
+        codegen_li_emit_iconst(b, n);
+        codegen_li_emit_iarray(b, OP_IARR_NEW);   // $w0 = field-run handle (packed int32, length N)
+        codegen_li_emit_store_local(b, fslot);    // <lname>#f<idx> = handle
+    }
+    localsoa_set(lname, ci, n);
+    return 1;
+}
+
 // `let`/`mut NAME [: type] = <init>;` inside a body — allocate (or reuse) a $v slot, lower the
 // initializer, store it. Refreshes the ctx local view (bind_add may realloc the table).
 static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
@@ -2127,6 +2357,18 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         fe_advance(p);
     int s = bind_lookup(*env->locals, *env->nlocals, lname);
     if (s < 0) { s = *env->nlocals; bind_add(env->locals, env->nlocals, env->caplocals, lname, s); }
+    env_sync(env);
+    // Phase 18 (18.E.3): `let s = soa Class[N];` — a structure-of-arrays construction. Allocate k
+    // contiguous typed-i32 field runs (handles in hidden `s#f<idx>` locals) and register `s` in
+    // g_localsoa. The SoA local `s` itself carries no $w0 value (it is a compile-time grouping); the
+    // base slot `s` stays allocated but unused. Claimed BEFORE the generic initializer path.
+    if (is_soa_init_head(p)) {
+        codegen_li_emit_iconst(b, 0);                // s = 0 (placeholder; the value is never read)
+        codegen_li_emit_store_local(b, s);
+        lower_soa_init(b, p, env, lname);
+        if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+        return;
+    }
     // Phase 15 (15.A/15.C): remember this local's class so later `lname.field`/`lname.method(...)`
     // resolve their compile-time index/slot. A concrete-instance RHS (`let g = c`) is read here; an
     // instantiation RHS (`ClassName()`/`T()`/`Box<Arg>()`) is read from g_last_inst_class AFTER
@@ -2175,10 +2417,16 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     // Phase 18 (18.E.1): remember an array-typed local (handle in $w0, VT_INT) so a later
     // `lname[i]` / `lname.len` resolves to OP_ARR_*. The handle was STORE_LOCAL'd above (VT_INT).
     localarr_set(lname, g_last_init_is_array);
-    // Phase 18 (18.E.2): remember a TYPED i32 packed-array local so a later `lname[i]`/`lname.len`/
+    // Phase 18 (18.E.3): an AoS array-of-objects (`let a = [Point(), …]`) — record its element class so
+    // `a[i].field` (index-then-member) resolves the field index at compile time. `a` stays a plain
+    // array local (the literal lowering is byte-identical); only the field RESOLUTION uses this.
+    if (g_last_init_is_array && g_last_init_aos_class >= 0) localaos_set(lname, g_last_init_aos_class);
     // `for x in lname` resolves to OP_IARR_* (disjoint from g_localarr). The two are mutually
     // exclusive (lower_array_literal sets exactly one of g_last_init_is_array/_is_iarray).
-    localiarr_set(lname, g_last_init_is_iarray);
+    // Phase 18 (18.E.3): the SoA whole-run accessor `let col = s.field;` ALSO yields an i32[] handle —
+    // record `col` as an iarray local referencing the SAME contiguous packed-i32 run (the SIMD hook),
+    // so `col[i]`/`col.len`/`simd.*` operate on it exactly like any typed `i32[]` local.
+    localiarr_set(lname, g_last_init_is_iarray || g_last_member_read_is_iarray);
     // Phase 18 (18.A): an OPTIONAL local (`let x: ?T = …`) carries a hidden present companion slot
     // `x#opt` set to 0 when the initializer is `null`, else 1 (compile-time constant — runtime-null
     // propagation arrives with the `?.` safe-navigation in 18.B). The payload was stored above; the
@@ -2526,6 +2774,98 @@ static int lower_array_index_write(BytecodeBuffer* b, Parser* p, LowerEnv* env) 
     return 1;
 }
 
+// Phase 18 (18.E.3): `s[i].field = <expr>;` SoA INDEX-then-FIELD WRITE -> OP_IARR_SET(field-run, i, v).
+// `s` is a SoA local (current token), peek `[`. Resolves the field run handle (`s#f<idx>`), evaluates
+// the index + value into hidden named locals first (each may stage $a0 via reads), then stages
+// handle=$a0 / index=$a1 / value=$w0 and writes. Returns 1 if consumed, 0 if `s` is not a SoA local.
+static int lower_soa_index_write(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    int si = localsoa_find(p->current_token.lexeme);
+    if (si < 0) return 0;
+    char base[96]; strncpy(base, p->current_token.lexeme, 95); base[95] = '\0';
+    int ci = g_localsoa[si].ci;
+    fe_advance(p); // consume the SoA name
+    fe_advance(p); // consume '['
+    static int g_soaset_seq = 0;
+    char inm[120], vnm[120];
+    snprintf(inm, sizeof(inm), "__soaset_i_%d", g_soaset_seq);
+    snprintf(vnm, sizeof(vnm), "__soaset_v_%d", g_soaset_seq);
+    g_soaset_seq++;
+    int it = env_alloc_local(env, inm);
+    int vt = env_alloc_local(env, vnm);
+    env_sync(env);
+    eval_expr_prec(b, p, env->ctx, 1, env->ctx->ta);    // index -> $w0
+    codegen_li_emit_store_local(b, it);                 // it = index
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    if (p->current_token.type == TOKEN_DOT) fe_advance(p); // '.'
+    int fidx = -1;
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        fidx = class_field_idx(ci, p->current_token.lexeme);
+        fe_advance(p);                                  // field name
+    }
+    if (fidx < 0) fidx = 0;
+    if (p->current_token.type == TOKEN_ASSIGN) fe_advance(p);
+    lower_init_value(b, p, env);                        // value -> $w0
+    codegen_li_emit_store_local(b, vt);                 // vt = value
+    char fnm[120]; snprintf(fnm, sizeof(fnm), "%s#f%d", base, fidx);
+    int fslot = bind_lookup(*env->locals, *env->nlocals, fnm);
+    if (fslot >= 0) codegen_li_emit_load_local(b, fslot); else codegen_li_emit_iconst(b, 0);
+    codegen_li_emit_setarg(b, 0);                       // $a0 = field-run handle
+    codegen_li_emit_load_local(b, it); codegen_li_emit_setarg(b, 1); // $a1 = index
+    codegen_li_emit_load_local(b, vt);                  // $w0 = value
+    codegen_li_emit_iarray(b, OP_IARR_SET);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    return 1;
+}
+
+// Phase 18 (18.E.3): `a[i].field = <expr>;` AoS INDEX-then-FIELD WRITE -> ARR_GET(a,i)=handle then
+// OP_OBJ_SET(handle, field_idx, v). `a` is an i64 array of object handles with a known element class
+// (g_localaos). Returns 1 if consumed, 0 if `a` is not an AoS-of-class array.
+static int lower_aos_index_write(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LBRACKET) return 0;
+    int ci = localaos_get(p->current_token.lexeme);
+    if (ci < 0) return 0;
+    char base[96]; strncpy(base, p->current_token.lexeme, 95); base[95] = '\0';
+    int hslot = bind_lookup(*env->locals, *env->nlocals, base);
+    if (hslot < 0) return 0;
+    fe_advance(p); // consume the array name
+    fe_advance(p); // consume '['
+    static int g_aosset_seq = 0;
+    char inm[120], vnm[120], onm[120];
+    snprintf(inm, sizeof(inm), "__aosset_i_%d", g_aosset_seq);
+    snprintf(vnm, sizeof(vnm), "__aosset_v_%d", g_aosset_seq);
+    snprintf(onm, sizeof(onm), "__aosset_o_%d", g_aosset_seq);
+    g_aosset_seq++;
+    int it = env_alloc_local(env, inm);
+    int vt = env_alloc_local(env, vnm);
+    int ot = env_alloc_local(env, onm);
+    env_sync(env);
+    eval_expr_prec(b, p, env->ctx, 1, env->ctx->ta);    // index -> $w0
+    codegen_li_emit_store_local(b, it);                 // it = index
+    if (p->current_token.type == TOKEN_RBRACKET) fe_advance(p);
+    if (p->current_token.type == TOKEN_DOT) fe_advance(p); // '.'
+    int fidx = -1;
+    if (p->current_token.type == TOKEN_IDENTIFIER) {
+        fidx = class_field_idx(ci, p->current_token.lexeme);
+        fe_advance(p);                                  // field name
+    }
+    if (fidx < 0) fidx = 0;
+    if (p->current_token.type == TOKEN_ASSIGN) fe_advance(p);
+    lower_init_value(b, p, env);                        // value -> $w0
+    codegen_li_emit_store_local(b, vt);                 // vt = value
+    // object handle = ARR_GET(a, i)
+    codegen_li_emit_load_local(b, hslot); codegen_li_emit_setarg(b, 0); // $a0 = array handle
+    codegen_li_emit_load_local(b, it);                                  // $w0 = index
+    codegen_li_emit_array(b, OP_ARR_GET);               // $w0 = object handle
+    codegen_li_emit_store_local(b, ot);                 // ot = object handle
+    codegen_li_emit_load_local(b, ot); codegen_li_emit_setarg(b, 0);   // $a0 = object handle
+    codegen_li_emit_iconst(b, fidx);   codegen_li_emit_setarg(b, 1);   // $a1 = field index
+    codegen_li_emit_load_local(b, vt);                  // $w0 = value
+    codegen_li_emit_object(b, OP_OBJ_SET);
+    if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
+    return 1;
+}
+
 // Phase 15 (15.A): a class member STATEMENT — `obj.field = expr;`, `obj.method(args);` (result
 // discarded). Returns 1 if consumed. Shared by the top-level loop and the block dispatcher.
 // Phase 15 (15.B): DYNAMIC dispatch `g.method(args)` where `g` is a FAT trait-typed local. Resolves
@@ -2754,6 +3094,10 @@ static void lower_one_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     } else if (p->current_token.type == TOKEN_CIRCUIT &&
                p->peek_token.type == TOKEN_IDENTIFIER) {
         lower_circuit_block(b, p, env);   // 14.F: circuit cb { } fallback { }
+    } else if (lower_soa_index_write(b, p, env)) {
+        /* Phase 18 (18.E.3): s[i].field = expr; consumed (before the plain index write) */
+    } else if (lower_aos_index_write(b, p, env)) {
+        /* Phase 18 (18.E.3): a[i].field = expr; consumed (before the plain index write) */
     } else if (lower_array_index_write(b, p, env)) {
         /* Phase 18 (18.E.1): a[i] = expr; consumed */
     } else if (lower_member_stmt(b, p, env)) {
@@ -3548,7 +3892,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset(); localsoa_reset(); localaos_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -3603,7 +3947,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset(); localsoa_reset(); localaos_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -3635,7 +3979,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset(); localsoa_reset(); localaos_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -3667,7 +4011,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); localopt_reset(); localarr_reset(); localiarr_reset(); localsoa_reset(); localaos_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.
@@ -3865,6 +4209,16 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
             // layout/contracts were pre-collected, and method bodies are emitted after $main
             // (emit_method_routines). Keyword-generic brace skip.
             skip_class_decl(&parser);
+        } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
+                   parser.peek_token.type == TOKEN_LBRACKET &&
+                   localsoa_find(parser.current_token.lexeme) >= 0 &&
+                   lower_soa_index_write(buffer, &parser, &top_env)) {
+            // Phase 18 (18.E.3): top-level `s[i].field = expr;` SoA write (before the plain index write).
+        } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
+                   parser.peek_token.type == TOKEN_LBRACKET &&
+                   localaos_get(parser.current_token.lexeme) >= 0 &&
+                   lower_aos_index_write(buffer, &parser, &top_env)) {
+            // Phase 18 (18.E.3): top-level `a[i].field = expr;` AoS write (before the plain index write).
         } else if (parser.current_token.type == TOKEN_IDENTIFIER &&
                    parser.peek_token.type == TOKEN_LBRACKET &&
                    localanyarr_get(parser.current_token.lexeme) &&
