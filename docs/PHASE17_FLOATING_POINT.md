@@ -246,6 +246,42 @@ the 16 native goldens + all prior native/WASM proofs intact (17.C is additive ru
 no emitter/frontend file touched). Implementation continues at **17.D** (the `convert.float_to_str`
 surface = id 50 + auto-`to_string` for floats, with `.tks` proofs on both targets).
 
+Sub-block **17.D (`convert.float_to_str` surface + auto-`to_string` for floats) is DONE** on both
+targets (locally green) — id 50 is now LIVE, with an executable `.tks` proof emitting BYTE-IDENTICAL
+output native + WASM. The crux: **id 50 is the ONLY OP_CALL_RUNTIME id whose value argument is a
+`double`** — the float rides the PARALLEL float accumulator `$f0` (xmm0/d0 native; `(local $f0 f64)`
+WASM), NOT the integer `$w0`; the result is a `char*` in `$w0` (VT_STR), like the other to_string ids.
+- **Runtime:** `char* teko_rt_float_to_string(double)` (`runtime/native/teko_rt.c`/`.h`) → the 17.C
+  Ryu shortest-round-trip `teko_convert_f64_to_string`. Added to the reactor `EXPORTS`
+  (`build-crypto-reactor.sh`) — `teko_convert_f64.c` was already a reactor SRC from 17.C.
+- **Native (`emit_native_hosted.c`):** symbol table gains `case 50` (arity 1); OP_CALL_RUNTIME
+  **special-cases id 50** to a BARE call (`emit_call_noarg`) — the double is already in xmm0/d0 (=
+  `$f0`) by the SysV/AAPCS FP-arg convention, so the normal `$w0`→GP-arg marshal must be skipped.
+- **WASM (`emit_wasm.c`):** id 50 added to `wasm_is_crypto_ext_id`; the import is declared
+  `(func $crypto_50 (param f64) (result i32))` — the ONLY non-i32 reactor import — and **gated on
+  `wasm_emit_float`** so a float-free crypto-ext module (convert.tks etc.) stays byte-identical; the
+  call lowers `local.get $f0 / call $crypto_50 / local.set $w0`. (`codegen_li_emit_call_runtime`
+  sets `uses_float` for id 50 defensively so `$f0` is declared.)
+- **Frontend (`frontend_interop.c`):** `coerce_to_string_in_w0(VT_FLOAT)` now emits id 50 (reads
+  `$f0`) — replacing the 17.A no-op. The `+` concat path reloads a LEFT-float operand via
+  `FLOAD_LOCAL` (not the integer `load_local`) before coercing; a RIGHT-float and interpolation float
+  holes are already in `$f0` at the coerce point. `convert.float_to_str(<expr>)` is surfaced through
+  the SAME `is_floatcast_head`/`lower_floatcast` machinery as 17.B's `to_int`/`to_float` (promotes an
+  int arg via OP_I2F, emits id 50, returns VT_STR) — so every call site (eval_primary,
+  lower_init_value, the top-level call-arg path) picks it up; the call-arg path accepts a bare
+  `convert.float_to_str(…)` (its char* result spills like `to_int`'s i32).
+- **Proof:** `runtime/{native,wasm}/samples/floatstr.tks` → `f = 3.14` / `0.1` / `pi~ 3.14, dbl 6.28`
+  / `2.5` / `3.14 = pi` (RIGHT-float concat, explicit `convert.float_to_str(0.1)`, interpolation with
+  a float hole + a float-EXPRESSION hole `{f * 2.0}`, a format bound to a string local, LEFT-float
+  concat). Native (`run-native.sh`) and WASM (`run-floatstr.mjs`, reactor-backed) are BYTE-FOR-BYTE
+  identical (the same 17.C Ryu C runs both sides). Wired into `run-native.sh`, the wasm harness, and
+  `wasm.yml`.
+
+Verification: suite 235/235 (17.D adds no runtime C → no new KATs); ASan/UBSan (both dispatch paths)
++ TSan clean; the 16 native goldens + all float-free native/WASM output byte-identical (id 50 only
+fires when a float is formatted; the `crypto_50` import is `wasm_emit_float`-gated). Implementation
+continues at **17.E** (`convert.parse_float`, id 54, checked fail-loud).
+
 ## Phase 17.F — exact base-10 `decimal` type (owner-APPROVED; implemented AFTER 17.A–17.E)
 **Owner decision: APPROVED, C#-`System.Decimal` semantics.** An EXACT base-10 `decimal`, **128-bit /
 16 bytes** = a **96-bit coefficient + sign + scale 0–28** (base-10), distinct from the binary f64 —

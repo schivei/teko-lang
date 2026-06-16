@@ -21,6 +21,7 @@ static int wasm_is_crypto_ext_id(int id) {
         case 37: case 38: case 39: case 40:                         // RSA
         case 44: case 45: case 46: case 47: case 48:               // wall-clock / timezone surface
         case 49: case 51: case 52:                                  // Phase 16 conversion surface
+        case 50:                                                    // Phase 17.D float->string (f64-arg)
         case 53: case 55:                                           // Phase 16.F checked parse
         case 56: case 57: case 58:                                  // Phase 16.E explicit formats
             return 1;
@@ -1135,6 +1136,20 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                     if (!wasm_is_crypto_ext_id(id)) continue;
                     sym = teko_native_runtime_symbol(id, &ar);
                     if (!sym) continue;
+                    // Phase 17.D — id 50 (teko_rt_float_to_string) is the ONLY non-i32 reactor
+                    // import: its single value arg is an f64 (the reactor entry really is
+                    // `(double)->char*`). Declare `(param f64) (result i32)` — getting this wrong
+                    // (e.g. `(param i32)`) makes the module fail to instantiate against the reactor.
+                    // Gate it on wasm_emit_float (set IFF a float op / id 50 is emitted) so a
+                    // float-free crypto-ext module (e.g. convert.tks) stays BYTE-IDENTICAL — this is
+                    // the only crypto-ext id whose import is conditional, mirroring the float-local
+                    // gate, because id 50 is the only one that can never appear without a float.
+                    if (id == 50) {
+                        if (!ctx->wasm_emit_float) continue;
+                        fprintf(f, "  (import \"crypto\" \"%s\" (func $crypto_%d (param f64) (result i32)))\n",
+                                sym, id);
+                        continue;
+                    }
                     fprintf(f, "  (import \"crypto\" \"%s\" (func $crypto_%d", sym, id);
                     for (int p = 0; p < ar; p++) fprintf(f, " (param i32)");
                     fprintf(f, " (result i32)))\n");
@@ -1302,6 +1317,11 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             else if (arg == 43) fn = "teko_uuid_v7";    // Phase 13 Sub-phase C uuid v7 (host time+entropy)
             if (fn) {
                 fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
+            } else if (arg == 50) {
+                // Phase 17.D — float->string: the f64-ARG runtime call. The value lives in the
+                // float accumulator $f0 (not $w0); push it as the f64 import param and store the
+                // resulting char* pointer into $w0 (VT_STR). Stack-neutral.
+                fprintf(f, "    local.get $f0\n    call $crypto_50\n    local.set $w0\n");
             } else if (wasm_is_crypto_ext_id(arg)) {
                 // Reactor-backed crypto: call the imported teko_rt_* entry point. Multi-arg
                 // ABI mirrors OP_CALL_IMPORT — args 0..n-2 come from the staging slots

@@ -747,13 +747,17 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
             // Phase 16 (16.B): a `+` with a string operand is culture-invariant CONCATENATION with
             // auto-`to_string`. Right is in $w0 — convert it to a string if it is an int (id 49),
             // stash it, then build the left string and call str_concat (id 52, arg0=left, $w0=right).
-            // NOTE (17.A): a FLOAT operand of a string `+` has no formatter yet (17.D) — see
-            // coerce_to_string_in_w0; the 17.A proof never concatenates a float, so this is inert.
-            coerce_to_string_in_w0(b, ctx, vt_r);      // $w0 = to_string(right) (int/object/string)
+            // Phase 17.D: a FLOAT operand auto-converts via id 50 (which reads $f0). For the RIGHT
+            // operand this works as-is — it was just evaluated into $f0 (coerce(FLOAT) reads it).
+            coerce_to_string_in_w0(b, ctx, vt_r);      // $w0 = to_string(right) (int/float/object/string)
             int t2 = ta->next_temp++;
             if (ta->next_temp > ta->hw) ta->hw = ta->next_temp;
             codegen_li_emit_store_local(b, t2);        // temp2 = right (string ptr)
-            codegen_li_emit_load_local(b, t);          // $w0 = left (raw)
+            // Phase 17.D: the LEFT operand was spilled to temp `t` with the type-appropriate store
+            // (FSTORE_LOCAL for a float, STORE_LOCAL otherwise). Reload it with the matching load so a
+            // float value reaches $f0 (where coerce(FLOAT)→id 50 reads it), not the integer $w0.
+            if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fload_local(b, t); // $f0 = left (float)
+            else                       codegen_li_emit_load_local(b, t);  // $w0 = left (raw)
             coerce_to_string_in_w0(b, ctx, vt_l);      // $w0 = to_string(left)
             codegen_li_emit_setarg(b, 0);              // $a0 = left string
             codegen_li_emit_load_local(b, t2);         // $w0 = right string
@@ -924,11 +928,12 @@ static void emit_object_to_string(BytecodeBuffer* b, const LowerCtx* ctx, int ci
 static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int vt) {
     if (vt == TEKO_VT_STR) return;                            // already a string pointer
     if (vt == TEKO_VT_FLOAT) {
-        // Phase 17 (17.A): float→string formatting (convert.float_to_str, id 50) does not exist
-        // until 17.D — the freestanding shortest-round-trip formatter is the large 17.C step. The
-        // 17.A proof never concatenates a float, so this branch is never reached in practice; leave
-        // it a deliberate no-op (must not fall through to the int id-49 path on a $f0 value).
-        // TODO(17.D): emit `convert.float_to_str` (id 50) once the formatter lands.
+        // Phase 17 (17.D): float→string. UNLIKE int/string/object (whose value is in $w0), a VT_FLOAT
+        // operand's value lives in the PARALLEL float accumulator $f0 — the caller guarantees it is
+        // there at this point (a freshly-evaluated float expr leaves $f0; a left-float concat operand
+        // is reloaded via FLOAD_LOCAL before coercing). id 50 (teko_rt_float_to_string, the 17.C Ryu
+        // shortest-round-trip formatter) reads $f0 and leaves the char* result in $w0 (VT_STR).
+        codegen_li_emit_call_runtime(b, 50);
         return;
     }
     if (vt >= TEKO_VT_OBJ_BASE) { emit_object_to_string(b, ctx, vt - TEKO_VT_OBJ_BASE); return; }
@@ -1169,19 +1174,31 @@ static void lower_duplex_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
 //                               an int expr is already in $w0 (no-op). Result VT_INT.
 //   convert.to_float(<expr>) -> if the expr is NOT VT_FLOAT (an int in $w0), OP_I2F -> $f0; a float
 //                               expr is already in $f0 (no-op). Result VT_FLOAT.
+// Phase 17.D adds `convert.float_to_str(<expr>)` to this SAME dotted-head machinery (so every
+// is_floatcast_head call site — eval_primary, lower_init_value, the call-arg path — picks it up):
+//   convert.float_to_str(<expr>) -> eval the inner expr; promote an int operand with OP_I2F (-> $f0);
+//                               then emit id 50 (reads $f0) -> char* in $w0. Result VT_STR.
 static int is_floatcast_head(const Parser* p) {
     if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
     const char* lx = p->current_token.lexeme;
-    return strcmp(lx, "convert.to_int") == 0 || strcmp(lx, "convert.to_float") == 0;
+    return strcmp(lx, "convert.to_int") == 0 || strcmp(lx, "convert.to_float") == 0 ||
+           strcmp(lx, "convert.float_to_str") == 0;
 }
 static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
     int to_int = (strcmp(p->current_token.lexeme, "convert.to_int") == 0);
+    int to_str = (strcmp(p->current_token.lexeme, "convert.float_to_str") == 0);
     fe_advance(p);                                       // consume the dotted identifier
     if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
     // The inner expression -> $w0 (int) or $f0 (float). ctx->ta is the active temp allocator.
     int vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);
     if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
-    if (to_int) {
+    if (to_str) {
+        // Phase 17.D: float->string surface. Promote an int operand to f64 first ($f0); a float
+        // expr is already in $f0. id 50 (the 17.C Ryu formatter) reads $f0 -> char* in $w0 (VT_STR).
+        if (vt != TEKO_VT_FLOAT) codegen_li_emit_funop(b, OP_I2F); // $f0 = (double)$w0
+        codegen_li_emit_call_runtime(b, 50);
+        return TEKO_VT_STR;
+    } else if (to_int) {
         if (vt == TEKO_VT_FLOAT) codegen_li_emit_f2i(b);  // $w0 = (i32)trunc($f0)  (checked)
         // else: an int expression is already in $w0 — to_int is a no-op.
         return TEKO_VT_INT;
@@ -3040,12 +3057,13 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                     // Phase 16.B: an expression argument (e.g. `"x = " + n`) — evaluated + spilled.
                     nargs++;
                 } else if (nargs < 16 && is_floatcast_head(&parser) &&
-                           strcmp(parser.current_token.lexeme, "convert.to_int") == 0) {
-                    // Phase 17 (17.B): a bare `convert.to_int(<expr>)` call argument — the checked
-                    // cast leaves an i32 in $w0, spilled to a temp like the codec case. (to_float
-                    // yields $f0, not passable as an int arg in this subset — reach it via an
-                    // expression arg instead.)
-                    lower_floatcast(buffer, &parser, &top_ctx); // $w0 = (i32)trunc(expr) (checked)
+                           (strcmp(parser.current_token.lexeme, "convert.to_int") == 0 ||
+                            strcmp(parser.current_token.lexeme, "convert.float_to_str") == 0)) {
+                    // Phase 17 (17.B/17.D): a bare `convert.to_int(<expr>)` (checked i32 in $w0) OR
+                    // `convert.float_to_str(<expr>)` (char* in $w0) call argument — both leave their
+                    // result in $w0, spilled to a temp like the codec case. (to_float yields $f0, not
+                    // passable as a value arg in this subset — reach it via an expression arg.)
+                    lower_floatcast(buffer, &parser, &top_ctx); // $w0 = result (i32 / char*)
                     int t = ta.next_temp++;
                     if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
                     codegen_li_emit_store_local(buffer, t);

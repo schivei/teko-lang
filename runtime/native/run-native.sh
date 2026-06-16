@@ -209,6 +209,18 @@ EXP
 # it does NOT silently truncate/wrap — the emitted inline guard calls teko_rt_f2i_fail (exit 70 +
 # stderr diag). WASM traps on the same value (run-cast.mjs), so the behavior is identical on both.
 check_fail cast_fail.tks "before" "convert.to_int: float out of i32 range"
+# Phase 17 (17.D): convert.float_to_str (id 50, the f64-ARG runtime call) + auto-`to_string` for
+# floats in `+` concat (right- AND left-float) and `"{…}"` interpolation (a float hole + a float
+# EXPRESSION hole). The value rides the FP-arg register (xmm0/d0 = $f0), not $w0; the formatter is
+# the 17.C Ryu shortest-round-trip core. Byte-identical to the WASM proof (run-floatstr.mjs).
+check floatstr.tks "$(cat <<'EXP'
+f = 3.14
+0.1
+pi~ 3.14, dbl 6.28
+2.5
+3.14 = pi
+EXP
+)"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

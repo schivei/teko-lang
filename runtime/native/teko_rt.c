@@ -817,6 +817,10 @@ long teko_rt_vtable_get(long type_id, long method_id) {
 // teko_convert.c is the source of truth (linked natively, compiled into the wasm32 reactor). The
 // value-carrying params are i32 to match the accumulator/reactor ABI; the full i64 core is KAT'd.
 char* teko_rt_int_to_string(int v)  { return teko_convert_i64_to_string((long long)v); }
+// Phase 17.D — float->string (id 50). The 17.C Ryu shortest-round-trip formatter is the source of
+// truth (src/runtime/teko_convert_f64.c, linked natively, compiled into the wasm32 reactor). This
+// is the ONLY conversion wrapper whose value param is a `double` (the f64-arg ABI; see teko_rt.h).
+char* teko_rt_float_to_string(double v) { return teko_convert_f64_to_string(v); }
 char* teko_rt_bool_to_string(int v) { return teko_convert_bool_to_string(v); }
 char* teko_rt_str_concat(const char* a, const char* b) { return teko_convert_str_concat(a, b); }
 // Phase 16.E — explicit integer formats.

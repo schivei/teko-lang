@@ -212,6 +212,11 @@ long teko_rt_vtable_get(long type_id, long method_id);            // -> slot (-1
 // wasm32 reactor). The value-carrying params are i32 to match the accumulator/reactor ABI ($w0 is
 // i32 on WASM); the full-range i64 core is exercised directly by the Unity KATs.
 char* teko_rt_int_to_string(int v);                    // id 49: signed decimal
+// Phase 17.D — float->string (shortest round-trip culture-invariant `.`-decimal, the 17.C Ryu
+// core). Unlike every other OP_CALL_RUNTIME id, the value-carrying param is a `double` (id 50 is
+// the ONLY f64-ARG runtime call): the emitter passes it in the FP-arg register (xmm0/d0 = $f0) /
+// the f64 reactor param, not the i32 accumulator ($w0).
+char* teko_rt_float_to_string(double v);               // id 50: f64 -> shortest `.`-decimal
 char* teko_rt_bool_to_string(int v);                   // id 51: "true"/"false"
 char* teko_rt_str_concat(const char* a, const char* b); // id 52: a ‖ b
 // Phase 16.E — explicit integer formats (developer-supplied spec).

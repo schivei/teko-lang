@@ -57,6 +57,10 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 48: sym = "teko_rt_time_format_utc";  arity = 1; break; // (epoch str)
         // Phase 16 (Casting / Conversions & Parsing) — culture-invariant conversion surface.
         case 49: sym = "teko_rt_int_to_string";    arity = 1; break; // (i32) -> decimal str
+        // Phase 17.D — float->string. id 50 is the ONLY f64-ARG runtime id: the value rides in the
+        // FP-arg register (xmm0/d0 = $f0), NOT $w0, so OP_CALL_RUNTIME special-cases it to a BARE
+        // call (no $w0->arg-reg marshal). arity 1 only describes the result-marshalling (char*->$w0).
+        case 50: sym = "teko_rt_float_to_string";  arity = 1; break; // (f64) -> shortest `.`-decimal
         case 51: sym = "teko_rt_bool_to_string";   arity = 1; break; // (0/1) -> "true"/"false"
         case 52: sym = "teko_rt_str_concat";       arity = 2; break; // (a, b) -> a‖b
         case 56: sym = "teko_rt_to_radix";         arity = 2; break; // (v, radix) -> base str
@@ -560,7 +564,13 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_CALL_RUNTIME: {
             int arity = 1;
             const char* sym = teko_native_runtime_symbol(arg, &arity);
-            if (sym) emit_call(ctx, sym, arity);
+            // Phase 17.D — id 50 (teko_rt_float_to_string) is the f64-ARG runtime call: the double
+            // is ALREADY in xmm0/d0 (= $f0) per the SysV/AAPCS FP-arg convention (the frontend
+            // guarantees $f0 holds the value before the call), so emit a BARE call — emit_call would
+            // wrongly marshal the integer $w0 into the first GP-arg register. The char* result lands
+            // in rax/x0 = $w0, exactly like the other to_string ids.
+            if (arg == 50) emit_call_noarg(ctx, "teko_rt_float_to_string");
+            else if (sym) emit_call(ctx, sym, arity);
             break;
         }
 

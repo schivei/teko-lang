@@ -56,7 +56,7 @@ SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/te
       "$ROOT/src/runtime/teko_object.c"    # Phase 15: object instance store (class field cells)
       "$ROOT/src/runtime/teko_vtable.c"    # Phase 15.B: static vtable (abstract/trait dispatch)
       "$ROOT/src/runtime/teko_convert.c"   # Phase 16: culture-invariant conversion runtime
-      "$ROOT/src/runtime/teko_convert_f64.c") # Phase 17.C: Ryu f64->string (compile-only; no export yet — surface is 17.D)
+      "$ROOT/src/runtime/teko_convert_f64.c") # Phase 17.C: Ryu f64->string (17.D EXPORTS teko_rt_float_to_string)
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()
@@ -104,6 +104,8 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          teko_rt_vtable_set teko_rt_vtable_get
          # Phase 16 (16.A): culture-invariant conversion surface (OP_CALL_RUNTIME ids 49/51/52).
          teko_rt_int_to_string teko_rt_bool_to_string teko_rt_str_concat
+         # Phase 17.D: float->string (id 50; the f64-arg reactor entry, (double)->char*).
+         teko_rt_float_to_string
          # Phase 16.E: explicit integer formats (ids 56/57/58).
          teko_rt_to_radix teko_rt_pad teko_rt_group
          # Phase 16.F: checked parse (ids 53/55; traps on malformed input).
