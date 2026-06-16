@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-06-16):** the work this hand-off described was completed in the SAME session — no new session was opened. Phase 15 (15.A–15.D) is DONE & CI-green. This doc is kept only as a record of the design rationale; the canonical status is `docs/PHASE15_OOP.md`.
+
 # Hand-off — Phase 15.C (generics/monomorphization) + 15.D (events)
 
 **Branch:** `feat/phase-15-oop` (PR #8, draft). **15.A (concrete classes) + 15.B (abstract + traits,
