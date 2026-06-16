@@ -206,6 +206,46 @@ Verification: suite 232/232 (17.B adds no runtime C → no new KATs); ASan/UBSan
 path and float-free modules emit zero float opcodes — purely additive). Implementation continues at
 **17.C** (the freestanding shortest-round-trip `teko_convert_f64_to_string` formatter + KATs).
 
+Sub-block **17.C (Ryu shortest-round-trip f64->string C core) is DONE** (locally green) — the
+single C source of truth, KAT-tested, with **NO language surface** (the `convert.float_to_str`
+surface = id 50 + auto-`to_string` is 17.D; like the parse core that landed in 16.A — so no `.tks`
+proof here). Owner-APPROVED algorithm = **Ryu** (Ulf Adams, PLDI 2018).
+- **Runtime:** `char* teko_convert_f64_to_string(double)` in new `src/runtime/teko_convert_f64.c`
+  (+ the power-of-5 split tables in `src/runtime/teko_convert_f64_tables.h`), declared in
+  `teko_convert.h`. The shortest-decimal core (`d2d`/`d2d_small_int` + `umul128`/`shiftright128`/
+  `mulShift64`/`mulShiftAll64`/`pow5Factor`/`multipleOfPowerOf5`/log helpers/`div*`) is transcribed
+  from the reference impl (github.com/ulfjack/ryu `d2s.c`/`d2s_intrinsics.h`/`common.h`) with an
+  **Apache-2.0 / Boost-1.0 attribution header** (NOT claimed public-domain). The two
+  `DOUBLE_POW5_INV_SPLIT` (342) / `DOUBLE_POW5_SPLIT` (326) tables are reproduced byte-for-byte.
+- **Freestanding / portability (HARD constraints, all met):** no `math.h`/`snprintf`/`strtod`/
+  `setlocale` — only `malloc`/`memcpy`/`strlen` (verified: the wasm32 object's only undefined
+  symbols are exactly those three). **NO `__int128` and NO 128-bit libcall** — always Ryu's portable
+  `!HAS_UINT128 && !HAS_64_BIT_INTRINSICS` 64-bit-halves path (verified: `llvm-nm` shows no
+  `__multi3`/`__udivti3`/`__umodti3`/`__divti3`). MSVC/Windows-safe portable C, no `auto`/`nullptr`,
+  no VLAs, pure/deterministic (native == WASM byte-identical).
+- **Renderer policy (custom, NOT Ryu's `to_chars`; documented in the file header):** plain
+  culture-invariant `.`-decimal; ALWAYS ≥1 fractional digit (`1.0`/`42.0`/`100.0`); specials
+  `NaN`/`Infinity`/`-Infinity`/`0.0`/`-0.0`; **scientific (lowercase `e`, explicit sign, no
+  leading-zero exponent) only when `e10 < -4` or `e10 >= 21`** (mirrors ECMAScript
+  `Number.toString`), else plain decimal; shortest digits, never padded to 17. Catalog confirms:
+  `5e-324`→`5e-324`, `1.7976931348623157e308`→`1.7976931348623157e+308`, `1e20`→plain,
+  `1e21`→`1e+21`, `0.1`→exactly `0.1`.
+- **Build wiring (proves wasm32 compat NOW, no surface):** added to `CMakeLists.txt` CORE_SOURCES
+  + the `teko_rt` archive, and to `runtime/wasm/crypto/build-crypto-reactor.sh` `SRCS`
+  (compile-only, NOT EXPORTS — no surface until 17.D). Confirmed it compiles + the reactor links
+  under `--target=wasm32 -ffreestanding -nostdlib`.
+- **KATs (new `tests/runtime/test_convert_f64.c`, 3 tests):** (1) exact-string catalog (zeros/
+  small wholes/fractions/pi/2^53/powers-of-ten across the e-threshold/`5e-324`/DBL_MAX/specials);
+  (2) round-trip property over ~30,265 doubles (39-value catalog + a 10,230-double binary-exponent
+  sweep + a 19,996-iter fixed-seed LCG over raw bit patterns, skipping NaN/Inf) — format then
+  re-parse with the **HOST libc `strtod`** and assert bit-for-bit equal; (3) shortest spot-checks
+  (`0.1`/`0.3`/`1.0` emit no padded digits).
+
+Verification: suite 232→235/235 (the 3 new f64 KATs); ASan/UBSan (both dispatch paths) + TSan clean;
+the 16 native goldens + all prior native/WASM proofs intact (17.C is additive runtime + tests only —
+no emitter/frontend file touched). Implementation continues at **17.D** (the `convert.float_to_str`
+surface = id 50 + auto-`to_string` for floats, with `.tks` proofs on both targets).
+
 ## Phase 17.F — exact base-10 `decimal` type (owner-APPROVED; implemented AFTER 17.A–17.E)
 **Owner decision: APPROVED, C#-`System.Decimal` semantics.** An EXACT base-10 `decimal`, **128-bit /
 16 bytes** = a **96-bit coefficient + sign + scale 0–28** (base-10), distinct from the binary f64 —

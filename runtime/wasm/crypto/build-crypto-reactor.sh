@@ -55,7 +55,8 @@ SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/te
       "$ROOT/src/runtime/teko_time.c"      # Phase 14: civil time formatter (wall-clock/timezone)
       "$ROOT/src/runtime/teko_object.c"    # Phase 15: object instance store (class field cells)
       "$ROOT/src/runtime/teko_vtable.c"    # Phase 15.B: static vtable (abstract/trait dispatch)
-      "$ROOT/src/runtime/teko_convert.c")  # Phase 16: culture-invariant conversion runtime
+      "$ROOT/src/runtime/teko_convert.c"   # Phase 16: culture-invariant conversion runtime
+      "$ROOT/src/runtime/teko_convert_f64.c") # Phase 17.C: Ryu f64->string (compile-only; no export yet — surface is 17.D)
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()

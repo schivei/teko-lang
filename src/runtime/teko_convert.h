@@ -21,6 +21,13 @@ char* teko_convert_bool_to_string(int v);
 // Concatenate two NUL-terminated strings into a fresh buffer. NULL is treated as "".
 char* teko_convert_str_concat(const char* a, const char* b);
 
+// Phase 17.C — shortest-round-trip f64 -> culture-invariant `.`-decimal string (Ryu).
+// Always >= 1 fractional digit (1.0, 100.0); specials NaN/Infinity/-Infinity/0.0/-0.0;
+// `e`-notation only outside -4 <= e10 < 21. Fresh malloc'd buffer (caller frees), NULL
+// on OOM. See teko_convert_f64.c for the full algorithm + renderer-policy notice. The
+// `convert.float_to_str` surface (id 50) is wired in 17.D — this is the C core only.
+char* teko_convert_f64_to_string(double v);
+
 // --- explicit format (developer-supplied spec; deviates from the default) ---------
 // Phase 16.E. These are the EXPLICIT formats a developer opts into — distinct from the universal
 // culture-invariant default (plain `.`-decimal, no grouping). Still locale-independent.
