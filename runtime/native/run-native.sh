@@ -232,6 +232,17 @@ got 0.5
 EXP
 )"
 check_fail parsefloat_fail.tks "before" "convert.parse_float: invalid float"
+# Phase 17.F.3: the 256-byte EXACT base-10 `decimal` VALUE MODEL — `dec` literals, a decimal local,
+# decimal arithmetic (`+`), and decimal comparisons (`== <`), carried through a SEPARATE 256-byte
+# memory-slot accumulator ($d0/$d1, native stack slots passed BY POINTER to teko_rt_decimal_*),
+# additive to the integer + f64 paths. No decimal formatter yet (17.F.4), so each comparison's 0/1
+# result is observed via convert.int_to_str (id 49). The exactness is the point: 9.99 + 0.01 ==
+# 10.00 holds in base-10 (it does NOT in binary f64). Byte-identical to the WASM proof (run-decimal.mjs).
+check decimal.tks "$(cat <<'EXP'
+eq = 1
+lt = 1
+EXP
+)"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

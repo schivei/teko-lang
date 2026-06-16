@@ -190,7 +190,14 @@ static Token lex_number(Lexer* lexer) {
     int length = lexer->cursor - start_pos; // numeric text length (excludes any suffix)
 
     // Optional unit suffix: scan the maximal trailing alpha run and match it whole.
+    // Phase 17.F.3: the `dec` suffix (e.g. `9.99dec`, `1000dec`) marks an EXACT base-10 `decimal`
+    // literal — owner-LOCKED `dec` (NOT `m`, which collides with the minutes unit). It is matched
+    // here exactly like a unit suffix (longest trailing-alpha run, consumed whole), but instead of
+    // a LiteralUnit it retypes the token to TOKEN_LIT_DECIMAL; the lexeme stays the BARE number
+    // (the decimal core's teko_decimal_parse takes the bare digits — the suffix is stripped here).
+    // A numeric whose trailing run is neither a unit nor `dec` is rewound (lexed as a separate ident).
     LiteralUnit unit = LIT_UNIT_NONE;
+    int is_decimal = 0;
     int suffix_start = lexer->cursor;
     while (isalpha(peek(lexer))) advance(lexer);
     int suffix_len = lexer->cursor - suffix_start;
@@ -199,15 +206,19 @@ static Token lex_number(Lexer* lexer) {
         if (suffix_len < (int)sizeof(suffix)) {
             memcpy(suffix, &lexer->source[suffix_start], suffix_len);
             suffix[suffix_len] = '\0';
-            for (int i = 0; literal_units[i].s != NULL; i++) {
-                if (strcmp(suffix, literal_units[i].s) == 0) { unit = literal_units[i].u; break; }
+            if (strcmp(suffix, "dec") == 0) {
+                is_decimal = 1; // exact-decimal literal (applies to both int-form and float-form)
+            } else {
+                for (int i = 0; literal_units[i].s != NULL; i++) {
+                    if (strcmp(suffix, literal_units[i].s) == 0) { unit = literal_units[i].u; break; }
+                }
             }
         }
-        if (unit == LIT_UNIT_NONE) lexer->cursor = suffix_start; // not a unit — rewind
+        if (unit == LIT_UNIT_NONE && !is_decimal) lexer->cursor = suffix_start; // not a unit/dec — rewind
     }
 
-    Token token = {is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT,
-                   create_lexeme(&lexer->source[start_pos], length), lexer->line, unit};
+    TokenType ttype = is_decimal ? TOKEN_LIT_DECIMAL : (is_float ? TOKEN_LIT_FLOAT : TOKEN_LIT_INT);
+    Token token = {ttype, create_lexeme(&lexer->source[start_pos], length), lexer->line, unit};
     return token;
 }
 
@@ -416,6 +427,7 @@ const char* get_token_type_name(TokenType type) {
         case TOKEN_MACRO_IDENT: return "MACRO_IDENTIFIER";
         case TOKEN_LIT_INT: return "LITERAL_INT";
         case TOKEN_LIT_FLOAT: return "LITERAL_FLOAT";
+        case TOKEN_LIT_DECIMAL: return "LITERAL_DECIMAL"; // Phase 17.F.3
         case TOKEN_LIT_STR: return "LITERAL_STRING";
         case TOKEN_LIT_CHAR: return "LITERAL_CHAR";
         case TOKEN_LIT_MULTILINE_STR: return "LITERAL_MULTILINE_STRING";

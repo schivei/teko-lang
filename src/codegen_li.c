@@ -43,6 +43,13 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->floats = (double*)malloc(sizeof(double) * buffer->float_capacity);
     buffer->uses_float = 0;
 
+    // Phase 17.F.3: the decimal-constant pool (256-byte blobs) starts empty; uses_decimal gates the
+    // WASM decimal linear-memory region + reactor imports and the native decimal frame region.
+    buffer->decimal_capacity = 4;
+    buffer->decimal_count = 0;
+    buffer->decimals = (unsigned char*)malloc((size_t)256 * buffer->decimal_capacity);
+    buffer->uses_decimal = 0;
+
     return buffer;
 }
 
@@ -102,6 +109,23 @@ int codegen_li_add_float_constant(BytecodeBuffer* buffer, double value) {
     }
     buffer->floats[buffer->float_count] = value;
     return buffer->float_count++;
+}
+
+// Phase 17.F.3: add a 256-byte decimal constant to the decimal pool (deduped by 256-byte memcmp),
+// returning its index — the 4-byte arg for OP_DCONST. `blob` is a teko_decimal value (by pointer).
+int codegen_li_add_decimal_constant(BytecodeBuffer* buffer, const unsigned char* blob) {
+    if (!buffer || !blob) return -1;
+
+    for (int i = 0; i < buffer->decimal_count; i++) {
+        if (memcmp(blob, buffer->decimals + (size_t)256 * i, 256) == 0) return i; // already pooled
+    }
+
+    if (buffer->decimal_count >= buffer->decimal_capacity) {
+        buffer->decimal_capacity *= 2;
+        buffer->decimals = (unsigned char*)realloc(buffer->decimals, (size_t)256 * buffer->decimal_capacity);
+    }
+    memcpy(buffer->decimals + (size_t)256 * buffer->decimal_count, blob, 256);
+    return buffer->decimal_count++;
 }
 
 // Registers a host import (deduped by ns+name); returns its table index.
@@ -346,6 +370,36 @@ void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot) {
     emit_int(buffer, slot);
 }
 
+// Phase 17.F.3: decimal value-model emit helpers. Each sets uses_decimal (gates the WASM decimal
+// linear-memory region + reactor imports / the native decimal frame region). Mirrors the float set.
+void codegen_li_emit_dconst(BytecodeBuffer* buffer, const unsigned char* blob) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    int idx = codegen_li_add_decimal_constant(buffer, blob);
+    emit_byte(buffer, OP_DCONST);
+    emit_int(buffer, idx); // 4-byte decimal-pool index
+}
+
+void codegen_li_emit_dunop(BytecodeBuffer* buffer, OpCode op) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, (unsigned char)op); // single-byte: DADD..DGE / DSTORE / DLOAD
+}
+
+void codegen_li_emit_dstore_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, OP_DSTORE_LOCAL);
+    emit_int(buffer, slot);
+}
+
+void codegen_li_emit_dload_local(BytecodeBuffer* buffer, int slot) {
+    if (!buffer) return;
+    buffer->uses_decimal = 1;
+    emit_byte(buffer, OP_DLOAD_LOCAL);
+    emit_int(buffer, slot);
+}
+
 void codegen_li_emit_halt(BytecodeBuffer* buffer) {
     if (!buffer) return;
     emit_byte(buffer, OP_HALT);
@@ -464,5 +518,6 @@ void codegen_li_free_context(BytecodeBuffer* buffer) {
     }
     free(buffer->imports);
     free(buffer->floats); // Phase 17 (17.A): the float-constant pool
+    free(buffer->decimals); // Phase 17.F.3: the decimal-constant pool (256-byte blobs)
     free(buffer);
 }

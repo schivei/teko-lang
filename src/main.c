@@ -146,6 +146,11 @@ static int compile_native_source(const char* input_path, const char* out_path,
     // byte-identical to before Phase 17.
     teko_metal_set_floats(ctx, buffer->floats, buffer->float_count);
     teko_metal_set_emit_float(ctx, buffer->uses_float);
+    // Phase 17.F.3: hand the hosted native emitter the decimal-constant pool (OP_DCONST's index
+    // space; 256-byte blobs) + the uses_decimal flag. Decimal-free programs leave uses_decimal 0 →
+    // emitted assembly byte-identical to before 17.F.3.
+    teko_metal_set_decimals(ctx, buffer->decimals, buffer->decimal_count);
+    teko_metal_set_emit_decimal(ctx, buffer->uses_decimal);
 
     teko_metal_emit_program(ctx, buffer->code, (uint32_t)buffer->size);
     teko_metal_close(ctx);

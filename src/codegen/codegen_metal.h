@@ -122,6 +122,14 @@ typedef struct {
     const double* float_pool;
     int float_count;
     int wasm_emit_float;
+    // Phase 17.F.3: the decimal-constant pool (256-byte teko_decimal blobs, decimal_count of them),
+    // threaded in so the hosted native + WASM emitters resolve OP_DCONST's 4-byte index to the
+    // 256-byte value. NULL/0 when unset (non-decimal programs). wasm_emit_decimal gates the WASM
+    // decimal linear-memory region + reactor imports (off keeps non-decimal modules byte-identical);
+    // the native emitter uses it to size the decimal frame region. Unused by the freestanding emitters.
+    const unsigned char* decimal_pool;
+    int decimal_count;
+    int wasm_emit_decimal;
     // Phase 13 (native runner): 1 routes x86_64/arm64 emission to the libc-hosted,
     // assemble-able emitter (emit_native_hosted.c) instead of the freestanding "metal"
     // emitters — produces a binary the system `cc` links against teko_rt and RUNS. The
@@ -165,6 +173,12 @@ void teko_metal_set_emit_vtable(MetalContext* ctx, int enabled);
 // must outlive teko_metal_emit_program. teko_metal_set_emit_float gates the WASM float locals.
 void teko_metal_set_floats(MetalContext* ctx, const double* floats, int count);
 void teko_metal_set_emit_float(MetalContext* ctx, int enabled);
+
+// Phase 17.F.3: hand the backend the decimal-constant pool (OP_DCONST's index space; 256-byte
+// blobs). `decimals` (decimal_count*256 bytes) must outlive teko_metal_emit_program.
+// teko_metal_set_emit_decimal gates the WASM decimal linear-memory region + reactor imports.
+void teko_metal_set_decimals(MetalContext* ctx, const unsigned char* decimals, int count);
+void teko_metal_set_emit_decimal(MetalContext* ctx, int enabled);
 
 // Phase 13 (native runner): route x86_64/arm64 emission to the libc-hosted emitter.
 void teko_metal_set_hosted(MetalContext* ctx, int enabled);

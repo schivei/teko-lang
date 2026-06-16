@@ -420,3 +420,58 @@ opcodes + language surface + checked casts). 17.F.1/.2 are the source of truth t
 **Decimal literal suffix = `dec`** (owner correction, applies in 17.F.3): e.g. `9.99dec`, `1000dec`.
 NOT `m` — `m` collides with the Phase-14 time-range minutes suffix (`5m`). The lexer recognizes a
 numeric literal with a trailing `dec` as a decimal literal → `OP_DCONST` (decimal-constant pool).
+
+### Status — 17.F.3 (the decimal VALUE MODEL: opcodes + `dec` literal + frontend + both backends) is DONE
+The reserved decimal opcodes `0x83–0x92` are now LIVE and a 256-byte decimal value flows end to end
+through a SEPARATE memory-slot accumulator (`$d0`/`$d1` + a `$dvN` decimal-local file), additive to
+the integer (`$w0`/`$w1`) and f64 (`$f0`/`$f1`) paths. NO casts (`0x93–0x96`) and NO
+`decimal.to_string`/`parse` surface — those remain 17.F.4. The 16 freestanding emitter goldens + all
+float-free/decimal-free native+WASM output stay BYTE-IDENTICAL (every decimal emission is gated on
+`uses_decimal`/`wasm_emit_decimal`).
+- **`dec` lexer:** `lex_number` matches the trailing alpha run; `dec` retypes the token to a NEW
+  `TOKEN_LIT_DECIMAL` (the lexeme stays the BARE number — the suffix is stripped, fed to the 17.F.2
+  `teko_decimal_parse`). Applies to BOTH int-form (`1000dec`) and float-form (`9.99dec`). Distinct
+  from the unit-suffix table (so `dec` is NOT mistaken for a unit and is NOT rewound as an ident).
+- **IL:** `OP_DCONST` (0x83, 4-byte decimal-pool index) + `OP_DADD/DSUB/DMUL/DDIV/DMOD` (0x84–0x88)
+  + `OP_DEQ..DGE` (0x89–0x8E, → i32 0/1 in `$w0` → VT_INT) + `OP_DSTORE/DLOAD` (0x8F/0x90) +
+  `OP_DSTORE_LOCAL/DLOAD_LOCAL` (0x91/0x92). A decimal-constant pool (`BytecodeBuffer.decimals`,
+  256-byte blobs deduped by memcmp) mirrors the float pool; `uses_decimal` gates everything. Threaded
+  to the backend via `teko_metal_set_decimals`/`set_emit_decimal` in BOTH drivers (main.c, codegen_li_wasm.c).
+- **codegen_metal.c:** the 4-byte ops (DCONST/DSTORE_LOCAL/DLOAD_LOCAL) added to all THREE walkers;
+  CSE: ALL decimal ops are an integer-CSE barrier, the COMPARES additionally invalidate the `$w0`
+  ICONST cache (they write a non-const 0/1).
+- **Native (emit_native_hosted.c):** `$d0`/`$d1` + a cmp-scratch sink + the `$dvN` file are 256-byte
+  STACK slots (a dedicated decimal frame region, 16-aligned, sized by the local high-water; the frame
+  prologue/epilogue gained a large-frame split so `stp`/`sub sp` stay in range). DCONST copies a
+  `.rodata` blob (`.L_dec_N`) into `$d0` via an inline scratch-only loop (never touches `$w0`/`$w1`);
+  arith `call teko_rt_decimal_*(&$d0,&$d1,&$d0)`; compares `call teko_rt_decimal_cmp` then map -1/0/+1
+  to the i32 0/1; moves are inline 256-byte scratch copies.
+- **WASM (emit_wasm.c):** `$d0`/`$d1`/cmp-scratch + the `$dvN` file are fixed 256-byte regions carved
+  from the TOP of the heap (the heap upper bound shrinks only when `wasm_emit_decimal`; decimal-free
+  modules keep the full `[16384..65536)` heap and stay byte-identical). The decimal-constant pool is a
+  `(data ...)` segment at the region base. DCONST/moves are `memory.copy` (stack-neutral); arith/compare
+  `call $decimal_*` (reactor imports, by-pointer i32 slot offsets over the SHARED memory). The reactor
+  EXPORTS `teko_rt_decimal_add/sub/mul/div/mod/cmp` (fail-loud via `teko_rt_die`).
+- **Frontend (frontend_interop.c):** `g_localdec` registry (parallel to `g_localflt`); `dec` literal
+  → pool → `OP_DCONST` (VT_DECIMAL); decimal-only arithmetic in `eval_expr_prec` (both operands
+  decimal → DSTORE-left/DLOAD-right + the decimal op; compares → VT_INT). Mixed int/float/decimal
+  promotion is DEFERRED to 17.F.4 (needs I2D/F2D). let/reassign store via DSTORE_LOCAL + record in
+  g_localdec. A VT_DECIMAL into a concat is a deliberate no-op (decimal→string is 17.F.4).
+- **Reactor build (no `__int128`, owner constraint upheld):** a recent clang's 128-bit-multiply idiom
+  recognizer (an -O2+ pass) folds teko_decimal.c's hand-rolled 64×64→128 `umul64` (NO `__int128` in the
+  source) into a `__multi3` builtin call, which wasm-ld can't resolve — and providing `__multi3` would
+  reintroduce `__int128`. So `build-crypto-reactor.sh` compiles JUST `teko_decimal.c` at **`-O1`** (the
+  idiom pass doesn't run at -O1), keeping the object 64-bit-limb-only and self-contained on every
+  toolchain. **No `__multi3`/`__int128` anywhere** (the shim needs no stub). Negligible perf cost.
+- **Proof:** `runtime/{native,wasm}/samples/decimal.tks` → `eq = 1` / `lt = 1` (9.99 + 0.01 == 10.00
+  exactly in base-10 — it does NOT in binary f64), BYTE-IDENTICAL native (run-native.sh) vs WASM
+  (run-decimal.mjs, reactor-backed). Compares funneled through `convert.int_to_str` (id 49) — observed
+  WITHOUT a to_string surface, exactly as 17.A observed floats.
+- **Verification:** suite **244/244**; ASan+UBSan clean on BOTH dispatch paths; TSan clean; native
+  proof + WASM proof byte-identical; x86_64 + macOS-arm64 hosted asm assemble; existing float + full
+  crypto WASM proofs intact; 16 native goldens + all float-free/decimal-free output byte-identical;
+  **NO `__int128`/`__multi3`/libc anywhere** in the decimal runtime OR the reactor (the `-O1`-per-file
+  build keeps the 64-bit-limb arithmetic self-contained).
+
+Next: **17.F.4** (checked casts `OP_I2D/D2I/F2D/D2F` 0x93–0x96 + `convert.to_decimal/to_int/to_float`
+mixed promotion + `decimal.to_string`/`parse` surface (ids 59/60) + auto-`to_string` for decimal).

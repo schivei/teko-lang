@@ -45,6 +45,9 @@ MetalContext* teko_metal_create(const char* output_asm_path, TekoTarget target) 
     ctx->float_pool = NULL;     // Phase 17 (17.A)
     ctx->float_count = 0;
     ctx->wasm_emit_float = 0;
+    ctx->decimal_pool = NULL;   // Phase 17.F.3
+    ctx->decimal_count = 0;
+    ctx->wasm_emit_decimal = 0;
     ctx->hosted = 0;
     return ctx;
 }
@@ -157,6 +160,17 @@ void teko_metal_set_emit_float(MetalContext* ctx, int enabled) {
     ctx->wasm_emit_float = enabled ? 1 : 0;
 }
 
+void teko_metal_set_decimals(MetalContext* ctx, const unsigned char* decimals, int count) {
+    if (!ctx) return;
+    ctx->decimal_pool = decimals;
+    ctx->decimal_count = (count > 0) ? count : 0;
+}
+
+void teko_metal_set_emit_decimal(MetalContext* ctx, int enabled) {
+    if (!ctx) return;
+    ctx->wasm_emit_decimal = enabled ? 1 : 0;
+}
+
 static void teko_metal_route_instruction(MetalContext* ctx, OpCode op, int32_t arg) {
     TekoOS os = ctx->target.os;
     TekoArch arch = ctx->target.arch;
@@ -230,7 +244,8 @@ static int count_routine_yields(const unsigned char* il, uint32_t start, uint32_
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
             op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
             op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG || op == OP_CALL_FUNC ||
-            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL) p += 5; // Phase 17 4-byte float ops
+            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL ||
+            op == OP_DCONST || op == OP_DSTORE_LOCAL || op == OP_DLOAD_LOCAL) p += 5; // Phase 17 4-byte float/decimal ops
         else p += 1;
     }
     return yields;
@@ -290,7 +305,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
             op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
             op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG || op == OP_CALL_FUNC ||
-            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL) scan += 5; // Phase 17 4-byte float ops
+            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL ||
+            op == OP_DCONST || op == OP_DSTORE_LOCAL || op == OP_DLOAD_LOCAL) scan += 5; // Phase 17 4-byte float/decimal ops
         else scan += 1;
     }
 
@@ -310,7 +326,8 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
             op == OP_FUNC_BEGIN || op == OP_CALL_IMPORT || op == OP_SETARG ||
             op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL || op == OP_CALL_RUNTIME ||
             op == OP_SPAWN_ASYNC_ARGS || op == OP_LOAD_SPAWN_ARG || op == OP_CALL_FUNC ||
-            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL) { // Phase 17 4-byte float ops
+            op == OP_FCONST || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL ||
+            op == OP_DCONST || op == OP_DSTORE_LOCAL || op == OP_DLOAD_LOCAL) { // Phase 17 4-byte float/decimal ops
             arg = read_le_int32(local_il, current_op_index + 1);
             i += 4;
         }
@@ -384,7 +401,16 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                      op == OP_I2F ||
                      // Phase 17 (17.B): OP_FMOD writes $f0 only (barrier suffices); OP_F2I writes
                      // $w0 with a non-const int, so it is a barrier here AND a $w0-cache reset below.
-                     op == OP_FMOD || op == OP_F2I) {
+                     op == OP_FMOD || op == OP_F2I ||
+                     // Phase 17.F.3: ALL decimal ops are an integer-CSE BARRIER (they are not integer
+                     // arith). The arith/move ops touch $d0/$d1/$dvN only (native scratch GPRs, NOT
+                     // $w0/$w1) — barrier suffices; the COMPARES (DEQ..DGE) write $w0 with a non-const
+                     // 0/1, so they are ALSO a $w0-cache reset below.
+                     op == OP_DCONST || op == OP_DADD || op == OP_DSUB || op == OP_DMUL ||
+                     op == OP_DDIV || op == OP_DMOD || op == OP_DEQ || op == OP_DNE ||
+                     op == OP_DLT || op == OP_DLE || op == OP_DGT || op == OP_DGE ||
+                     op == OP_DSTORE || op == OP_DLOAD || op == OP_DSTORE_LOCAL ||
+                     op == OP_DLOAD_LOCAL) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -432,7 +458,12 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 // Phase 17 (17.B): OP_F2I writes $w0 with the (non-constant) truncated int result,
                 // so it invalidates the ICONST reuse cache exactly like a float compare. (OP_FMOD
                 // touches $f0/$f1 only — no $w0 clobber — so it stays out of this set.)
-                op == OP_F2I) {
+                op == OP_F2I ||
+                // Phase 17.F.3: the decimal COMPARES (DEQ..DGE) write $w0 with a non-constant 0/1,
+                // so they invalidate the ICONST reuse cache exactly like a float compare. (DCONST/
+                // DADD/etc. touch $d0/$d1/$dvN only — no $w0 clobber — so they stay out of this set.)
+                op == OP_DEQ || op == OP_DNE || op == OP_DLT ||
+                op == OP_DLE || op == OP_DGT || op == OP_DGE) {
                 accum_has_value = false;
             }
         }

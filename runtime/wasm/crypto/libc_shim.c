@@ -67,3 +67,8 @@ void* calloc(size_t n, size_t sz) {
     return p;
 }
 void* realloc(void* p, size_t n) { (void)p; return malloc(n); }
+
+/* Phase 17.F.3 note: teko_decimal.c is compiled with -fno-builtin (see build-crypto-reactor.sh)
+ * so clang does NOT fold its hand-rolled 64x64->128 umul64 into a `__multi3` 128-bit-multiply
+ * builtin. The shim therefore needs NO __multi3 / __int128 — the decimal arithmetic stays
+ * 64-bit-limb only, end to end, exactly as the owner spec requires. */

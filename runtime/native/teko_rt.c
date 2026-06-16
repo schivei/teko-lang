@@ -25,6 +25,7 @@
 #include "teko_object.h"
 #include "teko_vtable.h"
 #include "teko_convert.h"
+#include "teko_decimal.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -868,4 +869,31 @@ double teko_rt_parse_float(const char* s) {
 // already decided); never returns.
 void teko_rt_f2i_fail(void) {
     teko_rt_die("convert.to_int: float out of i32 range or not finite");
+}
+
+// Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers. The opcode family
+// (OP_DADD/DSUB/DMUL/DDIV/DMOD/DEQ..DGE) lowers to these; the args are ALWAYS pointers into a
+// 256-byte decimal slot (native stack/frame, WASM linear memory — the same shared-memory pointer
+// ABI as the crypto hex strings). Each wraps the 17.F.1 core and FAILS LOUD on the core's 0 return
+// (overflow / divide-by-zero) via teko_rt_die — native exit 70 + stderr, wasm32 reactor
+// __builtin_trap — exactly the 16.F checked-parser posture (no NaN/Inf; decimal is always finite).
+void teko_rt_decimal_add(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_add(a, b, out)) teko_rt_die("decimal: add overflow");
+}
+void teko_rt_decimal_sub(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_sub(a, b, out)) teko_rt_die("decimal: sub overflow");
+}
+void teko_rt_decimal_mul(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_mul(a, b, out)) teko_rt_die("decimal: mul overflow");
+}
+void teko_rt_decimal_div(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_div(a, b, out)) teko_rt_die("decimal: divide by zero or overflow");
+}
+void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_decimal* out) {
+    if (!teko_decimal_mod(a, b, out)) teko_rt_die("decimal: modulo by zero or overflow");
+}
+// Compare: writes -1 / 0 / +1 to *out_lt_eq_gt (the core cannot fail — always-finite operands).
+// The emitter maps that tri-state to the i32 0/1 boolean each OP_DEQ..DGE wants in $w0.
+void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt) {
+    (void)teko_decimal_cmp(a, b, out_lt_eq_gt);
 }

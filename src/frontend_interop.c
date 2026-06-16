@@ -2,6 +2,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "parser_ffi.h"
+#include "runtime/teko_decimal.h" // Phase 17.F.3: dec-literal parse -> 256-byte decimal-pool blob
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -437,6 +438,29 @@ static int localflt_get(const char* n) {
     for (int i = 0; i < g_nlocalflt; i++) if (strcmp(g_localflt[i], n) == 0) return 1;
     return 0;
 }
+// Phase 17.F.3: names of DECIMAL-typed named locals (so `d` reads as VT_DECIMAL and routes through
+// the 256-byte decimal memory-slot accumulator $d0). Per-function scope, reset alongside
+// g_localstr/g_localflt/g_localcls. Mirrors the localflt registry exactly (set membership,
+// demote-on-reassign via tombstone).
+static char g_localdec[TEKO_MAX_LOCALCLS][96];
+static int  g_nlocaldec;
+static void localdec_reset(void) { g_nlocaldec = 0; }
+static void localdec_set(const char* n, int is_dec) {
+    for (int i = 0; i < g_nlocaldec; i++)
+        if (strcmp(g_localdec[i], n) == 0) {
+            if (!is_dec) { g_localdec[i][0] = g_localdec[i][1] = '\0'; } // demote (tombstone)
+            return;
+        }
+    if (is_dec && g_nlocaldec < TEKO_MAX_LOCALCLS) {
+        strncpy(g_localdec[g_nlocaldec], n, 95); g_localdec[g_nlocaldec][95] = '\0';
+        g_nlocaldec++;
+    }
+}
+static int localdec_get(const char* n) {
+    if (!n || !n[0]) return 0;
+    for (int i = 0; i < g_nlocaldec; i++) if (strcmp(g_localdec[i], n) == 0) return 1;
+    return 0;
+}
 // Split a dotted lexeme "base.member" into its two parts. Returns 1 on success (a dot present).
 static int dotted_split(const char* lex, char* base, char* member) {
     const char* dot = lex ? strchr(lex, '.') : NULL;
@@ -604,6 +628,19 @@ static int is_compare_tok(TokenType t) {
     return t == TOKEN_EQ || t == TOKEN_NE || t == TOKEN_LT ||
            t == TOKEN_LE || t == TOKEN_GT || t == TOKEN_GE;
 }
+// Phase 17.F.3: map a binary operator token to its DECIMAL opcode (parallel to p12_tok_fop). Arith
+// (+ - * / %) → OP_D*; compares (== != < <= > >=) → OP_D* compare (result i32 → VT_INT).
+static OpCode p12_tok_dop(TokenType t) {
+    switch (t) {
+        case TOKEN_PLUS:  return OP_DADD; case TOKEN_MINUS: return OP_DSUB;
+        case TOKEN_MUL:   return OP_DMUL; case TOKEN_DIV:   return OP_DDIV;
+        case TOKEN_MOD:   return OP_DMOD; // Python Decimal.__mod__
+        case TOKEN_EQ:    return OP_DEQ;  case TOKEN_NE:    return OP_DNE;
+        case TOKEN_LT:    return OP_DLT;  case TOKEN_LE:    return OP_DLE;
+        case TOKEN_GT:    return OP_DGT;  case TOKEN_GE:    return OP_DGE;
+        default:          return OP_DADD; // (unreachable for the routed binary decimal operators)
+    }
+}
 
 // Phase 16 (16.B): the expression evaluators now RETURN the result's value-type (TEKO_VT_*), so a
 // binary `+` with a string operand lowers to culture-invariant concatenation (auto-`to_string`).
@@ -679,6 +716,22 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         codegen_li_emit_fconst(b, strtod(buf, NULL));
         fe_advance(p);
         return TEKO_VT_FLOAT;
+    } else if (p->current_token.type == TOKEN_LIT_DECIMAL) {
+        // Phase 17.F.3: a `dec` literal (`9.99dec`, `1000dec`). The lexer already stripped the `dec`
+        // suffix, so the lexeme is the bare number; parse it through the EXACT 17.F.2 decimal core
+        // (teko_decimal_parse — culture-invariant, banker's-rounded) into a 256-byte value, pool it,
+        // and emit OP_DCONST. Digit separators `_` are stripped first (the lexeme may keep them).
+        // A parse failure (only on >1984-bit coefficient — the grammar already vetted the digits)
+        // canonicalizes to zero; that is a degenerate compile-time literal, not a runtime fail.
+        char buf[128]; int j = 0;
+        const char* lx = p->current_token.lexeme;
+        for (int k = 0; lx[k] && j < (int)sizeof(buf) - 1; k++) if (lx[k] != '_') buf[j++] = lx[k];
+        buf[j] = '\0';
+        teko_decimal dv;
+        if (!teko_decimal_parse(buf, &dv)) teko_decimal_zero(&dv);
+        codegen_li_emit_dconst(b, (const unsigned char*)&dv);
+        fe_advance(p);
+        return TEKO_VT_DECIMAL;
     } else if (p->current_token.type == TOKEN_LIT_STR || p->current_token.type == TOKEN_STRING_LIT) {
         if (strlit_is_interp(p->current_token.lexeme)) {
             // Phase 16 (16.C): an interpolated literal `"…{expr}…"` -> concat of chunks + holes.
@@ -713,12 +766,19 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         int s = ctx ? bind_lookup(ctx->locals, ctx->nlocals, p->current_token.lexeme) : -1;
         int isstr = localstr_get(p->current_token.lexeme);
         int isflt = localflt_get(p->current_token.lexeme); // Phase 17: a float-typed local?
+        int isdec = localdec_get(p->current_token.lexeme); // Phase 17.F.3: a decimal-typed local?
         int ci = localcls_get(p->current_token.lexeme); // Phase 16.D: a class-instance local?
         if (s >= 0 && isflt) {
             // Phase 17 (17.A): a float local reads through the float accumulator ($f0), not $w0.
             codegen_li_emit_fload_local(b, s);
             fe_advance(p);
             return TEKO_VT_FLOAT;
+        }
+        if (s >= 0 && isdec) {
+            // Phase 17.F.3: a decimal local reads through the 256-byte decimal slot ($d0), not $w0.
+            codegen_li_emit_dload_local(b, s);
+            fe_advance(p);
+            return TEKO_VT_DECIMAL;
         }
         if (s >= 0) codegen_li_emit_load_local(b, s);   // $w0 = value (int / string ptr / handle)
         else codegen_li_emit_iconst(b, 0); // unknown identifier in this subset → 0
@@ -746,9 +806,12 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
         // lives in $f0 (FSTORE_LOCAL to a float slot), an int/ptr operand in $w0 (STORE_LOCAL). The
         // temp slot `t` is one frame slot; on native it is reused as either type (a slot has one
         // type per use), on WASM $fvN / $vN are parallel local files.
-        if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, t); // temp = left (float)
-        else                       codegen_li_emit_store_local(b, t);  // temp = left (raw value)
-        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 / $f0 (left-associative)
+        // Phase 17.F.3: a decimal operand lives in the 256-byte $d0 slot — spill it to a decimal temp
+        // slot (DSTORE_LOCAL); a float to $fvN; an int/ptr to $vN.
+        if (vt_l == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, t); // temp = left (decimal)
+        else if (vt_l == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, t); // temp = left (float)
+        else                            codegen_li_emit_store_local(b, t);  // temp = left (raw value)
+        int vt_r = eval_expr_prec(b, p, ctx, prec + 1, ta);  // right → $w0 / $f0 / $d0 (left-assoc)
         if (optok == TOKEN_PLUS && (vt_l == TEKO_VT_STR || vt_r == TEKO_VT_STR)) {
             // Phase 16 (16.B): a `+` with a string operand is culture-invariant CONCATENATION with
             // auto-`to_string`. Right is in $w0 — convert it to a string if it is an int (id 49),
@@ -770,6 +833,16 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
             codegen_li_emit_call_runtime(b, 52);       // $w0 = str_concat(left, right)
             ta->next_temp--;                           // free temp2
             vt_l = TEKO_VT_STR;
+        } else if (vt_l == TEKO_VT_DECIMAL && vt_r == TEKO_VT_DECIMAL) {
+            // Phase 17.F.3: decimal arithmetic / comparison (BOTH operands decimal). Right is in $d0
+            // (just evaluated) → spill to $d1 (DSTORE); reload left from temp `t` into $d0
+            // (DLOAD_LOCAL); emit the decimal op ($d0 = left <op> right; or $w0 for compares). Arith
+            // (+ - * / %) → VT_DECIMAL; compares (== != < <= > >=) → i32 0/1 in $w0 (VT_INT).
+            // Mixed int/float + decimal promotion is 17.F.4 (needs I2D/F2D) — see the else-branch note.
+            codegen_li_emit_dunop(b, OP_DSTORE);   // $d1 = $d0 (right)
+            codegen_li_emit_dload_local(b, t);     // $d0 = left (decimal)
+            codegen_li_emit_dunop(b, p12_tok_dop(optok)); // $d0 = left <op> right  (or $w0 for compares)
+            vt_l = is_compare_tok(optok) ? TEKO_VT_INT : TEKO_VT_DECIMAL;
         } else if (vt_l == TEKO_VT_FLOAT || vt_r == TEKO_VT_FLOAT) {
             // Phase 17 (17.A): float arithmetic / comparison. Promote any int operand to f64 (I2F),
             // bring left into $f0 and right into $f1, then emit the float op. Arith ops (+ - * /)
@@ -940,6 +1013,14 @@ static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int v
         // is reloaded via FLOAD_LOCAL before coercing). id 50 (teko_rt_float_to_string, the 17.C Ryu
         // shortest-round-trip formatter) reads $f0 and leaves the char* result in $w0 (VT_STR).
         codegen_li_emit_call_runtime(b, 50);
+        return;
+    }
+    if (vt == TEKO_VT_DECIMAL) {
+        // Phase 17.F.3: decimal→string (decimal.to_string, id 59) does not exist until 17.F.4. The
+        // 17.F.3 proof never concatenates a decimal (it observes decimal arithmetic via DCMP→int→id
+        // 49, exactly as 17.A observed floats), so this branch is never reached in practice; leave it
+        // a deliberate no-op so a VT_DECIMAL ($d0) value never falls through to the OBJ_BASE branch
+        // below (1<<21 >= TEKO_VT_OBJ_BASE) or the int id-49 path. TODO(17.F.4): emit id 59.
         return;
     }
     if (vt >= TEKO_VT_OBJ_BASE) { emit_object_to_string(b, ctx, vt - TEKO_VT_OBJ_BASE); return; }
@@ -1517,10 +1598,12 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     env_sync(env);
     lower_init_value(b, p, env);
     int rhs_class = g_last_inst_class[0] ? class_find(g_last_inst_class) : rhs_local_class;
-    // Phase 17 (17.A): a float initializer lives in the float accumulator ($f0) — store it to the
-    // float local file (FSTORE_LOCAL), and record the local so `lname` reads back as VT_FLOAT.
-    if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, s);
-    else                                 codegen_li_emit_store_local(b, s);
+    // Phase 17 (17.A / 17.F.3): a float initializer lives in $f0 (FSTORE_LOCAL), a decimal in the
+    // 256-byte $d0 slot (DSTORE_LOCAL); both record the local so `lname` reads back with the right
+    // value-type. An int/ptr stays in $w0 (STORE_LOCAL).
+    if (g_last_init_vt == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, s);
+    else if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, s);
+    else                                      codegen_li_emit_store_local(b, s);
     if (annot_trait >= 0) {
         // Phase 15.B: a FAT trait-typed reference — its concrete type_id (from the RHS) rides in a
         // hidden tid slot as a compile-time constant; `lname.method()` dispatches dynamically.
@@ -1536,6 +1619,8 @@ static void lower_let_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localstr_set(lname, g_last_init_vt == TEKO_VT_STR);
     // Phase 17 (17.A): remember a float-typed local so `lname` routes through the float accumulator.
     localflt_set(lname, g_last_init_vt == TEKO_VT_FLOAT);
+    // Phase 17.F.3: remember a decimal-typed local so `lname` routes through the 256-byte $d0 slot.
+    localdec_set(lname, g_last_init_vt == TEKO_VT_DECIMAL);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
 }
 
@@ -1558,9 +1643,11 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         : -1;
     env_sync(env);
     lower_init_value(b, p, env);
-    // Phase 17 (17.A): keep the store type-correct on reassignment (float → FSTORE_LOCAL).
-    if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, slot);
-    else                                 codegen_li_emit_store_local(b, slot);
+    // Phase 17 (17.A / 17.F.3): keep the store type-correct on reassignment (decimal → DSTORE_LOCAL,
+    // float → FSTORE_LOCAL, else STORE_LOCAL).
+    if (g_last_init_vt == TEKO_VT_DECIMAL)    codegen_li_emit_dstore_local(b, slot);
+    else if (g_last_init_vt == TEKO_VT_FLOAT) codegen_li_emit_fstore_local(b, slot);
+    else                                      codegen_li_emit_store_local(b, slot);
     if (tl >= 0) {
         codegen_li_emit_iconst(b, rhs_class >= 0 ? class_type_id(rhs_class) : -1);
         codegen_li_emit_store_local(b, g_traitlocal[tl].tid_slot);
@@ -1569,6 +1656,8 @@ static int lower_reassign(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     localstr_set(nm, g_last_init_vt == TEKO_VT_STR);
     // Phase 17 (17.A): keep the local's float-typed-ness in sync with its new value.
     localflt_set(nm, g_last_init_vt == TEKO_VT_FLOAT);
+    // Phase 17.F.3: keep the local's decimal-typed-ness in sync with its new value.
+    localdec_set(nm, g_last_init_vt == TEKO_VT_DECIMAL);
     if (p->current_token.type == TOKEN_SEMICOLON) fe_advance(p);
     return 1;
 }
@@ -2685,7 +2774,7 @@ static void emit_class_body(Parser* p, BytecodeBuffer* buffer, int ci,
         renv.locals = &rlocals; renv.nlocals = &rnlocals; renv.caplocals = &rcaplocals;
         renv.binds = &binds; renv.nb = &nb; renv.ctx = &ctx;
 
-        localcls_reset(); localstr_reset(); localflt_reset(); // method scope: self (+ any objects it instantiates) are class-typed
+        localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset(); // method scope: self (+ any objects it instantiates) are class-typed
         traitlocal_reset(); // method scope: trait-typed locals don't leak across method bodies
         for (int pi = 0; pi < nparams; pi++) {
             int ps = env_alloc_local(&renv, params[pi]);
@@ -2740,7 +2829,7 @@ static void emit_method_routines(const char* source, BytecodeBuffer* buffer,
         if (p.current_token.type == TOKEN_LBRACE) fe_advance(&p);
         emit_class_body(&p, buffer, ci, fns, nfns, binds, nb, ta);
     }
-    localcls_reset(); localstr_reset(); localflt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
 }
 
 // Phase 15.C: emit each MONOMORPHIZED instance's methods. For each `Tmpl$Arg` concrete instance, set
@@ -2772,7 +2861,7 @@ static void emit_mono_routines(const char* source, BytecodeBuffer* buffer,
         }
         g_subst_param[0] = '\0'; g_subst_arg[0] = '\0';
     }
-    localcls_reset(); localstr_reset(); localflt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
 }
 
 int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
@@ -2804,7 +2893,7 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
     collect_events(source, fns, nfns); // Phase 15.D: events + their static subscriptions
     collect_classes(source, nfns);
     check_oop_collisions(); // ambiguous trait composition -> g_oop_error (compile failure below)
-    localcls_reset(); localstr_reset(); localflt_reset();
+    localcls_reset(); localstr_reset(); localflt_reset(); localdec_reset();
     if (g_oop_error) return 1; // do not emit a module with an unresolved OOP compile error
 
     // Phase 12: named local variables ($v0..) declared with `let`/`mut` at top level.

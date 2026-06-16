@@ -1,6 +1,9 @@
 #ifndef TEKO_RT_H
 #define TEKO_RT_H
 
+// Phase 17.F.3: the 256-byte `decimal` value type (the by-pointer ABI the OP_D* opcodes lower to).
+#include "teko_decimal.h"
+
 // Teko native runtime ABI (Phase 13 — native runner / crypto language surface).
 //
 // This is the thin C shim that a `teko build --target=<native>` executable links
@@ -233,5 +236,17 @@ double teko_rt_parse_float(const char* s);             // id 54: string -> f64 (
 // Phase 17.B — CHECKED float->int (OP_F2I) fail-loud landing pad (called by the emitted inline
 // NaN/i32-range guard; aborts non-zero with a stderr diagnostic, like the 16.F parsers). No return.
 void teko_rt_f2i_fail(void);
+
+// Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers (the by-pointer ABI the
+// OP_DADD/DSUB/DMUL/DDIV/DMOD/DEQ..DGE opcodes lower to). Each takes pointers into 256-byte decimal
+// slots (native stack/frame, WASM linear memory) and FAILS LOUD on overflow / divide-by-zero
+// (the 17.F.1 core's 0 return) via teko_rt_die — exit 70 native / __builtin_trap in the reactor.
+// cmp writes -1/0/+1 to *out_lt_eq_gt (the emitter maps it to the i32 0/1 boolean each compare wants).
+void teko_rt_decimal_add(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_sub(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_mul(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_div(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_mod(const teko_decimal* a, const teko_decimal* b, teko_decimal* out);
+void teko_rt_decimal_cmp(const teko_decimal* a, const teko_decimal* b, int* out_lt_eq_gt);
 
 #endif // TEKO_RT_H
