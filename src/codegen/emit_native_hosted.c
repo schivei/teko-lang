@@ -820,6 +820,63 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             else     fprintf(f, "    cvtsi2sdq %%rax, %%xmm0\n");
             break;
 
+        // Phase 17 (17.B): float modulo `%`. The hosted emitter is libc-hosted, so reuse libc fmod
+        // (exact IEEE remainder toward zero). Args are already in $f0=xmm0/d0 ($f0) and $f1=xmm1/d1
+        // ($f1) — fmod's SysV/AAPCS calling convention is (xmm0,xmm1)->xmm0 / (d0,d1)->d0, so no
+        // register shuffling is needed. Stack-neutral; $f0 receives the result.
+        case OP_FMOD:
+            if (arm) fprintf(f, "    bl %sfmod\n", pre);
+            else     fprintf(f, "    call %sfmod%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            break;
+
+        // Phase 17 (17.B): CHECKED float->int (truncate toward zero), FAIL-LOUD. cvttsd2si/fcvtzs do
+        // NOT trap (they return a sentinel on overflow), so emit an explicit NaN + i32-range guard
+        // matched to WASM's `i32.trunc_f64_s` valid OPEN interval: -2147483649.0 < $f0 < 2147483648.0
+        // (and not NaN). A value outside it `call`s teko_rt_f2i_fail (the SAME exit-70 + stderr
+        // fail-loud path 16.F uses), so a value that traps on WASM also aborts here. The scratch
+        // GPR is r11/x9 (materialize the bound, NEVER $w0/$w1); the bound goes in $f1=xmm1/d1
+        // (clobbering $f1 is fine — F2I consumes $f0 to produce an int and we never read $f1 after).
+        case OP_F2I: {
+            int id = ctx->cf_id_next++;
+            uint64_t hi = 0, lo = 0; // 2147483648.0 ; -2147483649.0
+            double dhi = 2147483648.0, dlo = -2147483649.0;
+            memcpy(&hi, &dhi, 8); memcpy(&lo, &dlo, 8);
+            if (arm) {
+                // NaN: fcmp d0,d0 sets V (unordered) -> b.vs die.
+                fprintf(f, "    fcmp d0, d0\n    b.vs .Lf2idie_%d\n", id);
+                // upper: d1 = 2147483648.0 ; if d0 >= d1 -> die.
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(hi & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((hi >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((hi >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((hi >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d1, x9\n    fcmp d0, d1\n    b.ge .Lf2idie_%d\n", id);
+                // lower: d1 = -2147483649.0 ; if d0 <= d1 -> die.
+                fprintf(f, "    movz x9, #%u\n", (unsigned)(lo & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #16\n", (unsigned)((lo >> 16) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #32\n", (unsigned)((lo >> 32) & 0xFFFFu));
+                fprintf(f, "    movk x9, #%u, lsl #48\n", (unsigned)((lo >> 48) & 0xFFFFu));
+                fprintf(f, "    fmov d1, x9\n    fcmp d0, d1\n    b.le .Lf2idie_%d\n", id);
+                fprintf(f, "    fcvtzs w0, d0\n");
+                fprintf(f, "    b .Lf2iok_%d\n", id);
+                fprintf(f, ".Lf2idie_%d:\n    bl %steko_rt_f2i_fail\n", id, pre);
+                fprintf(f, ".Lf2iok_%d:\n", id);
+            } else {
+                // NaN: ucomisd %xmm0,%xmm0 sets PF (unordered) -> jp die.
+                fprintf(f, "    ucomisd %%xmm0, %%xmm0\n    jp .Lf2idie_%d\n", id);
+                // upper: xmm1 = 2147483648.0 ; ucomisd %xmm1,%xmm0 -> jae die (x >= 2^31).
+                fprintf(f, "    movabsq $%llu, %%r11\n    movq %%r11, %%xmm1\n", (unsigned long long)hi);
+                fprintf(f, "    ucomisd %%xmm1, %%xmm0\n    jae .Lf2idie_%d\n", id);
+                // lower: xmm1 = -2147483649.0 ; ucomisd %xmm1,%xmm0 -> jbe die (x <= -(2^31+1)).
+                fprintf(f, "    movabsq $%llu, %%r11\n    movq %%r11, %%xmm1\n", (unsigned long long)lo);
+                fprintf(f, "    ucomisd %%xmm1, %%xmm0\n    jbe .Lf2idie_%d\n", id);
+                fprintf(f, "    cvttsd2si %%xmm0, %%eax\n");
+                fprintf(f, "    jmp .Lf2iok_%d\n", id);
+                fprintf(f, ".Lf2idie_%d:\n    call %steko_rt_f2i_fail%s\n", id, pre, is_macho(ctx) ? "" : "@PLT");
+                fprintf(f, ".Lf2iok_%d:\n", id);
+            }
+            break;
+        }
+
         default:
             break; // unsupported opcode in the hosted subset (straight-line surface)
     }

@@ -315,7 +315,16 @@ void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v) {
 void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op) {
     if (!buffer) return;
     buffer->uses_float = 1;
-    emit_byte(buffer, (unsigned char)op); // single-byte: FADD..FGE / FSTORE / FLOAD / I2F
+    emit_byte(buffer, (unsigned char)op); // single-byte: FADD..FGE / FMOD / FSTORE / FLOAD / I2F
+}
+
+// Phase 17 (17.B): emit OP_F2I — CHECKED float->int (truncate toward zero, fail-loud on
+// NaN/±Inf/out-of-i32-range). Single-byte; sets uses_float so the float accumulator locals are
+// declared on WASM even when the program only reads $f0 to produce an int.
+void codegen_li_emit_f2i(BytecodeBuffer* buffer) {
+    if (!buffer) return;
+    buffer->uses_float = 1;
+    emit_byte(buffer, OP_F2I);
 }
 
 void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot) {

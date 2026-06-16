@@ -845,3 +845,12 @@ int teko_rt_parse_bool(const char* s) {
     if (!teko_convert_parse_bool(s, &v)) teko_rt_die("convert.parse_bool: invalid boolean");
     return v;
 }
+
+// Phase 17 (17.B) — CHECKED float->int (OP_F2I) FAIL-LOUD landing pad. The hosted emitter emits an
+// inline NaN + i32-range guard (matched to WASM's i32.trunc_f64_s valid open interval) and `call`s
+// this when the float cannot be represented as an i32 — so a value that traps on WASM also aborts
+// non-zero here, via the SAME exit-70 + stderr path the 16.F parsers use. No arguments (the guard
+// already decided); never returns.
+void teko_rt_f2i_fail(void) {
+    teko_rt_die("convert.to_int: float out of i32 range or not finite");
+}

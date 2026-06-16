@@ -161,6 +161,45 @@ hosted `xmm`/`movabsq` path is not compiled on the freestanding Windows runner, 
 compiler C — float pool + `memcpy`'d bit pattern, no aliasing UB — is clean). Implementation
 continues at **17.B** (checked int↔float casts).
 
+Sub-block **17.B (checked int↔float casts + float modulo) is DONE** on both targets (locally green).
+The two opcodes 17.A reserved are now LIVE, surfaced as explicit conversion builtins, with executable
+`.tks` proofs on the happy AND fail-loud paths:
+- **OP_FMOD (0x76)** — float `%`. Native is libc-hosted, so it reuses `fmod` (args already in
+  xmm0/xmm1 = d0/d1 by the SysV/AAPCS convention; `call fmod` / `bl fmod`, result in $f0); WASM has
+  no `f64.rem`, so it inlines the IEEE remainder toward zero `$f0 - trunc($f0/$f1)*$f1`
+  (stack-neutral). `p12_tok_fop(TOKEN_MOD)` now maps `MOD → OP_FMOD`, so `7.5 % 2.0` lowers through
+  the existing float-arith branch.
+- **OP_F2I (0x82)** — CHECKED float→int (truncate toward zero), the **core deliverable**: it must
+  **FAIL LOUD**, never silently truncate/wrap/UB. WASM lowers to `i32.trunc_f64_s`, which TRAPS on
+  NaN/±Inf/out-of-i32-range automatically (a `WebAssembly.RuntimeError`, like 16.F's
+  `__builtin_trap`). `cvttsd2si`/`fcvtzs` do NOT trap, so the hosted emitter emits an explicit
+  inline guard — NaN test (`ucomisd %xmm0,%xmm0` + `jp` / `fcmp d0,d0` + `b.vs`) plus an i32-range
+  check **matched to `i32.trunc_f64_s`'s valid open interval `-2147483649.0 < x < 2147483648.0`**
+  (empirically confirmed) — that `call`s the new exported `teko_rt_f2i_fail` (the SAME exit-70 +
+  stderr fail-loud path the 16.F parsers use). So a value that traps on WASM (tested with
+  `3000000000.0`, over INT32_MAX) **aborts non-zero on native too** — identical behavior on both
+  targets.
+- **Surface** (`frontend_interop.c`): a NEW dotted-head path `convert.to_int` / `convert.to_float`
+  (`is_floatcast_head` / `lower_floatcast`), claimed BEFORE the codec check at every `is_codec_head`
+  site (eval_primary, lower_init_value — recording `g_last_init_vt` so a cast-initialized local reads
+  back as the right type, and the top-level call-arg path). The argument is a full EXPRESSION
+  (eval'd via `eval_expr_prec`), NOT a codec literal/local — so it bypasses `codec_id_for` /
+  `lower_base_codec`. `to_int(float)` emits OP_F2I (`codegen_li_emit_f2i`); `to_float(int)` emits
+  OP_I2F; an already-correct-type arg is a no-op.
+- **codegen_metal.c:** OP_FMOD added to the float-op integer-CSE barrier set (writes $f0 only);
+  OP_F2I added to BOTH the barrier set AND the $w0-clobber invalidation set (it writes $w0 with a
+  non-constant int). Both single-byte — no 4-byte-arg-walker change.
+- **Proofs:** `runtime/{native,wasm}/samples/cast.tks` → `a = 1 / n = 7 / m = 1` (byte-for-byte
+  identical native vs WASM — `to_float`, checked `to_int`, `fmod`) and `cast_fail.tks` (emits
+  `before`, then native aborts non-zero with `convert.to_int: float out of i32 range…` / WASM traps
+  — `run-cast.mjs` mirrors `run-parse.mjs`'s happy+trap structure). Wired into `run-native.sh`, the
+  wasm harness, and `wasm.yml`.
+
+Verification: suite 232/232 (17.B adds no runtime C → no new KATs); ASan/UBSan (both dispatch paths)
++ TSan clean; the 16 native goldens + all float-free native/WASM output byte-identical (the integer
+path and float-free modules emit zero float opcodes — purely additive). Implementation continues at
+**17.C** (the freestanding shortest-round-trip `teko_convert_f64_to_string` formatter + KATs).
+
 ## Reserved — future exact base-10 `decimal` type (Phase 17.F, pending owner decision)
 Owner design note: an EXACT base-10 `decimal` (C#-`decimal` / SQL `DECIMAL` style, 128-bit — exact
 for money, distinct from the binary f64 here) will probably be added; final placement (17.F in this

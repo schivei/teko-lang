@@ -196,6 +196,19 @@ b = 1
 c = 1
 EXP
 )"
+# Phase 17 (17.B): checked int↔float casts (convert.to_int / convert.to_float) + float modulo (`%`).
+# to_float promotes int→f64 (OP_I2F); to_int truncates toward zero with a CHECKED fail-loud guard
+# (OP_F2I); `%` on floats is OP_FMOD (libc fmod here). Byte-identical to the WASM proof (run-cast.mjs).
+check cast.tks "$(cat <<'EXP'
+a = 1
+n = 7
+m = 1
+EXP
+)"
+# Phase 17 (17.B) FAIL-LOUD: convert.to_int(3e9) is > INT32_MAX (outside i32.trunc_f64_s's range), so
+# it does NOT silently truncate/wrap — the emitted inline guard calls teko_rt_f2i_fail (exit 70 +
+# stderr diag). WASM traps on the same value (run-cast.mjs), so the behavior is identical on both.
+check_fail cast_fail.tks "before" "convert.to_int: float out of i32 range"
 # Phase 15 (15.A): concrete class — fields + methods + STATIC dispatch, zero runtime reflection.
 # `Point()` -> OP_OBJ_NEW; `p.x = 3` -> OP_OBJ_SET; `p.sum()`/`p.scale(10)` -> OP_CALL_FUNC
 # (the method routine reads `self.x`/`self.y` via OP_OBJ_GET). Prints 7 (3+4) then 70 ((3+4)*10).

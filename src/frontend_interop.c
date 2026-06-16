@@ -587,10 +587,11 @@ static OpCode p12_tok_fop(TokenType t) {
     switch (t) {
         case TOKEN_PLUS:  return OP_FADD; case TOKEN_MINUS: return OP_FSUB;
         case TOKEN_MUL:   return OP_FMUL; case TOKEN_DIV:   return OP_FDIV;
+        case TOKEN_MOD:   return OP_FMOD; // Phase 17 (17.B): float `%` (fmod, remainder toward zero)
         case TOKEN_EQ:    return OP_FEQ;  case TOKEN_NE:    return OP_FNE;
         case TOKEN_LT:    return OP_FLT;  case TOKEN_LE:    return OP_FLE;
         case TOKEN_GT:    return OP_FGT;  case TOKEN_GE:    return OP_FGE;
-        default:          return OP_FADD; // (TOKEN_MOD has no float form in 17.A — FMOD is 17.B)
+        default:          return OP_FADD; // (unreachable for the routed binary float operators)
     }
 }
 // Phase 17 (17.A): a comparison operator yields an i32 0/1 (VT_INT) regardless of operand types.
@@ -606,6 +607,13 @@ static int eval_expr_prec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx,
 static int is_codec_head(const Parser* p);   // fwd (defined with the codec surface below)
 static void lower_base_codec(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 static int lower_interp_string(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd (16.C)
+// Phase 17 (17.B): `convert.to_int` / `convert.to_float` — direct-opcode checked int↔float casts
+// whose argument is a full EXPRESSION (not a codec literal/local), so they take a dedicated path
+// (NOT codec_id_for / lower_base_codec). is_floatcast_head claims the dotted ident BEFORE the codec
+// check; lower_floatcast evaluates the inner expr and emits OP_F2I (to_int) / OP_I2F (to_float),
+// returning the result value-type (VT_INT / VT_FLOAT).
+static int is_floatcast_head(const Parser* p); // fwd (defined below)
+static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 // Phase 16 (16.D): coerce the operand VALUE in $w0 (per its value-type `vt`) to a string pointer in
 // $w0 — int via to_string (id 49), string unchanged, object via its to_string / synthesized default.
 static void coerce_to_string_in_w0(BytecodeBuffer* b, const LowerCtx* ctx, int vt); // fwd (16.D)
@@ -677,6 +685,10 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         codegen_li_emit_sconst(b, codegen_li_add_string_constant(b, sv));
         free(sv); fe_advance(p);
         return TEKO_VT_STR;
+    } else if (is_floatcast_head(p)) {
+        // Phase 17 (17.B): `convert.to_int(<expr>)` / `convert.to_float(<expr>)` — checked int↔float
+        // casts. Claimed BEFORE the codec check so the dotted ident is not mistaken for a codec call.
+        return lower_floatcast(b, p, ctx);
     } else if (is_codec_head(p)) {
         // Phase 16 (16.B/16.F): a codec / convert / hash call primary — most return a string pointer
         // (VT_STR); the checked parsers return an int (VT_INT). So `"n=" + convert.parse_int(s)`
@@ -1149,6 +1161,38 @@ static void lower_duplex_call(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx)
     codegen_li_emit_duplex(b, (OpCode)op);               // $w0 = duplex op result
 }
 
+// --- Phase 17 (17.B): checked int↔float casts (convert.to_int / convert.to_float) ---------------
+// These are NOT codec calls: their argument is a full EXPRESSION (a float or int sub-expression),
+// so they bypass codec_id_for / lower_base_codec (which emit OP_CALL_RUNTIME over a literal/local
+// arg). Instead the inner expression is eval'd via eval_expr_prec (leaving its result in $w0 for an
+// int or $f0 for a float), then the conversion opcode is emitted:
+//   convert.to_int(<expr>)   -> if the expr is VT_FLOAT, OP_F2I (CHECKED, fail-loud) -> i32 in $w0;
+//                               an int expr is already in $w0 (no-op). Result VT_INT.
+//   convert.to_float(<expr>) -> if the expr is NOT VT_FLOAT (an int in $w0), OP_I2F -> $f0; a float
+//                               expr is already in $f0 (no-op). Result VT_FLOAT.
+static int is_floatcast_head(const Parser* p) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
+    const char* lx = p->current_token.lexeme;
+    return strcmp(lx, "convert.to_int") == 0 || strcmp(lx, "convert.to_float") == 0;
+}
+static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    int to_int = (strcmp(p->current_token.lexeme, "convert.to_int") == 0);
+    fe_advance(p);                                       // consume the dotted identifier
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    // The inner expression -> $w0 (int) or $f0 (float). ctx->ta is the active temp allocator.
+    int vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    if (to_int) {
+        if (vt == TEKO_VT_FLOAT) codegen_li_emit_f2i(b);  // $w0 = (i32)trunc($f0)  (checked)
+        // else: an int expression is already in $w0 — to_int is a no-op.
+        return TEKO_VT_INT;
+    } else {
+        if (vt != TEKO_VT_FLOAT) codegen_li_emit_funop(b, OP_I2F); // $f0 = (double)$w0
+        // else: a float expression is already in $f0 — to_float is a no-op.
+        return TEKO_VT_FLOAT;
+    }
+}
+
 // --- delayed (timed) channels (Phase 14, 14.C) ----------------------------------
 // `delayed.open/send/advance/recv/poll/close(args)` — same dotted-identifier surface as duplex
 // (the lexer folds `delayed.open` into one IDENTIFIER), lowering to the dedicated OP_DELAYED_*.
@@ -1374,6 +1418,10 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     } else if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
                p->peek_token.type == TOKEN_LPAREN) {
         lower_intrinsic_call(b, p, ctx);
+    } else if (is_floatcast_head(p)) {
+        // Phase 17 (17.B): `let f = convert.to_float(3);` / `let n = convert.to_int(7.9);` — record
+        // the cast's result type so `f`/`n` reads back as a float/int local (via g_last_init_vt).
+        g_last_init_vt = lower_floatcast(b, p, ctx);
     } else if (is_codec_head(p))   { int id = codec_id_for(p->current_token.lexeme);
                                      lower_base_codec(b, p, ctx); g_last_init_vt = runtime_result_vt(id); }
     else if (is_duplex_head(p))    { lower_duplex_call(b, p, ctx); }
@@ -2992,6 +3040,19 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                                                           &args[nargs], &temps_used)) {
                     // Phase 16.B: an expression argument (e.g. `"x = " + n`) — evaluated + spilled.
                     nargs++;
+                } else if (nargs < 16 && is_floatcast_head(&parser) &&
+                           strcmp(parser.current_token.lexeme, "convert.to_int") == 0) {
+                    // Phase 17 (17.B): a bare `convert.to_int(<expr>)` call argument — the checked
+                    // cast leaves an i32 in $w0, spilled to a temp like the codec case. (to_float
+                    // yields $f0, not passable as an int arg in this subset — reach it via an
+                    // expression arg instead.)
+                    lower_floatcast(buffer, &parser, &top_ctx); // $w0 = (i32)trunc(expr) (checked)
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
                 } else if (nargs < 16 && is_codec_head(&parser)) {
                     // base64/hex codec call as an argument (P12-G): lower eagerly and
                     // spill the result pointer to a temp local, then pass the local.

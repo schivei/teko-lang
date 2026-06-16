@@ -196,7 +196,10 @@ typedef enum {
     OP_FSUB         = 0x73, // $f0 = $f0 - $f1
     OP_FMUL         = 0x74, // $f0 = $f0 * $f1
     OP_FDIV         = 0x75, // $f0 = $f0 / $f1 (IEEE; inf/nan are defined, no zero guard)
-    // 0x76 = OP_FMOD reserved for 17.B (do NOT emit yet).
+    // Phase 17 (17.B): float modulo `%`. $f0 = fmod($f0, $f1) = $f0 - trunc($f0/$f1)*$f1 (IEEE
+    // remainder toward zero). Native is libc-hosted -> `call fmod` (xmm0,xmm1 -> xmm0 / d0,d1 -> d0);
+    // WASM has no f64.rem so it inlines `a - trunc(a/b)*b`. Stack-neutral; touches $f0/$f1 only.
+    OP_FMOD         = 0x76, // $f0 = fmod($f0, $f1)
     OP_FEQ          = 0x77, // $w0 = ($f0 == $f1) ? 1 : 0  (result i32 → VT_INT)
     OP_FNE          = 0x78, // $w0 = ($f0 != $f1) ? 1 : 0
     OP_FLT          = 0x79, // $w0 = ($f0 <  $f1) ? 1 : 0
@@ -208,7 +211,14 @@ typedef enum {
     OP_FSTORE_LOCAL = 0x7F, // 4-byte slot: $fv<slot> = $f0
     OP_FLOAD_LOCAL  = 0x80, // 4-byte slot: $f0 = $fv<slot>
     OP_I2F          = 0x81, // $f0 = (double)$w0  ($w0 unchanged) — int→float promotion
-    // 0x82 = OP_F2I reserved for 17.B (do NOT emit yet).
+    // Phase 17 (17.B): CHECKED float->int (truncate toward zero), FAIL-LOUD. The int model is
+    // i32-range ($w0 is i32 on WASM; matches parse_int). WASM lowers to `i32.trunc_f64_s`, which
+    // TRAPS on NaN/±Inf/out-of-i32-range (automatic fail-loud, like 16.F's __builtin_trap). Native
+    // `cvttsd2si` does NOT trap, so the hosted emitter emits an explicit NaN + i32-range guard
+    // (matched to i32.trunc_f64_s's valid open interval -2147483649.0 < x < 2147483648.0) that
+    // `call`s teko_rt_f2i_fail (the SAME exit-70 + stderr fail-loud path 16.F uses) — so a value
+    // that traps on WASM also aborts on native. Result i32 in $w0 (clobbers $w0 with a non-const).
+    OP_F2I          = 0x82, // $w0 = (i32)trunc($f0)  (checked, fail-loud)
 
     // Phase 17.F (RESERVED — owner design note, pending final decision): an EXACT base-10
     // `decimal` type (C#-decimal / SQL DECIMAL style, 128-bit — exact for money, distinct from the
@@ -403,6 +413,9 @@ void codegen_li_emit_fconst(BytecodeBuffer* buffer, double v);
 void codegen_li_emit_funop(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_fstore_local(BytecodeBuffer* buffer, int slot);
 void codegen_li_emit_fload_local(BytecodeBuffer* buffer, int slot);
+// Phase 17 (17.B): emit OP_F2I (single-byte, CHECKED float->int; fail-loud). Sets uses_float so the
+// WASM backend declares the float accumulator locals even if the program only down-casts a float.
+void codegen_li_emit_f2i(BytecodeBuffer* buffer);
 void codegen_li_emit_halt(BytecodeBuffer* buffer);
 
 #endif // CODEGEN_LI_H

@@ -1576,6 +1576,18 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
         case OP_FSTORE_LOCAL: fprintf(f, "    local.get $f0\n    local.set $fv%d\n", arg); break;
         case OP_FLOAD_LOCAL:  fprintf(f, "    local.get $fv%d\n    local.set $f0\n", arg); break;
         case OP_I2F: fprintf(f, "    local.get $w0\n    f64.convert_i32_s\n    local.set $f0\n"); break;
+        // Phase 17 (17.B): float modulo `%`. WASM has no f64.rem, so inline the IEEE remainder
+        // toward zero: $f0 = $f0 - trunc($f0/$f1)*$f1. Stack-neutral (one f64 pushed, set to $f0).
+        case OP_FMOD:
+            fprintf(f, "    local.get $f0\n");                                  // a
+            fprintf(f, "    local.get $f0\n    local.get $f1\n    f64.div\n    f64.trunc\n"); // trunc(a/b)
+            fprintf(f, "    local.get $f1\n    f64.mul\n");                      // trunc(a/b)*b
+            fprintf(f, "    f64.sub\n    local.set $f0\n");                      // a - trunc(a/b)*b
+            break;
+        // Phase 17 (17.B): CHECKED float->int. i32.trunc_f64_s TRAPS on NaN/±Inf/out-of-i32-range
+        // (a WebAssembly.RuntimeError the host sees), so it is fail-loud automatically — no guard
+        // needed, and the trap boundary is exactly the open interval the native guard matches.
+        case OP_F2I: fprintf(f, "    local.get $f0\n    i32.trunc_f64_s\n    local.set $w0\n"); break;
 
         // ====================================================================
         // 4. NATIVE ARENA ALLOCATOR (O(1) bump)

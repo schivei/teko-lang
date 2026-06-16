@@ -381,7 +381,10 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                      op == OP_FDIV || op == OP_FEQ || op == OP_FNE || op == OP_FLT ||
                      op == OP_FLE || op == OP_FGT || op == OP_FGE || op == OP_FSTORE ||
                      op == OP_FLOAD || op == OP_FSTORE_LOCAL || op == OP_FLOAD_LOCAL ||
-                     op == OP_I2F) {
+                     op == OP_I2F ||
+                     // Phase 17 (17.B): OP_FMOD writes $f0 only (barrier suffices); OP_F2I writes
+                     // $w0 with a non-const int, so it is a barrier here AND a $w0-cache reset below.
+                     op == OP_FMOD || op == OP_F2I) {
                 last_arith_op = (OpCode)0;
             }
 
@@ -425,7 +428,11 @@ static void process_linear_il_bytes(MetalContext* ctx, const unsigned char* byte
                 // (FCONST/FADD/etc. write $f0/$f1 only — they don't clobber $w0, so they need only
                 // the last_arith_op barrier above, not this $w0-cache reset.)
                 op == OP_FEQ || op == OP_FNE || op == OP_FLT ||
-                op == OP_FLE || op == OP_FGT || op == OP_FGE) {
+                op == OP_FLE || op == OP_FGT || op == OP_FGE ||
+                // Phase 17 (17.B): OP_F2I writes $w0 with the (non-constant) truncated int result,
+                // so it invalidates the ICONST reuse cache exactly like a float compare. (OP_FMOD
+                // touches $f0/$f1 only — no $w0 clobber — so it stays out of this set.)
+                op == OP_F2I) {
                 accum_has_value = false;
             }
         }
