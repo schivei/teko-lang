@@ -97,7 +97,9 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   **Phase 12** (Frontend Grammar & Lexer Extension) is the **current phase** (PR #5;
   `docs/PHASE12_FRONTEND_GRAMMAR.md`). **Phase 13 = Native Cryptography** (dedicated,
   owner-requested, **functionally complete & CI-green** on `feat/phase-13-native-crypto`,
-  PR #6); the old 13–20 shifted to 14–21 (Self-Hosting = 21).
+  PR #6); the old 13–20 shifted to 14–21. A later **Phase 16 = Casting / Type Conversions &
+  Parsing** was inserted (owner-requested), shifting 16–21 → 17–22 (Self-Hosting = **22**); see
+  `docs/plan.md`.
 - **Phase 13 (Native Cryptography) decisions.** Every primitive is **portable C23 in the
   embedded native runtime** (`src/runtime/teko_crypto_*.c`) — the single source of truth,
   KAT-tested in the Unity suite against NIST/RFC vectors; it is *intended* to be linked into
@@ -153,7 +155,7 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   is generated at compile time as a specialized, monomorphized (de)serializer **per concrete type**,
   emitted directly — Go-style generated marshalers, never a runtime reflective walker — consistent with
   the language's zero-runtime-reflection ethos. `serialize`/`stringify` (and `parse.json`/`.csv`/`.xml`)
-  lower this way in **Phase 18** (Enterprise Parsers); the tokens are reserved in Phase 12 with that destination.
+  lower this way in **Phase 19** (Enterprise Parsers); the tokens are reserved in Phase 12 with that destination.
 - **Browser FFI backend AND a real `.tks` frontend are built.** The WASM backend lowers the
   full Browser FFI surface (imports, DOM, events, allocator, facade), and the frontend now
   compiles real source for it: `teko build <f>.tks --target=wasm` lexes/parses/lowers the

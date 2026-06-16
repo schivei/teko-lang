@@ -125,6 +125,41 @@ sub-block.** The proofs use the complete-signature convention (incl. a generic m
 generalized beyond `self`/instantiation, trait composition (union of method tables; collision =
 compile error). Then 15.C (generics, the deep one) and 15.D (events).
 
+## The `to_string` convention hook (for Phase 16's auto-conversion)
+
+**Owner directive (cross-phase):** every type — primitive, complex, and user-defined — has an
+automatic `to_string` producing a **culture-invariant default** representation, **auto-invoked when
+a value is concatenated with / interpolated into a string**. The auto-call *machinery* is **Phase 16
+(Casting / Type Conversions & Parsing)**; this OOP design must leave it viable and never paint it
+into a corner. The contract Phase 15 commits to:
+
+- **`to_string` is an ordinary, conventionally-named method.** A user-defined type exposes its
+  string form by defining `fn to_string(self): str { … }`. It is **overridable** (a class redefines
+  it) and **inheritable** (15.B: an abstract base or `trait` may supply a default `to_string` that
+  concrete classes inherit unless they override). No special grammar — it rides the exact same
+  method machinery as any other method.
+- **Discoverable by name at compile time.** The class registry already resolves methods by name
+  (`class_method_idx(ci, "to_string")`), so Phase 16 can ask "does this type define/inherit
+  `to_string`?" and get a definite compile-time answer (slot, or absent). **15.B's vtable layout
+  MUST keep methods name-resolvable** (no name-mangling/numbering scheme that hides `to_string`) and
+  **MUST place an inherited/overridden `to_string` in a stable, dispatchable slot** — so a
+  trait/abstract-typed reference can `to_string` through the vtable while a concrete static type
+  dispatches it directly.
+- **Dispatch reuses the existing primitives, zero runtime reflection.** A concrete-static receiver
+  lowers `to_string` to a direct `OP_CALL_FUNC` (static dispatch, exactly like `p.sum()` today); an
+  abstract/trait-typed receiver lowers it to a vtable-slot `call_indirect` (15.B). Phase 16 resolves
+  the concrete `to_string` at compile time — never a reflective runtime walk.
+- **Default when absent.** If a user-defined type neither defines nor inherits `to_string`, Phase 16
+  synthesizes the culture-invariant default (e.g. a generated per-type stringifier over the fields,
+  in the Go-style monomorphized-generator spirit of Phase 19) — the registry's "absent" answer is
+  the trigger. Phase 15 owns only the *hook* (the conventional, dispatchable method + name
+  resolution); Phase 16 owns the synthesis + the auto-call at concat/interpolation sites.
+
+**Status in 15.A:** the hook is already viable — methods are resolved by name and dispatched via
+`OP_CALL_FUNC`, so a class that defines `fn to_string(self): str` works today with no new machinery
+(it is just a method). 15.B will extend this to inherited/trait-default `to_string` via the static
+vtable, explicitly preserving name-resolvability. No design choice in 15.A blocks the auto-call.
+
 ## Discipline (unchanged, non-negotiable)
 One increment per commit; build + suite; **ASan + UBSan on BOTH dispatch paths + TSan**
 clean each commit; the **16 native emitter goldens never regress**; all four CI gates
