@@ -52,11 +52,23 @@ surface; integer/float values are marshalled as their canonical string form into
 (keeps the uniform pointer-passing convention — the runtime parses/formats).
 
 ## Sub-blocks & dependency order
-- **16.A — Conversion runtime foundation + primitive `to_string`/parse (explicit-call).**
-  `teko_convert.c` source of truth (Unity KATs: int/float/bool round-trips, edge cases —
-  INT64_MIN, ±inf/nan policy, leading/trailing whitespace, overflow → fail-loud). New
-  OP_CALL_RUNTIME ids 49–55, native wrappers, WASM reactor. Surface = explicit builtins. Proof
-  `.tks` native + WASM. **BOUNDED** (mirrors the crypto/time runtime pattern exactly). **Start here.**
+- **16.A — Conversion runtime foundation + primitive `to_string` (explicit-call). ✅ DONE & locally
+  green on both targets.** `teko_convert.c` is the source of truth (6 Unity KATs: i64 incl.
+  INT64_MIN, bool, str_concat, parse_i64 valid/invalid incl. overflow + grouping rejection,
+  parse_bool — suite 223→229). Surface = the dotted-identifier builtins `convert.int_to_str` (id
+  49), `convert.bool_to_str` (51), `convert.str_concat` (52, arity 2), lowering through
+  OP_CALL_RUNTIME → native `teko_rt_*` + the WASM reactor. Executable proofs
+  `runtime/{native,wasm}/samples/convert.tks` → `42 / 1000000 / true / false / "x = 42"`
+  (byte-identical across targets, asserting NO digit grouping). ASan+UBSan both dispatch paths +
+  16 goldens intact; crypto WASM proofs still green (additive reactor change).
+  - **Scope notes (carried forward):** (a) **Float** formatting/parsing is genuinely large in
+    freestanding C (shortest round-trip needs a Ryu/Grisu-class algorithm — the wasm32 shim has no
+    snprintf/strtod), so it is its OWN later step rather than part of this bounded foundation.
+    (b) The **parse** C core (`parse_i64`/`parse_bool`, checked, 1/0 + value-only-on-success) landed
+    here as the source of truth + KATs, but its language *surface* is deferred to **16.F** (checked
+    inter-type conversions) where fail-loud is the whole point — exposing a silent-failure single-
+    value parse on the surface now would be the wrong shape. No dead tokens: only `convert.int_to_str`
+    /`bool_to_str`/`str_concat` are surfaced, and all three have executable proofs.
 - **16.B — String-concat + auto-`to_string` on `+` for primitives.** Value-type tracking in
   `frontend_interop.c` (each producer carries int/float/bool/char/string/object); `"a" + n`
   auto-converts the non-string operand via the 16.A ids, then `teko_rt_str_concat`. Proof.
