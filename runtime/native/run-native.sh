@@ -198,7 +198,7 @@ EXP
 )"
 # Phase 17 (17.B): checked int↔float casts (convert.to_int / convert.to_float) + float modulo (`%`).
 # to_float promotes int→f64 (OP_I2F); to_int truncates toward zero with a CHECKED fail-loud guard
-# (OP_F2I); `%` on floats is OP_FMOD (libc fmod here). Byte-identical to the WASM proof (run-cast.mjs).
+# (OP_F2I); `%` on floats is OP_FMOD (inline a-trunc(a/b)*b — no libm). Byte-identical to the WASM proof (run-cast.mjs).
 check cast.tks "$(cat <<'EXP'
 a = 1
 n = 7

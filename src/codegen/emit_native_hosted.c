@@ -820,13 +820,31 @@ void emit_native_hosted(MetalContext* ctx, OpCode op, int32_t arg) {
             else     fprintf(f, "    cvtsi2sdq %%rax, %%xmm0\n");
             break;
 
-        // Phase 17 (17.B): float modulo `%`. The hosted emitter is libc-hosted, so reuse libc fmod
-        // (exact IEEE remainder toward zero). Args are already in $f0=xmm0/d0 ($f0) and $f1=xmm1/d1
-        // ($f1) — fmod's SysV/AAPCS calling convention is (xmm0,xmm1)->xmm0 / (d0,d1)->d0, so no
-        // register shuffling is needed. Stack-neutral; $f0 receives the result.
+        // Phase 17 (17.B): float modulo `%` = IEEE remainder toward zero, INLINE as
+        // `$f0 - trunc($f0/$f1)*$f1` — the EXACT same op sequence the WASM emitter uses
+        // (f64.div / f64.trunc / f64.mul / f64.sub), so native and WASM are byte-identical for every
+        // reachable input. Inlining (vs `call fmod`) keeps the hosted runner free of a libm
+        // dependency — Linux `cc` does not auto-link libm, and the wasm32 reactor has no libm either,
+        // so a libm call would be an asymmetric, non-portable dependency. SSE2-only: truncation is a
+        // `cvttsd2si`→`cvtsi2sdq` round-trip through the FCONST scratch GPR `r11` (NOT $w0/rax, so the
+        // op leaves the integer accumulator intact — it stays a pure CSE barrier, no $w0 clobber); the
+        // round-trip is exact for the |$f0/$f1| < 2^53 range the `.`-form float grammar can reach.
+        // xmm2 / d2 are scratch (outside the $f0/$f1 accumulator). $f0 receives the result.
         case OP_FMOD:
-            if (arm) fprintf(f, "    bl %sfmod\n", pre);
-            else     fprintf(f, "    call %sfmod%s\n", pre, is_macho(ctx) ? "" : "@PLT");
+            if (arm) {
+                fprintf(f, "    fdiv d2, d0, d1\n");   // d2 = a/b
+                fprintf(f, "    frintz d2, d2\n");      // d2 = trunc(a/b) toward zero
+                fprintf(f, "    fmul d2, d2, d1\n");    // d2 = trunc(a/b)*b
+                fprintf(f, "    fsub d0, d0, d2\n");    // d0 = a - trunc(a/b)*b
+            } else {
+                fprintf(f, "    movapd %%xmm0, %%xmm2\n");   // xmm2 = a
+                fprintf(f, "    divsd %%xmm1, %%xmm0\n");    // xmm0 = a/b
+                fprintf(f, "    cvttsd2si %%xmm0, %%r11\n"); // r11 = trunc(a/b) (toward zero)
+                fprintf(f, "    cvtsi2sdq %%r11, %%xmm0\n"); // xmm0 = (double)trunc(a/b)
+                fprintf(f, "    mulsd %%xmm1, %%xmm0\n");    // xmm0 = trunc(a/b)*b
+                fprintf(f, "    subsd %%xmm0, %%xmm2\n");    // xmm2 = a - trunc(a/b)*b
+                fprintf(f, "    movapd %%xmm2, %%xmm0\n");   // $f0 = result
+            }
             break;
 
         // Phase 17 (17.B): CHECKED float->int (truncate toward zero), FAIL-LOUD. cvttsd2si/fcvtzs do
