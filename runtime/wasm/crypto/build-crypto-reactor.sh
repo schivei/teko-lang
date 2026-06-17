@@ -59,7 +59,10 @@ SRCS=("$HERE/libc_shim.c" "$ROOT/runtime/native/teko_rt.c" "$ROOT/src/runtime/te
       "$ROOT/src/runtime/teko_vtable.c"    # Phase 15.B: static vtable (abstract/trait dispatch)
       "$ROOT/src/runtime/teko_convert.c"   # Phase 16: culture-invariant conversion runtime
       "$ROOT/src/runtime/teko_convert_f64.c" # Phase 17.C: Ryu f64->string (17.D EXPORTS teko_rt_float_to_string)
-      "$ROOT/src/runtime/teko_decimal.c") # Phase 17.F.1: exact base-10 decimal core (17.F.3 EXPORTS the teko_rt_decimal_* wrappers)
+      "$ROOT/src/runtime/teko_decimal.c"  # Phase 17.F.1: exact base-10 decimal core (17.F.3 EXPORTS the teko_rt_decimal_* wrappers)
+      "$ROOT/src/runtime/teko_deflate.c"  # Phase 19 (DEFLATE-CORE): portable DEFLATE/gzip/zlib codec (native backend + WASM reactor impl)
+      "$ROOT/src/runtime/teko_http.c"     # Phase 19: HTTP/1.1 codec (pure byte-buffer, no sockets; client subset used by HTTP-INT Wave 1)
+      "$ROOT/src/runtime/teko_router.c")  # Phase 19 (ROUTER-CORE Wave 0): target-agnostic radix-tree router
 for f in "$ROOT"/src/runtime/teko_crypto_*.c; do SRCS+=("$f"); done
 
 OBJS=()
@@ -139,7 +142,20 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          # Phase 17.F.4: int/float ↔ decimal casts + the decimal.to_string/parse surface (ids 59/60).
          teko_rt_decimal_from_i32 teko_rt_decimal_from_f64
          teko_rt_decimal_to_i32 teko_rt_decimal_to_f64
-         teko_rt_decimal_to_string teko_rt_decimal_parse)
+         teko_rt_decimal_to_string teko_rt_decimal_parse
+         # Phase 19 (DEFLATE-CORE): CRC32/Adler-32 checksums + DEFLATE inflate/deflate +
+         # zlib/gzip wrappers. OP_CALL_RUNTIME ids 120–139 reserved (compress.* lowering deferred).
+         # The reactor exports the C-level primitives; the surface wiring (frontend lowering) is
+         # a later wave. Reactor callers pass pointer+length offsets into the shared linear memory.
+         teko_crc32 teko_adler32
+         teko_deflate_compress teko_deflate_decompress
+         teko_zlib_compress teko_zlib_decompress
+         teko_gzip_compress teko_gzip_decompress
+         # Phase 19 (ROUTER-CORE Wave 0, ids 175-179 RESERVED): target-agnostic radix-tree router.
+         # The dispatch entry point is exported so the emitted WASM module can call it from the reactor.
+         # Frontend wiring (OP_CALL_RUNTIME ids) is deferred to ROUTER-NATIVE (Wave 2).
+         teko_router_new teko_router_free teko_router_reset
+         teko_router_add teko_router_dispatch)
 LDEXPORTS=(); for e in "${EXPORTS[@]}"; do LDEXPORTS+=("--export=$e"); done
 
 # Layout: keep the whole reactor image (data + shadow stack + heap) ABOVE Teko's
