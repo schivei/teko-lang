@@ -116,6 +116,9 @@ EXPORTS=(teko_rt_sha512_hex teko_rt_sha384_hex teko_rt_sha3_256_hex teko_rt_sha3
          teko_rt_array_new teko_rt_array_get teko_rt_array_set teko_rt_array_len
          # Phase 18 (18.E.2): typed i32[] packed-array ops (OP_IARR_* import these; get/set trap on OOB).
          teko_rt_iarray_new teko_rt_iarray_get teko_rt_iarray_set teko_rt_iarray_len
+         # Phase 18 (18.E.4): SIMD substrate access — data ptr (the run the in-module simd128 kernel
+         # walks) + the scalar reference reduction (the honest fallback / self-check oracle).
+         teko_rt_iarray_data teko_rt_iarray_sum
          # Phase 15 (15.B): static-vtable dispatch ops (OP_VTABLE_* import these from the reactor).
          teko_rt_vtable_set teko_rt_vtable_get
          # Phase 16 (16.A): culture-invariant conversion surface (OP_CALL_RUNTIME ids 49/51/52).

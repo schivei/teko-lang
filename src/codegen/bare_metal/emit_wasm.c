@@ -1250,6 +1250,12 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_iarray_set\" (func $iarray_set (param i32) (param i32) (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_iarray_len\" (func $iarray_len (param i32) (result i32)))\n");
             }
+            // Phase 18 (18.E.4): the SIMD reduction additionally needs the run's DATA POINTER (an i32
+            // offset into the SHARED linear memory) — the in-module simd128 kernel ($teko_simd_sum_i32)
+            // does `v128.load` directly from it. Imported from the SAME reactor, only when uses_simd.
+            if (ctx->wasm_emit_simd) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_iarray_data\" (func $iarray_data (param i32) (result i32)))\n");
+            }
             // Phase 14 (14.C): delayed (timed) channel entry points, also from the reactor.
             if (ctx->wasm_emit_delayed) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_delayed_open\" (func $delayed_open (param i32) (result i32)))\n");
@@ -1528,6 +1534,17 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
             fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", fn);
             break;
         }
+
+        // Phase 18 (18.E.4): the REAL SIMD reduction. The run HANDLE is in $w0; fetch its data ptr
+        // (an i32 offset into the SHARED memory) + length, then call the in-module simd128 kernel
+        // $teko_simd_sum_i32(ptr, n) -> the scalar sum, left in $w0. $w1 holds the length across the
+        // ptr fetch (both args are pushed before the kernel call). The kernel is a separate self-
+        // contained func (its own locals) — stack-disciplined, leaving exactly the sum on the stack.
+        case OP_SIMD_SUM:
+            fprintf(f, "    local.get $w0\n    call $iarray_len\n    local.set $w1\n"); // $w1 = length
+            fprintf(f, "    local.get $w0\n    call $iarray_data\n");                   // push data ptr
+            fprintf(f, "    local.get $w1\n    call $teko_simd_sum_i32\n    local.set $w0\n"); // sum
+            break;
 
         // Phase 14 (14.C): delayed (timed) channel ops — imported reactor calls, same ABI.
         case OP_DELAYED_OPEN:
@@ -2071,6 +2088,38 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                     fprintf(f, " $routine_%d", ctx->wasm_routine_ids[k]);
                 }
                 fprintf(f, ")\n");
+            }
+            // Phase 18 (18.E.4): the REAL simd128 vector reduction kernel — a separate self-contained
+            // func emitted ONCE per module (gated on wasm_emit_simd → simd-free modules byte-identical).
+            // 4-wide i32x4.add accumulate over v128.load -> 4-lane collapse -> scalar tail (N % 4).
+            // Stack-disciplined: own locals, returns exactly the i32 sum. wat2wasm enables simd by
+            // default; Node/wasmtime run it. ptr is an i32 offset into the SHARED linear memory.
+            if (ctx->wasm_emit_simd) {
+                fprintf(f, "  (func $teko_simd_sum_i32 (param $ptr i32) (param $n i32) (result i32)\n");
+                fprintf(f, "    (local $acc v128) (local $i i32) (local $vend i32) (local $sum i32)\n");
+                fprintf(f, "    (local.set $acc (v128.const i32x4 0 0 0 0))\n");
+                fprintf(f, "    (local.set $vend (i32.and (local.get $n) (i32.const -4)))\n");
+                // vector loop: while (i < vend) { acc += load(ptr + i*4); i += 4 }
+                fprintf(f, "    (block $bv (loop $lv\n");
+                fprintf(f, "      (br_if $bv (i32.ge_s (local.get $i) (local.get $vend)))\n");
+                fprintf(f, "      (local.set $acc (i32x4.add (local.get $acc)\n");
+                fprintf(f, "        (v128.load (i32.add (local.get $ptr) (i32.mul (local.get $i) (i32.const 4))))))\n");
+                fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 4)))\n");
+                fprintf(f, "      (br $lv)))\n");
+                // collapse the 4 lanes into the scalar accumulator.
+                fprintf(f, "    (local.set $sum (i32.add (i32.add\n");
+                fprintf(f, "      (i32x4.extract_lane 0 (local.get $acc)) (i32x4.extract_lane 1 (local.get $acc)))\n");
+                fprintf(f, "      (i32.add\n");
+                fprintf(f, "      (i32x4.extract_lane 2 (local.get $acc)) (i32x4.extract_lane 3 (local.get $acc)))))\n");
+                // scalar tail: while (i < n) { sum += load(ptr + i*4); i += 1 }
+                fprintf(f, "    (block $bt (loop $lt\n");
+                fprintf(f, "      (br_if $bt (i32.ge_s (local.get $i) (local.get $n)))\n");
+                fprintf(f, "      (local.set $sum (i32.add (local.get $sum)\n");
+                fprintf(f, "        (i32.load (i32.add (local.get $ptr) (i32.mul (local.get $i) (i32.const 4))))))\n");
+                fprintf(f, "      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n");
+                fprintf(f, "      (br $lt)))\n");
+                fprintf(f, "    (local.get $sum)\n");
+                fprintf(f, "  )\n");
             }
             fprintf(f, "  (export \"main\" (func $main))\n");
             // String constant pool → a real (data ...) segment: each pool string laid

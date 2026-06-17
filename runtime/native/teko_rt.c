@@ -918,6 +918,15 @@ long teko_rt_iarray_set(long handle, long i, long value) {
 long teko_rt_iarray_len(long handle) {
     return (long)teko_iarray_len((const TekoIArray*)(intptr_t)handle);
 }
+// Phase 18 (18.E.4) — SIMD substrate access. data returns the packed int32 cell-buffer pointer as a
+// register-width integer (the run the BACKEND-emitted teko_simd_sum_i32 kernel walks); sum is the
+// SCALAR reference reduction (the self-check oracle + the honest fallback for non-vector targets).
+long teko_rt_iarray_data(long handle) {
+    return (long)(intptr_t)teko_iarray_data((TekoIArray*)(intptr_t)handle);
+}
+long teko_rt_iarray_sum(long handle) {
+    return (long)teko_iarray_sum((const TekoIArray*)(intptr_t)handle);
+}
 
 // Phase 17.F.3 — the 256-byte `decimal` VALUE-MODEL runtime wrappers. The opcode family
 // (OP_DADD/DSUB/DMUL/DDIV/DMOD/DEQ..DGE) lowers to these; the args are ALWAYS pointers into a

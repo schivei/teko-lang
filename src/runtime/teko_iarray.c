@@ -42,3 +42,24 @@ int teko_iarray_set(TekoIArray* a, int i, int32_t v) {
     a->cells[i] = v;
     return 1;
 }
+
+// Phase 18 (18.E.4) — the SIMD substrate accessor: the pointer to the contiguous packed int32 cell
+// buffer the backend's vector kernel walks. NULL for a NULL/empty array (the kernel sees length 0
+// and reduces to 0). The cells are guaranteed contiguous (flexible array member) and 4-byte packed.
+int32_t* teko_iarray_data(TekoIArray* a) {
+    if (!a || a->n <= 0) return NULL;
+    return a->cells;
+}
+
+// Phase 18 (18.E.4) — the SCALAR reference reduction: a plain `for` loop summing the run. This is
+// the honest fallback for any target WITHOUT a vector unit (the 16 freestanding emitters, riscv
+// without RVV) AND the self-check oracle the in-program `simd.sum` proof asserts the vectorized
+// result against. NO intrinsics — portable across every ABI (Windows LLP64 int32 cells are fine).
+// Accumulates in a 32-bit int (matches the vector kernels' i32x4 accumulate + i32 collapse).
+int teko_iarray_sum(const TekoIArray* a) {
+    int s = 0;
+    if (a) {
+        for (int i = 0; i < a->n; i++) s += a->cells[i];
+    }
+    return s;
+}

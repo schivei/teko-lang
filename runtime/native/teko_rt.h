@@ -231,6 +231,15 @@ long teko_rt_iarray_get(long handle, long i); // -> cell value (fail-loud on OOB
 long teko_rt_iarray_set(long handle, long i, long value); // -> 0 (fail-loud on OOB)
 long teko_rt_iarray_len(long handle);         // -> length (O(1) metadata)
 
+// Phase 18 (18.E.4) — SIMD substrate access + scalar reference. teko_rt_iarray_data returns the
+// packed int32 cell-buffer pointer as a register-width integer (the run a vector kernel walks; 0
+// for an empty/NULL array). teko_rt_iarray_sum is the SCALAR reference reduction (plain loop) — the
+// honest fallback on non-vector targets AND the in-program self-check oracle. The REAL per-ISA
+// vector reduction is emitted by the BACKEND as `teko_simd_sum_i32` (NOT here) and called with the
+// data pointer + length; this scalar wrapper is its correctness oracle.
+long teko_rt_iarray_data(long handle);        // -> packed int32 buffer pointer (0 if empty/NULL)
+long teko_rt_iarray_sum(long handle);         // -> scalar reference sum (the self-check oracle)
+
 // Phase 16 (Casting / Type Conversions & Parsing) — culture-invariant conversion surface
 // (OP_CALL_RUNTIME ids 49/51/52). String-returning, like the crypto/time surface; the teko_convert
 // C runtime (src/runtime/teko_convert.c) is the source of truth (linked natively, compiled into the

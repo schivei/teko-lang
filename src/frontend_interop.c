@@ -948,6 +948,10 @@ static int lower_floatcast(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); /
 // Phase 17.F.4: the decimal.to_string / decimal.parse surface (ids 59/60).
 static int is_decimalsurf_head(const Parser* p); // fwd
 static int lower_decimalsurf(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
+// Phase 18 (18.E.4): the `simd.sum(<expr>)` head — a dotted-identifier surface (the lexer folds
+// `simd.sum` into one IDENTIFIER) lowering to OP_SIMD_SUM (the REAL per-ISA vector reduction).
+static int is_simd_head(const Parser* p);        // fwd
+static int lower_simd(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx); // fwd
 // Phase 18 (18.B): safe-navigation `obj?.member` / `obj?.method(args)` — a null-propagating member
 // access over an optional object. Defined after the member-access helpers; forward-declared so
 // eval_primary can claim the `IDENTIFIER ?. …` form. Returns the member-result value-type and exposes
@@ -1304,6 +1308,11 @@ static int eval_primary(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx, TempA
         // Phase 17.F.4: `decimal.to_string(<decimal>)` (id 59, VT_STR) / `decimal.parse(<string>)`
         // (id 60, VT_DECIMAL). Same pre-codec claim as the floatcast head.
         return lower_decimalsurf(b, p, ctx);
+    } else if (is_simd_head(p)) {
+        // Phase 18 (18.E.4): `simd.sum(<i32[] expr>)` -> OP_SIMD_SUM -> the scalar sum (VT_INT) in $w0.
+        // Same pre-codec dotted-head claim; works as a let-initializer and a call argument via the
+        // expression paths (try_lower_call_arg_expr / lower_init_value route through eval_primary).
+        return lower_simd(b, p, ctx);
     } else if (is_codec_head(p)) {
         // Phase 16 (16.B/16.F): a codec / convert / hash call primary — most return a string pointer
         // (VT_STR); the checked parsers return an int (VT_INT). So `"n=" + convert.parse_int(s)`
@@ -2006,6 +2015,27 @@ static int lower_decimalsurf(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) 
     }
 }
 
+// --- Phase 18 (18.E.4): the `simd.sum` SIMD-reduction language surface ----------------------------
+// `simd.sum(<expr>)` reduces a contiguous typed i32[] run to its scalar sum (VT_INT). The inner
+// expression evaluates to an i32[] HANDLE in $w0 — typically a typed-array local (`a`) or the SoA
+// whole-run accessor `s.field` (the 18.E.3 hook), both of which leave the handle in $w0. OP_SIMD_SUM
+// then lowers (per backend) to: fetch the run's data ptr + length, call the REAL per-ISA vector kernel
+// (SSE2/NEON/simd128; scalar fallback on the 16 freestanding emitters + riscv). Claimed via the
+// dotted-identifier head, same machinery as the floatcast/decimalsurf heads.
+static int is_simd_head(const Parser* p) {
+    if (p->current_token.type != TOKEN_IDENTIFIER || p->peek_token.type != TOKEN_LPAREN) return 0;
+    return strcmp(p->current_token.lexeme, "simd.sum") == 0;
+}
+static int lower_simd(BytecodeBuffer* b, Parser* p, const LowerCtx* ctx) {
+    fe_advance(p);                                       // consume `simd.sum`
+    if (p->current_token.type == TOKEN_LPAREN) fe_advance(p);
+    // The inner expression -> an i32[] handle in $w0 (a typed-array local or a SoA `s.field` run).
+    eval_expr_prec(b, p, ctx, 1, ctx->ta);
+    if (p->current_token.type == TOKEN_RPAREN) fe_advance(p);
+    codegen_li_emit_simd(b, OP_SIMD_SUM);                // $w0 = scalar sum of the run (real vector kernel)
+    return TEKO_VT_INT;
+}
+
 // --- delayed (timed) channels (Phase 14, 14.C) ----------------------------------
 // `delayed.open/send/advance/recv/poll/close(args)` — same dotted-identifier surface as duplex
 // (the lexer folds `delayed.open` into one IDENTIFIER), lowering to the dedicated OP_DELAYED_*.
@@ -2232,13 +2262,14 @@ static void lower_init_value(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
     } else if (p->current_token.type == TOKEN_MACRO_IDENT && is_dom_macro(p->current_token.lexeme) &&
                p->peek_token.type == TOKEN_LPAREN) {
         lower_intrinsic_call(b, p, ctx);
-    } else if (is_floatcast_head(p) || is_decimalsurf_head(p)) {
+    } else if (is_floatcast_head(p) || is_decimalsurf_head(p) || is_simd_head(p)) {
         // Phase 17 (17.B): `let f = convert.to_float(3);` / `let n = convert.to_int(7.9);` —
         // Phase 17.F.4: `let d = convert.to_decimal(42);`, `let s = decimal.to_string(d);`,
-        // `let d = decimal.parse(s);`. Route through eval_expr_prec (NOT the bare lower_*cast) so a
-        // TRAILING binary operator is also consumed — e.g. `let g = convert.to_decimal(n) + total;`
-        // (mixed promotion). eval_primary already claims both heads; the returned VT (after any `+`)
-        // is recorded in g_last_init_vt so the binding reads back as the right type.
+        // `let d = decimal.parse(s);`. Phase 18 (18.E.4): `let vec = simd.sum(a);`. Route through
+        // eval_expr_prec (NOT the bare lower_*) so a TRAILING binary operator is also consumed — e.g.
+        // `let g = convert.to_decimal(n) + total;` (mixed promotion) or `let t = simd.sum(a) + 1;`.
+        // eval_primary already claims all three heads; the returned VT (after any `+`) is recorded in
+        // g_last_init_vt so the binding reads back as the right type.
         env_sync(env);
         g_last_init_vt = eval_expr_prec(b, p, ctx, 1, ctx->ta);
     } else if (is_codec_head(p))   { int id = codec_id_for(p->current_token.lexeme);
@@ -2540,6 +2571,16 @@ static int lower_call_stmt(BytecodeBuffer* b, Parser* p, LowerEnv* env) {
         if (nargs < 16 && try_lower_call_arg_expr(b, p, env->ctx, *env->locals, *env->nlocals,
                                                   &args[nargs], &temps_used)) {
             nargs++;
+        } else if (nargs < 16 && is_simd_head(p)) {
+            // Phase 18 (18.E.4): a bare `simd.sum(<expr>)` call argument leaves the scalar sum (i32)
+            // in $w0, spilled to a temp like the codec case (so `emit(simd.sum(a))` passes the value).
+            lower_simd(b, p, env->ctx);                       // $w0 = scalar sum
+            int t = env->ctx->ta->next_temp++;
+            if (env->ctx->ta->next_temp > env->ctx->ta->hw) env->ctx->ta->hw = env->ctx->ta->next_temp;
+            codegen_li_emit_store_local(b, t);
+            args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+            args[nargs].is_local = 1; args[nargs].slot = t;
+            nargs++; temps_used++;
         } else if (nargs < 16 && (p->current_token.type == TOKEN_LIT_STR ||
                            p->current_token.type == TOKEN_STRING_LIT)) {
             args[nargs].is_string = 1; args[nargs].sval = strip_quotes(p->current_token.lexeme);
@@ -4331,6 +4372,16 @@ int teko_compile_interop(const char* source, BytecodeBuffer* buffer) {
                     // (passable), spilled to a temp like the codec case. (decimal.parse yields a value
                     // in $d0, not passable as a value arg in this subset — reach it via an expr arg.)
                     lower_decimalsurf(buffer, &parser, &top_ctx); // $w0 = char* (decimal string)
+                    int t = ta.next_temp++;
+                    if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
+                    codegen_li_emit_store_local(buffer, t);
+                    args[nargs].is_string = 0; args[nargs].sval = NULL; args[nargs].ival = 0;
+                    args[nargs].is_local = 1; args[nargs].slot = t;
+                    nargs++; temps_used++;
+                } else if (nargs < 16 && is_simd_head(&parser)) {
+                    // Phase 18 (18.E.4): a bare `simd.sum(<expr>)` top-level call arg leaves the
+                    // scalar sum (i32) in $w0, spilled to a temp like the codec case.
+                    lower_simd(buffer, &parser, &top_ctx); // $w0 = scalar sum
                     int t = ta.next_temp++;
                     if (ta.next_temp > ta.hw) ta.hw = ta.next_temp;
                     codegen_li_emit_store_local(buffer, t);

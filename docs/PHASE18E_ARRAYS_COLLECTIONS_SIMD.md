@@ -118,7 +118,30 @@ proofs (class/generics/traits/method_arg) intact.
 - Proof `soa.tks` (native + WASM, byte-identical): build a `soa Point[N]`, set/get fields, sum a field
   across elements, demonstrate the field run is contiguous.
 
-### 18.E.4 — Real SIMD emission over SoA field runs
+### 18.E.4 — Real SIMD emission over SoA field runs  — ✅ DONE
+**Status (DONE, locally green both targets).** `simd.sum(run)` reduces a contiguous `i32[]` run (an
+iarray local or the SoA `s.field` whole-run from 18.E.3) to its scalar sum via REAL per-backend vector
+instructions. The backend emits ONE kernel function `teko_simd_sum_i32` per module (gated on
+`uses_simd`/`wasm_emit_simd`); `OP_SIMD_SUM` (0x9F) lowers to: get data ptr (`teko_rt_iarray_data`) +
+len → call the kernel. Kernel = 4-wide vector accumulate → 4-lane collapse → scalar tail. **REAL
+emission confirmed:** x86_64 **SSE2** (`movdqu`/`paddd`, AT&T, store-collapse), arm64 **NEON**
+(`ld1 v.4s`/`add v.4s`/`addv` — verified in the native `.s`), WASM **simd128** (`v128.load`/`i32x4.add`/
+`extract_lane` — verified in the `.wat`); **scalar fallback** for riscv64 + the 16 freestanding
+emitters (honest, gated → byte-identical preserved). Proof `simd.tks`: a 10-element `i32[]`
+(`simd.sum`=55) + a `soa Point[6]` field run (`simd.sum(s.x)`=210), each with an IN-PROGRAM scalar
+self-check (`for`/`while` reference) — **vectorized == scalar must hold on every target** (a
+mis-emitted kernel diverges and fails the proof), N=10/6 exercise the scalar tail. **Output-identical
+native==WASM** (the byte-identity rule is relaxed to value-identity only for the vectorized op, as
+agreed). NEON + simd128 self-checks pass locally; x86_64 SSE2 validated by CI Linux x86_64 + the
+self-check. Suite 246/246; ASan/UBSan both paths + TSan clean; native 58 OK/0 FAIL; 16 goldens
+byte-identical; non-simd output byte-identical. riscv64 RVV remains a documented opportunistic
+follow-up (scalar is the honest fallback there).
+
+## PHASE 18.E COMPLETE (18.E.1–.4); PHASE 18 COMPLETE
+Arrays (fixed/contiguous/checked) + typed `i32[]` + `for…in` + AoS↔SoA + REAL per-ISA SIMD, all
+CI-green, no dead tokens, byte-identical (output-identical for the SIMD op). **Deferred by owner
+reorder (off the SIMD critical path):** the dynamic non-contiguous `list` type, f64-typed numeric
+arrays (float SIMD), AVX2/RVV opportunistic upgrades — all documented future sub-blocks.
 - A vectorized op family over a contiguous SoA field run (numeric `array`): a reduction (`simd.sum`)
   and an elementwise map/add (`simd.add(a,b)→c`). Per-backend emission:
   - x86_64: SSE2 (`movdqu`/`paddd` int, `addps` f32) baseline; AVX2 (`vpaddd`/`vaddps`) opportunistic.

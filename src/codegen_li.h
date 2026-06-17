@@ -291,6 +291,15 @@ typedef enum {
     OP_IARR_SET = 0x9D, // iarray_set(handle, idx, value) -> 0  (fail-loud on OOB)
     OP_IARR_LEN = 0x9E, // iarray_len(handle) -> length (O(1) metadata)
 
+    // Phase 18 (18.E.4): REAL per-ISA SIMD reduction. simd.sum(run) reduces a contiguous typed i32[]
+    // run (handle in $w0) to its scalar sum (i32 in $w0). UNLIKE the runtime-call families above, the
+    // vector loop is emitted as REAL per-backend instructions (x86 SSE2 / arm64 NEON / WASM simd128;
+    // scalar fallback on the 16 freestanding emitters + riscv): the backend emits ONE kernel function
+    // per module (teko_simd_sum_i32, gated on uses_simd / wasm_emit_simd) and this op lowers to "get
+    // the run's data pointer + length, then call that kernel". $w0-clobbering (call result). Gated so
+    // simd-free output stays byte-identical (the 16 goldens never see it).
+    OP_SIMD_SUM = 0x9F, // simd_sum(handle) -> scalar sum of the i32[] run (real vector kernel)
+
     // Control Flow and Branches
     OP_JMP = 0x20,
     OP_JMP_IF_FALSE = 0x21,
@@ -400,6 +409,11 @@ typedef struct {
     // links teko_rt_iarray_*; WASM imports them from the runtime reactor + shares linear memory (same
     // wiring as OP_ARR_*). iarray-free programs (incl. the 16 freestanding goldens) stay byte-identical.
     int uses_iarray;
+    // Phase 18 (18.E.4): 1 if the program uses the REAL SIMD reduction (OP_SIMD_SUM). The backend then
+    // emits ONE per-ISA vector kernel function (teko_simd_sum_i32) and lowers each OP_SIMD_SUM to a
+    // call into it. Native: emitted as SSE2/NEON asm (scalar on other arches); WASM: a simd128 func.
+    // Also implies uses_iarray (the run is a typed i32[]). simd-free output stays byte-identical.
+    int uses_simd;
     // Phase 17 (17.A): the float-constant pool — f64 bit patterns indexed by OP_FCONST's 4-byte
     // arg. Mirrors the string pool (codegen_li_add_float_constant dedups by bit-equality). Threaded
     // to the backend via teko_metal_set_floats. `uses_float` is 1 once any float opcode is emitted,
@@ -483,6 +497,9 @@ void codegen_li_emit_object(BytecodeBuffer* buffer, OpCode op);
 void codegen_li_emit_array(BytecodeBuffer* buffer, OpCode op);
 // Phase 18 (18.E.2): emit a typed `i32[]` packed-array op (one of OP_IARR_*); sets buffer->uses_iarray.
 void codegen_li_emit_iarray(BytecodeBuffer* buffer, OpCode op);
+// Phase 18 (18.E.4): emit the REAL SIMD reduction op (OP_SIMD_SUM); sets buffer->uses_simd (and
+// uses_iarray, since the run is a typed i32[]). The backend emits the per-ISA vector kernel once.
+void codegen_li_emit_simd(BytecodeBuffer* buffer, OpCode op);
 // Phase 15 (15.A): synchronously call the routine in $w0 with `argc` args staged in $a0..$a(argc-1)
 // (OP_CALL_FUNC); the result lands in $w0. Sets buffer->uses_spawn (routine table + scheduler).
 void codegen_li_emit_call_func(BytecodeBuffer* buffer, int argc);

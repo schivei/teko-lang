@@ -315,6 +315,18 @@ len = 3
 sum_x = 60
 EXP
 )"
+# Phase 18 (18.E.4): REAL per-ISA SIMD reduction — `simd.sum(run)` over a contiguous typed i32[] run,
+# the vector loop emitted as REAL backend instructions (this machine is arm64 → the NEON kernel;
+# CI Linux x86_64 → SSE2). The proof self-checks: the vectorized sum MUST equal an in-program scalar
+# reference loop (a mis-emitted vector kernel diverges and fails HERE). N=10 (8+2) and the SoA field
+# run N=6 (4+2) both exercise the scalar TAIL. Byte-identical stdout to the WASM proof (run-simd.mjs).
+check simd.tks "$(cat <<'EXP'
+simd = 55
+scalar = 55
+soa_simd = 210
+soa_scalar = 210
+EXP
+)"
 # Phase 18 (18.A): Zero-Overhead Optionals — `?T` nullability + `null` + the Elvis `??`. An optional
 # local is compacted (payload slot + a hidden 1-word present companion); `a ?? d` branches on the
 # present flag via OP_IF (→ native je/cbz), choosing the payload when present else the default. No new

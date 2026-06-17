@@ -34,6 +34,15 @@ int         teko_iarray_len(const TekoIArray* a);
 int         teko_iarray_get(const TekoIArray* a, int i, int32_t* out);
 int         teko_iarray_set(TekoIArray* a, int i, int32_t v);
 
+// Phase 18 (18.E.4) — SIMD substrate access + scalar reference. teko_iarray_data returns the
+// pointer to the PACKED contiguous int32 cell buffer (the run a SIMD kernel walks); NULL if the
+// array is NULL or empty. teko_iarray_sum is the SCALAR reference reduction (plain `for` loop) —
+// it is BOTH the honest scalar fallback for non-vector targets AND the in-program self-check
+// oracle the `simd.sum` proof asserts the vectorized result against. Pure C, NO intrinsics
+// (portable: the vectorization lives in the BACKEND emitters, never here).
+int32_t*    teko_iarray_data(TekoIArray* a);
+int         teko_iarray_sum(const TekoIArray* a);
+
 #define TEKO_IARRAY_MAX_LEN 65536 // bounded element count (allocation-free upper bound)
 
 #endif // TEKO_IARRAY_H
