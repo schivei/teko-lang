@@ -260,6 +260,40 @@ extern void test_teko_rsa_pkcs1v15_encrypt_roundtrip(void);
 extern void test_teko_rsa_oaep_sha256_kat(void);
 extern void test_teko_rsa_pss_sha256_kat(void);
 
+/* Phase 19 (DEFLATE-CORE) */
+extern void test_teko_crc32_empty(void);
+extern void test_teko_crc32_rfc_check_value(void);
+extern void test_teko_crc32_hello(void);
+extern void test_teko_crc32_chained(void);
+extern void test_teko_adler32_empty(void);
+extern void test_teko_adler32_rfc_example(void);
+extern void test_teko_adler32_mark_adler_example(void);
+extern void test_teko_adler32_chained(void);
+extern void test_teko_deflate_roundtrip_empty(void);
+extern void test_teko_deflate_roundtrip_single_byte(void);
+extern void test_teko_deflate_roundtrip_hello(void);
+extern void test_teko_deflate_roundtrip_repetitive(void);
+extern void test_teko_deflate_roundtrip_binary(void);
+extern void test_teko_deflate_roundtrip_lorem(void);
+extern void test_teko_zlib_roundtrip_hello(void);
+extern void test_teko_zlib_roundtrip_repetitive(void);
+extern void test_teko_gzip_roundtrip_hello(void);
+extern void test_teko_gzip_roundtrip_repetitive(void);
+extern void test_teko_gzip_roundtrip_binary(void);
+extern void test_teko_deflate_inflate_known_raw(void);
+extern void test_teko_zlib_decompress_known_vector(void);
+extern void test_teko_gzip_decompress_known_vector(void);
+extern void test_teko_deflate_bomb_guard(void);
+extern void test_teko_zlib_bomb_guard(void);
+extern void test_teko_gzip_bomb_guard(void);
+extern void test_teko_deflate_bomb_guard_exact_boundary(void);
+extern void test_teko_deflate_corrupt_input(void);
+extern void test_teko_zlib_bad_magic(void);
+extern void test_teko_gzip_bad_magic(void);
+extern void test_teko_zlib_truncated(void);
+extern void test_teko_gzip_truncated(void);
+extern void test_teko_deflate_badarg(void);
+
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
     // exactly how far the suite got (Windows pipes are otherwise fully buffered).
@@ -528,6 +562,40 @@ int main(void) {
     RUN_TEST(test_teko_rsa_pkcs1v15_encrypt_roundtrip);
     RUN_TEST(test_teko_rsa_oaep_sha256_kat);
     RUN_TEST(test_teko_rsa_pss_sha256_kat);
+
+    /* Phase 19 (DEFLATE-CORE) */
+    RUN_TEST(test_teko_crc32_empty);
+    RUN_TEST(test_teko_crc32_rfc_check_value);
+    RUN_TEST(test_teko_crc32_hello);
+    RUN_TEST(test_teko_crc32_chained);
+    RUN_TEST(test_teko_adler32_empty);
+    RUN_TEST(test_teko_adler32_rfc_example);
+    RUN_TEST(test_teko_adler32_mark_adler_example);
+    RUN_TEST(test_teko_adler32_chained);
+    RUN_TEST(test_teko_deflate_roundtrip_empty);
+    RUN_TEST(test_teko_deflate_roundtrip_single_byte);
+    RUN_TEST(test_teko_deflate_roundtrip_hello);
+    RUN_TEST(test_teko_deflate_roundtrip_repetitive);
+    RUN_TEST(test_teko_deflate_roundtrip_binary);
+    RUN_TEST(test_teko_deflate_roundtrip_lorem);
+    RUN_TEST(test_teko_zlib_roundtrip_hello);
+    RUN_TEST(test_teko_zlib_roundtrip_repetitive);
+    RUN_TEST(test_teko_gzip_roundtrip_hello);
+    RUN_TEST(test_teko_gzip_roundtrip_repetitive);
+    RUN_TEST(test_teko_gzip_roundtrip_binary);
+    RUN_TEST(test_teko_deflate_inflate_known_raw);
+    RUN_TEST(test_teko_zlib_decompress_known_vector);
+    RUN_TEST(test_teko_gzip_decompress_known_vector);
+    RUN_TEST(test_teko_deflate_bomb_guard);
+    RUN_TEST(test_teko_zlib_bomb_guard);
+    RUN_TEST(test_teko_gzip_bomb_guard);
+    RUN_TEST(test_teko_deflate_bomb_guard_exact_boundary);
+    RUN_TEST(test_teko_deflate_corrupt_input);
+    RUN_TEST(test_teko_zlib_bad_magic);
+    RUN_TEST(test_teko_gzip_bad_magic);
+    RUN_TEST(test_teko_zlib_truncated);
+    RUN_TEST(test_teko_gzip_truncated);
+    RUN_TEST(test_teko_deflate_badarg);
 
     return UNITY_END();
 }
