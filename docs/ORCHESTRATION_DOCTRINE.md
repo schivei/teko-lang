@@ -90,36 +90,31 @@ tarefas médias) executa, **antes** de liberar a próxima migalha:
 
 Só depois de o gate passar é que o Agente Mestre **determina a próxima migalha** e a distribui.
 
-## Hierarquia de PRs (PR hierarchy)
+## Hierarquia de PRs (PR hierarchy) — fluxo LEAN, **PR-only**
 
-A entrega de uma fase usa **dois níveis de PR**, espelhando a cadeia de papéis:
+O processo **ATIVO** é **só PRs** (sem Issues, sem board — ver "Futuro" abaixo). A especificação de
+cada migalha — o template `<tarefa_atual>` (descrição + contexto mínimo + formato esperado, BLOCO 2)
+— vai **NO CORPO DO SUB-PR**, não numa Issue. A entrega de uma fase usa **dois níveis de PR**,
+espelhando a cadeia de papéis:
 
-- **PR principal da fase → `main`.** No início da fase, o Agente Mestre (Opus) abre **um Draft PR
-  da fase** (`feat/phase-NN-…` → `main`). Este PR agrega o trabalho da fase inteira e **só o PO
-  (owner humano) faz o merge na `main`** — depois dos quatro gates de CI verdes (incl. Windows
-  MSVC). **Nenhum agente faz merge na `main`.**
-- **Sub-PRs por migalha → a branch DA FASE (não a `main`).** Cada migalha/tarefa média vira um
-  **sub-PR** que mira a **branch da fase** (ex.: `feat/phase-NN-crumb-xyz` → `feat/phase-NN-…`),
-  com **`Closes #N`** referenciando a Issue-migalha. Após **review + SAST + CI pertinente**, o
-  **PM** (orquestrador) faz o merge do sub-PR **na branch da fase** (fechando a Issue). Assim a
-  branch da fase acumula migalhas revisadas, e o PR principal sobe pra `main` pelo PO.
-- **Invariantes (nunca):** nenhum agente faz merge na `main`; **sem `git merge`/force-push**;
-  **sem delete destrutivo** (nada de apagar branch/histórico/tags de forma irreversível pelo
-  agente). O merge de sub-PR na branch da fase pelo PM **só** acontece após o gate de revisão+SAST
-  passar e a Issue correspondente poder ser fechada.
+- **PR PRINCIPAL da fase → `main`.** No início da fase, o Agente Mestre (Opus) abre **um Draft PR da
+  fase** (`feat/phase-NN-…` → `main`). Este PR agrega o trabalho da fase inteira e **só o OWNER (PO,
+  humano) faz o merge na `main`**, no fim, depois dos quatro gates de CI verdes (incl. Windows MSVC).
+  **Nenhum agente faz merge na `main`.**
+- **SUB-PRs por migalha → a branch DA FASE (não a `main`).** Cada migalha/tarefa média vira um
+  **sub-PR** que mira a **branch da fase** (ex.: `feat/phase-NN-crumb-xyz` → `feat/phase-NN-…`). O
+  **corpo do sub-PR carrega a especificação da migalha** (o `<tarefa_atual>` do BLOCO 2: descrição +
+  contexto mínimo + formato esperado + critérios de aceite + barras/SAST aplicáveis). Após **review +
+  gate de SAST + CI pertinente**, o **PM** (orquestrador) faz o merge do sub-PR **na branch da fase**.
+  Assim a branch da fase acumula migalhas revisadas, e o PR principal sobe pra `main` pelo OWNER.
+- **Invariantes (nunca):** nenhum agente faz merge na `main`; **sem `git merge`/force-push**; **sem
+  delete destrutivo** (nada de apagar branch/histórico/tags de forma irreversível pelo agente). O
+  merge de sub-PR na branch da fase pelo PM **só** acontece após o gate de revisão+SAST passar.
 
-## Integração com GitHub Issues / Projects
-
-- O **Tech Lead (Sonnet)** materializa cada migalha como uma **Issue do GitHub** *especificada* —
-  título claro, descrição com `<contexto_minimo>` + `<formato_esperado>` (BLOCO 2), critérios de
-  aceite e as barras/SAST aplicáveis — e a coloca no **Project** da fase (acompanhamento de
-  estado: To do → In progress → In review → Done).
-- O **Developer (Haiku)** executa a migalha e abre um **sub-PR** que **`Closes #N`** (a
-  Issue-migalha), mirando a branch da fase, no formato exato pedido.
-- O **gate de revisão+SAST** roda no sub-PR; ao passar, o **PM** faz o merge na branch da fase, o
-  GitHub **fecha a Issue** automaticamente (via `Closes #N`) e move o cartão no Project para Done.
-- O **PR principal da fase** referencia as Issues/migalhas que agrega; o **PO** o mergeia na `main`
-  quando a fase fecha verde.
+### Futuro (quando o projeto estiver em produção)
+Poderemos espelhar cada migalha como uma **GitHub Issue** + um **board Projects V2** (To do → In
+progress → In review → Done), com sub-PRs `Closes #N`. **Hoje isso NÃO é usado** — o processo ativo é
+PR-only e a doutrina **não acopla** nada a Issues/labels/board.
 
 ## Como isto compõe com a disciplina existente
 - As **barras inegociáveis do `CLAUDE.md` continuam valendo integralmente** — a doutrina adiciona

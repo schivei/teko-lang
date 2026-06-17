@@ -76,10 +76,11 @@ layer **on top of** the discipline above — it relaxes nothing.
   overflow/OOB, UAF/double-free, integer overflow, unsafe casts; confirm new emission stays gated +
   byte-identical) → **bounce back to the executor** if any rule/best-practice is violated, instead of
   patching over it.
-- **PR hierarchy:** the **phase PR → `main`** is merged ONLY by the **PO (human)**; **crumb sub-PRs →
-  the PHASE branch** (`Closes #N` the crumb Issue) are merged by the **PM** after review + SAST + CI.
-  No agent merges to `main`; no `git merge`/force-push; no destructive delete. Tech Leads file
-  specified crumb **Issues** (in the phase Project); Developers open `Closes #N` sub-PRs.
+- **PR hierarchy (LEAN, PR-only):** the **phase PR → `main`** is merged ONLY by the **PO (human)** at
+  the end; **crumb sub-PRs → the PHASE branch** are merged by the **PM** after review + SAST + CI. The
+  crumb spec (the BLOCO-2 `<tarefa_atual>`) lives **in the sub-PR body**, NOT in an Issue. No agent
+  merges to `main`; no `git merge`/force-push; no destructive delete. **Issues/Projects are NOT used
+  today** — a future option (mirror crumbs as Issues + a Projects V2 board) when in production.
 - Executor subagent profiles: `.claude/agents/teko-tech-lead.md` (Sonnet) and
   `.claude/agents/teko-developer.md` (Haiku); `teko-engineer.md` remains for direct senior work.
 
