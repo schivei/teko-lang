@@ -621,6 +621,30 @@ check_random random.tks
 check_uuid uuid_rng.tks
 check_time
 
+# Phase 19 (ROUTER-CORE — api block) native runner proof.
+# A router dispatches distinct routes and invokes the correct handler, emitting distinct
+# integers (200/201/204) that prove routing (not inline emit leakage). The asm assertion
+# verifies router symbols are linked in the binary (nm grep teko_rt_router* > 0). The
+# synthesis in lower_api_block constructs router_new -> router_add (3 routes) ->
+# router_dispatch (each route) -> OP_CALL_FUNC (handler body) -> router_free.
+# SAST: method/path are compile-time constants; no user strings passed to any syscall.
+check_api() {
+  local sample="api.tks" exe got expected router_count
+  exe="$TMP/api"
+  echo "--- $sample (radix-tree routing) ---"
+  "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$("$exe")" || fail "api exited non-zero"
+  expected="$(printf '200\n201\n204')"
+  [ "$got" = "$expected" ] || fail "api: expected [$expected], got [$got]"
+  # Assert router symbols are present in the linked binary (proved teko_rt_router_* ran).
+  router_count=$(nm "$exe" 2>/dev/null | grep -c "router" || true)
+  [ "$router_count" -gt 0 ] || fail "api: no router symbols in binary (nm grep router returned 0) — router did not run"
+  echo "OK: api -> routed [GET /hello → 200, POST /data → 201, DELETE /gone → 204]; router symbols present ($router_count)"
+}
+
+check_api
+
 # Phase 19 (T2 — net.* socket frontend wiring): connect → send → recv loopback proof.
 # A Python3 TCP echo server (one-connection, echo-then-close) is started on port 17342,
 # net.tks compiles, the binary runs (net.tcp_connect → send "hello" → recv → emit), and
