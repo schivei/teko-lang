@@ -61,6 +61,23 @@ output locally (the goldens only `strstr`; always *assemble + run*, never trust 
   root cause, don't mask with timeouts or non-blocking.
 - No `git merge`/force-push from the agent; the human merges. New phase ⇒ branch + **draft PR** up front.
 
+## Orchestration Doctrine — Phase 19+
+From **Phase 19 onward**, work is planned/decomposed/delegated/reviewed per
+`docs/ORCHESTRATION_DOCTRINE.md` (owner-authored; reproduced verbatim there). It is a *meta-process*
+layer **on top of** the discipline above — it relaxes nothing.
+- **Role hierarchy:** **PO** (human owner; the only merger) → **PM** (Dispatch orchestrator) →
+  **BA / Agente Mestre** (an **Opus** session per phase — plans & manages, decomposes into "migalhas",
+  **never writes massive code itself**) → **Tech Lead** (**Sonnet** subagents — take medium tasks,
+  subdivide into crumbs, write focused sub-prompts, review the devs) → **Developer** (**Haiku**
+  subagents — execute one tightly-scoped low-context crumb in the exact return format; no scope creep).
+- **Per-crumb review gate (mandatory before releasing the next crumb):** review for errors →
+  consolidate → **SECURITY + SAST evaluation** (injection; C-runtime memory-safety — buffer
+  overflow/OOB, UAF/double-free, integer overflow, unsafe casts; confirm new emission stays gated +
+  byte-identical) → **bounce back to the executor** if any rule/best-practice is violated, instead of
+  patching over it.
+- Executor subagent profiles: `.claude/agents/teko-tech-lead.md` (Sonnet) and
+  `.claude/agents/teko-developer.md` (Haiku); `teko-engineer.md` remains for direct senior work.
+
 ## MSVC / Windows portability rules (hard-won)
 - **No computed-goto** in the VM — guarded portable `switch` fallback (`TEKO_VM_PORTABLE_DISPATCH`,
   the path MSVC uses). No C23 `auto`/`nullptr` in shared code or tests.
