@@ -40,11 +40,11 @@ client HTTP/WS/RPC usage rides **dotted-identifier surfaces** (not tokens). Both
 
 | Token / surface | Kind | Native | WASM | Proof strategy |
 |---|---|---|---|---|
-| `api`, `middleware`, `get/post/put/delete/patch/head/options` | **SERVER route-definition tokens** | real listening server + AOT static **radix-tree** dispatch; `middleware` = server interceptor chain | **client-only platform** has no server | **Target-agnostic routing:** build the radix tree and dispatch a **SYNTHETIC in-module request** (method+path+headers, no real socket) on BOTH targets → proves grammar + emission + routing everywhere; real `bind/listen/accept` is **native-only**, honestly marked |
+| `api`, `middleware`, `get/post/put/delete/patch/head/options` | **SERVER route-definition tokens** | **real listening server** (`bind/listen/accept`) + AOT static **radix-tree** dispatch; `middleware` = server interceptor chain | WASM only (the lone client-restricted target): no listening server | **Target-agnostic routing:** build the radix tree and dispatch a **SYNTHETIC in-module request** (method+path+headers, no real socket) on BOTH targets → proves grammar + emission + routing everywhere; real `bind/listen/accept` is **native-only**, honestly marked |
 | `websocket` | **SERVER WS endpoint** token | real server WS endpoint (accept + RFC 6455) | synthetic | same target-agnostic proof (handshake/route built in-module; real accept native-only) |
 | `rpc` | RPC | native: server **and** client; minimal length-prefixed | client (host-import) | native server+client `.tks`; WASM client `.mjs` + synthetic server-route proof |
 | `http.*` (`http.get/post/...`) | **client** dotted surface | real client over socket | real client (host-import `fetch`) | live on BOTH (native socket / WASM host) |
-| `net.*` (`tcp_connect/...` + native `tcp_listen/accept`) | dotted surface | client **and** server primitives | **client only** (connect/send/recv); listen/accept **absent**, marked native-only | native server+client `.tks`; WASM client `.mjs` |
+| `net.*` (`tcp_connect/...` + native `tcp_listen/accept`) | dotted surface | client **and** server primitives (`connect/send/recv/close` **and** `bind/listen/accept`) | WASM only: connect/send/recv; listen/accept **absent**, marked native-only | native server+client `.tks`; WASM client `.mjs` |
 | `ws.*` (client WebSocket) | **client** dotted surface | real client | host-import client | live on BOTH |
 | `kbps/mbps/gbps` | client/server throttle | `limit(10mbps)` | same | normalized bps literal consumed by a throttle surface |
 
