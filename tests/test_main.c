@@ -260,6 +260,15 @@ extern void test_teko_rsa_pkcs1v15_encrypt_roundtrip(void);
 extern void test_teko_rsa_oaep_sha256_kat(void);
 extern void test_teko_rsa_pss_sha256_kat(void);
 
+// Phase 19 (T1a) — client socket runtime KATs
+extern void test_teko_socket_null_args(void);
+extern void test_teko_socket_recv_bounds_constant(void);
+extern void test_teko_socket_handle_table_constant(void);
+extern void test_teko_socket_state_machine(void);
+extern void test_teko_socket_loopback_roundtrip(void);
+extern void test_teko_socket_recv_bounds_gate(void);
+extern void test_teko_socket_send_on_closed(void);
+
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
     // exactly how far the suite got (Windows pipes are otherwise fully buffered).
@@ -528,6 +537,15 @@ int main(void) {
     RUN_TEST(test_teko_rsa_pkcs1v15_encrypt_roundtrip);
     RUN_TEST(test_teko_rsa_oaep_sha256_kat);
     RUN_TEST(test_teko_rsa_pss_sha256_kat);
+
+    // Phase 19 (T1a) — client socket runtime KATs
+    RUN_TEST(test_teko_socket_null_args);
+    RUN_TEST(test_teko_socket_recv_bounds_constant);
+    RUN_TEST(test_teko_socket_handle_table_constant);
+    RUN_TEST(test_teko_socket_state_machine);
+    RUN_TEST(test_teko_socket_loopback_roundtrip);
+    RUN_TEST(test_teko_socket_recv_bounds_gate);
+    RUN_TEST(test_teko_socket_send_on_closed);
 
     return UNITY_END();
 }
