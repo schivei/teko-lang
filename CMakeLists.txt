@@ -105,6 +105,9 @@ set(CORE_SOURCES
         src/runtime/teko_decimal.c
         src/runtime/teko_mem_sys.c
         src/runtime/teko_thread.c
+        # Phase 19 — FFI-CORE: manifest [deps] parser, deterministic resolver, lockfile,
+        #             marshalling/error-mapping helpers. Native-only (WASM short-circuits).
+        src/runtime/teko_ffi_core.c
         # Phase 19 (DEFLATE-CORE) — portable DEFLATE/gzip/zlib codec (the native `native`
         # backend for compress.deflate/gzip/zlib and the WASM reactor implementation).
         # OP_CALL_RUNTIME ids 120–139 reserved (no frontend wiring this wave).
@@ -271,6 +274,8 @@ set(TEST_SOURCES
         tests/runtime/test_crypto_p256.c
         tests/runtime/test_crypto_p384.c
         tests/runtime/test_crypto_rsa.c
+        # Phase 19 — FFI-CORE KAT suite
+        tests/runtime/test_ffi_core.c
         # Phase 19 (DEFLATE-CORE)
         tests/runtime/test_deflate.c
         tests/runtime/test_http.c          # Phase 19: HTTP/1.1 codec KATs
@@ -291,4 +296,12 @@ if (WIN32)
     target_link_libraries(teko_core PRIVATE ws2_32)
     target_link_libraries(teko_tests PRIVATE ws2_32)
     target_link_libraries(teko_rt PRIVATE ws2_32)
+endif()
+
+# Phase 19 — FFI-CORE uses dlopen/dlsym/dlclose on Linux (libdl).
+# macOS: dlopen is in the default linker search path (no extra -ldl needed).
+# Windows: LoadLibrary/FreeLibrary are in kernel32 (always linked).
+if (UNIX AND NOT APPLE)
+    target_link_libraries(teko_core PRIVATE dl)
+    target_link_libraries(teko_tests PRIVATE dl)
 endif()
