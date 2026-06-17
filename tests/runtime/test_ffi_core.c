@@ -282,8 +282,10 @@ void test_teko_ffi_lockfile_roundtrip(void) {
     (void)snprintf(orig.records[1].winning_lib, TEKO_FFI_MAX_STR, "teko-deflate-native");
     (void)snprintf(orig.records[1].winning_ver, TEKO_FFI_MAX_STR, "native");
 
-    /* Write to a temp file. */
-    const char* lock_path = "/tmp/teko_test_ffi_core.tkp.lock";
+    /* Write to a temp file. CWD-relative (not /tmp) so it is writable on every
+     * CI platform — Windows has no /tmp, which made fopen() fail and the write
+     * return -1. The file is removed at the end of the test. */
+    const char* lock_path = "teko_test_ffi_core.tkp.lock";
     int wrc = teko_ffi_lockfile_write(&orig, lock_path);
     TEST_ASSERT_EQUAL_INT(0, wrc);
 
