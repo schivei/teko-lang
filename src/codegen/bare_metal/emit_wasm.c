@@ -1350,17 +1350,17 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"env\" \"teko_http_get\"  (func $http_get  (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"env\" \"teko_http_post\" (func $http_post (param i32) (param i32) (result i32)))\n");
             }
-            // Phase 19 (ROUTER-NATIVE): import the teko_router_* entry points from the reactor
-            // so the module-owned radix-tree router runs on WASM (target-agnostic C code, same
-            // binary as native). The module SHARES reactor memory (wasm_emit_router is included
-            // in the memory-sharing guard above). Gated on wasm_emit_router — router-free programs
-            // stay byte-identical.
+            // Phase 19 (ROUTER-NATIVE): import the teko_rt_router_* entry points from the
+            // reactor ("crypto" namespace) so the module-owned radix-tree router runs on WASM
+            // (target-agnostic C code, same binary as native). The module SHARES reactor memory
+            // (wasm_emit_router is included in the memory-sharing guard above). Gated on
+            // wasm_emit_router — router-free programs stay byte-identical.
             if (ctx->wasm_emit_router) {
-                fprintf(f, "  (import \"env\" \"teko_rt_router_new\"       (func $router_new       (param i32) (result i32)))\n");
-                fprintf(f, "  (import \"env\" \"teko_rt_router_add\"        (func $router_add       (param i32) (param i32) (param i32) (param i32) (result i32)))\n");
-                fprintf(f, "  (import \"env\" \"teko_rt_router_dispatch\"   (func $router_dispatch  (param i32) (param i32) (param i32) (result i32)))\n");
-                fprintf(f, "  (import \"env\" \"teko_rt_router_free\"       (func $router_free      (param i32) (result i32)))\n");
-                fprintf(f, "  (import \"env\" \"teko_rt_router_status\"     (func $router_status    (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_router_new\"       (func $router_new       (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_router_add\"        (func $router_add       (param i32) (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_router_dispatch\"   (func $router_dispatch  (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_router_free\"       (func $router_free      (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_router_status\"     (func $router_status    (param i32) (param i32) (param i32) (result i32)))\n");
             }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
