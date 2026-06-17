@@ -270,6 +270,22 @@ extern void test_teko_router_no_match_404(void);
 extern void test_teko_router_middleware_order(void);
 extern void test_teko_router_synthetic_e2e(void);
 extern void test_teko_router_badarg_hardening(void);
+// Phase 19 (T1a) — client socket runtime KATs
+extern void test_teko_socket_null_args(void);
+extern void test_teko_socket_recv_bounds_constant(void);
+extern void test_teko_socket_handle_table_constant(void);
+extern void test_teko_socket_state_machine(void);
+extern void test_teko_socket_loopback_roundtrip(void);
+extern void test_teko_socket_recv_bounds_gate(void);
+extern void test_teko_socket_send_on_closed(void);
+// Phase 19 (T1b, Wave 0) — server socket KATs (NATIVE-ONLY; compiled only when !defined(__wasm__)).
+#if !defined(__wasm__)
+extern void test_teko_server_alloc_free(void);
+extern void test_teko_server_badarg(void);
+extern void test_teko_server_accept_again_when_idle(void);
+extern void test_teko_server_cap_enforcement(void);
+extern void test_teko_server_loopback_roundtrip(void);
+#endif
 
 int main(void) {
     // Unbuffered output: stream every line live so a crash on a CI runner shows
@@ -550,6 +566,22 @@ int main(void) {
     RUN_TEST(test_teko_router_middleware_order);
     RUN_TEST(test_teko_router_synthetic_e2e);
     RUN_TEST(test_teko_router_badarg_hardening);
+    // Phase 19 (T1a) — client socket runtime KATs
+    RUN_TEST(test_teko_socket_null_args);
+    RUN_TEST(test_teko_socket_recv_bounds_constant);
+    RUN_TEST(test_teko_socket_handle_table_constant);
+    RUN_TEST(test_teko_socket_state_machine);
+    RUN_TEST(test_teko_socket_loopback_roundtrip);
+    RUN_TEST(test_teko_socket_recv_bounds_gate);
+    RUN_TEST(test_teko_socket_send_on_closed);
+    // Phase 19 (T1b, Wave 0) — server socket KATs (NATIVE-ONLY).
+#if !defined(__wasm__)
+    RUN_TEST(test_teko_server_alloc_free);
+    RUN_TEST(test_teko_server_badarg);
+    RUN_TEST(test_teko_server_accept_again_when_idle);
+    RUN_TEST(test_teko_server_cap_enforcement);
+    RUN_TEST(test_teko_server_loopback_roundtrip);
+#endif
 
     return UNITY_END();
 }
