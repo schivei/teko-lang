@@ -105,6 +105,10 @@ set(CORE_SOURCES
         src/runtime/teko_decimal.c
         src/runtime/teko_mem_sys.c
         src/runtime/teko_thread.c
+        # Phase 19 (DEFLATE-CORE) — portable DEFLATE/gzip/zlib codec (the native `native`
+        # backend for compress.deflate/gzip/zlib and the WASM reactor implementation).
+        # OP_CALL_RUNTIME ids 120–139 reserved (no frontend wiring this wave).
+        src/runtime/teko_deflate.c
         src/runtime/teko_http.c          # Phase 19: HTTP/1.1 codec (pure byte-buffer; no sockets)
         src/runtime/teko_router.c         # Phase 19 (ROUTER-CORE Wave 0): target-agnostic radix-tree router
         # Phase 19 (T1a) — client socket C runtime (POSIX + Winsock; ids 60-69 reserved)
@@ -170,7 +174,7 @@ target_include_directories(teko PRIVATE src)
 #     the surface ABI shims (teko_rt_emit, and the crypto wrappers added in Sub-phase B)
 #     over the portable C crypto runtime (the single source of truth). Self-contained so
 #     produced binaries need nothing else.
-add_library(teko_rt STATIC runtime/native/teko_rt.c runtime/native/teko_rt_sched.c src/runtime/teko_socket.c src/runtime/teko_socket_server.c src/runtime/teko_duplex.c src/runtime/teko_delayed.c src/runtime/teko_broadcast.c src/runtime/teko_shared.c src/runtime/teko_retry.c src/runtime/teko_time.c src/runtime/teko_object.c src/runtime/teko_array.c src/runtime/teko_iarray.c src/runtime/teko_vtable.c src/runtime/teko_convert.c src/runtime/teko_convert_f64.c src/runtime/teko_decimal.c src/runtime/teko_router.c src/runtime/teko_http.c ${TEKO_CRYPTO_SOURCES})
+add_library(teko_rt STATIC runtime/native/teko_rt.c runtime/native/teko_rt_sched.c src/runtime/teko_socket.c src/runtime/teko_socket_server.c src/runtime/teko_duplex.c src/runtime/teko_delayed.c src/runtime/teko_broadcast.c src/runtime/teko_shared.c src/runtime/teko_retry.c src/runtime/teko_time.c src/runtime/teko_object.c src/runtime/teko_array.c src/runtime/teko_iarray.c src/runtime/teko_vtable.c src/runtime/teko_convert.c src/runtime/teko_convert_f64.c src/runtime/teko_decimal.c src/runtime/teko_router.c src/runtime/teko_http.c src/runtime/teko_deflate.c ${TEKO_CRYPTO_SOURCES})
 target_include_directories(teko_rt PRIVATE runtime/native src/runtime src)
 if (WIN32)
     target_link_libraries(teko_rt PRIVATE bcrypt) # CSPRNG: BCryptGenRandom
@@ -267,6 +271,8 @@ set(TEST_SOURCES
         tests/runtime/test_crypto_p256.c
         tests/runtime/test_crypto_p384.c
         tests/runtime/test_crypto_rsa.c
+        # Phase 19 (DEFLATE-CORE)
+        tests/runtime/test_deflate.c
         tests/runtime/test_http.c          # Phase 19: HTTP/1.1 codec KATs
         tests/runtime/test_router.c           # Phase 19 (ROUTER-CORE Wave 0)
         # Phase 19 (T1b, Wave 0) — server socket KATs (NATIVE-ONLY; #if !defined(__wasm__) in source).
