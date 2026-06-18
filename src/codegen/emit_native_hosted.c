@@ -105,6 +105,12 @@ const char* teko_native_runtime_symbol(int32_t id, int* out_arity) {
         case 177: sym = "teko_rt_router_dispatch"; arity = 3; break; // (handle, method, path) -> handler_id
         case 178: sym = "teko_rt_router_free";     arity = 1; break; // (handle) -> 0
         case 179: sym = "teko_rt_router_status";   arity = 3; break; // (handle, method, path) -> status (200/404/405)
+        // Phase 19 (WS-SRV): ids 100-103 map to the teko_rt_ws_* wrappers (RFC 6455 codec).
+        // SAST: frame data is opaque bytes, bounds-checked in teko_ws_frame_*; key is teko string.
+        case 100: sym = "teko_rt_ws_handshake_accept"; arity = 1; break; // (key_ptr) -> char*
+        case 101: sym = "teko_rt_ws_frame_encode";     arity = 3; break; // (opcode, payload_ptr, payload_len) -> char*
+        case 102: sym = "teko_rt_ws_frame_decode";     arity = 3; break; // (buf_ptr, buf_len, opcode_out_ptr) -> char*
+        case 103: sym = "teko_rt_ws_frame_free";       arity = 1; break; // (ptr) -> 0
         case 6: sym = "teko_rt_md5_hex";       break; // legacy
         case 7: sym = "teko_rt_sha1_hex";      break; // legacy
         case 8: sym = "teko_rt_uuid_v3";       break;

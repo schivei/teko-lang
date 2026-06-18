@@ -1362,13 +1362,24 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 fprintf(f, "  (import \"crypto\" \"teko_rt_router_free\"       (func $router_free      (param i32) (result i32)))\n");
                 fprintf(f, "  (import \"crypto\" \"teko_rt_router_status\"     (func $router_status    (param i32) (param i32) (param i32) (result i32)))\n");
             }
+            // Phase 19 (WS-SRV): import the teko_rt_ws_* entry points from the
+            // reactor ("crypto" namespace) so the module-owned websocket surface runs on WASM
+            // (target-agnostic C code, same binary as native). The module SHARES reactor memory
+            // (wasm_emit_ws is included in the memory-sharing guard below). Gated on
+            // wasm_emit_ws — WS-free programs stay byte-identical.
+            if (ctx->wasm_emit_ws) {
+                fprintf(f, "  (import \"crypto\" \"teko_rt_ws_handshake_accept\" (func $ws_handshake_accept (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_ws_frame_encode\"     (func $ws_frame_encode     (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_ws_frame_decode\"     (func $ws_frame_decode     (param i32) (param i32) (param i32) (result i32)))\n");
+                fprintf(f, "  (import \"crypto\" \"teko_rt_ws_frame_free\"       (func $ws_frame_free       (param i32) (result i32)))\n");
+            }
             // Memory: module-owned by default; when a reactor (crypto/duplex/delayed/broadcast/
             // shared) is in play it is host-owned and SHARED (imported from env), so both modules
             // address the same bytes. Re-export it either way so harnesses can read results.
             if (ctx->wasm_emit_crypto_ext || ctx->wasm_emit_duplex || ctx->wasm_emit_delayed ||
                 ctx->wasm_emit_bcast || ctx->wasm_emit_shared || ctx->wasm_emit_retry ||
                 ctx->wasm_emit_object || ctx->wasm_emit_vtable || ctx->wasm_emit_decimal ||
-                ctx->wasm_emit_array || ctx->wasm_emit_iarray || ctx->wasm_emit_router) {
+                ctx->wasm_emit_array || ctx->wasm_emit_iarray || ctx->wasm_emit_router || ctx->wasm_emit_ws) {
                 fprintf(f, "  (import \"env\" \"memory\" (memory 1))\n");
             } else {
                 fprintf(f, "  (memory 1)\n");
@@ -1533,6 +1544,28 @@ void emit_wasm_pure(MetalContext* ctx, OpCode op, int32_t arg) {
                 int ar  = router_arities[idx];
                 for (int p = 0; p + 1 < ar; p++) fprintf(f, "    local.get $a%d\n", p);
                 fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", router_fns[idx]);
+            } else if (arg >= 100 && arg <= 103) {
+                // Phase 19 (WS-SRV): call the reactor-imported teko_ws_* entry points.
+                // ABI (same as router — $w0 = last arg; $a0..$a{n-2} = prior args):
+                //   100 ws_handshake_accept($w0=key_ptr) -> char*          [1-arg]
+                //   101 ws_frame_encode($a0=opcode,$a1=payload_ptr,$w0=payload_len) -> char* [3-arg]
+                //   102 ws_frame_decode($a0=buf_ptr,$a1=buf_len,$w0=opcode_out_ptr) -> char* [3-arg]
+                //   103 ws_frame_free($w0=ptr) -> 0                        [1-arg]
+                // SAST: all inputs from teko compile-time constants (ws.tks source); the C codec
+                // bounds-checks payload_len vs TEKO_WS_MAX_PAYLOAD before alloc; masking loop
+                // bounded by payload_len; UTF-8 validation on text frames; no format-string paths.
+                static const char* ws_fns[] = {
+                    "ws_handshake_accept", // 100: (key_ptr) -> char*
+                    "ws_frame_encode",     // 101: (opcode, payload_ptr, payload_len) -> char*
+                    "ws_frame_decode",     // 102: (buf_ptr, buf_len, opcode_out_ptr) -> char*
+                    "ws_frame_free",       // 103: (ptr) -> 0
+                };
+                static const int ws_arities[] = { 1, 3, 3, 1 };
+                int idx = arg - 100;
+                int ar  = ws_arities[idx];
+                for (int ai = 0; ai + 1 < ar; ai++)
+                    fprintf(f, "    local.get $a%d\n", ai);
+                fprintf(f, "    local.get $w0\n    call $%s\n    local.set $w0\n", ws_fns[idx]);
             } else if (wasm_is_crypto_ext_id(arg)) {
                 // Reactor-backed crypto: call the imported teko_rt_* entry point. Multi-arg
                 // ABI mirrors OP_CALL_IMPORT — args 0..n-2 come from the staging slots

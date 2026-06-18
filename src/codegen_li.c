@@ -43,6 +43,7 @@ BytecodeBuffer* codegen_li_create_context(void) {
     buffer->uses_http = 0;   // Phase 19 (HTTP-INT): default OFF — zero-init so the 16 goldens stay byte-identical
     buffer->uses_router   = 0; // Phase 19 (ROUTER-NATIVE): default OFF — zero-init required
     buffer->uses_httpsrv  = 0; // Phase 19 (ROUTER-NATIVE): default OFF — zero-init required
+    buffer->uses_ws = 0;     // Phase 19 (WS-SRV): default OFF — zero-init required
 
     // Phase 17 (17.A): the float-constant pool starts empty; uses_float gates the WASM float locals.
     buffer->float_capacity = 8;
@@ -224,7 +225,10 @@ void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
     else if (codec_id == 42 || codec_id == 43) buffer->uses_uuid_rng = 1; // uuid.v4/v7
     else if (codec_id == 4 || codec_id == 6 || codec_id == 7 ||
              codec_id == 8 || codec_id == 9) buffer->uses_hash = 1;       // in-module set
-    else if (codec_id >= 4) buffer->uses_crypto_ext = 1;                  // reactor set
+    // ids 61-67 (net), 80-81 (http), 100-103 (ws), 110-119 (rpc), 120-179 (compress/router/throttle/
+    // server), 180+ (tls/h2/quic/h3/grpc) are NON-CRYPTO Phase 19 surfaces with their own gates.
+    // ONLY ids 4..60 (excluding the in-module/random sets above) belong to the crypto reactor.
+    else if (codec_id >= 4 && codec_id <= 60) buffer->uses_crypto_ext = 1; // reactor set
     else buffer->uses_codec = 1;
     // Phase 17.D/17.E — id 50 (float->string, reads $f0) and id 54 (parse_float, WRITES $f0) are the
     // two f64-ABI runtime calls: both touch the float accumulator, so the WASM float locals MUST be
@@ -250,6 +254,10 @@ void codegen_li_emit_call_runtime(BytecodeBuffer* buffer, int codec_id) {
     // On WASM the backend imports teko_router_* from the reactor; on native teko_rt_router_* is
     // linked unconditionally in libteko_rt.a. Set uses_router so the WASM emitter gates imports.
     if (codec_id >= 175 && codec_id <= 178) buffer->uses_router = 1;
+    // Phase 19 (WS-SRV): ids 100-103 are the websocket surface (handshake/frame_encode/frame_decode/frame_free).
+    // On WASM the backend imports teko_rt_ws_* from the reactor; on native teko_rt_ws_* is
+    // linked unconditionally in libteko_rt.a. Set uses_ws so the WASM emitter gates imports.
+    if (codec_id >= 100 && codec_id <= 103) buffer->uses_ws = 1;
     emit_byte(buffer, OP_CALL_RUNTIME);
     emit_int(buffer, codec_id);
 }

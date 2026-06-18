@@ -33,6 +33,11 @@
 // Phase 19 (T1b) — server socket runtime (NATIVE-ONLY; guarded in the header).
 #include "teko_socket_server.h"
 #include "teko_router.h"           // Phase 19 (ROUTER-NATIVE): target-agnostic radix-tree router
+// Note: teko_websocket.h is NOT included here — the teko_rt_ws_* wrappers (ids 100-103) are
+// implemented in src/runtime/teko_websocket.c (which is compiled into libteko_rt.a separately).
+// Including teko_websocket.h here would create duplicate symbols. teko_rt.c includes
+// teko_router.h above and the router wrappers below for the same reason (teko_router.c compiled
+// separately): we include its header only for the struct types we reference.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1415,3 +1420,7 @@ long teko_rt_router_status(long handle, long method_ptr, long path_ptr) {
     TekoRouteMatch m = teko_router_dispatch(r, method, path, NULL);
     return (long)m.status; // 200, 404, or 405
 }
+
+// Phase 19 (WS-SRV): teko_rt_ws_* wrappers (OP_CALL_RUNTIME ids 100-103) are implemented
+// in src/runtime/teko_websocket.c (compiled into libteko_rt.a). See teko_websocket.h for
+// the declarations and teko_websocket.c for the full implementations with SAST commentary.

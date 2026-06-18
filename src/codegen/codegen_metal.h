@@ -142,6 +142,12 @@ typedef struct {
     // emitted (api{} block on native). WASM: the synthetic dispatch proof uses wasm_emit_router
     // only; no listen socket on WASM. Server-free programs stay byte-identical.
     int wasm_emit_httpsrv;
+    // Phase 19 (WS-SRV — websocket endpoint surface): 1 when the program uses a websocket{} block
+    // (OP_CALL_RUNTIME ids 100-103). The WASM backend imports teko_rt_ws_* from the reactor ("crypto"
+    // namespace) so the real C teko_websocket.c computes handshake+framing — NO JS mock.
+    // WS-free programs (incl. the 16 freestanding goldens) stay byte-identical.
+    // MUST be zero-initialized in teko_metal_create (standing lesson: malloc'd struct).
+    int wasm_emit_ws;
     // Phase 14 (control-flow foundation): structured loop/if lowering state, shared by the native
     // hosted emitter and the WASM emitter. cf_id_next assigns a fresh monotonic id to each
     // LOOP_BEGIN/IF_BEGIN; cf_loop_stack/cf_if_stack track the active (nesting) ids so
@@ -215,6 +221,8 @@ void teko_metal_set_emit_http(MetalContext* ctx, int enabled);
 void teko_metal_set_emit_router(MetalContext* ctx, int enabled);
 // Phase 19 (ROUTER-NATIVE): request native HTTP server emission (api{} block on native).
 void teko_metal_set_emit_httpsrv(MetalContext* ctx, int enabled);
+// Phase 19 (WS-SRV): request websocket endpoint emission (WASM imports; native links teko_rt_ws_*).
+void teko_metal_set_emit_ws(MetalContext* ctx, int enabled);
 
 // Phase 17 (17.A): hand the backend the float-constant pool (OP_FCONST's index space). `floats`
 // must outlive teko_metal_emit_program. teko_metal_set_emit_float gates the WASM float locals.

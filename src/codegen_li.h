@@ -444,6 +444,11 @@ typedef struct {
     // Phase 19 (ROUTER-NATIVE): set to 1 when a native HTTP server accept loop is needed (api{})
     // block on a native target). WASM never sets this (synthetic dispatch only on WASM).
     int uses_httpsrv;
+    // Phase 19 (WS-SRV — websocket endpoint surface): set to 1 when any websocket{} block
+    // (OP_CALL_RUNTIME ids 100-103) is emitted. Gates wasm_emit_ws on the WASM backend (reactor
+    // imports teko_ws_*); native links teko_rt_ws_* via libteko_rt.a. WS-free programs (incl. the
+    // 16 freestanding goldens) stay byte-identical.
+    int uses_ws;
     // Phase 17 (17.A): the float-constant pool — f64 bit patterns indexed by OP_FCONST's 4-byte
     // arg. Mirrors the string pool (codegen_li_add_float_constant dedups by bit-equality). Threaded
     // to the backend via teko_metal_set_floats. `uses_float` is 1 once any float opcode is emitted,

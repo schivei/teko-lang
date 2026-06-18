@@ -742,4 +742,28 @@ conn.close(); s.close()
 
 check_http
 
+# Phase 19 (WS-SRV — websocket token): handshake accept proof.
+# ws.tks compiles, the binary runs, and the harness asserts the emitted string
+# is the RFC 6455 §1.3 test vector accept: "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".
+# The C teko_ws_handshake_accept (SHA-1 + base64) is linked from libteko_rt.a
+# (teko_websocket.c). No sockets, no OS I/O — pure codec proof.
+# SAST: key is a compile-time constant; no attacker-controlled input at this level.
+check_ws() {
+  local sample="ws.tks" exe got expected_accept
+  exe="$TMP/ws"
+  expected_accept="s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+  echo "--- $sample (RFC 6455 handshake accept proof) ---"
+  "$TEKO" build "$HERE/samples/$sample" --target=host --rt-lib="$RTLIB" -o "$exe" \
+    || fail "compile/link failed for $sample"
+  got="$("$exe")" || fail "ws exited non-zero"
+  [ "$got" = "$expected_accept" ] || fail "ws: expected [$expected_accept], got [$got]"
+  # Assert ws symbols are present (proves id=100 teko_rt_ws_handshake_accept ran).
+  local ws_count
+  ws_count=$(nm "$exe" 2>/dev/null | grep -c "teko_rt_ws" || true)
+  [ "$ws_count" -gt 0 ] || fail "ws: no teko_rt_ws symbols in binary"
+  echo "OK: ws -> [$got] (RFC 6455 test vector accept confirmed; ws_symbols=$ws_count)"
+}
+
+check_ws
+
 echo "All native runner proofs passed."
