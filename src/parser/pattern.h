@@ -1,0 +1,52 @@
+// src/parser/pattern.h   (namespace 'teko::parser')
+//
+// The parser's PATTERN type declarations, the C23 mirror of parser/pattern.tks
+// (LiteralPattern, RangePattern, AltPattern, BindPattern, FieldPattern,
+// WildcardPattern, Pattern + Arm). Split out of ast.h so each Teko file has its
+// same-name C pair. TYPE-ONLY header.
+//
+// Patterns reference expressions by value (a range/literal bound IS an Expr), so the
+// full tk_expr definition must already be visible. ast.h includes this header AFTER
+// it defines tk_expr; do not include pattern.h before tk_expr exists.
+#ifndef TK_PARSER_PATTERN_H
+#define TK_PARSER_PATTERN_H
+
+#include "type.h"             // tk_path
+// NOTE: tk_expr (the literal/range bound type) must be defined before this header is
+// included — ast.h arranges that ordering.
+
+#include <stdbool.h>
+#include <stddef.h>           // size_t
+
+// =========================================================================
+// Patterns (parser/pattern.tks: Literal/Range/Alt/Bind/Field/Wildcard + Pattern)
+// =========================================================================
+typedef struct tk_pattern tk_pattern;        // recursive (AltPattern holds []Pattern)
+
+typedef struct { tk_expr value; }                                   tk_literal_pattern;  // a scalar literal
+typedef struct { tk_expr lo; tk_expr hi; }                          tk_range_pattern;    // lo ..= hi (inclusive)
+typedef struct { tk_pattern *options; size_t n_options; }           tk_alt_pattern;      // a | b | … (value axis)
+typedef struct { tk_path type_name; bool has_binding; tk_str binding; } tk_bind_pattern; // `Foo` / `Foo as x`
+typedef struct { tk_path type_name; tk_str *fields; size_t n_fields; }  tk_field_pattern; // Type { f; g }
+typedef struct { int _unused; }                                     tk_wildcard_pattern; // _ (no payload)
+
+struct tk_pattern {
+    enum { TK_PAT_WILDCARD, TK_PAT_LITERAL, TK_PAT_BIND, TK_PAT_FIELD, TK_PAT_RANGE, TK_PAT_ALT } tag;
+    union {
+        tk_literal_pattern literal;
+        tk_bind_pattern    bind;
+        tk_field_pattern   field;
+        tk_range_pattern   range;
+        tk_alt_pattern     alt;
+        // WILDCARD carries no payload
+    } as;
+};
+
+struct tk_arm {                              // Arm = struct { pattern; has_when; guard; body }
+    tk_pattern pattern;
+    bool       has_when;                     // a `when` guard present? (NOT counted for exhaustiveness)
+    tk_expr    guard;                        // the guard condition (valid iff has_when)
+    tk_expr    body;                         // the arm's value (match is an expression)
+};
+
+#endif // TK_PARSER_PATTERN_H

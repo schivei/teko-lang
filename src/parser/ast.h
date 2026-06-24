@@ -16,31 +16,13 @@
 #include "../lexer/token.h"   // tk_token, tk_token_kind (op-typed fields)
 #include "../text/text.h"     // tk_str, tk_byte
 #include "../core.h"          // TK_RESULT, TK_LIST, tk_error
+#include "type.h"             // tk_segment, tk_path, tk_type_expr (parser/type.tks)
 
 #include <stddef.h>           // size_t
 #include <stdint.h>           // int64_t
 
-// =========================================================================
-// Paths (parser/type.tks: Segment, Path)
-// =========================================================================
-typedef struct { tk_str name; } tk_segment;          // one `::`-joined identifier
-typedef struct {                                     // Path = struct { segments: []Segment }
-    tk_segment *segments;                            // at least one
-    size_t      len;                                 // segment count (Teko `segments.len`)
-} tk_path;
-
-// =========================================================================
-// Type expressions (parser/type.tks: NamedType, SliceType, UnionType, TypeExpr)
-// =========================================================================
-typedef struct tk_type_expr tk_type_expr;            // recursive (Slice/Union hold TypeExpr)
-struct tk_type_expr {
-    enum { TK_TEXPR_NAMED, TK_TEXPR_SLICE, TK_TEXPR_UNION } tag;
-    union {
-        struct { tk_path path; }                       named;   // NamedType (u64 | lexer::Token)
-        struct { tk_type_expr *element; }              slice;   // SliceType ([]T)
-        struct { tk_type_expr *members; size_t len; }  uni;     // UnionType (A | B | …)  ('union' is reserved)
-    } as;
-};
+// (Paths + type expressions are now in type.h — parser/type.tks's same-name C pair.)
+// (Patterns + Arm are in pattern.h, included BELOW once tk_expr is defined.)
 
 // =========================================================================
 // Expressions (parser/ast.tks: Number/Var/StrLit/ByteLit/Binary/Unary/CmpTerm/
@@ -100,35 +82,11 @@ struct tk_expr {
 };
 
 // =========================================================================
-// Patterns (parser/pattern.tks: Literal/Range/Alt/Bind/Field/Wildcard + Pattern + Arm)
+// Patterns + Arm (parser/pattern.tks) — now in pattern.h, their same-name C pair.
+// tk_expr is fully defined above, so pattern.h's literal/range/guard/body fields
+// (which hold tk_expr by value) and struct tk_arm resolve cleanly here.
 // =========================================================================
-typedef struct tk_pattern tk_pattern;        // recursive (AltPattern holds []Pattern)
-
-typedef struct { tk_expr value; }                                   tk_literal_pattern;  // a scalar literal
-typedef struct { tk_expr lo; tk_expr hi; }                          tk_range_pattern;    // lo ..= hi (inclusive)
-typedef struct { tk_pattern *options; size_t n_options; }           tk_alt_pattern;      // a | b | … (value axis)
-typedef struct { tk_path type_name; bool has_binding; tk_str binding; } tk_bind_pattern; // `Foo` / `Foo as x`
-typedef struct { tk_path type_name; tk_str *fields; size_t n_fields; }  tk_field_pattern; // Type { f; g }
-typedef struct { int _unused; }                                     tk_wildcard_pattern; // _ (no payload)
-
-struct tk_pattern {
-    enum { TK_PAT_WILDCARD, TK_PAT_LITERAL, TK_PAT_BIND, TK_PAT_FIELD, TK_PAT_RANGE, TK_PAT_ALT } tag;
-    union {
-        tk_literal_pattern literal;
-        tk_bind_pattern    bind;
-        tk_field_pattern   field;
-        tk_range_pattern   range;
-        tk_alt_pattern     alt;
-        // WILDCARD carries no payload
-    } as;
-};
-
-struct tk_arm {                              // Arm = struct { pattern; has_when; guard; body }
-    tk_pattern pattern;
-    bool       has_when;                     // a `when` guard present? (NOT counted for exhaustiveness)
-    tk_expr    guard;                        // the guard condition (valid iff has_when)
-    tk_expr    body;                         // the arm's value (match is an expression)
-};
+#include "pattern.h"
 
 // =========================================================================
 // Statements (parser/ast.tks: BindKind/SimpleName/DestructurePattern/BindTarget/

@@ -441,24 +441,5 @@ tk_tokens_result tk_tokenize(tk_str source) {
     return (tk_tokens_result){ .ok = true, .as.value = tokens };
 }
 
-// --- literal decoders (parse_lit.tks `lit_int`/`lit_byte`) ---
-
-// a Number token's text (decimal digits with `_` separators) → i64.
-int64_t tk_lit_int(tk_str text) {
-    int64_t acc = 0;
-    size_t i = 0;
-    for (;;) {
-        if (i >= text.len) break;
-        tk_byte c = text.ptr[i];
-        if (c != '_') {
-            acc = acc * 10 + (int64_t)c - (int64_t)'0';
-        }
-        i++;
-    }
-    return acc;
-}
-
-// a Byte token's text is the already-decoded octet (the lexer resolved it).
-tk_byte tk_lit_byte(tk_str text) {
-    return text.ptr[0];
-}
+// (The literal decoders lit_int / lit_byte are parser-namespace fns — RELOCATED to
+//  src/parser/parse_lit.{c,h} per parse_lit.tks. They were never called by the lexer.)

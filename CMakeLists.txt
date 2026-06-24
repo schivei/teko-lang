@@ -37,7 +37,20 @@ set(TEKO_LEXER_SOURCES
     src/lexer/lexer.c)
 
 set(TEKO_PARSER_SOURCES
-    src/parser/parser.c)
+    src/parser/ast.c
+    src/parser/cursor.c
+    src/parser/optokens.c
+    src/parser/parse_lit.c
+    src/parser/parse_path.c
+    src/parser/parse_type.c
+    src/parser/parse_pattern.c
+    src/parser/parse_expr.c
+    src/parser/parse_if.c
+    src/parser/parse_match.c
+    src/parser/parse_arm.c
+    src/parser/parse_stmt.c
+    src/parser/parse_decl.c
+    src/parser/parse_file.c)
 
 set(TEKO_CHECKER_SOURCES
     src/checker/type.c
@@ -45,6 +58,7 @@ set(TEKO_CHECKER_SOURCES
     src/checker/resolve.c
     src/checker/collect.c
     src/checker/match.c
+    src/checker/expr.c
     src/checker/typer.c
     src/checker/revalidate.c)
 
@@ -76,7 +90,7 @@ add_library(teko_bootstrap STATIC
 # `teko` is now the REAL driver: read -> lex -> parse -> reconcile -> check, wired in
 # src/driver.c and linked against the bootstrap mirror library. (Codegen/emit is F2;
 # success here means the front-end pipeline ran and the program type-checked.)
-add_executable(teko src/main.c src/driver.c)
+add_executable(teko main.c src/driver.c)
 target_link_libraries(teko PRIVATE teko_bootstrap)
 
 # F3: the generated programs link the minimal execution runtime (libteko_rt).

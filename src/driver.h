@@ -26,7 +26,7 @@ tk_program tk_module_to_program(tk_module m);
 // B1d — the driver. read → lex → parse → reconcile → check for the file at `path`.
 // The parse entry is chosen by basename: `main.tks` → main-file parser, else module.
 // Returns 0 on success (prints a concise OK line to stdout); non-zero on any stage
-// failure (prints `tekoc: <path>: <message>` to stderr).
+// failure (prints `teko: <path>: <message>` to stderr).
 int tk_compile(const char *path);
 
 #endif // TK_DRIVER_H

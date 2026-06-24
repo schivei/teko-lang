@@ -1,7 +1,7 @@
 // src/driver.c — the Teko bootstrap DRIVER (F1: path-to-first-binary).
 //
 // Wires read → lex → parse → reconcile → check end-to-end. This is the milestone
-// where `tekoc <file.tks>` first processes real Teko: the front-end pipeline runs
+// where `teko <file.tks>` first processes real Teko: the front-end pipeline runs
 // and reports its verdict. Codegen/emit (F2) is NOT here — success == "type-checked".
 #include "driver.h"
 
@@ -16,7 +16,7 @@
 #include <string.h>          // strrchr, strcmp, memcpy
 
 // F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
-// absolute path; a non-CMake `cc`-built tekoc falls back to the in-tree dir.
+// absolute path; a non-CMake `cc`-built teko falls back to the in-tree dir.
 #ifndef TK_RT_DIR
 #define TK_RT_DIR "runtime"
 #endif
@@ -110,7 +110,7 @@ static const char *basename_of(const char *path) {
 }
 
 static int fail(const char *path, const char *message) {
-    fprintf(stderr, "tekoc: %s: %s\n", path, message);
+    fprintf(stderr, "teko: %s: %s\n", path, message);
     return 1;
 }
 
@@ -176,7 +176,7 @@ static int tk_backend(const char *path, tk_tprogram prog) {
     free(cfile);
     if (rc != 0) { free(stem); return fail(path, "cc failed to build the generated C"); }
 
-    printf("tekoc: %s: built %s\n", path, stem);
+    printf("teko: %s: built %s\n", path, stem);
     free(stem);
     return 0;
 }

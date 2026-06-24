@@ -5,7 +5,7 @@
 //
 // COVERAGE (M.3 — honesty): M0 only needs integer arithmetic + let + return. Any node
 // kind not yet lowered makes tk_emit_c FAIL with a clear message (no broken C, no
-// crash), which the driver surfaces as `tekoc: <path>: codegen: <node> not yet
+// crash), which the driver surfaces as `teko: <path>: codegen: <node> not yet
 // supported`.
 #ifndef TK_CODEGEN_C_H
 #define TK_CODEGEN_C_H

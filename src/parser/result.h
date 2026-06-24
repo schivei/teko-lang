@@ -70,21 +70,7 @@ TK_RESULT(tk_parsed_uses,       tk_parsed_uses_result);
 TK_RESULT(tk_parsed_main_file,  tk_parsed_main_file_result);
 TK_RESULT(tk_parsed_module,     tk_parsed_module_result);
 
-// =========================================================================
-// Token-cursor predicate DECLARATIONS (cursor.tks, optokens.tks). Bodies: parser.c.
-// =========================================================================
-bool tk_has_token (const tk_token *t, size_t n, size_t pos);                       // is there a token at pos?
-bool tk_is_kind_at(const tk_token *t, size_t n, size_t pos, tk_token_kind k);      // has_token + kind compare
-bool tk_is_sep    (const tk_token *t, size_t n, size_t pos);                       // `;` or a newline (B.17)
-size_t tk_skip_seps(const tk_token *t, size_t n, size_t pos);                      // skip a run of separators
-
-bool tk_is_unary         (const tk_token *t, size_t n, size_t pos);  // - ~ !            (level 2)
-bool tk_is_shift         (const tk_token *t, size_t n, size_t pos);  // << >>            (level 3)
-bool tk_is_multiplicative(const tk_token *t, size_t n, size_t pos);  // * / % &          (level 4)
-bool tk_is_additive      (const tk_token *t, size_t n, size_t pos);  // + - | ^          (level 5)
-bool tk_is_comparison    (const tk_token *t, size_t n, size_t pos);  // < > <= >= == !=  (level 6)
-bool tk_is_andand        (const tk_token *t, size_t n, size_t pos);  // &&               (level 7)
-bool tk_is_oror          (const tk_token *t, size_t n, size_t pos);  // ||               (level 8)
-bool tk_is_assign_op     (const tk_token *t, size_t n, size_t pos);  // = += -= … (B.4 — statement-only)
+// (Token-cursor predicate declarations moved to cursor.h / optokens.h — their
+//  same-name C pairs of cursor.tks / optokens.tks.)
 
 #endif // TK_PARSER_RESULT_H

@@ -20,10 +20,7 @@ TK_RESULT(tk_tokens, tk_tokens_result);
 // the first lex error.
 tk_tokens_result tk_tokenize(tk_str source);
 
-// --- literal decoders (parse_lit.tks `lit_int`/`lit_byte`) ---
-// A Number token's text (decimal digits with `_` separators) → i64.
-int64_t tk_lit_int(tk_str text);
-// A Byte token's text is the already-decoded octet (the lexer resolved it).
-tk_byte tk_lit_byte(tk_str text);
+// (The literal decoders lit_int / lit_byte moved to the parser namespace —
+//  src/parser/parse_lit.h, mirroring parse_lit.tks.)
 
 #endif // TK_LEXER_LEXER_H

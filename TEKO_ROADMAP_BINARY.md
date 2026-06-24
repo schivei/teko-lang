@@ -1,7 +1,7 @@
 # TEKO_ROADMAP_BINARY — caminho até o PRIMEIRO binário executável
 
-> Sucede o TEKO_ROADMAP_E7_V2 (front-end + checker + emissores `.tkb`/`.tkh`, concluídos).
-> **Alvo:** o bootstrap `tekoc` (o espelho **C** compilado pelo `cc` do host) compila um
+> Sucede o roadmap E7 (front-end + checker + emissores `.tkb`/`.tkh`, concluídos).
+> **Alvo:** o bootstrap `teko` (o espelho **C** compilado pelo `cc` do host) compila um
 > `main.tks` mínimo e produz um **binário nativo que roda**.
 > **Backend (decidido pelo legislador):** **transpile-para-C** — o codegen baixa a árvore
 > tipada para **C**, e o `cc` do host compila → binário. Reusa a toolchain (M.5); é a forma
@@ -27,12 +27,12 @@ código compila" (F0).
 |---|---|---|
 | Bm1a | Toolchain confirmada: **cmake 4.3.3**, **Apple clang 21**, **`-std=c23` aceito** | ✓ |
 | Bm1b | `cmake -B build` **configura limpo** — valida o `CMakeLists.txt` inteiro (incl. a lib-espelho `EXCLUDE_FROM_ALL`) | ✓ |
-| Bm1c | Alvo **`tekoc`** (esqueleto standalone em `src/main.c`, **sem** depender do espelho) **compila + linka + roda** (exit 0) | ✓ |
+| Bm1c | Alvo **`teko`** (esqueleto standalone em `src/main.c`, **sem** depender do espelho) **compila + linka + roda** (exit 0) | ✓ |
 
-**Marco F-1:** `cmake --build build --target tekoc && ./build/tekoc` funciona. O baseline está
+**Marco F-1:** `cmake --build build --target teko && ./build/teko` funciona. O baseline está
 de pé; F0 passa a crescer o espelho C sobre uma infra comprovada. (`build/` no `.gitignore`.)
 
-## Fase 0 — `tekoc` compila & linka (tornar o espelho C construível)
+## Fase 0 — `teko` compila & linka (tornar o espelho C construível)
 
 | # | Entrega | Lei | Esf. |
 |---|---|---|---|
@@ -41,14 +41,14 @@ de pé; F0 passa a crescer o espelho C sobre uma infra comprovada. (`build/` no 
 | B0c-1 ✓ | **AST/headers do parser** — **feito** (acima): definem `tk_expr`/`TK_EXPR_*`/`tk_pattern`/`tk_statement`/`tk_item`/… ; os 12 helpers de append + box + predicados de cursor declarados | M.4 | M |
 | B0c-2 ✓ | **Corpos do parser** — **feito**: `parser.c` com todos os `parse_*`/cursor/optokens + 12 helpers de append + box, transcritos de `parser/*.tks`. `-fsyntax-only` limpo; em CMake (`TEKO_PARSER_SOURCES`). Sem stubs/tensões | M.4 | M |
 | B0d | **Runtime/prelude C** — `core.h` ok; promover `tk_str_eq` (hoje `static` duplicado em type.c/typer.c) p/ `text.h` — *cleanup M.5, NÃO bloqueia* (pendente) | M.5 | P |
-| B0e ✓ | **CMake linka tudo** — **feito**: `parser.c` na lib; `EXCLUDE_FROM_ALL` removido; `cmake --build` (padrão) arquiva `libteko_bootstrap.a` + builda `tekoc` — verde | M.4 | P |
+| B0e ✓ | **CMake linka tudo** — **feito**: `parser.c` na lib; `EXCLUDE_FROM_ALL` removido; `cmake --build` (padrão) arquiva `libteko_bootstrap.a` + builda `teko` — verde | M.4 | P |
 
 > **F0 CONCLUÍDO ✅:** **17/17 `.c` do espelho compilam limpos**; `cmake --build` (padrão) produz
-> **`libteko_bootstrap.a`** (front-end + checker + emit inteiros) **+ `tekoc`** (smoke). Único resíduo: **B0d**
+> **`libteko_bootstrap.a`** (front-end + checker + emit inteiros) **+ `teko`** (smoke). Único resíduo: **B0d**
 > (`tk_str_eq` duplicado — cleanup M.5, não bloqueia). A lib ainda não é linkada num executável — isso é a
-> **F1** (conectar o driver: read→lex→parse→check, e linkar `tekoc` contra a lib).
+> **F1** (conectar o driver: read→lex→parse→check, e linkar `teko` contra a lib).
 
-**Marco F0:** `cmake --build` produz `tekoc`; `./tekoc` roda (sem fazer nada ainda).
+**Marco F0:** `cmake --build` produz `teko`; `./teko` roda (sem fazer nada ainda).
 
 ### Resultado da auditoria de compilação (clang `-fsyntax-only -I src`)
 **Já limpos (prontos p/ F0):** `text.c`, `type.c`, `tkb_buf.c`, `main.c`. `tast.h` (AST **tipada**) está
@@ -77,11 +77,11 @@ ast.h/result.h como headers reais + `tk_expr`/helpers/corpos → B0d `tk_str_eq`
 | # | Entrega | Lei | Esf. |
 |---|---|---|---|
 | B1a ✓ | **IO** — **feito**: `tk_read_file` (host `fopen`/`fread` → `tk_str_from_utf8`, a única IO contida do bootstrap, M.1) em `src/driver.c` | M.1 | P |
-| B1b | **`.tkp` reader** — parser TOML → `Artifact`/`source`/`[dependencies]`; fiar `check_main_file_rule`. **Deferido** (hoje o driver escolhe `parse_main_file`/`parse_module` pelo basename `main.tks`) | M.3 | M |
+| B1b | **`.tkp` reader** — parser TOML → `Artifact`/`source`/`[dependencies]`; fiar `check_main_file_rule`. **PROMOVIDO** ao `TEKO_ROADMAP_INDEPENDENCE.md` Eixo A (compilação por projeto): o basename-heurístico do driver é falha conceitual, corrigida lá. | M.3 | M |
 | B1c ✓ | **R-main** — **feito**: `tk_main_file_to_program`/`tk_module_to_program` achatam `MainFile`/`Module` em `tk_program` de `tk_item` (uses→USE, body→STATEMENT, decls→FUNCTION/TYPE_DECL). Sem tensão (flatten fiel) | M.4 | M |
-| B1d ✓ | **Driver** — **feito**: `tk_compile(path)` = read→lex→parse→reconcile→`tk_type_program`; `main()` mínimo (`tekoc <file>`); erros→stderr+exit 1, OK→stdout+exit 0. `tekoc` linkado contra `libteko_bootstrap.a` | M.4 | M |
+| B1d ✓ | **Driver** — **feito**: `tk_compile(path)` = read→lex→parse→reconcile→`tk_type_program`; `main()` mínimo (`teko <file>`); erros→stderr+exit 1, OK→stdout+exit 0. `teko` linkado contra `libteko_bootstrap.a` | M.4 | M |
 
-> **F1 CONCLUÍDO ✅:** `tekoc` é um **front-end real** — `read→lex→parse→reconcile→check` end-to-end, verificado:
+> **F1 CONCLUÍDO ✅:** `teko` é um **front-end real** — `read→lex→parse→reconcile→check` end-to-end, verificado:
 > `let x: u32 = 1` / `200 to u8` → `checked OK`; `let y: u8 = 999` (fora de faixa, M.1) e erro de parse →
 > reportados com mensagem + exit 1; `main.tks` vazio → OK (0 items). *(`.tkp` reader = B1b, deferido.)*
 
@@ -108,14 +108,14 @@ ast.h/result.h como headers reais + `tk_expr`/helpers/corpos → B0d `tk_str_eq`
 | B3d ✓ | **Entry + saída** — virtual-main → `main` C; exit codes (early-exit) **+ saída real via `print`**; pânico → `abort`/stderr com mensagem (`tk_panic`) | M.1 | P |
 
 > **MARCO ZERO (M0) ✅ ALCANÇADO no F2** — via **exit-code** (não precisou de runtime): `main.tks` de aritmética
-> inteira → `tekoc` → C → `cc` → binário nativo que **roda** (`return n`=exit n, default 0). Verificado:
+> inteira → `teko` → C → `cc` → binário nativo que **roda** (`return n`=exit n, default 0). Verificado:
 > `1+2`→3, `6*7`→42, `(1<<4)|2`→18, fall-through→0; nó não-suportado → erro honesto.
 >
 > **F3 = M1 (próximo nível — runtime de verdade):** o que destrava programas além de aritmética-com-exit-code —
 > **B3c `print`/IO** (saída real), **B3b pânicos** (÷0/OOB/cast-impossível/overflow), **B3a runtime de valor**
 > (`str`/`list`) e **funções com params** + str/byte literais no codegen. Cada um habilita mais do escopo M1.
 >
-> **F3 — incremento 1 ✅ (saída observável de verdade):** `print("hello, teko\n")` → `tekoc` → C+`teko_rt.c` → `cc` →
+> **F3 — incremento 1 ✅ (saída observável de verdade):** `print("hello, teko\n")` → `teko` → C+`teko_rt.c` → `cc` →
 > binário que **imprime** e sai 0. Entregue: `runtime/teko_rt.{h,c}` (str/IO + superfície de pânicos), typer injeta
 > `print`/`println:(str)->Unit`, codegen baixa literais `str` (escaping + len explícito) / `byte` e mapeia as chamadas
 > built-in, driver+CMake fiam o runtime no `cc`. Verificado: hello-world imprime; `let s: str` + `println(s)`; em-dash

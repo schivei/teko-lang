@@ -1,24 +1,22 @@
-// src/parser/parser.h — the parser FUNCTION prototypes (the public entry points).
+// src/parser/parser.h   (namespace 'teko::parser')
 //
-// B0c part 2 (next lote): complete the parser function bodies — transcribe from
-// src/parser/*.tks. This header + parser.c are NOT yet in CMakeLists; parser.c is
-// EXPECTED to be incomplete / not-yet-compiling until the body transcription lands.
+// Umbrella header for the parser's public entry points. The parser was split into one
+// C pair per Teko .tks file (cursor, optokens, parse_path, parse_lit, parse_type,
+// parse_pattern, parse_expr, parse_if, parse_match, parse_arm, parse_stmt, parse_decl,
+// parse_file). This header re-exports the public entries so consumers (the driver) can
+// `#include "parser/parser.h"` and reach the whole front end as before.
 #ifndef TK_PARSER_PARSER_H
 #define TK_PARSER_PARSER_H
 
 #include "ast.h"
 #include "result.h"
 
-// public parser entry points (bodies in parser.c — next lote)
-tk_parsed_type_result      tk_parse_type(const tk_token *t, size_t n, size_t pos);
-tk_parsed_result           tk_parse_expr(const tk_token *t, size_t n, size_t pos);
-tk_parsed_pattern_result   tk_parse_pattern(const tk_token *t, size_t n, size_t pos);
-tk_parsed_arm_result       tk_parse_arm(const tk_token *t, size_t n, size_t pos);
-tk_parsed_stmt_result      tk_parse_statement(const tk_token *t, size_t n, size_t pos);
-tk_parsed_block_result     tk_parse_block(const tk_token *t, size_t n, size_t pos);
-tk_parsed_decl_result      tk_parse_function(const tk_token *t, size_t n, size_t pos);
-tk_parsed_decl_result      tk_parse_type_decl(const tk_token *t, size_t n, size_t pos);
-tk_parsed_main_file_result tk_parse_main_file(const tk_token *t, size_t n, size_t pos);
-tk_parsed_module_result    tk_parse_module(const tk_token *t, size_t n, size_t pos);
+#include "parse_type.h"    // tk_parse_type
+#include "parse_expr.h"    // tk_parse_expr
+#include "parse_pattern.h" // tk_parse_pattern
+#include "parse_arm.h"     // tk_parse_arm
+#include "parse_stmt.h"    // tk_parse_statement, tk_parse_block
+#include "parse_decl.h"    // tk_parse_function, tk_parse_type_decl, tk_parse_module
+#include "parse_file.h"    // tk_parse_main_file
 
 #endif // TK_PARSER_PARSER_H
