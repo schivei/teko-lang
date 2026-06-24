@@ -19,6 +19,47 @@
   · loop/break/continue · if/match-expressões). **Diferimento do P2 removido.** ✓
 - Pré-requisitos resolvidos em passagem: tokens `Dot` (`.`) e `Semicolon` (`;`); helpers
   `is_sep`/`skip_seps`; refinos `has_binding`, `Return.has_value`.
+- **C1** — `check_*` → `type_*` concluído: AST tipada completa (todo nó/stmt/item
+  re-derivado), `revalidate` exaustivo, codec `.tkb` com tags 8/9 reservadas p/ `if`/
+  `match` (serialização completa → Fase S). Mirror C + `checker_test.tkt`. ✓
+  *Gap registrado (não-C1):* reconciliar o driver do checker (`Program`/`Item`) à AST
+  pós-R-main (`MainFile`/`Module`).
+- **C2** — cast `to` concluído (**inteiros**) — **regra B (↺ redefinição)**: `type_cast`/`cast_check`
+  permitem **toda conversão numérica definida** (incl. narrowing/sinal); a perda é pega, não
+  silenciosa — constante fora-de-faixa → erro de compilação, runtime → guarda em codegen
+  (panic-debug/definido-release, adiado M.4). `bool`/não-numérico → erro. Nó `TCast`, `revalidate`
+  re-deriva, `write_texpr` tag 10 (round-trip = S1a). Mirror C + testes. ✓ **Reverte** a regra
+  antiga (proibir perda em compilação) — registrado em HISTORY/REBOOT_PLAN + Índice de Redefinições.
+  *Adiado por M.4:* casts de **float** (sem float em `PrimKind`) e **newtype↔base** (`resolve_named`
+  não rebaixa o newtype ao tipo-base) — linhas float de C2a/C2b pendentes.
+- **C3–C6** (lote "agentes rascunham, eu integro" + portão de tensão): **C3** `FieldAccess`
+  (`type_field_access`, nó `TFieldAccess`, tag 11→S1b); **C4** regra `mut` (`ValBinding.is_mut` +
+  `lookup_binding`, recusa escrita em imutável); **C6** literal anotado **Side D** (leaf as-is i64,
+  binding adota via `value_fits` — veredito de tribunal + aval do legislador); **C5** return vs tipo
+  **DEFER** (`check_returns`/`check_trailing_value` no `type_function`, inclusão de membro B.14; guard
+  contra `loop` divergente; divergência completa = item próprio). ✓ C3/C4 limpos; C5/C6 via tribunal.
+- **Dívida `check_*`/`type_*` QUITADA** (a transição que C1 mandou, agora *concluída*): a camada legada
+  `check_*` (16 funções, Etapas 4/5a/5b/5c) foi **retirada** (Teko + mirror C) — o checker vivo é
+  `type_program`. Mantidos por serem **compartilhados** (não duplicatas): predicados `is_bool`/
+  `is_integer`/`is_comparable` + regimes `op_is_*`; helpers de padrão/exaustividade `check_pattern`/
+  `exhaustive` (C promovido a `tk_*` não-`static` — conserta mismatch de linkagem pré-existente); typedef
+  `tk_check_result`; `tk_env_result` realocado p/ `scope.h`. **Portão de subsunção** (agente) provou
+  zero-perda antes da demolição (M.4); leis M.5+M.3+M.1. *Resolve também a transversal F4* (`check_expr`
+  legado não-exaustivo sobre `Cast`/`FieldAccess`). Verificado: 90 cercas (par), 0 refs pendentes, 20 `#test`.
+- **C7 — checagem de padrões + exaustividade** (lote "agente rascunha, eu integro" + portão de tensão):
+  **C7a** `check_pattern` ganha Field (resolve struct → binda campos imutáveis via `field_type`, B.21),
+  Range (`lo..=hi` ambos `type_eq` o subject inteiro), Alt (cada opção; bindar em `|` → erro). **C7b**
+  exaustividade exclui guardas `when` e **expande** `AltPattern` de casos nus (`RED|GREEN` cobre os dois,
+  B.14). **Tensão do eixo do Alt → tribunal → você escolheu B** → **redefinição §VI de A.14** (registrada
+  em LEGISLATION/HISTORY Índices): opção de Alt pode ser caso-variante; bindings em Alt proibidos.
+  Mirror C (`field_type` promovida a não-`static`) + 6 `#test`. ✓
+- **Fase S — codec `.tkb` (round-trip)** (lote "agente rascunha, eu integro"): **S1a** tag `Cast` (10),
+  **S1b** tag `FieldAccess` (11) — write/read/`collect_strings` em Teko + mirror C; o tipo do nó já viaja
+  por `te.type`, então o payload é só o filho (Cast) ou `receiver`+`field` internado (FieldAccess). **S2**
+  satisfeito por construção (serialize consome a AST tipada). Novo `tkb_test.tkt` (`teko::emit`): round-trip
+  de Cast/FieldAccess + adulteração→hash FNV-1a (3 `#test`). **Sem tensão.** ✓
+  *Diferido (item próprio):* codec de `if`/`match` (tags 8/9) — exige um **serializador de statement**
+  (`[]TStatement`) que ainda não existe; read rejeita 8/9 visivelmente (M.1). `MethodCall` sem nó tipado.
 
 ---
 
@@ -86,23 +127,23 @@
 
 | # | Entrega | Lei / B.x | Esf. | Testes |
 |---|---|---|---|---|
-| C1 | concluir `check_*` → `type_*` (todo nó/stmt/item re-derivado) | M.3 | M | árvore tipada / nó destipado |
-| C2a | cast `to`: conversões **permitidas** (widening, exato, float→int trunca) | M.0+M.1 | P | `i8 to i32`, `3.7 to i32` ok |
-| C2b | cast `to`: conversões **proibidas** (narrowing/perda) → erro | M.1 | P | `i32 to i8`, `f64 to f32`, `1e20 to i32` → erro |
-| C3 | `FieldAccess` (tipo do campo via `TypeDecl`) [`MethodCall` segue diferido] | B.29 | M | `s.token` tipa / campo inexistente → erro |
-| C4 | regra `mut` (B.21, `is_mut`) — atribuir a imutável → erro | M.1; B.21 | P | `mut x` reatribui / `let x` reatribuído → erro |
-| C5 | `return`/expr-final vs `return_type` declarado | M.3 | P | tipos batem / retorno divergente → erro |
-| C6 | literal anotado (`let x: u8 = 1` adota a anotação) | M.2 | P | `: u8 = 1` ok / `: u8 = 999` fora de faixa → erro |
-| C7a | padrões Field/Range/Alt no `match` (checagem) | B.15 | M | match com cada padrão / padrão mal-tipado → erro |
-| C7b | exaustividade no eixo variante (`when` não conta) | M.1; B.15 | M | match exaustivo / faltando caso → erro |
+| C1 ✓ | concluir `check_*` → `type_*` (todo nó/stmt/item re-derivado) | M.3 | M | árvore tipada / nó destipado — **feito** (`TEKO_CHECKER.md` E6-1: `tast`/`typer` + mirror C + `checker_test.tkt`) |
+| C2a ✓ | cast `to`: conversões **permitidas** = toda numérica→numérica definida (incl. narrowing/sinal; constante que cabe) | M.0+M.1 | P | **feito (inteiros, regra B)**: `i8 to i32`, `i32 to i8`, `i32 to u32`, `u32 to i8`, `200 to u8` ok (perda = guarda runtime/codegen) · float = *pendente (alpha)* |
+| C2b ✓ | cast `to`: **erro** = indefinido (`bool`/não-numérico) + **constante fora-de-faixa** (fail-early) | M.1 | P | **feito**: `bool to i32`, `i32 to bool`, `str to i32`, `300 to i8`, `-1 to u8`, `5000000000 to i32` → erro · `f64 to f32`/`1e20`-runtime = *pendente floats* |
+| C3 ✓ | `FieldAccess` (tipo do campo via `TypeDecl`) [`MethodCall` segue diferido] | B.29 | M | **feito**: `s.token` tipa via `type_field_access` (`Named`→`TypeDecl`→`StructBody`→campo); campo inexistente / receiver não-struct → erro · nó `TFieldAccess`, revalidate re-deriva, codec tag 11 → S1b |
+| C4 ✓ | regra `mut` (B.21, `is_mut`) — atribuir a imutável → erro | M.1; B.21 | P | **feito**: `ValBinding.is_mut` + `define(…, is_mut)` + `lookup_binding`; `type_assign`/`check_assign` recusam escrita em não-`mut` (params/match/let/const imutáveis). `mut x` reatribui ok / `let x` reatribuído → erro |
+| C5 ✓ | `return`/expr-final vs `return_type` declarado | M.3 | P | **feito (DEFER)**: `type_function` faz post-pass `check_returns` (cada `return e` casa, incl. inclusão de membro em variante — B.14) + `check_trailing_value` (valor final só quando o último stmt é expressão — guard p/ não false-rejeitar corpos terminando em `loop` divergente). A análise de divergência ("todo caminho rende valor") é **item próprio** (M.4). |
+| C6 ✓ | literal anotado (`let x: u8 = 1` adota a anotação) | M.2 | P | **feito (Side D)**: o literal é gravado AS-IS (leaf i64); o `TBinding.bound` adota T; `value_fits` prova. `: u8 = 1` ok · `: u8 = 999` fora de faixa → erro · `: u8 = <i32 var>` (não-literal) → erro (sem conversão implícita) |
+| C7a ✓ | padrões Field/Range/Alt no `match` (checagem) | B.15 | M | **feito**: `check_pattern` checa Field (resolve struct, binda campos via `field_type`, B.21), Range (`lo..=hi` ambos `type_eq` o subject inteiro), Alt (cada opção; **bindar em `\|` → erro** — eixo settled). Campo inexistente/não-struct/range-sobre-bool/binding-em-Alt → erro |
+| C7b ✓ | exaustividade no eixo variante (`when` não conta) | M.1; B.15 | M | **feito**: `_`/caso só contam se **não-guardados**; `AltPattern` de casos nus **expande** (`RED\|GREEN` cobre os dois, B.14). `RED\|GREEN`+`BLUE` exaustivo / faltando caso ou guarda no último → erro. **Eixo do Alt ratificado (B) — redefinição §VI de A.14** (tribunal + legislador) |
 
 ## Fase S — serializer/deserializer `.tkb` (depende de C)
 
 | # | Entrega | Lei | Esf. | Testes |
 |---|---|---|---|---|
-| S1a | tag `Cast` no codec (write/read) | M.1 | P | round-trip de `Cast` / bytes adulterados → hash |
-| S1b | tags `FieldAccess`/`MethodCall` no codec | M.1 | P | round-trip dos nós / idem |
-| S2 | entrada de serialização aceita **só programa checado** | M.4 | P | checado serializa / não-checado recusado |
+| S1a ✓ | tag `Cast` no codec (write/read) | M.1 | P | **feito**: `write_texpr`/`read_texpr` tag 10 — alvo viaja em `te.type` (já serializado), payload = só o filho `expr`; `collect_strings` recursa. Mirror C. round-trip + tamper→hash |
+| S1b ✓ | tag `FieldAccess` no codec (`MethodCall` N/A) | M.1 | P | **feito**: tag 11 — `receiver` + `field` internado (`collect_strings` interna o nome, senão `st_find`→sentinela). Mirror C. round-trip + tamper→hash. `MethodCall`: **sem nó tipado** (typing diferido) → nada a serializar |
+| S2 ✓ | entrada de serialização aceita **só programa checado** | M.4 | P | **por construção**: `serialize` consome `TExpr` (AST tipada) — só o checker (`type_*`) a produz; não há caminho p/ serializar `Expr` não-checado. Guarda em nível de programa = fase do emissor/pipeline (diferida) |
 
 ## Fase X — limpeza cross-cutting (`to` em todo lugar; com F pronto)
 

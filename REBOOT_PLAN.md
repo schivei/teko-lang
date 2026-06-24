@@ -309,9 +309,12 @@ operando não-literal se cabe; dois tipados PROMOVEM; contexto flui top-down (o 
 esperado na AST; overflow constante = erro de compilação). **Shift mecânica:** sem `>>>`/`<<<` (o sinal
 da esquerda decide); contagem inválida (≥ largura ou < 0) **satura a ZERO** (não o mascaramento do
 C/x86, que era bug); literal inválido = erro de compilação, runtime inválido = zero (warning só em
-debug). **Conversões `as`:** permitidas onde o metal preserva (int menor→maior, float menor→maior,
-int→float exato, float→int trunca); proibidas onde o metal perde silenciosamente (int maior→menor,
-i64→f32, f64→f32, float-grande→int) — *reflete o metal onde preserva, protege onde perde*.
+debug). **Conversões `to` (↺ REDEFINIDO — antes "proibir toda perda em compilação"):** toda conversão
+numérica→numérica **definida é permitida** (incl. narrowing `i32 to i8`, sinal `i32 to u32`); a perda
+é **pega, nunca silenciosa** — constante fora-de-faixa = **erro de compilação**, valor de runtime =
+**panic em debug / definido em release** (a mesma política do overflow). Indefinidos (`bool`↔num,
+não-numérico) = erro. *M.1 proíbe a perda **silenciosa**, e a guarda a cura → M.0 mantém o metal;
+coerência com ÷0/overflow/OOB (§II). Ver HISTORY conversões + Índice de Redefinições.*
 **Overflow:** operador `+ - *` **panica em debug, wrappa em release** (wrap é valor DEFINIDO, não
 veneno como ∞/NaN); literal overflow = erro de compilação; `math::wrapping_*` wrappa sempre;
 `math::*` checado = `T | Error`. **Política de checagem (geral):** verificações custosas LIGADAS em
@@ -456,7 +459,7 @@ keywords, constrói-se UM front novo** sobre um kernel mínimo — o que torna o
 **Como isso JUSTIFICA retroativamente o que já cravamos** (o instinto estava alinhado ao destino):
 - **ACID exige determinismo absoluto** → valida banir **∞/NaN como valores**, **interceptar ÷0
   antes do veneno**, **overflow = wrap-definido (não poison)**, **zero comportamento indefinido**
-  (saturação de shift definida, conversão-que-perde = erro). Um valor envenenado num índice ou
+  (saturação de shift definida, conversão-que-perde = pega-não-silenciosa: constante fora-de-faixa = erro de compilação, runtime = guarda como overflow). Um valor envenenado num índice ou
   transação corromperia a consistência silenciosamente — o pior para um banco. A aversão a "veneno
   silencioso" não era estética; era requisito de ACID.
 - **Banco lida com dinheiro** → valida o **`decimal` ponto-fixo 512 bits** nativo (float arredonda
@@ -828,7 +831,7 @@ exige prova") + **threads**. Também adiado: **arenas com escopo** (liberação 
   qualquer unsigned [≥ 0], resultado imediato; senão compara na largura original. Mata a armadilha
   signed/unsigned do C SEM promover [não move bytes extras] e SEM TETO [`u256 vs i256` funciona]. É
   codegen do operador [como o `<` é compilado], semente, sem generics. M.1 [remove a armadilha] + M.0
-  [checa-sinal é a sequência metálica direta]). `as` reflete o metal onde preserva e proíbe onde perde;
+  [checa-sinal é a sequência metálica direta]). `to`: toda conversão numérica definida é permitida, a perda é pega (constante fora-de-faixa = erro de compilação; runtime = panic-debug/definido-release), nunca silenciosa;
   overflow panica-debug/wrappa-release.
 - **Comparação — operador vs função (B.31):** operadores `< > <= >= == !=` retornam **bool** (condições);
   a função `compare(a, b)` retorna **`Ordering`** (sort/ordem de três vias). `Ordering` é um **`enum`

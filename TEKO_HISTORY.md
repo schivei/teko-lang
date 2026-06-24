@@ -99,6 +99,9 @@ their top.
 | String prefixes (seed scope) | B.5 (four combinable prefixes + `$`-count trick) | `"`, `$`, `@`, `"""` all combinable; `$`-count set interpolation depth | **B.5 (M.5 audience)** | Seed keeps **only** `"` (delimiter) + `$"..."` **one-level** interpolation (literal brace = `{{`). **`$`-count trick REMOVED** as bloat (M.5: aesthetic, not weight). **Raw `@"..."` and multi-line `"""..."""` → evolution** (rare in bare-metal seed). |
 | Closures (what's banned, what returns) | B.10 (closures out; fn-pointers deferred) | justified by cost + concurrency hazard | **B.10 (M.3 audience)** | **Magic closures** (implicit scope capture) banned **primarily by M.3** — they *lie* (a `(code,state)` struct disguised as a function); cost/hazard are symptoms. The **capability** returns via **three honest forms** by state-origin: **function pointer** (no state), **`use`** (caller-local, user-declared, keyword), **`inject`** (DI — an **auxiliary footnote** that *contextualizes* the signature, after `-> return`, before body; not part of the signature, not a directive; compiler resolves via a traceable binding). **Lifetimes `#singleton`/`#scoped`/`#transient` are `#` directives** (the *title* — compile-time allocation strategy → arena). Three layers: title (directive/composition), sentence (signature/caller-contract), footnote (`inject`/injection context). The word is `inject` not `with`/`injects`. All evolution. |
 
+| Numeric conversions (`to`/`as`) | early conversion rule + E.1 example | **forbid every lossy conversion at compile time** (`i32 as i8` = compile error; "silent loss is a design-fault bug"), justified as "M.1 modulating M.0, same as opaque pointers" | **conversions block (§5456)** — M.1 "silently" + M.0 + §II homeostasis (five-judge tribunal) | **Any DEFINED numeric→numeric conversion is ALLOWED** incl. narrowing/sign (`i32 to i8`, `i32 to u32`); loss is **caught, never silent** — constant-out-of-range = **compile error**, runtime = **panic-debug / defined-release** (the overflow policy). `bool`↔num and non-numeric = **error** (undefined). Cast spelled **`to`** (renamed from `as`). The opaque-pointer analogy fails (loss is *reducible* by a guard). |
+| `AltPattern` axis (`\|`) | A.14 | **Alt = value axis only** (literals/ranges); parse dispatched axis-exclusively (Ident-led → variant pattern, no `\|` branch), so `RED \| GREEN` was inexpressible | **C7 Alt-axis block** — tribunal verdict + legislator (chose B) | **An `Alt` option may be a value pattern OR a bare variant case** (`BindPattern`, `has_binding=false`): `RED \| GREEN` is legal and **counts toward variant-axis exhaustiveness** (C7b expands it). **Bindings inside an `Alt` are forbidden** (`Foo as x \| Bar`, `FieldPattern` in `\|`) → error. The current SOURCE parser (which already builds variant-case Alts) is ratified; the canonical axis-exclusive parse is retired. Law basis **M.0 + M.2 + M.5** (with **M.1** kept by Alt-expansion + forbid-bindings). |
+
 *When this index and an individual entry disagree, the index's "Current state" (and
 the entry it points to) wins. Keep this index updated whenever a decision is
 rewritten.*
@@ -3137,6 +3140,13 @@ fn parse_continue(tokens: []lexer::Token, pos: u64) -> ParsedStmt | error {
 
 ### A.14 — `match`: pattern discrimination and match-bindings
 
+> ⚠️ **Partially superseded — `AltPattern` axis (↺).** This entry originally annotated
+> `AltPattern` as *value axis only* and described an axis-exclusive parse. The C7 tribunal
+> + the legislator **redefined** it: an `Alt` option may be a value pattern **or a bare
+> variant case** (`RED | GREEN`), counting toward variant-axis exhaustiveness; **bindings
+> inside an `Alt` are forbidden**. See the Redefinitions Index (`AltPattern` axis) and the
+> C7 Alt-axis block. The rest of A.14 stands.
+
 The signature control construct, and the **sixth strand of the assignment
 dimension** (match-bindings — a name receives a value by being matched). Per
 **B.15**, one `match` covers two axes: matching a **value** (a scalar — literals,
@@ -3216,7 +3226,7 @@ type TokenKind = enum {
 // A pattern: the left of an arm. Variant (B.14) over the pattern kinds.
 // - LiteralPattern: a scalar literal (a number/char/string token).
 // - RangePattern:   `lo ..= hi` (inclusive).
-// - AltPattern:     `a | b | …` (alternatives — value axis).
+// - AltPattern:     `a | b | …` (alternatives — value patterns OR bare variant cases; ↺ C7, see Redefinitions Index). Bindings inside an Alt are forbidden.
 // - BindPattern:    `Type as name` (variant axis — bind the whole value).
 // - FieldPattern:   `Type { f; g }` (variant axis — select fields; reuses A.11).
 // - WildcardPattern: `_` (the optional catch-all).
@@ -4257,6 +4267,15 @@ to be audited. A **closed system, without gaps.**
   says "intercept the ÷0." Distinct layers of the *same* operator — the metal is the capability,
   safety is the exposure. (This is why pointers, though pure metal, are kept *opaque* — safety
   modulating the metal's exposure, the conscious exception noted in M.0.)
+- **Illumination — the vice is the *silence*, not the loss (mirrors the Constitution's M.1 lighting).**
+  Read "a conversion that loses *silently* is an error" with the weight on **silently**: M.1 bans the
+  loss that happens **without telling**, not loss as such. A loss made **non-silent** — a compile error
+  on a constant already out of range, or a runtime **panic** on a value the compiler cannot see — is
+  **announced**, not the silent corruption M.1 forbids; so a checked `to` conversion is legitimate, the
+  same detect-and-fail shape as ÷0/overflow/OOB. Forbidding a **guardable** loss outright is stricter
+  than M.1 asks (it treats a *reducible* hazard like the *irreducible* one that justifies opaque
+  pointers). Always M.1's meaning; lit because the clause was once read too broadly. *(Second illumination
+  precedent — see §VI; reveals, does not alter.)*
 - **Agent rule:** never expose a raw metal hazard (UB, poison, silent truncation) to the user; if
   the metal would corrupt silently, intercept it (panic, or an `error` value) — failing loudly is
   always preferred to a silent wrong result.
@@ -5453,25 +5472,117 @@ to be audited. A **closed system, without gaps.**
   collides with `|` OR/union), reinforcing that they belong as named functions, not
   operators. (`%` stays the metal remainder operator; mathematical modulo is a
   library function.)
-- **Conversions (`as`) — reflect the metal when it preserves, forbid when it loses
-  (informed by what the hardware actually does):**
-  - **Permitted (metal preserves the value):** int **smaller→larger** (`i8 as
-    i32` — sign/zero extension, `MOVSX`/`MOVZX`); float **smaller→larger** (`f32 as
-    f64`, exact); int→float **that fits exactly** (`i32 as f64` — f64's 52-bit
-    mantissa holds any i32); **float→int** (`3.7 as i32` — the hardware
-    `CVTTSD2SI`/`FCVTZS` **truncates toward zero**: 3.7→3, -3.7→-3 — Teko matches).
-  - **Forbidden — compile error (the metal would lose silently):** int
-    **larger→smaller** (`i32 as i8` — the metal silently truncates bits, 300→44;
-    Teko forbids it — silent loss is a design-fault bug); **`i64 as f32`** (f32's
-    23-bit mantissa can't hold every i64 — the metal rounds, loses precision);
-    **`f64 as f32`** (rounds *and* can produce ∞ — double trouble);
-    **float-too-big→int** (`1e20 as i32` — the metal yields garbage/saturates; Teko:
-    error if constant, panic in debug if runtime).
-  - **The pattern:** Teko reflects the metal **where it preserves the value** and
-    protects (errors) **where the metal would lose silently** — this is **M.0 composing
-    with M.1 (Safety)** at loss points: the metal is the capability, safety governs the
-    exposure (the same logic as opaque pointers). Where loss is wanted, be explicit
-    another way (convert to a type that fits, or a documented library function).
+- **Conversions (`to`) — a DEFINED conversion is allowed; loss is *caught*, never silent
+  (two-pronged by knowability). ↺ REDEFINED — supersedes the early "forbid every lossy
+  conversion at compile time" rule (was→is→why recorded below):**
+  - **Permitted (the conversion is DEFINED):** *any* numeric→numeric conversion. The
+    value-preserving ones need no guard — int **smaller→larger** (`i8 to i32`, `MOVSX`/
+    `MOVZX`), float **smaller→larger** (`f32 to f64`), int→float exact (`i32 to f64`),
+    float→int truncate-toward-zero (`3.7 to i32` — `CVTTSD2SI`/`FCVTZS`). The **lossy ones
+    are also allowed** (int **larger→smaller** `i32 to i8`, signed↔unsigned `i32 to u32`,
+    `i64 to f32`, `f64 to f32`, float-magnitude→int): the value *might fit*, and the loss is
+    **caught, not silent**.
+  - **Where the loss is caught — two prongs by what the compiler can SEE (M.1):**
+    - **Constant provably out of range → COMPILE ERROR** (`300 to i8`, `1e20 to i32`) — fail
+      earliest, where the compiler already knows.
+    - **Runtime value the compiler cannot see → the metal converts; the loss is caught at
+      runtime — panic in debug, defined in release** (the *overflow* policy exactly: a checked
+      fault in dev, metal-pure modular truncation in release — a *defined* value, not poison).
+      (÷0's release-active check is the family's lone exception, kept because its alternative is
+      poison/crash.)
+  - **Undefined conversions → compile error:** `bool`↔numeric (no defined mapping in the seed)
+    and any cross to/from a non-numeric type — a separate *undefined* axis, not a *loss* axis.
+  - **Why this, not the old forbid:** M.1 forbids the **SILENT** loss — "`to` forbidden where the
+    metal would truncate *without telling*." A runtime check/panic **tells**, so the loss is no
+    longer silent and there is nothing left for M.1 to forbid; M.1 is **satisfied by the guard,
+    not by prohibition**. The conversion is a metal instruction, so **M.0** keeps it (don't cut a
+    metal capability a guard makes safe). This is the *same* allow-and-catch shape Teko already
+    uses for ÷0, overflow, array-OOB, and float-magnitude→int — **homeostasis** (Constitution §II):
+    the conversion must not be the one incoherent outlier that forbids what every sibling hazard
+    guards. Where a *value* form of the failure is wanted, a `teko::math` checked function
+    (`-> T | error`) is the explicit path; the operator stays ceremony-free.
+  - **↺ was→is→why (M.3 — the reversal recorded):** *WAS* — lossy conversions (`i32 as i8`, `i64
+    as f32`, `f64 as f32`) were a flat **compile error** ("silent loss is a design-fault bug"),
+    justified as "M.1 modulating M.0, the same logic as opaque pointers." *IS* — they are
+    **allowed**, gated by a constant-out-of-range compile error and a runtime debug-panic/
+    release-defined guard. *WHY* — submitted to the Laws via a five-judge tribunal: the
+    **opaque-pointer analogy fails** (conversion-loss is *reducible* by a guard, unlike a raw
+    deref's irreducible UB); M.1's operative word is **silently**, which the guard cures; and
+    homeostasis (§II) requires parity with the ÷0/overflow/OOB family. The judge tasked to defend
+    the old rule **conceded** to the new one. (Cast spelled **`to`**, renamed from `as` in E7.)
+- **Annotated literal (`let x: T = <literal>`) — stored AS-IS; the BINDING adopts the annotation
+  (C6, "Side D").** A numeric literal keeps its native type in the typed leaf (`TNumber` stays `i64`);
+  the declared type lives on the binding (`TBinding.bound`), and `value_fits(value, bound)` re-proves
+  admissibility — a constant out of range is a **compile error** (fail early), a non-literal of a
+  different type needs an explicit `to` (no implicit conversion). **Chosen over** (A) mutating the leaf
+  to read `T` — which would weaken the *env-less independent re-derivation* of a literal node (the
+  counter-validation's forge-defense, decision #7) — and over (B) synthesizing an implicit conversion
+  node (M.2). The leaf stays honestly `i64`; the binding is where the annotation is visible, so the
+  adoption is re-provable there. **Governing Law: M.1** (independent leaf re-derivation kept; out-of-range
+  caught, never silent) **+ M.2** (the annotation is the explicit request; no hidden conversion) **+ M.5**
+  (reuses `value_fits`; no new node, no widened inference). *Decided by tribunal + the legislator's
+  approval ("grava as-is, o revalidate pega o erro").* (Runtime, non-literal magnitude overflow on a
+  write is the cast's rule B — panic; here the literal is a compile-time constant, so it fails early.)
+- **Return-type consistency (`return e` / final-expr vs the declared return) — the checkable subset now;
+  whole-body divergence DEFERRED (C5).** `type_function` re-walks the typed body: every `return e`
+  reachable as a statement (incl. inside `loop` bodies and `if`-blocks) must be **assignable** to the
+  declared return — `assignable_to` = equal, or a **member of a variant** return (B.14, automatic union
+  inclusion, so `return <u64>` in a `-> u64 | error` fn is fine); and the body's **trailing expression**
+  (when the last statement IS an expression) must match too. **Named gap (M.4, §VI — not silence):** the
+  FULL "every path yields a value" guarantee (definite-return / divergence analysis — a breakless `loop`
+  diverges, an all-arms-returning `if`/`match` needs no trailing value, plus returns inside `match` arms
+  which the typed AST does not yet represent) is a **separate later item**. C5 deliberately does NOT apply
+  the trailing-value check when the body ends in a `loop`/`if`/`match` (no claim), so the seed's value-fns
+  ending in a breakless `loop` (e.g. `skip_block_comment`, `read_doc_comment`) are not false-rejected.
+  **Governing Law: M.3** (the signature must not lie about what it returns) **+ M.4** (the divergence
+  layer is absent — don't build the every-path check on it yet) **+ B.14** (variant member inclusion).
+  C5 lives in the typed pass; the superseded `check_*` layer is not dual-walked.
+- **The legacy `check_*` checker layer RETIRED — one typed checker, not two (the C1 debt closed).**
+  *WAS* — two parallel layers coexisted: the original `check_*` pass (Etapas 4/5a/5b/5c: `check_expr`,
+  `check_statement`, `check_if`, `check_match`, `check_function`, `check_program`, …) returning bare
+  `Type`/`Env`, and the typed `type_*` pass (Etapa 6-1) returning the typed tree. C1 ("concluir
+  `check_*` → `type_*`") had *built* the typed layer but never *removed* the old one. *IS* — the 16
+  duplicated `check_*` functions (+ the 4 expr sub-helpers) are deleted in Teko and the C mirror; the
+  single live checker is `type_program`. **Kept as genuinely shared** (used by the typed pass, NOT
+  duplicates): the type predicates `is_bool`/`is_integer`/`is_comparable` + op-regimes `op_is_shift`/
+  `op_is_arith_bitwise`; the pattern + exhaustiveness helpers `check_pattern`/`exhaustive` (C mirror
+  promoted to non-`static` `tk_check_pattern`/`tk_exhaustive`, fixing a pre-existing linkage mismatch);
+  the `tk_check_result` typedef (relocated to its sole consumer's reach — revalidate); and `tk_env_result`
+  (relocated from the deleted `stmt.h` into `scope.h`, which owns `tk_env`). One rewire: `check_pattern`'s
+  literal arm now types via `type_expr(…).type` instead of the deleted `check_expr`. *WHY* — a
+  **subsumption gate** (adversarial agent) proved every `type_X` re-derives every check `check_X` did
+  (3 are strict supersets: C5 return-checking, FieldAccess/Cast arms), so deletion lost **zero** safety.
+  **Governing Law: M.5** (two layers doing one job is the waste austerity forbids) **+ M.3** (drifting
+  duplicates lie — the legacy `check_expr` had already gone non-exhaustive over the post-C2/C3 `Expr`
+  enum, missing `Cast`/`FieldAccess`) **+ M.1** (that drift was a latent exhaustiveness hole, now gone)
+  **+ M.4** (verify the twins subsume *before* demolishing — the gate ran first). This was settled
+  doctrine, not a tension: C1 had already mandated the transition. *(The cross-cutting F4 "non-exhaustive
+  legacy `check_expr`" finding is resolved by this same retirement.)*
+- **Pattern checking + variant-axis exhaustiveness completed (C7).** *WAS* — `check_pattern` handled only
+  Wildcard/Bind/Literal (Field/Range/Alt were `=> env` stubs); exhaustiveness ignored `when`-guards and
+  did not expand `Alt`. *IS* — **FieldPattern** `Type { f; g }` resolves the struct and binds each field
+  immutably (B.21) via `field_type`; **RangePattern** `lo ..= hi` requires both bounds to match an integer
+  subject; **AltPattern** `a | b` checks each option and **forbids any binding option** (the ratified
+  axis rule). Exhaustiveness now (1) counts only **unguarded** arms (a guarded `_`/case never closes the
+  match — SOURCE A.14's `when`-exclusion) and (2) **expands** an `Alt` of bare cases so `RED | GREEN`
+  covers both members (B.14). These shared helpers serve the typed `type_match`; the C mirror promoted
+  `field_type` to non-`static` for `match.c`. *WHY* — the one design tension (could `Alt` carry variant
+  cases?) went to a **tribunal**; the legislator chose **B** (ratify), recorded as the **A.14 Alt-axis
+  redefinition** (see Redefinitions Index). The rest (Field/Range/`when`-exclusion) was settled by
+  **B.15 + B.21 + B.14** — no tension. Drafted by an agent, integrated + verified here (26 `#test`).
+- **`.tkb` codec round-trip for `Cast` + `FieldAccess` completed (Fase S — S1a/S1b).** *WAS* — `write_texpr`
+  emitted bare reserved tags 10 (`TCast`) / 11 (`TFieldAccess`) that `read_texpr` rejected — written, not
+  readable. *IS* — full round-trip: tag 10 writes/reads just the inner `expr` (the cast's TARGET type rides
+  the node's `te.type`, already serialized by the leading `write_type`); tag 11 writes/reads the `receiver`
+  then the **interned** field-name (the fix: `collect_strings` now recurses into both nodes and interns the
+  field — without it `st_find` returns the not-found sentinel and the writer corrupts the index). C mirror
+  byte-for-byte; new `tkb_test.tkt` round-trips both nodes and asserts a tampered body fails the FNV-1a hash
+  (M.1 — corruption is visible, never silent). **S2** ("serialize only a checked program") holds **by
+  construction**: `serialize` consumes a `TExpr` — the typed AST only the checker produces. *WHY* — **M.1**
+  (exact round-trip; tamper caught) **+ M.3** (the checker-proved type is carried, not re-derived). No
+  tension. **Still deferred (named):** the `if`/`match` codec (tags 8/9) needs a typed-**statement**
+  serializer (`[]TStatement`) that does not exist yet — a separate later item; read keeps rejecting 8/9
+  visibly. `MethodCall` has no typed node (typing deferred) → nothing to serialize.
 - **Arithmetic overflow (`+ - *`) — metal operates, debug catches:**
   - **Operator:** **panic in debug** (catches accidental overflow while testing),
     **wrap in release** (the metal's native modular result — a *defined* value, not
@@ -6450,10 +6561,11 @@ let mixed = 2i32 + 3i64            // promotes to i64 (the larger)
 let flags = 0b1010u8 & 0b0110u8    // both u8 → OK
 // let no = 1u8 & 1u16             // ERROR: different widths, no bitwise promotion
 
-// Conversion `as` — permitted where metal preserves, forbidden where it loses:
-let widen = a as i64               // i32→i64, sign-extend, OK
-let trunc = 3.7 as i32             // float→int truncates toward zero → 3
-// let lose = big as i32           // ERROR: u256→i32 loses silently — forbidden
+// Conversion `to` — any DEFINED numeric→numeric conversion is allowed; loss is caught, never silent:
+let widen  = a to i64              // i32→i64, sign-extend, OK (value-preserving)
+let trunc  = 3.7 to i32            // float→int truncates toward zero → 3
+let narrow = big to i32            // u256→i32: ALLOWED — runtime-guarded (panic-debug / defined-release)
+// let bad = 300 to i8            // COMPILE error: constant provably out of range
 
 // Comparison is made safe by a sign-check (codegen, not promotion) — kills the
 // C signed/unsigned trap, moves no extra bytes, and has NO ceiling:

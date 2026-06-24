@@ -142,10 +142,13 @@ sources — and **no lower source may ever wound or subvert a higher one.**
   change a Law is not to edit Teko but to destroy it and make something else (the two impossibilities of
   the seal). The Laws admit **exactly one** kind of iteration, and it is not change:
   - **Illumination** — revealing a nuance *already latent* in the natural-language form of a Law (a
-    sub-understanding that was always there). It does **not** modify the Law; it reveals more of it. The
-    one occurrence to date — **M.4 seen to govern both process *and* design** — affected nothing; it only
-    revealed M.4 more fully. *Approved as precedent.* Illumination is the **only** way a Law gains text,
-    and even then it is not amendment but the lighting of what the Law already meant.
+    sub-understanding that was always there). It does **not** modify the Law; it reveals more of it. **Two
+    occurrences to date**, each altering nothing and only lighting its Law more fully: (1) **M.4 seen to
+    govern both process *and* design**; (2) **M.1's "loses *silently*" seen to weight the *silence*, not
+    the loss** — a guarded (announced) loss is not the silent corruption M.1 bans, so a checked `to`
+    conversion is legitimate, the same detect-and-fail shape as ÷0/overflow (it lit a clause once read too
+    broadly as "forbid every lossy conversion"). *Both approved as precedent.* Illumination is the **only**
+    way a Law gains text, and even then it is not amendment but the lighting of what the Law already meant.
 - **Source 2 — Legislation (the decisions / doctrine / jurisprudence): grows, under the Laws.** Here
   creation *is* allowed — this is the body that grows (B.1–B.31 and all future decisions), the doctrine
   and the jurisprudence. **The iron rule:** legislation may **in no circumstance wound or subvert the
@@ -265,6 +268,17 @@ to be audited. A **closed system, without gaps.**
   says "intercept the ÷0." Distinct layers of the *same* operator — the metal is the capability,
   safety is the exposure. (This is why pointers, though pure metal, are kept *opaque* — safety
   modulating the metal's exposure, the conscious exception noted in M.0.)
+- **Illumination — the vice is the *silence*, not the loss (the "loses silently" clause, lit).** Read
+  "a conversion that loses *silently* is an error" with the weight on **silently**: M.1 bans the loss
+  that happens **without telling**, not loss as such. A loss made **non-silent** — a **compile error** on
+  a constant the compiler can already see is out of range, or a runtime **panic** on a value it cannot —
+  is **announced**, so it is not the silent corruption M.1 forbids. A checked `to` conversion (the metal
+  converts; the guard catches the loss) is therefore legitimate — the *same* detect-and-fail shape as
+  ÷0, overflow, and out-of-range indexing. To forbid a **guardable** loss outright would be *stricter
+  than M.1 asks*: it treats a **reducible** hazard (a conversion has a guard) like the **irreducible** one
+  that alone justifies opaque pointers (a raw deref has none). This was always M.1's meaning; it is lit
+  here only because the clause was once read too broadly (as "forbid every lossy conversion"). *(This
+  lighting reveals; it does not alter — the Law still bans exactly what it always banned: the silent loss.)*
 - **Agent rule:** never expose a raw metal hazard (UB, poison, silent truncation) to the user; if
   the metal would corrupt silently, intercept it (panic, or an `Error` value) — failing loudly is
   always preferred to a silent wrong result.
