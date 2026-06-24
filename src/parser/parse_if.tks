@@ -1,0 +1,27 @@
+// src/parser/parse_if.tks   (namespace 'teko::parser')
+
+// `if cond { then } [else { else } | else if …]` — if/else is an EXPRESSION (B.20).
+// `pos` is at `if`. `else if` is the else-block holding the nested if as one statement.
+fn parse_if(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let cond = match parse_expr(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+    if !is_kind_at(tokens, cond.next, lexer::TokenKind::LBrace) {
+        return error { message = "expected '{' after the `if` condition" }
+    }
+    let then_blk = match parse_block(tokens, cond.next) { ParsedBlock as x => x; error as e => return e }
+    let p = then_blk.next
+    if !is_kind_at(tokens, p, lexer::TokenKind::Else) {
+        return Parsed { node = IfExpr { cond = cond.node, then_blk = then_blk.statements, has_else = false, else_blk = teko::list::empty() }, next = p }
+    }
+    // `else if …` — the else branch is another if-expression, wrapped as one statement.
+    if is_kind_at(tokens, p + 1, lexer::TokenKind::If) {
+        let elif = match parse_if(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        let eb = teko::list::push(teko::list::empty(), ExprStmt { expr = elif.node })
+        return Parsed { node = IfExpr { cond = cond.node, then_blk = then_blk.statements, has_else = true, else_blk = eb }, next = elif.next }
+    }
+    // `else { … }`
+    if !is_kind_at(tokens, p + 1, lexer::TokenKind::LBrace) {
+        return error { message = "expected '{' or `if` after `else`" }
+    }
+    let else_blk = match parse_block(tokens, p + 1) { ParsedBlock as x => x; error as e => return e }
+    Parsed { node = IfExpr { cond = cond.node, then_blk = then_blk.statements, has_else = true, else_blk = else_blk.statements }, next = else_blk.next }
+}

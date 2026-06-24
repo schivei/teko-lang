@@ -1225,32 +1225,40 @@ fn value_fits(v: i64, k: PrimKind) -> bool {
 // not a type error — B). Only genuinely-undefined conversions are rejected: Bool, and crossing
 // to/from a non-numeric type. M.1 — no silent loss; M.3 — names the barrier. Reused by the
 // counter-validation (E6-2) so the rule has ONE source of truth (M.5).
+// byte casts AS u8 (B.36 "byte = u8 newtype"): byte's values ARE u8 values, so the effective
+// PrimKind for range/cast rules is U8. Bool and non-numeric types have no cast kind (rejected).
+// One source of truth (M.5) for cast_check + const_range_check.
+fn cast_kind(t: Type) -> PrimKind | error {
+    match t {
+        Prim as p => {
+            if p.kind == PrimKind::Bool { error { message = "bool casts are not defined in the seed" } }
+            else { p.kind }
+        }
+        Byte      => PrimKind::U8
+        _         => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
+    }
+}
+
+// is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
+// runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
+// Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
 fn cast_check(from: Type, to: Type) -> Unit | error {
     if type_eq(from, to) { return Unit { } }                     // same type — a no-op
-    match from {
-        Prim as pf => match to {
-            Prim as pt => {
-                if pf.kind == PrimKind::Bool || pt.kind == PrimKind::Bool {
-                    return error { message = "bool casts are not defined in the seed" }
-                }
-                Unit { }                                         // any integer → any integer is defined (B)
-            }
-            _ => error { message = "cast not defined: a primitive to a non-primitive type" }
-        }
-        _ => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
-    }
+    let _ = match cast_kind(from) { PrimKind as k => k; error as e => return e }
+    let _ = match cast_kind(to)   { PrimKind as k => k; error as e => return e }
+    Unit { }                                                     // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
 }
 
 // a CONSTANT literal already out of the target's range is a compile error (M.1 — fail early);
 // non-constant operands are guarded at runtime by codegen. Direct literals only (comptime folding deferred).
 fn const_range_check(e: Expr, target: Type) -> Unit | error {
     match e {
-        Number as n => match target {
-            Prim as p => {
-                if value_fits(n.value, p.kind) { Unit { } }
+        Number as n => match cast_kind(target) {                 // byte target → U8 range (0..255)
+            PrimKind as k => {
+                if value_fits(n.value, k) { Unit { } }
                 else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
             }
-            _ => Unit { }
+            error         => Unit { }                            // non-numeric target: cast_check already rejected it
         }
         _ => Unit { }                                            // not a constant literal → runtime-guarded (codegen)
     }
@@ -1904,14 +1912,27 @@ const char *annotated_literal_reason(tk_expr value, tk_type ann) {
 }
 // is `from -> to` a DEFINED conversion? NULL = yes; else the M.3 barrier message. Any integer ->
 // any integer is defined (B — the loss is runtime/codegen's). Only Bool / non-numeric are rejected.
+// byte casts AS u8 (B.36 "byte = u8 newtype"): the effective prim kind for range/cast rules.
+// false for bool / non-numeric (no cast kind); true with *out set otherwise. M.5 — shared by
+// cast_reason + the constant-range check in type_cast.
+static bool cast_kind(tk_type t, tk_prim_kind *out) {
+    if (t.tag == TK_TYPE_PRIM) {
+        if (t.as.prim == TK_PRIM_BOOL) return false;
+        *out = t.as.prim;
+        return true;
+    }
+    if (t.tag == TK_TYPE_BYTE) { *out = TK_PRIM_U8; return true; }
+    return false;
+}
 static const char *cast_reason(tk_type from, tk_type to) {
     if (tk_type_eq(&from, &to)) return NULL;                     // same type — a no-op
-    if (from.tag == TK_TYPE_PRIM && to.tag == TK_TYPE_PRIM) {
-        if (from.as.prim == TK_PRIM_BOOL || to.as.prim == TK_PRIM_BOOL) return "bool casts are not defined in the seed";
-        return NULL;                                            // any integer -> any integer (B)
-    }
-    if (from.tag == TK_TYPE_PRIM) return "cast not defined: a primitive to a non-primitive type";
-    return "cast not defined for this type in the seed (Named/Str/Slice/… — pending)";
+    if ((from.tag == TK_TYPE_PRIM && from.as.prim == TK_PRIM_BOOL)
+        || (to.tag == TK_TYPE_PRIM && to.as.prim == TK_PRIM_BOOL))
+        return "bool casts are not defined in the seed";        // bool on either end — distinct message (C2)
+    tk_prim_kind kf, kt;
+    if (!cast_kind(from, &kf)) return "cast not defined for this type in the seed (Named/Str/Slice/… — pending)";
+    if (!cast_kind(to,   &kt)) return "cast not defined: a primitive to a non-primitive type";
+    return NULL;                                                // any integer/byte -> any integer/byte (B; byte AS u8)
 }
 bool tk_cast_ok(tk_type from, tk_type to) { return cast_reason(from, to) == NULL; }
 
@@ -1921,8 +1942,10 @@ static tk_texpr_result type_cast(tk_cast c, tk_env env, tk_type_table table) {
     const char *why = cast_reason(inner.as.value.type, tgt.as.value);
     if (why != NULL) return xerr(why);
     // fail early (M.1): a constant literal already out of the target's range is a compile error.
-    if (c.expr->tag == TK_EXPR_NUMBER && tgt.as.value.tag == TK_TYPE_PRIM
-        && !value_fits(c.expr->as.number.value, tgt.as.value.as.prim))
+    // The target's effective kind comes from cast_kind, so `… to byte` checks the U8 range (0..255).
+    tk_prim_kind ck;
+    if (c.expr->tag == TK_EXPR_NUMBER && cast_kind(tgt.as.value, &ck)
+        && !value_fits(c.expr->as.number.value, ck))
         return xerr("constant out of range for the cast target (M.1 — fail early)");
     return xok((tk_texpr){ .tag = TK_TEXPR_CAST, .type = tgt.as.value, .as.cast = { box(inner.as.value) } });
 }
@@ -2456,6 +2479,56 @@ fn revalidate_rederives_casts() {
     match validate_texpr(bad) { Unit => assert false; error => assert true }
 }
 
+// --- byte↔int cast helpers (byte casts AS u8 — B.36) ---
+fn bytet() -> Type { Byte { } }
+// byte is the cast TARGET: the result type is Byte{} (not a Prim), so assert via type_eq.
+fn cast_types_to_byte(varname: str, src: Type) -> bool {
+    let env = define(empty_env(), varname, src, false)
+    match type_cast(cast_of(varname, "byte"), env, empty_table()) {
+        TExpr as te => type_eq(te.type, Byte { })
+        error       => false
+    }
+}
+// a CONSTANT `v to byte` — true iff it types (result is Byte{}).
+fn cast_const_types_to_byte(v: i64) -> bool {
+    let c = Cast { expr = Number { value = v }; target = NamedType { path = path1("byte") } }
+    match type_cast(c, empty_env(), empty_table()) { TExpr as te => type_eq(te.type, Byte { }); error => false }
+}
+
+#test
+fn byte_int_casts_allowed() {
+    // byte casts AS u8 (B.36): byte ↔ any integer is DEFINED, both directions.
+    assert cast_types_to("a", bytet(), "u32", PrimKind::U32)   // byte → wider unsigned (lossless — M.1)
+    assert cast_types_to("b", bytet(), "u8",  PrimKind::U8)    // byte → u8 (its own values)
+    assert cast_types_to("c", bytet(), "i64", PrimKind::I64)   // byte → wide signed
+    assert cast_types_to_byte("d", u8t())                      // u8  → byte
+    assert cast_types_to_byte("e", u32t())                     // u32 → byte (narrowing — runtime-guarded)
+    assert cast_const_types_to_byte(200)                       // constant 200 ∈ [0, 255]
+}
+
+#test
+fn byte_int_casts_forbidden() {
+    assert cast_const_errors(300, "byte")     // 300 ∉ [0, 255] — fail early (M.1)
+    assert cast_const_errors(-1,  "byte")     // -1  ∉ [0, 255]
+    assert cast_errors("a", boolt(), "byte")  // bool → byte undefined (bool has no cast kind)
+    assert cast_errors("b", bytet(), "bool")  // byte → bool undefined (either direction)
+    assert cast_errors("c", bytet(), "str")   // byte → non-numeric undefined
+}
+
+#test
+fn revalidate_rederives_byte_casts() {
+    // the counter-validation RE-PROVES byte↔int is DEFINED (M.3).
+    let gi  = TExpr { kind = TVar { name = "b" }; type = bytet() }
+    let g   = TExpr { kind = TCast { expr = gi }; type = u32t() }    // byte → u32 DEFINED (B; byte AS u8)
+    match validate_texpr(g) { Unit => assert true; error => assert false }
+    let gi2 = TExpr { kind = TVar { name = "x" }; type = u8t() }
+    let g2  = TExpr { kind = TCast { expr = gi2 }; type = bytet() }  // u8 → byte DEFINED
+    match validate_texpr(g2) { Unit => assert true; error => assert false }
+    let bi  = TExpr { kind = TVar { name = "b" }; type = bytet() }
+    let bad = TExpr { kind = TCast { expr = bi }; type = boolt() }   // byte → bool UNDEFINED
+    match validate_texpr(bad) { Unit => assert false; error => assert true }
+}
+
 // --- C3 field-access helpers (reuse path1/empty_env/define/prim_is from above) ---
 // a TypeTable with one struct `Foo { token: u8 }`.
 fn foo_table() -> TypeTable {
@@ -2929,17 +3002,17 @@ O hash é recomputado na desserialização e comparado — pega **alteração ma
 não a compilação.) Strings são **deduplicadas** numa tabela e referenciadas por
 índice — round-trip exato e compacto. Aqui a infra; `Type`/`TExpr` na E6-3c-2.
 
-> Um ponto aberto: as conversões inteiras `byte(…)` / `u32(…)` / `u64(…)`
-> (truncar/alargar/reinterpretar bits) — a sintaxe exata do cast fica TBD, **mesmo
-> ponto aberto do `str(b)`**. No C são casts diretos.
+> As conversões inteiras/byte usam o operador real **`x to T`** (Fase X): inteiro↔inteiro
+> por C2 (regra B) e **byte↔inteiro** tratando `byte` como `u8` (B.36). Ainda aberto: só
+> `str(b)` (texto↔bytes), que depende da camada de codepage. No C são casts diretos.
 
 ### Teko — `src/emit/tkb_buf.tks`
 
 ```teko
 // src/emit/tkb_buf.tks  (namespace 'teko::emit')
 
-// extract the low 8 bits as a byte. [integer cast syntax TBD — see note above]
-fn lo8(x: u32) -> byte { byte(x & 0xFF) }
+// extract the low 8 bits as a byte.
+fn lo8(x: u32) -> byte { (x & 0xFF) to byte }
 
 fn write_u8(buf: []byte, x: byte) -> []byte { teko::list::push(buf, x) }
 
@@ -2952,14 +3025,14 @@ fn write_u32(buf: []byte, x: u32) -> []byte {
     b
 }
 
-// an i64 as 8 LE bytes (its two's-complement bits, reinterpreted as u64).
+// an i64 as 8 LE bytes. codec i64s are non-negative (TNumber magnitudes), so the value conversion is exact.
 fn write_i64(buf: []byte, x: i64) -> []byte {
     mut b = buf
-    mut bits = u64(x)                  // [reinterpret cast TBD]
+    mut bits = x to u64                // codec i64s are non-negative (TNumber magnitudes), so the value conversion is exact
     mut k = 0
     loop {
         if k >= 8 { break }
-        b = teko::list::push(b, lo8(u32(bits & 0xFF)))
+        b = teko::list::push(b, lo8((bits & 0xFF) to u32))
         bits = bits >> 8
         k++
     }
@@ -2968,7 +3041,7 @@ fn write_i64(buf: []byte, x: i64) -> []byte {
 
 // a length-prefixed byte run (used by the string table).
 fn write_bytes(buf: []byte, s: str) -> []byte {
-    mut b = write_u32(buf, u32(s.len))
+    mut b = write_u32(buf, s.len to u32)
     mut i = 0
     loop {
         if i >= s.len { break }
@@ -2989,7 +3062,7 @@ fn st_find(t: StrTable, s: str) -> u32 {
     mut i = 0
     loop {
         if i >= t.strings.len { break }
-        if t.strings[i] == s { return u32(i) }
+        if t.strings[i] == s { return i to u32 }
         i++
     }
     0xFFFFFFFF                          // sentinel: not found
@@ -2999,13 +3072,13 @@ fn st_find(t: StrTable, s: str) -> u32 {
 fn st_intern(t: StrTable, s: str) -> Interned {
     let found = st_find(t, s)
     if found != 0xFFFFFFFF { return Interned { table = t; index = found } }
-    let idx = u32(t.strings.len)
+    let idx = t.strings.len to u32
     Interned { table = StrTable { strings = teko::list::push(t.strings, s) }; index = idx }
 }
 
 // serialize the whole string table into the buffer (count, then each string).
 fn write_strtable(buf: []byte, t: StrTable) -> []byte {
-    mut b = write_u32(buf, u32(t.strings.len))
+    mut b = write_u32(buf, t.strings.len to u32)
     mut i = 0
     loop {
         if i >= t.strings.len { break }
@@ -3022,7 +3095,7 @@ fn fnv1a(data: []byte) -> u64 {
     mut i = 0
     loop {
         if i >= data.len { break }
-        h = h ^ u64(data[i])           // [widening cast TBD]
+        h = h ^ (data[i] to u64)       // data[i] is a byte; byte→u64 widening
         h = h * 0x100000001B3          // FNV prime
         i++
     }
@@ -3151,7 +3224,7 @@ fn write_type(buf: []byte, t: StrTable, ty: Type) -> []byte {
 }
 
 fn write_types(buf: []byte, t: StrTable, xs: []Type) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -3163,7 +3236,7 @@ fn write_types(buf: []byte, t: StrTable, xs: []Type) -> []byte {
 
 // a path (callee) → count + each segment's name index.
 fn write_path(buf: []byte, t: StrTable, p: Path) -> []byte {
-    mut b = write_u32(buf, u32(p.segments.len))
+    mut b = write_u32(buf, p.segments.len to u32)
     mut i = 0
     loop {
         if i >= p.segments.len { break }
@@ -3175,7 +3248,7 @@ fn write_path(buf: []byte, t: StrTable, p: Path) -> []byte {
 
 // a list of typed expressions (call args) → count + each.
 fn write_texprs(buf: []byte, t: StrTable, xs: []TExpr) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -3187,7 +3260,7 @@ fn write_texprs(buf: []byte, t: StrTable, xs: []TExpr) -> []byte {
 
 // the comparison terms → count + each (op byte + operand).
 fn write_terms(buf: []byte, t: StrTable, ts: []TCmpTerm) -> []byte {
-    mut b = write_u32(buf, u32(ts.len))
+    mut b = write_u32(buf, ts.len to u32)
     mut i = 0
     loop {
         if i >= ts.len { break }
@@ -3333,7 +3406,7 @@ fn write_u64(buf: []byte, x: u64) -> []byte {
     mut k = 0
     loop {
         if k >= 8 { break }
-        b = teko::list::push(b, lo8(u32(v & 0xFF)))   // [integer casts → E7]
+        b = teko::list::push(b, lo8((v & 0xFF) to u32))
         v = v >> 8
         k++
     }
@@ -3551,19 +3624,19 @@ fn read_u32(r: Reader) -> RU32 | error {
     let b = match read_u8(a.r) { RByte as x => x; error as e => return e }
     let c = match read_u8(b.r) { RByte as x => x; error as e => return e }
     let d = match read_u8(c.r) { RByte as x => x; error as e => return e }
-    RU32 { r = d.r; value = u32(a.value) | (u32(b.value) << 8) | (u32(c.value) << 16) | (u32(d.value) << 24) }  // [casts → E7]
+    RU32 { r = d.r; value = (a.value to u32) | ((b.value to u32) << 8) | ((c.value to u32) << 16) | ((d.value to u32) << 24) }
 }
 
 fn read_u64(r: Reader) -> RU64 | error {
     let lo = match read_u32(r)    { RU32 as x => x; error as e => return e }
     let hi = match read_u32(lo.r) { RU32 as x => x; error as e => return e }
-    RU64 { r = hi.r; value = u64(lo.value) | (u64(hi.value) << 32) }                                          // [casts → E7]
+    RU64 { r = hi.r; value = (lo.value to u64) | ((hi.value to u64) << 32) }
 }
 
 // a string reference = a u32 index into the (already-read) table.
 fn read_str(r: Reader, table: []str) -> RStr | error {
     let idx = match read_u32(r) { RU32 as x => x; error as e => return e }
-    if u64(idx.value) >= table.len { return error { message = "bad string index in .tkb" } }
+    if (idx.value to u64) >= table.len { return error { message = "bad string index in .tkb" } }
     RStr { r = idx.r; value = table[idx.value] }
 }
 
@@ -3574,13 +3647,13 @@ fn read_strtable(r: Reader) -> RTable | error {
     mut table = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let len = match read_u32(rr) { RU32 as x => x; error as e => return e }
         mut bytes = teko::list::empty()
         mut br = len.r
         mut j = 0
         loop {
-            if j >= u64(len.value) { break }
+            if j >= (len.value to u64) { break }
             let by = match read_u8(br) { RByte as x => x; error as e => return e }
             bytes = teko::list::push(bytes, by.value)
             br = by.r
@@ -3612,7 +3685,7 @@ fn read_types(r: Reader, table: []str) -> RTypes | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let t = match read_type(rr, table) { RType as x => x; error as e => return e }
         xs = teko::list::push(xs, t.value)
         rr = t.r
@@ -3760,7 +3833,7 @@ type RPath   = struct { r: Reader; value: Path }
 
 fn read_i64(r: Reader) -> RI64 | error {
     let u = match read_u64(r) { RU64 as x => x; error as e => return e }
-    RI64 { r = u.r; value = i64(u.value) }                 // u64→i64 reinterpret [cast → E7]
+    RI64 { r = u.r; value = u.value to i64 }               // codec i64s are non-negative (TNumber magnitudes), so the value conversion is exact
 }
 
 // inverse of kind_byte (operator TokenKind ↔ byte). The byte→enum ordinal is E7's cast.
@@ -3772,7 +3845,7 @@ fn read_path(r: Reader, table: []str) -> RPath | error {
     mut segs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let nm = match read_str(rr, table) { RStr as x => x; error as e => return e }
         segs = teko::list::push(segs, Segment { name = nm.value })
         rr = nm.r
@@ -3787,7 +3860,7 @@ fn read_texprs(r: Reader, table: []str) -> RTExprs | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let e = match read_texpr(rr, table) { RTExpr as x => x; error as e => return e }
         xs = teko::list::push(xs, e.value)
         rr = e.r
@@ -3802,7 +3875,7 @@ fn read_terms(r: Reader, table: []str) -> RTerms | error {
     mut ts = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let op = match read_u8(rr) { RByte as x => x; error as e => return e }
         let o = match read_texpr(op.r, table) { RTExpr as x => x; error as e => return e }
         ts = teko::list::push(ts, TCmpTerm { op = kind_of(op.value); operand = o.value })
@@ -4127,7 +4200,7 @@ fn write_sigparam(buf: []byte, t: StrTable, p: SigParam) -> []byte {
 }
 
 fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -4145,7 +4218,7 @@ fn write_fnsig(buf: []byte, t: StrTable, f: FnSig) -> []byte {
 }
 
 fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -4160,7 +4233,7 @@ fn write_sigfield(buf: []byte, t: StrTable, f: SigField) -> []byte {
 }
 
 fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -4172,7 +4245,7 @@ fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField) -> []byte {
 
 // a list of member NAMES (enum) → count + each name index.
 fn write_members(buf: []byte, t: StrTable, xs: []str) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -4201,7 +4274,7 @@ fn write_tyexport(buf: []byte, t: StrTable, e: TyExport) -> []byte {
 }
 
 fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport) -> []byte {
-    mut b = write_u32(buf, u32(xs.len))
+    mut b = write_u32(buf, xs.len to u32)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -4353,7 +4426,7 @@ fn read_sigparams(r: Reader, table: []str) -> RSigParams | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let p = match read_sigparam(rr, table) { RSigParam as x => x; error as e => return e }
         xs = teko::list::push(xs, p.value)
         rr = p.r
@@ -4379,7 +4452,7 @@ fn read_fnsigs(r: Reader, table: []str) -> RFnSigs | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let f = match read_fnsig(rr, table) { RFnSig as x => x; error as e => return e }
         xs = teko::list::push(xs, f.value)
         rr = f.r
@@ -4400,7 +4473,7 @@ fn read_sigfields(r: Reader, table: []str) -> RSigFields | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let f = match read_sigfield(rr, table) { RSigField as x => x; error as e => return e }
         xs = teko::list::push(xs, f.value)
         rr = f.r
@@ -4415,7 +4488,7 @@ fn read_members(r: Reader, table: []str) -> RMembers | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let s = match read_str(rr, table) { RStr as x => x; error as e => return e }
         xs = teko::list::push(xs, s.value)
         rr = s.r
@@ -4451,7 +4524,7 @@ fn read_tyexports(r: Reader, table: []str) -> RTyExports | error {
     mut xs = teko::list::empty()
     mut i = 0
     loop {
-        if i >= u64(n.value) { break }
+        if i >= (n.value to u64) { break }
         let e = match read_tyexport(rr, table) { RTyExport as x => x; error as e => return e }
         xs = teko::list::push(xs, e.value)
         rr = e.r
@@ -4724,8 +4797,9 @@ tk_header_result tk_read_tkh(const tk_byte *data, size_t len) {
   + `value_fits`/`const_range_check` tipam `x to T`: **toda conversão numérica→numérica definida é
   permitida** (incl. narrowing `i32 to i8` e sinal `i32 to u32` — o valor pode caber, M.0). A perda
   é **pega, nunca silenciosa**: constante fora-de-faixa → **erro de compilação** (fail-early, M.1);
-  valor de runtime → guarda em **codegen** (panic-debug / definido-release, como overflow) — adiado
-  (M.4). Recusa só `bool`↔num e não-numéricos (indefinidos). Nó `TCast`; `revalidate` **re-deriva**
+  **a validação de possibilidade de um valor runtime é runtime** — conversão impossível (não cabe)
+  → **PÂNICO** (debug E release; paridade ÷0/OOB, não o wrap do overflow), guarda em **codegen**
+  (adiado M.4). Recusa só `bool`↔num e não-numéricos (indefinidos). Nó `TCast`; `revalidate` **re-deriva**
   que a conversão é *definida* (M.3); `write_texpr` reservou a **tag 10** (round-trip = **S1a**).
   **Redefine** a regra antiga (proibir perda em compilação) — ver HISTORY conversões + Índice de
   Redefinições. **Float/Named adiados (M.4):** sem float em `PrimKind`; `resolve_named` devolve `Named`

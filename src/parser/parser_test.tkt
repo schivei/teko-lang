@@ -1,0 +1,1002 @@
+// src/parser/parser_test.tkt — tests for teko::parser. NO main: PUBLIC `#test`
+// functions the compiler collects (a runner — ALPHA). C mirror: a `main` harness.
+
+// helper: lex `source`, then parse a type from position 0 — the TypeExpr, or error.
+fn type_of(source: str) -> TypeExpr | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pt = match parse_type(toks, 0) { ParsedType as x => x; error as e => return e }
+    pt.node
+}
+
+// does parsing a type from `source` fail (the barrier)?
+fn type_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_type(toks, 0) { ParsedType => false; error => true }
+}
+
+// is `t` a single-segment NamedType named `name`?
+fn named_is(t: TypeExpr, name: str) -> bool {
+    match t {
+        NamedType as n => n.path.segments.len == 1 && n.path.segments[0].name == name
+        _              => false
+    }
+}
+
+// the arity of a union type (0 if `t` is not a UnionType).
+fn union_arity(t: TypeExpr) -> u64 {
+    match t {
+        UnionType as u => u.members.len
+        _              => 0
+    }
+}
+
+#test
+fn parses_named_and_path() {
+    // happy: a bare name, and a multi-segment path.
+    let t = match type_of("u64") { TypeExpr as x => x; error => return }
+    assert named_is(t, "u64")
+    let p = match type_of("lexer::Token") { TypeExpr as x => x; error => return }
+    match p {
+        NamedType as n => {
+            assert n.path.segments.len == 2
+            assert n.path.segments[0].name == "lexer"
+            assert n.path.segments[1].name == "Token"
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn parses_slice_and_nesting() {
+    // happy: []u64 and [][]u64 (B.8 recursion).
+    let t = match type_of("[]u64") { TypeExpr as x => x; error => return }
+    match t {
+        SliceType as s => assert named_is(s.element, "u64")
+        _              => assert false
+    }
+    let t2 = match type_of("[][]u64") { TypeExpr as x => x; error => return }
+    match t2 {
+        SliceType as s => match s.element {
+            SliceType as s2 => assert named_is(s2.element, "u64")
+            _               => assert false
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn parses_union_and_single() {
+    // happy: A | B (arity 2), A | B | C (arity 3); a single primary is NOT wrapped (M.5).
+    let u2 = match type_of("A | B") { TypeExpr as x => x; error => return }
+    assert union_arity(u2) == 2
+    let u3 = match type_of("A | B | C") { TypeExpr as x => x; error => return }
+    assert union_arity(u3) == 3
+    let one = match type_of("A") { TypeExpr as x => x; error => return }
+    assert union_arity(one) == 0
+    assert named_is(one, "A")
+    // precedence: []A | B is ([]A) | B — a 2-member union whose first member is a slice.
+    let mix = match type_of("[]A | B") { TypeExpr as x => x; error => return }
+    match mix {
+        UnionType as u => {
+            assert u.members.len == 2
+            match u.members[0] { SliceType as s => assert named_is(s.element, "A"); _ => assert false }
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_types() {
+    // barrier: each must fail to parse (B.1).
+    assert type_errors("[]")          // slice with no element
+    assert type_errors("A |")         // union with no right-hand side
+    assert type_errors("::")          // path with no leading name
+    assert type_errors("lexer::")     // `::` with no name after
+    assert type_errors("")            // no type at all
+}
+
+// appended to parser_test.tkt — P2a expression-atom tests. #test collected.
+
+// helper: lex `source`, parse an expression from 0 — the Expr, or error.
+fn expr_of(source: str) -> Expr | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pe = match parse_expr(toks, 0) { Parsed as x => x; error as e => return e }
+    pe.node
+}
+
+// does parsing an expression from `source` fail (the barrier)?
+fn expr_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_expr(toks, 0) { Parsed => false; error => true }
+}
+
+#test
+fn parses_literals_and_names() {
+    match expr_of("42")  { Number as nn => assert nn.value == 42; _ => assert false }
+    match expr_of("x")   { Var as v     => assert v.name == "x";  _ => assert false }
+    match expr_of("b'A'"){ ByteLit as bl => assert bl.value == b'A'; _ => assert false }
+    match expr_of("\"hi\"") { StrLit as s => assert s.text == "hi"; _ => assert false }
+    // a qualified path as a value → PathExpr (PrimKind::U32 shape).
+    match expr_of("PrimKind::U32") {
+        PathExpr as pe => {
+            assert pe.path.segments.len == 2
+            assert pe.path.segments[0].name == "PrimKind"
+            assert pe.path.segments[1].name == "U32"
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn parses_calls_and_paren() {
+    // f(x) → Call(1 arg); f() → Call(0); ns::f(x) → Call with a 2-segment callee.
+    match expr_of("f(x)")     { Call as c => { assert c.callee.segments.len == 1; assert c.args.len == 1 } _ => assert false }
+    match expr_of("f()")      { Call as c => assert c.args.len == 0; _ => assert false }
+    match expr_of("ns::f(x)") { Call as c => assert c.callee.segments.len == 2; _ => assert false }
+    // a parenthesized atom is transparent: (42) is just 42.
+    match expr_of("(42)") { Number as nn => assert nn.value == 42; _ => assert false }
+}
+
+#test
+fn rejects_malformed_atoms() {
+    // barrier: each must fail (B.1). (Binary/operator cases arrive in P2c–P2e.)
+    assert expr_errors("(1")     // unclosed paren
+    assert expr_errors("f(")     // unclosed call, no arg
+    assert expr_errors("f(x")    // unclosed call after an arg
+    assert expr_errors("f(x,")   // trailing comma, no next arg
+    assert expr_errors("+")      // not the start of an atom
+    assert expr_errors("")       // empty
+}
+
+// appended to parser_test.tkt — P2b postfix tests.
+
+#test
+fn parses_field_and_method() {
+    // a.b → FieldAccess; a.b() → MethodCall(0 args); a.b(x) → MethodCall(1 arg).
+    match expr_of("a.b") { FieldAccess as fa => assert fa.field == "b"; _ => assert false }
+    match expr_of("a.b()")  { MethodCall as mc => { assert mc.method == "b"; assert mc.args.len == 0 } _ => assert false }
+    match expr_of("a.b(x)") { MethodCall as mc => { assert mc.method == "b"; assert mc.args.len == 1 } _ => assert false }
+}
+
+#test
+fn postfix_chains_left() {
+    // a.b.c → FieldAccess(FieldAccess(a,b),c) — left-assoc.
+    match expr_of("a.b.c") {
+        FieldAccess as outer => {
+            assert outer.field == "c"
+            match outer.receiver { FieldAccess as inner => assert inner.field == "b"; _ => assert false }
+        }
+        _ => assert false
+    }
+    // f(x).g → FieldAccess(Call(f,[x]), g) — postfix applies after a call atom.
+    match expr_of("f(x).g") {
+        FieldAccess as fa => {
+            assert fa.field == "g"
+            match fa.receiver { Call as c => assert c.args.len == 1; _ => assert false }
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_postfix() {
+    assert expr_errors("a.")     // no name after `.`
+    assert expr_errors("a.5")    // a number is not a field/method name
+    assert expr_errors("a.b(")   // unclosed method-call args
+}
+
+// appended to parser_test.tkt — P2c unary + cast tests.
+
+#test
+fn parses_unary() {
+    match expr_of("-x") { Unary as u => assert u.op == lexer::TokenKind::Minus; _ => assert false }
+    match expr_of("!a") { Unary as u => assert u.op == lexer::TokenKind::Bang;  _ => assert false }
+    match expr_of("~b") { Unary as u => assert u.op == lexer::TokenKind::Tilde; _ => assert false }
+    // right-assoc: !!a is !(!a).
+    match expr_of("!!a") {
+        Unary as outer => match outer.operand { Unary as inner => assert inner.op == lexer::TokenKind::Bang; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn parses_cast() {
+    match expr_of("x to u32") { Cast as c => assert true; _ => assert false }
+    // target may be a slice type.
+    match expr_of("x to []u8") {
+        Cast as c => match c.target { SliceType as s => assert true; _ => assert false }
+        _ => assert false
+    }
+    // left-assoc: x to A to B is (x to A) to B — the outer Cast's expr is a Cast.
+    match expr_of("x to A to B") {
+        Cast as outer => match outer.expr { Cast as inner => assert true; _ => assert false }
+        _ => assert false
+    }
+    // unary binds tighter than `to`: -x to u32 is (-x) to u32 — a Cast of a Unary.
+    match expr_of("-x to u32") {
+        Cast as c => match c.expr { Unary as u => assert u.op == lexer::TokenKind::Minus; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_unary_cast() {
+    assert expr_errors("-")        // unary with no operand
+    assert expr_errors("x to")     // cast with no target type
+    assert expr_errors("to u32")   // `to` cannot start an expression
+}
+
+// appended to parser_test.tkt — P2d binary + comparison tests.
+
+// is `e` a Binary with op `op`?
+fn binop_is(e: Expr, op: lexer::TokenKind) -> bool {
+    match e { Binary as b => b.op == op; _ => false }
+}
+
+#test
+fn binary_precedence() {
+    // `1 + 2 * 3` is `1 + (2 * 3)`: a `+` whose right is a `*`.
+    match expr_of("1 + 2 * 3") {
+        Binary as b => { assert b.op == lexer::TokenKind::Plus; assert binop_is(b.right, lexer::TokenKind::Star) }
+        _ => assert false
+    }
+    // `1 * 2 + 3` is `(1 * 2) + 3`: a `+` whose left is a `*`.
+    match expr_of("1 * 2 + 3") {
+        Binary as b => { assert b.op == lexer::TokenKind::Plus; assert binop_is(b.left, lexer::TokenKind::Star) }
+        _ => assert false
+    }
+    // bitwise: `&` (mult level) binds tighter than `|` (add level): `a | b & c` is `a | (b & c)`.
+    match expr_of("a | b & c") {
+        Binary as b => { assert b.op == lexer::TokenKind::Pipe; assert binop_is(b.right, lexer::TokenKind::Amp) }
+        _ => assert false
+    }
+}
+
+#test
+fn comparison_and_chains() {
+    // `a < b` → Compare with 1 term.
+    match expr_of("a < b") {
+        Compare as cmp => { assert cmp.rest.len == 1; assert cmp.rest[0].op == lexer::TokenKind::Lt }
+        _ => assert false
+    }
+    // `a < b < c` is kept as a chain (M.3): Compare with 2 terms.
+    match expr_of("a < b < c") { Compare as cmp => assert cmp.rest.len == 2; _ => assert false }
+    // additive binds tighter than comparison: `a + b < c` → Compare whose first is a `+`.
+    match expr_of("a + b < c") {
+        Compare as cmp => match cmp.first { Binary as b => assert b.op == lexer::TokenKind::Plus; _ => assert false }
+        _ => assert false
+    }
+    // a lone additive is NOT wrapped in Compare (M.5 — no needless node).
+    match expr_of("a + b") { Binary as b => assert b.op == lexer::TokenKind::Plus; _ => assert false }
+}
+
+#test
+fn rejects_malformed_binary() {
+    assert expr_errors("1 +")    // additive, no rhs
+    assert expr_errors("1 *")    // multiplicative, no rhs
+    assert expr_errors("1 <")    // comparison, no rhs
+    assert expr_errors("<< 2")   // shift, no left operand
+}
+
+// appended to parser_test.tkt — P2e logical tests + a full-ladder end-to-end check.
+
+#test
+fn parses_logical() {
+    match expr_of("a && b") { Binary as b => assert b.op == lexer::TokenKind::AndAnd; _ => assert false }
+    match expr_of("a || b") { Binary as b => assert b.op == lexer::TokenKind::OrOr;  _ => assert false }
+    // `&&` binds tighter than `||`: `a && b || c` is `(a && b) || c`.
+    match expr_of("a && b || c") {
+        Binary as b => { assert b.op == lexer::TokenKind::OrOr; assert binop_is(b.left, lexer::TokenKind::AndAnd) }
+        _ => assert false
+    }
+    // `a || b && c` is `a || (b && c)`: an `||` whose right is `&&`.
+    match expr_of("a || b && c") {
+        Binary as b => { assert b.op == lexer::TokenKind::OrOr; assert binop_is(b.right, lexer::TokenKind::AndAnd) }
+        _ => assert false
+    }
+}
+
+#test
+fn full_ladder_end_to_end() {
+    // `a + b < c && d` is `((a + b) < c) && d`: an `&&` whose left is a Compare whose
+    // first is a `+`. Exercises additive → comparison → and in one shot.
+    match expr_of("a + b < c && d") {
+        Binary as top => {
+            assert top.op == lexer::TokenKind::AndAnd
+            match top.left {
+                Compare as cmp => match cmp.first { Binary as p => assert p.op == lexer::TokenKind::Plus; _ => assert false }
+                _ => assert false
+            }
+        }
+        _ => assert false
+    }
+    // `x to u32 + 1` is `(x to u32) + 1`: cast binds tighter than additive.
+    match expr_of("x to u32 + 1") {
+        Binary as b => { assert b.op == lexer::TokenKind::Plus; match b.left { Cast as c => assert true; _ => assert false } }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_logical() {
+    assert expr_errors("a &&")   // no rhs
+    assert expr_errors("a ||")   // no rhs
+    assert expr_errors("|| b")   // no left operand
+}
+
+// appended to parser_test.tkt — P3a pattern tests.
+
+// helper: lex `source`, parse a pattern from 0 — the Pattern, or error.
+fn pattern_of(source: str) -> Pattern | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pp = match parse_pattern(toks, 0) { ParsedPattern as x => x; error as e => return e }
+    pp.node
+}
+
+// does parsing a pattern from `source` fail (the barrier)?
+fn pattern_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_pattern(toks, 0) { ParsedPattern => false; error => true }
+}
+
+#test
+fn parses_wildcard_and_literals() {
+    match pattern_of("_") { WildcardPattern => assert true; _ => assert false }
+    match pattern_of("5") {
+        LiteralPattern as lp => match lp.value { Number as nn => assert nn.value == 5; _ => assert false }
+        _ => assert false
+    }
+    match pattern_of("\"s\"") {
+        LiteralPattern as lp => match lp.value { StrLit as s => assert s.text == "s"; _ => assert false }
+        _ => assert false
+    }
+    match pattern_of("b'A'") {
+        LiteralPattern as lp => match lp.value { ByteLit as bl => assert bl.value == b'A'; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_non_patterns() {
+    assert pattern_errors("+")    // not a pattern start
+    assert pattern_errors("")     // empty
+}
+
+// appended to parser_test.tkt — P3b bind + bare-case tests.
+
+#test
+fn parses_bind_and_bare() {
+    // `Foo as x` → BindPattern with binding.
+    match pattern_of("Foo as x") {
+        BindPattern as bp => {
+            assert bp.has_binding
+            assert bp.binding == "x"
+            assert bp.type_name.segments.len == 1
+            assert bp.type_name.segments[0].name == "Foo"
+        }
+        _ => assert false
+    }
+    // bare `Foo` → BindPattern, no binding (matches the case; the checker's `Byte =>` shape).
+    match pattern_of("Foo") { BindPattern as bp => assert !bp.has_binding; _ => assert false }
+    // a qualified case: `lexer::Token as t`.
+    match pattern_of("lexer::Token as t") {
+        BindPattern as bp => { assert bp.has_binding; assert bp.type_name.segments.len == 2 }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_bind() {
+    assert pattern_errors("Foo as")    // `as` with no name
+    assert pattern_errors("Foo as 5")  // a number is not a binding name
+}
+
+// appended to parser_test.tkt — P3b-field field-pattern tests.
+
+#test
+fn parses_field_pattern() {
+    // Foo { a; b } → FieldPattern with fields [a, b].
+    match pattern_of("Foo { a; b }") {
+        FieldPattern as fp => {
+            assert fp.type_name.segments[0].name == "Foo"
+            assert fp.fields.len == 2
+            assert fp.fields[0] == "a"
+            assert fp.fields[1] == "b"
+        }
+        _ => assert false
+    }
+    // an empty field list is allowed: Foo { }.
+    match pattern_of("Foo { }") { FieldPattern as fp => assert fp.fields.len == 0; _ => assert false }
+    // a single field.
+    match pattern_of("Foo { a }") { FieldPattern as fp => assert fp.fields.len == 1; _ => assert false }
+}
+
+#test
+fn rejects_malformed_field() {
+    assert pattern_errors("Foo { a b }")   // two names with no separator
+    assert pattern_errors("Foo { a;")      // unclosed
+    assert pattern_errors("Foo { 5 }")     // a number is not a field name
+}
+
+// appended to parser_test.tkt — P3c range + alt tests.
+
+#test
+fn parses_range_and_alt() {
+    // 1 ..= 5 → RangePattern with literal bounds.
+    match pattern_of("1 ..= 5") {
+        RangePattern as rp => {
+            match rp.lo { Number as nn => assert nn.value == 1; _ => assert false }
+            match rp.hi { Number as nn => assert nn.value == 5; _ => assert false }
+        }
+        _ => assert false
+    }
+    // 1 | 2 | 3 → AltPattern with 3 options.
+    match pattern_of("1 | 2 | 3") { AltPattern as ap => assert ap.options.len == 3; _ => assert false }
+    // a single pattern is NOT wrapped in Alt (M.5).
+    match pattern_of("5") { LiteralPattern => assert true; _ => assert false }
+    // alt of ranges: 1 ..= 5 | 10 ..= 15 → Alt of 2, each a Range.
+    match pattern_of("1 ..= 5 | 10 ..= 15") {
+        AltPattern as ap => {
+            assert ap.options.len == 2
+            match ap.options[0] { RangePattern => assert true; _ => assert false }
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_range_alt() {
+    assert pattern_errors("1 ..=")       // range with no hi
+    assert pattern_errors("_ ..= 5")     // a range bound must be a literal (wildcard isn't)
+    assert pattern_errors("1 |")         // alt with no right option
+}
+
+// appended to parser_test.tkt — P3d arm tests.
+
+// helper: lex `source`, parse an arm from 0 — the Arm, or error.
+fn arm_of(source: str) -> Arm | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pa = match parse_arm(toks, 0) { ParsedArm as x => x; error as e => return e }
+    pa.node
+}
+
+fn arm_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_arm(toks, 0) { ParsedArm => false; error => true }
+}
+
+#test
+fn parses_arms() {
+    // `_ => 5`: wildcard, no guard, body 5.
+    match arm_of("_ => 5") {
+        Arm as a => {
+            assert !a.has_when
+            match a.pattern { WildcardPattern => assert true; _ => assert false }
+            match a.body { Number as nn => assert nn.value == 5; _ => assert false }
+        }
+        _ => assert false
+    }
+    // `Foo as x => x`: bind pattern, body the bound var.
+    match arm_of("Foo as x => x") {
+        Arm as a => match a.pattern { BindPattern as bp => assert bp.binding == "x"; _ => assert false }
+        _ => assert false
+    }
+    // `1 when c => 2`: a guard.
+    match arm_of("1 when c => 2") {
+        Arm as a => {
+            assert a.has_when
+            match a.guard { Var as v => assert v.name == "c"; _ => assert false }
+        }
+        _ => assert false
+    }
+    // `1 ..= 5 => 0`: a range-pattern arm.
+    match arm_of("1 ..= 5 => 0") {
+        Arm as a => match a.pattern { RangePattern => assert true; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_arms() {
+    assert arm_errors("_ 5")          // no `=>`
+    assert arm_errors("_ =>")         // no body
+    assert arm_errors("_ when => 1")  // `when` with no guard expression
+}
+
+// appended to parser_test.tkt — P4a block + statement tests.
+
+// helper: lex `source`, parse a block from 0 — the []Statement, or error.
+fn block_of(source: str) -> []Statement | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pb = match parse_block(toks, 0) { ParsedBlock as x => x; error as e => return e }
+    pb.statements
+}
+
+fn block_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_block(toks, 0) { ParsedBlock => false; error => true }
+}
+
+#test
+fn parses_block_stmts() {
+    // empty block.
+    match block_of("{ }") { ss: []Statement => assert ss.len == 0; error => assert false }
+    // a bare-expression statement.
+    let one = match block_of("{ x }") { ss: []Statement => ss; error => return }
+    assert one.len == 1
+    match one[0] {
+        ExprStmt as es => match es.expr { Var as v => assert v.name == "x"; _ => assert false }
+        _ => assert false
+    }
+    // return with a value.
+    let r = match block_of("{ return 5 }") { ss: []Statement => ss; error => return }
+    match r[0] {
+        Return as ret => { assert ret.has_value; match ret.value { Number as nn => assert nn.value == 5; _ => assert false } }
+        _ => assert false
+    }
+    // bare return (no value).
+    let br = match block_of("{ return }") { ss: []Statement => ss; error => return }
+    match br[0] { Return as ret => assert !ret.has_value; _ => assert false }
+    // two statements separated by `;`.
+    match block_of("{ a; b }") { ss: []Statement => assert ss.len == 2; error => assert false }
+}
+
+#test
+fn rejects_malformed_block() {
+    assert block_errors("{ a b }")    // two statements with no separator
+    assert block_errors("{ a")        // unclosed block
+    assert block_errors("{ + }")      // not a valid statement
+}
+
+// appended to parser_test.tkt — P4b binding tests.
+
+// helper: parse a single statement from `source` — the Statement, or error.
+fn stmt_of(source: str) -> Statement | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let ps = match parse_statement(toks, 0) { ParsedStmt as x => x; error as e => return e }
+    ps.node
+}
+
+fn stmt_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_statement(toks, 0) { ParsedStmt => false; error => true }
+}
+
+#test
+fn parses_bindings() {
+    // let x = 1
+    match stmt_of("let x = 1") {
+        Binding as b => {
+            assert b.kind == BindKind::Let
+            assert !b.has_type
+            match b.target { SimpleName as sn => assert sn.name == "x"; _ => assert false }
+            match b.value { Number as nn => assert nn.value == 1; _ => assert false }
+        }
+        _ => assert false
+    }
+    // mut y: u8 = 2  (with annotation)
+    match stmt_of("mut y: u8 = 2") {
+        Binding as b => {
+            assert b.kind == BindKind::Mut
+            assert b.has_type
+            match b.type_ann { NamedType as nt => assert nt.path.segments[0].name == "u8"; _ => assert false }
+        }
+        _ => assert false
+    }
+    // const Z = 3
+    match stmt_of("const Z = 3") { Binding as b => assert b.kind == BindKind::Const; _ => assert false }
+}
+
+#test
+fn rejects_malformed_bindings() {
+    assert stmt_errors("let = 1")      // no name
+    assert stmt_errors("let x 1")      // no `=`
+    assert stmt_errors("let x =")      // no value
+    assert stmt_errors("let x: = 1")   // annotation with no type
+}
+
+// appended to parser_test.tkt — P4c destructure + assignment tests.
+
+#test
+fn parses_destructure_and_assign() {
+    // let { x; y } = p → Binding with a destructure target of 2 names.
+    match stmt_of("let { x; y } = p") {
+        Binding as b => match b.target {
+            DestructurePattern as dp => { assert dp.names.len == 2; assert dp.names[0] == "x" }
+            _ => assert false
+        }
+        _ => assert false
+    }
+    // x = 5 → Assign with op `=`.
+    match stmt_of("x = 5") {
+        Assign as a => { assert a.name == "x"; assert a.op == lexer::TokenKind::Assign }
+        _ => assert false
+    }
+    // x += 1 → Assign with op `+=`.
+    match stmt_of("x += 1") { Assign as a => assert a.op == lexer::TokenKind::PlusEq; _ => assert false }
+    // a bare expression is still an ExprStmt, not an Assign.
+    match stmt_of("x") { ExprStmt => assert true; _ => assert false }
+}
+
+#test
+fn rejects_malformed_assign() {
+    assert stmt_errors("x =")          // assignment with no value
+    assert stmt_errors("let { x = p")  // unclosed destructure
+}
+
+// appended to parser_test.tkt — P4d loop/break/continue tests.
+
+#test
+fn parses_loop_break_continue() {
+    // loop { x } → LoopStmt with a 1-statement body.
+    match stmt_of("loop { x }") { LoopStmt as l => assert l.body.len == 1; _ => assert false }
+    // an empty loop body.
+    match stmt_of("loop { }") { LoopStmt as l => assert l.body.len == 0; _ => assert false }
+    // break / continue.
+    match stmt_of("break")    { BreakStmt => assert true;    _ => assert false }
+    match stmt_of("continue") { ContinueStmt => assert true; _ => assert false }
+    // loop { break } → a LoopStmt whose body is a single BreakStmt.
+    match stmt_of("loop { break }") {
+        LoopStmt as l => match l.body[0] { BreakStmt => assert true; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_loop() {
+    assert stmt_errors("loop x")     // no `{` after loop
+    assert stmt_errors("loop {")     // unclosed loop body
+}
+
+// appended to parser_test.tkt — P4e if/match-expression tests (reuses expr_of).
+
+#test
+fn parses_if_and_match() {
+    // if c { a } → IfExpr, no else.
+    match expr_of("if c { a }") {
+        IfExpr as ie => { assert !ie.has_else; assert ie.then_blk.len == 1 }
+        _ => assert false
+    }
+    // if c { a } else { b } → IfExpr with else.
+    match expr_of("if c { a } else { b }") {
+        IfExpr as ie => { assert ie.has_else; assert ie.else_blk.len == 1 }
+        _ => assert false
+    }
+    // else-if chains: the else block holds a single (nested) IfExpr statement.
+    match expr_of("if a { 1 } else if b { 2 } else { 3 }") {
+        IfExpr as ie => {
+            assert ie.has_else
+            match ie.else_blk[0] {
+                ExprStmt as es => match es.expr { IfExpr => assert true; _ => assert false }
+                _ => assert false
+            }
+        }
+        _ => assert false
+    }
+    // match subj { _ => 0 } → MatchExpr with 1 arm.
+    match expr_of("match x { _ => 0 }") { MatchExpr as me => assert me.arms.len == 1; _ => assert false }
+    // a match with two arms.
+    match expr_of("match x { 1 => a; _ => b }") { MatchExpr as me => assert me.arms.len == 2; _ => assert false }
+}
+
+#test
+fn rejects_malformed_if_match() {
+    assert expr_errors("if c a")            // no `{` after condition
+    assert expr_errors("if c { a } else")   // `else` with no block/if
+    assert expr_errors("match x a")         // no `{` after subject
+    assert expr_errors("match x { }")       // a match needs at least one arm
+}
+
+// appended to parser_test.tkt — R-main-b main-file tests.
+
+fn main_file_of(source: str) -> MainFile | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pf = match parse_main_file(toks, 0) { ParsedMainFile as x => x; error as e => return e }
+    pf.node
+}
+
+fn main_file_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_main_file(toks, 0) { ParsedMainFile => false; error => true }
+}
+
+#test
+fn parses_main_file() {
+    // a use header + a statement body.
+    match main_file_of("use teko::lexer; x") {
+        MainFile as mf => {
+            assert mf.uses.len == 1
+            assert mf.uses[0].path.segments[0].name == "teko"
+            assert mf.body.len == 1
+        }
+        _ => assert false
+    }
+    // a use with an alias, then a body statement.
+    match main_file_of("use a::b as c; x = 1") {
+        MainFile as mf => { assert mf.uses[0].has_alias; assert mf.uses[0].alias == "c" }
+        _ => assert false
+    }
+    // no use header, just a body of two statements.
+    match main_file_of("let x = 1; x") {
+        MainFile as mf => { assert mf.uses.len == 0; assert mf.body.len == 2 }
+        _ => assert false
+    }
+    // an empty file → an empty virtual main.
+    match main_file_of("") { MainFile as mf => { assert mf.uses.len == 0; assert mf.body.len == 0 } _ => assert false }
+}
+
+#test
+fn rejects_decls_in_main() {
+    assert main_file_errors("fn f() { }")            // a function declaration is forbidden
+    assert main_file_errors("type T = struct { }")   // a type declaration is forbidden
+    assert main_file_errors("x; use a::b")           // a `use` after a statement is misplaced
+}
+
+// appended to parser_test.tkt — P5a function tests.
+
+// helper: parse a function decl from `source` — the Function, or error.
+fn func_of(source: str) -> Function | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pd = match parse_function(toks, 0) { ParsedDecl as x => x; error as e => return e }
+    match pd.node { Function as f => f; _ => error { message = "not a function" } }
+}
+
+fn func_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_function(toks, 0) { ParsedDecl => false; error => true }
+}
+
+#test
+fn parses_functions() {
+    // fn f() -> u8 { return 1 }
+    match func_of("fn f() -> u8 { return 1 }") {
+        Function as f => {
+            assert f.name == "f"
+            assert f.params.len == 0
+            assert f.has_return
+            assert !f.is_exp
+            assert f.body.len == 1
+        }
+        _ => assert false
+    }
+    // exp fn g(x: u8, y: str) { }  — params, exported, Unit return (no `-> ret`).
+    match func_of("exp fn g(x: u8, y: str) { }") {
+        Function as f => {
+            assert f.is_exp
+            assert !f.has_return
+            assert f.params.len == 2
+            assert f.params[0].name == "x"
+        }
+        _ => assert false
+    }
+    // a doc comment precedes the function.
+    match func_of("/** hi */ fn h() { }") { Function as f => assert f.has_doc; _ => assert false }
+}
+
+#test
+fn rejects_malformed_functions() {
+    assert func_errors("fn { }")           // no name
+    assert func_errors("fn f { }")         // no params
+    assert func_errors("fn f() -> { }")    // `->` with no return type
+    assert func_errors("fn f() -> u8")     // no body
+    assert func_errors("fn f(x) { }")      // param with no type
+}
+
+// appended to parser_test.tkt — P5b struct type-decl tests.
+
+fn type_decl_of(source: str) -> TypeDecl | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pd = match parse_type_decl(toks, 0) { ParsedDecl as x => x; error as e => return e }
+    match pd.node { TypeDecl as td => td; _ => error { message = "not a type decl" } }
+}
+
+fn type_decl_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_type_decl(toks, 0) { ParsedDecl => false; error => true }
+}
+
+#test
+fn parses_struct_decl() {
+    // type Point = struct { x: i32; y: i32 }
+    match type_decl_of("type Point = struct { x: i32; y: i32 }") {
+        TypeDecl as td => {
+            assert td.name == "Point"
+            assert !td.is_exp
+            match td.body {
+                StructBody as sb => { assert sb.fields.len == 2; assert sb.fields[0].name == "x" }
+                _ => assert false
+            }
+        }
+        _ => assert false
+    }
+    // /** d */ exp type Empty = struct { }  — exp, doc, empty struct.
+    match type_decl_of("/** d */ exp type Empty = struct { }") {
+        TypeDecl as td => {
+            assert td.is_exp
+            assert td.has_doc
+            match td.body { StructBody as sb => assert sb.fields.len == 0; _ => assert false }
+        }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_struct() {
+    assert type_decl_errors("type = struct { }")                  // no name
+    assert type_decl_errors("type T struct { }")                  // no `=`
+    assert type_decl_errors("type T = struct x: i32 }")           // no `{`
+    assert type_decl_errors("type T = struct { x }")              // field with no type
+    assert type_decl_errors("type T = struct { x: i32 y: i32 }")  // two fields, no separator
+}
+
+// appended to parser_test.tkt — P5c enum/variant tests.
+
+#test
+fn parses_enum_and_variant() {
+    // type Color = enum { Red; Green; Blue }
+    match type_decl_of("type Color = enum { Red; Green; Blue }") {
+        TypeDecl as td => match td.body {
+            EnumBody as eb => { assert eb.members.len == 3; assert eb.members[0] == "Red" }
+            _ => assert false
+        }
+        _ => assert false
+    }
+    // type Shape = variant Circle | Square → VariantBody with a 2-member union.
+    match type_decl_of("type Shape = variant Circle | Square") {
+        TypeDecl as td => match td.body {
+            VariantBody as vb => match vb.type_expr {
+                UnionType as u => assert u.members.len == 2
+                _ => assert false
+            }
+            _ => assert false
+        }
+        _ => assert false
+    }
+    // a single-type variant: `variant A` (degenerate but parseable; the checker may require 2+).
+    match type_decl_of("type S = variant A") {
+        TypeDecl as td => match td.body { VariantBody => assert true; _ => assert false }
+        _ => assert false
+    }
+}
+
+#test
+fn rejects_malformed_enum_variant() {
+    assert type_decl_errors("type C = enum Red }")    // no `{` after `enum`
+    assert type_decl_errors("type C = enum { 5 }")    // a number is not a member name
+    assert type_decl_errors("type S = variant")       // variant with no type
+    assert type_decl_errors("type T = thing { }")     // not struct/enum/variant
+}
+
+// appended to parser_test.tkt — P5d standalone `use` tests.
+
+fn use_of(source: str) -> UseDecl | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pu = match parse_use(toks, 0) { ParsedUse as x => x; error as e => return e }
+    pu.node
+}
+
+fn use_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_use(toks, 0) { ParsedUse => false; error => true }
+}
+
+#test
+fn parses_use_decls() {
+    // use a::b::c  — a 3-segment path, no alias.
+    match use_of("use a::b::c") {
+        UseDecl as u => {
+            assert !u.has_alias
+            assert u.path.segments.len == 3
+            assert u.path.segments[2].name == "c"
+        }
+        _ => assert false
+    }
+    // use a::b as c  — with an alias.
+    match use_of("use a::b as c") {
+        UseDecl as u => { assert u.has_alias; assert u.alias == "c"; assert u.path.segments.len == 2 }
+        _ => assert false
+    }
+    // a single-segment use.
+    match use_of("use teko") { UseDecl as u => assert u.path.segments.len == 1; _ => assert false }
+}
+
+#test
+fn rejects_malformed_use() {
+    assert use_errors("use")          // no path
+    assert use_errors("use a as")     // `as` with no alias name
+    assert use_errors("use ::")       // `::` with no leading name
+}
+
+// appended to parser_test.tkt — R-main-c module tests.
+
+fn module_of(source: str) -> Module | error {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return error { message = "lex failed" } }
+    let pm = match parse_module(toks, 0) { ParsedModule as x => x; error as e => return e }
+    pm.node
+}
+
+fn module_errors(source: str) -> bool {
+    let toks = match tokenize(source) { ts: []lexer::Token => ts; error => return true }
+    match parse_module(toks, 0) { ParsedModule => false; error => true }
+}
+
+#test
+fn parses_module() {
+    // a use header + two declarations (a type and a function).
+    match module_of("use teko::lexer; type T = struct { x: u8 }; fn f() { }") {
+        Module as m => { assert m.uses.len == 1; assert m.decls.len == 2 }
+        _ => assert false
+    }
+    // exp + doc on a declaration.
+    match module_of("/** d */ exp fn g() -> u8 { return 1 }") {
+        Module as m => {
+            assert m.uses.len == 0
+            assert m.decls.len == 1
+            match m.decls[0] { Function as fn0 => { assert fn0.is_exp; assert fn0.has_doc } _ => assert false }
+        }
+        _ => assert false
+    }
+    // an empty module.
+    match module_of("") { Module as m => { assert m.uses.len == 0; assert m.decls.len == 0 } _ => assert false }
+}
+
+#test
+fn rejects_statements_in_module() {
+    assert module_errors("let x = 1")   // a loose binding is a statement, not a declaration
+    assert module_errors("x = 5")        // an assignment is a statement
+    assert module_errors("f()")          // a bare expression is a statement
+}
+
+// appended to parser_test.tkt — P6 end-to-end integration.
+
+#test
+fn integration_module() {
+    // a realistic module: use + a struct + an enum + a function with a conditional return.
+    let src = "use teko::lexer; type Tok = struct { kind: u8; text: str }; type Kind = enum { A; B }; fn classify(t: Tok) -> Kind { if t.kind == 0 { return Kind::A }; Kind::B }"
+    match module_of(src) {
+        Module as m => {
+            assert m.uses.len == 1
+            assert m.decls.len == 3
+            // the third declaration is the function `classify`.
+            match m.decls[2] {
+                Function as fn0 => {
+                    assert fn0.name == "classify"
+                    assert fn0.params.len == 1
+                    assert fn0.params[0].name == "t"
+                    assert fn0.has_return
+                    assert fn0.body.len == 2          // the `if` statement, then `Kind::B`
+                }
+                _ => assert false
+            }
+        }
+        error => assert false
+    }
+}
+
+#test
+fn integration_main() {
+    // a realistic main.tks: use + a mutable binding, a loop with break + assignment, and a match.
+    let src = "use teko::io; let mut n = 0; loop { if n == 3 { break }; n = n + 1 }; let r = match n { 3 => 1; _ => 0 }"
+    match main_file_of(src) {
+        MainFile as mf => {
+            assert mf.uses.len == 1
+            assert mf.body.len == 3              // the two `let`s and the `loop`
+            // the second body statement is the loop.
+            match mf.body[1] { LoopStmt as l => assert l.body.len == 2; _ => assert false }
+            // the third binds `r` to a match expression.
+            match mf.body[2] {
+                Binding as b => match b.value { MatchExpr as me => assert me.arms.len == 2; _ => assert false }
+                _ => assert false
+            }
+        }
+        error => assert false
+    }
+}
+
+#test
+fn integration_barriers() {
+    assert module_errors("fn f() { } let x = 1")    // a loose statement in a module
+    assert main_file_errors("type T = struct { }")  // a declaration in a main file
+    assert module_errors("fn f() { x + }")          // a malformed expression in a body
+    assert main_file_errors("let x = ; x")          // a malformed binding in the main body
+}

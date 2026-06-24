@@ -1,0 +1,49 @@
+// Is there a token at `pos`? Position/index are always u64.
+fn has_token(tokens: []lexer::Token, pos: u64) -> bool {
+    pos < tokens.len
+}
+
+// The kind at `pos` (caller guarantees has_token first).
+fn kind_at(tokens: []lexer::Token, pos: u64) -> lexer::TokenKind {
+    tokens[pos].kind
+}
+
+// has_token + kind compare, folded flat (guard over nest).
+fn is_kind_at(tokens: []lexer::Token, pos: u64, k: lexer::TokenKind) -> bool {
+    if !has_token(tokens, pos) { return false }
+    kind_at(tokens, pos) == k
+}
+
+// Demand a specific kind at `pos`; return the position AFTER it, or an error (B.1).
+// The shared helper that flattens "is there a token? is it right? else error."
+fn expect(tokens: []lexer::Token, pos: u64, kind: lexer::TokenKind, msg: str) -> u64 | error {
+    if !has_token(tokens, pos) { return error { message = msg } }
+    if kind_at(tokens, pos) != kind { return error { message = msg } }
+    pos + 1
+}
+
+// Skip a run of Newline terminators (blank lines / empty statements — B.17).
+fn skip_terminators(tokens: []lexer::Token, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if !has_token(tokens, p) { break }
+        if kind_at(tokens, p) != lexer::TokenKind::Newline { break }
+        p++
+    }
+    p
+}
+
+// is there a separator at `pos` — `;` or a newline? (B.17 — inside `{}`)
+fn is_sep(tokens: []lexer::Token, pos: u64) -> bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Semicolon) || is_kind_at(tokens, pos, lexer::TokenKind::Newline)
+}
+
+// skip a run of separators (`;` and newlines). Shared by field lists, arms (P3d), blocks (P4).
+fn skip_seps(tokens: []lexer::Token, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if !is_sep(tokens, p) { break }
+        p++
+    }
+    p
+}

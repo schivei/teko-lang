@@ -53,7 +53,7 @@ because redefinition is a legislative act.)*
 | Three-way comparison | `compare → Ordering`, an **`enum`** `{ Less=-1; Equal=0; Greater=1 }` (i8-backed). | **M.0 ≺ M.3 ≺ M.5** | → HISTORY §B.31 |
 | Closures | **Magic closures banned** (M.3 — they lie); **stateless function passing is SEED** (`fn(args)->ret` type, bare-name passing, no `&`, top-level only); stateful forms `use`/`inject` are evolution; DI lifetimes are `#` directives. | **M.3** (primary) | → HISTORY §B.10 |
 | `static` | **Banned** (disguised global state). Replacement: DI (`inject`) + singleton — evolution. `static` distinct from `inject`. | **M.1** + **M.5** | → HISTORY §B.25, §B.10 |
-| Numeric conversions (`to`) | **Any defined numeric→numeric conversion is allowed**, incl. narrowing/sign (`i32 to i8`, `i32 to u32`); loss is **caught, never silent** — constant-out-of-range = **compile error**, runtime = **panic-debug / defined-release** (the overflow policy). `bool`↔num and non-numeric = undefined → error. **Supersedes** the early "forbid every lossy conversion at compile time". | **M.1** (forbids only *silent* loss; a guard cures it) **+ M.0** (keep the metal conversion) **+ §II** (parity with ÷0/overflow/OOB) | → HISTORY conversions block |
+| Numeric conversions (`to`) | **Any defined numeric→numeric conversion is allowed** (incl. byte↔int — byte AS u8, B.36), incl. narrowing/sign (`i32 to i8`, `i32 to u32`); loss is **caught, never silent**. **Validating whether a conversion is possible lives at RUNTIME** — an impossible conversion (the value doesn't fit) **PANICS** (debug AND release; parity with ÷0/OOB). **Constants are the exception**: a constant out of range is a **compile error** (fail early, static). `bool`↔num and non-numeric = undefined → compile error. **Supersedes** the early "forbid every lossy conversion at compile time" *and* the interim "defined-release truncation" (↺ refined: conversions panic, they do not wrap). | **M.1** (forbids *silent* loss; the panic-guard cures it — fail loudly) **+ M.0** (keep the metal conversion attempt) **+ §II** (parity with ÷0/OOB) | → HISTORY conversions block |
 | `AltPattern` axis (`\|` in `match`) | An `Alt` option may be a **value pattern** (literal/range) **or a bare variant case** (`BindPattern`, `has_binding=false`) — so `RED \| GREEN` against a variant subject is legal and **counts toward variant-axis exhaustiveness** (C7b expands it). **Bindings inside an `Alt` option are forbidden** (`Foo as x \| Bar`, or a `FieldPattern` inside `\|`) → error. **Supersedes** A.14's "Alt = value axis only" annotation (the canonical axis-exclusive parse). | **M.0** (alternation is generous; `\|` already means "one of these" in the type grammar) **+ M.2** (legible at the call site) **+ M.5** (one unified parse path) **+ M.1** (exhaustiveness stays sound: Alt expands, bindings excluded by construction) | → HISTORY §A.14 (↺ Alt axis) |
 
 ---
@@ -212,6 +212,18 @@ because redefinition is a legislative act.)*
   parser). YAML rejected (lies — the "Norway problem"), JSON weak (no comments), INI weak (no nesting).
   **Governing Law: M.3** (typed, no coercion) **+ M.2** (commentable) **+ M.5** (minimal, reuse not bespoke)
   **+ M.1/M.0** (unambiguous, simple grammar). *(→ HISTORY §B.33.)*
+- **A Teko package = `.tkh` (interface) + `.tkb` (typed-tree payload); deps are STATICALLY pre-linked, not
+  FFI.** When a `.tkp` declares `artifact = library`, the compiler emits a **package**: the `.tkh` (the `exp`
+  interface a consumer type-checks against) and the `.tkb` (the full serialized **typed tree** — Teko IL).
+  The **`.tkb` is binary but is NOT a native object (`.o`)** — it is Teko's own typed-tree serialization. When
+  compiling the dev's code against dependencies, the compiler **loads the dependency packages into memory and
+  acts as a PRE-LINKER, statically merging** their typed trees with the dev's into one program before codegen.
+  This is **static linking of Teko objects at the typed-tree level** — the deliberate alternative to dynamic
+  linking / **FFI** (FFI is reserved for *foreign*, non-Teko code, at the unsafe IO boundary). **Governing Law:
+  M.1** (static merge = the whole program is checked together, no dynamic-boundary surprises) **+ M.3** (Teko↔Teko
+  is honest static inclusion, not a pretend-foreign call) **+ M.4** (the consuming compile is built on already-
+  checked packages). *(Forward-looking: the pre-linker + package loader land with the pipeline driver; today only
+  the emitters — `.tkb` codec and `.tkh` `build_header`/`emit_tkh` — exist.)*
 - **Recursive types allowed; cyclic namespace dependencies forbidden** — mutually recursive *types* are
   fine (compiler-managed indirection, no exposed pointer — the AST needs it); a namespace import **cycle
   is a compile error** (modules form a DAG, one-directional, matching the compiler's own pipeline flow).

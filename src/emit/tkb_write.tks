@@ -1,0 +1,87 @@
+// src/emit/tkb_write.tks  (namespace 'teko::emit')
+
+// a Type → tag byte + payload. (prim_byte/kind_byte = the enum's ordinal — E7.)
+fn write_type(buf: []byte, t: StrTable, ty: Type) -> []byte {
+    match ty {
+        Prim as p    => write_u8(write_u8(buf, 0), prim_byte(p.kind))
+        Byte         => write_u8(buf, 1)
+        Str          => write_u8(buf, 2)
+        Error        => write_u8(buf, 3)
+        Unit         => write_u8(buf, 4)
+        Slice as s   => write_type(write_u8(buf, 5), t, s.element)
+        Named as n   => write_u32(write_u8(buf, 6), st_find(t, n.name))
+        Variant as v => write_types(write_u8(buf, 7), t, v.members)
+        Func as f    => write_type(write_types(write_u8(buf, 8), t, f.params), t, f.ret)
+    }
+}
+
+fn write_types(buf: []byte, t: StrTable, xs: []Type) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_type(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+// a path (callee) → count + each segment's name index.
+fn write_path(buf: []byte, t: StrTable, p: Path) -> []byte {
+    mut b = write_u32(buf, p.segments.len to u32)
+    mut i = 0
+    loop {
+        if i >= p.segments.len { break }
+        b = write_u32(b, st_find(t, p.segments[i].name))
+        i++
+    }
+    b
+}
+
+// a list of typed expressions (call args) → count + each.
+fn write_texprs(buf: []byte, t: StrTable, xs: []TExpr) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_texpr(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+// the comparison terms → count + each (op byte + operand).
+fn write_terms(buf: []byte, t: StrTable, ts: []TCmpTerm) -> []byte {
+    mut b = write_u32(buf, ts.len to u32)
+    mut i = 0
+    loop {
+        if i >= ts.len { break }
+        b = write_texpr(write_u8(b, kind_byte(ts[i].op)), t, ts[i].operand)
+        i++
+    }
+    b
+}
+
+// a TExpr → its type, then a tag + payload (children recursive).
+fn write_texpr(buf: []byte, t: StrTable, te: TExpr) -> []byte {
+    let b = write_type(buf, t, te.type)        // every node carries its type
+    match te.kind {
+        TNumber as n   => write_i64(write_u8(b, 0), n.value)
+        TVar as v      => write_u32(write_u8(b, 1), st_find(t, v.name))
+        TStrLit as s   => write_u32(write_u8(b, 2), st_find(t, s.text))
+        TByteLit as bl => write_u8(write_u8(b, 3), bl.value)
+        TBinary as bn  => write_texpr(write_texpr(write_u8(write_u8(b, 4), kind_byte(bn.op)), t, bn.left), t, bn.right)
+        TUnary as u    => write_texpr(write_u8(write_u8(b, 5), kind_byte(u.op)), t, u.operand)
+        TCompare as c  => write_terms(write_texpr(write_u8(b, 6), t, c.first), t, c.rest)
+        TCall as cl    => write_texprs(write_path(write_u8(b, 7), t, cl.callee), t, cl.args)
+        // typed if/match: reserved tags 8/9. Full (de)serialization needs a typed-STATEMENT
+        // serializer ([]TStatement) — a separate later item; read rejects tags 8/9 as
+        // "bad texpr tag" (visible — M.1). (MethodCall has no typed node — typing deferred.)
+        TIfExpr        => write_u8(b, 8)
+        TMatchExpr     => write_u8(b, 9)
+        // S1a — Cast: the target type IS te.type (already written by the leading write_type); payload is just the inner expr.
+        TCast as c     => write_texpr(write_u8(b, 10), t, c.expr)
+        // S1b — FieldAccess: receiver THEN the interned field-name index (write order = read order).
+        TFieldAccess as f => write_u32(write_texpr(write_u8(b, 11), t, f.receiver), st_find(t, f.field))
+    }
+}

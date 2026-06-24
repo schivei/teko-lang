@@ -1,0 +1,33 @@
+// src/parser/parse_match.tks   (namespace 'teko::parser')
+
+// the arm list of a `match`: `{ arm; arm; … }` — `;`/newline separates; ≥1 arm (a match
+// needs a branch — M.1). `pos` is at `{`.
+fn parse_arms(tokens: []lexer::Token, pos: u64) -> ParsedArms | error {
+    mut p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
+    mut arms = teko::list::empty()
+    loop {
+        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
+        let a = match parse_arm(tokens, p) { ParsedArm as x => x; error as e => return e }
+        arms = teko::list::push(arms, a.node)
+        p = a.next
+        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
+        if !is_sep(tokens, p) {
+            return error { message = "expected ';', a newline, or '}' after a match arm" }
+        }
+        p = skip_seps(tokens, p)
+    }
+    if arms.len == 0 {
+        return error { message = "a `match` needs at least one arm" }
+    }
+    ParsedArms { arms = arms, next = p + 1 }
+}
+
+// `match subject { arms }` — match is an EXPRESSION (B.15). `pos` is at `match`.
+fn parse_match(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let subj = match parse_expr(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+    if !is_kind_at(tokens, subj.next, lexer::TokenKind::LBrace) {
+        return error { message = "expected '{' after the `match` subject" }
+    }
+    let arms = match parse_arms(tokens, subj.next) { ParsedArms as x => x; error as e => return e }
+    Parsed { node = MatchExpr { subject = subj.node, arms = arms.arms }, next = arms.next }
+}

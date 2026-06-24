@@ -1,0 +1,114 @@
+// src/parser/parse_stmt.tks   (namespace 'teko::parser')
+
+// dispatch a statement. P4a: `return [expr]` and a bare-expression statement. P4b–P4d add
+// bindings, assignment, loop/break/continue.
+fn parse_statement(tokens: []lexer::Token, pos: u64) -> ParsedStmt | error {
+    if !has_token(tokens, pos) { return error { message = "expected a statement" } }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Return) {
+        // `return` with an optional value: bare `return` ends at a separator or `}`.
+        let after = pos + 1
+        if !has_token(tokens, after) || is_sep(tokens, after) || is_kind_at(tokens, after, lexer::TokenKind::RBrace) {
+            return ParsedStmt { node = Return { has_value = false, value = Number { value = 0 } }, next = after }
+        }
+        let v = match parse_expr(tokens, after) { Parsed as x => x; error as e => return e }
+        return ParsedStmt { node = Return { has_value = true, value = v.node }, next = v.next }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Loop) {
+        if !is_kind_at(tokens, pos + 1, lexer::TokenKind::LBrace) {
+            return error { message = "expected '{' after `loop`" }
+        }
+        let blk = match parse_block(tokens, pos + 1) { ParsedBlock as x => x; error as e => return e }
+        return ParsedStmt { node = LoopStmt { body = blk.statements }, next = blk.next }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Break) {
+        return ParsedStmt { node = BreakStmt { }, next = pos + 1 }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Continue) {
+        return ParsedStmt { node = ContinueStmt { }, next = pos + 1 }
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) || is_kind_at(tokens, pos, lexer::TokenKind::Const) {
+        return parse_binding(tokens, pos)
+    }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Ident) && is_assign_op(tokens, pos + 1) {
+        return parse_assign(tokens, pos)
+    }
+    let e = match parse_expr(tokens, pos) { Parsed as x => x; error as e => return e }
+    ParsedStmt { node = ExprStmt { expr = e.node }, next = e.next }
+}
+
+// a `{ … }` block: a sequence of statements, `;`/newline separated; empty `{ }` allowed;
+// trailing separator allowed. `pos` is at `{`. (Same separator shape as field lists — B.17.)
+fn parse_block(tokens: []lexer::Token, pos: u64) -> ParsedBlock | error {
+    mut p = skip_seps(tokens, pos + 1)   // consume `{`, skip leading separators
+    mut stmts = teko::list::empty()
+    loop {
+        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
+        let s = match parse_statement(tokens, p) { ParsedStmt as x => x; error as e => return e }
+        stmts = teko::list::push(stmts, s.node)
+        p = s.next
+        if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }
+        if !is_sep(tokens, p) {
+            return error { message = "expected ';', a newline, or '}' after a statement" }
+        }
+        p = skip_seps(tokens, p)
+    }
+    ParsedBlock { statements = stmts, next = p + 1 }   // consume `}`
+}
+
+// a placeholder TypeExpr for an absent annotation (never read — gated by has_type).
+fn no_type() -> TypeExpr {
+    NamedType { path = Path { segments = teko::list::empty() } }
+}
+
+// an optional `: T` annotation. Absent → has_type=false (type_ann a placeholder). `pos`
+// is where the `:` would be.
+fn parse_annotation(tokens: []lexer::Token, pos: u64) -> Annotation | error {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Colon) {
+        return Annotation { has_type = false, type_ann = no_type(), next = pos }
+    }
+    let ty = match parse_type(tokens, pos + 1) { ParsedType as x => x; error as e => return e }
+    Annotation { has_type = true, type_ann = ty.node, next = ty.next }
+}
+
+// `let|mut|const TARGET [: T] = value` (B.13, B.21). TARGET is a name or a destructure
+// `{ x; y }` (parse_bind_target).
+fn parse_binding(tokens: []lexer::Token, pos: u64) -> ParsedStmt | error {
+    let kw = kind_at(tokens, pos)
+    mut kind = BindKind::Let
+    if kw == lexer::TokenKind::Mut   { kind = BindKind::Mut }
+    if kw == lexer::TokenKind::Const { kind = BindKind::Const }
+    let tgt = match parse_bind_target(tokens, pos + 1) { ParsedTarget as x => x; error as e => return e }
+    let ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
+    if !is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
+        return error { message = "expected '=' in a binding" }
+    }
+    let v = match parse_expr(tokens, ann.next + 1) { Parsed as x => x; error as e => return e }
+    ParsedStmt { node = Binding { kind = kind, target = tgt.node, has_type = ann.has_type, type_ann = ann.type_ann, value = v.node }, next = v.next }
+}
+
+// a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
+// Reuses parse_field_names for the `{ … }` name list.
+fn parse_bind_target(tokens: []lexer::Token, pos: u64) -> ParsedTarget | error {
+    if is_kind_at(tokens, pos, lexer::TokenKind::LBrace) {
+        let names = match parse_field_names(tokens, pos) { ParsedNames as x => x; error as e => return e }
+        return ParsedTarget { node = DestructurePattern { names = names.names }, next = names.next }
+    }
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) {
+        return error { message = "expected a name or `{ … }` after `let`/`mut`/`const`" }
+    }
+    ParsedTarget { node = SimpleName { name = tokens[pos].text }, next = pos + 1 }
+}
+
+// `name op= value` (B.4 — assignment is statement-only). Simple-name target; the op
+// (= += -= …) is captured. (is_assign_op already checked at dispatch.)
+fn parse_assign(tokens: []lexer::Token, pos: u64) -> ParsedStmt | error {
+    let name = tokens[pos].text
+    let op = kind_at(tokens, pos + 1)
+    let v = match parse_expr(tokens, pos + 2) { Parsed as x => x; error as e => return e }
+    ParsedStmt { node = Assign { name = name, op = op, value = v.node }, next = v.next }
+}
+
+// (added to parse_statement, P4d)
+//   loop { body } → LoopStmt { body = <block> }   (reuses parse_block)
+//   break         → BreakStmt { }
+//   continue      → ContinueStmt { }

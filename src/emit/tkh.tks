@@ -1,0 +1,422 @@
+// src/emit/tkh.tks  (namespace 'teko::emit')
+//
+// The `.tkh` is a project's EXPORTED INTERFACE — the `exp` function signatures and
+// `exp` type declarations, plus their docs. Together with the `.tkb` it forms a Teko
+// PACKAGE (emitted when the `.tkp` artifact is a `library`): the `.tkh` is the interface
+// a consumer TYPE-CHECKS against (signatures, KEEPS docs, no bodies), and the `.tkb` is
+// the full serialized TYPED TREE (Teko IL — NOT a native `.o`) that the compiler later
+// loads into memory and STATICALLY PRE-LINKS into the dev's program (Teko objects linked
+// statically at the typed-tree level — the alternative to dynamic/FFI; FFI is only for
+// FOREIGN code). The `.tkb` drops docs; the `.tkh` keeps them. The types are the RESOLVED
+// semantic `Type` (checker), so a consumer checks with no re-resolution. Reuses the .tkb
+// codec wholesale (write_type/read_type, string table, FNV-1a frame); adds no primitive.
+
+// --- the exported-interface model -------------------------------------------
+
+// a parameter in a signature: a name + its resolved type.
+type SigParam = struct { name: str; type: Type }
+
+// an exported FUNCTION's signature (no body — that is the .tkb's). Docs kept.
+type FnSig = struct {
+    name:    str
+    params:  []SigParam
+    ret:     Type
+    has_doc: bool
+    doc:     str
+}
+
+// a field of an exported struct: a name + its resolved type.
+type SigField = struct { name: str; type: Type }
+
+// which shape an exported type has (B.14 — struct/enum/variant; flags is evolution).
+type TyShape = enum { Struct; Enum; Variant }
+
+// an exported TYPE declaration's interface (nominal — B.13; the consumer needs the
+// shape to check construction/membership against it). Per `shape`, exactly one of
+// fields/members/cases is meaningful; the other two are serialized empty.
+type TyExport = struct {
+    name:    str
+    shape:   TyShape
+    fields:  []SigField     // Struct:  the fields  (empty otherwise)
+    members: []str          // Enum:    the members (empty otherwise)
+    cases:   []Type         // Variant: the cases   (empty otherwise)
+    has_doc: bool
+    doc:     str
+}
+
+// a whole project's exported surface: its types, then its functions.
+type Header = struct { types: []TyExport; fns: []FnSig }
+
+// --- the writers (reuse write_type / write_types; strings by u32 index) -----------
+
+// a doc: a presence byte, then (iff present) its string index.
+fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str) -> []byte {
+    if !has_doc { return write_u8(buf, 0) }
+    write_u32(write_u8(buf, 1), st_find(t, doc))
+}
+
+fn write_sigparam(buf: []byte, t: StrTable, p: SigParam) -> []byte {
+    write_type(write_u32(buf, st_find(t, p.name)), t, p.type)
+}
+
+fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_sigparam(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_fnsig(buf: []byte, t: StrTable, f: FnSig) -> []byte {
+    mut b = write_u32(buf, st_find(t, f.name))
+    b = write_sigparams(b, t, f.params)
+    b = write_type(b, t, f.ret)
+    write_doc(b, t, f.has_doc, f.doc)
+}
+
+fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_fnsig(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_sigfield(buf: []byte, t: StrTable, f: SigField) -> []byte {
+    write_type(write_u32(buf, st_find(t, f.name)), t, f.type)
+}
+
+fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_sigfield(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+// a list of member NAMES (enum) → count + each name index.
+fn write_members(buf: []byte, t: StrTable, xs: []str) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_u32(b, st_find(t, xs[i]))
+        i++
+    }
+    b
+}
+
+// the TyShape ordinal byte — explicit (no enum→int cast needed). Struct=0 Enum=1 Variant=2.
+fn shape_byte(s: TyShape) -> byte {
+    if s == TyShape::Struct { return 0 }
+    if s == TyShape::Enum   { return 1 }
+    2
+}
+
+// uniform: all three lists are written; `shape` selects the meaningful one, the others
+// come out empty (count 0). Sequential, branch-free both ways (M.1 / M.5).
+fn write_tyexport(buf: []byte, t: StrTable, e: TyExport) -> []byte {
+    mut b = write_u32(buf, st_find(t, e.name))
+    b = write_u8(b, shape_byte(e.shape))
+    b = write_sigfields(b, t, e.fields)
+    b = write_members(b, t, e.members)
+    b = write_types(b, t, e.cases)
+    write_doc(b, t, e.has_doc, e.doc)
+}
+
+fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_tyexport(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_header(buf: []byte, t: StrTable, h: Header) -> []byte {
+    write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
+}
+
+// --- collect every string (pre-pass; mirrors the writers; reuse collect_type_*) ----
+
+fn collect_doc(t: StrTable, has_doc: bool, doc: str) -> StrTable {
+    if !has_doc { return t }
+    st_intern(t, doc).table
+}
+
+fn collect_sigparam(t: StrTable, p: SigParam) -> StrTable {
+    collect_type_strings(st_intern(t, p.name).table, p.type)
+}
+
+fn collect_sigparams(t: StrTable, xs: []SigParam) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_sigparam(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_fnsig(t: StrTable, f: FnSig) -> StrTable {
+    let t1 = st_intern(t, f.name).table
+    let t2 = collect_sigparams(t1, f.params)
+    let t3 = collect_type_strings(t2, f.ret)
+    collect_doc(t3, f.has_doc, f.doc)
+}
+
+fn collect_fnsigs(t: StrTable, xs: []FnSig) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_fnsig(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_sigfield(t: StrTable, f: SigField) -> StrTable {
+    collect_type_strings(st_intern(t, f.name).table, f.type)
+}
+
+fn collect_sigfields(t: StrTable, xs: []SigField) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_sigfield(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_members(t: StrTable, xs: []str) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = st_intern(tab, xs[i]).table
+        i++
+    }
+    tab
+}
+
+fn collect_tyexport(t: StrTable, e: TyExport) -> StrTable {
+    let t1 = st_intern(t, e.name).table
+    let t2 = collect_sigfields(t1, e.fields)
+    let t3 = collect_members(t2, e.members)
+    let t4 = collect_type_list(t3, e.cases)
+    collect_doc(t4, e.has_doc, e.doc)
+}
+
+fn collect_tyexports(t: StrTable, xs: []TyExport) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_tyexport(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_header(t: StrTable, h: Header) -> StrTable {
+    collect_fnsigs(collect_tyexports(t, h.types), h.fns)
+}
+
+// --- the frame: collect → table → body → FNV-1a → header ("TKH\0" + ver + hash) ----
+
+fn emit_tkh(h: Header) -> []byte {
+    let table = collect_header(st_empty(), h)
+    let body = write_header(write_strtable(teko::list::empty(), table), table, h)
+    let hash = fnv1a(body)
+    mut out = teko::list::empty()
+    out = write_u8(out, b'T')
+    out = write_u8(out, b'K')
+    out = write_u8(out, b'H')
+    out = write_u8(out, 0)
+    out = write_u32(out, 1)              // version 1
+    out = write_u64(out, hash)           // FNV-1a of the body
+    append_bytes(out, body)
+}
+
+// --- the readers (inverse; reuse the Reader, read_type, read_types, read_strtable) --
+
+type RDoc        = struct { r: Reader; has_doc: bool; doc: str }
+type RSigParam   = struct { r: Reader; value: SigParam }
+type RSigParams  = struct { r: Reader; value: []SigParam }
+type RFnSig      = struct { r: Reader; value: FnSig }
+type RFnSigs     = struct { r: Reader; value: []FnSig }
+type RSigField   = struct { r: Reader; value: SigField }
+type RSigFields  = struct { r: Reader; value: []SigField }
+type RMembers    = struct { r: Reader; value: []str }
+type RTyExport   = struct { r: Reader; value: TyExport }
+type RTyExports  = struct { r: Reader; value: []TyExport }
+type RHeader     = struct { r: Reader; value: Header }
+
+fn read_doc(r: Reader, table: []str) -> RDoc | error {
+    let p = match read_u8(r) { RByte as x => x; error as e => return e }
+    if p.value == 0 { return RDoc { r = p.r; has_doc = false; doc = "" } }
+    let d = match read_str(p.r, table) { RStr as x => x; error as e => return e }
+    RDoc { r = d.r; has_doc = true; doc = d.value }
+}
+
+fn read_sigparam(r: Reader, table: []str) -> RSigParam | error {
+    let nm = match read_str(r, table)     { RStr as x => x; error as e => return e }
+    let ty = match read_type(nm.r, table) { RType as x => x; error as e => return e }
+    RSigParam { r = ty.r; value = SigParam { name = nm.value; type = ty.value } }
+}
+
+fn read_sigparams(r: Reader, table: []str) -> RSigParams | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let p = match read_sigparam(rr, table) { RSigParam as x => x; error as e => return e }
+        xs = teko::list::push(xs, p.value)
+        rr = p.r
+        i++
+    }
+    RSigParams { r = rr; value = xs }
+}
+
+fn read_fnsig(r: Reader, table: []str) -> RFnSig | error {
+    let nm = match read_str(r, table)          { RStr as x => x; error as e => return e }
+    let ps = match read_sigparams(nm.r, table) { RSigParams as x => x; error as e => return e }
+    let rt = match read_type(ps.r, table)      { RType as x => x; error as e => return e }
+    let dc = match read_doc(rt.r, table)       { RDoc as x => x; error as e => return e }
+    RFnSig { r = dc.r; value = FnSig {
+        name = nm.value; params = ps.value; ret = rt.value
+        has_doc = dc.has_doc; doc = dc.doc
+    } }
+}
+
+fn read_fnsigs(r: Reader, table: []str) -> RFnSigs | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let f = match read_fnsig(rr, table) { RFnSig as x => x; error as e => return e }
+        xs = teko::list::push(xs, f.value)
+        rr = f.r
+        i++
+    }
+    RFnSigs { r = rr; value = xs }
+}
+
+fn read_sigfield(r: Reader, table: []str) -> RSigField | error {
+    let nm = match read_str(r, table)     { RStr as x => x; error as e => return e }
+    let ty = match read_type(nm.r, table) { RType as x => x; error as e => return e }
+    RSigField { r = ty.r; value = SigField { name = nm.value; type = ty.value } }
+}
+
+fn read_sigfields(r: Reader, table: []str) -> RSigFields | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let f = match read_sigfield(rr, table) { RSigField as x => x; error as e => return e }
+        xs = teko::list::push(xs, f.value)
+        rr = f.r
+        i++
+    }
+    RSigFields { r = rr; value = xs }
+}
+
+fn read_members(r: Reader, table: []str) -> RMembers | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let s = match read_str(rr, table) { RStr as x => x; error as e => return e }
+        xs = teko::list::push(xs, s.value)
+        rr = s.r
+        i++
+    }
+    RMembers { r = rr; value = xs }
+}
+
+// inverse of shape_byte (byte → TyShape).
+fn shape_of(b: byte) -> TyShape {
+    if b == 0 { return TyShape::Struct }
+    if b == 1 { return TyShape::Enum }
+    TyShape::Variant
+}
+
+fn read_tyexport(r: Reader, table: []str) -> RTyExport | error {
+    let nm = match read_str(r, table)          { RStr as x => x; error as e => return e }
+    let sh = match read_u8(nm.r)               { RByte as x => x; error as e => return e }
+    let fs = match read_sigfields(sh.r, table) { RSigFields as x => x; error as e => return e }
+    let ms = match read_members(fs.r, table)   { RMembers as x => x; error as e => return e }
+    let cs = match read_types(ms.r, table)     { RTypes as x => x; error as e => return e }
+    let dc = match read_doc(cs.r, table)       { RDoc as x => x; error as e => return e }
+    RTyExport { r = dc.r; value = TyExport {
+        name = nm.value; shape = shape_of(sh.value)
+        fields = fs.value; members = ms.value; cases = cs.value
+        has_doc = dc.has_doc; doc = dc.doc
+    } }
+}
+
+fn read_tyexports(r: Reader, table: []str) -> RTyExports | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let e = match read_tyexport(rr, table) { RTyExport as x => x; error as e => return e }
+        xs = teko::list::push(xs, e.value)
+        rr = e.r
+        i++
+    }
+    RTyExports { r = rr; value = xs }
+}
+
+fn read_header(r: Reader, table: []str) -> RHeader | error {
+    let ts = match read_tyexports(r, table) { RTyExports as x => x; error as e => return e }
+    let fs = match read_fnsigs(ts.r, table) { RFnSigs as x => x; error as e => return e }
+    RHeader { r = fs.r; value = Header { types = ts.value; fns = fs.value } }
+}
+
+// THE ENTRY: verify magic "TKH\0" + version, recompute the FNV-1a, then read.
+fn read_tkh(data: []byte) -> Header | error {
+    let r0 = Reader { data = data; pos = 0 }
+    let m0 = match read_u8(r0)   { RByte as x => x; error as e => return e }
+    let m1 = match read_u8(m0.r) { RByte as x => x; error as e => return e }
+    let m2 = match read_u8(m1.r) { RByte as x => x; error as e => return e }
+    let m3 = match read_u8(m2.r) { RByte as x => x; error as e => return e }
+    if m0.value != b'T' || m1.value != b'K' || m2.value != b'H' || m3.value != 0 {
+        return error { message = "not a .tkh (bad magic)" }
+    }
+    let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
+    if ver.value != 1 { return error { message = "unsupported .tkh version" } }
+    let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
+    if data.len < 16 { return error { message = "truncated .tkh header" } }
+    if fnv1a(slice(data, 16, data.len)) != stored.value {
+        return error { message = ".tkh altered or corrupt (hash mismatch)" }
+    }
+    let table = match read_strtable(stored.r) { RTable as x => x; error as e => return e }
+    let h = match read_header(table.r, table.value) { RHeader as x => x; error as e => return e }
+    h.value
+}

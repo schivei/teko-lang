@@ -1,0 +1,53 @@
+// src/checker/type.tks  (namespace 'teko::checker')
+
+// the injected scalar primitives (B.19) — distinct real types.
+type PrimKind = enum {
+    U8; U16; U32; U64
+    I8; I16; I32; I64
+    Bool
+}
+
+// the cases that carry data (Teko has no payload on a bare enum — a variant case
+// is a struct). Byte/Str/Error are markers (no payload).
+type Prim    = struct { kind: PrimKind }
+type Slice   = struct { element: Type }        // []T — recursive (B.8)
+type Named   = struct { name: str }            // a user type, equal by NAME (nominal)
+type Variant = struct { members: []Type }      // A | B | … (two or more)
+type Func    = struct { params: []Type; ret: Type }   // (params) -> ret
+type Byte    = struct { }                      // the octet type
+type Str     = struct { }                      // validated UTF-8
+type Error  = struct { }                      // the injected error
+type Unit   = struct { }                      // value-less (a block with no trailing expr)
+
+// a semantic type. (Compiler-managed indirection for the recursive cases.)
+type Type = Prim | Byte | Str | Slice | Named | Variant | Func | Error | Unit
+
+// nominal type equality (B.13): structural over the shape, but Named is by name.
+fn type_eq(a: Type, b: Type) -> bool {
+    match a {
+        Prim as pa    => match b { Prim as pb    => pa.kind == pb.kind;             _ => false }
+        Byte          => match b { Byte          => true;                           _ => false }
+        Str           => match b { Str           => true;                           _ => false }
+        Error        => match b { Error        => true;                           _ => false }
+        Unit         => match b { Unit         => true;                           _ => false }
+        Slice as sa   => match b { Slice as sb   => type_eq(sa.element, sb.element); _ => false }
+        Named as na   => match b { Named as nb   => na.name == nb.name;             _ => false }
+        Variant as va => match b { Variant as vb => types_eq(va.members, vb.members); _ => false }
+        Func as fa    => match b {
+            Func as fb => type_eq(fa.ret, fb.ret) && types_eq(fa.params, fb.params)
+            _          => false
+        }
+    }
+}
+
+// element-wise equality of two type lists (same length, each equal in order).
+fn types_eq(xs: []Type, ys: []Type) -> bool {
+    if xs.len != ys.len { return false }
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if !type_eq(xs[i], ys[i]) { return false }
+        i++
+    }
+    true
+}

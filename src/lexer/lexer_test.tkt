@@ -1,0 +1,99 @@
+// src/lexer/lexer_test.tkt — tests for teko::lexer. NO `main`: tests are PUBLIC
+// `#test` functions the compiler collects and runs (a runner — ALPHA). The C
+// mirror uses a `main` harness (the runner does not exist in the bootstrap).
+
+// helpers (not tests):
+// the kinds of the tokens of `source` (already validated), or error if it fails.
+fn kinds_of(source: str) -> []TokenKind | error {
+    let toks = match tokenize(source) {
+        ts: []Token => ts
+        error       => return error { message = "lex failed" }
+    }
+    mut ks = teko::list::empty()
+    mut i  = 0
+    loop {
+        if i >= toks.len { break }
+        ks = teko::list::push(ks, toks[i].kind)
+        i++
+    }
+    ks
+}
+
+// do the kinds of `source` equal `want`, in order?
+fn kinds_eq(source: str, want: []TokenKind) -> bool {
+    let got = match kinds_of(source) {
+        ks: []TokenKind => ks
+        error           => return false
+    }
+    if got.len != want.len { return false }
+    mut i = 0
+    loop {
+        if i >= got.len { break }
+        if got[i] != want[i] { return false }
+        i++
+    }
+    true
+}
+
+// does lexing `source` fail with an error?
+fn is_error(source: str) -> bool {
+    match tokenize(source) {
+        []Token => false
+        error   => true
+    }
+}
+
+#test
+fn lexes_kinds_in_order() {
+    assert kinds_eq("1 + 2 * 3", [TokenKind::Number, TokenKind::Plus,
+                                  TokenKind::Number, TokenKind::Star, TokenKind::Number])
+    assert kinds_eq("( a )",     [TokenKind::LParen, TokenKind::Ident, TokenKind::RParen])
+    assert kinds_eq("1_000",     [TokenKind::Number])      // one number (separator)
+    assert kinds_eq("__bar",     [TokenKind::Ident])       // one ident (leading _)
+    assert kinds_eq("_",         [TokenKind::Underscore])
+    assert kinds_eq("",          [])                       // empty
+}
+
+#test
+fn rejects_unexpected_byte() {
+    assert is_error("1 @ 2")                               // unexpected byte
+}
+
+#test
+fn preserves_token_spans() {
+    // 1_000+foo -> Number("1_000") Plus("+") Ident("foo")
+    let toks = match tokenize("1_000+foo") {
+        ts: []Token => ts
+        error       => return
+    }
+    assert toks.len == 3
+    assert toks[0].text == "1_000"
+    assert toks[1].text == "+"
+    assert toks[2].text == "foo"
+}
+
+// --- F1: the `to` cast keyword ---
+
+#test
+fn lexes_to_cast_keyword() {
+    // happy: `x to u32` lexes as Ident · To · Ident.
+    assert kinds_eq("x to u32", [TokenKind::Ident, TokenKind::To, TokenKind::Ident])
+}
+
+#test
+fn to_is_reserved_not_ident() {
+    // barrier: `to` is a keyword — the lexer yields `To`, never `Ident`, so it
+    // cannot be a name (the parser then rejects `To` in name position — P-phase).
+    assert kinds_eq("to", [TokenKind::To])
+    assert !kinds_eq("to", [TokenKind::Ident])
+}
+
+#test
+fn lexes_dot_access() {
+    // `.` is its own token (P2/F2): a.b → Ident · Dot · Ident; `..` is still a range error.
+    assert kinds_eq("a.b", [TokenKind::Ident, TokenKind::Dot, TokenKind::Ident])
+    assert kinds_eq("a; b", [TokenKind::Ident, TokenKind::Semicolon, TokenKind::Ident])   // `;` separator (P3b-field)
+    assert kinds_eq("variant", [TokenKind::Variant])   // `variant` keyword (P5c)
+    assert kinds_eq(".",   [TokenKind::Dot])
+    assert is_error("..")
+}

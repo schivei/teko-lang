@@ -1,0 +1,80 @@
+// --- expressions ---
+type Number  = struct { value: i64 }                  // a literal number leaf
+type Var     = struct { name: str }                   // a variable reference (reading)
+type StrLit  = struct { text: str }                   // "…"  (B.36)
+type ByteLit = struct { value: byte }                 // b'x' (B.36)
+type Binary  = struct { op: lexer::TokenKind; left: Expr; right: Expr }   // any binary op
+type Unary   = struct { op: lexer::TokenKind; operand: Expr }             // - ~ ! (prefix)
+type CmpTerm = struct { op: lexer::TokenKind; operand: Expr }             // one cmp continuation
+type Compare = struct { first: Expr; rest: []CmpTerm }  // a<b<c chain, kept as written (M.3)
+type Call    = struct { callee: Path; args: []Expr }    // f(x), lexer::foo(x)
+type IfExpr  = struct {                                  // if/else is an EXPRESSION (B.20)
+    cond:     Expr
+    then_blk: []Statement
+    has_else: bool
+    else_blk: []Statement
+}
+type MatchExpr = struct { subject: Expr; arms: []Arm }  // match is an EXPRESSION (B.15)
+
+// --- postfix access & cast (F2) — recursive over Expr (compiler-managed indirection) ---
+type FieldAccess = struct { receiver: Expr; field: str }                 // x.field — read a struct field (the checker's own `s.token`/`b.left` shape; B.29)
+type MethodCall  = struct { receiver: Expr; method: str; args: []Expr }  // recv.method(a, …) — B.29 instance call via `.`; method *checking* is deferred (M.4)
+type Cast        = struct { expr: Expr; target: TypeExpr }               // x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1)
+type PathExpr    = struct { path: Path }                                 // a qualified path as a VALUE — Enum::Member (e.g. PrimKind::U32), module statics (P2; the F2/Part-1 AST had only single-name Var)
+
+type Expr = Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | Binary | Unary | Compare | FieldAccess | MethodCall | Cast | PathExpr
+
+// --- statements ---
+type BindKind = enum { Let; Mut; Const }
+type SimpleName = struct { name: str }
+type DestructurePattern = struct { names: []str }       // let { x; y } = … (B.13 partial)
+type BindTarget = SimpleName | DestructurePattern
+
+type Binding = struct {                                 // let/mut/const TARGET [: T] = value
+    kind:     BindKind
+    target:   BindTarget
+    has_type: bool
+    type_ann: TypeExpr                                  // the parsed annotation (A.8)
+    value:    Expr
+}
+type Assign  = struct { name: str; op: lexer::TokenKind; value: Expr }  // x = / += / … (B.4)
+type Return  = struct { has_value: bool; value: Expr }   // `return [expr]` — bare `return` (no value) has has_value=false, value a placeholder (B.20; P4a)
+type LoopStmt = struct { body: []Statement }            // the only primitive loop (M.5)
+type BreakStmt    = struct { }
+type ContinueStmt = struct { }
+type ExprStmt = struct { expr: Expr }                   // a bare expression on its own line
+
+type Statement = Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt
+
+// --- top-level items ---
+type Param    = struct { name: str; type_ann: TypeExpr }   // immutable (B.21)
+type Function = struct {
+    name:        str
+    params:      []Param
+    has_return:  bool                                   // `-> ret` present? (absent = Unit return; P5a)
+    return_type: TypeExpr                               // the return type (valid iff has_return)
+    body:        []Statement
+    is_exp:      bool                                   // marked `exp` → exported (.tkh)
+    has_doc:     bool                                   // a `/** … */` doc precedes it?
+    doc:         str                                    // the doc span (valid iff has_doc)
+}
+type Field       = struct { name: str; type_ann: TypeExpr }
+type StructBody  = struct { fields: []Field }
+type EnumBody    = struct { members: []str }            // member names, in order
+type VariantBody = struct { type_expr: TypeExpr }       // a union (A.8)
+type TypeBody    = StructBody | EnumBody | VariantBody
+type TypeDecl    = struct {                             // nominal (B.13)
+    name:    str
+    body:    TypeBody
+    is_exp:  bool                                       // marked `exp` → exported (.tkh)
+    has_doc: bool
+    doc:     str                                        // the doc span (valid iff has_doc)
+}
+type UseDecl     = struct { path: Path; has_alias: bool; alias: str }   // use a::b [as c]
+
+// --- R-main: a `.tks` file is a MAIN (executable entry) or a MODULE. The old `Item`
+//     (which mixed declarations and loose statements) is RETIRED. ---
+type Decl     = Function | TypeDecl                              // a top-level declaration (a module's content)
+type MainFile = struct { uses: []UseDecl; body: []Statement }    // main.tks: the `use` header + the VIRTUAL MAIN's body (statements only — no type/fn decls)
+type Module   = struct { uses: []UseDecl; decls: []Decl }        // a module: the `use` header + declarations (no loose statements)
+type File     = MainFile | Module                                // a `.tks` is exactly one; the file's role decides (main.tks ⇔ an executable `.tkp`)

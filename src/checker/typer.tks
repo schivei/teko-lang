@@ -1,0 +1,536 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+
+// ---- leaves ----
+fn type_number(n: Number) -> TExpr {
+    TExpr { kind = TNumber { value = n.value }; type = Prim { kind = PrimKind::I64 } }   // [literal typing in annotated context: C6]
+}
+fn type_strlit(s: StrLit) -> TExpr {
+    TExpr { kind = TStrLit { text = s.text }; type = Str { } }
+}
+fn type_bytelit(b: ByteLit) -> TExpr {
+    TExpr { kind = TByteLit { value = b.value }; type = Byte { } }
+}
+fn type_var(v: Var, env: Env) -> TExpr | error {
+    let t = match lookup(env, v.name) { Type as ty => ty; error as e => return e }
+    TExpr { kind = TVar { name = v.name }; type = t }
+}
+
+// ---- operators (the SAME B.22 regimes as check_binary/check_unary/check_compare) ----
+fn type_binary(b: Binary, env: Env, table: TypeTable) -> TExpr | error {
+    let l = match type_expr(b.left, env, table)  { TExpr as te => te; error as e => return e }
+    let r = match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e }
+    if op_is_shift(b.op) {
+        if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands" } }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
+    }
+    if op_is_arith_bitwise(b.op) {
+        if !is_integer(l.type) { return error { message = "arithmetic/bitwise needs an integer" } }
+        if !type_eq(l.type, r.type) { return error { message = "operands must be the same type (no promotion — B.22)" } }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
+    }
+    error { message = "not a binary operator" }
+}
+
+fn type_unary(u: Unary, env: Env, table: TypeTable) -> TExpr | error {
+    let o = match type_expr(u.operand, env, table) { TExpr as te => te; error as e => return e }
+    if u.op == lexer::TokenKind::Minus || u.op == lexer::TokenKind::Tilde {
+        if !is_integer(o.type) { return error { message = "unary -/~ needs an integer" } }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type }
+    }
+    if u.op == lexer::TokenKind::Bang {
+        if !is_bool(o.type) { return error { message = "! needs a bool" } }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type }
+    }
+    error { message = "not a unary operator" }
+}
+
+fn type_compare(c: Compare, env: Env, table: TypeTable) -> TExpr | error {
+    let first = match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e }
+    mut prev = first.type
+    mut terms = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= c.rest.len { break }
+        let cur = match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e }
+        if !is_comparable(prev, cur.type) { return error { message = "operands are not comparable" } }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = cur })
+        prev = cur.type
+        i++
+    }
+    TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool } }
+}
+
+fn type_call(c: Call, env: Env, table: TypeTable) -> TExpr | error {
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    let ft = match lookup(env, name) { Type as t => t; error as e => return e }
+    match ft {
+        Func as f => {
+            if c.args.len != f.params.len { return error { message = "wrong number of arguments" } }
+            mut args = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= c.args.len { break }
+                let a = match type_expr(c.args[i], env, table) { TExpr as te => te; error as e => return e }
+                if !type_eq(a.type, f.params[i]) { return error { message = "argument type mismatch" } }
+                args = teko::list::push(args, a)
+                i++
+            }
+            TExpr { kind = TCall { callee = c.callee; args = args }; type = f.ret }
+        }
+        _ => error { message = $"not a function: {name}" }
+    }
+}
+
+// ---- cast `to` (C2): a DEFINED conversion is allowed; loss is caught, never silent (M.1) ----
+// Two-pronged — the ÷0/overflow/OOB lineage applied to conversions (homeostasis, Constitution §II):
+//   • a CONSTANT operand the compiler can see out of range → COMPILE ERROR (fail early — M.1);
+//   • a runtime value the compiler cannot see → the metal converts and the loss is caught at
+//     runtime (debug-panic / release-defined, exactly like overflow) — that guard is CODEGEN's,
+//     deferred (M.4). M.1 forbids only SILENT loss; a check/panic is not silent, so narrowing and
+//     signed↔unsigned ARE allowed (the value might fit — M.0 keeps the metal conversion).
+// Scoped to the seed's scalars: Bool casts and non-numeric casts are UNDEFINED (rejected).
+// Floats/Decimal are alpha (not in PrimKind); newtype↔base awaits `resolve_named` lowering a
+// newtype to its base — both deferred (M.4). *(Redefines the early compile-forbid rule — see the
+// Redefinitions Index; the prior rule over-applied M.1, forbidding what a guard makes non-silent.)*
+
+// does a constant i64 value fit the target primitive's range? (shared with C6 — literal range.)
+fn value_fits(v: i64, k: PrimKind) -> bool {
+    if k == PrimKind::U8  { return v >= 0 && v <= 255 }
+    if k == PrimKind::U16 { return v >= 0 && v <= 65535 }
+    if k == PrimKind::U32 { return v >= 0 && v <= 4294967295 }
+    if k == PrimKind::U64 { return v >= 0 }                       // i64 max < u64 max → any v>=0 fits
+    if k == PrimKind::I8  { return v >= -128 && v <= 127 }
+    if k == PrimKind::I16 { return v >= -32768 && v <= 32767 }
+    if k == PrimKind::I32 { return v >= -2147483648 && v <= 2147483647 }
+    if k == PrimKind::I64 { return true }                         // v is already an i64
+    false   // Bool — not a numeric range (guarded by the caller)
+}
+
+// is `from -> to` a DEFINED conversion? Any integer↔integer is (the loss is runtime/codegen's,
+// not a type error — B). Only genuinely-undefined conversions are rejected: Bool, and crossing
+// to/from a non-numeric type. M.1 — no silent loss; M.3 — names the barrier. Reused by the
+// counter-validation (E6-2) so the rule has ONE source of truth (M.5).
+// byte casts AS u8 (B.36 "byte = u8 newtype"): byte's values ARE u8 values, so the effective
+// PrimKind for range/cast rules is U8. Bool and non-numeric types have no cast kind (rejected).
+// One source of truth (M.5) for cast_check + const_range_check.
+fn cast_kind(t: Type) -> PrimKind | error {
+    match t {
+        Prim as p => {
+            if p.kind == PrimKind::Bool { error { message = "bool casts are not defined in the seed" } }
+            else { p.kind }
+        }
+        Byte      => PrimKind::U8
+        _         => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
+    }
+}
+
+// is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
+// runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
+// Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
+fn cast_check(from: Type, to: Type) -> Unit | error {
+    if type_eq(from, to) { return Unit { } }                     // same type — a no-op
+    let _ = match cast_kind(from) { PrimKind as k => k; error as e => return e }
+    let _ = match cast_kind(to)   { PrimKind as k => k; error as e => return e }
+    Unit { }                                                     // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
+}
+
+// a CONSTANT literal already out of the target's range is a compile error (M.1 — fail early);
+// non-constant operands are guarded at runtime by codegen. Direct literals only (comptime folding deferred).
+fn const_range_check(e: Expr, target: Type) -> Unit | error {
+    match e {
+        Number as n => match cast_kind(target) {                 // byte target → U8 range (0..255)
+            PrimKind as k => {
+                if value_fits(n.value, k) { Unit { } }
+                else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
+            }
+            error         => Unit { }                            // non-numeric target: cast_check already rejected it
+        }
+        _ => Unit { }                                            // not a constant literal → runtime-guarded (codegen)
+    }
+}
+
+// C6 — an annotated binding `let x: T = <value>` whose value type ≠ T. A numeric LITERAL ADOPTS T
+// if it fits: the leaf stays i64 (stored AS-IS — Side D) and T lives in the binding's `bound`.
+// The fit is proven HERE at type time via `value_fits`. A NON-literal mismatch is a hard error —
+// no implicit conversion (M.2; use `to`). An out-of-range literal fails EARLY (M.1).
+// NOTE: the counter-validation does NOT yet re-prove the binding-level fit — a forged typed tree
+// `bound=u8, value=300` would currently pass revalidate. That re-proof lands with `validate_statement`
+// (deferred; named gap — §VI). The front-line type check above already rejects such source.
+fn annotated_literal_ok(value: Expr, ann: Type) -> Unit | error {
+    match value {
+        Number as n => match ann {
+            Prim as p => {
+                if value_fits(n.value, p.kind) { Unit { } }
+                else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
+            }
+            _ => error { message = "value type does not match annotation" }
+        }
+        _ => error { message = "value type does not match annotation" }
+    }
+}
+
+// `x to T` — type the inner, resolve the target, demand the conversion is DEFINED, then reject a
+// CONSTANT literal already out of range (fail early — M.1). The runtime fit-check for non-constant
+// operands is codegen's (debug-panic / release-defined) — deferred (M.4).
+fn type_cast(c: Cast, env: Env, table: TypeTable) -> TExpr | error {
+    let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
+    let target = match resolve_type(c.target, table) { Type as t => t; error as e => return e }
+    let _ = match cast_check(inner.type, target) { Unit as u => u; error as e => return e }
+    let _ = match const_range_check(c.expr, target) { Unit as u => u; error as e => return e }
+    TExpr { kind = TCast { expr = inner }; type = target }        // the cast's type IS the resolved target
+}
+
+// ---- field access `x.field` (C3): read a struct field; `.type` is the field's resolved type ----
+// B.29: FIELD read only (method *checking* stays deferred). M.3: nominal — resolve the receiver's
+// `Named` type to its `TypeDecl` body and read the field's declared type. Receiver must be a struct.
+
+// find a field by name in a struct body and resolve its annotation (M.3 — exact).
+fn field_type(sb: StructBody, field: str, table: TypeTable) -> Type | error {
+    mut i = 0
+    loop {
+        if i >= sb.fields.len { break }
+        if sb.fields[i].name == field { return resolve_type(sb.fields[i].type_ann, table) }
+        i++
+    }
+    error { message = $"no such field: {field}" }
+}
+
+fn type_field_access(fa: FieldAccess, env: Env, table: TypeTable) -> TExpr | error {
+    let recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
+    let name = match recv.type {
+        Named as n => n.name
+        _          => return error { message = "field access requires a struct receiver" }
+    }
+    let decl = match type_table_find(table, name) {
+        TypeDecl as td => td
+        error          => return error { message = $"unknown type for field access: {name}" }
+    }
+    let ft = match decl.body {
+        StructBody as sb => match field_type(sb, fa.field, table) { Type as t => t; error as e => return e }
+        _                => return error { message = $"type {name} is not a struct (no fields)" }
+    }
+    TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft }
+}
+
+// ---- the expression dispatch (the evolved check_expr) ----
+fn type_expr(e: Expr, env: Env, table: TypeTable) -> TExpr | error {
+    match e {
+        Number as n    => type_number(n)
+        StrLit as s    => type_strlit(s)
+        ByteLit as b   => type_bytelit(b)
+        Var as v       => type_var(v, env)
+        Binary as b    => type_binary(b, env, table)
+        Unary as u     => type_unary(u, env, table)
+        Compare as c   => type_compare(c, env, table)
+        Call as cl     => type_call(cl, env, table)
+        IfExpr as f    => type_if(f, env, table)
+        MatchExpr as m => type_match(m, env, table)
+        FieldAccess as fa => type_field_access(fa, env, table)
+        Cast as c      => type_cast(c, env, table)
+        MethodCall     => error { message = "method typing is deferred (B.29 / M.4)" }
+        PathExpr       => error { message = "path-expr typing pending (Enum::Member)" }
+    }
+}
+
+// ---- the value-type a TYPED block yields: the last stmt's, if an ExprStmt; else Unit ----
+fn tblock_type(stmts: []TStatement) -> Type {
+    if stmts.len == 0 { return Unit { } }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => es.expr.type
+        _               => Unit { }
+    }
+}
+
+// ---- a typed block: thread the env, collect the typed statements ----
+fn type_block(stmts: []Statement, env: Env, table: TypeTable) -> TypedBlock | error {
+    mut cur = env
+    mut out = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        let ts = match type_statement(stmts[i], cur, table) { TypedStmt as t => t; error as e => return e }
+        out = teko::list::push(out, ts.node)
+        cur = ts.env
+        i++
+    }
+    TypedBlock { stmts = out; env = cur }
+}
+
+// ---- if as a VALUE (B.20): cond bool; `else` required; both branches one type ----
+fn type_if(f: IfExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let c = match type_expr(f.cond, env, table) { TExpr as te => te; error as e => return e }
+    if !is_bool(c.type) { return error { message = "an `if` condition must be a bool" } }
+    if !f.has_else { return error { message = "an `if` used as a value needs an `else`" } }
+    let tb = match type_block(f.then_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+    let eb = match type_block(f.else_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+    let tt = tblock_type(tb.stmts)
+    let et = tblock_type(eb.stmts)
+    if !type_eq(tt, et) { return error { message = "the `if` branches have different types" } }
+    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = tt }
+}
+
+// ---- if as a STATEMENT: cond bool; branches validated; no `else`; value discarded → Unit ----
+fn type_if_stmt(f: IfExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let c = match type_expr(f.cond, env, table) { TExpr as te => te; error as e => return e }
+    if !is_bool(c.type) { return error { message = "an `if` condition must be a bool" } }
+    let tb = match type_block(f.then_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+    if f.has_else {
+        let eb = match type_block(f.else_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+        return TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = Unit { } }
+    }
+    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = false; else_blk = tb.stmts }; type = Unit { } }   // else_blk gated by has_else
+}
+
+// ---- one typed arm: pattern extends env; `when` guard bool; body typed in that env ----
+fn type_arm(a: Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
+    let e2 = match check_pattern(a.pattern, subject, env, table) { Env as e => e; error as err => return err }
+    let body = match type_expr(a.body, e2, table) { TExpr as te => te; error as err => return err }
+    mut guard = body                                  // gated by has_when (placeholder reuses body — never read)
+    if a.has_when {
+        let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
+        if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
+        guard = g
+    }
+    TArm { pattern = a.pattern; has_when = a.has_when; guard = guard; body = body }
+}
+
+// ---- match as a VALUE: all arm bodies the SAME type → the match's type; EXHAUSTIVE (B.15) ----
+fn type_match(m: MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
+    if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
+    let a0 = match type_arm(m.arms[0], s.type, env, table) { TArm as a => a; error as e => return e }
+    let first = a0.body.type
+    mut arms = teko::list::empty()
+    arms = teko::list::push(arms, a0)
+    mut i = 1
+    loop {
+        if i >= m.arms.len { break }
+        let ai = match type_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
+        if !type_eq(ai.body.type, first) { return error { message = "the `match` arms have different types" } }
+        arms = teko::list::push(arms, ai)
+        i++
+    }
+    if !exhaustive(m.arms, s.type) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = first }
+}
+
+// ---- match as a STATEMENT: validate the arms; exhaustiveness forced; value discarded → Unit ----
+fn type_match_stmt(m: MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
+    mut arms = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        let ai = match type_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
+        arms = teko::list::push(arms, ai)
+        i++
+    }
+    if !exhaustive(m.arms, s.type) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = Unit { } }
+}
+
+// ---- statements (the evolved check_* — produce the typed node + advance the env) ----
+
+fn type_binding(b: Binding, env: Env, table: TypeTable) -> TypedStmt | error {
+    let v = match type_expr(b.value, env, table) { TExpr as te => te; error as e => return e }
+    mut bound = v.type
+    if b.has_type {
+        let at = match resolve_type(b.type_ann, table) { Type as t => t; error as e => return e }
+        if !type_eq(v.type, at) {
+            let _ = match annotated_literal_ok(b.value, at) { Unit as u => u; error as e => return e }   // C6: a fitting literal adopts T (leaf stays i64)
+        }
+        bound = at
+    }
+    let node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v }
+    match b.target {
+        SimpleName as sn   => TypedStmt { node = node; env = define(env, sn.name, bound, bind_is_mut(b.kind)) }
+        DestructurePattern => TypedStmt { node = node; env = env }    // [destructuring binding: refinement]
+    }
+}
+
+fn type_assign(a: Assign, env: Env, table: TypeTable) -> TypedStmt | error {
+    let tb = match lookup_binding(env, a.name) { ValBinding as vb => vb; error as e => return e }
+    if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
+    let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    if !type_eq(tb.type, v.type) { return error { message = "assigned value does not match the target type" } }
+    TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
+}
+
+fn type_return(r: Return, env: Env, table: TypeTable) -> TypedStmt | error {
+    let v = match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
+    TypedStmt { node = TReturn { has_value = r.has_value; value = v }; env = env }    // value gated by has_value (B.20); the return-type match is enforced by type_function's check_returns (C5)
+}
+
+fn type_loop(l: LoopStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+    let tb = match type_block(l.body, env, table) { TypedBlock as bk => bk; error as e => return e }
+    TypedStmt { node = TLoopStmt { body = tb.stmts }; env = env }     // body bindings stay block-local
+}
+
+fn type_exprstmt(es: ExprStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+    // a TOP-LEVEL if/match is a STATEMENT — its value is discarded, so no `else` is required.
+    match es.expr {
+        IfExpr as f    => {
+            let te = match type_if_stmt(f, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+        MatchExpr as m => {
+            let te = match type_match_stmt(m, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+        _              => {
+            let te = match type_expr(es.expr, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+    }
+}
+
+fn type_statement(s: Statement, env: Env, table: TypeTable) -> TypedStmt | error {
+    match s {
+        Binding as b   => type_binding(b, env, table)
+        Assign as a    => type_assign(a, env, table)
+        Return as r    => type_return(r, env, table)
+        LoopStmt as l  => type_loop(l, env, table)
+        BreakStmt      => TypedStmt { node = TBreakStmt { }; env = env }
+        ContinueStmt   => TypedStmt { node = TContinueStmt { }; env = env }
+        ExprStmt as es => type_exprstmt(es, env, table)
+    }
+}
+
+// ---- items + program (the evolved check_function/check_item/check_program — E5c) ----
+
+// the resolved return type: the annotation if present, else Unit (no `-> ret`).
+fn function_return(f: Function, table: TypeTable) -> Type | error {
+    if !f.has_return { return Unit { } }
+    resolve_type(f.return_type, table)
+}
+
+// ---- C5 (DEFER scope): `return`/final-expr vs the declared return type ----
+// Every `return e` reachable as a statement must yield the declared return type, and — when the
+// body's trailing statement is an expression — that value too. A `return <member>` into a variant
+// return type is admissible (B.14 — a member is automatically the union, no cast). The FULL
+// "every path yields a value" guarantee (divergence/definite-return analysis) is a SEPARATE later
+// item (M.4): a body ending in a diverging `loop`/`if`/`match` makes NO trailing-value claim here,
+// so the seed's value-fns that end in a breakless `loop` (exits are inner `return`s) are NOT
+// false-rejected. (Lives in the typed pass — the producer; the superseded `check_*` layer is not
+// dual-walked — see the check_*/type_* duplication note in "Próximas etapas".)
+
+// is a value of type `from` admissible where `to` is expected? (B.14 — variant member inclusion.)
+fn assignable_to(from: Type, to: Type) -> bool {
+    if type_eq(from, to) { return true }
+    match to {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                if type_eq(from, v.members[i]) { return true }
+                i++
+            }
+            false
+        }
+        _ => false
+    }
+}
+
+// check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
+// match-arm returns await the divergence item — arm bodies are expressions, not statements).
+fn check_returns(stmts: []TStatement, ret: Type) -> Unit | error {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        let _ = match check_return_stmt(stmts[i], ret) { Unit as u => u; error as e => return e }
+        i++
+    }
+    Unit { }
+}
+
+fn check_return_stmt(s: TStatement, ret: Type) -> Unit | error {
+    match s {
+        TReturn as r => {
+            if r.has_value {
+                if assignable_to(r.value.type, ret) { Unit { } }
+                else { error { message = "return value does not match the function's declared return type" } }
+            } else {
+                if assignable_to(Unit { }, ret) { Unit { } }
+                else { error { message = "bare `return` in a function that declares a non-Unit return type" } }
+            }
+        }
+        TLoopStmt as l  => check_returns(l.body, ret)
+        TExprStmt as es => check_returns_inexpr(es.expr, ret)
+        _               => Unit { }
+    }
+}
+
+// returns can also live inside a top-level `if`'s blocks (`if c { return e }`).
+fn check_returns_inexpr(e: TExpr, ret: Type) -> Unit | error {
+    match e.kind {
+        TIfExpr as f => {
+            let _ = match check_returns(f.then_blk, ret) { Unit as u => u; error as e => return e }
+            check_returns(f.else_blk, ret)
+        }
+        _ => Unit { }
+    }
+}
+
+// the trailing-value check — ONLY when the last statement is an expression (else: NO claim, the
+// guard against false-rejecting a body that ends in a diverging loop/if/match — the every-path item).
+fn check_trailing_value(stmts: []TStatement, ret: Type) -> Unit | error {
+    if stmts.len == 0 { return Unit { } }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => {
+            if assignable_to(es.expr.type, ret) { Unit { } }
+            else { error { message = "the function's final expression does not match its declared return type" } }
+        }
+        _ => Unit { }
+    }
+}
+
+fn type_function(f: Function, env: Env, table: TypeTable) -> TFunction | error {
+    mut local = env
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = match resolve_type(f.params[i].type_ann, table) { Type as t => t; error as e => return e }
+        local = define(local, f.params[i].name, pt, false)        // params are immutable (B.21)
+        i++
+    }
+    let ret = match function_return(f, table) { Type as t => t; error as e => return e }
+    let tb = match type_block(f.body, local, table) { TypedBlock as bk => bk; error as e => return e }
+    let _ = match check_returns(tb.stmts, ret)       { Unit as u => u; error as e => return e }   // C5: each `return e` matches `ret`
+    let _ = match check_trailing_value(tb.stmts, ret) { Unit as u => u; error as e => return e }  // C5: trailing value (when present) matches
+    TFunction { name = f.name; params = f.params; return_type = ret; body = tb.stmts; is_exp = f.is_exp; has_doc = f.has_doc; doc = f.doc }
+}
+
+fn type_item(item: Item, env: Env, table: TypeTable) -> TItem | error {
+    match item {
+        Function as f  => {
+            let tf = match type_function(f, env, table) { TFunction as x => x; error as e => return e }
+            tf
+        }
+        TypeDecl as td => td       // carries no expr → passes through (collect resolved its fields)
+        UseDecl as ud  => ud       // seed no-op (alias resolution is the checker's, later)
+        Statement as s => {
+            let ts = match type_statement(s, env, table) { TypedStmt as x => x; error as e => return e }
+            ts.node
+        }
+    }
+}
+
+// THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
+fn type_program(program: Program) -> TProgram | error {
+    let c = match collect(program) { Collected as col => col; error as e => return e }
+    mut items = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        let ti = match type_item(program.items[i], c.env, c.types) { TItem as x => x; error as e => return e }
+        items = teko::list::push(items, ti)
+        i++
+    }
+    TProgram { items = items }
+}

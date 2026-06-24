@@ -1,0 +1,87 @@
+// src/checker/revalidate.tks  (namespace 'teko::checker')
+
+fn is_bool(t: Type) -> bool    { match t { Prim as p => p.kind == PrimKind::Bool; _ => false } }
+fn is_integer(t: Type) -> bool { match t { Prim as p => p.kind != PrimKind::Bool; _ => false } }
+
+// the stored type must equal the type derived independently here.
+fn check_node_type(stored: Type, expected: Type) -> Unit | error {
+    if type_eq(stored, expected) { return Unit { } }
+    error { message = "corrupt typed tree: a node's type does not match its derivation" }
+}
+
+// re-derive a binary's result type from its operands (B.22), independently.
+fn rederive_binary(lt: Type, rt: Type, op: lexer::TokenKind) -> Type | error {
+    if op_is_shift(op) {
+        if !is_integer(lt) || !is_integer(rt) { return error { message = "corrupt: shift operands not integer" } }
+        return lt
+    }
+    if op_is_arith_bitwise(op) {
+        if !is_integer(lt) { return error { message = "corrupt: arith/bitwise operand not integer" } }
+        if !type_eq(lt, rt) { return error { message = "corrupt: binary operands differ (no promotion)" } }
+        return lt
+    }
+    error { message = "corrupt: unknown binary operator" }
+}
+
+fn validate_each(xs: []TExpr) -> Unit | error {
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        let _ = match validate_texpr(xs[i]) { Unit as u => u; error as e => return e }
+        i++
+    }
+    Unit { }
+}
+
+// COUNTER-VALIDATE a typed expression: re-derive its type and confirm it matches
+// the stored one (operators/literals), or check it structurally (env-dependent).
+fn validate_texpr(te: TExpr) -> Unit | error {
+    match te.kind {
+        TNumber  => check_node_type(te.type, Prim { kind = PrimKind::I64 })
+        TStrLit  => check_node_type(te.type, Str { })
+        TByteLit => check_node_type(te.type, Byte { })
+        TVar     => Unit { }                       // env-dependent → trust (type is present)
+        TCall as c => validate_each(c.args)        // [callee re-derivation is env-dependent]
+        TBinary as b => {
+            let _ = match validate_texpr(b.left)  { Unit as u => u; error as e => return e }
+            let _ = match validate_texpr(b.right) { Unit as u => u; error as e => return e }
+            let d = match rederive_binary(b.left.type, b.right.type, b.op) { Type as t => t; error as e => return e }
+            check_node_type(te.type, d)
+        }
+        TUnary as u => {
+            let _ = match validate_texpr(u.operand) { Unit as u2 => u2; error as e => return e }
+            if u.op == lexer::TokenKind::Bang {
+                if !is_bool(u.operand.type) { return error { message = "corrupt: `!` operand not bool" } }
+                return check_node_type(te.type, Prim { kind = PrimKind::Bool })
+            }
+            if !is_integer(u.operand.type) { return error { message = "corrupt: `-`/`~` operand not integer" } }
+            check_node_type(te.type, u.operand.type)
+        }
+        TCompare as cmp => {
+            let _ = match validate_texpr(cmp.first) { Unit as u => u; error as e => return e }
+            mut i = 0
+            loop {
+                if i >= cmp.rest.len { break }
+                let _ = match validate_texpr(cmp.rest[i].operand) { Unit as u => u; error as e => return e }
+                i++
+            }
+            check_node_type(te.type, Prim { kind = PrimKind::Bool })   // a comparison is bool
+        }
+        TIfExpr    => Unit { }    // [block-bearing: deep revalidation lands with program-level — E6-2]
+        TMatchExpr => Unit { }    // [idem — typed blocks/arms validate once validate_statement exists]
+        TCast as c => {
+            let _ = match validate_texpr(c.expr) { Unit as u => u; error as e => return e }
+            match cast_check(c.expr.type, te.type) {           // RE-PROVE the cast independently (M.3 — not a rubber stamp)
+                Unit  => Unit { }
+                error => error { message = "corrupt: illegal cast in typed tree" }
+            }
+        }
+        TFieldAccess as f => {
+            let _ = match validate_texpr(f.receiver) { Unit as u => u; error as e => return e }
+            match f.receiver.type {                            // struct-receiver invariant (field type is table-dependent → trust, as TVar/TCall)
+                Named => Unit { }
+                _     => error { message = "corrupt: field access on a non-struct receiver" }
+            }
+        }
+    }
+}

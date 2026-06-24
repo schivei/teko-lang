@@ -1,0 +1,379 @@
+// src/lexer/lexer.tks   (namespace 'teko::lexer') — the complete scanner.
+
+// A read result: the token produced + where scanning stopped. (A struct because
+// Teko has no tuples; it packages result + new state.)
+type Scan = struct {
+    token: Token
+    next:  u64
+}
+
+// A decoded escape / a byte-literal value: the byte + the pos after it.
+type EscByte = struct {
+    value: byte
+    next:  u64
+}
+type ByteVal = struct {
+    value: byte
+    next:  u64
+}
+
+// --- byte access ---
+
+// the byte at p, or 0 if out of bounds (a safe peek for look-ahead — maximal munch).
+fn at(source: str, p: u64) -> byte {
+    if p >= source.len { return 0 }
+    source[p]
+}
+
+// --- predicates (pure, over a single byte; ASCII syntax → byte literals) ---
+
+fn is_digit(c: byte) -> bool {
+    c >= b'0' && c <= b'9'
+}
+
+fn is_alpha(c: byte) -> bool {
+    (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z')
+}
+
+fn is_ident_continue(c: byte) -> bool {
+    is_alpha(c) || is_digit(c) || c == b'_'
+}
+
+// --- whitespace & comments (pure: take pos, return the new pos) ---
+
+// skip spaces/tabs/CR — NOT newlines (a newline is a significant token, B.26).
+fn skip_spaces(source: str, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        let c = source[p]
+        if c != b' ' && c != b'\t' && c != b'\r' { break }
+        p++
+    }
+    p
+}
+
+// skip a `//` line comment: advance to the newline (or end), leaving it for the loop.
+fn skip_line(source: str, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if source[p] == b'\n' { break }
+        p++
+    }
+    p
+}
+
+// skip a block comment `/* … */` (not nested); returns the pos after the `*/`.
+fn skip_block_comment(source: str, pos: u64) -> u64 | error {
+    mut p = pos + 2                       // past `/*`
+    loop {
+        if p + 1 >= source.len { return error { message = "unterminated block comment" } }
+        if source[p] == b'*' && source[p + 1] == b'/' { return p + 2 }
+        p++
+    }
+}
+
+// read a DOC comment `/** … */` → a Doc token spanning the whole comment.
+fn read_doc_comment(source: str, pos: u64) -> Scan | error {
+    mut p = pos + 3                       // past `/**`
+    loop {
+        if p + 1 >= source.len { return error { message = "unterminated doc comment" } }
+        if source[p] == b'*' && source[p + 1] == b'/' {
+            let end = p + 2
+            return Scan { token = Token { kind = TokenKind::Doc; text = slice(source, pos, end) }; next = end }
+        }
+        p++
+    }
+}
+
+// --- a token spanning n bytes from pos (the common Scan builder) ---
+
+fn sym(source: str, pos: u64, n: u64, kind: TokenKind) -> Scan {
+    Scan { token = Token { kind = kind; text = slice(source, pos, pos + n) }; next = pos + n }
+}
+
+// --- numbers & identifiers ---
+
+// digits, allowing `_` as a separator BETWEEN digits (B.28): `1_000`.
+fn read_number(source: str, pos: u64) -> Scan {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        let c = source[p]
+        if is_digit(c) { p++; continue }
+        if c == b'_' {
+            if p + 1 < source.len && is_digit(at(source, p + 1)) { p++; continue }
+        }
+        break
+    }
+    Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p) }; next = p }
+}
+
+fn read_ident(source: str, pos: u64) -> Scan {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if !is_ident_continue(source[p]) { break }
+        p++
+    }
+    Scan { token = Token { kind = TokenKind::Ident; text = slice(source, pos, p) }; next = p }
+}
+
+// a run of `_` then a letter/digit is ONE identifier (`_foo`, `__bar`); a `_` not so
+// followed is the wildcard token (emitted one at a time — the parser rejects a run).
+fn read_underscore(source: str, pos: u64) -> Scan {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if source[p] != b'_' { break }
+        p++
+    }
+    if p < source.len {
+        if is_alpha(source[p]) || is_digit(source[p]) {
+            return read_ident(source, pos)   // reads from the first `_`
+        }
+    }
+    sym(source, pos, 1, TokenKind::Underscore)
+}
+
+// --- keywords (an ident whose text matches the table — B.19) ---
+
+fn keyword_kind(text: str) -> TokenKind {
+    if text == "fn"       { return TokenKind::Fn }
+    if text == "type"     { return TokenKind::Type }
+    if text == "struct"   { return TokenKind::Struct }
+    if text == "enum"     { return TokenKind::Enum }
+    if text == "variant"  { return TokenKind::Variant }
+    if text == "let"      { return TokenKind::Let }
+    if text == "mut"      { return TokenKind::Mut }
+    if text == "const"    { return TokenKind::Const }
+    if text == "if"       { return TokenKind::If }
+    if text == "else"     { return TokenKind::Else }
+    if text == "loop"     { return TokenKind::Loop }
+    if text == "break"    { return TokenKind::Break }
+    if text == "continue" { return TokenKind::Continue }
+    if text == "return"   { return TokenKind::Return }
+    if text == "match"    { return TokenKind::Match }
+    if text == "when"     { return TokenKind::When }
+    if text == "as"       { return TokenKind::As }
+    if text == "to"       { return TokenKind::To }   // the cast operator (x to T) — F1/E7
+    if text == "use"      { return TokenKind::Use }
+    if text == "exp"      { return TokenKind::Exp }
+    TokenKind::Ident
+}
+
+fn keyword_or_ident(source: str, pos: u64) -> Scan {
+    let s = read_ident(source, pos)
+    let k = keyword_kind(s.token.text)
+    Scan { token = Token { kind = k; text = s.token.text }; next = s.next }
+}
+
+// --- escapes & fresh-byte → str (reference-deferred; see the note above) ---
+
+// decode `\` + one byte → the byte; the set is the structural minimum (it can grow).
+fn escape_byte(source: str, pos: u64) -> EscByte | error {
+    let after = pos + 1
+    if after >= source.len { return error { message = "unterminated escape" } }
+    let v = match source[after] {
+        b'n'  => 0x0A
+        b't'  => 0x09
+        b'r'  => 0x0D
+        b'\\' => 0x5C
+        b'"'  => 0x22
+        b'\'' => 0x27
+        b'0'  => 0x00
+        _     => return error { message = "unknown escape" }
+    }
+    EscByte { value = v; next = after + 1 }
+}
+
+// one byte of a byte literal: a raw byte, or an escape.
+fn byte_value(source: str, pos: u64) -> ByteVal | error {
+    if source[pos] == b'\\' {
+        let e = match escape_byte(source, pos) {
+            EscByte as eb => eb
+            error as err  => return err
+        }
+        return ByteVal { value = e.value; next = e.next }
+    }
+    ByteVal { value = source[pos]; next = pos + 1 }
+}
+
+// build a str from FRESH bytes (a decoded literal), not a view into the source.
+// Escapes are ASCII and literal bytes come from the validated source, so validity
+// holds; the str-from-bytes primitive is the same as text.tks's `str(b)` [TBD].
+fn one_byte(b: byte) -> str {
+    mut xs = teko::list::empty()
+    xs = teko::list::push(xs, b)
+    str(xs)
+}
+fn str_of_bytes(xs: []byte) -> str {
+    str(xs)
+}
+
+// --- string & byte literals ---
+
+// `"` at pos. Collect bytes until the closing `"`, decoding escapes.
+fn read_str(source: str, pos: u64) -> Scan | error {
+    mut p = pos + 1                          // past the opening quote
+    mut bytes = teko::list::empty()
+    loop {
+        if p >= source.len { return error { message = "unterminated string literal" } }
+        let c = source[p]
+        if c == b'"' {
+            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes) }; next = p + 1 }
+        }
+        if c == b'\\' {
+            let e = match escape_byte(source, p) {
+                EscByte as eb => eb
+                error as err  => return err
+            }
+            bytes = teko::list::push(bytes, e.value)
+            p = e.next
+            continue
+        }
+        bytes = teko::list::push(bytes, c)   // a literal byte (ASCII or UTF-8 cont.)
+        p++
+    }
+}
+
+// `b'…'`: pos points at `b`, `'` at pos+1. One byte (raw or escaped) then a closing `'`.
+fn read_byte_lit(source: str, pos: u64) -> Scan | error {
+    let inner = pos + 2                       // past `b'`
+    if inner >= source.len { return error { message = "unterminated byte literal" } }
+    let v = match byte_value(source, inner) {
+        ByteVal as bv => bv
+        error as err  => return err
+    }
+    if at(source, v.next) != b'\'' { return error { message = "expected closing ' in byte literal" } }
+    Scan { token = Token { kind = TokenKind::Byte; text = one_byte(v.value) }; next = v.next + 1 }
+}
+
+// --- symbols: operators, delimiters, punctuation (maximal munch — B.23) ---
+
+fn read_symbol(source: str, pos: u64) -> Scan | error {
+    let c  = source[pos]
+    let c1 = at(source, pos + 1)
+    let c2 = at(source, pos + 2)
+
+    // 3-byte (longest first)
+    if c == b'<' && c1 == b'<' && c2 == b'=' { return sym(source, pos, 3, TokenKind::ShlEq) }
+    if c == b'>' && c1 == b'>' && c2 == b'=' { return sym(source, pos, 3, TokenKind::ShrEq) }
+    if c == b'.' && c1 == b'.' && c2 == b'=' { return sym(source, pos, 3, TokenKind::DotDotEq) }
+
+    // 2-byte
+    if c == b'=' && c1 == b'=' { return sym(source, pos, 2, TokenKind::EqEq) }
+    if c == b'=' && c1 == b'>' { return sym(source, pos, 2, TokenKind::FatArrow) }
+    if c == b'!' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Ne) }
+    if c == b'<' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Le) }
+    if c == b'>' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Ge) }
+    if c == b'<' && c1 == b'<' { return sym(source, pos, 2, TokenKind::Shl) }
+    if c == b'>' && c1 == b'>' { return sym(source, pos, 2, TokenKind::Shr) }
+    if c == b'-' && c1 == b'>' { return sym(source, pos, 2, TokenKind::Arrow) }
+    if c == b':' && c1 == b':' { return sym(source, pos, 2, TokenKind::ColonColon) }
+    if c == b'&' && c1 == b'&' { return sym(source, pos, 2, TokenKind::AndAnd) }
+    if c == b'|' && c1 == b'|' { return sym(source, pos, 2, TokenKind::OrOr) }
+    if c == b'+' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PlusEq) }
+    if c == b'-' && c1 == b'=' { return sym(source, pos, 2, TokenKind::MinusEq) }
+    if c == b'*' && c1 == b'=' { return sym(source, pos, 2, TokenKind::StarEq) }
+    if c == b'/' && c1 == b'=' { return sym(source, pos, 2, TokenKind::SlashEq) }
+    if c == b'%' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PercentEq) }
+    if c == b'&' && c1 == b'=' { return sym(source, pos, 2, TokenKind::AmpEq) }
+    if c == b'|' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PipeEq) }
+    if c == b'^' && c1 == b'=' { return sym(source, pos, 2, TokenKind::CaretEq) }
+
+    // `..` exists ONLY as `..=` (handled above); a lone `..` is an error
+    if c == b'.' && c1 == b'.' { return error { message = "expected '=' to close range '..='" } }
+
+    // 1-byte
+    let one = match c {
+        b'+' => TokenKind::Plus
+        b'-' => TokenKind::Minus
+        b'*' => TokenKind::Star
+        b'/' => TokenKind::Slash
+        b'%' => TokenKind::Percent
+        b'&' => TokenKind::Amp
+        b'|' => TokenKind::Pipe
+        b'^' => TokenKind::Caret
+        b'~' => TokenKind::Tilde
+        b'!' => TokenKind::Bang
+        b'<' => TokenKind::Lt
+        b'>' => TokenKind::Gt
+        b'=' => TokenKind::Assign
+        b':' => TokenKind::Colon
+        b';' => TokenKind::Semicolon
+        b',' => TokenKind::Comma
+        b'.' => TokenKind::Dot
+        b'(' => TokenKind::LParen
+        b')' => TokenKind::RParen
+        b'{' => TokenKind::LBrace
+        b'}' => TokenKind::RBrace
+        b'[' => TokenKind::LBracket
+        b']' => TokenKind::RBracket
+        _    => return error { message = "unexpected character" }
+    }
+    sym(source, pos, 1, one)
+}
+
+// --- one token at pos (already past spaces/comments/newline), or fail ---
+
+fn next_token(source: str, pos: u64) -> Scan | error {
+    let c = source[pos]
+    // a byte literal `b'…'` — `b` would otherwise begin an identifier
+    if c == b'b' && at(source, pos + 1) == b'\'' { return read_byte_lit(source, pos) }
+    if is_digit(c) { return read_number(source, pos) }
+    if is_alpha(c) { return keyword_or_ident(source, pos) }
+    if c == b'_'   { return read_underscore(source, pos) }
+    if c == b'"'   { return read_str(source, pos) }
+    read_symbol(source, pos)
+}
+
+// --- the main loop ---
+
+fn tokenize(source: str) -> []Token | error {
+    mut pos: u64 = 0
+    mut tokens = teko::list::empty()
+
+    loop {
+        pos = skip_spaces(source, pos)
+        if pos >= source.len { break }
+
+        let c = source[pos]
+
+        // `//` line comment → skip to the newline
+        if c == b'/' && at(source, pos + 1) == b'/' {
+            pos = skip_line(source, pos)
+            continue
+        }
+        // `/* … */` block & `/** … */` doc comments
+        if c == b'/' && at(source, pos + 1) == b'*' {
+            // a DOC comment `/** … */` (but NOT the empty `/**/`) becomes a Doc
+            // TOKEN (the parser attaches it to the next type/fn declaration); a plain
+            // block comment is skipped.
+            if at(source, pos + 2) == b'*' && at(source, pos + 3) != b'/' {
+                let scan = match read_doc_comment(source, pos) { Scan as sc => sc; error as e => return e }
+                tokens = teko::list::push(tokens, scan.token)
+                pos = scan.next
+                continue
+            }
+            pos = match skip_block_comment(source, pos) { u64 as p => p; error as e => return e }
+            continue
+        }
+        // a significant newline (B.26) is a token
+        if c == b'\n' {
+            tokens = teko::list::push(tokens, sym(source, pos, 1, TokenKind::Newline).token)
+            pos = pos + 1
+            continue
+        }
+
+        let scan = match next_token(source, pos) {
+            Scan as sc => sc
+            error as e => return e
+        }
+        tokens = teko::list::push(tokens, scan.token)
+        pos    = scan.next
+    }
+
+    tokens
+}

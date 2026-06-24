@@ -1,0 +1,112 @@
+// src/emit/tkb_frame.tks  (namespace 'teko::emit')
+
+fn write_u64(buf: []byte, x: u64) -> []byte {
+    mut b = buf
+    mut v = x
+    mut k = 0
+    loop {
+        if k >= 8 { break }
+        b = teko::list::push(b, lo8((v & 0xFF) to u32))
+        v = v >> 8
+        k++
+    }
+    b
+}
+
+fn append_bytes(dst: []byte, src: []byte) -> []byte {
+    mut b = dst
+    mut i = 0
+    loop {
+        if i >= src.len { break }
+        b = teko::list::push(b, src[i])
+        i++
+    }
+    b
+}
+
+// --- collect every string into the table (pre-pass; mirrors the write helpers) ---
+
+fn collect_type_list(t: StrTable, xs: []Type) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_type_strings(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_type_strings(t: StrTable, ty: Type) -> StrTable {
+    match ty {
+        Named as n   => st_intern(t, n.name).table
+        Slice as s   => collect_type_strings(t, s.element)
+        Variant as v => collect_type_list(t, v.members)
+        Func as f    => collect_type_strings(collect_type_list(t, f.params), f.ret)
+        _            => t
+    }
+}
+
+fn collect_path(t: StrTable, p: Path) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= p.segments.len { break }
+        tab = st_intern(tab, p.segments[i].name).table
+        i++
+    }
+    tab
+}
+
+fn collect_texprs(t: StrTable, xs: []TExpr) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_strings(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_terms(t: StrTable, ts: []TCmpTerm) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= ts.len { break }
+        tab = collect_strings(tab, ts[i].operand)
+        i++
+    }
+    tab
+}
+
+fn collect_strings(t: StrTable, te: TExpr) -> StrTable {
+    let t1 = collect_type_strings(t, te.type)        // the node's type may name things
+    match te.kind {
+        TVar as v     => st_intern(t1, v.name).table
+        TStrLit as s  => st_intern(t1, s.text).table
+        TBinary as b  => collect_strings(collect_strings(t1, b.left), b.right)
+        TUnary as u   => collect_strings(t1, u.operand)
+        TCompare as c => collect_terms(collect_strings(t1, c.first), c.rest)
+        TCall as cl   => collect_texprs(collect_path(t1, cl.callee), cl.args)
+        TCast as c    => collect_strings(t1, c.expr)                                    // S1a — recurse into the inner expr
+        TFieldAccess as f => st_intern(collect_strings(t1, f.receiver), f.field).table  // S1b — receiver AND the field name (must intern)
+        _             => t1
+    }
+}
+
+// --- the frame: header (magic + version + hash) + the body ---
+
+fn serialize(te: TExpr) -> []byte {
+    let table = collect_strings(st_empty(), te)
+    let body = write_texpr(write_strtable(teko::list::empty(), table), table, te)
+    let h = fnv1a(body)
+    mut out = teko::list::empty()
+    out = write_u8(out, b'T')
+    out = write_u8(out, b'K')
+    out = write_u8(out, b'B')
+    out = write_u8(out, 0)
+    out = write_u32(out, 1)                          // version 1
+    out = write_u64(out, h)                          // FNV-1a of the body
+    append_bytes(out, body)
+}

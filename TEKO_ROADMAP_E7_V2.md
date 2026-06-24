@@ -9,6 +9,14 @@
 
 ## Concluído
 
+- **Materialização da spec → árvore de arquivos** (estrutural, antes de prosseguir): todos os
+  blocos cercados de `TEKO_SOURCE.md` + `TEKO_CHECKER.md` foram movidos para arquivos sob `src/`
+  (76 arquivos: 42 `.tks`/`.tkt` Teko + 32 `.h`/`.c` mirror C, + `main.tks`/`teko.tkp` na raiz),
+  via extrator determinístico (concatena multi-bloco em ordem; resolve "appended to …", continuações
+  e o delta C do lexer). `CMakeLists.txt` define a estrutura (C23, `EXCLUDE_FROM_ALL` — mirror C ainda
+  não conectado: M.4). **Não compilado, não testado** (a pedido). A MD permanece a spec/histórico
+  canônico; `src/` é a árvore de trabalho materializada.
+
 - **F1** — token `to` (lexer). ✓
 - **F2** — nós `Cast`/`FieldAccess`/`MethodCall` no `Expr` + precedência (B.23). ✓
 - **P1** — `parse_type` (união → primário → slice/nomeado) + `parse_path`. ✓
@@ -26,8 +34,10 @@
   pós-R-main (`MainFile`/`Module`).
 - **C2** — cast `to` concluído (**inteiros**) — **regra B (↺ redefinição)**: `type_cast`/`cast_check`
   permitem **toda conversão numérica definida** (incl. narrowing/sinal); a perda é pega, não
-  silenciosa — constante fora-de-faixa → erro de compilação, runtime → guarda em codegen
-  (panic-debug/definido-release, adiado M.4). `bool`/não-numérico → erro. Nó `TCast`, `revalidate`
+  silenciosa — **a validação de possibilidade é runtime**: conversão impossível (o valor não cabe)
+  → **PÂNICO** (debug E release, paridade ÷0/OOB; ↺ refinado do "definido-release"); **constante**
+  fora-de-faixa → erro de compilação (exceção estática). Guarda runtime em codegen (adiado M.4).
+  `bool`/não-numérico → erro. Nó `TCast`, `revalidate`
   re-deriva, `write_texpr` tag 10 (round-trip = S1a). Mirror C + testes. ✓ **Reverte** a regra
   antiga (proibir perda em compilação) — registrado em HISTORY/REBOOT_PLAN + Índice de Redefinições.
   *Adiado por M.4:* casts de **float** (sem float em `PrimKind`) e **newtype↔base** (`resolve_named`
@@ -60,6 +70,12 @@
   de Cast/FieldAccess + adulteração→hash FNV-1a (3 `#test`). **Sem tensão.** ✓
   *Diferido (item próprio):* codec de `if`/`match` (tags 8/9) — exige um **serializador de statement**
   (`[]TStatement`) que ainda não existe; read rejeita 8/9 visivelmente (M.1). `MethodCall` sem nó tipado.
+- **Fase X — casts honestos** (M.3): **X0** estendeu o cast a `byte ↔ inteiro` (byte AS u8, B.36 — `cast_kind`
+  unificou `cast_check`/`const_range_check`, espelho C, +3 `#test`), completando o byte-cast diferido de C2.
+  **X1b** varreu 34 casts call-style falsos `u32(…)`/`u64(…)`/`i64(…)`/`byte(…)` nos blocos Teko do codec →
+  `x to T` (a forma falsa "aparenta função, não é" = M.3). **X1a** N/A (SOURCE limpo). Descoberta-chave do
+  legislador: `u32(…)` não passa nas leis (M.3) — só `x to T` é cast legal. *Fica E7:* ordinal de enum
+  (`prim_byte`/`kind_byte`/`kind_of` — funções reais, não casts falsos) e `str↔bytes` (camada de codepage).
 
 ---
 
@@ -149,15 +165,20 @@
 
 | # | Entrega | Lei | Esf. | Testes |
 |---|---|---|---|---|
-| X1a | trocar casts provisórios `u32(…)`/… por `x to T` em `SOURCE` | M.3 | P | recompila/round-trip verde |
-| X1b | idem em `CHECKER` (todos os `[cast TBD → E7]`) | M.3 | M | idem |
+| X0 ✓ | **fundação**: cast `byte ↔ inteiro` (byte AS u8 — B.36) — `cast_kind` unifica `cast_check`/`const_range_check` | M.0+M.2+M.1 | P | **feito**: `byte to u32`/`u8 to byte`/`200 to byte` ok; `300 to byte`/`byte to bool`/`byte to str` → erro; revalidate re-prova. Completa o byte-cast diferido de C2 |
+| X1a | trocar casts provisórios `u32(…)`/… por `x to T` em `SOURCE` | M.3 | P | **N/A** — `SOURCE` não tem casts call-style provisórios (só prosa) |
+| X1b ✓ | idem em `CHECKER` (`u32(…)`→`x to T` falso = M.3) | M.3 | M | **feito**: 34 sítios nos blocos `.tks` do codec (`emit/`) → `x to T` (parênteses onde a precedência exige); inteiro↔inteiro (C2), byte↔int (X0), i64↔u64 (valores não-negativos do codec). Enum-ordinal (`prim_byte`/`kind_byte`/`kind_of`) ficam (funções E7). C nativo intacto |
 
-## Depois (novo arquivo MD)
+## Depois
 
-- **Emissor `.tkh` + driver da pipeline** — constrói o `Header` do programa **checado**
-  (filtra `is_exp`), chama `emit_tkh`. Recebe dados validados (pré-req S2). *(M.4 — só
-  após C e S.)* Subdivisível na hora: E-emit-a (driver/Header), E-emit-b (round-trip
-  cross-projeto com o 2º projeto).
+- **E-emit-a ✓ — driver do `Header` + emissão `.tkh`** (em `src/`, agora canônico): `build_header(prog, table)`
+  varre o `TProgram` checado, mantém só `is_exp`, resolve as anotações sintáticas (`resolve_type`) em
+  `FnSig`/`TyExport`; `emit_program` = `build_header` → `emit_tkh`. Fundação: `TFunction` ganhou `has_doc`/`doc`
+  (perdidos na AST tipada; o `.tkh` preserva docs — M.3; isolado: codec serializa só `TExpr`). **Header sempre
+  emitido — sem exports, header vazio (counts=0) que diz "nada exportado", nunca nada** (regra do legislador, M.3).
+  Novos `src/emit/header.{tks,h,c}` + `header_test.tkt` (keep-only-exports · round-trip · tamper · **empty-still-emits**).
+  CMake atualizado. *Diferido:* **E-emit-b** (round-trip cross-projeto, 2º projeto) e o **driver da pipeline completo**
+  (read→lex→parse→check→codegen — codegen não existe, M.4).
 
 ---
 

@@ -1,0 +1,57 @@
+// src/checker/scope.tks  (namespace 'teko::checker')
+
+// a value binding visible in scope: a name and its type.
+type ValBinding = struct {
+    name:   str
+    type:   Type
+    is_mut: bool      // (B.21): true ONLY for a `mut` local; let/const/params/match-bindings = false
+}
+
+// the environment: a FLAT list of bindings. A later binding shadows an earlier of
+// the same name (lexical); block scoping is implicit (the caller keeps its prefix
+// when the recursion returns — the block's bindings were a local extension).
+type Env = []ValBinding
+
+// define a name (append); returns the extended env (ref-less consume-return). `is_mut`
+// comes from the call site: a `mut` binding passes true; EVERYTHING else (let, const,
+// params, match-bindings, function signatures) passes false (B.21).
+fn define(env: Env, name: str, t: Type, is_mut: bool) -> Env {
+    teko::list::push(env, ValBinding { name = name; type = t; is_mut = is_mut })
+}
+
+// a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
+fn bind_is_mut(k: BindKind) -> bool { k == BindKind::Mut }
+
+// the WHOLE binding (type + mutability), innermost first — for the `mut` write-guard (B.21).
+fn lookup_binding(env: Env, name: str) -> ValBinding | error {
+    mut i = env.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env[i].name == name { return env[i] }
+    }
+    error { message = $"undefined name: {name}" }
+}
+
+// the type of a name — the common case; a thin wrapper so existing callers are unchanged.
+fn lookup(env: Env, name: str) -> Type | error {
+    match lookup_binding(env, name) { ValBinding as b => b.type; error as e => e }
+}
+
+// resolve an INJECTED built-in type name to its Type (B.19). User types
+// (struct/enum/variant) resolve against the collected registry (Etapa 3).
+fn builtin_type(name: str) -> Type | error {
+    if name == "u8"   { return Prim { kind = PrimKind::U8 } }
+    if name == "u16"  { return Prim { kind = PrimKind::U16 } }
+    if name == "u32"  { return Prim { kind = PrimKind::U32 } }
+    if name == "u64"  { return Prim { kind = PrimKind::U64 } }
+    if name == "i8"   { return Prim { kind = PrimKind::I8 } }
+    if name == "i16"  { return Prim { kind = PrimKind::I16 } }
+    if name == "i32"  { return Prim { kind = PrimKind::I32 } }
+    if name == "i64"  { return Prim { kind = PrimKind::I64 } }
+    if name == "bool" { return Prim { kind = PrimKind::Bool } }
+    if name == "byte"  { return Byte { } }
+    if name == "str"   { return Str { } }
+    if name == "error" { return Error { } }
+    error { message = "not a built-in type" }
+}

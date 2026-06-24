@@ -1,0 +1,70 @@
+// src/checker/collect.tks  (namespace 'teko::checker') — pass 1 (forward refs).
+
+// the top-level environment after collecting: user types + function signatures.
+type Collected = struct { types: TypeTable; env: Env }
+
+// gather ALL user type declarations first (so a forward reference resolves).
+fn collect_types(items: []Item) -> TypeTable {
+    mut table = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; decl = td }) }
+            _              => {}
+        }
+        i++
+    }
+    table
+}
+
+// a function's signature as a FuncType (resolve its param + return types).
+fn func_type(f: Function, table: TypeTable) -> Type | error {
+    mut params = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = match resolve_type(f.params[i].type_ann, table) {
+            Type as t  => t
+            error as e => return e
+        }
+        params = teko::list::push(params, pt)
+        i++
+    }
+    let ret = match resolve_type(f.return_type, table) {
+        Type as t  => t
+        error as e => return e
+    }
+    Func { params = params; ret = ret }
+}
+
+// register every top-level function's signature (now that all type names exist).
+fn collect_funcs(items: []Item, table: TypeTable) -> Env | error {
+    mut env = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            Function as f => {
+                let ft = match func_type(f, table) {
+                    Type as t  => t
+                    error as e => return e
+                }
+                env = define(env, f.name, ft, false)
+            }
+            _ => {}
+        }
+        i++
+    }
+    env
+}
+
+// pass 1: types first, then function signatures — the top-level environment.
+fn collect(program: Program) -> Collected | error {
+    let table = collect_types(program.items)
+    let env = match collect_funcs(program.items, table) {
+        Env as e     => e
+        error as err => return err
+    }
+    Collected { types = table; env = env }
+}

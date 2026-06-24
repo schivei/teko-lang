@@ -1,0 +1,258 @@
+// src/emit/tkb_read.tks  (namespace 'teko::emit')
+
+type Reader  = struct { data: []byte; pos: u64 }
+type RByte   = struct { r: Reader; value: byte }
+type RU32    = struct { r: Reader; value: u32 }
+type RU64    = struct { r: Reader; value: u64 }
+type RStr    = struct { r: Reader; value: str }
+type RType   = struct { r: Reader; value: Type }
+type RTypes  = struct { r: Reader; value: []Type }
+type RTable  = struct { r: Reader; value: []str }
+
+fn read_u8(r: Reader) -> RByte | error {
+    if r.pos >= r.data.len { return error { message = "truncated .tkb" } }
+    RByte { r = Reader { data = r.data; pos = r.pos + 1 }; value = r.data[r.pos] }
+}
+
+fn read_u32(r: Reader) -> RU32 | error {
+    let a = match read_u8(r)   { RByte as x => x; error as e => return e }
+    let b = match read_u8(a.r) { RByte as x => x; error as e => return e }
+    let c = match read_u8(b.r) { RByte as x => x; error as e => return e }
+    let d = match read_u8(c.r) { RByte as x => x; error as e => return e }
+    RU32 { r = d.r; value = (a.value to u32) | ((b.value to u32) << 8) | ((c.value to u32) << 16) | ((d.value to u32) << 24) }
+}
+
+fn read_u64(r: Reader) -> RU64 | error {
+    let lo = match read_u32(r)    { RU32 as x => x; error as e => return e }
+    let hi = match read_u32(lo.r) { RU32 as x => x; error as e => return e }
+    RU64 { r = hi.r; value = (lo.value to u64) | ((hi.value to u64) << 32) }
+}
+
+// a string reference = a u32 index into the (already-read) table.
+fn read_str(r: Reader, table: []str) -> RStr | error {
+    let idx = match read_u32(r) { RU32 as x => x; error as e => return e }
+    if (idx.value to u64) >= table.len { return error { message = "bad string index in .tkb" } }
+    RStr { r = idx.r; value = table[idx.value] }
+}
+
+// the string table: count, then each (len + bytes).
+fn read_strtable(r: Reader) -> RTable | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut table = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let len = match read_u32(rr) { RU32 as x => x; error as e => return e }
+        mut bytes = teko::list::empty()
+        mut br = len.r
+        mut j = 0
+        loop {
+            if j >= (len.value to u64) { break }
+            let by = match read_u8(br) { RByte as x => x; error as e => return e }
+            bytes = teko::list::push(bytes, by.value)
+            br = by.r
+            j++
+        }
+        table = teko::list::push(table, str(bytes))      // []byte → str [wrap form TBD]
+        rr = br
+        i++
+    }
+    RTable { r = rr; value = table }
+}
+
+// inverse of prim_byte (PrimKind ↔ byte).
+fn prim_of(b: byte) -> PrimKind {
+    if b == 0 { return PrimKind::U8 }
+    if b == 1 { return PrimKind::U16 }
+    if b == 2 { return PrimKind::U32 }
+    if b == 3 { return PrimKind::U64 }
+    if b == 4 { return PrimKind::I8 }
+    if b == 5 { return PrimKind::I16 }
+    if b == 6 { return PrimKind::I32 }
+    if b == 7 { return PrimKind::I64 }
+    PrimKind::Bool
+}
+
+fn read_types(r: Reader, table: []str) -> RTypes | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let t = match read_type(rr, table) { RType as x => x; error as e => return e }
+        xs = teko::list::push(xs, t.value)
+        rr = t.r
+        i++
+    }
+    RTypes { r = rr; value = xs }
+}
+
+// inverse of write_type — tags 0=Prim 1=Byte 2=Str 3=error 4=Unit 5=Slice 6=Named 7=Variant 8=Func.
+fn read_type(r: Reader, table: []str) -> RType | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 {
+        let k = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        return RType { r = k.r; value = Prim { kind = prim_of(k.value) } }
+    }
+    if tag.value == 1 { return RType { r = tag.r; value = Byte { } } }
+    if tag.value == 2 { return RType { r = tag.r; value = Str { } } }
+    if tag.value == 3 { return RType { r = tag.r; value = Error { } } }
+    if tag.value == 4 { return RType { r = tag.r; value = Unit { } } }
+    if tag.value == 5 {
+        let el = match read_type(tag.r, table) { RType as x => x; error as e => return e }
+        return RType { r = el.r; value = Slice { element = el.value } }
+    }
+    if tag.value == 6 {
+        let nm = match read_str(tag.r, table) { RStr as x => x; error as e => return e }
+        return RType { r = nm.r; value = Named { name = nm.value } }
+    }
+    if tag.value == 7 {
+        let ms = match read_types(tag.r, table) { RTypes as x => x; error as e => return e }
+        return RType { r = ms.r; value = Variant { members = ms.value } }
+    }
+    if tag.value == 8 {
+        let ps = match read_types(tag.r, table) { RTypes as x => x; error as e => return e }
+        let rt = match read_type(ps.r, table) { RType as x => x; error as e => return e }
+        return RType { r = rt.r; value = Func { params = ps.value; ret = rt.value } }
+    }
+    error { message = "bad type tag in .tkb" }
+}
+
+type RI64    = struct { r: Reader; value: i64 }
+type RTExpr  = struct { r: Reader; value: TExpr }
+type RTExprs = struct { r: Reader; value: []TExpr }
+type RTerms  = struct { r: Reader; value: []TCmpTerm }
+type RPath   = struct { r: Reader; value: Path }
+
+fn read_i64(r: Reader) -> RI64 | error {
+    let u = match read_u64(r) { RU64 as x => x; error as e => return e }
+    RI64 { r = u.r; value = u.value to i64 }               // codec i64s are non-negative (TNumber magnitudes), so the value conversion is exact
+}
+
+// inverse of kind_byte (operator TokenKind ↔ byte). The byte→enum ordinal is E7's cast.
+fn kind_of(b: byte) -> lexer::TokenKind { /* E7: the byte → operator-TokenKind */ }
+
+fn read_path(r: Reader, table: []str) -> RPath | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut segs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let nm = match read_str(rr, table) { RStr as x => x; error as e => return e }
+        segs = teko::list::push(segs, Segment { name = nm.value })
+        rr = nm.r
+        i++
+    }
+    RPath { r = rr; value = Path { segments = segs } }
+}
+
+fn read_texprs(r: Reader, table: []str) -> RTExprs | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let e = match read_texpr(rr, table) { RTExpr as x => x; error as e => return e }
+        xs = teko::list::push(xs, e.value)
+        rr = e.r
+        i++
+    }
+    RTExprs { r = rr; value = xs }
+}
+
+fn read_terms(r: Reader, table: []str) -> RTerms | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut ts = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= (n.value to u64) { break }
+        let op = match read_u8(rr) { RByte as x => x; error as e => return e }
+        let o = match read_texpr(op.r, table) { RTExpr as x => x; error as e => return e }
+        ts = teko::list::push(ts, TCmpTerm { op = kind_of(op.value); operand = o.value })
+        rr = o.r
+        i++
+    }
+    RTerms { r = rr; value = ts }
+}
+
+// inverse of write_texpr: the type FIRST, then tag (0..7), then the payload.
+fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
+    let ty = match read_type(r, table) { RType as x => x; error as e => return e }
+    let tag = match read_u8(ty.r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 {
+        let v = match read_i64(tag.r) { RI64 as x => x; error as e => return e }
+        return RTExpr { r = v.r; value = TExpr { kind = TNumber { value = v.value }; type = ty.value } }
+    }
+    if tag.value == 1 {
+        let nm = match read_str(tag.r, table) { RStr as x => x; error as e => return e }
+        return RTExpr { r = nm.r; value = TExpr { kind = TVar { name = nm.value }; type = ty.value } }
+    }
+    if tag.value == 2 {
+        let s = match read_str(tag.r, table) { RStr as x => x; error as e => return e }
+        return RTExpr { r = s.r; value = TExpr { kind = TStrLit { text = s.value }; type = ty.value } }
+    }
+    if tag.value == 3 {
+        let bl = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        return RTExpr { r = bl.r; value = TExpr { kind = TByteLit { value = bl.value }; type = ty.value } }
+    }
+    if tag.value == 4 {
+        let op = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        let l  = match read_texpr(op.r, table) { RTExpr as x => x; error as e => return e }
+        let rt = match read_texpr(l.r, table)  { RTExpr as x => x; error as e => return e }
+        return RTExpr { r = rt.r; value = TExpr { kind = TBinary { op = kind_of(op.value); left = l.value; right = rt.value }; type = ty.value } }
+    }
+    if tag.value == 5 {
+        let op = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        let o  = match read_texpr(op.r, table) { RTExpr as x => x; error as e => return e }
+        return RTExpr { r = o.r; value = TExpr { kind = TUnary { op = kind_of(op.value); operand = o.value }; type = ty.value } }
+    }
+    if tag.value == 6 {
+        let f  = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
+        let ts = match read_terms(f.r, table)   { RTerms as x => x; error as e => return e }
+        return RTExpr { r = ts.r; value = TExpr { kind = TCompare { first = f.value; rest = ts.value }; type = ty.value } }
+    }
+    if tag.value == 7 {
+        let cal = match read_path(tag.r, table)   { RPath as x => x; error as e => return e }
+        let ar  = match read_texprs(cal.r, table) { RTExprs as x => x; error as e => return e }
+        return RTExpr { r = ar.r; value = TExpr { kind = TCall { callee = cal.value; args = ar.value }; type = ty.value } }
+    }
+    if tag.value == 10 {
+        // S1a — Cast: target type is ty.value (already read); read just the inner expr.
+        let inner = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
+        return RTExpr { r = inner.r; value = TExpr { kind = TCast { expr = inner.value }; type = ty.value } }
+    }
+    if tag.value == 11 {
+        // S1b — FieldAccess: receiver THEN field (inverse of write order).
+        let rc  = match read_texpr(tag.r, table) { RTExpr as x => x; error as e => return e }
+        let fld = match read_str(rc.r, table)    { RStr as x => x; error as e => return e }
+        return RTExpr { r = fld.r; value = TExpr { kind = TFieldAccess { receiver = rc.value; field = fld.value }; type = ty.value } }
+    }
+    error { message = "bad texpr tag in .tkb" }
+}
+
+// THE ENTRY: verify the header + hash, then read the table and the typed tree.
+fn deserialize(data: []byte) -> TExpr | error {
+    let r0 = Reader { data = data; pos = 0 }
+    let m0 = match read_u8(r0)   { RByte as x => x; error as e => return e }
+    let m1 = match read_u8(m0.r) { RByte as x => x; error as e => return e }
+    let m2 = match read_u8(m1.r) { RByte as x => x; error as e => return e }
+    let m3 = match read_u8(m2.r) { RByte as x => x; error as e => return e }
+    if m0.value != b'T' || m1.value != b'K' || m2.value != b'B' || m3.value != 0 {
+        return error { message = "not a .tkb (bad magic)" }
+    }
+    let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
+    if ver.value != 1 { return error { message = "unsupported .tkb version" } }
+    let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
+    if data.len < 16 { return error { message = "truncated .tkb header" } }
+    if fnv1a(slice(data, 16, data.len)) != stored.value {
+        return error { message = ".tkb altered or corrupt (hash mismatch)" }
+    }
+    let table = match read_strtable(stored.r) { RTable as x => x; error as e => return e }
+    let te = match read_texpr(table.r, table.value) { RTExpr as x => x; error as e => return e }
+    te.value
+}

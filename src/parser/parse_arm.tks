@@ -1,0 +1,23 @@
+// src/parser/parse_arm.tks   (namespace 'teko::parser')
+
+// an optional `when guard` before `=>`. Absent → has_when=false (guard is a placeholder
+// Number 0, never read — gated by has_when). `pos` is right after the pattern.
+fn parse_guard(tokens: []lexer::Token, pos: u64) -> Guard | error {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::When) {
+        return Guard { has_when = false, guard = Number { value = 0 }, next = pos }
+    }
+    let g = match parse_expr(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+    Guard { has_when = true, guard = g.node, next = g.next }
+}
+
+// a match arm: `pattern [when guard] => body`. The body is an expression (B.15); the
+// `when` guard does NOT count for exhaustiveness (M.1).
+fn parse_arm(tokens: []lexer::Token, pos: u64) -> ParsedArm | error {
+    let pat = match parse_pattern(tokens, pos) { ParsedPattern as x => x; error as e => return e }
+    let g = match parse_guard(tokens, pat.next) { Guard as x => x; error as e => return e }
+    if !is_kind_at(tokens, g.next, lexer::TokenKind::FatArrow) {
+        return error { message = "expected '=>' after a match pattern" }
+    }
+    let body = match parse_expr(tokens, g.next + 1) { Parsed as x => x; error as e => return e }
+    ParsedArm { node = Arm { pattern = pat.node, has_when = g.has_when, guard = g.guard, body = body.node }, next = body.next }
+}

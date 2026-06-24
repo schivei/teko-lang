@@ -1,0 +1,208 @@
+// src/parser/parse_expr.tks   (namespace 'teko::parser')
+
+// `( e, e, … )` — `pos` is at `(`. Empty `()` allowed; comma-separated; no trailing
+// comma (strict — M.2). Returns the args and the position after `)`. Used by Call (here)
+// and by MethodCall (P2b).
+fn parse_call_args(tokens: []lexer::Token, pos: u64) -> ParsedArgs | error {
+    mut p = pos + 1                                  // consume `(`
+    mut args = teko::list::empty()
+    if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return ParsedArgs { args = args, next = p + 1 }
+    }
+    loop {
+        let a = match parse_expr(tokens, p) { Parsed as x => x; error as e => return e }
+        args = teko::list::push(args, a.node)
+        p = a.next
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = p + 1                                    // consume `,`
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return error { message = "expected ')' to close the argument list" }
+    }
+    ParsedArgs { args = args, next = p + 1 }
+}
+
+// the LEAF: a literal, a name/path/call, `( expr )`, or an `if`/`match` expression (B.20/B.15).
+fn parse_atom(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    if !has_token(tokens, pos) { return error { message = "expected an expression" } }
+    let k = kind_at(tokens, pos)
+    if k == lexer::TokenKind::Number {
+        return Parsed { node = Number { value = lit_int(tokens[pos].text) }, next = pos + 1 }
+    }
+    if k == lexer::TokenKind::Str {
+        return Parsed { node = StrLit { text = tokens[pos].text }, next = pos + 1 }
+    }
+    if k == lexer::TokenKind::Byte {
+        return Parsed { node = ByteLit { value = lit_byte(tokens[pos].text) }, next = pos + 1 }
+    }
+    if k == lexer::TokenKind::LParen {
+        let inner = match parse_expr(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+        if !is_kind_at(tokens, inner.next, lexer::TokenKind::RParen) {
+            return error { message = "expected ')' to close a parenthesized expression" }
+        }
+        return Parsed { node = inner.node, next = inner.next + 1 }    // grouping is transparent
+    }
+    if k == lexer::TokenKind::If {
+        return parse_if(tokens, pos)
+    }
+    if k == lexer::TokenKind::Match {
+        return parse_match(tokens, pos)
+    }
+    if k == lexer::TokenKind::Ident {
+        let pp = match parse_path(tokens, pos) { ParsedPath as x => x; error as e => return e }
+        if is_kind_at(tokens, pp.next, lexer::TokenKind::LParen) {
+            let ca = match parse_call_args(tokens, pp.next) { ParsedArgs as x => x; error as e => return e }
+            return Parsed { node = Call { callee = pp.node, args = ca.args }, next = ca.next }
+        }
+        if pp.node.segments.len == 1 {
+            return Parsed { node = Var { name = pp.node.segments[0].name }, next = pp.next }
+        }
+        return Parsed { node = PathExpr { path = pp.node }, next = pp.next }
+    }
+    error { message = "expected an expression" }
+}
+
+// THE EXPRESSION ENTRY — descends the whole ladder (P2 complete: or → and → comparison
+// → additive → multiplicative → shift → cast → unary → postfix → atom).
+fn parse_expr(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    parse_or(tokens, pos)
+}
+
+// postfix: a chain of `.field` and `.method(args)` after an atom (tightest after the
+// leaf). Left-assoc. `a.b`, `a.b().c`, `f(x).g`.
+fn parse_postfix(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let prim = match parse_atom(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = prim.node
+    mut p = prim.next
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::Dot) { break }
+        if !is_kind_at(tokens, p + 1, lexer::TokenKind::Ident) {
+            return error { message = "expected a field or method name after '.'" }
+        }
+        let name = tokens[p + 1].text
+        if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
+            let ca = match parse_call_args(tokens, p + 2) { ParsedArgs as x => x; error as e => return e }
+            node = MethodCall { receiver = node, method = name, args = ca.args }
+            p = ca.next
+        } else {
+            node = FieldAccess { receiver = node, field = name }
+            p = p + 2
+        }
+    }
+    Parsed { node = node, next = p }
+}
+
+// prefix unary `- ~ !` (right-assoc: `!!a` is `!(!a)`). Below `to`.
+fn parse_unary(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    if is_unary(tokens, pos) {
+        let op = kind_at(tokens, pos)
+        let operand = match parse_unary(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+        return Parsed { node = Unary { op = op, operand = operand.node }, next = operand.next }
+    }
+    parse_postfix(tokens, pos)
+}
+
+// cast `x to T` (F2) — below unary, above all binary. Left-assoc. The target is a
+// type-PRIMARY (parse_primary, P1): `x to u32`, `x to []u8`, `x to lexer::Token`.
+fn parse_cast(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_unary(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::To) { break }
+        let ty = match parse_primary(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+        node = Cast { expr = node, target = ty.node }
+        p = ty.next
+    }
+    Parsed { node = node, next = p }
+}
+
+// level 3 — shift `<< >>` (left-assoc; the tightest binary, just above cast).
+fn parse_shift(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_cast(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_shift(tokens, p) { break }
+        let op = kind_at(tokens, p)
+        let rhs = match parse_cast(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        node = Binary { op = op, left = node, right = rhs.node }
+        p = rhs.next
+    }
+    Parsed { node = node, next = p }
+}
+
+// level 4 — multiplicative `* / %` and bitwise `&` (left-assoc).
+fn parse_multiplicative(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_shift(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_multiplicative(tokens, p) { break }
+        let op = kind_at(tokens, p)
+        let rhs = match parse_shift(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        node = Binary { op = op, left = node, right = rhs.node }
+        p = rhs.next
+    }
+    Parsed { node = node, next = p }
+}
+
+// level 5 — additive `+ -` and bitwise `| ^` (left-assoc).
+fn parse_additive(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_multiplicative(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_additive(tokens, p) { break }
+        let op = kind_at(tokens, p)
+        let rhs = match parse_multiplicative(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        node = Binary { op = op, left = node, right = rhs.node }
+        p = rhs.next
+    }
+    Parsed { node = node, next = p }
+}
+
+// level 6 — comparison. A CHAIN `a < b < c` is kept as written (M.3): a first + a list
+// of (op, operand) terms; no term → the bare first.
+fn parse_comparison(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_additive(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut terms = teko::list::empty()
+    mut p = first.next
+    loop {
+        if !is_comparison(tokens, p) { break }
+        let op = kind_at(tokens, p)
+        let rhs = match parse_additive(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        terms = teko::list::push(terms, CmpTerm { op = op, operand = rhs.node })
+        p = rhs.next
+    }
+    if terms.len == 0 { return Parsed { node = first.node, next = p } }
+    Parsed { node = Compare { first = first.node, rest = terms }, next = p }
+}
+
+// level 7 — logical AND `&&` (left-assoc).
+fn parse_and(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_comparison(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_andand(tokens, p) { break }
+        let rhs = match parse_comparison(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        node = Binary { op = lexer::TokenKind::AndAnd, left = node, right = rhs.node }
+        p = rhs.next
+    }
+    Parsed { node = node, next = p }
+}
+
+// level 8 — logical OR `||` (left-assoc, the loosest; the ladder's top).
+fn parse_or(tokens: []lexer::Token, pos: u64) -> Parsed | error {
+    let first = match parse_and(tokens, pos) { Parsed as x => x; error as e => return e }
+    mut node = first.node
+    mut p = first.next
+    loop {
+        if !is_oror(tokens, p) { break }
+        let rhs = match parse_and(tokens, p + 1) { Parsed as x => x; error as e => return e }
+        node = Binary { op = lexer::TokenKind::OrOr, left = node, right = rhs.node }
+        p = rhs.next
+    }
+    Parsed { node = node, next = p }
+}

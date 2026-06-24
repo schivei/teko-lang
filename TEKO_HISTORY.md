@@ -99,7 +99,7 @@ their top.
 | String prefixes (seed scope) | B.5 (four combinable prefixes + `$`-count trick) | `"`, `$`, `@`, `"""` all combinable; `$`-count set interpolation depth | **B.5 (M.5 audience)** | Seed keeps **only** `"` (delimiter) + `$"..."` **one-level** interpolation (literal brace = `{{`). **`$`-count trick REMOVED** as bloat (M.5: aesthetic, not weight). **Raw `@"..."` and multi-line `"""..."""` → evolution** (rare in bare-metal seed). |
 | Closures (what's banned, what returns) | B.10 (closures out; fn-pointers deferred) | justified by cost + concurrency hazard | **B.10 (M.3 audience)** | **Magic closures** (implicit scope capture) banned **primarily by M.3** — they *lie* (a `(code,state)` struct disguised as a function); cost/hazard are symptoms. The **capability** returns via **three honest forms** by state-origin: **function pointer** (no state), **`use`** (caller-local, user-declared, keyword), **`inject`** (DI — an **auxiliary footnote** that *contextualizes* the signature, after `-> return`, before body; not part of the signature, not a directive; compiler resolves via a traceable binding). **Lifetimes `#singleton`/`#scoped`/`#transient` are `#` directives** (the *title* — compile-time allocation strategy → arena). Three layers: title (directive/composition), sentence (signature/caller-contract), footnote (`inject`/injection context). The word is `inject` not `with`/`injects`. All evolution. |
 
-| Numeric conversions (`to`/`as`) | early conversion rule + E.1 example | **forbid every lossy conversion at compile time** (`i32 as i8` = compile error; "silent loss is a design-fault bug"), justified as "M.1 modulating M.0, same as opaque pointers" | **conversions block (§5456)** — M.1 "silently" + M.0 + §II homeostasis (five-judge tribunal) | **Any DEFINED numeric→numeric conversion is ALLOWED** incl. narrowing/sign (`i32 to i8`, `i32 to u32`); loss is **caught, never silent** — constant-out-of-range = **compile error**, runtime = **panic-debug / defined-release** (the overflow policy). `bool`↔num and non-numeric = **error** (undefined). Cast spelled **`to`** (renamed from `as`). The opaque-pointer analogy fails (loss is *reducible* by a guard). |
+| Numeric conversions (`to`/`as`) | early conversion rule + E.1 example | **forbid every lossy conversion at compile time** (`i32 as i8` = compile error; "silent loss is a design-fault bug"), justified as "M.1 modulating M.0, same as opaque pointers" | **conversions block (§5456)** — M.1 "silently" + M.0 + §II homeostasis (five-judge tribunal) | **Any DEFINED numeric→numeric conversion is ALLOWED** incl. narrowing/sign (`i32 to i8`, `i32 to u32`); loss is **caught, never silent** — constant-out-of-range = **compile error**, runtime = **PANIC on impossibility** (the value doesn't fit; debug AND release — parity with ÷0/OOB, ↺ refined from the earlier "defined-release" overflow-parity). `bool`↔num and non-numeric = **error** (undefined). Cast spelled **`to`** (renamed from `as`). The opaque-pointer analogy fails (loss is *reducible* by a guard). |
 | `AltPattern` axis (`\|`) | A.14 | **Alt = value axis only** (literals/ranges); parse dispatched axis-exclusively (Ident-led → variant pattern, no `\|` branch), so `RED \| GREEN` was inexpressible | **C7 Alt-axis block** — tribunal verdict + legislator (chose B) | **An `Alt` option may be a value pattern OR a bare variant case** (`BindPattern`, `has_binding=false`): `RED \| GREEN` is legal and **counts toward variant-axis exhaustiveness** (C7b expands it). **Bindings inside an `Alt` are forbidden** (`Foo as x \| Bar`, `FieldPattern` in `\|`) → error. The current SOURCE parser (which already builds variant-case Alts) is ratified; the canonical axis-exclusive parse is retired. Law basis **M.0 + M.2 + M.5** (with **M.1** kept by Alt-expansion + forbid-bindings). |
 
 *When this index and an individual entry disagree, the index's "Current state" (and
@@ -5485,11 +5485,13 @@ to be audited. A **closed system, without gaps.**
   - **Where the loss is caught — two prongs by what the compiler can SEE (M.1):**
     - **Constant provably out of range → COMPILE ERROR** (`300 to i8`, `1e20 to i32`) — fail
       earliest, where the compiler already knows.
-    - **Runtime value the compiler cannot see → the metal converts; the loss is caught at
-      runtime — panic in debug, defined in release** (the *overflow* policy exactly: a checked
-      fault in dev, metal-pure modular truncation in release — a *defined* value, not poison).
-      (÷0's release-active check is the family's lone exception, kept because its alternative is
-      poison/crash.)
+    - **Runtime value the compiler cannot see → the metal attempts the conversion; if the value
+      does NOT fit the target, it is an IMPOSSIBLE conversion → PANIC (debug AND release).** The
+      validation of *whether a conversion is possible* lives at runtime (constants excepted — see
+      above); impossibility fails LOUDLY, never a silent truncation. (↺ refined — see below: this
+      is parity with **÷0/OOB** (panic-always), NOT the overflow *wrap*-release — a lost conversion
+      is an explicit request to represent an unrepresentable value, i.e. a bug, so it panics; the
+      release-truncation reading is retired.)
   - **Undefined conversions → compile error:** `bool`↔numeric (no defined mapping in the seed)
     and any cross to/from a non-numeric type — a separate *undefined* axis, not a *loss* axis.
   - **Why this, not the old forbid:** M.1 forbids the **SILENT** loss — "`to` forbidden where the
@@ -5504,12 +5506,21 @@ to be audited. A **closed system, without gaps.**
   - **↺ was→is→why (M.3 — the reversal recorded):** *WAS* — lossy conversions (`i32 as i8`, `i64
     as f32`, `f64 as f32`) were a flat **compile error** ("silent loss is a design-fault bug"),
     justified as "M.1 modulating M.0, the same logic as opaque pointers." *IS* — they are
-    **allowed**, gated by a constant-out-of-range compile error and a runtime debug-panic/
-    release-defined guard. *WHY* — submitted to the Laws via a five-judge tribunal: the
-    **opaque-pointer analogy fails** (conversion-loss is *reducible* by a guard, unlike a raw
-    deref's irreducible UB); M.1's operative word is **silently**, which the guard cures; and
-    homeostasis (§II) requires parity with the ÷0/overflow/OOB family. The judge tasked to defend
+    **allowed**, gated by a constant-out-of-range compile error and a runtime guard that **PANICS
+    on impossibility** (the value does not fit). *WHY* — submitted to the Laws via a five-judge
+    tribunal: the **opaque-pointer analogy fails** (conversion-loss is *reducible* by a guard,
+    unlike a raw deref's irreducible UB); M.1's operative word is **silently**, which the guard
+    cures; and homeostasis (§II) requires parity with the ÷0/OOB family. The judge tasked to defend
     the old rule **conceded** to the new one. (Cast spelled **`to`**, renamed from `as` in E7.)
+    - **↺ runtime semantics refined (legislator, 2026-06):** the earlier record said the runtime
+      guard was *panic-debug / defined-release* (truncation, in lockstep with the **overflow**
+      wrap-release policy). The legislator clarified that an **impossible conversion must PANIC**
+      (debug AND release) — conversions sit with **÷0/OOB** (panic-always), not with arithmetic
+      overflow (wrap-release). *WAS* — release truncates (defined). *IS* — release panics. *WHY* —
+      **M.1**: a conversion whose value cannot be represented is an unrepresentable-value *request*
+      (a bug), so it must fail loudly, not silently truncate; M.0 still keeps the *attempt* (the
+      conversion is allowed, not compile-forbidden). The §II parity is therefore with ÷0/OOB, not
+      with the overflow wrap. (Arithmetic `+ - *` overflow is unchanged: panic-debug / wrap-release.)
 - **Annotated literal (`let x: T = <literal>`) — stored AS-IS; the BINDING adopts the annotation
   (C6, "Side D").** A numeric literal keeps its native type in the typed leaf (`TNumber` stays `i64`);
   the declared type lives on the binding (`TBinding.bound`), and `value_fits(value, bound)` re-proves
@@ -5583,6 +5594,44 @@ to be audited. A **closed system, without gaps.**
   tension. **Still deferred (named):** the `if`/`match` codec (tags 8/9) needs a typed-**statement**
   serializer (`[]TStatement`) that does not exist yet — a separate later item; read keeps rejecting 8/9
   visibly. `MethodCall` has no typed node (typing deferred) → nothing to serialize.
+- **`byte ↔ integer` casts enabled + provisional cast syntax retired (Fase X).** *WAS* — `cast_check`
+  accepted only `Prim ↔ Prim`; `byte` (a distinct `Byte{}` variant) had no cast, so the codec spelled its
+  byte↔int conversions as `u32(x)` / `u64(data[i])` / `byte(x & 0xFF)` — a **function-call-style cast that
+  is not a function (M.3 — it lies)**. *IS* — (X0) `cast_check`/`const_range_check` (Teko + C) route through
+  a shared `cast_kind` that maps `byte → u8` (B.36 "byte = u8 newtype"), so `byte to T` / `n to byte` is a
+  defined conversion (byte casts AS u8; bool & non-numeric still rejected; a constant out of 0..255 → compile
+  error); then (X1b) all 34 provisional `uNN(…)`/`iNN(…)`/`byte(…)` casts in the codec's `.tks` blocks were
+  swept to the real `x to T`. *WHY* — **M.3** (the legislator's call: `u32(…)` "appears to be something it
+  is not — a function"; only `x to T` is an honest cast) **+ M.0** (a byte is 8 bits; byte↔number is the
+  natural metal conversion) **+ M.2** (explicit `to`, no implicit conflation — B.36's distinctness is about
+  identity, not convertibility) **+ M.1** (byte→wider lossless; int→byte range-guarded). The codec's i64↔u64
+  sites are exact value conversions (a serialized `TNumber.value` is non-negative — negatives are `TUnary`).
+  Not a tension. **Still deferred:** enum-ordinal casts (`prim_byte`/`kind_byte`/`kind_of` — real functions,
+  E7), the general Named-newtype↔base cast (`type Meters = i32`), and `str ↔ bytes` (codepage layer).
+- **`.tkh` header-building driver (E-emit-a) — a checked program → its exported interface.** *WAS* —
+  `emit_tkh(Header)` could emit a `.tkh`, but nothing built the `Header`: the checked `TProgram` was never
+  turned into the exported surface. Also `TFunction` had dropped `has_doc`/`doc`, yet `.tkh` `FnSig` preserves
+  them. *IS* — `TFunction` carries `has_doc`/`doc` again (set by `type_function`; isolated — the `.tkb` codec
+  serializes only `TExpr`, so nothing else is touched); and `build_header(prog, table)` walks the program,
+  keeps only `is_exp` items, resolves each syntactic annotation (`resolve_type`) into the `FnSig`/`TyExport`
+  signatures, and `emit_program` = `build_header` → `emit_tkh`. **A header is ALWAYS emitted — a program with
+  NO exports yields an EMPTY header (0 types, 0 fns) that honestly states "nothing is exported", never nothing
+  at all** (the legislator's rule: a consumer must always find a readable interface). *WHY* — **M.3** (the
+  exported surface, docs included, is the honest interface; emit *something* even when empty) **+ M.4** (built
+  only after C + S; the full read→lex→parse→check→codegen pipeline stays deferred — codegen does not exist).
+  Lives in `src/emit/header.{tks,h,c}` (+ `header_test.tkt`) — `src/` is now canonical for code; the markdown
+  specs are frozen snapshots. *Deferred:* **E-emit-b** (cross-project `.tkh` consumption round-trip).
+- **The `.tkb` is a Teko PACKAGE payload, statically pre-linked — NOT a native `.o` (analogy corrected).**
+  *WAS* — a code comment (and an offhand framing) read "the `.tkh` is to the `.tkb` what a `.h` is to a `.o`",
+  implying the `.tkb` is a native object file fed to a native linker. *IS* — the `.tkb` is binary but is Teko's
+  serialized **typed tree** (IL), not a native `.o`. A `library` `.tkp` emits a **package** = `.tkh` (interface)
+  + `.tkb` (payload); when compiling against dependencies the compiler **loads the packages into memory and
+  STATICALLY PRE-LINKS** their typed trees into the dev's program (static linking of *Teko* objects at the
+  typed-tree level), then codegen runs on the whole. This is the deliberate alternative to **dynamic linking /
+  FFI** (FFI is only for foreign code). *WHY* (legislator) — **M.3**: the artifact's nature must be named
+  honestly (a typed-tree package, not a native object); **M.1**: static whole-program merge means deps are
+  checked together, no dynamic-boundary surprises. The off-plumb code comment in `src/emit/tkh.tks` was fixed;
+  the package/pre-linker model is recorded in LEGISLATION. (The pre-linker + loader are future — pipeline phase.)
 - **Arithmetic overflow (`+ - *`) — metal operates, debug catches:**
   - **Operator:** **panic in debug** (catches accidental overflow while testing),
     **wrap in release** (the metal's native modular result — a *defined* value, not
@@ -6564,7 +6613,7 @@ let flags = 0b1010u8 & 0b0110u8    // both u8 → OK
 // Conversion `to` — any DEFINED numeric→numeric conversion is allowed; loss is caught, never silent:
 let widen  = a to i64              // i32→i64, sign-extend, OK (value-preserving)
 let trunc  = 3.7 to i32            // float→int truncates toward zero → 3
-let narrow = big to i32            // u256→i32: ALLOWED — runtime-guarded (panic-debug / defined-release)
+let narrow = big to i32            // u256→i32: ALLOWED — runtime-guarded; PANICS if the value doesn't fit (impossibility)
 // let bad = 300 to i8            // COMPILE error: constant provably out of range
 
 // Comparison is made safe by a sign-check (codegen, not promotion) — kills the
