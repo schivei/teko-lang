@@ -4,6 +4,7 @@
 // logic is shared from match.c (promoted to non-static for the typed pass).
 #include "typer.h"
 #include "collect.h"   // tk_collect, tk_collected_result
+#include <string.h>    // memcmp (string-span compares)
 
 // shared from match.c (E5b-2), promoted to non-static for reuse:
 tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_type_table table);
@@ -47,8 +48,8 @@ static tk_texpr_result type_var(tk_var v, tk_env env) {
 
 // ---- operators (same B.22 regimes as check_binary/unary/compare) ----
 static tk_texpr_result type_binary(tk_binary b, tk_env env, tk_type_table table) {
-    tk_texpr_result l = tk_type_expr(*b.left,  env, table); if (!l.ok) return l;
-    tk_texpr_result r = tk_type_expr(*b.right, env, table); if (!r.ok) return r;
+    tk_texpr_result l = tk_typer_expr(*b.left,  env, table); if (!l.ok) return l;
+    tk_texpr_result r = tk_typer_expr(*b.right, env, table); if (!r.ok) return r;
     tk_type lt = l.as.value.type, rt = r.as.value.type;
     if (op_is_shift(b.op)) {
         if (!is_integer(lt) || !is_integer(rt)) return xerr("shift needs integer operands");
@@ -63,7 +64,7 @@ static tk_texpr_result type_binary(tk_binary b, tk_env env, tk_type_table table)
 }
 
 static tk_texpr_result type_unary(tk_unary u, tk_env env, tk_type_table table) {
-    tk_texpr_result o = tk_type_expr(*u.operand, env, table); if (!o.ok) return o;
+    tk_texpr_result o = tk_typer_expr(*u.operand, env, table); if (!o.ok) return o;
     tk_type ot = o.as.value.type;
     if (u.op == TK_TOKEN_MINUS || u.op == TK_TOKEN_TILDE) {
         if (!is_integer(ot)) return xerr("unary -/~ needs an integer");
@@ -77,11 +78,11 @@ static tk_texpr_result type_unary(tk_unary u, tk_env env, tk_type_table table) {
 }
 
 static tk_texpr_result type_compare(tk_compare c, tk_env env, tk_type_table table) {
-    tk_texpr_result f = tk_type_expr(*c.first, env, table); if (!f.ok) return f;
+    tk_texpr_result f = tk_typer_expr(*c.first, env, table); if (!f.ok) return f;
     tk_type prev = f.as.value.type;
     tk_tcmp_list terms = tk_tcmp_list_empty();
     for (size_t i = 0; i < c.nrest; i += 1) {
-        tk_texpr_result cur = tk_type_expr(c.rest[i].operand, env, table); if (!cur.ok) return cur;
+        tk_texpr_result cur = tk_typer_expr(*c.rest[i].operand, env, table); if (!cur.ok) return cur;
         if (!is_comparable(prev, cur.as.value.type)) return xerr("operands are not comparable");
         terms = tk_tcmp_list_push(terms, (tk_tcmp_term){ c.rest[i].op, box(cur.as.value) });
         prev = cur.as.value.type;
@@ -91,14 +92,14 @@ static tk_texpr_result type_compare(tk_compare c, tk_env env, tk_type_table tabl
 }
 
 static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
-    tk_str name = c.callee.segments[c.callee.n - 1].name;
+    tk_str name = c.callee.segments[c.callee.len - 1].name;
     tk_type_result ftr = tk_env_lookup(env, name); if (!ftr.ok) return xferr(ftr.as.error);
     tk_type ft = ftr.as.value;
     if (ft.tag != TK_TYPE_FUNC) return xerr("not a function");
     if (c.nargs != ft.as.func.nparams) return xerr("wrong number of arguments");
     tk_texpr_list args = tk_texpr_list_empty();
     for (size_t i = 0; i < c.nargs; i += 1) {
-        tk_texpr_result a = tk_type_expr(c.args[i], env, table); if (!a.ok) return a;
+        tk_texpr_result a = tk_typer_expr(c.args[i], env, table); if (!a.ok) return a;
         if (!tk_type_eq(&a.as.value.type, &ft.as.func.params[i])) return xerr("argument type mismatch");
         args = tk_texpr_list_push(args, a.as.value);
     }
@@ -159,7 +160,7 @@ static const char *cast_reason(tk_type from, tk_type to) {
 bool tk_cast_ok(tk_type from, tk_type to) { return cast_reason(from, to) == NULL; }
 
 static tk_texpr_result type_cast(tk_cast c, tk_env env, tk_type_table table) {
-    tk_texpr_result inner = tk_type_expr(*c.expr, env, table); if (!inner.ok) return inner;
+    tk_texpr_result inner = tk_typer_expr(*c.expr, env, table); if (!inner.ok) return inner;
     tk_type_result tgt = tk_resolve_type(c.target, table);     if (!tgt.ok) return xferr(tgt.as.error);
     const char *why = cast_reason(inner.as.value.type, tgt.as.value);
     if (why != NULL) return xerr(why);
@@ -183,7 +184,7 @@ tk_type_result field_type(tk_struct_body sb, tk_str field, tk_type_table table) 
 }
 
 static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type_table table) {
-    tk_texpr_result recv = tk_type_expr(*fa.receiver, env, table); if (!recv.ok) return recv;
+    tk_texpr_result recv = tk_typer_expr(*fa.receiver, env, table); if (!recv.ok) return recv;
     if (recv.as.value.type.tag != TK_TYPE_NAMED) return xerr("field access requires a struct receiver");
     tk_decl_result decl = tk_type_table_find(table, recv.as.value.type.as.named.name);
     if (!decl.ok) return xerr("unknown type for field access");
@@ -195,7 +196,7 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
 }
 
 // ---- the expression dispatch (the evolved check_expr) ----
-tk_texpr_result tk_type_expr(tk_expr e, tk_env env, tk_type_table table) {
+tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table) {
     switch (e.tag) {
         case TK_EXPR_NUMBER: return xok((tk_texpr){ .tag = TK_TEXPR_NUMBER, .type = prim(TK_PRIM_I64), .as.number = { e.as.number.value } });
         case TK_EXPR_STR:    return xok((tk_texpr){ .tag = TK_TEXPR_STR,  .type = (tk_type){ .tag = TK_TYPE_STR },  .as.str  = { e.as.str.text } });
@@ -237,7 +238,7 @@ static tk_typed_block_result type_block(tk_statement *stmts, size_t n, tk_env en
 
 // ---- if as a VALUE ----
 static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table) {
-    tk_texpr_result c = tk_type_expr(*f.cond, env, table); if (!c.ok) return c;
+    tk_texpr_result c = tk_typer_expr(*f.cond, env, table); if (!c.ok) return c;
     if (!is_bool(c.as.value.type)) return xerr("an `if` condition must be a bool");
     if (!f.has_else)               return xerr("an `if` used as a value needs an `else`");
     tk_typed_block_result tb = type_block(f.then_blk, f.nthen, env, table); if (!tb.ok) return xferr(tb.as.error);
@@ -251,7 +252,7 @@ static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table) {
 
 // ---- if as a STATEMENT (value discarded → Unit) ----
 static tk_texpr_result type_if_stmt(tk_if_expr f, tk_env env, tk_type_table table) {
-    tk_texpr_result c = tk_type_expr(*f.cond, env, table); if (!c.ok) return c;
+    tk_texpr_result c = tk_typer_expr(*f.cond, env, table); if (!c.ok) return c;
     if (!is_bool(c.as.value.type)) return xerr("an `if` condition must be a bool");
     tk_typed_block_result tb = type_block(f.then_blk, f.nthen, env, table); if (!tb.ok) return xferr(tb.as.error);
     tk_tstatement *eb_stmts = tb.as.value.stmts; size_t eb_n = 0;   // gated by has_else
@@ -267,12 +268,12 @@ static tk_texpr_result type_if_stmt(tk_if_expr f, tk_env env, tk_type_table tabl
 static tk_tarm_result type_arm(tk_arm a, tk_type subject, tk_env env, tk_type_table table) {
     tk_env_result e2 = tk_check_pattern(a.pattern, subject, env, table);
     if (!e2.ok) return (tk_tarm_result){ .ok = false, .as.error = e2.as.error };
-    tk_texpr_result body = tk_type_expr(a.body, e2.as.value, table);
+    tk_texpr_result body = tk_typer_expr(a.body, e2.as.value, table);
     if (!body.ok) return (tk_tarm_result){ .ok = false, .as.error = body.as.error };
     tk_texpr *bodyp = box(body.as.value);
     tk_texpr *guard = bodyp;                         // gated by has_when (placeholder reuses body)
     if (a.has_when) {
-        tk_texpr_result g = tk_type_expr(a.guard, e2.as.value, table);
+        tk_texpr_result g = tk_typer_expr(a.guard, e2.as.value, table);
         if (!g.ok) return (tk_tarm_result){ .ok = false, .as.error = g.as.error };
         if (!is_bool(g.as.value.type)) return (tk_tarm_result){ .ok = false, .as.error = tk_error_make("a `when` guard must be a bool") };
         guard = box(g.as.value);
@@ -282,7 +283,7 @@ static tk_tarm_result type_arm(tk_arm a, tk_type subject, tk_env env, tk_type_ta
 
 // ---- match as a VALUE ----
 static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table table) {
-    tk_texpr_result s = tk_type_expr(*m.subject, env, table); if (!s.ok) return s;
+    tk_texpr_result s = tk_typer_expr(*m.subject, env, table); if (!s.ok) return s;
     if (m.narms == 0) return xerr("a `match` needs at least one arm");
     tk_tarm_result a0 = type_arm(m.arms[0], s.as.value.type, env, table); if (!a0.ok) return xferr(a0.as.error);
     tk_type first = a0.as.value.body->type;
@@ -299,7 +300,7 @@ static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table tab
 
 // ---- match as a STATEMENT (value discarded → Unit) ----
 static tk_texpr_result type_match_stmt(tk_match_expr m, tk_env env, tk_type_table table) {
-    tk_texpr_result s = tk_type_expr(*m.subject, env, table); if (!s.ok) return s;
+    tk_texpr_result s = tk_typer_expr(*m.subject, env, table); if (!s.ok) return s;
     tk_tarm_list arms = tk_tarm_list_empty();
     for (size_t i = 0; i < m.narms; i += 1) {
         tk_tarm_result ai = type_arm(m.arms[i], s.as.value.type, env, table); if (!ai.ok) return xferr(ai.as.error);
@@ -315,7 +316,7 @@ static tk_typed_stmt_result sfail(tk_error e)   { return (tk_typed_stmt_result){
 static tk_typed_stmt_result smsg(const char *m) { return sfail(tk_error_make(m)); }
 
 static tk_typed_stmt_result type_binding(tk_binding b, tk_env env, tk_type_table table) {
-    tk_texpr_result v = tk_type_expr(b.value, env, table); if (!v.ok) return sfail(v.as.error);
+    tk_texpr_result v = tk_typer_expr(b.value, env, table); if (!v.ok) return sfail(v.as.error);
     tk_type bound = v.as.value.type;
     if (b.has_type) {
         tk_type_result a = tk_resolve_type(b.type_ann, table); if (!a.ok) return sfail(a.as.error);
@@ -334,14 +335,14 @@ static tk_typed_stmt_result type_binding(tk_binding b, tk_env env, tk_type_table
 static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table table) {
     tk_binding_result tb = tk_env_lookup_binding(env, a.name); if (!tb.ok) return sfail(tb.as.error);
     if (!tb.as.value.is_mut) return smsg("cannot assign to immutable binding — declare it `mut` (B.21)");
-    tk_texpr_result v = tk_type_expr(a.value, env, table); if (!v.ok) return sfail(v.as.error);
+    tk_texpr_result v = tk_typer_expr(a.value, env, table); if (!v.ok) return sfail(v.as.error);
     if (!tk_type_eq(&tb.as.value.type, &v.as.value.type)) return smsg("assigned value does not match the target type");
     tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, v.as.value } };
     return sok(node, env);   // mut rule enforced (B.21)
 }
 
 static tk_typed_stmt_result type_return(tk_return r, tk_env env, tk_type_table table) {
-    tk_texpr_result v = tk_type_expr(r.value, env, table); if (!v.ok) return sfail(v.as.error);
+    tk_texpr_result v = tk_typer_expr(r.value, env, table); if (!v.ok) return sfail(v.as.error);
     tk_tstatement node = { .tag = TK_TSTMT_RETURN, .as.ret = { r.has_value, v.as.value } };
     return sok(node, env);   // value gated by has_value (B.20); return-type match enforced by tk_type_function's check_returns (C5)
 }
@@ -356,7 +357,7 @@ static tk_typed_stmt_result type_exprstmt(tk_expr_stmt es, tk_env env, tk_type_t
     tk_texpr_result te;
     if (es.expr.tag == TK_EXPR_IF)         te = type_if_stmt(es.expr.as.if_expr, env, table);
     else if (es.expr.tag == TK_EXPR_MATCH) te = type_match_stmt(es.expr.as.match_expr, env, table);
-    else                                   te = tk_type_expr(es.expr, env, table);
+    else                                   te = tk_typer_expr(es.expr, env, table);
     if (!te.ok) return sfail(te.as.error);
     tk_tstatement node = { .tag = TK_TSTMT_EXPR, .as.expr_stmt = { te.as.value } };
     return sok(node, env);

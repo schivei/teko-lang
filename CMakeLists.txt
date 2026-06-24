@@ -36,6 +36,9 @@ set(TEKO_TEXT_SOURCES
 set(TEKO_LEXER_SOURCES
     src/lexer/lexer.c)
 
+set(TEKO_PARSER_SOURCES
+    src/parser/parser.c)
+
 set(TEKO_CHECKER_SOURCES
     src/checker/type.c
     src/checker/scope.c
@@ -53,11 +56,14 @@ set(TEKO_EMIT_SOURCES
     src/emit/tkh.c
     src/emit/header.c)
 
-# The bootstrap mirror as one (currently incomplete) static library. Excluded from
-# ALL so a plain `cmake --build` does not attempt the not-yet-linkable mirror.
-add_library(teko_bootstrap STATIC EXCLUDE_FROM_ALL
+# The bootstrap mirror as one static library. The whole C front-end + checker + emit
+# compiles (F0 done); the default build now archives it, guarding the mirror against
+# compile regressions. It is not yet linked into an executable — the driver (F1) will
+# link `tekoc` against it once the pipeline is wired.
+add_library(teko_bootstrap STATIC
     ${TEKO_TEXT_SOURCES}
     ${TEKO_LEXER_SOURCES}
+    ${TEKO_PARSER_SOURCES}
     ${TEKO_CHECKER_SOURCES}
     ${TEKO_EMIT_SOURCES})
 

@@ -1,5 +1,6 @@
 // src/emit/tkb_read.c
 #include "tkb_read.h"
+#include "tkb_buf.h"   // tk_fnv1a (hash check on the .tkb body)
 #include <stdlib.h>
 
 uint8_t tk_read_u8(tk_reader *r) {

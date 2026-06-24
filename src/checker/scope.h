@@ -3,7 +3,8 @@
 #define TK_CHECK_SCOPE_H
 
 #include "type.h"
-#include "../core.h"   // TK_LIST, TK_RESULT
+#include "../core.h"          // TK_LIST, TK_RESULT
+#include "../parser/ast.h"    // tk_bind_kind (the parser AST owns the binding kinds)
 
 typedef struct { tk_str name; tk_type type; bool is_mut; } tk_val_binding;  // is_mut — B.21
 TK_LIST(tk_val_binding, tk_env);        // a flat list; later bindings shadow earlier

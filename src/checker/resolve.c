@@ -23,7 +23,8 @@ tk_decl_result tk_type_table_find(tk_type_table table, tk_str name) {
     return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
 }
 
-static tk_type_result resolve_named(tk_path path, tk_type_table table) {
+// non-static: shared with match.c (the typed pattern checker resolves case/struct names — C7).
+tk_type_result resolve_named(tk_path path, tk_type_table table) {
     tk_str name = path.segments[path.len - 1].name;       // seed: last segment
     tk_type_result bt = tk_builtin_type(name);            // u8…u64, byte, str, error
     if (bt.ok) return bt;

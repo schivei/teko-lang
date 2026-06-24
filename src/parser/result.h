@@ -1,129 +1,90 @@
-// parser/result.h
-typedef struct { tk_str *names; size_t n_names; size_t next; } tk_parsed_names;
-TK_RESULT(tk_parsed_names, tk_parsed_names_result);
+// src/parser/result.h — the parser's result TYPES + token-cursor predicate
+// DECLARATIONS, the C23 mirror of parser/result.tks (+ parse_file's Parsed* family,
+// cursor.tks, optokens.tks).
+//
+// TYPE-ONLY / declarations-only header (B0c part 1). Every parser returns the parsed
+// thing + where parsing resumed (`next`). The cursor predicate BODIES live in
+// parser/parser.c (B0c part 2 — next lote), NOT here.
+//
+// The C cursor model carries the token slice explicitly as (t, n, pos): a `tk_token`
+// pointer, its length, and the current index. (The Teko side passes a `[]Token` whose
+// `.len` is implicit; the C mirror makes both explicit.)
+#ifndef TK_PARSER_RESULT_H
+#define TK_PARSER_RESULT_H
 
-// forward decl so parse_pattern_primary (above) can call it.
-static tk_parsed_names_result parse_field_names(const tk_token *t, size_t n, size_t pos);
+#include "ast.h"            // the AST node types every Parsed* wraps
+#include "../lexer/token.h" // tk_token, tk_token_kind
+#include "../core.h"        // TK_RESULT, tk_error
 
-static tk_parsed_names_result parse_field_names(const tk_token *t, size_t n, size_t pos) {
-    size_t p = tk_skip_seps(t, n, pos + 1);   // consume `{`, skip leading separators
-    tk_str *names = NULL; size_t nn = 0;
-    if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE))
-        return (tk_parsed_names_result){ .ok = true, .as.value = { .names = names, .n_names = 0, .next = p + 1 } };
-    for (;;) {
-        if (!tk_is_kind_at(t, n, p, TK_TOKEN_IDENT))
-            return (tk_parsed_names_result){ .ok = false, .as.error = tk_error_make("expected a field name in `Type { … }`") };
-        tk_strs_push(&names, &nn, t[p].text); p += 1;
-        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) break;
-        if (!tk_is_sep(t, n, p))
-            return (tk_parsed_names_result){ .ok = false, .as.error = tk_error_make("expected ';', a newline, or '}' after a field name") };
-        p = tk_skip_seps(t, n, p);
-        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) break;
-    }
-    return (tk_parsed_names_result){ .ok = true, .as.value = { .names = names, .n_names = nn, .next = p + 1 } };
-}
+#include <stdbool.h>
+#include <stddef.h>         // size_t
 
-// parser/result.h — new results.
-typedef struct { tk_use_decl node; size_t next; }                 tk_parsed_use;
-typedef struct { tk_use_decl *uses; size_t n_uses; size_t next; } tk_parsed_uses;
-typedef struct { tk_main_file node; size_t next; }                tk_parsed_main_file;
-TK_RESULT(tk_parsed_use,       tk_parsed_use_result);
-TK_RESULT(tk_parsed_uses,      tk_parsed_uses_result);
-TK_RESULT(tk_parsed_main_file, tk_parsed_main_file_result);
+// =========================================================================
+// The Parsed* result family (parser/result.tks). Each carries the parsed node (a
+// single node uses `node`; a list uses a descriptive field) + the resume index `next`.
+// =========================================================================
+typedef struct { tk_expr      node;       size_t next; } tk_parsed;          // an expression
+typedef struct { tk_statement node;       size_t next; } tk_parsed_stmt;     // a statement
+typedef struct { tk_type_expr node;       size_t next; } tk_parsed_type;     // a type expression
+typedef struct { tk_decl      node;       size_t next; } tk_parsed_decl;     // a top-level declaration (R-main)
+typedef struct { tk_statement *statements; size_t n; size_t next; } tk_parsed_block;  // a `{ … }` block
+typedef struct { tk_type_body node;       size_t next; } tk_parsed_body;     // a struct/enum/variant body
+typedef struct { tk_pattern   node;       size_t next; } tk_parsed_pattern;  // a match pattern
+typedef struct { tk_arm       node;       size_t next; } tk_parsed_arm;      // a match arm
+typedef struct { tk_arm      *arms;   size_t n_arms;   size_t next; } tk_parsed_arms;   // a `{ arm; … }` arm list
+typedef struct { tk_expr     *args;   size_t n_args;   size_t next; } tk_parsed_args;   // call arguments
+typedef struct { tk_param    *params; size_t n_params; size_t next; } tk_parsed_params; // function parameters
+typedef struct { tk_bind_target node; size_t next; } tk_parsed_target;       // a binding target
+typedef struct { tk_str      *names;  size_t n_names;  size_t next; } tk_parsed_names;  // a `{ … }` field-name list
+typedef struct { tk_path      node;       size_t next; } tk_parsed_path;     // an expression path a::b::c
+typedef struct { tk_field    *fields; size_t n_fields; size_t next; } tk_parsed_fields; // a struct field list
+typedef struct { bool has_when; tk_expr guard;        size_t next; } tk_guard;          // an optional `when`
+typedef struct { bool has_type; tk_type_expr type_ann; size_t next; } tk_annotation;    // an optional `: T`
 
-static bool is_decl_start(const tk_token *t, size_t n, size_t pos) {
-    return tk_is_kind_at(t, n, pos, TK_TOKEN_FN) || tk_is_kind_at(t, n, pos, TK_TOKEN_TYPE);
-}
+// --- file-level results (parse_file.tks: ParsedUse/ParsedUses/ParsedMainFile + module) ---
+typedef struct { tk_use_decl  node;  size_t next; }              tk_parsed_use;        // one `use`
+typedef struct { tk_use_decl *uses;  size_t n_uses; size_t next; } tk_parsed_uses;     // a `use` header
+typedef struct { tk_main_file node;  size_t next; }              tk_parsed_main_file;  // a parsed main.tks
+typedef struct { tk_module    node;  size_t next; }              tk_parsed_module;     // a parsed module
 
-static tk_parsed_use_result parse_use(const tk_token *t, size_t n, size_t pos) {
-    tk_parsed_path_result pp = parse_path(t, n, pos + 1);
-    if (!pp.ok) return (tk_parsed_use_result){ .ok = false, .as.error = pp.as.error };
-    bool has_alias = false; tk_str alias = (tk_str){0}; size_t p = pp.as.value.next;
-    if (tk_is_kind_at(t, n, p, TK_TOKEN_AS)) {
-        if (!tk_is_kind_at(t, n, p + 1, TK_TOKEN_IDENT))
-            return (tk_parsed_use_result){ .ok = false, .as.error = tk_error_make("expected a name after `as` in a `use`") };
-        has_alias = true; alias = t[p + 1].text; p += 2;
-    }
-    tk_use_decl u = { .path = pp.as.value.node, .has_alias = has_alias, .alias = alias };
-    return (tk_parsed_use_result){ .ok = true, .as.value = { .node = u, .next = p } };
-}
+// result stamps (Parsed* | error)
+TK_RESULT(tk_parsed,            tk_parsed_result);
+TK_RESULT(tk_parsed_stmt,       tk_parsed_stmt_result);
+TK_RESULT(tk_parsed_type,       tk_parsed_type_result);
+TK_RESULT(tk_parsed_decl,       tk_parsed_decl_result);
+TK_RESULT(tk_parsed_block,      tk_parsed_block_result);
+TK_RESULT(tk_parsed_body,       tk_parsed_body_result);
+TK_RESULT(tk_parsed_pattern,    tk_parsed_pattern_result);
+TK_RESULT(tk_parsed_arm,        tk_parsed_arm_result);
+TK_RESULT(tk_parsed_arms,       tk_parsed_arms_result);
+TK_RESULT(tk_parsed_args,       tk_parsed_args_result);
+TK_RESULT(tk_parsed_params,     tk_parsed_params_result);
+TK_RESULT(tk_parsed_target,     tk_parsed_target_result);
+TK_RESULT(tk_parsed_names,      tk_parsed_names_result);
+TK_RESULT(tk_parsed_path,       tk_parsed_path_result);
+TK_RESULT(tk_parsed_fields,     tk_parsed_fields_result);
+TK_RESULT(tk_guard,             tk_guard_result);
+TK_RESULT(tk_annotation,        tk_annotation_result);
+TK_RESULT(tk_parsed_use,        tk_parsed_use_result);
+TK_RESULT(tk_parsed_uses,       tk_parsed_uses_result);
+TK_RESULT(tk_parsed_main_file,  tk_parsed_main_file_result);
+TK_RESULT(tk_parsed_module,     tk_parsed_module_result);
 
-static tk_parsed_uses_result parse_use_header(const tk_token *t, size_t n, size_t pos) {
-    size_t p = tk_skip_seps(t, n, pos);
-    tk_use_decl *uses = NULL; size_t nu = 0;
-    while (tk_is_kind_at(t, n, p, TK_TOKEN_USE)) {
-        tk_parsed_use_result u = parse_use(t, n, p);
-        if (!u.ok) return (tk_parsed_uses_result){ .ok = false, .as.error = u.as.error };
-        tk_uses_push(&uses, &nu, u.as.value.node); p = u.as.value.next;
-        if (!tk_has_token(t, n, p)) break;
-        if (!tk_is_sep(t, n, p))
-            return (tk_parsed_uses_result){ .ok = false, .as.error = tk_error_make("expected ';' or a newline after a `use`") };
-        p = tk_skip_seps(t, n, p);
-    }
-    return (tk_parsed_uses_result){ .ok = true, .as.value = { .uses = uses, .n_uses = nu, .next = p } };
-}
+// =========================================================================
+// Token-cursor predicate DECLARATIONS (cursor.tks, optokens.tks). Bodies: parser.c.
+// =========================================================================
+bool tk_has_token (const tk_token *t, size_t n, size_t pos);                       // is there a token at pos?
+bool tk_is_kind_at(const tk_token *t, size_t n, size_t pos, tk_token_kind k);      // has_token + kind compare
+bool tk_is_sep    (const tk_token *t, size_t n, size_t pos);                       // `;` or a newline (B.17)
+size_t tk_skip_seps(const tk_token *t, size_t n, size_t pos);                      // skip a run of separators
 
-tk_parsed_main_file_result tk_parse_main_file(const tk_token *t, size_t n, size_t pos) {
-    tk_parsed_uses_result hdr = parse_use_header(t, n, pos);
-    if (!hdr.ok) return (tk_parsed_main_file_result){ .ok = false, .as.error = hdr.as.error };
-    size_t p = tk_skip_seps(t, n, hdr.as.value.next);
-    tk_statement *body = NULL; size_t nb = 0;
-    for (;;) {
-        if (!tk_has_token(t, n, p)) break;
-        if (is_decl_start(t, n, p))
-            return (tk_parsed_main_file_result){ .ok = false, .as.error = tk_error_make("main.tks is a virtual main: it may not declare types or functions (only `use` + statements)") };
-        tk_parsed_stmt_result s = tk_parse_statement(t, n, p);
-        if (!s.ok) return (tk_parsed_main_file_result){ .ok = false, .as.error = s.as.error };
-        tk_stmts_push(&body, &nb, s.as.value.node); p = s.as.value.next;
-        if (!tk_has_token(t, n, p)) break;
-        if (!tk_is_sep(t, n, p))
-            return (tk_parsed_main_file_result){ .ok = false, .as.error = tk_error_make("expected ';' or a newline after a statement") };
-        p = tk_skip_seps(t, n, p);
-    }
-    tk_main_file mf = { .uses = hdr.as.value.uses, .n_uses = hdr.as.value.n_uses, .body = body, .n_body = nb };
-    return (tk_parsed_main_file_result){ .ok = true, .as.value = { .node = mf, .next = p } };
-}
+bool tk_is_unary         (const tk_token *t, size_t n, size_t pos);  // - ~ !            (level 2)
+bool tk_is_shift         (const tk_token *t, size_t n, size_t pos);  // << >>            (level 3)
+bool tk_is_multiplicative(const tk_token *t, size_t n, size_t pos);  // * / % &          (level 4)
+bool tk_is_additive      (const tk_token *t, size_t n, size_t pos);  // + - | ^          (level 5)
+bool tk_is_comparison    (const tk_token *t, size_t n, size_t pos);  // < > <= >= == !=  (level 6)
+bool tk_is_andand        (const tk_token *t, size_t n, size_t pos);  // &&               (level 7)
+bool tk_is_oror          (const tk_token *t, size_t n, size_t pos);  // ||               (level 8)
+bool tk_is_assign_op     (const tk_token *t, size_t n, size_t pos);  // = += -= … (B.4 — statement-only)
 
-// parser/result.h — module result.
-typedef struct { tk_module node; size_t next; } tk_parsed_module;
-TK_RESULT(tk_parsed_module, tk_parsed_module_result);
-
-static tk_parsed_decl_result parse_decl(const tk_token *t, size_t n, size_t pos) {
-    size_t k = pos;
-    if (tk_is_kind_at(t, n, k, TK_TOKEN_DOC)) k += 1;
-    if (tk_is_kind_at(t, n, k, TK_TOKEN_EXP)) k += 1;
-    if (tk_is_kind_at(t, n, k, TK_TOKEN_FN))   return tk_parse_function(t, n, pos);
-    if (tk_is_kind_at(t, n, k, TK_TOKEN_TYPE)) return tk_parse_type_decl(t, n, pos);
-    return (tk_parsed_decl_result){ .ok = false, .as.error = tk_error_make("expected a declaration (`fn`/`type`, optionally `exp`/doc); loose statements belong in main.tks") };
-}
-
-tk_parsed_module_result tk_parse_module(const tk_token *t, size_t n, size_t pos) {
-    tk_parsed_uses_result hdr = parse_use_header(t, n, pos);
-    if (!hdr.ok) return (tk_parsed_module_result){ .ok = false, .as.error = hdr.as.error };
-    size_t p = tk_skip_seps(t, n, hdr.as.value.next);
-    tk_decl *decls = NULL; size_t nd = 0;
-    for (;;) {
-        if (!tk_has_token(t, n, p)) break;
-        tk_parsed_decl_result d = parse_decl(t, n, p);
-        if (!d.ok) return (tk_parsed_module_result){ .ok = false, .as.error = d.as.error };
-        tk_decls_push(&decls, &nd, d.as.value.node); p = d.as.value.next;
-        if (!tk_has_token(t, n, p)) break;
-        if (!tk_is_sep(t, n, p))
-            return (tk_parsed_module_result){ .ok = false, .as.error = tk_error_make("expected ';' or a newline after a declaration") };
-        p = tk_skip_seps(t, n, p);
-    }
-    tk_module m = { .uses = hdr.as.value.uses, .n_uses = hdr.as.value.n_uses, .decls = decls, .n_decls = nd };
-    return (tk_parsed_module_result){ .ok = true, .as.value = { .node = m, .next = p } };
-}
-
-// src/build/tkp_rule.{h,c}
-typedef enum { TK_ARTIFACT_EXECUTABLE, TK_ARTIFACT_LIBRARY } tk_artifact;
-TK_RESULT(tk_artifact, tk_artifact_result);   // tk_artifact | error
-
-tk_artifact_result tk_check_main_file_rule(tk_artifact artifact, bool has_main) {
-    if (artifact == TK_ARTIFACT_EXECUTABLE && !has_main)
-        return (tk_artifact_result){ .ok = false, .as.error = tk_error_make("an executable project requires a main.tks") };
-    if (artifact == TK_ARTIFACT_LIBRARY && has_main)
-        return (tk_artifact_result){ .ok = false, .as.error = tk_error_make("a library project may not have a main.tks") };
-    return (tk_artifact_result){ .ok = true, .as.value = artifact };
-}
+#endif // TK_PARSER_RESULT_H

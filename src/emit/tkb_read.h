@@ -1,7 +1,7 @@
 // src/emit/tkb_read.h
 #ifndef TK_EMIT_TKB_READ_H
 #define TK_EMIT_TKB_READ_H
-#include "tast.h"
+#include "../checker/tast.h"
 
 // a mutable cursor with an `ok` flag — a read past the end sets ok=false.
 typedef struct { const tk_byte *data; size_t len; size_t pos; bool ok; } tk_reader;

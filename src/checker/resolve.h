@@ -13,5 +13,6 @@ TK_RESULT(tk_type_decl, tk_decl_result);   // TypeDecl | error
 
 tk_decl_result tk_type_table_find(tk_type_table table, tk_str name);
 tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table);
+tk_type_result resolve_named(tk_path path, tk_type_table table);   // shared with match.c (C7)
 
 #endif // TK_CHECK_RESOLVE_H

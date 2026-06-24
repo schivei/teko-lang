@@ -5,7 +5,7 @@
 #include "tast.h"
 #include "resolve.h"   // tk_type_table
 
-tk_texpr_result      tk_type_expr(tk_expr e, tk_env env, tk_type_table table);
+tk_texpr_result      tk_typer_expr(tk_expr e, tk_env env, tk_type_table table);   // types an Expr → TExpr (renamed from tk_type_expr to avoid clashing with the AST type tk_type_expr/TypeExpr)
 tk_typed_stmt_result tk_type_statement(tk_statement s, tk_env env, tk_type_table table);
 tk_tfunction_result  tk_type_function(tk_function f, tk_env env, tk_type_table table);
 tk_titem_result      tk_type_item(tk_item item, tk_env env, tk_type_table table);

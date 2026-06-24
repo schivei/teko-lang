@@ -37,10 +37,16 @@ de pé; F0 passa a crescer o espelho C sobre uma infra comprovada. (`build/` no 
 | # | Entrega | Lei | Esf. |
 |---|---|---|---|
 | B0a ✓ | **Lexer C completo** — **feito**: `token.h` completo (enum `tk_token_kind` 1:1 com Teko, 76 kinds, ordinais preservados), `lexer.h`/`lexer.c` (scanner fiel a `lexer.tks`: skip/number/ident/str/byte/symbol maximal-munch + `tk_lit_int`/`tk_lit_byte`). `-fsyntax-only` limpo; em CMake (`TEKO_LEXER_SOURCES`) | M.4 | M |
-| B0b | **Headers C self-contained** — auditar TU a TU; consertar ordem de include + defs faltantes (`tk_token`, `tk_expr`, `tk_pattern`, `tk_bind_kind`, AST do parser) para cada `.c` compilar isolado | M.4 | M |
-| B0c | **Parser C completo** — verificar/materializar todos os `parse_*` em C (não só os headers consolidados) | M.4 | M |
-| B0d | **Runtime/prelude C** — `core.h` concreto: `tk_str`, `TK_LIST`/`tk_list`, `tk_error`, `panic`/`abort`, igualdade/`tk_str_eq`; compilável e completo | M.5 | M |
-| B0e | **CMake linka** — `tekoc` (alvo executável, `main` no-op por ora); remover `EXCLUDE_FROM_ALL`; `cmake --build` verde no host | M.4 | P |
+| B0b ✓ | **Headers C self-contained** — **feito**: `parser/ast.h`/`result.h` viraram headers de TIPO reais (guard+includes, sem corpos); `scope.h` inclui o AST (`tk_bind_kind`); `tkb_read.h` path corrigido. Colisão `tk_type_expr` (TYPE vs FUNÇÃO) resolvida → função renomeada `tk_typer_expr` (decisão do legislador). Bugs latentes: `resolve_named` exposto, `<string.h>` em typer/match, deref `*c.rest[i].operand` | M.4 | M |
+| B0c-1 ✓ | **AST/headers do parser** — **feito** (acima): definem `tk_expr`/`TK_EXPR_*`/`tk_pattern`/`tk_statement`/`tk_item`/… ; os 12 helpers de append + box + predicados de cursor declarados | M.4 | M |
+| B0c-2 ✓ | **Corpos do parser** — **feito**: `parser.c` com todos os `parse_*`/cursor/optokens + 12 helpers de append + box, transcritos de `parser/*.tks`. `-fsyntax-only` limpo; em CMake (`TEKO_PARSER_SOURCES`). Sem stubs/tensões | M.4 | M |
+| B0d | **Runtime/prelude C** — `core.h` ok; promover `tk_str_eq` (hoje `static` duplicado em type.c/typer.c) p/ `text.h` — *cleanup M.5, NÃO bloqueia* (pendente) | M.5 | P |
+| B0e ✓ | **CMake linka tudo** — **feito**: `parser.c` na lib; `EXCLUDE_FROM_ALL` removido; `cmake --build` (padrão) arquiva `libteko_bootstrap.a` + builda `tekoc` — verde | M.4 | P |
+
+> **F0 CONCLUÍDO ✅:** **17/17 `.c` do espelho compilam limpos**; `cmake --build` (padrão) produz
+> **`libteko_bootstrap.a`** (front-end + checker + emit inteiros) **+ `tekoc`** (smoke). Único resíduo: **B0d**
+> (`tk_str_eq` duplicado — cleanup M.5, não bloqueia). A lib ainda não é linkada num executável — isso é a
+> **F1** (conectar o driver: read→lex→parse→check, e linkar `tekoc` contra a lib).
 
 **Marco F0:** `cmake --build` produz `tekoc`; `./tekoc` roda (sem fazer nada ainda).
 

@@ -1,9 +1,10 @@
 // src/checker/match.c
 #include "match.h"
+#include <string.h>
 
 // from typer.c — the typed expression pass + the struct field resolver
 // (forward-declared, both non-static, to avoid a match↔typer cycle).
-tk_texpr_result tk_type_expr(tk_expr e, tk_env env, tk_type_table table);
+tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table);
 tk_type_result  field_type(tk_struct_body sb, tk_str field, tk_type_table table);
 
 static tk_env_result eok(tk_env e)     { return (tk_env_result){ .ok = true,  .as.value = e }; }
@@ -14,19 +15,19 @@ tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_typ
     switch (p.tag) {
         case TK_PAT_WILDCARD: return eok(env);
         case TK_PAT_BIND: {
-            tk_type_result ct = resolve_named_c(p.as.bind.type_name, table); // see resolve.c
+            tk_type_result ct = resolve_named(p.as.bind.type_name, table); // see resolve.c
             if (!ct.ok) return efail(ct.as.error);
             return eok(tk_env_define(env, p.as.bind.binding, ct.as.value, false));
         }
         case TK_PAT_LITERAL: {
-            tk_texpr_result lt = tk_type_expr(p.as.literal.value, env, table);
+            tk_texpr_result lt = tk_typer_expr(p.as.literal.value, env, table);
             if (!lt.ok) return efail(lt.as.error);
             if (!tk_type_eq(&lt.as.value.type, &subject)) return efail(tk_error_make("literal pattern does not match the subject type"));
             return eok(env);
         }
         case TK_PAT_FIELD: {
             // C7a: variant axis `Type { f; g }` — resolve to a struct, bind each field IMMUTABLE (B.21).
-            tk_type_result nt = resolve_named_c(p.as.field.type_name, table);
+            tk_type_result nt = resolve_named(p.as.field.type_name, table);
             if (!nt.ok) return efail(nt.as.error);
             if (nt.as.value.tag != TK_TYPE_NAMED) return efail(tk_error_make("field pattern requires a struct type"));
             tk_decl_result decl = tk_type_table_find(table, nt.as.value.as.named.name);
@@ -43,9 +44,9 @@ tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_typ
         }
         case TK_PAT_RANGE: {
             // C7a: `lo ..= hi` — both bounds type_eq the subject, AND the subject is an integer (M.1/M.2).
-            tk_texpr_result lo = tk_type_expr(p.as.range.lo, env, table);
+            tk_texpr_result lo = tk_typer_expr(p.as.range.lo, env, table);
             if (!lo.ok) return efail(lo.as.error);
-            tk_texpr_result hi = tk_type_expr(p.as.range.hi, env, table);
+            tk_texpr_result hi = tk_typer_expr(p.as.range.hi, env, table);
             if (!hi.ok) return efail(hi.as.error);
             if (!tk_type_eq(&lo.as.value.type, &subject)) return efail(tk_error_make("range lower bound does not match the subject type"));
             if (!tk_type_eq(&hi.as.value.type, &subject)) return efail(tk_error_make("range upper bound does not match the subject type"));
