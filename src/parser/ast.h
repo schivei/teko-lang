@@ -188,6 +188,11 @@ typedef struct {                                                        // a top
         tk_use_decl  use_decl;
         tk_statement statement;
     } as;
+    // A3 — the namespace this item came from, for multi-file project assembly
+    // (codegen name-mangling later). A single-file `tk_compile` leaves it the zero
+    // str (no namespace); the project assemble pass tags every merged item with its
+    // SourceFile namespace. Resolution/typing IGNORE this — it carries provenance only.
+    tk_str namespace;
 } tk_item;
 typedef struct { tk_item *items; size_t len; } tk_program;              // a flat item list
 
@@ -203,7 +208,7 @@ void tk_arms_push  (tk_arm **xs,       size_t *n, tk_arm       item);
 void tk_params_push(tk_param **xs,     size_t *n, tk_param     item);
 void tk_fields_push(tk_field **xs,     size_t *n, tk_field     item);
 void tk_segs_push  (tk_segment **xs,   size_t *n, tk_segment   item);
-void tk_strs_push  (tk_str **xs,       size_t *n, tk_str       item);
+void tk_strvec_push(tk_str **xs,       size_t *n, tk_str       item);   // (renamed from tk_strs_push to avoid the TK_LIST(tk_str, tk_strs) clash in TUs that also include build/manifest.h — A3)
 void tk_types_push (tk_type_expr **xs, size_t *n, tk_type_expr item);
 void tk_terms_push (tk_cmp_term **xs,  size_t *n, tk_cmp_term  item);
 void tk_decls_push (tk_decl **xs,      size_t *n, tk_decl      item);

@@ -1,0 +1,56 @@
+// src/vm/vm_test.tkt — tests for teko::vm (the D1 typed-tree VM). #test collected (no `main`).
+//
+// These exercise the VM's value/expression semantics through `teko::assert::is_true`, the
+// exact builtin the VM itself recognizes and routes to the runtime (so a passing test is
+// also a round-trip through the VM's print/assert path). The barrier (panic) cases — ÷0,
+// impossible cast, false assertion — are verified END-TO-END through the real front-end +
+// VM in the crumb's VERIFY step (a panic-capture harness does not exist in the runner yet,
+// M.3), and via their NEGATION here where it is expressible.
+
+// Integer arithmetic at the node's prim — the VM's eval_binary over a fixed-width carrier.
+#test
+fn arithmetic_holds() {
+    teko::assert::is_true(6 * 7 == 42)
+    teko::assert::is_true(100 - 58 == 42)
+    teko::assert::is_true(84 / 2 == 42)       // checked div, non-zero divisor: no panic
+    teko::assert::is_true(85 % 43 == 42)      // checked mod, non-zero divisor: no panic
+}
+
+// Chained comparison lowers to AND over adjacent pairs (eval_compare) — same as codegen.
+#test
+fn chained_compare_holds() {
+    teko::assert::is_true(1 < 2)
+    teko::assert::is_true(1 < 2 < 3)          // (1<2) && (2<3)
+    teko::assert::is_false(3 < 2 < 1)         // (3<2) is false → whole chain false
+}
+
+// Logical &&/|| short-circuit on bool (eval_binary's logical path).
+#test
+fn logical_holds() {
+    teko::assert::is_true((1 < 2) && (2 < 3))
+    teko::assert::is_true((1 < 2) || (3 < 2))
+    teko::assert::is_false((1 < 2) && (3 < 2))
+}
+
+// Lossless / widening cast emits no guard and preserves the value (eval_cast fast path).
+#test
+fn widening_cast_holds() {
+    let small: u8 = 200
+    teko::assert::is_true((small to u32) == 200)
+}
+
+// Narrowing cast that FITS the target does NOT panic (the guard passes through).
+#test
+fn narrowing_cast_in_range_holds() {
+    let n: u32 = 200
+    teko::assert::is_true((n to u8) == 200)   // 200 ≤ 255 → fits u8, no "impossible conversion"
+}
+
+// Unary minus / bitwise-not at width (eval_unary), and a let binding read back (env).
+#test
+fn unary_and_binding_holds() {
+    let x: i32 = 42
+    teko::assert::is_true(-x == -42)
+    let m: u8 = 0
+    teko::assert::is_true((~m) == 255)        // ~0 at u8 width == 0xFF
+}

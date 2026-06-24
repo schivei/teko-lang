@@ -1,0 +1,297 @@
+// src/vm/vm.tks   (namespace 'teko::vm')
+//
+// D1 — THE CANONICAL ORIGINAL of the typed-tree VM / interpreter (Stage-1: the
+// test/debug execution engine). It tree-walks the CHECKED typed tree (TProgram from
+// src/checker/tast) DIRECTLY: no .tkb serialization, no codegen, no native binary.
+// Tests run on THIS engine over the typed tree, BEFORE emit/codegen, then are discarded
+// — they never become .tkb/binary. This is the Teko pair of src/vm/vm.{c,h}.
+//
+// ARCHITECTURE: the VM and the C codegen (codegen.tks / codegen_c.c) are TWO execution
+// paths over the SAME checked tast. This VM MIRRORS codegen's semantics node-for-node —
+// the same coverage frontier, the same ÷0 / cast guards (F3), the same
+// print/println/assert builtin recognition, the same VIRTUAL-MAIN return rules. That
+// makes it the DIFFERENTIAL-CORRECTNESS anchor against the native path. If a node's
+// interpreter semantics would diverge from codegen, that is a HALT (report), not a
+// silent choice.
+//
+// LAWS: M.0 (metal — a tagged-union Value, no boxing tower); M.1 (fail loud — every
+// panic routes through the runtime panics so the MESSAGE matches the native path); M.3
+// (honest — any node not yet interpreted is a named error, never wrong-silently; the
+// frontier matches codegen's: if/match-as-value, destructuring, fn params are deferred).
+//
+// HOW THIS DIFFERS FROM THE C (faithful, not literal — Teko is cleaner):
+//   * The C tagged union `tk_value` (a `tag` + a hand-rolled `union`) IS the native
+//     `variant` here (B.14): `Value = Int | Bool | Str | List | Unit`.
+//   * The C `_Noreturn vm_unsupported(msg)` + `abort()` honesty barrier is `teko::panic`
+//     here — the same loud stop (M.1/M.3), no boolean error plumbing to thread.
+//   * The C chained-frame env (a malloc'd `tk_slot` list with a `head`) is an `Env`
+//     holding a `[]Slot`; `define` pushes, `find` scans newest-first (shadowing).
+//   * The C `tk_flow` struct (kind + has_ret + ret) is a `Flow` variant carrying the
+//     non-local exits a block can produce: Normal | Return(Value?) | Break | Continue.
+//   * The F3 numeric guards (tk_div_*/tk_to_*) the C re-derives inline (they are static
+//     inline in teko_rt.h, not linkable) are just calls to the runtime's checked div/cast
+//     here — same single check, same panic message.
+
+// ---------------------------------------------------------------------------
+// The VALUE model (M.0). Ints hold a 64-bit carrier + how to read it (signedness +
+// bit-width), enough to reproduce codegen's F3 width/range checks. Bool/Str/List/Unit
+// complete it. `width` is 8/16/32/64; `signed` selects the signed vs unsigned reading.
+// ---------------------------------------------------------------------------
+type Int = struct { bits: u64; signed: bool; width: u8 }
+
+type Value = variant {
+    Int(Int)        // an integer at a known width/signedness
+    Bool(bool)
+    Str(str)
+    List([]Value)
+    Unit            // the () value — print/println/assert/fn-without-return yield this
+}
+
+// ---------------------------------------------------------------------------
+// CONTROL FLOW. The non-local exits a block can produce — mirrors codegen's C control
+// structure (return / break / continue). A `return` value rides Return.
+// ---------------------------------------------------------------------------
+type Flow = variant {
+    Normal
+    Return(Value | Unit)   // Unit == `return` with no value
+    Break
+    Continue
+}
+
+// ---------------------------------------------------------------------------
+// ENV — a simple lexical frame: name -> Value. Mirrors the checker's scoping: a binding
+// pushes onto the current frame; assign mutates the nearest existing slot; a function
+// call runs in a FRESH root frame (no closure capture — M0 functions are flat, matching
+// codegen's C functions).
+// ---------------------------------------------------------------------------
+type Slot = struct { name: str; val: Value }
+type Env  = struct { slots: []Slot }
+
+// find — newest-first scan so a later binding SHADOWS an earlier one (the checker's rule).
+fn find(env: Env, name: str) -> Slot | error {
+    mut i = env.slots.len
+    loop {
+        if i == 0 { break }
+        i--
+        if env.slots[i].name == name { return env.slots[i] }
+    }
+    error("vm: unbound variable (internal: checker should reject)")
+}
+
+// define — push a fresh slot (shadowing). Returns the grown env (functional, like emit/*).
+fn define(env: Env, name: str, val: Value) -> Env {
+    Env { slots: teko::list::push(env.slots, Slot { name: name, val: val }) }
+}
+
+// ---------------------------------------------------------------------------
+// prim helpers — the VM's copy of codegen's prim_is_signed / prim_width / cast_may_lose
+// (verbatim semantics; this IS the mirror). Integer prims only.
+// ---------------------------------------------------------------------------
+fn prim_signed(k: PrimKind) -> bool {
+    match k { I8 | I16 | I32 | I64 => true; _ => false }
+}
+fn prim_width(k: PrimKind) -> u8 {
+    match k {
+        U8  | I8  => 8
+        U16 | I16 => 16
+        U32 | I32 => 32
+        U64 | I64 => 64
+        Bool      => 1
+    }
+}
+// A cast src->dst may LOSE data (needs a runtime guard) when some source value falls
+// outside the dest range. VERBATIM from codegen's cast_may_lose.
+fn cast_may_lose(src: PrimKind, dst: PrimKind) -> bool {
+    let ss = prim_signed(src); let ds = prim_signed(dst)
+    let sw = prim_width(src);  let dw = prim_width(dst)
+    if ss == ds  { return sw > dw }      // same signedness: only true narrowing loses
+    if !ss && ds { return sw >= dw }     // u->i: loses one bit of magnitude at equal width
+    true                                 // i->u: negatives never fit
+}
+
+// ---------------------------------------------------------------------------
+// BUILTIN call recognition — VERBATIM mirror of codegen's CALL lowering: print/println
+// and teko::assert::* are non-shadowable, recognized by the path's LAST segment when the
+// path is single-segment OR rooted at `teko`. Each assert FAILS LOUD on a false predicate
+// (the runtime panics with "assertion failed: <name>" — M.1).
+// ---------------------------------------------------------------------------
+fn try_builtin(callee: Path, args: []TExpr, env: Env) -> Value | error {
+    let last = callee.segments[callee.segments.len - 1].name
+    let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
+    if !addressable { return error("not a builtin") }
+
+    if last == "print" || last == "println" {
+        let a = eval_expr(args[0], env)
+        match a {
+            Str(s) => { if last == "print" { teko::print(s) } else { teko::println(s) }; return Unit }
+            _      => return error("vm: print/println on a non-str value not yet supported")
+        }
+    }
+
+    let assert_ns = callee.segments.len >= 2 && callee.segments[0].name == "teko"
+                 && callee.segments[callee.segments.len - 2].name == "assert"
+    if assert_ns {
+        if last == "is_true"  { teko::assert::is_true(as_bool(eval_expr(args[0], env)));  return Unit }
+        if last == "is_false" { teko::assert::is_false(as_bool(eval_expr(args[0], env))); return Unit }
+        if last == "str_contains" {
+            teko::assert::str_contains(as_str(eval_expr(args[0], env)), as_str(eval_expr(args[1], env)))
+            return Unit
+        }
+        // equals/is_ok/... need generics — DEFERRED (matches the seed). Honest stop (M.3).
+        teko::panic("vm: this teko::assert builtin not yet supported (needs generics)")
+    }
+    error("not a builtin")
+}
+
+// ---------------------------------------------------------------------------
+// EXPRESSIONS -> Value. Coverage MIRRORS codegen's emit_expr: Number, Var, Str, Byte,
+// Binary, Unary, Compare, Cast, Call, FieldAccess. IfExpr/MatchExpr AS A VALUE are the
+// honest frontier (same as codegen).
+// ---------------------------------------------------------------------------
+fn eval_expr(e: TExpr, env: Env) -> Value {
+    match e {
+        TNumber(n)   => int_of_prim(n.value, e.type)        // prim from the node's type
+        TVar(v)      => find(env, v.name).val                // checker guarantees it binds
+        TStr(s)      => Str(s.text)
+        TByte(b)     => Int(Int { bits: b.value, signed: false, width: 8 })   // byte == u8 rep
+        TBinary(b)   => eval_binary(b, e.type, env)
+        TUnary(u)    => eval_unary(u, e.type, env)
+        TCompare(c)  => eval_compare(c, env)
+        TCast(c)     => eval_cast(c, e.type, env)            // F3 narrowing guard inside
+        TCall(c)     => eval_call(c, env)
+
+        // The honest frontier — EXACTLY codegen's "not yet supported" set (M.3):
+        TFieldAccess(_) => teko::panic("vm: field access not yet supported (named types not in M0)")
+        TIfExpr(_)      => teko::panic("vm: if-expression (as a value) not yet supported")
+        TMatchExpr(_)   => teko::panic("vm: match-expression (as a value) not yet supported")
+    }
+}
+
+// eval_binary — integer arithmetic at the node's result prim (width/signedness from the
+// node's type, exactly as codegen selects tk_div_<width> / fixed-width C ops). Logical
+// &&/|| short-circuit on bool. `/` and `%` route through the runtime's CHECKED div/mod so
+// a zero divisor PANICS "division by zero" — the same message as the native path (M.1).
+fn eval_binary(b: TBinary, ty: Type, env: Env) -> Value {
+    if b.op == AndAnd || b.op == OrOr {
+        let l = as_bool(eval_expr(b.left, env))
+        if b.op == AndAnd && !l { return Bool(false) }
+        if b.op == OrOr  &&  l { return Bool(true) }
+        return Bool(as_bool(eval_expr(b.right, env)))
+    }
+    let prim = int_prim_of(ty)                 // honest stop if non-int (mirrors codegen)
+    let sgn  = prim_signed(prim); let w = prim_width(prim)
+    let l = as_int(eval_expr(b.left, env)); let r = as_int(eval_expr(b.right, env))
+    match b.op {
+        Slash   => norm_int(teko::div(l, r, sgn), sgn, w)   // CHECKED: panics on /0
+        Percent => norm_int(teko::rem(l, r, sgn), sgn, w)   // CHECKED: panics on %0
+        // +,-,*,&,|,^,<<,>>: plain fixed-width arithmetic. Overflow guarding for +,-,* is
+        // DEFERRED to build profiles (panic-debug / wrap-release) — exactly as codegen
+        // leaves +,-,* as plain C. norm_int truncates to the prim's width.
+        _       => norm_int(apply_int_op(b.op, l, r, sgn, w), sgn, w)
+    }
+}
+
+// eval_cast — `x to T`. Same guard predicate as codegen: both sides int prims AND
+// cast_may_lose -> route through the runtime's CHECKED conversion (PANIC "impossible
+// conversion" when out of range). Widening / same-type / lossless -> a plain reinterpret
+// to the target width (codegen emits the bare C cast).
+fn eval_cast(c: TCast, ty: Type, env: Env) -> Value {
+    let dst = int_prim_of(ty); let src = int_prim_of(c.expr.type)
+    let v   = as_int(eval_expr(c.expr, env))
+    if cast_may_lose(src, dst) { return norm_int(teko::to(v, src, dst), prim_signed(dst), prim_width(dst)) }
+    norm_int(v, prim_signed(dst), prim_width(dst))
+}
+
+// eval_call — builtins first (print/println/assert), else a user fn by single-segment
+// name. M0 fns take NO params (codegen rejects params) -> honest frontier. A fresh root
+// env (no capture). Return flows back as the call's value; a Unit-returning fn (or one
+// that falls off the end) yields Unit.
+fn eval_call(c: TCall, env: Env) -> Value {
+    match try_builtin(c.callee, c.args, env) {
+        Value(v) => return v
+        _        => {}                     // not a builtin — fall through to a user fn
+    }
+    let f = find_function(c.callee)        // honest stop if unknown / multi-segment / params
+    let fenv = Env { slots: [] }
+    match exec_block(f.body, fenv) {
+        Return(r) => match r { Value(v) => v; Unit => Unit }
+        _         => Unit
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STATEMENTS / BLOCKS. Coverage MIRRORS codegen's emit_stmt: Binding, Assign, Return,
+// ExprStmt, Loop, Break, Continue. A non-local Flow short-circuits the block.
+// ---------------------------------------------------------------------------
+fn exec_block(body: []TStatement, env: Env) -> Flow {
+    mut e = env
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        match exec_stmt(body[i], e) {
+            // Binding/Assign thread the env forward; a non-local exit returns immediately.
+            Stepped(ne) => { e = ne }
+            f           => return f          // Return / Break / Continue escape
+        }
+        i++
+    }
+    Normal
+}
+
+// One statement. Returns either Stepped(env') (Normal, env advanced) or a Flow exit.
+type Step = variant { Stepped(Env); Exit(Flow) }
+
+fn exec_stmt(s: TStatement, env: Env) -> Step {
+    match s {
+        TBinding(b)  => {
+            // Only SimpleName is lowered for M0 (destructuring is the honest frontier).
+            match b.target {
+                Simple(name) => Stepped(define(env, name, eval_expr(b.value, env)))
+                _            => { teko::panic("vm: destructuring binding not yet supported") }
+            }
+        }
+        TAssign(a)   => { mutate_slot(env, a.name, a.op, eval_expr(a.value, env)); Stepped(env) }
+        TReturn(r)   => Exit(Return(if r.has_value { eval_expr(r.value, env) } else { Unit }))
+        TExprStmt(x) => { eval_expr(x.expr, env); Stepped(env) }   // value discarded
+        TLoop(l)     => Exit(run_loop(l.body, env))                // while(1){…} with break/continue
+        TBreak       => Exit(Break)
+        TContinue    => Exit(Continue)
+    }
+}
+
+// run_loop — while(1){…}; Break exits, Continue/Normal re-iterate, Return propagates.
+fn run_loop(body: []TStatement, env: Env) -> Flow {
+    loop {
+        match exec_block(body, env) {
+            Return(r) => return Return(r)
+            Break     => break
+            _         => {}                   // Normal | Continue: loop again
+        }
+    }
+    Normal
+}
+
+// ---------------------------------------------------------------------------
+// PUBLIC ENTRY — run the VIRTUAL-MAIN. MIRRORS codegen's main(): the loose top-level
+// statements run in order; a `return n` is an early process exit with (int)n; falling off
+// the end -> 0. Top-level functions are callable (run only when called, never on their own).
+// ---------------------------------------------------------------------------
+exp fn run(prog: TProgram) -> i32 {
+    mut env = Env { slots: [] }
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            Statement(s) => match exec_stmt(s, env) {
+                Stepped(ne) => { env = ne }
+                Exit(f)     => match f {
+                    Return(r) => return exit_code_of(r)   // early exit, like main's `return (int)n`
+                    _         => {}                        // break/continue can't escape: checker rejects
+                }
+            }
+            _ => {}                                         // functions/types/uses: not run here
+        }
+        i++
+    }
+    0                                                       // fell off the end -> exit 0
+}

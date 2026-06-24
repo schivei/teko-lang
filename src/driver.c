@@ -10,10 +10,16 @@
 #include "parser/result.h"   // tk_parsed_main_file_result, tk_parsed_module_result
 #include "checker/typer.h"   // tk_type_program, tk_tprogram_result
 #include "codegen/codegen_c.h" // tk_emit_c, tk_cstr_result (F2 backend)
+#include "build/manifest.h"  // tk_parse_manifest, tk_manifest (A1)
+#include "build/discover.h"  // tk_discover, tk_source_files (A2)
+#include "build/assemble.h"  // tk_assemble, tk_program_result (A3)
+#include "vm/vm.h"           // tk_vm_run (Eixo D — the debug/test VM)
+#include "text/text.h"       // tk_str_from_utf8 (manifest source view)
 
 #include <stdio.h>           // fopen/fread/fclose, fprintf, printf
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
+#include <unistd.h>          // chdir (run the project path from its own root — A3)
 
 // F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
 // absolute path; a non-CMake `cc`-built teko falls back to the in-tree dir.
@@ -210,4 +216,92 @@ int tk_compile(const char *path) {
 
     // --- backend (F2): lower the checked typed program to C, build it natively ---
     return tk_backend(path, checked.as.value);
+}
+
+// =========================================================================
+// Eixo D — the VM run path (`teko run <file.tks>`): the debug profile. Same front-end as
+// tk_compile, but INTERPRET the checked tree on the VM instead of codegen → cc. Tests
+// (D2) reuse this engine; here it runs a single program for the dev-loop.
+// =========================================================================
+int tk_run(const char *path) {
+    tk_str_result src = tk_read_file(path);
+    if (!src.ok) return fail(path, src.as.error.message);
+
+    tk_tokens_result toks = tk_tokenize(src.as.value);
+    if (!toks.ok) return fail(path, toks.as.error.message);
+    const tk_token *t = toks.as.value.ptr;
+    size_t n = toks.as.value.len;
+
+    tk_program program;
+    if (strcmp(basename_of(path), "main.tks") == 0) {
+        tk_parsed_main_file_result pr = tk_parse_main_file(t, n, 0);
+        if (!pr.ok) return fail(path, pr.as.error.message);
+        program = tk_main_file_to_program(pr.as.value.node);
+    } else {
+        tk_parsed_module_result pr = tk_parse_module(t, n, 0);
+        if (!pr.ok) return fail(path, pr.as.error.message);
+        program = tk_module_to_program(pr.as.value.node);
+    }
+
+    tk_tprogram_result checked = tk_type_program(program);
+    if (!checked.ok) return fail(path, checked.as.error.message);
+
+    // Interpret on the VM — the process exit code is the virtual-main's (a panic exits
+    // non-zero from inside the VM with a "teko: panic: …" message).
+    return tk_vm_run(checked.as.value);
+}
+
+// =========================================================================
+// A3 — the PROJECT entry path. read `.tkp` → discover → assemble → check (whole).
+// Runs from the project root (chdir) so the manifest `source` and the discovered
+// file paths (relative) resolve against the project. Stops at "type-checked" — the
+// merged tast is the deliverable a later codegen/test-runner crumb consumes.
+// =========================================================================
+int tk_compile_project(const char *dir) {
+    // Enter the project root so relative source paths resolve (the contained host edge).
+    if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
+
+    // --- read + parse the manifest (.tkp at the project root — A1) ---
+    tk_str_result mtext = tk_read_file(".tkp");
+    if (!mtext.ok) return fail(dir, "cannot read .tkp manifest");
+    tk_manifest_result mr = tk_parse_manifest(mtext.as.value);
+    if (!mr.ok) return fail(dir, mr.as.error.message);
+    tk_manifest m = mr.as.value;
+
+    // --- discover the source tree (A2) ---
+    tk_source_files_result df = tk_discover(m.name, m.source);
+    if (!df.ok) return fail(dir, df.as.error.message);
+    tk_source_files files = df.as.value;
+
+    // The entry MainFile lives at the PROJECT ROOT, not under `source` (discover walks
+    // only `source`). Inject it into the file set so the merged program has an entry,
+    // tagged with the bare root namespace (provenance). Skip it if absent (a library).
+    { tk_str_result em = tk_read_file("main.tks");
+      if (em.ok) {
+          tk_str mainp = { .ptr = (const tk_byte *)"main.tks", .len = 8 };
+          files = tk_source_files_push(files,
+              (tk_source_file){ .path = mainp, .namespace = m.name });
+      } }
+
+    // --- report the discovered file → namespace map (the project's surface) ---
+    printf("teko: project '%.*s' (source=%.*s) — %zu file(s):\n",
+           (int)m.name.len, (const char *)m.name.ptr,
+           (int)m.source.len, (const char *)m.source.ptr, files.len);
+    for (size_t i = 0; i < files.len; i += 1)
+        printf("  %.*s\t-> %.*s\n",
+               (int)files.ptr[i].path.len,      (const char *)files.ptr[i].path.ptr,
+               (int)files.ptr[i].namespace.len, (const char *)files.ptr[i].namespace.ptr);
+
+    // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
+    tk_program_result asm_r = tk_assemble(files);
+    if (!asm_r.ok) return fail(dir, asm_r.as.error.message);
+    tk_program program = asm_r.as.value;
+
+    // --- check the WHOLE merged program (M.1 — whole program checked together) ---
+    tk_tprogram_result checked = tk_type_program(program);
+    if (!checked.ok) return fail(dir, checked.as.error.message);
+
+    printf("teko: %s: project assembled (%zu items) and type-checked OK\n",
+           dir, program.len);
+    return 0;
 }

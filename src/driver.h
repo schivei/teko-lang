@@ -29,4 +29,18 @@ tk_program tk_module_to_program(tk_module m);
 // failure (prints `teko: <path>: <message>` to stderr).
 int tk_compile(const char *path);
 
+// A3 — the PROJECT entry path. Given a project directory `dir`, read `<dir>/.tkp`
+// (tk_parse_manifest), discover the source tree (tk_discover), assemble all files into
+// one merged tk_program (tk_assemble), and type-check it whole (tk_type_program — M.1).
+// Reports OK / the first error. This is the multi-file analogue of tk_compile; it stops
+// at "type-checked" (multi-namespace native codegen is a later crumb). Returns 0 on a
+// clean check. main() dispatches here when its argument is a directory or a `.tkp`.
+int tk_compile_project(const char *dir);
+
+// Eixo D — the VM run path (debug profile). read → lex → parse → reconcile → check, then
+// INTERPRET the checked typed tree on the VM (tk_vm_run) instead of codegen. No .tkb, no
+// cc. The process exit code is the virtual-main's (early `return n` → n, default 0); a
+// panic (÷0 / impossible cast / failed assert) goes to stderr with a non-zero exit.
+int tk_run(const char *path);
+
 #endif // TK_DRIVER_H

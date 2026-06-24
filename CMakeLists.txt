@@ -35,7 +35,9 @@ set(TEKO_TEXT_SOURCES
 
 # teko::build — the `.tkp` manifest reader (crumb A1). The FIRST .c under src/build.
 set(TEKO_BUILD_SOURCES
-    src/build/manifest.c)
+    src/build/manifest.c
+    src/build/discover.c
+    src/build/assemble.c)
 
 set(TEKO_LEXER_SOURCES
     src/lexer/lexer.c)
@@ -78,6 +80,12 @@ set(TEKO_EMIT_SOURCES
 set(TEKO_CODEGEN_SOURCES
     src/codegen/codegen_c.c)
 
+# --- Eixo D: the VM / interpreter — the test/debug execution engine (Stage-1) ---
+# Tree-walks the checked typed tree directly (no .tkb, no codegen); mirrors codegen
+# semantics. `teko run` executes a program on it; D2 will run tests on it.
+set(TEKO_VM_SOURCES
+    src/vm/vm.c)
+
 # The bootstrap mirror as one static library. The whole C front-end + checker + emit
 # compiles (F0 done); the default build now archives it, guarding the mirror against
 # compile regressions. It is not yet linked into an executable — the driver (F1) will
@@ -89,13 +97,17 @@ add_library(teko_bootstrap STATIC
     ${TEKO_PARSER_SOURCES}
     ${TEKO_CHECKER_SOURCES}
     ${TEKO_EMIT_SOURCES}
-    ${TEKO_CODEGEN_SOURCES})
+    ${TEKO_CODEGEN_SOURCES}
+    ${TEKO_VM_SOURCES})
 
 # --- F1: the driver — path-to-first-binary -----------------------------------
 # `teko` is now the REAL driver: read -> lex -> parse -> reconcile -> check, wired in
 # src/driver.c and linked against the bootstrap mirror library. (Codegen/emit is F2;
 # success here means the front-end pipeline ran and the program type-checked.)
-add_executable(teko main.c src/driver.c)
+# The VM (`teko run`) calls the execution-runtime symbols (tk_print/tk_panic_*/
+# teko__assert__*), so the compiler binary itself links teko_rt.c — the same source the
+# driver also hands to the host cc for generated programs.
+add_executable(teko main.c src/driver.c runtime/teko_rt.c)
 target_link_libraries(teko PRIVATE teko_bootstrap)
 
 # F3: the generated programs link the minimal execution runtime (libteko_rt).

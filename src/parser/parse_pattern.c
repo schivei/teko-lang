@@ -5,7 +5,7 @@
 #include "parse_path.h"   // parse_path
 #include "parse_lit.h"    // tk_lit_int, tk_lit_byte
 #include "cursor.h"       // tk_has_token, tk_is_kind_at, tk_is_sep, tk_skip_seps
-#include "ast.h"          // tk_pats_push, tk_strs_push
+#include "ast.h"          // tk_pats_push, tk_strvec_push
 
 static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t n, size_t pos) {
     if (!tk_has_token(t, n, pos)) {
@@ -101,7 +101,7 @@ tk_parsed_names_result parse_field_names(const tk_token *t, size_t n, size_t pos
         if (!tk_is_kind_at(t, n, p, TK_TOKEN_IDENT)) {
             return (tk_parsed_names_result){ .ok = false, .as.error = tk_error_make("expected a field name in `Type { … }`") };
         }
-        tk_strs_push(&names, &nn, t[p].text);
+        tk_strvec_push(&names, &nn, t[p].text);
         p += 1;
         if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }
         if (!tk_is_sep(t, n, p)) {
