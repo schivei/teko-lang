@@ -50,3 +50,18 @@ tk_type_result tk_builtin_type(tk_str name) {
     else return (tk_type_result){ .ok = false, .as.error = tk_error_make("not a built-in type") };
     return (tk_type_result){ .ok = true, .as.value = t };
 }
+
+// The injected stdlib (non-shadowable): teko::print / teko::println are part of the
+// language surface, not imported — so type_call falls back here when env lookup fails.
+// Both are (str) -> Unit. The func type's params/ret are pointers, so they point at
+// immutable static singletons (whole-compile lifetime — they are never mutated).
+tk_type_result tk_builtin_fn(tk_str name) {
+    static tk_type str_t  = { .tag = TK_TYPE_STR };   // the single (str) parameter
+    static tk_type unit_t = { .tag = TK_TYPE_UNIT };  // the Unit return
+    if (name_is(name, "print") || name_is(name, "println")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC,
+                       .as.func = { .params = &str_t, .nparams = 1, .ret = &unit_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    return (tk_type_result){ .ok = false, .as.error = tk_error_make("not a built-in function") };
+}

@@ -93,7 +93,9 @@ static tk_texpr_result type_compare(tk_compare c, tk_env env, tk_type_table tabl
 
 static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     tk_str name = c.callee.segments[c.callee.len - 1].name;
-    tk_type_result ftr = tk_env_lookup(env, name); if (!ftr.ok) return xferr(ftr.as.error);
+    tk_type_result ftr = tk_env_lookup(env, name);   // user functions resolve first;
+    if (!ftr.ok) ftr = tk_builtin_fn(name);          // injected, non-shadowable stdlib is the fallback
+    if (!ftr.ok) return xferr(ftr.as.error);
     tk_type ft = ftr.as.value;
     if (ft.tag != TK_TYPE_FUNC) return xerr("not a function");
     if (c.nargs != ft.as.func.nparams) return xerr("wrong number of arguments");

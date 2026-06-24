@@ -78,3 +78,7 @@ add_library(teko_bootstrap STATIC
 # success here means the front-end pipeline ran and the program type-checked.)
 add_executable(tekoc src/main.c src/driver.c)
 target_link_libraries(tekoc PRIVATE teko_bootstrap)
+
+# F3: the generated programs link the minimal execution runtime (libteko_rt).
+# tekoc needs the runtime's location to pass -I and the runtime source to the host cc.
+target_compile_definitions(tekoc PRIVATE TK_RT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/runtime")

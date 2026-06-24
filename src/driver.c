@@ -15,6 +15,12 @@
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
 
+// F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
+// absolute path; a non-CMake `cc`-built tekoc falls back to the in-tree dir.
+#ifndef TK_RT_DIR
+#define TK_RT_DIR "runtime"
+#endif
+
 // =========================================================================
 // B1a — the IO boundary (the bootstrap's ONE host-IO function — M.1, contained).
 // fopen/fread/fclose is the unsafe host edge: raw bytes cross here, are UTF-8
@@ -128,11 +134,18 @@ static char *output_stem(const char *path) {
 
 // Run the host C compiler over `cfile`, producing `binary`. Returns 0 on success.
 static int run_cc(const char *cfile, const char *binary) {
-    // cc -std=c23 <file.c> -o <binary>  — quote paths to tolerate spaces.
-    size_t cap = strlen(cfile) + strlen(binary) + 64;
+    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println,
+    // so the host cc must see the runtime dir (-I) and compile its source (M.5 — one
+    // reuse-the-host-toolchain cc invocation, no extra build system).
+    //   cc -std=c23 -I"<rt>" "<file.c>" "<rt>/teko_rt.c" -o "<binary>"
+    // Quote every path to tolerate spaces. cap covers the fixed text + both rt-dir
+    // copies (the -I and the source path) + the "/teko_rt.c" suffix.
+    size_t cap = strlen(cfile) + strlen(binary) + 2 * strlen(TK_RT_DIR)
+               + strlen("/teko_rt.c") + 64;
     char *cmd = malloc(cap);
     if (cmd == NULL) abort();
-    snprintf(cmd, cap, "cc -std=c23 \"%s\" -o \"%s\"", cfile, binary);
+    snprintf(cmd, cap, "cc -std=c23 -I\"%s\" \"%s\" \"%s/teko_rt.c\" -o \"%s\"",
+             TK_RT_DIR, cfile, TK_RT_DIR, binary);
     int rc = system(cmd);
     free(cmd);
     return rc;
