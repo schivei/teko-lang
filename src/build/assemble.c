@@ -79,6 +79,15 @@ tk_program_result tk_assemble(tk_source_files files) {
 
     for (size_t i = 0; i < files.len; i += 1) {
         tk_source_file sf = files.ptr[i];
+
+        // Tests are NOT production source: a `.tkt` is run on the VM in the test
+        // sub-profile (crumb D2), never assembled into the program (it carries `#test`
+        // attributes the module grammar rejects). Skip it here. (Legislator: tests are
+        // not artifacts — they run before emit/codegen and are discarded.)
+        if (sf.path.len >= 4 &&
+            sf.path.ptr[sf.path.len-4]=='.' && sf.path.ptr[sf.path.len-3]=='t' &&
+            sf.path.ptr[sf.path.len-2]=='k' && sf.path.ptr[sf.path.len-1]=='t') continue;
+
         char *cpath = path_cstr(sf.path);
 
         // --- read (M.1 host-IO via driver.c::tk_read_file) ---

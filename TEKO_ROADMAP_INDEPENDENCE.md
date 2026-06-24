@@ -36,6 +36,23 @@ biblioteca **proíbe**) já existe em Teko: `src/build/tkp_rule.tks` (`check_mai
 > resolução cross-namespace e a regra do `main.tks` aplicada a partir do artefato. A1–A5 são a semente;
 > A6 (deps) é evolução.
 
+### Artefatos & saída (legislador)
+
+**A saída é um DIRETÓRIO, não um arquivo** — um build pode gerar **vários arquivos** (binário nativo, o
+`.c` intermediário do transpile, o `.tsym` de símbolos do Eixo E, e, no `pack`, o pacote `.tkh`+`.tkb`).
+Portanto:
+- **`-o <dir>`** define o **diretório destino** (NUNCA um arquivo único — a saída é multi-arquivo).
+- **Sem `-o`:** default = um diretório de saída na raiz do projeto. **A definir** (recomendo `target/`;
+  evitar `build/` — colide com o CMake do bootstrap). *(Decisão aberta — ver Decisões.)*
+- O diretório é criado se não existir; o nome dos artefatos vem do `name` do manifesto.
+
+**`teko pack <projdir>` — empacotar uma biblioteca.** Quando o `.tkp` é `artifact = library`, `pack`
+emite o **pacote Teko**: hoje definido como **`.tkh` (interface) + `.tkb` (árvore tipada / IL)**
+*(LEGISLATION §215–226)*. **O que mais vai no pacote além de `.tkh`/`.tkb` é PONTO DE DISCUSSÃO** —
+abrir quando A/B/C/D/E estiverem concluídos. Candidatos a debater: metadados/versão do manifesto,
+checksum/assinatura (defesa do registry — REBOOT_PLAN l.986), o `.tsym` (símbolos, Eixo E), licença,
+lock de dependências. **Nada decidido — só nomeado.**
+
 ---
 
 ## Eixo B — Framework de testes + portão de cobertura
@@ -174,7 +191,9 @@ symbols) *(REBOOT_PLAN l.113–114; §"sem stack trace salvo via `.tsym`")*. Hoj
 
 **Abertas (a legislar quando o crumb chegar):**
 - **F — Forma do `extern`/FFI (C1):** sintaxe da declaração externa + marshalling (`marshall`?) + conversão de `ptr`. *(Cânone em aberto — REBOOT_PLAN l.1186.)* → crumb **C1.0 (legislação)** bloqueia C1.1+.
-- **`teko build` por projeto (A5):** compilar um `.tks` avulso vira modo de diagnóstico (`teko check <file>`) ou sai de vez? → resolver no crumb A5.
+- ~~`teko build` por projeto (A5)~~ — **resolvido:** entrada projeto-só; `.tks` avulso é rejeitado (não há modo single-file).
+- **Diretório de saída default (sem `-o`):** `target/` (recomendado) · `out/` · outro? *(`build/` não — colide com o CMake do bootstrap.)* `-o` é sempre um **diretório**. → crumb **A7**.
+- **Conteúdo do pacote (`pack`) além de `.tkh`/`.tkb`:** metadados/versão · checksum/assinatura · `.tsym` · licença · lock de deps? **Discussão diferida** (abrir após A/B/C/D/E). → crumb **A8**.
 
 ---
 
@@ -202,7 +221,11 @@ que por sua vez destrava `driver.tks`/`main.tks` (self-hosting). F3-pânicos (BI
   > `artifact` do manifesto → `check_main_file_rule`; remove o basename-heurístico. **Aceite:** exec sem main → erro; lib com main → erro; válidos passam.
 - **[A5] Driver por projeto** — deps: A1–A4 · M.2 · par: `main.{tks,c}` + `driver`
   > `teko build [projdir]` lê o `.tkp`; sem `.tkp` → erro. **Decidir:** `.tks` avulso → `teko check <file>` ou removido. **Aceite:** `teko build` compila o repo; uso atualizado.
-- **[A6] Deps + pré-linker** — deps: A5, codec `.tkb`/`.tkh` (existe) · M.1 · **evolução** · par: `src/build/prelink.{tks,c,h}`
+- **[A7] Saída em diretório + `-o <dir>`** — deps: A5 · M.2 · par: `driver` + `src/build/output.{tks,c,h}`
+  > Default = `<projroot>/target/` (a decidir); `-o <dir>` força o diretório destino (nunca arquivo único — saída multi-arquivo: binário + `.c` + `.tsym` + pacote). Cria o dir; nomeia pelo `name` do manifesto. **Aceite:** `teko build` põe os artefatos em `target/`; `-o /x` redireciona; nome do binário = `name`.
+- **[A8] `teko pack` + formato de pacote** — deps: A5, A6, codec `.tkh`/`.tkb` · M.3 · **discussão diferida** · par: `src/build/pack.{tks,c,h}`
+  > `teko pack <projdir>` (library) → `.tkh`+`.tkb` no diretório de saída. **Conteúdo além de `.tkh`/`.tkb` = ponto de discussão** (metadados/versão, checksum/assinatura, `.tsym`, licença, lock) — abrir quando os demais eixos fecharem. **Aceite (futuro):** uma lib empacota e outro projeto consome via `[dependencies]` (A6).
+- **[A6] Deps + pré-linker** — deps: A5, A8, codec `.tkb`/`.tkh` (existe) · M.1 · **evolução** · par: `src/build/prelink.{tks,c,h}`
   > Carrega `.tkh`+`.tkb` das deps, funde árvores tipadas antes do codegen. **Aceite (futuro):** projeto+1 dep-lib linka estático e checa junto.
 
 ### Eixo B — testes/cobertura

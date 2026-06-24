@@ -9,7 +9,7 @@
 #include "parser/parser.h"   // tk_parse_main_file, tk_parse_module
 #include "parser/result.h"   // tk_parsed_main_file_result, tk_parsed_module_result
 #include "checker/typer.h"   // tk_type_program, tk_tprogram_result
-#include "codegen/codegen_c.h" // tk_emit_c, tk_cstr_result (F2 backend)
+#include "codegen/codegen.h" // tk_emit_c, tk_cstr_result (F2 backend)
 #include "build/manifest.h"  // tk_parse_manifest, tk_manifest (A1)
 #include "build/discover.h"  // tk_discover, tk_source_files (A2)
 #include "build/assemble.h"  // tk_assemble, tk_program_result (A3)
@@ -20,11 +20,19 @@
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
 #include <unistd.h>          // chdir (run the project path from its own root — A3)
+#include <dirent.h>          // opendir/readdir — find the single *.tkp manifest
 
 // F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
 // absolute path; a non-CMake `cc`-built teko falls back to the in-tree dir.
 #ifndef TK_RT_DIR
-#define TK_RT_DIR "runtime"
+#define TK_RT_DIR "src/runtime"
+#endif
+
+// F3: where the compiler source tree lives. The generated programs also link the
+// teko::assert C seed (src/assert/assert.c), so the host cc must compile it too. CMake
+// injects the absolute path; a non-CMake `cc`-built teko falls back to the in-tree dir.
+#ifndef TK_SRC_DIR
+#define TK_SRC_DIR "src"
 #endif
 
 // =========================================================================
@@ -108,61 +116,48 @@ tk_program tk_module_to_program(tk_module m) {
 }
 
 // =========================================================================
-// B1d — the driver. read → lex → parse → reconcile → check.
+// B1d — the driver. Shared diagnostics helper.
 // =========================================================================
-static const char *basename_of(const char *path) {
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
-}
-
 static int fail(const char *path, const char *message) {
     fprintf(stderr, "teko: %s: %s\n", path, message);
     return 1;
 }
 
 // =========================================================================
-// B2 — the BACKEND wiring (F2): write the emitted C next to the input, invoke the
-// host `cc`, produce the native binary. The output stem drops a trailing ".tks".
+// B2 — the BACKEND wiring (F2): write the emitted C, invoke the host `cc`, produce the
+// native binary. Teko compiles PROJECTS (§2.6), so the output stem comes from the
+// manifest `name`, not from any single input file.
 // =========================================================================
-
-// Derive "<dir>/<stem>" (no extension) from the input path — heap-allocated.
-static char *output_stem(const char *path) {
-    size_t n = strlen(path);
-    // strip a trailing ".tks" if present.
-    size_t base = n;
-    if (n >= 4 && strcmp(path + n - 4, ".tks") == 0) base = n - 4;
-    char *out = malloc(base + 1);
-    if (out == NULL) abort();
-    memcpy(out, path, base);
-    out[base] = '\0';
-    return out;
-}
 
 // Run the host C compiler over `cfile`, producing `binary`. Returns 0 on success.
 static int run_cc(const char *cfile, const char *binary) {
-    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println,
-    // so the host cc must see the runtime dir (-I) and compile its source (M.5 — one
+    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println
+    // (teko_rt.c) plus teko__assert__* (the teko::assert seed, src/assert/assert.c), so
+    // the host cc must see the runtime dir (-I) and compile BOTH seed sources (M.5 — one
     // reuse-the-host-toolchain cc invocation, no extra build system).
-    //   cc -std=c23 -I"<rt>" "<file.c>" "<rt>/teko_rt.c" -o "<binary>"
-    // Quote every path to tolerate spaces. cap covers the fixed text + both rt-dir
-    // copies (the -I and the source path) + the "/teko_rt.c" suffix.
+    //   cc -std=c23 -I"<rt>" -I"<src>/assert" "<file.c>" "<rt>/teko_rt.c" \
+    //      "<src>/assert/assert.c" -o "<bin>"
+    // The generated C does `#include "assert.h"`, so cc must also see src/assert (-I).
+    // Quote every path to tolerate spaces. cap covers the fixed text + both rt-dir copies
+    // (the -I and the source path) + two src-dir copies (the -I and assert.c) + suffixes.
     size_t cap = strlen(cfile) + strlen(binary) + 2 * strlen(TK_RT_DIR)
-               + strlen("/teko_rt.c") + 64;
+               + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
+               + strlen("/assert/assert.c") + 64;
     char *cmd = malloc(cap);
     if (cmd == NULL) abort();
-    snprintf(cmd, cap, "cc -std=c23 -I\"%s\" \"%s\" \"%s/teko_rt.c\" -o \"%s\"",
-             TK_RT_DIR, cfile, TK_RT_DIR, binary);
+    snprintf(cmd, cap,
+             "cc -std=c23 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -o \"%s\"",
+             TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, binary);
     int rc = system(cmd);
     free(cmd);
     return rc;
 }
 
-// Lower → write .c → invoke cc → report. Returns 0 on success.
-static int tk_backend(const char *path, tk_tprogram prog) {
+// Lower → write .c → invoke cc → report. `stem` is the output path (no extension);
+// `label` is what the diagnostics name (the project dir/name). Returns 0 on success.
+static int tk_backend(const char *label, const char *stem, tk_tprogram prog) {
     tk_cstr_result emitted = tk_emit_c(prog);
-    if (!emitted.ok) return fail(path, emitted.as.error.message);
-
-    char *stem = output_stem(path);
+    if (!emitted.ok) return fail(label, emitted.as.error.message);
 
     // The emitted C goes to "<stem>.c".
     size_t clen = strlen(stem) + 3;
@@ -171,98 +166,58 @@ static int tk_backend(const char *path, tk_tprogram prog) {
     snprintf(cfile, clen, "%s.c", stem);
 
     FILE *f = fopen(cfile, "wb");
-    if (f == NULL) { free(emitted.as.value); free(stem); free(cfile); return fail(path, "cannot write generated C"); }
+    if (f == NULL) { free(emitted.as.value); free(cfile); return fail(label, "cannot write generated C"); }
     size_t srclen = strlen(emitted.as.value);
     size_t wrote = fwrite(emitted.as.value, 1, srclen, f);
     fclose(f);
     free(emitted.as.value);
-    if (wrote != srclen) { free(stem); free(cfile); return fail(path, "short write on generated C"); }
+    if (wrote != srclen) { free(cfile); return fail(label, "short write on generated C"); }
 
     int rc = run_cc(cfile, stem);
     free(cfile);
-    if (rc != 0) { free(stem); return fail(path, "cc failed to build the generated C"); }
+    if (rc != 0) return fail(label, "cc failed to build the generated C");
 
-    printf("teko: %s: built %s\n", path, stem);
-    free(stem);
+    printf("teko: %s: built %s\n", label, stem);
     return 0;
 }
 
-int tk_compile(const char *path) {
-    // --- read (B1a) ---
-    tk_str_result src = tk_read_file(path);
-    if (!src.ok) return fail(path, src.as.error.message);
-
-    // --- lex ---
-    tk_tokens_result toks = tk_tokenize(src.as.value);
-    if (!toks.ok) return fail(path, toks.as.error.message);
-    const tk_token *t = toks.as.value.ptr;
-    size_t n = toks.as.value.len;
-
-    // --- parse + reconcile (entry chosen by basename — the .tkp decision is B1b) ---
-    tk_program program;
-    if (strcmp(basename_of(path), "main.tks") == 0) {
-        tk_parsed_main_file_result pr = tk_parse_main_file(t, n, 0);
-        if (!pr.ok) return fail(path, pr.as.error.message);
-        program = tk_main_file_to_program(pr.as.value.node);
-    } else {
-        tk_parsed_module_result pr = tk_parse_module(t, n, 0);
-        if (!pr.ok) return fail(path, pr.as.error.message);
-        program = tk_module_to_program(pr.as.value.node);
+// =========================================================================
+// The PROJECT FRONT-END (shared by build + run). read `.tkp` → discover → assemble →
+// check (whole). Runs from the project root (chdir) so the manifest `source` and the
+// discovered file paths (relative) resolve against the project. On success, `*out` holds
+// the checked merged typed program and `*manifest_out` the parsed manifest (its `name`
+// names the build artifact). Returns 0 on a clean check; non-zero (with a diagnostic)
+// otherwise.
+// =========================================================================
+// Find the single `*.tkp` manifest in the current directory (the project has exactly one).
+// Returns its name in `out` (1 on found, 0 if none/many). The name is conventionally
+// `<name>.tkp` (e.g. teko.tkp) — self-describing — so we glob the extension rather than
+// hardcode a filename. (Contained host edge — M.1.)
+static int find_manifest(char *out, size_t cap) {
+    DIR *d = opendir(".");
+    if (d == NULL) return 0;
+    int found = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        if (n < 4 || strcmp(e->d_name + n - 4, ".tkp") != 0) continue;
+        if (found || n >= cap) { found = 2; continue; }   // 2 = ambiguous (more than one)
+        memcpy(out, e->d_name, n + 1);
+        found = 1;
     }
-
-    // --- check ---
-    tk_tprogram_result checked = tk_type_program(program);
-    if (!checked.ok) return fail(path, checked.as.error.message);
-
-    // --- backend (F2): lower the checked typed program to C, build it natively ---
-    return tk_backend(path, checked.as.value);
+    closedir(d);
+    return found == 1;
 }
 
-// =========================================================================
-// Eixo D — the VM run path (`teko run <file.tks>`): the debug profile. Same front-end as
-// tk_compile, but INTERPRET the checked tree on the VM instead of codegen → cc. Tests
-// (D2) reuse this engine; here it runs a single program for the dev-loop.
-// =========================================================================
-int tk_run(const char *path) {
-    tk_str_result src = tk_read_file(path);
-    if (!src.ok) return fail(path, src.as.error.message);
-
-    tk_tokens_result toks = tk_tokenize(src.as.value);
-    if (!toks.ok) return fail(path, toks.as.error.message);
-    const tk_token *t = toks.as.value.ptr;
-    size_t n = toks.as.value.len;
-
-    tk_program program;
-    if (strcmp(basename_of(path), "main.tks") == 0) {
-        tk_parsed_main_file_result pr = tk_parse_main_file(t, n, 0);
-        if (!pr.ok) return fail(path, pr.as.error.message);
-        program = tk_main_file_to_program(pr.as.value.node);
-    } else {
-        tk_parsed_module_result pr = tk_parse_module(t, n, 0);
-        if (!pr.ok) return fail(path, pr.as.error.message);
-        program = tk_module_to_program(pr.as.value.node);
-    }
-
-    tk_tprogram_result checked = tk_type_program(program);
-    if (!checked.ok) return fail(path, checked.as.error.message);
-
-    // Interpret on the VM — the process exit code is the virtual-main's (a panic exits
-    // non-zero from inside the VM with a "teko: panic: …" message).
-    return tk_vm_run(checked.as.value);
-}
-
-// =========================================================================
-// A3 — the PROJECT entry path. read `.tkp` → discover → assemble → check (whole).
-// Runs from the project root (chdir) so the manifest `source` and the discovered
-// file paths (relative) resolve against the project. Stops at "type-checked" — the
-// merged tast is the deliverable a later codegen/test-runner crumb consumes.
-// =========================================================================
-int tk_compile_project(const char *dir) {
+static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *manifest_out) {
     // Enter the project root so relative source paths resolve (the contained host edge).
     if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
 
-    // --- read + parse the manifest (.tkp at the project root — A1) ---
-    tk_str_result mtext = tk_read_file(".tkp");
+    // --- find + read + parse the manifest (the single <name>.tkp at the root — A1) ---
+    char mname[256];
+    if (!find_manifest(mname, sizeof mname))
+        return fail(dir, "no single .tkp manifest in project directory");
+    tk_str_result mtext = tk_read_file(mname);
     if (!mtext.ok) return fail(dir, "cannot read .tkp manifest");
     tk_manifest_result mr = tk_parse_manifest(mtext.as.value);
     if (!mr.ok) return fail(dir, mr.as.error.message);
@@ -303,5 +258,52 @@ int tk_compile_project(const char *dir) {
 
     printf("teko: %s: project assembled (%zu items) and type-checked OK\n",
            dir, program.len);
+    *out = checked.as.value;
+    *manifest_out = m;
     return 0;
+}
+
+// Heap-allocate a NUL-terminated copy of a tk_str (the manifest `name`, used as the
+// output binary stem). Allocation failure aborts (M.5).
+static char *cstr_of(tk_str s) {
+    char *out = malloc(s.len + 1);
+    if (out == NULL) abort();
+    memcpy(out, s.ptr, s.len);
+    out[s.len] = '\0';
+    return out;
+}
+
+// =========================================================================
+// A3 — the PROJECT BUILD entry (`teko build <dir>`). Front-end (manifest → discover →
+// assemble → check), then the native BACKEND over the merged program. The output binary
+// stem is the manifest `name` (written at the project root, since project_frontend has
+// chdir'd there). Single-namespace projects lower; an unsupported multi-namespace
+// mangling case fails with codegen's honest message (no silent mis-emit).
+// =========================================================================
+int tk_compile_project(const char *dir) {
+    tk_tprogram prog;
+    tk_manifest m;
+    int rc = project_frontend(dir, &prog, &m);
+    if (rc != 0) return rc;
+
+    // --- backend (F2): lower the checked merged program to C, build it natively ---
+    char *stem = cstr_of(m.name);
+    rc = tk_backend(dir, stem, prog);
+    free(stem);
+    return rc;
+}
+
+// =========================================================================
+// Eixo D — the PROJECT RUN entry (`teko run <dir>`): the debug profile. Same front-end
+// as the build, but INTERPRET the checked merged tree on the VM (tk_vm_run) instead of
+// codegen → cc. The process exit code is the virtual-main's (a panic exits non-zero from
+// inside the VM with a "teko: panic: …" message).
+// =========================================================================
+int tk_run_project(const char *dir) {
+    tk_tprogram prog;
+    tk_manifest m;
+    int rc = project_frontend(dir, &prog, &m);
+    if (rc != 0) return rc;
+
+    return tk_vm_run(prog);
 }

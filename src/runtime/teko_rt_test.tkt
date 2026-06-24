@@ -1,0 +1,34 @@
+// src/runtime/teko_rt_test.tkt — tests for teko::runtime. #test collected (no `main`).
+//
+// The runtime is the metal bottom: its true surface (print/println, the panics) bottoms
+// out at the DEFERRED host write/abort (the FFI edge — C1), so it CANNOT be unit-tested in
+// the seed directly. What IS testable today is the OBSERVABLE behavior the checked guards
+// and the str view must preserve — exercised through `teko::assert::*` (the same builtin the
+// VM routes to the runtime, so a passing test round-trips the runtime's assert/print path).
+//
+// NOTE (M.3 — honest). The barrier (panic) cases — ÷0, impossible cast, the panics
+// themselves — are verified END-TO-END through the real front-end + VM/native in the crumb's
+// VERIFY step (a panic-capture harness does not exist in the runner yet); here they are
+// asserted via their NEGATION (the NON-panicking side) where expressible.
+
+// Checked division/modulo with a non-zero divisor: no panic, ordinary result (div/mod).
+#test
+fn checked_div_mod_no_panic() {
+    teko::assert::is_true(84 / 2 == 42)       // div: non-zero divisor → result, no panic_div0
+    teko::assert::is_true(85 % 43 == 42)      // mod: non-zero divisor → result, no panic_div0
+}
+
+// Checked narrowing cast that FITS the target: no panic (the panic_cast side is the barrier).
+#test
+fn checked_cast_in_range_no_panic() {
+    teko::assert::is_true((255 to u8) == 255) // 255 fits u8 → no panic_cast
+    teko::assert::is_true((0 to u8) == 0)     // lower edge fits
+}
+
+// str is a byte VIEW; str_contains is the substring scan the runtime/assert seed share.
+#test
+fn str_view_contains() {
+    teko::assert::str_contains("hello", "ell") // present
+    teko::assert::str_contains("hello", "")    // empty needle ⊆ any hay
+    teko::assert::is_false("hello".contains("xyz")) // absent → would be the panic side
+}

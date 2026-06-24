@@ -1,29 +1,67 @@
 // main.tks — the EXECUTABLE entry point of the `teko` project (root of the canonical
-// `teko::` namespace). This is the Teko ORIGINAL of src/main.c.
+// `teko::` namespace). This is the Teko ORIGINAL of the project-root main.c.
 //
 // WHY A PAIR. The project is written in pairs: a C/H SEED (compiled by the host cc) +
 // the canonical .tks. The seed `teko` exists to compile the .tks sources — this file
 // included — and so reproduce the compiler in Teko (SELF-HOSTING, the bootstrap's whole
-// point). main.tks and src/main.c must therefore stay SEMANTICALLY EQUIVALENT: both take
-// a file argument and run the compile driver over it. A `teko` that could not compile its
-// own main is not self-hosting.
+// point). main.tks and main.c must therefore stay SEMANTICALLY EQUIVALENT.
+//
+// MONOLITH, PROJECTS ONLY (REBOOT_PLAN §2.6). Teko compiles PROJECTS (`.tkp`), never an
+// isolated `.tks` file — a lone file is not a compilation unit. The CLI is project-only:
+//   teko build <projdir>   front-end → native codegen (a binary)
+//   teko run   <projdir>   front-end → VM (debug profile)
+//   teko test  <projdir>   honest stub (the test runner is crumb D2, not yet built)
+//   teko <projdir>         ≡ build
+// A bare file / `.tks` argument is rejected honestly.
 //
 // SHAPE (§2.20 — entry point). A LINEAR virtual main: top-level statements + local
 // var/const only (no fn/type declarations — those live in modules). Output contract:
 // natural end → exit 0; `teko::exit(n)` → exit n; panic → stderr + exit ≠0. NO value
-// return. Argv via `teko::env::args()` (args[0] is the program, args[1] the input file).
-// `teko::` is injected and reserved, referenced by absolute path — no `use` needed.
+// return. Argv via `teko::env::args()` (args[0] is the program, args[1] the subcommand
+// or project). `teko::` is injected and reserved, referenced by absolute path — no `use`.
 //
-// MIRRORS src/main.c: with no input file, fail with usage status 2; otherwise compile the
-// given file and exit with the driver's status.
+// MIRRORS main.c: subcommand dispatch (build/run/test) over a project dir, with bare
+// arg ≡ build and a file/`.tks` arg rejected; exit with the driver's status.
 //
-// NOT YET SEED-COMPILABLE (honest — M.3). The build/driver (`teko::compile`, the original
-// of src/driver.c's tk_compile) and the `teko::env`/`teko::exit` surfaces exist today only
-// as C seed, not as materialized .tks pairs; per the roadmap, self-hosting is deferred past
-// the first binary. This file is the canonical SOURCE that materialization will target.
+// NOT YET SEED-COMPILABLE (honest — M.3). The driver surfaces (`teko::build`,
+// `teko::run`, the original of driver.c's tk_compile_project / tk_run_project) and the
+// `teko::env`/`teko::exit` surfaces exist today only as C seed, not as materialized .tks
+// pairs; per the roadmap, self-hosting is deferred past the first binary. This file is
+// the canonical SOURCE that materialization will target.
 
 let args = teko::env::args()
 if args.len < 2 {
+    teko::env::eprintln("teko compiles projects: pass a project directory or .tkp")
     teko::exit(2)
 }
-teko::exit(teko::compile(args[1]))
+
+let cmd = args[1]
+
+if cmd == "build" || cmd == "run" || cmd == "test" {
+    if args.len < 3 {
+        teko::env::eprintln("teko compiles projects: pass a project directory or .tkp")
+        teko::exit(2)
+    }
+    let arg = args[2]
+    if teko::strings::ends_with(arg, ".tks") {
+        teko::env::eprintln("teko: teko compiles projects: pass a project directory or .tkp (a lone .tks is not a unit)")
+        teko::exit(2)
+    }
+    let dir = teko::build::project_dir_of(arg)
+    if cmd == "build" {
+        teko::exit(teko::build::compile_project(dir))
+    }
+    if cmd == "run" {
+        teko::exit(teko::build::run_project(dir))
+    }
+    // test — honest stub (crumb D2, not yet built)
+    teko::env::eprintln("teko: test not yet — the project test runner is crumb D2 (not built)")
+    teko::exit(1)
+}
+
+// bare argument: a project ≡ build; a file/`.tks` is rejected.
+if teko::strings::ends_with(cmd, ".tks") {
+    teko::env::eprintln("teko: teko compiles projects: pass a project directory or .tkp (a lone .tks is not a unit)")
+    teko::exit(2)
+}
+teko::exit(teko::build::compile_project(teko::build::project_dir_of(cmd)))

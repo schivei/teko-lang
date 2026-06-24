@@ -1,0 +1,73 @@
+// src/runtime/teko_rt.tks   (namespace 'teko::runtime')
+//
+// teko::runtime — the EXECUTION runtime for GENERATED Teko programs (M.1 fail-loud).
+// The metal bottom: print/println write bytes to the host, the panics fail loud and
+// abort, the F3 guards turn raw division and narrowing casts into checked ops that
+// PANIC rather than corrupt. This is the canonical Teko ORIGINAL of src/runtime/
+// teko_rt.{c,h} — they must stay SEMANTICALLY EQUIVALENT.
+//
+// WHY A PAIR (M.3 — honesty). Like main.tks and driver.tks, this file is the canonical
+// SOURCE but is NOT YET SEED-COMPILABLE. Its true realization rides the host primitives
+// the bootstrap does not yet expose as materialized .tks pairs:
+//   * print/println bottom out at the host write (the FFI bottom — crumb C1, DEFERRED).
+//   * panic bottoms out at the host abort/exit (the same deferred `extern`/syscall edge).
+// Until those primitives land, the C/H seed (teko_rt.{c,h}) is what generated programs
+// actually link; this .tks is the target materialization will hit. The pairing closes the
+// runtime SUPREME-RULE gap (no .c/.h without a .tks) HONESTLY — it does not pretend the
+// metal bottom already exists in Teko.
+//
+// FAIL LOUD (M.1). Every panic prints "teko: panic: <msg>" to stderr and exits non-zero.
+// SINGLE-EVALUATION (F3). Each guard takes its operands BY VALUE — the caller computes
+// each once — so codegen never duplicates an operand subtree.
+
+// --- output: write a str VIEW (len BYTES, NOT NUL-terminated; embedded NUL tolerated) ---
+
+// print — write exactly s.len bytes from s to stdout; no newline, no NUL.
+exp fn print(s: str) {
+    teko::io::write(s)                    // DEFERRED host write (FFI bottom — C1)
+}
+
+// println — print(s) then a single '\n' (0x0A).
+exp fn println(s: str) {
+    print(s)
+    teko::io::write("\n")
+}
+
+// --- panics: fail loud (M.1) — message to stderr, then non-zero exit ---
+
+// panic — "teko: panic: <msg>\n" to stderr, then abort (non-zero exit; conventional 134).
+exp fn panic(msg: str) -> never {
+    teko::io::ewrite(teko::str::concat3("teko: panic: ", msg, "\n"))
+    teko::abort()                         // DEFERRED host abort (the same `extern` edge)
+}
+
+exp fn panic_div0()     -> never { panic("division by zero") }
+exp fn panic_oob()      -> never { panic("index out of bounds") }
+exp fn panic_cast()     -> never { panic("impossible conversion") }   // the `x to T` guard — B.36 / M.1
+exp fn panic_overflow() -> never { panic("integer overflow") }
+
+// --- F3 checked division / modulo: panic on a zero divisor (no UB / SIGFPE) ---
+// One helper per signed/unsigned width in the seed; here the canonical form is the i64
+// shape — codegen selects the concrete width from the binary node's prim. (NOTE, out of
+// scope: overflow guarding for +,-,* is profile-dependent and DEFERRED; panic_overflow
+// above exists for that future wiring.)
+
+exp fn div(a: i64, b: i64) -> i64 {
+    if b == 0 { panic_div0() }
+    a / b
+}
+
+exp fn mod(a: i64, b: i64) -> i64 {
+    if b == 0 { panic_div0() }
+    a % b
+}
+
+// --- F3 checked narrowing conversion: panic if the value can't fit the target ---
+// The source is widened to a carrier WITHOUT loss (codegen only emits these when the
+// SOURCE prim fits the carrier); the range check catches an out-of-range value and PANICS.
+// One helper per target width/signedness in the seed; the canonical shape is shown for u8.
+
+exp fn to_u8(v: i64) -> u8 {
+    if v < 0 || v > 255 { panic_cast() }
+    v to u8
+}

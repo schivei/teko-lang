@@ -1,4 +1,5 @@
-// src/codegen/codegen_c.h — F2 BACKEND: lower a CHECKED typed program (tk_tprogram)
+// src/codegen/codegen.h   (namespace 'teko::codegen')
+// F2 BACKEND: lower a CHECKED typed program (tk_tprogram)
 // to C source text. The host `cc` then compiles that text to the first native Teko
 // binary (M0). Distinct from src/emit/* (the `.tkb`/`.tkh` serializers): this is the
 // path-to-machine-code lowering.
@@ -7,8 +8,8 @@
 // kind not yet lowered makes tk_emit_c FAIL with a clear message (no broken C, no
 // crash), which the driver surfaces as `teko: <path>: codegen: <node> not yet
 // supported`.
-#ifndef TK_CODEGEN_C_H
-#define TK_CODEGEN_C_H
+#ifndef TK_CODEGEN_H
+#define TK_CODEGEN_H
 
 #include "../checker/tast.h"   // tk_tprogram
 #include "../core.h"           // TK_RESULT, tk_error
@@ -25,4 +26,4 @@ TK_RESULT(char *, tk_cstr_result);
 // bare `return` -> `return 0;`). Returns heap C-source on success.
 tk_cstr_result tk_emit_c(tk_tprogram prog);
 
-#endif // TK_CODEGEN_C_H
+#endif // TK_CODEGEN_H

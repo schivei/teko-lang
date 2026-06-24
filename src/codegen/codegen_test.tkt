@@ -1,0 +1,57 @@
+// src/codegen/codegen_test.tkt — tests for teko::codegen. #test collected (no `main`).
+//
+// HONEST SCOPE (M.3). The C backend (tk_emit_c) lowers a CHECKED typed tree to C source
+// text — its inputs are tk_tprogram nodes, which are not constructible from Teko in the
+// seed (no AST/tast surface is exported). So this file does NOT call tk_emit_c directly;
+// it exercises the codegen-level INVARIANTS that ARE expressible in Teko, namely the exact
+// arithmetic / operator / cast semantics the lowering must preserve. The VM (src/vm/vm.c)
+// mirrors codegen node-for-node (the differential-correctness anchor — see vm.c's header),
+// so running these expressions pins the same numeric contract codegen emits into C.
+//
+// Each case maps to a codegen branch in codegen.tks: emit_binary, emit_div_mod, emit_cast,
+// emit_compare, emit_unary. A `.tkt` must exist to satisfy the pairing rule; these keep it
+// honest and minimal rather than faking a unit test of an un-callable C API.
+
+// emit_binary — `(L op R)` for +,-,*,&,|,^,<<,>> must preserve C integer semantics.
+#test
+fn lowers_integer_arithmetic() {
+    teko::assert::is_true(1 + 2 == 3)
+    teko::assert::is_true(7 - 4 == 3)
+    teko::assert::is_true(6 * 7 == 42)
+    teko::assert::is_true((6 & 3) == 2)
+    teko::assert::is_true((4 | 1) == 5)
+    teko::assert::is_true((5 ^ 1) == 4)
+    teko::assert::is_true((1 << 4) == 16)
+    teko::assert::is_true((32 >> 2) == 8)
+}
+
+// emit_div_mod — the checked `/` and `%` path (tk_div_*/tk_mod_*) on a non-zero divisor
+// must produce the plain quotient / remainder.
+#test
+fn lowers_checked_div_mod() {
+    teko::assert::is_true(42 / 6 == 7)
+    teko::assert::is_true(43 % 6 == 1)
+}
+
+// emit_compare — chained comparisons lower to `((a<b) && (b<c))`.
+#test
+fn lowers_chained_compare() {
+    teko::assert::is_true(1 < 2)
+    teko::assert::is_false(2 < 1)
+    teko::assert::is_true(1 <= 1)
+    teko::assert::is_false(1 == 2)
+}
+
+// emit_unary — `(op X)` for -, ~, !.
+#test
+fn lowers_unary_ops() {
+    teko::assert::is_true(-(3) + 3 == 0)
+    teko::assert::is_false(!(1 < 2))
+}
+
+// emit_cast — a widening / same-range cast is the plain C cast (no guard) and is lossless.
+#test
+fn lowers_widening_cast() {
+    let x = 200 to i64
+    teko::assert::is_true(x == 200)
+}

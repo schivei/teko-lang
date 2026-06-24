@@ -189,9 +189,9 @@ typedef struct {                                                        // a top
         tk_statement statement;
     } as;
     // A3 — the namespace this item came from, for multi-file project assembly
-    // (codegen name-mangling later). A single-file `tk_compile` leaves it the zero
-    // str (no namespace); the project assemble pass tags every merged item with its
-    // SourceFile namespace. Resolution/typing IGNORE this — it carries provenance only.
+    // (codegen name-mangling later). The project assemble pass tags every merged item
+    // with its SourceFile namespace; the bare root main.tks items carry the project's
+    // canonical root name. Resolution/typing IGNORE this — it carries provenance only.
     tk_str namespace;
 } tk_item;
 typedef struct { tk_item *items; size_t len; } tk_program;              // a flat item list

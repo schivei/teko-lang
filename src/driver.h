@@ -1,8 +1,9 @@
-// src/driver.h — the Teko bootstrap DRIVER (F1: path-to-first-binary).
+// src/driver.h — the Teko bootstrap DRIVER (F1/F2: path-to-first-binary).
 //
-// Wires the front-end pipeline end-to-end: read → lex (tk_tokenize) → parse
-// (tk_parse_main_file / tk_parse_module) → reconcile (file model → tk_program) →
-// check (tk_type_program). Codegen/emit is F2 — success here means "type-checked".
+// Teko is a MONOLITH that compiles PROJECTS, not isolated `.tks` files (REBOOT_PLAN
+// §2.6). The driver wires the project pipeline end-to-end: read `.tkp` → discover →
+// assemble (read → lex → parse → reconcile → MERGE) → check (whole, M.1) → then either
+// the native backend (build) or the VM (run).
 #ifndef TK_DRIVER_H
 #define TK_DRIVER_H
 
@@ -23,24 +24,23 @@ tk_str_result tk_read_file(const char *path);
 tk_program tk_main_file_to_program(tk_main_file mf);
 tk_program tk_module_to_program(tk_module m);
 
-// B1d — the driver. read → lex → parse → reconcile → check for the file at `path`.
-// The parse entry is chosen by basename: `main.tks` → main-file parser, else module.
-// Returns 0 on success (prints a concise OK line to stdout); non-zero on any stage
-// failure (prints `teko: <path>: <message>` to stderr).
-int tk_compile(const char *path);
-
-// A3 — the PROJECT entry path. Given a project directory `dir`, read `<dir>/.tkp`
+// A3 — the PROJECT BUILD entry. Teko is a MONOLITH that compiles PROJECTS, not isolated
+// `.tks` files (REBOOT_PLAN §2.6). Given a project directory `dir`, read `<dir>/.tkp`
 // (tk_parse_manifest), discover the source tree (tk_discover), assemble all files into
-// one merged tk_program (tk_assemble), and type-check it whole (tk_type_program — M.1).
-// Reports OK / the first error. This is the multi-file analogue of tk_compile; it stops
-// at "type-checked" (multi-namespace native codegen is a later crumb). Returns 0 on a
-// clean check. main() dispatches here when its argument is a directory or a `.tkp`.
+// one merged tk_program (tk_assemble), type-check it whole (tk_type_program — M.1), then
+// run the native BACKEND (tk_backend) over the merged program to produce a binary named
+// from the manifest. For a single-namespace project (root main.tks ± one namespace) the
+// lowering works; if codegen hits an unsupported multi-namespace mangling case it fails
+// with the honest existing message (no silent mis-emit). Output binary stem = manifest
+// `name`. Returns 0 on a clean build. main() dispatches here for `teko build <dir>`.
 int tk_compile_project(const char *dir);
 
-// Eixo D — the VM run path (debug profile). read → lex → parse → reconcile → check, then
-// INTERPRET the checked typed tree on the VM (tk_vm_run) instead of codegen. No .tkb, no
-// cc. The process exit code is the virtual-main's (early `return n` → n, default 0); a
-// panic (÷0 / impossible cast / failed assert) goes to stderr with a non-zero exit.
-int tk_run(const char *path);
+// Eixo D — the PROJECT RUN entry (debug profile). Mirrors tk_compile_project's front
+// (manifest → discover → assemble → check) but ends in the VM: INTERPRET the checked
+// merged tree (tk_vm_run) instead of codegen → cc. The process exit code is the
+// virtual-main's (early `return n` → n, default 0); a panic (÷0 / impossible cast /
+// failed assert) goes to stderr with a non-zero exit. main() dispatches here for
+// `teko run <dir>`.
+int tk_run_project(const char *dir);
 
 #endif // TK_DRIVER_H

@@ -1,4 +1,5 @@
-// runtime/teko_rt.h — libteko_rt: runtime for GENERATED Teko programs (M.1 fail-loud).
+// src/runtime/teko_rt.h   (namespace 'teko::runtime')
+// libteko_rt: runtime for GENERATED Teko programs (M.1 fail-loud).
 // Distinct from the compiler's own src/core.h; self-contained, libc-only.
 #ifndef TEKO_RT_H
 #define TEKO_RT_H
@@ -29,16 +30,10 @@ _Noreturn void tk_panic_oob(void);        // "index out of bounds"
 _Noreturn void tk_panic_cast(void);       // "impossible conversion" (the `x to T` guard — B.36 / M.1)
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 
-// =========================================================================
-// teko::assert — injected testing assertions (canonical: src/assert/assert.tks).
-// The generic CALL lowering emits `teko__assert__<name>(...)` for a call to
-// `teko::assert::<name>`, so these symbols realize the seed in C (no codegen change).
-// Each FAILS LOUD (M.1): on a false assertion -> tk_panic("assertion failed: <name>").
-// Seed subset is NON-generic; equals/is_error/is_ok need generics — DEFERRED (M.3).
-// =========================================================================
-void teko__assert__is_true(bool c);        // panic unless c
-void teko__assert__is_false(bool c);       // panic unless !c
-void teko__assert__str_contains(tk_str hay, tk_str needle);  // panic unless needle ⊆ hay
+// teko::assert (the injected testing assertions) lives in its own C seed —
+// src/assert/assert.{c,h} (canonical: src/assert/assert.tks). Generated programs that
+// call them get the symbols because driver.c::run_cc compiles src/assert/assert.c
+// alongside this runtime; the compiler lib links the same source via CMake.
 
 // =========================================================================
 // F3 runtime guards (M.1 — fail loud, never silent corruption / metal hazard):

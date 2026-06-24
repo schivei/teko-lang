@@ -1,0 +1,224 @@
+// src/driver.tks   (namespace 'teko')
+//
+// The Teko bootstrap DRIVER — the canonical Teko ORIGINAL of src/driver.c. It lives at
+// the `src/` root, so it sits in the bare `teko` namespace alongside the compiler's other
+// root files (the same place main.tks's virtual main lives). It wires the front-end
+// pipeline end to end: read → lex → parse → reconcile → check → (codegen | VM).
+//
+// NOT YET SEED-COMPILABLE (honest — M.3). This is the canonical SOURCE, but it cannot be
+// seed-compiled today: the host surfaces it leans on — `teko::io::read_file` /
+// `teko::io::write_file` (file IO), `teko::process` (invoking the host `cc`), `teko::env`
+// and `teko::exit` — exist now only as C seed inside driver.c, not yet as materialized
+// .tks pairs. Those surfaces are DEFERRED (Eixo C / crumb M2); self-hosting is past the
+// first binary on the roadmap. Exactly like main.tks, this file is the target that the
+// later materialization of those surfaces will satisfy. Faithful-not-literal: it mirrors
+// driver.c's SHAPE and contracts, expressed in native Teko (variants, `match`, lists).
+
+use teko::lexer
+use teko::parser
+use teko::checker
+use teko::codegen
+use teko::build
+use teko::vm
+
+// =========================================================================
+// B1a — the IO boundary. The bootstrap's ONE host-IO read (the unsafe host edge —
+// M.1, contained here). Reads the whole file at `path` into a freshly allocated `str`,
+// UTF-8 VALIDATED on the way in (B.36 — the only door from bytes to str). On any host
+// failure it yields an `error` with a clear message. In Teko the host edge is the
+// deferred `teko::io::read_file`; driver.c's tk_read_file is its C realization
+// (fopen/fread/fclose + tk_str_from_utf8).
+// =========================================================================
+fn read_file(path: str) -> str | error {
+    teko::io::read_file(path)
+}
+
+// =========================================================================
+// B1c — R-main reconciliation. Flatten the parsed file model into a flat `Item` list
+// (`Program`) that the checker consumes.
+//   * MainFile: each `use` → an Item::Use; each virtual-main statement → Item::Statement.
+//   * Module:   each `use` → an Item::Use; each decl → Item::Function | Item::TypeDecl.
+// =========================================================================
+fn main_file_to_program(mf: parser::MainFile) -> parser::Program {
+    mut items = teko::list::empty()
+    for u in mf.uses {
+        items = teko::list::push(items, parser::Item::Use(u))
+    }
+    for s in mf.body {
+        items = teko::list::push(items, parser::Item::Statement(s))
+    }
+    parser::Program { items = items }
+}
+
+fn module_to_program(m: parser::Module) -> parser::Program {
+    mut items = teko::list::empty()
+    for u in m.uses {
+        items = teko::list::push(items, parser::Item::Use(u))
+    }
+    for d in m.decls {
+        items = match d {
+            parser::Decl::Function as f => teko::list::push(items, parser::Item::Function(f))
+            parser::Decl::Type as t     => teko::list::push(items, parser::Item::TypeDecl(t))
+        }
+    }
+    parser::Program { items = items }
+}
+
+// =========================================================================
+// B1d — the driver. read → lex → parse → reconcile → check → backend, for the file at
+// `path`. The parse entry is chosen by BASENAME: `main.tks` → main-file parser (a virtual
+// main), else the module parser. On any stage failure it reports `teko: <path>: <message>`
+// and returns a non-zero status; on success it hands off to the backend.
+// =========================================================================
+fn basename_of(path: str) -> str {
+    match teko::str::last_index_of(path, "/") {
+        u64 as i => teko::str::slice_from(path, i + 1)
+        error    => path
+    }
+}
+
+// Parse + reconcile to a Program, choosing the entry by basename. Shared by compile/run.
+fn parse_to_program(path: str, tokens: []lexer::Token) -> parser::Program | error {
+    if basename_of(path) == "main.tks" {
+        let mf = match parser::parse_main_file(tokens, 0) { parser::ParsedMainFile as x => x.node; error as e => return e }
+        main_file_to_program(mf)
+    } else {
+        let m = match parser::parse_module(tokens, 0) { parser::ParsedModule as x => x.node; error as e => return e }
+        module_to_program(m)
+    }
+}
+
+fn compile(path: str) -> i32 {
+    // --- read (B1a) ---
+    let src = match read_file(path) { str as s => s; error as e => return fail(path, e.message) }
+
+    // --- lex ---
+    let tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return fail(path, e.message) }
+
+    // --- parse + reconcile (B1c) ---
+    let program = match parse_to_program(path, tokens) { parser::Program as p => p; error as e => return fail(path, e.message) }
+
+    // --- check ---
+    let checked = match checker::type_program(program) { checker::TProgram as c => c; error as e => return fail(path, e.message) }
+
+    // --- backend (F2): lower the checked typed program to C, build it natively ---
+    backend(path, checked)
+}
+
+// =========================================================================
+// B2 — the BACKEND wiring (F2): emit C, write it next to the input, invoke the host `cc`,
+// produce the native binary. The output stem drops a trailing ".tks". The IO write and the
+// `cc` spawn are deferred host surfaces (`teko::io::write_file`, `teko::process`).
+// =========================================================================
+
+// "<dir>/<stem>" — the input path with a trailing ".tks" stripped.
+fn output_stem(path: str) -> str {
+    if teko::str::ends_with(path, ".tks") {
+        teko::str::slice_to(path, teko::str::len(path) - 4)
+    } else {
+        path
+    }
+}
+
+// Run the host C compiler over `cfile`, producing `binary`. F3: the emitted C includes
+// the minimal runtime (teko_rt), so cc must see the runtime dir (-I) and compile its
+// source — one reuse-the-host-toolchain invocation (M.5), no extra build system. Returns
+// the cc exit code. The spawn is the deferred `teko::process` surface.
+fn run_cc(cfile: str, binary: str) -> i32 {
+    teko::process::run(["cc", "-std=c23", "-I", rt_dir(), cfile, teko::str::concat(rt_dir(), "/teko_rt.c"), "-o", binary])
+}
+
+// Lower → write .c → invoke cc → report. Returns 0 on success.
+fn backend(path: str, prog: checker::TProgram) -> i32 {
+    let csrc = match codegen::emit_c(prog) { str as s => s; error as e => return fail(path, e.message) }
+
+    let stem  = output_stem(path)
+    let cfile = teko::str::concat(stem, ".c")
+
+    match teko::io::write_file(cfile, csrc) {
+        error as e => return fail(path, e.message)
+        unit       => {}
+    }
+
+    if run_cc(cfile, stem) != 0 {
+        return fail(path, "cc failed to build the generated C")
+    }
+
+    teko::io::print(teko::str::concat3("teko: ", path, teko::str::concat(": built ", stem)))
+    0
+}
+
+// =========================================================================
+// Eixo D — the VM run path (`teko run <file.tks>`): the debug profile. The SAME front end
+// as `compile`, but INTERPRET the checked tree on the VM (vm::run) instead of codegen→cc.
+// No .tkb, no cc. The exit code is the virtual-main's (early `return n` → n, default 0);
+// a panic (÷0 / impossible cast / failed assert) goes to stderr with a non-zero exit.
+// =========================================================================
+fn run(path: str) -> i32 {
+    let src = match read_file(path) { str as s => s; error as e => return fail(path, e.message) }
+    let tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return fail(path, e.message) }
+    let program = match parse_to_program(path, tokens) { parser::Program as p => p; error as e => return fail(path, e.message) }
+    let checked = match checker::type_program(program) { checker::TProgram as c => c; error as e => return fail(path, e.message) }
+
+    // Interpret on the VM — the exit code is the virtual-main's; a panic exits non-zero
+    // from inside the VM with a "teko: panic: …" message.
+    vm::run(checked)
+}
+
+// =========================================================================
+// A3 — the PROJECT entry path. Given a project directory `dir`: enter it (so relative
+// `source` and discovered paths resolve from the root), read `<dir>/.tkp` (parse_manifest),
+// discover the source tree (discover), assemble all files into ONE merged Program
+// (assemble), and type-check the whole thing together (type_program — M.1). The entry
+// MainFile lives at the project ROOT (not under `source`), so it is injected into the file
+// set, tagged with the bare root namespace. Reports OK or the first error. Stops at
+// "type-checked" (multi-namespace native codegen is a later crumb). Returns 0 on a clean
+// check. main() dispatches here when its argument is a directory or a `.tkp`.
+// =========================================================================
+fn compile_project(dir: str) -> i32 {
+    // Enter the project root so relative source paths resolve (the contained host edge).
+    match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); unit => {} }
+
+    // --- read + parse the manifest (.tkp at the project root — A1) ---
+    let mtext = match read_file(".tkp") { str as s => s; error => return fail(dir, "cannot read .tkp manifest") }
+    let m = match build::parse_manifest(mtext) { build::Manifest as x => x; error as e => return fail(dir, e.message) }
+
+    // --- discover the source tree (A2) ---
+    mut files = match build::discover(m.name, m.source) { build::SourceFiles as f => f; error as e => return fail(dir, e.message) }
+
+    // The entry MainFile lives at the PROJECT ROOT, not under `source` (discover walks only
+    // `source`). Inject it into the file set so the merged program has an entry, tagged with
+    // the bare root namespace (provenance). Skip it if absent (a library).
+    match read_file("main.tks") {
+        str => files = build::source_files_push(files, build::SourceFile { path = "main.tks", namespace = m.name })
+        error => {}
+    }
+
+    // --- report the discovered file → namespace map (the project's surface) ---
+    teko::io::print(teko::str::concat3("teko: project '", m.name, "'"))
+    for f in files {
+        teko::io::print(teko::str::concat3("  ", f.path, teko::str::concat("\t-> ", f.namespace)))
+    }
+
+    // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
+    let program = match build::assemble(files) { parser::Program as p => p; error as e => return fail(dir, e.message) }
+
+    // --- check the WHOLE merged program (M.1 — whole program checked together) ---
+    match checker::type_program(program) { checker::TProgram => {}; error as e => return fail(dir, e.message) }
+
+    teko::io::print(teko::str::concat3("teko: ", dir, ": project assembled and type-checked OK"))
+    0
+}
+
+// Report a stage failure to stderr in the driver's canonical form and return status 1.
+fn fail(path: str, message: str) -> i32 {
+    teko::io::eprint(teko::str::concat3("teko: ", path, teko::str::concat(": ", message)))
+    1
+}
+
+// F3 — where the minimal execution runtime (teko_rt) lives. The C seed lets CMake inject
+// an absolute path (TK_RT_DIR) with a "runtime" fallback; in Teko this is an environment
+// lookup (`teko::env`), defaulting to the in-tree dir.
+fn rt_dir() -> str {
+    match teko::env::var("TK_RT_DIR") { str as d => d; error => "runtime" }
+}

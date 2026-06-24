@@ -33,8 +33,14 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(TEKO_TEXT_SOURCES
     src/text/text.c)
 
+# teko::assert — the C seed of assert.tks (the injected testing assertions). Shared by the
+# VM (linked via the lib) and generated programs (driver.c hands it to the host cc).
+set(TEKO_ASSERT_SOURCES
+    src/assert/assert.c)
+
 # teko::build — the `.tkp` manifest reader (crumb A1). The FIRST .c under src/build.
 set(TEKO_BUILD_SOURCES
+    src/build/tkp_rule.c
     src/build/manifest.c
     src/build/discover.c
     src/build/assemble.c)
@@ -78,7 +84,7 @@ set(TEKO_EMIT_SOURCES
 
 # --- F2: the C backend (codegen) — lowers the checked typed tree to C source ---
 set(TEKO_CODEGEN_SOURCES
-    src/codegen/codegen_c.c)
+    src/codegen/codegen.c)
 
 # --- Eixo D: the VM / interpreter — the test/debug execution engine (Stage-1) ---
 # Tree-walks the checked typed tree directly (no .tkb, no codegen); mirrors codegen
@@ -92,6 +98,7 @@ set(TEKO_VM_SOURCES
 # link `teko` against it once the pipeline is wired.
 add_library(teko_bootstrap STATIC
     ${TEKO_TEXT_SOURCES}
+    ${TEKO_ASSERT_SOURCES}
     ${TEKO_BUILD_SOURCES}
     ${TEKO_LEXER_SOURCES}
     ${TEKO_PARSER_SOURCES}
@@ -106,10 +113,13 @@ add_library(teko_bootstrap STATIC
 # success here means the front-end pipeline ran and the program type-checked.)
 # The VM (`teko run`) calls the execution-runtime symbols (tk_print/tk_panic_*/
 # teko__assert__*), so the compiler binary itself links teko_rt.c — the same source the
-# driver also hands to the host cc for generated programs.
-add_executable(teko main.c src/driver.c runtime/teko_rt.c)
+# driver also hands to the host cc for generated programs. It is kept an EXE source (not in
+# the lib) so it is never double-linked into the generated programs the driver builds.
+add_executable(teko main.c src/driver.c src/runtime/teko_rt.c)
 target_link_libraries(teko PRIVATE teko_bootstrap)
 
 # F3: the generated programs link the minimal execution runtime (libteko_rt).
 # teko needs the runtime's location to pass -I and the runtime source to the host cc.
-target_compile_definitions(teko PRIVATE TK_RT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/runtime")
+target_compile_definitions(teko PRIVATE
+    TK_RT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
+    TK_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")

@@ -6,14 +6,7 @@
 
 #include "../core.h"        // TK_LIST, TK_RESULT, tk_error
 #include "../text/text.h"   // tk_str
-
-// Artifact — the C mirror of tkp_rule.tks `enum { Executable; Library }`. (src/build
-// has no other .c yet, so the enum is realized here, at its first C use.) The manifest
-// encodes Executable as `[artifact] kind = "binary"`.
-typedef enum {
-    TK_ARTIFACT_EXECUTABLE,
-    TK_ARTIFACT_LIBRARY,
-} tk_artifact;
+#include "tkp_rule.h"       // tk_artifact (single home — the C seed of tkp_rule.tks)
 
 // a list of strings — teko::list realized over tk_str (deps / aliases as simple string
 // lists in the seed — M.5; richer dependency records are evolution).
