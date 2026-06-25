@@ -4,7 +4,7 @@ use teko::lexer
 
 // A primary type: a slice `[]T` or a named path. (Members of a `|` union and a
 // slice's element are primaries — the union level is `parse_type` below.)
-fn parse_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
+fn parse_type_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     let base = if is_kind_at(tokens, pos, lexer::TokenKind::LBracket) {
         match parse_slice(tokens, pos) { ParsedType as x => x; error as e => return e }
     } else {
@@ -28,13 +28,13 @@ fn parse_named(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     ParsedType { node = NamedType { path = pp.node }, next = pp.next }
 }
 
-// `[]T` — `pos` is at `[` (parse_primary checked). The element is a PRIMARY, so
+// `[]T` — `pos` is at `[` (parse_type_primary checked). The element is a PRIMARY, so
 // `[]A | B` is `([]A) | B`; nested slices recurse (`[][]T`). Recursive — B.8.
 fn parse_slice(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     if !is_kind_at(tokens, pos + 1, lexer::TokenKind::RBracket) {
         return err_at(tokens, pos + 1, "expected ']' to close '[' in a slice type '[]T'")
     }
-    let elem = match parse_primary(tokens, pos + 2) { ParsedType as x => x; error as e => return e }
+    let elem = match parse_type_primary(tokens, pos + 2) { ParsedType as x => x; error as e => return e }
     ParsedType { node = SliceType { element = elem.node }, next = elem.next }
 }
 
@@ -42,13 +42,13 @@ fn parse_slice(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
 // one or more primaries. One → that primary (no needless UnionType — M.5); two or
 // more → a UnionType.
 fn parse_type(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
-    let first = match parse_primary(tokens, pos) { ParsedType as x => x; error as e => return e }
+    let first = match parse_type_primary(tokens, pos) { ParsedType as x => x; error as e => return e }
     mut members = teko::list::empty()
     members = teko::list::push(members, first.node)
     mut p = first.next
     loop {
         if !is_kind_at(tokens, p, lexer::TokenKind::Pipe) { break }
-        let m = match parse_primary(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+        let m = match parse_type_primary(tokens, p + 1) { ParsedType as x => x; error as e => return e }
         members = teko::list::push(members, m.node)
         p = m.next
     }
