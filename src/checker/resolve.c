@@ -25,6 +25,8 @@ tk_decl_result tk_type_table_find(tk_type_table table, tk_str name) {
 
 // non-static: shared with match.c (the typed pattern checker resolves case/struct names — C7).
 tk_type_result resolve_named(tk_path path, tk_type_table table) {
+    if (path.len == 0)   // M.1: an empty path is an internal invariant break — an honest error, never a crash
+        return (tk_type_result){ .ok = false, .as.error = tk_error_make("internal: empty type path (a void/missing type used where a value type is required)") };
     tk_str name = path.segments[path.len - 1].name;       // seed: last segment
     tk_type_result bt = tk_builtin_type(name);            // u8…u64, byte, str, error
     if (bt.ok) return bt;

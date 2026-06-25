@@ -24,7 +24,12 @@ static tk_type_result func_type(tk_function f, tk_type_table table) {
         if (!params) abort();
         params[n] = pt.as.value; n += 1;
     }
-    tk_type_result ret = tk_resolve_type(f.return_type, table);
+    // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty `no_type()` placeholder
+    // (a NAMED type-expr with an empty path), which must NOT be resolved (it is not a value type).
+    // Mirrors typer.c's function typer (`if (!f.has_return) return void_t()`).
+    tk_type_result ret = f.has_return
+        ? tk_resolve_type(f.return_type, table)
+        : (tk_type_result){ .ok = true, .as.value = (tk_type){ .tag = TK_TYPE_VOID } };
     if (!ret.ok) { tk_free0(params); return ret; }
     tk_type *rp = tk_alloc(sizeof *rp); if (!rp) abort(); *rp = ret.as.value;
     tk_type t = { .tag = TK_TYPE_FUNC, .as.func = { params, n, rp } };
