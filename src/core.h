@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdlib.h>    // malloc, realloc, free, abort, size_t
 #include <string.h>    // memcpy — for tk_alloc_copy
+#include <stdint.h>    // uint32_t — diagnostic source positions (C1.3)
 
 // ── The allocation SEAM (S0 — TEKO_EVOLUTION_DESIGN §5; the swap point for S1 arenas) ──
 // One choke point for every dynamic allocation in the seed. Today these are thin
@@ -29,15 +30,49 @@ static inline void *tk_alloc_copy(const void *src, size_t size) {
     return p;
 }
 
+// severity — a diagnostic is fatal (error) or advisory (warning). Default 0 =
+// TK_SEV_ERROR, so every existing tk_error stays an error with no change (C1.3).
+typedef enum { TK_SEV_ERROR, TK_SEV_WARNING } tk_severity;
+
 // error — the built-in error-as-value (B.1). In the bootstrap the message is a
 // static ASCII literal (a const char*), keeping core.h independent of teko::text
 // (DAG one-directional); the Teko-level message is a `str`.
+//
+// (C1.3 / diagnostics axis) The bootstrap error doubles as the COMPILER DIAGNOSTIC
+// carrier, so it also holds OPTIONAL adornments — all default-zero/NULL, so every
+// existing construction site is unchanged (M.5 additive). Strings stay const char*
+// (off the teko::text DAG, exactly like `message`):
+//   file/line/col   — source position of the offending construct (NULL/0 = unknown);
+//                     populated once expr nodes carry positions (C1-POS), printed by
+//                     the driver's renderer (C1.8). (Eixo E1/E2.)
+//   expected/actual — rendered type names for a mismatch ("expected X, found Y"); NULL
+//                     when not a type mismatch.
+//   severity        — error (default) | warning (the warnings channel, Phase 5).
 typedef struct {
     const char *message;
+    const char *file;        // source file (NULL = unknown)
+    uint32_t    line, col;   // 1-based source position (0 = unknown)
+    const char *expected;    // rendered expected type (NULL = n/a)
+    const char *actual;      // rendered actual type   (NULL = n/a)
+    tk_severity severity;    // TK_SEV_ERROR (default) | TK_SEV_WARNING
 } tk_error;
 
 static inline tk_error tk_error_make(const char *message) {
-    return (tk_error){ .message = message };
+    return (tk_error){ .message = message };   // other fields zero/NULL — unknown/error (C1.3)
+}
+
+// Composable "with" adornments — return a copy with the field(s) set, so callers chain:
+//   tk_error_at(tk_error_make("argument type mismatch"), file, line, col)
+// ADDITIVE: existing constructors/sites need no change (C1.3). Real population at error
+// sites lands with expr positions (C1-POS) + the renderer (C1.8).
+static inline tk_error tk_error_at(tk_error e, const char *file, uint32_t line, uint32_t col) {
+    e.file = file; e.line = line; e.col = col; return e;
+}
+static inline tk_error tk_error_types(tk_error e, const char *expected, const char *actual) {
+    e.expected = expected; e.actual = actual; return e;
+}
+static inline tk_error tk_warning_make(const char *message) {
+    return (tk_error){ .message = message, .severity = TK_SEV_WARNING };   // warnings channel (Phase 5)
 }
 
 // TK_RESULT(T, Name) — the C form of `T | error` (no generics in the seed — M.5).
