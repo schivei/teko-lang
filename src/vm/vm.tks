@@ -193,7 +193,7 @@ fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> bool |
             return true
         }
         // equals/is_ok/... need generics — DEFERRED (matches the seed). Honest stop (M.3).
-        teko::panic("vm: this teko::assert builtin not yet supported (needs generics)")
+        panic("vm: this teko::assert builtin not yet supported (needs generics)")
     }
     error("not a builtin")
 }
@@ -221,11 +221,11 @@ fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> V
         let item = eval_expr(args[1], env)
         match base {
             []Value as xs => return teko::list::push(xs, item)
-            _             => teko::panic("vm: teko::list::push on a non-list value (internal: checker should reject)")
+            _             => panic("vm: teko::list::push on a non-list value (internal: checker should reject)")
         }
     }
     // other teko::list::* (len/get/…) are deferred — only empty/push in the fixed+copy seed.
-    teko::panic("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)")
+    panic("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)")
 }
 
 // ---------------------------------------------------------------------------
@@ -261,11 +261,11 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
     match eval_expr(fa.receiver, env) {
         str as s => {
             if fa.field == "len" { return s.len to u64 }
-            teko::panic("vm: only `.len` is defined on a str (internal: checker should reject)")
+            panic("vm: only `.len` is defined on a str (internal: checker should reject)")
         }
         []Value as xs => {
             if fa.field == "len" { return xs.len to u64 }
-            teko::panic("vm: field access on a slice value (internal: checker should reject)")
+            panic("vm: field access on a slice value (internal: checker should reject)")
         }
         StructVal as s => {
             mut i = 0
@@ -274,9 +274,9 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
                 if s.field_names[i] == fa.field { return s.field_vals[i] }
                 i++
             }
-            teko::panic("vm: field not found in struct value (internal: the checker guarantees the field)")
+            panic("vm: field not found in struct value (internal: the checker guarantees the field)")
         }
-        _ => teko::panic("vm: field access on a non-struct value (internal: checker should reject)")
+        _ => panic("vm: field access on a non-struct value (internal: checker should reject)")
     }
 }
 
@@ -297,7 +297,7 @@ fn eval_index(ix: checker::TIndex, env: Env) -> Value {
             if i >= xs.len { teko::panic_oob() }
             xs[i]
         }
-        _            => teko::panic("vm: subscript on a non-indexable value (internal: checker should reject)")
+        _            => panic("vm: subscript on a non-indexable value (internal: checker should reject)")
     }
 }
 
@@ -397,7 +397,7 @@ fn lit_as(lit: parser::Expr, subj: Value) -> Value {
         }
         parser::ByteLit as b => b.value      // a `byte` Value (the C carries u8; here byte is its own member)
         parser::StrLit as s  => s.text       // a `str` Value
-        _                    => teko::panic("vm: unsupported literal in a pattern (parser emits only number/byte/str)")
+        _                    => panic("vm: unsupported literal in a pattern (parser emits only number/byte/str)")
     }
 }
 
@@ -534,14 +534,14 @@ fn eval_match(m: checker::TMatchExpr, env: Env) -> Value {
             let guard_ok = if arm.has_when { as_bool(eval_expr(arm.guard, pm.env)) } else { true }
             if guard_ok {
                 match exec_block(arm.body, pm.env) {
-                    Normal as nm => return nm.value ?? teko::panic("vm: a `match` used as a value produced no value (internal: checker requires a value arm)")
-                    _            => teko::panic("vm: control flow inside a `match` used as a sub-expression not yet supported")
+                    Normal as nm => return nm.value ?? panic("vm: a `match` used as a value produced no value (internal: checker requires a value arm)")
+                    _            => panic("vm: control flow inside a `match` used as a sub-expression not yet supported")
                 }
             }
         }
         i++   // discard this arm's bindings (don't thread pm.env forward) and try the next
     }
-    teko::panic("vm: non-exhaustive match at runtime (internal: the checker guarantees exhaustiveness)")
+    panic("vm: non-exhaustive match at runtime (internal: the checker guarantees exhaustiveness)")
 }
 
 // run a `match` as CONTROL FLOW (the FLOW form, mirroring exec_if): eval the subject, find the
@@ -564,9 +564,9 @@ fn exec_match(e: checker::TExpr, env: Env) -> Flow {
                 }
                 i++   // discard this arm's bindings and try the next
             }
-            teko::panic("vm: non-exhaustive match at runtime (internal: the checker guarantees exhaustiveness)")
+            panic("vm: non-exhaustive match at runtime (internal: the checker guarantees exhaustiveness)")
         }
-        _ => teko::panic("vm: exec_match on a non-match expression (internal: checker should reject)")
+        _ => panic("vm: exec_match on a non-match expression (internal: checker should reject)")
     }
 }
 
@@ -574,7 +574,7 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
     match e.type {
         // Optional `T?` values ARE supported now (OptVal — REBOOT_PLAN §202): null / ?. / ?? and
         // the present-wrap (coerce_to) produce them; they flow through the value model like any tag.
-        checker::Void          => teko::panic("vm: void expression has no value (internal: checker should reject in value position)")
+        checker::Void          => panic("vm: void expression has no value (internal: checker should reject in value position)")
         _             => {}   // a real value type — evaluate below
     }
     match e {
@@ -597,8 +597,8 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         // stop (M.3); statement/tail position handles divergence via exec_if directly.
         checker::TIfExpr as _ => {
             match exec_if(e, env) {
-                Normal as nm => nm.value ?? teko::panic("vm: an `if` used as a value produced no value (internal: checker requires an `else` with a value)")
-                _            => teko::panic("vm: control flow inside an `if` used as a sub-expression not yet supported")
+                Normal as nm => nm.value ?? panic("vm: an `if` used as a value produced no value (internal: checker requires an `else` with a value)")
+                _            => panic("vm: control flow inside an `if` used as a sub-expression not yet supported")
             }
         }
         // W5b — `match` as a VALUE: pattern matching (literal/range/Alt/variant-case/destructure + `when`).
@@ -627,12 +627,12 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
                                 }
                                 i++
                             }
-                            teko::panic("vm: field not found in safe field access (internal: the checker guarantees the field)")
+                            panic("vm: field not found in safe field access (internal: the checker guarantees the field)")
                         }
-                        _ => teko::panic("vm: safe field access on a non-struct optional (internal: checker should reject)")
+                        _ => panic("vm: safe field access on a non-struct optional (internal: checker should reject)")
                     }
                 }
-                _ => teko::panic("vm: safe field access on a non-optional value (internal: checker should reject)")
+                _ => panic("vm: safe field access on a non-optional value (internal: checker should reject)")
             }
         }
         checker::TCoalesce as co  => {
@@ -641,13 +641,13 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
             match eval_expr(co.left, env) {
                 OptVal as o => {
                     if o.present {
-                        let inner = match o.inner { Value as iv => iv; null => teko::panic("vm: present optional with no inner (internal)") }
+                        let inner = match o.inner { Value as iv => iv; null => panic("vm: present optional with no inner (internal)") }
                         coerce_to(inner, e.type)
                     } else {
                         coerce_to(eval_expr(co.right, env), e.type)
                     }
                 }
-                _ => teko::panic("vm: coalesce left operand is not optional (internal: checker should reject)")
+                _ => panic("vm: coalesce left operand is not optional (internal: checker should reject)")
             }
         }
     }
@@ -688,8 +688,8 @@ fn eval_binary(b: checker::TBinary, ty: checker::Type, env: Env) -> Value {
             Minus   => float_val(lf - rf, w)
             Star    => float_val(lf * rf, w)
             Slash   => float_val(teko::fdiv(lf, rf), w)   // CHECKED: float ÷0 PANICS (M.1)
-            Percent => teko::panic("vm: '%' on a float value not supported (checker should reject)")
-            _       => teko::panic("vm: bitwise/shift on a float value not supported (checker should reject)")
+            Percent => panic("vm: '%' on a float value not supported (checker should reject)")
+            _       => panic("vm: bitwise/shift on a float value not supported (checker should reject)")
         }
     }
     let sgn  = prim_signed(prim); let w = prim_width(prim)
@@ -746,7 +746,7 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     // stop (M.3), never a synthesized Unit. A `false`/`error` result == "not a builtin" —
     // fall through to a user fn.
     match try_builtin(c.callee, c.args, env) {
-        bool as ran => if ran { teko::panic("vm: void builtin call used as a value (internal: checker should reject)") }
+        bool as ran => if ran { panic("vm: void builtin call used as a value (internal: checker should reject)") }
         error       => {}                  // not a builtin — fall through to a user fn
     }
     // teko::list::empty / push — value-producing SLICE builtins (FIXED+COPY). Recognized
@@ -757,9 +757,9 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn
     // present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot.
     match exec_block(f.body, fenv) {
-        Return as ret => coerce_to(ret.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
-        Normal as nm  => coerce_to(nm.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)  // W5a — implicit trailing value (B.20)
-        _             => teko::panic("vm: void fn call used as a value (internal: checker should reject)")
+        Return as ret => coerce_to(ret.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
+        Normal as nm  => coerce_to(nm.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)  // W5a — implicit trailing value (B.20)
+        _             => panic("vm: void fn call used as a value (internal: checker should reject)")
     }
 }
 
@@ -806,11 +806,11 @@ fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
                 parser::SimpleName as sn => {
                     match eval_rhs_flow(b.value, env) {
                         // present-wrap into a `T?` slot (REBOOT §202) via coerce_to(b.bound).
-                        Normal as nm => Stepped { env= define(env, sn.name, coerce_to(nm.value ?? teko::panic("vm: binding RHS produced no value (internal: checker should reject)"), b.bound)); value= null }
+                        Normal as nm => Stepped { env= define(env, sn.name, coerce_to(nm.value ?? panic("vm: binding RHS produced no value (internal: checker should reject)"), b.bound)); value= null }
                         other        => Exit { flow= other }   // diverged → propagate, no bind
                     }
                 }
-                _                => { teko::panic("vm: destructuring binding not yet supported") }
+                _                => { panic("vm: destructuring binding not yet supported") }
             }
         }
         // An assign is a NORMAL step with NO trailing value (value: null) — it keeps the env.
@@ -936,7 +936,7 @@ fn exec_if(e: checker::TExpr, env: Env) -> Flow {
             if f.has_else { return exec_block(f.else_blk, env) }
             Normal { value= null }    // if-without-else taken false: no value
         }
-        _ => teko::panic("vm: exec_if on a non-if expression (internal: checker should reject)")
+        _ => panic("vm: exec_if on a non-if expression (internal: checker should reject)")
     }
 }
 
