@@ -46,9 +46,14 @@ fn parse_type(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     mut members = teko::list::empty()
     members = teko::list::push(members, first.node)
     mut p = first.next
+    // A `|` may be led by a newline (MULTI-LINE type union, e.g. a wide `variant` over many lines);
+    // separators may also follow the `|`. We only advance `p` once a `|` is found, so a trailing
+    // newline that ENDS the type (no continuation `|`) is left intact for the caller.
     loop {
-        if !is_kind_at(tokens, p, lexer::TokenKind::Pipe) { break }
-        let m = match parse_type_primary(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+        let q = skip_seps(tokens, p)
+        if !is_kind_at(tokens, q, lexer::TokenKind::Pipe) { break }
+        let mp = skip_seps(tokens, q + 1)
+        let m = match parse_type_primary(tokens, mp) { ParsedType as x => x; error as e => return e }
         members = teko::list::push(members, m.node)
         p = m.next
     }

@@ -3,7 +3,7 @@
 // Type-expression parsing, the C23 mirror of parser/parse_type.tks.
 #include "parse_type.h"
 #include "parse_path.h"   // parse_path
-#include "cursor.h"       // tk_is_kind_at
+#include "cursor.h"       // tk_is_kind_at, tk_skip_seps
 #include "ast.h"          // tk_box_type, tk_types_push
 
 static tk_parsed_type_result parse_named(const tk_token *t, size_t n, size_t pos) {
@@ -50,8 +50,14 @@ tk_parsed_type_result tk_parse_type(const tk_token *t, size_t n, size_t pos) {
     tk_type_expr *members = NULL; size_t nm = 0;
     tk_types_push(&members, &nm, first.as.value.node);
     size_t p = first.as.value.next;
-    while (tk_is_kind_at(t, n, p, TK_TOKEN_PIPE)) {
-        tk_parsed_type_result m = parse_type_primary(t, n, p + 1);
+    // A `|` may be led by a newline (MULTI-LINE type union, e.g. a wide `variant` over many
+    // lines); separators may also follow the `|`. We only advance `p` once a `|` is found, so a
+    // trailing newline that ENDS the type (no continuation `|`) is left intact for the caller.
+    for (;;) {
+        size_t q = tk_skip_seps(t, n, p);
+        if (!tk_is_kind_at(t, n, q, TK_TOKEN_PIPE)) { break; }
+        size_t mp = tk_skip_seps(t, n, q + 1);
+        tk_parsed_type_result m = parse_type_primary(t, n, mp);
         if (!m.ok) { return m; }
         tk_types_push(&members, &nm, m.as.value.node);
         p = m.as.value.next;
