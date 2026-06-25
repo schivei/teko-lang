@@ -836,6 +836,11 @@ static bool pat_match(const tk_pattern *pat, tk_value subj, tk_venv *env) {
                 if (pat_match(&pat->as.alt.options[i], subj, env)) return true;   // options bind nothing (checker)
             return false;
         case TK_PAT_BIND: {
+            if (pat->as.bind.is_slice) {                                          // `[]T as x` — the slice case of a `[]T | error`
+                if (subj.tag != TK_VAL_LIST) return false;                        // a slice value is a list
+                if (pat->as.bind.has_binding) env_define(env, pat->as.bind.binding, subj);
+                return true;
+            }
             if (subj.tag != TK_VAL_STRUCT) return false;                          // a case value is a struct
             if (!name_eq(subj.as.st.type_name, path_last(pat->as.bind.type_name))) return false;
             if (pat->as.bind.has_binding) env_define(env, pat->as.bind.binding, subj);   // `Foo as x` binds the whole value

@@ -19,7 +19,9 @@ fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) 
         parser::NullPattern       => return error { message = "`null` pattern requires an optional subject (`T?`) — REBOOT_PLAN §202" }
         parser::WildcardPattern   => env
         parser::BindPattern as bp => {
-            let ct = match resolve_named(bp.type_name, table) { Type as t => t; error as e => return e }
+            // `[]T as x` resolves the slice TYPE-expr; a path bind resolves the named/builtin case.
+            let ct = match bind_pattern_type(bp, table) { Type as t => t; error as e => return e }
+            if !bp.has_binding { return env }      // bare case / `as _` discard — binds nothing
             define(env, bp.binding, ct, false)     // `Type as name` → name : the case type (match-binding immutable — B.21)
         }
         parser::LiteralPattern as lp => {
@@ -97,9 +99,14 @@ fn has_wildcard(arms: []parser::Arm) -> bool {
 }
 
 // the case-name(s) a variant pattern selects: a single Bind/Field, or EACH bare option of an Alt.
+// A slice bind (`[]T as x`) names NO nominal case (its type_name is empty) — it is skipped here
+// (and the empty-path read avoided); it is covered by some_arm_covers_type instead.
 fn arm_case_names(p: parser::Pattern) -> []str {
     match p {
-        parser::BindPattern as bp  => teko::list::push(teko::list::empty(), bp.type_name.segments[bp.type_name.segments.len - 1].name)
+        parser::BindPattern as bp  => {
+            if bp.is_slice { teko::list::empty() }
+            else { teko::list::push(teko::list::empty(), bp.type_name.segments[bp.type_name.segments.len - 1].name) }
+        }
         parser::FieldPattern as fp => teko::list::push(teko::list::empty(), fp.type_name.segments[fp.type_name.segments.len - 1].name)
         parser::AltPattern as ap   => {
             mut names = teko::list::empty()
@@ -107,7 +114,7 @@ fn arm_case_names(p: parser::Pattern) -> []str {
             loop {
                 if i >= ap.options.len { break }
                 match ap.options[i] {
-                    parser::BindPattern as bp  => { names = teko::list::push(names, bp.type_name.segments[bp.type_name.segments.len - 1].name) }
+                    parser::BindPattern as bp  => { if !bp.is_slice { names = teko::list::push(names, bp.type_name.segments[bp.type_name.segments.len - 1].name) } }
                     parser::FieldPattern as fp => { names = teko::list::push(names, fp.type_name.segments[fp.type_name.segments.len - 1].name) }
                     _                  => {}
                 }
@@ -117,6 +124,49 @@ fn arm_case_names(p: parser::Pattern) -> []str {
         }
         _ => teko::list::empty()
     }
+}
+
+// Resolve the type a BIND pattern denotes: `[]T as x` → the slice type, else the named/builtin path.
+fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable) -> Type | error {
+    if bp.is_slice {
+        match bp.slice_type {
+            parser::TypeExpr as st => resolve_type(st, table)
+            null                   => error { message = "internal: slice pattern missing its slice type" }
+        }
+    } else {
+        resolve_named(bp.type_name, table)
+    }
+}
+
+// Does some UNGUARDED arm cover variant member `mem` by resolved-TYPE equality? Covers the
+// non-nominal members of a `T | error` style variant (prim/byte/str/slice/error) — the arm is a
+// bind whose resolved type equals the member. NAMED (nominal) members use some_arm_names instead.
+fn some_arm_covers_type(arms: []parser::Arm, mem: Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern {
+                parser::BindPattern as bp => {
+                    match bind_pattern_type(bp, table) { Type as t => { if type_eq(t, mem) { return true } }; error => {} }
+                }
+                parser::AltPattern as ap => {
+                    mut j = 0
+                    loop {
+                        if j >= ap.options.len { break }
+                        match ap.options[j] {
+                            parser::BindPattern as bp => { match bind_pattern_type(bp, table) { Type as t => { if type_eq(t, mem) { return true } }; error => {} } }
+                            _                 => {}
+                        }
+                        j++
+                    }
+                }
+                _ => {}
+            }
+        }
+        i++
+    }
+    false
 }
 
 // is `name` covered by some UNGUARDED arm (directly via Bind/Field, or via an Alt option)?
@@ -138,14 +188,15 @@ fn some_arm_names(arms: []parser::Arm, name: str) -> bool {
     false
 }
 
-// every member of the variant must be named by some unguarded arm.
-fn variant_covered(arms: []parser::Arm, members: []Type) -> bool {
+// every member of the variant must be covered by some unguarded arm: NAMED (nominal) members by
+// name; non-nominal members (prim/byte/str/slice/error — the `T | error` idiom) by resolved-type.
+fn variant_covered(arms: []parser::Arm, members: []Type, table: TypeTable) -> bool {
     mut i = 0
     loop {
         if i >= members.len { break }
         match members[i] {
             Named as nm => { if !some_arm_names(arms, nm.name) { return false } }
-            _           => return false        // a non-named member needs a `_`
+            _           => { if !some_arm_covers_type(arms, members[i], table) { return false } }
         }
         i++
     }
@@ -195,7 +246,7 @@ fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable) -> bool {
         _ => {}
     }
     match expand_variant(subject, table) {       // a NAMED variant → its Variant cases (B.14/B.15)
-        Variant as v => variant_covered(arms, v.members)
+        Variant as v => variant_covered(arms, v.members, table)
         _            => false
     }
 }

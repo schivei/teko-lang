@@ -23,8 +23,12 @@ tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_typ
             return efail(tk_error_make("`null` pattern requires an optional subject (`T?`) — REBOOT_PLAN §202"));
         case TK_PAT_WILDCARD: return eok(env);
         case TK_PAT_BIND: {
-            tk_type_result ct = resolve_named(p.as.bind.type_name, table); // see resolve.c
+            // `[]T as x` resolves the slice TYPE-expr; a path bind resolves the named/builtin case.
+            tk_type_result ct = p.as.bind.is_slice
+                ? tk_resolve_type(*p.as.bind.slice_type, table)
+                : resolve_named(p.as.bind.type_name, table);   // see resolve.c
             if (!ct.ok) return efail(ct.as.error);
+            if (!p.as.bind.has_binding) return eok(env);   // bare case / `as _` discard — binds nothing
             return eok(tk_env_define(env, p.as.bind.binding, ct.as.value, false));
         }
         case TK_PAT_LITERAL: {
@@ -88,16 +92,46 @@ static bool has_wildcard(tk_arm *arms, size_t n) {
 }
 static bool name_eq(tk_str a, tk_str b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }
 // does pattern `p` name case `name` — directly (Bind/Field) or via a bare Alt option?
+// A slice bind (`[]T as x`) names NO nominal case (its type_name is empty) — it is covered by
+// some_arm_covers_type instead, so it is skipped here (and the empty-path read is avoided).
 static bool pattern_names(tk_pattern p, tk_str name) {
     if (p.tag == TK_PAT_BIND)
-        return name_eq(p.as.bind.type_name.segments[p.as.bind.type_name.len - 1].name, name);
+        return !p.as.bind.is_slice && name_eq(p.as.bind.type_name.segments[p.as.bind.type_name.len - 1].name, name);
     if (p.tag == TK_PAT_FIELD)
         return name_eq(p.as.field.type_name.segments[p.as.field.type_name.len - 1].name, name);
     if (p.tag == TK_PAT_ALT) {
         for (size_t i = 0; i < p.as.alt.n_options; i += 1) {
             tk_pattern opt = p.as.alt.options[i];
-            if (opt.tag == TK_PAT_BIND  && name_eq(opt.as.bind.type_name.segments[opt.as.bind.type_name.len - 1].name, name)) return true;
+            if (opt.tag == TK_PAT_BIND  && !opt.as.bind.is_slice && name_eq(opt.as.bind.type_name.segments[opt.as.bind.type_name.len - 1].name, name)) return true;
             if (opt.tag == TK_PAT_FIELD && name_eq(opt.as.field.type_name.segments[opt.as.field.type_name.len - 1].name, name)) return true;
+        }
+    }
+    return false;
+}
+
+// Resolve the type a BIND pattern denotes: `[]T as x` → the slice type, else the named/builtin path.
+static tk_type_result bind_pattern_type(tk_pattern p, tk_type_table table) {
+    if (p.as.bind.is_slice) return tk_resolve_type(*p.as.bind.slice_type, table);
+    return resolve_named(p.as.bind.type_name, table);
+}
+// Does some UNGUARDED arm cover variant member `mem` by resolved-TYPE equality? This covers the
+// non-nominal members of a `T | error` style variant — prim/byte/str/slice/error — where the
+// arm is a bind whose resolved type equals the member (e.g. `[]byte as o` ⇒ []byte, `error as e`
+// ⇒ error, `i64 as v` ⇒ i64). NAMED (nominal) members keep the name-based some_arm_names path.
+static bool some_arm_covers_type(tk_arm *arms, size_t n, tk_type mem, tk_type_table table) {
+    for (size_t i = 0; i < n; i += 1) {
+        if (arms[i].has_when) continue;
+        tk_pattern p = arms[i].pattern;
+        if (p.tag == TK_PAT_BIND) {
+            tk_type_result rt = bind_pattern_type(p, table);
+            if (rt.ok && tk_type_eq(&rt.as.value, &mem)) return true;
+        } else if (p.tag == TK_PAT_ALT) {
+            for (size_t j = 0; j < p.as.alt.n_options; j += 1) {
+                tk_pattern opt = p.as.alt.options[j];
+                if (opt.tag != TK_PAT_BIND) continue;
+                tk_type_result rt = bind_pattern_type(opt, table);
+                if (rt.ok && tk_type_eq(&rt.as.value, &mem)) return true;
+            }
         }
     }
     return false;
@@ -139,8 +173,13 @@ bool tk_exhaustive(tk_arm *arms, size_t n, tk_type subject, tk_type_table table)
     if (sv.tag != TK_TYPE_VARIANT) return false;
     for (size_t i = 0; i < sv.as.variant.len; i += 1) {
         tk_type mem = sv.as.variant.members[i];
-        if (mem.tag != TK_TYPE_NAMED) return false;
-        if (!some_arm_names(arms, n, mem.as.named.name)) return false;
+        // NAMED (nominal) members match by name; non-nominal members (prim/byte/str/slice/error —
+        // the `T | error` idiom) match by resolved-type equality against a bind arm.
+        if (mem.tag == TK_TYPE_NAMED) {
+            if (!some_arm_names(arms, n, mem.as.named.name)) return false;
+        } else {
+            if (!some_arm_covers_type(arms, n, mem, table)) return false;
+        }
     }
     return true;
 }

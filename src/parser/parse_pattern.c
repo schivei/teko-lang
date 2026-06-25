@@ -3,6 +3,7 @@
 // Pattern parsing, the C23 mirror of parser/parse_pattern.tks.
 #include "parse_pattern.h"
 #include "parse_path.h"   // parse_path
+#include "parse_type.h"   // parse_type_primary (the `[]T` of a slice pattern)
 #include "parse_lit.h"    // tk_lit_int, tk_lit_byte
 #include "cursor.h"       // tk_has_token, tk_is_kind_at, tk_is_sep, tk_skip_seps
 #include "ast.h"          // tk_pats_push, tk_strvec_push
@@ -41,13 +42,37 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
         tk_pattern p = { .tag = TK_PAT_LITERAL, .as.literal = { .value = v } };
         return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = pos + 1 } };
     }
+    if (k == TK_TOKEN_LBRACKET) {
+        // slice pattern `[]T as x` (or `[]T as _` discard): a slice-TYPED binding (the `[]T | error`
+        // idiom). The `[]T` reuses the type-primary parser; an `as <name>` (or `as _`) must follow.
+        tk_parsed_type_result ty = parse_type_primary(t, n, pos);
+        if (!ty.ok) { return (tk_parsed_pattern_result){ .ok = false, .as.error = ty.as.error }; }
+        size_t after = ty.as.value.next;
+        if (!tk_is_kind_at(t, n, after, TK_TOKEN_AS)) {
+            return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after, "expected `as <name>` after a slice type in a pattern") };
+        }
+        tk_type_expr *st = tk_box_type(ty.as.value.node);
+        if (tk_is_kind_at(t, n, after + 1, TK_TOKEN_UNDERSCORE)) {   // `[]T as _` — match the slice case, bind nothing
+            tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = false, .binding = (tk_str){0}, .is_slice = true, .slice_type = st } };
+            return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
+        }
+        if (!tk_is_kind_at(t, n, after + 1, TK_TOKEN_IDENT)) {
+            return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after + 1, "expected a name (or `_`) after `as` in a slice pattern") };
+        }
+        tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = true, .binding = t[after + 1].text, .is_slice = true, .slice_type = st } };
+        return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
+    }
     if (k == TK_TOKEN_IDENT) {
         tk_parsed_path_result pp = parse_path(t, n, pos);
         if (!pp.ok) { return (tk_parsed_pattern_result){ .ok = false, .as.error = pp.as.error }; }
         size_t after = pp.as.value.next;
         if (tk_is_kind_at(t, n, after, TK_TOKEN_AS)) {
+            if (tk_is_kind_at(t, n, after + 1, TK_TOKEN_UNDERSCORE)) {   // `Path as _` — match the case, discard the bind (≡ bare `Path`)
+                tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .type_name = pp.as.value.node, .has_binding = false, .binding = (tk_str){0} } };
+                return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
+            }
             if (!tk_is_kind_at(t, n, after + 1, TK_TOKEN_IDENT)) {
-                return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after + 1, "expected a name after `as` in a pattern") };
+                return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after + 1, "expected a name (or `_`) after `as` in a pattern") };
             }
             tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .type_name = pp.as.value.node, .has_binding = true, .binding = t[after + 1].text } };
             return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };

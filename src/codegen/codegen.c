@@ -1224,6 +1224,8 @@ static bool emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
             cb(b, ")");
             return true;
         case TK_PAT_BIND:
+            if (pat->as.bind.is_slice)   // `[]T as x` — needs `T | error` anonymous-variant codegen (not yet); honest barrier (M.3)
+                return fail_node(err, "codegen: slice patterns (`[]T as x`) not yet supported");
             cb(b, "("); cb(b, subj); cb(b, ".tag == TK_TAG_");
             cb_upper(b, variant_name);
             cb(b, "_");
@@ -1321,6 +1323,8 @@ static bool emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
                            const char *indent, const char **err) {
     switch (pat->tag) {
         case TK_PAT_BIND:
+            if (pat->as.bind.is_slice)   // `[]T as x` — see emit_pat_test; honest barrier until `T | error` codegen lands (M.3)
+                return fail_node(err, "codegen: slice patterns (`[]T as x`) not yet supported");
             if (pat->as.bind.has_binding) {
                 // `Foo as x` binds the WHOLE case value (the union member struct).
                 cb(b, indent); cb(b, "auto ");

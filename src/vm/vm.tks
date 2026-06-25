@@ -458,17 +458,31 @@ fn pat_match(pat: parser::Pattern, subj: Value, env: Env) -> PatMatch {
             PatMatch { matched = false; env = env }
         }
         parser::BindPattern as bp => {
-            // a case value is a StructVal whose type_name IS the case (the path's last segment).
-            match subj {
-                StructVal as sv => {
-                    if sv.type_name != path_last(bp.type_name) { return PatMatch { matched = false; env = env } }
-                    if bp.has_binding {
-                        PatMatch { matched = true; env = define(env, bp.binding, subj) }   // `Foo as x` binds the whole value
-                    } else {
-                        PatMatch { matched = true; env = env }
+            if bp.is_slice {
+                // `[]T as x` — the slice case of a `[]T | error`: a slice value is a list.
+                match subj {
+                    []Value as _ => {
+                        if bp.has_binding {
+                            PatMatch { matched = true; env = define(env, bp.binding, subj) }
+                        } else {
+                            PatMatch { matched = true; env = env }
+                        }
                     }
+                    _ => PatMatch { matched = false; env = env }
                 }
-                _ => PatMatch { matched = false; env = env }
+            } else {
+                // a case value is a StructVal whose type_name IS the case (the path's last segment).
+                match subj {
+                    StructVal as sv => {
+                        if sv.type_name != path_last(bp.type_name) { return PatMatch { matched = false; env = env } }
+                        if bp.has_binding {
+                            PatMatch { matched = true; env = define(env, bp.binding, subj) }   // `Foo as x` binds the whole value
+                        } else {
+                            PatMatch { matched = true; env = env }
+                        }
+                    }
+                    _ => PatMatch { matched = false; env = env }
+                }
             }
         }
         parser::FieldPattern as fp => {
