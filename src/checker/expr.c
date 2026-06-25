@@ -69,6 +69,12 @@ static tk_texpr_result type_binary(tk_binary b, tk_env env, tk_type_table table)
     tk_texpr_result r = tk_typer_expr(*b.right, env, table); if (!r.ok) return r;
     tk_type lt = l.as.value.type, rt = r.as.value.type;
     if (tk_type_is_void(&lt) || tk_type_is_void(&rt)) return xerr("a `void` expression cannot be an operand (M.1)");
+    // C6 — a fitting numeric LITERAL operand adopts the OTHER operand's type (e.g. `line + 1`,
+    // `n % 10`): the non-literal operand's type wins; update the literal's typed node to match.
+    if (!tk_type_eq(&lt, &rt)) {
+        if (l.as.value.tag == TK_TEXPR_NUMBER && tk_literal_adopts(l.as.value, rt)) { l.as.value.type = rt; lt = rt; }
+        else if (r.as.value.tag == TK_TEXPR_NUMBER && tk_literal_adopts(r.as.value, lt)) { r.as.value.type = lt; rt = lt; }
+    }
     if (op_is_shift(b.op)) {
         if (!is_integer(lt) || !is_integer(rt)) return xerr("shift needs integer operands (no float bit-shifts — B.38)");
         return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = lt, .as.binary = { b.op, box(l.as.value), box(r.as.value) } });
@@ -215,7 +221,11 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     for (size_t i = 0; i < c.nargs; i += 1) {
         tk_texpr_result a = tk_typer_expr(c.args[i], env, table); if (!a.ok) return a;
         if (tk_type_is_void(&a.as.value.type)) return xerr("a `void` expression cannot be passed as an argument (M.1)");
-        if (!tk_type_eq(&a.as.value.type, &ft.as.func.params[i])) return xerr("argument type mismatch");
+        tk_type pt = ft.as.func.params[i];
+        if (!tk_type_eq(&a.as.value.type, &pt)) {
+            if (!tk_literal_adopts(a.as.value, pt)) return xerr("argument type mismatch");
+            a.as.value.type = pt;   // a fitting literal arg adopts the parameter's type (C6)
+        }
         args = tk_texpr_list_push(args, a.as.value);
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = *ft.as.func.ret,

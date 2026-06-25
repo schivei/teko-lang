@@ -111,7 +111,10 @@ static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table t
     tk_binding_result tb = tk_env_lookup_binding(env, a.name); if (!tb.ok) return sfail(tb.as.error);
     if (!tb.as.value.is_mut) return smsg("cannot assign to immutable binding — declare it `mut` (B.21)");
     tk_texpr_result v = tk_typer_expr(a.value, env, table); if (!v.ok) return sfail(v.as.error);
-    if (!tk_type_eq(&tb.as.value.type, &v.as.value.type)) return smsg("assigned value does not match the target type");
+    if (!tk_type_eq(&tb.as.value.type, &v.as.value.type)) {
+        if (!tk_literal_adopts(v.as.value, tb.as.value.type)) return smsg("assigned value does not match the target type");
+        v.as.value.type = tb.as.value.type;   // a fitting literal adopts the target's type (C6)
+    }
     tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, v.as.value } };
     return sok(node, env);   // mut rule enforced (B.21)
 }

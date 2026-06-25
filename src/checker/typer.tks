@@ -43,9 +43,15 @@ fn type_var(v: parser::Var, env: Env) -> TExpr | error {
 
 // ---- operators (the SAME B.22 regimes as check_binary/check_unary/check_compare) ----
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
-    let l = match type_expr(b.left, env, table)  { TExpr as te => te; error as e => return e }
-    let r = match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e }
+    mut l = match type_expr(b.left, env, table)  { TExpr as te => te; error as e => return e }
+    mut r = match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(l.type) || type_is_void(r.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    // C6 — a fitting numeric LITERAL operand adopts the OTHER operand's type (e.g. `line + 1`,
+    // `n % 10`): the non-literal operand's type wins; rebuild the literal node with that type.
+    if !type_eq(l.type, r.type) {
+        if literal_adopts(l, r.type) { l = TExpr { kind = l.kind; type = r.type } }
+        else { if literal_adopts(r, l.type) { r = TExpr { kind = r.kind; type = l.type } } }
+    }
     if op_is_shift(b.op) {
         if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands (no float bit-shifts — B.38)" } }
         return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
@@ -180,9 +186,12 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             mut i = 0
             loop {
                 if i >= c.args.len { break }
-                let a = match type_expr(c.args[i], env, table) { TExpr as te => te; error as e => return e }
+                mut a = match type_expr(c.args[i], env, table) { TExpr as te => te; error as e => return e }
                 if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
-                if !type_eq(a.type, f.params[i]) { return error { message = "argument type mismatch" } }
+                if !type_eq(a.type, f.params[i]) {
+                    if !literal_adopts(a, f.params[i]) { return error { message = "argument type mismatch" } }
+                    a = TExpr { kind = a.kind; type = f.params[i] }   // a fitting literal arg adopts the parameter's type (C6)
+                }
                 args = teko::list::push(args, a)
                 i++
             }
@@ -750,8 +759,11 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
 fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
     let tb = match lookup_binding(env, a.name) { ValBinding as vb => vb; error as e => return e }
     if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
-    let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
-    if !type_eq(tb.type, v.type) { return error { message = "assigned value does not match the target type" } }
+    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    if !type_eq(tb.type, v.type) {
+        if !literal_adopts(v, tb.type) { return error { message = "assigned value does not match the target type" } }
+        v = TExpr { kind = v.kind; type = tb.type }   // a fitting literal adopts the target's type (C6)
+    }
     TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
 }
 
