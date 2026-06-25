@@ -86,6 +86,7 @@ typedef enum {
 
 struct tk_expr {
     tk_expr_kind tag;
+    uint32_t line, col;   // (C1-POS/E1) node source position — the expr's first token; stamped by the parser; 0 = unknown
     union {
         tk_number       number;        // TK_EXPR_NUMBER
         tk_var          var;           // TK_EXPR_VAR

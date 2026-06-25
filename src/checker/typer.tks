@@ -16,16 +16,16 @@ fn type_number(n: parser::Number) -> TExpr {
     // (annotated_literal_ok / const_range_check), where the full int set (incl u128/i128)
     // and the float set (f16/f32) come into play. [literal typing in annotated context: C6]
     let k = if n.is_float { PrimKind::F64 } else { PrimKind::I64 }
-    TExpr { kind = TNumber { is_float = n.is_float; value = n.value; fval = n.fval }; type = Prim { kind = k } }
+    TExpr { kind = TNumber { is_float = n.is_float; value = n.value; fval = n.fval }; type = Prim { kind = k }; line = 0; col = 0 }
 }
 fn type_strlit(s: parser::StrLit) -> TExpr {
-    TExpr { kind = TStrLit { text = s.text }; type = Str { } }
+    TExpr { kind = TStrLit { text = s.text }; type = Str { }; line = 0; col = 0 }
 }
 fn type_bytelit(b: parser::ByteLit) -> TExpr {
-    TExpr { kind = TByteLit { value = b.value }; type = Byte { } }
+    TExpr { kind = TByteLit { value = b.value }; type = Byte { }; line = 0; col = 0 }
 }
 fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool prim (LEGISLATION §75)
-    TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool } }
+    TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 // A bare `null` types to the SENTINEL optional (an `Optional` whose inner is the `Void` marker
 // — REBOOT_PLAN §202; the C twin uses a NULL inner pointer): it unifies with ANY concrete `T?`
@@ -34,11 +34,11 @@ fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool 
 // or `x ?? null` — like a variant case widening into a variant slot. The VM lowers it to NONE
 // (untyped); codegen wraps it to the slot's optional type via emit_as.
 fn type_nulllit(n: parser::NullLit) -> TExpr | error {
-    TExpr { kind = TNullLit { }; type = Optional { inner = Void { } } }
+    TExpr { kind = TNullLit { }; type = Optional { inner = Void { } }; line = 0; col = 0 }
 }
 fn type_var(v: parser::Var, env: Env) -> TExpr | error {
     let t = match lookup(env, v.name) { Type as ty => ty; error as e => return e }
-    TExpr { kind = TVar { name = v.name }; type = t }
+    TExpr { kind = TVar { name = v.name }; type = t; line = 0; col = 0 }
 }
 
 // ---- operators (the SAME B.22 regimes as check_binary/check_unary/check_compare) ----
@@ -49,28 +49,28 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     // C6 — a fitting numeric LITERAL operand adopts the OTHER operand's type (e.g. `line + 1`,
     // `n % 10`): the non-literal operand's type wins; rebuild the literal node with that type.
     if !type_eq(l.type, r.type) {
-        if literal_adopts(l, r.type) { l = TExpr { kind = l.kind; type = r.type } }
-        else { if literal_adopts(r, l.type) { r = TExpr { kind = r.kind; type = l.type } } }
+        if literal_adopts(l, r.type) { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col } }
+        else { if literal_adopts(r, l.type) { r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
     }
     if op_is_shift(b.op) {
         if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands (no float bit-shifts — B.38)" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     if op_is_arith(b.op) {
         // + - * / over the native numeric set (B.38): ints AND floats. Same-type only
         // (B.22 — no promotion, no mixed int/float; cross-family needs an explicit `to`).
         if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
         if !type_eq(l.type, r.type) { return error { message = "operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     if op_is_arith_bitwise(b.op) {   // %, & | ^ — integer-only
         if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
         if !type_eq(l.type, r.type) { return error { message = "operands must be the same type (no promotion — B.22)" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     if b.op == lexer::TokenKind::AndAnd || b.op == lexer::TokenKind::OrOr {   // logical && / || — bool operands, bool result, short-circuit (matches C + the VM)
         if !is_bool(l.type) || !is_bool(r.type) { return error { message = "logical `&&`/`||` need bool operands" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = Prim { kind = PrimKind::Bool } }
+        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
     }
     error { message = "not a binary operator" }
 }
@@ -80,15 +80,15 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
     if type_is_void(o.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
     if u.op == lexer::TokenKind::Minus {   // negation: any numeric (int or float — B.38)
         if !is_numeric(o.type) { return error { message = "unary `-` needs a numeric operand (int or float)" } }
-        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
     if u.op == lexer::TokenKind::Tilde {   // bitwise complement: integer-only (no float bit-flip — B.38)
         if !is_integer(o.type) { return error { message = "unary `~` needs an integer (not a float — B.38)" } }
-        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
     if u.op == lexer::TokenKind::Bang {
         if !is_bool(o.type) { return error { message = "! needs a bool" } }
-        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
     }
     error { message = "not a unary operator" }
 }
@@ -108,7 +108,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
         prev = cur.type
         i++
     }
-    TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool } }
+    TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
 // teko::list::empty / teko::list::push — GENERIC builtins (no `.tks` module), special-cased
@@ -131,7 +131,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
     if last == "empty" {
         if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
         // SENTINEL slice: element is the Void marker (unifies with any concrete slice — type_eq).
-        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty() }; type = Slice { element = Void { } } }
+        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty() }; type = Slice { element = Void { } }; line = 0; col = 0 }
     } else if last == "push" {
         if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
         let s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -143,7 +143,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
         let matches = match elem { Void => true; _ => type_eq(elem, x.type) }
         if !matches { return error { message = "teko::list::push item type does not match the slice element type" } }
         mut args = teko::list::push(teko::list::push(teko::list::empty(), s), x)
-        TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = x.type } }
+        TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = x.type }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
@@ -167,7 +167,7 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             let ok = match a.type { Str => true; Error => true; _ => false }
             if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
             mut pargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = pargs }; type = Void { } }
+            return TExpr { kind = TCall { callee = c.callee; args = pargs }; type = Void { }; line = 0; col = 0 }
         }
         if name == "exit" {
             if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
@@ -175,7 +175,7 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             let ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
             if !ok { return error { message = "exit's argument must be an integer status code" } }
             mut eargs = teko::list::push(teko::list::empty(), a)
-            return TExpr { kind = TCall { callee = c.callee; args = eargs }; type = Void { } }
+            return TExpr { kind = TCall { callee = c.callee; args = eargs }; type = Void { }; line = 0; col = 0 }
         }
     }
     let ft = match lookup(env, name) {                                  // user fns resolve first;
@@ -193,12 +193,12 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                 if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
                 if !type_eq(a.type, f.params[i]) {
                     if !literal_adopts(a, f.params[i]) { return error { message = "argument type mismatch" } }
-                    a = TExpr { kind = a.kind; type = f.params[i] }   // a fitting literal arg adopts the parameter's type (C6)
+                    a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // a fitting literal arg adopts the parameter's type (C6)
                 }
                 args = teko::list::push(args, a)
                 i++
             }
-            TExpr { kind = TCall { callee = c.callee; args = args }; type = f.ret }
+            TExpr { kind = TCall { callee = c.callee; args = args }; type = f.ret; line = 0; col = 0 }
         }
         _ => error { message = $"not a function: {name}" }
     }
@@ -274,7 +274,7 @@ fn cast_check(from: Type, to: Type) -> error? {
 // a CONSTANT literal already out of the target's range is a compile error (M.1 — fail early);
 // non-constant operands are guarded at runtime by codegen. Direct literals only (comptime folding deferred).
 fn const_range_check(e: parser::Expr, target: Type) -> error? {
-    match e {
+    match e.kind {
         parser::Number as n => match cast_kind(target) {                 // byte target → U8 range (0..255)
             PrimKind as k => {
                 // only the int-literal → int-target case is statically range-checkable (B.38, incl 128).
@@ -298,7 +298,7 @@ fn const_range_check(e: parser::Expr, target: Type) -> error? {
 // `bound=u8, value=300` would currently pass revalidate. That re-proof lands with `validate_statement`
 // (deferred; named gap — §VI). The front-line type check above already rejects such source.
 fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
-    match value {
+    match value.kind {
         parser::Number as n => match ann {
             Prim as p => {
                 if n.is_float {
@@ -328,7 +328,7 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     let target = match resolve_type(c.target, table) { Type as t => t; error as e => return e }
     match cast_check(inner.type, target) { null => {}; error as e => return e }
     match const_range_check(c.expr, target) { null => {}; error as e => return e }
-    TExpr { kind = TCast { expr = inner }; type = target }        // the cast's type IS the resolved target
+    TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }        // the cast's type IS the resolved target
 }
 
 // ---- field access `x.field` (C3): read a struct field; `.type` is the field's resolved type ----
@@ -352,7 +352,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
     // path: a str/slice has no struct body, so `len` is a built-in length, not a field.
     let is_str_or_slice = match recv.type { Str => true; Slice => true; _ => false }
     if is_str_or_slice && fa.field == "len" {
-        return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 } }
+        return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 }; line = 0; col = 0 }
     }
     let name = match recv.type {
         Named as n => n.name
@@ -366,7 +366,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
         parser::StructBody as sb => match field_type(sb, fa.field, table) { Type as t => t; error as e => return e }
         _                => return error { message = $"type {name} is not a struct (no fields)" }
     }
-    TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft }
+    TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft; line = 0; col = 0 }
 }
 
 // `recv?.field` (REBOOT_PLAN §203): the receiver must be an Optional of a named struct; the
@@ -392,7 +392,7 @@ fn type_safe_field_access(sfa: parser::SafeFieldAccess, env: Env, table: TypeTab
     }
     // the result is `(field)?` — an already-optional field stays as-is (no double-wrap).
     let rt = match ft { Optional => ft; _ => Optional { inner = ft } }
-    TExpr { kind = TSafeFieldAccess { receiver = recv; field = sfa.field }; type = rt }
+    TExpr { kind = TSafeFieldAccess { receiver = recv; field = sfa.field }; type = rt; line = 0; col = 0 }
 }
 
 // `a ?? b` (REBOOT_PLAN §203): the left must be Optional `T?`; the right is `T` (result `T`)
@@ -404,22 +404,22 @@ fn type_coalesce(co: parser::Coalesce, env: Env, table: TypeTable) -> TExpr | er
         Optional as o => o.inner
         _             => return error { message = "`??` needs an optional left operand (`T?`) — its right is the fallback (REBOOT_PLAN §203)" }
     }
-    match co.right {
+    match co.right.kind {
         parser::NullLit => {   // `x ?? null` ⇒ T? — the right adopts the left's optional type
-            let rnull = TExpr { kind = TNullLit { }; type = l.type }
-            return TExpr { kind = TCoalesce { left = l; right = rnull }; type = l.type }
+            let rnull = TExpr { kind = TNullLit { }; type = l.type; line = 0; col = 0 }
+            return TExpr { kind = TCoalesce { left = l; right = rnull }; type = l.type; line = 0; col = 0 }
         }
         _ => {}
     }
     let r = match type_expr(co.right, env, table) { TExpr as te => te; error as e => return e }
     // A DIVERGING fallback (panic/exit) never produces a value — accept it for any left type; the
     // result is the unwrapped `T` (the present-case value). (No `never` type — legislator's ruling.)
-    if texpr_diverges(r) { return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped } }
+    if texpr_diverges(r) { return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 } }
     if type_eq(r.type, unwrapped) {   // `T? ?? T` ⇒ T (the unwrapping case)
-        return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped }
+        return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 }
     }
     if type_eq(r.type, l.type) {      // `T? ?? T?` ⇒ T?
-        return TExpr { kind = TCoalesce { left = l; right = r }; type = l.type }
+        return TExpr { kind = TCoalesce { left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     error { message = "the `??` fallback must be `T` or `T?` for the left's optional `T?` (REBOOT_PLAN §203)" }
 }
@@ -441,7 +441,7 @@ fn type_struct_lit(sl: parser::StructLit, env: Env, table: TypeTable) -> TExpr |
             match v.type { Str => {}; _ => return error { message = "`error`'s `message` must be a `str`" } }
             mut enames = teko::list::push(teko::list::empty(), "message")
             mut evals  = teko::list::push(teko::list::empty(), v)
-            return TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { } }
+            return TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
         }
         _ => {}
     }
@@ -485,7 +485,7 @@ fn type_struct_lit(sl: parser::StructLit, env: Env, table: TypeTable) -> TExpr |
                     if !type_eq(val.type, ft) {
                         let fits = if num.is_float { prim_is_float(p.kind) }
                                    else { prim_is_int(p.kind) && value_fits(num.value, p.kind) }
-                        if fits { val = TExpr { kind = val.kind; type = ft } }
+                        if fits { val = TExpr { kind = val.kind; type = ft; line = val.line; col = val.col } }
                     }
                 }
                 _ => {}
@@ -497,7 +497,7 @@ fn type_struct_lit(sl: parser::StructLit, env: Env, table: TypeTable) -> TExpr |
         vals = teko::list::push(vals, val)
         d++
     }
-    TExpr { kind = TStructInit { field_names = names; field_vals = vals }; type = nt }
+    TExpr { kind = TStructInit { field_names = names; field_vals = vals }; type = nt; line = 0; col = 0 }
 }
 
 // ---- subscript index `recv[index]` (W5-idx) ----
@@ -509,8 +509,8 @@ fn type_index(ix: parser::Index, env: Env, table: TypeTable) -> TExpr | error {
     let idx  = match type_expr(ix.index, env, table)    { TExpr as te => te; error as e => return e }
     if !is_integer(idx.type) { return error { message = "a subscript index must be an integer" } }
     match recv.type {
-        Str        => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { } }
-        Slice as s => TExpr { kind = TIndex { receiver = recv; index = idx }; type = s.element }
+        Str        => TExpr { kind = TIndex { receiver = recv; index = idx }; type = Byte { }; line = 0; col = 0 }
+        Slice as s => TExpr { kind = TIndex { receiver = recv; index = idx }; type = s.element; line = 0; col = 0 }
         _          => error { message = "cannot index a value of this type" }
     }
 }
@@ -532,7 +532,7 @@ fn type_interp(in: parser::Interp, env: Env, table: TypeTable) -> TExpr | error 
         holes = teko::list::push(holes, h)
         i++
     }
-    TExpr { kind = TInterp { pieces = in.pieces; holes = holes }; type = Str { } }
+    TExpr { kind = TInterp { pieces = in.pieces; holes = holes }; type = Str { }; line = 0; col = 0 }
 }
 
 // ---- the expression dispatch (the evolved check_expr) ----
@@ -557,14 +557,18 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable) -> TExpr | error {
     mut j: u64 = 0
     loop {
         if j >= eb.members.len { break }
-        if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = ename; member = member; ordinal = j }; type = et } }
+        if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = ename; member = member; ordinal = j }; type = et; line = 0; col = 0 } }
         j++
     }
     error { message = $"no member `{member}` in enum `{ename}`" }
 }
 
-fn type_expr(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
-    match e {
+// (C1-POS) inner dispatch — the raw match over the untyped Expr's `kind`. The public type_expr
+// (below) wraps this to copy each node's source position onto the typed node. The dispatch's
+// TExpr constructions are built with line=0/col=0 (designated-init parity with the C twin); the
+// wrapper overwrites them with the real e.line/e.col on success.
+fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    match e.kind {
         parser::Number as n    => type_number(n)
         parser::StrLit as s    => type_strlit(s)
         parser::ByteLit as b   => type_bytelit(b)
@@ -586,6 +590,20 @@ fn type_expr(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
         parser::StructLit as sl => type_struct_lit(sl, env, table)   // W4a
         parser::Index as ix    => type_index(ix, env, table)        // W5-idx
         parser::Interp as in   => type_interp(in, env, table)       // $"…{expr}…"
+    }
+}
+
+// (C1-POS/E1) public entry — wrap the dispatch to thread the source position. On success, copy
+// the untyped node's line/col onto the typed node so later passes (and the renderer) can point at
+// it (mirrors the C twin's tk_typer_expr). The C twin ALSO stamps the failing expr's line/col onto
+// the error when the error carries none (innermost-wins); that half is NOT mirrored here because
+// the Teko surface `error` value is { message: str } only — it has no line/col fields to set (the
+// position adornments are a compiler-internal extension of core.h's tk_error, NOT on the surface
+// `error` — core.tks C1.3). The error therefore passes through unchanged.
+fn type_expr(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    match type_dispatch(e, env, table) {
+        TExpr as te => TExpr { kind = te.kind; type = te.type; line = e.line; col = e.col }
+        error as err => err
     }
 }
 
@@ -654,7 +672,7 @@ fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable) -> TypedBl
         if i + 1 == stmts.len {
             match stmts[i] {
                 ExprStmt as es => {
-                    match es.expr {
+                    match es.expr.kind {
                         IfExpr as f => {
                             if f.has_else {
                                 let te = match type_expr(es.expr, cur, table) { TExpr as x => x; error as e => return e }
@@ -693,7 +711,7 @@ fn type_if(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error {
     let tt = tblock_type(tb.stmts)
     let et = tblock_type(eb.stmts)
     if !type_eq(tt, et) { return error { message = "the `if` branches have different types" } }
-    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = tt }
+    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = tt; line = 0; col = 0 }
 }
 
 // ---- if as a STATEMENT: cond bool; branches validated; no `else`; value discarded → void ----
@@ -703,9 +721,9 @@ fn type_if_stmt(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error 
     let tb = match type_block(f.then_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
     if f.has_else {
         let eb = match type_block(f.else_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
-        return TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = Void { } }
+        return TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = Void { }; line = 0; col = 0 }
     }
-    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = false; else_blk = tb.stmts }; type = Void { } }   // else_blk gated by has_else
+    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = false; else_blk = tb.stmts }; type = Void { }; line = 0; col = 0 }   // else_blk gated by has_else
 }
 
 // ---- one typed arm: pattern extends env; `when` guard bool; body BLOCK typed in that env ----
@@ -714,7 +732,7 @@ fn type_if_stmt(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error 
 fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
     let e2 = match check_pattern(a.pattern, subject, env, table) { Env as e => e; error as err => return err }
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { value = 0 }; type = Void { } }   // gated by has_when (never read when absent)
+    mut guard = TExpr { kind = TNumber { value = 0 }; type = Void { }; line = 0; col = 0 }   // gated by has_when (never read when absent)
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -748,7 +766,7 @@ fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error
     }
     if !exhaustive(m.arms, s.type, table) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
     let result = if have_type { first } else { Void { } }   // all arms diverge → void
-    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result; line = 0; col = 0 }
 }
 
 // ---- match as a STATEMENT: validate the arms; exhaustiveness forced; value discarded → void ----
@@ -763,7 +781,7 @@ fn type_match_stmt(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | 
         i++
     }
     if !exhaustive(m.arms, s.type, table) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
-    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = Void { } }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = Void { }; line = 0; col = 0 }
 }
 
 // ---- statements (the evolved check_* — produce the typed node + advance the env) ----
@@ -792,7 +810,7 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if !type_eq(tb.type, v.type) {
         if !literal_adopts(v, tb.type) { return error { message = "assigned value does not match the target type" } }
-        v = TExpr { kind = v.kind; type = tb.type }   // a fitting literal adopts the target's type (C6)
+        v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }   // a fitting literal adopts the target's type (C6)
     }
     TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
 }
@@ -809,7 +827,7 @@ fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable) -> TypedStmt | err
 
 fn type_exprstmt(es: parser::ExprStmt, env: Env, table: TypeTable) -> TypedStmt | error {
     // a TOP-LEVEL if/match is a STATEMENT — its value is discarded, so no `else` is required.
-    match es.expr {
+    match es.expr.kind {
         parser::IfExpr as f    => {
             let te = match type_if_stmt(f, env, table) { TExpr as x => x; error as e => return e }
             TypedStmt { node = TExprStmt { expr = te }; env = env }
@@ -1110,6 +1128,13 @@ pub fn type_program(program: parser::Program) -> TProgram | error {
         }
         // a loose top-level Statement is typed directly so its node also feeds the virtual-main's
         // label validation below (mirrors typer.c's separate `mainbody` accumulator).
+        // (C1-POS) The C twin prefers the ERROR's own line/col over the item's
+        // (`el = err.line ? err.line : line`), so an inner-expr position wins. That is NOT mirrored
+        // here: the Teko surface `error` value is { message: str } only — it has no line/col fields
+        // (those position adornments are a compiler-internal extension of core.h's tk_error, NOT on
+        // the surface `error` — core.tks C1.3). We therefore fall back to the ITEM's line/col, the
+        // same as before C1-POS. (HALT/§VI gap: surface a finer position only once `error` gains the
+        // adornment fields, or via a separate diagnostic carrier.)
         match it.content {
             parser::Statement as s => {
                 let ts = match type_statement(s, c.env, c.types) {

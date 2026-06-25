@@ -47,6 +47,7 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
         tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
             .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
             .has_else = false, .else_blk = NULL, .nelse = 0 } };
+        e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = then_next } };
     }
 
@@ -60,6 +61,7 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
         tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
             .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
             .has_else = true, .else_blk = eb, .nelse = neb } };
+        e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = elif.as.value.next } };
     }
 
@@ -69,5 +71,6 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
     tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
         .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
         .has_else = true, .else_blk = ebk.as.value.statements, .nelse = ebk.as.value.n } };
+    e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
     return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = ebk.as.value.next } };
 }

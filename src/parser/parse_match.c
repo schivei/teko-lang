@@ -38,5 +38,6 @@ tk_parsed_result parse_match(const tk_token *t, size_t n, size_t pos) {
     if (!arms.ok) { return (tk_parsed_result){ .ok = false, .as.error = arms.as.error }; }
     tk_expr e = { .tag = TK_EXPR_MATCH, .as.match_expr = { .subject = tk_box_expr(subj.as.value.node),
         .arms = arms.as.value.arms, .narms = arms.as.value.n_arms } };
+    e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `match` keyword's position
     return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = arms.as.value.next } };
 }

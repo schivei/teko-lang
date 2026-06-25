@@ -346,14 +346,22 @@ tk_tprogram_result tk_type_program(tk_program program) {
                       : it.tag == TK_ITEM_TYPE_DECL ? it.as.type_decl.col : 0;
         if (it.tag == TK_ITEM_STATEMENT) {
             tk_typed_stmt_result ts = tk_type_statement(it.as.statement, cur, c.as.value.types);
-            if (!ts.ok) return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, line, col, ts.as.error.message)) };
+            if (!ts.ok) {   // (C1-POS) prefer the failing expr's own position; the item's is the fallback
+                uint32_t el = ts.as.error.line ? ts.as.error.line : line;
+                uint32_t ec = ts.as.error.line ? ts.as.error.col  : col;
+                return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, el, ec, ts.as.error.message)) };
+            }
             cur = ts.as.value.env;   // advance scope for subsequent statements
             items = tk_titem_list_push(items, (tk_titem){ .tag = TK_TITEM_STATEMENT, .as.statement = ts.as.value.node });
             mainbody = tk_tstmt_list_push(mainbody, ts.as.value.node);
             continue;
         }
         tk_titem_result ti = tk_type_item(it, c.as.value.env, c.as.value.types);
-        if (!ti.ok) return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, line, col, ti.as.error.message)) };
+        if (!ti.ok) {   // (C1-POS) prefer the failing expr's own position; the item's is the fallback
+            uint32_t el = ti.as.error.line ? ti.as.error.line : line;
+            uint32_t ec = ti.as.error.line ? ti.as.error.col  : col;
+            return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, el, ec, ti.as.error.message)) };
+        }
         items = tk_titem_list_push(items, ti.as.value);
     }
     { tk_str seen[TK_MAX_LABELS]; size_t nseen = 0;   // W5-cf-2: validate labels in the virtual-main

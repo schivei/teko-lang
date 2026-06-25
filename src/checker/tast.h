@@ -40,6 +40,7 @@ typedef struct {
 struct tk_texpr {
     tk_texpr_tag tag;
     tk_type      type;        // this node's resolved type
+    uint32_t     line, col;   // (C1-POS/E1) source position, copied from the untyped tk_expr; 0 = unknown
     union {
         struct { bool is_float; __int128 value; double fval; }       number;  // raw literal value; `.type` decides width/float-kind (N1/N2). C bootstrap uses __int128.
         struct { tk_str name; }                                      var;

@@ -210,7 +210,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 |-------|------|-----|--------|
 | **C1.2** lexer carries `file:line:col` on every token | `L` | — | ✅ DONE (R1.1 — verified no-op; positions already correct. Accessor for C1-POS: `t[pos].line/.col`, 1-based, 0=unstamped, capture-on-leading-token like `parse_decl`) |
 | **C1.3** error-model data: position + expected/actual + severity | `core.h`,`core.tks` | — | ✅ DONE (R1.1 — Option B; additive; build green; regressions 5/6; VM==native) |
-| **C1-POS** expr-position plumbing: `tk_expr`/`tk_texpr` `line,col` (C, additive) + untyped `Expr`→struct-wrapper reshape (.tks) + parser stamps + checker copies to tast + available at error sites | `ast`,`tast`,`P`,`chk`,`match`,`collect` (+ `.tks` `Expr` match sites in `cg`,`vm`,`tkb`) | — | ⏳ NEXT (the big serial foundation) |
+| **C1-POS** expr-position plumbing | `ast`,`tast`,`P`,`chk`,`tkb` (C: +`expr.c`,`typer.c`) | — | ✅ DONE — **C-side** (tk_expr/tk_texpr line,col; parser `tk_at` stamps every node; `tk_typer_expr` wrapper copies position onto the typed node + attaches it to errors innermost-wins; `tk_type_program` prefers the expr position). Proof: body type-error → **expr** `3:15`; self-host wall `lexer.tks:451:4`→`460:29`. **.tks mirror** (ast.tks `Expr`→struct-wrapper `{kind,line,col}`; tast.tks `TExpr` +line,col; parse_*/typer/tkb_read reshaped via agent fan-out): parses all 64. Build green; regressions 5/6. **CARVE-OUT → E2:** the C checker attaches positions to error VALUES (via tk_error's C1.3 fields); the `.tks` `error` is `{message}` and gaining line/col ripples EVERY `error {}` under exact-fields → that is **E2** ("teko::Error carry file:line"), done corpus-wide there. C-side error-position is a forward-compatible down payment (delivers the win now); `.tks` error-position lands in E2. |
 | **C1.7** native panics/Error carry file:line | `rt` | C1.3 ✅ | pending |
 | **C1.6** VM panics/Error carry file:line + frames | `vm` | C1-POS | pending |
 | **C1.8** driver renderer: snippet+caret + expected/actual; cc-failure surfacing (creates `diag` here) | `main`,`build`,`diag` | C1.3 ✅, C1-POS | pending |
@@ -278,6 +278,10 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C6.11** #19 X5 justification-header sweep (headers only) | *(all headers — solo)* | all above |
 
 **Rounds:** R6.1 `{C6.1, C6.2, C6.3, C6.10}` (w4) → R6.2 `{C6.4, C6.5, C6.6}` (w3) → R6.3 `{C6.7, C6.8}` (w2) → R6.4 `{C6.11}` (w1) → **attempt `teko .`**.
+
+**Self-host facts uncovered during C1-POS** (both behind the `lexer.tks:460` wall, both pre-existing — the typed `TExpr` already relies on them; C1-POS's `Expr` struct-wrapper just adds more instances):
+- **Variant-widening in a struct-literal field is NOT yet supported by the checker.** `S { kind = A {} }` where `kind: K` and `K = variant A | B` → "field value does not match the field's declared type". The ENTIRE struct-wrapper AST (`TExpr { kind = TNumber{…} }`, and now `Expr { kind = Number{…} }`) needs this. A real Phase-6 checker feature.
+- **`match` convention over a struct-wrapper is unsettled.** typer.tks now uses `match e.kind { Case }` (matching the variant field — safe under any model); codegen.tks/vm.tks use bare `match e { Case }` over the struct `TExpr` (pre-existing). Phase 6 must confirm which the checker accepts and unify (prefer `.kind` — sound under both).
 
 ## Phase 7 — Host independence *(gated by the C7.0 tribunal decision; Phase 6 done)*
 

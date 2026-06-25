@@ -584,7 +584,10 @@ static tk_texpr_result type_path_expr(tk_path_expr pe, tk_type_table table) {
     return xerr("no such member in the enum");
 }
 
-tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table) {
+// (C1-POS) inner dispatch — the raw switch. The public tk_typer_expr (below) wraps this to
+// copy each node's source position onto the typed node AND to attach the expr's position to
+// any error that does not already carry a finer (inner-expr) one.
+static tk_texpr_result type_dispatch(tk_expr e, tk_env env, tk_type_table table) {
     switch (e.tag) {
         case TK_EXPR_NUMBER: {
             // N1/N2 (B.38): the literal leaf adopts a DEFAULT here — i64 for an integer literal,
@@ -630,6 +633,20 @@ tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table) {
         case TK_EXPR_INTERP:       return type_interp(e.as.interp, env, table);          // $"…{expr}…"
     }
     return xerr("unknown expression");
+}
+
+// (C1-POS/E1) public entry — wrap the dispatch to thread source positions. On success, copy
+// the untyped node's line/col onto the typed node so later passes (and the renderer) can point
+// at it. On failure, stamp the error with this expr's position UNLESS it already carries one —
+// the innermost (most specific) expr that set it wins, so `f(g(x))` blames the inner `g(x)`/`x`.
+tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table) {
+    tk_texpr_result r = type_dispatch(e, env, table);
+    if (r.ok) {
+        r.as.value.line = e.line; r.as.value.col = e.col;
+    } else if (r.as.error.line == 0) {
+        r.as.error.line = e.line; r.as.error.col = e.col;
+    }
+    return r;
 }
 
 // ---- the value-type a typed block yields (shared with typer.c's if/match stmt forms) ----
