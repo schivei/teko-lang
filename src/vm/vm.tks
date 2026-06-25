@@ -198,6 +198,36 @@ fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> bool |
     error("not a builtin")
 }
 
+// teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY semantics (no
+// dynamic push; copy-append only — TEKO_CORRECTION_PLAN §16). `empty()` is the sentinel/
+// untyped empty slice; `push(xs, item)` returns a FRESH list (copy-on-push) so
+// `xs = teko::list::push(xs, item)` never mutates a captured `xs`. These PRODUCE A VALUE,
+// so — unlike the `-> void` builtins in `try_builtin` — they are recognized here in value
+// position (the C twin sets `*out` in try_builtin_call; the `.tks` try_builtin carries no
+// value, so the value-producing list builtins live on the value-call path instead). They
+// resolve to the language's own `teko::list::empty`/`push` intrinsics (the same calls the
+// engine itself uses above), keeping VM==native copy-on-push semantics.
+fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+    let last = callee.segments[callee.segments.len - 1].name
+    let list_ns = callee.segments.len >= 2 && callee.segments[0].name == "teko"
+               && callee.segments[callee.segments.len - 2].name == "list"
+    if !list_ns { return null }
+    if last == "empty" {
+        let xs: []Value = teko::list::empty()
+        return xs
+    }
+    if last == "push" {
+        let base = eval_expr(args[0], env)
+        let item = eval_expr(args[1], env)
+        match base {
+            []Value as xs => return teko::list::push(xs, item)
+            _             => teko::panic("vm: teko::list::push on a non-list value (internal: checker should reject)")
+        }
+    }
+    // other teko::list::* (len/get/…) are deferred — only empty/push in the fixed+copy seed.
+    teko::panic("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)")
+}
+
 // ---------------------------------------------------------------------------
 // EXPRESSIONS -> Value. Coverage MIRRORS codegen's emit_expr: Number, Var, Str, Byte,
 // Binary, Unary, Compare, Cast, Call, FieldAccess. IfExpr/MatchExpr AS A VALUE are the
@@ -225,16 +255,16 @@ fn eval_struct_init(si: checker::TStructInit, ty: checker::Type, env: Env) -> Va
 }
 
 // W4b — read field `fa.field` from a struct value (the checker guarantees it exists).
-// W5-idx — `.len`: a `str` value yields its byte length as a u64; a list value (slice) is an
-// honest stop (slice VALUES are the next feature). The checker types `.len` as u64 for str/slice.
+// W5-idx — `.len`: a `str` value yields its byte length as a u64; a list value (slice) yields
+// its element count as a u64 (the SLICE value layer — fixed+copy). Checker types `.len` as u64.
 fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
     match eval_expr(fa.receiver, env) {
         str as s => {
             if fa.field == "len" { return s.len to u64 }
             teko::panic("vm: only `.len` is defined on a str (internal: checker should reject)")
         }
-        []Value as _ => {
-            if fa.field == "len" { teko::panic("vm: slice value layer not yet implemented") }
+        []Value as xs => {
+            if fa.field == "len" { return xs.len to u64 }
             teko::panic("vm: field access on a slice value (internal: checker should reject)")
         }
         StructVal as s => {
@@ -252,8 +282,9 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
 
 // W5-idx — subscript `recv[index]`. A `str` receiver yields the byte at `index`, BOUNDS-
 // CHECKED: an index >= len routes through the SAME out-of-bounds panic the runtime uses
-// ("index out of bounds" — M.1), else a `byte` Value. A list value (slice) is an honest stop
-// — slice VALUES can't be constructed yet (the next feature). Mirrors codegen's stmt-expr guard.
+// ("index out of bounds" — M.1), else a `byte` Value. A list value (slice) yields the element
+// at `index`, bounds-checked through the SAME panic (the SLICE value layer — fixed+copy).
+// Mirrors codegen's stmt-expr guard.
 fn eval_index(ix: checker::TIndex, env: Env) -> Value {
     let recv = eval_expr(ix.receiver, env)
     let i = as_int(eval_expr(ix.index, env))
@@ -262,7 +293,10 @@ fn eval_index(ix: checker::TIndex, env: Env) -> Value {
             if i >= s.len { teko::panic_oob() }
             s[i] to byte
         }
-        []Value as _ => teko::panic("vm: slice value layer not yet implemented")
+        []Value as xs => {
+            if i >= xs.len { teko::panic_oob() }
+            xs[i]
+        }
         _            => teko::panic("vm: subscript on a non-indexable value (internal: checker should reject)")
     }
 }
@@ -555,7 +589,7 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         }
         // W5b — `match` as a VALUE: pattern matching (literal/range/Alt/variant-case/destructure + `when`).
         checker::TMatchExpr as m => eval_match(m, env)
-        // W5-idx — subscript `recv[index]` (str→byte; slice = honest stop, the next feature).
+        // W5-idx — subscript `recv[index]` (str→byte; slice→element, bounds-checked — SLICE layer).
         checker::TIndex as ix => eval_index(ix, env)
         // $"…{expr}…" — string interpolation: pieces ++ str(holes) (self-host parity).
         checker::TInterp as in => eval_interp(in, env)
@@ -701,6 +735,9 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
         bool as ran => if ran { teko::panic("vm: void builtin call used as a value (internal: checker should reject)") }
         error       => {}                  // not a builtin — fall through to a user fn
     }
+    // teko::list::empty / push — value-producing SLICE builtins (FIXED+COPY). Recognized
+    // before user-fn resolution; null == not a list builtin, fall through.
+    match try_list_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
     let f = find_function(c.callee)        // resolved by LAST segment (cross-ns ok); honest stop if unknown / params
     let fenv = Env { slots: [] }
     // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn

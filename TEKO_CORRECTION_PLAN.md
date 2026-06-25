@@ -376,10 +376,20 @@ Descartado "depois dos tokens" (tokens são do dev, por-arquivo). "Antes do chec
 
 **PAREDE atual (gap #14): `parse_expr.tks:115` — PADRÃO de slice `[]lexer::Token as ts`** → entra no **subsistema de SLICES**.
 
-**Dois grandes subsistemas de BACKEND restantes (cada um multi-feature):**
-- **slices/lists/`teko::list` stdlib** — codegen tem ZERO suporte a slice; precisa repr + literais + push/empty + .len + indexação + **padrão de slice (`[]T as x`)** em codegen/VM. (PRÓXIMO.)
-- **parâmetros de função em codegen+VM** — toda fn do corpus tem params; ambos honest-stop hoje.
-> O front-end (parse+check) está perto da paridade; o BACKEND (codegen/exec destes 3) é a montanha — campanha multi-sessão.
+### §15.1 — SLICE value-layer **Increment A — FEITO + diferencial (VM==binário)** (task #57)
+O **valor** de slice agora EXECUTA nos dois backends (era a montanha "codegen tem ZERO suporte a slice"). Survey multi-agente revelou que ~80% já existia (tipo `TK_TYPE_SLICE` completo no checker; `TK_VAL_LIST`+`v_list_empty`/`v_list_push` no VM, porém inalcançáveis). Implementado, **fixed+copy** (sem dynamic push — §16):
+- **VM** (`vm.c`): `teko::list::empty`/`push` (copy-on-push) ligados no dispatch de builtins (`try_builtin_call`); índice de slice (bounds-check + `tk_panic_oob`, mesmo panic do nativo); `.len` de slice → u64.
+- **codegen** (`codegen.c`): tipo C gerado `tk_slice_<elem>` `{ <elemC> *ptr; uint64_t len; }` (carimbado por-elemento via o mesmo set/mangle dos optionals, emitido no prelúdio após os `tk_opt_<i>`); `empty()` → `(tk_slice_<elem>){0}` via `emit_as` (slot concreto, igual ao `null`→optional); `push` → stmt-expr GNU de copy-append inline (`malloc`+`abort` no programa gerado, `+#include <stdlib.h>`); índice de slice (stmt-expr bounds-checked, gêmeo do `str`); `.len` → `(recv).len`.
+- **checker** (`expr.c`): guard de null-deref em `type_index` para o slice SENTINEL (element NULL/`Void`) → erro honesto "anote o tipo do elemento" (era um crash — M.1).
+- **Mirrors** (`vm.tks`/`codegen.tks`): espelhados (agentes; divergências honestas: VM usa `try_list_builtin` separado pois o `try_builtin` do `.tks` é void-only; codegen usa `CgTypeSet` threaded-by-return; sentinel = `Void` no `.tks`).
+- **Validado:** scratch `/tmp/slicetest` (empty/push/index/.len) VM=binário=62; regressões match_pattern_bindings(5) e optionals(6) intactas.
+- **Dívida de mirror conhecida:** `expr.tks` é scaffold de 41 linhas (todo o motor de tipagem — `type_binary`/`type_index`/`type_list_builtin`/dispatch — é não-espelhado; o guard de `type_index` entra nessa dívida pré-existente).
+
+**Restante do subsistema de SLICES (Increment B+):**
+- **`[]T as x` (gap #14)** — padrão de slice no match: AST (`tk_bind_pattern` ganha `is_slice`/`slice_type`), parser (`parse_pattern_primary` reusa `parse_type_primary`), checker (`match.c` casa o membro slice + relaxa exaustividade), VM (`pat_match` arm de `TK_VAL_LIST`), codegen (test/bind do arm de slice). **Bloqueio acoplado:** exige codegen de variant `[]T | error` (membro slice → `emit_type_expr` ainda fail_node em posição de membro de type-decl) e/ou variant inline — entra no subsistema de **variants/retorno**.
+- **literal `[]`/`[a,b]` + `xs+[x]`** — superfície alternativa (o corpus usa `teko::list::push`); baixa prioridade.
+- **parâmetros de função em codegen+VM** — toda fn do corpus tem params; ambos honest-stop hoje (a outra montanha).
+> O front-end (parse+check) está perto da paridade; o BACKEND (codegen/exec) é a montanha — campanha multi-sessão.
 
 > **Recomendação de checkpoint:** as correções W5 + 12 gaps de front-end + o fix de heap são um corpo validado e um limite natural de commit. Sugiro commitar isso agora e seguir o self-host de backend (slices/params/optionals/stdlib) como campanha rastreada (task #55), em vez de um único mega-commit. Dívida de mirror `.tks` do último lote (discard-binding + contextual-`to`) em andamento (agente).
 

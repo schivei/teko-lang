@@ -388,6 +388,30 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         // other assert::* (equals/is_ok/...) need generics — DEFERRED (matches the seed).
         vm_unsupported("vm: this teko::assert builtin not yet supported (needs generics)");
     }
+
+    // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY semantics
+    // (no dynamic push; copy-append only — TEKO_CORRECTION_PLAN §16). `empty()` is the
+    // sentinel/untyped empty slice; `push(xs, item)` returns a FRESH list (copy-on-push,
+    // v_list_push) so `xs = teko::list::push(xs, item)` never mutates a captured `xs`.
+    bool list_ns = (p.len >= 2) && seg_is(p.segments[0].name, "teko")
+                                && seg_is(p.segments[p.len - 2].name, "list");
+    if (list_ns) {
+        if (seg_is(last, "empty")) {
+            if (nargs != 0) vm_unsupported("teko::list::empty expects no arguments");
+            *out = v_list_empty();
+            return true;
+        }
+        if (seg_is(last, "push")) {
+            if (nargs != 2) vm_unsupported("teko::list::push expects two arguments (the list, the item)");
+            tk_value base = tk_vm_eval_expr(&args[0], env);
+            tk_value item = tk_vm_eval_expr(&args[1], env);
+            if (base.tag != TK_VAL_LIST) vm_unsupported("teko::list::push on a non-list value (internal: checker should reject)");
+            *out = v_list_push(base.as.list, item);
+            return true;
+        }
+        // other teko::list::* (len/get/…) are deferred — only empty/push in the fixed+copy seed.
+        vm_unsupported("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)");
+    }
     return false;
 }
 
@@ -871,7 +895,10 @@ static tk_value eval_index(const tk_texpr *e, tk_venv *env) {
         if (i >= recv.as.s.len) tk_panic_oob();
         return v_int((uint64_t)recv.as.s.ptr[(size_t)i], false, 8);   // byte == u8
     }
-    if (recv.tag == TK_VAL_LIST) vm_unsupported("slice value layer not yet implemented");
+    if (recv.tag == TK_VAL_LIST) {   // slice subscript: bounds-checked, same panic as native (M.1)
+        if (i >= recv.as.list.len) tk_panic_oob();
+        return recv.as.list.ptr[(size_t)i];
+    }
     vm_unsupported("subscript on a non-indexable value (internal: checker should reject)");
 }
 
@@ -955,7 +982,7 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
             if (recv.tag == TK_VAL_STR && name_eq(e->as.field_access.field, (tk_str){ (const tk_byte *)"len", 3 }))
                 return v_int((uint64_t)recv.as.s.len, false, 64);
             if (recv.tag == TK_VAL_LIST && name_eq(e->as.field_access.field, (tk_str){ (const tk_byte *)"len", 3 }))
-                vm_unsupported("slice value layer not yet implemented");
+                return v_int((uint64_t)recv.as.list.len, false, 64);
             if (recv.tag != TK_VAL_STRUCT)
                 vm_unsupported("field access on a non-struct value (internal: checker should reject)");
             for (size_t i = 0; i < recv.as.st.fields.len; i += 1)

@@ -297,7 +297,13 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
             checker::Void => error { message = "codegen: a bare `null` needs a known optional type from context (internal)" }
             _ => cg_opt_typename(buf, opt.inner)
         }
-        checker::Slice     => error { message = "codegen: slice type not yet supported" }
+        // SLICE (`[]T`) — the generated tk_slice_<elem> struct. The sentinel/untyped slice
+        // (element = the Void marker, from teko::list::empty()) never reaches here on its own —
+        // emit_as wraps it to a concrete slot type, exactly like a bare `null` optional.
+        checker::Slice as sl => match sl.element {
+            checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
+            _ => cg_slice_typename(buf, sl.element)
+        }
         // W4c — a Named aggregate -> its mangled typedef name (the bare name; resolve
         // drops the namespace). decl + ref agree via mangle_type_name.
         checker::Named as nm => mangle_type_name(buf, "", nm.name)
@@ -314,6 +320,12 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
 // lowers to its message tk_str, so `error?` is `tk_opt_error`. (C: `cg_opt_typename`/`cg_opt_mangle`.)
 fn cg_opt_typename(buf: []byte, inner: checker::Type) -> []byte | error {
     cg_opt_mangle(cb(buf, "tk_opt_"), inner)
+}
+// SLICE value layer (fixed+copy): a `[]T` lowers to the generated `tk_slice_<elemMangle>`
+// struct `{ <elemC> *ptr; uint64_t len; }` (same shape as tk_str). Reuses the optional element
+// mangle for the suffix, so decl + every use agree byte-for-byte. (C: `cg_slice_typename`.)
+fn cg_slice_typename(buf: []byte, elem: checker::Type) -> []byte | error {
+    cg_opt_mangle(cb(buf, "tk_slice_"), elem)
 }
 // The deterministic mangle SUFFIX for an optional inner type (used in tk_opt_<suffix>).
 fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
@@ -684,11 +696,86 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
     cb(out, "))")
 }
 
+// emit_list_empty — `teko::list::empty()`. If the call's OWN type is a concrete slice, emit the
+// empty literal `(tk_slice_<elem>){ .ptr = 0, .len = 0 }`; else an honest error (it should have
+// been wrapped to a slot type by emit_as). (C: the `empty` arm of the teko::list branch.)
+fn emit_list_empty(buf: []byte, e: checker::TExpr) -> []byte | error {
+    match e.type {
+        checker::Slice as sl => match sl.element {
+            checker::Void => error { message = "codegen: teko::list::empty() needs a known slice type from context (annotate the binding)" }
+            _ => {
+                mut o = cb(buf, "(")
+                o = match cg_slice_typename(o, sl.element) { []byte as r => r; error as err => return err }
+                cb(o, "){ .ptr = 0, .len = 0 }")
+            }
+        }
+        _ => error { message = "codegen: teko::list::empty() needs a known slice type from context (annotate the binding)" }
+    }
+}
+
+// emit_list_push — `teko::list::push(base, item)`. The push result type (the node's `.type`) is
+// `[]elem`. Lower to an inline copy-append GNU stmt-expr: declare the base slice, a COPY of the
+// item (wrapped to elem via emit_as), malloc len+1 elements (abort on OOM — M.1), copy the old
+// elements, append the item, then yield the fresh tk_slice_<elem>. (C: the `push` arm.)
+fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall) -> []byte | error {
+    let elem = match e.type {
+        checker::Slice as sl => match sl.element {
+            checker::Void => return error { message = "codegen: teko::list::push result is not a concrete slice (internal)" }
+            _ => sl.element
+        }
+        _ => return error { message = "codegen: teko::list::push result is not a concrete slice (internal)" }
+    }
+    let bN = $"_sb{buf.len}"
+    let iN = $"_si{buf.len + 1}"
+    let pN = $"_sp{buf.len + 2}"
+    let jN = $"_sj{buf.len + 3}"
+    mut out = cb(buf, "({ ")
+    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, bN); out = cb(out, " = ")
+    out = match emit_expr(out, prog, c.args[0]) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, iN); out = cb(out, " = ")
+    out = match emit_as(out, prog, elem, c.args[1]) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = (")
+    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " *)malloc(("); out = cb(out, bN)
+    out = cb(out, ".len + 1) * sizeof(")
+    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, ")); if ("); out = cb(out, pN); out = cb(out, " == 0) abort(); ")
+    out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; "); out = cb(out, jN)
+    out = cb(out, " < "); out = cb(out, bN); out = cb(out, ".len; "); out = cb(out, jN); out = cb(out, " += 1) { ")
+    out = cb(out, pN); out = cb(out, "["); out = cb(out, jN); out = cb(out, "] = ")
+    out = cb(out, bN); out = cb(out, ".ptr["); out = cb(out, jN); out = cb(out, "]; } ")
+    out = cb(out, pN); out = cb(out, "["); out = cb(out, bN); out = cb(out, ".len] = "); out = cb(out, iN); out = cb(out, "; (")
+    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = "); out = cb(out, bN); out = cb(out, ".len + 1 }; })")
+    out
+}
+
 // emit_call — a TCall. The callee path -> a C identifier joined by "__" (single-segment
 // in M0). Non-shadowable built-ins `print`/`println` (bare, or under `teko`) map to
 // tk_print/tk_println. (C: TK_TEXPR_CALL branch.)
-fn emit_call(buf: []byte, prog: checker::TProgram, c: checker::TCall) -> []byte | error {
+fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall) -> []byte | error {
     let p = c.callee
+    // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
+    // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching here
+    // directly means a context-less empty (honest error). `push(base, item)` lowers to an
+    // inline copy-append GNU stmt-expr (alloc len+1 via malloc/abort — M.1 — copy the old
+    // elements, append a COPY of item, yield the fresh tk_slice_<elem>). (C: the teko::list branch.)
+    if p.segments.len >= 2 && p.segments[0].name == "teko"
+                           && p.segments[p.segments.len - 2].name == "list" {
+        let llast = p.segments[p.segments.len - 1].name
+        if llast == "empty" {
+            return emit_list_empty(buf, e)
+        }
+        if llast == "push" {
+            return emit_list_push(buf, prog, e, c)
+        }
+        return error { message = "codegen: this teko::list builtin not yet supported (only empty/push — fixed+copy)" }
+    }
     // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
     mut builtin = ""
     mut has_builtin = false
@@ -723,11 +810,13 @@ fn emit_call(buf: []byte, prog: checker::TProgram, c: checker::TCall) -> []byte 
 
 // emit_field_access — a TFieldAccess -> `(recv.field)`. (C: TK_TEXPR_FIELD_ACCESS branch.)
 // W5-idx — `.len`: a `str` lowers to the runtime tk_str's `.len` member (`(recv).len`); a
-// slice is an honest barrier (slice VALUES are the next feature).
+// slice's `.len` reads its tk_slice_<elem> `.len` member (same {ptr,len} shape as tk_str -> u64).
 fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAccess) -> []byte | error {
     let is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
-        return error { message = "codegen: slice .len not yet supported (slice value layer pending)" }
+        mut o = cb(buf, "(")   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str -> u64
+        o = match emit_expr(o, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        return cb(o, ".len)")
     }
     mut out = cb(buf, "(")
     out = match emit_expr(out, prog, fa.receiver) { []byte as o => o; error as err => return err }
@@ -790,11 +879,43 @@ fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: ch
 //   ({ tk_str _sN = <recv>; uint64_t _iN = <idx>; _iN < _sN.len ? _sN.ptr[_iN]
 //                                              : (tk_panic_oob(), (tk_byte)0); })
 // tk_panic_oob is declared in teko_rt.h (the generated TU's runtime header) — an out-of-bounds
-// index PANICS with the SAME message as the VM's eval_index (M.1). A slice receiver is an
-// honest barrier (slice VALUES are the next feature). (C: the TK_TEXPR_INDEX branch.)
+// index PANICS with the SAME message as the VM's eval_index (M.1). A slice receiver uses the
+// SAME bounds-checked shape, with the element C type substituted for tk_byte and reading
+// `(recv).ptr[i]` with a `(tk_panic_oob(), (<elem>){0})` fallback. (C: the TK_TEXPR_INDEX branch.)
 fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: checker::TIndex) -> []byte | error {
+    // slice subscript: the SAME bounds-checked stmt-expr as str, with the element type
+    // substituted for tk_byte and a 0-of-element fallback after the panic.
     match ix.receiver.type {
-        checker::Slice => return error { message = "codegen: slice indexing not yet supported (slice value layer pending)" }
+        checker::Slice as srt => {
+            let elem = match srt.element {
+                checker::Void => return error { message = "codegen: indexing an untyped empty slice (internal: checker should reject)" }
+                _ => srt.element
+            }
+            let lstmp = $"_ls{buf.len}"
+            let litmp = $"_li{buf.len + 1}"
+            mut so = cb(buf, "({ ")
+            so = match emit_type(so, elem) { []byte as o => o; error as err => return err }
+            so = cb(so, " const *")
+            so = cb(so, lstmp)
+            so = cb(so, " = (")
+            so = match emit_expr(so, prog, ix.receiver) { []byte as o => o; error as err => return err }
+            so = cb(so, ").ptr; uint64_t ")
+            so = cb(so, litmp)
+            so = cb(so, " = (uint64_t)(")
+            so = match emit_expr(so, prog, ix.index) { []byte as o => o; error as err => return err }
+            so = cb(so, "); ")
+            so = cb(so, litmp)
+            so = cb(so, " < (")
+            so = match emit_expr(so, prog, ix.receiver) { []byte as o => o; error as err => return err }
+            so = cb(so, ").len ? ")
+            so = cb(so, lstmp)
+            so = cb(so, "[")
+            so = cb(so, litmp)
+            so = cb(so, "]")
+            so = cb(so, " : (tk_panic_oob(), (")
+            so = match emit_type(so, elem) { []byte as o => o; error as err => return err }
+            return cb(so, "){0}); })")
+        }
         checker::Str   => { }
         _              => return error { message = "codegen: indexing a non-string value not yet supported" }
     }
@@ -1051,6 +1172,28 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
                             return cb(o1, " }")
                         }
                     }
+                }
+            }
+        }
+        _ => { }
+    }
+    // SLICE slot: the sentinel/untyped empty slice (teko::list::empty(), element = Void) becomes
+    // this slot's concrete empty literal; a concrete slice value passes through.
+    match expected {
+        checker::Slice as sexp => {
+            match sexp.element {
+                checker::Void => { }   // sentinel expected — fall through (should not occur at a real slot)
+                _ => {
+                    let val_sentinel = match value.type {
+                        checker::Slice as svt => match svt.element { checker::Void => true; _ => false }
+                        _ => false
+                    }
+                    if val_sentinel {
+                        mut so = cb(buf, "(")
+                        so = match cg_slice_typename(so, sexp.element) { []byte as o => o; error as err => return err }
+                        return cb(so, "){ .ptr = 0, .len = 0 }")
+                    }
+                    return emit_expr(buf, value)
                 }
             }
         }
@@ -1592,7 +1735,7 @@ fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte 
         checker::TUnary as u       => emit_unary(buf, prog, u)
         checker::TCompare as c     => emit_compare(buf, prog, c)
         checker::TCast as c        => emit_cast(buf, prog, e, c)
-        checker::TCall as cl       => emit_call(buf, prog, cl)
+        checker::TCall as cl       => emit_call(buf, prog, e, cl)
         checker::TFieldAccess as fa => emit_field_access(buf, prog, fa)
         checker::TStructInit as si  => emit_struct_init(buf, prog, e, si)
         checker::TStrLit as s      => emit_strlit(buf, s)
@@ -1608,7 +1751,7 @@ fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte 
         checker::TNullLit          => error { message = "codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)" }
         checker::TSafeFieldAccess as sfa => emit_safe_field_access(buf, prog, e, sfa)
         checker::TCoalesce as co   => emit_coalesce(buf, prog, e, co)
-        checker::TIndex as ix      => emit_index(buf, prog, e, ix)   // W5-idx — subscript recv[index] (str; slice = honest barrier)
+        checker::TIndex as ix      => emit_index(buf, prog, e, ix)   // W5-idx — subscript recv[index] (str + slice, bounds-checked)
         checker::TInterp as in     => emit_interp(buf, prog, in)     // $"…{expr}…" — nested tk_str_concat over pieces + holes
     }
 }
@@ -2022,23 +2165,44 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
 // optionals register the inner first so its typedef precedes the outer's reference. (C: the
 // cg_opt_set / cg_collect_* / cg_emit_optional_typedefs family.)
 // ---------------------------------------------------------------------------
-// the mangled-name key for an inner type (dedup key); "" for an unsupported inner (skipped).
-fn cg_opt_key(inner: checker::Type) -> str {
-    match cg_opt_mangle(teko::list::empty(), inner) { []byte as o => str(o); error => "" }
+// The per-type generated typedefs collected in ONE walk: optional inners (tk_opt_<i>) AND slice
+// element types (tk_slice_<e>). Mirrors the C's `cg_opt_set` struct (two parallel lists threaded
+// by pointer); here it is a value threaded by return (the functional `.tks` idiom). One walk feeds
+// both — cg_collect_type_opts registers a slice's element in the same traversal as optionals.
+type CgTypeSet = struct { inners: []checker::Type; slices: []checker::Type }
+
+// the mangled-name key for a type (dedup key); "" for an unsupported type (skipped). Used for
+// both optional inners and slice elements (same mangle). (C: `cg_opt_mangle` render-to-scratch.)
+fn cg_opt_key(t: checker::Type) -> str {
+    match cg_opt_mangle(teko::list::empty(), t) { []byte as o => str(o); error => "" }
 }
-fn cg_opt_set_add(set: []checker::Type, inner: checker::Type) -> []checker::Type {
+// register an optional inner (dedup by mangle). (C: `cg_opt_set_add`.)
+fn cg_opt_set_add(set: CgTypeSet, inner: checker::Type) -> CgTypeSet {
     let key = cg_opt_key(inner)
     if key == "" { return set }
     mut i = 0
     loop {
-        if i >= set.len { break }
-        if cg_opt_key(set[i]) == key { return set }   // already present
+        if i >= set.inners.len { break }
+        if cg_opt_key(set.inners[i]) == key { return set }   // already present
         i++
     }
-    teko::list::push(set, inner)
+    CgTypeSet { inners = teko::list::push(set.inners, inner); slices = set.slices }
 }
-// register every optional in a type (nested inners first, so `T??` orders right).
-fn cg_collect_type_opts(set: []checker::Type, t: checker::Type) -> []checker::Type {
+// register a slice element type (dedup by mangle), parallel to cg_opt_set_add. (C: `cg_slice_add`.)
+fn cg_slice_add(set: CgTypeSet, elem: checker::Type) -> CgTypeSet {
+    let key = cg_opt_key(elem)
+    if key == "" { return set }   // unsupported element → skip (emit_type errors honestly)
+    mut i = 0
+    loop {
+        if i >= set.slices.len { break }
+        if cg_opt_key(set.slices[i]) == key { return set }   // already present
+        i++
+    }
+    CgTypeSet { inners = set.inners; slices = teko::list::push(set.slices, elem) }
+}
+// register every optional in a type AND every slice's element (nested inners/elements first, so
+// `T??` and `[][]T`/`[]T?` order right). (C: `cg_collect_type_opts`.)
+fn cg_collect_type_opts(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
     match t {
         checker::Optional as opt => {
             match opt.inner {
@@ -2046,12 +2210,15 @@ fn cg_collect_type_opts(set: []checker::Type, t: checker::Type) -> []checker::Ty
                 _ => cg_opt_set_add(cg_collect_type_opts(set, opt.inner), opt.inner)
             }
         }
-        checker::Slice as sl => cg_collect_type_opts(set, sl.element)
+        checker::Slice as sl => match sl.element {
+            checker::Void => set
+            _ => cg_slice_add(cg_collect_type_opts(set, sl.element), sl.element)   // recurse (covers [][]T, []T?), then register THIS slice's element
+        }
         _ => set
     }
 }
-fn cg_collect_expr_opts(set: []checker::Type, e: checker::TExpr) -> []checker::Type {
-    mut s = cg_collect_type_opts(set, e.type)   // the node's own resolved type may be `T?`
+fn cg_collect_expr_opts(set: CgTypeSet, e: checker::TExpr) -> CgTypeSet {
+    mut s = cg_collect_type_opts(set, e.type)   // the node's own resolved type may be `T?` / `[]T`
     match e.kind {
         checker::TBinary as b  => { s = cg_collect_expr_opts(s, b.left); s = cg_collect_expr_opts(s, b.right) }
         checker::TUnary as u   => { s = cg_collect_expr_opts(s, u.operand) }
@@ -2087,7 +2254,7 @@ fn cg_collect_expr_opts(set: []checker::Type, e: checker::TExpr) -> []checker::T
     }
     s
 }
-fn cg_collect_block_opts(set: []checker::Type, stmts: []checker::TStatement) -> []checker::Type {
+fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement) -> CgTypeSet {
     mut s = set
     mut i = 0
     loop {
@@ -2105,9 +2272,10 @@ fn cg_collect_block_opts(set: []checker::Type, stmts: []checker::TStatement) -> 
     s
 }
 // walk the whole program; emit each distinct optional typedef once (registration order, so a
-// nested inner optional precedes the outer that references it).
+// nested inner optional precedes the outer that references it), then the slice typedefs AFTER the
+// optionals (so a `[](T?)` element's tk_opt_<i> already exists). Same {ptr,len} shape as tk_str.
 fn cg_emit_optional_typedefs(buf: []byte, prog: checker::TProgram) -> []byte | error {
-    mut set = teko::list::empty()
+    mut set = CgTypeSet { inners = teko::list::empty(); slices = teko::list::empty() }
     mut i = 0
     loop {
         if i >= prog.items.len { break }
@@ -2124,15 +2292,28 @@ fn cg_emit_optional_typedefs(buf: []byte, prog: checker::TProgram) -> []byte | e
     mut out = buf
     mut j = 0
     loop {
-        if j >= set.len { break }
+        if j >= set.inners.len { break }
         out = cb(out, "typedef struct { bool present; ")
-        out = match emit_type(out, set[j]) { []byte as o => o; error as err => return err }
+        out = match emit_type(out, set.inners[j]) { []byte as o => o; error as err => return err }
         out = cb(out, " value; } ")
-        out = match cg_opt_typename(out, set[j]) { []byte as o => o; error as err => return err }
+        out = match cg_opt_typename(out, set.inners[j]) { []byte as o => o; error as err => return err }
         out = cb(out, ";\n")
         j++
     }
-    if set.len > 0 { out = cb(out, "\n") }
+    if set.inners.len > 0 { out = cb(out, "\n") }
+    // SLICE TYPEDEFS — after optionals. Same {ptr,len} shape as tk_str; a non-const ptr (we
+    // build slices via copy-append).
+    mut k = 0
+    loop {
+        if k >= set.slices.len { break }
+        out = cb(out, "typedef struct { ")
+        out = match emit_type(out, set.slices[k]) { []byte as o => o; error as err => return err }
+        out = cb(out, " *ptr; uint64_t len; } ")
+        out = match cg_slice_typename(out, set.slices[k]) { []byte as o => o; error as err => return err }
+        out = cb(out, ";\n")
+        k++
+    }
+    if set.slices.len > 0 { out = cb(out, "\n") }
     out
 }
 
@@ -2151,6 +2332,7 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     b = cb(b, "// generated by teko (F2 backend) — do not edit\n")
     b = cb(b, "#include <stdint.h>\n")
     b = cb(b, "#include <stdbool.h>\n")
+    b = cb(b, "#include <stdlib.h>\n")   // malloc/abort — slice copy-append (fixed+copy)
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")   // teko::assert seed decls (driver adds its -I)
 

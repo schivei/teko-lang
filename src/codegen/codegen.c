@@ -269,6 +269,14 @@ static bool cg_opt_typename(cbuf *b, tk_type inner, const char **err) {
     return cg_opt_mangle(b, inner, err);
 }
 
+// SLICE value layer (fixed+copy): a `[]T` lowers to the generated `tk_slice_<elemMangle>`
+// struct `{ <elemC> *ptr; uint64_t len; }` (same shape as tk_str). Reuses the optional
+// element mangle for the suffix, so decl + every use agree byte-for-byte.
+static bool cg_slice_typename(cbuf *b, tk_type elem, const char **err) {
+    cb(b, "tk_slice_");
+    return cg_opt_mangle(b, elem, err);
+}
+
 static bool emit_type(cbuf *b, tk_type t, const char **err) {
     switch (t.tag) {
         case TK_TYPE_PRIM: return emit_prim(b, t.as.prim, err);
@@ -285,7 +293,13 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
             if (t.as.optional.inner == NULL)
                 return fail_node(err, "codegen: a bare `null` needs a known optional type from context (internal)");
             return cg_opt_typename(b, *t.as.optional.inner, err);
-        case TK_TYPE_SLICE:   return fail_node(err, "codegen: slice type not yet supported");
+        // SLICE (`[]T`) — the generated tk_slice_<elem> struct. The sentinel/untyped slice
+        // (element == NULL, from teko::list::empty()) never reaches here on its own: emit_as
+        // wraps it to a concrete slot type, exactly like a bare `null` optional.
+        case TK_TYPE_SLICE:
+            if (t.as.slice.element == NULL)
+                return fail_node(err, "codegen: an untyped empty slice needs a known element type from context (internal)");
+            return cg_slice_typename(b, *t.as.slice.element, err);
         // W4c — a named aggregate references its mangled typedef name (decl + ref agree
         // via mangle_type_name). The semantic NAMED carries only the bare name.
         case TK_TYPE_NAMED:   mangle_type_name(b, (tk_str){ NULL, 0 }, t.as.named.name); return true;
@@ -771,6 +785,49 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
         case TK_TEXPR_CALL: {
             // callee path -> C identifier joined by "__" (single-segment in M0).
             tk_path p = e->as.call.callee;
+            // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
+            // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching
+            // here directly means a context-less empty (honest error). `push(base, item)` lowers
+            // to an inline copy-append GNU stmt-expr (alloc len+1 via malloc/abort — M.1 — copy
+            // the old elements, append a COPY of item, yield the fresh tk_slice_<elem>).
+            if (p.len >= 2 && seg_is(p.segments[0].name, "teko")
+                           && seg_is(p.segments[p.len - 2].name, "list")) {
+                tk_str llast = p.segments[p.len - 1].name;
+                if (seg_is(llast, "empty")) {
+                    if (e->type.tag == TK_TYPE_SLICE && e->type.as.slice.element != NULL) {
+                        cb(b, "("); if (!cg_slice_typename(b, *e->type.as.slice.element, err)) return false;
+                        cb(b, "){ .ptr = 0, .len = 0 }");
+                        return true;
+                    }
+                    return fail_node(err, "codegen: teko::list::empty() needs a known slice type from context (annotate the binding)");
+                }
+                if (seg_is(llast, "push")) {
+                    tk_type st = e->type;   // the push result type is []elem
+                    if (st.tag != TK_TYPE_SLICE || st.as.slice.element == NULL)
+                        return fail_node(err, "codegen: teko::list::push result is not a concrete slice (internal)");
+                    tk_type elem = *st.as.slice.element;
+                    char bN[40], iN[40], pN[40], jN[40];
+                    snprintf(bN, sizeof bN, "_sb%zu", (size_t)b->len);
+                    snprintf(iN, sizeof iN, "_si%zu", (size_t)b->len + 1);
+                    snprintf(pN, sizeof pN, "_sp%zu", (size_t)b->len + 2);
+                    snprintf(jN, sizeof jN, "_sj%zu", (size_t)b->len + 3);
+                    cb(b, "({ ");
+                    if (!cg_slice_typename(b, elem, err)) return false; cb(b, " "); cb(b, bN); cb(b, " = ");
+                    if (!emit_expr(b, &e->as.call.args[0], err)) return false; cb(b, "; ");
+                    if (!emit_type(b, elem, err)) return false; cb(b, " "); cb(b, iN); cb(b, " = ");
+                    if (!emit_as(b, elem, &e->as.call.args[1], err)) return false; cb(b, "; ");
+                    if (!emit_type(b, elem, err)) return false; cb(b, " *"); cb(b, pN); cb(b, " = (");
+                    if (!emit_type(b, elem, err)) return false; cb(b, " *)malloc(("); cb(b, bN);
+                    cb(b, ".len + 1) * sizeof("); if (!emit_type(b, elem, err)) return false; cb(b, ")); if ("); cb(b, pN); cb(b, " == 0) abort(); ");
+                    cb(b, "for (uint64_t "); cb(b, jN); cb(b, " = 0; "); cb(b, jN); cb(b, " < "); cb(b, bN); cb(b, ".len; "); cb(b, jN); cb(b, " += 1) { ");
+                    cb(b, pN); cb(b, "["); cb(b, jN); cb(b, "] = "); cb(b, bN); cb(b, ".ptr["); cb(b, jN); cb(b, "]; } ");
+                    cb(b, pN); cb(b, "["); cb(b, bN); cb(b, ".len] = "); cb(b, iN); cb(b, "; (");
+                    if (!cg_slice_typename(b, elem, err)) return false;
+                    cb(b, "){ .ptr = "); cb(b, pN); cb(b, ", .len = "); cb(b, bN); cb(b, ".len + 1 }; })");
+                    return true;
+                }
+                return fail_node(err, "codegen: this teko::list builtin not yet supported (only empty/push — fixed+copy)");
+            }
             // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
             const char *builtin = NULL;
             if (p.len >= 1) {
@@ -804,8 +861,12 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // (`(recv).len`); a slice is an honest barrier (slice VALUES are the next
             // feature). Otherwise a plain struct-field read `(recv.field)`.
             tk_type rt = e->as.field_access.receiver->type;
-            if (rt.tag == TK_TYPE_SLICE && seg_is(e->as.field_access.field, "len"))
-                return fail_node(err, "codegen: slice .len not yet supported (slice value layer pending)");
+            if (rt.tag == TK_TYPE_SLICE && seg_is(e->as.field_access.field, "len")) {
+                cb(b, "(");   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str → u64
+                if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
+                cb(b, ".len)");
+                return true;
+            }
             cb(b, "(");
             if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
             cb(b, ".");
@@ -977,8 +1038,26 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // VM's eval_index routes through the identical panic. A slice receiver is an honest
             // barrier (slice VALUES are the next feature).
             tk_type rt = e->as.index.receiver->type;
-            if (rt.tag == TK_TYPE_SLICE)
-                return fail_node(err, "codegen: slice indexing not yet supported (slice value layer pending)");
+            if (rt.tag == TK_TYPE_SLICE) {
+                // slice subscript: the SAME bounds-checked stmt-expr as str, with the element
+                // type substituted for tk_byte and a 0-of-element fallback after the panic.
+                if (rt.as.slice.element == NULL)
+                    return fail_node(err, "codegen: indexing an untyped empty slice (internal: checker should reject)");
+                tk_type elem = *rt.as.slice.element;
+                char stmp[40], itmp[40];
+                snprintf(stmp, sizeof stmp, "_ls%zu", (size_t)b->len);
+                snprintf(itmp, sizeof itmp, "_li%zu", (size_t)b->len + 1);
+                cb(b, "({ "); if (!emit_type(b, elem, err)) return false;
+                cb(b, " const *"); cb(b, stmp); cb(b, " = (");
+                if (!emit_expr(b, e->as.index.receiver, err)) return false; cb(b, ").ptr; uint64_t ");
+                cb(b, itmp); cb(b, " = (uint64_t)(");
+                if (!emit_expr(b, e->as.index.index, err)) return false; cb(b, "); ");
+                cb(b, itmp); cb(b, " < (");
+                if (!emit_expr(b, e->as.index.receiver, err)) return false; cb(b, ").len ? ");
+                cb(b, stmp); cb(b, "["); cb(b, itmp); cb(b, "]");
+                cb(b, " : (tk_panic_oob(), ("); if (!emit_type(b, elem, err)) return false; cb(b, "){0}); })");
+                return true;
+            }
             if (rt.tag != TK_TYPE_STR)
                 return fail_node(err, "codegen: indexing a non-string value not yet supported");
             // Freeze unique temp names (buffer length is the functional uniquifier — see emit_if_value).
@@ -1031,6 +1110,16 @@ static bool emit_as(cbuf *b, tk_type expected, const tk_texpr *value, const char
         if (!emit_as(b, inner, value, err)) return false;   // the inner may itself need a wrap (e.g. a variant inner)
         cb(b, " }");
         return true;
+    }
+    // SLICE slot: the sentinel/untyped empty slice (teko::list::empty(), element unknown)
+    // becomes this slot's concrete empty literal; a concrete slice value passes through.
+    if (expected.tag == TK_TYPE_SLICE && expected.as.slice.element != NULL) {
+        if (value->type.tag == TK_TYPE_SLICE && value->type.as.slice.element == NULL) {
+            cb(b, "("); if (!cg_slice_typename(b, *expected.as.slice.element, err)) return false;
+            cb(b, "){ .ptr = 0, .len = 0 }");
+            return true;
+        }
+        return emit_expr(b, value, err);
     }
     // Wrap only when: expected is a NAMED variant, the value's type is a NAMED case, and
     // that case is one of the variant's members. (If value's type IS the variant already
@@ -1841,7 +1930,28 @@ static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
 // distinct inner types (deduped by mangled name). Nested optionals (`T??`) register the inner
 // optional first so its typedef precedes the outer's reference.
 // =========================================================================
-typedef struct { tk_type *inners; size_t len; size_t cap; } cg_opt_set;
+// Collects the per-type generated typedefs: optional inners (tk_opt_<i>) AND slice element
+// types (tk_slice_<e>). One walk feeds both — cg_collect_type_opts registers a slice's element
+// in the same traversal that registers optionals (so no second walker is needed).
+typedef struct { tk_type *inners; size_t len; size_t cap;
+                 tk_type *slices; size_t slen; size_t scap; } cg_opt_set;
+
+// Register a slice element type (dedup by mangle), parallel to cg_opt_set_add.
+static void cg_slice_add(cg_opt_set *set, tk_type elem) {
+    cbuf key = { NULL, 0, 0 }; const char *e = NULL;
+    if (!cg_opt_mangle(&key, elem, &e)) { tk_free0(key.ptr); return; }   // unsupported element → skip (emit_type errors honestly)
+    for (size_t i = 0; i < set->slen; i += 1) {
+        cbuf prev = { NULL, 0, 0 }; const char *pe = NULL;
+        if (!cg_opt_mangle(&prev, set->slices[i], &pe)) { tk_free0(prev.ptr); continue; }
+        bool same = prev.len == key.len && (key.len == 0 || memcmp(prev.ptr, key.ptr, key.len) == 0);
+        tk_free0(prev.ptr);
+        if (same) { tk_free0(key.ptr); return; }   // already present
+    }
+    tk_free0(key.ptr);
+    if (set->slen == set->scap) { set->scap = set->scap ? set->scap * 2 : 8;
+        set->slices = tk_realloc0(set->slices, set->scap * sizeof *set->slices); }
+    set->slices[set->slen++] = elem;
+}
 
 static void cg_opt_set_add(cg_opt_set *set, tk_type inner) {
     // Dedup by mangled name (render to a scratch cbuf, compare bytes).
@@ -1869,7 +1979,12 @@ static void cg_collect_type_opts(cg_opt_set *set, tk_type t) {
                 cg_opt_set_add(set, *t.as.optional.inner);
             }
             return;
-        case TK_TYPE_SLICE:   if (t.as.slice.element) cg_collect_type_opts(set, *t.as.slice.element); return;
+        case TK_TYPE_SLICE:
+            if (t.as.slice.element) {
+                cg_collect_type_opts(set, *t.as.slice.element);   // recurse (covers [][]T, []T?) — innermost first
+                cg_slice_add(set, *t.as.slice.element);            // register THIS slice's tk_slice_<elem> typedef
+            }
+            return;
         default: return;   // PRIM/STR/BYTE/ERROR/NAMED/VARIANT/FUNC/VOID carry no optional to register here
     }
 }
@@ -1928,7 +2043,7 @@ static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, s
 // Walk the whole program; emit each distinct optional typedef once (in registration order, so
 // a nested inner optional precedes the outer that references it).
 static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **err) {
-    cg_opt_set set = { NULL, 0, 0 };
+    cg_opt_set set = { NULL, 0, 0, NULL, 0, 0 };
     for (size_t i = 0; i < prog.nitems; i += 1) {
         tk_titem it = prog.items[i];
         switch (it.tag) {
@@ -1942,13 +2057,23 @@ static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **er
     }
     for (size_t i = 0; i < set.len; i += 1) {
         cb(b, "typedef struct { bool present; ");
-        if (!emit_type(b, set.inners[i], err)) { tk_free0(set.inners); return false; }
+        if (!emit_type(b, set.inners[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
         cb(b, " value; } ");
-        if (!cg_opt_typename(b, set.inners[i], err)) { tk_free0(set.inners); return false; }
+        if (!cg_opt_typename(b, set.inners[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
         cb(b, ";\n");
     }
     if (set.len > 0) cb(b, "\n");
-    tk_free0(set.inners);
+    // SLICE TYPEDEFS — after optionals (so a `[](T?)` element's tk_opt_<i> already exists).
+    // Same {ptr,len} shape as tk_str; a non-const ptr (we build slices via copy-append).
+    for (size_t i = 0; i < set.slen; i += 1) {
+        cb(b, "typedef struct { ");
+        if (!emit_type(b, set.slices[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        cb(b, " *ptr; uint64_t len; } ");
+        if (!cg_slice_typename(b, set.slices[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        cb(b, ";\n");
+    }
+    if (set.slen > 0) cb(b, "\n");
+    tk_free0(set.inners); tk_free0(set.slices);
     return true;
 }
 
@@ -1970,6 +2095,7 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     cb(&b, "// generated by teko (F2 backend) — do not edit\n");
     cb(&b, "#include <stdint.h>\n");
     cb(&b, "#include <stdbool.h>\n");
+    cb(&b, "#include <stdlib.h>\n");   // malloc/abort — slice copy-append (fixed+copy)
     cb(&b, "#include \"teko_rt.h\"\n");
     cb(&b, "#include \"assert.h\"\n\n");   // teko::assert seed decls (driver adds its -I)
 

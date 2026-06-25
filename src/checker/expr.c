@@ -354,9 +354,12 @@ static tk_texpr_result type_index(tk_index ix, tk_env env, tk_type_table table) 
     if (rt.tag == TK_TYPE_STR)
         return xok((tk_texpr){ .tag = TK_TEXPR_INDEX, .type = (tk_type){ .tag = TK_TYPE_BYTE },
                                .as.index = { box(recv.as.value), box(idx.as.value) } });
-    if (rt.tag == TK_TYPE_SLICE)
+    if (rt.tag == TK_TYPE_SLICE) {
+        if (rt.as.slice.element == NULL)   // sentinel/untyped empty slice — element unknown (M.1 fail-loud, not a null-deref)
+            return xerr("cannot index an untyped empty slice; annotate the element type (e.g. `mut xs: []i32 = teko::list::empty()`)");
         return xok((tk_texpr){ .tag = TK_TEXPR_INDEX, .type = *rt.as.slice.element,
                                .as.index = { box(recv.as.value), box(idx.as.value) } });
+    }
     return xerr("cannot index a value of this type");
 }
 
