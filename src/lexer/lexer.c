@@ -55,7 +55,7 @@ static tk_token stamp(tk_token tok, tk_str source, size_t pos) {
 // driver/assemble — same shape as parse errors, so lexer errors carry file:line:col too — M.3).
 static tk_scan_result scan_err_at(tk_str source, size_t pos, const char *msg) {
     uint32_t line, col; compute_loc(source, pos, &line, &col);
-    char *buf = malloc(strlen(msg) + 32); if (!buf) abort();
+    char *buf = tk_alloc(strlen(msg) + 32); if (!buf) abort();
     sprintf(buf, "%u:%u: %s", line, col, msg);
     return (tk_scan_result){ .ok = false, .as.error = tk_error_make(buf) };
 }
@@ -323,7 +323,7 @@ static tk_byteval_result byte_value(tk_str source, size_t pos) {
 static tk_str str_of_bytes(const tk_byte *xs, size_t n) {
     tk_byte *buf = NULL;
     if (n > 0) {
-        buf = malloc(n);
+        buf = tk_alloc(n);
         if (buf == NULL) abort();
         for (size_t i = 0; i < n; i += 1) buf[i] = xs[i];
     }

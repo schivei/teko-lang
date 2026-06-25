@@ -54,18 +54,18 @@ tk_str_result tk_read_file(const char *path) {
     if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return io_err("cannot rewind file"); }
 
     size_t n = (size_t)sz;
-    tk_byte *buf = malloc(n == 0 ? 1 : n);   // never malloc(0)
+    tk_byte *buf = tk_alloc(n == 0 ? 1 : n);   // never tk_alloc(0)
     if (buf == NULL) { fclose(f); return io_err("out of memory reading file"); }
 
     size_t got = fread(buf, 1, n, f);
     fclose(f);
-    if (got != n) { free(buf); return io_err("short read on file"); }
+    if (got != n) { tk_free0(buf); return io_err("short read on file"); }
 
     // The validated door from bytes to a str (UTF-8 FORCED — B.36). The buffer is
     // owned by the returned str's view for the lifetime of the compile (process-
     // lifetime in the bootstrap; no free needed — M.5 arena-style).
     tk_str_result s = tk_str_from_utf8(buf, n);
-    if (!s.ok) { free(buf); }
+    if (!s.ok) { tk_free0(buf); }
     return s;
 }
 
@@ -78,7 +78,7 @@ typedef struct { tk_item *ptr; size_t len; size_t cap; } items_buf;
 static items_buf items_push(items_buf b, tk_item it) {
     if (b.len == b.cap) {
         size_t ncap = (b.cap == 0) ? 8 : (b.cap * 2);
-        tk_item *np = realloc(b.ptr, ncap * sizeof(tk_item));
+        tk_item *np = tk_realloc0(b.ptr, ncap * sizeof(tk_item));
         if (np == NULL) abort();   // allocation failure PANICS (M.5)
         b.ptr = np;
         b.cap = ncap;
@@ -146,13 +146,13 @@ static int run_cc(const char *cfile, const char *binary) {
     size_t cap = strlen(cfile) + strlen(binary) + 2 * strlen(TK_RT_DIR)
                + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
                + strlen("/assert/assert.c") + 64;
-    char *cmd = malloc(cap);
+    char *cmd = tk_alloc(cap);
     if (cmd == NULL) abort();
     snprintf(cmd, cap,
              "cc -std=c23 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -o \"%s\"",
              TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, binary);
     int rc = system(cmd);
-    free(cmd);
+    tk_free0(cmd);
     return rc;
 }
 
@@ -164,20 +164,20 @@ static int tk_backend(const char *label, const char *stem, tk_tprogram prog) {
 
     // The emitted C goes to "<stem>.c".
     size_t clen = strlen(stem) + 3;
-    char *cfile = malloc(clen);
+    char *cfile = tk_alloc(clen);
     if (cfile == NULL) abort();
     snprintf(cfile, clen, "%s.c", stem);
 
     FILE *f = fopen(cfile, "wb");
-    if (f == NULL) { free(emitted.as.value); free(cfile); return fail(label, "cannot write generated C"); }
+    if (f == NULL) { tk_free0(emitted.as.value); tk_free0(cfile); return fail(label, "cannot write generated C"); }
     size_t srclen = strlen(emitted.as.value);
     size_t wrote = fwrite(emitted.as.value, 1, srclen, f);
     fclose(f);
-    free(emitted.as.value);
-    if (wrote != srclen) { free(cfile); return fail(label, "short write on generated C"); }
+    tk_free0(emitted.as.value);
+    if (wrote != srclen) { tk_free0(cfile); return fail(label, "short write on generated C"); }
 
     int rc = run_cc(cfile, stem);
-    free(cfile);
+    tk_free0(cfile);
     if (rc != 0) return fail(label, "cc failed to build the generated C");
 
     printf("teko: %s: built %s\n", label, stem);
@@ -269,7 +269,7 @@ static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *mani
 // Heap-allocate a NUL-terminated copy of a tk_str (the manifest `name`, used as the
 // output binary stem). Allocation failure aborts (M.5).
 static char *cstr_of(tk_str s) {
-    char *out = malloc(s.len + 1);
+    char *out = tk_alloc(s.len + 1);
     if (out == NULL) abort();
     memcpy(out, s.ptr, s.len);
     out[s.len] = '\0';
@@ -292,7 +292,7 @@ int tk_compile_project(const char *dir) {
     // --- backend (F2): lower the checked merged program to C, build it natively ---
     char *stem = cstr_of(m.name);
     rc = tk_backend(dir, stem, prog);
-    free(stem);
+    tk_free0(stem);
     return rc;
 }
 

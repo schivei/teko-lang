@@ -81,7 +81,7 @@ _Noreturn static void vm_unsupported(const char *msg) {
 // =========================================================================
 typedef struct tk_value tk_value;
 
-typedef enum { TK_VAL_INT, TK_VAL_FLOAT, TK_VAL_BOOL, TK_VAL_STR, TK_VAL_LIST, TK_VAL_STRUCT } tk_value_tag;
+typedef enum { TK_VAL_INT, TK_VAL_FLOAT, TK_VAL_BOOL, TK_VAL_STR, TK_VAL_LIST, TK_VAL_STRUCT, TK_VAL_OPT } tk_value_tag;
 
 // the value list — TK_LIST over tk_value (core.h convention). Declared after tk_value.
 typedef struct { tk_value *ptr; size_t len; size_t cap; } tk_value_list;
@@ -109,6 +109,10 @@ struct tk_value {
         // declared order. A variant value is just a member-struct value (the case is the
         // value's type_name) — no separate wrapper; match-over-variant (W5) reads type_name.
         struct { tk_str type_name; tk_value_fields fields; } st;
+        // OPT (REBOOT_PLAN §202) — an optional `T?` value: NONE (present=false) or PRESENT
+        // (present=true, `inner` heap-boxed). NONE carries inner=NULL. Distinguishable from any
+        // payload value, so `null`/`?.`/`??`/match-over-`T?` all read it unambiguously.
+        struct { bool present; tk_value *inner; } opt;
     } as;
 };
 
@@ -132,6 +136,38 @@ static tk_value v_float(double f, int width) {
 // v_struct (W4b) — a struct value: nominal type name + fields (declared order).
 static tk_value v_struct(tk_str type_name, tk_value_fields fields) {
     return (tk_value){ .tag = TK_VAL_STRUCT, .as.st = { .type_name = type_name, .fields = fields } };
+}
+// v_list_empty / v_list_push — the SLICE value model (teko::list::empty / push). The list is a
+// {ptr,len,cap} of tk_value (TK_VAL_LIST). push is FUNCTIONAL / persistent (copy-on-push,
+// mirroring tk_env_define's copy-on-extend): it returns a FRESH list holding the old elements
+// then `item`, so a list pushed-from is never mutated — `xs = push(xs, …)` and a captured `xs`
+// stay independent (the corpus reassigns through `mut`, but aliasing must not corrupt). Leak-
+// tolerant (M.5 — process-lifetime buffers).
+static tk_value v_list_empty(void) {
+    return (tk_value){ .tag = TK_VAL_LIST, .as.list = { .ptr = NULL, .len = 0, .cap = 0 } };
+}
+static tk_value v_list_push(tk_value_list base, tk_value item) {
+    size_t n = base.len;
+    tk_value *ptr = tk_alloc((n + 1) * sizeof *ptr); if (!ptr) abort();
+    for (size_t i = 0; i < n; i += 1) ptr[i] = base.ptr[i];   // copy-on-push (persistent)
+    ptr[n] = item;
+    return (tk_value){ .tag = TK_VAL_LIST, .as.list = { .ptr = ptr, .len = n + 1, .cap = n + 1 } };
+}
+// v_none / v_some (REBOOT_PLAN §202) — the optional `T?` value model. NONE is the `null`
+// literal; PRESENT(inner) heap-boxes the wrapped value. coerce_opt wraps a bare value into
+// PRESENT when a `T?` slot expects it (the binding/return/struct-field present-wrap).
+static tk_value v_none(void) { return (tk_value){ .tag = TK_VAL_OPT, .as.opt = { .present = false, .inner = NULL } }; }
+static tk_value v_some(tk_value inner) {
+    tk_value *p = tk_alloc(sizeof *p); if (!p) abort(); *p = inner;
+    return (tk_value){ .tag = TK_VAL_OPT, .as.opt = { .present = true, .inner = p } };
+}
+// coerce a value into the declared slot type `t`: if `t` is `T?` and the value is NOT already
+// an optional, wrap it PRESENT (the present-wrap — mirrors codegen's emit_as). A value that is
+// already optional (NONE from `null`, or a PRESENT) passes through. Non-optional slots are a
+// no-op. This is the VM twin of codegen's emit_as optional wrapping.
+static tk_value coerce_to(tk_value v, tk_type t) {
+    if (t.tag == TK_TYPE_OPTIONAL && v.tag != TK_VAL_OPT) return v_some(v);
+    return v;
 }
 
 // Read an INT value's signed view (sign-extended from its width, held in the 128-bit
@@ -257,14 +293,14 @@ static tk_slot *env_find(tk_venv *env, tk_str name) {
     return NULL;
 }
 static void env_define(tk_venv *env, tk_str name, tk_value val) {
-    tk_slot *s = malloc(sizeof *s);
+    tk_slot *s = tk_alloc(sizeof *s);
     if (s == NULL) abort();
     s->name = name; s->val = val; s->next = env->head;
     env->head = s;
 }
 static void env_free(tk_venv *env) {
     tk_slot *s = env->head;
-    while (s != NULL) { tk_slot *n = s->next; free(s); s = n; }
+    while (s != NULL) { tk_slot *n = s->next; tk_free0(s); s = n; }
     env->head = NULL;
 }
 
@@ -684,8 +720,11 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
     tk_venv fenv = { .head = NULL };
     tk_flow fl = tk_vm_exec_block(fn->body, fn->nbody, &fenv);
     env_free(&fenv);
-    if (fl.kind == TK_FLOW_RETURN && fl.has_value) return fl.value;   // explicit `return e`
-    if (fl.kind == TK_FLOW_NORMAL && fl.has_value) return fl.value;   // W5 — implicit trailing value (B.20)
+    // Coerce the returned value into the declared return type: a `T` returned from a `-> T?`
+    // fn present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot. A NONE
+    // (`null`) / already-optional value passes through.
+    if (fl.kind == TK_FLOW_RETURN && fl.has_value) return coerce_to(fl.value, fn->return_type);   // explicit `return e`
+    if (fl.kind == TK_FLOW_NORMAL && fl.has_value) return coerce_to(fl.value, fn->return_type);   // W5 — implicit trailing value (B.20)
     // A `-> void` fn (or one that falls off the end without a value) PRODUCES NO VALUE:
     // the call is a statement, its result discarded. Not a Unit value (TEKO_CORRECTION
     // §4 [Z-design]) — a never-consumed placeholder.
@@ -734,13 +773,32 @@ static tk_value lit_as(const tk_expr *lit, tk_value subj) {
 // pop env slots added since `stop` (discard a pattern's bindings between arms).
 static void env_pop_to(tk_venv *env, tk_slot *stop) {
     tk_slot *s = env->head;
-    while (s != stop) { tk_slot *n = s->next; free(s); s = n; }
+    while (s != stop) { tk_slot *n = s->next; tk_free0(s); s = n; }
     env->head = stop;
 }
 
 // Does `subj` match `pat`? On match, defines the pattern's bindings into `env`.
 static bool pat_match(const tk_pattern *pat, tk_value subj, tk_venv *env) {
+    // OPTIONAL subject (REBOOT_PLAN §202): `null` matches NONE; any other pattern matches the
+    // PRESENT case and is re-tested against the inner value. Mirrors the checker's tk_check_pattern.
+    if (subj.tag == TK_VAL_OPT) {
+        if (pat->tag == TK_PAT_NULL) return !subj.as.opt.present;          // `null` ⇔ NONE
+        if (!subj.as.opt.present) return false;                            // non-null pattern over NONE: no match
+        tk_value inner = *subj.as.opt.inner;
+        // A bare bind/wildcard over a present NON-struct inner (i64/str/error/…) matches and
+        // binds the inner directly — `i64 as v` / `error as e` / `_`. (A struct/variant inner
+        // recurses so the variant tag check / field destructure still applies.)
+        if (inner.tag != TK_VAL_STRUCT) {
+            if (pat->tag == TK_PAT_WILDCARD) return true;
+            if (pat->tag == TK_PAT_BIND) {
+                if (pat->as.bind.has_binding) env_define(env, pat->as.bind.binding, inner);
+                return true;
+            }
+        }
+        return pat_match(pat, inner, env);                                 // PRESENT → match the inner
+    }
     switch (pat->tag) {
+        case TK_PAT_NULL: return false;   // a `null` pattern over a non-optional value never matches
         case TK_PAT_WILDCARD: return true;
         case TK_PAT_LITERAL:  return value_eq(subj, lit_as(&pat->as.literal.value, subj));
         case TK_PAT_RANGE: {
@@ -847,11 +905,10 @@ static tk_value eval_interp(const tk_texpr *e, tk_venv *env) {
 
 static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
     // New type tags (TEKO_CORRECTION_PLAN [Z1]). A value-position expression can never be
-    // typed `void` (void is return-only, never a value — the checker rejects it elsewhere),
-    // and `T?` optionals are a later wave (the parser does not emit TK_TYPE_OPTIONAL yet).
-    // If either is ever reached here it is an honest stop (M.3), never a wrong-silent value.
-    if (e->type.tag == TK_TYPE_OPTIONAL)
-        vm_unsupported("optional value (T?) not yet supported");
+    // typed `void` (void is return-only, never a value — the checker rejects it elsewhere).
+    // Optional `T?` values ARE supported now (TK_VAL_OPT — REBOOT_PLAN §202): null / ?. / ??
+    // produce them, the present-wrap (coerce_to) constructs them, and pattern matching reads
+    // them; they flow through the value model like any other tag.
     // A void CALL is the one void expression that legitimately RUNS (print/println/assert
     // or a `-> void` fn), executed for effect in statement position; eval_call returns the
     // never-consumed v_void() placeholder. Any OTHER void expr in a value position is a
@@ -916,19 +973,42 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
         case TK_TEXPR_MATCH: return eval_match(e, env);   // W5b — pattern matching (literal/range/Alt/variant-case/destructure + `when`)
         case TK_TEXPR_INDEX: return eval_index(e, env);   // W5-idx — subscript recv[index] (str→byte; slice = honest stop)
         case TK_TEXPR_INTERP: return eval_interp(e, env); // $"…{expr}…" — string interpolation (pieces ++ str(holes))
-        // null literal + safe-field-access (x?.field) + coalesce (x ?? y) (W2 surface) all
-        // need the OPTIONAL value representation (presence+value) — a later wave (W6). Honest
-        // stop now (M.3), the SAME frontier as codegen's fail_node for these nodes.
+        // null / ?. / ?? (REBOOT_PLAN §202/§203) — the OPTIONAL value model (TK_VAL_OPT).
         case TK_TEXPR_NULL:
-            vm_unsupported("null literal not yet supported (optional value repr is a later wave)");
-        case TK_TEXPR_SAFE_FIELD_ACCESS:
-            vm_unsupported("safe field access (x?.field) not yet supported (optional value repr is a later wave)");
-        case TK_TEXPR_COALESCE:
-            vm_unsupported("coalesce (x ?? y) not yet supported (optional value repr is a later wave)");
+            return v_none();   // the `null` literal is NONE; the destination's wrap (coerce_to) makes it a concrete `T?`
+        case TK_TEXPR_SAFE_FIELD_ACCESS: {
+            // `recv?.field`: NONE → NONE; PRESENT → the inner's field, re-wrapped PRESENT
+            // (an already-optional field stays as-is). Result is always an optional value.
+            tk_value recv = tk_vm_eval_expr(e->as.safe_field_access.receiver, env);
+            if (recv.tag != TK_VAL_OPT)
+                vm_unsupported("safe field access on a non-optional value (internal: checker should reject)");
+            if (!recv.as.opt.present) return v_none();              // NONE propagates
+            tk_value inner = *recv.as.opt.inner;
+            if (inner.tag != TK_VAL_STRUCT)
+                vm_unsupported("safe field access on a non-struct optional (internal: checker should reject)");
+            for (size_t i = 0; i < inner.as.st.fields.len; i += 1)
+                if (name_eq(inner.as.st.fields.names[i], e->as.safe_field_access.field)) {
+                    tk_value f = inner.as.st.fields.vals[i];
+                    return f.tag == TK_VAL_OPT ? f : v_some(f);     // result is `(field)?`
+                }
+            vm_unsupported("field not found in safe field access (internal: the checker guarantees the field)");
+        }
+        case TK_TEXPR_COALESCE: {
+            // `a ?? b`: a's inner if PRESENT, else b (short-circuit — b only evaluated on NONE).
+            // The result type (the node's `.type`) is `T` (unwrap) or `T?` (b itself optional);
+            // coerce both arms to that type so a `T? ?? T?` stays optional and a `T? ?? T`
+            // unwraps. Mirrors the checker's type_coalesce + codegen's emit lowering.
+            tk_value a = tk_vm_eval_expr(e->as.coalesce.left, env);
+            if (a.tag != TK_VAL_OPT)
+                vm_unsupported("coalesce left operand is not optional (internal: checker should reject)");
+            if (a.as.opt.present) return coerce_to(*a.as.opt.inner, e->type);
+            tk_value b = tk_vm_eval_expr(e->as.coalesce.right, env);
+            return coerce_to(b, e->type);
+        }
         case TK_TEXPR_STRUCT_INIT: {   // W4b — `Name { f = v, … }`: build a struct value (declared field order).
             size_t nf = e->as.struct_init.nfields;
-            tk_str   *names = malloc((nf ? nf : 1) * sizeof *names); if (!names) abort();
-            tk_value *vals  = malloc((nf ? nf : 1) * sizeof *vals);  if (!vals)  abort();
+            tk_str   *names = tk_alloc((nf ? nf : 1) * sizeof *names); if (!names) abort();
+            tk_value *vals  = tk_alloc((nf ? nf : 1) * sizeof *vals);  if (!vals)  abort();
             for (size_t i = 0; i < nf; i += 1) {
                 names[i] = e->as.struct_init.field_names[i];
                 vals[i]  = tk_vm_eval_expr(&e->as.struct_init.field_vals[i], env);
@@ -972,6 +1052,7 @@ static tk_flow exec_stmt(const tk_tstatement *s, tk_venv *env) {
             tk_flow fl = eval_rhs_flow(&s->as.binding.value, env, &v);
             if (fl.kind != TK_FLOW_NORMAL) return fl;            // diverged → propagate, no bind
             v = fl.has_value ? fl.value : v;                     // the NORMAL trailing value
+            v = coerce_to(v, s->as.binding.bound);               // present-wrap into a `T?` slot (REBOOT §202)
             env_define(env, tgt.as.simple.name, v);
             return flow_normal();
         }

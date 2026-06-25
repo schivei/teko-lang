@@ -13,14 +13,14 @@
 // "file:line:col: msg" with absent parts omitted (M.3 — show what we know). Fresh string.
 const char *tk_diag_at(tk_str file, uint32_t line, uint32_t col, const char *msg) {
     size_t cap = file.len + strlen(msg) + 48;
-    char *buf = malloc(cap); if (!buf) abort();
+    char *buf = tk_alloc(cap); if (!buf) abort();
     if (file.len > 0 && line > 0)
         snprintf(buf, cap, "%.*s:%u:%u: %s", (int)file.len, (const char *)file.ptr, line, col, msg);
     else if (file.len > 0)
         snprintf(buf, cap, "%.*s: %s", (int)file.len, (const char *)file.ptr, msg);
     else if (line > 0)
         snprintf(buf, cap, "%u:%u: %s", line, col, msg);
-    else { free(buf); return msg; }
+    else { tk_free0(buf); return msg; }
     return buf;
 }
 
@@ -36,7 +36,7 @@ typedef struct { alias_bind *ptr; size_t len; size_t cap; } aliases;
 static aliases aliases_push(aliases a, alias_bind b) {
     if (a.len == a.cap) {
         size_t nc = a.cap ? a.cap * 2 : 8;
-        alias_bind *np = realloc(a.ptr, nc * sizeof *np); if (!np) abort();
+        alias_bind *np = tk_realloc0(a.ptr, nc * sizeof *np); if (!np) abort();
         a.ptr = np; a.cap = nc;
     }
     a.ptr[a.len++] = b; return a;
@@ -48,7 +48,7 @@ static tk_str join_n(tk_path p, size_t n) {
     if (n == 0) return (tk_str){ NULL, 0 };
     size_t total = 0;
     for (size_t i = 0; i < n; i += 1) { total += p.segments[i].name.len; if (i + 1 < n) total += 2; }
-    tk_byte *buf = malloc(total ? total : 1); if (!buf) abort();
+    tk_byte *buf = tk_alloc(total ? total : 1); if (!buf) abort();
     size_t o = 0;
     for (size_t i = 0; i < n; i += 1) {
         memcpy(buf + o, p.segments[i].name.ptr, p.segments[i].name.len); o += p.segments[i].name.len;
@@ -161,8 +161,8 @@ const char *tk_check_modules(tk_program prog, tk_type_table table) {
             }
             // enum body: member names only — no type references to check
         }
-        if (e) { free(al.ptr); return tk_diag_at(it.file, line, col, e); }   // W-loc-2: file:line:col
+        if (e) { tk_free0(al.ptr); return tk_diag_at(it.file, line, col, e); }   // W-loc-2: file:line:col
     }
-    free(al.ptr);
+    tk_free0(al.ptr);
     return NULL;
 }

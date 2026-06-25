@@ -65,10 +65,15 @@ use teko::parser
 // A variant value is just a member-struct value (the case = its type_name); match (W5) reads it.
 type StructVal = struct { type_name: str; field_names: []str; field_vals: []Value }
 
+// OptVal (REBOOT_PLAN §202) — an optional `T?` value: NONE (present=false) or PRESENT
+// (present=true, `inner` set). Distinguishable from any payload value, so null/?./??/match-
+// over-`T?` read it unambiguously (the C twin is the TK_VAL_OPT tag).
+type OptVal = struct { present: bool; inner: Value? }
+
 type Value = variant u8 | u16 | u32 | u64 | u128
            | i8 | i16 | i32 | i64 | i128
            | f16 | f32 | f64
-           | bool | byte | str | []Value | StructVal
+           | bool | byte | str | []Value | StructVal | OptVal
 
 // ---------------------------------------------------------------------------
 // CONTROL FLOW. The exits a block can produce — mirrors the C `tk_flow`
@@ -369,7 +374,36 @@ fn lit_as(lit: parser::Expr, subj: Value) -> Value {
 type PatMatch = struct { matched: bool; env: Env }
 
 fn pat_match(pat: parser::Pattern, subj: Value, env: Env) -> PatMatch {
+    // OPTIONAL subject (REBOOT_PLAN §202): `null` matches NONE; any other pattern matches the
+    // PRESENT case. A bare bind/wildcard over a present NON-struct inner binds the inner directly;
+    // a struct/variant inner recurses (the variant tag check / field destructure still applies).
+    match subj {
+        OptVal as o => {
+            match pat {
+                parser::NullPattern => return PatMatch { matched = !o.present; env = env }
+                _ => {
+                    if !o.present { return PatMatch { matched = false; env = env } }
+                    let inner = match o.inner { Value as iv => iv; null => return PatMatch { matched = false; env = env } }
+                    match inner {
+                        StructVal => return pat_match(pat, inner, env)   // variant/struct inner — recurse
+                        _ => {
+                            match pat {
+                                parser::WildcardPattern   => return PatMatch { matched = true; env = env }
+                                parser::BindPattern as bp => {
+                                    if bp.has_binding { return PatMatch { matched = true; env = define(env, bp.binding, inner) } }
+                                    return PatMatch { matched = true; env = env }
+                                }
+                                _ => return pat_match(pat, inner, env)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
     match pat {
+        parser::NullPattern      => PatMatch { matched = false; env = env }   // `null` over a non-optional never matches
         parser::WildcardPattern  => PatMatch { matched = true; env = env }
         parser::LiteralPattern as lp => PatMatch { matched = value_eq(subj, lit_as(lp.value, subj)); env = env }
         parser::RangePattern as rp => {
@@ -490,7 +524,8 @@ fn exec_match(e: checker::TExpr, env: Env) -> Flow {
 
 fn eval_expr(e: checker::TExpr, env: Env) -> Value {
     match e.type {
-        checker::Optional as _ => teko::panic("vm: optional value (T?) not yet supported")
+        // Optional `T?` values ARE supported now (OptVal — REBOOT_PLAN §202): null / ?. / ?? and
+        // the present-wrap (coerce_to) produce them; they flow through the value model like any tag.
         checker::Void          => teko::panic("vm: void expression has no value (internal: checker should reject in value position)")
         _             => {}   // a real value type — evaluate below
     }
@@ -524,12 +559,62 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         checker::TIndex as ix => eval_index(ix, env)
         // $"…{expr}…" — string interpolation: pieces ++ str(holes) (self-host parity).
         checker::TInterp as in => eval_interp(in, env)
-        // null literal + safe-field-access (x?.field) + coalesce (x ?? y) (W2 surface) all
-        // need the OPTIONAL value representation (presence+value) — a later wave (W6). Honest
-        // stop now (M.3), the SAME frontier as codegen's error for these nodes.
-        checker::TNullLit         => teko::panic("vm: null literal not yet supported (optional value repr is a later wave)")
-        checker::TSafeFieldAccess => teko::panic("vm: safe field access (x?.field) not yet supported (optional value repr is a later wave)")
-        checker::TCoalesce        => teko::panic("vm: coalesce (x ?? y) not yet supported (optional value repr is a later wave)")
+        // null / ?. / ?? — the OPTIONAL value model (OptVal — REBOOT_PLAN §202/§203).
+        // null is NONE; the destination's wrap (coerce_to) makes it a concrete `T?`.
+        checker::TNullLit            => OptVal { present = false; inner = null }
+        checker::TSafeFieldAccess as sfa => {
+            // `recv?.field`: NONE → NONE; PRESENT → the inner's field, re-wrapped PRESENT.
+            match eval_expr(sfa.receiver, env) {
+                OptVal as o => {
+                    if !o.present { return OptVal { present = false; inner = null } }
+                    let inner = match o.inner { Value as iv => iv; null => return OptVal { present = false; inner = null } }
+                    match inner {
+                        StructVal as sv => {
+                            mut i = 0
+                            loop {
+                                if i >= sv.field_names.len { break }
+                                if sv.field_names[i] == sfa.field {
+                                    // result is `(field)?` — an already-optional field stays as-is.
+                                    match sv.field_vals[i] { OptVal as fo => return fo; _ => return OptVal { present = true; inner = sv.field_vals[i] } }
+                                }
+                                i++
+                            }
+                            teko::panic("vm: field not found in safe field access (internal: the checker guarantees the field)")
+                        }
+                        _ => teko::panic("vm: safe field access on a non-struct optional (internal: checker should reject)")
+                    }
+                }
+                _ => teko::panic("vm: safe field access on a non-optional value (internal: checker should reject)")
+            }
+        }
+        checker::TCoalesce as co  => {
+            // `a ?? b`: a's inner if PRESENT, else b (short-circuit b). Both arms coerced to the
+            // result type (the node's `.type`): `T? ?? T` unwraps, `T? ?? T?` stays optional.
+            match eval_expr(co.left, env) {
+                OptVal as o => {
+                    if o.present {
+                        let inner = match o.inner { Value as iv => iv; null => teko::panic("vm: present optional with no inner (internal)") }
+                        coerce_to(inner, e.type)
+                    } else {
+                        coerce_to(eval_expr(co.right, env), e.type)
+                    }
+                }
+                _ => teko::panic("vm: coalesce left operand is not optional (internal: checker should reject)")
+            }
+        }
+    }
+}
+
+// coerce a Value into the declared slot type `t`: if `t` is `T?` and the value is NOT already an
+// optional, wrap it PRESENT (the present-wrap — mirrors codegen's emit_as). A value that is
+// already optional (NONE / PRESENT) passes through; a non-optional slot is a no-op. The VM twin
+// of codegen's emit_as optional wrapping (REBOOT_PLAN §202).
+fn coerce_to(v: Value, t: checker::Type) -> Value {
+    match t {
+        checker::Optional => {
+            match v { OptVal => v; _ => OptVal { present = true; inner = v } }
+        }
+        _ => v
     }
 }
 
@@ -618,9 +703,11 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     }
     let f = find_function(c.callee)        // resolved by LAST segment (cross-ns ok); honest stop if unknown / params
     let fenv = Env { slots: [] }
+    // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn
+    // present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot.
     match exec_block(f.body, fenv) {
-        Return as ret => ret.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)")
-        Normal as nm  => nm.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)")  // W5a — implicit trailing value (B.20)
+        Return as ret => coerce_to(ret.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
+        Normal as nm  => coerce_to(nm.value ?? teko::panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)  // W5a — implicit trailing value (B.20)
         _             => teko::panic("vm: void fn call used as a value (internal: checker should reject)")
     }
 }
@@ -667,7 +754,8 @@ fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
             match b.target {
                 parser::SimpleName as sn => {
                     match eval_rhs_flow(b.value, env) {
-                        Normal as nm => Stepped { env: define(env, sn.name, nm.value ?? teko::panic("vm: binding RHS produced no value (internal: checker should reject)")); value: null }
+                        // present-wrap into a `T?` slot (REBOOT §202) via coerce_to(b.bound).
+                        Normal as nm => Stepped { env: define(env, sn.name, coerce_to(nm.value ?? teko::panic("vm: binding RHS produced no value (internal: checker should reject)"), b.bound)); value: null }
                         other        => Exit { flow: other }   // diverged → propagate, no bind
                     }
                 }

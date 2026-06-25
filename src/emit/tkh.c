@@ -114,7 +114,7 @@ static tk_fnsig read_fnsig(tk_reader *r, tk_strs t) {
     tk_fnsig f = {0};
     f.name = tk_read_str(r, t);
     f.nparams = tk_read_u32(r);
-    f.params = malloc(f.nparams ? f.nparams * sizeof *f.params : 1); if (!f.params) abort();
+    f.params = tk_alloc(f.nparams ? f.nparams * sizeof *f.params : 1); if (!f.params) abort();
     for (size_t i = 0; i < f.nparams; i += 1) { f.params[i].name = tk_read_str(r, t); f.params[i].type = tk_read_type(r, t); }
     f.ret = tk_read_type(r, t);
     read_doc(r, t, &f.has_doc, &f.doc);
@@ -125,13 +125,13 @@ static tk_tyexport read_tyexport(tk_reader *r, tk_strs t) {
     e.name  = tk_read_str(r, t);
     e.shape = shape_of(tk_read_u8(r));
     e.nfields = tk_read_u32(r);
-    e.fields = malloc(e.nfields ? e.nfields * sizeof *e.fields : 1); if (!e.fields) abort();
+    e.fields = tk_alloc(e.nfields ? e.nfields * sizeof *e.fields : 1); if (!e.fields) abort();
     for (size_t i = 0; i < e.nfields; i += 1) { e.fields[i].name = tk_read_str(r, t); e.fields[i].type = tk_read_type(r, t); }
     e.nmembers = tk_read_u32(r);
-    e.members = malloc(e.nmembers ? e.nmembers * sizeof *e.members : 1); if (!e.members) abort();
+    e.members = tk_alloc(e.nmembers ? e.nmembers * sizeof *e.members : 1); if (!e.members) abort();
     for (size_t i = 0; i < e.nmembers; i += 1) e.members[i] = tk_read_str(r, t);
     e.ncases = tk_read_u32(r);
-    e.cases = malloc(e.ncases ? e.ncases * sizeof *e.cases : 1); if (!e.cases) abort();
+    e.cases = tk_alloc(e.ncases ? e.ncases * sizeof *e.cases : 1); if (!e.cases) abort();
     for (size_t i = 0; i < e.ncases; i += 1) e.cases[i] = tk_read_type(r, t);
     read_doc(r, t, &e.has_doc, &e.doc);
     return e;
@@ -139,10 +139,10 @@ static tk_tyexport read_tyexport(tk_reader *r, tk_strs t) {
 static tk_header read_header(tk_reader *r, tk_strs t) {
     tk_header h = {0};
     h.ntypes = tk_read_u32(r);
-    h.types = malloc(h.ntypes ? h.ntypes * sizeof *h.types : 1); if (!h.types) abort();
+    h.types = tk_alloc(h.ntypes ? h.ntypes * sizeof *h.types : 1); if (!h.types) abort();
     for (size_t i = 0; i < h.ntypes; i += 1) h.types[i] = read_tyexport(r, t);
     h.nfns = tk_read_u32(r);
-    h.fns = malloc(h.nfns ? h.nfns * sizeof *h.fns : 1); if (!h.fns) abort();
+    h.fns = tk_alloc(h.nfns ? h.nfns * sizeof *h.fns : 1); if (!h.fns) abort();
     for (size_t i = 0; i < h.nfns; i += 1) h.fns[i] = read_fnsig(r, t);
     return h;
 }

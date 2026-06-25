@@ -161,6 +161,15 @@ static tk_type function_return(tk_function f, tk_type_table table) {
 // ---- C5: return / final-expr vs the declared return type (see the Teko twin; NULL = ok) ----
 static bool assignable_to(tk_type from, tk_type to, tk_type_table table) {   // B.14 — variant member inclusion
     if (tk_type_eq(&from, &to)) return true;
+    // PRESENT-WRAP (REBOOT_PLAN §202): a `T` widens to `T?` (and to `T??`-collapsed `T?`).
+    // The destination is `T?`; the source is a plain `T` (or itself a `T?` whose inner is T,
+    // already covered by tk_type_eq). Mirrors the variant case→variant widening below; codegen
+    // performs the PRESENT wrap via emit_as. A bare null (sentinel optional) is handled by
+    // tk_type_eq (it unifies with any optional).
+    if (to.tag == TK_TYPE_OPTIONAL && to.as.optional.inner != NULL) {
+        if (tk_type_eq(&from, to.as.optional.inner)) return true;        // T → T?
+        if (from.tag == TK_TYPE_OPTIONAL) return true;                   // U? / sentinel → T? (eq/sentinel)
+    }
     tk_type tv = tk_expand_variant(to, table);   // a NAMED variant → its TK_TYPE_VARIANT (so cases widen in)
     if (tv.tag == TK_TYPE_VARIANT)
         for (size_t i = 0; i < tv.as.variant.len; i += 1)

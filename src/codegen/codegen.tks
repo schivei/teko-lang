@@ -290,16 +290,52 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         // here is always a Func.ret position.
         checker::Void      => cb(buf, "void")
         checker::Str       => cb(buf, "tk_str")
-        // OPTIONAL (T?) — the parser doesn't emit it yet; full lowering is Z3-codegen.
-        // Be honest now rather than mis-emit (M.3).
-        checker::Optional  => error { message = "codegen: optional type not yet supported" }
+        // OPTIONAL (T?) — the generated `tk_opt_<innerMangle>` struct (REBOOT_PLAN §202). The
+        // sentinel optional (a bare `null`, inner = the Void marker) never reaches here on its
+        // own — it is always wrapped to a concrete slot type via emit_as.
+        checker::Optional as opt => match opt.inner {
+            checker::Void => error { message = "codegen: a bare `null` needs a known optional type from context (internal)" }
+            _ => cg_opt_typename(buf, opt.inner)
+        }
         checker::Slice     => error { message = "codegen: slice type not yet supported" }
         // W4c — a Named aggregate -> its mangled typedef name (the bare name; resolve
         // drops the namespace). decl + ref agree via mangle_type_name.
         checker::Named as nm => mangle_type_name(buf, "", nm.name)
         checker::Variant   => error { message = "codegen: variant type not yet supported" }
         checker::Func      => error { message = "codegen: function type not yet supported" }
-        checker::Error     => error { message = "codegen: error type not yet supported" }
+        // `error` lowers to its message str (no separate error C value type — REBOOT §202).
+        checker::Error     => cb(buf, "tk_str")
+    }
+}
+
+// OPTIONAL `T?` C REPRESENTATION (REBOOT_PLAN §202). Each distinct optional inner type maps to a
+// generated struct `tk_opt_<innerMangle>` = `{ bool present; <innerCtype> value; }`. The mangle
+// suffix is a deterministic function of the inner type so the typedef + every use agree. `error`
+// lowers to its message tk_str, so `error?` is `tk_opt_error`. (C: `cg_opt_typename`/`cg_opt_mangle`.)
+fn cg_opt_typename(buf: []byte, inner: checker::Type) -> []byte | error {
+    cg_opt_mangle(cb(buf, "tk_opt_"), inner)
+}
+// The deterministic mangle SUFFIX for an optional inner type (used in tk_opt_<suffix>).
+fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
+    match inner {
+        checker::Prim as p => match p.kind {
+            checker::PrimKind::U8 => cb(buf, "u8");   checker::PrimKind::U16 => cb(buf, "u16")
+            checker::PrimKind::U32 => cb(buf, "u32"); checker::PrimKind::U64 => cb(buf, "u64")
+            checker::PrimKind::U128 => cb(buf, "u128"); checker::PrimKind::I8 => cb(buf, "i8")
+            checker::PrimKind::I16 => cb(buf, "i16"); checker::PrimKind::I32 => cb(buf, "i32")
+            checker::PrimKind::I64 => cb(buf, "i64"); checker::PrimKind::I128 => cb(buf, "i128")
+            checker::PrimKind::F16 => cb(buf, "f16"); checker::PrimKind::F32 => cb(buf, "f32")
+            checker::PrimKind::F64 => cb(buf, "f64"); checker::PrimKind::Bool => cb(buf, "bool")
+        }
+        checker::Byte  => cb(buf, "byte")
+        checker::Str   => cb(buf, "str")
+        checker::Error => cb(buf, "error")
+        checker::Named as nm => cb_str(buf, nm.name)
+        checker::Optional as o => match o.inner {
+            checker::Void => error { message = "codegen: nested bare-null optional (internal)" }
+            _ => cg_opt_mangle(cb(buf, "opt_"), o.inner)
+        }
+        _ => error { message = "codegen: optional inner type not yet supported" }
     }
 }
 
@@ -329,13 +365,25 @@ fn emit_type_expr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
             else if last == "bool"  { return cb(buf, "bool") }
             else if last == "byte"  { return cb(buf, "uint8_t") }
             else if last == "str"   { return cb(buf, "tk_str") }
-            else if last == "error" { return error { message = "codegen: error type not yet supported" } }
+            else if last == "error" { return cb(buf, "tk_str") }   // error → its message str (REBOOT §202)
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(buf, "", last)
         }
         parser::SliceType    => error { message = "codegen: slice type not yet supported" }
         parser::UnionType    => error { message = "codegen: inline union type not yet supported" }
-        parser::OptionalType => error { message = "codegen: optional type not yet supported" }
+        // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
+        parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "tk_opt_"), ot.inner)
+    }
+}
+
+// The deterministic optional-mangle SUFFIX for a SYNTACTIC inner type-expr (the struct-field /
+// member position twin of cg_opt_mangle). Must agree byte-for-byte with cg_opt_mangle.
+// (C: `cg_opt_mangle_texpr`.)
+fn cg_opt_mangle_texpr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
+    match te {
+        parser::NamedType as nt => cb_str(buf, nt.path.segments[nt.path.segments.len - 1].name)
+        parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "opt_"), ot.inner)
+        _ => error { message = "codegen: optional inner type-expr not yet supported" }
     }
 }
 
@@ -688,6 +736,55 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
     cb(out, ")")
 }
 
+// emit_safe_field_access — `recv?.field` (REBOOT §203). ({ <optTy> _oN = (recv); _oN.present
+//   ? (<resTy>){ .present = true, .value = _oN.value.<field> } : (<resTy>){ .present = false }; })
+// The node's `.type` is the result optional `(field)?`; the receiver type is `T?`. (C: TK_TEXPR_SAFE_FIELD_ACCESS.)
+fn emit_safe_field_access(buf: []byte, prog: checker::TProgram, e: checker::TExpr, sfa: checker::TSafeFieldAccess) -> []byte | error {
+    let tmp = fresh_named("_o", buf.len to i64)
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, sfa.receiver.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
+    out = match emit_expr(out, prog, sfa.receiver) { []byte as o => o; error as err => return err }
+    out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? (")
+    out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
+    out = cb(out, "){ .present = true, .value = "); out = cb(out, tmp); out = cb(out, ".value.")
+    out = cb_str(out, sfa.field)
+    out = cb(out, " } : (")
+    out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
+    out = cb(out, "){ .present = false }; })")
+    out
+}
+
+// emit_coalesce — `a ?? b` (REBOOT §203). ({ <optTy> _cN = (a); _cN.present ? <a.value as result>
+//   : <b as result>; }). Short-circuits b (only evaluated on NONE). The result type (node `.type`)
+// is `T` (unwrap) or `T?` (b itself optional); both arms wrapped to it. (C: TK_TEXPR_COALESCE.)
+fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: checker::TCoalesce) -> []byte | error {
+    let tmp = fresh_named("_c", buf.len to i64)
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, co.left.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
+    out = match emit_expr(out, prog, co.left) { []byte as o => o; error as err => return err }
+    out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? ")
+    // a's inner `_cN.value` into the result: plain if result is `T`, PRESENT-wrapped if `T?`.
+    match e.type {
+        checker::Optional as ropt => {
+            match ropt.inner {
+                checker::Void => { out = cb(out, tmp); out = cb(out, ".value") }
+                _ => {
+                    out = cb(out, "(")
+                    out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
+                    out = cb(out, "){ .present = true, .value = "); out = cb(out, tmp); out = cb(out, ".value }")
+                }
+            }
+        }
+        _ => { out = cb(out, tmp); out = cb(out, ".value") }
+    }
+    out = cb(out, " : ")
+    out = match emit_as(out, prog, e.type, co.right) { []byte as o => o; error as err => return err }
+    out = cb(out, "; })")
+    out
+}
+
 // emit_index — W5-idx `recv[index]`. A `str` receiver lowers to a BOUNDS-CHECKED byte access
 // as a GNU statement-expression (single-eval of recv + idx, then the guard):
 //   ({ tk_str _sN = <recv>; uint64_t _iN = <idx>; _iN < _sN.len ? _sN.ptr[_iN]
@@ -779,7 +876,12 @@ fn emit_interp(buf: []byte, prog: checker::TProgram, in: checker::TInterp) -> []
 fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit) -> []byte | error {
     let name = match e.type {
         checker::Named as nm => nm.name
-        checker::Error       => return error { message = "codegen: error value construction not yet supported (error has no C value repr yet)" }
+        // `error` lowers to its message str (REBOOT §202): `error { message = s }` IS the str `s`
+        // (the checker fixed the single `message` field), matching the VM's observable behavior.
+        checker::Error       => {
+            if si.field_vals.len != 1 { return error { message = "codegen: error value must have exactly the `message` field (internal)" } }
+            return emit_expr(buf, prog, si.field_vals[0])
+        }
         _           => return error { message = "codegen: struct literal with a non-named type not yet supported" }
     }
     mut out = cb(buf, "(")
@@ -922,6 +1024,38 @@ fn fresh_named(prefix: str, n: i64) -> str {
 // agree. The VM needs no wrap (its struct value already carries the case name); this
 // synthesizes the C equivalent — the W4c-deferred variant-value layer. (C: `emit_as`.)
 fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value: checker::TExpr) -> []byte | error {
+    // OPTIONAL slot (REBOOT_PLAN §202): wrap the value into the slot's tk_opt_<inner> struct.
+    //   * a bare `null`           → (tk_opt_<inner>){ .present = false }
+    //   * an already-optional val → emitted plainly (it IS a tk_opt_<inner>)
+    //   * a plain `T`             → (tk_opt_<inner>){ .present = true, .value = <v> }  (present-wrap)
+    match expected {
+        checker::Optional as opt => {
+            match opt.inner {
+                checker::Void => { }   // sentinel — fall through (should not occur at a real slot)
+                _ => {
+                    match value.kind {
+                        checker::TNullLit => {
+                            mut o0 = cb(buf, "(")
+                            o0 = match cg_opt_typename(o0, opt.inner) { []byte as o => o; error as err => return err }
+                            return cb(o0, "){ .present = false }")
+                        }
+                        _ => { }
+                    }
+                    match value.type {
+                        checker::Optional => return emit_expr(buf, value)   // already optional → pass through
+                        _ => {
+                            mut o1 = cb(buf, "(")
+                            o1 = match cg_opt_typename(o1, opt.inner) { []byte as o => o; error as err => return err }
+                            o1 = cb(o1, "){ .present = true, .value = ")
+                            o1 = match emit_as(o1, prog, opt.inner, value) { []byte as o => o; error as err => return err }
+                            return cb(o1, " }")
+                        }
+                    }
+                }
+            }
+        }
+        _ => { }
+    }
     // Wrap only when expected is a NAMED variant, value's type is a NAMED case, and that
     // case is one of the variant's members. (If value's type IS the variant already — a var
     // of the variant type — it is not a bare member, so no wrap.)
@@ -1013,8 +1147,52 @@ fn emit_pat_test(buf: []byte, pat: parser::Pattern, subj: str, variant_name: str
             out = cb_upper(out, cg_path_last(fp.type_name))
             cb(out, ")")
         }
+        // A `null` pattern reaches here only over a NON-optional subject (the optional case is
+        // handled by cg_emit_pat_test's `.present` test) — the checker rejects that.
+        parser::NullPattern => error { message = "codegen: `null` pattern over a non-optional subject (internal)" }
     }
 }
+
+// cg_emit_pat_test — TOP-LEVEL pattern test (handles an OPTIONAL subject — REBOOT_PLAN §202).
+// `subjT` is the subject's resolved type; `subj` is the subject temp name (a tk_opt_<inner>
+// struct when optional). For an optional subject: `null` ⇒ `(!_s.present)`; a bare bind/wildcard
+// over a NON-variant present value ⇒ `(_s.present)`; otherwise ⇒ `(_s.present && <inner test>)`.
+// For a non-optional subject it delegates to emit_pat_test. (C: `cg_emit_pat_test`.)
+fn cg_emit_pat_test(buf: []byte, prog: checker::TProgram, pat: parser::Pattern, subj: str, subjT: checker::Type) -> []byte | error {
+    match subjT {
+        checker::Optional as opt => {
+            match opt.inner {
+                checker::Void => { }   // sentinel — never a real match subject; fall through
+                _ => {
+                    match pat {
+                        parser::NullPattern => { mut o = cb(buf, "(!"); o = cb(o, subj); return cb(o, ".present)") }
+                        _ => { }
+                    }
+                    let inner_is_variant = match opt.inner { checker::Named as nm => cg_named_is_variant(prog, nm.name); _ => false }
+                    // bare bind/wildcard over a NON-variant present value matches whenever present.
+                    match pat {
+                        parser::WildcardPattern => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
+                        parser::BindPattern     => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
+                        _ => { }
+                    }
+                    let innerVN = match opt.inner { checker::Named as nm => nm.name; _ => "" }
+                    let val = cb_to_str(subj, ".value")
+                    mut o2 = cb(buf, "(")
+                    o2 = cb(o2, subj)
+                    o2 = cb(o2, ".present && ")
+                    o2 = match emit_pat_test(o2, pat, val, innerVN) { []byte as o => o; error as err => return err }
+                    return cb(o2, ")")
+                }
+            }
+        }
+        _ => { }
+    }
+    let vn = match subjT { checker::Named as nm => nm.name; _ => "" }
+    emit_pat_test(buf, pat, subj, vn)
+}
+
+// cb_to_str — `<a><b>` as a fresh str (the `_s.value` accessor for an optional present subject).
+fn cb_to_str(a: str, b: str) -> str { str(cb(cb(teko::list::empty(), a), b)) }
 
 // emit_pat_binds — emit the BINDINGS a pattern introduces (BIND `as x`, FIELD fields), at
 // the top of the arm block (in scope for the guard and the body). Mirrors pat_match's
@@ -1055,18 +1233,57 @@ fn emit_pat_binds(buf: []byte, pat: parser::Pattern, subj: str, indent: str) -> 
             }
             out
         }
-        _ => buf   // WILDCARD/LITERAL/RANGE/ALT bind nothing
+        _ => buf   // WILDCARD/LITERAL/RANGE/ALT/NULL bind nothing
     }
 }
 
-// cg_match_variant_name — the subject's variant name (its NAMED type), or empty for a
-// scalar subject. The tag constant needs the VARIANT name; the case comes from the pattern.
-// (C: `cg_match_variant_name`.)
-fn cg_match_variant_name(e: checker::TExpr) -> str {
-    match e.kind {
-        checker::TMatchExpr as m => match m.subject.type { checker::Named as nm => nm.name; _ => "" }
-        _ => ""
+// cg_emit_pat_binds — TOP-LEVEL pattern binds (handles an OPTIONAL subject — REBOOT_PLAN §202).
+// For an optional present pattern the inner value is `_s.value`: a bare `T as x` binds it
+// directly (any non-variant inner); a FIELD destructure reads fields off it directly; a variant
+// inner binds via the variant union. For a non-optional subject it delegates to emit_pat_binds.
+// (C: `cg_emit_pat_binds`.)
+fn cg_emit_pat_binds(buf: []byte, prog: checker::TProgram, pat: parser::Pattern, subj: str, subjT: checker::Type, indent: str) -> []byte | error {
+    match subjT {
+        checker::Optional as opt => {
+            match opt.inner {
+                checker::Void => { }
+                _ => {
+                    match pat { parser::NullPattern => return buf; _ => { } }   // NONE binds nothing
+                    let inner_is_variant = match opt.inner { checker::Named as nm => cg_named_is_variant(prog, nm.name); _ => false }
+                    let val = cb_to_str(subj, ".value")
+                    // bare `T as x` over a non-variant present value binds the inner directly.
+                    match pat {
+                        parser::BindPattern as bp => {
+                            if !inner_is_variant {
+                                if bp.has_binding {
+                                    mut o = cb(buf, indent); o = cb(o, "auto "); o = cb_str(o, bp.binding)
+                                    o = cb(o, " = "); o = cb(o, val); return cb(o, ";\n")
+                                }
+                                return buf
+                            }
+                        }
+                        parser::FieldPattern as fp => {
+                            if !inner_is_variant {
+                                mut o = buf
+                                mut i = 0
+                                loop {
+                                    if i >= fp.fields.len { break }
+                                    o = cb(o, indent); o = cb(o, "auto "); o = cb_str(o, fp.fields[i])
+                                    o = cb(o, " = "); o = cb(o, val); o = cb(o, "."); o = cb_str(o, fp.fields[i]); o = cb(o, ";\n")
+                                    i++
+                                }
+                                return o
+                            }
+                        }
+                        _ => { }
+                    }
+                    return emit_pat_binds(buf, pat, val, indent)   // variant inner: bind via the union over _s.value
+                }
+            }
+        }
+        _ => { }
     }
+    emit_pat_binds(buf, pat, subj, indent)
 }
 
 // cg_block_diverges — does a typed block DIVERGE (exit via return/break/continue on every
@@ -1185,7 +1402,7 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, match_e: checker::TExpr,
 fn emit_match_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
     let res  = fresh_named("_r", buf.len to i64 + 1)   // +1 so it differs from subj
-    let vn = cg_match_variant_name(e)
+    let subjT = m.subject.type   // for optional / variant pattern lowering
     mut out = cb(buf, "({ ")
     out = match emit_type(out, m.subject.type) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
@@ -1202,9 +1419,9 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: 
         if i >= m.arms.len { break }
         let arm = m.arms[i]
         out = cb(out, "    if (")
-        out = match emit_pat_test(out, arm.pattern, subj, vn) { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { []byte as o => o; error as err => return err }
         out = cb(out, ") {\n")
-        out = match emit_pat_binds(out, arm.pattern, subj, "        ") { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, "        ") { []byte as o => o; error as err => return err }
         mut ci = "        "
         if arm.has_when {
             out = cb(out, "        if (")
@@ -1231,7 +1448,7 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: 
 // (C: `emit_match_tail`.)
 fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
-    let vn = cg_match_variant_name(e)
+    let subjT = m.subject.type   // for optional / variant pattern lowering
     let inner = cb_indent_deeper(indent)
     let inner2 = cb_indent_deeper(inner)
     mut out = cb(buf, indent)
@@ -1249,9 +1466,9 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         let arm = m.arms[i]
         out = cb(out, inner)
         out = cb(out, "if (")
-        out = match emit_pat_test(out, arm.pattern, subj, vn) { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { []byte as o => o; error as err => return err }
         out = cb(out, ") {\n")
-        out = match emit_pat_binds(out, arm.pattern, subj, inner2) { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, inner2) { []byte as o => o; error as err => return err }
         mut ci = inner2
         if arm.has_when {
             out = cb(out, inner2)
@@ -1282,7 +1499,7 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
 fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr, indent: str) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
     let done = fresh_named("tk_m", buf.len to i64 + 1) + "_done"   // unique commit label
-    let vn = cg_match_variant_name(e)
+    let subjT = m.subject.type   // for optional / variant pattern lowering
     let inner = cb_indent_deeper(indent)
     let inner2 = cb_indent_deeper(inner)
     mut out = cb(buf, indent)
@@ -1300,9 +1517,9 @@ fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         let arm = m.arms[i]
         out = cb(out, inner)
         out = cb(out, "if (")
-        out = match emit_pat_test(out, arm.pattern, subj, vn) { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_test(out, prog, arm.pattern, subj, subjT) { []byte as o => o; error as err => return err }
         out = cb(out, ") {\n")
-        out = match emit_pat_binds(out, arm.pattern, subj, inner2) { []byte as o => o; error as err => return err }
+        out = match cg_emit_pat_binds(out, prog, arm.pattern, subj, subjT, inner2) { []byte as o => o; error as err => return err }
         mut ci = inner2
         if arm.has_when {
             out = cb(out, inner2)
@@ -1385,12 +1602,12 @@ fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte 
         checker::TBoolLit as bl    => cb(buf, if bl.value { "true" } else { "false" })
         checker::TIfExpr as f      => emit_if_value(buf, prog, e, f)   // W5a — `if` as a value (GNU stmt-expr)
         checker::TMatchExpr as m   => emit_match_value(buf, prog, e, m)   // W5b — `match` as a value (GNU stmt-expr)
-        // null literal + safe-field-access (x?.field) + coalesce (x ?? y) (W2 surface) all
-        // need the OPTIONAL value representation (presence+value) — a later wave (W6). Be
-        // honest now rather than mis-emit (M.3), exactly like the if/match frontier above.
-        checker::TNullLit          => error { message = "codegen: null literal not yet supported (optional value repr is a later wave)" }
-        checker::TSafeFieldAccess  => error { message = "codegen: safe field access (x?.field) not yet supported (optional value repr is a later wave)" }
-        checker::TCoalesce         => error { message = "codegen: coalesce (x ?? y) not yet supported (optional value repr is a later wave)" }
+        // null / ?. / ?? — the OPTIONAL value model (REBOOT_PLAN §202/§203; tk_opt_<inner>).
+        // A bare `null` in raw expression position has the SENTINEL optional type: it cannot be
+        // emitted alone — its concrete type comes from the destination slot via emit_as.
+        checker::TNullLit          => error { message = "codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)" }
+        checker::TSafeFieldAccess as sfa => emit_safe_field_access(buf, prog, e, sfa)
+        checker::TCoalesce as co   => emit_coalesce(buf, prog, e, co)
         checker::TIndex as ix      => emit_index(buf, prog, e, ix)   // W5-idx — subscript recv[index] (str; slice = honest barrier)
         checker::TInterp as in     => emit_interp(buf, prog, in)     // $"…{expr}…" — nested tk_str_concat over pieces + holes
     }
@@ -1798,6 +2015,128 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
 }
 
 // ---------------------------------------------------------------------------
+// OPTIONAL TYPEDEF COLLECTION (REBOOT_PLAN §202). Every distinct optional inner type used in
+// the typed program needs its `typedef struct { bool present; <inner> value; } tk_opt_<inner>;`
+// emitted once in the prelude. We walk every type that flows through emit_type (function sigs,
+// bindings, every TExpr `.type`), collecting distinct inners (deduped by mangled name). Nested
+// optionals register the inner first so its typedef precedes the outer's reference. (C: the
+// cg_opt_set / cg_collect_* / cg_emit_optional_typedefs family.)
+// ---------------------------------------------------------------------------
+// the mangled-name key for an inner type (dedup key); "" for an unsupported inner (skipped).
+fn cg_opt_key(inner: checker::Type) -> str {
+    match cg_opt_mangle(teko::list::empty(), inner) { []byte as o => str(o); error => "" }
+}
+fn cg_opt_set_add(set: []checker::Type, inner: checker::Type) -> []checker::Type {
+    let key = cg_opt_key(inner)
+    if key == "" { return set }
+    mut i = 0
+    loop {
+        if i >= set.len { break }
+        if cg_opt_key(set[i]) == key { return set }   // already present
+        i++
+    }
+    teko::list::push(set, inner)
+}
+// register every optional in a type (nested inners first, so `T??` orders right).
+fn cg_collect_type_opts(set: []checker::Type, t: checker::Type) -> []checker::Type {
+    match t {
+        checker::Optional as opt => {
+            match opt.inner {
+                checker::Void => set
+                _ => cg_opt_set_add(cg_collect_type_opts(set, opt.inner), opt.inner)
+            }
+        }
+        checker::Slice as sl => cg_collect_type_opts(set, sl.element)
+        _ => set
+    }
+}
+fn cg_collect_expr_opts(set: []checker::Type, e: checker::TExpr) -> []checker::Type {
+    mut s = cg_collect_type_opts(set, e.type)   // the node's own resolved type may be `T?`
+    match e.kind {
+        checker::TBinary as b  => { s = cg_collect_expr_opts(s, b.left); s = cg_collect_expr_opts(s, b.right) }
+        checker::TUnary as u   => { s = cg_collect_expr_opts(s, u.operand) }
+        checker::TCompare as c => {
+            s = cg_collect_expr_opts(s, c.first)
+            mut i = 0
+            loop { if i >= c.rest.len { break }; s = cg_collect_expr_opts(s, c.rest[i].operand); i++ }
+        }
+        checker::TCall as cl => { mut i = 0; loop { if i >= cl.args.len { break }; s = cg_collect_expr_opts(s, cl.args[i]); i++ } }
+        checker::TIfExpr as f => {
+            s = cg_collect_expr_opts(s, f.cond)
+            s = cg_collect_block_opts(s, f.then_blk)
+            s = cg_collect_block_opts(s, f.else_blk)
+        }
+        checker::TMatchExpr as m => {
+            s = cg_collect_expr_opts(s, m.subject)
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if m.arms[i].has_when { s = cg_collect_expr_opts(s, m.arms[i].guard) }
+                s = cg_collect_block_opts(s, m.arms[i].body)
+                i++
+            }
+        }
+        checker::TCast as c => { s = cg_collect_expr_opts(s, c.expr) }
+        checker::TFieldAccess as fa => { s = cg_collect_expr_opts(s, fa.receiver) }
+        checker::TSafeFieldAccess as sfa => { s = cg_collect_expr_opts(s, sfa.receiver) }
+        checker::TCoalesce as co => { s = cg_collect_expr_opts(s, co.left); s = cg_collect_expr_opts(s, co.right) }
+        checker::TStructInit as si => { mut i = 0; loop { if i >= si.field_vals.len { break }; s = cg_collect_expr_opts(s, si.field_vals[i]); i++ } }
+        checker::TIndex as ix => { s = cg_collect_expr_opts(s, ix.receiver); s = cg_collect_expr_opts(s, ix.index) }
+        checker::TInterp as in => { mut i = 0; loop { if i >= in.holes.len { break }; s = cg_collect_expr_opts(s, in.holes[i]); i++ } }
+        _ => { }   // leaves: type already registered above
+    }
+    s
+}
+fn cg_collect_block_opts(set: []checker::Type, stmts: []checker::TStatement) -> []checker::Type {
+    mut s = set
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        match stmts[i] {
+            checker::TBinding as b => { s = cg_collect_type_opts(s, b.bound); s = cg_collect_expr_opts(s, b.value) }
+            checker::TAssign as a  => { s = cg_collect_expr_opts(s, a.value) }
+            checker::TReturn as r  => { if r.has_value { s = cg_collect_expr_opts(s, r.value) } }
+            checker::TLoopStmt as l => { s = cg_collect_block_opts(s, l.body) }
+            checker::TExprStmt as es => { s = cg_collect_expr_opts(s, es.expr) }
+            _ => { }
+        }
+        i++
+    }
+    s
+}
+// walk the whole program; emit each distinct optional typedef once (registration order, so a
+// nested inner optional precedes the outer that references it).
+fn cg_emit_optional_typedefs(buf: []byte, prog: checker::TProgram) -> []byte | error {
+    mut set = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                set = cg_collect_type_opts(set, f.return_type)
+                set = cg_collect_block_opts(set, f.body)
+            }
+            checker::TStatement as st => { set = cg_collect_block_opts(set, teko::list::push(teko::list::empty(), st)) }
+            _ => { }
+        }
+        i++
+    }
+    mut out = buf
+    mut j = 0
+    loop {
+        if j >= set.len { break }
+        out = cb(out, "typedef struct { bool present; ")
+        out = match emit_type(out, set[j]) { []byte as o => o; error as err => return err }
+        out = cb(out, " value; } ")
+        out = match cg_opt_typename(out, set[j]) { []byte as o => o; error as err => return err }
+        out = cb(out, ";\n")
+        j++
+    }
+    if set.len > 0 { out = cb(out, "\n") }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // The program -> a full C translation unit. Passes:
 //   0. (W4c) every TYPE DECL -> a C type declaration, BEFORE the functions (forward
 //      order): first a forward `typedef struct tk_t_<M> tk_t_<M>;` for each struct/variant
@@ -1860,6 +2199,10 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
         }
         td++
     }
+
+    // OPTIONAL TYPEDEFS (REBOOT_PLAN §202) — after the named type decls (so a `Named?` inner's
+    // typedef precedes its reference) and before any function (so `T?` sigs resolve).
+    b = match cg_emit_optional_typedefs(b, prog) { []byte as o => o; error as err => return err }
 
     // First pass: emit every top-level function. Type-decls are handled above; use-decls
     // are a no-op at the C level (imports); loose statements are the second pass.

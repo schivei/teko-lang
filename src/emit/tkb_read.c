@@ -22,10 +22,10 @@ tk_str tk_read_str(tk_reader *r, tk_strs t) {
 }
 tk_strs tk_read_strtable(tk_reader *r) {
     uint32_t n = tk_read_u32(r);
-    tk_str *xs = malloc(n * sizeof *xs); if (n && !xs) abort();
+    tk_str *xs = tk_alloc(n * sizeof *xs); if (n && !xs) abort();
     for (uint32_t i = 0; i < n; i += 1) {
         uint32_t len = tk_read_u32(r);
-        tk_byte *bytes = malloc(len ? len : 1); if (!bytes) abort();
+        tk_byte *bytes = tk_alloc(len ? len : 1); if (!bytes) abort();
         for (uint32_t j = 0; j < len; j += 1) bytes[j] = tk_read_u8(r);
         xs[i] = (tk_str){ bytes, len };
     }
@@ -45,7 +45,7 @@ static tk_prim_kind prim_of(uint8_t b) {
         default: return TK_PRIM_BOOL;
     }
 }
-static tk_type *box(tk_type t) { tk_type *p = malloc(sizeof *p); if (!p) abort(); *p = t; return p; }
+static tk_type *box(tk_type t) { tk_type *p = tk_alloc(sizeof *p); if (!p) abort(); *p = t; return p; }
 
 tk_type tk_read_type(tk_reader *r, tk_strs t) {
     uint8_t tag = tk_read_u8(r);
@@ -58,12 +58,12 @@ tk_type tk_read_type(tk_reader *r, tk_strs t) {
         case 5: return (tk_type){ .tag = TK_TYPE_SLICE, .as.slice.element = box(tk_read_type(r, t)) };
         case 6: return (tk_type){ .tag = TK_TYPE_NAMED, .as.named.name = tk_read_str(r, t) };
         case 7: {
-            uint32_t n = tk_read_u32(r); tk_type *m = malloc(n * sizeof *m); if (n && !m) abort();
+            uint32_t n = tk_read_u32(r); tk_type *m = tk_alloc(n * sizeof *m); if (n && !m) abort();
             for (uint32_t i = 0; i < n; i += 1) m[i] = tk_read_type(r, t);
             return (tk_type){ .tag = TK_TYPE_VARIANT, .as.variant = { m, n } };
         }
         case 8: {
-            uint32_t n = tk_read_u32(r); tk_type *p = malloc(n * sizeof *p); if (n && !p) abort();
+            uint32_t n = tk_read_u32(r); tk_type *p = tk_alloc(n * sizeof *p); if (n && !p) abort();
             for (uint32_t i = 0; i < n; i += 1) p[i] = tk_read_type(r, t);
             tk_type ret = tk_read_type(r, t);
             return (tk_type){ .tag = TK_TYPE_FUNC, .as.func = { p, n, box(ret) } };
@@ -78,7 +78,7 @@ static tk_texpr_result texpr_ok(tk_texpr t)  { return (tk_texpr_result){ .ok = t
 static tk_texpr_result texpr_err(const char *m) { return (tk_texpr_result){ .ok = false, .as.error = tk_error_make(m) }; }
 
 static tk_token_kind kind_of(uint8_t b) { return (tk_token_kind)b; }   // [E7: byte→enum]
-static tk_texpr *boxe(tk_texpr t) { tk_texpr *p = malloc(sizeof *p); if (!p) abort(); *p = t; return p; }
+static tk_texpr *boxe(tk_texpr t) { tk_texpr *p = tk_alloc(sizeof *p); if (!p) abort(); *p = t; return p; }
 
 tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
     tk_type ty = tk_read_type(r, t);
@@ -105,16 +105,16 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
                 e.as.unary.operand = boxe(tk_read_texpr(r, t)); return e;
         case 6: {
             e.tag = TK_TEXPR_COMPARE; e.as.compare.first = boxe(tk_read_texpr(r, t));
-            uint32_t n = tk_read_u32(r); tk_tcmp_term *ts = malloc(n * sizeof *ts); if (n && !ts) abort();
+            uint32_t n = tk_read_u32(r); tk_tcmp_term *ts = tk_alloc(n * sizeof *ts); if (n && !ts) abort();
             for (uint32_t i = 0; i < n; i += 1) { ts[i].op = kind_of(tk_read_u8(r)); ts[i].operand = boxe(tk_read_texpr(r, t)); }
             e.as.compare.rest = ts; e.as.compare.nrest = n; return e;
         }
         case 7: {
             e.tag = TK_TEXPR_CALL;
-            uint32_t np = tk_read_u32(r); tk_segment *segs = malloc(np * sizeof *segs); if (np && !segs) abort();
+            uint32_t np = tk_read_u32(r); tk_segment *segs = tk_alloc(np * sizeof *segs); if (np && !segs) abort();
             for (uint32_t i = 0; i < np; i += 1) segs[i].name = tk_read_str(r, t);
             e.as.call.callee = (tk_path){ segs, np };
-            uint32_t na = tk_read_u32(r); tk_texpr *as = malloc(na * sizeof *as); if (na && !as) abort();
+            uint32_t na = tk_read_u32(r); tk_texpr *as = tk_alloc(na * sizeof *as); if (na && !as) abort();
             for (uint32_t i = 0; i < na; i += 1) as[i] = tk_read_texpr(r, t);
             e.as.call.args = as; e.as.call.nargs = na; return e;
         }
@@ -143,8 +143,8 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
         case 16: {                                                              /* W4a — Name { f = v, … } */
             e.tag = TK_TEXPR_STRUCT_INIT;
             uint32_t nf = tk_read_u32(r);
-            tk_str   *names = malloc((nf ? nf : 1) * sizeof *names); if (!names) abort();
-            tk_texpr *vals  = malloc((nf ? nf : 1) * sizeof *vals);  if (!vals)  abort();
+            tk_str   *names = tk_alloc((nf ? nf : 1) * sizeof *names); if (!names) abort();
+            tk_texpr *vals  = tk_alloc((nf ? nf : 1) * sizeof *vals);  if (!vals)  abort();
             for (uint32_t i = 0; i < nf; i += 1) { names[i] = tk_read_str(r, t); vals[i] = tk_read_texpr(r, t); }
             e.as.struct_init.field_names = names; e.as.struct_init.field_vals = vals; e.as.struct_init.nfields = nf;
             return e;
@@ -157,10 +157,10 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
         case 18: {                                                              /* $"…{expr}…": npieces, each piece, then nholes, each hole */
             e.tag = TK_TEXPR_INTERP;
             uint32_t np = tk_read_u32(r);
-            tk_str *pieces = malloc((np ? np : 1) * sizeof *pieces); if (!pieces) abort();
+            tk_str *pieces = tk_alloc((np ? np : 1) * sizeof *pieces); if (!pieces) abort();
             for (uint32_t i = 0; i < np; i += 1) pieces[i] = tk_read_str(r, t);
             uint32_t nh = tk_read_u32(r);
-            tk_texpr *holes = malloc((nh ? nh : 1) * sizeof *holes); if (!holes) abort();
+            tk_texpr *holes = tk_alloc((nh ? nh : 1) * sizeof *holes); if (!holes) abort();
             for (uint32_t i = 0; i < nh; i += 1) holes[i] = tk_read_texpr(r, t);
             e.as.interp.pieces = pieces; e.as.interp.npieces = np;
             e.as.interp.holes  = holes;  e.as.interp.nholes  = nh;

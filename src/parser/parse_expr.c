@@ -88,7 +88,7 @@ typedef struct { tk_byte *ptr; size_t len; size_t cap; } tk_piece_buf;
 static void piece_push(tk_piece_buf *b, tk_byte c) {
     if (b->len == b->cap) {
         size_t ncap = b->cap ? b->cap * 2 : 16;
-        tk_byte *np = realloc(b->ptr, ncap); if (!np) abort();
+        tk_byte *np = tk_realloc0(b->ptr, ncap); if (!np) abort();
         b->ptr = np; b->cap = ncap;
     }
     b->ptr[b->len++] = c;
@@ -96,10 +96,10 @@ static void piece_push(tk_piece_buf *b, tk_byte c) {
 // finalize a piece buffer into a fresh tk_str (decoded bytes are valid by construction).
 static tk_str piece_to_str(tk_piece_buf *b) {
     tk_byte *buf = NULL;
-    if (b->len > 0) { buf = malloc(b->len); if (!buf) abort(); memcpy(buf, b->ptr, b->len); }
+    if (b->len > 0) { buf = tk_alloc(b->len); if (!buf) abort(); memcpy(buf, b->ptr, b->len); }
     tk_str_result r = tk_str_from_utf8(buf, b->len);
     if (!r.ok) abort();
-    free(b->ptr); b->ptr = NULL; b->len = 0; b->cap = 0;
+    tk_free0(b->ptr); b->ptr = NULL; b->len = 0; b->cap = 0;
     return r.as.value;
 }
 
@@ -139,7 +139,7 @@ static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos) {
         tk_byte c = raw.ptr[i];
         if (c == '\\') {
             bool ok; size_t ni = piece_escape(raw, i, &cur, &ok);
-            if (!ok) { free(cur.ptr); free(pieces); free(holes);
+            if (!ok) { tk_free0(cur.ptr); tk_free0(pieces); tk_free0(holes);
                 return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, pos, "unknown escape in interpolated string") }; }
             i = ni; continue;
         }
@@ -153,21 +153,21 @@ static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos) {
                 if (hc == '{') depth += 1;
                 else if (hc == '}') { depth -= 1; if (depth == 0) break; }
             }
-            if (j >= raw.len) { free(cur.ptr); free(pieces); free(holes);
+            if (j >= raw.len) { tk_free0(cur.ptr); tk_free0(pieces); tk_free0(holes);
                 return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, pos, "unterminated `{` in interpolated string") }; }
             tk_str hole_src = tk_str_slice(raw, hs, j);
             // re-lex + parse the hole as a FULL expression.
             tk_tokens_result tr = tk_tokenize(hole_src);
-            if (!tr.ok) { free(pieces); free(holes);
+            if (!tr.ok) { tk_free0(pieces); tk_free0(holes);
                 return (tk_parsed_result){ .ok = false, .as.error = tr.as.error }; }
             tk_parsed_result he = tk_parse_expr(tr.as.value.ptr, tr.as.value.len, 0);
-            if (!he.ok) { tk_tokens_free(tr.as.value); free(pieces); free(holes); return he; }
+            if (!he.ok) { tk_tokens_free(tr.as.value); tk_free0(pieces); tk_free0(holes); return he; }
             tk_exprs_push(&holes, &nholes, he.as.value.node);
             i = j + 1;                                  // past the `}`
             continue;
         }
         if (c == '}') {                                 // a stray closing brace (no open hole)
-            free(cur.ptr); free(pieces); free(holes);
+            tk_free0(cur.ptr); tk_free0(pieces); tk_free0(holes);
             return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, pos, "unexpected `}` in interpolated string") };
         }
         piece_push(&cur, c);

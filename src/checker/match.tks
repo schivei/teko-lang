@@ -4,7 +4,19 @@ use teko::parser
 
 // validate a pattern against the subject; return the env extended with bindings.
 fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) -> Env | error {
+    // OPTIONAL subject `T?` (REBOOT_PLAN §202): `null` matches the NONE case (binds nothing);
+    // any OTHER pattern matches the PRESENT case and is checked against the inner `T`.
+    match subject {
+        Optional as opt => {
+            match p {
+                parser::NullPattern => return env                        // NONE — binds nothing
+                _                   => return check_pattern(p, opt.inner, env, table)   // PRESENT — check vs inner
+            }
+        }
+        _ => {}
+    }
     match p {
+        parser::NullPattern       => return error { message = "`null` pattern requires an optional subject (`T?`) — REBOOT_PLAN §202" }
         parser::WildcardPattern   => env
         parser::BindPattern as bp => {
             let ct = match resolve_named(bp.type_name, table) { Type as t => t; error as e => return e }
@@ -140,11 +152,48 @@ fn variant_covered(arms: []parser::Arm, members: []Type) -> bool {
     true
 }
 
-// a `_` covers all; otherwise a Variant subject must have every case named. A NAMED variant
+// is the NONE case (a `null` pattern) covered by some UNGUARDED arm?
+fn some_arm_is_null(arms: []parser::Arm) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern { parser::NullPattern => return true; _ => {} }
+        }
+        i++
+    }
+    false
+}
+
+// is the PRESENT case of an optional `T?` covered? A bare bind/wildcard (un-`null`, unguarded)
+// covers the whole present value; otherwise fall back to ordinary exhaustiveness over the inner
+// (e.g. a variant inner). Mirrors the C twin's present_case_covered (REBOOT_PLAN §202).
+fn present_case_covered(arms: []parser::Arm, inner: Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern {
+                parser::WildcardPattern => return true
+                parser::BindPattern as bp => { if bp.type_name.segments.len > 0 { return true } }   // `T as x` / `T`
+                _ => {}
+            }
+        }
+        i++
+    }
+    exhaustive(arms, inner, table)
+}
+
+// a `_` covers all; an optional `T?` is exhaustive iff `null` AND the present case are covered
+// (REBOOT_PLAN §202); otherwise a Variant subject must have every case named. A NAMED variant
 // subject is first expanded to its Variant cases (B.14/B.15) so `match s { Circle … }` over a
 // `Shape = Circle | …` covers exhaustively.
 fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable) -> bool {
     if has_wildcard(arms) { return true }
+    match subject {       // an optional `T?` — `null` + present coverage (REBOOT §202)
+        Optional as opt => return some_arm_is_null(arms) && present_case_covered(arms, opt.inner, table)
+        _ => {}
+    }
     match expand_variant(subject, table) {       // a NAMED variant → its Variant cases (B.14/B.15)
         Variant as v => variant_covered(arms, v.members)
         _            => false

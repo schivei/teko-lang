@@ -19,7 +19,7 @@
 #define TK_PUSH_BODY(T)                                          \
     do {                                                         \
         size_t m = *n;                                           \
-        T *np = realloc(*xs, (m + 1) * sizeof(T));               \
+        T *np = tk_realloc0(*xs, (m + 1) * sizeof(T));               \
         if (np == NULL) { abort(); }                            \
         np[m] = item;                                            \
         *xs = np;                                                \
@@ -45,13 +45,13 @@ void tk_uses_push  (tk_use_decl **xs,  size_t *n, tk_use_decl  item) { TK_PUSH_B
 // box helpers — heap a node so a recursive parent can point at it.
 // ===================================================================
 tk_expr *tk_box_expr(tk_expr e) {
-    tk_expr *p = malloc(sizeof(tk_expr));
+    tk_expr *p = tk_alloc(sizeof(tk_expr));
     if (p == NULL) { abort(); }
     memcpy(p, &e, sizeof(tk_expr));
     return p;
 }
 tk_type_expr *tk_box_type(tk_type_expr t) {
-    tk_type_expr *p = malloc(sizeof(tk_type_expr));
+    tk_type_expr *p = tk_alloc(sizeof(tk_type_expr));
     if (p == NULL) { abort(); }
     memcpy(p, &t, sizeof(tk_type_expr));
     return p;

@@ -36,7 +36,7 @@ static void cbuf_reserve(cbuf *b, size_t extra) {
     if (b->len + extra + 1 <= b->cap) return;   // +1 for the NUL
     size_t ncap = b->cap == 0 ? 256 : b->cap;
     while (b->len + extra + 1 > ncap) ncap *= 2;
-    char *np = realloc(b->ptr, ncap);
+    char *np = tk_realloc0(b->ptr, ncap);
     if (np == NULL) abort();
     b->ptr = np;
     b->cap = ncap;
@@ -258,6 +258,17 @@ static bool cg_variant_has_member(const tk_type_decl *d, tk_str member) {
     return false;
 }
 
+// OPTIONAL `T?` C REPRESENTATION (REBOOT_PLAN §202). Each distinct optional inner type maps to
+// a generated struct `tk_opt_<innerMangle>` = `{ bool present; <innerCtype> value; }`. The
+// mangle suffix is a deterministic function of the inner type so the typedef and every use
+// agree. `error` lowers to its message `tk_str` (no separate error C value type), so `error?`
+// is `tk_opt_error`. The distinct optional types are collected + emitted in tk_emit_c's prelude.
+static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err);   // fwd
+static bool cg_opt_typename(cbuf *b, tk_type inner, const char **err) {
+    cb(b, "tk_opt_");
+    return cg_opt_mangle(b, inner, err);
+}
+
 static bool emit_type(cbuf *b, tk_type t, const char **err) {
     switch (t.tag) {
         case TK_TYPE_PRIM: return emit_prim(b, t.as.prim, err);
@@ -267,18 +278,50 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
         // here is always a Func.ret position.
         case TK_TYPE_VOID:    cb(b, "void");   return true;
         case TK_TYPE_STR:     cb(b, "tk_str"); return true;
-        // OPTIONAL (T?) — the parser doesn't emit it yet; full lowering is Z3-codegen.
-        // Be honest now rather than mis-emit (M.3).
-        case TK_TYPE_OPTIONAL: return fail_node(err, "codegen: optional type not yet supported");
+        // OPTIONAL (T?) — the generated `tk_opt_<innerMangle>` struct (REBOOT_PLAN §202). The
+        // sentinel optional (a bare `null`, inner == NULL) never reaches here on its own: it is
+        // always wrapped to a concrete slot type via emit_as.
+        case TK_TYPE_OPTIONAL:
+            if (t.as.optional.inner == NULL)
+                return fail_node(err, "codegen: a bare `null` needs a known optional type from context (internal)");
+            return cg_opt_typename(b, *t.as.optional.inner, err);
         case TK_TYPE_SLICE:   return fail_node(err, "codegen: slice type not yet supported");
         // W4c — a named aggregate references its mangled typedef name (decl + ref agree
         // via mangle_type_name). The semantic NAMED carries only the bare name.
         case TK_TYPE_NAMED:   mangle_type_name(b, (tk_str){ NULL, 0 }, t.as.named.name); return true;
         case TK_TYPE_VARIANT: return fail_node(err, "codegen: variant type not yet supported");
+        // `error` lowers to its message str (no separate error C value type — REBOOT §202).
+        case TK_TYPE_ERROR:   cb(b, "tk_str"); return true;
         case TK_TYPE_FUNC:    return fail_node(err, "codegen: function type not yet supported");
-        case TK_TYPE_ERROR:   return fail_node(err, "codegen: error type not yet supported");
     }
     return fail_node(err, "codegen: unknown type not yet supported");
+}
+
+// The deterministic mangle SUFFIX for an optional's inner type (used in tk_opt_<suffix>).
+// Names are C-identifier-safe (prim keywords, "str"/"byte"/"error", a named type's bare name,
+// and "opt_" + nested for `T??`). Mirrors emit_type's coverage.
+static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err) {
+    switch (inner.tag) {
+        case TK_TYPE_PRIM:
+            switch (inner.as.prim) {
+                case TK_PRIM_U8:  cb(b, "u8");  return true;   case TK_PRIM_U16: cb(b, "u16"); return true;
+                case TK_PRIM_U32: cb(b, "u32"); return true;   case TK_PRIM_U64: cb(b, "u64"); return true;
+                case TK_PRIM_U128:cb(b, "u128");return true;   case TK_PRIM_I8:  cb(b, "i8");  return true;
+                case TK_PRIM_I16: cb(b, "i16"); return true;   case TK_PRIM_I32: cb(b, "i32"); return true;
+                case TK_PRIM_I64: cb(b, "i64"); return true;   case TK_PRIM_I128:cb(b, "i128");return true;
+                case TK_PRIM_F16: cb(b, "f16"); return true;   case TK_PRIM_F32: cb(b, "f32"); return true;
+                case TK_PRIM_F64: cb(b, "f64"); return true;   case TK_PRIM_BOOL:cb(b, "bool");return true;
+            }
+            return fail_node(err, "codegen: unknown prim in optional inner");
+        case TK_TYPE_BYTE:  cb(b, "byte");  return true;
+        case TK_TYPE_STR:   cb(b, "str");   return true;
+        case TK_TYPE_ERROR: cb(b, "error"); return true;
+        case TK_TYPE_NAMED: cb_str(b, inner.as.named.name); return true;
+        case TK_TYPE_OPTIONAL:
+            if (inner.as.optional.inner == NULL) return fail_node(err, "codegen: nested bare-null optional (internal)");
+            cb(b, "opt_"); return cg_opt_mangle(b, *inner.as.optional.inner, err);
+        default: return fail_node(err, "codegen: optional inner type not yet supported");
+    }
 }
 
 // =========================================================================
@@ -287,6 +330,20 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
 // carries the SYNTACTIC body, not the resolved `tk_type`. A NAMED type-expr's last path
 // segment is either a built-in name (u8..f64/bool/byte/str -> its C type) or a user type
 // (-> its mangled typedef). Slice/union/optional members are honest barriers (later waves).
+// The deterministic optional-mangle SUFFIX for a SYNTACTIC inner type-expr (the struct-field /
+// member position twin of cg_opt_mangle). Must agree byte-for-byte with cg_opt_mangle so a
+// field's `T?` type references the SAME tk_opt_<suffix> the prelude declares.
+static bool cg_opt_mangle_texpr(cbuf *b, tk_type_expr te, const char **err) {
+    if (te.tag == TK_TEXPR_NAMED) {
+        tk_path p = te.as.named.path;
+        tk_str last = p.segments[p.len - 1].name;
+        cb_str(b, last);   // prim keyword / str / byte / error / a named type's bare name — all C-safe
+        return true;
+    }
+    if (te.tag == TK_TEXPR_OPTIONAL) { cb(b, "opt_"); return cg_opt_mangle_texpr(b, *te.as.optional.inner, err); }
+    return fail_node(err, "codegen: optional inner type-expr not yet supported");
+}
+
 static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
     switch (te.tag) {
         case TK_TEXPR_NAMED: {
@@ -308,14 +365,18 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             else if (seg_is(last, "bool"))  { cb(b, "bool");              return true; }
             else if (seg_is(last, "byte"))  { cb(b, "uint8_t");           return true; }
             else if (seg_is(last, "str"))   { cb(b, "tk_str");            return true; }
-            else if (seg_is(last, "error")) return fail_node(err, "codegen: error type not yet supported");
+            else if (seg_is(last, "error")) { cb(b, "tk_str"); return true; }   // error → its message str (REBOOT §202)
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(b, (tk_str){ NULL, 0 }, last);
             return true;
         }
         case TK_TEXPR_SLICE:    return fail_node(err, "codegen: slice type not yet supported");
         case TK_TEXPR_UNION:    return fail_node(err, "codegen: inline union type not yet supported");
-        case TK_TEXPR_OPTIONAL: return fail_node(err, "codegen: optional type not yet supported");
+        case TK_TEXPR_OPTIONAL: {
+            // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
+            cb(b, "tk_opt_");
+            return cg_opt_mangle_texpr(b, *te.as.optional.inner, err);
+        }
     }
     return fail_node(err, "codegen: unknown type expression not yet supported");
 }
@@ -778,16 +839,60 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
         case TK_TEXPR_IF:    return emit_if_value(b, e, err);   // W5a — `if` as a value (GNU stmt-expr)
         case TK_TEXPR_MATCH: return emit_match_value(b, e, err); // W5b — `match` as a value (GNU stmt-expr)
 
-        // null literal + safe-field-access (`x?.field`) + coalesce (`x ?? y`) (W2 surface)
-        // all need the OPTIONAL value representation (presence+value), which is a later
-        // wave (W6). Be honest now rather than mis-emit (M.3), exactly like the if/match
-        // frontier above — never crash, never emit broken C.
+        // null / ?. / ?? — the OPTIONAL value model (REBOOT_PLAN §202/§203; tk_opt_<inner>).
         case TK_TEXPR_NULL:
-            return fail_node(err, "codegen: null literal not yet supported (optional value repr is a later wave)");
-        case TK_TEXPR_SAFE_FIELD_ACCESS:
-            return fail_node(err, "codegen: safe field access (x?.field) not yet supported (optional value repr is a later wave)");
-        case TK_TEXPR_COALESCE:
-            return fail_node(err, "codegen: coalesce (x ?? y) not yet supported (optional value repr is a later wave)");
+            // A bare `null` in raw expression position has the SENTINEL optional type (inner
+            // NULL): it cannot be emitted alone — its concrete type comes from the destination
+            // slot via emit_as. Reaching here means a null with no slot context (a checker/route
+            // gap) — honest stop rather than mis-emit.
+            return fail_node(err, "codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)");
+        case TK_TEXPR_SAFE_FIELD_ACCESS: {
+            // `recv?.field`: ({ <optTy> _tN = (recv); _tN.present
+            //      ? (<resTy>){ .present = true, .value = _tN.value.<field> }
+            //      : (<resTy>){ .present = false }; })
+            // The node's `.type` is the result optional `(field)?`; the receiver type is `T?`.
+            tk_type recvT = e->as.safe_field_access.receiver->type;
+            if (recvT.tag != TK_TYPE_OPTIONAL || recvT.as.optional.inner == NULL)
+                return fail_node(err, "codegen: safe field access on a non-optional receiver (internal)");
+            char tmp[40]; snprintf(tmp, sizeof tmp, "_o%zu", (size_t)b->len);
+            cb(b, "({ "); if (!emit_type(b, recvT, err)) return false;
+            cb(b, " "); cb(b, tmp); cb(b, " = (");
+            if (!emit_expr(b, e->as.safe_field_access.receiver, err)) return false;
+            cb(b, "); "); cb(b, tmp); cb(b, ".present ? (");
+            if (!emit_type(b, e->type, err)) return false;            // result optional type
+            cb(b, "){ .present = true, .value = "); cb(b, tmp); cb(b, ".value.");
+            cb_str(b, e->as.safe_field_access.field);
+            cb(b, " } : ("); if (!emit_type(b, e->type, err)) return false;
+            cb(b, "){ .present = false }; })");
+            return true;
+        }
+        case TK_TEXPR_COALESCE: {
+            // `a ?? b`: ({ <optTy> _tN = (a); _tN.present ? <a.value as result> : <b as result>; })
+            // Short-circuits b (only evaluated when a is NONE). The result type (the node's
+            // `.type`) is `T` (unwrap) or `T?` (b itself optional); both arms are wrapped to it
+            // via emit_as — so `T? ?? T` unwraps and `T? ?? T?` stays optional.
+            tk_type leftT = e->as.coalesce.left->type;
+            if (leftT.tag != TK_TYPE_OPTIONAL || leftT.as.optional.inner == NULL)
+                return fail_node(err, "codegen: `??` left operand is not optional (internal)");
+            char tmp[40]; snprintf(tmp, sizeof tmp, "_c%zu", (size_t)b->len);
+            cb(b, "({ "); if (!emit_type(b, leftT, err)) return false;
+            cb(b, " "); cb(b, tmp); cb(b, " = (");
+            if (!emit_expr(b, e->as.coalesce.left, err)) return false;
+            cb(b, "); "); cb(b, tmp); cb(b, ".present ? ");
+            // a's inner value `_tN.value` flows into the result. If the result is `T` (unwrap),
+            // emit it plainly; if the result is `T?` (b itself optional), wrap a.value PRESENT
+            // into the result optional. (a.value already has the inner's C type.)
+            if (e->type.tag == TK_TYPE_OPTIONAL && e->type.as.optional.inner != NULL) {
+                cb(b, "("); if (!emit_type(b, e->type, err)) return false;
+                cb(b, "){ .present = true, .value = "); cb(b, tmp); cb(b, ".value }");
+            } else {
+                cb(b, tmp); cb(b, ".value");
+            }
+            cb(b, " : ");
+            if (!emit_as(b, e->type, e->as.coalesce.right, err)) return false;   // fallback, wrapped to result
+            cb(b, "; })");
+            return true;
+        }
         case TK_TEXPR_STRUCT_INIT: {
             // W4c — `Name { f = v, … }` -> a C compound literal in DECLARED field order
             //   (tk_t_<MANGLE>){ .<field> = <val>, … }
@@ -796,11 +901,15 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // equivalence with the VM, which stores fields in the same order).
             //
             // The node's `.type` is TK_TYPE_NAMED (a user struct -> mangle its name) or
-            // TK_TYPE_ERROR (`error { message = … }`). `error` has NO C value
-            // representation in the generated TU yet (teko_rt.h defines no tk_error value
-            // type), so that case is an honest barrier — named-struct construction works.
-            if (e->type.tag == TK_TYPE_ERROR)
-                return fail_node(err, "codegen: error value construction not yet supported (error has no C value repr yet)");
+            // TK_TYPE_ERROR (`error { message = … }`). `error` lowers to its message `tk_str`
+            // (REBOOT §202): `error { message = s }` IS the str value `s` (the checker fixed
+            // the single `message` field), so the VM's struct value (one "message" str field)
+            // and the C str agree observably.
+            if (e->type.tag == TK_TYPE_ERROR) {
+                if (e->as.struct_init.nfields != 1)
+                    return fail_node(err, "codegen: error value must have exactly the `message` field (internal)");
+                return emit_expr(b, &e->as.struct_init.field_vals[0], err);
+            }
             if (e->type.tag != TK_TYPE_NAMED)
                 return fail_node(err, "codegen: struct literal with a non-named type not yet supported");
             cb(b, "(");
@@ -905,6 +1014,24 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
 // (not a bare member), the value is emitted plainly.
 // =========================================================================
 static bool emit_as(cbuf *b, tk_type expected, const tk_texpr *value, const char **err) {
+    // OPTIONAL slot (REBOOT_PLAN §202): wrap the value into the slot's tk_opt_<inner> struct.
+    //   * a bare `null`           → (tk_opt_<inner>){ .present = false }
+    //   * an already-optional val → emitted plainly (it IS a tk_opt_<inner>)
+    //   * a plain `T`             → (tk_opt_<inner>){ .present = true, .value = <v> }  (present-wrap)
+    if (expected.tag == TK_TYPE_OPTIONAL && expected.as.optional.inner != NULL) {
+        tk_type inner = *expected.as.optional.inner;
+        if (value->tag == TK_TEXPR_NULL) {
+            cb(b, "("); if (!cg_opt_typename(b, inner, err)) return false; cb(b, "){ .present = false }");
+            return true;
+        }
+        if (value->type.tag == TK_TYPE_OPTIONAL)   // already an optional value → pass through
+            return emit_expr(b, value, err);
+        cb(b, "("); if (!cg_opt_typename(b, inner, err)) return false;
+        cb(b, "){ .present = true, .value = ");
+        if (!emit_as(b, inner, value, err)) return false;   // the inner may itself need a wrap (e.g. a variant inner)
+        cb(b, " }");
+        return true;
+    }
     // Wrap only when: expected is a NAMED variant, the value's type is a NAMED case, and
     // that case is one of the variant's members. (If value's type IS the variant already
     // — e.g. a var of the variant type — it is not a bare member, so no wrap.)
@@ -1021,8 +1148,81 @@ static bool emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
             cb_upper(b, cg_path_last(pat->as.field.type_name));
             cb(b, ")");
             return true;
+        case TK_PAT_NULL:
+            // A `null` pattern reaches here only over a NON-optional subject (the optional case
+            // is handled by cg_emit_pat_test's `.present` test) — the checker rejects that, so
+            // be honest rather than mis-emit.
+            return fail_node(err, "codegen: `null` pattern over a non-optional subject (internal)");
     }
     return fail_node(err, "codegen: unknown pattern not yet supported");
+}
+
+// fwd — emit_pat_binds is defined below; the top-level optional-aware wrapper needs it.
+static bool emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
+                           const char *indent, const char **err);
+
+// TOP-LEVEL pattern test (handles an OPTIONAL subject — REBOOT_PLAN §202). `subjT` is the
+// subject's resolved type; `subj` is the subject temp name (a tk_opt_<inner> struct when
+// optional). For an optional subject: `null` ⇒ `(!_s.present)`; any other pattern ⇒
+// `(_s.present && <test over _s.value>)`. The inner test reuses emit_pat_test with the
+// value-accessor `_s.value` as the subject and the inner's variant name. For a non-optional
+// subject it delegates straight to emit_pat_test.
+static bool cg_emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
+                             tk_type subjT, const char **err) {
+    if (subjT.tag == TK_TYPE_OPTIONAL && subjT.as.optional.inner != NULL) {
+        if (pat->tag == TK_PAT_NULL) { cb(b, "(!"); cb(b, subj); cb(b, ".present)"); return true; }
+        tk_type inner = *subjT.as.optional.inner;
+        bool inner_is_variant = inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name);
+        // A bare bind/wildcard over a NON-variant present value matches whenever present (no inner
+        // tag to test) — `error as e` / `i64 as v` / `_`. Only a variant inner (or a literal/range
+        // /field test) adds an inner test against `_s.value`.
+        if ((pat->tag == TK_PAT_BIND || pat->tag == TK_PAT_WILDCARD) && !inner_is_variant) {
+            cb(b, "("); cb(b, subj); cb(b, ".present)");
+            return true;
+        }
+        tk_str innerVN = inner.tag == TK_TYPE_NAMED ? inner.as.named.name : (tk_str){ NULL, 0 };
+        char val[56]; snprintf(val, sizeof val, "%s.value", subj);
+        cb(b, "("); cb(b, subj); cb(b, ".present && ");
+        if (!emit_pat_test(b, pat, val, innerVN, err)) return false;
+        cb(b, ")");
+        return true;
+    }
+    tk_str vn = subjT.tag == TK_TYPE_NAMED ? subjT.as.named.name : (tk_str){ NULL, 0 };
+    return emit_pat_test(b, pat, subj, vn, err);
+}
+
+// TOP-LEVEL pattern binds (handles an OPTIONAL subject). For an optional present pattern the
+// inner value is `_s.value`; for a non-optional subject it delegates straight to emit_pat_binds.
+static bool cg_emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
+                              tk_type subjT, const char *indent, const char **err) {
+    if (subjT.tag == TK_TYPE_OPTIONAL && subjT.as.optional.inner != NULL) {
+        if (pat->tag == TK_PAT_NULL) return true;   // NONE binds nothing
+        tk_type inner = *subjT.as.optional.inner;
+        bool inner_is_variant = inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name);
+        char val[56]; snprintf(val, sizeof val, "%s.value", subj);
+        // A bare `T as x` over an optional binds the INNER value directly (the present value IS
+        // the inner — not a variant `.as.<case>`), for any non-variant inner (prim/str/error/
+        // struct).
+        if (pat->tag == TK_PAT_BIND && !inner_is_variant) {
+            if (pat->as.bind.has_binding) {
+                cb(b, indent); cb(b, "auto "); cb_str(b, pat->as.bind.binding);
+                cb(b, " = "); cb(b, val); cb(b, ";\n");
+            }
+            return true;
+        }
+        // A FIELD destructure `Struct { f; g }` over a present STRUCT inner reads fields off the
+        // inner value directly (`_s.value.f`), not via a variant union.
+        if (pat->tag == TK_PAT_FIELD && !inner_is_variant) {
+            for (size_t i = 0; i < pat->as.field.n_fields; i += 1) {
+                cb(b, indent); cb(b, "auto "); cb_str(b, pat->as.field.fields[i]);
+                cb(b, " = "); cb(b, val); cb(b, "."); cb_str(b, pat->as.field.fields[i]); cb(b, ";\n");
+            }
+            return true;
+        }
+        // A variant inner: bind via the variant union over `_s.value`.
+        return emit_pat_binds(b, pat, val, indent, err);
+    }
+    return emit_pat_binds(b, pat, subj, indent, err);
 }
 
 // Emit the BINDINGS a pattern introduces (BIND `as x`, FIELD fields), at the top of the
@@ -1057,13 +1257,6 @@ static bool emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
     }
 }
 
-// The subject's variant name (its NAMED type), or empty for a scalar subject. The tag
-// constant needs the VARIANT name; the case name comes from the pattern.
-static tk_str cg_match_variant_name(const tk_texpr *e) {
-    if (e->as.match_expr.subject->type.tag == TK_TYPE_NAMED)
-        return e->as.match_expr.subject->type.as.named.name;
-    return (tk_str){ NULL, 0 };
-}
 
 // Does a typed block DIVERGE (exit via return/break/continue on every path)? Mirrors the
 // checker's tk_tblock_diverges so codegen lowers a diverging arm body as real control flow
@@ -1161,7 +1354,7 @@ static bool emit_match_value(cbuf *b, const tk_texpr *e, const char **err) {
     char subj[40], res[40];
     snprintf(subj, sizeof subj, "_s%zu", (size_t)b->len);
     snprintf(res,  sizeof res,  "_r%zu", (size_t)b->len + 1);   // +1 so it differs from subj
-    tk_str vn = cg_match_variant_name(e);
+    tk_type subjT = e->as.match_expr.subject->type;   // for optional / variant pattern lowering
     cb(b, "({ ");
     if (!emit_type(b, e->as.match_expr.subject->type, err)) return false;
     cb(b, " "); cb(b, subj); cb(b, " = (");
@@ -1172,9 +1365,9 @@ static bool emit_match_value(cbuf *b, const tk_texpr *e, const char **err) {
     for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
         const tk_tarm *arm = &e->as.match_expr.arms[i];
         cb(b, "    if (");
-        if (!emit_pat_test(b, &arm->pattern, subj, vn, err)) return false;
+        if (!cg_emit_pat_test(b, &arm->pattern, subj, subjT, err)) return false;
         cb(b, ") {\n");
-        if (!emit_pat_binds(b, &arm->pattern, subj, "        ", err)) return false;
+        if (!cg_emit_pat_binds(b, &arm->pattern, subj, subjT, "        ", err)) return false;
         const char *commit_indent = "        ";
         if (arm->has_when) {
             cb(b, "        if (");
@@ -1201,7 +1394,7 @@ static bool emit_match_tail(cbuf *b, const tk_texpr *e, bool in_main,
                             tk_type ret_type, const char *indent, const char **err) {
     char subj[40];
     snprintf(subj, sizeof subj, "_s%zu", (size_t)b->len);
-    tk_str vn = cg_match_variant_name(e);
+    tk_type subjT = e->as.match_expr.subject->type;   // for optional / variant pattern lowering
     char inner[72]; snprintf(inner, sizeof inner, "%s    ", indent);
     char inner2[80]; snprintf(inner2, sizeof inner2, "%s    ", inner);
     cb(b, indent); cb(b, "{\n");
@@ -1213,9 +1406,9 @@ static bool emit_match_tail(cbuf *b, const tk_texpr *e, bool in_main,
     for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
         const tk_tarm *arm = &e->as.match_expr.arms[i];
         cb(b, inner); cb(b, "if (");
-        if (!emit_pat_test(b, &arm->pattern, subj, vn, err)) return false;
+        if (!cg_emit_pat_test(b, &arm->pattern, subj, subjT, err)) return false;
         cb(b, ") {\n");
-        if (!emit_pat_binds(b, &arm->pattern, subj, inner2, err)) return false;
+        if (!cg_emit_pat_binds(b, &arm->pattern, subj, subjT, inner2, err)) return false;
         const char *ci = inner2;
         char inner3[88];
         if (arm->has_when) {
@@ -1246,7 +1439,7 @@ static bool emit_match_stmt(cbuf *b, const tk_texpr *e, const char *indent, cons
     char subj[40], done[48];
     snprintf(subj, sizeof subj, "_s%zu", (size_t)b->len);
     snprintf(done, sizeof done, "tk_m%zu_done", (size_t)b->len + 1);   // unique commit label
-    tk_str vn = cg_match_variant_name(e);
+    tk_type subjT = e->as.match_expr.subject->type;   // for optional / variant pattern lowering
     char inner[72]; snprintf(inner, sizeof inner, "%s    ", indent);
     char inner2[80]; snprintf(inner2, sizeof inner2, "%s    ", inner);
     cb(b, indent); cb(b, "{\n");
@@ -1258,9 +1451,9 @@ static bool emit_match_stmt(cbuf *b, const tk_texpr *e, const char *indent, cons
     for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
         const tk_tarm *arm = &e->as.match_expr.arms[i];
         cb(b, inner); cb(b, "if (");
-        if (!emit_pat_test(b, &arm->pattern, subj, vn, err)) return false;
+        if (!cg_emit_pat_test(b, &arm->pattern, subj, subjT, err)) return false;
         cb(b, ") {\n");
-        if (!emit_pat_binds(b, &arm->pattern, subj, inner2, err)) return false;
+        if (!cg_emit_pat_binds(b, &arm->pattern, subj, subjT, inner2, err)) return false;
         const char *ci = inner2;
         char inner3[88];
         if (arm->has_when) {
@@ -1641,6 +1834,125 @@ static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
 }
 
 // =========================================================================
+// OPTIONAL TYPEDEF COLLECTION (REBOOT_PLAN §202). Every distinct optional inner type used
+// anywhere in the typed program needs its `typedef struct { bool present; <inner> value; }
+// tk_opt_<inner>;` emitted ONCE in the prelude (before any function). We walk every type that
+// flows through emit_type (function sigs, bindings, and every texpr `.type`), collecting the
+// distinct inner types (deduped by mangled name). Nested optionals (`T??`) register the inner
+// optional first so its typedef precedes the outer's reference.
+// =========================================================================
+typedef struct { tk_type *inners; size_t len; size_t cap; } cg_opt_set;
+
+static void cg_opt_set_add(cg_opt_set *set, tk_type inner) {
+    // Dedup by mangled name (render to a scratch cbuf, compare bytes).
+    cbuf key = { NULL, 0, 0 }; const char *e = NULL;
+    if (!cg_opt_mangle(&key, inner, &e)) { tk_free0(key.ptr); return; }   // unsupported inner → skip (emit_type will error honestly)
+    for (size_t i = 0; i < set->len; i += 1) {
+        cbuf prev = { NULL, 0, 0 }; const char *pe = NULL;
+        if (!cg_opt_mangle(&prev, set->inners[i], &pe)) { tk_free0(prev.ptr); continue; }
+        bool same = prev.len == key.len && (key.len == 0 || memcmp(prev.ptr, key.ptr, key.len) == 0);
+        tk_free0(prev.ptr);
+        if (same) { tk_free0(key.ptr); return; }   // already present
+    }
+    tk_free0(key.ptr);
+    if (set->len == set->cap) { set->cap = set->cap ? set->cap * 2 : 8;
+        set->inners = tk_realloc0(set->inners, set->cap * sizeof *set->inners); if (!set->inners) abort(); }
+    set->inners[set->len++] = inner;
+}
+
+// Register every optional in a type (and its nested inners, innermost first).
+static void cg_collect_type_opts(cg_opt_set *set, tk_type t) {
+    switch (t.tag) {
+        case TK_TYPE_OPTIONAL:
+            if (t.as.optional.inner != NULL) {
+                cg_collect_type_opts(set, *t.as.optional.inner);   // inner first (so `T??` orders right)
+                cg_opt_set_add(set, *t.as.optional.inner);
+            }
+            return;
+        case TK_TYPE_SLICE:   if (t.as.slice.element) cg_collect_type_opts(set, *t.as.slice.element); return;
+        default: return;   // PRIM/STR/BYTE/ERROR/NAMED/VARIANT/FUNC/VOID carry no optional to register here
+    }
+}
+
+static void cg_collect_expr_opts(cg_opt_set *set, const tk_texpr *e);
+static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, size_t n);
+
+static void cg_collect_expr_opts(cg_opt_set *set, const tk_texpr *e) {
+    if (e == NULL) return;
+    cg_collect_type_opts(set, e->type);   // the node's own resolved type may be `T?`
+    switch (e->tag) {
+        case TK_TEXPR_BINARY: cg_collect_expr_opts(set, e->as.binary.left); cg_collect_expr_opts(set, e->as.binary.right); return;
+        case TK_TEXPR_UNARY:  cg_collect_expr_opts(set, e->as.unary.operand); return;
+        case TK_TEXPR_COMPARE:
+            cg_collect_expr_opts(set, e->as.compare.first);
+            for (size_t i = 0; i < e->as.compare.nrest; i += 1) cg_collect_expr_opts(set, e->as.compare.rest[i].operand);
+            return;
+        case TK_TEXPR_CALL: for (size_t i = 0; i < e->as.call.nargs; i += 1) cg_collect_expr_opts(set, &e->as.call.args[i]); return;
+        case TK_TEXPR_IF:
+            cg_collect_expr_opts(set, e->as.if_expr.cond);
+            cg_collect_block_opts(set, e->as.if_expr.then_blk, e->as.if_expr.nthen);
+            cg_collect_block_opts(set, e->as.if_expr.else_blk, e->as.if_expr.nelse);
+            return;
+        case TK_TEXPR_MATCH:
+            cg_collect_expr_opts(set, e->as.match_expr.subject);
+            for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
+                if (e->as.match_expr.arms[i].has_when) cg_collect_expr_opts(set, e->as.match_expr.arms[i].guard);
+                cg_collect_block_opts(set, e->as.match_expr.arms[i].body, e->as.match_expr.arms[i].nbody);
+            }
+            return;
+        case TK_TEXPR_CAST: cg_collect_expr_opts(set, e->as.cast.expr); return;
+        case TK_TEXPR_FIELD_ACCESS:      cg_collect_expr_opts(set, e->as.field_access.receiver); return;
+        case TK_TEXPR_SAFE_FIELD_ACCESS: cg_collect_expr_opts(set, e->as.safe_field_access.receiver); return;
+        case TK_TEXPR_COALESCE: cg_collect_expr_opts(set, e->as.coalesce.left); cg_collect_expr_opts(set, e->as.coalesce.right); return;
+        case TK_TEXPR_STRUCT_INIT: for (size_t i = 0; i < e->as.struct_init.nfields; i += 1) cg_collect_expr_opts(set, &e->as.struct_init.field_vals[i]); return;
+        case TK_TEXPR_INDEX: cg_collect_expr_opts(set, e->as.index.receiver); cg_collect_expr_opts(set, e->as.index.index); return;
+        case TK_TEXPR_INTERP: for (size_t i = 0; i < e->as.interp.nholes; i += 1) cg_collect_expr_opts(set, &e->as.interp.holes[i]); return;
+        default: return;   // leaves (NUMBER/VAR/STR/BYTE/BOOL/NULL) — type already registered above
+    }
+}
+
+static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, size_t n) {
+    for (size_t i = 0; i < n; i += 1) {
+        const tk_tstatement *s = &stmts[i];
+        switch (s->tag) {
+            case TK_TSTMT_BINDING: cg_collect_type_opts(set, s->as.binding.bound); cg_collect_expr_opts(set, &s->as.binding.value); break;
+            case TK_TSTMT_ASSIGN:  cg_collect_expr_opts(set, &s->as.assign.value); break;
+            case TK_TSTMT_RETURN:  if (s->as.ret.has_value) cg_collect_expr_opts(set, &s->as.ret.value); break;
+            case TK_TSTMT_LOOP:    cg_collect_block_opts(set, s->as.loop_stmt.body, s->as.loop_stmt.nbody); break;
+            case TK_TSTMT_EXPR:    cg_collect_expr_opts(set, &s->as.expr_stmt.expr); break;
+            default: break;   // BREAK/CONTINUE carry no expr
+        }
+    }
+}
+
+// Walk the whole program; emit each distinct optional typedef once (in registration order, so
+// a nested inner optional precedes the outer that references it).
+static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **err) {
+    cg_opt_set set = { NULL, 0, 0 };
+    for (size_t i = 0; i < prog.nitems; i += 1) {
+        tk_titem it = prog.items[i];
+        switch (it.tag) {
+            case TK_TITEM_FUNCTION:
+                cg_collect_type_opts(&set, it.as.function.return_type);
+                cg_collect_block_opts(&set, it.as.function.body, it.as.function.nbody);
+                break;
+            case TK_TITEM_STATEMENT: cg_collect_block_opts(&set, &it.as.statement, 1); break;
+            default: break;
+        }
+    }
+    for (size_t i = 0; i < set.len; i += 1) {
+        cb(b, "typedef struct { bool present; ");
+        if (!emit_type(b, set.inners[i], err)) { tk_free0(set.inners); return false; }
+        cb(b, " value; } ");
+        if (!cg_opt_typename(b, set.inners[i], err)) { tk_free0(set.inners); return false; }
+        cb(b, ";\n");
+    }
+    if (set.len > 0) cb(b, "\n");
+    tk_free0(set.inners);
+    return true;
+}
+
+// =========================================================================
 // The program -> a full C translation unit.
 // =========================================================================
 static tk_cstr_result cg_err(const char *m) {
@@ -1683,15 +1995,19 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     for (size_t i = 0; i < prog.nitems; i += 1) {
         tk_titem it = prog.items[i];
         if (it.tag != TK_TITEM_TYPE_DECL) continue;
-        if (!emit_type_decl(&b, it.as.type_decl, &err)) { free(b.ptr); return cg_err(err); }
+        if (!emit_type_decl(&b, it.as.type_decl, &err)) { tk_free0(b.ptr); return cg_err(err); }
     }
+
+    // OPTIONAL TYPEDEFS (REBOOT_PLAN §202) — after the named type decls (so a `Named?` inner's
+    // typedef is already declared) and before any function (so `T?` sigs resolve).
+    if (!cg_emit_optional_typedefs(&b, prog, &err)) { tk_free0(b.ptr); return cg_err(err); }
 
     // First pass: emit every top-level function. Use-decls/type-decls are handled above.
     for (size_t i = 0; i < prog.nitems; i += 1) {
         tk_titem it = prog.items[i];
         switch (it.tag) {
             case TK_TITEM_FUNCTION:
-                if (!emit_function(&b, it.as.function, &err)) { free(b.ptr); return cg_err(err); }
+                if (!emit_function(&b, it.as.function, &err)) { tk_free0(b.ptr); return cg_err(err); }
                 break;
             case TK_TITEM_USE:
                 break;   // imports are a no-op at the C level (M0)
@@ -1722,7 +2038,7 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
         bool ok = (i == last_stmt)
             ? emit_block_tail(&b, &it.as.statement, 1, /*in_main=*/true, main_ret, "    ", &err)
             : emit_stmt(&b, &it.as.statement, /*in_main=*/true, main_ret, "    ", &err);
-        if (!ok) { free(b.ptr); return cg_err(err); }
+        if (!ok) { tk_free0(b.ptr); return cg_err(err); }
     }
     cb(&b, "    return 0;\n");
     cb(&b, "}\n");

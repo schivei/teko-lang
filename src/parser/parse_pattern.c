@@ -16,6 +16,10 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
         tk_pattern p = { .tag = TK_PAT_WILDCARD };
         return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = pos + 1 } };
     }
+    if (k == TK_TOKEN_NULL) {   // `null` — matches the NONE of an optional `T?` (REBOOT_PLAN §202)
+        tk_pattern p = { .tag = TK_PAT_NULL };
+        return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = pos + 1 } };
+    }
     if (k == TK_TOKEN_NUMBER) {
         tk_str txt = t[pos].text;
         tk_expr v;

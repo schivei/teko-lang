@@ -94,9 +94,27 @@ fn type_eq(a: Type, b: Type) -> bool {
         Str           => match b { Str           => true;                           _ => false }
         Error         => match b { Error         => true;                           _ => false }  // native `error`
         Void          => match b { Void          => true;                           _ => false }  // return-only marker
-        Slice as sa   => match b { Slice as sb   => type_eq(sa.element, sb.element); _ => false }
-        // T? == U? iff inners equal (built-in unary former, like Slice).
-        Optional as oa => match b { Optional as ob => type_eq(oa.inner, ob.inner);  _ => false }
+        // []T == []U iff elements equal (built-in unary former). A `teko::list::empty()` carries
+        // the SENTINEL slice (its element is the `Void` marker; the C twin uses a NULL element
+        // pointer): it unifies with ANY concrete slice, so a bare `empty()` flows into a typed slot
+        // / a `push` whose item fixes the element type. A real slice never has a `void` element.
+        Slice as sa   => match b {
+            Slice as sb => {
+                match sa.element { Void => true; _ => match sb.element { Void => true; _ => type_eq(sa.element, sb.element) } }
+            }
+            _ => false
+        }
+        // T? == U? iff inners equal (built-in unary former, like Slice). A bare `null` literal
+        // carries the SENTINEL optional (its inner is the `Void` marker — REBOOT_PLAN §202; the
+        // C twin uses a NULL inner pointer): it unifies with ANY concrete optional, so `if`/
+        // `match` arms and binding/return slots accept it. The concrete type wins at the
+        // destination (via assignable / emit_as). A real optional never has a `void` inner.
+        Optional as oa => match b {
+            Optional as ob => {
+                match oa.inner { Void => true; _ => match ob.inner { Void => true; _ => type_eq(oa.inner, ob.inner) } }
+            }
+            _ => false
+        }
         Named as na   => match b { Named as nb   => na.name == nb.name;             _ => false }
         Variant as va => match b { Variant as vb => types_eq(va.members, vb.members); _ => false }
         Func as fa    => match b {

@@ -19,14 +19,14 @@ static tk_type_result func_type(tk_function f, tk_type_table table) {
     tk_type *params = NULL; size_t n = 0;
     for (size_t i = 0; i < f.nparams; i += 1) {
         tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
-        if (!pt.ok) { free(params); return pt; }
-        params = realloc(params, (n + 1) * sizeof *params);
+        if (!pt.ok) { tk_free0(params); return pt; }
+        params = tk_realloc0(params, (n + 1) * sizeof *params);
         if (!params) abort();
         params[n] = pt.as.value; n += 1;
     }
     tk_type_result ret = tk_resolve_type(f.return_type, table);
-    if (!ret.ok) { free(params); return ret; }
-    tk_type *rp = malloc(sizeof *rp); if (!rp) abort(); *rp = ret.as.value;
+    if (!ret.ok) { tk_free0(params); return ret; }
+    tk_type *rp = tk_alloc(sizeof *rp); if (!rp) abort(); *rp = ret.as.value;
     tk_type t = { .tag = TK_TYPE_FUNC, .as.func = { params, n, rp } };
     return (tk_type_result){ .ok = true, .as.value = t };
 }

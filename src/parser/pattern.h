@@ -29,9 +29,10 @@ typedef struct { tk_pattern *options; size_t n_options; }           tk_alt_patte
 typedef struct { tk_path type_name; bool has_binding; tk_str binding; } tk_bind_pattern; // `Foo` / `Foo as x`
 typedef struct { tk_path type_name; tk_str *fields; size_t n_fields; }  tk_field_pattern; // Type { f; g }
 typedef struct { int _unused; }                                     tk_wildcard_pattern; // _ (no payload)
+typedef struct { int _unused; }                                     tk_null_pattern;     // null — matches the NONE of an optional `T?` (REBOOT_PLAN §202); no payload
 
 struct tk_pattern {
-    enum { TK_PAT_WILDCARD, TK_PAT_LITERAL, TK_PAT_BIND, TK_PAT_FIELD, TK_PAT_RANGE, TK_PAT_ALT } tag;
+    enum { TK_PAT_WILDCARD, TK_PAT_LITERAL, TK_PAT_BIND, TK_PAT_FIELD, TK_PAT_RANGE, TK_PAT_ALT, TK_PAT_NULL } tag;
     union {
         tk_literal_pattern literal;
         tk_bind_pattern    bind;

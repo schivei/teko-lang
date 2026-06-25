@@ -372,12 +372,43 @@ Descartado "depois dos tokens" (tokens são do dev, por-arquivo). "Antes do chec
 11. **discard binding `let _ = expr`** — alvo `_`; codegen `(void)(expr);` (sem var C, repetições não colidem).
 12. **keywords contextuais `type`/`to` como nome** — `tk_is_name_at` (IDENT|type|to) em campo/param/binding + **valor/path** (parse_atom/parse_path).
 
-**PAREDE atual do march (gap #13): `typer.tks:249` — `null` como PADRÃO de match** (`match err? { null => {} ; error as e => return e }`) → entra no **subsistema de OPTIONALS** (`T?`/`null`/`?.`/`??`), que VM/codegen ainda honest-stop.
+13. **subsistema de OPTIONALS `T?`/`null`/`?.`/`??` — FEITO** (era a parede do gap #13): repr de valor opcional (VM `TK_VAL_OPT` none/present; codegen `tk_opt_<inner>` typedef por-tipo); `null` literal + `null` PADRÃO de match (NONE) + arm present (bind do inner); present-wrap (`T`→`T?` em `assignable_to`/`emit_as`); `?.` (safe-field propaga none) e `??` (coalesce, short-circuit). Diferencial VM==binário (idioma `error?` ambos os arms, `??`, `?.`, `fn -> T? { null }`). Regressão `examples/regressions/optionals` (VM=bin=6).
 
-**Três grandes subsistemas de BACKEND restantes (cada um multi-feature):**
-- **slices/lists/`teko::list` stdlib** — codegen tem ZERO suporte a slice; precisa repr + literais + push/empty + .len + indexação em codegen/VM.
+**PAREDE atual (gap #14): `parse_expr.tks:115` — PADRÃO de slice `[]lexer::Token as ts`** → entra no **subsistema de SLICES**.
+
+**Dois grandes subsistemas de BACKEND restantes (cada um multi-feature):**
+- **slices/lists/`teko::list` stdlib** — codegen tem ZERO suporte a slice; precisa repr + literais + push/empty + .len + indexação + **padrão de slice (`[]T as x`)** em codegen/VM. (PRÓXIMO.)
 - **parâmetros de função em codegen+VM** — toda fn do corpus tem params; ambos honest-stop hoje.
-- **optionals `T?`/`null`/`?.`/`??`** — repr de valor opcional + null-pattern + safe-field + coalesce em codegen/VM.
 > O front-end (parse+check) está perto da paridade; o BACKEND (codegen/exec destes 3) é a montanha — campanha multi-sessão.
 
 > **Recomendação de checkpoint:** as correções W5 + 12 gaps de front-end + o fix de heap são um corpo validado e um limite natural de commit. Sugiro commitar isso agora e seguir o self-host de backend (slices/params/optionals/stdlib) como campanha rastreada (task #55), em vez de um único mega-commit. Dívida de mirror `.tks` do último lote (discard-binding + contextual-`to`) em andamento (agente).
+
+## §16 — EVOLUÇÃO (RATIFICADA — 2026-06-25) — collections · generics · arenas/memória · `ref` · concorrência
+**Documento-mãe:** [`TEKO_EVOLUTION_DESIGN.md`](TEKO_EVOLUTION_DESIGN.md) (síntese unificada, S1–S9) + [`TEKO_EVOLUTION_JUSTIFICATION.md`](TEKO_EVOLUTION_JUSTIFICATION.md) (números medidos do corpus). Duas decisões do legislador transformam o estudo em **trabalho comprometido**:
+
+- **R1 — A evolução NÃO é diferida; é a campanha imediata pós-self-host.** *"Without it, we can't evolve more, the codebase is too 'locked' without these things."* Generics + controle de memória (arenas/`ref`) + collections reais + concorrência são **fundacionais, não opcionais**. Seguir a sequência S1–S9 do design. **Nuance de ordenação (aceita):** copy-append mínimo **agora** (forward-compatible, não tranca nada) para **chegar ao self-host**; depois construir a fundação **em Teko** (mais barato que duas vezes em C), **keystone primeiro** (S1→S2 arena + escape check). O "lock" é real; o destrancar é chegar ao self-host barato e então construir a fundação de imediato — não diferir indefinidamente.
+- **R2 — `ref` é só para valores mutáveis.** *"`ref` only mutable values can be referred, not immutable."* **Não há `ref` imutável/compartilhado.** Um `ref` só aponta para valor **mutável** e sempre carrega intenção de mutação; compartilhamento read-only é **cópia** (copy-by-default, M.0). Colapsa o par `ref`/`ref mut` num único `ref` (mutável), **remove** o rider aliasing-XOR-mutation (§3.1 do design) — reforçando o invariante "um escape check, **sem borrow-solver**". Trade-off aceito: aliasing read-only de valor **grande** copia (ou aguarda um read-view futuro); ok enquanto valores são pequenos (a norma do corpus).
+
+**A decidir ainda (keystone — §6 do design):** ratificar o **escape rule = UMA comparação de profundidade de região** (e com ele a recusa permanente a um borrow-solver / variáveis-de-lifetime). É a decisão da qual tudo o mais depende; será trazida ao tribunal ao chegar em S2.
+
+### §16.1 — Sequência de construção (espelha S1–S9 do design)
+```
+NOW (sem features de evolução; termina self-host, não tranca nada):
+  [now, custo ~0]  SEAM de alocação tk_alloc()/tk_realloc0()/tk_free0()  ← ponto-de-troca p/ arenas (S1)
+  [next]           slice-value layer + params de fn em codegen/VM + optionals  ← TERMINA SELF-HOST
+EVOLUÇÃO (pós-self-host, em ordem de dependência):
+  S1 arena primitive + root region          (deps: seam)
+  S2 scope regions + ESCAPE CHECK ★         (deps: S1)  ← linchpin; tribunal ratifica o escape rule aqui
+  S3 ref (MUTÁVEL-ONLY, R2)                  (deps: S2)
+  S4 generics (monomorphization) ∥ S1–S3    (deps: self-host)
+  S5 DI lifetimes → arenas                   (deps: S2[, S3])
+  S6 constraints (forçado por Map<K,V>)      (deps: S4 + Map real)
+  S7 collections dinâmicas reais/Map/Set     (deps: S4[,S6] + S2/S3)
+  S8 concorrência (capstone)                 (deps: S2+S3)
+  S9 LTS cleanup (Parsed<T>×14, parse/to_string)  (deps: S4)
+```
+**Invariantes de ordem:** arenas (S1–S2) antes de `ref` (S3) e de DI (S5) e do *storage* de collections (S7); `ref` (S3) antes de collections mutate-through (S7); generics (S4) antes de Map/Set (S7), e Map força constraints (S6); single-task (S1–S3) antes de concorrência (S8). Generics ⟂ concorrência (retrofit, nunca pré-requisito).
+
+### §16.2 — Início da execução (task #56)
+1. **SEAM `tk_alloc()`** (custo ~0, sem mudança de comportamento — hoje é um `malloc` fino): rotear os sítios de alocação do seed por `tk_alloc`/`tk_realloc0`/`tk_free0` em `core.h`/`core.c` (+ mirror `.tks`), para que o swap malloc→`region_alloc` (S1) seja mecânico. **SUPREME RULE**: cada `.c/.h` espelhado no `.tks`.
+2. Em seguida, retomar o self-host pela **slice-value layer + copy-append** (lado-leitura `[]T as x`/`.len`/índice já existe; falta repr de valor de slice em codegen+VM, literal `[]`, e append por cópia `xs + [x]`), tudo **fixed+copy** (sem dynamic push — diferido a S7). Cada incremento diferencial VM==binário.

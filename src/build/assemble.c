@@ -36,7 +36,7 @@ typedef struct { tk_item *ptr; size_t len; size_t cap; } items_buf;
 static items_buf items_push(items_buf b, tk_item it) {
     if (b.len == b.cap) {
         size_t ncap = (b.cap == 0) ? 8 : (b.cap * 2);
-        tk_item *np = realloc(b.ptr, ncap * sizeof(tk_item));
+        tk_item *np = tk_realloc0(b.ptr, ncap * sizeof(tk_item));
         if (np == NULL) abort();   // allocation failure PANICS (M.5)
         b.ptr = np;
         b.cap = ncap;
@@ -54,7 +54,7 @@ static tk_program_result fail(const char *msg) {
 // error is). For a located error msg is "line:col: text", yielding "path:line:col: text".
 static const char *diag_file(tk_str path, const char *msg) {
     size_t len = path.len + strlen(msg) + 2;
-    char *buf = malloc(len); if (!buf) abort();
+    char *buf = tk_alloc(len); if (!buf) abort();
     snprintf(buf, len, "%.*s:%s", (int)path.len, (const char *)path.ptr, msg);
     return buf;
 }
@@ -77,7 +77,7 @@ static bool is_main_file(tk_str path) {
 // Read a SourceFile's path (a str view) into a NUL-terminated C string for the host-IO
 // boundary (tk_read_file takes a const char*). Heap, process-lifetime (M.5).
 static char *path_cstr(tk_str path) {
-    char *buf = malloc(path.len + 1);
+    char *buf = tk_alloc(path.len + 1);
     if (buf == NULL) abort();
     memcpy(buf, path.ptr, path.len);
     buf[path.len] = '\0';
@@ -102,12 +102,12 @@ tk_program_result tk_assemble(tk_source_files files) {
 
         // --- read (M.1 host-IO via driver.c::tk_read_file) ---
         tk_str_result src = tk_read_file(cpath);
-        free(cpath);
-        if (!src.ok) { free(merged.ptr); return fail(src.as.error.message); }
+        tk_free0(cpath);
+        if (!src.ok) { tk_free0(merged.ptr); return fail(src.as.error.message); }
 
         // --- lex ---
         tk_tokens_result toks = tk_tokenize(src.as.value);
-        if (!toks.ok) { free(merged.ptr); return fail(diag_file(sf.path, toks.as.error.message)); }
+        if (!toks.ok) { tk_free0(merged.ptr); return fail(diag_file(sf.path, toks.as.error.message)); }
         const tk_token *t = toks.as.value.ptr;
         size_t n = toks.as.value.len;
 
@@ -115,11 +115,11 @@ tk_program_result tk_assemble(tk_source_files files) {
         tk_program one;
         if (is_main_file(sf.path)) {
             tk_parsed_main_file_result pr = tk_parse_main_file(t, n, 0);
-            if (!pr.ok) { free(merged.ptr); return fail(diag_file(sf.path, pr.as.error.message)); }
+            if (!pr.ok) { tk_free0(merged.ptr); return fail(diag_file(sf.path, pr.as.error.message)); }
             one = tk_main_file_to_program(pr.as.value.node);
         } else {
             tk_parsed_module_result pr = tk_parse_module(t, n, 0);
-            if (!pr.ok) { free(merged.ptr); return fail(diag_file(sf.path, pr.as.error.message)); }
+            if (!pr.ok) { tk_free0(merged.ptr); return fail(diag_file(sf.path, pr.as.error.message)); }
             one = tk_module_to_program(pr.as.value.node);
         }
 
@@ -130,7 +130,7 @@ tk_program_result tk_assemble(tk_source_files files) {
             it.file      = sf.path;        // W-loc-2: tag the source file for checker diagnostics
             merged = items_push(merged, it);
         }
-        free(one.items);   // the per-file program's backing array is copied out
+        tk_free0(one.items);   // the per-file program's backing array is copied out
     }
 
     return (tk_program_result){ .ok = true,

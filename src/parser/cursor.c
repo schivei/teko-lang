@@ -25,7 +25,7 @@ tk_error tk_err_at(const tk_token *t, size_t n, size_t pos, const char *msg) {
     if (n > 0) { size_t i = pos < n ? pos : n - 1; line = t[i].line; col = t[i].col; }
     if (line == 0) return tk_error_make(msg);
     size_t len = strlen(msg) + 32;
-    char *buf = malloc(len); if (!buf) abort();
+    char *buf = tk_alloc(len); if (!buf) abort();
     snprintf(buf, len, "%u:%u: %s", line, col, msg);
     return tk_error_make(buf);
 }

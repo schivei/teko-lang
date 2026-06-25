@@ -27,11 +27,14 @@ fn type_bytelit(b: parser::ByteLit) -> TExpr {
 fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool prim (LEGISLATION §75)
     TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool } }
 }
-// A bare `null` is ambiguous — its optional inner is inferred from context (REBOOT_PLAN §202).
-// The only internal site with that context is `x ?? null` (type_coalesce). Elsewhere the type
-// is unknown, so this honest-errors (M.3) instead of guessing.
+// A bare `null` types to the SENTINEL optional (an `Optional` whose inner is the `Void` marker
+// — REBOOT_PLAN §202; the C twin uses a NULL inner pointer): it unifies with ANY concrete `T?`
+// (type_eq) and is assignable to any optional slot (assignable). The CONCRETE inner is supplied
+// by the destination — a binding annotation `: T?`, a return `-> T?`, the other match/`if` arm,
+// or `x ?? null` — like a variant case widening into a variant slot. The VM lowers it to NONE
+// (untyped); codegen wraps it to the slot's optional type via emit_as.
 fn type_nulllit(n: parser::NullLit) -> TExpr | error {
-    error { message = "`null` needs a known optional type from context (e.g. `x ?? null`) — REBOOT_PLAN §202" }
+    TExpr { kind = TNullLit { }; type = Optional { inner = Void { } } }
 }
 fn type_var(v: parser::Var, env: Env) -> TExpr | error {
     let t = match lookup(env, v.name) { Type as ty => ty; error as e => return e }
@@ -102,7 +105,43 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
     TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool } }
 }
 
+// teko::list::empty / teko::list::push — GENERIC builtins (no `.tks` module), special-cased
+// like print/assert. Recognized by the LAST-2 path segments `list::empty` / `list::push`,
+// rooted at `teko` (or bare `list::*`). The element type is INFERRED (B.8/Slice):
+//   * empty()    -> []<sentinel> (Slice whose element is the Void marker) — unifies with any slice
+//   * push(s, x) -> []typeof(x); `s` must be a slice (sentinel or matching element)
+// Returns the typed TExpr, or `error`; a non-list path returns null (try the ordinary call).
+fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr? | error {
+    if c.callee.segments.len < 2 { return null }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    if prev != "list" { return null }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return null }
+
+    if last == "empty" {
+        if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
+        // SENTINEL slice: element is the Void marker (unifies with any concrete slice — type_eq).
+        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty() }; type = Slice { element = Void { } } }
+    } else if last == "push" {
+        if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
+        let s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+        let x = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+        let elem = match s.type { Slice as sl => sl.element; _ => return error { message = "teko::list::push first argument must be a slice (`[]T`)" } }
+        if type_is_void(x.type) { return error { message = "teko::list::push item cannot be a `void` expression (M.1)" } }
+        // The pushed item fixes the result element type; a concrete slice element must match the
+        // item (a sentinel `empty()` element is the Void marker, which type_eq accepts as any).
+        let matches = match elem { Void => true; _ => type_eq(elem, x.type) }
+        if !matches { return error { message = "teko::list::push item type does not match the slice element type" } }
+        mut args = teko::list::push(teko::list::push(teko::list::empty(), s), x)
+        TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = x.type } }
+    } else {
+        null
+    }
+}
+
 fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
+    match type_list_builtin(c, env, table) { TExpr as te => return te; null => { } }   // teko::list::empty / push (generic)
     let name = c.callee.segments[c.callee.segments.len - 1].name
     let ft = match lookup(env, name) { Type as t => t; error as e => return e }
     match ft {
@@ -624,7 +663,7 @@ fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error
         i++
     }
     if !exhaustive(m.arms, s.type, table) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
-    let result = match have_type { true => first; false => Void { } }   // all arms diverge → void
+    let result = if have_type { first } else { Void { } }   // all arms diverge → void
     TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result }
 }
 
@@ -734,6 +773,16 @@ fn function_return(f: parser::Function, table: TypeTable) -> Type | error {
 // variant (`let s: Shape = Circle { … }`).
 fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool {
     if type_eq(from, to) { return true }
+    // PRESENT-WRAP (REBOOT_PLAN §202): a `T` widens to `T?`. The destination is `T?`; the source
+    // is a plain `T` (or itself a `T?` — eq/sentinel handled by type_eq). Mirrors the variant
+    // case→variant widening below; codegen performs the PRESENT wrap via emit_as.
+    match to {
+        Optional as opt => {
+            if type_eq(from, opt.inner) { return true }          // T → T?
+            match from { Optional => return true; _ => {} }       // U? / sentinel → T?
+        }
+        _ => {}
+    }
     match expand_variant(to, table) {        // a NAMED variant → its Variant (so cases widen in)
         Variant as v => {
             mut i = 0

@@ -12,7 +12,15 @@ static tk_env_result efail(tk_error e) { return (tk_env_result){ .ok = false, .a
 
 // env | error: validate a pattern, extend the env.
 tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_type_table table) {
+    // OPTIONAL subject `T?` (REBOOT_PLAN §202): `null` matches the NONE case (binds nothing);
+    // any OTHER pattern matches the PRESENT case and is checked against the inner `T`.
+    if (subject.tag == TK_TYPE_OPTIONAL) {
+        if (p.tag == TK_PAT_NULL) return eok(env);   // NONE — binds nothing
+        return tk_check_pattern(p, *subject.as.optional.inner, env, table);   // PRESENT — check vs inner
+    }
     switch (p.tag) {
+        case TK_PAT_NULL:
+            return efail(tk_error_make("`null` pattern requires an optional subject (`T?`) — REBOOT_PLAN §202"));
         case TK_PAT_WILDCARD: return eok(env);
         case TK_PAT_BIND: {
             tk_type_result ct = resolve_named(p.as.bind.type_name, table); // see resolve.c
@@ -100,8 +108,33 @@ static bool some_arm_names(tk_arm *arms, size_t n, tk_str name) {
         if (!arms[i].has_when && pattern_names(arms[i].pattern, name)) return true;
     return false;
 }
+// is the NONE case (a `null` pattern) covered by some UNGUARDED arm?
+static bool some_arm_is_null(tk_arm *arms, size_t n) {
+    for (size_t i = 0; i < n; i += 1)
+        if (!arms[i].has_when && arms[i].pattern.tag == TK_PAT_NULL) return true;
+    return false;
+}
+// is the PRESENT case of an optional `T?` covered? `inner` is the `T`. The present case is
+// covered by some UNGUARDED non-`null` pattern that is exhaustive over the inner: a wildcard,
+// a bare bind (`T as x` / `T`) over the inner, OR (recursively) the inner's own exhaustiveness
+// when the inner is a variant. We re-run tk_exhaustive over the non-null arms with the inner
+// subject, but a bare BIND over a SCALAR inner does count as present-covering here.
+static bool present_case_covered(tk_arm *arms, size_t n, tk_type inner, tk_type_table table) {
+    // A bare bind/wildcard arm (un-`null`, unguarded) covers the whole present value.
+    for (size_t i = 0; i < n; i += 1) {
+        if (arms[i].has_when) continue;
+        tk_pattern p = arms[i].pattern;
+        if (p.tag == TK_PAT_WILDCARD) return true;
+        if (p.tag == TK_PAT_BIND && p.as.bind.type_name.len > 0) return true;   // `T as x` / `T` binds the present value
+    }
+    // Otherwise fall back to ordinary exhaustiveness over the inner (e.g. a variant inner).
+    return tk_exhaustive(arms, n, inner, table);
+}
 bool tk_exhaustive(tk_arm *arms, size_t n, tk_type subject, tk_type_table table) {
     if (has_wildcard(arms, n)) return true;
+    if (subject.tag == TK_TYPE_OPTIONAL) {   // `T?` — exhaustive iff `null` AND the present case are covered (REBOOT §202)
+        return some_arm_is_null(arms, n) && present_case_covered(arms, n, *subject.as.optional.inner, table);
+    }
     tk_type sv = tk_expand_variant(subject, table);   // a NAMED variant → its TK_TYPE_VARIANT cases (B.14/B.15)
     if (sv.tag != TK_TYPE_VARIANT) return false;
     for (size_t i = 0; i < sv.as.variant.len; i += 1) {

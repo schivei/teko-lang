@@ -45,7 +45,7 @@ uint32_t tk_st_intern(tk_strtable *t, tk_str s) {
     if (f != 0xFFFFFFFFu) return f;
     if (t->len == t->cap) {
         size_t nc = t->cap ? t->cap * 2 : 8;
-        tk_str *np = realloc(t->ptr, nc * sizeof *np); if (!np) abort();
+        tk_str *np = tk_realloc0(t->ptr, nc * sizeof *np); if (!np) abort();
         t->ptr = np; t->cap = nc;
     }
     t->ptr[t->len] = s;

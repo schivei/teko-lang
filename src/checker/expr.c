@@ -12,7 +12,7 @@ tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_typ
 // (tk_exhaustive is declared in typer_internal.h)
 
 // ---- shared small helpers (one definition here; expr.h declares them for typer.c) ----
-tk_texpr      *tk_box(tk_texpr t) { tk_texpr *p = malloc(sizeof *p); if (!p) abort(); *p = t; return p; }
+tk_texpr      *tk_box(tk_texpr t) { tk_texpr *p = tk_alloc(sizeof *p); if (!p) abort(); *p = t; return p; }
 tk_type        tk_prim_t(tk_prim_kind k) { return (tk_type){ .tag = TK_TYPE_PRIM, .as.prim = k }; }
 tk_type        tk_void_t(void)           { return (tk_type){ .tag = TK_TYPE_VOID }; }
 bool           tk_is_bool(tk_type t)     { return t.tag == TK_TYPE_PRIM && t.as.prim == TK_PRIM_BOOL; }
@@ -127,7 +127,61 @@ static tk_texpr_result type_compare(tk_compare c, tk_env env, tk_type_table tabl
                            .as.compare = { box(f.as.value), terms.ptr, terms.len } });
 }
 
+// heap a tk_type (the slice element pointer). Local twin of resolve.c's box.
+static tk_type *box_type(tk_type t) { tk_type *p = tk_alloc(sizeof *p); if (!p) abort(); *p = t; return p; }
+
+// segment-name == C literal (terse; tk_str_eq is defined later for resolved comparisons).
+static bool seg_lit(tk_str s, const char *lit) {
+    size_t n = 0; while (lit[n]) n += 1;
+    return s.len == n && (n == 0 || memcmp(s.ptr, lit, n) == 0);
+}
+
+// teko::list::empty / teko::list::push — GENERIC builtins (no `.tks` module), special-cased
+// like print/assert. Recognized by the LAST-2 path segments `list::empty` / `list::push`,
+// rooted at `teko` (or bare `list::*`). The element type is INFERRED (B.8/Slice):
+//   * empty()        -> []<sentinel> (TK_TYPE_SLICE, element == NULL) — unifies with any slice
+//   * push(s, x)     -> []typeof(x); `s` must be a slice (sentinel or matching element)
+// Returns true and sets *out when the path named one (typed accordingly).
+static bool type_list_builtin(tk_call c, tk_env env, tk_type_table table, tk_texpr_result *out) {
+    if (c.callee.len < 2) return false;
+    tk_str last = c.callee.segments[c.callee.len - 1].name;
+    tk_str prev = c.callee.segments[c.callee.len - 2].name;
+    if (!seg_lit(prev, "list")) return false;
+    bool rooted = (c.callee.len == 2) || seg_lit(c.callee.segments[0].name, "teko");
+    if (!rooted) return false;
+
+    if (seg_lit(last, "empty")) {
+        if (c.nargs != 0) { *out = xerr("teko::list::empty expects no arguments"); return true; }
+        // SENTINEL slice: element == NULL (unifies with any concrete slice via tk_type_eq).
+        tk_type st = { .tag = TK_TYPE_SLICE, .as.slice.element = NULL };
+        *out = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = st, .as.call = { c.callee, NULL, 0 } });
+        return true;
+    }
+    if (seg_lit(last, "push")) {
+        if (c.nargs != 2) { *out = xerr("teko::list::push expects two arguments (slice, item)"); return true; }
+        tk_texpr_result s = tk_typer_expr(c.args[0], env, table); if (!s.ok) { *out = s; return true; }
+        tk_texpr_result x = tk_typer_expr(c.args[1], env, table); if (!x.ok) { *out = x; return true; }
+        if (s.as.value.type.tag != TK_TYPE_SLICE) { *out = xerr("teko::list::push first argument must be a slice (`[]T`)"); return true; }
+        if (tk_type_is_void(&x.as.value.type)) { *out = xerr("teko::list::push item cannot be a `void` expression (M.1)"); return true; }
+        // The pushed item fixes the result element type; if the slice carried a concrete element
+        // it must match the item (sentinel `empty()` accepts anything — tk_type_eq).
+        if (s.as.value.type.as.slice.element != NULL &&
+            !tk_type_eq(s.as.value.type.as.slice.element, &x.as.value.type)) {
+            *out = xerr("teko::list::push item type does not match the slice element type"); return true;
+        }
+        tk_type elem = x.as.value.type;
+        tk_type st = { .tag = TK_TYPE_SLICE, .as.slice.element = box_type(elem) };
+        tk_texpr *args = tk_alloc(2 * sizeof *args); if (!args) abort();
+        args[0] = s.as.value; args[1] = x.as.value;
+        *out = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = st, .as.call = { c.callee, args, 2 } });
+        return true;
+    }
+    return false;
+}
+
 static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
+    tk_texpr_result lb;
+    if (type_list_builtin(c, env, table, &lb)) return lb;   // teko::list::empty / push (generic)
     tk_str name = c.callee.segments[c.callee.len - 1].name;
     tk_type_result ftr = tk_env_lookup(env, name);   // user functions resolve first;
     if (!ftr.ok) ftr = tk_builtin_fn(name);          // injected, non-shadowable stdlib is the fallback
@@ -308,7 +362,7 @@ static tk_texpr_result type_index(tk_index ix, tk_env env, tk_type_table table) 
 
 // ---- nullability nodes (LEGISLATION §75 booleans; REBOOT_PLAN §202/§203 null/?./??) ----
 // box a tk_type onto the heap (the optional's inner) — like resolve.c's box, local here.
-static tk_type *tk_box_type_val(tk_type t) { tk_type *p = malloc(sizeof *p); if (!p) abort(); *p = t; return p; }
+static tk_type *tk_box_type_val(tk_type t) { tk_type *p = tk_alloc(sizeof *p); if (!p) abort(); *p = t; return p; }
 
 // `recv?.field` (REBOOT_PLAN §203): the receiver must be an OPTIONAL of a named struct;
 // the result is the field's type made optional — null propagates. The struct-field layer
@@ -380,8 +434,8 @@ static tk_texpr_result type_struct_lit(tk_struct_lit sl, tk_env env, tk_type_tab
         if (!vt.ok) return vt;
         if (vt.as.value.type.tag != TK_TYPE_STR)
             return xerr("`error`'s `message` must be a `str`");
-        tk_str  *names = malloc(sizeof *names); if (!names) abort(); names[0] = msg_field;
-        tk_texpr *vals = malloc(sizeof *vals);  if (!vals)  abort(); vals[0]  = vt.as.value;
+        tk_str  *names = tk_alloc(sizeof *names); if (!names) abort(); names[0] = msg_field;
+        tk_texpr *vals = tk_alloc(sizeof *vals);  if (!vals)  abort(); vals[0]  = vt.as.value;
         return xok((tk_texpr){ .tag = TK_TEXPR_STRUCT_INIT, .type = (tk_type){ .tag = TK_TYPE_ERROR },
                                .as.struct_init = { names, vals, 1 } });
     }
@@ -392,19 +446,19 @@ static tk_texpr_result type_struct_lit(tk_struct_lit sl, tk_env env, tk_type_tab
     tk_struct_body sb = decl.as.value.body.as.struct_body;
     if (sl.nfields != sb.n_fields) return xerr("a struct literal must set exactly the declared fields (count mismatch)");
 
-    tk_str  *names = malloc((sb.n_fields ? sb.n_fields : 1) * sizeof *names); if (!names) abort();
-    tk_texpr *vals = malloc((sb.n_fields ? sb.n_fields : 1) * sizeof *vals); if (!vals) abort();
+    tk_str  *names = tk_alloc((sb.n_fields ? sb.n_fields : 1) * sizeof *names); if (!names) abort();
+    tk_texpr *vals = tk_alloc((sb.n_fields ? sb.n_fields : 1) * sizeof *vals); if (!vals) abort();
     for (size_t d = 0; d < sb.n_fields; d += 1) {
         tk_str fname = sb.fields[d].name;
         size_t found = sl.nfields, hits = 0;          // locate the provided value for this declared field
         for (size_t i = 0; i < sl.nfields; i += 1)
             if (tk_str_eq(sl.field_names[i], fname)) { found = i; hits += 1; }
-        if (hits == 0) { free(names); free(vals); return xerr("a struct literal is missing a declared field"); }
-        if (hits > 1)  { free(names); free(vals); return xerr("a struct literal sets a field more than once"); }
+        if (hits == 0) { tk_free0(names); tk_free0(vals); return xerr("a struct literal is missing a declared field"); }
+        if (hits > 1)  { tk_free0(names); tk_free0(vals); return xerr("a struct literal sets a field more than once"); }
         tk_type_result ft = tk_resolve_type(sb.fields[d].type_ann, table);
-        if (!ft.ok) { free(names); free(vals); return xferr(ft.as.error); }
+        if (!ft.ok) { tk_free0(names); tk_free0(vals); return xferr(ft.as.error); }
         tk_texpr_result vt = tk_typer_expr(sl.field_vals[found], env, table);
-        if (!vt.ok) { free(names); free(vals); return vt; }
+        if (!vt.ok) { tk_free0(names); tk_free0(vals); return vt; }
         tk_texpr val = vt.as.value;
         // literal adaptation: a fitting numeric literal adopts the field's prim type.
         if (val.tag == TK_TEXPR_NUMBER && ft.as.value.tag == TK_TYPE_PRIM && !tk_type_eq(&val.type, &ft.as.value)) {
@@ -414,7 +468,7 @@ static tk_texpr_result type_struct_lit(tk_struct_lit sl, tk_env env, tk_type_tab
             if (fits) val.type = ft.as.value;
         }
         if (!tk_type_eq(&val.type, &ft.as.value)) {
-            free(names); free(vals);
+            tk_free0(names); tk_free0(vals);
             return xerr("a struct-literal field value does not match the field's declared type");
         }
         names[d] = fname; vals[d] = val;
@@ -431,20 +485,20 @@ static tk_texpr_result type_struct_lit(tk_struct_lit sl, tk_env env, tk_type_tab
 // so VM/codegen know str-passthrough vs int→str.
 static tk_texpr_result type_interp(tk_interp in, tk_env env, tk_type_table table) {
     tk_texpr *holes = NULL;
-    if (in.nholes > 0) { holes = malloc(in.nholes * sizeof *holes); if (!holes) abort(); }
+    if (in.nholes > 0) { holes = tk_alloc(in.nholes * sizeof *holes); if (!holes) abort(); }
     for (size_t i = 0; i < in.nholes; i += 1) {
         tk_texpr_result h = tk_typer_expr(in.holes[i], env, table);
-        if (!h.ok) { free(holes); return h; }
+        if (!h.ok) { tk_free0(holes); return h; }
         tk_type ht = h.as.value.type;
         if (ht.tag != TK_TYPE_STR && !is_integer(ht)) {
-            free(holes);
+            tk_free0(holes);
             return xerr("interpolation hole must be a str or an integer");
         }
         holes[i] = h.as.value;
     }
     // carry the decoded pieces verbatim (the parser already resolved escapes).
     tk_str *pieces = NULL;
-    if (in.npieces > 0) { pieces = malloc(in.npieces * sizeof *pieces); if (!pieces) abort();
+    if (in.npieces > 0) { pieces = tk_alloc(in.npieces * sizeof *pieces); if (!pieces) abort();
         for (size_t i = 0; i < in.npieces; i += 1) pieces[i] = in.pieces[i]; }
     return xok((tk_texpr){ .tag = TK_TEXPR_INTERP, .type = (tk_type){ .tag = TK_TYPE_STR },
                            .as.interp = { pieces, in.npieces, holes, in.nholes } });
@@ -473,11 +527,16 @@ tk_texpr_result tk_typer_expr(tk_expr e, tk_env env, tk_type_table table) {
             return xok((tk_texpr){ .tag = TK_TEXPR_BOOL, .type = tk_prim_t(TK_PRIM_BOOL),
                                    .as.boolean = { e.as.boolean.value } });
         case TK_EXPR_NULL:
-            // A bare `null` is ambiguous — its optional inner is inferred from context
-            // (REBOOT_PLAN §202). The only internal site with that context is `x ?? null`,
-            // handled in type_coalesce. Elsewhere (a binding without `: T?`, a loose
-            // statement) the type is unknown, so we honest-error (M.3) instead of guessing.
-            return xerr("`null` needs a known optional type from context (e.g. `x ?? null`) — REBOOT_PLAN §202");
+            // A bare `null` types to the SENTINEL optional (TK_TYPE_OPTIONAL with inner == NULL
+            // — REBOOT_PLAN §202): it unifies with ANY concrete `T?` (tk_type_eq) and is
+            // assignable to any optional slot (assignable_to). The CONCRETE inner is supplied by
+            // the destination — a binding annotation `: T?`, a function return `-> T?`, the other
+            // match/`if` arm, or `x ?? null` — exactly like a variant case widening into a
+            // variant slot. The VM lowers it to NONE (untyped); codegen wraps it to the slot's
+            // optional type via emit_as. The sentinel never reaches codegen's emit_type alone.
+            return xok((tk_texpr){ .tag = TK_TEXPR_NULL,
+                                   .type = (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional.inner = NULL },
+                                   .as.null_lit = { 0 } });
         case TK_EXPR_VAR:    return type_var(e.as.var, env);
         case TK_EXPR_BINARY: return type_binary(e.as.binary, env, table);
         case TK_EXPR_UNARY:  return type_unary(e.as.unary, env, table);

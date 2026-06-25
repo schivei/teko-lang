@@ -8,7 +8,7 @@ static bool name_eq(tk_str a, tk_str b) {
 }
 // box a Type onto the heap — the compiler-managed indirection, made concrete.
 static tk_type *box(tk_type t) {
-    tk_type *p = malloc(sizeof *p);
+    tk_type *p = tk_alloc(sizeof *p);
     if (!p) abort();
     *p = t;
     return p;
@@ -76,18 +76,18 @@ tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
             tk_type *members = NULL; size_t n = 0;
             for (size_t i = 0; i < te.as.uni.len; i += 1) {
                 tk_type_result m = tk_resolve_type(te.as.uni.members[i], table);
-                if (!m.ok) { free(members); return m; }
+                if (!m.ok) { tk_free0(members); return m; }
                 // M.1/rule 2 & 3: a variant member must be a COMPLETE type — never
                 // `void` (not a value) and never nullable (`T?` — disjoint domain).
                 if (m.as.value.tag == TK_TYPE_VOID) {
-                    free(members);
+                    tk_free0(members);
                     return (tk_type_result){ .ok = false, .as.error = tk_error_make("a variant member may not be `void`") };
                 }
                 if (m.as.value.tag == TK_TYPE_OPTIONAL) {
-                    free(members);
+                    tk_free0(members);
                     return (tk_type_result){ .ok = false, .as.error = tk_error_make("a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`") };
                 }
-                members = realloc(members, (n + 1) * sizeof *members);
+                members = tk_realloc0(members, (n + 1) * sizeof *members);
                 if (!members) abort();
                 members[n] = m.as.value; n += 1;
             }

@@ -23,7 +23,7 @@ tk_env tk_env_define(tk_env env, tk_str name, tk_type t, bool is_mut) {
     // allocated"). Copy-on-extend keeps each branch's env independent. O(n) per define;
     // the bootstrap stays small (M.5), and this matches the functional `.tks` env twin.
     size_t n = env.len;
-    tk_val_binding *buf = malloc((n + 1) * sizeof *buf);
+    tk_val_binding *buf = tk_alloc((n + 1) * sizeof *buf);
     if (buf == NULL) { abort(); }
     if (n != 0) { memcpy(buf, env.ptr, n * sizeof *buf); }
     buf[n] = (tk_val_binding){ .name = name, .type = t, .is_mut = is_mut };

@@ -16,7 +16,7 @@
 // return a str viewing its [0,len) bytes. Never freed — process lifetime (M.5);
 // allocation failure aborts, like the rest of the tree.
 static tk_str owned_str(const char *bytes, size_t len) {
-    char *buf = malloc(len + 1);
+    char *buf = tk_alloc(len + 1);
     if (buf == NULL) abort();
     memcpy(buf, bytes, len);
     buf[len] = '\0';
@@ -63,7 +63,7 @@ static bool walk(const char *dir, const char *ns,
 
         // child path on disk: dir + "/" + name.
         size_t dlen = strlen(dir), nlen = strlen(name);
-        char *child = malloc(dlen + 1 + nlen + 1);
+        char *child = tk_alloc(dlen + 1 + nlen + 1);
         if (child == NULL) { closedir(d); abort(); }
         memcpy(child, dir, dlen);
         child[dlen] = '/';
@@ -78,16 +78,16 @@ static bool walk(const char *dir, const char *ns,
             closedir(sub);
             // extend the namespace: ns + "::" + name.
             size_t nslen = strlen(ns);
-            char *cns = malloc(nslen + 2 + nlen + 1);
-            if (cns == NULL) { free(child); closedir(d); abort(); }
+            char *cns = tk_alloc(nslen + 2 + nlen + 1);
+            if (cns == NULL) { tk_free0(child); closedir(d); abort(); }
             memcpy(cns, ns, nslen);
             cns[nslen] = ':'; cns[nslen + 1] = ':';
             memcpy(cns + nslen + 2, name, nlen);
             cns[nslen + 2 + nlen] = '\0';
 
             bool ok = walk(child, cns, out);
-            free(cns);
-            free(child);
+            tk_free0(cns);
+            tk_free0(child);
             if (!ok) { closedir(d); return false; }
         } else {
             // a regular file — keep only .tks/.tkt, mapped to THIS dir's namespace.
@@ -98,7 +98,7 @@ static bool walk(const char *dir, const char *ns,
                 };
                 *out = tk_source_files_push(*out, sf);
             }
-            free(child);
+            tk_free0(child);
         }
     }
 
@@ -111,21 +111,21 @@ static bool walk(const char *dir, const char *ns,
 // invisible — never a namespace segment). name/source are str VIEWS, not necessarily
 // NUL-terminated, so copy them to C strings for the host-IO boundary first.
 tk_source_files_result tk_discover(tk_str name, tk_str source) {
-    char *root_dir = malloc(source.len + 1);
+    char *root_dir = tk_alloc(source.len + 1);
     if (root_dir == NULL) abort();
     memcpy(root_dir, source.ptr, source.len);
     root_dir[source.len] = '\0';
 
-    char *root_ns = malloc(name.len + 1);
-    if (root_ns == NULL) { free(root_dir); abort(); }
+    char *root_ns = tk_alloc(name.len + 1);
+    if (root_ns == NULL) { tk_free0(root_dir); abort(); }
     memcpy(root_ns, name.ptr, name.len);
     root_ns[name.len] = '\0';
 
     tk_source_files files = tk_source_files_empty();
     bool ok = walk(root_dir, root_ns, &files);
 
-    free(root_dir);
-    free(root_ns);
+    tk_free0(root_dir);
+    tk_free0(root_ns);
 
     if (!ok) {
         tk_source_files_free(files);
