@@ -29,7 +29,7 @@
 static tk_parsed_result parse_expr_a(const tk_token *t, size_t n, size_t pos, bool as_);
 
 static tk_parsed_args_result parse_call_args(const tk_token *t, size_t n, size_t pos) {
-    size_t p = pos + 1;                                  // consume `(`
+    size_t p = tk_skip_seps(t, n, pos + 1);             // consume `(`, skip leading newlines (multi-line args)
     tk_expr *args = NULL; size_t na = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
         return (tk_parsed_args_result){ .ok = true, .as.value = { .args = args, .n_args = 0, .next = p + 1 } };
@@ -38,9 +38,10 @@ static tk_parsed_args_result parse_call_args(const tk_token *t, size_t n, size_t
         tk_parsed_result a = parse_expr_a(t, n, p, true);   // inside `(` … `)` — struct literals allowed
         if (!a.ok) { return (tk_parsed_args_result){ .ok = false, .as.error = a.as.error }; }
         tk_exprs_push(&args, &na, a.as.value.node);
-        p = a.as.value.next;
+        p = tk_skip_seps(t, n, a.as.value.next);         // a `,` / `)` may sit on the next line (multi-line args)
         if (!tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { break; }
-        p += 1;                                          // consume `,`
+        p = tk_skip_seps(t, n, p + 1);                   // consume `,` (+ optional newlines before the next arg)
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) { break; }   // trailing comma before `)`
     }
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
         return (tk_parsed_args_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ')' to close the argument list") };

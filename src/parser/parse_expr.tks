@@ -7,7 +7,7 @@ use teko::lexer
 // and by MethodCall (P2b). Args parse with struct literals ALLOWED (W4a): a comma/paren
 // delimiter makes a trailing `{` unambiguous again, so each arg uses parse_expr.
 fn parse_call_args(tokens: []lexer::Token, pos: u64) -> ParsedArgs | error {
-    mut p = pos + 1                                  // consume `(`
+    mut p = skip_seps(tokens, pos + 1)              // consume `(`, skip leading newlines (multi-line args)
     mut args = teko::list::empty()
     if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return ParsedArgs { args = args, next = p + 1 }
@@ -15,9 +15,10 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64) -> ParsedArgs | error {
     loop {
         let a = match parse_expr(tokens, p) { Parsed as x => x; error as e => return e }   // inside `(` … `)` — struct literals allowed
         args = teko::list::push(args, a.node)
-        p = a.next
+        p = skip_seps(tokens, a.next)               // a `,` / `)` may sit on the next line (multi-line args)
         if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
-        p = p + 1                                    // consume `,`
+        p = skip_seps(tokens, p + 1)                // consume `,` (+ optional newlines before the next arg)
+        if is_kind_at(tokens, p, lexer::TokenKind::RParen) { break }   // trailing comma before `)`
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return err_at(tokens, p, "expected ')' to close the argument list")
