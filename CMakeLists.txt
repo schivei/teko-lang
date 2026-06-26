@@ -124,3 +124,16 @@ target_link_libraries(teko PRIVATE teko_bootstrap)
 target_compile_definitions(teko PRIVATE
     TK_RT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
     TK_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+# --- SELF-HOST: the native build of teko's OWN corpus — THE end-to-end validation ----------
+# `teko build .` runs the full pipeline (read → lex → parse → check → native codegen → cc link),
+# emitting ./bin/teko. This is the gating proof: if this fails, the native backend is not coherent,
+# so nothing downstream is guaranteed. Run it with:  cmake --build build --target selfhost
+# (equivalently, by hand:  ./build/teko build .  from the project root → ./bin/teko).
+add_custom_target(selfhost
+    COMMAND $<TARGET_FILE:teko> build ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS teko
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "self-host: native build of teko's own corpus -> ./bin/teko (THE validation gate)"
+    USES_TERMINAL
+    VERBATIM)

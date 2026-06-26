@@ -156,19 +156,22 @@ fn run_cc(cfile: str, binary: str) -> i32 {
 fn backend(path: str, prog: checker::TProgram) -> i32 {
     let csrc = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(path, e.message) }
 
-    let stem  = output_stem(path)
-    let cfile = teko::str::concat(stem, ".c")
+    // Native build artifacts go to ./bin (mirrors driver.c's tk_backend). The C twin does
+    // mkdir("bin"); the .tks host-FFI `mkdir` is a pending bottom (teko::fs::mkdir), so this path
+    // assumes ./bin exists for now — to be completed when the dir-create FFI lands.
+    let base  = teko::str::concat("bin/", output_stem(path))
+    let cfile = teko::str::concat(base, ".c")
 
     match teko::io::write_file(cfile, csrc) {
         error as e => return fail(path, e.message)
         null       => {}                              // error? — null = success (write_file yields no value)
     }
 
-    if run_cc(cfile, stem) != 0 {
+    if run_cc(cfile, base) != 0 {
         return fail(path, "cc failed to build the generated C")
     }
 
-    teko::io::print(teko::str::concat3("teko: ", path, teko::str::concat(": built ", stem)))
+    teko::io::print(teko::str::concat3("teko: ", path, teko::str::concat(": built ", base)))
     0
 }
 

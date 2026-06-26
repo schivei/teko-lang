@@ -20,6 +20,7 @@
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
 #include <unistd.h>          // chdir (run the project path from its own root — A3)
+#include <sys/stat.h>        // mkdir — the native build output dir (./bin)
 #include <dirent.h>          // opendir/readdir — find the single *.tkp manifest
 
 // F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
@@ -226,25 +227,30 @@ static int tk_backend(const char *label, const char *stem, tk_tprogram prog) {
     tk_cstr_result emitted = tk_emit_c(prog);
     if (!emitted.ok) return fail(label, emitted.as.error.message);
 
-    // The emitted C goes to "<stem>.c".
-    size_t clen = strlen(stem) + 3;
-    char *cfile = tk_alloc(clen);
-    if (cfile == NULL) abort();
-    snprintf(cfile, clen, "%s.c", stem);
+    // Native build artifacts go to ./bin (created at the project root — cwd is the project after
+    // the front-end chdir'd). The generated C is "bin/<stem>.c"; the binary is "bin/<stem>".
+    mkdir("bin", 0755);   // ignore EEXIST — only a hard mkdir failure surfaces below via fopen
+    size_t blen = strlen(stem) + 8;   // "bin/" + stem + ".c" + NUL
+    char *cfile = tk_alloc(blen);
+    char *binp  = tk_alloc(blen);
+    if (cfile == NULL || binp == NULL) abort();
+    snprintf(cfile, blen, "bin/%s.c", stem);
+    snprintf(binp,  blen, "bin/%s", stem);
 
     FILE *f = fopen(cfile, "wb");
-    if (f == NULL) { tk_free0(emitted.as.value); tk_free0(cfile); return fail(label, "cannot write generated C"); }
+    if (f == NULL) { tk_free0(emitted.as.value); tk_free0(cfile); tk_free0(binp); return fail(label, "cannot write generated C to ./bin"); }
     size_t srclen = strlen(emitted.as.value);
     size_t wrote = fwrite(emitted.as.value, 1, srclen, f);
     fclose(f);
     tk_free0(emitted.as.value);
-    if (wrote != srclen) { tk_free0(cfile); return fail(label, "short write on generated C"); }
+    if (wrote != srclen) { tk_free0(cfile); tk_free0(binp); return fail(label, "short write on generated C"); }
 
-    int rc = run_cc(cfile, stem);
+    int rc = run_cc(cfile, binp);
     tk_free0(cfile);
-    if (rc != 0) return fail(label, "cc failed to build the generated C");
+    if (rc != 0) { tk_free0(binp); return fail(label, "cc failed to build the generated C"); }
 
-    printf("teko: %s: built %s\n", label, stem);
+    printf("teko: %s: built %s\n", label, binp);
+    tk_free0(binp);
     return 0;
 }
 
