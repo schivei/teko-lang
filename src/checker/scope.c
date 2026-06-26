@@ -142,6 +142,9 @@ tk_type_result tk_builtin_fn(tk_str name) {
     static tk_type str_el = { .tag = TK_TYPE_STR };
     static tk_type str_slice_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el };
     static tk_type i32_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I32 };
+    // host dir-listing FFI: teko::fs::list_dir(str) -> []str | error (the entries in a directory).
+    static tk_type strslice_or_err_m[2] = { { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el }, { .tag = TK_TYPE_ERROR } };
+    static tk_type strslice_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { strslice_or_err_m, 2 } };
     // VM-internal arithmetic FFI: sign-aware int div/rem over the i128 carrier, float div.
     static tk_type i128_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 };
     static tk_type divrem_p[3] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_BOOL } };
@@ -208,6 +211,10 @@ tk_type_result tk_builtin_fn(tk_str name) {
     }
     if (name_is(name, "var")) {                                       // teko::env::var(str) -> str | error
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &str_or_err } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "list_dir")) {                                  // teko::fs::list_dir(str) -> []str | error (dir entries)
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &strslice_or_err } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
     if (name_is(name, "chdir")) {                                     // teko::env::chdir(str) -> error?

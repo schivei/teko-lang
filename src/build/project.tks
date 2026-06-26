@@ -1,0 +1,194 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → VM, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end, then diverge at the
+// backend (codegen→cc) vs the VM.
+
+use teko::parser
+use teko::checker
+use teko::codegen
+use teko::vm
+
+// =========================================================================
+// project_dir_of — mirror main.c::project_dir_of. Resolve a project ARGUMENT to its
+// directory: a `.tkp` path resolves to its CONTAINING directory ("." when it has no path
+// separator); anything else is taken as the directory as-is.
+// =========================================================================
+fn project_dir_of(arg: str) -> str {
+    if !teko::str::ends_with(arg, ".tkp") {
+        return arg
+    }
+    match teko::str::last_index_of(arg, "/") {
+        u64 as i => teko::str::slice_to(arg, i)   // ".../foo.tkp" → ".../" stem before the last slash
+        error    => "."                           // no separator → the current directory
+    }
+}
+
+// =========================================================================
+// The shared front-end result — Teko's stand-in for project_frontend's two out-params.
+// =========================================================================
+type Frontend = struct {
+    prog:     checker::TProgram
+    manifest: Manifest
+}
+
+// Report a stage failure to stderr in the driver's canonical form and return status 1.
+// An empty path means the message already carries its own file:line:col (a per-file
+// assemble / checker diagnostic) — print it bare, with no redundant location prefix.
+fn fail(path: str, message: str) -> i32 {
+    if path == "" {
+        teko::io::eprint(teko::str::concat("teko: ", message))
+    } else {
+        teko::io::eprint(teko::str::concat3("teko: ", path, teko::str::concat(": ", message)))
+    }
+    1
+}
+
+// =========================================================================
+// find_manifest — mirror driver.c::find_manifest. Scan the CURRENT directory for the
+// single `<name>.tkp` manifest (self-describing — glob the extension, don't hardcode a
+// name). Yields the manifest filename, or an error when there is none / more than one.
+// (Contained host edge — M.1; the dir listing is the deferred teko::fs::list_dir FFI.)
+// =========================================================================
+fn find_manifest() -> str | error {
+    let entries = match teko::fs::list_dir(".") { []str as e => e; error as e => return e }
+    mut found = ""
+    mut count: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let name = entries[i]
+        if teko::str::ends_with(name, ".tkp") {
+            found = name
+            count = count + 1
+        }
+        i++
+    }
+    if count != 1 {
+        return error { message = "no single .tkp manifest in project directory" }
+    }
+    found
+}
+
+// =========================================================================
+// project_frontend — mirror driver.c::project_frontend. Enter `dir` (so relative `source`
+// and discovered paths resolve from the root), find + read + parse the single `<name>.tkp`,
+// discover the source tree, inject the project-root `main.tks` (tagged with the manifest
+// name as namespace), report the file → namespace map, assemble all files into ONE merged
+// program, and type-check the WHOLE thing together (M.1). Returns the checked program +
+// the manifest, or the first error.
+// =========================================================================
+fn project_frontend(dir: str) -> Frontend | error {
+    // Enter the project root so relative source paths resolve (the contained host edge).
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => {} }   // error? — null = success
+
+    // --- find + read + parse the manifest (the single <name>.tkp at the root — A1) ---
+    let mname = match find_manifest() { str as n => n; error as e => return e }
+    let mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
+    let m = match parse_manifest(mtext) { Manifest as x => x; error as e => return e }
+
+    // --- discover the source tree (A2) ---
+    mut files = match discover(m.name, m.source) { []SourceFile as f => f; error as e => return e }
+
+    // The entry MainFile lives at the PROJECT ROOT, not under `source` (discover walks only
+    // `source`). Inject it into the file set so the merged program has an entry, tagged with
+    // the bare root namespace (provenance). Skip it if absent (a library).
+    match teko::io::read_file("main.tks") {
+        str => files = teko::list::push(files, SourceFile { path = "main.tks", namespace = m.name })
+        error => {}
+    }
+
+    // --- report the discovered file → namespace map (the project's surface) ---
+    teko::io::print(teko::str::concat3("teko: project '", m.name, teko::str::concat3("' (source=", m.source, ")")))
+    mut fi: u64 = 0
+    loop {
+        if fi >= files.len { break }
+        let f = files[fi]
+        teko::io::print(teko::str::concat3("  ", f.path, teko::str::concat("\t-> ", f.namespace)))
+        fi++
+    }
+
+    // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
+    // assemble bakes file:line:col into the message, so report with an empty path (W-loc).
+    let program = match assemble(files) { parser::Program as p => p; error as e => return e }
+
+    // --- check the WHOLE merged program (M.1 — whole program checked together) ---
+    let checked = match checker::type_program(program) { checker::TProgram as c => c; error as e => return e }
+
+    Frontend { prog = checked, manifest = m }
+}
+
+// =========================================================================
+// rt_dir / run_cc / backend — the native BACKEND wiring (F2/F3), mirroring driver.c's
+// tk_backend. Emit C for the checked program, write it at the project root (the front-end
+// has chdir'd there), invoke the host `cc`, produce the native binary. The output stem is
+// the manifest `name`.
+// =========================================================================
+
+// F3 — where the minimal execution runtime (teko_rt) lives. An environment lookup
+// (teko::env::var), defaulting to the in-tree dir.
+fn rt_dir() -> str {
+    match teko::env::var("TK_RT_DIR") { str as d => d; error => "runtime" }
+}
+
+// Run the host C compiler over `cfile`, producing `binary`. cc must see the runtime dir
+// (-I) and compile its source (one reuse-the-host-toolchain invocation — M.5). Returns the
+// cc exit code. The spawn is the deferred teko::process::run surface.
+fn run_cc(cfile: str, binary: str) -> i32 {
+    mut argv = teko::list::empty()
+    argv = teko::list::push(argv, "cc")
+    argv = teko::list::push(argv, "-std=c23")
+    argv = teko::list::push(argv, "-I")
+    argv = teko::list::push(argv, rt_dir())
+    argv = teko::list::push(argv, cfile)
+    argv = teko::list::push(argv, teko::str::concat(rt_dir(), "/teko_rt.c"))
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, binary)
+    teko::process::run(argv)
+}
+
+// Lower → write .c → invoke cc → report. Returns 0 on success. `stem` is the output binary
+// name (the manifest `name`); the .c is written beside it.
+fn backend(dir: str, stem: str, prog: checker::TProgram) -> i32 {
+    let csrc = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
+    let cfile = teko::str::concat(stem, ".c")
+    match teko::io::write_file(cfile, csrc) {
+        error as e => return fail(dir, e.message)
+        null       => {}                              // error? — null = success
+    }
+    if run_cc(cfile, stem) != 0 {
+        return fail(dir, "cc failed to build the generated C")
+    }
+    teko::io::print(teko::str::concat3("teko: ", dir, teko::str::concat3(": built ", stem, "")))
+    0
+}
+
+// =========================================================================
+// compile_project — mirror driver.c::tk_compile_project (the `teko build <dir>` entry).
+// Front-end (manifest → discover → assemble → check), then the native backend over the
+// merged program. The output binary stem is the manifest `name`.
+// =========================================================================
+fn compile_project(dir: str) -> i32 {
+    let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    backend(dir, fe.manifest.name, fe.prog)
+}
+
+// =========================================================================
+// run_project — mirror driver.c::tk_run_project (the `teko run <dir>` entry, debug
+// profile). Same front-end as the build, but INTERPRET the checked merged tree on the VM
+// (vm::run) instead of codegen → cc. The exit code is the virtual-main's (a panic exits
+// non-zero from inside the VM with a "teko: panic: …" message).
+// =========================================================================
+fn run_project(dir: str) -> i32 {
+    let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    vm::run(fe.prog)
+}
