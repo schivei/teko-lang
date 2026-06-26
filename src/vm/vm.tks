@@ -173,15 +173,17 @@ fn vm_float_to_int(f: f64, dst: checker::PrimKind, line: u32, col: u32) -> i128 
 type Slot = struct { name: str; val: Value }
 pub type Venv  = struct { slots: []Slot }
 
-// find — newest-first scan so a later binding SHADOWS an earlier one (the checker's rule).
-fn find(env: Venv, name: str) -> Slot | error {
+// find — newest-first scan so a later binding SHADOWS an earlier one (the checker's rule). The
+// checker guarantees every read binds, so a miss is an internal invariant break → panic (M.1),
+// matching the C env_find + caller's vm_unsupported. Returns the Slot directly (callers read .val).
+fn find(env: Venv, name: str) -> Slot {
     mut i = env.slots.len
     loop {
         if i == 0 { break }
         i--
         if env.slots[i].name == name { return env.slots[i] }
     }
-    error { message = "vm: unbound variable (internal: checker should reject)" }
+    panic("vm: unbound variable (internal: checker should reject)")
 }
 
 // define — push a fresh slot (shadowing). Returns the grown env (functional, like emit/*).
@@ -633,6 +635,53 @@ fn as_bool(v: Value) -> bool {
 }
 fn as_str(v: Value) -> str {
     match v { str as x => x; _ => panic("vm: as_str on a non-str value (checker should reject)") }
+}
+
+// Value CONSTRUCTORS — the .tks stand-in for the C v_int / v_float (+ norm_int). A `u32` Value IS
+// the `u32` case (the member carries the scalar), so we build by MASKING the low `width` bits with
+// bitwise `&` (never panics, unlike a checked `to`) and then sign-extending for signed widths — the
+// masked/extended value fits its prim, so the final `to` is in range. Mirrors mask_to_width /
+// sext_to_width + v_int in vm.c (the 128-bit case is the i128 carrier itself).
+fn norm_int(raw: i128, signed: bool, width: u8) -> Value {
+    if signed {
+        if width == 8        { let m = raw & 0xFF;                  if m >= 0x80 { (m - 0x100) to i8 } else { m to i8 } }
+        else if width == 16  { let m = raw & 0xFFFF;               if m >= 0x8000 { (m - 0x10000) to i16 } else { m to i16 } }
+        else if width == 32  { let m = raw & 0xFFFFFFFF;           if m >= 0x80000000 { (m - 0x100000000) to i32 } else { m to i32 } }
+        else if width == 64  { let m = raw & 0xFFFFFFFFFFFFFFFF;   if m >= 0x8000000000000000 { (m - 0x10000000000000000) to i64 } else { m to i64 } }
+        else                 { raw to i128 }                       // 128: raw IS the full-width carrier
+    } else {
+        if width == 8        { (raw & 0xFF) to u8 }
+        else if width == 16  { (raw & 0xFFFF) to u16 }
+        else if width == 32  { (raw & 0xFFFFFFFF) to u32 }
+        else if width == 64  { (raw & 0xFFFFFFFFFFFFFFFF) to u64 }
+        else                 { raw to u128 }                       // 128: reinterpret the carrier's bits
+    }
+}
+
+// float_val — a FLOAT Value at the IEEE width (16/32/64), mirror of v_float. f16/f32 round via the cast.
+fn float_val(f: f64, width: u8) -> Value {
+    if width == 16 { f to f16 }
+    else if width == 32 { f to f32 }
+    else { f }   // 64 (default): f IS an f64 Value
+}
+
+// num_of_prim — a literal NUMBER node → a concrete Value at the node's prim (mirror of vm.c's
+// TK_TEXPR_NUMBER case): a float literal → float_val at the prim width; a bool prim → a bool Value;
+// an int literal → norm_int (width/sign-correct, incl 128). The checker guarantees the kind.
+fn num_of_prim(n: checker::TNumber, t: checker::Type) -> Value {
+    let k = match t {
+        checker::Prim as p => p.kind
+        _                  => panic("vm: number literal with a non-primitive type not yet supported")
+    }
+    if n.is_float {
+        if !prim_float(k) { panic("vm: float literal with a non-float type (internal: checker should reject)") }
+        float_val(n.fval, prim_width(k))
+    } else {
+        match k {
+            checker::PrimKind::Bool => n.value != 0                       // a bool Value
+            _                       => norm_int(n.value, prim_signed(k), prim_width(k))
+        }
+    }
 }
 
 // value equality (literal patterns) — same-kind scalar compare. Mirrors the C `value_eq`; struct/

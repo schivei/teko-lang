@@ -131,11 +131,15 @@ The corpus fully **parses**; self-host is deep in the CHECK phase. See `TEKO_HIS
 **Reserved (don't freeze syntax until parser + real duplication data exist):** arena/scope surface, the three `ref` positions, the five concurrency primitives.
 **Deferred ceilings (keep deferred):** borrow-solver / lifetime-variable system; region-polymorphism; async/await (conditional); M:N green-thread scheduler. **Tribunal micro-decision:** implicit copy-out of a very small escaping value (default lean: NO implicit copy).
 
-### Phase 11 — DRY sweep  *(§A.5 — LAST)*
+### Phase 11 — DRY sweep + comment hygiene  *(§A.5 — LAST)*
 **Goal:** kill repeated identical calls with no variance across the WHOLE codebase (C AND Teko), e.g. `if at(source, p) == b'e' || at(source, p) == b'E'`.
 **Work:** whole-corpus refactor using the tools now in place — the `in` operator (Phase 2), hoisting (`let ch = at(source, p)`), or `match`.
+**COMMENT HYGIENE (legislator, 2026-06-26):** as part of this final settling pass, normalize ALL comments across the corpus (C AND Teko):
+  - **Doc comments only** — every retained comment becomes a `/** … */` doc comment (block form), attached to the declaration/section it documents.
+  - **Drop inline comments** — trailing/inline `// …` and `/* … */` mid-code comments are REMOVED; if a line genuinely needs explanation, the logic is hoisted/renamed so it reads without one, or the rationale moves into the preceding `/** … */`.
+  - **Why last:** comments churn with the code through every prior phase; normalizing earlier would re-touch the same lines repeatedly. Do it once, on settled code.
 **Why last:** it is a settling pass; running it earlier would refactor code that later phases still churn.
-**Exit:** no remaining no-variance repeated-call patterns; corpus still green + VM==native.
+**Exit:** no remaining no-variance repeated-call patterns; every comment is a `/** … */` doc comment with NO inline comments remaining; corpus still green + VM==native.
 
 ---
 
@@ -359,16 +363,18 @@ Stage-level dependency waves (the hard-ordering invariant). Generics (S4) runs p
 **Waves:** W10.A `{S1, S4}` → W10.B `{S2 ★}` → W10.C `{S3, S5}` → W10.D `{S6 → S7}` → W10.E `{S8, S9}`.
 *(Keep deferred ceilings deferred: borrow-solver, region-poly, async, M:N. Implicit-copy-on-escape micro-decision → tribunal.)*
 
-## Phase 11 — DRY sweep *(LAST; read-mostly; partitioned by directory → fully parallel)*
+## Phase 11 — DRY sweep + comment hygiene *(LAST; read-mostly; partitioned by directory → fully parallel)*
+
+Each crumb does BOTH on its partition: (a) DRY (kill no-variance repeated calls), and (b) **comment hygiene** — convert every retained comment to a `/** … */` doc comment and DROP all inline `//` / mid-code `/* */` comments (hoist/rename so the line reads without one, or fold the rationale into the preceding doc comment). Partitioned by directory → fully parallel; do (a) then (b) per file so comments settle on the already-DRY'd code.
 
 | Crumb | Owns | Dep |
 |-------|------|-----|
-| **C11.1** DRY sweep lexer + parser | `L`, `ast`, `P` | — |
-| **C11.2** DRY sweep checker | `chk`, `match`, `collect`, `res`, `scope`, `tast` | — |
-| **C11.3** DRY sweep codegen + vm | `cg`, `vm` | — |
-| **C11.4** DRY sweep emit + runtime + build + assert + main | `tkb`, `rt`, `build`, `assert`, `main` | — |
+| **C11.1** DRY + comment-hygiene lexer + parser | `L`, `ast`, `P` | — |
+| **C11.2** DRY + comment-hygiene checker | `chk`, `match`, `collect`, `res`, `scope`, `tast` | — |
+| **C11.3** DRY + comment-hygiene codegen + vm | `cg`, `vm` | — |
+| **C11.4** DRY + comment-hygiene emit + runtime + build + assert + main | `tkb`, `rt`, `build`, `assert`, `main` | — |
 
-**Rounds:** R11.1 `{C11.1, C11.2, C11.3, C11.4}` (w4).
+**Rounds:** R11.1 `{C11.1, C11.2, C11.3, C11.4}` (w4). Exit: no no-variance repeats; every comment is `/** … */`; zero inline comments; corpus green + VM==native.
 
 ---
 

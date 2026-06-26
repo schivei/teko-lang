@@ -864,6 +864,12 @@ static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table) {
     tk_typed_block_result eb = tk_type_block(f.else_blk, f.nelse, env, table); if (!eb.ok) return xferr(eb.as.error);
     tk_type tt = tk_tblock_type(tb.as.value.stmts, tb.as.value.n);
     tk_type et = tk_tblock_type(eb.as.value.stmts, eb.as.value.n);
+    // literal cross-adoption: a numeric-literal branch adopts the OTHER branch's numeric type, so
+    // `if c { u8_expr } else { 64 }` is u8 (not the union u8 | i64). Mirrors the compare/arg rule.
+    const tk_texpr *tl = tblock_trailing(tb.as.value.stmts, tb.as.value.n);
+    const tk_texpr *el = tblock_trailing(eb.as.value.stmts, eb.as.value.n);
+    if (tl && tl->tag == TK_TEXPR_NUMBER && tk_literal_adopts(*tl, et)) tt = et;
+    else if (el && el->tag == TK_TEXPR_NUMBER && tk_literal_adopts(*el, tt)) et = tt;
     tk_type joined;
     if (!tk_type_join(tt, et, table, &joined)) return xerr("the `if` branches have different types");   // widen (a case joins into its variant)
     tt = joined;
