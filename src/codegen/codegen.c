@@ -355,6 +355,7 @@ static bool cg_opt_mangle_texpr(cbuf *b, tk_type_expr te, const char **err) {
         return true;
     }
     if (te.tag == TK_TEXPR_OPTIONAL) { cb(b, "opt_"); return cg_opt_mangle_texpr(b, *te.as.optional.inner, err); }
+    if (te.tag == TK_TEXPR_SLICE)    { cb(b, "slice_"); return cg_opt_mangle_texpr(b, *te.as.slice.element, err); }
     return fail_node(err, "codegen: optional inner type-expr not yet supported");
 }
 
@@ -384,7 +385,10 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             mangle_type_name(b, (tk_str){ NULL, 0 }, last);
             return true;
         }
-        case TK_TEXPR_SLICE:    return fail_node(err, "codegen: slice type not yet supported");
+        // SLICE `[]T` in a SIGNATURE / field position → the generated `tk_slice_<elem>` struct
+        // (same name cg_slice_typename produces from the resolved type, so decl + ref agree; the
+        // typedef is stamped in the prelude from the function's return/body usage). W-backend.
+        case TK_TEXPR_SLICE:    cb(b, "tk_slice_"); return cg_opt_mangle_texpr(b, *te.as.slice.element, err);
         case TK_TEXPR_UNION:    return fail_node(err, "codegen: inline union type not yet supported");
         case TK_TEXPR_OPTIONAL: {
             // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
