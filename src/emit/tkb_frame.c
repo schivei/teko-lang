@@ -1,10 +1,9 @@
 // src/emit/tkb_frame.c
 #include "tkb_frame.h"
 
-tk_bytes tk_write_u64(tk_bytes b, uint64_t x) {
-    for (int k = 0; k < 8; k += 1) { b = tk_bytes_push(b, (tk_byte)(x & 0xFF)); x >>= 8; }
-    return b;
-}
+// tk_write_u64 is defined ONCE, in tkb_buf.c (lo u32 then hi u32 — the same LE byte run). This
+// file used to carry an identical-output duplicate; removed (one definition, no duplicate symbol).
+// tkb_frame.h still declares it (it composes the writers); the definition links from tkb_buf.c.
 
 static tk_bytes append_bytes(tk_bytes dst, tk_bytes src) {
     for (size_t i = 0; i < src.len; i += 1) dst = tk_bytes_push(dst, src.ptr[i]);
