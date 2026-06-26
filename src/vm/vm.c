@@ -910,7 +910,16 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
     if (try_builtin_call(p, args, nargs, env, &out)) return out;
 
     const tk_tfunction *fn = find_function(p);
-    if (fn == NULL) vm_unsupported("call to an unknown function not yet supported");
+    if (fn == NULL) {
+        // HOST-FFI FRONTIER (not a checker bug): the checker accepts host-FFI/builtin calls
+        // because the native backend lowers them; the VM has no host surface (Phase 7). Stop
+        // honestly, naming the callee and pointing at `teko build`. (Mirrors vm.tks find_function.)
+        static char buf[256];
+        tk_str last = p.segments[p.len - 1].name;
+        snprintf(buf, sizeof buf, "`%.*s` is a host function the VM cannot run (use `teko build` to compile natively)",
+                 (int)last.len, (const char *)last.ptr);
+        vm_unsupported(buf);
+    }
     // M0/codegen: functions take NO params (codegen fails on params). Honest frontier.
     if (fn->nparams != 0 || nargs != 0)
         vm_unsupported("function parameters not yet supported");

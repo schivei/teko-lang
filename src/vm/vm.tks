@@ -1110,8 +1110,14 @@ fn eval_compare(c: checker::TCompare, env: Venv) -> Value {
 // find_function — resolve a user call by its callee Path, the .tks twin of vm.c's find_function.
 // The C twin scans a file-global `g_prog`; here the typed program rides the env (M.0 — no mutable
 // globals), so we scan `env.prog.items`. Match by the LAST path segment (a cross-namespace call
-// `ns::fn` qualifies; the seed resolves names by last segment, like resolve_named for types). A
-// miss is the honest "unknown function" frontier — a loud stop (M.3).
+// `ns::fn` qualifies; the seed resolves names by last segment, like resolve_named for types).
+//
+// A miss is the HOST-FFI FRONTIER, not a checker bug. The checker accepts host-FFI/builtin calls
+// (scope.tks builtin_fn — read_file/list_dir/run/env::*/…) because the NATIVE backend lowers them
+// to runtime primitives; the VM has no host surface (that is Phase 7's C2* work). So a callee that
+// is neither a VM builtin (try_builtin/try_list_builtin) nor a user function is a host call the VM
+// cannot run. Stop HONESTLY, naming it and pointing at `teko build` — never the misleading
+// "internal: checker should reject" (M.1 fail-loud, M.3 honest frontier).
 fn find_function(env: Venv, callee: parser::Path) -> checker::TFunction {
     let name = callee.segments[callee.segments.len - 1].name
     mut i = 0
@@ -1123,7 +1129,7 @@ fn find_function(env: Venv, callee: parser::Path) -> checker::TFunction {
         }
         i++
     }
-    panic("vm: unknown function (internal: checker should reject)")
+    panic(teko::str::concat3("vm: `", name, "` is a host function the VM cannot run (use `teko build` to compile natively)"))
 }
 
 // mutate_slot — a compound/plain assignment to the NEWEST slot named `name`, the .tks twin of
