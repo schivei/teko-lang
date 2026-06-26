@@ -1476,6 +1476,13 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     if (have_fte && fte.tag == TK_TEXPR_NAMED) {
                         tk_str fn = fte.as.named.path.segments[fte.as.named.path.len - 1].name;
                         exp = (tk_type){ .tag = TK_TYPE_NAMED, .as.named.name = fn };
+                    } else if (have_fte && fte.tag == TK_TEXPR_OPTIONAL && fte.as.optional.inner != NULL
+                               && fte.as.optional.inner->tag == TK_TEXPR_NAMED) {
+                        // a present value into a `T?` field (T named) → emit_as wraps T → T?
+                        // ({ .present = true, .value = … }). (A bare `null` took the branch above.)
+                        tk_path ip = fte.as.optional.inner->as.named.path;
+                        elemT = (tk_type){ .tag = TK_TYPE_NAMED, .as.named.name = ip.segments[ip.len - 1].name };
+                        exp = (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional.inner = &elemT };
                     } else if (have_fte && fte.tag == TK_TEXPR_SLICE
                                && fte.as.slice.element->tag == TK_TEXPR_NAMED
                                && !cg_is_prim_name(fte.as.slice.element->as.named.path.segments[fte.as.slice.element->as.named.path.len - 1].name)) {
