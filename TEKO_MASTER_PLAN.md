@@ -27,10 +27,13 @@ Type-model doctrine (void/error/variant/nullable; no `never`), 128-bit + float p
 layer, match/if-value execution, labeled loops, subscript indexing, the **S0 `tk_alloc()` allocation seam**,
 slice value-layer Increment A (fixed+copy), and the `panic`/`exit` global-diverging-fn ruling are **DONE**.
 
-**★ SELF-HOST CHECK GREEN + NATIVE CODEGEN COMPILING DEEP (2026-06-26):** `teko build .` →
-*"project assembled (853 items) and type-checked OK"*; the native backend now generates C that compiles
-through almost the entire corpus, with a short tail of remaining walls. SIX milestones committed this
-session (each mirrored to `.tks`, regressions VM==native 5/6, bootstrap clean):
+**★ THE VALIDATION GATE — native self-host (`cmake --build build --target selfhost`, i.e. `./build/teko
+build .` → `./bin/teko`):** this is the ONE end-to-end proof (read→lex→parse→check→native codegen→cc
+link). **It does NOT pass yet** — native codegen has a short tail of walls, so Phase 6 is 🔶 and nothing
+downstream is guaranteed. The green sub-checks (corpus type-check 854 items, regressions VM==native 5/6,
+bootstrap clean) are NECESSARY but NOT SUFFICIENT; only a clean `selfhost` makes them cohesive. Native
+build artifacts land in `./bin`. EIGHT+ milestones committed this session toward the gate (each mirrored
+to `.tks`):
 - `916c568` **Collections ruling #4** (no untyped empty — element type required at decl; sentinel
   back-inference machinery deleted) + **topological type-decl emission** (slice typedefs first, then
   named/optional/inline-variant bodies in by-value dep order).
