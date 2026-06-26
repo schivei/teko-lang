@@ -306,23 +306,26 @@ static int find_manifest(char *out, size_t cap) {
     return found == 1;
 }
 
-static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *manifest_out, bool include_tests) {
-    // Enter the project root so relative source paths resolve (the contained host edge).
-    if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
-
+// frontend_body — the front-end AFTER the chdir (manifest → discover → assemble → check),
+// operating in the CURRENT directory. Split out so the D4 gate can retry it WITHOUT tests after a
+// test-assembly failure on the SAME chdir (a second chdir to a relative project dir would fail).
+// `quiet` suppresses the failure prints (the caller decides whether it's a hard error or a
+// degrade-to-warning). (Mirrors project.tks frontend_body.)
+static int frontend_body(const char *dir, tk_tprogram *out, tk_manifest *manifest_out,
+                         bool include_tests, bool quiet) {
     // --- find + read + parse the manifest (the single <name>.tkp at the root — A1) ---
     char mname[256];
     if (!find_manifest(mname, sizeof mname))
-        return fail(dir, "no single .tkp manifest in project directory");
+        return quiet ? 1 : fail(dir, "no single .tkp manifest in project directory");
     tk_str_result mtext = tk_read_file(mname);
-    if (!mtext.ok) return fail(dir, "cannot read .tkp manifest");
+    if (!mtext.ok) return quiet ? 1 : fail(dir, "cannot read .tkp manifest");
     tk_manifest_result mr = tk_parse_manifest(mtext.as.value);
-    if (!mr.ok) return fail(dir, mr.as.error.message);
+    if (!mr.ok) return quiet ? 1 : fail(dir, mr.as.error.message);
     tk_manifest m = mr.as.value;
 
     // --- discover the source tree (A2) ---
     tk_source_files_result df = tk_discover(m.name, m.source);
-    if (!df.ok) return fail(dir, df.as.error.message);
+    if (!df.ok) return quiet ? 1 : fail(dir, df.as.error.message);
     tk_source_files files = df.as.value;
 
     // The entry MainFile lives at the PROJECT ROOT, not under `source` (discover walks
@@ -336,28 +339,36 @@ static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *mani
       } }
 
     // --- report the discovered file → namespace map (the project's surface) ---
-    printf("teko: project '%.*s' (source=%.*s) — %zu file(s):\n",
-           (int)m.name.len, (const char *)m.name.ptr,
-           (int)m.source.len, (const char *)m.source.ptr, files.len);
-    for (size_t i = 0; i < files.len; i += 1)
-        printf("  %.*s\t-> %.*s\n",
-               (int)files.ptr[i].path.len,      (const char *)files.ptr[i].path.ptr,
-               (int)files.ptr[i].namespace.len, (const char *)files.ptr[i].namespace.ptr);
+    if (!quiet) {
+        printf("teko: project '%.*s' (source=%.*s) — %zu file(s):\n",
+               (int)m.name.len, (const char *)m.name.ptr,
+               (int)m.source.len, (const char *)m.source.ptr, files.len);
+        for (size_t i = 0; i < files.len; i += 1)
+            printf("  %.*s\t-> %.*s\n",
+                   (int)files.ptr[i].path.len,      (const char *)files.ptr[i].path.ptr,
+                   (int)files.ptr[i].namespace.len, (const char *)files.ptr[i].namespace.ptr);
+    }
 
     // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
     tk_program_result asm_r = tk_assemble_sel(files, include_tests);
-    if (!asm_r.ok) return fail("", asm_r.as.error.message);   // assemble bakes file:line:col into the message
+    if (!asm_r.ok) return quiet ? 1 : fail("", asm_r.as.error.message);   // assemble bakes file:line:col in
     tk_program program = asm_r.as.value;
 
     // --- check the WHOLE merged program (M.1 — whole program checked together) ---
     tk_tprogram_result checked = tk_type_program(program);
-    if (!checked.ok) return fail_diag(checked.as.error);   // (C1.8) located header + source snippet/caret + expected/actual
+    if (!checked.ok) return quiet ? 1 : fail_diag(checked.as.error);   // (C1.8) located header + snippet/caret
 
-    printf("teko: %s: project assembled (%zu items) and type-checked OK\n",
-           dir, program.len);
+    if (!quiet)
+        printf("teko: %s: project assembled (%zu items) and type-checked OK\n", dir, program.len);
     *out = checked.as.value;
     *manifest_out = m;
     return 0;
+}
+
+static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *manifest_out, bool include_tests) {
+    // Enter the project root so relative source paths resolve (the contained host edge).
+    if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
+    return frontend_body(dir, out, manifest_out, include_tests, false);
 }
 
 // Heap-allocate a NUL-terminated copy of a tk_str (the manifest `name`, used as the
@@ -402,25 +413,40 @@ static tk_tprogram strip_tests(tk_tprogram prog) {
 int tk_compile_project_g(const char *dir, const char *out_dir, bool gate) {
     tk_tprogram prog;
     tk_manifest m;
-    int rc = project_frontend(dir, &prog, &m, gate);   // gate ⇒ include the `.tkt` tests
-    if (rc != 0) return rc;
 
-    if (gate) {
-        int trc = tk_vm_run_tests(prog);   // GATE: fail-fast — a failed assertion aborts here
+    if (!gate) {
+        int rc = project_frontend(dir, &prog, &m, false);
+        if (rc != 0) return rc;
+        char *stem = cstr_of(m.name);
+        rc = tk_backend(dir, stem, prog, out_dir);
+        tk_free0(stem);
+        return rc;
+    }
+
+    // D4 gate: enter the project ONCE, then assemble WITH the tests.
+    if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
+    if (frontend_body(dir, &prog, &m, true, false) == 0) {
+        int trc = tk_vm_run_tests(prog);   // a failed assertion aborts here (fail-fast) → bars the build
         if (trc != 0) return trc;
-        // D4 coverage floor (10%): bar the build if the tests exercise too little of the code.
-        uint64_t cov = tk_vm_coverage_pct(prog);
+        uint64_t cov = tk_vm_coverage_pct(prog);   // D4 coverage floor (10%)
         if (cov < 10) {
             fprintf(stderr, "teko: %s: test coverage %llu%% is below the 10%% floor — add tests or build with `--no-test`\n",
                     dir, (unsigned long long)cov);
             return 1;
         }
         prog = strip_tests(prog);          // a release binary carries no test code
+    } else {
+        // The `.tkt` tests could not be ASSEMBLED/typechecked in this compiler (e.g. they use a
+        // feature this build doesn't support yet). That must NOT block native compilation: WARN and
+        // build WITHOUT the gate, on the SAME chdir (a quiet retry — no second chdir). A test that
+        // RUNS and fails an assertion still bars (above).
+        fprintf(stderr, "teko: %s: tests not runnable here — building without the test gate\n", dir);
+        if (frontend_body(dir, &prog, &m, false, true) != 0) return fail(dir, "build failed");
     }
 
     // --- backend (F2): lower the checked merged program to C, build it natively ---
     char *stem = cstr_of(m.name);
-    rc = tk_backend(dir, stem, prog, out_dir);
+    int rc = tk_backend(dir, stem, prog, out_dir);
     tk_free0(stem);
     return rc;
 }

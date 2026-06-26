@@ -95,7 +95,15 @@ fn project_frontend(dir: str) -> Frontend | error { project_frontend_sel(dir, fa
 fn project_frontend_sel(dir: str, include_tests: bool) -> Frontend | error {
     // Enter the project root so relative source paths resolve (the contained host edge).
     match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => {} }   // error? — null = success
+    frontend_body(include_tests, false)
+}
 
+// frontend_body — the front-end AFTER the chdir (manifest → discover → assemble → check),
+// operating in the CURRENT directory. Split out so the D4 gate can retry it WITHOUT tests after a
+// test-assembly failure, on the SAME chdir (no second `teko::env::chdir`, which would fail for a
+// relative project dir already entered). `quiet` suppresses the file-map print (the gate's retry
+// already printed it on the failed first attempt).
+fn frontend_body(include_tests: bool, quiet: bool) -> Frontend | error {
     // --- find + read + parse the manifest (the single <name>.tkp at the root — A1) ---
     let mname = match find_manifest() { str as n => n; error as e => return e }
     let mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
@@ -113,9 +121,10 @@ fn project_frontend_sel(dir: str, include_tests: bool) -> Frontend | error {
     }
 
     // --- report the discovered file → namespace map (the project's surface) ---
-    teko::io::println(teko::str::concat3("teko: project '", m.name, teko::str::concat3("' (source=", m.source, ")")))
+    if !quiet { teko::io::println(teko::str::concat3("teko: project '", m.name, teko::str::concat3("' (source=", m.source, ")"))) }
     mut fi: u64 = 0
     loop {
+        if quiet { break }
         if fi >= files.len { break }
         let f = files[fi]
         teko::io::println(teko::str::concat3("  ", f.path, teko::str::concat("\t-> ", f.namespace)))
@@ -265,16 +274,31 @@ fn compile_project_g(dir: str, out_dir: str, gate: bool) -> i32 {
         let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
         return backend(dir, fe.manifest.name, out_dir, fe.prog)
     }
-    let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
-    let trc = vm::run_tests(fe.prog)   // GATE: fail-fast — a failed assertion panics here, barring the build
-    if trc != 0 { return trc }
-    // D4 coverage floor (10%): bar the build if the tests exercise too little of the code. Skipped
-    // implicitly when there are no production functions (coverage_pct → 100).
-    let cov = vm::coverage_pct(fe.prog)
-    if cov < 10 {
-        return fail(dir, teko::str::concat3("test coverage ", teko::str::u64_to_str(cov), "% is below the 10% floor — add tests or build with `--no-test`"))
+    // D4 gate: enter the project ONCE, then assemble WITH the tests.
+    match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => {} }
+    match frontend_body(true, false) {
+        Frontend as fe => {
+            let trc = vm::run_tests(fe.prog)   // a failed assertion panics here (fail-fast) → bars the build
+            if trc != 0 { return trc }
+            // D4 coverage floor (10%): bar if the tests exercise too little (→ 100 when no prod fns).
+            let cov = vm::coverage_pct(fe.prog)
+            if cov < 10 {
+                return fail(dir, teko::str::concat3("test coverage ", teko::str::u64_to_str(cov), "% is below the 10% floor — add tests or build with `--no-test`"))
+            }
+            backend(dir, fe.manifest.name, out_dir, strip_tests(fe.prog))
+        }
+        // The `.tkt` tests could not be ASSEMBLED/typechecked in this compiler (e.g. they use a
+        // feature this build doesn't support yet). That must NOT block native compilation: WARN
+        // loudly and build WITHOUT the gate (same chdir — no second chdir). A test that RUNS and
+        // fails an assertion still bars (above). This is the honest "tests not runnable here" path.
+        error as e => {
+            teko::io::eprintln(teko::str::concat3("teko: ", dir, teko::str::concat3(": tests not runnable (", e.message, ") — building without the test gate")))
+            match frontend_body(false, true) {
+                Frontend as fe => backend(dir, fe.manifest.name, out_dir, fe.prog)
+                error as e2 => return fail(dir, e2.message)
+            }
+        }
     }
-    backend(dir, fe.manifest.name, out_dir, strip_tests(fe.prog))
 }
 
 // CLI helpers (mirror main.c::parse_out_dir; here because main.tks is the virtual-main and holds no

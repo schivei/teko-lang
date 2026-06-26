@@ -26,11 +26,12 @@ fn parse_pattern_primary(tokens: []lexer::Token, pos: u64) -> ParsedPattern | er
         return ParsedPattern { node = LiteralPattern { value = Expr { kind = ByteLit { value = lit_byte(tokens[pos].text) }, line = 0, col = 0 } }, next = pos + 1 }   // (C1-POS) literal-pattern value — not stamped in the C twin (position unknown, 0)
     }
     if k == lexer::TokenKind::LBracket {
-        // slice pattern `[]T as x` (or `[]T as _` discard): a slice-TYPED binding (the `[]T | error`
-        // idiom). The `[]T` reuses the type-primary parser; an `as <name>` (or `as _`) must follow.
+        // slice pattern: `[]T as x` (bind), `[]T as _` (discard), or bare `[]T` (match the slice
+        // case, bind nothing — like a bare `Foo`). The `[]T` reuses the type-primary parser; the
+        // `as <name>` is OPTIONAL — a bare `[]T` is the bindingless form (≡ `[]T as _`).
         let ty = match parse_type_primary(tokens, pos) { ParsedType as x => x; error as e => return e }
-        if !is_kind_at(tokens, ty.next, lexer::TokenKind::As) {
-            return err_at(tokens, ty.next, "expected `as <name>` after a slice type in a pattern")
+        if !is_kind_at(tokens, ty.next, lexer::TokenKind::As) {   // bare `[]T` — match the slice case, bind nothing
+            return ParsedPattern { node = BindPattern { type_name = Path { segments = teko::list::empty() }, has_binding = false, binding = "", is_slice = true, slice_type = ty.node }, next = ty.next }
         }
         if is_kind_at(tokens, ty.next + 1, lexer::TokenKind::Underscore) {   // `[]T as _` — match the slice case, bind nothing
             return ParsedPattern { node = BindPattern { type_name = Path { segments = teko::list::empty() }, has_binding = false, binding = "", is_slice = true, slice_type = ty.node }, next = ty.next + 2 }

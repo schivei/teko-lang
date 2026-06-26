@@ -43,15 +43,17 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
         return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = pos + 1 } };
     }
     if (k == TK_TOKEN_LBRACKET) {
-        // slice pattern `[]T as x` (or `[]T as _` discard): a slice-TYPED binding (the `[]T | error`
-        // idiom). The `[]T` reuses the type-primary parser; an `as <name>` (or `as _`) must follow.
+        // slice pattern: `[]T as x` (bind), `[]T as _` (discard), or bare `[]T` (match the slice
+        // case, bind nothing — like a bare `Foo`). The `[]T` reuses the type-primary parser; the
+        // `as <name>` is OPTIONAL — a bare `[]T` is the bindingless form (≡ `[]T as _`).
         tk_parsed_type_result ty = parse_type_primary(t, n, pos);
         if (!ty.ok) { return (tk_parsed_pattern_result){ .ok = false, .as.error = ty.as.error }; }
         size_t after = ty.as.value.next;
-        if (!tk_is_kind_at(t, n, after, TK_TOKEN_AS)) {
-            return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after, "expected `as <name>` after a slice type in a pattern") };
-        }
         tk_type_expr *st = tk_box_type(ty.as.value.node);
+        if (!tk_is_kind_at(t, n, after, TK_TOKEN_AS)) {   // bare `[]T` — match the slice case, bind nothing
+            tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = false, .binding = (tk_str){0}, .is_slice = true, .slice_type = st } };
+            return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after } };
+        }
         if (tk_is_kind_at(t, n, after + 1, TK_TOKEN_UNDERSCORE)) {   // `[]T as _` — match the slice case, bind nothing
             tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = false, .binding = (tk_str){0}, .is_slice = true, .slice_type = st } };
             return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
