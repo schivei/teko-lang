@@ -52,7 +52,7 @@ bind-whole-variant pattern. See memory `teko-collections-rulings.md` for the exa
 
 ## THE SEQUENCE
 
-> **Status legend:** ✅ done · 🔶 in progress / partial · ⬜ not started. **🔶 means ACTIVELY in flight now** — not "touched once and left". Updated 2026-06-26 (commit `ce09807`).
+> **Status legend:** ✅ done · 🔶 ACTIVELY in flight now · ⬜ TODO (to be completed — NOT "deferred"; every item here gets done, blocking or not). Updated 2026-06-26 (commit `973dbd2`).
 
 | # | Phase | Status | Why here |
 |---|-------|--------|----------|
@@ -70,8 +70,8 @@ bind-whole-variant pattern. See memory `teko-collections-rulings.md` for the exa
 
 ---
 
-### Phase 1 — Diagnostics axis  *(§A.1 ∪ INDEPENDENCE Eixo E ∪ CORRECTION_PLAN §10 column-granularity)*  ✅ CORE DONE (E3/E4 deferred polish, not in flight)
-**Status:** ✅ E1 (file:line:col threaded through tokens→AST→tast) · ✅ source snippet + caret · ✅ expected-vs-actual on every mismatch (type/arg/return/assign/field/struct-lit) · ✅ E2 (error fields/`err_loc`/`err_typed`; native degraded). ⬜ DEFERRED (not active): E3 `.tsym` symbol map · E4 stack-trace · cc-failure surfacing · warnings channel (shared w/ Phase 5).
+### Phase 1 — Diagnostics axis  *(§A.1 ∪ INDEPENDENCE Eixo E ∪ CORRECTION_PLAN §10 column-granularity)*  🔶 core delivered; E3/E4 ⬜ TODO
+**Status:** ✅ E1 (file:line:col threaded through tokens→AST→tast) · ✅ source snippet + caret · ✅ expected-vs-actual on every mismatch (type/arg/return/assign/field/struct-lit) · ✅ E2 (error fields/`err_loc`/`err_typed`; native degraded). ⬜ TODO (must complete — not deferred): E3 `.tsym` symbol map · E4 stack-trace · cc-failure surfacing · warnings channel (shared w/ Phase 5).
 **Goal:** compile-time messages stop being poor. Errors point at the failing **expression**, not the enclosing function.
 **Work:**
 - **E1** — thread `{file, line, col}` through the whole pipeline: lexer → tokens → parser → AST → `tast` (every node knows its origin). Root cause today: AST exprs carry no position; only decls do.
@@ -109,7 +109,7 @@ bind-whole-variant pattern. See memory `teko-collections-rulings.md` for the exa
 **Goal:** the bootstrap compiles its own `src/` corpus to a native binary. The gating milestone.
 **Status (2026-06-26, commit `048b4af`):**
 - ✅ **CHECK GREEN** — `teko build .` type-checks the whole corpus (796 items, 0 errors). Delivered: the widening lattice (`tk_widens_into`/`tk_type_join`), enum-subject `match`, pervasive literal adoption, **E7 enum↔int casts**, the host-FFI builtin surface, the VM `.tks` value+eval cluster, `src/build/project.tks`. Regressions VM==native 5/6.
-- **#41/#49** — namespace-aware *call* resolution (`tk_env_lookup_call`) ✅ AND codegen namespace-qualified function mangling (`teko__checker__type_eq`, call+def, fixed collisions) ✅ done this session. Namespace-aware *type* resolution (a `Named` carrying its namespace) ⬜ deferred — sidestepped (the `vm::Env/Return`→`Venv/VmReturn` rename) and not currently blocking; reopen only if a type-name collision surfaces.
+- **#41/#49** — namespace-aware *call* resolution (`tk_env_lookup_call`) ✅ AND codegen namespace-qualified function mangling (`teko__checker__type_eq`, call+def, fixed collisions) ✅ done this session. Namespace-aware *type* resolution (a `Named` carrying its namespace) ⬜ TODO — currently sidestepped (the `vm::Env/Return`→`Venv/VmReturn` rename); to be completed (not deferred).
 - 🔶 **Native codegen** — generates C that compiles DEEP into the corpus (6 commits this session, all mirrored to `.tks`, regressions VM==native 5/6): slice value-layer, inline-union lowering, topological type-decl emission, **auto-boxing of recursive value types** (`tk_alloc` back-edge pointers, S0 seam — cycle fully broken), **namespace-qualified function mangling** (`teko::checker::type_eq`→`teko__checker__type_eq`, fixed #41/#49 collisions incl. libc `div`), **case→variant wrapping** at every site (bindings/struct-fields/call-args/returns — DIRECT, TRANSITIVE `Named`→`Type`→`Type|error`, and covariant `[]case`→`[]variant` element-wise slice rebuild), enum-subject match lowering, C-keyword escaping (`bool`/`signed`), alias-in-field resolution, `str==`→`tk_str_eq`, str builtin call-map, **function prototypes**. Native runtime: str surface (`tk_str_eq/slice/len/ends_with/contains/…`) + `tk_alloc` seam. **Remaining short tail**: host-FFI builtins (`write`/`ewrite`/`parse` — easy map+runtime; then Phase-7 file/process/env + `last_index_of`, variant returns); duplicate same-ns helpers (`is_bool`/… in expr.tks + revalidate.tks — structural dedup); one bind-whole-variant pattern (`TypeExpr as t` over optional); value-form-`if` diverging returns.
 - ⬜ **VM execution** — `teko run .` reaches `vm: call to an unknown function`: `.tks` `eval_call` doesn't bind params yet; `teko::fs::list_dir` is checker-only (no `tk_list_dir` runtime).
 - ⬜ **#19** X5 justification-header sweep.
