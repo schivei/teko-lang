@@ -148,6 +148,13 @@ tk_check_result tk_validate_texpr(const tk_texpr *te) {
             }
             return cok();
         }
+        case TK_TEXPR_IN: {   // <lhs> in [ … ] (Phase 2): bool result; lhs + each element valid
+            tk_check_result l = tk_validate_texpr(te->as.in_expr.lhs); if (!l.ok) return l;
+            for (size_t i = 0; i < te->as.in_expr.nelems; i += 1) {
+                tk_check_result r = tk_validate_texpr(&te->as.in_expr.elems[i]); if (!r.ok) return r;
+            }
+            return node_is(te->type, prim(TK_PRIM_BOOL));
+        }
     }
     return cfail("corrupt: unknown typed expression");
 }

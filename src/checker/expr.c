@@ -582,6 +582,33 @@ static tk_texpr_result type_interp(tk_interp in, tk_env env, tk_type_table table
                            .as.interp = { pieces, in.npieces, holes, in.nholes } });
 }
 
+// <expr> in [ e0, e1, … ] (Phase 2) — membership test. Type the lhs ONCE; require each element
+// be COMPARABLE to the lhs (the SAME is_comparable rule used by `==`/compare — B.22), since the
+// runtime is `lhs == e0 || lhs == e1 || …`. The empty set `x in []` is allowed (result is still
+// bool — always false). The node's `.type` is bool. C twin's mirror: type_in in typer.tks.
+static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
+    tk_texpr_result lhs = tk_typer_expr(*n.lhs, env, table); if (!lhs.ok) return lhs;
+    tk_type lt = lhs.as.value.type;
+    if (tk_type_is_void(&lt)) return xerr("a `void` expression cannot be an operand (M.1)");
+    tk_texpr *elems = NULL;
+    if (n.nelems > 0) { elems = tk_alloc(n.nelems * sizeof *elems); if (!elems) abort(); }
+    for (size_t i = 0; i < n.nelems; i += 1) {
+        tk_texpr_result e = tk_typer_expr(n.elems[i], env, table);
+        if (!e.ok) { tk_free0(elems); return e; }
+        if (tk_type_is_void(&e.as.value.type)) {
+            tk_free0(elems);
+            return xerr("a `void` expression cannot be an operand (M.1)");
+        }
+        if (!is_comparable(lt, e.as.value.type)) {
+            tk_free0(elems);
+            return xerr("`in` element is not comparable to the left-hand operand");
+        }
+        elems[i] = e.as.value;
+    }
+    return xok((tk_texpr){ .tag = TK_TEXPR_IN, .type = tk_prim_t(TK_PRIM_BOOL),
+                           .as.in_expr = { box(lhs.as.value), elems, n.nelems } });
+}
+
 // forward decls for the if/match VALUE forms (mutual recursion: expr ↔ block).
 static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table);
 static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table table);
@@ -657,6 +684,7 @@ static tk_texpr_result type_dispatch(tk_expr e, tk_env env, tk_type_table table)
         case TK_EXPR_STRUCT_LIT:   return type_struct_lit(e.as.struct_lit, env, table);   // W4a
         case TK_EXPR_INDEX:        return type_index(e.as.index, env, table);            // W5-idx
         case TK_EXPR_INTERP:       return type_interp(e.as.interp, env, table);          // $"…{expr}…"
+        case TK_EXPR_IN:           return type_in(e.as.in_expr, env, table);            // <expr> in [ … ] (Phase 2)
     }
     return xerr("unknown expression");
 }

@@ -379,9 +379,49 @@ static tk_parsed_result parse_additive(const tk_token *t, size_t n, size_t pos, 
     return (tk_parsed_result){ .ok = true, .as.value = { .node = node, .next = p } };
 }
 
+// `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`
+// allowed → always false. Comma- and separator-tolerant (newlines, like multi-line call args).
+// Elements parse with struct literals ALLOWED (a `[`/`,` delimiter makes a trailing `{` unambiguous
+// again, like call args / `(` … `)`). Returns the elements + the position after `]`.
+static tk_parsed_args_result parse_in_elems(const tk_token *t, size_t n, size_t pos) {
+    size_t p = tk_skip_seps(t, n, pos + 1);             // consume `[`, skip leading newlines (multi-line set)
+    tk_expr *elems = NULL; size_t ne = 0;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {    // empty set `[]` → always false
+        return (tk_parsed_args_result){ .ok = true, .as.value = { .args = elems, .n_args = 0, .next = p + 1 } };
+    }
+    for (;;) {
+        tk_parsed_result a = parse_expr_a(t, n, p, true);   // inside `[` … `]` — struct literals allowed
+        if (!a.ok) { return (tk_parsed_args_result){ .ok = false, .as.error = a.as.error }; }
+        tk_exprs_push(&elems, &ne, a.as.value.node);
+        p = tk_skip_seps(t, n, a.as.value.next);         // a `,` / `]` may sit on the next line
+        if (!tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { break; }
+        p = tk_skip_seps(t, n, p + 1);                   // consume `,` (+ optional newlines before the next element)
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) { break; }   // trailing comma before `]`
+    }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {
+        return (tk_parsed_args_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ']' to close the `in` membership set") };
+    }
+    return (tk_parsed_args_result){ .ok = true, .as.value = { .args = elems, .n_args = ne, .next = p + 1 } };
+}
+
 static tk_parsed_result parse_comparison(const tk_token *t, size_t n, size_t pos, bool as_) {
     tk_parsed_result first = parse_additive(t, n, pos, as_);
     if (!first.ok) { return first; }
+    // `<expr> in [ … ]` — membership test (Phase 2), at comparison precedence and NON-chaining.
+    // The LHS is the just-parsed operand; the RHS is the special bracketed set. The `[` is
+    // REQUIRED after `in` (there is no general array literal). The node is stamped at the LHS's
+    // first token (`t[pos]`, this function's entry — C1-POS).
+    if (tk_is_kind_at(t, n, first.as.value.next, TK_TOKEN_IN)) {
+        size_t ip = first.as.value.next + 1;             // past `in`
+        if (!tk_is_kind_at(t, n, ip, TK_TOKEN_LBRACKET)) {
+            return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, ip, "expected '[' to begin the `in` membership set") };
+        }
+        tk_parsed_args_result set = parse_in_elems(t, n, ip);
+        if (!set.ok) { return (tk_parsed_result){ .ok = false, .as.error = set.as.error }; }
+        tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_IN, .as.in_expr = {
+            .lhs = tk_box_expr(first.as.value.node), .elems = set.as.value.args, .nelems = set.as.value.n_args } }, t, pos);
+        return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = set.as.value.next } };
+    }
     tk_cmp_term *terms = NULL; size_t nt = 0;
     size_t p = first.as.value.next;
     while (tk_is_comparison(t, n, p)) {

@@ -553,6 +553,26 @@ fn type_interp(in: parser::Interp, env: Env, table: TypeTable) -> TExpr | error 
     TExpr { kind = TInterp { pieces = in.pieces; holes = holes }; type = Str { }; line = 0; col = 0 }
 }
 
+// <expr> in [ e0, e1, … ] (Phase 2) — membership test. Type the lhs ONCE; require each element
+// be COMPARABLE to the lhs (the SAME is_comparable rule used by `==`/compare — B.22), since the
+// runtime is `lhs == e0 || lhs == e1 || …`. The empty set `x in []` is allowed (result is still
+// bool — always false). The node's `.type` is bool. C twin: type_in in expr.c.
+fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let lhs = match type_expr(n.lhs, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(lhs.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    mut elems = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.elems.len { break }
+        let el = match type_expr(n.elems[i], env, table) { TExpr as te => te; error as e => return e }
+        if type_is_void(el.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        if !is_comparable(lhs.type, el.type) { return error { message = "`in` element is not comparable to the left-hand operand" } }
+        elems = teko::list::push(elems, el)
+        i++
+    }
+    TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
 // ---- the expression dispatch (the evolved check_expr) ----
 // `Enum::Member` as a VALUE — the enum type (path minus the member) resolved to an `enum` decl,
 // the member checked, the node typed NAMED(enum) carrying enum name + member ORDINAL (so both
@@ -608,6 +628,7 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
         parser::StructLit as sl => type_struct_lit(sl, env, table)   // W4a
         parser::Index as ix    => type_index(ix, env, table)        // W5-idx
         parser::Interp as in   => type_interp(in, env, table)       // $"…{expr}…"
+        parser::InExpr as n    => type_in(n, env, table)            // <expr> in [ … ] (Phase 2)
     }
 }
 

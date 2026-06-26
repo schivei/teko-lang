@@ -1005,6 +1005,42 @@ fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: check
     cb(z, "), (tk_byte)0); })")
 }
 
+// emit_in — Phase 2: `<lhs> in [ e0, e1, … ]` -> bool. The lhs is EVALUATED ONCE (single-eval),
+// bound to a temp via a GNU statement-expression, then compared to each element with `==` OR'd
+// together (true iff the lhs equals any element). The node's `.type` is bool.
+//   ({ <CtypeOfLhs> _invN = <lhs>; (_invN == <e0>) || (_invN == <e1>) || …; })
+// The temp `_inv<buf.len>` uses the buffer length as the functional uniquifier (see emit_index).
+// The EMPTY set `x in []` still EVALUATES the lhs once (single-eval), then yields false — so a
+// side-effecting lhs runs identically in the VM (which evaluates the lhs before its zero-iteration
+// loop). VM==native even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
+fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte | error {
+    if ie.elems.len == 0 {
+        mut z = cb(buf, "({ (void)(")
+        z = match emit_expr(z, prog, ie.lhs) { []byte as o => o; error as err => return err }
+        return cb(z, "); 0; })")
+    }
+    let tmp = $"_inv{buf.len}"
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, ie.lhs.type) { []byte as o => o; error as err => return err }   // the lhs's resolved C type
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    out = cb(out, " = ")
+    out = match emit_expr(out, prog, ie.lhs) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    mut i = 0
+    loop {
+        if i >= ie.elems.len { break }
+        if i > 0 { out = cb(out, " || ") }
+        out = cb(out, "(")
+        out = cb(out, tmp)
+        out = cb(out, " == ")
+        out = match emit_expr(out, prog, ie.elems[i]) { []byte as o => o; error as err => return err }
+        out = cb(out, ")")
+        i++
+    }
+    cb(out, "; })")
+}
+
 // emit_interp — $"…{expr}…" (self-host parity). Lower to nested tk_str_concat over the piece
 // literals and the holes: pieces[0] ++ str(holes[0]) ++ pieces[1] ++ … . A piece literal is the
 // SAME (tk_str){…} emission as TStrLit. A `str` hole is the str expr directly; an INTEGER hole is
@@ -1818,6 +1854,7 @@ fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte 
         checker::TCoalesce as co   => emit_coalesce(buf, prog, e, co)
         checker::TIndex as ix      => emit_index(buf, prog, e, ix)   // W5-idx — subscript recv[index] (str + slice, bounds-checked)
         checker::TInterp as in     => emit_interp(buf, prog, in)     // $"…{expr}…" — nested tk_str_concat over pieces + holes
+        checker::TInExpr as ie     => emit_in(buf, prog, ie)         // Phase 2 — `<lhs> in [ … ]` membership (single-eval, OR of `==`)
         checker::TPathExpr as pe   => {                              // Enum::Member → C constant TK_E_<UPPER enum>_<UPPER member>
             mut out = cb(buf, "TK_E_")
             out = cb_upper(out, pe.enum_name)
@@ -2321,6 +2358,7 @@ fn cg_collect_expr_opts(set: CgTypeSet, e: checker::TExpr) -> CgTypeSet {
         checker::TStructInit as si => { mut i = 0; loop { if i >= si.field_vals.len { break }; s = cg_collect_expr_opts(s, si.field_vals[i]); i++ } }
         checker::TIndex as ix => { s = cg_collect_expr_opts(s, ix.receiver); s = cg_collect_expr_opts(s, ix.index) }
         checker::TInterp as in => { mut i = 0; loop { if i >= in.holes.len { break }; s = cg_collect_expr_opts(s, in.holes[i]); i++ } }
+        checker::TInExpr as ie => { s = cg_collect_expr_opts(s, ie.lhs); mut i = 0; loop { if i >= ie.elems.len { break }; s = cg_collect_expr_opts(s, ie.elems[i]); i++ } }
         _ => { }   // leaves: type already registered above
     }
     s

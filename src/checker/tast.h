@@ -22,6 +22,7 @@ typedef enum {
     TK_TEXPR_STRUCT_INIT,                                  // Name { f = v, … } — struct value constructor (W4a)
     TK_TEXPR_INDEX,                                        // recv[index] — str→byte / []T→T (W5-idx)
     TK_TEXPR_INTERP,                                       // $"…{expr}…" — string interpolation (self-host parity)
+    TK_TEXPR_IN,                                           // <expr> in [ … ] — membership test (Phase 2); `.type` is bool
     TK_TEXPR_PATH,                                         // Enum::Member as a VALUE — `.type` is the NAMED enum
 } tk_texpr_tag;
 
@@ -70,6 +71,10 @@ struct tk_texpr {
         // hole carries its OWN resolved type (str passthrough vs integer→decimal text), so
         // both backends lower it identically (differential equivalence).
         struct { tk_str *pieces; size_t npieces; tk_texpr *holes; size_t nholes; } interp;
+        // <expr> in [ … ] (Phase 2) — `.type` is bool. The lhs is EVALUATED ONCE; the result
+        // is true iff lhs equals any element. Both lhs and the elements are typed TExprs, so
+        // both backends lower it identically (differential equivalence).
+        struct { tk_texpr *lhs; tk_texpr *elems; size_t nelems; }                  in_expr;
         // Enum::Member as a VALUE (E#/value-level enum paths). `.type` is the NAMED enum; the
         // checker resolves the enum decl + member ORDINAL so both backends lower without re-lookup:
         // codegen → the C constant `TK_E_<UPPER enum_name>_<UPPER member>`; VM → the ordinal int.

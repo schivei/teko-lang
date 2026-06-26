@@ -73,6 +73,11 @@ typedef struct { tk_expr *receiver; tk_expr *index; }       tk_index;         //
 // Teko expression (parsed from the hole's source span). A `str` hole passes through; an
 // integer hole converts to its decimal text; any other hole type is a clean checker error.
 typedef struct { tk_str *pieces; size_t npieces; tk_expr *holes; size_t nholes; } tk_interp;
+// `<expr> in [ e0, e1, … ]` → bool (Phase 2). True iff the LHS equals any element; the LHS is
+// EVALUATED ONCE. The `[ … ]` is a SPECIAL membership-set syntax valid ONLY here (no general
+// array literal). Empty set `x in []` is allowed → always false. `elems` is a flat tk_expr
+// array (like tk_call.args — by-value tk_expr is incomplete here, so a pointer field).
+typedef struct { tk_expr *lhs; tk_expr *elems; size_t nelems; } tk_in;
 
 typedef enum {
     TK_EXPR_NUMBER, TK_EXPR_VAR, TK_EXPR_STR, TK_EXPR_BYTE,
@@ -82,6 +87,7 @@ typedef enum {
     TK_EXPR_SAFE_FIELD_ACCESS, TK_EXPR_COALESCE,
     TK_EXPR_CAST, TK_EXPR_PATH, TK_EXPR_STRUCT_LIT, TK_EXPR_INDEX,
     TK_EXPR_INTERP,   // $"…{expr}…" — string interpolation (self-host parity)
+    TK_EXPR_IN,       // <expr> in [ … ] — membership test (Phase 2)
 } tk_expr_kind;
 
 struct tk_expr {
@@ -109,6 +115,7 @@ struct tk_expr {
         tk_struct_lit   struct_lit;    // TK_EXPR_STRUCT_LIT
         tk_index        index;         // TK_EXPR_INDEX
         tk_interp       interp;        // TK_EXPR_INTERP
+        tk_in           in_expr;       // TK_EXPR_IN
     } as;
 };
 

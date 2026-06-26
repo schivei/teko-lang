@@ -56,7 +56,7 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
             tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = false, .binding = (tk_str){0}, .is_slice = true, .slice_type = st } };
             return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
         }
-        if (!tk_is_kind_at(t, n, after + 1, TK_TOKEN_IDENT)) {
+        if (!tk_is_name_at(t, n, after + 1)) {   // a binding name may be a contextual keyword (`in`/`to`/`type`)
             return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after + 1, "expected a name (or `_`) after `as` in a slice pattern") };
         }
         tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .has_binding = true, .binding = t[after + 1].text, .is_slice = true, .slice_type = st } };
@@ -71,7 +71,7 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
                 tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .type_name = pp.as.value.node, .has_binding = false, .binding = (tk_str){0} } };
                 return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = p, .next = after + 2 } };
             }
-            if (!tk_is_kind_at(t, n, after + 1, TK_TOKEN_IDENT)) {
+            if (!tk_is_name_at(t, n, after + 1)) {   // a binding name may be a contextual keyword (`in`/`to`/`type`)
                 return (tk_parsed_pattern_result){ .ok = false, .as.error = tk_err_at(t, n, after + 1, "expected a name (or `_`) after `as` in a pattern") };
             }
             tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .type_name = pp.as.value.node, .has_binding = true, .binding = t[after + 1].text } };

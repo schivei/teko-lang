@@ -130,6 +130,13 @@ typedef enum {
     //     inner content between the quotes (holes + escapes still encoded); the PARSER
     //     splits it into literal pieces + hole expressions (parse_expr's INTERP case).
     TK_TOKEN_INTERP,        // `$"…{expr}…"` — an interpolated string (raw inner text)
+
+    // --- membership (`in` operator — Phase 2). APPENDED LAST (ordinal stability — operator
+    //     kinds serialize by enum ordinal; `in` is never a stored op, so its ordinal is never
+    //     serialized). `<expr> in [ e0, e1, … ]` → bool: true iff the LHS equals any element.
+    //     The `[ … ]` is a SPECIAL membership-set syntax valid ONLY as the `in` RHS (there is
+    //     no general array literal). Comparison-precedence; does NOT chain.
+    TK_TOKEN_IN,            // `in` — the membership operator (x in [ … ])
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW

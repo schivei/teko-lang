@@ -326,10 +326,47 @@ fn parse_additive(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parse
     Parsed { node = node, next = p }
 }
 
+// `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`
+// allowed → always false. Comma- and separator-tolerant (newlines, like multi-line call args).
+// Elements parse with struct literals ALLOWED (a `[`/`,` delimiter makes a trailing `{` unambiguous
+// again, like call args / `(` … `)`). Returns the elements + the position after `]`.
+fn parse_in_elems(tokens: []lexer::Token, pos: u64) -> ParsedArgs | error {
+    mut p = skip_seps(tokens, pos + 1)              // consume `[`, skip leading newlines (multi-line set)
+    mut elems = teko::list::empty()
+    if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {   // empty set `[]` → always false
+        return ParsedArgs { args = elems, next = p + 1 }
+    }
+    loop {
+        let a = match parse_expr(tokens, p) { Parsed as x => x; error as e => return e }   // inside `[` … `]` — struct literals allowed
+        elems = teko::list::push(elems, a.node)
+        p = skip_seps(tokens, a.next)               // a `,` / `]` may sit on the next line
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = skip_seps(tokens, p + 1)                // consume `,` (+ optional newlines before the next element)
+        if is_kind_at(tokens, p, lexer::TokenKind::RBracket) { break }   // trailing comma before `]`
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
+        return err_at(tokens, p, "expected ']' to close the `in` membership set")
+    }
+    ParsedArgs { args = elems, next = p + 1 }
+}
+
 // level 6 — comparison. A CHAIN `a < b < c` is kept as written (M.3): a first + a list
-// of (op, operand) terms; no term → the bare first.
+// of (op, operand) terms; no term → the bare first. ALSO the home of `in` membership
+// (Phase 2): `<expr> in [ … ]` at comparison precedence, NON-chaining.
 fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed | error {
     let first = match parse_additive(tokens, pos, allow_struct) { Parsed as x => x; error as e => return e }
+    // `<expr> in [ … ]` — membership test (Phase 2), at comparison precedence and NON-chaining.
+    // The LHS is the just-parsed operand; the RHS is the special bracketed set. The `[` is
+    // REQUIRED after `in` (there is no general array literal). The node is stamped at the LHS's
+    // first token (tokens[pos], this function's entry — C1-POS).
+    if is_kind_at(tokens, first.next, lexer::TokenKind::In) {
+        let ip = first.next + 1                     // past `in`
+        if !is_kind_at(tokens, ip, lexer::TokenKind::LBracket) {
+            return err_at(tokens, ip, "expected '[' to begin the `in` membership set")
+        }
+        let set = match parse_in_elems(tokens, ip) { ParsedArgs as x => x; error as e => return e }
+        return Parsed { node = Expr { kind = InExpr { lhs = first.node, elems = set.args }, line = tokens[pos].line, col = tokens[pos].col }, next = set.next }
+    }
     mut terms = teko::list::empty()
     mut p = first.next
     loop {

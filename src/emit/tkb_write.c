@@ -114,6 +114,11 @@ tk_bytes tk_write_texpr(tk_bytes b, tk_strtable t, const tk_texpr *te) {
             b = tk_write_u32(b, tk_st_find(t, te->as.path.enum_name));
             b = tk_write_u32(b, tk_st_find(t, te->as.path.member));
             return tk_write_u64(b, (uint64_t)te->as.path.ordinal);
+        case TK_TEXPR_IN:                                                    // Phase 2 — <expr> in [ … ]: lhs THEN nelems (u64) THEN each elem
+            b = tk_write_texpr(tk_write_u8(b, 20), t, te->as.in_expr.lhs);
+            b = tk_write_u64(b, (uint64_t)te->as.in_expr.nelems);
+            for (size_t i = 0; i < te->as.in_expr.nelems; i += 1) b = tk_write_texpr(b, t, &te->as.in_expr.elems[i]);
+            return b;
     }
     return b;
 }

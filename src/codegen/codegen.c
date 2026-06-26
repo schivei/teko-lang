@@ -1131,6 +1131,38 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             cb(b, " : (tk_panic_oob_at("); cb_u64_dec(b, e->line); cb(b, ", "); cb_u64_dec(b, e->col); cb(b, "), (tk_byte)0); })");
             return true;
         }
+
+        case TK_TEXPR_IN: {
+            // Phase 2 — `<lhs> in [ e0, e1, … ]` -> bool. The lhs is EVALUATED ONCE (single-eval),
+            // bound to a temp via a GNU statement-expression, then compared to each element with `==`
+            // OR'd together (true iff the lhs equals any element). The node's `.type` is bool.
+            //   ({ <CtypeOfLhs> _invN = <lhs>; (_invN == <e0>) || (_invN == <e1>) || …; })
+            // The temp `_inv<buflen>` uses the CURRENT buffer length as the functional uniquifier
+            // (see emit_if_value / emit_index). The EMPTY set `x in []` still EVALUATES the lhs once
+            // (single-eval), then yields false — so a side-effecting lhs runs identically in the VM
+            // (which evaluates the lhs before its zero-iteration loop). VM==native even for `[]`.
+            if (e->as.in_expr.nelems == 0) {
+                cb(b, "({ (void)(");
+                if (!emit_expr(b, e->as.in_expr.lhs, err)) return false;
+                cb(b, "); 0; })");
+                return true;
+            }
+            char tmp[40];
+            snprintf(tmp, sizeof tmp, "_inv%zu", (size_t)b->len);
+            cb(b, "({ ");
+            if (!emit_type(b, e->as.in_expr.lhs->type, err)) return false;   // the lhs's resolved C type
+            cb(b, " "); cb(b, tmp); cb(b, " = ");
+            if (!emit_expr(b, e->as.in_expr.lhs, err)) return false;
+            cb(b, "; ");
+            for (size_t i = 0; i < e->as.in_expr.nelems; i += 1) {
+                if (i > 0) cb(b, " || ");
+                cb(b, "("); cb(b, tmp); cb(b, " == ");
+                if (!emit_expr(b, &e->as.in_expr.elems[i], err)) return false;
+                cb(b, ")");
+            }
+            cb(b, "; })");
+            return true;
+        }
     }
     return fail_node(err, "codegen: unknown expression not yet supported");
 }
@@ -2083,6 +2115,10 @@ static void cg_collect_expr_opts(cg_opt_set *set, const tk_texpr *e) {
         case TK_TEXPR_STRUCT_INIT: for (size_t i = 0; i < e->as.struct_init.nfields; i += 1) cg_collect_expr_opts(set, &e->as.struct_init.field_vals[i]); return;
         case TK_TEXPR_INDEX: cg_collect_expr_opts(set, e->as.index.receiver); cg_collect_expr_opts(set, e->as.index.index); return;
         case TK_TEXPR_INTERP: for (size_t i = 0; i < e->as.interp.nholes; i += 1) cg_collect_expr_opts(set, &e->as.interp.holes[i]); return;
+        case TK_TEXPR_IN:
+            cg_collect_expr_opts(set, e->as.in_expr.lhs);
+            for (size_t i = 0; i < e->as.in_expr.nelems; i += 1) cg_collect_expr_opts(set, &e->as.in_expr.elems[i]);
+            return;
         default: return;   // leaves (NUMBER/VAR/STR/BYTE/BOOL/NULL) — type already registered above
     }
 }

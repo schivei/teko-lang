@@ -491,6 +491,23 @@ fn eval_interp(in: checker::TInterp, env: Env) -> Value {
     acc
 }
 
+// Phase 2 — `<lhs> in [ e0, e1, … ]` -> bool. The LHS is EVALUATED ONCE; then each element is
+// evaluated and compared to that SAME value with value_eq (the SAME value-equality the VM uses for
+// scalar `==` / literal patterns — int/float/bool/str). Returns true iff any element equals the lhs;
+// the empty set `x in []` -> false (the loop runs zero times). value_eq returns false for struct/list
+// operands, but the checker restricts `in` to scalar-comparable element types, so the honest frontier
+// matches `==`. Mirrors the C `eval_in` and codegen's fold of value_eq (single-eval lhs).
+fn eval_in(ie: checker::TInExpr, env: Env) -> Value {
+    let lhs = eval_expr(ie.lhs, env)   // single-eval: the LHS once
+    mut i = 0
+    loop {
+        if i >= ie.elems.len { break }
+        if value_eq(lhs, eval_expr(ie.elems[i], env)) { return true }
+        i++
+    }
+    false   // empty set, or no element matched
+}
+
 // ---------------------------------------------------------------------------
 // W5b — MATCH execution. The typed arm keeps the SYNTACTIC pattern (literal/range bounds are
 // AST literal exprs; BIND/FIELD name a case by its path's LAST segment — a variant value is a
@@ -772,6 +789,8 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         checker::TIndex as ix => eval_index(ix, e.line, e.col, env)
         // $"…{expr}…" — string interpolation: pieces ++ str(holes) (self-host parity).
         checker::TInterp as in => eval_interp(in, env)
+        // Phase 2 — `<lhs> in [ … ]`: true iff lhs (single-eval) value_eq's any element.
+        checker::TInExpr as ie => eval_in(ie, env)
         // Enum::Member as a VALUE → its ordinal (u64); the C twin's C enum auto-numbers identically.
         checker::TPathExpr as pe => pe.ordinal
         // null / ?. / ?? — the OPTIONAL value model (OptVal — REBOOT_PLAN §202/§203).

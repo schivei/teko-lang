@@ -1047,6 +1047,21 @@ static tk_value eval_interp(const tk_texpr *e, tk_venv *env) {
     return v_str(acc);
 }
 
+// Phase 2 — `<lhs> in [ e0, e1, … ]` -> bool. The LHS is EVALUATED ONCE; then each element is
+// evaluated and compared to that SAME value with value_eq (the SAME value-equality the VM uses for
+// scalar `==` / literal patterns — INT/BOOL/STR/FLOAT). Returns true iff any element equals the lhs;
+// the empty set `x in []` -> false (the loop runs zero times). value_eq returns false for
+// struct/list operands, but the checker restricts `in` to scalar-comparable element types, so the
+// honest frontier matches `==`. Mirrors the codegen lowering (a fold of value_eq, single-eval lhs).
+static tk_value eval_in(const tk_texpr *e, tk_venv *env) {
+    tk_value lhs = tk_vm_eval_expr(e->as.in_expr.lhs, env);   // single-eval: the LHS once
+    for (size_t i = 0; i < e->as.in_expr.nelems; i += 1) {
+        tk_value el = tk_vm_eval_expr(&e->as.in_expr.elems[i], env);
+        if (value_eq(lhs, el)) return v_bool(true);
+    }
+    return v_bool(false);   // empty set, or no element matched
+}
+
 static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
     // New type tags (TEKO_CORRECTION_PLAN [Z1]). A value-position expression can never be
     // typed `void` (void is return-only, never a value — the checker rejects it elsewhere).
@@ -1124,6 +1139,7 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
         case TK_TEXPR_MATCH: return eval_match(e, env);   // W5b — pattern matching (literal/range/Alt/variant-case/destructure + `when`)
         case TK_TEXPR_INDEX: return eval_index(e, env);   // W5-idx — subscript recv[index] (str→byte; slice = honest stop)
         case TK_TEXPR_INTERP: return eval_interp(e, env); // $"…{expr}…" — string interpolation (pieces ++ str(holes))
+        case TK_TEXPR_IN: return eval_in(e, env);         // Phase 2 — `<lhs> in [ … ]`: true iff lhs (single-eval) value_eq's any element
         // null / ?. / ?? (REBOOT_PLAN §202/§203) — the OPTIONAL value model (TK_VAL_OPT).
         case TK_TEXPR_NULL:
             return v_none();   // the `null` literal is NONE; the destination's wrap (coerce_to) makes it a concrete `T?`

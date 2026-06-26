@@ -252,6 +252,7 @@ static tk_token_kind keyword_kind(tk_str text) {
     if (tk_str_eq_lit(text, "return"))   return TK_TOKEN_RETURN;
     if (tk_str_eq_lit(text, "match"))    return TK_TOKEN_MATCH;
     if (tk_str_eq_lit(text, "when"))     return TK_TOKEN_WHEN;
+    if (tk_str_eq_lit(text, "in"))       return TK_TOKEN_IN;    // the membership operator (x in [ … ]) — Phase 2
     if (tk_str_eq_lit(text, "as"))       return TK_TOKEN_AS;
     if (tk_str_eq_lit(text, "to"))       return TK_TOKEN_TO;   // the cast operator (x to T) — F1/E7
     if (tk_str_eq_lit(text, "use"))      return TK_TOKEN_USE;

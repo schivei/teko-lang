@@ -229,7 +229,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C2.5** VM eval | `vm` | C2.2 |
 | **C2.6** `.tkb` tag serialize/deserialize | `tkb` | C2.2 |
 
-**Rounds:** R2.1 `{C2.1}` (w1) → R2.2 `{C2.2}` (w1) → R2.3 `{C2.3, C2.4, C2.5, C2.6}` (w4).
+**Rounds:** R2.1 `{C2.1}` (w1) → R2.2 `{C2.2}` (w1) → R2.3 `{C2.3, C2.4, C2.5, C2.6}` (w4). ✅ **DONE** (workflow `p2-in-operator`: frontend then parallel checker/codegen/vm/tkb + adversarial review). `x in [a,b,…]`→bool, single-eval LHS (GNU stmt-expr), comparison precedence, special `[…]` membership-set (no array literal). VM==native: `3 in [1,2,3]`→true, `9 in […]`/`x in []`→false, `b'e' in [b'e',b'E']`→true. **3 reviewer fixes applied:** (1) self-host regression — `in` added to `is_name_at` (cursor) AND pattern bind-names (parse_pattern) so the corpus's `in` identifiers/bindings still parse (the `to` precedent); (2) empty-set VM==native — codegen now evaluates the LHS once for `[]` too; (3) `revalidate` gained the `TK_TEXPR_IN`/`TInExpr` case (-Wswitch + non-exhaustive `.tks` match fixed). Build clean; regressions 5/6; self-host wall restored to `lexer.tks:461` (CHECK).
 
 ## Phase 3 — str/byte stdlib as real mirrored fns
 

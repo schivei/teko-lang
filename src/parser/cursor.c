@@ -46,8 +46,9 @@ bool tk_is_sep(const tk_token *t, size_t n, size_t pos) {
 bool tk_is_name_at(const tk_token *t, size_t n, size_t pos) {
     return tk_is_kind_at(t, n, pos, TK_TOKEN_IDENT)
         || tk_is_kind_at(t, n, pos, TK_TOKEN_TYPE)
-        || tk_is_kind_at(t, n, pos, TK_TOKEN_TO);
-}
+        || tk_is_kind_at(t, n, pos, TK_TOKEN_TO)
+        || tk_is_kind_at(t, n, pos, TK_TOKEN_IN);   // `in`: the membership OPERATOR (checked at
+}                                                    // comparison level) AND a plain name, like `to`
 
 size_t tk_skip_seps(const tk_token *t, size_t n, size_t pos) {
     size_t p = pos;

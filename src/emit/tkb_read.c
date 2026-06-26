@@ -172,6 +172,14 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
             e.as.path.member    = tk_read_str(r, t);
             e.as.path.ordinal   = tk_read_u64(r);
             return e;
+        case 20: {                                                              /* Phase 2 — <expr> in [ … ]: lhs THEN nelems (u64) THEN each elem */
+            e.tag = TK_TEXPR_IN;
+            e.as.in_expr.lhs = boxe(tk_read_texpr(r, t));
+            uint64_t ne = tk_read_u64(r); tk_texpr *es = tk_alloc((ne ? ne : 1) * sizeof *es); if (!es) abort();
+            for (uint64_t i = 0; i < ne; i += 1) es[i] = tk_read_texpr(r, t);
+            e.as.in_expr.elems = es; e.as.in_expr.nelems = (size_t)ne;
+            return e;
+        }
     }
     r->ok = false; return e;
 }
