@@ -51,6 +51,33 @@ tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c);
 // tk_ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str.
 tk_str tk_ftoa(double x);
 
+// --- Phase 3 str query/slice builtins (the checker types these via tk_builtin_fn) ---
+// The query helpers (eq/ends_with/contains/len) do NO allocation; the slice helpers return a
+// FRESH owned buffer (same ownership as tk_str_concat), tk_panic on OOM/out-of-range (M.1).
+//
+// tk_str_eq — true iff a and b have the same length and the same bytes (memcmp; embedded NUL
+// tolerated). No allocation.
+bool tk_str_eq(tk_str a, tk_str b);
+// tk_str_slice — the substring bytes [start, end) as a fresh owned str. An out-of-range slice
+// (start > end, or end > s.len) PANICS (M.1, parity with the VM's bounds check). The empty
+// slice (start == end) is a valid empty str (1-byte buffer so ptr is never NULL+stale len).
+tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end);
+// tk_str_slice_to — tk_str_slice(s, 0, end).
+tk_str tk_str_slice_to(tk_str s, uint64_t end);
+// tk_str_slice_from — tk_str_slice(s, start, s.len).
+tk_str tk_str_slice_from(tk_str s, uint64_t start);
+// tk_str_len — s.len (the byte length). No allocation.
+uint64_t tk_str_len(tk_str s);
+// tk_str_ends_with — true iff s ends with suffix (suffix.len <= s.len and the tail bytes
+// match). No allocation.
+bool tk_str_ends_with(tk_str s, tk_str suffix);
+// tk_str_contains — true iff needle occurs in s (naive byte search; an empty needle → true).
+// No allocation.
+bool tk_str_contains(tk_str s, tk_str needle);
+// tk_f64_g17 — x rendered as %.17g into a fresh owned str (the host float renderer; the same
+// renderer as tk_ftoa, exposed under the `f64_g17` name the checker/codegen reference).
+tk_str tk_f64_g17(double x);
+
 // tk_panic — fail loud (M.1): "teko: panic: <msg>\n" to stderr, then non-zero exit.
 _Noreturn void tk_panic(const char *msg);
 // the Teko-level globals `panic(str)` / `exit(<int>)` (legislator's ruling — no `never` type).

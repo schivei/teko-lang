@@ -256,6 +256,106 @@ fn cg_named_is_variant(prog: checker::TProgram, name: str) -> bool {
     match cg_find_variant_decl(prog, name) { parser::TypeDecl => true; error => false }
 }
 
+// cg_find_decl — any TYPE_DECL (struct/variant/enum/alias) named `name`, or a `not found`
+// error. (C: `cg_find_decl`, which returned NULL.)
+fn cg_find_decl(prog: checker::TProgram, name: str) -> parser::TypeDecl | error {
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as d => { if d.name == name { return d } }
+            _ => { }
+        }
+        i++
+    }
+    error { message = "codegen: no such type decl" }
+}
+
+// cg_is_prim_name — is `name` a builtin scalar (prim/byte/str/error), i.e. carries no user
+// decl? (C: `cg_is_prim_name`; same set as cg_is_builtin_scalar.)
+fn cg_is_prim_name(name: str) -> bool { cg_is_builtin_scalar(name) }
+
+// =========================================================================
+// AUTO-BOX recursive value-type back-edges. A struct field whose (named) type can reach BACK
+// to the enclosing type through BY-VALUE embedding (struct field / optional inner / variant
+// member / inline-union member — a SLICE is a pointer, not a by-value edge) closes an
+// infinite-size cycle in C. Such a field is emitted as a heap POINTER (tk_alloc) instead of an
+// inline value: construction mallocs+copies the child, field-access derefs. Mirrors the C twin.
+// A VISITED set of type names (here a `[]str` threaded by return — the functional twin of the C
+// stack buffer + len/cap) dedups the reachability walk so a CYCLIC type graph is explored in
+// O(V+E) (a naive depth-bounded DFS revisits exponentially on cycles → codegen hangs).
+// (C: `cg_nameset`/`cg_nameset_seen`/`cg_nameset_mark`.)
+// =========================================================================
+fn cg_nameset_seen(seen: []str, n: str) -> bool { cg_str_in(seen, n) }
+
+// cg_te_reaches_byvalue — does this type-expr's BY-VALUE content reach the named type `to`?
+// (C: `cg_te_reaches_byvalue`.)
+fn cg_te_reaches_byvalue(prog: checker::TProgram, te: parser::TypeExpr, to: str, seen: []str) -> bool {
+    match te {
+        parser::NamedType as nt => {
+            let y = nt.path.segments[nt.path.segments.len - 1].name
+            if cg_is_prim_name(y) { return false }
+            if y == to { return true }
+            cg_name_reaches_byvalue(prog, y, to, seen)
+        }
+        parser::OptionalType as ot => cg_te_reaches_byvalue(prog, ot.inner, to, seen)   // opt embeds inner by value
+        parser::UnionType as ut => {
+            mut i = 0
+            loop {
+                if i >= ut.members.len { break }
+                if cg_te_reaches_byvalue(prog, ut.members[i], to, seen) { return true }
+                i++
+            }
+            false
+        }
+        parser::SliceType => false   // a slice is a pointer — not a by-value edge
+    }
+}
+// cg_name_reaches_byvalue — does named type `from` reach named type `to` through by-value edges?
+// (visited-set guarded). (C: `cg_name_reaches_byvalue`.)
+fn cg_name_reaches_byvalue(prog: checker::TProgram, from: str, to: str, seen: []str) -> bool {
+    if cg_nameset_seen(seen, from) { return false }   // already explored this node
+    let seen2 = teko::list::push(seen, from)
+    let d = match cg_find_decl(prog, from) { parser::TypeDecl as dd => dd; error => return false }
+    match d.body {
+        parser::StructBody as sb => {
+            mut i = 0
+            loop {
+                if i >= sb.fields.len { break }
+                if cg_te_reaches_byvalue(prog, sb.fields[i].type_ann, to, seen2) { return true }
+                i++
+            }
+            false
+        }
+        parser::VariantBody as vb => match vb.type_expr {
+            parser::UnionType as u => {
+                mut i = 0
+                loop {
+                    if i >= u.members.len { break }
+                    if cg_te_reaches_byvalue(prog, u.members[i], to, seen2) { return true }
+                    i++
+                }
+                false
+            }
+            _ => false
+        }
+        _ => false   // enum/alias — no by-value aggregate edges
+    }
+}
+// cg_field_boxed — is the struct `sname`'s field of declared type `fte` a recursive back-edge
+// (→ box as pointer)? A NAMED `Y` or OPTIONAL `Y?` field is boxed iff its by-value content
+// reaches BACK to `sname`. A SLICE field is already a pointer (never boxed); an inline-UNION
+// field is left unboxed (none close a cycle in the corpus). (C: `cg_field_boxed`.)
+fn cg_field_boxed(prog: checker::TProgram, sname: str, fte: parser::TypeExpr) -> bool {
+    let is_box_candidate = match fte {
+        parser::NamedType    => true
+        parser::OptionalType => true
+        _ => false
+    }
+    if !is_box_candidate { return false }
+    cg_te_reaches_byvalue(prog, fte, sname, teko::list::empty())
+}
+
 // cg_variant_has_member — does variant decl `d` have a member whose bare name is `member`?
 // (The member name is the union FIELD name and the UPPERCASE tag suffix.) (C: `cg_variant_has_member`.)
 fn cg_variant_has_member(d: parser::TypeDecl, member: str) -> bool {
@@ -382,18 +482,42 @@ fn cg_opt_mangle_str(inner: checker::Type) -> str | error {
     }
 }
 
+// cg_is_c_keyword — does `s` collide with a C(23) keyword? A variant member KEY (a union
+// FIELD identifier) or a user identifier that spells a C keyword (`bool bool;`) is invalid, so
+// it gets a trailing `_`. (C: `cg_is_c_keyword`.)
+fn cg_is_c_keyword(s: str) -> bool {
+    s == "bool" || s == "int" || s == "char" || s == "short" || s == "long" ||
+    s == "float" || s == "double" || s == "void" || s == "unsigned" || s == "signed" ||
+    s == "const" || s == "volatile" || s == "register" || s == "auto" || s == "static" ||
+    s == "struct" || s == "union" || s == "enum" || s == "return" || s == "default" ||
+    s == "goto" || s == "break" || s == "continue" || s == "case" || s == "switch" ||
+    s == "do" || s == "for" || s == "while" || s == "if" || s == "else" || s == "sizeof" ||
+    s == "typedef" || s == "extern" || s == "inline" || s == "restrict"
+}
+
+// cb_ident — emit a user IDENTIFIER (variable / parameter / binding / assignment target),
+// escaping a C keyword with a trailing `_` (e.g. a parameter named `signed` → `signed_`).
+// Applied at the definition AND every use so they agree. (C: `cb_ident`.)
+fn cb_ident(buf: []byte, name: str) -> []byte {
+    let out = cb_str(buf, name)
+    if cg_is_c_keyword(name) { cb(out, "_") } else { out }
+}
+
 // cg_member_key_str — a variant member's C-IDENTIFIER-SAFE KEY (str) for a RESOLVED member
 // type: the spelling used for BOTH the tag constant (TK_TAG_<V>_<UPPER key>) and the union
 // field (.as.<key>). Extends cg_opt_mangle_str with the SLICE member (`slice_<elem>`), so
-// EVERY member kind maps to a key. (C: `cg_member_key`.)
+// EVERY member kind maps to a key. A key that collides with a C keyword (`bool`) gets a
+// trailing `_` so the union field, the `.as.<key>` construction, and the destructure agree.
+// (C: `cg_member_key`.)
 fn cg_member_key_str(m: checker::Type) -> str | error {
-    match m {
+    let k = match m {
         checker::Slice as sl => match sl.element {
-            checker::Void => error { message = "codegen: an untyped slice variant member needs a known element type (internal)" }
+            checker::Void => return error { message = "codegen: an untyped slice variant member needs a known element type (internal)" }
             _ => teko::str::concat("slice_", match cg_opt_mangle_str(sl.element) { str as s => s; error as e => return e })
         }
-        _ => cg_opt_mangle_str(m)
+        _ => match cg_opt_mangle_str(m) { str as s => s; error as e => return e }
     }
+    if cg_is_c_keyword(k) { teko::str::concat(k, "_") } else { k }
 }
 
 // cg_member_key — append a resolved member's key to a buffer. (C: `cg_member_key`.)
@@ -441,9 +565,11 @@ fn cg_opt_mangle_texpr_str(te: parser::TypeExpr) -> str | error {
     }
 }
 
-// cg_member_key_texpr_str — a SYNTACTIC member's key (str). (C: `cg_member_key_texpr`.)
+// cg_member_key_texpr_str — a SYNTACTIC member's key (str). A C-keyword key (`bool`) → `bool_`
+// so the union field, construction, and destructure agree. (C: `cg_member_key_texpr`.)
 fn cg_member_key_texpr_str(m: parser::TypeExpr) -> str | error {
-    cg_opt_mangle_texpr_str(m)
+    let k = match cg_opt_mangle_texpr_str(m) { str as s => s; error as e => return e }
+    if cg_is_c_keyword(k) { teko::str::concat(k, "_") } else { k }
 }
 
 // cg_variant_typename_texpr — the SYNTACTIC twin of cg_variant_typename — the inline-union
@@ -466,7 +592,7 @@ fn cg_variant_typename_texpr(buf: []byte, te: parser::UnionType) -> []byte | err
 // segment is either a built-in name (u8..f64/bool/byte/str -> its C type) or a user type
 // (-> its mangled typedef). Slice/union/optional members are honest barriers (later
 // waves). (C: `emit_type_expr`.)
-fn emit_type_expr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
+fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr) -> []byte | error {
     match te {
         parser::NamedType as nt => {
             let last = nt.path.segments[nt.path.segments.len - 1].name
@@ -487,6 +613,16 @@ fn emit_type_expr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
             else if last == "byte"  { return cb(buf, "uint8_t") }
             else if last == "str"   { return cb(buf, "tk_str") }
             else if last == "error" { return cb(buf, "tk_str") }   // error → its message str (REBOOT §202)
+            // a TRANSPARENT alias (`type Name = <type-expr>`) emits NO C type of its own —
+            // resolve through to the aliased type-expr at every use site (e.g. a field `[]TypeReg`
+            // → tk_slice_TypeReg). Matches the checker, which resolves aliases transparently.
+            match cg_find_decl(prog, last) {
+                parser::TypeDecl as ad => match ad.body {
+                    parser::AliasBody as alb => return emit_type_expr(buf, prog, alb.alias)
+                    _ => { }
+                }
+                error => { }
+            }
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(buf, "", last)
         }
@@ -743,13 +879,28 @@ fn emit_compare(buf: []byte, prog: checker::TProgram, c: checker::TCompare) -> [
         let term = c.rest[i]
         let op = match cmpop_c(term.op) { str as s => s; error as err => return err }
         if i > 0 { out = cb(out, " && ") }
-        out = cb(out, "(")
-        out = match emit_expr(out, prog, prev) { []byte as o => o; error as err => return err }
-        out = cb(out, " ")
-        out = cb(out, op)
-        out = cb(out, " ")
-        out = match emit_expr(out, prog, term.operand) { []byte as o => o; error as err => return err }
-        out = cb(out, ")")
+        // str equality/inequality lowers to tk_str_eq (a tk_str is a {ptr,len} struct — C `==`
+        // is invalid on it). `a == b` → tk_str_eq(a,b); `a != b` → !tk_str_eq(a,b).
+        let prev_str = match prev.type { checker::Str => true; _ => false }
+        let opnd_str = match term.operand.type { checker::Str => true; _ => false }
+        let is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
+        if (prev_str || opnd_str) && is_eq {
+            out = cb(out, "(")
+            if term.op == lexer::TokenKind::Ne { out = cb(out, "!") }
+            out = cb(out, "tk_str_eq(")
+            out = match emit_expr(out, prog, prev) { []byte as o => o; error as err => return err }
+            out = cb(out, ", ")
+            out = match emit_expr(out, prog, term.operand) { []byte as o => o; error as err => return err }
+            out = cb(out, "))")
+        } else {
+            out = cb(out, "(")
+            out = match emit_expr(out, prog, prev) { []byte as o => o; error as err => return err }
+            out = cb(out, " ")
+            out = cb(out, op)
+            out = cb(out, " ")
+            out = match emit_expr(out, prog, term.operand) { []byte as o => o; error as err => return err }
+            out = cb(out, ")")
+        }
         prev = term.operand
         i++
     }
@@ -950,9 +1101,22 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             // by the checker and lowered to their tk_ runtime twins (a fresh tk_str; OOM-panics, M.1).
             // (`str`/`str_of_bytes` are bridged specially ABOVE — a []byte lowers to tk_slice_byte, a
             // DISTINCT C type from tk_str. In a CALL `str` is this builtin, not the str TYPE.)
-            else if last == "one_byte"    { builtin = "tk_one_byte";    has_builtin = true }   // (byte) -> str
-            else if last == "str_concat3" { builtin = "tk_str_concat3"; has_builtin = true }   // (str, str, str) -> str
-            else if last == "ftoa"        { builtin = "tk_ftoa";        has_builtin = true }   // (f64) -> str
+            else if last == "one_byte"     { builtin = "tk_one_byte";     has_builtin = true }   // (byte) -> str
+            else if last == "str_concat"   { builtin = "tk_str_concat";   has_builtin = true }   // (str, str) -> str
+            else if last == "str_concat3"  { builtin = "tk_str_concat3";  has_builtin = true }   // (str, str, str) -> str
+            else if last == "concat"       { builtin = "tk_str_concat";   has_builtin = true }   // teko::str::concat
+            else if last == "concat3"      { builtin = "tk_str_concat3";  has_builtin = true }   // teko::str::concat3
+            else if last == "slice"        { builtin = "tk_str_slice";    has_builtin = true }   // str::slice(str,u64,u64) -> str
+            else if last == "slice_to"     { builtin = "tk_str_slice_to"; has_builtin = true }   // (str,u64) -> str
+            else if last == "slice_from"   { builtin = "tk_str_slice_from"; has_builtin = true } // (str,u64) -> str
+            else if last == "len"          { builtin = "tk_str_len";      has_builtin = true }   // (str) -> u64
+            else if last == "ends_with"    { builtin = "tk_str_ends_with"; has_builtin = true }  // (str,str) -> bool
+            else if last == "contains"     { builtin = "tk_str_contains"; has_builtin = true }   // (str,str) -> bool
+            else if last == "last_index_of" { builtin = "tk_str_last_index_of"; has_builtin = true } // (str,str) -> u64|error
+            else if last == "i64_to_str"   { builtin = "tk_i64_to_str";   has_builtin = true }   // (i64) -> str
+            else if last == "u64_to_str"   { builtin = "tk_u64_to_str";   has_builtin = true }   // (u64) -> str
+            else if last == "ftoa"         { builtin = "tk_ftoa";         has_builtin = true }   // (f64) -> str
+            else if last == "f64_g17"      { builtin = "tk_f64_g17";      has_builtin = true }   // (f64) -> str (host float renderer)
             // (err_loc/err_typed handled DEGRADED at the top of this fn — native error is message-only;
             //  the error-struct representation is a Phase-6 follow-on. Mirrors codegen.c.)
         }
@@ -1001,11 +1165,21 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
         if fa.field == "line" || fa.field == "col" { return cb(buf, "((uint32_t)0)") }
         return cb(buf, "((tk_str){0})")
     }
+    // auto-box: reading a recursive back-edge field derefs the heap pointer.
+    let fa_boxed = match fa.receiver.type {
+        checker::Named as nm => match cg_find_struct_field_type(prog, nm.name, fa.field) {
+            parser::TypeExpr as fte => cg_field_boxed(prog, nm.name, fte)
+            null => false
+        }
+        _ => false
+    }
     mut out = cb(buf, "(")
+    if fa_boxed { out = cb(out, "*") }
+    out = cb(out, "(")
     out = match emit_expr(out, prog, fa.receiver) { []byte as o => o; error as err => return err }
     out = cb(out, ".")
     out = cb_str(out, fa.field)
-    cb(out, ")")
+    cb(out, "))")
 }
 
 // emit_safe_field_access — `recv?.field` (REBOOT §203). ({ <optTy> _oN = (recv); _oN.present
@@ -1292,17 +1466,35 @@ fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si:
         out = cb(out, ".")
         out = cb_str(out, si.field_names[i])
         out = cb(out, " = ")
-        // Sentinel empty() field: look up the declared field type and emit a concrete empty
-        // literal so emit_expr doesn't fail on the unknown element. (C: emit_struct_init fix.)
+        // Look up the declared field type once: it drives both the sentinel/null literal forms
+        // AND auto-boxing of a recursive back-edge field. (C: emit_struct_init.)
         let fv = si.field_vals[i]
+        let fte_opt = cg_find_struct_field_type(prog, name, si.field_names[i])
+        // auto-box: a recursive back-edge field stores a heap pointer — malloc + copy the child
+        // value into it (`({ T *_bxN = tk_alloc(sizeof *_bxN); *_bxN = (val); _bxN; })`). The
+        // unique id is the buffer length (the functional uniquifier).
+        let boxed = match fte_opt {
+            parser::TypeExpr as fte => cg_field_boxed(prog, name, fte)
+            null => false
+        }
+        let bxid = out.len to i64
+        let bxN = fresh_named("_bx", bxid)
+        if boxed {
+            out = cb(out, "({ ")
+            match fte_opt { parser::TypeExpr as fte => { out = match emit_type_expr(out, prog, fte) { []byte as o => o; error as err => return err } }; null => { } }
+            out = cb(out, " *"); out = cb(out, bxN)
+            out = cb(out, " = tk_alloc(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+        }
+        // Sentinel empty() field: emit a concrete empty literal so emit_expr doesn't fail on the
+        // unknown element. (C: emit_struct_init fix.)
         let emitted: bool = match fv.type {
             checker::Slice as sl => match sl.element {
                 checker::Void => {
-                    match cg_find_struct_field_type(prog, name, si.field_names[i]) {
+                    match fte_opt {
                         parser::TypeExpr as fte => match fte {
                             parser::SliceType as st => {
                                 out = cb(out, "(")
-                                out = match emit_type_expr(out, fte) { []byte as o => o; error as err => return err }
+                                out = match emit_type_expr(out, prog, fte) { []byte as o => o; error as err => return err }
                                 out = cb(out, "){ .ptr = 0, .len = 0 }")
                                 true
                             }
@@ -1318,6 +1510,7 @@ fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si:
         if !emitted {
             out = match emit_expr(out, prog, fv) { []byte as o => o; error as err => return err }
         }
+        if boxed { out = cb(out, "; "); out = cb(out, bxN); out = cb(out, "; })") }
         i++
     }
     cb(out, " }")
@@ -1891,28 +2084,30 @@ fn cg_block_diverges_jump(stmts: []checker::TStatement) -> bool {
 // control flow (a `return …;` leaves the whole function) and never commits to `sink`. A break/
 // continue divergence is an HONEST STOP (it can't escape a stmt-expr), the same frontier the VM
 // enforces (eval_match). (C: `emit_arm_value`.)
-fn emit_arm_value(buf: []byte, prog: checker::TProgram, match_e: checker::TExpr, body: []checker::TStatement, sink: str, ci: str) -> []byte | error {
+fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, match_e: checker::TExpr, body: []checker::TStatement, sink: str, ci: str) -> []byte | error {
     if cg_block_diverges_jump(body) {
         return error { message = "codegen: break/continue inside a `match` used as a sub-expression not yet supported" }
     }
     if cg_block_diverges(body) {
-        // `return`-divergence: emit every statement as-is; the trailing return (or a diverging
-        // trailing if/match) leaves the enclosing function. No `sink =` / `break`.
+        // `return`-divergence: emit every statement as-is; the trailing `return e` (or a diverging
+        // trailing if/match) leaves the ENCLOSING FUNCTION — so its value wraps into the FUNCTION's
+        // return type (ret_type, the C's g_cg_ret_type), NOT the match result type. No `sink =` /
+        // `break`. (C: emit_arm_value's diverging branch.)
         mut out = buf
         mut i = 0
         loop {
             if i + 1 >= body.len { break }
-            out = match emit_stmt(out, body[i], false, prog, Void { }, ci) { []byte as o => o; error as err => return err }
+            out = match emit_stmt(out, body[i], false, prog, ret_type, ci) { []byte as o => o; error as err => return err }
             i++
         }
         let last = body[body.len - 1]
         return match last {
             checker::TExprStmt as es => match es.expr.kind {
-                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, match_e.type, ci)
-                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, match_e.type, ci)
-                _              => emit_stmt(out, last, false, prog, match_e.type, ci)
+                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci)
+                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci)
+                _              => emit_stmt(out, last, false, prog, ret_type, ci)
             }
-            _ => emit_stmt(out, last, false, prog, match_e.type, ci)
+            _ => emit_stmt(out, last, false, prog, ret_type, ci)
         }
     }
     // Value form: all-but-last normally; the trailing value → `sink` (wrapped), then `break`.
@@ -1945,7 +2140,7 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, match_e: checker::TExpr,
 // The non-`else` `if` chain gives the VM's first-match-with-guard order; a failed guard
 // falls through to the next arm. Exhaustiveness (checker-guaranteed) means the chain always
 // commits before the `while (0)` exits. (C: `emit_match_value`.)
-fn emit_match_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr) -> []byte | error {
+fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, m: checker::TMatchExpr) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
     let res  = fresh_named("_r", buf.len to i64 + 1)   // +1 so it differs from subj
     let subjT = m.subject.type   // for optional / variant pattern lowering
@@ -1977,7 +2172,7 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: 
         }
         // the arm body is a BLOCK (B.20): its trailing value flows into _r (wrapped to the
         // match result type), or a diverging arm (`=> return e`) emits real control flow.
-        out = match emit_arm_value(out, prog, e, arm.body, res, ci) { []byte as o => o; error as err => return err }
+        out = match emit_arm_value(out, prog, ret_type, e, arm.body, res, ci) { []byte as o => o; error as err => return err }
         if arm.has_when { out = cb(out, "        }\n") }
         out = cb(out, "    }\n")
         i++
@@ -2140,10 +2335,20 @@ fn emit_number(buf: []byte, e: checker::TExpr, n: checker::TNumber) -> []byte | 
     cb(out, ")")
 }
 
+// emit_expr — a TExpr -> C expression text. `ret_type` threads the ENCLOSING FUNCTION's return
+// type (the functional twin of the C's `g_cg_ret_type` static): a value-form `match` whose arm
+// DIVERGES via `return e` wraps that value into the FUNCTION return type, not the match-result
+// type (emit_arm_value). Every other expr ignores it. (C: `emit_expr`.)
 fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte | error {
+    emit_expr_ret(buf, prog, checker::Void { }, e)
+}
+// emit_expr_ret — emit_expr carrying the enclosing function return type for value-form match
+// diverging arms. emit_expr is the `ret_type = void` convenience wrapper (most callers are not
+// inside a diverging value-form arm, so the threaded type is unused there).
+fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr) -> []byte | error {
     match e.kind {
         checker::TNumber as n      => emit_number(buf, e, n)
-        checker::TVar as v         => cb_str(buf, v.name)
+        checker::TVar as v         => cb_ident(buf, v.name)
         checker::TBinary as b      => emit_binary(buf, prog, e, b)
         checker::TUnary as u       => emit_unary(buf, prog, u)
         checker::TCompare as c     => emit_compare(buf, prog, c)
@@ -2157,7 +2362,7 @@ fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte 
         // emit the C `true`/`false` keyword (C type is `bool`). (C: TK_TEXPR_BOOL branch.)
         checker::TBoolLit as bl    => cb(buf, if bl.value { "true" } else { "false" })
         checker::TIfExpr as f      => emit_if_value(buf, prog, e, f)   // W5a — `if` as a value (GNU stmt-expr)
-        checker::TMatchExpr as m   => emit_match_value(buf, prog, e, m)   // W5b — `match` as a value (GNU stmt-expr)
+        checker::TMatchExpr as m   => emit_match_value(buf, prog, ret_type, e, m)   // W5b — `match` as a value (GNU stmt-expr)
         // null / ?. / ?? — the OPTIONAL value model (REBOOT_PLAN §202/§203; tk_opt_<inner>).
         // A bare `null` in raw expression position has the SENTINEL optional type: it cannot be
         // emitted alone — its concrete type comes from the destination slot via emit_as.
@@ -2308,7 +2513,7 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, b: checker::TBinding, inde
     if b.kind == parser::BindKind::Const { out = cb(out, "const ") }
     out = match emit_type(out, b.bound) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
-    out = cb_str(out, name)
+    out = cb_ident(out, name)
     out = cb(out, " = ")
     // W5b — if the binding's declared type is a variant and the value is a case member,
     // WRAP it into the variant repr (e.g. `let s: Shape = Circle { … }`). (C: emit_as.)
@@ -2320,7 +2525,7 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, b: checker::TBinding, inde
 fn emit_assign(buf: []byte, prog: checker::TProgram, a: checker::TAssign, indent: str) -> []byte | error {
     let op = match assignop_c(a.op) { str as s => s; error as err => return err }
     mut out = cb(buf, indent)
-    out = cb_str(out, a.name)
+    out = cb_ident(out, a.name)
     out = cb(out, " ")
     out = cb(out, op)
     out = cb(out, " ")
@@ -2428,7 +2633,11 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: checker::
 
 // emit_function — a TFunction -> a C function definition.
 // (C: `emit_function`.)
-fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) -> []byte | error {
+// emit_function_sig — the return type + name + params up to the `)` (no body). Shared by the
+// definition AND the PROTOTYPE pass in tk_emit_c, so a forward declaration and its definition
+// spell the same signature. Parameter names ride cb_ident (a C-keyword param → trailing `_`).
+// (C: `emit_function_sig`.)
+fn emit_function_sig(buf: []byte, prog: checker::TProgram, f: checker::TFunction) -> []byte | error {
     mut out = match emit_type(buf, f.return_type) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
     out = cb_str(out, f.name)
@@ -2440,13 +2649,18 @@ fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) ->
         loop {
             if i >= f.params.len { break }
             if i > 0 { out = cb(out, ", ") }
-            out = match emit_type_expr(out, f.params[i].type_ann) { []byte as o => o; error as err => return err }
+            out = match emit_type_expr(out, prog, f.params[i].type_ann) { []byte as o => o; error as err => return err }
             out = cb(out, " ")
-            out = cb_str(out, f.params[i].name)
+            out = cb_ident(out, f.params[i].name)
             i++
         }
     }
-    out = cb(out, ") {\n")
+    cb(out, ")")
+}
+
+fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) -> []byte | error {
+    mut out = match emit_function_sig(buf, prog, f) { []byte as o => o; error as err => return err }
+    out = cb(out, " {\n")
     // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
     // W5b — thread the fn's return type so a tail/return case value is wrapped into a variant
     // return slot (emit_as).
@@ -2494,7 +2708,7 @@ fn variant_member_name(m: parser::TypeExpr) -> str | error {
 // emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
 // empty (the typed item carries no provenance) so decl + ref mangle identically.
 // (C: `emit_type_decl`.)
-fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
+fn emit_type_decl(buf: []byte, prog: checker::TProgram, d: parser::TypeDecl) -> []byte | error {
     match d.body {
         parser::StructBody as sb => {
             mut out = cb(buf, "typedef struct ")
@@ -2504,8 +2718,10 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
             loop {
                 if i >= sb.fields.len { break }
                 out = cb(out, "    ")
-                out = match emit_type_expr(out, sb.fields[i].type_ann) { []byte as o => o; error as err => return err }
+                out = match emit_type_expr(out, prog, sb.fields[i].type_ann) { []byte as o => o; error as err => return err }
                 out = cb(out, " ")
+                // auto-box: a recursive back-edge field is a heap pointer (finite C struct).
+                if cg_field_boxed(prog, d.name, sb.fields[i].type_ann) { out = cb(out, "*") }
                 out = cb_str(out, sb.fields[i].name)
                 out = cb(out, ";\n")
                 i++
@@ -2553,7 +2769,7 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
                 let mem = members[j]
                 let mk = match cg_member_key_texpr_str(mem) { str as s => s; error as err => return err }
                 out = cb(out, "        ")
-                out = match emit_type_expr(out, mem) { []byte as o => o; error as err => return err }
+                out = match emit_type_expr(out, prog, mem) { []byte as o => o; error as err => return err }
                 out = cb(out, " ")
                 out = cb_str(out, mk)   // union field == the member key
                 out = cb(out, ";\n")
@@ -2889,14 +3105,18 @@ fn cg_texpr_ready(em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr) -> bool {
     }
 }
 // Is a named decl's body emittable now (all its by-value field/member deps already emitted)?
-fn cg_named_ready(em: CgEmitted, set: CgTypeSet, d: parser::TypeDecl) -> bool {
+fn cg_named_ready(prog: checker::TProgram, em: CgEmitted, set: CgTypeSet, d: parser::TypeDecl) -> bool {
     match d.body {
         parser::StructBody as sb => {
             mut i = 0
             loop {
                 if i >= sb.fields.len { break }
-                if !cg_texpr_ready(em, set, sb.fields[i].type_ann) { return false }
-                i++
+                // a boxed (recursive back-edge) field is a POINTER — needs only a forward typedef,
+                // so it is NOT a by-value dependency (this is what breaks the cycle for the fixpoint).
+                if cg_field_boxed(prog, d.name, sb.fields[i].type_ann) { i++ } else {
+                    if !cg_texpr_ready(em, set, sb.fields[i].type_ann) { return false }
+                    i++
+                }
             }
             true
         }
@@ -2952,6 +3172,37 @@ fn cg_emit_types_ordered(buf: []byte, prog: checker::TProgram) -> []byte | error
     let named = cg_named_decls(prog)
 
     mut out = buf
+    // 1b) FORWARD typedefs for optionals + inline variants (named struct tags), so a boxed
+    //     back-edge field (a POINTER to tk_opt_/tk_u_) and slices-of-opt/-uvar resolve before the
+    //     bodies are emitted. A pointer needs a named, forward-declarable tag — an anonymous-struct
+    //     typedef can't be forward-declared. (Same redef-to-same-type idiom as the named decls.)
+    mut fi = 0
+    loop {
+        if fi >= set.inners.len { break }
+        out = cb(out, "typedef struct ")
+        out = match cg_opt_typename(out, set.inners[fi]) { []byte as o => o; error as err => return err }
+        out = cb(out, " ")
+        out = match cg_opt_typename(out, set.inners[fi]) { []byte as o => o; error as err => return err }
+        out = cb(out, ";\n")
+        fi++
+    }
+    mut fv = 0
+    loop {
+        if fv >= set.variants.len { break }
+        match set.variants[fv] {
+            checker::Variant as va => {
+                out = cb(out, "typedef struct ")
+                out = match cg_variant_typename(out, va) { []byte as o => o; error as err => return err }
+                out = cb(out, " ")
+                out = match cg_variant_typename(out, va) { []byte as o => o; error as err => return err }
+                out = cb(out, ";\n")
+            }
+            _ => { }
+        }
+        fv++
+    }
+    if set.inners.len + set.variants.len > 0 { out = cb(out, "\n") }
+
     // 2) SLICE typedefs first (pointer-only; their named elements already have forward typedefs).
     mut k = 0
     loop {
@@ -2979,8 +3230,8 @@ fn cg_emit_types_ordered(buf: []byte, prog: checker::TProgram) -> []byte | error
             if ni >= named.len { break }
             let d = named[ni]
             if cg_named_emitted(em, d.name) { ni++ } else {
-                if !cg_named_ready(em, set, d) { ni++ } else {
-                    out = match emit_type_decl(out, d) { []byte as o => o; error as err => return err }
+                if !cg_named_ready(prog, em, set, d) { ni++ } else {
+                    out = match emit_type_decl(out, prog, d) { []byte as o => o; error as err => return err }
                     em = CgEmitted { names = teko::list::push(em.names, d.name); opt_keys = em.opt_keys; uvar_keys = em.uvar_keys }
                     remaining = remaining - 1
                     progress = true
@@ -2996,7 +3247,9 @@ fn cg_emit_types_ordered(buf: []byte, prog: checker::TProgram) -> []byte | error
             let okey = cg_opt_key(inner)
             if cg_str_in(em.opt_keys, okey) { oi++ } else {
                 if !cg_type_ready(em, set, inner) { oi++ } else {
-                    out = cb(out, "typedef struct { bool present; ")
+                    out = cb(out, "typedef struct ")   // named tag (matches the forward decl) so a pointer to it resolves
+                    out = match cg_opt_typename(out, inner) { []byte as o => o; error as err => return err }
+                    out = cb(out, " { bool present; ")
                     out = match emit_type(out, inner) { []byte as o => o; error as err => return err }
                     out = cb(out, " value; } ")
                     out = match cg_opt_typename(out, inner) { []byte as o => o; error as err => return err }
@@ -3105,6 +3358,24 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     // by-value embed (`tk_t_Y`, `tk_opt_T`, `tk_u_…`) is fully defined before the body using it.
     // This is also before any function (so `T?`/`[]T`/variant signatures resolve).
     b = match cg_emit_types_ordered(b, prog) { []byte as o => o; error as err => return err }
+
+    // Function PROTOTYPES — a forward declaration for every function, so a call to a function
+    // defined LATER in the unit (mutual recursion / forward reference across the merged corpus)
+    // resolves. C23 makes an undeclared call an error, so without these the whole self-host corpus
+    // (which freely forward-references) fails to compile. (C: the prototype pass in tk_emit_c.)
+    mut pi = 0
+    loop {
+        if pi >= prog.items.len { break }
+        match prog.items[pi] {
+            checker::TFunction as f => {
+                b = match emit_function_sig(b, prog, f) { []byte as o => o; error as err => return err }
+                b = cb(b, ";\n")
+            }
+            _ => { }
+        }
+        pi++
+    }
+    b = cb(b, "\n")
 
     // First pass: emit every top-level function. Type-decls are handled above; use-decls
     // are a no-op at the C level (imports); loose statements are the second pass.

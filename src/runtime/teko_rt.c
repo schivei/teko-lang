@@ -111,6 +111,77 @@ tk_str tk_ftoa(double x) {
     return (tk_str){ buf, len };
 }
 
+// --- Phase 3 str query/slice builtins (query helpers allocate nothing; slice helpers follow
+// tk_str_concat's ownership — a fresh malloc'd buffer the result OWNS, tk_panic on OOM) ---
+
+// tk_str_eq — same length AND same bytes. memcmp (NOT strcmp — strings may hold embedded NUL);
+// a zero-length pair compares equal without touching ptr (memcmp of 0 bytes is well-defined).
+bool tk_str_eq(tk_str a, tk_str b) {
+    if (a.len != b.len) return false;
+    return memcmp(a.ptr, b.ptr, a.len) == 0;
+}
+
+// tk_str_slice — the bytes [start, end) COPIED into a fresh owned str. Bounds: an out-of-range
+// slice (start > end, or end past the byte length) PANICS (M.1, fail-loud — matches the VM's
+// index bounds check). The empty slice (start == end, in range) uses a 1-byte buffer so ptr is
+// never NULL with a stale len (parity with tk_str_concat's zero-length handling).
+tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end) {
+    if (start > end || end > s.len) tk_panic("string slice out of range");
+    size_t n = (size_t)(end - start);
+    tk_byte *buf = malloc(n ? n : 1);
+    if (buf == NULL) tk_panic("out of memory (str slice)");
+    if (n) memcpy(buf, s.ptr + start, n);
+    return (tk_str){ buf, n };
+}
+
+// tk_str_slice_to — slice from the start to `end`.
+tk_str tk_str_slice_to(tk_str s, uint64_t end) {
+    return tk_str_slice(s, 0, end);
+}
+
+// tk_str_slice_from — slice from `start` to the byte length.
+tk_str tk_str_slice_from(tk_str s, uint64_t start) {
+    return tk_str_slice(s, start, s.len);
+}
+
+// tk_str_len — the byte length (no allocation).
+uint64_t tk_str_len(tk_str s) {
+    return s.len;
+}
+
+// tk_str_ends_with — the tail of s equals suffix. A suffix longer than s can't match; otherwise
+// memcmp the last suffix.len bytes. An empty suffix matches (memcmp of 0 bytes is equal).
+bool tk_str_ends_with(tk_str s, tk_str suffix) {
+    if (suffix.len > s.len) return false;
+    return memcmp(s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
+}
+
+// tk_str_contains — naive byte search: true iff needle occurs anywhere in s. An empty needle is
+// trivially contained (matches at offset 0). Each candidate offset is memcmp'd against needle;
+// the last candidate offset is s.len - needle.len (inclusive).
+bool tk_str_contains(tk_str s, tk_str needle) {
+    if (needle.len == 0) return true;
+    if (needle.len > s.len) return false;
+    size_t last = s.len - needle.len;
+    for (size_t i = 0; i <= last; i += 1) {
+        if (memcmp(s.ptr + i, needle.ptr, needle.len) == 0) return true;
+    }
+    return false;
+}
+
+// tk_f64_g17 — x as %.17g in a fresh owned str (the host float renderer; same behavior as
+// tk_ftoa, exposed under the name the checker/codegen reference for `f64_g17`).
+tk_str tk_f64_g17(double x) {
+    char tmp[40];                 // %.17g of a double fits in well under 40 chars
+    int n = snprintf(tmp, sizeof tmp, "%.17g", x);
+    if (n < 0) tk_panic("f64_g17: snprintf failed");
+    size_t len = (size_t)n;
+    tk_byte *buf = malloc(len ? len : 1);
+    if (buf == NULL) tk_panic("out of memory (f64_g17)");
+    if (len) memcpy(buf, tmp, len);
+    return (tk_str){ buf, len };
+}
+
 void tk_print(tk_str s) {
     // Exactly s.len bytes; tolerate embedded NUL; no strlen/puts.
     fwrite(s.ptr, 1, s.len, stdout);

@@ -103,6 +103,81 @@ exp fn ftoa(x: f64) -> str {
     teko::fmt::f64_g17(x)                 // DEFERRED host float renderer (FFI bottom — C1)
 }
 
+// --- Phase 3 str query/slice builtins (mirror of teko_rt.c's tk_str_eq / tk_str_slice /
+// tk_str_slice_to / tk_str_slice_from / tk_str_len / tk_str_ends_with / tk_str_contains /
+// tk_f64_g17). The query helpers ALLOCATE NOTHING; the slice helpers return a fresh owned str
+// (str() copies the byte builder), and an out-of-range slice PANICS (M.1, parity with the VM). ---
+
+// str_eq — same length AND same bytes. Compares byte-by-byte (the C twin uses memcmp; embedded
+// NUL tolerated). A zero-length pair is equal.
+exp fn str_eq(a: str, b: str) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop { if i >= a.len { break }; if a[i] != b[i] { return false }; i++ }
+    true
+}
+
+// str_slice — the bytes [start, end) COPIED into a fresh owned str. An out-of-range slice
+// (start > end, or end past the byte length) PANICS (M.1, fail-loud — matches the VM's bounds
+// check). The empty slice (start == end, in range) is a valid empty str.
+exp fn str_slice(s: str, start: u64, end: u64) -> str {
+    if start > end || end > s.len { panic("string slice out of range") }
+    mut xs: []byte = teko::list::empty()
+    mut i = start
+    loop { if i >= end { break }; xs = teko::list::push(xs, s[i]); i++ }
+    str(xs)
+}
+
+// str_slice_to — slice from the start to `end`.
+exp fn str_slice_to(s: str, end: u64) -> str {
+    str_slice(s, 0, end)
+}
+
+// str_slice_from — slice from `start` to the byte length.
+exp fn str_slice_from(s: str, start: u64) -> str {
+    str_slice(s, start, s.len)
+}
+
+// str_len — the byte length (no allocation).
+exp fn str_len(s: str) -> u64 {
+    s.len
+}
+
+// str_ends_with — the tail of s equals suffix. A suffix longer than s can't match; otherwise the
+// last suffix.len bytes are compared (the C twin uses memcmp). An empty suffix matches.
+exp fn str_ends_with(s: str, suffix: str) -> bool {
+    if suffix.len > s.len { return false }
+    let base = s.len - suffix.len
+    mut i: u64 = 0
+    loop { if i >= suffix.len { break }; if s[base + i] != suffix[i] { return false }; i++ }
+    true
+}
+
+// str_contains — naive byte search: true iff needle occurs anywhere in s. An empty needle is
+// trivially contained; each candidate offset is compared against needle (the last offset is
+// s.len - needle.len, inclusive).
+exp fn str_contains(s: str, needle: str) -> bool {
+    if needle.len == 0 { return true }
+    if needle.len > s.len { return false }
+    let last = s.len - needle.len
+    mut i: u64 = 0
+    loop {
+        if i > last { break }
+        mut matched = true
+        mut j: u64 = 0
+        loop { if j >= needle.len { break }; if s[i + j] != needle[j] { matched = false; break }; j++ }
+        if matched { return true }
+        i++
+    }
+    false
+}
+
+// f64_g17 — x as %.17g in a fresh owned str (the host float renderer; same behavior as ftoa,
+// riding the DEFERRED host edge — C1). The C twin (teko_rt.c::tk_f64_g17) carries it today.
+exp fn f64_g17(x: f64) -> str {
+    teko::fmt::f64_g17(x)                 // DEFERRED host float renderer (FFI bottom — C1)
+}
+
 // --- panics: fail loud (M.1) — message to stderr, then non-zero exit ---
 
 // (C1.9) NATIVE STACK TRACES — the C twin (teko_rt.c) prints a backtrace on panic and installs a

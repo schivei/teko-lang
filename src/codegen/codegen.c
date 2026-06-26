@@ -212,6 +212,11 @@ static void mangle_type_name(cbuf *b, tk_str namespace, tk_str name) {
 // using the SAME tag/field spellings as emit_type_decl so wrap + decl agree byte-for-byte.
 // =========================================================================
 static tk_tprogram g_cg_prog;   // set once at the top of tk_emit_c (mirror of vm.c's g_prog)
+// The CURRENT function's return type — set at the top of emit_function. A `return` inside a
+// VALUE-form match/if (a GNU statement-expression, reached via emit_expr which carries no
+// ret_type) wraps its value into THIS type via emit_as, so `return error{…}` in a diverging arm
+// of a `T | error` function lands in the tk_u_ variant, not as a bare member.
+static tk_type g_cg_ret_type;
 
 // Forward decl — variant_member_name (the member's bare last path segment; the union
 // field name + the source of the UPPERCASE tag suffix) is defined with the type-decl
@@ -245,6 +250,95 @@ static const tk_type_decl *cg_find_variant_decl(tk_str name) {
 
 // Is the NAMED type `name` a (declared) variant?
 static bool cg_named_is_variant(tk_str name) { return cg_find_variant_decl(name) != NULL; }
+
+// Any TYPE_DECL (struct/variant/enum/alias) named `name`, or NULL.
+static const tk_type_decl *cg_find_decl(tk_str name) {
+    for (size_t i = 0; i < g_cg_prog.nitems; i += 1) {
+        if (g_cg_prog.items[i].tag != TK_TITEM_TYPE_DECL) continue;
+        const tk_type_decl *d = &g_cg_prog.items[i].as.type_decl;
+        if (cg_name_eq(d->name, name)) return d;
+    }
+    return NULL;
+}
+
+// Is `name` a builtin scalar (prim/byte/str/error), i.e. carries no user decl?
+static bool cg_is_prim_name(tk_str name) {
+    static const char *prims[] = { "u8","u16","u32","u64","u128","i8","i16","i32","i64",
+                                   "i128","f16","f32","f64","bool","byte","str","error" };
+    for (size_t i = 0; i < sizeof prims / sizeof *prims; i += 1)
+        if (seg_is(name, prims[i])) return true;
+    return false;
+}
+
+// =========================================================================
+// AUTO-BOX recursive value-type back-edges. A struct field whose (named) type can reach BACK
+// to the enclosing type through BY-VALUE embedding (struct field / optional inner / variant
+// member / inline-union member — a SLICE is a pointer, not a by-value edge) closes an
+// infinite-size cycle in C. Such a field is emitted as a heap POINTER (tk_alloc) instead of
+// an inline value: construction mallocs+copies the child, field-access derefs. This mirrors
+// the hand-written C twin (`tk_texpr *left`) and rides the S0 tk_alloc seam (the S2 arena swap
+// stays mechanical). The VM is unaffected (it boxes every value already).
+// =========================================================================
+// A VISITED set of type names (a stack buffer — the corpus has few dozen named types). The
+// reachability walk dedups against it so a CYCLIC type graph is explored in O(V+E) per query
+// (a naive depth-bounded DFS revisits exponentially on cycles → codegen hangs).
+typedef struct { tk_str *names; size_t len; size_t cap; } cg_nameset;
+static bool cg_nameset_seen(cg_nameset *s, tk_str n) {
+    for (size_t i = 0; i < s->len; i += 1) if (cg_name_eq(s->names[i], n)) return true;
+    return false;
+}
+static void cg_nameset_mark(cg_nameset *s, tk_str n) { if (s->len < s->cap) s->names[s->len++] = n; }
+
+static bool cg_name_reaches_byvalue(tk_str from, tk_str to, cg_nameset *seen);
+
+// Does this type-expr's BY-VALUE content reach the named type `to`?
+static bool cg_te_reaches_byvalue(tk_type_expr te, tk_str to, cg_nameset *seen) {
+    switch (te.tag) {
+        case TK_TEXPR_NAMED: {
+            tk_str y = te.as.named.path.segments[te.as.named.path.len - 1].name;
+            if (cg_is_prim_name(y)) return false;
+            if (cg_name_eq(y, to)) return true;
+            return cg_name_reaches_byvalue(y, to, seen);
+        }
+        case TK_TEXPR_OPTIONAL: return cg_te_reaches_byvalue(*te.as.optional.inner, to, seen);   // opt embeds inner by value
+        case TK_TEXPR_UNION:
+            for (size_t i = 0; i < te.as.uni.len; i += 1)
+                if (cg_te_reaches_byvalue(te.as.uni.members[i], to, seen)) return true;
+            return false;
+        case TK_TEXPR_SLICE: return false;   // a slice is a pointer — not a by-value edge
+        default: return false;
+    }
+}
+// Does named type `from` reach named type `to` through by-value edges? (visited-set guarded.)
+static bool cg_name_reaches_byvalue(tk_str from, tk_str to, cg_nameset *seen) {
+    if (cg_nameset_seen(seen, from)) return false;   // already explored this node
+    cg_nameset_mark(seen, from);
+    const tk_type_decl *d = cg_find_decl(from);
+    if (d == NULL) return false;
+    if (d->body.tag == TK_BODY_STRUCT) {
+        for (size_t i = 0; i < d->body.as.struct_body.n_fields; i += 1)
+            if (cg_te_reaches_byvalue(d->body.as.struct_body.fields[i].type_ann, to, seen)) return true;
+        return false;
+    }
+    if (d->body.tag == TK_BODY_VARIANT) {
+        tk_type_expr vt = d->body.as.variant_body.type_expr;
+        if (vt.tag == TK_TEXPR_UNION)
+            for (size_t i = 0; i < vt.as.uni.len; i += 1)
+                if (cg_te_reaches_byvalue(vt.as.uni.members[i], to, seen)) return true;
+        return false;
+    }
+    return false;   // enum/alias — no by-value aggregate edges
+}
+// Is the struct `sname`'s field of declared type `fte` a recursive back-edge (→ box as pointer)?
+// A NAMED field `Y` or an OPTIONAL field `Y?` is boxed iff its by-value content reaches BACK to
+// `sname` (closing a cycle): `Y` → `tk_t_Y *`, `Y?` → `tk_opt_Y *`. A SLICE field is already a
+// pointer (never boxed). An inline-UNION field is left unboxed (none close a cycle in the corpus;
+// the topo pass flags it honestly if one ever does).
+static bool cg_field_boxed(tk_str sname, tk_type_expr fte) {
+    if (fte.tag != TK_TEXPR_NAMED && fte.tag != TK_TEXPR_OPTIONAL) return false;
+    tk_str buf[512]; cg_nameset seen = { buf, 0, 512 };
+    return cg_te_reaches_byvalue(fte, sname, &seen);   // does the field's by-value content reach back?
+}
 
 // Look up the declared type_expr of field `fname` in struct named `sname` from g_cg_prog.
 // Returns true + sets *out if found; false if the struct or field is absent.
@@ -373,6 +467,31 @@ static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err) {
 // "slice_<elem>", optional → "opt_<inner>"). The key for a member equals the key the
 // optional/slice typedef machinery already uses, so decl + ref + wrap agree byte-for-byte.
 // =========================================================================
+// A variant member KEY becomes a C struct FIELD identifier (the union member name). A prim
+// member like `bool` would yield the invalid field `bool bool;` (C23 keyword) — so a key that
+// collides with a C keyword gets a trailing `_`. Applied to the two lowercase key emitters so
+// the union field, the construction `.as.<key>`, and the destructure agree; the UPPERCASE tag
+// constant (a separate emitter) is unaffected (TK_TAG_..._BOOL is fine).
+static bool cg_is_c_keyword(tk_str s) {
+    static const char *kw[] = { "bool","int","char","short","long","float","double","void",
+        "unsigned","signed","const","volatile","register","auto","static","struct","union",
+        "enum","return","default","goto","break","continue","case","switch","do","for","while",
+        "if","else","sizeof","typedef","extern","inline","restrict" };
+    for (size_t i = 0; i < sizeof kw / sizeof *kw; i += 1) {
+        size_t n = strlen(kw[i]);
+        if (s.len == n && memcmp(s.ptr, kw[i], n) == 0) return true;
+    }
+    return false;
+}
+
+// Emit a user IDENTIFIER (variable / parameter / binding name), escaping a C keyword with a
+// trailing `_` so e.g. a parameter named `signed` becomes `signed_` (invalid `bool signed`
+// otherwise). Applied at the definition AND every use so they agree.
+static void cb_ident(cbuf *b, tk_str name) {
+    cb_str(b, name);
+    if (cg_is_c_keyword(name)) cb(b, "_");
+}
+
 static bool cg_member_key(cbuf *b, tk_type m, const char **err) {
     if (m.tag == TK_TYPE_SLICE) {
         if (m.as.slice.element == NULL)
@@ -380,7 +499,13 @@ static bool cg_member_key(cbuf *b, tk_type m, const char **err) {
         cb(b, "slice_");
         return cg_opt_mangle(b, *m.as.slice.element, err);
     }
-    return cg_opt_mangle(b, m, err);
+    cbuf k = { NULL, 0, 0 };
+    if (!cg_opt_mangle(&k, m, err)) { tk_free0(k.ptr); return false; }
+    tk_str ks = { (const tk_byte *)k.ptr, k.len };
+    cb_str(b, ks);
+    if (cg_is_c_keyword(ks)) cb(b, "_");
+    tk_free0(k.ptr);
+    return true;
 }
 
 // The deterministic C type NAME of an INLINE (anonymous) variant `A | B | …`: `tk_u_` then
@@ -461,6 +586,14 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             else if (seg_is(last, "byte"))  { cb(b, "uint8_t");           return true; }
             else if (seg_is(last, "str"))   { cb(b, "tk_str");            return true; }
             else if (seg_is(last, "error")) { cb(b, "tk_str"); return true; }   // error → its message str (REBOOT §202)
+            // a TRANSPARENT alias (`type Name = <type-expr>`) emits NO C type of its own — resolve
+            // through to the aliased type-expr at every use site (e.g. a `TypeTable` field = []TypeReg
+            // → tk_slice_TypeReg). Matches the checker, which resolves aliases transparently.
+            {
+                const tk_type_decl *ad = cg_find_decl(last);
+                if (ad != NULL && ad->body.tag == TK_BODY_ALIAS)
+                    return emit_type_expr(b, ad->body.as.alias_body.alias, err);
+            }
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(b, (tk_str){ NULL, 0 }, last);
             return true;
@@ -765,7 +898,7 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
         }
 
         case TK_TEXPR_VAR:
-            cb_str(b, e->as.var.name);
+            cb_ident(b, e->as.var.name);
             return true;
 
         case TK_TEXPR_BINARY: {
@@ -828,11 +961,25 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 const char *op = cmpop_c(term.op);
                 if (op == NULL) return fail_node(err, "codegen: comparison operator not yet supported");
                 if (i > 0) cb(b, " && ");
-                cb(b, "(");
-                if (!emit_expr(b, prev, err)) return false;
-                cb(b, " "); cb(b, op); cb(b, " ");
-                if (!emit_expr(b, term.operand, err)) return false;
-                cb(b, ")");
+                // str equality/inequality lowers to tk_str_eq (a tk_str is a {ptr,len} struct — C
+                // `==` is invalid on it). `a == b` → tk_str_eq(a,b); `a != b` → !tk_str_eq(a,b).
+                bool str_cmp = (prev->type.tag == TK_TYPE_STR || term.operand->type.tag == TK_TYPE_STR)
+                               && (term.op == TK_TOKEN_EQEQ || term.op == TK_TOKEN_NE);
+                if (str_cmp) {
+                    cb(b, "(");
+                    if (term.op == TK_TOKEN_NE) cb(b, "!");
+                    cb(b, "tk_str_eq(");
+                    if (!emit_expr(b, prev, err)) return false;
+                    cb(b, ", ");
+                    if (!emit_expr(b, term.operand, err)) return false;
+                    cb(b, "))");
+                } else {
+                    cb(b, "(");
+                    if (!emit_expr(b, prev, err)) return false;
+                    cb(b, " "); cb(b, op); cb(b, " ");
+                    if (!emit_expr(b, term.operand, err)) return false;
+                    cb(b, ")");
+                }
                 prev = term.operand;
             }
             cb(b, ")");
@@ -996,8 +1143,21 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     // type from tk_str, so they are bridged specially ABOVE. In a CALL `str` is this
                     // builtin, not the str TYPE — that's emit_type.)
                     else if (seg_is(last, "one_byte"))    builtin = "tk_one_byte";       // (byte) -> str
+                    else if (seg_is(last, "str_concat"))  builtin = "tk_str_concat";     // (str, str) -> str
                     else if (seg_is(last, "str_concat3")) builtin = "tk_str_concat3";    // (str, str, str) -> str
+                    else if (seg_is(last, "concat"))      builtin = "tk_str_concat";     // teko::str::concat
+                    else if (seg_is(last, "concat3"))     builtin = "tk_str_concat3";    // teko::str::concat3
+                    else if (seg_is(last, "slice"))       builtin = "tk_str_slice";      // str::slice(str,u64,u64) -> str
+                    else if (seg_is(last, "slice_to"))    builtin = "tk_str_slice_to";   // (str,u64) -> str
+                    else if (seg_is(last, "slice_from"))  builtin = "tk_str_slice_from"; // (str,u64) -> str
+                    else if (seg_is(last, "len"))         builtin = "tk_str_len";        // (str) -> u64
+                    else if (seg_is(last, "ends_with"))   builtin = "tk_str_ends_with";  // (str,str) -> bool
+                    else if (seg_is(last, "contains"))    builtin = "tk_str_contains";   // (str,str) -> bool
+                    else if (seg_is(last, "last_index_of")) builtin = "tk_str_last_index_of"; // (str,str) -> u64|error
+                    else if (seg_is(last, "i64_to_str"))  builtin = "tk_i64_to_str";     // (i64) -> str
+                    else if (seg_is(last, "u64_to_str"))  builtin = "tk_u64_to_str";     // (u64) -> str
                     else if (seg_is(last, "ftoa"))        builtin = "tk_ftoa";           // (f64) -> str
+                    else if (seg_is(last, "f64_g17"))     builtin = "tk_f64_g17";        // (f64) -> str (host float renderer)
                     // (err_loc/err_typed handled DEGRADED at the top of this CALL case — native
                     //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }
@@ -1046,11 +1206,20 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 }
                 return true;
             }
+            // auto-box: reading a recursive back-edge field derefs the heap pointer.
+            bool fa_boxed = false;
+            if (rt.tag == TK_TYPE_NAMED) {
+                tk_type_expr fte;
+                if (cg_find_struct_field_type(rt.as.named.name, e->as.field_access.field, &fte))
+                    fa_boxed = cg_field_boxed(rt.as.named.name, fte);
+            }
+            cb(b, "(");
+            if (fa_boxed) cb(b, "*");
             cb(b, "(");
             if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
             cb(b, ".");
             cb_str(b, e->as.field_access.field);
-            cb(b, ")");
+            cb(b, "))");
             return true;
         }
 
@@ -1168,27 +1337,34 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 cb(b, ".");
                 cb_str(b, e->as.struct_init.field_names[i]);
                 cb(b, " = ");
-                // Sentinel field: look up the declared field type and emit a concrete literal.
-                // Covers: empty-slice fields (element==NULL) and null/absent optional fields.
                 const tk_texpr *fv = &e->as.struct_init.field_vals[i];
+                // Look up the declared field type once: it drives both the sentinel/null literal
+                // forms AND auto-boxing of a recursive back-edge field.
+                tk_type_expr fte; bool have_fte =
+                    cg_find_struct_field_type(e->type.as.named.name,
+                                              e->as.struct_init.field_names[i], &fte);
+                // auto-box: a recursive back-edge field stores a heap pointer — malloc + copy the
+                // child value into it (`({ T *_bx = tk_alloc(sizeof *_bx); *_bx = (val); _bx; })`).
+                bool boxed = have_fte && cg_field_boxed(e->type.as.named.name, fte);
+                size_t bxid = b->len;
+                if (boxed) {
+                    cb(b, "({ ");
+                    if (!emit_type_expr(b, fte, err)) return false;
+                    cb(b, " *_bx"); cb_i64(b, (int64_t)bxid);
+                    cb(b, " = tk_alloc(sizeof *_bx"); cb_i64(b, (int64_t)bxid); cb(b, "); *_bx"); cb_i64(b, (int64_t)bxid); cb(b, " = ");
+                }
+                // Sentinel field: emit a concrete literal from the declared field type.
+                // Covers: empty-slice fields (element==NULL) and null/absent optional fields.
                 bool emitted = false;
                 if (fv->type.tag == TK_TYPE_SLICE && fv->type.as.slice.element == NULL) {
-                    tk_type_expr fte;
-                    if (cg_find_struct_field_type(e->type.as.named.name,
-                                                   e->as.struct_init.field_names[i], &fte)
-                        && fte.tag == TK_TEXPR_SLICE && fte.as.slice.element != NULL) {
+                    if (have_fte && fte.tag == TK_TEXPR_SLICE && fte.as.slice.element != NULL) {
                         cb(b, "(");
                         if (!emit_type_expr(b, fte, err)) return false;
                         cb(b, "){ .ptr = 0, .len = 0 }");
                         emitted = true;
                     }
                 } else if (fv->tag == TK_TEXPR_NULL) {
-                    // Bare null in a struct field: look up the declared T? type and emit absent.
-                    // emit_type_expr for T? emits "tk_opt_<inner>" — use it to name the struct.
-                    tk_type_expr fte;
-                    if (cg_find_struct_field_type(e->type.as.named.name,
-                                                   e->as.struct_init.field_names[i], &fte)
-                        && fte.tag == TK_TEXPR_OPTIONAL) {
+                    if (have_fte && fte.tag == TK_TEXPR_OPTIONAL) {
                         cb(b, "(");
                         if (!emit_type_expr(b, fte, err)) return false;
                         cb(b, "){ .present = false }");
@@ -1196,6 +1372,7 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     }
                 }
                 if (!emitted && !emit_expr(b, fv, err)) return false;
+                if (boxed) { cb(b, "; _bx"); cb_i64(b, (int64_t)bxid); cb(b, "; })"); }
             }
             cb(b, " }");
             return true;
@@ -1750,14 +1927,15 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
         return fail_node(err, "codegen: break/continue inside a `match` used as a sub-expression not yet supported");
     if (cg_block_diverges(body, n)) {
         // `return`-divergence: emit every statement as-is; the trailing `return e;` (or a
-        // diverging trailing if/match) leaves the enclosing function. No `sink =` / `break`.
+        // diverging trailing if/match) leaves the ENCLOSING FUNCTION — so its value wraps into the
+        // FUNCTION's return type (g_cg_ret_type), NOT the match result type. No `sink =` / `break`.
         for (size_t i = 0; i + 1 < n; i += 1)
-            if (!emit_stmt(b, &body[i], /*in_main=*/false, (tk_type){ .tag = TK_TYPE_VOID }, commit_indent, err)) return false;
+            if (!emit_stmt(b, &body[i], /*in_main=*/false, g_cg_ret_type, commit_indent, err)) return false;
         const tk_tstatement *last = &body[n - 1];
         if (last->tag == TK_TSTMT_EXPR &&
             (last->as.expr_stmt.expr.tag == TK_TEXPR_IF || last->as.expr_stmt.expr.tag == TK_TEXPR_MATCH))
-            return emit_exprstmt_tail(b, &last->as.expr_stmt.expr, /*in_main=*/false, match_e->type, commit_indent, err);
-        return emit_stmt(b, last, /*in_main=*/false, match_e->type, commit_indent, err);
+            return emit_exprstmt_tail(b, &last->as.expr_stmt.expr, /*in_main=*/false, g_cg_ret_type, commit_indent, err);
+        return emit_stmt(b, last, /*in_main=*/false, g_cg_ret_type, commit_indent, err);
     }
     // Value form: all-but-last normally; the trailing value → `sink` (wrapped), then `break`.
     for (size_t i = 0; i + 1 < n; i += 1)
@@ -2030,7 +2208,7 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
             if (s->as.binding.kind == TK_BIND_CONST) cb(b, "const ");
             if (!emit_type(b, s->as.binding.bound, err)) return false;
             cb(b, " ");
-            cb_str(b, tgt.as.simple.name);
+            cb_ident(b, tgt.as.simple.name);
             cb(b, " = ");
             // W5b — if the binding's declared type is a variant and the value is a case
             // member, WRAP it into the variant repr (e.g. `let s: Shape = Circle { … }`).
@@ -2043,7 +2221,7 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
             const char *op = assignop_c(s->as.assign.op);
             if (op == NULL) return fail_node(err, "codegen: assignment operator not yet supported");
             cb(b, indent);
-            cb_str(b, s->as.assign.name);
+            cb_ident(b, s->as.assign.name);
             cb(b, " "); cb(b, op); cb(b, " ");
             // (#4) the RHS carries a concrete type (an annotated binding's element flows in via
             // type_assign's target-adopt), so it emits directly — no sentinel back-inference.
@@ -2120,7 +2298,9 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
 // =========================================================================
 // A top-level function -> a C function.
 // =========================================================================
-static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
+// Emit a function SIGNATURE (return type, name, parameter list) up to the closing `)`. Shared by
+// the prototype pass (`;`) and the definition (`{ … }`), so both agree byte-for-byte.
+static bool emit_function_sig(cbuf *b, tk_tfunction f, const char **err) {
     if (!emit_type(b, f.return_type, err)) return false;
     cb(b, " ");
     cb_str(b, f.name);
@@ -2132,10 +2312,17 @@ static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
             if (i > 0) cb(b, ", ");
             if (!emit_type_expr(b, f.params[i].type_ann, err)) return false;
             cb(b, " ");
-            cb_str(b, f.params[i].name);
+            cb_ident(b, f.params[i].name);
         }
     }
-    cb(b, ") {\n");
+    cb(b, ")");
+    return true;
+}
+
+static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
+    g_cg_ret_type = f.return_type;   // so a return inside a value-form match/if wraps correctly
+    if (!emit_function_sig(b, f, err)) return false;
+    cb(b, " {\n");
     // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
     // W5b — thread the fn's return type so a tail/return case value is wrapped into a
     // variant return slot (emit_as).
@@ -2182,7 +2369,13 @@ static tk_str variant_member_name(tk_type_expr m) {
 // `error` is "error", a prim is its keyword, a slice is "slice_<elem>", an optional is
 // "opt_<inner>". Used by emit_type_decl so EVERY member kind (not just named) lowers.
 static bool cg_member_key_texpr(cbuf *b, tk_type_expr m, const char **err) {
-    return cg_opt_mangle_texpr(b, m, err);
+    cbuf k = { NULL, 0, 0 };
+    if (!cg_opt_mangle_texpr(&k, m, err)) { tk_free0(k.ptr); return false; }
+    tk_str ks = { (const tk_byte *)k.ptr, k.len };
+    cb_str(b, ks);
+    if (cg_is_c_keyword(ks)) cb(b, "_");   // a C-keyword key (`bool`) → `bool_` union field
+    tk_free0(k.ptr);
+    return true;
 }
 
 // Emit the UPPERCASE form of a member key for a tag constant (TK_TAG_<V>_<UPPER key>). The
@@ -2209,6 +2402,8 @@ static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
                 cb(b, "    ");
                 if (!emit_type_expr(b, sb.fields[i].type_ann, err)) return false;
                 cb(b, " ");
+                // auto-box: a recursive back-edge field is a heap pointer (finite C struct).
+                if (cg_field_boxed(d.name, sb.fields[i].type_ann)) cb(b, "*");
                 cb_str(b, sb.fields[i].name);
                 cb(b, ";\n");
             }
@@ -2572,8 +2767,12 @@ static bool cg_texpr_ready(cg_typenodes *N, tk_type_expr te) {
 static bool cg_named_ready(cg_typenodes *N, tk_type_decl d) {
     if (d.body.tag == TK_BODY_STRUCT) {
         tk_struct_body sb = d.body.as.struct_body;
-        for (size_t i = 0; i < sb.n_fields; i += 1)
+        for (size_t i = 0; i < sb.n_fields; i += 1) {
+            // a boxed (recursive back-edge) field is a POINTER — needs only a forward typedef,
+            // so it is NOT a by-value dependency (this is what breaks the cycle for the fixpoint).
+            if (cg_field_boxed(d.name, sb.fields[i].type_ann)) continue;
             if (!cg_texpr_ready(N, sb.fields[i].type_ann)) return false;
+        }
         return true;
     }
     if (d.body.tag == TK_BODY_VARIANT) {
@@ -2620,6 +2819,26 @@ static bool cg_emit_types_ordered(cbuf *b, tk_tprogram prog, const char **err) {
     #define CG_ORDERED_FREE() do { tk_free0(set.inners); tk_free0(set.slices); tk_free0(set.variants); \
         tk_free0(named); tk_free0(named_done); tk_free0(opt_done); tk_free0(uvar_done); } while (0)
 
+    // 1b) FORWARD typedefs for optionals + inline variants (named struct tags), so a boxed
+    //     back-edge field (a POINTER to tk_opt_/tk_u_) and slices-of-opt/-uvar resolve before the
+    //     bodies are emitted. A pointer needs a named, forward-declarable tag — an anonymous-struct
+    //     typedef can't be forward-declared. (Same redef-to-same-type idiom as the named decls.)
+    for (size_t i = 0; i < set.len; i += 1) {
+        cb(b, "typedef struct ");
+        if (!cg_opt_typename(b, set.inners[i], err)) { CG_ORDERED_FREE(); return false; }
+        cb(b, " ");
+        if (!cg_opt_typename(b, set.inners[i], err)) { CG_ORDERED_FREE(); return false; }
+        cb(b, ";\n");
+    }
+    for (size_t i = 0; i < set.vlen; i += 1) {
+        cb(b, "typedef struct ");
+        if (!cg_variant_typename(b, set.variants[i], err)) { CG_ORDERED_FREE(); return false; }
+        cb(b, " ");
+        if (!cg_variant_typename(b, set.variants[i], err)) { CG_ORDERED_FREE(); return false; }
+        cb(b, ";\n");
+    }
+    if (set.len + set.vlen > 0) cb(b, "\n");
+
     // 2) SLICE typedefs first (pointer-only; their named elements already have forward typedefs).
     for (size_t i = 0; i < set.slen; i += 1) {
         cb(b, "typedef struct { ");
@@ -2642,7 +2861,9 @@ static bool cg_emit_types_ordered(cbuf *b, tk_tprogram prog, const char **err) {
         }
         for (size_t i = 0; i < set.len; i += 1) {
             if (opt_done[i] || !cg_type_ready(&N, set.inners[i])) continue;
-            cb(b, "typedef struct { bool present; ");
+            cb(b, "typedef struct ");   // named tag (matches the forward decl) so a pointer to it resolves
+            if (!cg_opt_typename(b, set.inners[i], err)) { CG_ORDERED_FREE(); return false; }
+            cb(b, " { bool present; ");
             if (!emit_type(b, set.inners[i], err)) { CG_ORDERED_FREE(); return false; }
             cb(b, " value; } ");
             if (!cg_opt_typename(b, set.inners[i], err)) { CG_ORDERED_FREE(); return false; }
@@ -2711,6 +2932,17 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     // by-value embed (`tk_t_Y`, `tk_opt_T`, `tk_u_…`) is fully defined before the body using it.
     // This is also before any function (so `T?`/`[]T`/variant signatures resolve).
     if (!cg_emit_types_ordered(&b, prog, &err)) { tk_free0(b.ptr); return cg_err(err); }
+
+    // Function PROTOTYPES — a forward declaration for every function, so a call to a function
+    // defined LATER in the unit (mutual recursion / forward reference across the merged corpus)
+    // resolves. C23 makes an undeclared call an error, so without these the whole self-host corpus
+    // (which freely forward-references) fails to compile.
+    for (size_t i = 0; i < prog.nitems; i += 1) {
+        if (prog.items[i].tag != TK_TITEM_FUNCTION) continue;
+        if (!emit_function_sig(&b, prog.items[i].as.function, &err)) { tk_free0(b.ptr); return cg_err(err); }
+        cb(&b, ";\n");
+    }
+    cb(&b, "\n");
 
     // First pass: emit every top-level function. Use-decls/type-decls are handled above.
     for (size_t i = 0; i < prog.nitems; i += 1) {
