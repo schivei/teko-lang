@@ -264,6 +264,10 @@ static bool cg_variant_has_member(const tk_type_decl *d, tk_str member) {
 // agree. `error` lowers to its message `tk_str` (no separate error C value type), so `error?`
 // is `tk_opt_error`. The distinct optional types are collected + emitted in tk_emit_c's prelude.
 static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err);   // fwd
+static bool cg_variant_typename(cbuf *b, tk_type v, const char **err);          // fwd (B-cg2)
+static bool cg_member_key(cbuf *b, tk_type m, const char **err);                // fwd (B-cg2)
+static bool cg_member_key_texpr(cbuf *b, tk_type_expr m, const char **err);     // fwd (B-cg2)
+static bool cg_opt_mangle_texpr(cbuf *b, tk_type_expr te, const char **err);    // fwd (B-cg2)
 static bool cg_opt_typename(cbuf *b, tk_type inner, const char **err) {
     cb(b, "tk_opt_");
     return cg_opt_mangle(b, inner, err);
@@ -303,7 +307,10 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
         // W4c — a named aggregate references its mangled typedef name (decl + ref agree
         // via mangle_type_name). The semantic NAMED carries only the bare name.
         case TK_TYPE_NAMED:   mangle_type_name(b, (tk_str){ NULL, 0 }, t.as.named.name); return true;
-        case TK_TYPE_VARIANT: return fail_node(err, "codegen: variant type not yet supported");
+        // VARIANT (`A | B | …`) — the generated `tk_u_<keys>` tagged-union struct (B-cg2).
+        // Its typedef is stamped in the prelude (cg_emit_optional_typedefs) from every distinct
+        // variant the program uses. A NAMED variant decl is reached via TK_TYPE_NAMED, not here.
+        case TK_TYPE_VARIANT: return cg_variant_typename(b, t, err);
         // `error` lowers to its message str (no separate error C value type — REBOOT §202).
         case TK_TYPE_ERROR:   cb(b, "tk_str"); return true;
         case TK_TYPE_FUNC:    return fail_node(err, "codegen: function type not yet supported");
@@ -339,6 +346,48 @@ static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err) {
 }
 
 // =========================================================================
+// B-cg2 — VARIANT codegen (the `T | error` sum types the corpus uses pervasively).
+//
+// A variant member's C-IDENTIFIER-SAFE KEY: the spelling used for BOTH the tag constant
+// (TK_TAG_<V>_<UPPER key>) and the union field name (.as.<key>). It extends cg_opt_mangle
+// to cover the SLICE member (`slice_<elem>`), so EVERY member kind maps to a key (prim →
+// "i32"/"u64"/…, byte → "byte", str → "str", error → "error", named → bare name, slice →
+// "slice_<elem>", optional → "opt_<inner>"). The key for a member equals the key the
+// optional/slice typedef machinery already uses, so decl + ref + wrap agree byte-for-byte.
+// =========================================================================
+static bool cg_member_key(cbuf *b, tk_type m, const char **err) {
+    if (m.tag == TK_TYPE_SLICE) {
+        if (m.as.slice.element == NULL)
+            return fail_node(err, "codegen: an untyped slice variant member needs a known element type (internal)");
+        cb(b, "slice_");
+        return cg_opt_mangle(b, *m.as.slice.element, err);
+    }
+    return cg_opt_mangle(b, m, err);
+}
+
+// The deterministic C type NAME of an INLINE (anonymous) variant `A | B | …`: `tk_u_` then
+// each member's key joined by `_`, in SOURCE ORDER (so the name is a pure function of the
+// member list — decl, every signature/field reference, and every wrap agree). The matching
+// typedef (tag enum + tag/union struct, SAME shape as a named variant) is emitted ONCE in
+// the prelude by the collection pass.
+static bool cg_variant_typename(cbuf *b, tk_type v, const char **err) {
+    cb(b, "tk_u");
+    for (size_t i = 0; i < v.as.variant.len; i += 1) {
+        cb(b, "_");
+        if (!cg_member_key(b, v.as.variant.members[i], err)) return false;
+    }
+    return true;
+}
+
+// Emit the C TYPE for any variant-shaped resolved type: a NAMED variant decl → its mangled
+// `tk_t_<Name>`; an inline `A | B | …` → its `tk_u_<keys>`. (A NAMED non-variant aggregate
+// reaches emit_type's NAMED arm, never here.)
+static bool cg_emit_variant_ctype(cbuf *b, tk_type v, const char **err) {
+    if (v.tag == TK_TYPE_NAMED) { mangle_type_name(b, (tk_str){ NULL, 0 }, v.as.named.name); return true; }
+    return cg_variant_typename(b, v, err);
+}
+
+// =========================================================================
 // W4c — a SYNTACTIC type-expr (parser tk_type_expr) -> C type text. Needed for type-decl
 // member positions (struct field annotations, variant member types), where the typed item
 // carries the SYNTACTIC body, not the resolved `tk_type`. A NAMED type-expr's last path
@@ -357,6 +406,19 @@ static bool cg_opt_mangle_texpr(cbuf *b, tk_type_expr te, const char **err) {
     if (te.tag == TK_TEXPR_OPTIONAL) { cb(b, "opt_"); return cg_opt_mangle_texpr(b, *te.as.optional.inner, err); }
     if (te.tag == TK_TEXPR_SLICE)    { cb(b, "slice_"); return cg_opt_mangle_texpr(b, *te.as.slice.element, err); }
     return fail_node(err, "codegen: optional inner type-expr not yet supported");
+}
+
+// The SYNTACTIC twin of cg_variant_typename — the inline-union `tk_u_<keys>` name from a
+// UnionType type-expr (a signature/field position). Each member's key via cg_opt_mangle_texpr,
+// which agrees byte-for-byte with cg_member_key's resolved-type keys, so a `T | error` in a
+// signature references the SAME tk_u_… the prelude declares from its resolved type.
+static bool cg_variant_typename_texpr(cbuf *b, tk_type_expr te, const char **err) {
+    cb(b, "tk_u");
+    for (size_t i = 0; i < te.as.uni.len; i += 1) {
+        cb(b, "_");
+        if (!cg_opt_mangle_texpr(b, te.as.uni.members[i], err)) return false;
+    }
+    return true;
 }
 
 static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
@@ -389,7 +451,9 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
         // (same name cg_slice_typename produces from the resolved type, so decl + ref agree; the
         // typedef is stamped in the prelude from the function's return/body usage). W-backend.
         case TK_TEXPR_SLICE:    cb(b, "tk_slice_"); return cg_opt_mangle_texpr(b, *te.as.slice.element, err);
-        case TK_TEXPR_UNION:    return fail_node(err, "codegen: inline union type not yet supported");
+        // INLINE union `A | B | …` in a signature/field position → the generated tk_u_<keys>
+        // tagged-union struct (B-cg2); the typedef is stamped in the prelude from its resolved type.
+        case TK_TEXPR_UNION:    return cg_variant_typename_texpr(b, te, err);
         case TK_TEXPR_OPTIONAL: {
             // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
             cb(b, "tk_opt_");
@@ -1240,25 +1304,68 @@ static bool emit_as(cbuf *b, tk_type expected, const tk_texpr *value, const char
         }
         return emit_expr(b, value, err);
     }
-    // Wrap only when: expected is a NAMED variant, the value's type is a NAMED case, and
-    // that case is one of the variant's members. (If value's type IS the variant already
-    // — e.g. a var of the variant type — it is not a bare member, so no wrap.)
-    if (expected.tag == TK_TYPE_NAMED && value->type.tag == TK_TYPE_NAMED) {
-        const tk_type_decl *vd = cg_find_variant_decl(expected.as.named.name);
-        if (vd != NULL && cg_variant_has_member(vd, value->type.as.named.name)) {
-            cb(b, "(");
-            mangle_type_name(b, (tk_str){ NULL, 0 }, expected.as.named.name);
-            cb(b, "){ .tag = TK_TAG_");
-            cb_upper(b, expected.as.named.name);
-            cb(b, "_");
-            cb_upper(b, value->type.as.named.name);
-            cb(b, ", .as.");
-            cb_str(b, value->type.as.named.name);   // union field == the member's bare name
-            cb(b, " = ");
-            if (!emit_expr(b, value, err)) return false;
-            cb(b, " }");
-            return true;
+    // VARIANT slot wrap (B-cg2). Wrap a bare MEMBER value into the variant's tag+union rep:
+    //   (<variantCType>){ .tag = TK_TAG_<V|U…>_<UPPER memberKey>, .as.<memberKey> = <value> }
+    // The member is identified by RESOLVED-TYPE equality (the value's key == one member's key),
+    // so a non-named member (error/prim/slice) wraps too, not just a named case. If the value
+    // is ALREADY the whole variant (its key matches no member — e.g. a var of the variant type),
+    // no wrap: it passes through.
+    if (expected.tag == TK_TYPE_NAMED || expected.tag == TK_TYPE_VARIANT) {
+        // The value's member KEY (rendered once). A value whose type can't form a key (e.g. it
+        // IS a variant) yields no key → no match → pass-through.
+        cbuf vkey = { NULL, 0, 0 }; const char *ke = NULL;
+        bool have_vkey = cg_member_key(&vkey, value->type, &ke);
+        if (have_vkey) {
+            if (expected.tag == TK_TYPE_VARIANT) {
+                // INLINE union slot: members are resolved tk_types.
+                for (size_t i = 0; i < expected.as.variant.len; i += 1) {
+                    cbuf mk = { NULL, 0, 0 }; const char *me = NULL;
+                    if (!cg_member_key(&mk, expected.as.variant.members[i], &me)) { tk_free0(mk.ptr); continue; }
+                    bool same = mk.len == vkey.len && (vkey.len == 0 || memcmp(mk.ptr, vkey.ptr, vkey.len) == 0);
+                    tk_free0(mk.ptr);
+                    if (!same) continue;
+                    cb(b, "("); if (!cg_variant_typename(b, expected, err)) { tk_free0(vkey.ptr); return false; }
+                    cb(b, "){ .tag = TK_TAG_U");
+                    for (size_t j = 0; j < expected.as.variant.len; j += 1) {
+                        cb(b, "_"); cbuf k = { NULL, 0, 0 }; const char *e2 = NULL;
+                        cg_member_key(&k, expected.as.variant.members[j], &e2);
+                        cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr);
+                    }
+                    cb(b, "_"); cb_upper(b, (tk_str){ (const tk_byte *)vkey.ptr, vkey.len });
+                    cb(b, ", .as."); cb_str(b, (tk_str){ (const tk_byte *)vkey.ptr, vkey.len }); cb(b, " = ");
+                    bool ok = emit_expr(b, value, err); tk_free0(vkey.ptr);
+                    if (!ok) return false;
+                    cb(b, " }");
+                    return true;
+                }
+            } else {
+                // NAMED variant decl slot: members are SYNTACTIC type-exprs; match by key.
+                const tk_type_decl *vd = cg_find_variant_decl(expected.as.named.name);
+                if (vd != NULL && vd->body.tag == TK_BODY_VARIANT) {
+                    tk_type_expr vt = vd->body.as.variant_body.type_expr;
+                    if (vt.tag == TK_TEXPR_UNION) {
+                        for (size_t i = 0; i < vt.as.uni.len; i += 1) {
+                            cbuf mk = { NULL, 0, 0 }; const char *me = NULL;
+                            if (!cg_member_key_texpr(&mk, vt.as.uni.members[i], &me)) { tk_free0(mk.ptr); continue; }
+                            bool same = mk.len == vkey.len && (vkey.len == 0 || memcmp(mk.ptr, vkey.ptr, vkey.len) == 0);
+                            tk_free0(mk.ptr);
+                            if (!same) continue;
+                            cb(b, "(");
+                            mangle_type_name(b, (tk_str){ NULL, 0 }, expected.as.named.name);
+                            cb(b, "){ .tag = TK_TAG_");
+                            cb_upper(b, expected.as.named.name);
+                            cb(b, "_"); cb_upper(b, (tk_str){ (const tk_byte *)vkey.ptr, vkey.len });
+                            cb(b, ", .as."); cb_str(b, (tk_str){ (const tk_byte *)vkey.ptr, vkey.len }); cb(b, " = ");
+                            bool ok = emit_expr(b, value, err); tk_free0(vkey.ptr);
+                            if (!ok) return false;
+                            cb(b, " }");
+                            return true;
+                        }
+                    }
+                }
+            }
         }
+        tk_free0(vkey.ptr);
     }
     return emit_expr(b, value, err);
 }
@@ -1313,11 +1420,47 @@ static bool cg_emit_lit_pattern(cbuf *b, const tk_expr *lit, const char **err) {
     }
 }
 
-// Emit the boolean TEST that `_s` (`subj`) matches `pat`. `variant_name` is the subject's
-// variant name (its NAMED type), needed to spell a case's tag constant; it is empty for a
-// scalar subject. Mirrors pat_match's match decisions (no binding here — binds are separate).
+// B-cg2 — emit a variant tag-constant PREFIX (everything up to and including the second `_`,
+// i.e. `TK_TAG_<NAME>_` for a named variant or `TK_TAG_U_<UPPER keys…>_` for an inline union),
+// so a case suffix can be appended. `variantT` is the subject's variant type (NAMED decl or
+// inline TK_TYPE_VARIANT). Mirrors emit_type_decl / cg_emit_inline_variant_typedef spellings.
+static bool cg_emit_tag_prefix(cbuf *b, tk_type variantT, const char **err) {
+    cb(b, "TK_TAG_");
+    if (variantT.tag == TK_TYPE_VARIANT) {
+        cb(b, "U");
+        for (size_t j = 0; j < variantT.as.variant.len; j += 1) {
+            cb(b, "_"); cbuf k = { NULL, 0, 0 }; const char *e2 = NULL;
+            if (!cg_member_key(&k, variantT.as.variant.members[j], &e2)) { tk_free0(k.ptr); return false; }
+            cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr);
+        }
+        cb(b, "_");
+        return true;
+    }
+    cb_upper(b, variantT.as.named.name);   // NAMED variant decl
+    cb(b, "_");
+    return true;
+}
+
+// B-cg2 — emit a BIND/FIELD pattern's CASE KEY (the union field name + the UPPERCASE tag
+// suffix source). A non-slice case uses its path-last identifier (== the member key for
+// named/error/prim members); a slice case (`[]T as x`) uses `slice_<elem>`.
+static bool cg_emit_case_key(cbuf *b, const tk_pattern *pat, const char **err) {
+    if (pat->tag == TK_PAT_BIND && pat->as.bind.is_slice) {
+        if (pat->as.bind.slice_type == NULL)
+            return fail_node(err, "codegen: slice pattern without a slice type (internal)");
+        return cg_member_key_texpr(b, *pat->as.bind.slice_type, err);
+    }
+    tk_path tn = (pat->tag == TK_PAT_FIELD) ? pat->as.field.type_name : pat->as.bind.type_name;
+    cb_str(b, cg_path_last(tn));
+    return true;
+}
+
+// Emit the boolean TEST that `_s` (`subj`) matches `pat`. `variantT` is the subject's variant
+// type (a NAMED variant decl or an inline TK_TYPE_VARIANT), needed to spell a case's tag
+// constant; it is a scalar/void type for a non-variant subject. Mirrors pat_match's match
+// decisions (no binding here — binds are separate).
 static bool emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
-                          tk_str variant_name, const char **err) {
+                          tk_type variantT, const char **err) {
     switch (pat->tag) {
         case TK_PAT_WILDCARD:
             cb(b, "1");
@@ -1338,24 +1481,24 @@ static bool emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
             cb(b, "(");
             for (size_t i = 0; i < pat->as.alt.n_options; i += 1) {
                 if (i > 0) cb(b, " || ");
-                if (!emit_pat_test(b, &pat->as.alt.options[i], subj, variant_name, err)) return false;
+                if (!emit_pat_test(b, &pat->as.alt.options[i], subj, variantT, err)) return false;
             }
             cb(b, ")");
             return true;
         case TK_PAT_BIND:
-            if (pat->as.bind.is_slice)   // `[]T as x` — needs `T | error` anonymous-variant codegen (not yet); honest barrier (M.3)
-                return fail_node(err, "codegen: slice patterns (`[]T as x`) not yet supported");
-            cb(b, "("); cb(b, subj); cb(b, ".tag == TK_TAG_");
-            cb_upper(b, variant_name);
-            cb(b, "_");
-            cb_upper(b, cg_path_last(pat->as.bind.type_name));
+            cb(b, "("); cb(b, subj); cb(b, ".tag == ");
+            if (!cg_emit_tag_prefix(b, variantT, err)) return false;
+            { cbuf k = { NULL, 0, 0 };
+              if (!cg_emit_case_key(&k, pat, err)) { tk_free0(k.ptr); return false; }
+              cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr); }
             cb(b, ")");
             return true;
         case TK_PAT_FIELD:
-            cb(b, "("); cb(b, subj); cb(b, ".tag == TK_TAG_");
-            cb_upper(b, variant_name);
-            cb(b, "_");
-            cb_upper(b, cg_path_last(pat->as.field.type_name));
+            cb(b, "("); cb(b, subj); cb(b, ".tag == ");
+            if (!cg_emit_tag_prefix(b, variantT, err)) return false;
+            { cbuf k = { NULL, 0, 0 };
+              if (!cg_emit_case_key(&k, pat, err)) { tk_free0(k.ptr); return false; }
+              cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr); }
             cb(b, ")");
             return true;
         case TK_PAT_NULL:
@@ -1382,7 +1525,8 @@ static bool cg_emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
     if (subjT.tag == TK_TYPE_OPTIONAL && subjT.as.optional.inner != NULL) {
         if (pat->tag == TK_PAT_NULL) { cb(b, "(!"); cb(b, subj); cb(b, ".present)"); return true; }
         tk_type inner = *subjT.as.optional.inner;
-        bool inner_is_variant = inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name);
+        bool inner_is_variant = inner.tag == TK_TYPE_VARIANT
+                             || (inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name));
         // A bare bind/wildcard over a NON-variant present value matches whenever present (no inner
         // tag to test) — `error as e` / `i64 as v` / `_`. Only a variant inner (or a literal/range
         // /field test) adds an inner test against `_s.value`.
@@ -1390,15 +1534,13 @@ static bool cg_emit_pat_test(cbuf *b, const tk_pattern *pat, const char *subj,
             cb(b, "("); cb(b, subj); cb(b, ".present)");
             return true;
         }
-        tk_str innerVN = inner.tag == TK_TYPE_NAMED ? inner.as.named.name : (tk_str){ NULL, 0 };
         char val[56]; snprintf(val, sizeof val, "%s.value", subj);
         cb(b, "("); cb(b, subj); cb(b, ".present && ");
-        if (!emit_pat_test(b, pat, val, innerVN, err)) return false;
+        if (!emit_pat_test(b, pat, val, inner, err)) return false;
         cb(b, ")");
         return true;
     }
-    tk_str vn = subjT.tag == TK_TYPE_NAMED ? subjT.as.named.name : (tk_str){ NULL, 0 };
-    return emit_pat_test(b, pat, subj, vn, err);
+    return emit_pat_test(b, pat, subj, subjT, err);
 }
 
 // TOP-LEVEL pattern binds (handles an OPTIONAL subject). For an optional present pattern the
@@ -1408,7 +1550,8 @@ static bool cg_emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
     if (subjT.tag == TK_TYPE_OPTIONAL && subjT.as.optional.inner != NULL) {
         if (pat->tag == TK_PAT_NULL) return true;   // NONE binds nothing
         tk_type inner = *subjT.as.optional.inner;
-        bool inner_is_variant = inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name);
+        bool inner_is_variant = inner.tag == TK_TYPE_VARIANT
+                             || (inner.tag == TK_TYPE_NAMED && cg_named_is_variant(inner.as.named.name));
         char val[56]; snprintf(val, sizeof val, "%s.value", subj);
         // A bare `T as x` over an optional binds the INNER value directly (the present value IS
         // the inner — not a variant `.as.<case>`), for any non-variant inner (prim/str/error/
@@ -1442,14 +1585,13 @@ static bool emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
                            const char *indent, const char **err) {
     switch (pat->tag) {
         case TK_PAT_BIND:
-            if (pat->as.bind.is_slice)   // `[]T as x` — see emit_pat_test; honest barrier until `T | error` codegen lands (M.3)
-                return fail_node(err, "codegen: slice patterns (`[]T as x`) not yet supported");
             if (pat->as.bind.has_binding) {
-                // `Foo as x` binds the WHOLE case value (the union member struct).
+                // `Foo as x` binds the WHOLE case value (the union member, named by its KEY:
+                // bare name for named/error/prim, `slice_<elem>` for `[]T as x`).
                 cb(b, indent); cb(b, "auto ");
                 cb_str(b, pat->as.bind.binding);
                 cb(b, " = "); cb(b, subj); cb(b, ".as.");
-                cb_str(b, cg_path_last(pat->as.bind.type_name));
+                if (!cg_emit_case_key(b, pat, err)) return false;
                 cb(b, ";\n");
             }
             return true;
@@ -1458,7 +1600,7 @@ static bool emit_pat_binds(cbuf *b, const tk_pattern *pat, const char *subj,
                 cb(b, indent); cb(b, "auto ");
                 cb_str(b, pat->as.field.fields[i]);
                 cb(b, " = "); cb(b, subj); cb(b, ".as.");
-                cb_str(b, cg_path_last(pat->as.field.type_name));
+                if (!cg_emit_case_key(b, pat, err)) return false;
                 cb(b, ".");
                 cb_str(b, pat->as.field.fields[i]);
                 cb(b, ";\n");
@@ -1957,6 +2099,24 @@ static tk_str variant_member_name(tk_type_expr m) {
     return (tk_str){ NULL, 0 };
 }
 
+// B-cg2 — a variant member's KEY (union field name + tag-constant suffix source) for a
+// SYNTACTIC member type-expr. Reuses cg_opt_mangle_texpr so a NAMED member is its bare name,
+// `error` is "error", a prim is its keyword, a slice is "slice_<elem>", an optional is
+// "opt_<inner>". Used by emit_type_decl so EVERY member kind (not just named) lowers.
+static bool cg_member_key_texpr(cbuf *b, tk_type_expr m, const char **err) {
+    return cg_opt_mangle_texpr(b, m, err);
+}
+
+// Emit the UPPERCASE form of a member key for a tag constant (TK_TAG_<V>_<UPPER key>). The
+// key is rendered to a scratch cbuf, then case-folded via cb_upper.
+static bool cg_member_key_upper_texpr(cbuf *b, tk_type_expr m, const char **err) {
+    cbuf key = { NULL, 0, 0 };
+    if (!cg_member_key_texpr(&key, m, err)) { tk_free0(key.ptr); return false; }
+    cb_upper(b, (tk_str){ (const tk_byte *)key.ptr, key.len });
+    tk_free0(key.ptr);
+    return true;
+}
+
 // Emit ONE type declaration. `name` is the decl's bare name; namespace is empty (the typed
 // item carries no provenance) so decl + ref mangle identically.
 static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
@@ -1980,38 +2140,36 @@ static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
             return true;
         }
         case TK_BODY_VARIANT: {
-            // A variant body is a UnionType (A | B | …). Its members are NAMED type-exprs.
+            // A variant body is a UnionType (A | B | …). Members may be ANY type (B-cg2):
+            // named cases, `error`, prims, slices — each mapped to a C-safe member KEY.
             tk_type_expr vt = d.body.as.variant_body.type_expr;
             if (vt.tag != TK_TEXPR_UNION)
-                return fail_node(err, "codegen: a variant body must be a union of named members");
+                return fail_node(err, "codegen: a variant body must be a union of members");
             size_t nmem = vt.as.uni.len;
-            // 1) the tag enum.
+            // 1) the tag enum: TK_TAG_<UPPER Name>_<UPPER memberKey> per member.
             cb(b, "typedef enum ");
             cb(b, "tk_tag_"); cb_str(b, d.name);
             cb(b, " {\n");
             for (size_t i = 0; i < nmem; i += 1) {
-                tk_str mn = variant_member_name(vt.as.uni.members[i]);
-                if (mn.ptr == NULL)
-                    return fail_node(err, "codegen: a variant member must be a named type");
                 cb(b, "    TK_TAG_");
                 cb_upper(b, d.name);
                 cb(b, "_");
-                cb_upper(b, mn);
+                if (!cg_member_key_upper_texpr(b, vt.as.uni.members[i], err)) return false;
                 if (i + 1 < nmem) cb(b, ",");
                 cb(b, "\n");
             }
             cb(b, "} tk_tag_"); cb_str(b, d.name); cb(b, ";\n\n");
-            // 2) the value: tag + union as.
+            // 2) the value: tag + union as. Each union field is named by the member KEY and
+            //    typed via emit_type_expr (covers named/error/prim/slice/optional members).
             cb(b, "typedef struct ");
             mangle_type_name(b, ns, d.name);
             cb(b, " {\n    tk_tag_"); cb_str(b, d.name); cb(b, " tag;\n    union {\n");
             for (size_t i = 0; i < nmem; i += 1) {
                 tk_type_expr mem = vt.as.uni.members[i];
-                tk_str mn = variant_member_name(mem);
                 cb(b, "        ");
                 if (!emit_type_expr(b, mem, err)) return false;
                 cb(b, " ");
-                cb_str(b, mn);   // the member's bare name is the union field name
+                if (!cg_member_key_texpr(b, mem, err)) return false;   // union field == the member key
                 cb(b, ";\n");
             }
             cb(b, "    } as;\n} ");
@@ -2057,7 +2215,8 @@ static bool emit_type_decl(cbuf *b, tk_type_decl d, const char **err) {
 // types (tk_slice_<e>). One walk feeds both — cg_collect_type_opts registers a slice's element
 // in the same traversal that registers optionals (so no second walker is needed).
 typedef struct { tk_type *inners; size_t len; size_t cap;
-                 tk_type *slices; size_t slen; size_t scap; } cg_opt_set;
+                 tk_type *slices; size_t slen; size_t scap;
+                 tk_type *variants; size_t vlen; size_t vcap; } cg_opt_set;   // B-cg2 — inline tk_u_<keys>
 
 // Register a slice element type (dedup by mangle), parallel to cg_opt_set_add.
 static void cg_slice_add(cg_opt_set *set, tk_type elem) {
@@ -2093,6 +2252,24 @@ static void cg_opt_set_add(cg_opt_set *set, tk_type inner) {
     set->inners[set->len++] = inner;
 }
 
+// B-cg2 — register an INLINE variant type (dedup by its tk_u_<keys> name), parallel to the
+// optional/slice adders. A NAMED variant has its own decl typedef and is NOT registered here.
+static void cg_variant_add(cg_opt_set *set, tk_type v) {
+    cbuf key = { NULL, 0, 0 }; const char *e = NULL;
+    if (!cg_variant_typename(&key, v, &e)) { tk_free0(key.ptr); return; }   // unsupported member → skip (emit_type errors honestly)
+    for (size_t i = 0; i < set->vlen; i += 1) {
+        cbuf prev = { NULL, 0, 0 }; const char *pe = NULL;
+        if (!cg_variant_typename(&prev, set->variants[i], &pe)) { tk_free0(prev.ptr); continue; }
+        bool same = prev.len == key.len && (key.len == 0 || memcmp(prev.ptr, key.ptr, key.len) == 0);
+        tk_free0(prev.ptr);
+        if (same) { tk_free0(key.ptr); return; }   // already present
+    }
+    tk_free0(key.ptr);
+    if (set->vlen == set->vcap) { set->vcap = set->vcap ? set->vcap * 2 : 8;
+        set->variants = tk_realloc0(set->variants, set->vcap * sizeof *set->variants); if (!set->variants) abort(); }
+    set->variants[set->vlen++] = v;
+}
+
 // Register every optional in a type (and its nested inners, innermost first).
 static void cg_collect_type_opts(cg_opt_set *set, tk_type t) {
     switch (t.tag) {
@@ -2108,7 +2285,15 @@ static void cg_collect_type_opts(cg_opt_set *set, tk_type t) {
                 cg_slice_add(set, *t.as.slice.element);            // register THIS slice's tk_slice_<elem> typedef
             }
             return;
-        default: return;   // PRIM/STR/BYTE/ERROR/NAMED/VARIANT/FUNC/VOID carry no optional to register here
+        case TK_TYPE_VARIANT:
+            // B-cg2 — an INLINE `A | B | …`. Recurse into each member FIRST (so a member that is
+            // a slice/optional gets its tk_slice_/tk_opt_ typedef before this tk_u_ references it),
+            // then register THIS variant's tk_u_<keys> typedef.
+            for (size_t i = 0; i < t.as.variant.len; i += 1)
+                cg_collect_type_opts(set, t.as.variant.members[i]);
+            cg_variant_add(set, t);
+            return;
+        default: return;   // PRIM/STR/BYTE/ERROR/NAMED/FUNC/VOID carry no generated typedef to register here
     }
 }
 
@@ -2167,10 +2352,62 @@ static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, s
     }
 }
 
+// B-cg2 — emit ONE inline-variant typedef `tk_u_<keys>` (the SAME tag-enum + tag/union-struct
+// shape as a named variant decl, but named/keyed off the resolved member types). Members'
+// typedefs (slice/opt) precede it by registration order.
+static bool cg_emit_inline_variant_typedef(cbuf *b, tk_type v, const char **err) {
+    size_t nmem = v.as.variant.len;
+    // tag enum: typedef enum tk_tag_u_<keys> { TK_TAG_U_<keys>_<UPPER key>, … } tk_tag_u_<keys>;
+    cb(b, "typedef enum tk_tag");
+    for (size_t i = 0; i < nmem; i += 1) { cb(b, "_"); if (!cg_member_key(b, v.as.variant.members[i], err)) return false; }
+    cb(b, " {\n");
+    for (size_t i = 0; i < nmem; i += 1) {
+        cb(b, "    TK_TAG_U");
+        for (size_t j = 0; j < nmem; j += 1) {
+            cb(b, "_");
+            cbuf k = { NULL, 0, 0 };
+            if (!cg_member_key(&k, v.as.variant.members[j], err)) { tk_free0(k.ptr); return false; }
+            cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr);
+        }
+        cb(b, "_");
+        { cbuf k = { NULL, 0, 0 };
+          if (!cg_member_key(&k, v.as.variant.members[i], err)) { tk_free0(k.ptr); return false; }
+          cb_upper(b, (tk_str){ (const tk_byte *)k.ptr, k.len }); tk_free0(k.ptr); }
+        if (i + 1 < nmem) cb(b, ",");
+        cb(b, "\n");
+    }
+    cb(b, "} tk_tag");
+    for (size_t i = 0; i < nmem; i += 1) { cb(b, "_"); if (!cg_member_key(b, v.as.variant.members[i], err)) return false; }
+    cb(b, ";\n");
+    // value struct: typedef struct tk_u_<keys> { tk_tag_u_<keys> tag; union { … } as; } tk_u_<keys>;
+    cb(b, "typedef struct ");
+    if (!cg_variant_typename(b, v, err)) return false;
+    cb(b, " {\n    tk_tag");
+    for (size_t i = 0; i < nmem; i += 1) { cb(b, "_"); if (!cg_member_key(b, v.as.variant.members[i], err)) return false; }
+    cb(b, " tag;\n    union {\n");
+    for (size_t i = 0; i < nmem; i += 1) {
+        cb(b, "        ");
+        if (!emit_type(b, v.as.variant.members[i], err)) return false;
+        cb(b, " ");
+        if (!cg_member_key(b, v.as.variant.members[i], err)) return false;
+        cb(b, ";\n");
+    }
+    cb(b, "    } as;\n} ");
+    if (!cg_variant_typename(b, v, err)) return false;
+    cb(b, ";\n");
+    return true;
+}
+
+// Collect generated-typedef dependencies from a TYPE_DECL body (struct fields' resolved-ish
+// types via type-exprs are barriers; here we only need the variant-decl member types, which the
+// emit already covers — but a struct field that is `[]T` needs the slice typedef). The decl
+// member positions carry SYNTACTIC type-exprs; the resolved walk above handles signatures and
+// bodies, which is where the corpus's variants live. (Decls are left to emit honestly.)
+
 // Walk the whole program; emit each distinct optional typedef once (in registration order, so
 // a nested inner optional precedes the outer that references it).
 static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **err) {
-    cg_opt_set set = { NULL, 0, 0, NULL, 0, 0 };
+    cg_opt_set set = { NULL, 0, 0, NULL, 0, 0, NULL, 0, 0 };
     for (size_t i = 0; i < prog.nitems; i += 1) {
         tk_titem it = prog.items[i];
         switch (it.tag) {
@@ -2182,11 +2419,12 @@ static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **er
             default: break;
         }
     }
+    #define CG_TYPEDEF_FREE() do { tk_free0(set.inners); tk_free0(set.slices); tk_free0(set.variants); } while (0)
     for (size_t i = 0; i < set.len; i += 1) {
         cb(b, "typedef struct { bool present; ");
-        if (!emit_type(b, set.inners[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        if (!emit_type(b, set.inners[i], err)) { CG_TYPEDEF_FREE(); return false; }
         cb(b, " value; } ");
-        if (!cg_opt_typename(b, set.inners[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        if (!cg_opt_typename(b, set.inners[i], err)) { CG_TYPEDEF_FREE(); return false; }
         cb(b, ";\n");
     }
     if (set.len > 0) cb(b, "\n");
@@ -2194,13 +2432,21 @@ static bool cg_emit_optional_typedefs(cbuf *b, tk_tprogram prog, const char **er
     // Same {ptr,len} shape as tk_str; a non-const ptr (we build slices via copy-append).
     for (size_t i = 0; i < set.slen; i += 1) {
         cb(b, "typedef struct { ");
-        if (!emit_type(b, set.slices[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        if (!emit_type(b, set.slices[i], err)) { CG_TYPEDEF_FREE(); return false; }
         cb(b, " *ptr; uint64_t len; } ");
-        if (!cg_slice_typename(b, set.slices[i], err)) { tk_free0(set.inners); tk_free0(set.slices); return false; }
+        if (!cg_slice_typename(b, set.slices[i], err)) { CG_TYPEDEF_FREE(); return false; }
         cb(b, ";\n");
     }
     if (set.slen > 0) cb(b, "\n");
-    tk_free0(set.inners); tk_free0(set.slices);
+    // VARIANT TYPEDEFS (B-cg2) — after slices/optionals (so a member that is `[]T` / `T?`
+    // already has its typedef). In registration order: each member was collected before the
+    // variant, so any nested inline variant member also precedes its container.
+    for (size_t i = 0; i < set.vlen; i += 1) {
+        if (!cg_emit_inline_variant_typedef(b, set.variants[i], err)) { CG_TYPEDEF_FREE(); return false; }
+    }
+    if (set.vlen > 0) cb(b, "\n");
+    CG_TYPEDEF_FREE();
+    #undef CG_TYPEDEF_FREE
     return true;
 }
 

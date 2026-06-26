@@ -307,7 +307,9 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         // W4c — a Named aggregate -> its mangled typedef name (the bare name; resolve
         // drops the namespace). decl + ref agree via mangle_type_name.
         checker::Named as nm => mangle_type_name(buf, "", nm.name)
-        checker::Variant   => error { message = "codegen: variant type not yet supported" }
+        // VARIANT (`A | B | …`) — the generated tk_u_<keys> tagged-union struct (B-cg2). Its
+        // typedef is stamped in the prelude. A Named variant decl is reached via Named, not here.
+        checker::Variant as va => cg_variant_typename(buf, va)
         checker::Func      => error { message = "codegen: function type not yet supported" }
         // `error` lowers to its message str (no separate error C value type — REBOOT §202).
         checker::Error     => cb(buf, "tk_str")
@@ -351,6 +353,113 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
     }
 }
 
+// ---------------------------------------------------------------------------
+// B-cg2 — VARIANT codegen (the `T | error` sum types the corpus uses pervasively).
+// ---------------------------------------------------------------------------
+
+// cg_opt_mangle_str — the resolved-type mangle SUFFIX as a STRING (the str twin of
+// cg_opt_mangle, which appends to a buffer). Used to compose member keys via str concat.
+fn cg_opt_mangle_str(inner: checker::Type) -> str | error {
+    match inner {
+        checker::Prim as p => match p.kind {
+            checker::PrimKind::U8 => "u8";   checker::PrimKind::U16 => "u16"
+            checker::PrimKind::U32 => "u32"; checker::PrimKind::U64 => "u64"
+            checker::PrimKind::U128 => "u128"; checker::PrimKind::I8 => "i8"
+            checker::PrimKind::I16 => "i16"; checker::PrimKind::I32 => "i32"
+            checker::PrimKind::I64 => "i64"; checker::PrimKind::I128 => "i128"
+            checker::PrimKind::F16 => "f16"; checker::PrimKind::F32 => "f32"
+            checker::PrimKind::F64 => "f64"; checker::PrimKind::Bool => "bool"
+        }
+        checker::Byte  => "byte"
+        checker::Str   => "str"
+        checker::Error => "error"
+        checker::Named as nm => nm.name
+        checker::Optional as o => match o.inner {
+            checker::Void => error { message = "codegen: nested bare-null optional (internal)" }
+            _ => teko::str::concat("opt_", match cg_opt_mangle_str(o.inner) { str as s => s; error as e => return e })
+        }
+        _ => error { message = "codegen: optional inner type not yet supported" }
+    }
+}
+
+// cg_member_key_str — a variant member's C-IDENTIFIER-SAFE KEY (str) for a RESOLVED member
+// type: the spelling used for BOTH the tag constant (TK_TAG_<V>_<UPPER key>) and the union
+// field (.as.<key>). Extends cg_opt_mangle_str with the SLICE member (`slice_<elem>`), so
+// EVERY member kind maps to a key. (C: `cg_member_key`.)
+fn cg_member_key_str(m: checker::Type) -> str | error {
+    match m {
+        checker::Slice as sl => match sl.element {
+            checker::Void => error { message = "codegen: an untyped slice variant member needs a known element type (internal)" }
+            _ => teko::str::concat("slice_", match cg_opt_mangle_str(sl.element) { str as s => s; error as e => return e })
+        }
+        _ => cg_opt_mangle_str(m)
+    }
+}
+
+// cg_member_key — append a resolved member's key to a buffer. (C: `cg_member_key`.)
+fn cg_member_key(buf: []byte, m: checker::Type) -> []byte | error {
+    cb(buf, match cg_member_key_str(m) { str as s => s; error as e => return e })
+}
+
+// cg_variant_typename_str — the deterministic C type NAME of an INLINE variant `A | B | …`:
+// `tk_u_` then each member's key joined by `_`, in SOURCE ORDER. (C: `cg_variant_typename`.)
+fn cg_variant_typename_str(v: checker::Variant) -> str | error {
+    mut name = "tk_u"
+    mut i = 0
+    loop {
+        if i >= v.members.len { break }
+        let k = match cg_member_key_str(v.members[i]) { str as s => s; error as e => return e }
+        name = teko::str::concat3(name, "_", k)
+        i++
+    }
+    name
+}
+
+// cg_variant_typename — append the inline-variant tk_u_<keys> name to a buffer. (C: `cg_variant_typename`.)
+fn cg_variant_typename(buf: []byte, v: checker::Variant) -> []byte | error {
+    cb(buf, match cg_variant_typename_str(v) { str as s => s; error as e => return e })
+}
+
+// cg_emit_variant_ctype — emit the C TYPE for any variant-shaped resolved type: a Named
+// variant decl → its mangled tk_t_<Name>; an inline `A | B | …` → its tk_u_<keys>. (C: `cg_emit_variant_ctype`.)
+fn cg_emit_variant_ctype(buf: []byte, v: checker::Type) -> []byte | error {
+    match v {
+        checker::Named as nm => mangle_type_name(buf, "", nm.name)
+        checker::Variant as va => cg_variant_typename(buf, va)
+        _ => error { message = "codegen: cg_emit_variant_ctype on a non-variant type (internal)" }
+    }
+}
+
+// cg_opt_mangle_texpr_str — the SYNTACTIC mangle suffix as a STRING (str twin of
+// cg_opt_mangle_texpr). Agrees byte-for-byte with cg_opt_mangle_str. (C: `cg_opt_mangle_texpr`.)
+fn cg_opt_mangle_texpr_str(te: parser::TypeExpr) -> str | error {
+    match te {
+        parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
+        parser::OptionalType as ot => teko::str::concat("opt_", match cg_opt_mangle_texpr_str(ot.inner) { str as s => s; error as e => return e })
+        parser::SliceType as st => teko::str::concat("slice_", match cg_opt_mangle_texpr_str(st.element) { str as s => s; error as e => return e })
+        _ => error { message = "codegen: optional inner type-expr not yet supported" }
+    }
+}
+
+// cg_member_key_texpr_str — a SYNTACTIC member's key (str). (C: `cg_member_key_texpr`.)
+fn cg_member_key_texpr_str(m: parser::TypeExpr) -> str | error {
+    cg_opt_mangle_texpr_str(m)
+}
+
+// cg_variant_typename_texpr — the SYNTACTIC twin of cg_variant_typename — the inline-union
+// tk_u_<keys> name from a UnionType type-expr (a signature/field position). (C: `cg_variant_typename_texpr`.)
+fn cg_variant_typename_texpr(buf: []byte, te: parser::UnionType) -> []byte | error {
+    mut out = cb(buf, "tk_u")
+    mut i = 0
+    loop {
+        if i >= te.members.len { break }
+        out = cb(out, "_")
+        out = cb(out, match cg_member_key_texpr_str(te.members[i]) { str as s => s; error as e => return e })
+        i++
+    }
+    out
+}
+
 // emit_type_expr — a SYNTACTIC type-expr (parser TypeExpr) -> C type text. Needed for
 // type-decl member positions (struct field annotations, variant member types), where the
 // typed item carries the SYNTACTIC body, not the resolved Type. A NamedType's last path
@@ -382,7 +491,9 @@ fn emit_type_expr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
             mangle_type_name(buf, "", last)
         }
         parser::SliceType    => error { message = "codegen: slice type not yet supported" }
-        parser::UnionType    => error { message = "codegen: inline union type not yet supported" }
+        // INLINE union `A | B | …` in a signature/field position → the generated tk_u_<keys>
+        // tagged-union struct (B-cg2); the typedef is stamped in the prelude. (C: emit_type_expr TEXPR_UNION arm.)
+        parser::UnionType as ut => cg_variant_typename_texpr(buf, ut)
         // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
         parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "tk_opt_"), ot.inner)
     }
@@ -1317,24 +1428,74 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
         }
         _ => { }
     }
-    // Wrap only when expected is a NAMED variant, value's type is a NAMED case, and that
-    // case is one of the variant's members. (If value's type IS the variant already — a var
-    // of the variant type — it is not a bare member, so no wrap.)
-    let exp_name = match expected { checker::Named as nm => nm.name; _ => return emit_expr(buf, prog, value) }
-    let val_name = match value.type { checker::Named as nm => nm.name; _ => return emit_expr(buf, prog, value) }
-    let vd = match cg_find_variant_decl(prog, exp_name) { parser::TypeDecl as d => d; error => return emit_expr(buf, prog, value) }
-    if !cg_variant_has_member(vd, val_name) { return emit_expr(buf, prog, value) }
-    mut out = cb(buf, "(")
-    out = mangle_type_name(out, "", exp_name)
-    out = cb(out, "){ .tag = TK_TAG_")
-    out = cb_upper(out, exp_name)
-    out = cb(out, "_")
-    out = cb_upper(out, val_name)
-    out = cb(out, ", .as.")
-    out = cb_str(out, val_name)            // union field == the member's bare name
-    out = cb(out, " = ")
-    out = match emit_expr(out, prog, value) { []byte as o => o; error as err => return err }
-    cb(out, " }")
+    // VARIANT slot wrap (B-cg2). Wrap a bare MEMBER value into the variant's tag+union rep:
+    //   (<variantCType>){ .tag = TK_TAG_<V|U…>_<UPPER memberKey>, .as.<memberKey> = <value> }
+    // The member is identified by RESOLVED-TYPE equality (the value's KEY == one member's key),
+    // so a non-named member (error/prim/slice) wraps too. If the value is ALREADY the whole
+    // variant (its key matches no member), it passes through. (C: the variant arm of emit_as.)
+    let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
+    if vkey == "" { return emit_expr(buf, prog, value) }
+    match expected {
+        checker::Variant as va => {
+            // INLINE union slot: members are resolved Types.
+            mut i = 0
+            loop {
+                if i >= va.members.len { break }
+                let mk = match cg_member_key_str(va.members[i]) { str as s => s; error => "" }
+                if mk == vkey {
+                    mut out = cb(buf, "(")
+                    out = match cg_variant_typename(out, va) { []byte as o => o; error as err => return err }
+                    out = cb(out, "){ .tag = TK_TAG_U")
+                    mut j = 0
+                    loop {
+                        if j >= va.members.len { break }
+                        out = cb(out, "_")
+                        let kj = match cg_member_key_str(va.members[j]) { str as s => s; error => "" }
+                        out = cb_upper(out, kj)
+                        j++
+                    }
+                    out = cb(out, "_")
+                    out = cb_upper(out, vkey)
+                    out = cb(out, ", .as.")
+                    out = cb_str(out, vkey)
+                    out = cb(out, " = ")
+                    out = match emit_expr(out, prog, value) { []byte as o => o; error as err => return err }
+                    return cb(out, " }")
+                }
+                i++
+            }
+            return emit_expr(buf, prog, value)
+        }
+        checker::Named as nm => {
+            // NAMED variant decl slot: members are SYNTACTIC type-exprs; match by KEY.
+            let vd = match cg_find_variant_decl(prog, nm.name) { parser::TypeDecl as d => d; error => return emit_expr(buf, prog, value) }
+            let members = match vd.body {
+                parser::VariantBody as vb => match vb.type_expr { parser::UnionType as u => u.members; _ => return emit_expr(buf, prog, value) }
+                _ => return emit_expr(buf, prog, value)
+            }
+            mut i = 0
+            loop {
+                if i >= members.len { break }
+                let mk = match cg_member_key_texpr_str(members[i]) { str as s => s; error => "" }
+                if mk == vkey {
+                    mut out = cb(buf, "(")
+                    out = mangle_type_name(out, "", nm.name)
+                    out = cb(out, "){ .tag = TK_TAG_")
+                    out = cb_upper(out, nm.name)
+                    out = cb(out, "_")
+                    out = cb_upper(out, vkey)
+                    out = cb(out, ", .as.")
+                    out = cb_str(out, vkey)
+                    out = cb(out, " = ")
+                    out = match emit_expr(out, prog, value) { []byte as o => o; error as err => return err }
+                    return cb(out, " }")
+                }
+                i++
+            }
+            return emit_expr(buf, prog, value)
+        }
+        _ => emit_expr(buf, prog, value)
+    }
 }
 
 // cg_emit_lit_pattern — emit an AST LITERAL pattern bound as a C constant comparable to the
@@ -1355,10 +1516,52 @@ fn cg_emit_lit_pattern(buf: []byte, lit: parser::Expr) -> []byte | error {
     }
 }
 
-// emit_pat_test — emit the boolean TEST that `_s` (`subj`) matches `pat`. `variant_name` is
-// the subject's variant name (its NAMED type), needed to spell a case's tag constant; it is
-// empty for a scalar subject. Mirrors pat_match's decisions (binds are separate). (C: `emit_pat_test`.)
-fn emit_pat_test(buf: []byte, pat: parser::Pattern, subj: str, variant_name: str) -> []byte | error {
+// cg_emit_tag_prefix — emit a variant tag-constant PREFIX up to and including the second `_`
+// (`TK_TAG_<NAME>_` for a named variant, `TK_TAG_U_<UPPER keys…>_` for an inline union), so a
+// case suffix can be appended. `variantT` is the subject's variant type. (C: `cg_emit_tag_prefix`.)
+fn cg_emit_tag_prefix(buf: []byte, variantT: checker::Type) -> []byte | error {
+    mut out = cb(buf, "TK_TAG_")
+    match variantT {
+        checker::Variant as va => {
+            out = cb(out, "U")
+            mut j = 0
+            loop {
+                if j >= va.members.len { break }
+                out = cb(out, "_")
+                let kj = match cg_member_key_str(va.members[j]) { str as s => s; error as err => return err }
+                out = cb_upper(out, kj)
+                j++
+            }
+            cb(out, "_")
+        }
+        checker::Named as nm => { out = cb_upper(out, nm.name); cb(out, "_") }
+        _ => error { message = "codegen: tag prefix over a non-variant subject (internal)" }
+    }
+}
+
+// cg_emit_case_key_str — a BIND/FIELD pattern's CASE KEY (the union field name + the UPPERCASE
+// tag-suffix source). A non-slice case uses its path-last identifier (== the member key for
+// named/error/prim); a slice case (`[]T as x`) uses `slice_<elem>`. (C: `cg_emit_case_key`.)
+fn cg_emit_case_key_str(pat: parser::Pattern) -> str | error {
+    match pat {
+        parser::BindPattern as bp => {
+            if bp.is_slice {
+                match bp.slice_type {
+                    null => error { message = "codegen: slice pattern without a slice type (internal)" }
+                    parser::TypeExpr as st => cg_member_key_texpr_str(st)
+                }
+            } else { cg_path_last(bp.type_name) }
+        }
+        parser::FieldPattern as fp => cg_path_last(fp.type_name)
+        _ => error { message = "codegen: case key over a non-bind/field pattern (internal)" }
+    }
+}
+
+// emit_pat_test — emit the boolean TEST that `_s` (`subj`) matches `pat`. `variantT` is the
+// subject's variant type (a Named variant decl or an inline Variant), needed to spell a case's
+// tag constant; it is a scalar/void type for a non-variant subject. Mirrors pat_match's
+// decisions (binds are separate). (C: `emit_pat_test`.)
+fn emit_pat_test(buf: []byte, pat: parser::Pattern, subj: str, variantT: checker::Type) -> []byte | error {
     match pat {
         parser::WildcardPattern => cb(buf, "1")
         parser::LiteralPattern as lp => {
@@ -1385,28 +1588,27 @@ fn emit_pat_test(buf: []byte, pat: parser::Pattern, subj: str, variant_name: str
             loop {
                 if i >= ap.options.len { break }
                 if i > 0 { out = cb(out, " || ") }
-                out = match emit_pat_test(out, ap.options[i], subj, variant_name) { []byte as o => o; error as err => return err }
+                out = match emit_pat_test(out, ap.options[i], subj, variantT) { []byte as o => o; error as err => return err }
                 i++
             }
             cb(out, ")")
         }
-        parser::BindPattern as bp => {
-            if bp.is_slice { return error { message = "codegen: slice patterns (`[]T as x`) not yet supported" } }   // needs `T | error` anonymous-variant codegen; honest barrier (M.3)
+        parser::BindPattern => {
             mut out = cb(buf, "(")
             out = cb(out, subj)
-            out = cb(out, ".tag == TK_TAG_")
-            out = cb_upper(out, variant_name)
-            out = cb(out, "_")
-            out = cb_upper(out, cg_path_last(bp.type_name))
+            out = cb(out, ".tag == ")
+            out = match cg_emit_tag_prefix(out, variantT) { []byte as o => o; error as err => return err }
+            let ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+            out = cb_upper(out, ck)
             cb(out, ")")
         }
-        parser::FieldPattern as fp => {
+        parser::FieldPattern => {
             mut out = cb(buf, "(")
             out = cb(out, subj)
-            out = cb(out, ".tag == TK_TAG_")
-            out = cb_upper(out, variant_name)
-            out = cb(out, "_")
-            out = cb_upper(out, cg_path_last(fp.type_name))
+            out = cb(out, ".tag == ")
+            out = match cg_emit_tag_prefix(out, variantT) { []byte as o => o; error as err => return err }
+            let ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+            out = cb_upper(out, ck)
             cb(out, ")")
         }
         // A `null` pattern reaches here only over a NON-optional subject (the optional case is
@@ -1430,27 +1632,29 @@ fn cg_emit_pat_test(buf: []byte, prog: checker::TProgram, pat: parser::Pattern, 
                         parser::NullPattern => { mut o = cb(buf, "(!"); o = cb(o, subj); return cb(o, ".present)") }
                         _ => { }
                     }
-                    let inner_is_variant = match opt.inner { checker::Named as nm => cg_named_is_variant(prog, nm.name); _ => false }
+                    let inner_is_variant = match opt.inner {
+                        checker::Variant => true
+                        checker::Named as nm => cg_named_is_variant(prog, nm.name)
+                        _ => false
+                    }
                     // bare bind/wildcard over a NON-variant present value matches whenever present.
                     match pat {
                         parser::WildcardPattern => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
                         parser::BindPattern     => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
                         _ => { }
                     }
-                    let innerVN = match opt.inner { checker::Named as nm => nm.name; _ => "" }
                     let val = cb_to_str(subj, ".value")
                     mut o2 = cb(buf, "(")
                     o2 = cb(o2, subj)
                     o2 = cb(o2, ".present && ")
-                    o2 = match emit_pat_test(o2, pat, val, innerVN) { []byte as o => o; error as err => return err }
+                    o2 = match emit_pat_test(o2, pat, val, opt.inner) { []byte as o => o; error as err => return err }
                     return cb(o2, ")")
                 }
             }
         }
         _ => { }
     }
-    let vn = match subjT { checker::Named as nm => nm.name; _ => "" }
-    emit_pat_test(buf, pat, subj, vn)
+    emit_pat_test(buf, pat, subj, subjT)
 }
 
 // cb_to_str — `<a><b>` as a fresh str (the `_s.value` accessor for an optional present subject).
@@ -1464,16 +1668,17 @@ fn cb_to_str(a: str, b: str) -> str { str(cb(cb(teko::list::empty(), a), b)) }
 fn emit_pat_binds(buf: []byte, pat: parser::Pattern, subj: str, indent: str) -> []byte | error {
     match pat {
         parser::BindPattern as bp => {
-            if bp.is_slice { return error { message = "codegen: slice patterns (`[]T as x`) not yet supported" } }   // see emit_pat_test; honest barrier until `T | error` codegen lands (M.3)
             if bp.has_binding {
-                // `Foo as x` binds the WHOLE case value (the union member struct).
+                // `Foo as x` binds the WHOLE case value (the union member, named by its KEY:
+                // bare name for named/error/prim, `slice_<elem>` for `[]T as x`).
                 mut out = cb(buf, indent)
                 out = cb(out, "auto ")
                 out = cb_str(out, bp.binding)
                 out = cb(out, " = ")
                 out = cb(out, subj)
                 out = cb(out, ".as.")
-                out = cb_str(out, cg_path_last(bp.type_name))
+                let ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+                out = cb_str(out, ck)
                 cb(out, ";\n")
             } else { buf }
         }
@@ -1488,7 +1693,8 @@ fn emit_pat_binds(buf: []byte, pat: parser::Pattern, subj: str, indent: str) -> 
                 out = cb(out, " = ")
                 out = cb(out, subj)
                 out = cb(out, ".as.")
-                out = cb_str(out, cg_path_last(fp.type_name))
+                let ck = match cg_emit_case_key_str(pat) { str as s => s; error as err => return err }
+                out = cb_str(out, ck)
                 out = cb(out, ".")
                 out = cb_str(out, fp.fields[i])
                 out = cb(out, ";\n")
@@ -1512,7 +1718,11 @@ fn cg_emit_pat_binds(buf: []byte, prog: checker::TProgram, pat: parser::Pattern,
                 checker::Void => { }
                 _ => {
                     match pat { parser::NullPattern => return buf; _ => { } }   // NONE binds nothing
-                    let inner_is_variant = match opt.inner { checker::Named as nm => cg_named_is_variant(prog, nm.name); _ => false }
+                    let inner_is_variant = match opt.inner {
+                        checker::Variant => true
+                        checker::Named as nm => cg_named_is_variant(prog, nm.name)
+                        _ => false
+                    }
                     let val = cb_to_str(subj, ".value")
                     // bare `T as x` over a non-variant present value binds the inner directly.
                     match pat {
@@ -2178,8 +2388,8 @@ fn cb_upper(buf: []byte, s: str) -> []byte {
     out
 }
 
-// variant_member_name — a variant member's bare last path segment (the union field name;
-// the TAG constant uses its uppercase form). (C: `variant_member_name`.)
+// variant_member_name — a variant member's bare last path segment (the union field name for a
+// NAMED member). Kept for the cg_variant_has_member scan. (C: `variant_member_name`.)
 fn variant_member_name(m: parser::TypeExpr) -> str | error {
     match m {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
@@ -2211,23 +2421,24 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
             cb(out, ";\n\n")
         }
         parser::VariantBody as vb => {
-            // A variant body is a UnionType (A | B | …). Its members are NamedTypes.
+            // A variant body is a UnionType (A | B | …). Members may be ANY type (B-cg2):
+            // named cases, `error`, prims, slices — each mapped to a C-safe member KEY.
             let members = match vb.type_expr {
                 parser::UnionType as u => u.members
-                _             => return error { message = "codegen: a variant body must be a union of named members" }
+                _             => return error { message = "codegen: a variant body must be a union of members" }
             }
-            // 1) the tag enum.
+            // 1) the tag enum: TK_TAG_<UPPER Name>_<UPPER memberKey> per member.
             mut out = cb(buf, "typedef enum tk_tag_")
             out = cb_str(out, d.name)
             out = cb(out, " {\n")
             mut i = 0
             loop {
                 if i >= members.len { break }
-                let mn = match variant_member_name(members[i]) { str as s => s; error as err => return err }
+                let mk = match cg_member_key_texpr_str(members[i]) { str as s => s; error as err => return err }
                 out = cb(out, "    TK_TAG_")
                 out = cb_upper(out, d.name)
                 out = cb(out, "_")
-                out = cb_upper(out, mn)
+                out = cb_upper(out, mk)
                 if i + 1 < members.len { out = cb(out, ",") }
                 out = cb(out, "\n")
                 i++
@@ -2235,7 +2446,8 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
             out = cb(out, "} tk_tag_")
             out = cb_str(out, d.name)
             out = cb(out, ";\n\n")
-            // 2) the value: tag + union as.
+            // 2) the value: tag + union as. Each union field is named by the member KEY and
+            //    typed via emit_type_expr (covers named/error/prim/slice/optional members).
             out = cb(out, "typedef struct ")
             out = mangle_type_name(out, "", d.name)
             out = cb(out, " {\n    tk_tag_")
@@ -2245,11 +2457,11 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
             loop {
                 if j >= members.len { break }
                 let mem = members[j]
-                let mn = match variant_member_name(mem) { str as s => s; error as err => return err }
+                let mk = match cg_member_key_texpr_str(mem) { str as s => s; error as err => return err }
                 out = cb(out, "        ")
                 out = match emit_type_expr(out, mem) { []byte as o => o; error as err => return err }
                 out = cb(out, " ")
-                out = cb_str(out, mn)   // the member's bare name is the union field name
+                out = cb_str(out, mk)   // union field == the member key
                 out = cb(out, ";\n")
                 j++
             }
@@ -2296,7 +2508,7 @@ fn emit_type_decl(buf: []byte, d: parser::TypeDecl) -> []byte | error {
 // element types (tk_slice_<e>). Mirrors the C's `cg_opt_set` struct (two parallel lists threaded
 // by pointer); here it is a value threaded by return (the functional `.tks` idiom). One walk feeds
 // both — cg_collect_type_opts registers a slice's element in the same traversal as optionals.
-type CgTypeSet = struct { inners: []checker::Type; slices: []checker::Type }
+type CgTypeSet = struct { inners: []checker::Type; slices: []checker::Type; variants: []checker::Type }   // B-cg2 — inline tk_u_<keys>
 
 // the mangled-name key for a type (dedup key); "" for an unsupported type (skipped). Used for
 // both optional inners and slice elements (same mangle). (C: `cg_opt_mangle` render-to-scratch.)
@@ -2313,7 +2525,7 @@ fn cg_opt_set_add(set: CgTypeSet, inner: checker::Type) -> CgTypeSet {
         if cg_opt_key(set.inners[i]) == key { return set }   // already present
         i++
     }
-    CgTypeSet { inners = teko::list::push(set.inners, inner); slices = set.slices }
+    CgTypeSet { inners = teko::list::push(set.inners, inner); slices = set.slices; variants = set.variants }
 }
 // register a slice element type (dedup by mangle), parallel to cg_opt_set_add. (C: `cg_slice_add`.)
 fn cg_slice_add(set: CgTypeSet, elem: checker::Type) -> CgTypeSet {
@@ -2325,7 +2537,27 @@ fn cg_slice_add(set: CgTypeSet, elem: checker::Type) -> CgTypeSet {
         if cg_opt_key(set.slices[i]) == key { return set }   // already present
         i++
     }
-    CgTypeSet { inners = set.inners; slices = teko::list::push(set.slices, elem) }
+    CgTypeSet { inners = set.inners; slices = teko::list::push(set.slices, elem); variants = set.variants }
+}
+// B-cg2 — the dedup key for an INLINE variant TYPE (its tk_u_<keys> name); "" for unsupported. (C: `cg_variant_typename` render-to-scratch.)
+fn cg_variant_key(t: checker::Type) -> str {
+    match t {
+        checker::Variant as v => match cg_variant_typename(teko::list::empty(), v) { []byte as o => str(o); error => "" }
+        _ => ""
+    }
+}
+// B-cg2 — register an INLINE variant TYPE (dedup by its tk_u_<keys> name). A Named variant has
+// its own decl typedef and is NOT registered here. (C: `cg_variant_add`.)
+fn cg_variant_add(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
+    let key = cg_variant_key(t)
+    if key == "" { return set }   // unsupported member → skip (emit_type errors honestly)
+    mut i = 0
+    loop {
+        if i >= set.variants.len { break }
+        if cg_variant_key(set.variants[i]) == key { return set }   // already present
+        i++
+    }
+    CgTypeSet { inners = set.inners; slices = set.slices; variants = teko::list::push(set.variants, t) }
 }
 // register every optional in a type AND every slice's element (nested inners/elements first, so
 // `T??` and `[][]T`/`[]T?` order right). (C: `cg_collect_type_opts`.)
@@ -2340,6 +2572,19 @@ fn cg_collect_type_opts(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
         checker::Slice as sl => match sl.element {
             checker::Void => set
             _ => cg_slice_add(cg_collect_type_opts(set, sl.element), sl.element)   // recurse (covers [][]T, []T?), then register THIS slice's element
+        }
+        // B-cg2 — an INLINE `A | B | …`. Recurse into each member FIRST (so a member that is a
+        // slice/optional gets its typedef before this tk_u_ references it), then register THIS
+        // variant's tk_u_<keys> typedef. (C: the VARIANT arm of cg_collect_type_opts.)
+        checker::Variant as va => {
+            mut s = set
+            mut i = 0
+            loop {
+                if i >= va.members.len { break }
+                s = cg_collect_type_opts(s, va.members[i])
+                i++
+            }
+            cg_variant_add(s, t)
         }
         _ => set
     }
@@ -2399,11 +2644,80 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement) -> CgType
     }
     s
 }
+// B-cg2 — emit ONE inline-variant typedef tk_u_<keys> (the SAME tag-enum + tag/union-struct
+// shape as a named variant decl, but keyed off the resolved member types). Members' typedefs
+// (slice/opt) precede it by registration order. (C: `cg_emit_inline_variant_typedef`.)
+fn cg_emit_inline_variant_typedef(buf: []byte, v: checker::Variant) -> []byte | error {
+    // tag enum: typedef enum tk_tag_<keys> { TK_TAG_U_<UPPER keys…>_<UPPER key>, … } tk_tag_<keys>;
+    mut out = cb(buf, "typedef enum tk_tag")
+    mut a = 0
+    loop {
+        if a >= v.members.len { break }
+        out = cb(out, "_")
+        out = match cg_member_key(out, v.members[a]) { []byte as o => o; error as err => return err }
+        a++
+    }
+    out = cb(out, " {\n")
+    mut i = 0
+    loop {
+        if i >= v.members.len { break }
+        out = cb(out, "    TK_TAG_U")
+        mut j = 0
+        loop {
+            if j >= v.members.len { break }
+            out = cb(out, "_")
+            let kj = match cg_member_key_str(v.members[j]) { str as s => s; error as err => return err }
+            out = cb_upper(out, kj)
+            j++
+        }
+        out = cb(out, "_")
+        let ki = match cg_member_key_str(v.members[i]) { str as s => s; error as err => return err }
+        out = cb_upper(out, ki)
+        if i + 1 < v.members.len { out = cb(out, ",") }
+        out = cb(out, "\n")
+        i++
+    }
+    out = cb(out, "} tk_tag")
+    mut b = 0
+    loop {
+        if b >= v.members.len { break }
+        out = cb(out, "_")
+        out = match cg_member_key(out, v.members[b]) { []byte as o => o; error as err => return err }
+        b++
+    }
+    out = cb(out, ";\n")
+    // value struct: typedef struct tk_u_<keys> { tk_tag_<keys> tag; union { … } as; } tk_u_<keys>;
+    out = cb(out, "typedef struct ")
+    out = match cg_variant_typename(out, v) { []byte as o => o; error as err => return err }
+    out = cb(out, " {\n    tk_tag")
+    mut c = 0
+    loop {
+        if c >= v.members.len { break }
+        out = cb(out, "_")
+        out = match cg_member_key(out, v.members[c]) { []byte as o => o; error as err => return err }
+        c++
+    }
+    out = cb(out, " tag;\n    union {\n")
+    mut m = 0
+    loop {
+        if m >= v.members.len { break }
+        out = cb(out, "        ")
+        out = match emit_type(out, v.members[m]) { []byte as o => o; error as err => return err }
+        out = cb(out, " ")
+        out = match cg_member_key(out, v.members[m]) { []byte as o => o; error as err => return err }
+        out = cb(out, ";\n")
+        m++
+    }
+    out = cb(out, "    } as;\n} ")
+    out = match cg_variant_typename(out, v) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
+}
+
 // walk the whole program; emit each distinct optional typedef once (registration order, so a
 // nested inner optional precedes the outer that references it), then the slice typedefs AFTER the
 // optionals (so a `[](T?)` element's tk_opt_<i> already exists). Same {ptr,len} shape as tk_str.
 fn cg_emit_optional_typedefs(buf: []byte, prog: checker::TProgram) -> []byte | error {
-    mut set = CgTypeSet { inners = teko::list::empty(); slices = teko::list::empty() }
+    mut set = CgTypeSet { inners = teko::list::empty(); slices = teko::list::empty(); variants = teko::list::empty() }
     mut i = 0
     loop {
         if i >= prog.items.len { break }
@@ -2442,6 +2756,18 @@ fn cg_emit_optional_typedefs(buf: []byte, prog: checker::TProgram) -> []byte | e
         k++
     }
     if set.slices.len > 0 { out = cb(out, "\n") }
+    // VARIANT TYPEDEFS (B-cg2) — after slices/optionals (so a member that is `[]T` / `T?` already
+    // has its typedef). In registration order: each member was collected before the variant.
+    mut vi = 0
+    loop {
+        if vi >= set.variants.len { break }
+        match set.variants[vi] {
+            checker::Variant as va => { out = match cg_emit_inline_variant_typedef(out, va) { []byte as o => o; error as err => return err } }
+            _ => { }
+        }
+        vi++
+    }
+    if set.variants.len > 0 { out = cb(out, "\n") }
     out
 }
 
