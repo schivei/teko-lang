@@ -114,15 +114,36 @@ fn cb_u128_digits(buf: []byte, v: u128) -> []byte {
     b
 }
 
-// cb_i128 — append a signed 128-bit value as a decimal literal (sign + magnitude). For
-// the most-negative value, negating in i128 overflows, so the magnitude is derived via
-// unsigned wrap: `-(v to u128)` yields the exact magnitude in all cases. (C: `cb_i128`.)
+// cb_u128_c_expr — a u128 MAGNITUDE as a C constant EXPRESSION of type `unsigned __int128`. A
+// 128-bit value has NO C literal: a decimal token wider than `unsigned long long` is rejected
+// BEFORE any cast applies, so when it exceeds 64 bits we BUILD it from two 64-bit halves via
+// shifts: `(((unsigned __int128)<hi>ULL << 64) | (unsigned __int128)<lo>ULL)`. ≤64-bit values
+// stay a plain `(unsigned __int128)<dec>ULL`. (C: `cb_u128_c_expr`.)
+fn cb_u128_c_expr(buf: []byte, v: u128) -> []byte {
+    let lo = v & 0xFFFFFFFFFFFFFFFF      // low 64 bits (fits a C decimal)
+    let hi = v >> 64                     // high 64 bits
+    if hi == 0 {
+        mut b = cb(buf, "(unsigned __int128)")
+        b = cb_u128_digits(b, lo)
+        return cb(b, "ULL")
+    }
+    mut b = cb(buf, "(((unsigned __int128)")
+    b = cb_u128_digits(b, hi)
+    b = cb(b, "ULL << 64) | (unsigned __int128)")
+    b = cb_u128_digits(b, lo)
+    cb(b, "ULL)")
+}
+
+// cb_i128 — append a signed 128-bit value as a C constant expression (sign + magnitude via the
+// shift form). For the most-negative value, negating in i128 overflows, so the magnitude is
+// derived via unsigned wrap. (C: `cb_i128`.)
 fn cb_i128(buf: []byte, v: i128) -> []byte {
     if v < 0 {
-        mut b = cb_byte(buf, b'-')
-        return cb_u128_digits(b, (0 to u128) - (v to u128))
+        mut b = cb(buf, "-(")
+        b = cb_u128_c_expr(b, (0 to u128) - (v to u128))
+        return cb(b, ")")
     }
-    cb_u128_digits(buf, v to u128)
+    cb_u128_c_expr(buf, v to u128)
 }
 
 // cb_f64_literal — append a f64 as a round-trippable decimal literal. The C twin used
@@ -1090,7 +1111,7 @@ fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: ch
 // emit_call — a TCall. The callee path -> a C identifier joined by "__" (single-segment
 // in M0). Non-shadowable built-ins `print`/`println` (bare, or under `teko`) map to
 // tk_print/tk_println. (C: TK_TEXPR_CALL branch.)
-fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall) -> []byte | error {
+fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall) -> []byte | error {
     let p = c.callee
     // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
     // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching here
@@ -1243,7 +1264,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
                     match cf.params[j].type_ann {
                         parser::NamedType as nt => {
                             let pn = nt.path.segments[nt.path.segments.len - 1].name
-                            out = match emit_as(out, prog, checker::Named { name = pn }, c.args[j]) { []byte as o => o; error as err => return err }
+                            out = match emit_as_r(out, prog, ret_type, checker::Named { name = pn }, c.args[j]) { []byte as o => o; error as err => return err }
                             wrapped = true
                         }
                         _ => { }
@@ -1253,7 +1274,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             error => { }
         }
         if !wrapped {
-            out = match emit_expr(out, prog, c.args[j]) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ret(out, prog, ret_type, c.args[j]) { []byte as o => o; error as err => return err }
         }
         j++
     }
@@ -1933,7 +1954,7 @@ fn cg_wrap_open(buf: []byte, v: checker::Type, mkey: str) -> []byte | error {
 // `expected` (the caller guards with cg_var_reaches and otherwise emits plainly); `T? | error`
 // is an illegal type here, so reachability is a separate predicate rather than a `null` result.
 // (C: `emit_variant_wrap`.)
-fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, expected: checker::Type, value: checker::TExpr) -> []byte | error {
+fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr) -> []byte | error {
     let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
     let n = cg_var_nmem(prog, expected)
     // pass 1 — DIRECT: value's key matches a member of `expected`.
@@ -1943,7 +1964,7 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, expected: checker::Ty
         let mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
         if mk == vkey {
             mut out = match cg_wrap_open(buf, expected, vkey) { []byte as o => o; error as err => return err }
-            out = match emit_expr(out, prog, value) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ret(out, prog, ret_type, value) { []byte as o => o; error as err => return err }
             return cb(out, " }")
         }
         i++
@@ -1957,7 +1978,7 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, expected: checker::Ty
             if cg_var_reaches(prog, mt, vkey, 16) {
                 let mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
                 mut out = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
-                out = match emit_variant_wrap(out, prog, mt, value) { []byte as o => o; error as err => return err }   // recurse into the member variant
+                out = match emit_variant_wrap(out, prog, ret_type, mt, value) { []byte as o => o; error as err => return err }   // recurse into the member variant
                 return cb(out, " }")
             }
         }
@@ -2246,7 +2267,7 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
     let is_variant_slot = match expected { checker::Variant => true; checker::Named => true; _ => false }
     if is_variant_slot {
         if cg_var_reaches(prog, expected, vkey, 16) {
-            return emit_variant_wrap(buf, prog, expected, value)
+            return emit_variant_wrap(buf, prog, ret_type, expected, value)
         }
     }
     emit_expr_ret(buf, prog, ret_type, value)
@@ -2983,7 +3004,7 @@ fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, 
         checker::TUnary as u       => emit_unary(buf, prog, u)
         checker::TCompare as c     => emit_compare(buf, prog, c)
         checker::TCast as c        => emit_cast(buf, prog, e, c)
-        checker::TCall as cl       => emit_call(buf, prog, e, cl)
+        checker::TCall as cl       => emit_call(buf, prog, ret_type, e, cl)
         checker::TFieldAccess as fa => emit_field_access(buf, prog, fa)
         checker::TStructInit as si  => emit_struct_init(buf, prog, e, si)
         checker::TStrLit as s      => emit_strlit(buf, s)
