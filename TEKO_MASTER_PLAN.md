@@ -102,12 +102,15 @@ native codegen (inline-union lowering — `codegen: slice/inline union not yet s
 - ⬜ **Native codegen** — `teko build .` reaches `codegen: slice / inline union type not yet supported` (codegen.c:306/388) + the function-parameter barrier. Inline/anonymous-variant lowering (`T | error` returns) is the keystone (W-backend #40).
 - ⬜ **VM execution** — `teko run .` reaches `vm: call to an unknown function`: `.tks` `eval_call` doesn't bind params yet; `teko::fs::list_dir` is checker-only (no `tk_list_dir` runtime).
 - ⬜ **#19** X5 justification-header sweep.
-**Work remaining:**
-- **Function parameters in codegen + VM** — the big W-backend barrier (#40 = INDEPENDENCE C3 partial); nearly every corpus fn has params; both backends honest-stop today.
-- **Inline/anonymous-variant codegen** (`T | error`) — required to lower the corpus natively.
-- Slice **Increment B+**: append `xs+[x]` / literal `[]`/`[a,b]` syntax (the value layer is in; codegen slice/list emission pending).
-- **#41** namespace-aware type resolution.  **#19** X5 (justification-header sweep).  VM `list_dir`/param-binding runtime.
+**Work remaining — native backend (W-backend #40), in order:**
+- **B-cg1** ✅ `emit_type_expr` slice `[]T` in signatures/fields (commit `7ce809f`).
+- **B-cg2** ⬜ **variant/inline-union codegen (the keystone, current wall):** (a) named-variant decls with NON-named members (error/prim/slice/byte/str) — `variant_member_name` returns NULL for them today (codegen.c:1952/1995); (b) ANONYMOUS inline unions (`T | error` return/param types — no decl): a deterministic mangled name + typedef (tag enum + union) STAMPED in the prelude + a collection pass (cg_emit_*_typedefs walks only optionals/slices today); (c) `emit_as` wrapping a bare case into a named OR anonymous variant (codegen.c:1247 keys off a NAMED decl only); (d) match-over-variant discrimination for non-named members. *Verify with a `T | error` smoke project (native==VM), not just the regressions (which don't exercise inline unions).*
+- **B-cg3** ⬜ function parameters in codegen + VM (nearly every corpus fn; both backends honest-stop).
+- **B-cg4** ⬜ slice/list value emission (empty/push) in all positions; Increment B+ append `xs+[x]` / `[]`/`[a,b]` literal syntax.
+- **B-vm** ⬜ VM execution path (`teko run .`): `eval_call` param-binding + host-FFI runtime (args/read_file/write_file/list_dir/process::run/env::*) — needs argv/host plumbing into `tk_vm_run`.
+- **#41** ⬜ namespace-aware TYPE resolution (a `Named` carrying its namespace).  **#19** ⬜ X5 justification-header sweep.
 **Exit:** `teko .` produces a working native binary of the compiler; VM==native across the corpus regression set.
+**Note:** the native self-build is the single largest remaining effort (full C emission for a 65-file compiler) — expect many codegen walls beyond B-cg2; grind incrementally with regressions + per-feature smoke tests as the safety net.
 
 ### Phase 7 — Host independence  *(INDEPENDENCE Eixos A/C/D + BINARY cleanup)*
 **Goal:** the compiler reaches the host without C-side scaffolding; tests gate emission.
