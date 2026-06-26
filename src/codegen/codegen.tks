@@ -3111,9 +3111,11 @@ fn emit_assign(buf: []byte, prog: checker::TProgram, a: checker::TAssign, indent
     out = cb(out, " ")
     out = cb(out, op)
     out = cb(out, " ")
-    // (#4) the RHS carries a concrete type (an annotated binding's element flows in via
-    // type_assign's target-adopt), so it emits directly — no sentinel back-inference.
-    out = match emit_expr(out, prog, a.value) { []byte as o => o; error as err => return err }
+    // Wrap the value into the target's declared type (`bound`) — a case → its variant, a `T` →
+    // `T?`, a fitting literal — exactly like a binding. (Plain numerics emit as-is; `+=` etc.
+    // preserve the op.) Without this, `node = OptionalType { … }` (node: TypeExpr, a variant)
+    // emitted the case's fields under the variant's C type → a field-designator error.
+    out = match emit_as(out, prog, a.bound, a.value) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
 }
 

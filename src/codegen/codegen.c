@@ -2618,9 +2618,11 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
             cb(b, indent);
             cb_ident(b, s->as.assign.name);
             cb(b, " "); cb(b, op); cb(b, " ");
-            // (#4) the RHS carries a concrete type (an annotated binding's element flows in via
-            // type_assign's target-adopt), so it emits directly — no sentinel back-inference.
-            if (!emit_expr(b, &s->as.assign.value, err)) return false;
+            // Wrap the value into the target's declared type (`bound`) — a case → its variant,
+            // a `T` → `T?`, a fitting literal — exactly like a binding. (Plain numerics emit as-is;
+            // `+=` etc. preserve the op.) Without this, `node = OptionalType { … }` (node: TypeExpr,
+            // a variant) emitted the case's fields under the variant's C type → field-designator error.
+            if (!emit_as(b, s->as.assign.bound, &s->as.assign.value, err)) return false;
             cb(b, ";\n");
             return true;
         }

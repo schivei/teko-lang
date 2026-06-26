@@ -961,8 +961,19 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
         // typer.c type_assign's tk_error_types wrap.
         if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
     }
-    v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }   // adopt the target type (a fitting literal C6, or a widened case/value)
-    TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
+    // (#4) a sentinel empty list/array ADOPTS the target's concrete slice type so codegen sees the
+    // element. OTHERWISE keep the value's NATURAL (case / T) type and store the target as `bound` —
+    // codegen's emit_as wraps the value into the target at the assign site (case→variant, T→T?, a
+    // fitting literal). Mirrors type_binding (clobbering the case type made `node = OptionalType{…}`
+    // emit the case's fields under the variant's C type → a field-designator error).
+    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    let bound_is_concrete_slice = match tb.type { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if v_is_sentinel_slice {
+        if bound_is_concrete_slice {
+            v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }
+        }
+    }
+    TypedStmt { node = TAssign { name = a.name; op = a.op; bound = tb.type; value = v }; env = env }   // mut rule enforced (B.21)
 }
 
 fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | error {

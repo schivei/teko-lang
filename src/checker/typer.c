@@ -128,13 +128,21 @@ static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table t
     // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
     // that adopts it (C6) — same rule as an annotated binding. On success the value adopts the target
     // type so a downstream pass (and codegen's wrap) sees the slot type, not the bare case.
-    if (!assignable_to(v.as.value.type, tb.as.value.type, table)) {
-        if (!tk_literal_adopts(v.as.value, tb.as.value.type))   // (C1.8) expected = target, actual = value
+    tk_type target = tb.as.value.type;
+    if (!assignable_to(v.as.value.type, target, table)) {
+        if (!tk_literal_adopts(v.as.value, target))   // (C1.8) expected = target, actual = value
             return sfail(tk_error_types(tk_error_make("assigned value does not match the target type"),
-                                        tk_type_render(tb.as.value.type), tk_type_render(v.as.value.type)));
+                                        tk_type_render(target), tk_type_render(v.as.value.type)));
     }
-    v.as.value.type = tb.as.value.type;   // adopt the target type (a fitting literal C6, or a widened case/value)
-    tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, v.as.value } };
+    // (#4) a sentinel empty list/array ADOPTS the target's concrete slice type so codegen sees the
+    // element. OTHERWISE keep the value's NATURAL (case / T) type and store the target as `bound` —
+    // codegen's emit_as then wraps the value into the target at the assign site (case→variant, T→T?,
+    // a fitting literal). Mirrors type_binding (the binding kept its case type; the assign clobbered
+    // it, which made a `node = OptionalType{…}` emit the case's fields under the variant's C type).
+    if (v.as.value.type.tag == TK_TYPE_SLICE && v.as.value.type.as.slice.element == NULL
+        && target.tag == TK_TYPE_SLICE && target.as.slice.element != NULL)
+        v.as.value.type = target;
+    tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, target, v.as.value } };
     return sok(node, env);   // mut rule enforced (B.21)
 }
 
