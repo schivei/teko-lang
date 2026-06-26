@@ -181,6 +181,12 @@ static bool type_list_builtin(tk_call c, tk_env env, tk_type_table table, tk_tex
         }
         tk_type elem = x.as.value.type;
         tk_type st = { .tag = TK_TYPE_SLICE, .as.slice.element = box_type(elem) };
+        // (#57) CONCRETIZE a SENTINEL base (a bare `empty()`) to []elem so codegen can EMIT it.
+        // The VM ignores a slice's element type, but codegen's emit_list_empty REQUIRES it — a
+        // `push(empty(), x)` left the inner empty() at the element-less sentinel, so native codegen
+        // failed ("empty() needs a known slice type"). A push onto []elem has a []elem base; the
+        // pushed item fixes the element, and nested pushes fix each base in turn.
+        if (s.as.value.type.as.slice.element == NULL) s.as.value.type = st;
         tk_texpr *args = tk_alloc(2 * sizeof *args); if (!args) abort();
         args[0] = s.as.value; args[1] = x.as.value;
         *out = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = st, .as.call = { c.callee, args, 2 } });

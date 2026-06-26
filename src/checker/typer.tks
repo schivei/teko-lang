@@ -145,7 +145,10 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
         // item (a sentinel `empty()` element is the Void marker, which type_eq accepts as any).
         let matches = match elem { Void => true; _ => type_eq(elem, x.type) }
         if !matches { return error { message = "teko::list::push item type does not match the slice element type" } }
-        mut args = teko::list::push(teko::list::push(teko::list::empty(), s), x)
+        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the VM
+        // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
+        let base = match elem { Void => TExpr { kind = s.kind; type = Slice { element = x.type }; line = s.line; col = s.col }; _ => s }
+        mut args = teko::list::push(teko::list::push(teko::list::empty(), base), x)
         TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = x.type }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
