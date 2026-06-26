@@ -2732,6 +2732,18 @@ static bool emit_function_sig(cbuf *b, tk_tfunction f, const char **err) {
     return true;
 }
 
+// Does this statement, AS LOWERED, guarantee C control does not fall through past it? A `return`
+// does; a trailing value-expr lowers to `return <v>;` so it does too — EXCEPT a `match`/`if` value
+// tail, which lowers to a condition chain whose exhaustiveness C cannot see (it warns -Wreturn-type
+// and, worse, falls off the end as UB if ever reached). break/continue terminate the enclosing
+// construct. A loop / binding / assign does NOT terminate the function.
+static bool cg_stmt_c_terminates(const tk_tstatement *s) {
+    if (s->tag == TK_TSTMT_RETURN || s->tag == TK_TSTMT_BREAK || s->tag == TK_TSTMT_CONTINUE) return true;
+    if (s->tag == TK_TSTMT_EXPR)
+        return s->as.expr_stmt.expr.tag != TK_TEXPR_MATCH && s->as.expr_stmt.expr.tag != TK_TEXPR_IF;
+    return false;
+}
+
 static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
     g_cg_ret_type = f.return_type;   // so a return inside a value-form match/if wraps correctly
     if (!emit_function_sig(b, f, err)) return false;
@@ -2740,6 +2752,14 @@ static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
     // W5b — thread the fn's return type so a tail/return case value is wrapped into a
     // variant return slot (emit_as).
     if (!emit_block_tail(b, f.body, f.nbody, /*in_main=*/false, f.return_type, "    ", err)) return false;
+    // A non-void function whose body's tail is a value-form `match`/`if` (or a loop) returns on
+    // every path the CHECKER proved exhaustive — but C's flow analysis can't see that, so without a
+    // terminator it warns -Wreturn-type and the fall-through is UB. The checker guarantees it is
+    // never reached: emit `__builtin_unreachable()`. (Skip when the tail already C-terminates, and
+    // for void functions — falling off the end is fine there.)
+    bool needs_unreachable = f.return_type.tag != TK_TYPE_VOID
+        && !(f.nbody > 0 && cg_stmt_c_terminates(&f.body[f.nbody - 1]));
+    if (needs_unreachable) cb(b, "    __builtin_unreachable();\n");
     cb(b, "}\n\n");
     return true;
 }

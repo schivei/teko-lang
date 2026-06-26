@@ -210,11 +210,14 @@ static int run_cc(const char *cfile, const char *binary) {
     // (the -I and the source path) + two src-dir copies (the -I and assert.c) + suffixes.
     size_t cap = strlen(cfile) + strlen(binary) + 2 * strlen(TK_RT_DIR)
                + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
-               + strlen("/assert/assert.c") + 64;
+               + strlen("/assert/assert.c") + 96;   // fixed flags incl. -w/-std/-ferror-limit + quotes
     char *cmd = tk_alloc(cap);
     if (cmd == NULL) abort();
+    // -w: silence warnings on generated C (it is machine output — its parenthesization,
+    // exhaustiveness and literal widths are the codegen's contract, not the user's to read).
+    // -ferror-limit=0 still shows every genuine ERROR (a real codegen bug must surface).
     snprintf(cmd, cap,
-             "cc -std=c23 -ferror-limit=0 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -lm -o \"%s\"",
+             "cc -std=c23 -w -ferror-limit=0 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -lm -o \"%s\"",
              TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, binary);
     int rc = system(cmd);
     tk_free0(cmd);

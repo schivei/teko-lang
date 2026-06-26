@@ -3266,6 +3266,23 @@ fn emit_function_sig(buf: []byte, prog: checker::TProgram, f: checker::TFunction
     cb(out, ")")
 }
 
+// cg_stmt_c_terminates — does this statement, AS LOWERED, guarantee C control doesn't fall through
+// past it? A `return`/break/continue does; a trailing value-expr lowers to `return <v>;` so it does
+// too — EXCEPT a `match`/`if` value tail, whose exhaustiveness C cannot see. (C: cg_stmt_c_terminates.)
+fn cg_stmt_c_terminates(s: checker::TStatement) -> bool {
+    match s {
+        checker::TReturn => true
+        checker::TBreakStmt => true
+        checker::TContinueStmt => true
+        checker::TExprStmt as es => match es.expr.kind {
+            checker::TMatchExpr => false
+            checker::TIfExpr => false
+            _ => true
+        }
+        _ => false
+    }
+}
+
 fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) -> []byte | error {
     mut out = match emit_function_sig(buf, prog, f) { []byte as o => o; error as err => return err }
     out = cb(out, " {\n")
@@ -3273,6 +3290,15 @@ fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) ->
     // W5b — thread the fn's return type so a tail/return case value is wrapped into a variant
     // return slot (emit_as).
     out = match emit_block_tail(out, f.body, false, prog, f.return_type, "    ") { []byte as o => o; error as err => return err }
+    // A non-void function whose tail is a value-form `match`/`if` (or a loop) returns on every path
+    // the CHECKER proved exhaustive — but C can't see that, so without a terminator it warns
+    // -Wreturn-type and the fall-through is UB. The checker guarantees it is never reached: emit
+    // `__builtin_unreachable()`. (Skip when the tail already C-terminates, and for void functions.)
+    let needs_unreachable = match f.return_type {
+        checker::Void => false
+        _ => if f.body.len > 0 { !cg_stmt_c_terminates(f.body[f.body.len - 1]) } else { true }
+    }
+    if needs_unreachable { out = cb(out, "    __builtin_unreachable();\n") }
     cb(out, "}\n\n")
 }
 
