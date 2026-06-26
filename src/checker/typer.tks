@@ -97,15 +97,25 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
 }
 
 fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error {
-    let first = match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e }
+    mut first = match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e }
     mut prev = first.type
     if type_is_void(prev) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
     mut terms = teko::list::empty()
     mut i = 0
     loop {
         if i >= c.rest.len { break }
-        let cur = match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e }
+        mut cur = match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(cur.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        // numeric-literal adoption (parity with binary ops): a literal operand adopts the OTHER's
+        // numeric type so `c < 0x20` (byte vs int-literal) and `0x20 < c` compare (byte = u8).
+        let cur_is_num = match cur.kind { TNumber => true; _ => false }
+        let first_is_num = match first.kind { TNumber => true; _ => false }
+        if cur_is_num && literal_adopts(cur, prev) {
+            cur = TExpr { kind = cur.kind; type = prev; line = cur.line; col = cur.col }
+        } else if i == 0 && first_is_num && literal_adopts(first, cur.type) {
+            first = TExpr { kind = first.kind; type = cur.type; line = first.line; col = first.col }
+            prev = cur.type
+        }
         if !is_comparable(prev, cur.type) { return error { message = "operands are not comparable" } }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = cur })
         prev = cur.type
@@ -141,15 +151,21 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
         let x = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
         let elem = match s.type { Slice as sl => sl.element; _ => return error { message = "teko::list::push first argument must be a slice (`[]T`)" } }
         if type_is_void(x.type) { return error { message = "teko::list::push item cannot be a `void` expression (M.1)" } }
-        // The pushed item fixes the result element type; a concrete slice element must match the
-        // item (a sentinel `empty()` element is the Void marker, which type_eq accepts as any).
-        let matches = match elem { Void => true; _ => type_eq(elem, x.type) }
-        if !matches { return error { message = "teko::list::push item type does not match the slice element type" } }
+        // A SENTINEL base (Void element) is fixed BY the item — the result element is the item's type.
+        // A CONCRETE element is preserved; the item must WIDEN into it (a case into a variant element —
+        // so a `[]Type` accepts heterogeneous cases: str, u64, …) OR adopt it (literal). (Mirror expr.c.)
+        let result_elem = match elem {
+            Void => x.type
+            _    => {
+                if !widens_into(x.type, elem, table) && !literal_adopts(x, elem) { return error { message = "teko::list::push item type does not match the slice element type" } }
+                elem
+            }
+        }
         // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the VM
         // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
-        let base = match elem { Void => TExpr { kind = s.kind; type = Slice { element = x.type }; line = s.line; col = s.col }; _ => s }
+        let base = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
         mut args = teko::list::push(teko::list::push(teko::list::empty(), base), x)
-        TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = x.type }; line = 0; col = 0 }
+        TExpr { kind = TCall { callee = c.callee; args = args }; type = Slice { element = result_elem }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
@@ -165,8 +181,10 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
     // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
     // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
     // program; the call's STATIC type is void, but texpr_diverges accepts it in any value position.
-    let in_env = match lookup(env, name) { Type => true; error => false }
-    if c.callee.segments.len == 1 && !in_env {
+    // Fire ONLY when the namespace-aware lookup finds nothing — so the runtime's own `fn panic`
+    // resolves to ITSELF (below) while every other namespace gets the injected global (#41).
+    let in_scope = match lookup_call(env, c.callee) { Type => true; error => false }
+    if c.callee.segments.len == 1 && !in_scope {
         if name == "panic" {
             if c.args.len != 1 { return error { message = "panic expects one argument (an `error` or a `str`)" } }
             let a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
@@ -197,12 +215,14 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                 if i >= c.args.len { break }
                 mut a = match type_expr(c.args[i], env, table) { TExpr as te => te; error as e => return e }
                 if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
-                if !type_eq(a.type, f.params[i]) {
+                // The argument must WIDEN into the parameter's type (B.14 case→variant, T→T?) OR be a
+                // fitting literal that adopts it (C6) — same rule as binding/return/assign.
+                if !assignable_to(a.type, f.params[i], table) {
                     // (C1.8/E2) attach expected=type_render(f.params[i]), actual=type_render(a.type) — THE
                     // user's reported mismatch. Mirrors expr.c type_call's tk_error_types wrap.
                     if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
-                    a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // a fitting literal arg adopts the parameter's type (C6)
                 }
+                a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // adopt the parameter type (a fitting literal C6, or a widened case/value)
                 args = teko::list::push(args, a)
                 i++
             }
@@ -307,6 +327,32 @@ fn const_range_check(e: parser::Expr, target: Type) -> error? {
 // (deferred; named gap — §VI). The front-line type check above already rejects such source.
 fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
     match value.kind {
+        // a NEGATIVE numeric literal `-N` (unary minus over a NUMBER) — adopts a SIGNED int
+        // annotation that N fits, or a float annotation for `-3.14` (parse_lit's `mut d: i128 = -1`).
+        parser::Unary as u => {
+            if u.op == lexer::TokenKind::Minus {
+                match u.operand.kind {
+                    parser::Number as n => match ann {
+                        Prim as p => {
+                            if n.is_float {
+                                if !prim_is_float(p.kind) { error { message = "a float literal cannot be annotated as an integer type (B.38)" } }
+                                else if float_fits(n.fval, p.kind) { null }
+                                else { error { message = "float literal out of range for the annotated type (M.1 — fail early)" } }
+                            } else {
+                                if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
+                                else if !prim_is_signed(p.kind) { error { message = "a negative literal cannot be annotated as an unsigned type (M.1)" } }
+                                else if value_fits(n.value, p.kind) { null }
+                                else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
+                            }
+                        }
+                        _ => error { message = "value type does not match annotation" }
+                    }
+                    _ => error { message = "value type does not match annotation" }
+                }
+            } else {
+                error { message = "value type does not match annotation" }
+            }
+        }
         parser::Number as n => match ann {
             Prim as p => {
                 if n.is_float {
@@ -489,7 +535,7 @@ fn type_struct_lit(sl: parser::StructLit, env: Env, table: TypeTable) -> TExpr |
         // locate the provided value for this declared field (count its hits for missing/dup checks).
         mut found = sl.field_names.len
         mut hits = 0
-        mut i = 0
+        mut i: u64 = 0                          // u64 index (so `found = i` matches found's u64 type; mirrors the C twin's size_t)
         loop {
             if i >= sl.field_names.len { break }
             if sl.field_names[i] == fname { found = i; hits++ }
@@ -513,7 +559,10 @@ fn type_struct_lit(sl: parser::StructLit, env: Env, table: TypeTable) -> TExpr |
             }
             _ => {}
         }
-        if !type_eq(val.type, ft) { return error { message = "a struct-literal field value does not match the field's declared type" } }
+        // The field value must WIDEN into the field's declared type: exact, a variant CASE into a
+        // variant-typed field (`TExpr.kind = TNumber{…}`), or `T` into a `T?` field. Same rule as
+        // return/arm widening (the single source of truth, resolve.tks).
+        if !widens_into(val.type, ft, table) { return error { message = "a struct-literal field value does not match the field's declared type" } }
         names = teko::list::push(names, fname)
         vals = teko::list::push(vals, val)
         d++
@@ -669,6 +718,19 @@ fn tblock_type(stmts: []TStatement) -> Type {
 fn texpr_diverges(e: TExpr) -> bool {
     match e.kind {
         TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
+        // a `match` whose EVERY arm diverges, or an `if`/`else` where both branches diverge, yields
+        // no value and never falls through — so a function ending in it satisfies any return type.
+        TMatchExpr as m => {
+            if m.arms.len == 0 { return false }
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if !tblock_diverges(m.arms[i].body) { return false }
+                i++
+            }
+            true
+        }
+        TIfExpr as f => f.has_else && tblock_diverges(f.then_blk) && tblock_diverges(f.else_blk)
         _          => false
     }
 }
@@ -753,8 +815,8 @@ fn type_if(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error {
     let eb = match type_block(f.else_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
     let tt = tblock_type(tb.stmts)
     let et = tblock_type(eb.stmts)
-    if !type_eq(tt, et) { return error { message = "the `if` branches have different types" } }
-    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = tt; line = 0; col = 0 }
+    let joined = type_join(tt, et, table)   // widen (a case joins into its variant; siblings → their union)
+    TExpr { kind = TIfExpr { cond = c; then_blk = tb.stmts; has_else = true; else_blk = eb.stmts }; type = joined; line = 0; col = 0 }
 }
 
 // ---- if as a STATEMENT: cond bool; branches validated; no `else`; value discarded → void ----
@@ -775,7 +837,7 @@ fn type_if_stmt(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error 
 fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
     let e2 = match check_pattern(a.pattern, subject, env, table) { Env as e => e; error as err => return err }
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { value = 0 }; type = Void { }; line = 0; col = 0 }   // gated by has_when (never read when absent)
+    mut guard = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }   // placeholder, gated by has_when (never read when absent)
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -792,7 +854,7 @@ fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error
     if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
     mut arms = teko::list::empty()
     mut have_type = false
-    mut first = Void { }
+    mut first: Type = Void { }     // Type-typed (so a case arm widens in); placeholder until first non-diverging arm
     mut i = 0
     loop {
         if i >= m.arms.len { break }
@@ -801,9 +863,7 @@ fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error
         if !tblock_diverges(ai.body) {
             let t = tblock_type(ai.body)
             if !have_type { first = t; have_type = true }
-            else {
-                if !type_eq(t, first) { return error { message = "the `match` arms have different types" } }
-            }
+            else { first = type_join(first, t, table) }   // widen (a case joins into its variant; siblings → their union)
         }
         i++
     }
@@ -853,12 +913,14 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     let tb = match lookup_binding(env, a.name) { ValBinding as vb => vb; error as e => return e }
     if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
-    if !type_eq(tb.type, v.type) {
+    // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
+    // that adopts it (C6) — same rule as an annotated binding (the single source of truth).
+    if !assignable_to(v.type, tb.type, table) {
         // (C1.8/E2) attach expected=type_render(tb.type), actual=type_render(v.type) — mirrors
         // typer.c type_assign's tk_error_types wrap.
         if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
-        v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }   // a fitting literal adopts the target's type (C6)
     }
+    v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }   // adopt the target type (a fitting literal C6, or a widened case/value)
     TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
 }
 
@@ -921,33 +983,11 @@ fn function_return(f: parser::Function, table: TypeTable) -> Type | error {
 // dual-walked — see the check_*/type_* duplication note in "Próximas etapas".)
 
 // is a value of type `from` admissible where `to` is expected? (B.14 — variant member inclusion.)
-// A NAMED variant target is first expanded to its Variant cases, so a case widens into a named
-// variant (`let s: Shape = Circle { … }`).
-fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool {
-    if type_eq(from, to) { return true }
-    // PRESENT-WRAP (REBOOT_PLAN §202): a `T` widens to `T?`. The destination is `T?`; the source
-    // is a plain `T` (or itself a `T?` — eq/sentinel handled by type_eq). Mirrors the variant
-    // case→variant widening below; codegen performs the PRESENT wrap via emit_as.
-    match to {
-        Optional as opt => {
-            if type_eq(from, opt.inner) { return true }          // T → T?
-            match from { Optional => return true; _ => {} }       // U? / sentinel → T?
-        }
-        _ => {}
-    }
-    match expand_variant(to, table) {        // a NAMED variant → its Variant (so cases widen in)
-        Variant as v => {
-            mut i = 0
-            loop {
-                if i >= v.members.len { break }
-                if type_eq(from, v.members[i]) { return true }
-                i++
-            }
-            false
-        }
-        _ => false
-    }
-}
+// The widening rule is now the single source of truth in resolve.tks (widens_into), shared with
+// the match/`if` arm JOIN (type_join) so the binding/return/assign checks and arm unification can
+// never drift apart. A case widens into a named variant (`let s: Shape = Circle { … }`), a nested
+// case widens transitively, and `T` widens into `T?`.
+fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool { widens_into(from, to, table) }
 
 // check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
 // match-arm returns await the divergence item — arm bodies are expressions, not statements).

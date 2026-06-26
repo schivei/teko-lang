@@ -33,12 +33,12 @@
 //     evaluator stays well-typed; the legal `.tks` simply does not produce a Value.
 //   * The C `_Noreturn vm_unsupported(msg)` + `abort()` honesty barrier is `teko::panic`
 //     here — the same loud stop (M.1/M.3), no boolean error plumbing to thread.
-//   * The C chained-frame env (a malloc'd `tk_slot` list with a `head`) is an `Env`
+//   * The C chained-frame env (a malloc'd `tk_slot` list with a `head`) is an `Venv`
 //     holding a `[]Slot`; `define` pushes, `find` scans newest-first (shadowing).
 //   * The C `tk_flow` struct (W5a: kind + has_value + value) is a `Flow` variant carrying the
-//     exits a block can produce: Normal | Return | Break | Continue. W5a — a flow now carries
+//     exits a block can produce: Normal | VmReturn | Break | Continue. W5a — a flow now carries
 //     an OPTIONAL value (`Value?`): Normal's value is the STATEMENT's value (so a block's
-//     TRAILING expr is the block's value — B.20); Return's value is the return value; both use
+//     TRAILING expr is the block's value — B.20); VmReturn's value is the return value; both use
 //     null == "no value" (a void statement / bare `return` / a void fn). Break/Continue carry
 //     an optional loop LABEL (M.5 — empty = innermost; a labeled jump bubbles through inner loops
 //     until the loop whose label matches catches it). The C's in-place env mutation is the
@@ -82,18 +82,18 @@ type Value = variant u8 | u16 | u32 | u64 | u128
 //   * Normal's value is the STATEMENT's value (an expr-statement's result) — so a block's
 //     TRAILING expression becomes the block's value (B.20 — implicit return / if-as-value);
 //     `null` == no value (a void statement, or an `if`-without-`else` taken false).
-//   * Return's value is the RETURN value; `null` == bare `return` / a `-> void` fn.
+//   * VmReturn's value is the RETURN value; `null` == bare `return` / a `-> void` fn.
 //   * Break/Continue carry an optional loop LABEL (empty = innermost): a labeled break/continue
 //     bubbles through inner loops until the loop whose label matches catches it (mirrors the C
 //     `tk_flow.label`). They carry no value (their `value` is always null).
 // (The C uses ONE struct with a `kind` discriminant; here each kind is a variant member,
-// and Normal+Return each carry the optional value just like the C `value` field.)
+// and Normal+VmReturn each carry the optional value just like the C `value` field.)
 // ---------------------------------------------------------------------------
 pub type Normal   = struct { value: Value? }   // W5a — the NORMAL flow's trailing/statement value (null == none)
-pub type Return   = struct { value: Value? }   // null == return with no value (void / bare `return`)
+pub type VmReturn   = struct { value: Value? }   // null == return with no value (void / bare `return`)
 pub type Break    = struct { label: str }      // break [NAME] — label empty = innermost loop (M.5)
 pub type Continue = struct { label: str }      // continue [NAME] — label empty = innermost loop (M.5)
-type Flow = variant Normal | Return | Break | Continue
+type Flow = variant Normal | VmReturn | Break | Continue
 
 // str equality (loop labels) — mirrors the C `vm_str_eq`. The empty label matches empty.
 fn vm_str_eq(a: str, b: str) -> bool { a == b }
@@ -171,22 +171,22 @@ fn vm_float_to_int(f: f64, dst: checker::PrimKind, line: u32, col: u32) -> i128 
 // codegen's C functions).
 // ---------------------------------------------------------------------------
 type Slot = struct { name: str; val: Value }
-pub type Env  = struct { slots: []Slot }
+pub type Venv  = struct { slots: []Slot }
 
 // find — newest-first scan so a later binding SHADOWS an earlier one (the checker's rule).
-fn find(env: Env, name: str) -> Slot | error {
+fn find(env: Venv, name: str) -> Slot | error {
     mut i = env.slots.len
     loop {
         if i == 0 { break }
         i--
         if env.slots[i].name == name { return env.slots[i] }
     }
-    error("vm: unbound variable (internal: checker should reject)")
+    error { message = "vm: unbound variable (internal: checker should reject)" }
 }
 
 // define — push a fresh slot (shadowing). Returns the grown env (functional, like emit/*).
-pub fn define(env: Env, name: str, val: Value) -> Env {
-    Env { slots= teko::list::push(env.slots, Slot { name= name, val= val }) }
+pub fn define(env: Venv, name: str, val: Value) -> Venv {
+    Venv { slots= teko::list::push(env.slots, Slot { name= name, val= val }) }
 }
 
 // ---------------------------------------------------------------------------
@@ -236,16 +236,16 @@ pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
 // statement context (a void call is a statement) expects no value back. A non-builtin
 // path returns an `error` so `eval_call` falls through to a user fn.
 // ---------------------------------------------------------------------------
-fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> bool | error {
+fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Venv) -> bool | error {
     let last = callee.segments[callee.segments.len - 1].name
     let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
-    if !addressable { return error("not a builtin") }
+    if !addressable { return error { message = "not a builtin" } }
 
     if last == "print" || last == "println" {
         let a = eval_expr(args[0], env)
         match a {
             str as s => { if last == "print" { teko::print(s) } else { teko::println(s) }; return true }
-            _        => return error("vm: print/println on a non-str value not yet supported")
+            _        => return error { message = "vm: print/println on a non-str value not yet supported" }
         }
     }
 
@@ -261,7 +261,7 @@ fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> bool |
         // equals/is_ok/... need generics — DEFERRED (matches the seed). Honest stop (M.3).
         panic("vm: this teko::assert builtin not yet supported (needs generics)")
     }
-    error("not a builtin")
+    error { message = "not a builtin" }
 }
 
 // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY semantics (no
@@ -273,7 +273,7 @@ fn try_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> bool |
 // value, so the value-producing list builtins live on the value-call path instead). They
 // resolve to the language's own `teko::list::empty`/`push` intrinsics (the same calls the
 // engine itself uses above), keeping VM==native copy-on-push semantics.
-fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Venv) -> Value? {
     let last = callee.segments[callee.segments.len - 1].name
     let list_ns = callee.segments.len >= 2 && callee.segments[0].name == "teko" &&
                callee.segments[callee.segments.len - 2].name == "list"
@@ -300,7 +300,7 @@ fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> V
 // err_set is copy-on-set), so they live on the value-call path (like try_list_builtin), not the
 // `-> void` try_builtin. They mirror C's tk_error_loc(e,line,col) / tk_error_types(e,exp,act).
 // `null` == not an err builtin → fall through.
-fn try_err_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+fn try_err_builtin(callee: parser::Path, args: []checker::TExpr, env: Venv) -> Value? {
     let last = callee.segments[callee.segments.len - 1].name
     let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
     if !addressable { return null }
@@ -345,7 +345,7 @@ fn try_err_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Va
 // passes directly). The VM's []Value is not a contiguous byte buffer, so we MATERIALIZE the
 // bytes into a `str` first (each byte → teko::one_byte, concatenated — M.1), then call
 // teko::str_of_bytes (which COPIES into the fresh owned result), mirroring the C twin.
-fn try_str_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+fn try_str_builtin(callee: parser::Path, args: []checker::TExpr, env: Venv) -> Value? {
     let last = callee.segments[callee.segments.len - 1].name
     let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
     if !addressable { return null }
@@ -362,7 +362,7 @@ fn try_str_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Va
                     }
                     i++
                 }
-                return teko::str_of_bytes(view)   // COPIES the bytes into a fresh owned str
+                return view   // `view` is already the fresh str built from the bytes (str_concat copies); it IS the result
             }
             _ => panic("vm: str/str_of_bytes on a non-[]byte value (internal: checker should reject)")
         }
@@ -453,7 +453,7 @@ fn err_field(e: StructVal, field: str) -> Value {
 
 // W4b — build a struct value `Name { f = v, … }` (declared field order). The nominal name
 // is the node's type (a named type, or "error"); a non-named/non-error type is unreachable.
-fn eval_struct_init(si: checker::TStructInit, ty: checker::Type, env: Env) -> Value {
+fn eval_struct_init(si: checker::TStructInit, ty: checker::Type, env: Venv) -> Value {
     mut names = teko::list::empty()
     mut vals = teko::list::empty()
     mut i = 0
@@ -470,7 +470,7 @@ fn eval_struct_init(si: checker::TStructInit, ty: checker::Type, env: Env) -> Va
 // W4b — read field `fa.field` from a struct value (the checker guarantees it exists).
 // W5-idx — `.len`: a `str` value yields its byte length as a u64; a list value (slice) yields
 // its element count as a u64 (the SLICE value layer — fixed+copy). Checker types `.len` as u64.
-fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
+fn eval_field_access(fa: checker::TFieldAccess, env: Venv) -> Value {
     match eval_expr(fa.receiver, env) {
         str as s => {
             if fa.field == "len" { return s.len to u64 }
@@ -502,7 +502,7 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
 // ("index out of bounds" — M.1), else a `byte` Value. A list value (slice) yields the element
 // at `index`, bounds-checked through the SAME panic (the SLICE value layer — fixed+copy).
 // Mirrors codegen's stmt-expr guard.
-fn eval_index(ix: checker::TIndex, line: u32, col: u32, env: Env) -> Value {
+fn eval_index(ix: checker::TIndex, line: u32, col: u32, env: Venv) -> Value {
     let recv = eval_expr(ix.receiver, env)
     let i = as_int(eval_expr(ix.index, env))
     match recv {
@@ -523,7 +523,7 @@ fn eval_index(ix: checker::TIndex, line: u32, col: u32, env: Env) -> Value {
 // builders codegen emits (i64_to_str / u64_to_str, selected by the value's own signedness), so
 // VM==codegen byte-for-byte. The result is pieces[0] ++ str(holes[0]) ++ … ++ pieces[nholes]
 // (pieces.len == holes.len + 1). The checker restricted hole types to str/integer.
-fn eval_interp(in: checker::TInterp, env: Env) -> Value {
+fn eval_interp(in: checker::TInterp, env: Venv) -> Value {
     mut acc = ""
     mut i = 0
     loop {
@@ -533,7 +533,7 @@ fn eval_interp(in: checker::TInterp, env: Env) -> Value {
             let h = eval_expr(in.holes[i], env)
             let hs = match h {
                 str as s => s
-                _        => if int_sign_of(h) { teko::i64_to_str(as_int(h)) }
+                _        => if int_sign_of(h) { teko::i64_to_str(as_int(h) to i64) }
                             else { teko::u64_to_str(as_int(h) to u64) }
             }
             acc = teko::str_concat(acc, hs)
@@ -549,7 +549,7 @@ fn eval_interp(in: checker::TInterp, env: Env) -> Value {
 // the empty set `x in []` -> false (the loop runs zero times). value_eq returns false for struct/list
 // operands, but the checker restricts `in` to scalar-comparable element types, so the honest frontier
 // matches `==`. Mirrors the C `eval_in` and codegen's fold of value_eq (single-eval lhs).
-fn eval_in(ie: checker::TInExpr, env: Env) -> Value {
+fn eval_in(ie: checker::TInExpr, env: Venv) -> Value {
     let lhs = eval_expr(ie.lhs, env)   // single-eval: the LHS once
     mut i = 0
     loop {
@@ -573,7 +573,7 @@ fn eval_in(ie: checker::TInExpr, env: Env) -> Value {
 //   * The C represents `byte` as an INT (u8 carrier); here `byte` is its OWN Value member, so
 //     `value_eq`/`lit_as` carry a `byte` literal as a `byte` Value (not an int) — same compare,
 //     distinct member.
-//   * The C `env_pop_to(armenv, env->head)` pops an arm's bindings between arms. The Env here is
+//   * The C `env_pop_to(armenv, env->head)` pops an arm's bindings between arms. The Venv here is
 //     FUNCTIONAL (a `[]Slot`), so there is nothing to pop: a non-matching / guard-failing arm
 //     simply does NOT thread its grown env (`pm.env`) forward — the next arm starts from the
 //     parent `env`. Same scoping semantics, expressed immutably (as check_pattern/type_arm do).
@@ -599,6 +599,41 @@ fn int_width_of(v: Value) -> u8 {
     match v { u8 | i8 => 8; u16 | i16 => 16; u32 | i32 => 32; u64 | i64 => 64; u128 | i128 => 128; _ => 64 }
 }
 fn float_width_of(v: Value) -> u8 { match v { f16 => 16; f32 => 32; f64 => 64; _ => 64 } }
+
+// Value accessors — extract the carried scalar (the .tks stand-in for the C `.as.*` union read).
+// as_int: any INT member (incl byte=u8) → the i128 carrier (the C exposes ONE signed accessor;
+// the width/sign live in the member). as_float: any FLOAT → f64. as_bool/as_str: the lone member.
+// A wrong-kind access is an internal invariant break (the checker guarantees the kind) — panic (M.1).
+fn as_int(v: Value) -> i128 {
+    match v {
+        u8 as x   => x to i128
+        u16 as x  => x to i128
+        u32 as x  => x to i128
+        u64 as x  => x to i128
+        u128 as x => x to i128
+        i8 as x   => x to i128
+        i16 as x  => x to i128
+        i32 as x  => x to i128
+        i64 as x  => x to i128
+        i128 as x => x
+        byte as x => x to i128
+        _ => panic("vm: as_int on a non-int value (checker should reject)")
+    }
+}
+fn as_float(v: Value) -> f64 {
+    match v {
+        f16 as x => x to f64
+        f32 as x => x to f64
+        f64 as x => x
+        _ => panic("vm: as_float on a non-float value (checker should reject)")
+    }
+}
+fn as_bool(v: Value) -> bool {
+    match v { bool as x => x; _ => panic("vm: as_bool on a non-bool value (checker should reject)") }
+}
+fn as_str(v: Value) -> str {
+    match v { str as x => x; _ => panic("vm: as_str on a non-str value (checker should reject)") }
+}
 
 // value equality (literal patterns) — same-kind scalar compare. Mirrors the C `value_eq`; struct/
 // list are not literal-comparable (false). Ints compare via the i128 carrier (`as_int`); the
@@ -639,9 +674,9 @@ fn lit_as(lit: parser::Expr, subj: Value) -> Value {
 // bindings (`matched = true`); on no match, `matched = false` and the env is irrelevant (the caller
 // discards it). The FUNCTIONAL stand-in for the C `pat_match(pat, subj, env)` that mutates `env` in
 // place and is unwound by `env_pop_to`.
-type PatMatch = struct { matched: bool; env: Env }
+type PatMatch = struct { matched: bool; env: Venv }
 
-fn pat_match(pat: parser::Pattern, subj: Value, env: Env) -> PatMatch {
+fn pat_match(pat: parser::Pattern, subj: Value, env: Venv) -> PatMatch {
     // OPTIONAL subject (REBOOT_PLAN §202): `null` matches NONE; any other pattern matches the
     // PRESENT case. A bare bind/wildcard over a present NON-struct inner binds the inner directly;
     // a struct/variant inner recurses (the variant tag check / field destructure still applies).
@@ -757,7 +792,7 @@ fn pat_match(pat: parser::Pattern, subj: Value, env: Env) -> PatMatch {
 // bindings ride its grown env (`pm.env`); a non-matching / guard-failing arm is discarded by NOT
 // threading that env forward (the functional stand-in for the C `env_pop_to`). Mirrors the C
 // `eval_match`.
-fn eval_match(m: checker::TMatchExpr, env: Env) -> Value {
+fn eval_match(m: checker::TMatchExpr, env: Venv) -> Value {
     let subj = eval_expr(m.subject, env)
     mut i = 0
     loop {
@@ -783,7 +818,7 @@ fn eval_match(m: checker::TMatchExpr, env: Env) -> Value {
 // A `return`/`break`/`continue` inside the arm propagates out; a NORMAL trailing value rides the
 // flow (the match's value). Routed from a binding/return/loose-statement RHS, exactly as `if` RHS
 // routes through exec_if. Mirrors the C `exec_match`.
-fn exec_match(e: checker::TExpr, env: Env) -> Flow {
+fn exec_match(e: checker::TExpr, env: Venv) -> Flow {
     match e {
         checker::TMatchExpr as m => {
             let subj = eval_expr(m.subject, env)
@@ -804,7 +839,7 @@ fn exec_match(e: checker::TExpr, env: Env) -> Flow {
     }
 }
 
-fn eval_expr(e: checker::TExpr, env: Env) -> Value {
+fn eval_expr(e: checker::TExpr, env: Venv) -> Value {
     match e.type {
         // Optional `T?` values ARE supported now (OptVal — REBOOT_PLAN §202): null / ?. / ?? and
         // the present-wrap (coerce_to) produce them; they flow through the value model like any tag.
@@ -910,7 +945,7 @@ fn coerce_to(v: Value, t: checker::Type) -> Value {
 // div/mod so a zero divisor PANICS "division by zero" (M.1). FLOAT + - * / honestly in
 // `f64` (the VM-debug carrier for all float widths); float ÷0 PANICS too (plan §5, same as
 // int). `%` / bitwise / shift on a float is honest-unsupported (the checker rejects them).
-fn eval_binary(b: checker::TBinary, ty: checker::Type, line: u32, col: u32, env: Env) -> Value {
+fn eval_binary(b: checker::TBinary, ty: checker::Type, line: u32, col: u32, env: Venv) -> Value {
     if b.op == AndAnd || b.op == OrOr {
         let l = as_bool(eval_expr(b.left, env))
         if b.op == AndAnd && !l { return false }
@@ -952,7 +987,7 @@ fn eval_binary(b: checker::TBinary, ty: checker::Type, line: u32, col: u32, env:
 //                   conversion" (plan §5, parity with the integer cast guard, M.1).
 //   * int->int:     codegen's guard predicate — cast_may_lose -> CHECKED conversion
 //                   (PANIC out of range); else a plain reinterpret to the target width.
-fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Env) -> Value {
+fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Venv) -> Value {
     // num_prim_of maps a cast endpoint to its effective numeric prim: a Prim is itself, a
     // `byte` is U8 (B.36 — byte is a u8 newtype), so `s[i] to i32` (a byte source — W5-idx)
     // casts as u8->i32. Any other type (str/named/…) is the honest non-numeric cast frontier.
@@ -985,7 +1020,7 @@ fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Env
 // explicit `return e` OR (NORMAL) the body's TRAILING value (B.20 — implicit return); a
 // `-> void` fn (or one that falls off the end without a value) produces NO Value: the call is
 // a statement whose result is discarded — there is no `Unit`.
-fn eval_call(c: checker::TCall, env: Env) -> Value {
+fn eval_call(c: checker::TCall, env: Venv) -> Value {
     // A builtin that RAN (`true`) is `-> void`, so there is no Value to yield: a void call
     // only appears in statement position, and reaching here in value position is an honest
     // stop (M.3), never a synthesized Unit. A `false`/`error` result == "not a builtin" —
@@ -1004,24 +1039,24 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     // str_concat3/ftoa). Recognized before user-fn resolution; null == not a str builtin, fall through.
     match try_str_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
     let f = find_function(c.callee)        // resolved by LAST segment (cross-ns ok); honest stop if unknown / params
-    let fenv = Env { slots = teko::list::empty() }
+    let fenv = Venv { slots = teko::list::empty() }
     // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn
     // present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot.
     match exec_block(f.body, fenv) {
-        Return as ret => coerce_to(ret.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
+        VmReturn as ret => coerce_to(ret.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
         Normal as nm  => coerce_to(nm.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)  // W5a — implicit trailing value (B.20)
         _             => panic("vm: void fn call used as a value (internal: checker should reject)")
     }
 }
 
 // ---------------------------------------------------------------------------
-// STATEMENTS / BLOCKS. Coverage MIRRORS codegen's emit_stmt: Binding, Assign, Return,
+// STATEMENTS / BLOCKS. Coverage MIRRORS codegen's emit_stmt: Binding, Assign, VmReturn,
 // ExprStmt, Loop, Break, Continue. A non-local Flow short-circuits the block.
 // ---------------------------------------------------------------------------
 // W5a — exec_block now YIELDS THE TRAILING VALUE: it returns the LAST statement's NORMAL flow
 // (keeping its value), so a block's last expression becomes the block's value (B.20). Mirrors
 // the C `tk_vm_exec_block` returning the last statement's flow. A non-local exit short-circuits.
-fn exec_block(body: []checker::TStatement, env: Env) -> Flow {
+fn exec_block(body: []checker::TStatement, env: Venv) -> Flow {
     mut e = env
     mut last: Value? = null      // the last NORMAL step's value — the block's trailing value (B.20)
     mut i = 0
@@ -1030,7 +1065,7 @@ fn exec_block(body: []checker::TStatement, env: Env) -> Flow {
         match exec_stmt(body[i], e) {
             // A NORMAL step threads the env forward AND keeps its value as the block's trailing value.
             Stepped as st => { e = st.env; last = st.value }
-            Exit as ex    => return ex.flow      // Return / Break / Continue escape
+            Exit as ex    => return ex.flow      // VmReturn / Break / Continue escape
         }
         i++
     }
@@ -1039,15 +1074,15 @@ fn exec_block(body: []checker::TStatement, env: Env) -> Flow {
 
 // One statement. Returns either Stepped(env', value) — a NORMAL step that threads the env
 // forward AND carries the statement's value (an expr-statement's result; `null` == none) —
-// or a Flow exit (Return/Break/Continue). W5a: Stepped's `value` is how a NORMAL flow
+// or a Flow exit (VmReturn/Break/Continue). W5a: Stepped's `value` is how a NORMAL flow
 // carries its trailing value (the C `tk_flow.value` for a NORMAL kind); a block keeps the
 // LAST Stepped's value as its trailing value (B.20). The functional env (threaded via
 // Stepped) is the faithful Teko stand-in for the C's in-place env mutation.
-type Stepped = struct { env: Env; value: Value? }
+type Stepped = struct { env: Venv; value: Value? }
 type Exit    = struct { flow: Flow }
 type Step    = variant Stepped | Exit
 
-fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
+fn exec_stmt(s: checker::TStatement, env: Venv) -> Step {
     match s {
         checker::TBinding as b  => {
             // Only SimpleName is lowered for M0 (destructuring is the honest frontier).
@@ -1082,11 +1117,11 @@ fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
         checker::TReturn as r   => {
             if r.has_value {
                 match eval_rhs_flow(r.value, env) {
-                    Normal as nm => Exit { flow= Return { value= nm.value } }
+                    Normal as nm => Exit { flow= VmReturn { value= nm.value } }
                     other        => Exit { flow= other }   // inner return/break/continue
                 }
             } else {
-                Exit { flow= Return { value= null } }
+                Exit { flow= VmReturn { value= null } }
             }
         }
         // W5a — an `if`/`match` in statement/tail position runs as CONTROL FLOW (exec_if/exec_match),
@@ -1110,7 +1145,7 @@ fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
 // `return`/`break`/`continue` inside a branch/arm propagates out (the dominant idiom
 // `let v = match r { i64 as x => x ; error as e => return e }`). Any other expr evaluates plainly
 // and rides a NORMAL flow carrying its value. Mirrors the C `eval_rhs_flow`.
-fn eval_rhs_flow(e: checker::TExpr, env: Env) -> Flow {
+fn eval_rhs_flow(e: checker::TExpr, env: Venv) -> Flow {
     match e {
         checker::TIfExpr as _    => exec_if(e, env)
         checker::TMatchExpr as _ => exec_match(e, env)
@@ -1120,9 +1155,9 @@ fn eval_rhs_flow(e: checker::TExpr, env: Env) -> Flow {
 
 // step_of_flow — adapt a Flow (from exec_if) back into the Step the statement loop expects:
 // a NORMAL flow keeps stepping (Stepped, env threaded, carrying the branch's trailing value);
-// a Return/Break/Continue escapes (Exit). Mirrors the C `exec_stmt` for a tail `if` directly
+// a VmReturn/Break/Continue escapes (Exit). Mirrors the C `exec_stmt` for a tail `if` directly
 // returning the `exec_if` flow (whose NORMAL value is the statement's value).
-fn step_of_flow(fl: Flow, env: Env) -> Step {
+fn step_of_flow(fl: Flow, env: Venv) -> Step {
     match fl {
         Normal as nm => Stepped { env= env; value= nm.value }   // branch's trailing value rides NORMAL
         _            => Exit { flow= fl }                        // return/break/continue propagate
@@ -1134,7 +1169,7 @@ fn step_of_flow(fl: Flow, env: Env) -> Step {
 // `tk_vm_eval_expr` in exec_stmt's EXPR case: a `-> void` call (print/println/assert/void fn)
 // runs purely for effect and yields NO Value (`null` — the Teko stand-in for the C's never-read
 // v_void() placeholder); any value-typed expression yields its evaluated value.
-fn eval_stmt_value(e: checker::TExpr, env: Env) -> Value? {
+fn eval_stmt_value(e: checker::TExpr, env: Venv) -> Value? {
     match e {
         checker::TCall as c => call_value(c, env)       // may be a void call — null; else the call's value
         _          => eval_expr(e, env)          // value expr in stmt position — carries its value
@@ -1146,7 +1181,7 @@ fn eval_stmt_value(e: checker::TExpr, env: Env) -> Value? {
 // trailing value (NORMAL) yields that (W5a), else `null` (a `-> void` fn). Mirrors the C call
 // path (return value OR trailing NORMAL value OR void) — reused so a tail/non-tail call in
 // statement position carries the right value.
-fn call_value(c: checker::TCall, env: Env) -> Value? {
+fn call_value(c: checker::TCall, env: Venv) -> Value? {
     // A builtin that RAN (`true`) is `-> void` — yield null. A `false`/`error` result ==
     // "not a builtin": run the user fn.
     match try_builtin(c.callee, c.args, env) {
@@ -1154,9 +1189,9 @@ fn call_value(c: checker::TCall, env: Env) -> Value? {
         error       => {}
     }
     let f = find_function(c.callee)
-    let fenv = Env { slots = teko::list::empty() }
+    let fenv = Venv { slots = teko::list::empty() }
     match exec_block(f.body, fenv) {
-        Return as ret => ret.value                      // explicit `return e` (or bare return -> null)
+        VmReturn as ret => ret.value                      // explicit `return e` (or bare return -> null)
         Normal as nm  => nm.value                       // W5a — implicit trailing value (B.20); null if none
         _             => null                            // break/continue can't escape a fn body
     }
@@ -1165,13 +1200,13 @@ fn call_value(c: checker::TCall, env: Env) -> Value? {
 // run_loop — while(1){…}; `mylabel` is THIS loop's label (empty = unlabeled). A BREAK whose
 // label is empty OR equals `mylabel` stops THIS loop; otherwise the flow is RE-RETURNED so it
 // propagates to the enclosing loop. A CONTINUE whose label is empty OR matches re-iterates THIS
-// loop; otherwise it propagates. Return propagates. Normal re-iterates. A loop completing (via a
+// loop; otherwise it propagates. VmReturn propagates. Normal re-iterates. A loop completing (via a
 // matching Break) produces NO trailing value — it yields a valueless NORMAL flow. (Mirrors the C
 // `TK_TSTMT_LOOP` exec.)
-fn run_loop(mylabel: str, body: []checker::TStatement, env: Env) -> Flow {
+fn run_loop(mylabel: str, body: []checker::TStatement, env: Venv) -> Flow {
     loop {
         match exec_block(body, env) {
-            Return as ret => return ret
+            VmReturn as ret => return ret
             Break as b    => {
                 if b.label.len == 0 || vm_str_eq(b.label, mylabel) { break }   // this loop
                 return b                                                        // propagate to outer
@@ -1190,7 +1225,7 @@ fn run_loop(mylabel: str, body: []checker::TStatement, env: Env) -> Flow {
 // and return its flow. The branch's trailing value rides the NORMAL flow (the `if`'s value);
 // a `return`/`break`/`continue` inside the branch propagates out. An `if`-without-`else` taken
 // false yields a valueless NORMAL flow (no value). Mirrors the C `exec_if`.
-fn exec_if(e: checker::TExpr, env: Env) -> Flow {
+fn exec_if(e: checker::TExpr, env: Venv) -> Flow {
     match e {
         checker::TIfExpr as f => {
             let c = as_bool(eval_expr(f.cond, env))
@@ -1208,7 +1243,7 @@ fn exec_if(e: checker::TExpr, env: Env) -> Flow {
 // the end -> 0. Top-level functions are callable (run only when called, never on their own).
 // ---------------------------------------------------------------------------
 exp fn run(prog: checker::TProgram) -> i32 {
-    mut env = Env { slots = teko::list::empty() }
+    mut env = Venv { slots = teko::list::empty() }
     mut last: Value? = null      // W5a — the last NORMAL top-level statement's trailing value (B.20)
     mut i = 0
     loop {
@@ -1220,11 +1255,11 @@ exp fn run(prog: checker::TProgram) -> i32 {
                     // Binding/Assign/expr-stmt thread the env forward AND keep the statement's
                     // trailing value (the virtual-main's value if it's the last one — B.20).
                     Stepped as st => { env = st.env; last = st.value }
-                    // A top-level Return is an early process exit (like main's `return (int)n`).
+                    // A top-level VmReturn is an early process exit (like main's `return (int)n`).
                     // Break/Continue can't escape the virtual-main — the checker rejects them.
                     Exit as ex    => {
                         match ex.flow {
-                            Return as ret => return exit_code_of(ret.value)
+                            VmReturn as ret => return exit_code_of(ret.value)
                             Normal as nm  => { last = nm.value }   // a tail `if` routed via exec_if rides NORMAL
                             _             => {}   // break/continue: unreachable at top level
                         }

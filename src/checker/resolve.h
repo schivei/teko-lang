@@ -25,6 +25,14 @@ tk_type_result resolve_named(tk_path path, tk_type_table table);   // shared wit
 // exhaustiveness see a named variant's cases without changing the nominal representation.
 tk_type tk_expand_variant(tk_type t, tk_type_table table);
 
+// (#41-followon) Value-position widening — the single source of truth shared by the
+// return/trailing-value check and the match/`if` arm join. `tk_widens_into`: does `from` widen
+// into `to` (equality, T→T?, a variant member → the variant)? `tk_type_join`: the least-upper-
+// bound of two arm/branch types — the wider one when either widens into the other (so `error`
+// and `Type | error` join to `Type | error`); false when incompatible (out set only on success).
+bool tk_widens_into(tk_type from, tk_type to, tk_type_table table);
+bool tk_type_join(tk_type a, tk_type b, tk_type_table table, tk_type *out);
+
 // (C1.8) RENDER a semantic type to a human string for diagnostics ("expected X, found Y"):
 //   prims → "i32"/"u64"/"f64"/"bool"/… (the surface spellings), "byte", "str", "error", "void",
 //   slice → "[]<elem>", optional → "<inner>?", variant → "A | B | …", named → "<name>".

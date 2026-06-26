@@ -129,6 +129,20 @@ tk_type_result tk_builtin_fn(tk_str name) {
     static tk_type bytes_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &byte_elem };  // []byte
     static tk_type slice_p[3] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 } };
     static tk_type str3_t[3]  = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR } };
+    static tk_type str_u64_p[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 } };  // (str, u64)
+    // teko::str::last_index_of -> `u64 | error` (a found index, or error when absent)
+    static tk_type u64_or_err_m[2] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 }, { .tag = TK_TYPE_ERROR } };
+    static tk_type u64_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { u64_or_err_m, 2 } };
+    // host file-IO FFI bottoms: read_file -> `str | error` ; write_file -> `error?` (null = success)
+    static tk_type str_or_err_m[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_ERROR } };
+    static tk_type str_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { str_or_err_m, 2 } };
+    static tk_type error_inner = { .tag = TK_TYPE_ERROR };
+    static tk_type err_opt = { .tag = TK_TYPE_OPTIONAL, .as.optional.inner = &error_inner };
+    // VM-internal arithmetic FFI: sign-aware int div/rem over the i128 carrier, float div.
+    static tk_type i128_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 };
+    static tk_type divrem_p[3] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_BOOL } };
+    static tk_type f64x2_p[2] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_F64 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_F64 } };
+    static tk_type i128_bool_p[2] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_BOOL } };
     // error diagnostic adornment builtins (E2): err_loc(error,u32,u32)->error ; err_typed(error,str,str)->error.
     static tk_type error_t   = { .tag = TK_TYPE_ERROR };
     static tk_type err_loc_p[3]   = { { .tag = TK_TYPE_ERROR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U32 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U32 } };
@@ -146,10 +160,85 @@ tk_type_result tk_builtin_fn(tk_str name) {
     if (name_is(name, "i64_to_str"))   return TK_BFN(&i64_t, 1);    // (i64) -> str
     if (name_is(name, "u64_to_str"))   return TK_BFN(&u64_t, 1);    // (u64) -> str
     if (name_is(name, "ftoa"))         return TK_BFN(&f64_t, 1);    // (f64) -> str
+    if (name_is(name, "f64_g17"))      return TK_BFN(&f64_t, 1);    // teko::fmt::f64_g17(f64) -> str (host float renderer FFI bottom)
+    // teko::str::* — the self-host string stdlib the corpus calls namespaced (resolved by last
+    // segment, like the underscored twins above; the C runtime twins are tk_str_concat/slice/…).
+    if (name_is(name, "concat"))       return TK_BFN(str2_t, 2);      // str::concat(str, str) -> str
+    if (name_is(name, "concat3"))      return TK_BFN(str3_t, 3);      // str::concat3(str, str, str) -> str
+    if (name_is(name, "slice_to"))     return TK_BFN(str_u64_p, 2);   // str::slice_to(str, u64) -> str
+    if (name_is(name, "slice_from"))   return TK_BFN(str_u64_p, 2);   // str::slice_from(str, u64) -> str
     #undef TK_BFN
-    if (name_is(name, "print") || name_is(name, "println")) {
+    if (name_is(name, "len")) {                                       // str::len(str) -> u64
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &u64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "ends_with")) {                                 // str::ends_with(str, str) -> bool
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str2_t, .nparams = 2, .ret = &bool_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "last_index_of")) {                             // str::last_index_of(str, str) -> u64 | error
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str2_t, .nparams = 2, .ret = &u64_or_err } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "contains")) {                                  // str::contains(str, str) -> bool
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str2_t, .nparams = 2, .ret = &bool_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // host FFI bottoms: teko::float::parse(str)->f64 ; teko::io::read_file(str)->str|error ;
+    // teko::io::write_file(str,str)->error? (null=success). The C twins live in driver.c/teko_rt.c.
+    if (name_is(name, "parse")) {                                     // teko::float::parse(str) -> f64
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &f64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "read_file")) {                                 // teko::io::read_file(str) -> str | error
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &str_or_err } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "write_file")) {                                // teko::io::write_file(str, str) -> error?
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str2_t, .nparams = 2, .ret = &err_opt } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // print/println + teko::io::write/ewrite — the host output bottom (write/ewrite are the FFI
+    // primitives the runtime's print/println/panic lower to; ewrite is stderr). All (str) -> void.
+    if (name_is(name, "print") || name_is(name, "println") || name_is(name, "write") || name_is(name, "ewrite") || name_is(name, "eprint")) {
         tk_type ft = { .tag = TK_TYPE_FUNC,
                        .as.func = { .params = &str_t, .nparams = 1, .ret = &void_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // teko::abort — the host abort FFI bottom (() -> void). The runtime's panic lowers to it.
+    if (name_is(name, "abort")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &void_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // VM-internal arithmetic FFI (sign-aware over the i128 carrier) + the F3 panic helpers the VM
+    // and runtime call via the reserved `teko::` root (teko::runtime mirrors these in Teko).
+    if (name_is(name, "div") || name_is(name, "rem")) {              // (i128, i128, bool) -> i128
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = divrem_p, .nparams = 3, .ret = &i128_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "fdiv")) {                                     // (f64, f64) -> f64
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = f64x2_p, .nparams = 2, .ret = &f64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "panic_div0") || name_is(name, "panic_oob") || name_is(name, "panic_cast") || name_is(name, "panic_overflow")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &void_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // math / bit-pattern FFI: floor(f64)->f64 ; int_to_float(i128,bool)->f64 ; f64<->bits.
+    if (name_is(name, "floor")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &f64_t, .nparams = 1, .ret = &f64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "int_to_float")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = i128_bool_p, .nparams = 2, .ret = &f64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "f64_from_bits")) {                            // (u64) -> f64
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &u64_t, .nparams = 1, .ret = &f64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "f64_bits")) {                                 // (f64) -> u64
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &f64_t, .nparams = 1, .ret = &u64_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
     // teko::assert — injected testing assertions (canonical: src/assert/assert.tks).

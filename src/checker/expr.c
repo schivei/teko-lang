@@ -123,18 +123,27 @@ static tk_texpr_result type_unary(tk_unary u, tk_env env, tk_type_table table) {
 
 static tk_texpr_result type_compare(tk_compare c, tk_env env, tk_type_table table) {
     tk_texpr_result f = tk_typer_expr(*c.first, env, table); if (!f.ok) return f;
-    tk_type prev = f.as.value.type;
+    tk_texpr first_val = f.as.value;
+    tk_type prev = first_val.type;
     if (tk_type_is_void(&prev)) return xerr("a `void` expression cannot be an operand (M.1)");
     tk_tcmp_list terms = tk_tcmp_list_empty();
     for (size_t i = 0; i < c.nrest; i += 1) {
         tk_texpr_result cur = tk_typer_expr(*c.rest[i].operand, env, table); if (!cur.ok) return cur;
         if (tk_type_is_void(&cur.as.value.type)) return xerr("a `void` expression cannot be an operand (M.1)");
+        // numeric-literal adoption (parity with binary ops): a literal operand adopts the OTHER's
+        // numeric type so `c < 0x20` (byte vs int-literal) and `0x20 < c` compare. byte = u8, so a
+        // fitting int literal adopts it via tk_literal_adopts (cast_kind treats byte AS u8).
+        if (cur.as.value.tag == TK_TEXPR_NUMBER && tk_literal_adopts(cur.as.value, prev)) {
+            cur.as.value.type = prev;
+        } else if (i == 0 && first_val.tag == TK_TEXPR_NUMBER && tk_literal_adopts(first_val, cur.as.value.type)) {
+            first_val.type = cur.as.value.type; prev = first_val.type;
+        }
         if (!is_comparable(prev, cur.as.value.type)) return xerr("operands are not comparable");
         terms = tk_tcmp_list_push(terms, (tk_tcmp_term){ c.rest[i].op, box(cur.as.value) });
         prev = cur.as.value.type;
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_COMPARE, .type = tk_prim_t(TK_PRIM_BOOL),
-                           .as.compare = { box(f.as.value), terms.ptr, terms.len } });
+                           .as.compare = { box(first_val), terms.ptr, terms.len } });
 }
 
 // heap a tk_type (the slice element pointer). Local twin of resolve.c's box.
@@ -173,13 +182,18 @@ static bool type_list_builtin(tk_call c, tk_env env, tk_type_table table, tk_tex
         tk_texpr_result x = tk_typer_expr(c.args[1], env, table); if (!x.ok) { *out = x; return true; }
         if (s.as.value.type.tag != TK_TYPE_SLICE) { *out = xerr("teko::list::push first argument must be a slice (`[]T`)"); return true; }
         if (tk_type_is_void(&x.as.value.type)) { *out = xerr("teko::list::push item cannot be a `void` expression (M.1)"); return true; }
-        // The pushed item fixes the result element type; if the slice carried a concrete element
-        // it must match the item (sentinel `empty()` accepts anything — tk_type_eq).
-        if (s.as.value.type.as.slice.element != NULL &&
-            !tk_type_eq(s.as.value.type.as.slice.element, &x.as.value.type)) {
-            *out = xerr("teko::list::push item type does not match the slice element type"); return true;
+        // A SENTINEL base (bare `empty()`) is fixed BY the item — the result element is the item's
+        // type. A CONCRETE base keeps its element; the item must WIDEN into it (a case into a variant
+        // element — so a `[]Type` list accepts heterogeneous cases: str, u64, …) OR adopt it (literal).
+        tk_type elem;
+        if (s.as.value.type.as.slice.element == NULL) {
+            elem = x.as.value.type;
+        } else {
+            elem = *s.as.value.type.as.slice.element;
+            if (!tk_widens_into(x.as.value.type, elem, table) && !tk_literal_adopts(x.as.value, elem)) {
+                *out = xerr("teko::list::push item type does not match the slice element type"); return true;
+            }
         }
-        tk_type elem = x.as.value.type;
         tk_type st = { .tag = TK_TYPE_SLICE, .as.slice.element = box_type(elem) };
         // (#57) CONCRETIZE a SENTINEL base (a bare `empty()`) to []elem so codegen can EMIT it.
         // The VM ignores a slice's element type, but codegen's emit_list_empty REQUIRES it — a
@@ -202,8 +216,11 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
     // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
     // program; the call's STATIC type is void, but tk_texpr_diverges accepts it in any value
-    // position (type_coalesce / tk_tblock_diverges). Unqualified, and not shadowed by a local.
-    if (c.callee.len == 1 && !tk_env_lookup(env, name).ok) {
+    // position (type_coalesce / tk_tblock_diverges). Unqualified, and only when the namespace-aware
+    // lookup finds NOTHING — so a same-namespace `fn panic` (the runtime's own) resolves to ITSELF
+    // (below), while every other namespace gets the injected global (the runtime defines `panic`,
+    // so #41's env now contains it; the old `tk_env_lookup` by-name guard wrongly suppressed this).
+    if (c.callee.len == 1 && !tk_env_lookup_call(env, c.callee).ok) {
         bool is_panic = seg_lit(name, "panic");
         if (is_panic || seg_lit(name, "exit")) {
             if (c.nargs != 1) return xerr(is_panic ? "panic expects one argument (an `error` or a `str`)"
@@ -233,14 +250,16 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
         tk_texpr_result a = tk_typer_expr(c.args[i], env, table); if (!a.ok) return a;
         if (tk_type_is_void(&a.as.value.type)) return xerr("a `void` expression cannot be passed as an argument (M.1)");
         tk_type pt = ft.as.func.params[i];
-        if (!tk_type_eq(&a.as.value.type, &pt)) {
+        // The argument must WIDEN into the parameter's type (B.14 case→variant, T→T?) OR be a fitting
+        // literal that adopts it (C6) — same rule as binding/return/assign (single source of truth).
+        if (!tk_widens_into(a.as.value.type, pt, table)) {
             // (C1.8) attach expected (the parameter type) vs actual (the argument's type) so the
             // driver renders "expected <pt>, found <arg>". The C1-POS wrapper adds the position.
             if (!tk_literal_adopts(a.as.value, pt))
                 return xferr(tk_error_types(tk_error_make("argument type mismatch"),
                                             tk_type_render(pt), tk_type_render(a.as.value.type)));
-            a.as.value.type = pt;   // a fitting literal arg adopts the parameter's type (C6)
         }
+        a.as.value.type = pt;   // adopt the parameter type (a fitting literal C6, or a widened case/value)
         args = tk_texpr_list_push(args, a.as.value);
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = *ft.as.func.ret,
@@ -301,6 +320,20 @@ static bool float_fits(double v, tk_prim_kind k) { (void)v; return tk_prim_is_fl
 // i64 — Side D); a non-literal mismatch or out-of-range literal is rejected. NULL = ok.
 // Used by the typed type_binding in typer.c (reuses value_fits).
 const char *annotated_literal_reason(tk_expr value, tk_type ann) {
+    // a NEGATIVE numeric literal `-N` (unary minus over a NUMBER) — adopts a SIGNED int annotation
+    // that N fits, or a float annotation for `-3.14` (parse_lit's `mut d: i128 = -1`).
+    if (value.tag == TK_EXPR_UNARY && value.as.unary.op == TK_TOKEN_MINUS
+        && value.as.unary.operand != NULL && value.as.unary.operand->tag == TK_EXPR_NUMBER) {
+        if (ann.tag != TK_TYPE_PRIM) return "value type does not match annotation";
+        tk_number n = value.as.unary.operand->as.number;
+        if (n.is_float) {
+            if (!tk_prim_is_float(ann.as.prim)) return "a float literal cannot be annotated as an integer type (B.38)";
+            return float_fits(n.fval, ann.as.prim) ? NULL : "float literal out of range for the annotated type (M.1 — fail early)";
+        }
+        if (tk_prim_is_float(ann.as.prim)) return "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)";
+        if (!tk_prim_is_signed(ann.as.prim)) return "a negative literal cannot be annotated as an unsigned type (M.1)";
+        return value_fits(n.value, ann.as.prim) ? NULL : "literal out of range for the annotated type (M.1 — fail early)";
+    }
     if (value.tag != TK_EXPR_NUMBER || ann.tag != TK_TYPE_PRIM) return "value type does not match annotation";
     if (value.as.number.is_float) {   // a float literal (3.14, 1.5e3) — adopts a float annotation only (N2)
         if (!tk_prim_is_float(ann.as.prim)) return "a float literal cannot be annotated as an integer type (B.38)";
@@ -339,16 +372,55 @@ static const char *cast_reason(tk_type from, tk_type to) {
 }
 bool tk_cast_ok(tk_type from, tk_type to) { return cast_reason(from, to) == NULL; }
 
+bool tk_tblock_diverges(const tk_tstatement *stmts, size_t n);   // fwd (defined below; used by the match/if recursion)
+
+// the trailing value-expr of a typed block, or NULL if it does not end in a value expression.
+static const tk_texpr *tblock_trailing(const tk_tstatement *stmts, size_t n) {
+    if (n == 0) return NULL;
+    if (stmts[n - 1].tag != TK_TSTMT_EXPR) return NULL;
+    return &stmts[n - 1].as.expr_stmt.expr;
+}
+
 // C6 (extended) — a fitting numeric LITERAL adopts the destination type at a value position
-// (return value / trailing expr / binding): an int literal → an int prim it fits, OR `byte`
+// (return value / trailing expr / binding / arg): an int literal → an int prim it fits, OR `byte`
 // (byte = u8, B.36); a float literal → a float prim it fits. Reuses cast_kind (byte AS u8) +
 // value_fits / float_fits — the same range rules as a binding annotation or a `… to T` target.
+// RECURSES through `match`/`if`: a compound whose every NON-diverging arm/branch trailing value
+// adopts `to` itself adopts `to` (`fn f() -> u32 { match k { … => 8; … } }` — each arm fits u32).
 bool tk_literal_adopts(tk_texpr e, tk_type to) {
-    if (e.tag != TK_TEXPR_NUMBER) return false;
-    tk_prim_kind k;
-    if (!cast_kind(to, &k)) return false;   // `to` must be numeric (a prim, or byte→u8)
-    if (e.as.number.is_float) return tk_prim_is_float(k) && float_fits(e.as.number.fval, k);
-    return tk_prim_is_int(k) && value_fits(e.as.number.value, k);
+    if (e.tag == TK_TEXPR_NUMBER) {
+        tk_prim_kind k;
+        if (!cast_kind(to, &k)) return false;   // `to` must be numeric (a prim, or byte→u8)
+        if (e.as.number.is_float) return tk_prim_is_float(k) && float_fits(e.as.number.fval, k);
+        return tk_prim_is_int(k) && value_fits(e.as.number.value, k);
+    }
+    if (e.tag == TK_TEXPR_MATCH) {
+        bool any = false;
+        for (size_t i = 0; i < e.as.match_expr.narms; i += 1) {
+            const tk_tarm *arm = &e.as.match_expr.arms[i];
+            if (tk_tblock_diverges(arm->body, arm->nbody)) continue;   // no value
+            const tk_texpr *t = tblock_trailing(arm->body, arm->nbody);
+            if (t == NULL || !tk_literal_adopts(*t, to)) return false;
+            any = true;
+        }
+        return any;   // ≥1 contributing arm, all adopt
+    }
+    if (e.tag == TK_TEXPR_IF) {
+        if (!e.as.if_expr.has_else) return false;
+        bool any = false;
+        if (!tk_tblock_diverges(e.as.if_expr.then_blk, e.as.if_expr.nthen)) {
+            const tk_texpr *t = tblock_trailing(e.as.if_expr.then_blk, e.as.if_expr.nthen);
+            if (t == NULL || !tk_literal_adopts(*t, to)) return false;
+            any = true;
+        }
+        if (!tk_tblock_diverges(e.as.if_expr.else_blk, e.as.if_expr.nelse)) {
+            const tk_texpr *t = tblock_trailing(e.as.if_expr.else_blk, e.as.if_expr.nelse);
+            if (t == NULL || !tk_literal_adopts(*t, to)) return false;
+            any = true;
+        }
+        return any;
+    }
+    return false;
 }
 
 static tk_texpr_result type_cast(tk_cast c, tk_env env, tk_type_table table) {
@@ -552,9 +624,14 @@ static tk_texpr_result type_struct_lit(tk_struct_lit sl, tk_env env, tk_type_tab
                 : (tk_prim_is_int(ft.as.value.as.prim) && value_fits(val.as.number.value, ft.as.value.as.prim));
             if (fits) val.type = ft.as.value;
         }
-        if (!tk_type_eq(&val.type, &ft.as.value)) {
+        // The field value must WIDEN into the field's declared type: exact, a variant CASE into a
+        // variant-typed field (`TExpr.kind = TNumber{…}` where kind: TExprKind), or `T` into a `T?`
+        // field. Same rule as return/arm widening (the single source of truth, resolve.c).
+        if (!tk_widens_into(val.type, ft.as.value, table)) {
             tk_free0(names); tk_free0(vals);
-            return xerr("a struct-literal field value does not match the field's declared type");
+            // (C1.8) expected = the field's declared type, actual = the provided value's type
+            return xferr(tk_error_types(tk_error_make("a struct-literal field value does not match the field's declared type"),
+                                        tk_type_render(ft.as.value), tk_type_render(val.type)));
         }
         names[d] = fname; vals[d] = val;
     }
@@ -722,10 +799,26 @@ tk_type tk_tblock_type(tk_tstatement *stmts, size_t n) {
 // produces no value and may stand in for ANY type at a value position (`x ?? panic(…)`, a
 // return, a binding RHS). Recognized structurally: an unqualified `panic`/`exit` call.
 bool tk_texpr_diverges(const tk_texpr *e) {
-    if (e->tag != TK_TEXPR_CALL) return false;
-    if (e->as.call.callee.len != 1) return false;   // the GLOBAL builtins are unqualified
-    tk_str last = e->as.call.callee.segments[0].name;
-    return seg_lit(last, "panic") || seg_lit(last, "exit");
+    if (e->tag == TK_TEXPR_CALL) {
+        if (e->as.call.callee.len != 1) return false;   // the GLOBAL builtins are unqualified
+        tk_str last = e->as.call.callee.segments[0].name;
+        return seg_lit(last, "panic") || seg_lit(last, "exit");
+    }
+    // A `match` whose EVERY arm diverges (each body returns/panics) yields no value and never falls
+    // through — so a function ending in it satisfies any declared return type (`eval_field_access`'s
+    // match-of-all-returns). Likewise an `if`/`else` where both branches diverge.
+    if (e->tag == TK_TEXPR_MATCH) {
+        if (e->as.match_expr.narms == 0) return false;
+        for (size_t i = 0; i < e->as.match_expr.narms; i += 1)
+            if (!tk_tblock_diverges(e->as.match_expr.arms[i].body, e->as.match_expr.arms[i].nbody)) return false;
+        return true;
+    }
+    if (e->tag == TK_TEXPR_IF) {
+        if (!e->as.if_expr.has_else) return false;
+        return tk_tblock_diverges(e->as.if_expr.then_blk, e->as.if_expr.nthen)
+            && tk_tblock_diverges(e->as.if_expr.else_blk, e->as.if_expr.nelse);
+    }
+    return false;
 }
 
 // ---- does a typed block DIVERGE (exit via return/break/continue on every path)? ----
@@ -771,7 +864,9 @@ static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table) {
     tk_typed_block_result eb = tk_type_block(f.else_blk, f.nelse, env, table); if (!eb.ok) return xferr(eb.as.error);
     tk_type tt = tk_tblock_type(tb.as.value.stmts, tb.as.value.n);
     tk_type et = tk_tblock_type(eb.as.value.stmts, eb.as.value.n);
-    if (!tk_type_eq(&tt, &et)) return xerr("the `if` branches have different types");
+    tk_type joined;
+    if (!tk_type_join(tt, et, table, &joined)) return xerr("the `if` branches have different types");   // widen (a case joins into its variant)
+    tt = joined;
     return xok((tk_texpr){ .tag = TK_TEXPR_IF, .type = tt, .as.if_expr = {
         box(c.as.value), tb.as.value.stmts, tb.as.value.n, true, eb.as.value.stmts, eb.as.value.n } });
 }
@@ -813,7 +908,7 @@ static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table tab
         if (tk_tblock_diverges(ai.as.value.body, ai.as.value.nbody)) continue;   // skip: no value
         tk_type t = tk_tblock_type(ai.as.value.body, ai.as.value.nbody);
         if (!have_type) { first = t; have_type = true; }
-        else if (!tk_type_eq(&t, &first)) return xerr("the `match` arms have different types");
+        else if (!tk_type_join(first, t, table, &first)) return xerr("the `match` arms have different types");   // widen (a case joins into its variant)
     }
     if (!tk_exhaustive(m.arms, m.narms, s.as.value.type, table)) return xerr("non-exhaustive `match` (cover all cases or add `_`)");
     tk_type result = have_type ? first : tk_void_t();   // all arms diverge → void

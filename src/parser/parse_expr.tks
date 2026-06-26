@@ -77,7 +77,7 @@ fn piece_escape(raw: str, i: u64, bytes: []byte) -> EscPiece | error {
         b'0'  => 0x00
         _     => return error { message = "unknown escape in interpolated string" }
     }
-    EscPiece { bytes = teko::list::push(bytes, v), next = i + 2 }
+    EscPiece { bytes = teko::list::push(bytes, v to byte), next = i + 2 }   // the decoded escape value is a byte (all fit u8)
 }
 
 // Parse a `$"…"` Interp token's RAW inner text into the Interp node: literal pieces (escapes
@@ -134,7 +134,11 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed | 
     if !has_token(tokens, pos) { return err_at(tokens, pos, "expected an expression") }
     let k = kind_at(tokens, pos)
     if k == lexer::TokenKind::Number {
-        return Parsed { node = Expr { kind = Number { value = lit_int(tokens[pos].text) }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        let txt = tokens[pos].text
+        // a FLOAT token carries fval (via lit_float); an INT token carries value (via lit_int) — mirror parse_expr.c.
+        let num = if lit_is_float(txt) { Number { is_float = true, value = 0, fval = lit_float(txt) } }
+                  else { Number { is_float = false, value = lit_int(txt), fval = 0.0 } }
+        return Parsed { node = Expr { kind = num, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
     }
     if k == lexer::TokenKind::Str {
         return Parsed { node = Expr { kind = StrLit { text = tokens[pos].text }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }

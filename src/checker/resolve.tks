@@ -66,6 +66,103 @@ fn expand_variant(t: Type, table: TypeTable) -> Type {
     }
 }
 
+// (#41-followon) Does a value of `from` WIDEN into `to`? The single source of truth for value-
+// position widening, shared by the return/trailing-value/assign/binding check (assignable_to
+// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14 + present-wrap §202):
+//   • type equality,
+//   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
+//   • `T` into `T?` (and `U?`/sentinel into `T?`),
+//   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
+// Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
+fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
+    if type_eq(from, to) { return true }
+    if depth <= 0 { return false }
+    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
+    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
+    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
+    match to {
+        Optional as opt => {
+            if widens_into_at(from, opt.inner, table, depth - 1) { return true }   // T (or a case of T) → T?
+            match from { Optional => return true; _ => {} }                        // U? / sentinel → T?
+        }
+        _ => {}
+    }
+    match expand_variant(from, table) {        // a VARIANT source decomposes into its members
+        Variant as fv => {
+            mut i = 0
+            loop {
+                if i >= fv.members.len { break }
+                if !widens_into_at(fv.members[i], to, table, depth - 1) { return false }
+                i++
+            }
+            return true
+        }
+        _ => {}
+    }
+    // COVARIANT value slices: `[]A` widens into `[]B` iff A widens into B (value/copy semantics —
+    // sound; a sentinel `Void` element is already accepted by type_eq above). `[]Str` fits `[]Type`.
+    match from {
+        Slice as fs => match to {
+            Slice as ts => return widens_into_at(fs.element, ts.element, table, depth - 1)
+            _           => {}
+        }
+        _ => {}
+    }
+    match expand_variant(to, table) {        // a NAMED variant → its Variant (so cases widen in)
+        Variant as tv => {
+            mut j = 0
+            loop {
+                if j >= tv.members.len { break }
+                if widens_into_at(from, tv.members[j], table, depth - 1) { return true }
+                j++
+            }
+            false
+        }
+        _ => false
+    }
+}
+fn widens_into(from: Type, to: Type, table: TypeTable) -> bool { widens_into_at(from, to, table, 16) }
+
+// (#41-followon) Collect `t`'s members into `acc` for a union JOIN: an INLINE variant contributes
+// its members (flattened); anything else contributes itself. Deduped by type_eq. Named variants
+// stay NOMINAL (consistent with how `Type | error` keeps `Type` named). (Mirror of resolve.c.)
+fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
+    match t {
+        Variant as v => {
+            mut out = acc
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                out = union_collect(out, v.members[i], table)
+                i++
+            }
+            out
+        }
+        _ => {
+            mut i = 0
+            loop {
+                if i >= acc.len { break }
+                if type_eq(acc[i], t) { return acc }   // dedup
+                i++
+            }
+            teko::list::push(acc, t)
+        }
+    }
+}
+
+// (#41-followon) The JOIN (least-upper-bound) of two arm/branch types for match/`if` value
+// unification (B.20). If either widens into the other, the WIDER one; otherwise the UNION variant
+// `a | b` (members flattened + deduped) — the branch values are bare cases that each widen into
+// this union, which in turn widens into any wider declared return variant. (Mirror of resolve.c.)
+fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
+    if type_eq(a, b) { return a }
+    if widens_into(a, b, table) { return b }
+    if widens_into(b, a, table) { return a }
+    let m1 = union_collect(teko::list::empty(), a, table)
+    let m2 = union_collect(m1, b, table)
+    Variant { members = m2 }
+}
+
 // resolve a syntactic TypeExpr to a pure semantic Type (recursive — B.8).
 pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
     match te {

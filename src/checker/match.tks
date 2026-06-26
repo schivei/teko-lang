@@ -2,6 +2,48 @@
 
 use teko::parser
 
+// (C7b) is `name` a member of the enum body?
+fn enum_has_member(eb: parser::EnumBody, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= eb.members.len { break }
+        if eb.members[i] == name { return true }
+        i++
+    }
+    false
+}
+
+// (C7b) ENUM-subject pattern check: a bare/qualified path pattern names a MEMBER (enum members
+// carry NO data). `U8` and `PrimKind::U8` both name member "U8" (by the LAST path segment, like the
+// `Type::Member` enum-value form). `_` matches anything; an Alt checks each option; `as x` binds the
+// whole enum value. (Mirror of match.c check_enum_pattern.)
+fn check_enum_pattern(p: parser::Pattern, subject: Type, eb: parser::EnumBody, env: Env, table: TypeTable) -> Env | error {
+    match p {
+        parser::WildcardPattern   => env
+        parser::BindPattern as bp => {
+            if bp.is_slice { return error { message = "a slice pattern cannot match an enum value" } }
+            let name = bp.type_name.segments[bp.type_name.segments.len - 1].name
+            if !enum_has_member(eb, name) { return error { message = $"not a member of the enum: {name}" } }
+            if bp.has_binding { define(env, bp.binding, subject, false) }   // `as x` — the enum value
+            else { env }                                                    // bare member — binds nothing
+        }
+        parser::AltPattern as ap  => {
+            mut i = 0
+            loop {
+                if i >= ap.options.len { break }
+                match ap.options[i] {
+                    parser::BindPattern as bp => { if bp.has_binding { return error { message = "an alternative (`|`) cannot bind; use a separate arm" } } }
+                    _                 => {}
+                }
+                match check_enum_pattern(ap.options[i], subject, eb, env, table) { Env => {}; error as e => return e }
+                i++
+            }
+            env
+        }
+        _ => error { message = "an enum subject needs member patterns (`U8`) or `_`" }
+    }
+}
+
 // validate a pattern against the subject; return the env extended with bindings.
 fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) -> Env | error {
     // OPTIONAL subject `T?` (REBOOT_PLAN §202): `null` matches the NONE case (binds nothing);
@@ -11,6 +53,22 @@ fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) 
             match p {
                 parser::NullPattern => return env                        // NONE — binds nothing
                 _                   => return check_pattern(p, opt.inner, env, table)   // PRESENT — check vs inner
+            }
+        }
+        _ => {}
+    }
+    // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
+    // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
+    match subject {
+        Named as n => {
+            match type_table_find(table, n.name) {
+                parser::TypeDecl as td => {
+                    match td.body {
+                        parser::EnumBody as eb => return check_enum_pattern(p, subject, eb, env, table)
+                        _                      => {}
+                    }
+                }
+                error => {}
             }
         }
         _ => {}
@@ -203,6 +261,17 @@ fn variant_covered(arms: []parser::Arm, members: []Type, table: TypeTable) -> bo
     true
 }
 
+// (C7b) every member of the enum must be covered by some unguarded arm (by name).
+fn enum_covered(arms: []parser::Arm, eb: parser::EnumBody) -> bool {
+    mut i = 0
+    loop {
+        if i >= eb.members.len { break }
+        if !some_arm_names(arms, eb.members[i]) { return false }
+        i++
+    }
+    true
+}
+
 // is the NONE case (a `null` pattern) covered by some UNGUARDED arm?
 fn some_arm_is_null(arms: []parser::Arm) -> bool {
     mut i = 0
@@ -241,6 +310,20 @@ fn present_case_covered(arms: []parser::Arm, inner: Type, table: TypeTable) -> b
 // `Shape = Circle | …` covers exhaustively.
 fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable) -> bool {
     if has_wildcard(arms) { return true }
+    match subject {       // an ENUM subject — exhaustive iff EVERY member is named (C7b)
+        Named as n => {
+            match type_table_find(table, n.name) {
+                parser::TypeDecl as td => {
+                    match td.body {
+                        parser::EnumBody as eb => return enum_covered(arms, eb)
+                        _                      => {}
+                    }
+                }
+                error => {}
+            }
+        }
+        _ => {}
+    }
     match subject {       // an optional `T?` — `null` + present coverage (REBOOT §202)
         Optional as opt => return some_arm_is_null(arms) && present_case_covered(arms, opt.inner, table)
         _ => {}

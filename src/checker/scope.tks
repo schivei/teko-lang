@@ -112,11 +112,25 @@ fn builtin_fn(name: str) -> Type | error {
     let str_t = Str { }
     let void_t = Void { }
     let bytes_t = Slice { element = Byte { } }
-    if name == "print" || name == "println" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = void_t } }
+    if name == "print" || name == "println" || name == "write" || name == "ewrite" || name == "eprint" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = void_t } }   // write/ewrite/eprint: the host output FFI bottom (e* = stderr)
+    if name == "abort" { return Func { params = teko::list::empty(); ret = void_t } }   // teko::abort — host abort FFI bottom (() -> void)
+    // VM-internal arithmetic FFI (sign-aware over the i128 carrier) + F3 panic helpers (reserved teko:: root).
+    if name == "div" || name == "rem" {
+        mut dp: []Type = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I128 }), Prim { kind = PrimKind::I128 })
+        dp = teko::list::push(dp, Prim { kind = PrimKind::Bool })
+        return Func { params = dp; ret = Prim { kind = PrimKind::I128 } }
+    }
+    if name == "fdiv" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 } } }
+    if name == "panic_div0" || name == "panic_oob" || name == "panic_cast" || name == "panic_overflow" { return Func { params = teko::list::empty(); ret = void_t } }
+    // math / bit-pattern FFI: floor(f64)->f64 ; int_to_float(i128,bool)->f64 ; f64<->bits.
+    if name == "floor" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 } } }
+    if name == "int_to_float" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I128 }), Prim { kind = PrimKind::Bool }); ret = Prim { kind = PrimKind::F64 } } }
+    if name == "f64_from_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::F64 } } }
+    if name == "f64_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::U64 } } }
     if name == "is_true" || name == "is_false" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::Bool }); ret = void_t } }
     if name == "str_contains" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = void_t } }
     if name == "slice" {
-        mut p = teko::list::push(teko::list::empty(), str_t)
+        mut p: []Type = teko::list::push(teko::list::empty(), str_t)   // []Type: a heterogeneous param list (str, u64, u64)
         p = teko::list::push(p, Prim { kind = PrimKind::U64 })
         p = teko::list::push(p, Prim { kind = PrimKind::U64 })
         return Func { params = p; ret = str_t }
@@ -132,15 +146,48 @@ fn builtin_fn(name: str) -> Type | error {
     if name == "i64_to_str" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I64 }); ret = str_t } }
     if name == "u64_to_str" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 }); ret = str_t } }
     if name == "ftoa" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = str_t } }
+    if name == "f64_g17" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = str_t } }   // host float renderer FFI bottom
+    // host FFI bottoms: teko::float::parse(str)->f64 ; teko::io::read_file(str)->str|error ; write_file(str,str)->error?
+    if name == "parse" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Prim { kind = PrimKind::F64 } } }
+    if name == "read_file" {
+        mut sm: []Type = teko::list::push(teko::list::empty(), str_t)
+        sm = teko::list::push(sm, Error { })
+        return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Variant { members = sm } }
+    }
+    if name == "write_file" {
+        return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = Optional { inner = Error { } } }
+    }
+    // teko::str::* — the self-host string stdlib the corpus calls namespaced (resolved by last
+    // segment, like the underscored twins; the C runtime twins are tk_str_concat/slice/…).
+    if name == "concat" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = str_t } }
+    if name == "concat3" {
+        mut p3: []Type = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t)
+        p3 = teko::list::push(p3, str_t)
+        return Func { params = p3; ret = str_t }
+    }
+    if name == "slice_to" || name == "slice_from" {
+        mut p: []Type = teko::list::push(teko::list::empty(), str_t)   // []Type: (str, u64)
+        p = teko::list::push(p, Prim { kind = PrimKind::U64 })
+        return Func { params = p; ret = str_t }
+    }
+    if name == "len" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Prim { kind = PrimKind::U64 } } }
+    if name == "ends_with" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = Prim { kind = PrimKind::Bool } } }
+    if name == "contains" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = Prim { kind = PrimKind::Bool } } }
+    if name == "last_index_of" {
+        mut m: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })   // []Type: (u64 | error)
+        m = teko::list::push(m, Error { })
+        let u64_or_err = Variant { members = m }
+        return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = u64_or_err }
+    }
     // error diagnostic adornment builtins (E2): err_loc(error,u32,u32)->error ; err_typed(error,str,str)->error.
     if name == "err_loc" {
-        mut p = teko::list::push(teko::list::empty(), Error { })
+        mut p: []Type = teko::list::push(teko::list::empty(), Error { })   // []Type: (error, u32, u32)
         p = teko::list::push(p, Prim { kind = PrimKind::U32 })
         p = teko::list::push(p, Prim { kind = PrimKind::U32 })
         return Func { params = p; ret = Error { } }
     }
     if name == "err_typed" {
-        mut p = teko::list::push(teko::list::empty(), Error { })
+        mut p: []Type = teko::list::push(teko::list::empty(), Error { })   // []Type: (error, str, str)
         p = teko::list::push(p, str_t)
         p = teko::list::push(p, str_t)
         return Func { params = p; ret = Error { } }

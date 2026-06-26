@@ -113,12 +113,15 @@ static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table t
     tk_binding_result tb = tk_env_lookup_binding(env, a.name); if (!tb.ok) return sfail(tb.as.error);
     if (!tb.as.value.is_mut) return smsg("cannot assign to immutable binding — declare it `mut` (B.21)");
     tk_texpr_result v = tk_typer_expr(a.value, env, table); if (!v.ok) return sfail(v.as.error);
-    if (!tk_type_eq(&tb.as.value.type, &v.as.value.type)) {
+    // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
+    // that adopts it (C6) — same rule as an annotated binding. On success the value adopts the target
+    // type so a downstream pass (and codegen's wrap) sees the slot type, not the bare case.
+    if (!assignable_to(v.as.value.type, tb.as.value.type, table)) {
         if (!tk_literal_adopts(v.as.value, tb.as.value.type))   // (C1.8) expected = target, actual = value
             return sfail(tk_error_types(tk_error_make("assigned value does not match the target type"),
                                         tk_type_render(tb.as.value.type), tk_type_render(v.as.value.type)));
-        v.as.value.type = tb.as.value.type;   // a fitting literal adopts the target's type (C6)
     }
+    v.as.value.type = tb.as.value.type;   // adopt the target type (a fitting literal C6, or a widened case/value)
     tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, v.as.value } };
     return sok(node, env);   // mut rule enforced (B.21)
 }
@@ -166,22 +169,11 @@ static tk_type function_return(tk_function f, tk_type_table table) {
 }
 
 // ---- C5: return / final-expr vs the declared return type (see the Teko twin; NULL = ok) ----
-static bool assignable_to(tk_type from, tk_type to, tk_type_table table) {   // B.14 — variant member inclusion
-    if (tk_type_eq(&from, &to)) return true;
-    // PRESENT-WRAP (REBOOT_PLAN §202): a `T` widens to `T?` (and to `T??`-collapsed `T?`).
-    // The destination is `T?`; the source is a plain `T` (or itself a `T?` whose inner is T,
-    // already covered by tk_type_eq). Mirrors the variant case→variant widening below; codegen
-    // performs the PRESENT wrap via emit_as. A bare null (sentinel optional) is handled by
-    // tk_type_eq (it unifies with any optional).
-    if (to.tag == TK_TYPE_OPTIONAL && to.as.optional.inner != NULL) {
-        if (tk_type_eq(&from, to.as.optional.inner)) return true;        // T → T?
-        if (from.tag == TK_TYPE_OPTIONAL) return true;                   // U? / sentinel → T? (eq/sentinel)
-    }
-    tk_type tv = tk_expand_variant(to, table);   // a NAMED variant → its TK_TYPE_VARIANT (so cases widen in)
-    if (tv.tag == TK_TYPE_VARIANT)
-        for (size_t i = 0; i < tv.as.variant.len; i += 1)
-            if (tk_type_eq(&from, &tv.as.variant.members[i])) return true;
-    return false;
+// B.14 — variant member inclusion + present-wrap. The widening rule is now the single source of
+// truth in resolve.c (tk_widens_into), shared with the match/`if` arm JOIN (tk_type_join) so the
+// return check and arm unification can never drift apart.
+static bool assignable_to(tk_type from, tk_type to, tk_type_table table) {
+    return tk_widens_into(from, to, table);
 }
 // (C1.8) the return-/trailing-value checks return a tk_error rather than a bare const char*, so a
 // type mismatch can carry expected (the declared return type) vs actual (the produced value's type).

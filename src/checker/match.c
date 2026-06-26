@@ -10,6 +10,40 @@ tk_type_result  field_type(tk_struct_body sb, tk_str field, tk_type_table table)
 static tk_env_result eok(tk_env e)     { return (tk_env_result){ .ok = true,  .as.value = e }; }
 static tk_env_result efail(tk_error e) { return (tk_env_result){ .ok = false, .as.error = e }; }
 
+static bool name_eq(tk_str a, tk_str b);   // fwd (defined with the exhaustiveness helpers below)
+
+// ENUM-subject pattern check (C7b): a bare/qualified path pattern names a MEMBER of the enum —
+// enum members carry NO data, so they bind nothing. `U8` and `PrimKind::U8` both name member "U8"
+// (resolved by the LAST path segment, like the `Type::Member` enum-value form in expr.c). `_`
+// matches anything; an Alt (`U8 | U16`) checks each option; `as x` binds the whole enum value.
+static bool enum_has_member(tk_enum_body eb, tk_str name) {
+    for (size_t i = 0; i < eb.n_members; i += 1) if (name_eq(eb.members[i], name)) return true;
+    return false;
+}
+static tk_env_result check_enum_pattern(tk_pattern p, tk_type subject, tk_enum_body eb, tk_env env, tk_type_table table) {
+    switch (p.tag) {
+        case TK_PAT_WILDCARD: return eok(env);
+        case TK_PAT_BIND: {
+            if (p.as.bind.is_slice) return efail(tk_error_make("a slice pattern cannot match an enum value"));
+            tk_str name = p.as.bind.type_name.segments[p.as.bind.type_name.len - 1].name;
+            if (!enum_has_member(eb, name)) return efail(tk_error_named("not a member of the enum", name));
+            if (p.as.bind.has_binding) return eok(tk_env_define(env, p.as.bind.binding, subject, false));   // `as x` — the enum value
+            return eok(env);   // bare member — binds nothing
+        }
+        case TK_PAT_ALT: {
+            for (size_t i = 0; i < p.as.alt.n_options; i += 1) {
+                tk_pattern opt = p.as.alt.options[i];
+                if (opt.tag == TK_PAT_BIND && opt.as.bind.has_binding)
+                    return efail(tk_error_make("an alternative (`|`) cannot bind; use a separate arm"));
+                tk_env_result r = check_enum_pattern(opt, subject, eb, env, table);
+                if (!r.ok) return efail(r.as.error);
+            }
+            return eok(env);   // binds nothing
+        }
+        default: return efail(tk_error_make("an enum subject needs member patterns (`U8`) or `_`"));
+    }
+}
+
 // env | error: validate a pattern, extend the env.
 tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_type_table table) {
     // OPTIONAL subject `T?` (REBOOT_PLAN §202): `null` matches the NONE case (binds nothing);
@@ -17,6 +51,13 @@ tk_env_result tk_check_pattern(tk_pattern p, tk_type subject, tk_env env, tk_typ
     if (subject.tag == TK_TYPE_OPTIONAL) {
         if (p.tag == TK_PAT_NULL) return eok(env);   // NONE — binds nothing
         return tk_check_pattern(p, *subject.as.optional.inner, env, table);   // PRESENT — check vs inner
+    }
+    // ENUM subject (C7b): member patterns, not type binds. Detected before the generic switch so a
+    // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
+    if (subject.tag == TK_TYPE_NAMED) {
+        tk_decl_result d = tk_type_table_find(table, subject.as.named.name);
+        if (d.ok && d.as.value.body.tag == TK_BODY_ENUM)
+            return check_enum_pattern(p, subject, d.as.value.body.as.enum_body, env, table);
     }
     switch (p.tag) {
         case TK_PAT_NULL:
@@ -166,6 +207,15 @@ static bool present_case_covered(tk_arm *arms, size_t n, tk_type inner, tk_type_
 }
 bool tk_exhaustive(tk_arm *arms, size_t n, tk_type subject, tk_type_table table) {
     if (has_wildcard(arms, n)) return true;
+    if (subject.tag == TK_TYPE_NAMED) {   // an ENUM subject is exhaustive iff EVERY member is named (C7b)
+        tk_decl_result d = tk_type_table_find(table, subject.as.named.name);
+        if (d.ok && d.as.value.body.tag == TK_BODY_ENUM) {
+            tk_enum_body eb = d.as.value.body.as.enum_body;
+            for (size_t i = 0; i < eb.n_members; i += 1)
+                if (!some_arm_names(arms, n, eb.members[i])) return false;
+            return true;
+        }
+    }
     if (subject.tag == TK_TYPE_OPTIONAL) {   // `T?` — exhaustive iff `null` AND the present case are covered (REBOOT §202)
         return some_arm_is_null(arms, n) && present_case_covered(arms, n, *subject.as.optional.inner, table);
     }

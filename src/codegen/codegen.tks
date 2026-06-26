@@ -75,7 +75,7 @@ fn cb_i64(buf: []byte, v: i64) -> []byte {
     mut n = v
     if n < 0 { b = cb_byte(b, b'-'); n = -n }   // -n is safe for the M0 magnitudes codegen emits
     // collect digits low-to-high into a scratch list, then emit reversed.
-    mut digits = teko::list::empty()
+    mut digits: []byte = teko::list::empty()   // byte builder (indexed below — needs a concrete element)
     loop {
         if n == 0 { break }
         let d = (n % 10) to byte                 // 0..9
@@ -98,7 +98,7 @@ fn cb_u128_digits(buf: []byte, v: u128) -> []byte {
     if v == 0 { return cb_byte(buf, b'0') }
     mut b = buf
     mut n = v
-    mut digits = teko::list::empty()
+    mut digits: []byte = teko::list::empty()   // byte builder (indexed below — needs a concrete element)
     loop {
         if n == 0 { break }
         let d = (n % 10) to byte                 // 0..9
@@ -1281,7 +1281,7 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
                         _ => { }
                     }
                     match value.type {
-                        checker::Optional => return emit_expr(buf, value)   // already optional → pass through
+                        checker::Optional => return emit_expr(buf, prog, value)   // already optional → pass through
                         _ => {
                             mut o1 = cb(buf, "(")
                             o1 = match cg_opt_typename(o1, opt.inner) { []byte as o => o; error as err => return err }
@@ -1311,7 +1311,7 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
                         so = match cg_slice_typename(so, sexp.element) { []byte as o => o; error as err => return err }
                         return cb(so, "){ .ptr = 0, .len = 0 }")
                     }
-                    return emit_expr(buf, value)
+                    return emit_expr(buf, prog, value)
                 }
             }
         }
@@ -1320,10 +1320,10 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
     // Wrap only when expected is a NAMED variant, value's type is a NAMED case, and that
     // case is one of the variant's members. (If value's type IS the variant already — a var
     // of the variant type — it is not a bare member, so no wrap.)
-    let exp_name = match expected { checker::Named as nm => nm.name; _ => return emit_expr(buf, value) }
-    let val_name = match value.type { checker::Named as nm => nm.name; _ => return emit_expr(buf, value) }
-    let vd = match cg_find_variant_decl(prog, exp_name) { parser::TypeDecl as d => d; error => return emit_expr(buf, value) }
-    if !cg_variant_has_member(vd, val_name) { return emit_expr(buf, value) }
+    let exp_name = match expected { checker::Named as nm => nm.name; _ => return emit_expr(buf, prog, value) }
+    let val_name = match value.type { checker::Named as nm => nm.name; _ => return emit_expr(buf, prog, value) }
+    let vd = match cg_find_variant_decl(prog, exp_name) { parser::TypeDecl as d => d; error => return emit_expr(buf, prog, value) }
+    if !cg_variant_has_member(vd, val_name) { return emit_expr(buf, prog, value) }
     mut out = cb(buf, "(")
     out = mangle_type_name(out, "", exp_name)
     out = cb(out, "){ .tag = TK_TAG_")
@@ -1333,7 +1333,7 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
     out = cb(out, ", .as.")
     out = cb_str(out, val_name)            // union field == the member's bare name
     out = cb(out, " = ")
-    out = match emit_expr(out, value) { []byte as o => o; error as err => return err }
+    out = match emit_expr(out, prog, value) { []byte as o => o; error as err => return err }
     cb(out, " }")
 }
 
@@ -1761,7 +1761,7 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
 // (mirrors the VM propagating the arm's flow). (C: `emit_match_stmt`.)
 fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr, indent: str) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
-    let done = fresh_named("tk_m", buf.len to i64 + 1) + "_done"   // unique commit label
+    let done = teko::str::concat(fresh_named("tk_m", buf.len to i64 + 1), "_done")   // unique commit label (str concat — no `+` on str)
     let subjT = m.subject.type   // for optional / variant pattern lowering
     let inner = cb_indent_deeper(indent)
     let inner2 = cb_indent_deeper(inner)
@@ -2536,7 +2536,7 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     // branch returns to `return (int)(…)`.
     // Find the LAST loose statement's index (the tail); prog.items.len means "no loose stmt".
     mut last_stmt = prog.items.len
-    mut li = 0
+    mut li: u64 = 0                    // u64 index (so `last_stmt = li` matches last_stmt's u64 type)
     loop {
         if li >= prog.items.len { break }
         match prog.items[li] {

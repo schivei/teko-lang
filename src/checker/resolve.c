@@ -183,6 +183,85 @@ tk_type tk_expand_variant(tk_type t, tk_type_table table) {
     return ex.ok ? ex.as.value : t;
 }
 
+// (#41-followon) Does `from` WIDEN into `to`? The single source of truth for value-position
+// widening, shared by: the return/trailing-value check (assignable_to delegates here) AND the
+// match/`if` arm JOIN (via tk_type_join). The rules (B.14 + present-wrap, REBOOT_PLAN §202):
+//   • exact type equality,
+//   • a `T` into a `T?` (and a `U?`/sentinel into a `T?`),
+//   • a variant MEMBER into the (named-expanded) variant — TRANSITIVELY: a member that is itself
+//     a variant is expanded too, so a case of a NESTED variant widens in (`Named` → `Type` →
+//     `Type | error`). Depth-bounded so a pathological self-referential variant cannot loop.
+static bool widens_into_at(tk_type from, tk_type to, tk_type_table table, int depth) {
+    if (tk_type_eq(&from, &to)) return true;
+    if (depth <= 0) return false;
+    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
+    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
+    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
+    if (to.tag == TK_TYPE_OPTIONAL && to.as.optional.inner != NULL) {
+        if (widens_into_at(from, *to.as.optional.inner, table, depth - 1)) return true;   // T (or a case of T) → T?
+        if (from.tag == TK_TYPE_OPTIONAL) return true;              // U?/sentinel → T?
+    }
+    // A VARIANT `from` widens into `to` iff EVERY member widens in — a sub-variant into a wider
+    // variant (`TExpr | NotListBuiltin` → `TExpr | NotListBuiltin | error`). Checked before the
+    // member-of-`to` scan so a variant source is decomposed, not matched whole.
+    tk_type fv = tk_expand_variant(from, table);
+    if (fv.tag == TK_TYPE_VARIANT) {
+        for (size_t i = 0; i < fv.as.variant.len; i += 1)
+            if (!widens_into_at(fv.as.variant.members[i], to, table, depth - 1)) return false;
+        return true;
+    }
+    // COVARIANT value slices: `[]A` widens into `[]B` iff A widens into B (value/copy semantics —
+    // sound; the sentinel/NULL element is already accepted by tk_type_eq above). So `[]Str`
+    // (push(empty(), str_t)) fits a `[]Type` field — the element is a case of the variant.
+    if (from.tag == TK_TYPE_SLICE && to.tag == TK_TYPE_SLICE
+        && from.as.slice.element != NULL && to.as.slice.element != NULL)
+        return widens_into_at(*from.as.slice.element, *to.as.slice.element, table, depth - 1);
+    tk_type tv = tk_expand_variant(to, table);   // a NAMED variant → its members (so cases widen in)
+    if (tv.tag == TK_TYPE_VARIANT)
+        for (size_t i = 0; i < tv.as.variant.len; i += 1)
+            if (widens_into_at(from, tv.as.variant.members[i], table, depth - 1)) return true;
+    return false;
+}
+bool tk_widens_into(tk_type from, tk_type to, tk_type_table table) {
+    return widens_into_at(from, to, table, 16);   // variant nesting is shallow; 16 is a safe backstop
+}
+
+// (#41-followon) Collect `t`'s members into out[] for a union JOIN: an INLINE variant contributes
+// its members (flattened); anything else (a named type/case, prim, …) contributes itself. Deduped
+// by type_eq. Named variants stay NOMINAL (consistent with how `Type | error` keeps `Type` named).
+#define TK_JOIN_MAX 64
+static size_t union_collect(tk_type *out, size_t n, tk_type t, tk_type_table table) {
+    if (t.tag == TK_TYPE_VARIANT) {
+        for (size_t i = 0; i < t.as.variant.len; i += 1)
+            n = union_collect(out, n, t.as.variant.members[i], table);
+        return n;
+    }
+    for (size_t i = 0; i < n; i += 1) if (tk_type_eq(&out[i], &t)) return n;   // dedup
+    if (n < TK_JOIN_MAX) out[n++] = t;
+    return n;
+}
+
+// (#41-followon) The JOIN (least-upper-bound) of two arm/branch types, for match/`if` value
+// unification (B.20). Symmetric widening: if either side widens into the other, the WIDER one is
+// the result (`error` and `Type | error` join to `Type | error`). Equal types join to themselves.
+// Returns false when neither widens into the other ("the arms have different types"). The result
+// is written to *out only on success.
+bool tk_type_join(tk_type a, tk_type b, tk_type_table table, tk_type *out) {
+    if (tk_type_eq(&a, &b))            { *out = a; return true; }
+    if (tk_widens_into(a, b, table))   { *out = b; return true; }   // a is a case of b → b
+    if (tk_widens_into(b, a, table))   { *out = a; return true; }   // b is a case of a → a
+    // SIBLINGS (neither a case of the other): the join is the UNION variant `a | b` — the branch
+    // values are bare cases that each widen into this union, which in turn widens into any wider
+    // declared return variant. (Anonymous; native codegen lowers it via inline-union support.)
+    tk_type tmp[TK_JOIN_MAX]; size_t n = 0;
+    n = union_collect(tmp, n, a, table);
+    n = union_collect(tmp, n, b, table);
+    tk_type *m = tk_alloc(n * sizeof *m); if (!m) abort();
+    for (size_t i = 0; i < n; i += 1) m[i] = tmp[i];
+    *out = (tk_type){ .tag = TK_TYPE_VARIANT, .as.variant = { m, n } };
+    return true;   // always joinable now (worst case: an explicit union)
+}
+
 tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
     switch (te.tag) {
         case TK_TEXPR_NAMED:
