@@ -1723,42 +1723,43 @@ fn fresh_tmp_name(buf_len: i64) -> str {
 // matching the VM (eval_expr's TIfExpr stops on a divergent branch). A value-carrying expr
 // statement -> `<sink> = <expr>;`. Anything else (void expr-stmt, loop, binding, assign) ->
 // emitted normally (no value). (C: `emit_stmt_value`.)
-fn emit_stmt_value(buf: []byte, prog: checker::TProgram, s: checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
+fn emit_stmt_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, s: checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
     match s {
         checker::TReturn       => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TBreakStmt    => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TContinueStmt => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TExprStmt as es => {
             if is_void_type(es.expr.type) {
-                // A non-value statement in an if-value branch has no variant return slot:
-                // pass void ret_type (emit_as never wraps for void).
-                return emit_stmt(buf, s, false, prog, checker::Void { }, indent)
+                // A non-value statement in an if-value branch: thread ret_type so an embedded return wraps.
+                return emit_stmt(buf, s, false, prog, ret_type, indent)
             }
             mut out = cb(buf, indent)
             out = cb(out, sink)
             out = cb(out, " = ")
             // wrap the branch value into the if's RESULT type (`slot`) — a bare case / `[]case` / null
-            // lands in the variant/optional/slice result, exactly like a match arm's sink (emit_as).
-            out = match emit_as(out, prog, slot, es.expr) { []byte as o => o; error as err => return err }
+            // lands in the variant/optional/slice result; emit_as_r threads ret_type so a diverging
+            // value-form-match arm inside the branch (`… => return e`) wraps into the FUNCTION's slot.
+            out = match emit_as_r(out, prog, ret_type, slot, es.expr) { []byte as o => o; error as err => return err }
             cb(out, ";\n")
         }
-        _ => emit_stmt(buf, s, false, prog, checker::Void { }, indent)
+        _ => emit_stmt(buf, s, false, prog, ret_type, indent)
     }
 }
 
 // emit_branch_value — emit a BRANCH block (the `if`-value then/else): all but the last
 // statement normally, the LAST via emit_stmt_value (its trailing value -> `sink`). An empty
 // branch yields nothing (the checker forbids a value-typed empty branch). (C: `emit_branch_value`.)
-fn emit_branch_value(buf: []byte, prog: checker::TProgram, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
+fn emit_branch_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
     mut out = buf
     mut i = 0
     loop {
         if i + 1 >= body.len { break }
-        out = match emit_stmt(out, body[i], false, prog, checker::Void { }, indent) { []byte as o => o; error as err => return err }
+        // ret_type (not Void) so a non-last `return e` in the branch wraps into the function's slot.
+        out = match emit_stmt(out, body[i], false, prog, ret_type, indent) { []byte as o => o; error as err => return err }
         i++
     }
     if body.len > 0 {
-        out = match emit_stmt_value(out, prog, body[body.len - 1], slot, sink, indent) { []byte as o => o; error as err => return err }
+        out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent) { []byte as o => o; error as err => return err }
     }
     out
 }
@@ -1770,7 +1771,7 @@ fn emit_branch_value(buf: []byte, prog: checker::TProgram, body: []checker::TSta
 // cc -std=c23). (VM parity: eval_expr's TIfExpr runs exec_if and yields the taken branch's
 // trailing NORMAL value; a divergent branch is an honest stop — see emit_stmt_value.)
 // (C: `emit_if_value`.)
-fn emit_if_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, f: checker::TIfExpr) -> []byte | error {
+fn emit_if_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, f: checker::TIfExpr) -> []byte | error {
     if !f.has_else { return error { message = "codegen: if-without-else used as a value not yet supported" } }
     // The temp name is `_tk<buflen>` frozen at the CURRENT length (the buffer is about to
     // grow). Capture it once and reuse it for the declaration AND the trailing read, so both
@@ -1783,9 +1784,9 @@ fn emit_if_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, f: che
     out = cb(out, "; if (")
     out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
     out = cb(out, ") {\n")
-    out = match emit_branch_value(out, prog, f.then_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, ret_type, f.then_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
     out = cb(out, "} else {\n")
-    out = match emit_branch_value(out, prog, f.else_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, ret_type, f.else_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
     out = cb(out, "} ")
     out = cb(out, tmp)
     cb(out, "; })")
@@ -2990,7 +2991,7 @@ fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, 
         // bool literal (W2) — FULL support: bool already flows through both backends, so
         // emit the C `true`/`false` keyword (C type is `bool`). (C: TK_TEXPR_BOOL branch.)
         checker::TBoolLit as bl    => cb(buf, if bl.value { "true" } else { "false" })
-        checker::TIfExpr as f      => emit_if_value(buf, prog, e, f)   // W5a — `if` as a value (GNU stmt-expr)
+        checker::TIfExpr as f      => emit_if_value(buf, prog, ret_type, e, f)   // W5a — `if` as a value (GNU stmt-expr)
         checker::TMatchExpr as m   => emit_match_value(buf, prog, ret_type, e, m)   // W5b — `match` as a value (GNU stmt-expr)
         // null / ?. / ?? — the OPTIONAL value model (REBOOT_PLAN §202/§203; tk_opt_<inner>).
         // A bare `null` in raw expression position has the SENTINEL optional type: it cannot be
