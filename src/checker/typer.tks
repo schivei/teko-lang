@@ -60,18 +60,15 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
         // + - * / over the native numeric set (B.38): ints AND floats. Same-type only
         // (B.22 — no promotion, no mixed int/float; cross-family needs an explicit `to`).
         if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
-        // (C1.8/E2) the C twin attaches expected=type_render(l.type), actual=type_render(r.type) here
-        // so the driver prints "expected X, found Y". The Teko surface `error` is `{ message }` only —
-        // adding expected/actual is the E2 carve-out (it ripples every `error {}` corpus-wide). Until
-        // E2, this twin carries the message only; type_render (below) is already materialized for it.
-        if !type_eq(l.type, r.type) { return error { message = "operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)" } }
+        // (C1.8/E2) attach expected=type_render(l.type), actual=type_render(r.type) so the driver
+        // prints "expected X, found Y" — mirrors expr.c type_binary's tk_error_types wrap.
+        if !type_eq(l.type, r.type) { return teko::error::err_typed(error { message = "operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)" }, type_render(l.type), type_render(r.type)) }
         return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     if op_is_arith_bitwise(b.op) {   // %, & | ^ — integer-only
         if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
-        // (C1.8/E2) the C twin attaches expected/actual (type_render of l/r); blocked here by E2 (the
-        // surface `error` is `{ message }` only). Message-only until E2.
-        if !type_eq(l.type, r.type) { return error { message = "operands must be the same type (no promotion — B.22)" } }
+        // (C1.8/E2) attach expected/actual (type_render of l/r) — mirrors expr.c type_binary.
+        if !type_eq(l.type, r.type) { return teko::error::err_typed(error { message = "operands must be the same type (no promotion — B.22)" }, type_render(l.type), type_render(r.type)) }
         return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
     }
     if b.op == lexer::TokenKind::AndAnd || b.op == lexer::TokenKind::OrOr {   // logical && / || — bool operands, bool result, short-circuit (matches C + the VM)
@@ -198,10 +195,9 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                 mut a = match type_expr(c.args[i], env, table) { TExpr as te => te; error as e => return e }
                 if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
                 if !type_eq(a.type, f.params[i]) {
-                    // (C1.8/E2) the C twin attaches expected=type_render(f.params[i]), actual=type_render(a.type)
-                    // here (THE user's reported mismatch). Blocked on the Teko side by E2 (the surface `error`
-                    // is `{ message }` only — adding expected/actual ripples every `error {}`). Message-only until E2.
-                    if !literal_adopts(a, f.params[i]) { return error { message = "argument type mismatch" } }
+                    // (C1.8/E2) attach expected=type_render(f.params[i]), actual=type_render(a.type) — THE
+                    // user's reported mismatch. Mirrors expr.c type_call's tk_error_types wrap.
+                    if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
                     a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // a fitting literal arg adopts the parameter's type (C6)
                 }
                 args = teko::list::push(args, a)
@@ -362,6 +358,19 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
     let is_str_or_slice = match recv.type { Str => true; Slice => true; _ => false }
     if is_str_or_slice && fa.field == "len" {
         return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 }; line = 0; col = 0 }
+    }
+    // error diagnostic adornments (E2): the built-in `error` value exposes its carrier fields as
+    // readable fields — message/file/expected/actual -> str, line/col -> u32. error has no struct
+    // body, so (like str/slice `.len`) this precedes the struct-field path.
+    let is_error = match recv.type { Error => true; _ => false }
+    if is_error {
+        if fa.field == "message" || fa.field == "file" || fa.field == "expected" || fa.field == "actual" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Str { }; line = 0; col = 0 }
+        }
+        if fa.field == "line" || fa.field == "col" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U32 }; line = 0; col = 0 }
+        }
+        return error { message = "no such field on error (message/file/expected/actual: str; line/col: u32)" }
     }
     let name = match recv.type {
         Named as n => n.name
@@ -602,17 +611,18 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
     }
 }
 
-// (C1-POS/E1) public entry — wrap the dispatch to thread the source position. On success, copy
+// (C1-POS/E1/E2) public entry — wrap the dispatch to thread the source position. On success, copy
 // the untyped node's line/col onto the typed node so later passes (and the renderer) can point at
-// it (mirrors the C twin's tk_typer_expr). The C twin ALSO stamps the failing expr's line/col onto
-// the error when the error carries none (innermost-wins); that half is NOT mirrored here because
-// the Teko surface `error` value is { message: str } only — it has no line/col fields to set (the
-// position adornments are a compiler-internal extension of core.h's tk_error, NOT on the surface
-// `error` — core.tks C1.3). The error therefore passes through unchanged.
+// it (mirrors the C twin's tk_typer_expr). On failure, stamp THIS expr's position onto the error
+// UNLESS it already carries one — the innermost (most specific) expr that set it wins, so `f(g(x))`
+// blames the inner `g(x)`/`x`. E2: the error value now carries the position adornments (err_loc +
+// the line/col field reads, per the E2 contract), so this half is mirrored — no longer blocked.
 fn type_expr(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
     match type_dispatch(e, env, table) {
         TExpr as te => TExpr { kind = te.kind; type = te.type; line = e.line; col = e.col }
-        error as err => err
+        error as inner => {
+            if inner.line == 0 { teko::error::err_loc(inner, e.line, e.col) } else { inner }
+        }
     }
 }
 
@@ -802,9 +812,9 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     if b.has_type {
         let at = match resolve_type(b.type_ann, table) { Type as t => t; error as e => return e }
         if !assignable_to(v.type, at, table) {   // B.14 widening (case → variant) OR C6: a fitting literal adopts T (leaf stays i64)
-            // (C1.8/E2) the C twin wraps this with expected=type_render(at), actual=type_render(v.type);
-            // blocked here by E2 (surface `error` is `{ message }` only). Message-only until E2.
-            match annotated_literal_ok(b.value, at) { null => {}; error as e => return e }
+            // (C1.8/E2) wrap with expected=type_render(at), actual=type_render(v.type) — mirrors
+            // typer.c type_binding's tk_error_types wrap of annotated_literal_reason's message.
+            match annotated_literal_ok(b.value, at) { null => {}; error as e => return teko::error::err_typed(e, type_render(at), type_render(v.type)) }
         }
         bound = at
     }
@@ -820,9 +830,9 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if !type_eq(tb.type, v.type) {
-        // (C1.8/E2) the C twin attaches expected=type_render(tb.type), actual=type_render(v.type);
-        // blocked here by E2 (surface `error` is `{ message }` only). Message-only until E2.
-        if !literal_adopts(v, tb.type) { return error { message = "assigned value does not match the target type" } }
+        // (C1.8/E2) attach expected=type_render(tb.type), actual=type_render(v.type) — mirrors
+        // typer.c type_assign's tk_error_types wrap.
+        if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
         v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }   // a fitting literal adopts the target's type (C6)
     }
     TypedStmt { node = TAssign { name = a.name; op = a.op; value = v }; env = env }   // mut rule enforced (B.21)
@@ -948,9 +958,9 @@ fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error? {
         TReturn as r => {
             if r.has_value {
                 if assignable_to(r.value.type, ret, table) || literal_adopts(r.value, ret) { null }   // a fitting int/float/byte literal adopts the return type (C6)
-                // (C1.8/E2) the C twin attaches expected=type_render(ret), actual=type_render(r.value.type);
-                // blocked here by E2 (surface `error` is `{ message }` only). Message-only until E2.
-                else { error { message = "return value does not match the function's declared return type" } }
+                // (C1.8/E2) attach expected=type_render(ret), actual=type_render(r.value.type) —
+                // mirrors typer.c check_return_stmt's tk_error_types wrap.
+                else { teko::error::err_typed(error { message = "return value does not match the function's declared return type" }, type_render(ret), type_render(r.value.type)) }
             } else {
                 if type_is_void(ret) { null }   // a bare `return` is legal iff the function returns no value (M.3)
                 else { error { message = "bare `return` in a function that declares a value-returning (non-void) return type" } }
@@ -991,9 +1001,9 @@ fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> err
         TExprStmt as es => {
             if texpr_diverges(es.expr) { null }   // a trailing panic/exit yields no value (M.3)
             else { if assignable_to(es.expr.type, ret, table) || literal_adopts(es.expr, ret) { null }   // a fitting trailing literal adopts the return type (C6)
-            // (C1.8/E2) the C twin attaches expected=type_render(ret), actual=type_render(es.expr.type);
-            // blocked here by E2 (surface `error` is `{ message }` only). Message-only until E2.
-            else { error { message = "the function's final expression does not match its declared return type" } } }
+            // (C1.8/E2) attach expected=type_render(ret), actual=type_render(es.expr.type) — mirrors
+            // typer.c check_trailing_value's tk_error_types wrap.
+            else { teko::error::err_typed(error { message = "the function's final expression does not match its declared return type" }, type_render(ret), type_render(es.expr.type)) } }
         }
         _ => null
     }
@@ -1122,6 +1132,20 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
     }
 }
 
+// (C1.8/E2) surface an inner checker error at the program level — mirror of typer.c's surface_at.
+// PREFER the inner error's own line/col over the item's (an inner-expr position wins — C1-POS),
+// build the LOCATED message string (diag_at — file:line:col baked in, the fallback the driver
+// prints when it can't read the file), then re-attach the STRUCTURED file/line/col (err_loc) and
+// PRESERVE the inner error's expected/actual (err_typed) so a type mismatch still renders
+// "expected X, found Y" after surfacing.
+fn surface_at(file: str, item_line: u32, item_col: u32, inner: error) -> error {
+    let el = if inner.line != 0 { inner.line } else { item_line }
+    let ec = if inner.line != 0 { inner.col } else { item_col }
+    let located = error { message = diag_at(file, el, ec, inner.message) }   // located string (fallback)
+    let positioned = teko::error::err_loc(located, el, ec)                   // structured position (renderer)
+    teko::error::err_typed(positioned, inner.expected, inner.actual)         // preserve expected/actual (C1.8)
+}
+
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
 pub fn type_program(program: parser::Program) -> TProgram | error {
     let c = match collect(program) { Collected as col => col; error as e => return e }
@@ -1145,22 +1169,15 @@ pub fn type_program(program: parser::Program) -> TProgram | error {
         }
         // a loose top-level Statement is typed directly so its node also feeds the virtual-main's
         // label validation below (mirrors typer.c's separate `mainbody` accumulator).
-        // (C1-POS) The C twin prefers the ERROR's own line/col over the item's
-        // (`el = err.line ? err.line : line`), so an inner-expr position wins. That is NOT mirrored
-        // here: the Teko surface `error` value is { message: str } only — it has no line/col fields
-        // (those position adornments are a compiler-internal extension of core.h's tk_error, NOT on
-        // the surface `error` — core.tks C1.3). We therefore fall back to the ITEM's line/col, the
-        // same as before C1-POS. (HALT/§VI gap: surface a finer position only once `error` gains the
-        // adornment fields, or via a separate diagnostic carrier.)
-        // (C1.8/E2) The C twin's `surface_at` ALSO sets the STRUCTURED file/line/col on the returned
-        // error and PRESERVES the inner error's expected/actual, so the driver's renderer can read the
-        // source line, draw a caret, and print "expected X, found Y". Same E2 block as above: the
-        // surface `error` has none of those fields, so this twin keeps ONLY the located diag_at string.
+        // (C1-POS/C1.8/E2) surface_at prefers the ERROR's own line/col over the item's (inner-expr
+        // position wins), bakes file:line:col into the message (diag_at fallback), sets the STRUCTURED
+        // file/line/col (err_loc) AND preserves expected/actual (err_typed) — mirror of typer.c's
+        // surface_at. The error value now carries those adornments per the E2 contract.
         match it.content {
             parser::Statement as s => {
                 let ts = match type_statement(s, c.env, c.types) {
                     TypedStmt as x => x
-                    error as e => return error { message = diag_at(it.file, line, col, e.message) }
+                    error as e => return surface_at(it.file, line, col, e)
                 }
                 items = teko::list::push(items, ts.node)
                 mainbody = teko::list::push(mainbody, ts.node)
@@ -1168,7 +1185,7 @@ pub fn type_program(program: parser::Program) -> TProgram | error {
             _ => {
                 let ti = match type_item(it, c.env, c.types) {
                     TItem as x => x
-                    error as e => return error { message = diag_at(it.file, line, col, e.message) }
+                    error as e => return surface_at(it.file, line, col, e)
                 }
                 items = teko::list::push(items, ti)
             }

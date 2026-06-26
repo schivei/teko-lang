@@ -68,6 +68,9 @@ static inline tk_error tk_error_make(const char *message) {
 static inline tk_error tk_error_at(tk_error e, const char *file, uint32_t line, uint32_t col) {
     e.file = file; e.line = line; e.col = col; return e;
 }
+static inline tk_error tk_error_loc(tk_error e, uint32_t line, uint32_t col) {
+    e.line = line; e.col = col; return e;   // line/col only (file/message/… preserved) — the err_loc builtin (E2)
+}
 static inline tk_error tk_error_types(tk_error e, const char *expected, const char *actual) {
     e.expected = expected; e.actual = actual; return e;
 }

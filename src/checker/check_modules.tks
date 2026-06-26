@@ -204,7 +204,16 @@ fn check_modules(prog: parser::Program, table: TypeTable) -> error? {
             _ => {}
         }
         match e {
-            error as err => return error { message = diag_at(it.file, line, col, err.message) }   // W-loc-2: file:line:col
+            error as err => {
+                // (C1-POS/C1.8/E2) prefer the inner error's own line/col over the item's, bake
+                // file:line:col into the message (diag_at fallback), set the STRUCTURED position
+                // (err_loc) and preserve expected/actual (err_typed) — mirrors typer.c surface_at.
+                let el = if err.line != 0 { err.line } else { line }
+                let ec = if err.line != 0 { err.col } else { col }
+                let located = error { message = diag_at(it.file, el, ec, err.message) }   // W-loc-2: file:line:col
+                let positioned = teko::error::err_loc(located, el, ec)
+                return teko::error::err_typed(positioned, err.expected, err.actual)
+            }
             null => {}
         }
         i++

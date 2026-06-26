@@ -383,6 +383,24 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
         return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = tk_prim_t(TK_PRIM_U64),
                                .as.field_access = { box(recv.as.value), fa.field } });
     }
+    // error diagnostic adornments (E2): the built-in `error` value exposes its carrier fields as
+    // readable fields — message/file/expected/actual -> str, line/col -> u32. error has no struct
+    // body, so (like str/slice `.len`) this precedes the struct-field path.
+    if (recv.as.value.type.tag == TK_TYPE_ERROR) {
+        if (tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"message",  7 }) ||
+            tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"file",     4 }) ||
+            tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"expected", 8 }) ||
+            tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"actual",   6 })) {
+            return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = (tk_type){ .tag = TK_TYPE_STR },
+                                   .as.field_access = { box(recv.as.value), fa.field } });
+        }
+        if (tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"line", 4 }) ||
+            tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"col",  3 })) {
+            return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = tk_prim_t(TK_PRIM_U32),
+                                   .as.field_access = { box(recv.as.value), fa.field } });
+        }
+        return xerr("no such field on error (message/file/expected/actual: str; line/col: u32)");
+    }
     if (recv.as.value.type.tag != TK_TYPE_NAMED) return xerr("field access requires a struct receiver");
     tk_decl_result decl = tk_type_table_find(table, recv.as.value.type.as.named.name);
     if (!decl.ok) return xerr("unknown type for field access");

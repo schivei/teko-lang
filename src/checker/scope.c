@@ -89,6 +89,14 @@ tk_type_result tk_builtin_fn(tk_str name) {
     static tk_type bytes_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &byte_elem };  // []byte
     static tk_type slice_p[3] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 } };
     static tk_type str3_t[3]  = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR } };
+    // error diagnostic adornment builtins (E2): err_loc(error,u32,u32)->error ; err_typed(error,str,str)->error.
+    static tk_type error_t   = { .tag = TK_TYPE_ERROR };
+    static tk_type err_loc_p[3]   = { { .tag = TK_TYPE_ERROR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U32 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U32 } };
+    static tk_type err_typed_p[3] = { { .tag = TK_TYPE_ERROR }, { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR } };
+    #define TK_EFN(P, N) (tk_type_result){ .ok = true, .as.value = (tk_type){ .tag = TK_TYPE_FUNC, .as.func = { .params = (P), .nparams = (N), .ret = &error_t } } }
+    if (name_is(name, "err_loc"))   return TK_EFN(err_loc_p, 3);     // (error, u32, u32) -> error
+    if (name_is(name, "err_typed")) return TK_EFN(err_typed_p, 3);   // (error, str, str) -> error
+    #undef TK_EFN
     #define TK_BFN(P, N) (tk_type_result){ .ok = true, .as.value = (tk_type){ .tag = TK_TYPE_FUNC, .as.func = { .params = (P), .nparams = (N), .ret = &str_t } } }
     if (name_is(name, "slice"))        return TK_BFN(slice_p, 3);   // slice(str, u64, u64) -> str
     if (name_is(name, "str") || name_is(name, "str_of_bytes")) return TK_BFN(&bytes_t, 1);   // ([]byte) -> str

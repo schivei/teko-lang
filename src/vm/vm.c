@@ -162,6 +162,58 @@ static tk_value v_float(double f, int width) {
 static tk_value v_struct(tk_str type_name, tk_value_fields fields) {
     return (tk_value){ .tag = TK_VAL_STRUCT, .as.st = { .type_name = type_name, .fields = fields } };
 }
+
+// =========================================================================
+// E2 — the ERROR value carries compiler-diagnostic adornments. An error value is a
+// STRUCT value (type_name "error"); its fields mirror tk_error (core.h): message:str,
+// file:str, line:u32, col:u32, expected:str, actual:str. A message-only literal
+// `error { message = … }` carries ONLY the "message" field; the other adornments default
+// (empty str / 0) — set by the err_loc / err_typed builtins, read by error field access.
+// We re-use the generic STRUCT carrier (parallel name/value arrays) — no new value tag.
+// =========================================================================
+static bool name_eq(tk_str a, tk_str b);   // fwd — defined in the ENV section (byte-compare, empty==empty)
+static tk_str ERR_LIT(const char *s) {   // a static-ASCII literal as a tk_str view
+    size_t n = 0; while (s[n]) n += 1;
+    return (tk_str){ (const tk_byte *)s, n };
+}
+// Build a FRESH error value from `base`, with the named field set to `val` (overwriting if
+// `base` already holds it, appending otherwise). FUNCTIONAL (copy-on-set, mirroring
+// v_list_push / tk_env_define): `base` is never mutated, so err_loc(e,…) / err_typed(e,…)
+// leave the source error intact (M.5 — process-lifetime buffers, leak-tolerant). This is
+// the VM twin of core.h's tk_error_loc / tk_error_types (which return a modified copy).
+static tk_value v_error_set(tk_value base, tk_str field, tk_value val) {
+    size_t n = (base.tag == TK_VAL_STRUCT) ? base.as.st.fields.len : 0;
+    // does `base` already hold `field`? then overwrite in the copy; else append one slot.
+    bool present = false;
+    for (size_t i = 0; i < n; i += 1)
+        if (name_eq(base.as.st.fields.names[i], field)) { present = true; break; }
+    size_t m = present ? n : n + 1;
+    tk_str   *names = tk_alloc((m ? m : 1) * sizeof *names);
+    tk_value *vals  = tk_alloc((m ? m : 1) * sizeof *vals);
+    for (size_t i = 0; i < n; i += 1) {           // copy the existing fields (overwriting the target)
+        names[i] = base.as.st.fields.names[i];
+        vals[i]  = name_eq(base.as.st.fields.names[i], field) ? val : base.as.st.fields.vals[i];
+    }
+    if (!present) { names[n] = field; vals[n] = val; }   // append the new field
+    return v_struct(ERR_LIT("error"), (tk_value_fields){ names, vals, m });
+}
+// Read an error value's field by name; if absent (the field was never set), return the
+// adornment DEFAULT: empty str for the str fields, 0:u32 for line/col (mirrors tk_error's
+// zero/NULL defaults — C1.3). Called by error field access so `e.line` on a message-only
+// error reads 0 (never an honest stop). A field that IS present rides as stored.
+static bool err_field_is_str(tk_str f) {
+    return name_eq(f, ERR_LIT("message")) || name_eq(f, ERR_LIT("file"))
+        || name_eq(f, ERR_LIT("expected")) || name_eq(f, ERR_LIT("actual"));
+}
+static tk_value v_error_field(tk_value e, tk_str field) {
+    for (size_t i = 0; i < e.as.st.fields.len; i += 1)
+        if (name_eq(e.as.st.fields.names[i], field)) return e.as.st.fields.vals[i];
+    // unset adornment → the default: line/col are u32 0; the str fields are the empty str.
+    if (name_eq(field, ERR_LIT("line")) || name_eq(field, ERR_LIT("col")))
+        return v_int(0, false, 32);
+    if (err_field_is_str(field)) return v_str(ERR_LIT(""));
+    return v_str(ERR_LIT(""));   // any other field on an error → empty str (honest, never a crash)
+}
 // v_list_empty / v_list_push — the SLICE value model (teko::list::empty / push). The list is a
 // {ptr,len,cap} of tk_value (TK_VAL_LIST). push is FUNCTIONAL / persistent (copy-on-push,
 // mirroring tk_env_define's copy-on-extend): it returns a FRESH list holding the old elements
@@ -436,6 +488,37 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         }
         // other teko::list::* (len/get/…) are deferred — only empty/push in the fixed+copy seed.
         vm_unsupported("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)");
+    }
+
+    // E2 — err_loc / err_typed: the error-adornment builtins. Recognized by the LAST path
+    // segment (single-segment OR teko-rooted — the `addressable` gate above), exactly like
+    // print/println. Both PRODUCE A VALUE (a fresh error with the diagnostic fields set);
+    // the source error is preserved (v_error_set is copy-on-set). These mirror C's
+    // tk_error_loc(e,line,col) / tk_error_types(e,expected,actual).
+    if (seg_is(last, "err_loc")) {
+        if (nargs != 3) vm_unsupported("err_loc expects three arguments (the error, line, col)");
+        tk_value e   = tk_vm_eval_expr(&args[0], env);
+        tk_value ln  = tk_vm_eval_expr(&args[1], env);
+        tk_value cl  = tk_vm_eval_expr(&args[2], env);
+        if (e.tag != TK_VAL_STRUCT) vm_unsupported("err_loc on a non-error value (internal: checker should reject)");
+        if (ln.tag != TK_VAL_INT || cl.tag != TK_VAL_INT) vm_unsupported("err_loc line/col must be integers (internal: checker should reject)");
+        // line/col are u32 (the contract's field types) — re-normalize the int carriers to width 32.
+        tk_value e1 = v_error_set(e,  ERR_LIT("line"), norm_int(ln.as.i.bits, false, 32));
+        tk_value e2 = v_error_set(e1, ERR_LIT("col"),  norm_int(cl.as.i.bits, false, 32));
+        *out = e2;
+        return true;
+    }
+    if (seg_is(last, "err_typed")) {
+        if (nargs != 3) vm_unsupported("err_typed expects three arguments (the error, expected, actual)");
+        tk_value e   = tk_vm_eval_expr(&args[0], env);
+        tk_value exp = tk_vm_eval_expr(&args[1], env);
+        tk_value act = tk_vm_eval_expr(&args[2], env);
+        if (e.tag != TK_VAL_STRUCT) vm_unsupported("err_typed on a non-error value (internal: checker should reject)");
+        if (exp.tag != TK_VAL_STR || act.tag != TK_VAL_STR) vm_unsupported("err_typed expected/actual must be strings (internal: checker should reject)");
+        tk_value e1 = v_error_set(e,  ERR_LIT("expected"), exp);
+        tk_value e2 = v_error_set(e1, ERR_LIT("actual"),   act);
+        *out = e2;
+        return true;
     }
     return false;
 }
@@ -1021,6 +1104,11 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
                 return v_int((uint64_t)recv.as.list.len, false, 64);
             if (recv.tag != TK_VAL_STRUCT)
                 vm_unsupported("field access on a non-struct value (internal: checker should reject)");
+            // E2 — an ERROR value's adornment field (message/file/line/col/expected/actual):
+            // a present field rides as stored; an UNSET adornment reads its default (empty str /
+            // 0:u32) rather than an honest stop, so `e.line` on a message-only error is 0 (C1.3).
+            if (name_eq(recv.as.st.type_name, (tk_str){ (const tk_byte *)"error", 5 }))
+                return v_error_field(recv, e->as.field_access.field);
             for (size_t i = 0; i < recv.as.st.fields.len; i += 1)
                 if (name_eq(recv.as.st.fields.names[i], e->as.field_access.field))
                     return recv.as.st.fields.vals[i];

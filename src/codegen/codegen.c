@@ -793,6 +793,18 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
         case TK_TEXPR_CALL: {
             // callee path -> C identifier joined by "__" (single-segment in M0).
             tk_path p = e->as.call.callee;
+            // E2 (native, DEGRADED): err_loc/err_typed adorn an error VALUE with diagnostic
+            // position/types. Native `error` is lowered to its message tk_str (the error-STRUCT
+            // representation is a Phase-6 follow-on), so natively these are NO-OPs returning the
+            // error (arg0) UNCHANGED — the program keeps the message; expr-position precision is
+            // the VM's (full) vs native's (degraded to the item position). Mirrors codegen.tks.
+            if (p.len >= 1) {
+                tk_str pe = p.segments[p.len - 1].name;
+                if (seg_is(pe, "err_loc") || seg_is(pe, "err_typed")) {
+                    cb(b, "("); if (!emit_expr(b, &e->as.call.args[0], err)) return false; cb(b, ")");
+                    return true;
+                }
+            }
             // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
             // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching
             // here directly means a context-less empty (honest error). `push(base, item)` lowers
@@ -846,6 +858,8 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "println")) builtin = "tk_println";
                     else if (seg_is(last, "panic"))   builtin = "tk_panic_str";   // panic(str) — diverges (no `never` type)
                     else if (seg_is(last, "exit"))    builtin = "tk_exit";        // exit(<int>) — diverges
+                    // (err_loc/err_typed handled DEGRADED at the top of this CALL case — native
+                    //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }
             }
             if (builtin != NULL) {
@@ -875,6 +889,21 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 cb(b, "(");   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str → u64
                 if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
                 cb(b, ".len)");
+                return true;
+            }
+            // E2 (native, DEGRADED): an error VALUE is lowered to its message tk_str (no struct
+            // yet — Phase-6 follow-on). So `e.message` IS that tk_str; the position/type adornments
+            // (file/line/col/expected/actual) have no native carrier and degrade to defaults
+            // (line/col -> 0u32, file/expected/actual -> empty str). The VM carries them in full.
+            if (rt.tag == TK_TYPE_ERROR) {
+                tk_str f = e->as.field_access.field;
+                if (seg_is(f, "message")) {        // error IS its message tk_str natively
+                    cb(b, "("); if (!emit_expr(b, e->as.field_access.receiver, err)) return false; cb(b, ")");
+                } else if (seg_is(f, "line") || seg_is(f, "col")) {
+                    cb(b, "((uint32_t)0)");         // degraded position (the Phase-6 error-struct fills it)
+                } else {                            // file/expected/actual -> empty str
+                    cb(b, "((tk_str){0})");
+                }
                 return true;
             }
             cb(b, "(");

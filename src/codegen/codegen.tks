@@ -776,6 +776,18 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
         }
         return error { message = "codegen: this teko::list builtin not yet supported (only empty/push — fixed+copy)" }
     }
+    // E2 (native, DEGRADED): err_loc/err_typed adorn an error VALUE with diagnostic position/types.
+    // Native `error` is lowered to its message tk_str (the error-STRUCT representation is a Phase-6
+    // follow-on), so natively these are NO-OPs returning the error (arg0) UNCHANGED. The VM carries
+    // the adornments in full; native diagnostics degrade to the item position. Mirrors codegen.c.
+    if p.segments.len >= 1 {
+        let pe = p.segments[p.segments.len - 1].name
+        if pe == "err_loc" || pe == "err_typed" {
+            mut oe = cb(buf, "(")
+            oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            return cb(oe, ")")
+        }
+    }
     // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
     mut builtin = ""
     mut has_builtin = false
@@ -787,6 +799,14 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             else if last == "println" { builtin = "tk_println"; has_builtin = true }
             else if last == "panic"   { builtin = "tk_panic_str"; has_builtin = true }   // panic(str) — diverges (no `never` type)
             else if last == "exit"    { builtin = "tk_exit";      has_builtin = true }   // exit(<int>) — diverges
+            // E2 — diagnostic-adornment builtins on an error VALUE (recognized by last segment,
+            // like the str builtins). Args flow through the generic arg loop, so
+            //   err_loc(<e>, <line>, <col>)  -> tk_error_loc(<e>, <line>, <col>)
+            //   err_typed(<e>, <exp>, <act>) -> tk_error_types(<e>, <exp>, <act>)
+            // mirroring C core.h: each returns a COPY of the error with the named fields set,
+            // all other adornments preserved.
+            else if last == "err_loc"   { builtin = "tk_error_loc";   has_builtin = true }
+            else if last == "err_typed" { builtin = "tk_error_types"; has_builtin = true }
         }
     }
     mut out = buf
@@ -819,6 +839,19 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
         mut o = cb(buf, "(")   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str -> u64
         o = match emit_expr(o, prog, fa.receiver) { []byte as r => r; error as err => return err }
         return cb(o, ".len)")
+    }
+    // E2 (native, DEGRADED): an error VALUE is its message tk_str (no struct yet — Phase-6 follow-on),
+    // so `e.message` IS that tk_str; position/type adornments degrade to defaults (line/col -> 0u32,
+    // file/expected/actual -> empty str). The VM carries them in full. Mirrors codegen.c.
+    let is_error = match fa.receiver.type { checker::Error => true; _ => false }
+    if is_error {
+        if fa.field == "message" {
+            mut oe = cb(buf, "(")
+            oe = match emit_expr(oe, prog, fa.receiver) { []byte as r => r; error as err => return err }
+            return cb(oe, ")")
+        }
+        if fa.field == "line" || fa.field == "col" { return cb(buf, "((uint32_t)0)") }
+        return cb(buf, "((tk_str){0})")
     }
     mut out = cb(buf, "(")
     out = match emit_expr(out, prog, fa.receiver) { []byte as o => o; error as err => return err }

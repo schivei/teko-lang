@@ -294,6 +294,44 @@ fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> V
     panic("vm: this teko::list builtin not yet supported (only empty/push — fixed+copy)")
 }
 
+// E2 — err_loc / err_typed: the error-adornment builtins. Recognized by the LAST path segment
+// when single-segment OR teko-rooted (the `addressable` gate, like print/println). Both PRODUCE
+// A VALUE (a fresh error with the diagnostic fields set; the source error is preserved —
+// err_set is copy-on-set), so they live on the value-call path (like try_list_builtin), not the
+// `-> void` try_builtin. They mirror C's tk_error_loc(e,line,col) / tk_error_types(e,exp,act).
+// `null` == not an err builtin → fall through.
+fn try_err_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+    let last = callee.segments[callee.segments.len - 1].name
+    let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
+    if !addressable { return null }
+    if last == "err_loc" {
+        match eval_expr(args[0], env) {
+            // line/col are u32 (the contract's field types) — re-normalize the carriers to width 32.
+            StructVal as e => {
+                let e1 = err_set(e, "line", as_int(eval_expr(args[1], env)) to u32)
+                match e1 {
+                    StructVal as e1s => return err_set(e1s, "col", as_int(eval_expr(args[2], env)) to u32)
+                    _                => panic("vm: err_loc internal (err_set must yield an error struct)")
+                }
+            }
+            _ => panic("vm: err_loc on a non-error value (internal: checker should reject)")
+        }
+    }
+    if last == "err_typed" {
+        match eval_expr(args[0], env) {
+            StructVal as e => {
+                let e1 = err_set(e, "expected", as_str(eval_expr(args[1], env)))
+                match e1 {
+                    StructVal as e1s => return err_set(e1s, "actual", as_str(eval_expr(args[2], env)))
+                    _                => panic("vm: err_typed internal (err_set must yield an error struct)")
+                }
+            }
+            _ => panic("vm: err_typed on a non-error value (internal: checker should reject)")
+        }
+    }
+    null   // not an err builtin — fall through to user-fn resolution
+}
+
 // ---------------------------------------------------------------------------
 // EXPRESSIONS -> Value. Coverage MIRRORS codegen's emit_expr: Number, Var, Str, Byte,
 // Binary, Unary, Compare, Cast, Call, FieldAccess. IfExpr/MatchExpr AS A VALUE are the
@@ -303,6 +341,63 @@ fn try_list_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> V
 // it as a value) and `T?` optionals are a later wave (the parser does not emit them yet):
 // either tag on a node's type is an honest stop (M.3), never a wrong-silent value.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// E2 — the ERROR value carries compiler-diagnostic adornments. An error value is a
+// StructVal (type_name "error"); its fields mirror tk_error (core.h): message:str,
+// file:str, line:u32, col:u32, expected:str, actual:str. A message-only literal
+// `error { message = … }` carries ONLY the "message" field; the other adornments default
+// (empty str / 0) — set by the err_loc / err_typed builtins, read by error field access.
+// We re-use the generic StructVal carrier (parallel name/value lists) — no new Value member.
+// ---------------------------------------------------------------------------
+
+// Build a FRESH error value from `base`, with the named field set to `val` (overwriting if
+// `base` already holds it, appending otherwise). FUNCTIONAL (copy-on-set, mirroring
+// teko::list::push / env extend): `base` is never mutated, so err_loc(e,…) / err_typed(e,…)
+// leave the source error intact. The VM twin of core.h's tk_error_loc / tk_error_types
+// (which return a modified copy).
+fn err_set(base: StructVal, field: str, val: Value) -> Value {
+    mut names = teko::list::empty()
+    mut vals = teko::list::empty()
+    mut present = false
+    mut i = 0
+    loop {                                  // copy the existing fields (overwriting the target)
+        if i >= base.field_names.len { break }
+        names = teko::list::push(names, base.field_names[i])
+        if base.field_names[i] == field {
+            vals = teko::list::push(vals, val)
+            present = true
+        } else {
+            vals = teko::list::push(vals, base.field_vals[i])
+        }
+        i++
+    }
+    if !present {                           // append the new field
+        names = teko::list::push(names, field)
+        vals = teko::list::push(vals, val)
+    }
+    StructVal { type_name = "error"; field_names = names; field_vals = vals }
+}
+
+// Is `f` one of the error's STR adornment fields (vs the u32 line/col)?
+fn err_field_is_str(f: str) -> bool {
+    f == "message" || f == "file" || f == "expected" || f == "actual"
+}
+
+// Read an error value's field by name; if absent (never set), return the adornment DEFAULT:
+// empty str for the str fields, 0:u32 for line/col (mirrors tk_error's zero/NULL defaults —
+// C1.3). So `e.line` on a message-only error reads 0, never an honest stop.
+fn err_field(e: StructVal, field: str) -> Value {
+    mut i = 0
+    loop {
+        if i >= e.field_names.len { break }
+        if e.field_names[i] == field { return e.field_vals[i] }
+        i++
+    }
+    if field == "line" || field == "col" { return 0 to u32 }   // unset numeric adornment → 0:u32
+    if err_field_is_str(field) { return "" }                    // unset str adornment → empty str
+    ""                                                          // any other field on an error → empty str (honest)
+}
 
 // W4b — build a struct value `Name { f = v, … }` (declared field order). The nominal name
 // is the node's type (a named type, or "error"); a non-named/non-error type is unreachable.
@@ -334,6 +429,10 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
             panic("vm: field access on a slice value (internal: checker should reject)")
         }
         StructVal as s => {
+            // E2 — an ERROR value's adornment field (message/file/line/col/expected/actual):
+            // a present field rides as stored; an UNSET adornment reads its default (empty str /
+            // 0:u32) rather than an honest stop, so `e.line` on a message-only error is 0 (C1.3).
+            if s.type_name == "error" { return err_field(s, fa.field) }
             mut i = 0
             loop {
                 if i >= s.field_names.len { break }
@@ -827,6 +926,9 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     // teko::list::empty / push — value-producing SLICE builtins (FIXED+COPY). Recognized
     // before user-fn resolution; null == not a list builtin, fall through.
     match try_list_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
+    // E2 — err_loc / err_typed — value-producing error-adornment builtins. Recognized before
+    // user-fn resolution; null == not an err builtin, fall through.
+    match try_err_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
     let f = find_function(c.callee)        // resolved by LAST segment (cross-ns ok); honest stop if unknown / params
     let fenv = Env { slots = teko::list::empty() }
     // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn
