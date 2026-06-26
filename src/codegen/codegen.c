@@ -833,14 +833,16 @@ static void cb_upper(cbuf *b, tk_str s);
 //     `if` in STATEMENT/TAIL position takes the direct-control-flow path (emit_exprstmt_tail),
 //     which DOES carry return/break/continue — so this restriction only bites the sub-expr use.
 //   * anything else (void expr-stmt, loop, binding, assign) -> emitted normally (no value).
-static bool emit_stmt_value(cbuf *b, const tk_tstatement *s, const char *sink,
+static bool emit_stmt_value(cbuf *b, const tk_tstatement *s, tk_type slot, const char *sink,
                             const char *indent, const char **err) {
     if (s->tag == TK_TSTMT_RETURN || s->tag == TK_TSTMT_BREAK || s->tag == TK_TSTMT_CONTINUE)
         return fail_node(err, "codegen: control flow inside an `if` used as a sub-expression not yet supported");
     if (s->tag == TK_TSTMT_EXPR && s->as.expr_stmt.expr.type.tag != TK_TYPE_VOID) {
         cb(b, indent);
         cb(b, sink); cb(b, " = ");
-        if (!emit_expr(b, &s->as.expr_stmt.expr, err)) return false;
+        // wrap the branch value into the if's RESULT type (`slot`) — a bare case / `[]case` / null
+        // lands in the variant/optional/slice result, exactly like a match arm's sink (emit_as).
+        if (!emit_as(b, slot, &s->as.expr_stmt.expr, err)) return false;
         cb(b, ";\n");
         return true;
     }
@@ -852,12 +854,12 @@ static bool emit_stmt_value(cbuf *b, const tk_tstatement *s, const char *sink,
 // Emit a BRANCH block (the `if`-value then/else): all but the last statement normally, the
 // LAST via emit_stmt_value (its trailing value -> `sink`). An empty branch yields nothing
 // (the checker forbids a value-typed empty branch).
-static bool emit_branch_value(cbuf *b, const tk_tstatement *body, size_t n,
+static bool emit_branch_value(cbuf *b, const tk_tstatement *body, size_t n, tk_type slot,
                               const char *sink, const char *indent, const char **err) {
     for (size_t i = 0; i + 1 < n; i += 1)
         if (!emit_stmt(b, &body[i], /*in_main=*/false, (tk_type){ .tag = TK_TYPE_VOID }, indent, err)) return false;
     if (n > 0)
-        if (!emit_stmt_value(b, &body[n - 1], sink, indent, err)) return false;
+        if (!emit_stmt_value(b, &body[n - 1], slot, sink, indent, err)) return false;
     return true;
 }
 
@@ -881,10 +883,10 @@ static bool emit_if_value(cbuf *b, const tk_texpr *e, const char **err) {
     cb(b, " "); cb(b, tmp); cb(b, "; if (");
     if (!emit_expr(b, e->as.if_expr.cond, err)) return false;
     cb(b, ") {\n");
-    if (!emit_branch_value(b, e->as.if_expr.then_blk, e->as.if_expr.nthen, tmp, "    ", err))
+    if (!emit_branch_value(b, e->as.if_expr.then_blk, e->as.if_expr.nthen, e->type, tmp, "    ", err))
         return false;
     cb(b, "} else {\n");
-    if (!emit_branch_value(b, e->as.if_expr.else_blk, e->as.if_expr.nelse, tmp, "    ", err))
+    if (!emit_branch_value(b, e->as.if_expr.else_blk, e->as.if_expr.nelse, e->type, tmp, "    ", err))
         return false;
     cb(b, "} "); cb(b, tmp); cb(b, "; })");
     return true;
@@ -1178,6 +1180,11 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "eprint"))   builtin = "tk_eprint";
                     else if (seg_is(last, "eprintln")) builtin = "tk_eprintln";
                     else if (seg_is(last, "parse"))    builtin = "tk_float_parse"; // teko::float::parse(str) -> f64
+                    // diverging runtime panic helpers (the corpus calls these by bare name)
+                    else if (seg_is(last, "panic_div0"))     builtin = "tk_panic_div0";
+                    else if (seg_is(last, "panic_oob"))      builtin = "tk_panic_oob";
+                    else if (seg_is(last, "panic_cast"))     builtin = "tk_panic_cast";
+                    else if (seg_is(last, "panic_overflow")) builtin = "tk_panic_overflow";
                     // str/byte STDLIB surface (Phase 3) — the unqualified helpers the corpus calls,
                     // recognized by the checker (scope.c tk_builtin_fn) and lowered to their tk_ runtime
                     // twins (teko_rt). These return a fresh tk_str (malloc + tk_panic on OOM, M.1) and
@@ -1894,7 +1901,9 @@ static bool cg_emit_case_key(cbuf *b, const tk_pattern *pat, const char **err) {
         return cg_member_key_texpr(b, *pat->as.bind.slice_type, err);
     }
     tk_path tn = (pat->tag == TK_PAT_FIELD) ? pat->as.field.type_name : pat->as.bind.type_name;
-    cb_str(b, cg_path_last(tn));
+    // keyword-escape (cb_ident) so a `bool` case's `.as.bool_` field / `TK_TAG_..._BOOL_` tag
+    // match the definitions (cg_member_key escapes the field+tag; the pattern side must agree).
+    cb_ident(b, cg_path_last(tn));
     return true;
 }
 
@@ -3138,6 +3147,7 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     cb(&b, "#include <stdint.h>\n");
     cb(&b, "#include <stdbool.h>\n");
     cb(&b, "#include <stdlib.h>\n");   // malloc/abort — slice copy-append (fixed+copy)
+    cb(&b, "#include <math.h>\n");     // floor/… — float ops the corpus lowers inline (link -lm)
     cb(&b, "#include \"teko_rt.h\"\n");
     cb(&b, "#include \"assert.h\"\n\n");   // teko::assert seed decls (driver adds its -I)
 

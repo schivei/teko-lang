@@ -214,7 +214,7 @@ static int run_cc(const char *cfile, const char *binary) {
     char *cmd = tk_alloc(cap);
     if (cmd == NULL) abort();
     snprintf(cmd, cap,
-             "cc -std=c23 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -o \"%s\"",
+             "cc -std=c23 -ferror-limit=0 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -lm -o \"%s\"",
              TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, binary);
     int rc = system(cmd);
     tk_free0(cmd);

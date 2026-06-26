@@ -1155,6 +1155,11 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             else if last == "eprint"   { builtin = "tk_eprint";      has_builtin = true }   // (str) -> void (stderr)
             else if last == "eprintln" { builtin = "tk_eprintln";    has_builtin = true }   // (str) -> void (stderr + '\n')
             else if last == "parse"    { builtin = "tk_float_parse"; has_builtin = true }   // teko::float::parse(str) -> f64
+            // diverging runtime panic helpers (the corpus calls these by bare name)
+            else if last == "panic_div0"     { builtin = "tk_panic_div0";     has_builtin = true }
+            else if last == "panic_oob"      { builtin = "tk_panic_oob";      has_builtin = true }
+            else if last == "panic_cast"     { builtin = "tk_panic_cast";     has_builtin = true }
+            else if last == "panic_overflow" { builtin = "tk_panic_overflow"; has_builtin = true }
             // str/byte STDLIB surface (Phase 3) — the unqualified helpers the corpus calls, recognized
             // by the checker and lowered to their tk_ runtime twins (a fresh tk_str; OOM-panics, M.1).
             // (`str`/`str_of_bytes` are bridged specially ABOVE — a []byte lowers to tk_slice_byte, a
@@ -1666,7 +1671,7 @@ fn fresh_tmp_name(buf_len: i64) -> str {
 // matching the VM (eval_expr's TIfExpr stops on a divergent branch). A value-carrying expr
 // statement -> `<sink> = <expr>;`. Anything else (void expr-stmt, loop, binding, assign) ->
 // emitted normally (no value). (C: `emit_stmt_value`.)
-fn emit_stmt_value(buf: []byte, prog: checker::TProgram, s: checker::TStatement, sink: str, indent: str) -> []byte | error {
+fn emit_stmt_value(buf: []byte, prog: checker::TProgram, s: checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
     match s {
         checker::TReturn       => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TBreakStmt    => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
@@ -1680,7 +1685,9 @@ fn emit_stmt_value(buf: []byte, prog: checker::TProgram, s: checker::TStatement,
             mut out = cb(buf, indent)
             out = cb(out, sink)
             out = cb(out, " = ")
-            out = match emit_expr(out, prog, es.expr) { []byte as o => o; error as err => return err }
+            // wrap the branch value into the if's RESULT type (`slot`) — a bare case / `[]case` / null
+            // lands in the variant/optional/slice result, exactly like a match arm's sink (emit_as).
+            out = match emit_as(out, prog, slot, es.expr) { []byte as o => o; error as err => return err }
             cb(out, ";\n")
         }
         _ => emit_stmt(buf, s, false, prog, checker::Void { }, indent)
@@ -1690,7 +1697,7 @@ fn emit_stmt_value(buf: []byte, prog: checker::TProgram, s: checker::TStatement,
 // emit_branch_value — emit a BRANCH block (the `if`-value then/else): all but the last
 // statement normally, the LAST via emit_stmt_value (its trailing value -> `sink`). An empty
 // branch yields nothing (the checker forbids a value-typed empty branch). (C: `emit_branch_value`.)
-fn emit_branch_value(buf: []byte, prog: checker::TProgram, body: []checker::TStatement, sink: str, indent: str) -> []byte | error {
+fn emit_branch_value(buf: []byte, prog: checker::TProgram, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
     mut out = buf
     mut i = 0
     loop {
@@ -1699,7 +1706,7 @@ fn emit_branch_value(buf: []byte, prog: checker::TProgram, body: []checker::TSta
         i++
     }
     if body.len > 0 {
-        out = match emit_stmt_value(out, prog, body[body.len - 1], sink, indent) { []byte as o => o; error as err => return err }
+        out = match emit_stmt_value(out, prog, body[body.len - 1], slot, sink, indent) { []byte as o => o; error as err => return err }
     }
     out
 }
@@ -1724,9 +1731,9 @@ fn emit_if_value(buf: []byte, prog: checker::TProgram, e: checker::TExpr, f: che
     out = cb(out, "; if (")
     out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
     out = cb(out, ") {\n")
-    out = match emit_branch_value(out, prog, f.then_blk, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, f.then_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
     out = cb(out, "} else {\n")
-    out = match emit_branch_value(out, prog, f.else_blk, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, f.else_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
     out = cb(out, "} ")
     out = cb(out, tmp)
     cb(out, "; })")
@@ -2093,7 +2100,10 @@ fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value:
 // is an honest barrier — the VM DOES support str patterns (name_eq), so this is a true
 // codegen-only gap (M.3). (C: `cg_emit_lit_pattern`.)
 fn cg_emit_lit_pattern(buf: []byte, lit: parser::Expr) -> []byte | error {
-    match lit {
+    // descend to the variant `.kind` — `Expr` is `struct { kind: ExprKind }` in the .tks model
+    // (the C twin's tk_expr is a tagged union, so its cg_emit_lit_pattern matches `lit` directly —
+    // a known parser-AST model divergence between the C bootstrap and the self-host corpus).
+    match lit.kind {
         parser::Number as n => {
             if n.is_float { return cb_f64_literal(buf, n.fval) }
             cb_i128(buf, n.value)
@@ -2138,11 +2148,19 @@ fn cg_emit_case_key_str(pat: parser::Pattern) -> str | error {
                     null => error { message = "codegen: slice pattern without a slice type (internal)" }
                     parser::TypeExpr as st => cg_member_key_texpr_str(st)
                 }
-            } else { cg_path_last(bp.type_name) }
+            } else { cg_case_name_escaped(cg_path_last(bp.type_name)) }
         }
-        parser::FieldPattern as fp => cg_path_last(fp.type_name)
+        parser::FieldPattern as fp => cg_case_name_escaped(cg_path_last(fp.type_name))
         _ => error { message = "codegen: case key over a non-bind/field pattern (internal)" }
     }
+}
+
+// cg_case_name_escaped — keyword-escape a case name (the union FIELD identifier + tag-suffix
+// source): a `bool` case → `bool_`, so the destructure `.as.bool_` and tag `TK_TAG_..._BOOL_`
+// match the field/tag definitions (cg_member_key escapes the field+tag; the pattern side must
+// agree). Mirrors the C `cb_ident` keyword-escape applied in `cg_emit_case_key`.
+fn cg_case_name_escaped(name: str) -> str {
+    if cg_is_c_keyword(name) { teko::str::concat(name, "_") } else { name }
 }
 
 // emit_pat_test — emit the boolean TEST that `_s` (`subj`) matches `pat`. `variantT` is the
@@ -3690,6 +3708,7 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     b = cb(b, "#include <stdint.h>\n")
     b = cb(b, "#include <stdbool.h>\n")
     b = cb(b, "#include <stdlib.h>\n")   // malloc/abort — slice copy-append (fixed+copy)
+    b = cb(b, "#include <math.h>\n")      // floor/… — float ops the corpus lowers inline (link -lm)
     b = cb(b, "#include \"teko_rt.h\"\n")
     b = cb(b, "#include \"assert.h\"\n\n")   // teko::assert seed decls (driver adds its -I)
 
