@@ -60,6 +60,31 @@ _Noreturn static void vm_unsupported(const char *msg) {
 }
 
 // =========================================================================
+// C1.6 — RUNTIME PANICS CARRY file:line:col. A runtime panic (÷0, bad cast,
+// index-out-of-bounds) is raised AS the VM evaluates a typed node, so the node's
+// {line,col} (tast.h, copied from the untyped expr at C1-POS) locates the offence.
+// We print "<line>:<col>: " to stderr FIRST, then tail-call the runtime panic
+// helper, which prints the CANONICAL "teko: panic: <msg>\n" (M.1 — the panic
+// message stays byte-for-byte identical to the native path; we only PREFIX a
+// locator the native path does not yet have). A 0 line means "unknown" (the node
+// carried no position) — we then skip the locator and the panic reads as before.
+//
+// FILE is NOT included: the typed tree (tk_tprogram / tk_titem / tk_texpr in
+// tast.h) carries no `.file`, and tk_vm_run(tk_tprogram) receives no filename, so
+// the file is not reachable at a panic site WITHOUT threading a new field through
+// tast.h + the checker + the public VM entry (out of this crumb's edit scope —
+// vm.c/vm.tks only). File-threading is DEFERRED; we emit the honest "line:col:".
+static void vm_panic_pos(uint32_t line, uint32_t col) {
+    if (line == 0) return;   // no position recorded — fall through to the bare runtime panic
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
+    if (n > 0) fputs(buf, stderr);
+}
+_Noreturn static void vm_panic_div0_at(const tk_texpr *e) { vm_panic_pos(e->line, e->col); tk_panic_div0(); }
+_Noreturn static void vm_panic_cast_at(const tk_texpr *e) { vm_panic_pos(e->line, e->col); tk_panic_cast(); }
+_Noreturn static void vm_panic_oob_at (const tk_texpr *e) { vm_panic_pos(e->line, e->col); tk_panic_oob();  }
+
+// =========================================================================
 // The VALUE model (M.0 — a tagged union; integers all held in a 128-bit carrier,
 // signedness/width tracked alongside so the F3 guards can reproduce codegen's
 // panic checks exactly; floats held in a `double` carrier + width). Bool, str (a
@@ -471,7 +496,7 @@ static tk_value eval_binary(const tk_texpr *e, tk_venv *env) {
             case TK_TOKEN_MINUS: res = a - b; break;
             case TK_TOKEN_STAR:  res = a * b; break;
             case TK_TOKEN_SLASH:
-                if (b == 0.0) tk_panic_div0();   // float ÷0 -> PANIC (mirrors codegen, M.1)
+                if (b == 0.0) vm_panic_div0_at(e);   // float ÷0 -> PANIC, positioned at this node (C1.6; mirrors codegen, M.1)
                 res = a / b; break;
             case TK_TOKEN_PERCENT:
                 vm_unsupported("'%' on a float value not supported (checker should reject)");
@@ -497,12 +522,16 @@ static tk_value eval_binary(const tk_texpr *e, tk_venv *env) {
         // Operands are already in-range for their width; the quotient/remainder of
         // in-range values is identical at any carrier width — so a 128-bit checked op +
         // norm_int width-truncation reproduces tk_div_<width>/tk_mod_<width> exactly.
+        // C1.6 — POSITION the ÷0 panic at THIS node before the runtime helper fires (the
+        // checked_* helpers still call tk_panic_div0 as the canonical message — M.1).
         unsigned __int128 res;
         if (is_signed) {
             __int128 a = v_as_i128(lv), b = v_as_i128(rv);
+            if (b == 0) vm_panic_div0_at(e);
             res = (unsigned __int128)(isdiv ? checked_div_i(a, b) : checked_mod_i(a, b));
         } else {
             unsigned __int128 a = v_as_u128(lv), b = v_as_u128(rv);
+            if (b == 0) vm_panic_div0_at(e);
             res = isdiv ? checked_div_u(a, b) : checked_mod_u(a, b);
         }
         return norm_int(res, is_signed, width);
@@ -672,18 +701,18 @@ static tk_value eval_cast(const tk_texpr *e, tk_venv *env) {
     if (sflt && !dflt) {
         if (iv.tag != TK_VAL_FLOAT) vm_unsupported("cast of a non-float value not yet supported");
         double f = iv.as.fl.f;
-        if (f != f) tk_panic_cast();                        // NaN never converts
+        if (f != f) vm_panic_cast_at(e);                    // NaN never converts (C1.6 — positioned)
         double t = f < 0 ? -__builtin_floor(-f) : __builtin_floor(f);   // trunc toward zero
         bool dsigned = prim_is_signed(dst);
         int  dwidth  = prim_width(dst);
         if (dsigned) {
             // representable closed interval on the double axis
             double lo = (double)i_min_of(dwidth), hi = (double)i_max_of(dwidth);
-            if (t < lo || t > hi) tk_panic_cast();          // also catches ±∞
+            if (t < lo || t > hi) vm_panic_cast_at(e);      // also catches ±∞ (C1.6 — positioned)
             return norm_int((unsigned __int128)(__int128)t, true, dwidth);
         } else {
             double hi = (double)u_max_of(dwidth);
-            if (t < 0 || t > hi) tk_panic_cast();           // negatives never fit; also ±∞
+            if (t < 0 || t > hi) vm_panic_cast_at(e);       // negatives never fit; also ±∞ (C1.6 — positioned)
             return norm_int((unsigned __int128)t, false, dwidth);
         }
     }
@@ -702,22 +731,22 @@ static tk_value eval_cast(const tk_texpr *e, tk_venv *env) {
         if (prim_is_signed(src)) {
             __int128 v = v_as_i128(iv);
             if (dsigned) {
-                if (v < i_min_of(dwidth) || v > i_max_of(dwidth)) tk_panic_cast();
+                if (v < i_min_of(dwidth) || v > i_max_of(dwidth)) vm_panic_cast_at(e);   // C1.6 — positioned
                 return norm_int((unsigned __int128)v, true, dwidth);
             }
             // signed source -> unsigned dst: negatives never fit; upper bound is 2^w-1.
-            if (v < 0) tk_panic_cast();
-            if ((unsigned __int128)v > u_max_of(dwidth)) tk_panic_cast();
+            if (v < 0) vm_panic_cast_at(e);                                  // C1.6 — positioned
+            if ((unsigned __int128)v > u_max_of(dwidth)) vm_panic_cast_at(e);   // C1.6 — positioned
             return norm_int((unsigned __int128)v, false, dwidth);
         } else {
             unsigned __int128 v = v_as_u128(iv);
             if (dsigned) {
                 // unsigned source -> signed dst: upper bound is the signed max.
-                if (v > (unsigned __int128)i_max_of(dwidth)) tk_panic_cast();
+                if (v > (unsigned __int128)i_max_of(dwidth)) vm_panic_cast_at(e);   // C1.6 — positioned
                 return norm_int(v, true, dwidth);
             }
             // unsigned source -> unsigned dst: upper bound 2^w-1 (u128 never narrows further).
-            if (v > u_max_of(dwidth)) tk_panic_cast();
+            if (v > u_max_of(dwidth)) vm_panic_cast_at(e);   // C1.6 — positioned
             return norm_int(v, false, dwidth);
         }
     }
@@ -897,11 +926,11 @@ static tk_value eval_index(const tk_texpr *e, tk_venv *env) {
     if (idx.tag != TK_VAL_INT) vm_unsupported("subscript index is not an integer (internal: checker should reject)");
     unsigned __int128 i = idx.as.i.bits;
     if (recv.tag == TK_VAL_STR) {
-        if (i >= recv.as.s.len) tk_panic_oob();
+        if (i >= recv.as.s.len) vm_panic_oob_at(e);   // C1.6 — positioned at the subscript node
         return v_int((uint64_t)recv.as.s.ptr[(size_t)i], false, 8);   // byte == u8
     }
     if (recv.tag == TK_VAL_LIST) {   // slice subscript: bounds-checked, same panic as native (M.1)
-        if (i >= recv.as.list.len) tk_panic_oob();
+        if (i >= recv.as.list.len) vm_panic_oob_at(e);   // C1.6 — positioned at the subscript node
         return recv.as.list.ptr[(size_t)i];
     }
     vm_unsupported("subscript on a non-indexable value (internal: checker should reject)");
@@ -1114,7 +1143,10 @@ static tk_flow exec_stmt(const tk_tstatement *s, tk_venv *env) {
                 case TK_TOKEN_SLASHEQ:
                 case TK_TOKEN_PERCENTEQ: {
                     // checked: route through the guard so ÷0 PANICS like the native path.
+                    // C1.6 — POSITION the ÷0 panic at the RHS expr (the only positioned node
+                    // in a compound-assign; tk_tassign carries no line/col) before the helper.
                     bool isdiv = (op == TK_TOKEN_SLASHEQ);
+                    if (b == 0) vm_panic_div0_at(&s->as.assign.value);
                     if (sgn) raw = (uint64_t)(isdiv ? checked_div_i((int64_t)a,(int64_t)b)
                                                     : checked_mod_i((int64_t)a,(int64_t)b));
                     else     raw = isdiv ? checked_div_u(a,b) : checked_mod_u(a,b);

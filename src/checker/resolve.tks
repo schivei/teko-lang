@@ -114,3 +114,64 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
         }
     }
 }
+
+// (C1.8) the surface spelling of a prim kind — the same names builtin_type accepts (scope.tks),
+// so a rendered mismatch reads in the user's own vocabulary. Mirror of resolve.c::prim_name.
+fn prim_name(k: PrimKind) -> str {
+    match k {
+        U8 => "u8"; U16 => "u16"; U32 => "u32"; U64 => "u64"; U128 => "u128"
+        I8 => "i8"; I16 => "i16"; I32 => "i32"; I64 => "i64"; I128 => "i128"
+        F16 => "f16"; F32 => "f32"; F64 => "f64"
+        Bool => "bool"
+    }
+}
+
+// (C1.8) render a semantic Type to a human string for diagnostics ("expected X, found Y"):
+//   prims → "i32"/… , "byte", "str", "error", "void", slice → "[]<elem>", optional → "<inner>?",
+//   variant → "A | B | …", named → "<name>". Recursion builds slice/optional/variant bottom-up.
+// Mirror of resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it
+// never touches the surface `error` value), so it is materialized now, not deferred to E2.
+// (A SENTINEL slice/optional — a `Void`-marker element/inner, the untyped `empty()` / bare `null`
+//  — renders its hole as "_", matching the C twin's NULL-pointer case.)
+pub fn type_render(t: Type) -> str {
+    match t {
+        Prim as p     => prim_name(p.kind)
+        Byte          => "byte"
+        Str           => "str"
+        Error         => "error"
+        Void          => "void"
+        Named as n    => n.name
+        Slice as s    => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
+        Optional as o => match o.inner   { Void => "_?";  _ => $"{type_render(o.inner)}?" }
+        Variant as v  => render_members(v.members)
+        Func as f     => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+    }
+}
+
+// (C1.8) render a function type "(p0, p1, …) -> ret" — mirror of the FUNC branch of
+// resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
+fn render_func(f: Func) -> str {
+    mut params = ""
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if i > 0 { params = $"{params}, " }
+        params = $"{params}{type_render(f.params[i])}"
+        i++
+    }
+    $"({params}) -> {type_render(f.ret)}"
+}
+
+// (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the
+// variant branch of resolve.c::tk_type_render.
+fn render_members(members: []Type) -> str {
+    if members.len == 0 { return "<empty variant>" }
+    mut out = type_render(members[0])
+    mut i = 1
+    loop {
+        if i >= members.len { break }
+        out = $"{out} | {type_render(members[i])}"
+        i++
+    }
+    out
+}

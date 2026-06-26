@@ -12,6 +12,116 @@ tk_error tk_error_named(const char *msg, tk_str name) {
     return tk_error_make(buf);
 }
 
+// (C1.8) the surface spelling of a prim kind — the same names tk_builtin_type accepts (scope.c),
+// so a rendered mismatch reads in the user's own vocabulary ("i32", "f64", "bool", …).
+static const char *prim_name(tk_prim_kind k) {
+    switch (k) {
+        case TK_PRIM_U8:   return "u8";   case TK_PRIM_U16:  return "u16";
+        case TK_PRIM_U32:  return "u32";  case TK_PRIM_U64:  return "u64";
+        case TK_PRIM_U128: return "u128";
+        case TK_PRIM_I8:   return "i8";   case TK_PRIM_I16:  return "i16";
+        case TK_PRIM_I32:  return "i32";  case TK_PRIM_I64:  return "i64";
+        case TK_PRIM_I128: return "i128";
+        case TK_PRIM_F16:  return "f16";  case TK_PRIM_F32:  return "f32";
+        case TK_PRIM_F64:  return "f64";
+        case TK_PRIM_BOOL: return "bool";
+    }
+    return "<prim>";
+}
+
+// (C1.8) a fresh whole-compile-lifetime copy of a NUL-terminated string (tk_alloc; no free in the
+// bootstrap — M.5 arena-style). Used to hand the static prim/marker spellings back as owned strings
+// so callers (the renderer's recursive composers) treat every result uniformly.
+static char *dup_cstr(const char *s) {
+    size_t n = strlen(s);
+    char *out = tk_alloc(n + 1); if (!out) abort();
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+// (C1.8) render a semantic type to a human string for diagnostics. Recursion builds slice/optional/
+// variant bottom-up; each result is a fresh tk_alloc'd, whole-compile-lifetime string. See resolve.h.
+const char *tk_type_render(tk_type t) {
+    switch (t.tag) {
+        case TK_TYPE_PRIM:  return dup_cstr(prim_name(t.as.prim));
+        case TK_TYPE_BYTE:  return dup_cstr("byte");
+        case TK_TYPE_STR:   return dup_cstr("str");
+        case TK_TYPE_ERROR: return dup_cstr("error");
+        case TK_TYPE_VOID:  return dup_cstr("void");
+        case TK_TYPE_NAMED: {
+            // a nominal user type — its declared name verbatim.
+            size_t n = t.as.named.name.len;
+            char *out = tk_alloc(n + 1); if (!out) abort();
+            if (n != 0) memcpy(out, t.as.named.name.ptr, n);
+            out[n] = '\0';
+            return out;
+        }
+        case TK_TYPE_SLICE: {
+            // []<elem>; a SENTINEL slice (element == NULL, the untyped `empty()`) renders "[]_".
+            const char *el = t.as.slice.element ? tk_type_render(*t.as.slice.element) : "_";
+            size_t cap = strlen(el) + 3;   // "[]" + el + NUL
+            char *out = tk_alloc(cap); if (!out) abort();
+            snprintf(out, cap, "[]%s", el);
+            return out;
+        }
+        case TK_TYPE_OPTIONAL: {
+            // <inner>?; a SENTINEL optional (inner == NULL, a bare `null`) renders "_?".
+            const char *in = t.as.optional.inner ? tk_type_render(*t.as.optional.inner) : "_";
+            size_t cap = strlen(in) + 2;   // in + "?" + NUL
+            char *out = tk_alloc(cap); if (!out) abort();
+            snprintf(out, cap, "%s?", in);
+            return out;
+        }
+        case TK_TYPE_VARIANT: {
+            // "A | B | …" — join each member with " | ". Two-pass: size, then fill.
+            if (t.as.variant.len == 0) return dup_cstr("<empty variant>");
+            const char *sep = " | ";
+            size_t seplen = strlen(sep);
+            size_t cap = 1;   // NUL
+            const char **parts = tk_alloc(t.as.variant.len * sizeof *parts); if (!parts) abort();
+            for (size_t i = 0; i < t.as.variant.len; i += 1) {
+                parts[i] = tk_type_render(t.as.variant.members[i]);
+                cap += strlen(parts[i]);
+                if (i + 1 < t.as.variant.len) cap += seplen;
+            }
+            char *out = tk_alloc(cap); if (!out) abort();
+            out[0] = '\0';
+            for (size_t i = 0; i < t.as.variant.len; i += 1) {
+                strcat(out, parts[i]);
+                if (i + 1 < t.as.variant.len) strcat(out, sep);
+            }
+            tk_free0(parts);
+            return out;
+        }
+        case TK_TYPE_FUNC: {
+            // a function type — uncommon in user-facing mismatch messages, but render it honestly
+            // as "(p0, p1, …) -> ret" rather than a placeholder (M.3 — show what we know).
+            const char *ret = t.as.func.ret ? tk_type_render(*t.as.func.ret) : "void";
+            const char **ps = NULL;
+            size_t cap = strlen("() -> ") + strlen(ret) + 1;
+            if (t.as.func.nparams > 0) {
+                ps = tk_alloc(t.as.func.nparams * sizeof *ps); if (!ps) abort();
+                for (size_t i = 0; i < t.as.func.nparams; i += 1) {
+                    ps[i] = tk_type_render(t.as.func.params[i]);
+                    cap += strlen(ps[i]);
+                    if (i + 1 < t.as.func.nparams) cap += 2;   // ", "
+                }
+            }
+            char *out = tk_alloc(cap); if (!out) abort();
+            out[0] = '\0';
+            strcat(out, "(");
+            for (size_t i = 0; i < t.as.func.nparams; i += 1) {
+                strcat(out, ps[i]);
+                if (i + 1 < t.as.func.nparams) strcat(out, ", ");
+            }
+            strcat(out, ") -> "); strcat(out, ret);
+            if (ps) tk_free0(ps);
+            return out;
+        }
+    }
+    return dup_cstr("<type>");
+}
+
 static bool name_eq(tk_str a, tk_str b) {
     return a.len == b.len && memcmp(a.ptr, b.ptr, a.len) == 0;
 }

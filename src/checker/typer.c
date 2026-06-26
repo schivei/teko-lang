@@ -97,7 +97,9 @@ static tk_typed_stmt_result type_binding(tk_binding b, tk_env env, tk_type_table
         tk_type_result a = tk_resolve_type(b.type_ann, table); if (!a.ok) return sfail(a.as.error);
         if (!assignable_to(v.as.value.type, a.as.value, table)) {   // B.14 widening (case → variant) OR C6: a fitting literal adopts T (leaf stays i64)
             const char *why = annotated_literal_reason(b.value, a.as.value);
-            if (why != NULL) return smsg(why);
+            if (why != NULL)   // (C1.8) expected = the annotation, actual = the bound value's type
+                return sfail(tk_error_types(tk_error_make(why),
+                                            tk_type_render(a.as.value), tk_type_render(v.as.value.type)));
         }
         bound = a.as.value;
     }
@@ -112,7 +114,9 @@ static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table t
     if (!tb.as.value.is_mut) return smsg("cannot assign to immutable binding — declare it `mut` (B.21)");
     tk_texpr_result v = tk_typer_expr(a.value, env, table); if (!v.ok) return sfail(v.as.error);
     if (!tk_type_eq(&tb.as.value.type, &v.as.value.type)) {
-        if (!tk_literal_adopts(v.as.value, tb.as.value.type)) return smsg("assigned value does not match the target type");
+        if (!tk_literal_adopts(v.as.value, tb.as.value.type))   // (C1.8) expected = target, actual = value
+            return sfail(tk_error_types(tk_error_make("assigned value does not match the target type"),
+                                        tk_type_render(tb.as.value.type), tk_type_render(v.as.value.type)));
         v.as.value.type = tb.as.value.type;   // a fitting literal adopts the target's type (C6)
     }
     tk_tstatement node = { .tag = TK_TSTMT_ASSIGN, .as.assign = { a.name, a.op, v.as.value } };
@@ -179,46 +183,58 @@ static bool assignable_to(tk_type from, tk_type to, tk_type_table table) {   // 
             if (tk_type_eq(&from, &tv.as.variant.members[i])) return true;
     return false;
 }
-static const char *check_returns(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table);   // fwd (mutual)
-static const char *check_returns_inexpr(const tk_texpr *e, tk_type ret, tk_type_table table) {
+// (C1.8) the return-/trailing-value checks return a tk_error rather than a bare const char*, so a
+// type mismatch can carry expected (the declared return type) vs actual (the produced value's type).
+// CONVENTION: `.message == NULL` means "ok" (the old NULL-is-ok contract, now on the struct). The
+// non-mismatch diagnostics (bare `return` in a value-returning fn) carry only a message — no types.
+static inline tk_error ret_ok(void)            { return tk_error_make(NULL); }
+static inline bool     ret_is_ok(tk_error e)   { return e.message == NULL; }
+
+static tk_error check_returns(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table);   // fwd (mutual)
+static tk_error check_returns_inexpr(const tk_texpr *e, tk_type ret, tk_type_table table) {
     if (e->tag == TK_TEXPR_IF) {
-        const char *t = check_returns(e->as.if_expr.then_blk, e->as.if_expr.nthen, ret, table); if (t) return t;
+        tk_error t = check_returns(e->as.if_expr.then_blk, e->as.if_expr.nthen, ret, table); if (!ret_is_ok(t)) return t;
         return check_returns(e->as.if_expr.else_blk, e->as.if_expr.nelse, ret, table);
     }
     if (e->tag == TK_TEXPR_MATCH) {   // arm bodies are blocks now — a `return` inside one is checked (B.20)
         for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
-            const char *t = check_returns(e->as.match_expr.arms[i].body, e->as.match_expr.arms[i].nbody, ret, table);
-            if (t) return t;
+            tk_error t = check_returns(e->as.match_expr.arms[i].body, e->as.match_expr.arms[i].nbody, ret, table);
+            if (!ret_is_ok(t)) return t;
         }
     }
-    return NULL;
+    return ret_ok();
 }
-static const char *check_return_stmt(const tk_tstatement *s, tk_type ret, tk_type_table table) {
+static tk_error check_return_stmt(const tk_tstatement *s, tk_type ret, tk_type_table table) {
     switch (s->tag) {
         case TK_TSTMT_RETURN:
-            if (s->as.ret.has_value)
-                return (assignable_to(s->as.ret.value.type, ret, table)
-                        || tk_literal_adopts(s->as.ret.value, ret)) ? NULL   // a fitting int/float/byte literal adopts the return type (C6)
-                     : "return value does not match the function's declared return type";
-            return tk_type_is_void(&ret) ? NULL
-                 : "bare `return` in a function that declares a value-returning (non-void) return type";
+            if (s->as.ret.has_value) {
+                if (assignable_to(s->as.ret.value.type, ret, table) || tk_literal_adopts(s->as.ret.value, ret))
+                    return ret_ok();   // a fitting int/float/byte literal adopts the return type (C6)
+                // (C1.8) expected = declared return type, actual = the `return e` value's type
+                return tk_error_types(tk_error_make("return value does not match the function's declared return type"),
+                                      tk_type_render(ret), tk_type_render(s->as.ret.value.type));
+            }
+            return tk_type_is_void(&ret) ? ret_ok()
+                 : tk_error_make("bare `return` in a function that declares a value-returning (non-void) return type");
         case TK_TSTMT_LOOP: return check_returns(s->as.loop_stmt.body, s->as.loop_stmt.nbody, ret, table);
         case TK_TSTMT_EXPR: return check_returns_inexpr(&s->as.expr_stmt.expr, ret, table);
-        default:            return NULL;
+        default:            return ret_ok();
     }
 }
-static const char *check_returns(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table) {
-    for (size_t i = 0; i < n; i += 1) { const char *e = check_return_stmt(&stmts[i], ret, table); if (e) return e; }
-    return NULL;
+static tk_error check_returns(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table) {
+    for (size_t i = 0; i < n; i += 1) { tk_error e = check_return_stmt(&stmts[i], ret, table); if (!ret_is_ok(e)) return e; }
+    return ret_ok();
 }
-static const char *check_trailing_value(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table) {
-    if (n == 0) return NULL;
+static tk_error check_trailing_value(const tk_tstatement *stmts, size_t n, tk_type ret, tk_type_table table) {
+    if (n == 0) return ret_ok();
     const tk_tstatement *last = &stmts[n - 1];
-    if (last->tag != TK_TSTMT_EXPR) return NULL;   // trailing loop/if/match → no claim (guard)
-    if (tk_texpr_diverges(&last->as.expr_stmt.expr)) return NULL;   // a trailing panic/exit yields no value (M.3)
-    return (assignable_to(last->as.expr_stmt.expr.type, ret, table)
-            || tk_literal_adopts(last->as.expr_stmt.expr, ret)) ? NULL   // a fitting trailing literal adopts the return type (C6)
-         : "the function's final expression does not match its declared return type";
+    if (last->tag != TK_TSTMT_EXPR) return ret_ok();   // trailing loop/if/match → no claim (guard)
+    if (tk_texpr_diverges(&last->as.expr_stmt.expr)) return ret_ok();   // a trailing panic/exit yields no value (M.3)
+    if (assignable_to(last->as.expr_stmt.expr.type, ret, table) || tk_literal_adopts(last->as.expr_stmt.expr, ret))
+        return ret_ok();   // a fitting trailing literal adopts the return type (C6)
+    // (C1.8) expected = declared return type, actual = the trailing expression's type
+    return tk_error_types(tk_error_make("the function's final expression does not match its declared return type"),
+                          tk_type_render(ret), tk_type_render(last->as.expr_stmt.expr.type));
 }
 
 // ---- W5-cf-2: loop-label validation (the Teko twin checks the same; NULL = ok) ----
@@ -291,10 +307,10 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
     tk_type ret = function_return(f, table);
     tk_typed_block_result tb = tk_type_block(f.body, f.nbody, local, table);
     if (!tb.ok) return (tk_tfunction_result){ .ok = false, .as.error = tb.as.error };
-    { const char *why = check_returns(tb.as.value.stmts, tb.as.value.n, ret, table);        // C5: each `return e` matches
-      if (why) return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make(why) }; }
-    { const char *why = check_trailing_value(tb.as.value.stmts, tb.as.value.n, ret, table); // C5: trailing value (when present)
-      if (why) return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make(why) }; }
+    { tk_error e = check_returns(tb.as.value.stmts, tb.as.value.n, ret, table);        // C5: each `return e` matches
+      if (!ret_is_ok(e)) return (tk_tfunction_result){ .ok = false, .as.error = e }; }   // (C1.8) carries expected/actual
+    { tk_error e = check_trailing_value(tb.as.value.stmts, tb.as.value.n, ret, table); // C5: trailing value (when present)
+      if (!ret_is_ok(e)) return (tk_tfunction_result){ .ok = false, .as.error = e }; }   // (C1.8) carries expected/actual
     { tk_str seen[TK_MAX_LABELS]; size_t nseen = 0;                                  // W5-cf-2: loop labels resolve + are unique
       const char *why = check_labels(tb.as.value.stmts, tb.as.value.n, NULL, false, seen, &nseen);
       if (why) return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make(why) }; }
@@ -320,6 +336,19 @@ tk_titem_result tk_type_item(tk_item item, tk_env env, tk_type_table table) {
         }
     }
     return (tk_titem_result){ .ok = false, .as.error = tk_error_make("unknown item") };
+}
+
+// (C1.8) surface an inner checker error at the program level. Builds the located message string
+// (tk_diag_at — file:line:col baked in, the FALLBACK the driver prints when it can't read the file)
+// AND sets the STRUCTURED file/line/col on the error so the driver's renderer can read the source
+// line + draw a caret. expected/actual carried by the inner error are PRESERVED (not dropped when
+// re-wrapping), so a type mismatch still renders "expected X, found Y" after surfacing.
+static tk_error surface_at(tk_str file, uint32_t line, uint32_t col, tk_error inner) {
+    tk_error e = tk_error_make(tk_diag_at(file, line, col, inner.message));   // located string (fallback)
+    e = tk_error_at(e, file.ptr ? (const char *)file.ptr : NULL, line, col);  // structured position (renderer)
+    e = tk_error_types(e, inner.expected, inner.actual);                      // preserve expected/actual (C1.8)
+    e.severity = inner.severity;
+    return e;
 }
 
 tk_tprogram_result tk_type_program(tk_program program) {
@@ -349,7 +378,8 @@ tk_tprogram_result tk_type_program(tk_program program) {
             if (!ts.ok) {   // (C1-POS) prefer the failing expr's own position; the item's is the fallback
                 uint32_t el = ts.as.error.line ? ts.as.error.line : line;
                 uint32_t ec = ts.as.error.line ? ts.as.error.col  : col;
-                return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, el, ec, ts.as.error.message)) };
+                // (C1.8) located message string AND structured file/line/col + preserved expected/actual
+                return (tk_tprogram_result){ .ok = false, .as.error = surface_at(it.file, el, ec, ts.as.error) };
             }
             cur = ts.as.value.env;   // advance scope for subsequent statements
             items = tk_titem_list_push(items, (tk_titem){ .tag = TK_TITEM_STATEMENT, .as.statement = ts.as.value.node });
@@ -360,7 +390,8 @@ tk_tprogram_result tk_type_program(tk_program program) {
         if (!ti.ok) {   // (C1-POS) prefer the failing expr's own position; the item's is the fallback
             uint32_t el = ti.as.error.line ? ti.as.error.line : line;
             uint32_t ec = ti.as.error.line ? ti.as.error.col  : col;
-            return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(tk_diag_at(it.file, el, ec, ti.as.error.message)) };
+            // (C1.8) located message string AND structured file/line/col + preserved expected/actual
+            return (tk_tprogram_result){ .ok = false, .as.error = surface_at(it.file, el, ec, ti.as.error) };
         }
         items = tk_titem_list_push(items, ti.as.value);
     }

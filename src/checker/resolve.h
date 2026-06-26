@@ -25,4 +25,11 @@ tk_type_result resolve_named(tk_path path, tk_type_table table);   // shared wit
 // exhaustiveness see a named variant's cases without changing the nominal representation.
 tk_type tk_expand_variant(tk_type t, tk_type_table table);
 
+// (C1.8) RENDER a semantic type to a human string for diagnostics ("expected X, found Y"):
+//   prims → "i32"/"u64"/"f64"/"bool"/… (the surface spellings), "byte", "str", "error", "void",
+//   slice → "[]<elem>", optional → "<inner>?", variant → "A | B | …", named → "<name>".
+// The result is a fresh, whole-compile-lifetime string (tk_alloc; recursion for slice/optional/
+// variant builds it bottom-up). Never returns NULL (an unknown tag renders "<type>").
+const char *tk_type_render(tk_type t);
+
 #endif // TK_CHECK_RESOLVE_H

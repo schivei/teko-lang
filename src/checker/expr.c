@@ -83,12 +83,16 @@ static tk_texpr_result type_binary(tk_binary b, tk_env env, tk_type_table table)
         // + - * / over the native numeric set (B.38): ints AND floats. Same-type only
         // (B.22 — no promotion, no mixed int/float; cross-family needs an explicit `to`).
         if (!is_numeric(lt)) return xerr("arithmetic needs a numeric operand (int or float)");
-        if (!tk_type_eq(&lt, &rt)) return xerr("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)");
+        if (!tk_type_eq(&lt, &rt))   // (C1.8) expected = left's type, actual = right's
+            return xferr(tk_error_types(tk_error_make("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)"),
+                                        tk_type_render(lt), tk_type_render(rt)));
         return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = lt, .as.binary = { b.op, box(l.as.value), box(r.as.value) } });
     }
     if (op_is_arith_bitwise(b.op)) {   // the bitwise/% remainder (%, & | ^) — integer-only
         if (!is_integer(lt)) return xerr("bitwise/remainder needs an integer (not a float — B.38)");
-        if (!tk_type_eq(&lt, &rt)) return xerr("operands must be the same type (no promotion — B.22)");
+        if (!tk_type_eq(&lt, &rt))   // (C1.8) expected = left's type, actual = right's
+            return xferr(tk_error_types(tk_error_make("operands must be the same type (no promotion — B.22)"),
+                                        tk_type_render(lt), tk_type_render(rt)));
         return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = lt, .as.binary = { b.op, box(l.as.value), box(r.as.value) } });
     }
     if (b.op == TK_TOKEN_ANDAND || b.op == TK_TOKEN_OROR) {   // logical && / || — bool operands, bool result, short-circuit (matches C + the VM)
@@ -223,7 +227,11 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
         if (tk_type_is_void(&a.as.value.type)) return xerr("a `void` expression cannot be passed as an argument (M.1)");
         tk_type pt = ft.as.func.params[i];
         if (!tk_type_eq(&a.as.value.type, &pt)) {
-            if (!tk_literal_adopts(a.as.value, pt)) return xerr("argument type mismatch");
+            // (C1.8) attach expected (the parameter type) vs actual (the argument's type) so the
+            // driver renders "expected <pt>, found <arg>". The C1-POS wrapper adds the position.
+            if (!tk_literal_adopts(a.as.value, pt))
+                return xferr(tk_error_types(tk_error_make("argument type mismatch"),
+                                            tk_type_render(pt), tk_type_render(a.as.value.type)));
             a.as.value.type = pt;   // a fitting literal arg adopts the parameter's type (C6)
         }
         args = tk_texpr_list_push(args, a.as.value);

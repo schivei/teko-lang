@@ -127,6 +127,70 @@ static int fail(const char *path, const char *message) {
 }
 
 // =========================================================================
+// (C1.8/E2) RICH DIAGNOSTIC RENDERER — a host edge (its .tks mirror is driver.tks/main.tks,
+// both already noted as deferred host edges; the structured tk_error fields are the E2 carve-out,
+// not yet on the Teko surface `error`). When the checker hands back a STRUCTURED error (file +
+// line + col set — C1-POS/C1.8), print the located header (unchanged behavior), then the offending
+// SOURCE LINE read from the file, then a caret '^' aligned under the column, and — when present —
+// an "expected … found …" type line. With no structured position, fall back to plain `fail`.
+// =========================================================================
+
+// Find the 1-based `line` within `src`, returning a VIEW of its bytes (no trailing newline) in
+// *out. Returns true if the line exists. (Contained host-text walk — same spirit as compute_loc.)
+static bool nth_line(tk_str src, uint32_t line, tk_str *out) {
+    if (line == 0) return false;
+    uint32_t cur = 1;
+    size_t start = 0;
+    for (size_t i = 0; i < src.len; i += 1) {
+        if (cur == line) {
+            size_t end = i;                          // scan to end-of-line from `start`
+            while (end < src.len && src.ptr[end] != '\n') end += 1;
+            *out = (tk_str){ .ptr = src.ptr + start, .len = end - start };
+            return true;
+        }
+        if (src.ptr[i] == '\n') { cur += 1; start = i + 1; }
+    }
+    if (cur == line && start <= src.len) {           // the final line (no trailing '\n')
+        *out = (tk_str){ .ptr = src.ptr + start, .len = src.len - start };
+        return true;
+    }
+    return false;
+}
+
+// Print the offending source line + a caret under column `col` (1-based). The caret prefix
+// REPRODUCES the source line's leading bytes up to col-1, emitting a TAB where the source has a
+// tab and a SPACE otherwise — so the caret aligns under proportional/tab-indented code. Tabs
+// count as ONE column, matching the lexer's compute_loc convention (lexer.c). If col exceeds the
+// line length we clamp the caret to the line's end (still honest — points at the last column).
+static void print_caret(tk_str srcline, uint32_t col) {
+    fprintf(stderr, "  %.*s\n", (int)srcline.len, (const char *)srcline.ptr);
+    fputs("  ", stderr);                             // align under the 2-space source indent above
+    uint32_t upto = col > 0 ? col - 1 : 0;
+    for (uint32_t i = 0; i < upto; i += 1) {
+        char c = (i < srcline.len && srcline.ptr[i] == '\t') ? '\t' : ' ';
+        fputc(c, stderr);
+    }
+    fputs("^\n", stderr);
+}
+
+// Render a checker error richly. `e.message` already carries file:line:col (the located string —
+// the fallback). When structured fields are set, add the source snippet + caret + type line.
+static int fail_diag(tk_error e) {
+    fprintf(stderr, "teko: %s\n", e.message);        // the located header (unchanged behavior)
+    if (e.file != NULL && e.line > 0) {
+        // e.file is a NUL-terminated path (discover.c::owned_str / the main.tks literal keep the
+        // NUL), so it is safe to fopen here (the one contained host edge — M.1).
+        tk_str_result fr = tk_read_file(e.file);
+        tk_str srcline;
+        if (fr.ok && nth_line(fr.as.value, e.line, &srcline))
+            print_caret(srcline, e.col);
+    }
+    if (e.expected != NULL && e.actual != NULL)
+        fprintf(stderr, "  expected %s, found %s\n", e.expected, e.actual);
+    return 1;
+}
+
+// =========================================================================
 // B2 — the BACKEND wiring (F2): write the emitted C, invoke the host `cc`, produce the
 // native binary. Teko compiles PROJECTS (§2.6), so the output stem comes from the
 // manifest `name`, not from any single input file.
@@ -257,7 +321,7 @@ static int project_frontend(const char *dir, tk_tprogram *out, tk_manifest *mani
 
     // --- check the WHOLE merged program (M.1 — whole program checked together) ---
     tk_tprogram_result checked = tk_type_program(program);
-    if (!checked.ok) return fail("", checked.as.error.message);   // message already carries file:line:col (W-loc-2)
+    if (!checked.ok) return fail_diag(checked.as.error);   // (C1.8) located header + source snippet/caret + expected/actual
 
     printf("teko: %s: project assembled (%zu items) and type-checked OK\n",
            dir, program.len);

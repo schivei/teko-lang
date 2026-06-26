@@ -99,6 +99,72 @@ type Flow = variant Normal | Return | Break | Continue
 fn vm_str_eq(a: str, b: str) -> bool { a == b }
 
 // ---------------------------------------------------------------------------
+// C1.6 — RUNTIME PANICS CARRY file:line:col. A runtime panic (÷0, bad cast, index-out-of-
+// bounds) is raised AS the VM evaluates a typed node, so the node's {line,col} (TExpr, copied
+// from the untyped Expr at C1-POS) locates the offence. We print "<line>:<col>: " to stderr
+// FIRST (via the runtime's stderr writer), then call the canonical runtime panic, which prints
+// "teko: panic: <msg>\n" (M.1 — the message stays byte-for-byte identical to the native path;
+// we only PREFIX a locator). A 0 line means "unknown" — we then skip the locator and the panic
+// reads as before. FILE is NOT included: the typed tree (TProgram/TItem/TExpr) carries no
+// `.file` and tk_vm_run(TProgram) receives no filename, so the file is not reachable at a panic
+// site WITHOUT a new field threaded through tast + the checker + the VM entry (out of this
+// crumb's scope — vm.c/vm.tks only). File-threading is DEFERRED; we emit the honest "line:col:".
+fn vm_panic_pos(line: u32, col: u32) {
+    if line == 0 { return }   // no position recorded — fall through to the bare runtime panic
+    teko::io::ewrite(teko::str::concat3(teko::u64_to_str(line to u64), ":", teko::u64_to_str(col to u64)))
+    teko::io::ewrite(": ")
+}
+fn vm_panic_div0_at(line: u32, col: u32) { vm_panic_pos(line, col); teko::panic_div0() }
+fn vm_panic_cast_at(line: u32, col: u32) { vm_panic_pos(line, col); teko::panic_cast() }
+fn vm_panic_oob_at (line: u32, col: u32) { vm_panic_pos(line, col); teko::panic_oob()  }
+
+// C1.6 — width range bounds (mirror the C `i_min_of`/`i_max_of`/`u_max_of`). The .tks cast
+// guard delegated its range check to the runtime `teko::cast`/`teko::float_to_int`, which take
+// NO position; to PREFIX the offending node's line:col before the canonical "impossible
+// conversion" panic, the positioned cast wrappers below re-derive that same check inline (the C
+// twin always checked inline) and call vm_panic_cast_at on failure. Bounds in the i128 carrier.
+fn i_min_of(width: u8) -> i128 { if width >= 128 { return (1 to i128) << 127 }; -((1 to i128) << (width - 1)) }
+fn i_max_of(width: u8) -> i128 { if width >= 128 { return ~((1 to i128) << 127) }; ((1 to i128) << (width - 1)) - 1 }
+fn u_max_of(width: u8) -> u128 { if width >= 128 { return ~(0 to u128) }; ((1 to u128) << width) - 1 }
+
+// vm_cast — positioned int->int checked conversion (mirrors the C eval_cast INT->INT guard:
+// the same i_min/i_max/u_max bounds, the same panic). Only called when cast_may_lose(src,dst).
+fn vm_cast(v: i128, src: checker::PrimKind, dst: checker::PrimKind, line: u32, col: u32) -> i128 {
+    let dwidth = prim_width(dst)
+    if prim_signed(src) {
+        if prim_signed(dst) {
+            if v < i_min_of(dwidth) || v > i_max_of(dwidth) { vm_panic_cast_at(line, col) }
+            return v
+        }
+        // signed source -> unsigned dst: negatives never fit; upper bound is 2^w-1.
+        if v < 0 { vm_panic_cast_at(line, col) }
+        if (v to u128) > u_max_of(dwidth) { vm_panic_cast_at(line, col) }
+        return v
+    }
+    let uv = v to u128
+    if prim_signed(dst) {
+        if uv > (i_max_of(dwidth) to u128) { vm_panic_cast_at(line, col) }   // unsigned src -> signed dst: signed max
+        return v
+    }
+    if uv > u_max_of(dwidth) { vm_panic_cast_at(line, col) }                 // unsigned src -> unsigned dst: 2^w-1
+    v
+}
+
+// vm_float_to_int — positioned float->int truncate (mirrors the C eval_cast FLOAT->INT guard:
+// NaN / ±∞ / out-of-range -> positioned "impossible conversion"). Truncates toward zero.
+fn vm_float_to_int(f: f64, dst: checker::PrimKind, line: u32, col: u32) -> i128 {
+    if f != f { vm_panic_cast_at(line, col) }                                // NaN never converts
+    let t = if f < 0.0 { -teko::floor(-f) } else { teko::floor(f) }          // trunc toward zero
+    let dwidth = prim_width(dst)
+    if prim_signed(dst) {
+        if t < (i_min_of(dwidth) to f64) || t > (i_max_of(dwidth) to f64) { vm_panic_cast_at(line, col) }   // also catches ±∞
+        return t to i128
+    }
+    if t < 0.0 || t > (u_max_of(dwidth) to f64) { vm_panic_cast_at(line, col) }   // negatives never fit; also ±∞
+    t to i128
+}
+
+// ---------------------------------------------------------------------------
 // ENV — a simple lexical frame: name -> Value. Mirrors the checker's scoping: a binding
 // pushes onto the current frame; assign mutates the nearest existing slot; a function
 // call runs in a FRESH root frame (no closure capture — M0 functions are flat, matching
@@ -285,16 +351,16 @@ fn eval_field_access(fa: checker::TFieldAccess, env: Env) -> Value {
 // ("index out of bounds" — M.1), else a `byte` Value. A list value (slice) yields the element
 // at `index`, bounds-checked through the SAME panic (the SLICE value layer — fixed+copy).
 // Mirrors codegen's stmt-expr guard.
-fn eval_index(ix: checker::TIndex, env: Env) -> Value {
+fn eval_index(ix: checker::TIndex, line: u32, col: u32, env: Env) -> Value {
     let recv = eval_expr(ix.receiver, env)
     let i = as_int(eval_expr(ix.index, env))
     match recv {
         str as s => {
-            if i >= s.len { teko::panic_oob() }
+            if i >= s.len { vm_panic_oob_at(line, col) }   // C1.6 — positioned at the subscript node
             s[i] to byte
         }
         []Value as xs => {
-            if i >= xs.len { teko::panic_oob() }
+            if i >= xs.len { vm_panic_oob_at(line, col) }   // C1.6 — positioned at the subscript node
             xs[i]
         }
         _            => panic("vm: subscript on a non-indexable value (internal: checker should reject)")
@@ -583,10 +649,10 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         checker::TStrLit as s   => s.text                    // a `str` member of Value
         checker::TByteLit as b  => b.value                   // a `byte` member of Value
         checker::TBoolLit as bl => bl.value                           // bool literal (W2) — FULL: a `bool` member of Value
-        checker::TBinary as b   => eval_binary(b, e.type, env)
+        checker::TBinary as b   => eval_binary(b, e.type, e.line, e.col, env)
         checker::TUnary as u    => eval_unary(u, e.type, env)
         checker::TCompare as c  => eval_compare(c, env)
-        checker::TCast as c     => eval_cast(c, e.type, env)          // F3 narrowing guard inside
+        checker::TCast as c     => eval_cast(c, e.type, e.line, e.col, env)          // F3 narrowing guard inside (positioned — C1.6)
         checker::TCall as c     => eval_call(c, env)
         checker::TStructInit as si  => eval_struct_init(si, e.type, env)   // W4b — build a struct value (declared field order)
         checker::TFieldAccess as fa => eval_field_access(fa, env)          // W4b — read a field by name from a struct value
@@ -604,7 +670,7 @@ fn eval_expr(e: checker::TExpr, env: Env) -> Value {
         // W5b — `match` as a VALUE: pattern matching (literal/range/Alt/variant-case/destructure + `when`).
         checker::TMatchExpr as m => eval_match(m, env)
         // W5-idx — subscript `recv[index]` (str→byte; slice→element, bounds-checked — SLICE layer).
-        checker::TIndex as ix => eval_index(ix, env)
+        checker::TIndex as ix => eval_index(ix, e.line, e.col, env)
         // $"…{expr}…" — string interpolation: pieces ++ str(holes) (self-host parity).
         checker::TInterp as in => eval_interp(in, env)
         // Enum::Member as a VALUE → its ordinal (u64); the C twin's C enum auto-numbers identically.
@@ -674,7 +740,7 @@ fn coerce_to(v: Value, t: checker::Type) -> Value {
 // div/mod so a zero divisor PANICS "division by zero" (M.1). FLOAT + - * / honestly in
 // `f64` (the VM-debug carrier for all float widths); float ÷0 PANICS too (plan §5, same as
 // int). `%` / bitwise / shift on a float is honest-unsupported (the checker rejects them).
-fn eval_binary(b: checker::TBinary, ty: checker::Type, env: Env) -> Value {
+fn eval_binary(b: checker::TBinary, ty: checker::Type, line: u32, col: u32, env: Env) -> Value {
     if b.op == AndAnd || b.op == OrOr {
         let l = as_bool(eval_expr(b.left, env))
         if b.op == AndAnd && !l { return false }
@@ -689,16 +755,19 @@ fn eval_binary(b: checker::TBinary, ty: checker::Type, env: Env) -> Value {
             Plus    => float_val(lf + rf, w)
             Minus   => float_val(lf - rf, w)
             Star    => float_val(lf * rf, w)
-            Slash   => float_val(teko::fdiv(lf, rf), w)   // CHECKED: float ÷0 PANICS (M.1)
+            // C1.6 — POSITION the float ÷0 panic at THIS node before the runtime helper fires.
+            Slash   => { if rf == 0.0 { vm_panic_div0_at(line, col) }; float_val(teko::fdiv(lf, rf), w) }   // CHECKED: float ÷0 PANICS (M.1)
             Percent => panic("vm: '%' on a float value not supported (checker should reject)")
             _       => panic("vm: bitwise/shift on a float value not supported (checker should reject)")
         }
     }
     let sgn  = prim_signed(prim); let w = prim_width(prim)
     let l = as_int(eval_expr(b.left, env)); let r = as_int(eval_expr(b.right, env))
+    // C1.6 — POSITION the int ÷0 / %0 panic at THIS node before the runtime helper fires (the
+    // runtime div/rem still panic as the canonical message — M.1).
     match b.op {
-        Slash   => norm_int(teko::div(l, r, sgn), sgn, w)   // CHECKED: panics on /0
-        Percent => norm_int(teko::rem(l, r, sgn), sgn, w)   // CHECKED: panics on %0
+        Slash   => { if r == 0 { vm_panic_div0_at(line, col) }; norm_int(teko::div(l, r, sgn), sgn, w) }   // CHECKED: panics on /0
+        Percent => { if r == 0 { vm_panic_div0_at(line, col) }; norm_int(teko::rem(l, r, sgn), sgn, w) }   // CHECKED: panics on %0
         // +,-,*,&,|,^,<<,>>: plain fixed-width arithmetic. Overflow guarding for +,-,* is
         // DEFERRED to build profiles (panic-debug / wrap-release) — exactly as codegen
         // leaves +,-,* as plain C. norm_int truncates to the prim's width.
@@ -713,7 +782,7 @@ fn eval_binary(b: checker::TBinary, ty: checker::Type, env: Env) -> Value {
 //                   conversion" (plan §5, parity with the integer cast guard, M.1).
 //   * int->int:     codegen's guard predicate — cast_may_lose -> CHECKED conversion
 //                   (PANIC out of range); else a plain reinterpret to the target width.
-fn eval_cast(c: checker::TCast, ty: checker::Type, env: Env) -> Value {
+fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Env) -> Value {
     // num_prim_of maps a cast endpoint to its effective numeric prim: a Prim is itself, a
     // `byte` is U8 (B.36 — byte is a u8 newtype), so `s[i] to i32` (a byte source — W5-idx)
     // casts as u8->i32. Any other type (str/named/…) is the honest non-numeric cast frontier.
@@ -726,11 +795,15 @@ fn eval_cast(c: checker::TCast, ty: checker::Type, env: Env) -> Value {
         return float_val(teko::int_to_float(as_int(eval_expr(c.expr, env)), prim_signed(src)), prim_width(dst))
     }
     if sflt && !dflt {
-        // truncate toward zero; NaN / ±∞ / out-of-range PANIC "impossible conversion".
-        return norm_int(teko::float_to_int(as_float(eval_expr(c.expr, env)), dst), prim_signed(dst), prim_width(dst))
+        // C1.6 — truncate toward zero; NaN / ±∞ / out-of-range PANIC "impossible conversion",
+        // POSITIONED at this node (vm_float_to_int re-derives the runtime check inline so it can
+        // prefix line:col before the canonical panic — M.1).
+        return norm_int(vm_float_to_int(as_float(eval_expr(c.expr, env)), dst, line, col), prim_signed(dst), prim_width(dst))
     }
     let v = as_int(eval_expr(c.expr, env))
-    if cast_may_lose(src, dst) { return norm_int(teko::cast(v, src, dst), prim_signed(dst), prim_width(dst)) }
+    // C1.6 — int->int narrowing PANIC positioned at this node (vm_cast re-derives the runtime
+    // range check inline so it can prefix line:col before the canonical panic — M.1).
+    if cast_may_lose(src, dst) { return norm_int(vm_cast(v, src, dst, line, col), prim_signed(dst), prim_width(dst)) }
     norm_int(v, prim_signed(dst), prim_width(dst))
 }
 
@@ -816,7 +889,18 @@ fn exec_stmt(s: checker::TStatement, env: Env) -> Step {
             }
         }
         // An assign is a NORMAL step with NO trailing value (value: null) — it keeps the env.
-        checker::TAssign as a   => { mutate_slot(env, a.name, a.op, eval_expr(a.value, env)); Stepped { env= env; value= null } }
+        // C1.6 — a compound `/=` / `%=` PANICS on a zero divisor through mutate_slot's checked
+        // div/rem; POSITION it at the RHS expr (the only positioned node in a compound assign —
+        // TAssign carries no line/col, but its `value` TExpr does), mirroring the C twin which
+        // panics at `&s->as.assign.value`. The runtime div/rem still panic as the canonical
+        // message (M.1); we only prefix line:col first.
+        checker::TAssign as a   => {
+            let rhs = eval_expr(a.value, env)
+            if (a.op == SlashEq || a.op == PercentEq) && val_is_int(rhs) && as_int(rhs) == 0 {
+                vm_panic_div0_at(a.value.line, a.value.col)
+            }
+            mutate_slot(env, a.name, a.op, rhs); Stepped { env= env; value= null }
+        }
         // `return e` rides a present value; a bare `return` carries null. The value may itself be
         // an `if`/`match` whose arm DIVERGES — run it flow-aware so an inner return propagates.
         checker::TReturn as r   => {
