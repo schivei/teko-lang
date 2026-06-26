@@ -71,6 +71,38 @@ exp fn i64_to_str(v: i64) -> str {
     str_concat("-", u64_to_str(mag))
 }
 
+// --- Phase 3 str/byte stdlib (mirror of teko_rt.c's tk_str_of_bytes / tk_one_byte /
+// tk_str_concat3 / tk_ftoa). Same contract as str_concat — a fresh owned str, leak-tolerant
+// (M.5 — short-lived). These are the canonical originals of the four recognized builtins. ---
+
+// str_of_bytes — COPY a []byte slice into a fresh owned str (the `str` builtin aliases it).
+// A []byte slice indexes like a str view here; the C twin copies the {ptr,len} buffer.
+exp fn str_of_bytes(bytes: []byte) -> str {
+    mut xs = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= bytes.len { break }; xs = teko::list::push(xs, bytes[i]); i++ }
+    str(xs)
+}
+
+// one_byte — a fresh 1-byte str holding c.
+exp fn one_byte(c: byte) -> str {
+    mut xs = teko::list::empty()
+    xs = teko::list::push(xs, c)
+    str(xs)
+}
+
+// str_concat3 — a ++ b ++ c via two str_concat steps (the C twin reuses tk_str_concat twice).
+exp fn str_concat3(a: str, b: str, c: str) -> str {
+    str_concat(str_concat(a, b), c)
+}
+
+// ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str. Teko has
+// no snprintf, so the true realization rides the host float renderer (the same DEFERRED FFI
+// bottom as print/panic — C1); the C twin (teko_rt.c::tk_ftoa) carries the behavior today.
+exp fn ftoa(x: f64) -> str {
+    teko::fmt::f64_g17(x)                 // DEFERRED host float renderer (FFI bottom — C1)
+}
+
 // --- panics: fail loud (M.1) — message to stderr, then non-zero exit ---
 
 // (C1.9) NATIVE STACK TRACES — the C twin (teko_rt.c) prints a backtrace on panic and installs a

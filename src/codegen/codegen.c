@@ -804,6 +804,22 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     cb(b, "("); if (!emit_expr(b, &e->as.call.args[0], err)) return false; cb(b, ")");
                     return true;
                 }
+                // Phase 3 — `str`/`str_of_bytes` (([]byte) -> str). A []byte lowers to the generated
+                // struct `tk_slice_byte {uint8_t*,uint64_t}`, a DISTINCT C type from `tk_str
+                // {const tk_byte*,size_t}` — passing one for the other is a C constraint violation. So
+                // BRIDGE the slice value to a tk_str at the call site (single-eval via a temp), then
+                // tk_str_of_bytes COPIES it into a fresh owned str. (`str` here is the call-builtin.)
+                if ((p.len == 1 || seg_is(p.segments[0].name, "teko"))
+                    && (seg_is(pe, "str") || seg_is(pe, "str_of_bytes")) && e->as.call.nargs == 1) {
+                    char sb[40]; snprintf(sb, sizeof sb, "_sb%zu", (size_t)b->len);
+                    cb(b, "({ ");
+                    if (!emit_type(b, e->as.call.args[0].type, err)) return false;   // tk_slice_byte
+                    cb(b, " "); cb(b, sb); cb(b, " = ");
+                    if (!emit_expr(b, &e->as.call.args[0], err)) return false;
+                    cb(b, "; tk_str_of_bytes((tk_str){ (const tk_byte *)"); cb(b, sb);
+                    cb(b, ".ptr, "); cb(b, sb); cb(b, ".len }); })");
+                    return true;
+                }
             }
             // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
             // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching
@@ -858,6 +874,16 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "println")) builtin = "tk_println";
                     else if (seg_is(last, "panic"))   builtin = "tk_panic_str";   // panic(str) — diverges (no `never` type)
                     else if (seg_is(last, "exit"))    builtin = "tk_exit";        // exit(<int>) — diverges
+                    // str/byte STDLIB surface (Phase 3) — the unqualified helpers the corpus calls,
+                    // recognized by the checker (scope.c tk_builtin_fn) and lowered to their tk_ runtime
+                    // twins (teko_rt). These return a fresh tk_str (malloc + tk_panic on OOM, M.1) and
+                    // their args flow unchanged through the generic arg loop below. (`str`/`str_of_bytes`
+                    // are NOT here: a []byte lowers to the generated struct tk_slice_byte, a DISTINCT C
+                    // type from tk_str, so they are bridged specially ABOVE. In a CALL `str` is this
+                    // builtin, not the str TYPE — that's emit_type.)
+                    else if (seg_is(last, "one_byte"))    builtin = "tk_one_byte";       // (byte) -> str
+                    else if (seg_is(last, "str_concat3")) builtin = "tk_str_concat3";    // (str, str, str) -> str
+                    else if (seg_is(last, "ftoa"))        builtin = "tk_ftoa";           // (f64) -> str
                     // (err_loc/err_typed handled DEGRADED at the top of this CALL case — native
                     //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }

@@ -36,6 +36,21 @@ tk_str tk_str_concat(tk_str a, tk_str b);
 tk_str tk_i64_to_str(int64_t v);
 tk_str tk_u64_to_str(uint64_t v);
 
+// --- Phase 3 str/byte stdlib (the four recognized-but-not-yet-lowered builtins) ---
+// Same contract as tk_str_concat: a fresh malloc'd buffer the result OWNS, tk_panic on OOM
+// (M.1), leak-tolerant (M.5 — short-lived).
+//
+// tk_str_of_bytes — a fresh str COPYING the bytes of a []byte slice. A []byte slice has the
+// SAME {ptr,len} shape as tk_str, so codegen passes the slice value directly; this copies it
+// into a fresh owned buffer (the `str_of_bytes` builtin; the `str` builtin aliases it).
+tk_str tk_str_of_bytes(tk_str bytes);
+// tk_one_byte — a fresh 1-byte str holding c.
+tk_str tk_one_byte(tk_byte c);
+// tk_str_concat3 — a ++ b ++ c in a fresh owned buffer (two tk_str_concat steps).
+tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c);
+// tk_ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str.
+tk_str tk_ftoa(double x);
+
 // tk_panic — fail loud (M.1): "teko: panic: <msg>\n" to stderr, then non-zero exit.
 _Noreturn void tk_panic(const char *msg);
 // the Teko-level globals `panic(str)` / `exit(<int>)` (legislator's ruling — no `never` type).

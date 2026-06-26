@@ -240,7 +240,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C3.2** codegen lowering of each builtin → runtime call | `cg` | C3.1 |
 | **C3.3** VM execution of each builtin | `vm` | C3.1 |
 
-**Rounds:** R3.1 `{C3.1, C3.4}` (w2) → R3.2 `{C3.2, C3.3}` (w2).
+**Rounds:** R3.1 `{C3.1, C3.4}` (w2) → R3.2 `{C3.2, C3.3}` (w2). ✅ **DONE** (workflow `p3-stdlib`): wired the 4 missing builtins — `str_of_bytes`/`str` (`[]byte`→str), `one_byte` (byte→str), `str_concat3`, `ftoa` (f64→str) — runtime (teko_rt) + codegen + VM + mirrors. **Reviewer fix:** `str`/`str_of_bytes` codegen bridges the `[]byte` value (which lowers to the struct `tk_slice_byte`, a DISTINCT C type from `tk_str`) to a `tk_str` at the call site (single-eval) before `tk_str_of_bytes` copies it — was a latent cc error. Verified VM==native: `str_concat3("ab","cd","ef").len`=6, `ftoa(1.5).len`=3, `one_byte`/1-elem `str_of_bytes`=1. Build clean; regressions 5/6; parses all 64. **⚠ Surfaced a PRE-EXISTING bug (task #57, slice value-layer): `teko::list::push` does NOT accumulate past one element** (`push(push(empty,a),b).len`==1, should be 2) in BOTH VM and native — a major Phase-6/self-host blocker (the corpus builds strings via `push` everywhere). NOT a Phase-3 regression (Phase 3 didn't touch `emit_list_push`/VM push).
 
 ## Phase 4 — C↔.tks mirroring audit *(read-mostly; partitioned by directory → fully parallel)*
 

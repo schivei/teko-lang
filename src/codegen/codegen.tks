@@ -787,6 +787,24 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
             return cb(oe, ")")
         }
+        // Phase 3 — `str`/`str_of_bytes` (([]byte) -> str). A []byte lowers to the generated struct
+        // tk_slice_byte {uint8_t*,uint64_t}, a DISTINCT C type from tk_str — BRIDGE the slice to a
+        // tk_str at the call site (single-eval via a temp), then tk_str_of_bytes COPIES it. Mirrors codegen.c.
+        let addr = (p.segments.len == 1) || (p.segments[0].name == "teko")
+        if addr && (pe == "str" || pe == "str_of_bytes") && c.args.len == 1 {
+            let sb = $"_sb{buf.len}"
+            mut o = cb(buf, "({ ")
+            o = match emit_type(o, c.args[0].type) { []byte as r => r; error as err => return err }
+            o = cb(o, " ")
+            o = cb(o, sb)
+            o = cb(o, " = ")
+            o = match emit_expr(o, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            o = cb(o, "; tk_str_of_bytes((tk_str){ (const tk_byte *)")
+            o = cb(o, sb)
+            o = cb(o, ".ptr, ")
+            o = cb(o, sb)
+            return cb(o, ".len }); })")
+        }
     }
     // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
     mut builtin = ""
@@ -799,14 +817,15 @@ fn emit_call(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             else if last == "println" { builtin = "tk_println"; has_builtin = true }
             else if last == "panic"   { builtin = "tk_panic_str"; has_builtin = true }   // panic(str) — diverges (no `never` type)
             else if last == "exit"    { builtin = "tk_exit";      has_builtin = true }   // exit(<int>) — diverges
-            // E2 — diagnostic-adornment builtins on an error VALUE (recognized by last segment,
-            // like the str builtins). Args flow through the generic arg loop, so
-            //   err_loc(<e>, <line>, <col>)  -> tk_error_loc(<e>, <line>, <col>)
-            //   err_typed(<e>, <exp>, <act>) -> tk_error_types(<e>, <exp>, <act>)
-            // mirroring C core.h: each returns a COPY of the error with the named fields set,
-            // all other adornments preserved.
-            else if last == "err_loc"   { builtin = "tk_error_loc";   has_builtin = true }
-            else if last == "err_typed" { builtin = "tk_error_types"; has_builtin = true }
+            // str/byte STDLIB surface (Phase 3) — the unqualified helpers the corpus calls, recognized
+            // by the checker and lowered to their tk_ runtime twins (a fresh tk_str; OOM-panics, M.1).
+            // (`str`/`str_of_bytes` are bridged specially ABOVE — a []byte lowers to tk_slice_byte, a
+            // DISTINCT C type from tk_str. In a CALL `str` is this builtin, not the str TYPE.)
+            else if last == "one_byte"    { builtin = "tk_one_byte";    has_builtin = true }   // (byte) -> str
+            else if last == "str_concat3" { builtin = "tk_str_concat3"; has_builtin = true }   // (str, str, str) -> str
+            else if last == "ftoa"        { builtin = "tk_ftoa";        has_builtin = true }   // (f64) -> str
+            // (err_loc/err_typed handled DEGRADED at the top of this fn — native error is message-only;
+            //  the error-struct representation is a Phase-6 follow-on. Mirrors codegen.c.)
         }
     }
     mut out = buf

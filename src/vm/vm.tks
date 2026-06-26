@@ -332,6 +332,58 @@ fn try_err_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Va
     null   // not an err builtin — fall through to user-fn resolution
 }
 
+// str/byte STDLIB builtins (Phase 3) — the unqualified str-returning helpers the corpus calls
+// (str / str_of_bytes / one_byte / str_concat3 / ftoa). Recognized by the LAST path segment
+// when single-segment OR teko-rooted (the `addressable` gate, like print/println). All PRODUCE
+// A VALUE (a fresh str), so — like try_list_builtin / try_err_builtin — they live on the
+// value-call path, not the `-> void` try_builtin. Each calls the SAME tk_* runtime symbol
+// codegen emits, so VM==native byte-for-byte; a str Value IS the `str` member of Value (no
+// constructor). `null` == not a str builtin → fall through to user-fn resolution.
+//
+// str / str_of_bytes — ([]byte) -> str. A []byte is a []Value of byte members. The runtime
+// teko::str_of_bytes takes a `str` (a []byte has the same {ptr,len} shape; the form codegen
+// passes directly). The VM's []Value is not a contiguous byte buffer, so we MATERIALIZE the
+// bytes into a `str` first (each byte → teko::one_byte, concatenated — M.1), then call
+// teko::str_of_bytes (which COPIES into the fresh owned result), mirroring the C twin.
+fn try_str_builtin(callee: parser::Path, args: []checker::TExpr, env: Env) -> Value? {
+    let last = callee.segments[callee.segments.len - 1].name
+    let addressable = callee.segments.len == 1 || callee.segments[0].name == "teko"
+    if !addressable { return null }
+    if last == "str" || last == "str_of_bytes" {
+        match eval_expr(args[0], env) {
+            []Value as xs => {
+                mut view = ""
+                mut i = 0
+                loop {
+                    if i >= xs.len { break }
+                    match xs[i] {
+                        byte as b => view = teko::str_concat(view, teko::one_byte(b))
+                        _         => panic("vm: str/str_of_bytes element is not a byte (internal: checker should reject)")
+                    }
+                    i++
+                }
+                return teko::str_of_bytes(view)   // COPIES the bytes into a fresh owned str
+            }
+            _ => panic("vm: str/str_of_bytes on a non-[]byte value (internal: checker should reject)")
+        }
+    }
+    if last == "one_byte" {
+        match eval_expr(args[0], env) {
+            byte as b => return teko::one_byte(b)
+            _         => panic("vm: one_byte on a non-byte value (internal: checker should reject)")
+        }
+    }
+    if last == "str_concat3" {
+        return teko::str_concat3(as_str(eval_expr(args[0], env)),
+                                 as_str(eval_expr(args[1], env)),
+                                 as_str(eval_expr(args[2], env)))
+    }
+    if last == "ftoa" {
+        return teko::ftoa(as_float(eval_expr(args[0], env)))
+    }
+    null   // not a str builtin — fall through to user-fn resolution
+}
+
 // ---------------------------------------------------------------------------
 // EXPRESSIONS -> Value. Coverage MIRRORS codegen's emit_expr: Number, Var, Str, Byte,
 // Binary, Unary, Compare, Cast, Call, FieldAccess. IfExpr/MatchExpr AS A VALUE are the
@@ -948,6 +1000,9 @@ fn eval_call(c: checker::TCall, env: Env) -> Value {
     // E2 — err_loc / err_typed — value-producing error-adornment builtins. Recognized before
     // user-fn resolution; null == not an err builtin, fall through.
     match try_err_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
+    // str/byte STDLIB — value-producing str-returning builtins (str/str_of_bytes/one_byte/
+    // str_concat3/ftoa). Recognized before user-fn resolution; null == not a str builtin, fall through.
+    match try_str_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
     let f = find_function(c.callee)        // resolved by LAST segment (cross-ns ok); honest stop if unknown / params
     let fenv = Env { slots = teko::list::empty() }
     // Coerce the returned value into the declared return type: a `T` from a `-> T?` fn

@@ -71,6 +71,46 @@ tk_str tk_i64_to_str(int64_t v) {
     return (tk_str){ buf, digits.len + 1 };
 }
 
+// --- Phase 3 str/byte stdlib (modeled exactly on tk_str_concat — fresh malloc'd buffer the
+// result OWNS, tk_panic on OOM (M.1), leak-tolerant (M.5)) ---
+
+// tk_str_of_bytes — COPY a []byte slice (same {ptr,len} shape as tk_str) into a fresh owned
+// str. A zero-length result uses a 1-byte buffer so ptr is never NULL with a stale len.
+tk_str tk_str_of_bytes(tk_str bytes) {
+    size_t n = bytes.len;
+    tk_byte *buf = malloc(n ? n : 1);
+    if (buf == NULL) tk_panic("out of memory (str of bytes)");
+    if (n) memcpy(buf, bytes.ptr, n);
+    return (tk_str){ buf, n };
+}
+
+// tk_one_byte — a fresh 1-byte str holding c.
+tk_str tk_one_byte(tk_byte c) {
+    tk_byte *buf = malloc(1);
+    if (buf == NULL) tk_panic("out of memory (one byte)");
+    buf[0] = c;
+    return (tk_str){ buf, 1 };
+}
+
+// tk_str_concat3 — a ++ b ++ c via two tk_str_concat steps. Each step allocates a fresh
+// owned buffer (the intermediate a++b is leaked — M.5 short-lived).
+tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c) {
+    return tk_str_concat(tk_str_concat(a, b), c);
+}
+
+// tk_ftoa — x rendered as %.17g (exact binary64 round-trip; same renderer as codegen's float
+// literal emission) into a temp, then COPIED into a fresh owned str.
+tk_str tk_ftoa(double x) {
+    char tmp[40];                 // %.17g of a double fits in well under 40 chars
+    int n = snprintf(tmp, sizeof tmp, "%.17g", x);
+    if (n < 0) tk_panic("ftoa: snprintf failed");
+    size_t len = (size_t)n;
+    tk_byte *buf = malloc(len ? len : 1);
+    if (buf == NULL) tk_panic("out of memory (ftoa)");
+    if (len) memcpy(buf, tmp, len);
+    return (tk_str){ buf, len };
+}
+
 void tk_print(tk_str s) {
     // Exactly s.len bytes; tolerate embedded NUL; no strlen/puts.
     fwrite(s.ptr, 1, s.len, stdout);

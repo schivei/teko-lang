@@ -36,6 +36,14 @@ _Noreturn void tk_panic_oob(void);    // "index out of bounds" (the subscript gu
 tk_str tk_str_concat(tk_str a, tk_str b);
 tk_str tk_i64_to_str(int64_t v);
 tk_str tk_u64_to_str(uint64_t v);
+// str/byte STDLIB builtins (Phase 3) — the SAME runtime symbols codegen emits, so the
+// named-builtin calls run byte-for-byte the same in the VM as natively. EXTERN (linked
+// from teko_rt.c). str_of_bytes COPIES the []byte's bytes into a fresh str; one_byte
+// makes a fresh 1-byte str; str_concat3 is a ++ b ++ c; ftoa is %.17g float text.
+tk_str tk_str_of_bytes(tk_str bytes);
+tk_str tk_one_byte(tk_byte c);
+tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c);
+tk_str tk_ftoa(double x);
 void teko__assert__is_true(bool c);
 void teko__assert__is_false(bool c);
 void teko__assert__str_contains(tk_str hay, tk_str needle);
@@ -518,6 +526,61 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         tk_value e1 = v_error_set(e,  ERR_LIT("expected"), exp);
         tk_value e2 = v_error_set(e1, ERR_LIT("actual"),   act);
         *out = e2;
+        return true;
+    }
+
+    // str/byte STDLIB builtins (Phase 3) — the unqualified str-returning helpers the corpus
+    // calls. Recognized by the LAST path segment (single-segment OR teko-rooted — the same
+    // `addressable` gate as print). Each evaluates its args and calls the SAME tk_* runtime
+    // symbol codegen emits, so VM==native byte-for-byte; the result is a fresh str VALUE
+    // (v_str over a runtime-owned buffer — exactly like the interp builders).
+    //
+    // str / str_of_bytes — ([]byte) -> str. A []byte is a TK_VAL_LIST of u8 INT byte
+    // values; the runtime's tk_str_of_bytes takes a tk_str (same {ptr,len} shape as a
+    // []byte, the form codegen passes directly). The VM list is NOT a contiguous byte
+    // buffer (its elements are tk_value), so we first MATERIALIZE the bytes into a tk_str
+    // view (alloc via the seam, M.1), then call tk_str_of_bytes (which COPIES into the
+    // fresh owned result). The materialized view is a throwaway (the VM-debug engine).
+    if (seg_is(last, "str") || seg_is(last, "str_of_bytes")) {
+        if (nargs != 1) vm_unsupported("str/str_of_bytes expects exactly one argument (a []byte)");
+        tk_value a = tk_vm_eval_expr(&args[0], env);
+        if (a.tag != TK_VAL_LIST) vm_unsupported("str/str_of_bytes on a non-[]byte value (internal: checker should reject)");
+        size_t n = a.as.list.len;
+        tk_byte *buf = tk_alloc((n ? n : 1) * sizeof *buf);   // OOM-panics in the seam (M.1)
+        for (size_t i = 0; i < n; i += 1) {
+            tk_value el = a.as.list.ptr[i];
+            if (el.tag != TK_VAL_INT) vm_unsupported("str/str_of_bytes element is not a byte (internal: checker should reject)");
+            buf[i] = (tk_byte)v_as_u128(el);   // a byte == u8; take the low 8 bits of the carrier
+        }
+        tk_str view = { buf, n };
+        *out = v_str(tk_str_of_bytes(view));   // COPIES the bytes into a fresh owned str
+        return true;
+    }
+    // one_byte — (byte) -> str. A fresh 1-byte str holding the byte value.
+    if (seg_is(last, "one_byte")) {
+        if (nargs != 1) vm_unsupported("one_byte expects exactly one argument (a byte)");
+        tk_value a = tk_vm_eval_expr(&args[0], env);
+        if (a.tag != TK_VAL_INT) vm_unsupported("one_byte on a non-byte value (internal: checker should reject)");
+        *out = v_str(tk_one_byte((tk_byte)v_as_u128(a)));
+        return true;
+    }
+    // str_concat3 — (str, str, str) -> str. a ++ b ++ c in a fresh owned buffer.
+    if (seg_is(last, "str_concat3")) {
+        if (nargs != 3) vm_unsupported("str_concat3 expects three arguments (str, str, str)");
+        tk_value a = tk_vm_eval_expr(&args[0], env);
+        tk_value b = tk_vm_eval_expr(&args[1], env);
+        tk_value c = tk_vm_eval_expr(&args[2], env);
+        if (a.tag != TK_VAL_STR || b.tag != TK_VAL_STR || c.tag != TK_VAL_STR)
+            vm_unsupported("str_concat3 on non-str args (internal: checker should reject)");
+        *out = v_str(tk_str_concat3(a.as.s, b.as.s, c.as.s));
+        return true;
+    }
+    // ftoa — (f64) -> str. The float rendered as %.17g text in a fresh owned str.
+    if (seg_is(last, "ftoa")) {
+        if (nargs != 1) vm_unsupported("ftoa expects exactly one argument (an f64)");
+        tk_value a = tk_vm_eval_expr(&args[0], env);
+        if (a.tag != TK_VAL_FLOAT) vm_unsupported("ftoa on a non-float value (internal: checker should reject)");
+        *out = v_str(tk_ftoa(a.as.fl.f));
         return true;
     }
     return false;
