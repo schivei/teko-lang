@@ -6,10 +6,17 @@
 // the host-cc-built native binary (driver.c::run_cc compiles it alongside teko_rt.c).
 #include "assert.h"
 
-void teko__assert__is_true(bool c)  { if (!c) tk_panic("assertion failed: is_true"); }
-void teko__assert__is_false(bool c) { if ( c) tk_panic("assertion failed: is_false"); }
+// WEAK linkage (the seed's dual role). run_cc links this seed into EVERY native binary so a
+// program that calls teko::assert but doesn't DEFINE it (the regression examples) resolves the
+// symbols. But the teko compiler's OWN corpus DOES define teko::assert (assert.tks → the generated
+// teko.c), so a self-host build would otherwise get a DUPLICATE symbol. Weak makes the seed the
+// FALLBACK: the corpus's strong definitions win when present, the seed fills in when absent.
+#define TK_ASSERT_WEAK __attribute__((weak))
 
-void teko__assert__str_contains(tk_str hay, tk_str needle) {
+TK_ASSERT_WEAK void teko__assert__is_true(bool c)  { if (!c) tk_panic("assertion failed: is_true"); }
+TK_ASSERT_WEAK void teko__assert__is_false(bool c) { if ( c) tk_panic("assertion failed: is_false"); }
+
+TK_ASSERT_WEAK void teko__assert__str_contains(tk_str hay, tk_str needle) {
     // Plain byte-substring scan over the spans; no allocation. Empty needle ⊆ any hay.
     if (needle.len == 0) return;
     if (needle.len <= hay.len) {

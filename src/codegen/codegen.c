@@ -2340,8 +2340,11 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
         return emit_stmt(b, last, /*in_main=*/false, g_cg_ret_type, commit_indent, err);
     }
     // Value form: all-but-last normally; the trailing value → `sink` (wrapped), then `break`.
+    // ret_type is the FUNCTION's return type (not VOID): a non-last statement may itself be a
+    // `return e` (e.g. `_ => { if cond { return error{…} }; v }`), and that `return` must wrap its
+    // value into the fn's return slot (g_cg_ret_type) — a VOID slot left an error returned bare.
     for (size_t i = 0; i + 1 < n; i += 1)
-        if (!emit_stmt(b, &body[i], /*in_main=*/false, (tk_type){ .tag = TK_TYPE_VOID }, commit_indent, err)) return false;
+        if (!emit_stmt(b, &body[i], /*in_main=*/false, g_cg_ret_type, commit_indent, err)) return false;
     if (n == 0) return fail_node(err, "codegen: empty match arm body in value position");
     const tk_tstatement *last = &body[n - 1];
     if (last->tag != TK_TSTMT_EXPR)

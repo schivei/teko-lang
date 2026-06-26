@@ -1635,25 +1635,30 @@ fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si:
             // Other field shapes keep the plain emit.
             // `Void` is the "no expected slot" sentinel (mirrors the C `tk_type exp = {.tag = VOID}`):
             // emit plainly when nothing was built.
-            let exp_t = match fte_opt {
+            // Build the expected slot type IMPERATIVELY (mut + statement-matches assigning the full
+            // `Type`), mirroring the C twin's if/else. A nested match-VALUE would yield sub-unions
+            // (`Void|Slice`, `Optional|Void`) that codegen can't widen into this union; each
+            // `exp_t = <case>` instead wraps the case into `Type` at the assignment (assign-wrap).
+            mut exp_t: checker::Type = checker::Void { }
+            match fte_opt {
                 parser::TypeExpr as fte => match fte {
-                    parser::NamedType as nt => checker::Named { name = nt.path.segments[nt.path.segments.len - 1].name }
+                    parser::NamedType as nt => { exp_t = checker::Named { name = nt.path.segments[nt.path.segments.len - 1].name } }
                     parser::SliceType as st => match st.element {
                         parser::NamedType as ent => {
                             let elem = ent.path.segments[ent.path.segments.len - 1].name
-                            if cg_is_prim_name(elem) { checker::Void { } } else { checker::Slice { element = checker::Named { name = elem } } }
+                            if !cg_is_prim_name(elem) { exp_t = checker::Slice { element = checker::Named { name = elem } } }
                         }
-                        _ => checker::Void { }
+                        _ => { }
                     }
                     // a present value into a `T?` field (T named) → emit_as wraps T → T?
                     // ({ .present = true, .value = … }). (A bare `null` is the sentinel branch above.)
                     parser::OptionalType as ot => match ot.inner {
-                        parser::NamedType as inner_nt => checker::Optional { inner = checker::Named { name = inner_nt.path.segments[inner_nt.path.segments.len - 1].name } }
-                        _ => checker::Void { }
+                        parser::NamedType as inner_nt => { exp_t = checker::Optional { inner = checker::Named { name = inner_nt.path.segments[inner_nt.path.segments.len - 1].name } } }
+                        _ => { }
                     }
-                    _ => checker::Void { }
+                    _ => { }
                 }
-                null => checker::Void { }
+                null => { }
             }
             match exp_t {
                 checker::Void => { out = match emit_expr(out, prog, fv) { []byte as o => o; error as err => return err } }
@@ -2699,11 +2704,14 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type,
         }
     }
     // Value form: all-but-last normally; the trailing value → `sink` (wrapped), then `break`.
+    // ret_type is the FUNCTION's return type (not Void): a non-last statement may itself be a
+    // `return e` (e.g. `_ => { if cond { return error{…} }; v }`), and that `return` must wrap its
+    // value into the fn's return slot — a Void slot left an error returned bare.
     mut out = buf
     mut i = 0
     loop {
         if i + 1 >= body.len { break }
-        out = match emit_stmt(out, body[i], false, prog, Void { }, ci) { []byte as o => o; error as err => return err }
+        out = match emit_stmt(out, body[i], false, prog, ret_type, ci) { []byte as o => o; error as err => return err }
         i++
     }
     if body.len == 0 { return error { message = "codegen: empty match arm body in value position" } }
