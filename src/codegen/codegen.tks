@@ -3989,6 +3989,132 @@ fn cg_emit_types_ordered(buf: []byte, prog: checker::TProgram) -> []byte | error
 // The C's `cg_err` (build a tk_cstr_result error) folds away: here the function simply
 // `return error { … }`, since `str | error` IS the C's TK_RESULT. (C: `tk_emit_c` + `cg_err`.)
 // ---------------------------------------------------------------------------
+// fmt_indent — append `depth` levels of 4-space indent.
+fn fmt_indent(buf: []byte, depth: u64) -> []byte {
+    mut b = buf
+    mut k: u64 = 0
+    loop {
+        if k >= depth { break }
+        b = cb(b, "    ")
+        k = k + 1
+    }
+    b
+}
+
+// cg_format_c — re-flow the generated C into readable, brace-indented form (mirror of codegen.c's
+// cg_format_c). It is STRUCTURAL: STRING/CHAR literals, `//` line comments and `#` preprocessor
+// lines are copied verbatim; a `;` inside `(…)` (a `for` header) does NOT break; whitespace runs
+// collapse to one space; a top-level function body close gets a blank line. The bracket stack is a
+// str whose chars encode each open bracket — 'B'/'b' = block/non-block brace, '(' / '[' = paren/
+// bracket — pushed via concat, popped via slice_to (no in-place mutation needed). The result is
+// recompiled by cc on every build, so any corruption fails loudly.
+fn cg_format_c(src: str) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut depth: u64 = 0
+    mut stk = ""
+    mut line_start = true
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        let c = src[i]
+        if c == b'#' && line_start {
+            loop {
+                if i >= src.len { break }
+                if src[i] == b'\n' { break }
+                out = cb_byte(out, src[i])
+                i = i + 1
+            }
+            out = cb(out, "\n")
+            if i < src.len { i = i + 1 }
+            line_start = true
+        } else if c == b'/' && i + 1 < src.len && src[i + 1] == b'/' {
+            if line_start { out = fmt_indent(out, depth); line_start = false }
+            loop {
+                if i >= src.len { break }
+                if src[i] == b'\n' { break }
+                out = cb_byte(out, src[i])
+                i = i + 1
+            }
+            out = cb(out, "\n")
+            if i < src.len { i = i + 1 }
+            line_start = true
+        } else if c == b'"' || c == b'\'' {
+            if line_start { out = fmt_indent(out, depth); line_start = false }
+            let q = c
+            out = cb_byte(out, c)
+            i = i + 1
+            loop {
+                if i >= src.len { break }
+                if src[i] == q { break }
+                if src[i] == b'\\' && i + 1 < src.len {
+                    out = cb_byte(out, src[i])
+                    out = cb_byte(out, src[i + 1])
+                    i = i + 2
+                } else {
+                    out = cb_byte(out, src[i])
+                    i = i + 1
+                }
+            }
+            if i < src.len && src[i] == q {
+                out = cb_byte(out, q)
+                i = i + 1
+            }
+        } else if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+            loop {
+                if i >= src.len { break }
+                let w = src[i]
+                if w != b' ' && w != b'\t' && w != b'\n' && w != b'\r' { break }
+                i = i + 1
+            }
+            let is_brace = i < src.len && (src[i] == b'}' || src[i] == b'{')
+            if !line_start && !is_brace && out.len > 0 && out[out.len - 1] != b' ' { out = cb(out, " ") }
+        } else if c == b'{' {
+            let is_block = out.len > 0 && out[out.len - 1] == b')'
+            if line_start { out = fmt_indent(out, depth) } else { out = cb(out, " ") }
+            out = cb(out, "{\n")
+            stk = teko::str::concat(stk, if is_block { "B" } else { "b" })
+            depth = depth + 1
+            line_start = true
+            i = i + 1
+        } else if c == b'}' {
+            let was_block = stk.len > 0 && stk[stk.len - 1] == b'B'
+            if depth > 0 { depth = depth - 1 }
+            if stk.len > 0 { stk = teko::str::slice_to(stk, stk.len - 1) }
+            if !line_start { out = cb(out, "\n") }
+            out = fmt_indent(out, depth)
+            out = cb(out, "}")
+            if depth == 0 && was_block { out = cb(out, "\n\n"); line_start = true }
+            else { line_start = false }
+            i = i + 1
+        } else if c == b';' {
+            out = cb(out, ";")
+            // break after `;` at top level (empty stack — a declaration) OR inside a `{` block;
+            // NOT inside `(…)` (a `for` header). Mirrors codegen.c's `sp == 0 || top == '{'`.
+            let brace_top = stk.len == 0 || stk[stk.len - 1] == b'B' || stk[stk.len - 1] == b'b'
+            if brace_top { out = cb(out, "\n"); line_start = true }
+            else {
+                if out.len > 0 && out[out.len - 1] != b' ' { out = cb(out, " ") }
+                line_start = false
+            }
+            i = i + 1
+        } else if c == b'(' || c == b'[' {
+            if line_start { out = fmt_indent(out, depth); line_start = false }
+            stk = teko::str::concat(stk, if c == b'(' { "(" } else { "[" })
+            out = cb_byte(out, c)
+            i = i + 1
+        } else if c == b')' || c == b']' {
+            if stk.len > 0 { stk = teko::str::slice_to(stk, stk.len - 1) }
+            out = cb_byte(out, c)
+            i = i + 1
+        } else {
+            if line_start { out = fmt_indent(out, depth); line_start = false }
+            out = cb_byte(out, c)
+            i = i + 1
+        }
+    }
+    cb(out, "\n")
+}
+
 fn tk_emit_c(prog: checker::TProgram) -> str | error {
     mut b: []byte = teko::list::empty()
     b = cb(b, "// generated by teko (F2 backend) — do not edit\n")
@@ -4117,5 +4243,6 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     b = cb(b, "    return 0;\n")
     b = cb(b, "}\n")
 
-    str(b)
+    // Re-flow into readable, brace-indented C (the raw emission packs each `({…})` on one line).
+    str(cg_format_c(str(b)))
 }

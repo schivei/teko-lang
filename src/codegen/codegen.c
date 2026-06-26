@@ -3332,6 +3332,91 @@ static tk_cstr_result cg_err(const char *m) {
     return (tk_cstr_result){ .ok = false, .as.error = tk_error_make(m) };
 }
 
+// cg_format_c — re-flow the generated C into readable, brace-indented form. The codegen emits
+// statements line-by-line but packs each long `({ … })` statement-expression onto ONE line; this
+// post-pass breaks after `{`/`;` and before `}`, re-indenting by brace depth. It is structural, not
+// semantic: STRING/CHAR literals, `//` line comments and `#` preprocessor lines are copied verbatim
+// (never broken); a `;` inside `(…)` (a `for` header) does NOT break; runs of whitespace collapse to
+// one space. The result is re-compiled by cc on every build, so any corruption fails loudly.
+static char *cg_format_c(const char *src) {
+    cbuf out = { NULL, 0, 0 };
+    size_t depth = 0;            // open-brace count (= indent level)
+    char stk[4096]; size_t sp = 0;   // bracket stack — innermost decides `;` breaking ({ vs ( )
+    bool blk[4096];              // per-`{`: is it a function/control BLOCK (preceded by `)`)? — for top-level separation
+    bool line_start = true;      // at the start of a fresh output line?
+    char one[2] = { 0, 0 };
+    size_t i = 0;
+    while (src[i] != '\0') {
+        char c = src[i];
+        // `#` preprocessor directive at line start → copy the whole physical line verbatim.
+        if (c == '#' && line_start) {
+            while (src[i] != '\0' && src[i] != '\n') { one[0] = src[i]; cb(&out, one); i += 1; }
+            cb(&out, "\n"); if (src[i] == '\n') i += 1; line_start = true; continue;
+        }
+        // `//` line comment → copy to end of line.
+        if (c == '/' && src[i + 1] == '/') {
+            if (line_start) { for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); line_start = false; }
+            while (src[i] != '\0' && src[i] != '\n') { one[0] = src[i]; cb(&out, one); i += 1; }
+            cb(&out, "\n"); if (src[i] == '\n') i += 1; line_start = true; continue;
+        }
+        // string / char literal → copy verbatim (incl. escapes); never break inside.
+        if (c == '"' || c == '\'') {
+            if (line_start) { for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); line_start = false; }
+            char q = c; one[0] = c; cb(&out, one); i += 1;
+            while (src[i] != '\0' && src[i] != q) {
+                if (src[i] == '\\' && src[i + 1] != '\0') { one[0] = src[i]; cb(&out, one); one[0] = src[i + 1]; cb(&out, one); i += 2; }
+                else { one[0] = src[i]; cb(&out, one); i += 1; }
+            }
+            if (src[i] == q) { one[0] = q; cb(&out, one); i += 1; }
+            continue;
+        }
+        // whitespace → collapse: skip at line start; else a single space (no double spaces).
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            i += 1;
+            if (!line_start && out.len > 0 && out.ptr[out.len - 1] != ' ') cb(&out, " ");
+            continue;
+        }
+        if (c == '{') {
+            if (line_start) { for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); line_start = false; }
+            if (out.len > 0 && out.ptr[out.len - 1] == ' ') out.len -= 1;   // trim a space before `{`
+            bool is_block = (out.len > 0 && out.ptr[out.len - 1] == ')');   // `) {` = function/control body (vs `struct {`, `= {`, `({`)
+            cb(&out, " {\n");
+            if (sp < sizeof stk) { stk[sp] = '{'; blk[sp] = is_block; }
+            depth += 1; sp += 1;
+            line_start = true; i += 1; continue;
+        }
+        if (c == '}') {
+            while (out.len > 0 && (out.ptr[out.len - 1] == ' ' || out.ptr[out.len - 1] == '\n')) out.len -= 1;
+            bool was_block = (sp > 0 && sp <= sizeof stk && blk[sp - 1]);
+            if (depth > 0) depth -= 1; if (sp > 0) sp -= 1;
+            cb(&out, "\n"); for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); cb(&out, "}");
+            // a TOP-LEVEL block close (a function body) → blank line before the next declaration.
+            if (depth == 0 && was_block) { cb(&out, "\n\n"); line_start = true; }
+            else line_start = false;
+            i += 1; continue;
+        }
+        if (c == ';') {
+            if (out.len > 0 && out.ptr[out.len - 1] == ' ') out.len -= 1;
+            cb(&out, ";");
+            // break after `;` only when the innermost open bracket is `{` (NOT a `for(…;…;…)` header).
+            if (sp == 0 || (sp <= sizeof stk && stk[sp - 1] == '{')) { cb(&out, "\n"); line_start = true; }
+            else if (out.len > 0 && out.ptr[out.len - 1] != ' ') cb(&out, " ");
+            i += 1; continue;
+        }
+        if (c == '(' || c == '[') {
+            if (line_start) { for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); line_start = false; }
+            if (sp < sizeof stk) { stk[sp] = c; } sp += 1; one[0] = c; cb(&out, one); i += 1; continue;
+        }
+        if (c == ')' || c == ']') {
+            if (sp > 0) sp -= 1; one[0] = c; cb(&out, one); i += 1; continue;
+        }
+        if (line_start) { for (size_t k = 0; k < depth; k += 1) cb(&out, "    "); line_start = false; }
+        one[0] = c; cb(&out, one); i += 1;
+    }
+    cb(&out, "\n");
+    return out.ptr;
+}
+
 tk_cstr_result tk_emit_c(tk_tprogram prog) {
     cbuf b = { .ptr = NULL, .len = 0, .cap = 0 };
     const char *err = NULL;
@@ -3427,5 +3512,8 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     cb(&b, "    return 0;\n");
     cb(&b, "}\n");
 
-    return (tk_cstr_result){ .ok = true, .as.value = b.ptr };
+    // Re-flow into readable, brace-indented C (the raw emission packs each `({…})` on one line).
+    char *formatted = cg_format_c(b.ptr);
+    tk_free0(b.ptr);
+    return (tk_cstr_result){ .ok = true, .as.value = formatted };
 }
