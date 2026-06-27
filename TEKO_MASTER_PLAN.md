@@ -374,6 +374,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C7.1j** multi-OS/arch CI pipelines *(LAST)* — Linux arm64+x86_64, Windows arm64+x86_64, macOS arm64. Local verification via **docker** (Linux arm64 native / amd64 emulated) + **Rosetta** (macOS x86_64); Windows needs CI runners. Stack VERIFIED on macOS arm64+x86_64 & Linux arm64+amd64 (extern `abs()`→7, `os()`). | CI | C7.1* |
 | **C7.1g** `ptr`/`uptr` opaque transport types (✅) + `extern type` opaque handle (→ `void*`) (✅) | `chk`, `cg`, `ast`, `P` | C7.1a–c |
 | **C7.1i** marshalling primitives `teko::mem::as_ptr`/`as_cstr`/`str_from_cstr`/`bytes_from_ptr` (✅ — complete set; `bytes_from_ptr` via `tk_ffi_bytes`→`tk_slice_byte` lift) | `chk`, `cg`, `rt` | C7.1g |
+| **C7.1m** ARTIFACT KINDS — `[artifact] kind` ∈ {`binary`,`static`,`shared`,`package`} (was executable/library); `Artifact = enum {Binary,Static,Shared,Package}` + parse + R-main-d rule (Binary needs main; libs forbid it) + build dispatch (✅ all twins; tests). `binary` ✅ (current); `static`/`shared`/`package` are HONEST STOPS until their increments (M.3). Legislated: `.tkl` = ZIP of `.tkh`+`.tkb`+`.tsym` named `<name>-<version>[-suffix].tkl`; `.tkb` carries ONLY own typed-tree (deps referenced, never inlined); pipeline = load deps → check app → emit. **Blocker for real `.tkl`: C7.16** (program-level `.tkb` codec) | `build`(tkp_rule/manifest/project), `driver` | C7.1k |
 | **C7.1k** BINARY METADATA — `.tkp` `description` + `[platforms] targets` (Manifest +`description`/`platforms`); EVERY binary carries an `@(#)`-marked metadata string (✅ universal — `what(1)`/`strings`; `codegen::tk_emit_meta` appended by the backend) + macOS Mach-O `__TEXT,__info_plist` section (✅ — `mdls`/`otool`; `run_cc` writes Info.plist + `-Wl,-sectcreate`). Staged: Windows PE VERSIONINFO (windres @ pipeline) + Linux ELF `.note`; XML/quote-escaping of arbitrary metadata | `build`(manifest/project), `cg`, `driver` | C7.1f |
 | **C7.1h** pointer-family future: `ptr<T>` (deref behind `#repr(C)`) + `ptr ≡ ptr<void>` | — | **S4 generics** |
 | **C7.2** `teko::env::args` + `teko::exit` | *(new ns files)* | C7.1b–d |
@@ -384,13 +385,13 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C7.7** D3 coverage in VM (function-level; per-line is a follow-up) | `vm`, `rt` | ✅ **DONE** |
 | **C7.8** D4 pre-emit gate (tests+coverage before codegen). **`--no-test` is now IGNORED for a build — a release MUST run its tests** (only a project with NO `#test` skips); `gate` param dropped from `compile_project_g`/`tk_compile_project_g`, `no_test_of`/`has_no_test` removed, CMake `selfhost` no longer passes `--no-test` | `main`, `build` | ✅ **DONE** |
 | **C7.9** A4 main-rule from manifest artifact | `build` | — |
-| **C7.10** A6 packages + pre-linker (.tkh/.tkb merge pre-codegen) | `tkb`, `build`, `res` | C7.16 |
-| **C7.11** A7 output directory + `-o <dir>` *(decision then impl)* | `main` | — |
-| **C7.12** A8 `teko pack` → .tkh+.tkb *(decision then impl)* | `build`, `tkb` | C7.16 |
+| **C7.10** A6 packages + pre-linker — load each dep (static/shared native lib OR a `.tkl`'s `.tkb`) → merge typed trees → check app, BEFORE emit. The `.tkb` merged in is the dep's OWN tree (deps never re-inline their deps — C7.1m) | `tkb`, `build`, `res` | C7.16, C7.1m |
+| **C7.11** A7 output directory + `-o <dir>` ✅ DONE | `main` | — |
+| **C7.12** A8 `package` output → `.tkl` (ZIP of `.tkh`+`.tkb`+`.tsym`, named `<name>-<version>[-suffix].tkl`) + the pure-Teko ZIP-STORE writer (CRC32, twins). Kinds + dispatch ✅ (C7.1m); BLOCKED on C7.16 for the real `.tkb` payload | `build`, `tkb` | C7.16, C7.1m |
 | **C7.13** B0d promote `tk_str_eq`→text.h (+panic wrapper) | `rt`(text.h), `chk` | — |
 | **C7.14** B3a `TK_LIST` runtime list | `rt` | — |
 | **C7.15** B3b overflow-debug panic guard wiring | `cg` | — |
-| **C7.16** `.tkb` statement/program codec (today only `TExpr`) | `tkb` | — |
+| **C7.16** `.tkb` statement/program codec (today only `TExpr`) — **THE KEYSTONE for packaging**: extend the expression-only `serialize`/`deserialize` to whole `TProgram`/`TFunction`/`TStatement`/`TypeDecl` (writer + reader + round-trip tests), reusing the existing `write_*`/StrTable/frame helpers. Unblocks C7.10 (pre-linker load) + C7.12 (`.tkl` payload) | `tkb` | — |
 | **C7.17** M2 `driver.tks` materialized | *(driver)* | C7.2–C7.5 |
 
 **Rounds:**

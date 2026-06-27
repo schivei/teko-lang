@@ -111,7 +111,7 @@ static tk_str extern_flag(tk_str s) {
 tk_manifest_result tk_parse_manifest(tk_str src) {
     tk_manifest m = {
         .name     = (tk_str){ NULL, 0 },
-        .artifact = TK_ARTIFACT_LIBRARY,   // default until `[artifact] kind = "binary"`
+        .artifact = TK_ARTIFACT_BINARY,    // default (executable) until `[artifact] kind = "…"`
         .source   = (tk_str){ NULL, 0 },
         .deps     = tk_strs_empty(),
         .aliases  = tk_strs_empty(),
@@ -194,11 +194,14 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
             break;
         }
         case SEC_ARTIFACT: {
-            // `kind = "binary"` → Executable; anything else (incl. "library") → Library.
+            // `kind = "binary" | "static" | "shared" | "package"` (C7.1m); unknown → Binary.
             if (key_is(key, "kind")) {
                 tk_str val; size_t ve;
                 if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string value"); }
-                m.artifact = key_is(val, "binary") ? TK_ARTIFACT_EXECUTABLE : TK_ARTIFACT_LIBRARY;
+                if      (key_is(val, "static"))  m.artifact = TK_ARTIFACT_STATIC;
+                else if (key_is(val, "shared"))  m.artifact = TK_ARTIFACT_SHARED;
+                else if (key_is(val, "package")) m.artifact = TK_ARTIFACT_PACKAGE;
+                else                             m.artifact = TK_ARTIFACT_BINARY;
             }
             break;
         }

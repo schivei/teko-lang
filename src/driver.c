@@ -293,6 +293,16 @@ static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
 // Lower → write .c → invoke cc → report. `stem` is the output path (no extension);
 // `label` is what the diagnostics name (the project dir/name). Returns 0 on success.
 static int tk_backend(const char *label, const char *stem, tk_tprogram prog, const char *out_dir, tk_manifest m) {
+    // (C7.1m) artifact-kind dispatch. Binary → the native executable backend below. The library kinds
+    // are HONEST STOPS until their increments land (M.3 — no fake artifact): static/shared = native
+    // lib output (ar / -shared); package = a `.tkl` ZIP of .tkh+.tkb+.tsym, which needs the PROGRAM-
+    // level `.tkb` typed-tree codec (today the `.tkb` is expression-only) — the keystone next step.
+    if (m.artifact == TK_ARTIFACT_STATIC)
+        return fail(label, "static library output (.a) is not yet implemented — planned (C7.1m)");
+    if (m.artifact == TK_ARTIFACT_SHARED)
+        return fail(label, "shared library output (.dylib/.so/.dll) is not yet implemented — planned (C7.1m)");
+    if (m.artifact == TK_ARTIFACT_PACKAGE)
+        return fail(label, "package output (.tkl) needs the program-level .tkb typed-tree codec (C7.16; the .tkb is currently expression-only) — not yet implemented");
     tk_cstr_result emitted = tk_emit_c(prog);
     if (!emitted.ok) return fail(label, emitted.as.error.message);
 

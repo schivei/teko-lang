@@ -298,27 +298,42 @@ because redefinition is a legislative act.)*
   externally); `exp` = **exported in the binary header** (the library's public ABI), hence **public by
   definition**. `pub` is "open inside the house," `exp` is "open to the street." **Governing Law: M.2** (the
   boundary is explicit) **+ M.3** (`pub`/`exp` honestly mark the two reaches). *(→ HISTORY §B.9.)*
-- **The `.tkp` manifest is TOML** — declares `name` (canonical root), `artifact` (executable/library),
-  `source` (invisible root), `[dependencies]` (+ import aliases), `[aliases]` (global). TOML because it is
+- **The `.tkp` manifest is TOML** — declares `name` (canonical root), `artifact` (`binary`/`static`/`shared`/`package`),
+  `source` (invisible root), `description` (embedded in the artifact's metadata — C7.1k), `[platforms] targets`
+  (the CI OS matrix), `[dependencies]` (+ import aliases), `[aliases]` (global). TOML because it is
   read *before* any Teko is parsed (standalone simple parser): explicit and *typed* (no YAML coercion lies),
   commentable (a manifest explains its choices), minimal, unambiguous, and **not bespoke** (no duplicate
   parser). YAML rejected (lies — the "Norway problem"), JSON weak (no comments), INI weak (no nesting).
   **Governing Law: M.3** (typed, no coercion) **+ M.2** (commentable) **+ M.5** (minimal, reuse not bespoke)
   **+ M.1/M.0** (unambiguous, simple grammar). *(→ HISTORY §B.33.)*
-- **A Teko package is a `.tkl` (Teko Library) = `.tkh` (interface) + `.tkb` (typed-tree payload); deps are
-  STATICALLY pre-linked, not FFI.** When a `.tkp` declares `artifact = library`, the compiler emits a
-  **package — a `.tkl`** carrying the `.tkh` (the `exp` interface a consumer type-checks against) and the
-  `.tkb` (the full serialized **typed tree** — Teko IL). *(The `.tkl` internal layout — one bundled file vs
-  co-located `.tkh`/`.tkb` — is a forward design point; see TEKO_CORRECTION_PLAN §11.)*
-  The **`.tkb` is binary but is NOT a native object (`.o`)** — it is Teko's own typed-tree serialization. When
-  compiling the dev's code against dependencies, the compiler **loads the dependency packages into memory and
-  acts as a PRE-LINKER, statically merging** their typed trees with the dev's into one program before codegen.
-  This is **static linking of Teko objects at the typed-tree level** — the deliberate alternative to dynamic
-  linking / **FFI** (FFI is reserved for *foreign*, non-Teko code, at the unsafe IO boundary). **Governing Law:
-  M.1** (static merge = the whole program is checked together, no dynamic-boundary surprises) **+ M.3** (Teko↔Teko
-  is honest static inclusion, not a pretend-foreign call) **+ M.4** (the consuming compile is built on already-
-  checked packages). *(Forward-looking: the pre-linker + package loader land with the pipeline driver; today only
-  the emitters — `.tkb` codec and `.tkh` `build_header`/`emit_tkh` — exist.)*
+- **ARTIFACT KINDS (legislator, 2026-06-27 — C7.1m).** `[artifact] kind` is one of FOUR:
+  - **`binary`** — a native executable (REQUIRES a `main.tks`). The default when `kind` is absent.
+  - **`static`** — a native static library (`.a`/`.lib`) for C/FFI consumers.
+  - **`shared`** — a native shared/dynamic library (`.dylib`/`.so`/`.dll`).
+  - **`package`** — a **Teko `.tkl`** — the distributable DEPENDENCY unit. The `static`/`shared`/`package`
+    kinds FORBID a `main.tks` (the R-main-d rule). *(Today: `binary` is implemented; `static`/`shared`/`package`
+    are recognized and honest-stop until their increments land.)*
+- **A Teko package (`.tkl`, "Teko Library File") is a ZIP** containing `<name>.tkh` (the `exp` interface a
+  consumer type-checks against) + `<name>.tkb` (the serialized **typed tree** — Teko IL) + `<name>.tsym` (the
+  debug symbols, **when present**). The package file is named **`<project.name>-<version>[-<suffix>].tkl`**.
+  *(This RESOLVES the former "forward design point": the `.tkl` layout is a ZIP-STORE archive of the three files.)*
+- **The `.tkb` in a package carries ONLY the project's OWN typed tree — NEVER its dependencies' AST.** A
+  package must not inline (inject) its dependencies; doing so would bloat the artifact and duplicate code across
+  the dependency graph. Dependencies are REFERENCED (by name/version), resolved and loaded at the CONSUMER's
+  build. **Governing Law: M.5** (minimal — no duplicated dependency payload) **+ M.4** (each package is built on
+  already-published dependencies, not by re-embedding them).
+- **The build PIPELINE (legislator, 2026-06-27).** Before the current project's AST is validated, **ALL of its
+  dependencies are loaded first** (a dep may be a `static`/`shared` native lib OR a `.tkl` package's `.tkb`
+  typed tree); THEN the current application is type-checked WITH those dependencies in scope; **only after it
+  validates** is the artifact emitted — the `package` (`.tkl`) generated or the `binary`/`static`/`shared`
+  produced. Teko↔Teko deps are **statically pre-linked at the typed-tree level** (the `.tkb` merge), the
+  deliberate alternative to dynamic linking / **FFI** (FFI is reserved for *foreign*, non-Teko code at the
+  unsafe IO boundary). **Governing Law: M.1** (the whole program — app + deps — is checked together) **+ M.3**
+  (Teko↔Teko is honest static inclusion, not a pretend-foreign call) **+ M.4** (built on already-checked deps).
+  *(PREREQUISITE: a real `.tkl`/pre-linker needs the **program-level `.tkb` codec** — today the `.tkb` codec is
+  EXPRESSION-only; the program/statement serializer+deserializer is the keystone next step (crumb C7.16). The `.tkh`
+  `build_header`/`emit_program` and `.tsym` emitters already exist. Consumption — where/how a dep is unzipped
+  and resolved — is deferred until the phases are finalized.)*
 - **The Teko file-extension registry (legislator, 2026-06-24).** The canonical set, each name one role:
   - **`.tks`** — *Teko Source* (a source file; namespace = its directory).
   - **`.tkt`** — *Teko Test* (a test file; runs on the VM in the test sub-profile, beside its `.tks`, never an artifact).
@@ -326,7 +341,7 @@ because redefinition is a legislative act.)*
   - **`.tkb`** — *Teko Binary* (the serialized **typed tree** / Teko IL — NOT a native `.o`; the pre-linker's unit).
   - **`.tkh`** — *Teko Header* (the `exp` **interface** a consumer type-checks against — the `pub`/`exp` surface).
   - **`.tsym`** — *Teko Symbols* (debug symbols: file:line + names for the debugger + stack traces — Eixo E).
-  - **`.tkl`** — *Teko Library* (a **package**: the distributable dependency unit = `.tkh` interface + `.tkb` payload).
+  - **`.tkl`** — *Teko Library File* (a **package**: a ZIP of `.tkh` interface + `.tkb` payload + `.tsym` (if present); named `<name>-<version>[-<suffix>].tkl`; the distributable dependency unit).
   **Governing Law: M.3** (each extension names its role honestly) **+ M.5** (one extension per role, no overlap).
 - **Teko's own native backend — transpile-to-C is REVOKED (legislator, 2026-06-24).** The AOT path will be
   **Teko's OWN native code generator** (typed tree / `.tkb` → native object/binary directly), realizing the

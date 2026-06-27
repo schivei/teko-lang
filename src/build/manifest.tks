@@ -35,7 +35,7 @@ pub type Manifest = struct {
 // silent coercion). The recognized TOML subset:
 //   * top-level  `key = "value"`     → name / source (strings)
 //   * table head `[table]`           → [artifact] / [dependencies] / [aliases]
-//   * `[artifact] kind = "binary"`   → Artifact::Executable (else Library)
+//   * `[artifact] kind = "binary"|"static"|"shared"|"package"` → Artifact (default Binary)
 //   * keys under [dependencies]      → deps
 //   * keys under [aliases]           → aliases
 //   * arrays     `key = ["a", "b"]`  → recognized (a value form)
@@ -165,7 +165,7 @@ fn mf_extern_flag(s: str) -> str {
 fn parse_manifest(src: str) -> Manifest | error {
     mut name = ""
     mut source = ""
-    mut artifact = Artifact::Library          // default until `[artifact] kind = "binary"`
+    mut artifact = Artifact::Binary           // default (executable) until `[artifact] kind = "…"`
     mut deps: []str = teko::list::empty()
     mut aliases: []str = teko::list::empty()
     mut version = ""
@@ -244,10 +244,13 @@ fn parse_manifest(src: str) -> Manifest | error {
                 else if key == "lines"    { cov_lines = mf_read_int(line, v) }
                 else if key == "branches" { cov_branches = mf_read_int(line, v) }
             } else if sec == "artifact" {
-                // `kind = "binary"` → Executable; anything else → Library.
+                // `kind = "binary" | "static" | "shared" | "package"` (C7.1m); unknown → Binary.
                 if key == "kind" {
                     let q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                    if q.text == "binary" { artifact = Artifact::Executable } else { artifact = Artifact::Library }
+                    if q.text == "static" { artifact = Artifact::Static }
+                    else if q.text == "shared" { artifact = Artifact::Shared }
+                    else if q.text == "package" { artifact = Artifact::Package }
+                    else { artifact = Artifact::Binary }
                 }
             } else if sec == "deps" {
                 deps = teko::list::push(deps, key)

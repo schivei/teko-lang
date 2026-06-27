@@ -9,11 +9,14 @@
 #include "../core.h"   // TK_RESULT, tk_error
 #include <stdbool.h>   // bool
 
-// the `.tkp` artifact kind (tkp_rule.tks `enum { Executable; Library }`). The manifest
-// encodes Executable as `[artifact] kind = "binary"`.
+// the `.tkp` artifact kind (tkp_rule.tks `enum { Binary; Static; Shared; Package }`). The
+// manifest encodes these as `[artifact] kind = "binary" | "static" | "shared" | "package"`.
+// Binary = executable; Static/Shared = native libs (.a / .dylib|.so|.dll); Package = a `.tkl`.
 typedef enum {
-    TK_ARTIFACT_EXECUTABLE,
-    TK_ARTIFACT_LIBRARY,
+    TK_ARTIFACT_BINARY,
+    TK_ARTIFACT_STATIC,
+    TK_ARTIFACT_SHARED,
+    TK_ARTIFACT_PACKAGE,
 } tk_artifact;
 
 // `Artifact | error` — the result of the main-file rule (pass-through on success).
