@@ -1,12 +1,22 @@
 // src/runtime/teko_rt.c   (namespace 'teko::runtime')
 // libteko_rt impl: runtime for GENERATED Teko programs (M.1 fail-loud).
 // Distinct from the compiler's own src/core.h; self-contained, libc-only.
+// (C7.1f) expose POSIX (setenv/fork/execvp/opendir/getlogin/…) under strict `-std=c23` — musl
+// (the Alpine/Linux pipeline) hides them otherwise. Harmless on macOS/glibc. MUST precede includes.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "teko_rt.h"
 #include <stdio.h>    // fwrite, fputc, fputs, stdout, stderr
 #include <stdlib.h>   // abort, malloc, _Exit
 #include <string.h>   // memcpy
 #include <signal.h>   // signal — native crash backtraces (C1.9)
+// execinfo (backtrace) exists on macOS + glibc, but NOT musl (the Alpine/Linux pipeline). Guard it
+// so the runtime is musl-portable (C7.1f); without it the backtrace degrades to a one-line notice.
+#if defined(__APPLE__) || defined(__GLIBC__)
 #include <execinfo.h> // backtrace, backtrace_symbols_fd (C1.9)
+#define TK_HAVE_BACKTRACE 1
+#endif
 #include <unistd.h>   // chdir, fork, execvp, _exit (host FFI bottoms)
 #include <sys/wait.h> // waitpid — teko::process::run
 #include <dirent.h>   // opendir/readdir — teko::fs::list_dir
@@ -22,6 +32,7 @@
 // handler is active only in generated programs (which have no such main).
 static int    tk_g_argc;   // captured argv (defined below; used here to locate <argv0>.tsym)
 static char **tk_g_argv;
+#if defined(TK_HAVE_BACKTRACE)
 static char  *tk_tsym_buf; // the loaded .tsym contents, or NULL (process-lifetime)
 
 // Load `<argv0>.tsym` once (best-effort — missing/unreadable is fine).
@@ -81,6 +92,10 @@ static void tk_backtrace(void) {
     }
     free(syms);
 }
+#else
+// musl (or any platform without execinfo): no symbolic backtrace — degrade to a one-line notice.
+static void tk_backtrace(void) { fputs("teko: stack trace unavailable on this platform (no execinfo)\n", stderr); }
+#endif
 static void tk_rt_crash_handler(int sig) {
     fputs("\nteko: FATAL signal — a generated program crashed (M.1).\n", stderr);
     tk_backtrace();
