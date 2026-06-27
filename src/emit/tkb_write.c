@@ -221,6 +221,7 @@ static tk_bytes write_typebody(tk_bytes b, tk_strtable t, tk_type_body tb) {
         case TK_BODY_VARIANT: return write_typeexpr(tk_write_u8(b, 2), t, tb.as.variant_body.type_expr);
         case TK_BODY_ALIAS:   return write_typeexpr(tk_write_u8(b, 3), t, tb.as.alias_body.alias);
         case TK_BODY_EXTERN:  return tk_write_u8(b, 4);
+        case TK_BODY_FLAGS:   return write_strs(tk_write_u8(b, 5), t, tb.as.flags_body.members, tb.as.flags_body.n_members);
     }
     return b;
 }

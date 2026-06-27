@@ -47,6 +47,32 @@ typedef struct {
     size_t         len;   // length in BYTES
 } tk_str;
 
+// error — the Teko built-in error-as-value (E2-NATIVE). Mirrors core.h's tk_error so that
+// generated programs carry full diagnostic adornments in native just as the VM does.
+// A message-only `error { message = "…" }` literal leaves file/line/col/expected/actual
+// at their zero/NULL defaults (C1.3 additive — all existing sites are unchanged).
+typedef struct {
+    tk_str     message;    // the error message (required)
+    tk_str     file;       // source file (empty = unknown)
+    uint32_t   line;       // 1-based line (0 = unknown)
+    uint32_t   col;        // 1-based column (0 = unknown)
+    tk_str     expected;   // rendered expected type (empty = n/a)
+    tk_str     actual;     // rendered actual type   (empty = n/a)
+} tk_error;
+
+// Constructors — message-only (minimal) and the two diagnostic adornment helpers that
+// mirror core.h's tk_error_loc / tk_error_types (E2).
+static inline tk_error tk_error_make(tk_str message) {
+    tk_error e; e.message = message; e.file = (tk_str){0}; e.line = 0; e.col = 0;
+    e.expected = (tk_str){0}; e.actual = (tk_str){0}; return e;
+}
+static inline tk_error tk_error_loc(tk_error e, uint32_t line, uint32_t col) {
+    e.line = line; e.col = col; return e;
+}
+static inline tk_error tk_error_types(tk_error e, tk_str expected, tk_str actual) {
+    e.expected = expected; e.actual = actual; return e;
+}
+
 // C7.14: concrete list type instantiations (must come AFTER tk_byte/tk_str are defined).
 // Generated programs and the compiler itself use these typed lists. The Teko-surface
 // equivalents are `[]str`, `[]byte`, `[]i64` with `teko::list::push` / `teko::list::empty`

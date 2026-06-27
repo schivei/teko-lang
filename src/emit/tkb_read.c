@@ -324,6 +324,7 @@ static tk_type_body read_typebody(tk_reader *r, tk_strs t) {
         case 2: tb.tag = TK_BODY_VARIANT; tb.as.variant_body.type_expr = read_typeexpr(r, t); return tb;
         case 3: tb.tag = TK_BODY_ALIAS;   tb.as.alias_body.alias = read_typeexpr(r, t); return tb;
         case 4: tb.tag = TK_BODY_EXTERN;  return tb;
+        case 5: tb.tag = TK_BODY_FLAGS;   tb.as.flags_body.members = read_strs(r, t, &tb.as.flags_body.n_members); return tb;
     }
     r->ok = false; return tb;
 }

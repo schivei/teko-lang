@@ -161,6 +161,15 @@ static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t
         tk_type_body b = { .tag = TK_BODY_ENUM, .as.enum_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
         return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = ms.as.value.next } };
     }
+    if (tk_is_kind_at(t, n, pos, TK_TOKEN_FLAGS)) {
+        if (!tk_is_kind_at(t, n, pos + 1, TK_TOKEN_LBRACE)) {
+            return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, pos + 1, "expected '{' after `flags`") };
+        }
+        tk_parsed_names_result ms = parse_field_names(t, n, pos + 1);
+        if (!ms.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = ms.as.error }; }
+        tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
+        return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = ms.as.value.next } };
+    }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_VARIANT)) {
         tk_parsed_type_result ty = tk_parse_type(t, n, pos + 1);
         if (!ty.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = ty.as.error }; }
@@ -209,6 +218,35 @@ tk_parsed_decl_result tk_parse_type_decl(const tk_token *t, size_t n, size_t pos
     return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = d, .next = body.as.value.next } };
 }
 
+// `[doc] [pub|exp] flags Name { Member; Member; … }` (C8.2).
+// A standalone bitflag-enum declaration: `flags` keyword + name + member-name list.
+// Power-of-2 values are auto-assigned by the checker (C8.3); no `=` and no manual values here.
+static tk_parsed_decl_result tk_parse_flags_decl(const tk_token *t, size_t n, size_t pos) {
+    size_t p = pos;
+    bool has_doc = false; tk_str doc = (tk_str){0};
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_DOC)) { has_doc = true; doc = t[p].text; p += 1; }
+    tk_visibility vis = TK_VIS_PRIVATE;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_PUB))      { vis = TK_VIS_PUB; p += 1; }
+    else if (tk_is_kind_at(t, n, p, TK_TOKEN_EXP)) { vis = TK_VIS_EXP; p += 1; }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_FLAGS)) {
+        return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected `flags`") };
+    }
+    p += 1;
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_IDENT)) {
+        return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected a type name after `flags`") };
+    }
+    tk_str name = t[p].text; uint32_t name_line = t[p].line, name_col = t[p].col; p += 1;
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_LBRACE)) {
+        return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected '{' after the flags type name") };
+    }
+    tk_parsed_names_result ms = parse_field_names(t, n, p);
+    if (!ms.ok) { return (tk_parsed_decl_result){ .ok = false, .as.error = ms.as.error }; }
+    tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
+    tk_type_decl td = { .name = name, .body = b, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
+    tk_decl d = { .tag = TK_DECL_TYPE, .as.type_decl = td };
+    return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = d, .next = ms.as.value.next } };
+}
+
 static tk_parsed_decl_result parse_decl(const tk_token *t, size_t n, size_t pos) {
     // optional leading `#test` attribute (D2): `#` `test` then a function (only on functions).
     size_t start = pos;
@@ -244,10 +282,15 @@ static tk_parsed_decl_result parse_decl(const tk_token *t, size_t n, size_t pos)
         if (os_guard.len) { return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "`#os(\"…\")` may only precede a function") }; }
         return tk_parse_type_decl(t, n, start);   // handles the optional `extern` (→ opaque handle)
     }
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_FLAGS)) {
+        if (is_test) { return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "`#test` may only precede a function") }; }
+        if (os_guard.len) { return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "`#os(\"…\")` may only precede a function") }; }
+        return tk_parse_flags_decl(t, n, start);
+    }
     if (saw_extern) {
         return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "expected `fn` or `type` after `extern`") };
     }
-    return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "expected a declaration (`fn`/`type`, optionally `pub`/`exp`/doc); loose statements belong in main.tks") };
+    return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "expected a declaration (`fn`/`type`/`flags`, optionally `pub`/`exp`/doc); loose statements belong in main.tks") };
 }
 
 tk_parsed_module_result tk_parse_module(const tk_token *t, size_t n, size_t pos) {

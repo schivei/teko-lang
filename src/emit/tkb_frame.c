@@ -144,6 +144,7 @@ static void collect_typebody(tk_strtable *t, tk_type_body tb) {
     switch (tb.tag) {
         case TK_BODY_STRUCT:  collect_fields(t, tb.as.struct_body.fields, tb.as.struct_body.n_fields); break;
         case TK_BODY_ENUM:    for (size_t i = 0; i < tb.as.enum_body.n_members; i += 1) tk_st_intern(t, tb.as.enum_body.members[i]); break;
+        case TK_BODY_FLAGS:   for (size_t i = 0; i < tb.as.flags_body.n_members; i += 1) tk_st_intern(t, tb.as.flags_body.members[i]); break;
         case TK_BODY_VARIANT: collect_typeexpr(t, tb.as.variant_body.type_expr); break;
         case TK_BODY_ALIAS:   collect_typeexpr(t, tb.as.alias_body.alias); break;
         case TK_BODY_EXTERN:  break;

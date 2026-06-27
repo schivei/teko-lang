@@ -203,12 +203,13 @@ typedef struct {                                                   // Function (
 typedef struct { tk_str name; tk_type_expr type_ann; } tk_field;
 typedef struct { tk_field *fields; size_t n_fields; }  tk_struct_body;
 typedef struct { tk_str  *members; size_t n_members; } tk_enum_body;    // member names, in order
+typedef struct { tk_str  *members; size_t n_members; } tk_flags_body;   // member names, in order (power-of-2 auto-assigned at checker time; C8.3)
 typedef struct { tk_type_expr type_expr; }             tk_variant_body; // a union (A.8)
 typedef struct { tk_type_expr alias; }                 tk_alias_body;   // `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity)
 typedef struct { int _unused; }                        tk_extern_body;  // `extern type Name` — an OPAQUE foreign handle (C7.1a; lowers to `void *`)
-typedef struct {                                                        // TypeBody = StructBody | EnumBody | VariantBody | AliasBody | ExternBody
-    enum { TK_BODY_STRUCT, TK_BODY_ENUM, TK_BODY_VARIANT, TK_BODY_ALIAS, TK_BODY_EXTERN } tag;
-    union { tk_struct_body struct_body; tk_enum_body enum_body; tk_variant_body variant_body; tk_alias_body alias_body; tk_extern_body extern_body; } as;
+typedef struct {                                                        // TypeBody = StructBody | EnumBody | FlagsBody | VariantBody | AliasBody | ExternBody
+    enum { TK_BODY_STRUCT, TK_BODY_ENUM, TK_BODY_FLAGS, TK_BODY_VARIANT, TK_BODY_ALIAS, TK_BODY_EXTERN } tag;
+    union { tk_struct_body struct_body; tk_enum_body enum_body; tk_flags_body flags_body; tk_variant_body variant_body; tk_alias_body alias_body; tk_extern_body extern_body; } as;
 } tk_type_body;
 typedef struct {                                                        // TypeDecl (nominal — B.13)
     tk_str        name;

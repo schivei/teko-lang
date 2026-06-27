@@ -76,6 +76,9 @@ static tyexport_result build_tyexport(tk_type_decl d, tk_type_table table) {
         case TK_BODY_EXTERN:
             // (C7.1a) exporting an `extern type` opaque handle in the `.tkh` is a LATER gap. Honest stop.
             return (tyexport_result){ .ok = false, .as.error = tk_error_make("exporting an extern type in the header is not yet supported") };
+        case TK_BODY_FLAGS:
+            // (C8.4) exporting a `flags` type in the `.tkh` is deferred to C8.4. Honest stop.
+            return (tyexport_result){ .ok = false, .as.error = tk_error_make("exporting a flags type in the header is not yet supported") };
     }
     return (tyexport_result){ .ok = false, .as.error = tk_error_make("unknown type body shape") };
 }

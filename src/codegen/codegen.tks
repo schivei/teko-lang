@@ -502,8 +502,8 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         // typedef is stamped in the prelude. A Named variant decl is reached via Named, not here.
         checker::Variant as va => cg_variant_typename(buf, va)
         checker::Func      => error { message = "codegen: function type not yet supported" }
-        // `error` lowers to its message str (no separate error C value type — REBOOT §202).
-        checker::Error     => cb(buf, "tk_str")
+        // `error` — the runtime tk_error struct (E2-NATIVE; teko_rt.h). Full diagnostic fields.
+        checker::Error     => cb(buf, "tk_error")
         // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
         // unsigned. Never dereferenced in Teko; only crosses the extern boundary.
         checker::Ptr       => cb(buf, "void *")
@@ -707,7 +707,7 @@ fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr) ->
             else if last == "bool"  { return cb(buf, "bool") }
             else if last == "byte"  { return cb(buf, "uint8_t") }
             else if last == "str"   { return cb(buf, "tk_str") }
-            else if last == "error" { return cb(buf, "tk_str") }   // error → its message str (REBOOT §202)
+            else if last == "error" { return cb(buf, "tk_error") }   // error → runtime tk_error struct (E2-NATIVE)
             else if last == "ptr"   { return cb(buf, "void *") }     // (C7.1a) opaque FFI pointer
             else if last == "uptr"  { return cb(buf, "uintptr_t") }  // (C7.1a) opaque word-size unsigned
             // a TRANSPARENT alias (`type Name = <type-expr>`) emits NO C type of its own —
@@ -1190,15 +1190,29 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
         }
         return error { message = "codegen: this teko::list builtin not yet supported (only empty/push — fixed+copy)" }
     }
-    // E2 (native, DEGRADED): err_loc/err_typed adorn an error VALUE with diagnostic position/types.
-    // Native `error` is lowered to its message tk_str (the error-STRUCT representation is a Phase-6
-    // follow-on), so natively these are NO-OPs returning the error (arg0) UNCHANGED. The VM carries
-    // the adornments in full; native diagnostics degrade to the item position. Mirrors codegen.c.
+    // E2 (native): err_loc/err_typed adorn an error VALUE with diagnostic position/types.
+    // `error` is now the full tk_error struct (E2-NATIVE), so these call tk_error_loc /
+    // tk_error_types (teko_rt.h) which return a modified copy — native parity with the VM.
     if p.segments.len >= 1 {
         let pe = p.segments[p.segments.len - 1].name
-        if pe == "err_loc" || pe == "err_typed" {
-            mut oe = cb(buf, "(")
+        if pe == "err_loc" {
+            // tk_error_loc(e, line, col) — returns a copy with line/col set.
+            mut oe = cb(buf, "tk_error_loc(")
             oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            oe = cb(oe, ", (uint32_t)(")
+            oe = match emit_expr(oe, prog, c.args[1]) { []byte as r => r; error as err => return err }
+            oe = cb(oe, "), (uint32_t)(")
+            oe = match emit_expr(oe, prog, c.args[2]) { []byte as r => r; error as err => return err }
+            return cb(oe, "))")
+        }
+        if pe == "err_typed" {
+            // tk_error_types(e, expected, actual) — returns a copy with expected/actual set.
+            mut oe = cb(buf, "tk_error_types(")
+            oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            oe = cb(oe, ", ")
+            oe = match emit_expr(oe, prog, c.args[1]) { []byte as r => r; error as err => return err }
+            oe = cb(oe, ", ")
+            oe = match emit_expr(oe, prog, c.args[2]) { []byte as r => r; error as err => return err }
             return cb(oe, ")")
         }
         // Phase 3 — `str`/`str_of_bytes` (([]byte) -> str). A []byte lowers to the generated struct
@@ -1314,8 +1328,8 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             else if last == "as_cstr"       { builtin = "tk_cstr_dup";      has_builtin = true }   // (str) -> ptr (fresh NUL-terminated copy)
             else if last == "str_from_cstr" { builtin = "tk_str_from_cstr"; has_builtin = true }   // (ptr) -> str (copy a C string back)
             else if last == "os"            { builtin = "tk_rt_os";         has_builtin = true }   // () -> str (host OS — C7.1f)
-            // (err_loc/err_typed handled DEGRADED at the top of this fn — native error is message-only;
-            //  the error-struct representation is a Phase-6 follow-on. Mirrors codegen.c.)
+            // (err_loc/err_typed handled at the top of this fn — they call tk_error_loc /
+            //  tk_error_types on the full tk_error struct — E2-NATIVE. Mirrors codegen.c.)
         }
     }
     mut out = buf
@@ -1390,18 +1404,15 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
         o = match emit_expr(o, prog, fa.receiver) { []byte as r => r; error as err => return err }
         return cb(o, ".len)")
     }
-    // E2 (native, DEGRADED): an error VALUE is its message tk_str (no struct yet — Phase-6 follow-on),
-    // so `e.message` IS that tk_str; position/type adornments degrade to defaults (line/col -> 0u32,
-    // file/expected/actual -> empty str). The VM carries them in full. Mirrors codegen.c.
+    // E2 (native): error values are now the full tk_error struct (E2-NATIVE), so
+    // field access reads the real struct fields — native parity with the VM. Mirrors codegen.c.
     let is_error = match fa.receiver.type { checker::Error => true; _ => false }
     if is_error {
-        if fa.field == "message" {
-            mut oe = cb(buf, "(")
-            oe = match emit_expr(oe, prog, fa.receiver) { []byte as r => r; error as err => return err }
-            return cb(oe, ")")
-        }
-        if fa.field == "line" || fa.field == "col" { return cb(buf, "((uint32_t)0)") }
-        return cb(buf, "((tk_str){0})")
+        mut oe = cb(buf, "((")
+        oe = match emit_expr(oe, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        oe = cb(oe, ").")
+        oe = cb_str(oe, fa.field)
+        return cb(oe, ")")
     }
     // auto-box: reading a recursive back-edge field derefs the heap pointer.
     let fa_boxed = match fa.receiver.type {
@@ -1781,17 +1792,19 @@ fn cg_find_struct_field_type(prog: checker::TProgram, sname: str, fname: str) ->
 // field_names/field_vals into the struct's declared order (expr.tks), so both backends
 // lower identically (differential equivalence with the VM, which stores fields in the
 // same order). The node's `.type` is Named (a user struct -> mangle its name) or Error
-// (`error { message = … }`). `error` has NO C value representation in the generated TU
-// yet (teko_rt.h defines no error value type), so that case is an honest barrier —
-// named-struct construction works. (C: TK_TEXPR_STRUCT_INIT branch.)
+// (`error { message = … }`). E2-NATIVE: `error` is now the runtime tk_error struct
+// (teko_rt.h); `error { message = s }` emits tk_error_make(s) which fills the other
+// diagnostic fields with zero defaults (C1.3 additive). (C: TK_TEXPR_STRUCT_INIT branch.)
 fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit) -> []byte | error {
     let name = match e.type {
         checker::Named as nm => nm.name
-        // `error` lowers to its message str (REBOOT §202): `error { message = s }` IS the str `s`
-        // (the checker fixed the single `message` field), matching the VM's observable behavior.
+        // E2-NATIVE: `error { message = s }` → tk_error_make(s); the checker ensures exactly
+        // one `message` field. The other diagnostic fields default to zero (C1.3 additive).
         checker::Error       => {
             if si.field_vals.len != 1 { return error { message = "codegen: error value must have exactly the `message` field (internal)" } }
-            return emit_expr(buf, prog, si.field_vals[0])
+            mut oe = cb(buf, "tk_error_make(")
+            oe = match emit_expr(oe, prog, si.field_vals[0]) { []byte as r => r; error as err => return err }
+            return cb(oe, ")")
         }
         _           => return error { message = "codegen: struct literal with a non-named type not yet supported" }
     }
@@ -2322,9 +2335,10 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = match emit_type(o, e.type) { []byte as r => r; error as err => return err }
         o = cb(o, "){ .present = false } : (")
         o = match emit_type(o, e.type) { []byte as r => r; error as err => return err }
-        o = cb(o, "){ .present = true, .value = ")
+        // E2-NATIVE: .value is now tk_error; wrap the tk_str .err message via tk_error_make.
+        o = cb(o, "){ .present = true, .value = tk_error_make(")
         o = cb(o, t)
-        return cb(o, "r.err }; })")
+        return cb(o, "r.err) }; })")
     }
 
     // The struct-returning host FFI: bind the fixed-ABI result, then lift per result shape.
@@ -2345,19 +2359,20 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
     }
     o = cb(o, "); ")
 
-    // error? : ok → present=false (success) ; !ok → present=true, value=<message>.
+    // error? : ok → present=false (success) ; !ok → present=true, value=<tk_error>.
+    // E2-NATIVE: .value is now tk_error; wrap the tk_str .err message via tk_error_make.
     if kind == "ures" {
         o = cb(o, t)
         o = cb(o, ".ok ? (")
         o = match emit_type(o, e.type) { []byte as r => r; error as err => return err }
         o = cb(o, "){ .present = false } : (")
         o = match emit_type(o, e.type) { []byte as r => r; error as err => return err }
-        o = cb(o, "){ .present = true, .value = ")
+        o = cb(o, "){ .present = true, .value = tk_error_make(")
         o = cb(o, t)
-        return cb(o, ".err }; })")
+        return cb(o, ".err) }; })")
     }
 
-    // VARIANT results: ok → wrap the value arm ; !ok → wrap the error arm (its message str).
+    // VARIANT results: ok → wrap the value arm ; !ok → wrap the error arm (a tk_error).
     o = cb(o, t)
     o = cb(o, ".ok ? ")
     if kind == "sres" {
@@ -2371,9 +2386,9 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = match emit_variant_wrap_str(o, prog, e.type, slice_t, sx) { []byte as r => r; error as err => return err }
     }
     o = cb(o, " : ")
-    // u64res carries no message (not-found is the only failure) → an empty error str; the others
-    // surface the primitive's `.err` message.
-    let eexpr = if kind == "u64res" { "(tk_str){0}" } else { $"{t}.err" }
+    // E2-NATIVE: wrap the runtime's `.err` tk_str (message) into a full tk_error via tk_error_make.
+    // u64res carries no message (not-found is the only failure) → empty message tk_error_make.
+    let eexpr = if kind == "u64res" { "tk_error_make((tk_str){0})" } else { teko::str::concat3("tk_error_make(", t, ".err)") }
     o = match emit_variant_wrap_str(o, prog, e.type, err_t, eexpr) { []byte as r => r; error as err => return err }
     return cb(o, "; })")
 }
@@ -3740,6 +3755,11 @@ fn emit_type_decl(buf: []byte, prog: checker::TProgram, d: parser::TypeDecl) -> 
         parser::AliasBody => {
             // A TRANSPARENT alias emits NO C type — references resolve through to the aliased
             // type at the checker, and codegen emits that resolved type at every use site.
+            buf
+        }
+        parser::FlagsBody => {
+            // (C8.4) flags codegen (power-of-2 integer typedef) is deferred to C8.4.
+            // For now, emit nothing so the parser/AST crumb (C8.2) doesn't crash.
             buf
         }
         parser::ExternBody => {
