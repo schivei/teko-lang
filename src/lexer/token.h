@@ -138,6 +138,13 @@ typedef enum {
     //     no general array literal). Comparison-precedence; does NOT chain.
     TK_TOKEN_IN,            // `in` — the membership operator (x in [ … ])
     TK_TOKEN_HASH,          // `#` — attribute marker (`#test`) — D2 test gate
+
+    // --- FFI (`extern` — C7.1a). APPENDED LAST (ordinal stability — never a stored op, so its
+    //     ordinal is never serialized). `extern fn name(params) -> ret = "sym" from "lib"`
+    //     declares a foreign C function (no body). `from` is NOT reserved — it stays a normal
+    //     identifier (the corpus uses `from` as a param name), matched CONTEXTUALLY by the parser
+    //     in the extern position. See LEGISLATION §"FFI / `extern`".
+    TK_TOKEN_EXTERN,        // `extern` — foreign-function declarator
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW

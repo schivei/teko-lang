@@ -261,6 +261,7 @@ static tk_token_kind keyword_kind(tk_str text) {
     if (tk_str_eq_lit(text, "use"))      return TK_TOKEN_USE;
     if (tk_str_eq_lit(text, "pub"))      return TK_TOKEN_PUB;   // public within the project (B.9)
     if (tk_str_eq_lit(text, "exp"))      return TK_TOKEN_EXP;
+    if (tk_str_eq_lit(text, "extern"))   return TK_TOKEN_EXTERN;   // foreign-function declarator (C7.1a)
     if (tk_str_eq_lit(text, "true"))     return TK_TOKEN_TRUE;   // bool literal (LEGISLATION §75)
     if (tk_str_eq_lit(text, "false"))    return TK_TOKEN_FALSE;  // bool literal (LEGISLATION §75)
     if (tk_str_eq_lit(text, "null"))     return TK_TOKEN_NULL;   // null literal (REBOOT_PLAN §202)

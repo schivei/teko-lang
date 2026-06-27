@@ -50,6 +50,8 @@ tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos,
     tk_visibility vis = TK_VIS_PRIVATE;                              // default: own-namespace only
     if (tk_is_kind_at(t, n, p, TK_TOKEN_PUB))      { vis = TK_VIS_PUB; p += 1; }
     else if (tk_is_kind_at(t, n, p, TK_TOKEN_EXP)) { vis = TK_VIS_EXP; p += 1; }
+    bool is_extern = false;                                          // C7.1a: `extern fn …` (foreign, no body)
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_EXTERN)) { is_extern = true; p += 1; }
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_FN)) {
         return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected `fn`") };
     }
@@ -70,6 +72,34 @@ tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos,
         if (!r.ok) { return (tk_parsed_decl_result){ .ok = false, .as.error = r.as.error }; }
         has_return = true; ret = r.as.value.node; p = r.as.value.next;
     }
+    if (is_extern) {
+        if (is_test) { return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "`#test` may not precede `extern`") }; }
+        if (!tk_is_kind_at(t, n, p, TK_TOKEN_ASSIGN)) {
+            return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected `= \"symbol\"` to bind the C symbol of an `extern` function") };
+        }
+        p += 1;
+        if (!tk_is_kind_at(t, n, p, TK_TOKEN_STR)) {
+            return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected a quoted C symbol after `=` in an `extern` function") };
+        }
+        tk_str c_symbol = t[p].text; p += 1;
+        tk_str from_lib = (tk_str){0};                              // "" = implicit libc (C7.1a, macOS)
+        // `from` is CONTEXTUAL (not a reserved word — the corpus uses it as an identifier), so
+        // match it as a plain Ident in the extern position.
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_IDENT) && text_is(t[p].text, "from")) {
+            p += 1;
+            if (!tk_is_kind_at(t, n, p, TK_TOKEN_STR)) {
+                return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected a quoted library name after `from`") };
+            }
+            from_lib = t[p].text; p += 1;
+        }
+        tk_function ef = { .name = name, .params = ps.as.value.params, .nparams = ps.as.value.n_params,
+            .has_return = has_return, .return_type = ret,
+            .body = NULL, .nbody = 0,
+            .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col, .is_test = is_test,
+            .is_extern = true, .c_symbol = c_symbol, .from_lib = from_lib };
+        tk_decl ed = { .tag = TK_DECL_FUNCTION, .as.function = ef };
+        return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = ed, .next = p } };
+    }
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_LBRACE)) {
         return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected '{' for the function body") };
     }
@@ -78,7 +108,8 @@ tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos,
     tk_function f = { .name = name, .params = ps.as.value.params, .nparams = ps.as.value.n_params,
         .has_return = has_return, .return_type = ret,
         .body = blk.as.value.statements, .nbody = blk.as.value.n,
-        .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col, .is_test = is_test };
+        .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col, .is_test = is_test,
+        .is_extern = false, .c_symbol = (tk_str){0}, .from_lib = (tk_str){0} };
     tk_decl d = { .tag = TK_DECL_FUNCTION, .as.function = f };
     return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = d, .next = blk.as.value.next } };
 }
@@ -182,7 +213,12 @@ static tk_parsed_decl_result parse_decl(const tk_token *t, size_t n, size_t pos)
     size_t k = start;
     if (tk_is_kind_at(t, n, k, TK_TOKEN_DOC)) { k += 1; }
     if (tk_is_kind_at(t, n, k, TK_TOKEN_PUB) || tk_is_kind_at(t, n, k, TK_TOKEN_EXP)) { k += 1; }
+    bool saw_extern = false;                                        // C7.1a: peek past `extern` to reach `fn`
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_EXTERN)) { saw_extern = true; k += 1; }
     if (tk_is_kind_at(t, n, k, TK_TOKEN_FN))   { return tk_parse_function(t, n, start, is_test); }
+    if (saw_extern) {
+        return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "expected `fn` after `extern` (only functions may be `extern`)") };
+    }
     if (tk_is_kind_at(t, n, k, TK_TOKEN_TYPE)) {
         if (is_test) { return (tk_parsed_decl_result){ .ok = false, .as.error = tk_err_at(t, n, k, "`#test` may only precede a function") }; }
         return tk_parse_type_decl(t, n, start);

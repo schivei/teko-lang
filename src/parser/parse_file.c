@@ -8,7 +8,7 @@
 #include "ast.h"          // tk_uses_push, tk_stmts_push
 
 static bool is_decl_start(const tk_token *t, size_t n, size_t pos) {
-    return tk_is_kind_at(t, n, pos, TK_TOKEN_FN) || tk_is_kind_at(t, n, pos, TK_TOKEN_TYPE);
+    return tk_is_kind_at(t, n, pos, TK_TOKEN_FN) || tk_is_kind_at(t, n, pos, TK_TOKEN_TYPE) || tk_is_kind_at(t, n, pos, TK_TOKEN_EXTERN);
 }
 
 static tk_parsed_use_result parse_use(const tk_token *t, size_t n, size_t pos) {

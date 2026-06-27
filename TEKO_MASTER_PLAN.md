@@ -84,7 +84,7 @@ compile+link gate which is now the milestone reached.
 | 4 | C↔.tks mirroring | ✅ MAINTAINED continuously — every commit mirrors its `.c`/`.h` change to the `.tks` twin (SUPREME RULE); a standing per-commit discipline, not a pending sweep | Pay down mirror debt before more code lands |
 | 5 | Definite-assignment / init analysis | ✅ **CLOSED** — `src/checker/initanalysis.{tks,c,h}` runs last in `type_program`: **use-before-init is STRUCTURAL** (Teko has no uninitialized binding form — every let/mut/const carries a value typed in the pre-binding env → law-first: no check needed); **unused-local → ERROR** (Phase-1 location, snippet+caret in the native renderer; `_` discard exempt); **unused-private-fn → WARNING** via the new **warnings channel** (stderr, never fails the build). Both twins lockstep; gate GREEN; corpus clean of unused locals; surfaced 14 genuinely-dead private fns. | Real checker gap; lands the warnings channel |
 | 6 | Finish self-host → working `teko .` | ✅ **CLOSED** — both exit criteria met: (1) FULL SELF-HOSTING — `selfhost` gate produces `bin/teko` (gen-1→gen-2→gen-3), 0 cc errors, 902 items; (2) VM==native across the regression set (5/6/106). VM-execution frontier lands an HONEST host-FFI stop (``vm: `args` is a host function…use `teko build```) in both twins. Deferred law-first: #41 type-resolution (latent — 0 collisions), VM host surface → Phase 7 C2*, #19 X5 (headers densely satisfied). | The gating milestone for everything downstream |
-| 7 | Host independence | 🔶 **ACTIVE** — host-FFI runtime DONE (str surface + `tk_alloc` + `read_file`/`write_file`/`var`/`run`/`chdir`/`list_dir`/`args` + arith). **`-o <dir>`** ✅. **VM test gate D2+D3+D4** ✅ (`#test` attribute; `vm::run_tests` fail-fast + VM param-binding; function-level coverage via a runtime sink; `teko build` gate w/ 80% floor + `#test`-strip + `--no-test` opt-out — both twins). Remaining: FFI/`extern` legislation+impl (C7.0 tribunal), host surfaces over `extern`, packages/pre-linker, `pack`, cleanup | FFI + host surfaces + VM test gate + project/output/pack |
+| 7 | Host independence | 🔶 **ACTIVE** — host-FFI runtime DONE (str surface + `tk_alloc` + `read_file`/`write_file`/`var`/`run`/`chdir`/`list_dir`/`args` + arith). **`-o <dir>`** ✅. **VM test gate D2+D3+D4** ✅ (`#test` attribute; `vm::run_tests` fail-fast + VM param-binding; function-level coverage via a runtime sink; `teko build` gate w/ 80% floor + `#test`-strip + `--no-test` opt-out — both twins). Remaining: **C7.0 ✅ RATIFIED 2026-06-27** (extern form — LEGISLATION §"FFI / `extern`"), **C7.1 extern impl IN PROGRESS** (macOS+libc → Linux → Windows), host surfaces over `extern`, packages/pre-linker, `pack`, cleanup | FFI + host surfaces + VM test gate + project/output/pack |
 | 8 | FLAGS | ⬜ not started | Bitflag enums (spec frozen) |
 | 9 | SEC | ⬜ not started | SAST + capability audit, after corrections |
 | 10 | Evolution S1–S9 | ⬜ not started | Post-self-host campaign (arenas→…→concurrency) |
@@ -159,7 +159,7 @@ compile+link gate which is now the milestone reached.
 ### Phase 7 — Host independence  *(INDEPENDENCE Eixos A/C/D + BINARY cleanup)*
 **Goal:** the compiler reaches the host without C-side scaffolding; tests gate emission.
 **Work (in order):**
-1. **C1.0 LEGISLATE `extern`/FFI form** (TRIBUNAL — blocks all of FFI) → **C1.1** extern primitive (single opcode → platform convention).
+1. **C1.0 `extern`/FFI form — ✅ RATIFIED 2026-06-27** (see LEGISLATION §"FFI / `extern`"; master-plan C7.0) → **C1.1** extern primitive (single `OP_CALL_EXTERN` → platform convention), **macOS+libc first**, then Linux, then Windows; per-OS `.tkp` resolution + `#os(...)` guard are legislated-now / implemented as follow-ons.
 2. **Host surfaces over FFI:** C2a `teko::env::args` + `teko::exit`; C2b `teko::io` slurp (read/write/write_err); C2c `teko::fs` `list_dir` (feeds discovery); C2d `teko::process` exec (invoke `cc`).
 3. **VM test gate:** D2 `#test` runner in VM (`teko test`) ✅ **DONE** → D3 coverage (`.tkt` outside denominator) ✅ **DONE (function-level)** → D4 pre-emit gate (tests + coverage BEFORE codegen; release bars on fail) ✅ **DONE**.
    - **D2 delivered (both twins).** `#test` is a real attribute: lexer `Hash` token → parser consumes `#test` (own line ok) on a function → `Function.is_test`/`TFunction.is_test` threaded checker-through. `teko test <proj>` assembles WITH the `.tkt` files (`assemble_sel`/`project_frontend_sel`/`test_project`) and the VM runs every `#test` function (`vm::run_tests` / `tk_vm_run_tests`), FAIL-FAST: a failed assertion panics with its message after the running test's name is printed (`test ns::name ... ok`; all pass → "N test(s) passed", exit 0). This forced **VM function-parameter binding** (`eval_call` now binds args→params in a fresh frame — closes the B-vm-i gap) in BOTH twins. `#test` fns are exempt from the unused-private-fn warning (run by the runner, not source). The one bare-`assert`-keyword test file (`assert_test.tkt`) migrated to `teko::assert::is_true`. Regressions hold VM==native (5/6/106).
@@ -361,14 +361,16 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 ## Phase 7 — Host independence *(gated by the C7.0 tribunal decision; Phase 6 done)*
 
-> **C7.0 — LEGISLATE `extern`/FFI form (TRIBUNAL DECISION, not an agent crumb).** Blocks the FFI track (C7.1*, C7.2–C7.5, C7.17). The other tracks (test-gate, project, cleanup) do NOT wait on it.
+> **C7.0 — `extern`/FFI form — ✅ RATIFIED 2026-06-27** (TRIBUNAL DECISION). Form: `extern fn name(p) -> r = "symbol" from "lib"` (bodyless; `from` optional→libc; `freestanding` makes it mandatory); `ptr`-only marshalling; one `OP_CALL_EXTERN` → platform convention; library resolution indirected through `.tkp [extern.libs]` (array vocabulary `[]`/name/`static:`|`shared:`/path/`-flag`) + `[extern.search]` (`-L`, per-OS soft-drop) + `prefer` + `cc`/`target`/`sysroot` (musl-ready); cross-OS name-diffs resolve in the `.tkp`, shape-diffs need the general `#os(...)` guard. Full clause: **LEGISLATION §"FFI / `extern`"**. **Staging: macOS+libc FIRST, then Linux, then Windows;** per-OS `.tkp` resolution and `#os(...)` are legislated now / implemented as follow-ons.
 
 | Crumb | Owns | Dep |
 |-------|------|-----|
-| **C7.1a** `extern` decl — lexer + parser + AST | `L`, `ast`, `P` | C7.0 |
-| **C7.1b** `extern` checker typing/marshalling | `chk` | C7.1a |
-| **C7.1c** `extern` codegen emit | `cg` | C7.1a |
-| **C7.1d** `extern` VM (dlopen/libffi boundary) | `vm` | C7.1a |
+| **C7.1a** `extern` decl — lexer (`extern`/`from`) + parser + AST/tast *(macOS)* | `L`, `ast`, `P` | C7.0 |
+| **C7.1b** `extern` checker typing (prims+`ptr`/`uptr`/`void` only) | `chk` | C7.1a |
+| **C7.1c** `extern` codegen emit (C extern proto + call; Teko-name→C-symbol) | `cg` | C7.1a |
+| **C7.1d** `extern` VM handling (defer/stub like the other host bottoms) | `vm` | C7.1a |
+| **C7.1e** `.tkp` parser: array values + nested sub-tables + `[extern]`/`[extern.libs]`/`search`/`prefer` | `build`(manifest) | C7.0 |
+| **C7.1f** per-OS symbol/lib resolution + `#os(...)` conditional-compile guard *(Linux/Windows)* | `build`, `L`, `P`, `chk`, `cg` | C7.1a–e · **follow-on** |
 | **C7.2** `teko::env::args` + `teko::exit` | *(new ns files)* | C7.1b–d |
 | **C7.3** `teko::io` slurp (read/write/write_err) | *(new ns files)* | C7.1b–d |
 | **C7.4** `teko::fs` `list_dir` | *(new ns files)* | C7.1b–d |

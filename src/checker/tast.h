@@ -117,6 +117,9 @@ typedef struct {
     tk_str         file;                     // (E3) the source file the fn was declared in (for the .tsym symbol map)
     uint32_t       line, col;                // (E3) the fn name's 1-based source position (for the .tsym symbol map)
     bool           is_test;                  // (D2) a `#test` attribute precedes it? (run by `teko test` / the build gate)
+    bool           is_extern;                // (C7.1a) a foreign `extern fn` (no body — codegen emits a C prototype + direct call)
+    tk_str         c_symbol;                 // (C7.1a) the C symbol it binds (valid iff is_extern)
+    tk_str         from_lib;                 // (C7.1a) the providing library ("" = implicit libc; valid iff is_extern)
 } tk_tfunction;
 
 typedef enum { TK_TITEM_FUNCTION, TK_TITEM_TYPE_DECL, TK_TITEM_USE, TK_TITEM_STATEMENT } tk_titem_tag;

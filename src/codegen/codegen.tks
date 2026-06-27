@@ -1251,13 +1251,28 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
         }
     }
     mut out = buf
+    // Resolve the callee FIRST (when a namespaced user call) so we know its C name AND whether it
+    // is an `extern` (C7.1a): an extern lowers to its raw C symbol, with NO namespace mangling.
+    let cf_res = if c.call_ns.len != 0 {
+        cg_find_function(prog, c.call_ns, p.segments[p.segments.len - 1].name)
+    } else { error { message = "codegen: no resolved namespace" } }
     if has_builtin {
         out = cb(out, builtin)
     } else if c.call_ns.len != 0 {
-        // (#49) a resolved USER call -> the SAME namespace-mangled C name emit_function_sig gives
-        // the definition (teko::checker::type_eq -> teko__checker__type_eq), so def + call agree
-        // and same-named functions across namespaces never collide.
-        out = cb_fn_name(out, c.call_ns, p.segments[p.segments.len - 1].name)
+        mut is_extern_call = false
+        mut ext_symbol = ""
+        match cf_res {
+            checker::TFunction as cf => { if cf.is_extern { is_extern_call = true; ext_symbol = cf.c_symbol } }
+            error => { }
+        }
+        if is_extern_call {
+            out = cb(out, ext_symbol)   // C7.1a: the raw foreign C symbol
+        } else {
+            // (#49) a resolved USER call -> the SAME namespace-mangled C name emit_function_sig gives
+            // the definition (teko::checker::type_eq -> teko__checker__type_eq), so def + call agree
+            // and same-named functions across namespaces never collide.
+            out = cb_fn_name(out, c.call_ns, p.segments[p.segments.len - 1].name)
+        }
     } else {
         // No resolved namespace (a local fn-value, or a name not carried) -> the bare
         // (keyword-escaped) last segment.
@@ -1268,9 +1283,6 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
     // keeps its case type (type_call no longer clobbers widened args). For a NAMED param only
     // (variant/struct/enum); other param shapes emit plainly, as before. When there's no resolved
     // function (builtins / call_ns empty), emit all args plainly.
-    let cf_res = if c.call_ns.len != 0 {
-        cg_find_function(prog, c.call_ns, p.segments[p.segments.len - 1].name)
-    } else { error { message = "codegen: no resolved namespace" } }
     out = cb(out, "(")
     mut j = 0
     loop {
@@ -3346,9 +3358,15 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: checker::
 // spell the same signature. Parameter names ride cb_ident (a C-keyword param → trailing `_`).
 // (C: `emit_function_sig`.)
 fn emit_function_sig(buf: []byte, prog: checker::TProgram, f: checker::TFunction) -> []byte | error {
-    mut out = match emit_type(buf, f.return_type) { []byte as o => o; error as err => return err }
+    mut out = buf
+    if f.is_extern { out = cb(out, "extern ") }   // C7.1a: a foreign prototype (no body)
+    out = match emit_type(out, f.return_type) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
-    out = cb_fn_name(out, f.namespace, f.name)   // (#49) namespace-mangled C name (def + prototype agree)
+    if f.is_extern {
+        out = cb(out, f.c_symbol)                 // C7.1a: the raw foreign C symbol (NO namespace mangling)
+    } else {
+        out = cb_fn_name(out, f.namespace, f.name)   // (#49) namespace-mangled C name (def + prototype agree)
+    }
     out = cb(out, "(")
     if f.params.len == 0 {
         out = cb(out, "void")
@@ -4272,7 +4290,7 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
-            checker::TFunction as f => { b = match emit_function(b, prog, f) { []byte as o => o; error as err => return err } }
+            checker::TFunction as f => { if !f.is_extern { b = match emit_function(b, prog, f) { []byte as o => o; error as err => return err } } }   // C7.1a: extern fns have no body (prototype only)
             parser::TypeDecl       => { }   // emitted in the type-decl passes above
             parser::UseDecl        => { }   // imports are a no-op at the C level (M0)
             checker::TStatement     => { }   // a loose Statement → virtual-main, second pass

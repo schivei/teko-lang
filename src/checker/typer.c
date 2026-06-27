@@ -310,14 +310,37 @@ static const char *check_labels(const tk_tstatement *stmts, size_t n, const lbl_
     return NULL;
 }
 
+// C7.1a: an `extern` param/return type must be a primitive (int/float/bool) or `byte` — the
+// only shapes that marshal 1:1 across the C ABI. `ptr`/`uptr` join next; `void` is allowed for
+// the RETURN only (handled by the caller). Mirrors typer.tks extern_type_ok.
+static bool extern_type_ok(tk_type t) {
+    return t.tag == TK_TYPE_PRIM || t.tag == TK_TYPE_BYTE;
+}
+
 tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table table) {
     tk_env local = env;
     for (size_t i = 0; i < f.nparams; i += 1) {           // params immutable (B.21)
         tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
         if (!pt.ok) return (tk_tfunction_result){ .ok = false, .as.error = pt.as.error };
+        if (f.is_extern && !extern_type_ok(pt.as.value)) {
+            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function parameter must be a primitive (int/float/bool) or `byte` — `ptr`/`uptr` land next (C7.1a)") };
+        }
         local = tk_env_define(local, f.params[i].name, pt.as.value, false);
     }
     tk_type ret = function_return(f, table);
+    if (f.is_extern) {
+        // a bodyless foreign declaration: no body to check / return-analyze. Validate the
+        // return marshals (void = no value is fine; else prim/byte only for now).
+        bool ret_ok = (ret.tag == TK_TYPE_VOID) || extern_type_ok(ret);
+        if (!ret_ok) {
+            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function return must be a primitive (int/float/bool), `byte`, or absent — `ptr`/`uptr` land next (C7.1a)") };
+        }
+        tk_tfunction ef = { .name = f.name, .params = f.params, .nparams = f.nparams,
+                            .return_type = ret, .body = NULL, .nbody = 0,
+                            .vis = f.vis, .has_doc = f.has_doc, .doc = f.doc, .is_test = f.is_test,
+                            .is_extern = true, .c_symbol = f.c_symbol, .from_lib = f.from_lib };
+        return (tk_tfunction_result){ .ok = true, .as.value = ef };
+    }
     tk_typed_block_result tb = tk_type_block(f.body, f.nbody, local, table);
     if (!tb.ok) return (tk_tfunction_result){ .ok = false, .as.error = tb.as.error };
     { tk_error e = check_returns(tb.as.value.stmts, tb.as.value.n, ret, table);        // C5: each `return e` matches

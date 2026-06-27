@@ -1559,6 +1559,10 @@ fn eval_call(c: checker::TCall, env: Venv) -> Value {
     match try_fs_builtin(c.callee, c.args, env) { Value as v => return v; null => {} }
     let h = find_function(env, c.callee)   // resolved by LAST segment (cross-ns ok); honest stop if unknown
     let f = h.func
+    // C7.1a — an `extern` is a foreign C function with NO Teko body; the tree-walking VM has no
+    // FFI surface (the same deferred host edge as the io/fs bottoms). Stop HONESTLY (M.3), never
+    // synthesize a value, and point at the native path.
+    if f.is_extern { panic("vm: an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)") }
     if !f.is_test { teko::cov_mark(h.idx) }   // D3 — globally-unique items index (not line) avoids cross-file collisions
     // Bind each parameter to its evaluated argument in a FRESH root frame (no closure capture —
     // flat M0 functions, like codegen's C). Args evaluate in the CALLER's env, then enter the
@@ -1762,6 +1766,9 @@ fn call_value(c: checker::TCall, env: Venv) -> Value? {
     match try_fs_builtin(c.callee, c.args, env)   { Value as v => return v; null => {} }
     let h = find_function(env, c.callee)
     let f = h.func
+    // C7.1a — extern has no Teko body; the VM has no FFI surface. Honest stop (M.3), same as
+    // eval_call (this is the STATEMENT-position call path vm.c folds into its single eval_call).
+    if f.is_extern { panic("vm: an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)") }
     if !f.is_test { teko::cov_mark(h.idx) }   // D3 — globally-unique items index (parity with eval_call)
     // A FRESH root frame with each parameter bound to its evaluated argument (args evaluate in the
     // CALLER's env, then enter the callee's frame positionally) — the SAME setup as eval_call. Without

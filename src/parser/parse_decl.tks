@@ -49,6 +49,11 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool) -> ParsedDecl
         vis = Visibility::Exp
         p = p + 1
     }
+    mut is_extern = false                                // C7.1a: `extern fn …` (foreign, no body)
+    if is_kind_at(tokens, p, lexer::TokenKind::Extern) {
+        is_extern = true
+        p = p + 1
+    }
     if !is_kind_at(tokens, p, lexer::TokenKind::Fn) {
         return err_at(tokens, p, "expected `fn`")
     }
@@ -73,11 +78,36 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool) -> ParsedDecl
         return_type = ret.node
         p = ret.next
     }
+    if is_extern {
+        if is_test { return err_at(tokens, p, "`#test` may not precede `extern`") }
+        if !is_kind_at(tokens, p, lexer::TokenKind::Assign) {
+            return err_at(tokens, p, "expected `= \"symbol\"` to bind the C symbol of an `extern` function")
+        }
+        p = p + 1
+        if !is_kind_at(tokens, p, lexer::TokenKind::Str) {
+            return err_at(tokens, p, "expected a quoted C symbol after `=` in an `extern` function")
+        }
+        let c_symbol = tokens[p].text
+        p = p + 1
+        mut from_lib = ""                                // "" = implicit libc (C7.1a, macOS)
+        // `from` is CONTEXTUAL (not a reserved word — the corpus uses it as an identifier), so
+        // match it as a plain Ident in the extern position.
+        if is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "from" {
+            p = p + 1
+            if !is_kind_at(tokens, p, lexer::TokenKind::Str) {
+                return err_at(tokens, p, "expected a quoted library name after `from`")
+            }
+            from_lib = tokens[p].text
+            p = p + 1
+        }
+        let no_body: []Statement = teko::list::empty()
+        return ParsedDecl { node = Function { name = name, params = params.params, has_return = has_return, return_type = return_type, body = no_body, vis = vis, has_doc = has_doc, doc = doc, line = name_line, col = name_col, is_test = is_test, is_extern = true, c_symbol = c_symbol, from_lib = from_lib }, next = p }
+    }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the function body")
     }
     let blk = match parse_block(tokens, p) { ParsedBlock as x => x; error as e => return e }
-    ParsedDecl { node = Function { name = name, params = params.params, has_return = has_return, return_type = return_type, body = blk.statements, vis = vis, has_doc = has_doc, doc = doc, line = name_line, col = name_col, is_test = is_test }, next = blk.next }
+    ParsedDecl { node = Function { name = name, params = params.params, has_return = has_return, return_type = return_type, body = blk.statements, vis = vis, has_doc = has_doc, doc = doc, line = name_line, col = name_col, is_test = is_test, is_extern = false, c_symbol = "", from_lib = "" }, next = blk.next }
 }
 
 // `{ name: T; name: T; … }` — field list; `;`/newline separates; empty `{ }` allowed;
@@ -199,8 +229,16 @@ fn parse_decl(tokens: []lexer::Token, pos: u64) -> ParsedDecl | error {
     } else if is_kind_at(tokens, k, lexer::TokenKind::Exp) {
         k = k + 1
     }
+    mut saw_extern = false                              // C7.1a: peek past `extern` to reach `fn`
+    if is_kind_at(tokens, k, lexer::TokenKind::Extern) {
+        saw_extern = true
+        k = k + 1
+    }
     if is_kind_at(tokens, k, lexer::TokenKind::Fn) {
         return parse_function(tokens, start, is_test)
+    }
+    if saw_extern {
+        return err_at(tokens, k, "expected `fn` after `extern` (only functions may be `extern`)")
     }
     if is_kind_at(tokens, k, lexer::TokenKind::Type) {
         if is_test { return err_at(tokens, k, "`#test` may only precede a function") }

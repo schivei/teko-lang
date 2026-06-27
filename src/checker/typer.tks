@@ -1348,22 +1348,44 @@ fn check_labels(stmts: []TStatement, scope: []str, in_loop: bool, seen: []str) -
     LabelCheck { failed = false; message = ""; seen = acc }
 }
 
+// C7.1a: an `extern` param/return type must be primitive (int/float/bool) or `byte` — the
+// only shapes that marshal 1:1 across the C ABI. `ptr`/`uptr` join next; `void` is allowed
+// for the RETURN only (handled by the caller). Rejects str/slice/optional/variant/named.
+fn extern_type_ok(t: Type) -> bool {
+    match t { Prim => true; Byte => true; _ => false }
+}
+
 fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
     mut local = env
     mut i = 0
     loop {
         if i >= f.params.len { break }
         let pt = match resolve_type(f.params[i].type_ann, table) { Type as t => t; error as e => return e }
+        if f.is_extern {
+            if !extern_type_ok(pt) {
+                return error { message = "an `extern` function parameter must be a primitive (int/float/bool) or `byte` — `ptr`/`uptr` land next (C7.1a)" }
+            }
+        }
         local = define(local, f.params[i].name, pt, false)        // params are immutable (B.21)
         i++
     }
     let ret = match function_return(f, table) { Type as t => t; error as e => return e }
+    if f.is_extern {
+        // an extern is a bodyless foreign declaration (no body to check / return-analyze).
+        // Validate the return marshals (void = no value is fine; else prim/byte only for now).
+        let ret_ok = match ret { Void => true; _ => extern_type_ok(ret) }
+        if !ret_ok {
+            return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, or absent — `ptr`/`uptr` land next (C7.1a)" }
+        }
+        let no_body: []TStatement = teko::list::empty()
+        return TFunction { name = f.name; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib }
+    }
     let tb = match type_block(f.body, local, table) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table)        { null => {}; error as e => return e }   // C5: each `return e` matches `ret`
     match check_trailing_value(tb.stmts, ret, table) { null => {}; error as e => return e }  // C5: trailing value (when present) matches
     let lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())  // W5-cf-2: loop labels resolve + are unique
     if lc.failed { return error { message = lc.message } }
-    TFunction { name = f.name; params = f.params; return_type = ret; body = tb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test }   // (#49/E3) namespace/file/line stamped by type_item from the parsed item
+    TFunction { name = f.name; params = f.params; return_type = ret; body = tb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = ""; from_lib = "" }   // (#49/E3) namespace/file/line stamped by type_item from the parsed item
 }
 
 fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
@@ -1371,7 +1393,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
         parser::Function as f  => {
             let tf = match type_function(f, env, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
-            TFunction { name = tf.name; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test }
+            TFunction { name = tf.name; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib }
         }
         parser::TypeDecl as td => td       // carries no expr → passes through (collect resolved its fields)
         parser::UseDecl as ud  => ud       // seed no-op (alias resolution is the checker's, later)

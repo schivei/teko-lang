@@ -1269,13 +1269,21 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }
             }
+            // Resolve the callee FIRST so we know its C name AND whether it is an `extern`
+            // (C7.1a): an extern lowers to its raw C symbol, with NO namespace mangling.
+            const tk_tfunction *cf = (e->as.call.call_ns.len != 0)
+                ? cg_find_function(e->as.call.call_ns, p.segments[p.len - 1].name) : NULL;
             if (builtin != NULL) {
                 cb(b, builtin);
             } else if (e->as.call.call_ns.len != 0) {
-                // (#49) a resolved USER call → the SAME namespace-mangled C name emit_function_sig
-                // gives the definition (teko::checker::type_eq → teko__checker__type_eq), so def +
-                // call agree and same-named functions across namespaces never collide.
-                cb_fn_name(b, e->as.call.call_ns, p.segments[p.len - 1].name);
+                if (cf != NULL && cf->is_extern) {
+                    cb_str(b, cf->c_symbol);   // C7.1a: the raw foreign C symbol
+                } else {
+                    // (#49) a resolved USER call → the SAME namespace-mangled C name emit_function_sig
+                    // gives the definition (teko::checker::type_eq → teko__checker__type_eq), so def +
+                    // call agree and same-named functions across namespaces never collide.
+                    cb_fn_name(b, e->as.call.call_ns, p.segments[p.len - 1].name);
+                }
             } else {
                 // No resolved namespace (a local fn-value, or a name not carried) → the bare
                 // (keyword-escaped) last segment.
@@ -1285,8 +1293,6 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // value (e.g. `Prim{…}` passed where a `Type` variant is expected) lands in the variant
             // rep — the arg keeps its case type (type_call no longer clobbers widened args). For a
             // NAMED param only (variant/struct/enum); other param shapes emit plainly, as before.
-            const tk_tfunction *cf = (e->as.call.call_ns.len != 0)
-                ? cg_find_function(e->as.call.call_ns, p.segments[p.len - 1].name) : NULL;
             cb(b, "(");
             for (size_t i = 0; i < e->as.call.nargs; i += 1) {
                 if (i > 0) cb(b, ", ");
@@ -2766,9 +2772,14 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
 // Emit a function SIGNATURE (return type, name, parameter list) up to the closing `)`. Shared by
 // the prototype pass (`;`) and the definition (`{ … }`), so both agree byte-for-byte.
 static bool emit_function_sig(cbuf *b, tk_tfunction f, const char **err) {
+    if (f.is_extern) cb(b, "extern ");    // C7.1a: a foreign prototype (no body)
     if (!emit_type(b, f.return_type, err)) return false;
     cb(b, " ");
-    cb_fn_name(b, f.namespace, f.name);   // (#49) namespace-mangled C name
+    if (f.is_extern) {
+        cb_str(b, f.c_symbol);            // C7.1a: the raw foreign C symbol (NO namespace mangling)
+    } else {
+        cb_fn_name(b, f.namespace, f.name);   // (#49) namespace-mangled C name
+    }
     cb(b, "(");
     if (f.nparams == 0) {
         cb(b, "void");
@@ -3537,6 +3548,7 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
         tk_titem it = prog.items[i];
         switch (it.tag) {
             case TK_TITEM_FUNCTION:
+                if (it.as.function.is_extern) break;   // C7.1a: extern fns have no body (prototype only)
                 if (!emit_function(&b, it.as.function, &err)) { tk_free0(b.ptr); return cg_err(err); }
                 break;
             case TK_TITEM_USE:

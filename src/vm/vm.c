@@ -1087,7 +1087,12 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
                  (int)last.len, (const char *)last.ptr);
         vm_unsupported(buf);
     }
+    // C7.1a — an `extern` is a foreign C function with NO Teko body; the tree-walking VM has no
+    // FFI surface (the same deferred host edge as the io/fs bottoms). Stop HONESTLY (M.3), never
+    // synthesize a value, and point at the native path. (Mirrors vm.tks eval_call.)
+    if (fn->is_extern) vm_unsupported("an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)");
     if (!fn->is_test) tk_cov_mark(fn_idx);   // D3 — globally unique index (not line) avoids cross-file collisions
+
     // A fresh root frame — no closure capture (flat functions, like codegen's C). Bind each
     // parameter to its evaluated argument (args evaluate in the CALLER's env, then enter the
     // callee's frame positionally by the param's name). (B-vm — VM function parameters.)
