@@ -374,5 +374,15 @@ tk_type_result tk_builtin_fn(tk_str name) {
                        .as.func = { .params = str2_t, .nparams = 2, .ret = &void_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
+    // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
+    static tk_type ptr_t = { .tag = TK_TYPE_PTR };
+    if (name_is(name, "as_ptr") || name_is(name, "as_cstr")) {     // (str) -> ptr
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &ptr_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "str_from_cstr")) {                          // (ptr) -> str
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &ptr_t, .nparams = 1, .ret = &str_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
     return (tk_type_result){ .ok = false, .as.error = tk_error_make("not a built-in function") };
 }

@@ -1272,6 +1272,10 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "u64_to_str"))  builtin = "tk_u64_to_str";     // (u64) -> str
                     else if (seg_is(last, "ftoa"))        builtin = "tk_ftoa";           // (f64) -> str
                     else if (seg_is(last, "f64_g17"))     builtin = "tk_f64_g17";        // (f64) -> str (host float renderer)
+                    // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
+                    else if (seg_is(last, "as_ptr"))        builtin = "tk_as_ptr";         // (str) -> ptr (raw bytes; borrows, pair with `.len`)
+                    else if (seg_is(last, "as_cstr"))       builtin = "tk_cstr_dup";       // (str) -> ptr (fresh NUL-terminated copy)
+                    else if (seg_is(last, "str_from_cstr")) builtin = "tk_str_from_cstr";  // (ptr) -> str (copy a C string back)
                     // (err_loc/err_typed handled DEGRADED at the top of this CALL case — native
                     //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }

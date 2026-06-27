@@ -106,6 +106,32 @@ tk_str tk_str_concat(tk_str a, tk_str b) {
     return (tk_str){ buf, n };
 }
 
+// (C7.1a) marshalling — the raw byte pointer of a Teko str (NOT NUL-terminated), for ptr+len C
+// APIs like write(fd,buf,len). Borrows the str's buffer — valid only while the str is alive; the
+// FFI boundary is unsafe by contract (cast away const). [teko::mem::as_ptr]
+void *tk_as_ptr(tk_str s) { return (void *)s.ptr; }
+
+// (C7.1a) marshalling — a fresh NUL-terminated C copy of a Teko str, for C `char*` APIs (getenv,
+// fopen, …). A Teko str is NOT NUL-terminated, so this copy is required when the foreign function
+// expects a `char*`. The caller owns the buffer (whole-program lifetime in the seed). [teko::mem::as_cstr]
+void *tk_cstr_dup(tk_str s) {
+    char *buf = malloc(s.len + 1);
+    if (buf == NULL) tk_panic("out of memory (cstr dup)");
+    if (s.len) memcpy(buf, s.ptr, s.len);
+    buf[s.len] = '\0';
+    return buf;
+}
+
+// (C7.1a) marshalling — copy a NUL-terminated C string from a foreign pointer into a fresh Teko
+// str (octets up to the NUL, exclusive). A NULL pointer yields the empty str. [teko::mem::str_from_cstr]
+tk_str tk_str_from_cstr(const void *p) {
+    size_t n = (p == NULL) ? 0 : strlen((const char *)p);
+    tk_byte *buf = malloc(n ? n : 1);
+    if (buf == NULL) tk_panic("out of memory (str from cstr)");
+    if (n) memcpy(buf, p, n);
+    return (tk_str){ buf, n };
+}
+
 // decimal text of an unsigned 64-bit value into a fresh str (no leading zeros; "0" for 0).
 tk_str tk_u64_to_str(uint64_t v) {
     char tmp[20];                 // u64 max = 20 digits

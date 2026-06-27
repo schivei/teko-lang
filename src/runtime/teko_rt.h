@@ -43,6 +43,12 @@ double tk_float_parse(tk_str s);
 //
 // tk_str_concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
 tk_str tk_str_concat(tk_str a, tk_str b);
+// (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
+// use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
+// NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
+void *tk_as_ptr(tk_str s);
+void *tk_cstr_dup(tk_str s);
+tk_str tk_str_from_cstr(const void *p);
 // tk_i64_to_str / tk_u64_to_str — the integer's DECIMAL text in a fresh str. The interp
 // lowering widens every signed int hole to i64 and every unsigned hole to u64 (every Teko
 // integer prim except u128/i128 fits; the checker scopes holes to what the corpus needs).
