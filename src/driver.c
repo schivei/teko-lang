@@ -428,9 +428,9 @@ int tk_compile_project_g(const char *dir, const char *out_dir, bool gate) {
     if (frontend_body(dir, &prog, &m, true, false) == 0) {
         int trc = tk_vm_run_tests(prog);   // a failed assertion aborts here (fail-fast) → bars the build
         if (trc != 0) return trc;
-        uint64_t cov = tk_vm_coverage_pct(prog);   // D4 coverage floor (10%)
-        if (cov < 10) {
-            fprintf(stderr, "teko: %s: test coverage %llu%% is below the 10%% floor — add tests or build with `--no-test`\n",
+        uint64_t cov = tk_vm_coverage_pct(prog);   // D4 coverage floor (80%)
+        if (cov < 80) {
+            fprintf(stderr, "teko: %s: test coverage %llu%% is below the 80%% floor — add tests or build with `--no-test`\n",
                     dir, (unsigned long long)cov);
             return 1;
         }
