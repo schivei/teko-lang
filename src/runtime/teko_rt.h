@@ -4,9 +4,38 @@
 #ifndef TEKO_RT_H
 #define TEKO_RT_H
 
-#include <stdint.h>   // uint8_t
+#include <stdint.h>   // uint8_t, int64_t
 #include <stddef.h>   // size_t
 #include <stdbool.h>  // bool
+#include <stdlib.h>   // realloc, free — needed by TK_RT_LIST
+
+
+// ─── C7.14: concrete list types (TK_RT_LIST) ────────────────────────────────
+// TK_RT_LIST(T, Name) — the runtime analogue of core.h's TK_LIST. Generates a
+// typed growable array struct and three static-inline helpers with ZERO overhead
+// at the call site (all inlined). Growth uses realloc/free directly (stdlib.h)
+// because this header is self-contained and must not include core.h (which
+// re-declares tk_alloc as static-inline, conflicting with the extern below).
+// OOM panics via abort() — same M.1 fail-loud contract as tk_alloc itself.
+// `push` CONSUMES and RETURNS (xs = Name##_push(xs, item)); the caller holds the
+// one live copy. `free` releases the backing buffer without touching elements.
+#define TK_RT_LIST(T, Name)                                                   \
+    typedef struct { T *ptr; size_t len; size_t cap; } Name;                  \
+    static inline Name Name##_empty(void) {                                   \
+        return (Name){ .ptr = NULL, .len = 0, .cap = 0 };                    \
+    }                                                                         \
+    static inline Name Name##_push(Name xs, T item) {                        \
+        if (xs.len == xs.cap) {                                               \
+            size_t ncap = (xs.cap == 0) ? 8 : (xs.cap * 2);                  \
+            void *p = realloc(xs.ptr, ncap * sizeof(T));                      \
+            if (p == NULL) { abort(); }                                       \
+            xs.ptr = (T *)p; xs.cap = ncap;                                   \
+        }                                                                     \
+        xs.ptr[xs.len] = item;                                                \
+        xs.len = xs.len + 1;                                                  \
+        return xs;                                                            \
+    }                                                                         \
+    static inline void Name##_free(Name xs) { free(xs.ptr); }
 
 // byte — one octet (mirrors src/text/text.h's tk_byte; same rep).
 typedef uint8_t tk_byte;
@@ -17,6 +46,14 @@ typedef struct {
     const tk_byte *ptr;   // the bytes
     size_t         len;   // length in BYTES
 } tk_str;
+
+// C7.14: concrete list type instantiations (must come AFTER tk_byte/tk_str are defined).
+// Generated programs and the compiler itself use these typed lists. The Teko-surface
+// equivalents are `[]str`, `[]byte`, `[]i64` with `teko::list::push` / `teko::list::empty`
+// (see teko_rt.tks § C7.14 comment block).
+TK_RT_LIST(tk_byte,   tk_byte_list)    // []byte  — byte builder, str of bytes, etc.
+TK_RT_LIST(tk_str,    tk_str_list)     // []str   — string accumulator lists (argv, paths, …)
+TK_RT_LIST(int64_t,   tk_i64_list)     // []i64   — integer accumulator lists
 
 // tk_alloc — the allocation seam (S0). malloc(n) (n→1 when 0 so the result is unique); tk_panic
 // on OOM (M.1). Generated code allocates through this: slice copy-append AND the auto-boxed
