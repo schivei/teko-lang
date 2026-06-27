@@ -13,5 +13,6 @@ uint64_t tk_read_u64(tk_reader *r);
 tk_str   tk_read_str(tk_reader *r, tk_strs t);
 tk_strs  tk_read_strtable(tk_reader *r);
 tk_type  tk_read_type(tk_reader *r, tk_strs t);
+tk_tprogram_result tk_deserialize_program(const tk_byte *data, size_t len);   // (C7.16) whole-program .tkb
 
 #endif // TK_EMIT_TKB_READ_H

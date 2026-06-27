@@ -9,6 +9,7 @@ use teko::lexer
 fn prim_byte(k: checker::PrimKind) -> byte { k to byte }
 fn kind_byte(k: lexer::TokenKind) -> byte { k to byte }
 fn bindkind_byte(k: parser::BindKind) -> byte { k to byte }   // (C7.16) Let/Mut/Const → ordinal byte
+fn vis_byte(v: parser::Visibility) -> byte { v to byte }      // (C7.16) Private/Pub/Exp → ordinal byte
 
 // a Type → tag byte + payload. (prim_byte/kind_byte = the enum's ordinal — E7.)
 fn write_type(buf: []byte, t: StrTable, ty: checker::Type) -> []byte {
@@ -233,4 +234,116 @@ fn write_tstatement(buf: []byte, t: StrTable, s: checker::TStatement) -> []byte 
         // TExprStmt (6): expr (TExpr).
         checker::TExprStmt as e => write_texpr(write_u8(buf, 6), t, e.expr)
     }
+}
+
+// ============================================================================
+// (C7.16) PROGRAM FRAMING — the typed program tree: TypeExpr / Param / Field / TypeBody /
+// TypeDecl / UseDecl / TFunction / TItem / TProgram. Strings are interned (st_find); every
+// write_* has a read_* inverse and a collect_* pre-pass.
+// ============================================================================
+
+// a []TypeExpr (UnionType members): u64 count + each.
+fn write_typeexprs(buf: []byte, t: StrTable, xs: []parser::TypeExpr) -> []byte {
+    mut b = write_u64(buf, xs.len to u64)
+    mut i = 0
+    loop { if i >= xs.len { break }; b = write_typeexpr(b, t, xs[i]); i++ }
+    b
+}
+
+// a parser TypeExpr (the syntactic type annotation): u8 tag + payload.
+fn write_typeexpr(buf: []byte, t: StrTable, te: parser::TypeExpr) -> []byte {
+    match te {
+        parser::NamedType as n    => write_path(write_u8(buf, 0), t, n.path)
+        parser::SliceType as s    => write_typeexpr(write_u8(buf, 1), t, s.element)
+        parser::UnionType as u    => write_typeexprs(write_u8(buf, 2), t, u.members)
+        parser::OptionalType as o => write_typeexpr(write_u8(buf, 3), t, o.inner)
+    }
+}
+
+// a []str (interned indices): u64 count + each.
+fn write_strs(buf: []byte, t: StrTable, xs: []str) -> []byte {
+    mut b = write_u64(buf, xs.len to u64)
+    mut i = 0
+    loop { if i >= xs.len { break }; b = write_u32(b, st_find(t, xs[i])); i++ }
+    b
+}
+
+fn write_params(buf: []byte, t: StrTable, xs: []parser::Param) -> []byte {
+    mut b = write_u64(buf, xs.len to u64)
+    mut i = 0
+    loop { if i >= xs.len { break }; b = write_typeexpr(write_u32(b, st_find(t, xs[i].name)), t, xs[i].type_ann); i++ }
+    b
+}
+
+fn write_fields(buf: []byte, t: StrTable, xs: []parser::Field) -> []byte {
+    mut b = write_u64(buf, xs.len to u64)
+    mut i = 0
+    loop { if i >= xs.len { break }; b = write_typeexpr(write_u32(b, st_find(t, xs[i].name)), t, xs[i].type_ann); i++ }
+    b
+}
+
+// a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4).
+fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
+    match tb {
+        parser::StructBody as s  => write_fields(write_u8(buf, 0), t, s.fields)
+        parser::EnumBody as e    => write_strs(write_u8(buf, 1), t, e.members)
+        parser::VariantBody as v => write_typeexpr(write_u8(buf, 2), t, v.type_expr)
+        parser::AliasBody as a   => write_typeexpr(write_u8(buf, 3), t, a.alias)
+        parser::ExternBody       => write_u8(buf, 4)
+    }
+}
+
+// a parser TypeDecl: name + body + vis + has_doc + doc + line + col.
+fn write_typedecl(buf: []byte, t: StrTable, d: parser::TypeDecl) -> []byte {
+    mut b = write_u32(buf, st_find(t, d.name))
+    b = write_typebody(b, t, d.body)
+    b = write_u8(b, vis_byte(d.vis))
+    b = write_u8(b, (if d.has_doc { 1 } else { 0 }) to byte)
+    b = write_u32(b, st_find(t, d.doc))
+    b = write_u32(b, d.line to u32)
+    write_u32(b, d.col to u32)
+}
+
+// a parser UseDecl: path + has_alias + alias.
+fn write_usedecl(buf: []byte, t: StrTable, u: parser::UseDecl) -> []byte {
+    mut b = write_path(buf, t, u.path)
+    b = write_u8(b, (if u.has_alias { 1 } else { 0 }) to byte)
+    write_u32(b, st_find(t, u.alias))
+}
+
+// a TFunction: name + params + return_type + body + vis + has_doc + doc + namespace + file + line + col + is_test + is_extern + c_symbol + from_lib.
+fn write_tfunction(buf: []byte, t: StrTable, f: checker::TFunction) -> []byte {
+    mut b = write_u32(buf, st_find(t, f.name))
+    b = write_params(b, t, f.params)
+    b = write_type(b, t, f.return_type)
+    b = write_tstatements(b, t, f.body)
+    b = write_u8(b, vis_byte(f.vis))
+    b = write_u8(b, (if f.has_doc { 1 } else { 0 }) to byte)
+    b = write_u32(b, st_find(t, f.doc))
+    b = write_u32(b, st_find(t, f.namespace))
+    b = write_u32(b, st_find(t, f.file))
+    b = write_u32(b, f.line to u32)
+    b = write_u32(b, f.col to u32)
+    b = write_u8(b, (if f.is_test { 1 } else { 0 }) to byte)
+    b = write_u8(b, (if f.is_extern { 1 } else { 0 }) to byte)
+    b = write_u32(b, st_find(t, f.c_symbol))
+    write_u32(b, st_find(t, f.from_lib))
+}
+
+// a TItem: u8 tag — TFunction(0) | TypeDecl(1) | UseDecl(2) | TStatement(3).
+fn write_titem(buf: []byte, t: StrTable, it: checker::TItem) -> []byte {
+    match it {
+        checker::TFunction as f  => write_tfunction(write_u8(buf, 0), t, f)
+        parser::TypeDecl as d    => write_typedecl(write_u8(buf, 1), t, d)
+        parser::UseDecl as u     => write_usedecl(write_u8(buf, 2), t, u)
+        checker::TStatement as s => write_tstatement(write_u8(buf, 3), t, s)
+    }
+}
+
+// a TProgram: u64 count + each item.
+fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram) -> []byte {
+    mut b = write_u64(buf, prog.items.len to u64)
+    mut i = 0
+    loop { if i >= prog.items.len { break }; b = write_titem(b, t, prog.items[i]); i++ }
+    b
 }

@@ -259,6 +259,118 @@ static tk_tstatement *read_tstmts(tk_reader *r, tk_strs t, size_t *out_n) {
     return xs;
 }
 
+// ============================================================================
+// (C7.16) PROGRAM FRAMING readers (mirror tkb_read.tks). In-place reader; values by value.
+// ============================================================================
+static tk_path read_path_c(tk_reader *r, tk_strs t) {
+    uint32_t n = tk_read_u32(r);
+    tk_segment *segs = tk_alloc((n ? n : 1) * sizeof *segs); if (!segs) abort();
+    for (uint32_t i = 0; i < n; i += 1) segs[i].name = tk_read_str(r, t);
+    return (tk_path){ segs, n };
+}
+static tk_type_expr read_typeexpr(tk_reader *r, tk_strs t);   // fwd (recursive)
+static tk_type_expr *read_typeexprs(tk_reader *r, tk_strs t, size_t *out_n) {
+    uint64_t n = tk_read_u64(r);
+    tk_type_expr *xs = tk_alloc((n ? n : 1) * sizeof *xs); if (!xs) abort();
+    for (uint64_t i = 0; i < n; i += 1) xs[i] = read_typeexpr(r, t);
+    *out_n = (size_t)n; return xs;
+}
+static tk_type_expr read_typeexpr(tk_reader *r, tk_strs t) {
+    uint8_t tag = tk_read_u8(r);
+    tk_type_expr te = {0};
+    switch (tag) {
+        case 0: te.tag = TK_TEXPR_NAMED;    te.as.named.path = read_path_c(r, t); return te;
+        case 1: te.tag = TK_TEXPR_SLICE;    te.as.slice.element = tk_box_type(read_typeexpr(r, t)); return te;
+        case 2: te.tag = TK_TEXPR_UNION;    te.as.uni.members = read_typeexprs(r, t, &te.as.uni.len); return te;
+        case 3: te.tag = TK_TEXPR_OPTIONAL; te.as.optional.inner = tk_box_type(read_typeexpr(r, t)); return te;
+    }
+    r->ok = false; return te;
+}
+static tk_param *read_params(tk_reader *r, tk_strs t, size_t *out_n) {
+    uint64_t n = tk_read_u64(r);
+    tk_param *xs = tk_alloc((n ? n : 1) * sizeof *xs); if (!xs) abort();
+    for (uint64_t i = 0; i < n; i += 1) { xs[i].name = tk_read_str(r, t); xs[i].type_ann = read_typeexpr(r, t); }
+    *out_n = (size_t)n; return xs;
+}
+static tk_field *read_fields(tk_reader *r, tk_strs t, size_t *out_n) {
+    uint64_t n = tk_read_u64(r);
+    tk_field *xs = tk_alloc((n ? n : 1) * sizeof *xs); if (!xs) abort();
+    for (uint64_t i = 0; i < n; i += 1) { xs[i].name = tk_read_str(r, t); xs[i].type_ann = read_typeexpr(r, t); }
+    *out_n = (size_t)n; return xs;
+}
+static tk_str *read_strs(tk_reader *r, tk_strs t, size_t *out_n) {
+    uint64_t n = tk_read_u64(r);
+    tk_str *xs = tk_alloc((n ? n : 1) * sizeof *xs); if (!xs) abort();
+    for (uint64_t i = 0; i < n; i += 1) xs[i] = tk_read_str(r, t);
+    *out_n = (size_t)n; return xs;
+}
+static tk_type_body read_typebody(tk_reader *r, tk_strs t) {
+    uint8_t tag = tk_read_u8(r);
+    tk_type_body tb = {0};
+    switch (tag) {
+        case 0: tb.tag = TK_BODY_STRUCT;  tb.as.struct_body.fields = read_fields(r, t, &tb.as.struct_body.n_fields); return tb;
+        case 1: tb.tag = TK_BODY_ENUM;    tb.as.enum_body.members = read_strs(r, t, &tb.as.enum_body.n_members); return tb;
+        case 2: tb.tag = TK_BODY_VARIANT; tb.as.variant_body.type_expr = read_typeexpr(r, t); return tb;
+        case 3: tb.tag = TK_BODY_ALIAS;   tb.as.alias_body.alias = read_typeexpr(r, t); return tb;
+        case 4: tb.tag = TK_BODY_EXTERN;  return tb;
+    }
+    r->ok = false; return tb;
+}
+static tk_type_decl read_typedecl(tk_reader *r, tk_strs t) {
+    tk_type_decl d = {0};
+    d.name = tk_read_str(r, t);
+    d.body = read_typebody(r, t);
+    d.vis = (tk_visibility)tk_read_u8(r);
+    d.has_doc = (tk_read_u8(r) != 0);
+    d.doc = tk_read_str(r, t);
+    d.line = tk_read_u32(r);
+    d.col = tk_read_u32(r);
+    return d;
+}
+static tk_use_decl read_usedecl(tk_reader *r, tk_strs t) {
+    tk_use_decl u = {0};
+    u.path = read_path_c(r, t);
+    u.has_alias = (tk_read_u8(r) != 0);
+    u.alias = tk_read_str(r, t);
+    return u;
+}
+static tk_tfunction read_tfunction(tk_reader *r, tk_strs t) {
+    tk_tfunction f = {0};
+    f.name = tk_read_str(r, t);
+    f.params = read_params(r, t, &f.nparams);
+    f.return_type = tk_read_type(r, t);
+    f.body = read_tstmts(r, t, &f.nbody);
+    f.vis = (tk_visibility)tk_read_u8(r);
+    f.has_doc = (tk_read_u8(r) != 0);
+    f.doc = tk_read_str(r, t);
+    f.namespace = tk_read_str(r, t);
+    f.file = tk_read_str(r, t);
+    f.line = tk_read_u32(r);
+    f.col = tk_read_u32(r);
+    f.is_test = (tk_read_u8(r) != 0);
+    f.is_extern = (tk_read_u8(r) != 0);
+    f.c_symbol = tk_read_str(r, t);
+    f.from_lib = tk_read_str(r, t);
+    return f;
+}
+static tk_titem read_titem(tk_reader *r, tk_strs t) {
+    uint8_t tag = tk_read_u8(r);
+    tk_titem it = {0};
+    switch (tag) {
+        case 0: it.tag = TK_TITEM_FUNCTION;  it.as.function  = read_tfunction(r, t); return it;
+        case 1: it.tag = TK_TITEM_TYPE_DECL; it.as.type_decl = read_typedecl(r, t); return it;
+        case 2: it.tag = TK_TITEM_USE;       it.as.use_decl  = read_usedecl(r, t); return it;
+        case 3: it.tag = TK_TITEM_STATEMENT; it.as.statement = read_tstmt(r, t); return it;
+    }
+    r->ok = false; return it;
+}
+static tk_titem *read_titems(tk_reader *r, tk_strs t, size_t *out_n) {
+    uint64_t n = tk_read_u64(r);
+    tk_titem *xs = tk_alloc((n ? n : 1) * sizeof *xs); if (!xs) abort();
+    for (uint64_t i = 0; i < n; i += 1) xs[i] = read_titem(r, t);
+    *out_n = (size_t)n; return xs;
+}
+
 tk_texpr_result tk_deserialize(const tk_byte *data, size_t len) {
     tk_reader r = { data, len, 0, true };
     if (tk_read_u8(&r) != 'T' || tk_read_u8(&r) != 'K' || tk_read_u8(&r) != 'B' || tk_read_u8(&r) != 0)
@@ -271,4 +383,20 @@ tk_texpr_result tk_deserialize(const tk_byte *data, size_t len) {
     tk_texpr te = tk_read_texpr(&r, table);
     if (!r.ok) return texpr_err("truncated/corrupt .tkb");
     return texpr_ok(te);
+}
+
+// (C7.16) THE PROGRAM ENTRY: verify header + VERSION 2 + hash, then read the typed PROGRAM.
+tk_tprogram_result tk_deserialize_program(const tk_byte *data, size_t len) {
+    tk_reader r = { data, len, 0, true };
+    if (tk_read_u8(&r) != 'T' || tk_read_u8(&r) != 'K' || tk_read_u8(&r) != 'B' || tk_read_u8(&r) != 0)
+        return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make("not a .tkb (bad magic)") };
+    if (tk_read_u32(&r) != 2) return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make("unsupported .tkb program version") };
+    uint64_t stored = tk_read_u64(&r);
+    if (len < 16) return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make("truncated .tkb header") };
+    if (tk_fnv1a(data + 16, len - 16) != stored)
+        return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make(".tkb altered or corrupt (hash mismatch)") };
+    tk_strs table = tk_read_strtable(&r);
+    size_t n; tk_titem *items = read_titems(&r, table, &n);
+    if (!r.ok) return (tk_tprogram_result){ .ok = false, .as.error = tk_error_make("truncated/corrupt .tkb (program)") };
+    return (tk_tprogram_result){ .ok = true, .as.value = (tk_tprogram){ items, n } };
 }

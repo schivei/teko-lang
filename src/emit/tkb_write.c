@@ -172,3 +172,94 @@ static tk_bytes write_tstatements(tk_bytes b, tk_strtable t, const tk_tstatement
     for (size_t i = 0; i < n; i += 1) b = write_tstatement(b, t, &xs[i]);
     return b;
 }
+
+// ============================================================================
+// (C7.16) PROGRAM FRAMING writers (mirror tkb_write.tks). Strings interned via tk_st_find.
+// ============================================================================
+static tk_byte vis_byte(tk_visibility v) { return (tk_byte)v; }
+
+static tk_bytes write_typeexpr(tk_bytes b, tk_strtable t, tk_type_expr te);   // fwd (recursive)
+static tk_bytes write_typeexprs(tk_bytes b, tk_strtable t, const tk_type_expr *xs, size_t n) {
+    b = tk_write_u64(b, (uint64_t)n);
+    for (size_t i = 0; i < n; i += 1) b = write_typeexpr(b, t, xs[i]);
+    return b;
+}
+static tk_bytes write_typeexpr(tk_bytes b, tk_strtable t, tk_type_expr te) {
+    switch (te.tag) {
+        case TK_TEXPR_NAMED:    return write_path(tk_write_u8(b, 0), t, te.as.named.path);
+        case TK_TEXPR_SLICE:    return write_typeexpr(tk_write_u8(b, 1), t, *te.as.slice.element);
+        case TK_TEXPR_UNION:    return write_typeexprs(tk_write_u8(b, 2), t, te.as.uni.members, te.as.uni.len);
+        case TK_TEXPR_OPTIONAL: return write_typeexpr(tk_write_u8(b, 3), t, *te.as.optional.inner);
+    }
+    return b;
+}
+static tk_bytes write_strs(tk_bytes b, tk_strtable t, const tk_str *xs, size_t n) {
+    b = tk_write_u64(b, (uint64_t)n);
+    for (size_t i = 0; i < n; i += 1) b = tk_write_u32(b, tk_st_find(t, xs[i]));
+    return b;
+}
+static tk_bytes write_params(tk_bytes b, tk_strtable t, const tk_param *xs, size_t n) {
+    b = tk_write_u64(b, (uint64_t)n);
+    for (size_t i = 0; i < n; i += 1) b = write_typeexpr(tk_write_u32(b, tk_st_find(t, xs[i].name)), t, xs[i].type_ann);
+    return b;
+}
+static tk_bytes write_fields(tk_bytes b, tk_strtable t, const tk_field *xs, size_t n) {
+    b = tk_write_u64(b, (uint64_t)n);
+    for (size_t i = 0; i < n; i += 1) b = write_typeexpr(tk_write_u32(b, tk_st_find(t, xs[i].name)), t, xs[i].type_ann);
+    return b;
+}
+static tk_bytes write_typebody(tk_bytes b, tk_strtable t, tk_type_body tb) {
+    switch (tb.tag) {
+        case TK_BODY_STRUCT:  return write_fields(tk_write_u8(b, 0), t, tb.as.struct_body.fields, tb.as.struct_body.n_fields);
+        case TK_BODY_ENUM:    return write_strs(tk_write_u8(b, 1), t, tb.as.enum_body.members, tb.as.enum_body.n_members);
+        case TK_BODY_VARIANT: return write_typeexpr(tk_write_u8(b, 2), t, tb.as.variant_body.type_expr);
+        case TK_BODY_ALIAS:   return write_typeexpr(tk_write_u8(b, 3), t, tb.as.alias_body.alias);
+        case TK_BODY_EXTERN:  return tk_write_u8(b, 4);
+    }
+    return b;
+}
+static tk_bytes write_typedecl(tk_bytes b, tk_strtable t, tk_type_decl d) {
+    b = tk_write_u32(b, tk_st_find(t, d.name));
+    b = write_typebody(b, t, d.body);
+    b = tk_write_u8(b, vis_byte(d.vis));
+    b = tk_write_u8(b, (tk_byte)(d.has_doc ? 1 : 0));
+    b = tk_write_u32(b, tk_st_find(t, d.doc));
+    b = tk_write_u32(b, d.line);
+    return tk_write_u32(b, d.col);
+}
+static tk_bytes write_usedecl(tk_bytes b, tk_strtable t, tk_use_decl u) {
+    b = write_path(b, t, u.path);
+    b = tk_write_u8(b, (tk_byte)(u.has_alias ? 1 : 0));
+    return tk_write_u32(b, tk_st_find(t, u.alias));
+}
+static tk_bytes write_tfunction(tk_bytes b, tk_strtable t, const tk_tfunction *f) {
+    b = tk_write_u32(b, tk_st_find(t, f->name));
+    b = write_params(b, t, f->params, f->nparams);
+    b = tk_write_type(b, t, f->return_type);
+    b = write_tstatements(b, t, f->body, f->nbody);
+    b = tk_write_u8(b, vis_byte(f->vis));
+    b = tk_write_u8(b, (tk_byte)(f->has_doc ? 1 : 0));
+    b = tk_write_u32(b, tk_st_find(t, f->doc));
+    b = tk_write_u32(b, tk_st_find(t, f->namespace));
+    b = tk_write_u32(b, tk_st_find(t, f->file));
+    b = tk_write_u32(b, f->line);
+    b = tk_write_u32(b, f->col);
+    b = tk_write_u8(b, (tk_byte)(f->is_test ? 1 : 0));
+    b = tk_write_u8(b, (tk_byte)(f->is_extern ? 1 : 0));
+    b = tk_write_u32(b, tk_st_find(t, f->c_symbol));
+    return tk_write_u32(b, tk_st_find(t, f->from_lib));
+}
+static tk_bytes write_titem(tk_bytes b, tk_strtable t, const tk_titem *it) {
+    switch (it->tag) {
+        case TK_TITEM_FUNCTION:  return write_tfunction(tk_write_u8(b, 0), t, &it->as.function);
+        case TK_TITEM_TYPE_DECL: return write_typedecl(tk_write_u8(b, 1), t, it->as.type_decl);
+        case TK_TITEM_USE:       return write_usedecl(tk_write_u8(b, 2), t, it->as.use_decl);
+        case TK_TITEM_STATEMENT: return write_tstatement(tk_write_u8(b, 3), t, &it->as.statement);
+    }
+    return b;
+}
+tk_bytes tk_write_program(tk_bytes b, tk_strtable t, const tk_tprogram *prog) {
+    b = tk_write_u64(b, (uint64_t)prog->nitems);
+    for (size_t i = 0; i < prog->nitems; i += 1) b = write_titem(b, t, &prog->items[i]);
+    return b;
+}

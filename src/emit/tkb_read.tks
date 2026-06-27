@@ -141,6 +141,17 @@ type RPath   = struct { r: Reader; value: parser::Path }
 type RTStmt      = struct { r: Reader; value: checker::TStatement }       // (C7.16)
 type RTStmts     = struct { r: Reader; value: []checker::TStatement }     // (C7.16)
 type RBindTarget = struct { r: Reader; value: parser::BindTarget }        // (C7.16)
+type RTypeExpr   = struct { r: Reader; value: parser::TypeExpr }          // (C7.16) program framing
+type RTypeExprs  = struct { r: Reader; value: []parser::TypeExpr }
+type RParams     = struct { r: Reader; value: []parser::Param }
+type RFields     = struct { r: Reader; value: []parser::Field }
+type RStrs       = struct { r: Reader; value: []str }
+type RTypeBody   = struct { r: Reader; value: parser::TypeBody }
+type RTypeDecl   = struct { r: Reader; value: parser::TypeDecl }
+type RUseDecl    = struct { r: Reader; value: parser::UseDecl }
+type RTFunction  = struct { r: Reader; value: checker::TFunction }
+type RTItem      = struct { r: Reader; value: checker::TItem }
+type RProgram    = struct { r: Reader; value: checker::TProgram }
 
 fn read_i64(r: Reader) -> RI64 | error {
     let u = match read_u64(r) { RU64 as x => x; error as e => return e }
@@ -461,6 +472,119 @@ fn read_tstatement(r: Reader, table: []str) -> RTStmt | error {
     error { message = "bad tstatement tag in .tkb" }
 }
 
+// ============================================================================
+// (C7.16) PROGRAM FRAMING readers — inverse of the write_* framing helpers.
+// ============================================================================
+fn read_typeexprs(r: Reader, table: []str) -> RTypeExprs | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []parser::TypeExpr = teko::list::empty()
+    mut i = 0
+    loop { if i >= n.value { break }; let e = match read_typeexpr(rr, table) { RTypeExpr as x => x; error as e => return e }; xs = teko::list::push(xs, e.value); rr = e.r; i++ }
+    RTypeExprs { r = rr; value = xs }
+}
+fn read_typeexpr(r: Reader, table: []str) -> RTypeExpr | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 { let p = match read_path(tag.r, table)     { RPath as x => x; error as e => return e };     return RTypeExpr { r = p.r;  value = parser::NamedType { path = p.value } } }
+    if tag.value == 1 { let e = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeExpr { r = e.r;  value = parser::SliceType { element = e.value } } }
+    if tag.value == 2 { let xs = match read_typeexprs(tag.r, table) { RTypeExprs as x => x; error as e => return e }; return RTypeExpr { r = xs.r; value = parser::UnionType { members = xs.value } } }
+    if tag.value == 3 { let i = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeExpr { r = i.r;  value = parser::OptionalType { inner = i.value } } }
+    error { message = "bad typeexpr tag in .tkb" }
+}
+fn read_params(r: Reader, table: []str) -> RParams | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []parser::Param = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.value { break }
+        let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
+        let ty = match read_typeexpr(nm.r, table) { RTypeExpr as x => x; error as e => return e }
+        xs = teko::list::push(xs, parser::Param { name = nm.value; type_ann = ty.value }); rr = ty.r; i++
+    }
+    RParams { r = rr; value = xs }
+}
+fn read_fields(r: Reader, table: []str) -> RFields | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []parser::Field = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.value { break }
+        let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
+        let ty = match read_typeexpr(nm.r, table) { RTypeExpr as x => x; error as e => return e }
+        xs = teko::list::push(xs, parser::Field { name = nm.value; type_ann = ty.value }); rr = ty.r; i++
+    }
+    RFields { r = rr; value = xs }
+}
+fn read_strs(r: Reader, table: []str) -> RStrs | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []str = teko::list::empty()
+    mut i = 0
+    loop { if i >= n.value { break }; let s = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }; xs = teko::list::push(xs, s.value); rr = s.r; i++ }
+    RStrs { r = rr; value = xs }
+}
+fn read_typebody(r: Reader, table: []str) -> RTypeBody | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 { let fs = match read_fields(tag.r, table)   { RFields as x => x; error as e => return e };   return RTypeBody { r = fs.r; value = parser::StructBody { fields = fs.value } } }
+    if tag.value == 1 { let ms = match read_strs(tag.r, table)     { RStrs as x => x; error as e => return e };     return RTypeBody { r = ms.r; value = parser::EnumBody { members = ms.value } } }
+    if tag.value == 2 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::VariantBody { type_expr = te.value } } }
+    if tag.value == 3 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::AliasBody { alias = te.value } } }
+    if tag.value == 4 { return RTypeBody { r = tag.r; value = parser::ExternBody { } } }
+    error { message = "bad typebody tag in .tkb" }
+}
+fn read_typedecl(r: Reader, table: []str) -> RTypeDecl | error {
+    let nm  = match tkb_read_str(r, table)      { RStr as x => x; error as e => return e }
+    let bd  = match read_typebody(nm.r, table)  { RTypeBody as x => x; error as e => return e }
+    let vis = match read_u8(bd.r)               { RByte as x => x; error as e => return e }
+    let hd  = match read_u8(vis.r)              { RByte as x => x; error as e => return e }
+    let doc = match tkb_read_str(hd.r, table)   { RStr as x => x; error as e => return e }
+    let ln  = match read_u32(doc.r)             { RU32 as x => x; error as e => return e }
+    let cl  = match read_u32(ln.r)              { RU32 as x => x; error as e => return e }
+    RTypeDecl { r = cl.r; value = parser::TypeDecl { name = nm.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; line = ln.value; col = cl.value } }
+}
+fn read_usedecl(r: Reader, table: []str) -> RUseDecl | error {
+    let p  = match read_path(r, table)        { RPath as x => x; error as e => return e }
+    let ha = match read_u8(p.r)               { RByte as x => x; error as e => return e }
+    let al = match tkb_read_str(ha.r, table)  { RStr as x => x; error as e => return e }
+    RUseDecl { r = al.r; value = parser::UseDecl { path = p.value; has_alias = ha.value != 0; alias = al.value } }
+}
+fn read_tfunction(r: Reader, table: []str) -> RTFunction | error {
+    let nm  = match tkb_read_str(r, table)        { RStr as x => x; error as e => return e }
+    let ps  = match read_params(nm.r, table)      { RParams as x => x; error as e => return e }
+    let rt  = match read_type(ps.r, table)        { RType as x => x; error as e => return e }
+    let bd  = match read_tstatements(rt.r, table) { RTStmts as x => x; error as e => return e }
+    let vis = match read_u8(bd.r)                 { RByte as x => x; error as e => return e }
+    let hd  = match read_u8(vis.r)                { RByte as x => x; error as e => return e }
+    let doc = match tkb_read_str(hd.r, table)     { RStr as x => x; error as e => return e }
+    let ns  = match tkb_read_str(doc.r, table)    { RStr as x => x; error as e => return e }
+    let fl  = match tkb_read_str(ns.r, table)     { RStr as x => x; error as e => return e }
+    let ln  = match read_u32(fl.r)                { RU32 as x => x; error as e => return e }
+    let cl  = match read_u32(ln.r)                { RU32 as x => x; error as e => return e }
+    let it  = match read_u8(cl.r)                 { RByte as x => x; error as e => return e }
+    let ie  = match read_u8(it.r)                 { RByte as x => x; error as e => return e }
+    let cs  = match tkb_read_str(ie.r, table)     { RStr as x => x; error as e => return e }
+    let fr  = match tkb_read_str(cs.r, table)     { RStr as x => x; error as e => return e }
+    RTFunction { r = fr.r; value = checker::TFunction { name = nm.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value } }
+}
+fn read_titem(r: Reader, table: []str) -> RTItem | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 { let f = match read_tfunction(tag.r, table) { RTFunction as x => x; error as e => return e }; return RTItem { r = f.r; value = f.value } }
+    if tag.value == 1 { let d = match read_typedecl(tag.r, table)  { RTypeDecl as x => x; error as e => return e }; return RTItem { r = d.r; value = d.value } }
+    if tag.value == 2 { let u = match read_usedecl(tag.r, table)   { RUseDecl as x => x; error as e => return e }; return RTItem { r = u.r; value = u.value } }
+    if tag.value == 3 { let s = match read_tstatement(tag.r, table) { RTStmt as x => x; error as e => return e }; return RTItem { r = s.r; value = s.value } }
+    error { message = "bad titem tag in .tkb" }
+}
+fn read_program(r: Reader, table: []str) -> RProgram | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []checker::TItem = teko::list::empty()
+    mut i = 0
+    loop { if i >= n.value { break }; let it = match read_titem(rr, table) { RTItem as x => x; error as e => return e }; xs = teko::list::push(xs, it.value); rr = it.r; i++ }
+    RProgram { r = rr; value = checker::TProgram { items = xs } }
+}
+
 // THE ENTRY: verify the header + hash, then read the table and the typed tree.
 fn deserialize(data: []byte) -> checker::TExpr | error {
     let r0 = Reader { data = data; pos = 0 }
@@ -481,4 +605,27 @@ fn deserialize(data: []byte) -> checker::TExpr | error {
     let table = match read_strtable(stored.r) { RTable as x => x; error as e => return e }
     let te = match read_texpr(table.r, table.value) { RTExpr as x => x; error as e => return e }
     te.value
+}
+
+// (C7.16) THE PROGRAM ENTRY: verify the header + VERSION 2 + hash, then read the table and the
+// typed PROGRAM. Inverse of serialize_program.
+fn deserialize_program(data: []byte) -> checker::TProgram | error {
+    let r0 = Reader { data = data; pos = 0 }
+    let m0 = match read_u8(r0)   { RByte as x => x; error as e => return e }
+    let m1 = match read_u8(m0.r) { RByte as x => x; error as e => return e }
+    let m2 = match read_u8(m1.r) { RByte as x => x; error as e => return e }
+    let m3 = match read_u8(m2.r) { RByte as x => x; error as e => return e }
+    if m0.value != b'T' || m1.value != b'K' || m2.value != b'B' || m3.value != 0 {
+        return error { message = "not a .tkb (bad magic)" }
+    }
+    let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
+    if ver.value != 2 { return error { message = "unsupported .tkb program version" } }
+    let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
+    if data.len < 16 { return error { message = "truncated .tkb header" } }
+    if fnv1a(data, 16) != stored.value {
+        return error { message = ".tkb altered or corrupt (hash mismatch)" }
+    }
+    let table = match read_strtable(stored.r) { RTable as x => x; error as e => return e }
+    let prog = match read_program(table.r, table.value) { RProgram as x => x; error as e => return e }
+    prog.value
 }

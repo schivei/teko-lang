@@ -112,6 +112,63 @@ static void collect_tstmts(tk_strtable *t, const tk_tstatement *xs, size_t n) {
     for (size_t i = 0; i < n; i += 1) collect_tstmt(t, &xs[i]);
 }
 
+// ============================================================================
+// (C7.16) PROGRAM FRAMING collect pass (mirror tkb_frame.tks).
+// ============================================================================
+static void collect_typeexpr(tk_strtable *t, tk_type_expr te);   // fwd (recursive)
+static void collect_typeexprs(tk_strtable *t, const tk_type_expr *xs, size_t n) {
+    for (size_t i = 0; i < n; i += 1) collect_typeexpr(t, xs[i]);
+}
+static void collect_typeexpr(tk_strtable *t, tk_type_expr te) {
+    switch (te.tag) {
+        case TK_TEXPR_NAMED:    for (size_t i = 0; i < te.as.named.path.len; i += 1) tk_st_intern(t, te.as.named.path.segments[i].name); break;
+        case TK_TEXPR_SLICE:    collect_typeexpr(t, *te.as.slice.element); break;
+        case TK_TEXPR_UNION:    collect_typeexprs(t, te.as.uni.members, te.as.uni.len); break;
+        case TK_TEXPR_OPTIONAL: collect_typeexpr(t, *te.as.optional.inner); break;
+    }
+}
+static void collect_params(tk_strtable *t, const tk_param *xs, size_t n) {
+    for (size_t i = 0; i < n; i += 1) { tk_st_intern(t, xs[i].name); collect_typeexpr(t, xs[i].type_ann); }
+}
+static void collect_fields(tk_strtable *t, const tk_field *xs, size_t n) {
+    for (size_t i = 0; i < n; i += 1) { tk_st_intern(t, xs[i].name); collect_typeexpr(t, xs[i].type_ann); }
+}
+static void collect_typebody(tk_strtable *t, tk_type_body tb) {
+    switch (tb.tag) {
+        case TK_BODY_STRUCT:  collect_fields(t, tb.as.struct_body.fields, tb.as.struct_body.n_fields); break;
+        case TK_BODY_ENUM:    for (size_t i = 0; i < tb.as.enum_body.n_members; i += 1) tk_st_intern(t, tb.as.enum_body.members[i]); break;
+        case TK_BODY_VARIANT: collect_typeexpr(t, tb.as.variant_body.type_expr); break;
+        case TK_BODY_ALIAS:   collect_typeexpr(t, tb.as.alias_body.alias); break;
+        case TK_BODY_EXTERN:  break;
+    }
+}
+static void collect_typedecl(tk_strtable *t, tk_type_decl d) {
+    tk_st_intern(t, d.name); collect_typebody(t, d.body); tk_st_intern(t, d.doc);
+}
+static void collect_usedecl(tk_strtable *t, tk_use_decl u) {
+    for (size_t i = 0; i < u.path.len; i += 1) tk_st_intern(t, u.path.segments[i].name);
+    tk_st_intern(t, u.alias);
+}
+static void collect_tfunction(tk_strtable *t, const tk_tfunction *f) {
+    tk_st_intern(t, f->name);
+    collect_params(t, f->params, f->nparams);
+    collect_type(t, f->return_type);
+    collect_tstmts(t, f->body, f->nbody);
+    tk_st_intern(t, f->doc); tk_st_intern(t, f->namespace); tk_st_intern(t, f->file);
+    tk_st_intern(t, f->c_symbol); tk_st_intern(t, f->from_lib);
+}
+static void collect_titem(tk_strtable *t, const tk_titem *it) {
+    switch (it->tag) {
+        case TK_TITEM_FUNCTION:  collect_tfunction(t, &it->as.function); break;
+        case TK_TITEM_TYPE_DECL: collect_typedecl(t, it->as.type_decl); break;
+        case TK_TITEM_USE:       collect_usedecl(t, it->as.use_decl); break;
+        case TK_TITEM_STATEMENT: collect_tstmt(t, &it->as.statement); break;
+    }
+}
+static void collect_program(tk_strtable *t, const tk_tprogram *prog) {
+    for (size_t i = 0; i < prog->nitems; i += 1) collect_titem(t, &prog->items[i]);
+}
+
 tk_bytes tk_serialize(const tk_texpr *te) {
     tk_strtable table = tk_st_empty();
     collect(&table, te);
@@ -122,5 +179,19 @@ tk_bytes tk_serialize(const tk_texpr *te) {
     out = tk_write_u8(out, (tk_byte)'B'); out = tk_write_u8(out, 0);
     out = tk_write_u32(out, 1);                  // version 1
     out = tk_write_u64(out, h);                  // FNV-1a of the body
+    return append_bytes(out, body);
+}
+
+// (C7.16) serialize a whole typed PROGRAM. Same frame, VERSION 2 (program tree). Keystone for .tkl.
+tk_bytes tk_serialize_program(const tk_tprogram *prog) {
+    tk_strtable table = tk_st_empty();
+    collect_program(&table, prog);
+    tk_bytes body = tk_write_program(tk_write_strtable((tk_bytes){0}, table), table, prog);
+    uint64_t h = tk_fnv1a(body.ptr, body.len);
+    tk_bytes out = {0};
+    out = tk_write_u8(out, (tk_byte)'T'); out = tk_write_u8(out, (tk_byte)'K');
+    out = tk_write_u8(out, (tk_byte)'B'); out = tk_write_u8(out, 0);
+    out = tk_write_u32(out, 2);                  // version 2 = program tree
+    out = tk_write_u64(out, h);
     return append_bytes(out, body);
 }
