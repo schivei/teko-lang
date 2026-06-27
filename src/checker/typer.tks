@@ -1385,15 +1385,39 @@ fn extern_type_ok(t: Type, table: TypeTable) -> bool {
     }
 }
 
+// C7.2: teko_rt speaks Teko's own internal ABI (tk_str/tk_ffi_sres/tk_ffi_ures/etc.) and may
+// legally declare str/[]str/str|error/error?/i32 — allow those for `from "teko_rt"` externs.
+fn teko_rt_type_ok(t: Type) -> bool {
+    match t {
+        Str     => true
+        Void    => true
+        Prim    => true
+        Byte    => true
+        Ptr     => true
+        Uptr    => true
+        Slice   => true   // []str, []byte, etc.
+        Variant => true   // str | error
+        Optional => true  // error?
+        _ => false
+    }
+}
+
 fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
     mut local = env
+    let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"   // C7.2: bypass for Teko's own runtime
     mut i = 0
     loop {
         if i >= f.params.len { break }
         let pt = match resolve_type(f.params[i].type_ann, table) { Type as t => t; error as e => return e }
         if f.is_extern {
-            if !extern_type_ok(pt, table) {
-                return error { message = "an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)" }
+            if is_teko_rt {
+                if !teko_rt_type_ok(pt) {
+                    return error { message = "a `teko_rt` extern function parameter must be a primitive, `str`, slice, variant, or optional (C7.2)" }
+                }
+            } else {
+                if !extern_type_ok(pt, table) {
+                    return error { message = "an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)" }
+                }
             }
         }
         local = define(local, f.params[i].name, pt, false)        // params are immutable (B.21)
@@ -1403,7 +1427,11 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
     if f.is_extern {
         // an extern is a bodyless foreign declaration (no body to check / return-analyze).
         // Validate the return marshals (void = no value is fine; else prim/byte only for now).
-        let ret_ok = match ret { Void => true; _ => extern_type_ok(ret, table) }
+        let ret_ok = if is_teko_rt {
+            teko_rt_type_ok(ret)
+        } else {
+            match ret { Void => true; _ => extern_type_ok(ret, table) }
+        }
         if !ret_ok {
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }

@@ -316,6 +316,12 @@ static const char *check_labels(const tk_tstatement *stmts, size_t n, const lbl_
 // C7.1a: is `t` legal across the extern boundary? prims/byte/ptr/uptr, OR an `extern type`
 // opaque handle (a Named whose decl is an ExternBody) — but NOT an ordinary Teko struct/enum/
 // variant (those would be unsupported by-value aggregate FFI). `void` handled by the caller.
+// C7.2: `from "teko_rt"` functions use Teko's internal ABI (tk_str/tk_ffi_sres/etc.) and may
+// declare str/[]str/str|error/error?/i32 — those are whitelisted via the `teko_rt` bypass.
+static bool str_eq(tk_str a, const char *b) {
+    size_t n = strlen(b);
+    return a.len == n && memcmp(a.ptr, b, n) == 0;
+}
 static bool extern_type_ok(tk_type t, tk_type_table table) {
     if (t.tag == TK_TYPE_PRIM || t.tag == TK_TYPE_BYTE
         || t.tag == TK_TYPE_PTR  || t.tag == TK_TYPE_UPTR) return true;
@@ -325,14 +331,28 @@ static bool extern_type_ok(tk_type t, tk_type_table table) {
     }
     return false;
 }
+// C7.2: teko_rt speaks Teko's own internal ABI — str/[]str/variant/optional are legal there.
+static bool teko_rt_type_ok(tk_type t) {
+    if (t.tag == TK_TYPE_STR || t.tag == TK_TYPE_VOID) return true;
+    if (t.tag == TK_TYPE_PRIM || t.tag == TK_TYPE_BYTE
+        || t.tag == TK_TYPE_PTR  || t.tag == TK_TYPE_UPTR) return true;
+    if (t.tag == TK_TYPE_SLICE)    return true;   // []str, []byte, etc.
+    if (t.tag == TK_TYPE_VARIANT)  return true;   // str | error
+    if (t.tag == TK_TYPE_OPTIONAL) return true;   // error?
+    return false;
+}
 
 tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table table) {
     tk_env local = env;
+    bool is_teko_rt = f.is_extern && str_eq(f.from_lib, "teko_rt");   // C7.2: bypass for Teko's own runtime
     for (size_t i = 0; i < f.nparams; i += 1) {           // params immutable (B.21)
         tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
         if (!pt.ok) return (tk_tfunction_result){ .ok = false, .as.error = pt.as.error };
-        if (f.is_extern && !extern_type_ok(pt.as.value, table)) {
+        if (f.is_extern && !is_teko_rt && !extern_type_ok(pt.as.value, table)) {
             return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)") };
+        }
+        if (f.is_extern && is_teko_rt && !teko_rt_type_ok(pt.as.value)) {
+            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("a `teko_rt` extern function parameter must be a primitive, `str`, slice, variant, or optional (C7.2)") };
         }
         local = tk_env_define(local, f.params[i].name, pt.as.value, false);
     }
@@ -340,7 +360,8 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
     if (f.is_extern) {
         // a bodyless foreign declaration: no body to check / return-analyze. Validate the
         // return marshals (void = no value is fine; else prim/byte only for now).
-        bool ret_ok = (ret.tag == TK_TYPE_VOID) || extern_type_ok(ret, table);
+        bool ret_ok = is_teko_rt ? teko_rt_type_ok(ret) || ret.tag == TK_TYPE_VOID
+                                 : (ret.tag == TK_TYPE_VOID) || extern_type_ok(ret, table);
         if (!ret_ok) {
             return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)") };
         }

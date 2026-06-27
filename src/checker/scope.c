@@ -124,6 +124,7 @@ tk_type_result tk_builtin_type(tk_str name) {
     else if (name_is(name, "byte"))  t = (tk_type){ .tag = TK_TYPE_BYTE };
     else if (name_is(name, "str"))   t = (tk_type){ .tag = TK_TYPE_STR };
     else if (name_is(name, "error")) t = (tk_type){ .tag = TK_TYPE_ERROR };
+    else if (name_is(name, "void"))  t = (tk_type){ .tag = TK_TYPE_VOID };   // (C7.2) explicit void return annotation in extern fn declarations
     else if (name_is(name, "ptr"))   t = (tk_type){ .tag = TK_TYPE_PTR };    // (C7.1a) opaque FFI pointer
     else if (name_is(name, "uptr"))  t = (tk_type){ .tag = TK_TYPE_UPTR };   // (C7.1a) opaque word-size unsigned
     else return (tk_type_result){ .ok = false, .as.error = tk_error_make("not a built-in type") };
@@ -154,18 +155,6 @@ tk_type_result tk_builtin_fn(tk_str name) {
     // teko::str::last_index_of -> `u64 | error` (a found index, or error when absent)
     static tk_type u64_or_err_m[2] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 }, { .tag = TK_TYPE_ERROR } };
     static tk_type u64_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { u64_or_err_m, 2 } };
-    // host file-IO FFI bottoms: read_file -> `str | error` ; write_file -> `error?` (null = success)
-    static tk_type str_or_err_m[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_ERROR } };
-    static tk_type str_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { str_or_err_m, 2 } };
-    static tk_type error_inner = { .tag = TK_TYPE_ERROR };
-    static tk_type err_opt = { .tag = TK_TYPE_OPTIONAL, .as.optional.inner = &error_inner };
-    // driver host FFI: process::run([]str)->i32 (cc spawn), env::var(str)->str|error, env::chdir(str)->error?.
-    static tk_type str_el = { .tag = TK_TYPE_STR };
-    static tk_type str_slice_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el };
-    static tk_type i32_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I32 };
-    // host dir-listing FFI: teko::fs::list_dir(str) -> []str | error (the entries in a directory).
-    static tk_type strslice_or_err_m[2] = { { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el }, { .tag = TK_TYPE_ERROR } };
-    static tk_type strslice_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { strslice_or_err_m, 2 } };
     // VM-internal arithmetic FFI: sign-aware int div/rem over the i128 carrier, float div.
     static tk_type i128_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 };
     static tk_type divrem_p[3] = { { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I128 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_BOOL } };
@@ -214,6 +203,29 @@ tk_type_result tk_builtin_fn(tk_str name) {
     }
     // host FFI bottoms: teko::float::parse(str)->f64 ; teko::io::read_file(str)->str|error ;
     // teko::io::write_file(str,str)->error? (null=success). The C twins live in driver.c/teko_rt.c.
+    // (C7.2) These remain here as SEED entries so that resolved-by-last-segment lookup works while
+    // the checker does not yet prefer namespace-file-declared externs over the hardcoded seed.
+    static tk_type str_or_err_m[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_ERROR } };
+    static tk_type str_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { str_or_err_m, 2 } };
+    static tk_type error_inner = { .tag = TK_TYPE_ERROR };
+    static tk_type err_opt = { .tag = TK_TYPE_OPTIONAL, .as.optional.inner = &error_inner };
+    // driver host FFI: process::run([]str)->i32 (cc spawn), env::var(str)->str|error, env::chdir(str)->error?.
+    static tk_type str_el = { .tag = TK_TYPE_STR };
+    static tk_type str_slice_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el };
+    static tk_type i32_t = { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I32 };
+    // host dir-listing FFI: teko::fs::list_dir(str) -> []str | error (the entries in a directory).
+    static tk_type strslice_or_err_m[2] = { { .tag = TK_TYPE_SLICE, .as.slice.element = &str_el }, { .tag = TK_TYPE_ERROR } };
+    static tk_type strslice_or_err = { .tag = TK_TYPE_VARIANT, .as.variant = { strslice_or_err_m, 2 } };
+    // print/println + teko::io::write/ewrite — the host output bottom (write/ewrite are the FFI
+    // primitives the runtime's print/println/panic lower to; ewrite is stderr). All (str) -> void.
+    if (name_is(name, "print") || name_is(name, "println") || name_is(name, "write") || name_is(name, "ewrite") || name_is(name, "eprint") || name_is(name, "eprintln")) {
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &void_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "args")) {                                      // teko::env::args() -> []str (argv)
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &str_slice_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
     if (name_is(name, "parse")) {                                     // teko::float::parse(str) -> f64
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &f64_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
@@ -254,19 +266,8 @@ tk_type_result tk_builtin_fn(tk_str name) {
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str2_t, .nparams = 2, .ret = &err_opt } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
-    // print/println + teko::io::write/ewrite — the host output bottom (write/ewrite are the FFI
-    // primitives the runtime's print/println/panic lower to; ewrite is stderr). All (str) -> void.
-    if (name_is(name, "args")) {                                      // teko::env::args() -> []str (argv)
-        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &str_slice_t } };
-        return (tk_type_result){ .ok = true, .as.value = ft };
-    }
     if (name_is(name, "os")) {                                        // teko::os() -> str — C7.1f
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &str_t } };
-        return (tk_type_result){ .ok = true, .as.value = ft };
-    }
-    if (name_is(name, "print") || name_is(name, "println") || name_is(name, "write") || name_is(name, "ewrite") || name_is(name, "eprint") || name_is(name, "eprintln")) {
-        tk_type ft = { .tag = TK_TYPE_FUNC,
-                       .as.func = { .params = &str_t, .nparams = 1, .ret = &void_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
     // teko::abort — the host abort FFI bottom (() -> void). The runtime's panic lowers to it.

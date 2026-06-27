@@ -3654,9 +3654,13 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     // defined LATER in the unit (mutual recursion / forward reference across the merged corpus)
     // resolves. C23 makes an undeclared call an error, so without these the whole self-host corpus
     // (which freely forward-references) fails to compile.
+    // (C7.2) Skip `from "teko_rt"` externs — they are already declared in teko_rt.h with the
+    // correct FFI struct types (tk_ffi_ures/tk_ffi_sres/etc.); emitting them again would conflict.
     for (size_t i = 0; i < prog.nitems; i += 1) {
         if (prog.items[i].tag != TK_TITEM_FUNCTION) continue;
-        if (!emit_function_sig(&b, prog.items[i].as.function, &err)) { tk_free0(b.ptr); return cg_err(err); }
+        tk_tfunction f = prog.items[i].as.function;
+        if (f.is_extern && seg_is(f.from_lib, "teko_rt")) continue;   // already in teko_rt.h
+        if (!emit_function_sig(&b, f, &err)) { tk_free0(b.ptr); return cg_err(err); }
         cb(&b, ";\n");
     }
     cb(&b, "\n");

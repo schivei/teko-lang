@@ -4394,13 +4394,17 @@ fn tk_emit_c(prog: checker::TProgram) -> str | error {
     // defined LATER in the unit (mutual recursion / forward reference across the merged corpus)
     // resolves. C23 makes an undeclared call an error, so without these the whole self-host corpus
     // (which freely forward-references) fails to compile. (C: the prototype pass in tk_emit_c.)
+    // (C7.2) Skip `from "teko_rt"` externs — they are already declared in teko_rt.h with the
+    // correct FFI struct types (tk_ffi_ures/tk_ffi_sres/etc.); emitting them again would conflict.
     mut pi = 0
     loop {
         if pi >= prog.items.len { break }
         match prog.items[pi] {
             checker::TFunction as f => {
-                b = match emit_function_sig(b, prog, f) { []byte as o => o; error as err => return err }
-                b = cb(b, ";\n")
+                if !(f.is_extern && f.from_lib == "teko_rt") {
+                    b = match emit_function_sig(b, prog, f) { []byte as o => o; error as err => return err }
+                    b = cb(b, ";\n")
+                }
             }
             _ => { }
         }
