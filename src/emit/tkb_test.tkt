@@ -6,6 +6,13 @@ use teko::checker
 fn u8ty()  -> checker::Type { checker::Prim { kind = checker::PrimKind::U8 } }
 fn i64ty() -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
 fn tnum(v: i128) -> checker::TExpr { checker::TExpr { kind = checker::TNumber { is_float = false; value = v; fval = 0.0 }; type = i64ty(); line = 0; col = 0 } }
+// drop the last byte of a `[]byte` (str's `slice` is text-only) — shared by header_test (same ns).
+fn drop_last(b: []byte) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i + 1 >= b.len { break }; out = teko::list::push(out, b[i]); i = i + 1 }
+    out
+}
 
 #test
 fn tkb_roundtrip_cast() {
@@ -51,6 +58,6 @@ fn tkb_tamper_caught() {
     // barrier (M.1): a corrupted body (last byte dropped) fails the FNV-1a hash check → error.
     let orig  = checker::TExpr { kind = checker::TCast { expr = tnum(7) }; type = u8ty(); line = 0; col = 0 }
     let bytes = serialize(orig)
-    let short = slice(bytes, 0, bytes.len - 1)
+    let short = drop_last(bytes)
     match deserialize(short) { checker::TExpr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
 }
