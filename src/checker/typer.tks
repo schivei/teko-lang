@@ -686,18 +686,31 @@ fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
 // `[ e0, e1, … ]` (Increment B+): type every element, UNIFY to a common element type T (widening —
 // a case joins into its variant; sibling cases → their union), result `[]T`. An empty `[]` yields
 // the SENTINEL `[]Void` — exactly like `teko::list::empty()` — so a binding annotation (`: []T`)
-// adopts it and a bare unannotated `[]` is rejected by type_binding (collections #4). C twin:
-// type_array_lit in expr.c.
+// adopts it and a bare unannotated `[]` is rejected by type_binding (collections #4). Spread
+// elements (`..xs`) must type as `[]T`; their element type T is widened into the unified element.
+// C twin: type_array_lit in expr.c.
 fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | error {
-    mut elems: []TExpr = teko::list::empty()
+    mut elems: []TArrayElem = teko::list::empty()
     mut et: Type = Void { }                 // sentinel for an empty `[]` (no inferable element)
     mut i = 0
     loop {
         if i >= a.elements.len { break }
-        let el = match type_expr(a.elements[i], env, table) { TExpr as te => te; error as e => return e }
-        if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
-        if i == 0 { et = el.type } else { et = type_join(et, el.type, table) }   // widen across the elements
-        elems = teko::list::push(elems, el)
+        let ae = a.elements[i]
+        let el = match type_expr(ae.expr, env, table) { TExpr as te => te; error as e => return e }
+        if ae.is_spread {
+            // spread element: expr must be a `[]T` slice; contribute T as the element type
+            let spread_elem = match el.type {
+                Slice as s => s.element
+                _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
+            }
+            if type_is_void(spread_elem) { return error { message = "a spread element cannot be an untyped empty slice" } }
+            if type_is_void(et) { et = spread_elem } else { et = type_join(et, spread_elem, table) }
+        } else {
+            // plain element: original logic
+            if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
+            if type_is_void(et) { et = el.type } else { et = type_join(et, el.type, table) }
+        }
+        elems = teko::list::push(elems, TArrayElem { is_spread = ae.is_spread; expr = el })
         i++
     }
     TExpr { kind = TArrayLit { elements = elems }; type = Slice { element = et }; line = 0; col = 0 }
@@ -1184,14 +1197,18 @@ fn literal_adopts(e: TExpr, to: Type) -> bool {
             }
             any
         }
-        // an ARRAY LITERAL adopts a `[]E` slot when EVERY element adopts E (element-wise literal
-        // adoption — e.g. `[0x68, 0x65]` adopts `[]byte`). An empty `[]` adopts any slice.
+        // an ARRAY LITERAL adopts a `[]E` slot when EVERY non-spread element adopts E (element-wise
+        // literal adoption — e.g. `[0x68, 0x65]` adopts `[]byte`). Spread elements are already
+        // `[]T` and were type-checked at construction time — skip adoption for them.
+        // An empty `[]` adopts any slice.
         TArrayLit as a => match to {
             Slice as s => {
                 mut i = 0
                 loop {
                     if i >= a.elements.len { break }
-                    if !literal_adopts(a.elements[i], s.element) { return false }
+                    if !a.elements[i].is_spread {
+                        if !literal_adopts(a.elements[i].expr, s.element) { return false }
+                    }
                     i++
                 }
                 true

@@ -75,6 +75,8 @@ static void collect(tk_strtable *t, const tk_texpr *te) {
             for (size_t i = 0; i < te->as.in_expr.nelems; i += 1) collect(t, &te->as.in_expr.elems[i]);
             break;
         case TK_TEXPR_ARRAY:
+            // C6.7: each element carries an is_spread flag (bool *is_spread parallel to elements[]).
+            // The flag is a plain byte in the wire format — no string to intern, just recurse the expr.
             for (size_t i = 0; i < te->as.array.nelements; i += 1) collect(t, &te->as.array.elements[i]);
             break;
         case TK_TEXPR_PATH:

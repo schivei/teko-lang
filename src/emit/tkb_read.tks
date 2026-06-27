@@ -385,15 +385,17 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TInExpr { lhs = lhs.value; elems = elems }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 21 {
-        // Increment B+ — ArrayLit ([ e0, e1, … ]): inverse of write tag 21 — nelements (u64), then each elem texpr.
+        // C6.7 — ArrayLit ([ e0, e1, … ]): inverse of write tag 21 — nelements (u64), then for
+        // each element: is_spread (u8: 0=plain 1=spread) followed by the element TExpr.
         let ne = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
         mut rr = ne.r
-        mut elems: []checker::TExpr = teko::list::empty()
+        mut elems: []checker::TArrayElem = teko::list::empty()
         mut i = 0
         loop {
             if i >= ne.value { break }
-            let el = match read_texpr(rr, table) { RTExpr as x => x; error as e => return e }
-            elems = teko::list::push(elems, el.value)
+            let sp = match read_u8(rr)         { RByte as x => x; error as e => return e }
+            let el = match read_texpr(sp.r, table) { RTExpr as x => x; error as e => return e }
+            elems = teko::list::push(elems, checker::TArrayElem { is_spread = sp.value != 0; expr = el.value })
             rr = el.r
             i++
         }

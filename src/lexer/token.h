@@ -145,6 +145,12 @@ typedef enum {
     //     identifier (the corpus uses `from` as a param name), matched CONTEXTUALLY by the parser
     //     in the extern position. See LEGISLATION §"FFI / `extern`".
     TK_TOKEN_EXTERN,        // `extern` — foreign-function declarator
+
+    // --- bare range / spread (C6.7). APPENDED LAST (ordinal stability — never a stored op, so
+    //     its ordinal is never serialized). `..` without a trailing `=` is a distinct token used
+    //     for exclusive ranges and spread expressions. `..=` (inclusive range) is still
+    //     TK_TOKEN_DOTDOTEQ and is matched first by the 3-byte maximal-munch check.
+    TK_TOKEN_DOTDOT,        // `..` — bare range / spread (exclusive; `..=` remains TK_TOKEN_DOTDOTEQ)
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW

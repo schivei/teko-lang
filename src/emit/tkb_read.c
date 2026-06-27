@@ -196,11 +196,16 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
             e.as.in_expr.elems = es; e.as.in_expr.nelems = (size_t)ne;
             return e;
         }
-        case 21: {                                                              /* Increment B+ — [ e0, e1, … ]: nelements (u64) THEN each elem */
+        case 21: {                                                              /* C6.7 — [ e0, e1, … ]: nelements (u64) THEN for each: is_spread (u8) + elem (TExpr) */
             e.tag = TK_TEXPR_ARRAY;
-            uint64_t na = tk_read_u64(r); tk_texpr *es = tk_alloc((na ? na : 1) * sizeof *es); if (!es) abort();
-            for (uint64_t i = 0; i < na; i += 1) es[i] = tk_read_texpr(r, t);
-            e.as.array.elements = es; e.as.array.nelements = (size_t)na;
+            uint64_t na = tk_read_u64(r);
+            tk_texpr *es = tk_alloc((na ? na : 1) * sizeof *es); if (!es) abort();
+            bool *sp = tk_alloc((na ? na : 1) * sizeof *sp); if (!sp) abort();
+            for (uint64_t i = 0; i < na; i += 1) {
+                sp[i] = (tk_read_u8(r) != 0);
+                es[i] = tk_read_texpr(r, t);
+            }
+            e.as.array.elements = es; e.as.array.nelements = (size_t)na; e.as.array.is_spread = sp;
             return e;
         }
     }

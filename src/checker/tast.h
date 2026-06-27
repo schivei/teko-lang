@@ -82,7 +82,9 @@ struct tk_texpr {
         struct { tk_str enum_name; tk_str member; uint64_t ordinal; }  path;
         // [ e0, e1, … ] (Increment B+) — `.type` is []T; each element is a typed texpr already
         // adopted into the element type T, so both backends build the same `[]T` value.
-        struct { tk_texpr *elements; size_t nelements; }              array;
+        // A spread element (`..xs`) carries is_spread=true and was checked against []T; the spread
+        // slice itself is stored as the typed expr (codegen flattens it at runtime).
+        struct { tk_texpr *elements; size_t nelements; bool *is_spread; }  array;
     } as;
 };
 

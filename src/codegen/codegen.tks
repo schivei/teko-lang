@@ -1564,9 +1564,9 @@ fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte
 }
 
 // emit_array_lit — `[ e0, e1, … ]` (Increment B+) -> a `tk_slice_<elem>` value. Empty `[]` is the
-// concrete empty literal `(tk_slice_<elem>){ .ptr = 0, .len = 0 }`. Non-empty allocates an N-element
-// buffer (M.1 OOM-abort), stores each element via emit_as (so a case wraps into its variant / a
-// fitting literal adopts the element type), and yields the `{ .ptr, .len }` slice in a GNU stmt-expr.
+// concrete empty literal. Plain elements: allocate N slots, fill by index via emit_as.
+// Spread elements (`..xs`): when present, build via tk_slice_push into a dynamic accumulator
+// (mirrors the slow path in the C twin codegen.c — see its TK_TEXPR_ARRAY / has_spread branch).
 fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: checker::TArrayLit) -> []byte | error {
     let elem = match e.type { checker::Slice as s => s.element; _ => return error { message = "codegen: array literal is not a slice type (internal)" } }
     if a.elements.len == 0 {
@@ -1574,27 +1574,94 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
         z = match cg_slice_typename(z, elem) { []byte as o => o; error as err => return err }
         return cb(z, "){ .ptr = 0, .len = 0 }")
     }
-    let pN = $"_arr{buf.len}"
+    // detect any spread element
+    mut has_spread = false
+    mut si: u64 = 0
+    loop {
+        if si >= a.elements.len { break }
+        if a.elements[si].is_spread { has_spread = true; break }
+        si++
+    }
+    if !has_spread {
+        // fast path: all plain elements — allocate once, fill by index
+        let pN = $"_arr{buf.len}"
+        mut out = cb(buf, "({ ")
+        out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+        out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = malloc(")
+        out = cb_u128_digits(out, a.elements.len to u128)
+        out = cb(out, " * sizeof(")
+        out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+        out = cb(out, ")); if (!"); out = cb(out, pN); out = cb(out, ") abort(); ")
+        mut i: u64 = 0
+        loop {
+            if i >= a.elements.len { break }
+            out = cb(out, pN); out = cb(out, "["); out = cb_u128_digits(out, i to u128); out = cb(out, "] = ")
+            out = match emit_as(out, prog, elem, a.elements[i].expr) { []byte as o => o; error as err => return err }
+            out = cb(out, "; ")
+            i++
+        }
+        out = cb(out, "(")
+        out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+        out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = ")
+        out = cb_u128_digits(out, a.elements.len to u128)
+        return cb(out, " }; })")
+    }
+    // slow path: has spread — build incrementally via tk_slice_push
+    // acc = accumulator slice; cap = capacity passed to tk_slice_push by reference
+    let tag = buf.len
+    let accN = $"_sarr{tag}"
+    let capN = $"_scap{tag}"
     mut out = cb(buf, "({ ")
-    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = malloc(")
-    out = cb_u128_digits(out, a.elements.len to u128)
-    out = cb(out, " * sizeof(")
-    out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, ")); if (!"); out = cb(out, pN); out = cb(out, ") abort(); ")
-    mut i = 0
+    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, accN); out = cb(out, " = { .ptr = 0, .len = 0 }; uint64_t "); out = cb(out, capN); out = cb(out, " = 0; ")
+    mut i: u64 = 0
     loop {
         if i >= a.elements.len { break }
-        out = cb(out, pN); out = cb(out, "["); out = cb_u128_digits(out, i to u128); out = cb(out, "] = ")
-        out = match emit_as(out, prog, elem, a.elements[i]) { []byte as o => o; error as err => return err }
-        out = cb(out, "; ")
+        let ae = a.elements[i]
+        let spN = $"_spp{tag}_{i}"
+        if ae.is_spread {
+            // spread: evaluate sub-slice, loop and push each item
+            let subN = $"_ssub{tag}_{i}"
+            let jN   = $"_sj{tag}_{i}"
+            out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, " "); out = cb(out, subN); out = cb(out, " = ")
+            out = match emit_expr(out, prog, ae.expr) { []byte as o => o; error as err => return err }
+            out = cb(out, "; ")
+            out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; ")
+            out = cb(out, jN); out = cb(out, " < "); out = cb(out, subN); out = cb(out, ".len; ")
+            out = cb(out, jN); out = cb(out, "++) { ")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, " *"); out = cb(out, spN); out = cb(out, " = (")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "*)tk_slice_push("); out = cb(out, accN); out = cb(out, ".ptr, "); out = cb(out, accN); out = cb(out, ".len, &")
+            out = cb(out, subN); out = cb(out, ".ptr["); out = cb(out, jN); out = cb(out, "], sizeof(")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "), &"); out = cb(out, capN); out = cb(out, "); if (!"); out = cb(out, spN); out = cb(out, ") abort(); ")
+            out = cb(out, accN); out = cb(out, " = (")
+            out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "){ .ptr = "); out = cb(out, spN); out = cb(out, ", .len = "); out = cb(out, capN); out = cb(out, " }; } ")
+        } else {
+            // plain element: evaluate into a temp, push
+            let tmpN = $"_sitm{tag}_{i}"
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, " "); out = cb(out, tmpN); out = cb(out, " = ")
+            out = match emit_as(out, prog, elem, ae.expr) { []byte as o => o; error as err => return err }
+            out = cb(out, "; ")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, " *"); out = cb(out, spN); out = cb(out, " = (")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "*)tk_slice_push("); out = cb(out, accN); out = cb(out, ".ptr, "); out = cb(out, accN); out = cb(out, ".len, &")
+            out = cb(out, tmpN); out = cb(out, ", sizeof(")
+            out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "), &"); out = cb(out, capN); out = cb(out, "); if (!"); out = cb(out, spN); out = cb(out, ") abort(); ")
+            out = cb(out, accN); out = cb(out, " = (")
+            out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
+            out = cb(out, "){ .ptr = "); out = cb(out, spN); out = cb(out, ", .len = "); out = cb(out, capN); out = cb(out, " }; ")
+        }
         i++
     }
-    out = cb(out, "(")
-    out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = ")
-    out = cb_u128_digits(out, a.elements.len to u128)
-    cb(out, " }; })")
+    mut z = cb(out, accN)
+    cb(z, "; })")
 }
 
 // emit_interp — $"…{expr}…" (self-host parity). Lower to nested tk_str_concat over the piece

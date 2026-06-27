@@ -1689,8 +1689,11 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             return true;
         }
         case TK_TEXPR_ARRAY: {
-            // [ e0, … ] (Increment B+) -> a tk_slice_<elem>. Empty [] -> the empty literal; non-empty
-            // allocates N elements (M.1 OOM-abort), stores each via emit_as, yields { .ptr, .len }.
+            // [ e0, … ] (Increment B+) -> a tk_slice_<elem>. Empty [] -> the empty literal.
+            // Plain elements: allocate N slots, fill by index with emit_as.
+            // Spread elements (..xs): counted in with their runtime length; appended via tk_slice_push.
+            // When there are ANY spread elements the total count is dynamic so we use tk_slice_push
+            // for ALL elements (simplest and always correct via the amortised runtime grow).
             tk_type elem = (e->type.tag == TK_TYPE_SLICE && e->type.as.slice.element)
                          ? *e->type.as.slice.element : (tk_type){ .tag = TK_TYPE_VOID };
             size_t nelem = e->as.array.nelements;
@@ -1699,21 +1702,86 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 cb(b, "){ .ptr = 0, .len = 0 }");
                 return true;
             }
-            char pN[40]; snprintf(pN, sizeof pN, "_arr%zu", (size_t)b->len);
-            char cnt[24]; snprintf(cnt, sizeof cnt, "%zu", nelem);
-            cb(b, "({ ");
-            if (!emit_type(b, elem, err)) return false;
-            cb(b, " *"); cb(b, pN); cb(b, " = malloc("); cb(b, cnt); cb(b, " * sizeof(");
-            if (!emit_type(b, elem, err)) return false;
-            cb(b, ")); if (!"); cb(b, pN); cb(b, ") abort(); ");
-            for (size_t i = 0; i < nelem; i += 1) {
-                char idx[24]; snprintf(idx, sizeof idx, "%zu", i);
-                cb(b, pN); cb(b, "["); cb(b, idx); cb(b, "] = ");
-                if (!emit_as(b, elem, &e->as.array.elements[i], err)) return false;
-                cb(b, "; ");
+            // detect whether any element is a spread
+            bool has_spread = false;
+            if (e->as.array.is_spread) {
+                for (size_t i = 0; i < nelem; i += 1) if (e->as.array.is_spread[i]) { has_spread = true; break; }
             }
-            cb(b, "("); if (!cg_slice_typename(b, elem, err)) return false;
-            cb(b, "){ .ptr = "); cb(b, pN); cb(b, ", .len = "); cb(b, cnt); cb(b, " }; })");
+            if (!has_spread) {
+                // fast path: fully static count — allocate once, fill by index
+                char pN[40]; snprintf(pN, sizeof pN, "_arr%zu", (size_t)b->len);
+                char cnt[24]; snprintf(cnt, sizeof cnt, "%zu", nelem);
+                cb(b, "({ ");
+                if (!emit_type(b, elem, err)) return false;
+                cb(b, " *"); cb(b, pN); cb(b, " = malloc("); cb(b, cnt); cb(b, " * sizeof(");
+                if (!emit_type(b, elem, err)) return false;
+                cb(b, ")); if (!"); cb(b, pN); cb(b, ") abort(); ");
+                for (size_t i = 0; i < nelem; i += 1) {
+                    char idx[24]; snprintf(idx, sizeof idx, "%zu", i);
+                    cb(b, pN); cb(b, "["); cb(b, idx); cb(b, "] = ");
+                    if (!emit_as(b, elem, &e->as.array.elements[i], err)) return false;
+                    cb(b, "; ");
+                }
+                cb(b, "("); if (!cg_slice_typename(b, elem, err)) return false;
+                cb(b, "){ .ptr = "); cb(b, pN); cb(b, ", .len = "); cb(b, cnt); cb(b, " }; })");
+                return true;
+            }
+            // slow path: has spread — build via tk_slice_push into a dynamic buffer.
+            // Each plain element is pushed individually; each spread element is looped over and
+            // each of its sub-elements is pushed. Pattern mirrors teko::list::push codegen.
+            // Variables: _sarr<N> = accumulator slice; _sl<N> = capacity (passed to tk_slice_push).
+            // For each push: T *_sp = (T*)tk_slice_push(acc.ptr, acc.len, &item, sizeof T, &cap);
+            //                acc = (slice_T){ .ptr = _sp, .len = cap };
+            size_t tag = (size_t)b->len;
+            char accN[48]; snprintf(accN, sizeof accN, "_sarr%zu", tag);
+            char capN[48]; snprintf(capN, sizeof capN, "_scap%zu", tag);
+            cb(b, "({ ");
+            if (!cg_slice_typename(b, elem, err)) return false;
+            cb(b, " "); cb(b, accN); cb(b, " = { .ptr = 0, .len = 0 }; uint64_t "); cb(b, capN); cb(b, " = 0; ");
+            for (size_t i = 0; i < nelem; i += 1) {
+                bool spread = e->as.array.is_spread && e->as.array.is_spread[i];
+                char spN[64]; snprintf(spN, sizeof spN, "_spp%zu_%zu", tag, i);
+                if (spread) {
+                    // spread: evaluate the sub-slice, then loop and push each item
+                    char subN[64]; snprintf(subN, sizeof subN, "_ssub%zu_%zu", tag, i);
+                    char jN[64];   snprintf(jN,   sizeof jN,   "_sj%zu_%zu",  tag, i);
+                    if (!cg_slice_typename(b, elem, err)) return false;
+                    cb(b, " "); cb(b, subN); cb(b, " = ");
+                    if (!emit_expr(b, &e->as.array.elements[i], err)) return false;
+                    cb(b, "; ");
+                    cb(b, "for (uint64_t "); cb(b, jN); cb(b, " = 0; ");
+                    cb(b, jN); cb(b, " < "); cb(b, subN); cb(b, ".len; ");
+                    cb(b, jN); cb(b, "++) { ");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, " *"); cb(b, spN); cb(b, " = (");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, "*)tk_slice_push("); cb(b, accN); cb(b, ".ptr, "); cb(b, accN); cb(b, ".len, &");
+                    cb(b, subN); cb(b, ".ptr["); cb(b, jN); cb(b, "], sizeof(");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, "), &"); cb(b, capN); cb(b, "); if (!"); cb(b, spN); cb(b, ") abort(); ");
+                    cb(b, accN); cb(b, " = (");
+                    if (!cg_slice_typename(b, elem, err)) return false;
+                    cb(b, "){ .ptr = "); cb(b, spN); cb(b, ", .len = "); cb(b, capN); cb(b, " }; } ");
+                } else {
+                    // plain element: evaluate into a temp, push
+                    char tmpN[64]; snprintf(tmpN, sizeof tmpN, "_sitm%zu_%zu", tag, i);
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, " "); cb(b, tmpN); cb(b, " = ");
+                    if (!emit_as(b, elem, &e->as.array.elements[i], err)) return false;
+                    cb(b, "; ");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, " *"); cb(b, spN); cb(b, " = (");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, "*)tk_slice_push("); cb(b, accN); cb(b, ".ptr, "); cb(b, accN); cb(b, ".len, &");
+                    cb(b, tmpN); cb(b, ", sizeof(");
+                    if (!emit_type(b, elem, err)) return false;
+                    cb(b, "), &"); cb(b, capN); cb(b, "); if (!"); cb(b, spN); cb(b, ") abort(); ");
+                    cb(b, accN); cb(b, " = (");
+                    if (!cg_slice_typename(b, elem, err)) return false;
+                    cb(b, "){ .ptr = "); cb(b, spN); cb(b, ", .len = "); cb(b, capN); cb(b, " }; ");
+                }
+            }
+            cb(b, accN); cb(b, "; })");
             return true;
         }
     }

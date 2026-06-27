@@ -38,6 +38,7 @@ typedef struct { tk_bind_target node; size_t next; } tk_parsed_target;       // 
 typedef struct { tk_str      *names;  size_t n_names;  size_t next; } tk_parsed_names;  // a `{ … }` field-name list
 typedef struct { tk_path      node;       size_t next; } tk_parsed_path;     // an expression path a::b::c
 typedef struct { tk_field    *fields; size_t n_fields; size_t next; } tk_parsed_fields; // a struct field list
+typedef struct { tk_array_elem *elems; size_t n_elems; size_t next; } tk_parsed_array_elems; // array literal elements (with spread support)
 typedef struct { bool has_when; tk_expr guard;        size_t next; } tk_guard;          // an optional `when`
 typedef struct { bool has_type; tk_type_expr type_ann; size_t next; } tk_annotation;    // an optional `: T`
 
@@ -63,6 +64,7 @@ TK_RESULT(tk_parsed_target,     tk_parsed_target_result);
 TK_RESULT(tk_parsed_names,      tk_parsed_names_result);
 TK_RESULT(tk_parsed_path,       tk_parsed_path_result);
 TK_RESULT(tk_parsed_fields,     tk_parsed_fields_result);
+TK_RESULT(tk_parsed_array_elems, tk_parsed_array_elems_result);
 TK_RESULT(tk_guard,             tk_guard_result);
 TK_RESULT(tk_annotation,        tk_annotation_result);
 TK_RESULT(tk_parsed_use,        tk_parsed_use_result);

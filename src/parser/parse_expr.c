@@ -27,7 +27,8 @@
 
 // the ladder is internal + flagged; the two public entries set the flag (bottom of file).
 static tk_parsed_result parse_expr_a(const tk_token *t, size_t n, size_t pos, bool as_);
-static tk_parsed_args_result parse_in_elems(const tk_token *t, size_t n, size_t pos);   // [ e0, … ] elements (array lit + `in` set)
+static tk_parsed_args_result parse_in_elems(const tk_token *t, size_t n, size_t pos);            // [ e0, … ] elements (`in` set only)
+static tk_parsed_array_elems_result parse_array_elems(const tk_token *t, size_t n, size_t pos);  // [ e0, ..e1, … ] array literal elements (C6.7)
 
 // (C1-POS/E1) stamp a freshly-built node with its FIRST-token source position. A node's
 // first token is always `t[pos]` at its parser function's ENTRY: atom leaves start there,
@@ -233,13 +234,14 @@ static tk_parsed_result parse_atom(const tk_token *t, size_t n, size_t pos, bool
         return (tk_parsed_result){ .ok = true, .as.value = { .node = in.as.value.node, .next = in.as.value.next + 1 } };
     }
     if (k == TK_TOKEN_LBRACKET) {
-        // `[ e0, e1, … ]` — an array/slice literal (Increment B+). Reuses the bracket-element
-        // parser (same shape as the `in` set). The checker unifies the element type.
-        tk_parsed_args_result es = parse_in_elems(t, n, pos);
-        if (!es.ok) { return (tk_parsed_result){ .ok = false, .as.error = es.as.error }; }
+        // `[ e0, ..e1, e2, … ]` — an array/slice literal (Increment B+, C6.7 spread). Each
+        // element may be prefixed with `..` to mark it as a spread (is_spread=true). The checker
+        // unifies non-spread element types and flattens spread operands.
+        tk_parsed_array_elems_result aer = parse_array_elems(t, n, pos);
+        if (!aer.ok) { return (tk_parsed_result){ .ok = false, .as.error = aer.as.error }; }
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_ARRAY, .as.array = {
-            .elements = es.as.value.args, .nelements = es.as.value.n_args } }, t, pos);
-        return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = es.as.value.next } };
+            .elements = aer.as.value.elems, .nelements = aer.as.value.n_elems } }, t, pos);
+        return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = aer.as.value.next } };
     }
     if (k == TK_TOKEN_IF)    { return parse_if(t, n, pos); }
     if (k == TK_TOKEN_MATCH) { return parse_match(t, n, pos); }
@@ -387,6 +389,42 @@ static tk_parsed_result parse_additive(const tk_token *t, size_t n, size_t pos, 
         node = b; p = rhs.as.value.next;
     }
     return (tk_parsed_result){ .ok = true, .as.value = { .node = node, .next = p } };
+}
+
+// `[ e0, ..e1, e2, … ]` — array literal element collector (C6.7). `pos` is at `[`. Each element
+// may be prefixed with `..` (TK_TOKEN_DOTDOT) to produce a spread element (is_spread=true). After
+// consuming `..` the operand is parsed at primary/unary level (parse_unary) to avoid swallowing the
+// comma separator. Non-spread elements are parsed at the full expression level with struct literals
+// allowed. Empty `[]` is valid (zero-element array). Newline-tolerant like call args.
+static tk_parsed_array_elems_result parse_array_elems(const tk_token *t, size_t n, size_t pos) {
+    size_t p = tk_skip_seps(t, n, pos + 1);              // consume `[`, skip leading newlines
+    tk_array_elem *elems = NULL; size_t ne = 0;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {     // empty `[]`
+        return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .elems = elems, .n_elems = 0, .next = p + 1 } };
+    }
+    for (;;) {
+        bool is_spread = false;
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_DOTDOT)) {   // `..expr` spread prefix (C6.7)
+            is_spread = true;
+            p = tk_skip_seps(t, n, p + 1);               // consume `..`, skip optional newlines
+        }
+        // spread operand: parse at unary level (avoids consuming the comma separator);
+        // non-spread: parse at full expression level with struct literals allowed.
+        tk_parsed_result a = is_spread
+            ? parse_unary(t, n, p, false)
+            : parse_expr_a(t, n, p, true);
+        if (!a.ok) { return (tk_parsed_array_elems_result){ .ok = false, .as.error = a.as.error }; }
+        tk_array_elem ae = { .is_spread = is_spread, .expr = tk_box_expr(a.as.value.node) };
+        tk_array_elems_push(&elems, &ne, ae);
+        p = tk_skip_seps(t, n, a.as.value.next);
+        if (!tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { break; }
+        p = tk_skip_seps(t, n, p + 1);                   // consume `,`
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) { break; }  // trailing comma
+    }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {
+        return (tk_parsed_array_elems_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ']' to close the array literal") };
+    }
+    return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .elems = elems, .n_elems = ne, .next = p + 1 } };
 }
 
 // `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`

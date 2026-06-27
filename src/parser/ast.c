@@ -26,7 +26,8 @@
         *n  = m + 1;                                             \
     } while (0)
 
-void tk_exprs_push (tk_expr **xs,      size_t *n, tk_expr      item) { TK_PUSH_BODY(tk_expr); }
+void tk_exprs_push       (tk_expr **xs,        size_t *n, tk_expr        item) { TK_PUSH_BODY(tk_expr); }
+void tk_array_elems_push (tk_array_elem **xs,  size_t *n, tk_array_elem  item) { TK_PUSH_BODY(tk_array_elem); }
 void tk_stmts_push (tk_statement **xs, size_t *n, tk_statement item) { TK_PUSH_BODY(tk_statement); }
 void tk_pats_push  (tk_pattern **xs,   size_t *n, tk_pattern   item) { TK_PUSH_BODY(tk_pattern); }
 void tk_arms_push  (tk_arm **xs,       size_t *n, tk_arm       item) { TK_PUSH_BODY(tk_arm); }

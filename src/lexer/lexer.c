@@ -459,8 +459,8 @@ static tk_scan_result read_symbol(tk_str source, size_t pos) {
     if (c == '?' && c1 == '?') return scan_ok(sym(source, pos, 2, TK_TOKEN_QQ));
     if (c == '?' && c1 == '.') return scan_ok(sym(source, pos, 2, TK_TOKEN_QDOT));
 
-    // `..` exists ONLY as `..=` (handled above); a lone `..` is an error
-    if (c == '.' && c1 == '.') return scan_err("expected '=' to close range '..='");
+    // `..` — bare range / spread (C6.7); `..=` is already consumed above by the 3-byte check.
+    if (c == '.' && c1 == '.') return scan_ok(sym(source, pos, 2, TK_TOKEN_DOTDOT));
 
     // 1-byte
     tk_token_kind one;

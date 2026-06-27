@@ -430,12 +430,15 @@ bool tk_literal_adopts(tk_texpr e, tk_type to) {
         }
         return any;
     }
-    // an ARRAY LITERAL adopts a `[]E` slot when EVERY element adopts E (element-wise; `[0x68,…]`
-    // adopts `[]byte`). An empty `[]` adopts any slice.
+    // an ARRAY LITERAL adopts a `[]E` slot when EVERY non-spread element adopts E (element-wise;
+    // `[0x68,…]` adopts `[]byte`). Spread elements are already `[]T` — skip adoption for them.
+    // An empty `[]` adopts any slice.
     if (e.tag == TK_TEXPR_ARRAY) {
         if (to.tag != TK_TYPE_SLICE || to.as.slice.element == NULL) return false;
-        for (size_t i = 0; i < e.as.array.nelements; i += 1)
+        for (size_t i = 0; i < e.as.array.nelements; i += 1) {
+            if (e.as.array.is_spread && e.as.array.is_spread[i]) continue;  // spread: already []T, skip
             if (!tk_literal_adopts(e.as.array.elements[i], *to.as.slice.element)) return false;
+        }
         return true;
     }
     return false;
@@ -737,18 +740,47 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
 
 // `[ e0, e1, … ]` (Increment B+): type every element, UNIFY to a common element type T (widening),
 // result `[]T`. An empty `[]` yields the SENTINEL `[]void` (like teko::list::empty()) so a binding
-// annotation adopts it. C twin's mirror: type_array_lit in typer.tks.
+// annotation adopts it. Spread elements (`..xs`) must type as `[]T`; their element type T is widened
+// into the array's unified element type. C twin's mirror: type_array_lit in typer.tks.
 static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table table) {
-    tk_texpr *elems = NULL;
-    if (a.nelements > 0) { elems = tk_alloc(a.nelements * sizeof *elems); if (!elems) abort(); }
+    tk_texpr  *elems    = NULL;
+    bool      *spreads  = NULL;
+    if (a.nelements > 0) {
+        elems   = tk_alloc(a.nelements * sizeof *elems);   if (!elems)   abort();
+        spreads = tk_alloc(a.nelements * sizeof *spreads); if (!spreads) abort();
+    }
     tk_type et = (tk_type){ .tag = TK_TYPE_VOID };   // sentinel for an empty `[]`
     for (size_t i = 0; i < a.nelements; i += 1) {
-        tk_texpr_result e = tk_typer_expr(a.elements[i], env, table);
-        if (!e.ok) { tk_free0(elems); return e; }
-        if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); return xerr("a `void` expression cannot be an array element (M.1)"); }
-        if (i == 0) { et = e.as.value.type; }
-        else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); return xerr("array elements have different types"); } et = j; }
-        elems[i] = e.as.value;
+        tk_texpr_result e = tk_typer_expr(*a.elements[i].expr, env, table);
+        if (!e.ok) { tk_free0(elems); tk_free0(spreads); return e; }
+        if (a.elements[i].is_spread) {
+            // spread element: expr must be a `[]T` slice; contribute T as the element type
+            if (e.as.value.type.tag != TK_TYPE_SLICE) {
+                tk_free0(elems); tk_free0(spreads);
+                return xerr("a spread element (`..xs`) must be a slice (`[]T`)");
+            }
+            if (e.as.value.type.as.slice.element == NULL) {
+                tk_free0(elems); tk_free0(spreads);
+                return xerr("a spread element cannot be an untyped empty slice");
+            }
+            tk_type spread_elem = *e.as.value.type.as.slice.element;
+            if (tk_type_is_void(&et)) { et = spread_elem; }   // first contributor
+            else {
+                tk_type j;
+                if (!tk_type_join(et, spread_elem, table, &j)) {
+                    tk_free0(elems); tk_free0(spreads);
+                    return xerr("spread element type does not match the array element type");
+                }
+                et = j;
+            }
+        } else {
+            // plain element: original logic
+            if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); tk_free0(spreads); return xerr("a `void` expression cannot be an array element (M.1)"); }
+            if (tk_type_is_void(&et)) { et = e.as.value.type; }   // first contributor
+            else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); tk_free0(spreads); return xerr("array elements have different types"); } et = j; }
+        }
+        elems[i]   = e.as.value;
+        spreads[i] = a.elements[i].is_spread;
     }
     // an EMPTY `[]` is the SENTINEL slice (element == NULL, like teko::list::empty()) — it unifies
     // with any concrete slice via a binding annotation. A non-empty array carries its joined element.
@@ -759,7 +791,7 @@ static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table 
         tk_type *ep = tk_alloc(sizeof *ep); if (!ep) abort(); *ep = et;
         st = (tk_type){ .tag = TK_TYPE_SLICE, .as.slice.element = ep };
     }
-    return xok((tk_texpr){ .tag = TK_TEXPR_ARRAY, .type = st, .as.array = { elems, a.nelements } });
+    return xok((tk_texpr){ .tag = TK_TEXPR_ARRAY, .type = st, .as.array = { elems, a.nelements, spreads } });
 }
 
 // forward decls for the if/match VALUE forms (mutual recursion: expr ↔ block).

@@ -1497,8 +1497,18 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
                            ? *e->type.as.slice.element : (tk_type){ .tag = TK_TYPE_VOID };
             tk_value arr = v_list_empty();
             for (size_t i = 0; i < e->as.array.nelements; i += 1) {
-                tk_value el = coerce_to(tk_vm_eval_expr(&e->as.array.elements[i], env), elem_t);
-                arr = v_list_push(arr.as.list, el);
+                bool is_spread = e->as.array.is_spread && e->as.array.is_spread[i];
+                if (is_spread) {
+                    // spread element: flatten sub-slice items individually into arr
+                    tk_value sub = tk_vm_eval_expr(&e->as.array.elements[i], env);
+                    if (sub.tag == TK_VAL_LIST) {
+                        for (size_t j = 0; j < sub.as.list.len; j += 1)
+                            arr = v_list_push(arr.as.list, coerce_to(sub.as.list.ptr[j], elem_t));
+                    }
+                } else {
+                    tk_value el = coerce_to(tk_vm_eval_expr(&e->as.array.elements[i], env), elem_t);
+                    arr = v_list_push(arr.as.list, el);
+                }
             }
             return arr;
         }

@@ -78,7 +78,8 @@ typedef struct { tk_str *pieces; size_t npieces; tk_expr *holes; size_t nholes; 
 // array literal). Empty set `x in []` is allowed → always false. `elems` is a flat tk_expr
 // array (like tk_call.args — by-value tk_expr is incomplete here, so a pointer field).
 typedef struct { tk_expr *lhs; tk_expr *elems; size_t nelems; } tk_in;
-typedef struct { tk_expr *elements; size_t nelements; } tk_array_lit;   // [ e0, e1, … ] — slice/array literal (Increment B+)
+typedef struct { bool is_spread; tk_expr *expr; } tk_array_elem;        // one element in an array literal: plain (is_spread=false) or spread (is_spread=true, ..expr)
+typedef struct { tk_array_elem *elements; size_t nelements; } tk_array_lit;   // [ e0, e1, … ] — slice/array literal (Increment B+)
 
 typedef enum {
     TK_EXPR_NUMBER, TK_EXPR_VAR, TK_EXPR_STR, TK_EXPR_BYTE,
@@ -266,7 +267,8 @@ typedef struct { tk_item *items; size_t len; } tk_program;              // a fla
 // These grow the variable-length AST arrays the parser builds; box helpers give the
 // compiler-managed indirection for recursive nodes (tk_expr*, tk_type_expr*).
 // =========================================================================
-void tk_exprs_push (tk_expr **xs,      size_t *n, tk_expr      item);
+void tk_exprs_push       (tk_expr **xs,       size_t *n, tk_expr       item);
+void tk_array_elems_push (tk_array_elem **xs, size_t *n, tk_array_elem item);
 void tk_stmts_push (tk_statement **xs, size_t *n, tk_statement item);
 void tk_pats_push  (tk_pattern **xs,   size_t *n, tk_pattern   item);
 void tk_arms_push  (tk_arm **xs,       size_t *n, tk_arm       item);
