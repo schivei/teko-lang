@@ -17,10 +17,9 @@ static tk_parsed_arms_result parse_arms(const tk_token *t, size_t n, size_t pos)
         tk_arms_push(&arms, &na, a.as.value.node);
         p = a.as.value.next;
         if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }
-        // A block-bodied arm (`=> { … }`) ends in `}`, a natural terminator — the next arm may
-        // follow on the SAME line with no separator. Otherwise a `;`/newline is required.
-        bool prev_brace = p > 0 && tk_is_kind_at(t, n, p - 1, TK_TOKEN_RBRACE);
-        if (!prev_brace && !tk_is_sep(t, n, p)) {
+        // Arms are SEPARATED by `;` or a newline (B.17). Inline arms need an explicit `;` between
+        // them (a comma is NOT an arm separator). The trailing arm before `}` needs none.
+        if (!tk_is_sep(t, n, p)) {
             return (tk_parsed_arms_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ';', a newline, or '}' after a match arm") };
         }
         p = tk_skip_seps(t, n, p);
