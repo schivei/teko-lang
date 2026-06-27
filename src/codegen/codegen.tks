@@ -486,6 +486,10 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         checker::Func      => error { message = "codegen: function type not yet supported" }
         // `error` lowers to its message str (no separate error C value type — REBOOT §202).
         checker::Error     => cb(buf, "tk_str")
+        // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
+        // unsigned. Never dereferenced in Teko; only crosses the extern boundary.
+        checker::Ptr       => cb(buf, "void *")
+        checker::Uptr      => cb(buf, "uintptr_t")
     }
 }
 
@@ -686,6 +690,8 @@ fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr) ->
             else if last == "byte"  { return cb(buf, "uint8_t") }
             else if last == "str"   { return cb(buf, "tk_str") }
             else if last == "error" { return cb(buf, "tk_str") }   // error → its message str (REBOOT §202)
+            else if last == "ptr"   { return cb(buf, "void *") }     // (C7.1a) opaque FFI pointer
+            else if last == "uptr"  { return cb(buf, "uintptr_t") }  // (C7.1a) opaque word-size unsigned
             // a TRANSPARENT alias (`type Name = <type-expr>`) emits NO C type of its own —
             // resolve through to the aliased type-expr at every use site (e.g. a field `[]TypeReg`
             // → tk_slice_TypeReg). Matches the checker, which resolves aliases transparently.
@@ -3841,7 +3847,7 @@ fn cg_is_builtin_scalar(last: str) -> bool {
     last == "u8" || last == "u16" || last == "u32" || last == "u64" || last == "u128" ||
     last == "i8" || last == "i16" || last == "i32" || last == "i64" || last == "i128" ||
     last == "f16" || last == "f32" || last == "f64" || last == "bool" || last == "byte" ||
-    last == "str" || last == "error"
+    last == "str" || last == "error" || last == "ptr" || last == "uptr"   // (C7.1a) opaque FFI transport types
 }
 // By-value readiness of a field/member SYNTACTIC type-expr (struct field / variant member).
 fn cg_texpr_ready(em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr) -> bool {

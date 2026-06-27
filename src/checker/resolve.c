@@ -118,6 +118,8 @@ const char *tk_type_render(tk_type t) {
             if (ps) tk_free0(ps);
             return out;
         }
+        case TK_TYPE_PTR:   return dup_cstr("ptr");    // (C7.1a) opaque FFI pointer
+        case TK_TYPE_UPTR:  return dup_cstr("uptr");   // (C7.1a) opaque word-size unsigned
     }
     return dup_cstr("<type>");
 }

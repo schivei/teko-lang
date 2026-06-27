@@ -286,7 +286,8 @@ static const tk_tfunction *cg_find_function(tk_str ns, tk_str name) {
 // Is `name` a builtin scalar (prim/byte/str/error), i.e. carries no user decl?
 static bool cg_is_prim_name(tk_str name) {
     static const char *prims[] = { "u8","u16","u32","u64","u128","i8","i16","i32","i64",
-                                   "i128","f16","f32","f64","bool","byte","str","error" };
+                                   "i128","f16","f32","f64","bool","byte","str","error",
+                                   "ptr","uptr" };   // (C7.1a) opaque FFI transport types
     for (size_t i = 0; i < sizeof prims / sizeof *prims; i += 1)
         if (seg_is(name, prims[i])) return true;
     return false;
@@ -448,6 +449,10 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
         // `error` lowers to its message str (no separate error C value type — REBOOT §202).
         case TK_TYPE_ERROR:   cb(b, "tk_str"); return true;
         case TK_TYPE_FUNC:    return fail_node(err, "codegen: function type not yet supported");
+        // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
+        // unsigned. Never dereferenced in Teko; only crosses the extern boundary.
+        case TK_TYPE_PTR:     cb(b, "void *");    return true;
+        case TK_TYPE_UPTR:    cb(b, "uintptr_t"); return true;
     }
     return fail_node(err, "codegen: unknown type not yet supported");
 }
@@ -623,6 +628,8 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             else if (seg_is(last, "byte"))  { cb(b, "uint8_t");           return true; }
             else if (seg_is(last, "str"))   { cb(b, "tk_str");            return true; }
             else if (seg_is(last, "error")) { cb(b, "tk_str"); return true; }   // error → its message str (REBOOT §202)
+            else if (seg_is(last, "ptr"))   { cb(b, "void *");            return true; }   // (C7.1a) opaque FFI pointer
+            else if (seg_is(last, "uptr"))  { cb(b, "uintptr_t");         return true; }   // (C7.1a) opaque word-size unsigned
             // a TRANSPARENT alias (`type Name = <type-expr>`) emits NO C type of its own — resolve
             // through to the aliased type-expr at every use site (e.g. a `TypeTable` field = []TypeReg
             // → tk_slice_TypeReg). Matches the checker, which resolves aliases transparently.

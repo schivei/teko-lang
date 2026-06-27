@@ -124,6 +124,8 @@ tk_type_result tk_builtin_type(tk_str name) {
     else if (name_is(name, "byte"))  t = (tk_type){ .tag = TK_TYPE_BYTE };
     else if (name_is(name, "str"))   t = (tk_type){ .tag = TK_TYPE_STR };
     else if (name_is(name, "error")) t = (tk_type){ .tag = TK_TYPE_ERROR };
+    else if (name_is(name, "ptr"))   t = (tk_type){ .tag = TK_TYPE_PTR };    // (C7.1a) opaque FFI pointer
+    else if (name_is(name, "uptr"))  t = (tk_type){ .tag = TK_TYPE_UPTR };   // (C7.1a) opaque word-size unsigned
     else return (tk_type_result){ .ok = false, .as.error = tk_error_make("not a built-in type") };
     return (tk_type_result){ .ok = true, .as.value = t };
 }

@@ -69,6 +69,8 @@ tk_type tk_read_type(tk_reader *r, tk_strs t) {
             return (tk_type){ .tag = TK_TYPE_FUNC, .as.func = { p, n, box(ret) } };
         }
         case 9: return (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional.inner = box(tk_read_type(r, t)) };  // tag 9 = T? (B.37)
+        case 10: return (tk_type){ .tag = TK_TYPE_PTR };    // (C7.1a) tag 10 = ptr
+        case 11: return (tk_type){ .tag = TK_TYPE_UPTR };   // (C7.1a) tag 11 = uptr
     }
     r->ok = false; return (tk_type){ .tag = TK_TYPE_VOID };
 }

@@ -314,7 +314,8 @@ static const char *check_labels(const tk_tstatement *stmts, size_t n, const lbl_
 // only shapes that marshal 1:1 across the C ABI. `ptr`/`uptr` join next; `void` is allowed for
 // the RETURN only (handled by the caller). Mirrors typer.tks extern_type_ok.
 static bool extern_type_ok(tk_type t) {
-    return t.tag == TK_TYPE_PRIM || t.tag == TK_TYPE_BYTE;
+    return t.tag == TK_TYPE_PRIM || t.tag == TK_TYPE_BYTE
+        || t.tag == TK_TYPE_PTR  || t.tag == TK_TYPE_UPTR;   // C7.1a: prims+byte+ptr/uptr
 }
 
 tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table table) {
@@ -323,7 +324,7 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
         tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
         if (!pt.ok) return (tk_tfunction_result){ .ok = false, .as.error = pt.as.error };
         if (f.is_extern && !extern_type_ok(pt.as.value)) {
-            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function parameter must be a primitive (int/float/bool) or `byte` — `ptr`/`uptr` land next (C7.1a)") };
+            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, or `uptr` (C7.1a)") };
         }
         local = tk_env_define(local, f.params[i].name, pt.as.value, false);
     }
@@ -333,7 +334,7 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
         // return marshals (void = no value is fine; else prim/byte only for now).
         bool ret_ok = (ret.tag == TK_TYPE_VOID) || extern_type_ok(ret);
         if (!ret_ok) {
-            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function return must be a primitive (int/float/bool), `byte`, or absent — `ptr`/`uptr` land next (C7.1a)") };
+            return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or absent (C7.1a)") };
         }
         tk_tfunction ef = { .name = f.name, .params = f.params, .nparams = f.nparams,
                             .return_type = ret, .body = NULL, .nbody = 0,

@@ -48,6 +48,8 @@ bool tk_type_eq(const tk_type *a, const tk_type *b) {
             return tk_type_eq(a->as.func.ret, b->as.func.ret) &&
                    tk_types_eq(a->as.func.params, a->as.func.nparams,
                                b->as.func.params, b->as.func.nparams);
+        case TK_TYPE_PTR:   return true;   // (C7.1a) opaque, same-kind only (tags already matched)
+        case TK_TYPE_UPTR:  return true;   // (C7.1a) opaque, same-kind only
     }
     return false;
 }

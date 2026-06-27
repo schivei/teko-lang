@@ -80,6 +80,8 @@ typedef enum {
     TK_TYPE_NAMED, TK_TYPE_VARIANT, TK_TYPE_FUNC, TK_TYPE_ERROR,
     TK_TYPE_OPTIONAL,  // T? — built-in nullable former (like Slice []T)
     TK_TYPE_VOID,      // return-only marker; legal ONLY as Func.ret
+    TK_TYPE_PTR,       // (C7.1a) opaque pointer — transport-only at the FFI boundary, never dereferenced
+    TK_TYPE_UPTR,      // (C7.1a) opaque word-size unsigned — transport-only at the FFI boundary
 } tk_type_tag;
 
 // recursive (the Slice/Variant/Func cases hold tk_type) — the indirection the Teko
