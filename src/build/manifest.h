@@ -23,6 +23,8 @@ typedef struct {
     tk_strs     aliases;    // [aliases] keys
     tk_str      version;    // `version = "x.y.z.b"` (info; empty if unset)
     tk_str      suffix;     // `suffix = "bootstrap"` (pre-release stage; empty if unset)
+    tk_str      description; // `description = "…"` — embedded in the binary metadata (C7.1k; empty if unset)
+    tk_strs     platforms;  // [platforms] targets — OSes this project targets (CI matrix; informational)
     uint64_t    cov_functions; // [coverage] functions — the D4 FUNCTION-coverage floor % (default 80)
     uint64_t    cov_lines;     // [coverage] lines     — the D4 LINE-coverage floor %     (default 80)
     uint64_t    cov_branches;  // [coverage] branches  — the D4 BRANCH-coverage floor %   (default 80)

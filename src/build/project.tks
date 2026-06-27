@@ -245,16 +245,47 @@ fn run_cc(cfile: str, binary: str, m: Manifest) -> i32 {
         if m.os_lib_os[oi] == tos { argv = teko::list::push(argv, m.os_lib_flag[oi]) }
         oi = oi + 1
     }
+    // C7.1k: on macOS, embed an Info.plist section so the Mach-O carries native version metadata
+    // (mdls / `Get Info` / `otool -s __TEXT __info_plist`). Best-effort — a plist write failure must
+    // not break the build. (Windows VERSIONINFO + a Linux ELF note are the staged follow-ons.)
+    if tos == "macos" {
+        let plist = teko::str::concat(binary, ".Info.plist")
+        match teko::io::write_file(plist, plist_xml(m)) {
+            null  => { argv = teko::list::push(argv, teko::str::concat("-Wl,-sectcreate,__TEXT,__info_plist,", plist)) }
+            error => {}
+        }
+    }
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, binary)
     teko::process::run(argv)
+}
+
+// (C7.1k) plist_xml — a minimal macOS Info.plist carrying the project's identity, embedded into the
+// Mach-O `__TEXT,__info_plist` section by run_cc. Fields must be plain text (no XML metacharacters);
+// the seed's own metadata is. (XML-escaping of arbitrary metadata is a follow-on.)
+fn plist_xml(m: Manifest) -> str {
+    let ver  = if m.version != "" { m.version } else { "0.0.0.0" }
+    let info = if m.description != "" { teko::str::concat3(m.name, " — ", m.description) } else { m.name }
+    teko::str::concat(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n",
+        teko::str::concat(
+            teko::str::concat3("  <key>CFBundleName</key><string>", m.name, "</string>\n"),
+            teko::str::concat(
+                teko::str::concat3("  <key>CFBundleIdentifier</key><string>org.teko.", m.name, "</string>\n"),
+                teko::str::concat(
+                    teko::str::concat3("  <key>CFBundleShortVersionString</key><string>", ver, "</string>\n"),
+                    teko::str::concat(
+                        teko::str::concat3("  <key>CFBundleVersion</key><string>", ver, "</string>\n"),
+                        teko::str::concat3("  <key>CFBundleGetInfoString</key><string>", info, "</string>\n</dict>\n</plist>\n"))))))
 }
 
 // Lower → write .c → invoke cc → report. Returns 0 on success. `stem` is the output binary name
 // (the manifest `name`); artifacts go to `out_dir`/<stem>{.c,} (default "bin", or the `-o <dir>`
 // argument), created at the project root (cwd after the front-end chdir'd). Mirrors driver.c.
 fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
-    let csrc = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
+    let emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
+    // C7.1k — append the build-metadata C so every binary carries its identity (what(1)/strings).
+    let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
     // trim a trailing `/` from the output dir so `-o ./bin/build/` doesn't yield `./bin/build//teko`.
     let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => {} }   // idempotent — error? null = success
@@ -295,7 +326,7 @@ fn ensure_rt_dir_abs() {
     match teko::env::set_var("TK_RT_DIR", teko::str::concat3(cwd, "/", rel)) { error => {}; null => {} }
 }
 
-fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, true, false) }
+fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false) }
 
 // strip_tests — the production program WITHOUT `#test` functions (D4): a release binary must
 // not carry test code. Tests are excluded from codegen; everything else passes through.
@@ -315,18 +346,13 @@ fn strip_tests(prog: checker::TProgram) -> checker::TProgram {
     checker::TProgram { items = kept }
 }
 
-// compile_project_g — the build with the D4 TEST GATE. `gate=true` (the default `teko build`):
-// assemble WITH the `.tkt` tests, run them on the VM FIRST (fail-fast — a failed assertion
-// panics, aborting the build before any emission), THEN codegen the production program (tests
-// stripped). An empty suite is not a failure. `gate=false` (`teko build --no-test`, used by the
-// bootstrap self-build whose own corpus tests are not yet VM-runnable) is the plain production
-// front-end with no test files assembled. (D4 — tests gate emission; release bars on fail.)
-fn compile_project_g(dir: str, out_dir: str, gate: bool, gen_cov: bool) -> i32 {
+// compile_project_g — the build with the D4 TEST GATE (ALWAYS ON; `--no-test` is IGNORED for a
+// build — a release MUST run its tests). Assemble WITH the `.tkt` tests, run them on the VM FIRST
+// (fail-fast — a failed assertion panics, aborting the build before any emission), THEN codegen the
+// production program (tests stripped). The ONLY skip is a project with NO `#test` functions. (D4 —
+// tests gate emission; release bars on fail.)
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool) -> i32 {
     ensure_rt_dir_abs()   // pin the runtime to an absolute path BEFORE the front-end chdir's
-    if !gate {
-        let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
-        return backend(dir, fe.manifest.name, out_dir, fe.prog, fe.manifest)
-    }
     // D4 gate (STRICT): enter the project ONCE, assemble WITH the tests. If `.tkt` tests exist they
     // MUST assemble, RUN, all pass, AND meet the coverage threshold — otherwise the build is BLOCKED.
     // The ONLY skip is a project with NO tests (no `#test`): then the gate is ignored and we build.
@@ -347,21 +373,21 @@ fn compile_project_g(dir: str, out_dir: str, gate: bool, gen_cov: bool) -> i32 {
             // BLOCKED when FUNCTION, LINE, or BRANCH coverage is below its floor.
             let fcov = vm::coverage_pct(fe.prog)
             if fcov < fe.manifest.cov_functions {
-                return fail(dir, $"function coverage {fcov}% is below the {fe.manifest.cov_functions}% floor ([coverage] functions) — add tests (or `--no-test`)")
+                return fail(dir, $"function coverage {fcov}% is below the {fe.manifest.cov_functions}% floor ([coverage] functions) — add tests")
             }
             let lcov = vm::line_coverage_pct(fe.prog)
             if lcov < fe.manifest.cov_lines {
-                return fail(dir, $"line coverage {lcov}% is below the {fe.manifest.cov_lines}% floor ([coverage] lines) — add tests (or `--no-test`)")
+                return fail(dir, $"line coverage {lcov}% is below the {fe.manifest.cov_lines}% floor ([coverage] lines) — add tests")
             }
             let bcov = vm::branch_coverage_pct(fe.prog)
             if bcov < fe.manifest.cov_branches {
-                return fail(dir, $"branch coverage {bcov}% is below the {fe.manifest.cov_branches}% floor ([coverage] branches) — add tests (or `--no-test`)")
+                return fail(dir, $"branch coverage {bcov}% is below the {fe.manifest.cov_branches}% floor ([coverage] branches) — add tests")
             }
             backend(dir, fe.manifest.name, out_dir, strip_tests(fe.prog), fe.manifest)
         }
         // `.tkt` tests (or the production code) could not be ASSEMBLED/typechecked. With tests present,
         // that is a hard BUILD FAILURE — no graceful degradation (the gate is strict; only a project
-        // with NO `.tkt` files skips tests). Use `--no-test` to bypass explicitly.
+        // with NO `.tkt` files skips tests).
         error as e => return fail(dir, e.message)
     }
 }
@@ -395,18 +421,6 @@ fn out_dir_of(args: []str, start: u64) -> str {
         i = i + 1
     }
     "bin"
-}
-
-// does `--no-test` appear in the args? (D4 — skip the build-time test gate; used by the
-// bootstrap self-build, whose own corpus tests are not yet VM-runnable.)
-fn no_test_of(args: []str) -> bool {
-    mut i: u64 = 0
-    loop {
-        if i >= args.len { break }
-        if args[i] == "--no-test" { return true }
-        i = i + 1
-    }
-    false
 }
 
 // does `--coverage` appear in the args? (write a Cobertura `cobertura.xml` next to the build output.)

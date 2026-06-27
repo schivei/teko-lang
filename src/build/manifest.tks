@@ -17,6 +17,8 @@ pub type Manifest = struct {
     aliases:  []str         // [aliases] keys
     version:  str           // `version = "x.y.z.b"` (info; empty if unset)
     suffix:   str           // `suffix = "bootstrap"` (pre-release stage; empty if unset)
+    description: str        // `description = "…"` — embedded in the binary's metadata (C7.1k; empty if unset)
+    platforms: []str        // [platforms] targets — OSes this project targets (CI matrix; informational for a single build)
     cov_functions: u64      // [coverage] functions — the D4 FUNCTION-coverage floor % (default 80)
     cov_lines:     u64      // [coverage] lines     — the D4 LINE-coverage floor %     (default 80)
     cov_branches:  u64      // [coverage] branches  — the D4 BRANCH-coverage floor %   (default 80)
@@ -168,6 +170,8 @@ fn parse_manifest(src: str) -> Manifest | error {
     mut aliases: []str = teko::list::empty()
     mut version = ""
     mut suffix = ""
+    mut description = ""                        // `description = "…"` — embedded in the binary metadata (C7.1k)
+    mut platforms: []str = teko::list::empty()  // [platforms] targets — the OSes this project targets
     mut cov_functions: u64 = 80                // D4 floors — default 80 when [coverage] / its keys are absent
     mut cov_lines: u64 = 80
     mut cov_branches: u64 = 80
@@ -210,6 +214,7 @@ fn parse_manifest(src: str) -> Manifest | error {
             if nm == "artifact"          { sec = "artifact" }
             else if nm == "dependencies" { sec = "deps" }
             else if nm == "aliases"      { sec = "aliases" }
+            else if nm == "platforms"    { sec = "platforms" }   // C7.1k: OSes this project targets (CI matrix)
             else if nm == "coverage"     { sec = "coverage" }
             else if nm == "extern.libs"  { sec = "extern.libs" }   // C7.1e: libraries to link (all OSes)
             else if mf_starts_with(nm, "extern.libs.") { sec = "extern.libs.os"; sec_os = teko::str::slice_from(nm, 12) }   // C7.1f: per-OS libs
@@ -231,6 +236,7 @@ fn parse_manifest(src: str) -> Manifest | error {
                 else if key == "source"  { source = q.text; have_source = true }
                 else if key == "version" { version = q.text }
                 else if key == "suffix"  { suffix = q.text }
+                else if key == "description" { description = q.text }
                 // unknown top-level keys are ignored (forward-compatible — M.5).
             } else if sec == "coverage" {
                 // [coverage] functions / lines / branches — UNQUOTED integer floors (default 80 each).
@@ -247,6 +253,12 @@ fn parse_manifest(src: str) -> Manifest | error {
                 deps = teko::list::push(deps, key)
             } else if sec == "aliases" {
                 aliases = teko::list::push(aliases, key)
+            } else if sec == "platforms" {
+                // [platforms] targets = ["macos", "linux", "windows"] — the OSes the project's CI builds.
+                if key == "targets" {
+                    let arr = match mf_read_array(line, v) { MfArray as a => a; error as e => return e }
+                    platforms = arr.items
+                }
             } else if sec == "extern" {
                 // [extern] scalars (C7.1f): cc/target/sysroot are quoted strings; freestanding is a bool.
                 if key == "cc" || key == "target" || key == "sysroot" {
@@ -286,5 +298,5 @@ fn parse_manifest(src: str) -> Manifest | error {
     if !have_name   { return error { message = "manifest missing required field 'name'" } }
     if !have_source { return error { message = "manifest missing required field 'source'" } }
 
-    Manifest { name = name; artifact = artifact; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = link_flags; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding }
+    Manifest { name = name; artifact = artifact; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = link_flags; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding }
 }

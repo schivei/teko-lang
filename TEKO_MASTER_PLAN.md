@@ -374,6 +374,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C7.1j** multi-OS/arch CI pipelines *(LAST)* — Linux arm64+x86_64, Windows arm64+x86_64, macOS arm64. Local verification via **docker** (Linux arm64 native / amd64 emulated) + **Rosetta** (macOS x86_64); Windows needs CI runners. Stack VERIFIED on macOS arm64+x86_64 & Linux arm64+amd64 (extern `abs()`→7, `os()`). | CI | C7.1* |
 | **C7.1g** `ptr`/`uptr` opaque transport types (✅) + `extern type` opaque handle (→ `void*`) (✅) | `chk`, `cg`, `ast`, `P` | C7.1a–c |
 | **C7.1i** marshalling primitives `teko::mem::as_ptr`/`as_cstr`/`str_from_cstr`/`bytes_from_ptr` (✅ — complete set; `bytes_from_ptr` via `tk_ffi_bytes`→`tk_slice_byte` lift) | `chk`, `cg`, `rt` | C7.1g |
+| **C7.1k** BINARY METADATA — `.tkp` `description` + `[platforms] targets` (Manifest +`description`/`platforms`); EVERY binary carries an `@(#)`-marked metadata string (✅ universal — `what(1)`/`strings`; `codegen::tk_emit_meta` appended by the backend) + macOS Mach-O `__TEXT,__info_plist` section (✅ — `mdls`/`otool`; `run_cc` writes Info.plist + `-Wl,-sectcreate`). Staged: Windows PE VERSIONINFO (windres @ pipeline) + Linux ELF `.note`; XML/quote-escaping of arbitrary metadata | `build`(manifest/project), `cg`, `driver` | C7.1f |
 | **C7.1h** pointer-family future: `ptr<T>` (deref behind `#repr(C)`) + `ptr ≡ ptr<void>` | — | **S4 generics** |
 | **C7.2** `teko::env::args` + `teko::exit` | *(new ns files)* | C7.1b–d |
 | **C7.3** `teko::io` slurp (read/write/write_err) | *(new ns files)* | C7.1b–d |
@@ -381,7 +382,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C7.5** `teko::process` exec (invoke `cc`) | *(new ns files)* | C7.1b–d |
 | **C7.6** D2 `#test` runner in VM (`teko test`) | `vm`, *(runner)*, `main` | ✅ **DONE** |
 | **C7.7** D3 coverage in VM (function-level; per-line is a follow-up) | `vm`, `rt` | ✅ **DONE** |
-| **C7.8** D4 pre-emit gate (tests+coverage before codegen; `--no-test` opt-out) | `main`, `build` | ✅ **DONE** |
+| **C7.8** D4 pre-emit gate (tests+coverage before codegen). **`--no-test` is now IGNORED for a build — a release MUST run its tests** (only a project with NO `#test` skips); `gate` param dropped from `compile_project_g`/`tk_compile_project_g`, `no_test_of`/`has_no_test` removed, CMake `selfhost` no longer passes `--no-test` | `main`, `build` | ✅ **DONE** |
 | **C7.9** A4 main-rule from manifest artifact | `build` | — |
 | **C7.10** A6 packages + pre-linker (.tkh/.tkb merge pre-codegen) | `tkb`, `build`, `res` | C7.16 |
 | **C7.11** A7 output directory + `-o <dir>` *(decision then impl)* | `main` | — |

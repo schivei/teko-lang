@@ -151,6 +151,23 @@ static void cb_cstr_escaped(cbuf *b, tk_str s) {
     }
 }
 
+// (C7.1k) tk_emit_meta — the build-metadata C appended to EVERY binary by the backend (after
+// tk_emit_c), so the artifact carries its identity on every OS. An `@(#)`-marked string literal,
+// readable by what(1) / `strings`: "@(#)<name> <version>[-<suffix>] | <description>". Returns a
+// malloc'd C string (the caller frees). (Mirror of codegen.tks::tk_emit_meta.)
+char *tk_emit_meta(tk_str name, tk_str version, tk_str suffix, tk_str description) {
+    cbuf b = { .ptr = NULL, .len = 0, .cap = 0 };
+    cb(&b, "\n/* build metadata (teko C7.1k) — what(1)/strings-readable */\n");
+    cb(&b, "__attribute__((used)) static const char tk_build_meta[] = \"@(#)");
+    cb_cstr_escaped(&b, name);
+    cb(&b, " ");
+    cb_cstr_escaped(&b, version);
+    if (suffix.len)      { cb(&b, "-");   cb_cstr_escaped(&b, suffix); }
+    if (description.len) { cb(&b, " | "); cb_cstr_escaped(&b, description); }
+    cb(&b, "\";\n");
+    return b.ptr;
+}
+
 // =========================================================================
 // Types -> C type text.
 // =========================================================================

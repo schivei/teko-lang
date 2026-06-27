@@ -93,13 +93,6 @@ static const char *parse_out_dir(int argc, char **argv, int start, const char **
     return out_dir;
 }
 
-// does `--no-test` appear in the args? (D4 — skip the build-time test gate; the bootstrap
-// self-build uses it because the corpus's own tests are not yet VM-runnable.)
-static bool has_no_test(int argc, char **argv) {
-    for (int i = 1; i < argc; i += 1) if (strcmp(argv[i], "--no-test") == 0) return true;
-    return false;
-}
-
 // does `--coverage` appear in the args? (write a Cobertura `cobertura.xml` next to the build output.)
 static bool has_coverage(int argc, char **argv) {
     for (int i = 1; i < argc; i += 1) if (strcmp(argv[i], "--coverage") == 0) return true;
@@ -122,7 +115,7 @@ int main(int argc, char **argv) {
         if (looks_like_file_arg(proj)) return reject_file_arg();
         const char *dir = project_dir_of(proj, buf, sizeof(buf));
         bool cov = has_coverage(argc, argv);   // `--coverage` → write <out>/cobertura.xml (test: project root)
-        if (strcmp(cmd, "build") == 0) return tk_compile_project_g(dir, out_dir, !has_no_test(argc, argv), cov);   // D4 gate (unless --no-test)
+        if (strcmp(cmd, "build") == 0) return tk_compile_project_g(dir, out_dir, cov);   // D4 gate (ALWAYS; --no-test ignored)
         if (strcmp(cmd, "run") == 0)   return tk_run_project(dir);
         return tk_test_project(dir, cov);   // D2 — run the project's `#test` functions on the VM
     }
@@ -132,5 +125,5 @@ int main(int argc, char **argv) {
     const char *out_dir = parse_out_dir(argc, argv, 1, &proj);
     if (proj == NULL) { usage(); return 2; }
     if (looks_like_file_arg(proj)) return reject_file_arg();
-    return tk_compile_project_g(project_dir_of(proj, buf, sizeof(buf)), out_dir, !has_no_test(argc, argv), has_coverage(argc, argv));   // D4 gate (unless --no-test)
+    return tk_compile_project_g(project_dir_of(proj, buf, sizeof(buf)), out_dir, has_coverage(argc, argv));   // D4 gate (ALWAYS; --no-test ignored)
 }

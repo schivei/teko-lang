@@ -30,4 +30,9 @@ tk_cstr_result tk_emit_c(tk_tprogram prog);
 // written beside the binary so the native stack-trace (E4) resolves each frame to its Teko origin.
 tk_cstr_result tk_emit_tsym(tk_tprogram prog);
 
+// C7.1k — the build-metadata C appended to every binary (after tk_emit_c): an `@(#)`-marked
+// string literal (what(1)/strings-readable) carrying name, version[-suffix], and description.
+// Returns a malloc'd, NUL-terminated C string (the caller frees).
+char *tk_emit_meta(tk_str name, tk_str version, tk_str suffix, tk_str description);
+
 #endif // TK_CODEGEN_H

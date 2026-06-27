@@ -64,7 +64,7 @@ static bool key_is(tk_str k, const char *lit) {
 }
 
 // --- which table are we in? --------------------------------------------------
-typedef enum { SEC_ROOT, SEC_ARTIFACT, SEC_DEPS, SEC_ALIASES, SEC_COVERAGE, SEC_EXTERN, SEC_EXTERN_LIBS, SEC_EXTERN_LIBS_OS, SEC_OTHER } section;
+typedef enum { SEC_ROOT, SEC_ARTIFACT, SEC_DEPS, SEC_ALIASES, SEC_PLATFORMS, SEC_COVERAGE, SEC_EXTERN, SEC_EXTERN_LIBS, SEC_EXTERN_LIBS_OS, SEC_OTHER } section;
 
 static tk_manifest_result fail(const char *msg) {
     return (tk_manifest_result){ .ok = false, .as.error = tk_error_make(msg) };
@@ -117,6 +117,8 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
         .aliases  = tk_strs_empty(),
         .version  = (tk_str){ NULL, 0 },
         .suffix   = (tk_str){ NULL, 0 },
+        .description = (tk_str){ NULL, 0 },   // `description = "…"` — embedded in binary metadata (C7.1k)
+        .platforms   = tk_strs_empty(),       // [platforms] targets — the OSes this project targets
         .cov_functions = 80,  // D4 floors — default 80 when [coverage] / its keys are absent
         .cov_lines    = 80,
         .cov_branches = 80,
@@ -154,6 +156,7 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
             if      (key_is(name, "artifact"))     sec = SEC_ARTIFACT;
             else if (key_is(name, "dependencies")) sec = SEC_DEPS;
             else if (key_is(name, "aliases"))      sec = SEC_ALIASES;
+            else if (key_is(name, "platforms"))    sec = SEC_PLATFORMS;   // C7.1k: OSes this project targets
             else if (key_is(name, "coverage"))     sec = SEC_COVERAGE;
             else if (key_is(name, "extern.libs"))  sec = SEC_EXTERN_LIBS;   // C7.1e: libraries to link (all OSes)
             else if (name.len > 12 && memcmp(name.ptr, "extern.libs.", 12) == 0) { sec = SEC_EXTERN_LIBS_OS; sec_os = tk_str_slice(name, 12, name.len); }   // C7.1f: per-OS libs
@@ -179,6 +182,7 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
             else if (key_is(key, "source"))  { m.source = val; have_source = true; }
             else if (key_is(key, "version")) { m.version = val; }
             else if (key_is(key, "suffix"))  { m.suffix = val; }
+            else if (key_is(key, "description")) { m.description = val; }
             // unknown top-level keys are ignored (forward-compatible — M.5).
             break;
         }
@@ -200,6 +204,26 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
         }
         case SEC_DEPS:    m.deps    = tk_strs_push(m.deps, key);    break;
         case SEC_ALIASES: m.aliases = tk_strs_push(m.aliases, key); break;
+        case SEC_PLATFORMS: {
+            // [platforms] targets = ["macos", "linux", "windows"] — the OSes the project's CI builds.
+            if (key_is(key, "targets")) {
+                if (at(line, v) != '[') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected '[' for [platforms] targets (e.g. targets = [\"macos\"])"); }
+                size_t q = skip_spaces(line, v + 1);
+                if (at(line, q) != ']') {
+                    for (;;) {
+                        tk_str val; size_t ve;
+                        if (!read_quoted(line, q, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string in [platforms] targets"); }
+                        m.platforms = tk_strs_push(m.platforms, val);
+                        q = skip_spaces(line, ve);
+                        tk_byte ac = at(line, q);
+                        if (ac == ']') break;
+                        if (ac != ',') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected ',' or ']' in [platforms] targets"); }
+                        q = skip_spaces(line, q + 1);
+                    }
+                }
+            }
+            break;
+        }
         case SEC_EXTERN: {
             // [extern] scalars (C7.1f): cc/target/sysroot are quoted strings; freestanding is a bool.
             if (key_is(key, "cc") || key_is(key, "target") || key_is(key, "sysroot")) {

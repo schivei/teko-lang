@@ -202,6 +202,30 @@ static char *cstr_of(tk_str s);   // (defined below — used by run_cc for the [
 static tk_str target_os_of(tk_manifest m);   // (defined below — C7.1f: target OS for [extern.libs.<os>] selection)
 static bool   os_str_eq(tk_str a, tk_str b); // (defined below — os name equality)
 
+// (C7.1k) write a minimal macOS Info.plist (mirror of project.tks::plist_xml) for the Mach-O
+// `__TEXT,__info_plist` section, so the binary carries native version metadata (mdls / Get Info).
+// Returns true on success. Fields must be plain text (no XML metacharacters); the seed's are.
+static bool write_macos_plist(const char *path, tk_manifest m) {
+    FILE *p = fopen(path, "wb");
+    if (p == NULL) return false;
+    tk_str ver = m.version.len ? m.version : (tk_str){ (const tk_byte *)"0.0.0.0", 7 };
+    fputs("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+          "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+          "<plist version=\"1.0\">\n<dict>\n", p);
+    fprintf(p, "  <key>CFBundleName</key><string>%.*s</string>\n", (int)m.name.len, (const char *)m.name.ptr);
+    fprintf(p, "  <key>CFBundleIdentifier</key><string>org.teko.%.*s</string>\n", (int)m.name.len, (const char *)m.name.ptr);
+    fprintf(p, "  <key>CFBundleShortVersionString</key><string>%.*s</string>\n", (int)ver.len, (const char *)ver.ptr);
+    fprintf(p, "  <key>CFBundleVersion</key><string>%.*s</string>\n", (int)ver.len, (const char *)ver.ptr);
+    if (m.description.len)
+        fprintf(p, "  <key>CFBundleGetInfoString</key><string>%.*s — %.*s</string>\n</dict>\n</plist>\n",
+                (int)m.name.len, (const char *)m.name.ptr, (int)m.description.len, (const char *)m.description.ptr);
+    else
+        fprintf(p, "  <key>CFBundleGetInfoString</key><string>%.*s</string>\n</dict>\n</plist>\n",
+                (int)m.name.len, (const char *)m.name.ptr);
+    fclose(p);
+    return true;
+}
+
 // Run the host C compiler over `cfile`, producing `binary`. Returns 0 on success.
 static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
     // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println (teko_rt.c) plus
@@ -235,17 +259,33 @@ static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
         lo += (size_t)snprintf(libflags + lo, libcap - lo, " %.*s",
                                (int)m.os_lib_flag.ptr[i].len, (const char *)m.os_lib_flag.ptr[i].ptr);
     }
+    // C7.1k: on macOS, embed an Info.plist section so the Mach-O carries native version metadata.
+    // Best-effort — a plist write failure must not break the build. (Windows VERSIONINFO follows.)
+    char *secflag = NULL, *plistp = NULL;
+    if (tos.len == 5 && memcmp(tos.ptr, "macos", 5) == 0) {
+        size_t pl = strlen(binary) + strlen(".Info.plist") + 1;
+        plistp = tk_alloc(pl);
+        snprintf(plistp, pl, "%s.Info.plist", binary);
+        if (write_macos_plist(plistp, m)) {
+            size_t sl = strlen(" -Wl,-sectcreate,__TEXT,__info_plist,") + strlen(plistp) + 1;
+            secflag = tk_alloc(sl);
+            snprintf(secflag, sl, " -Wl,-sectcreate,__TEXT,__info_plist,%s", plistp);
+        }
+    }
+    const char *sec = secflag ? secflag : "";
     size_t cap = strlen(cc) + strlen(xflags) + strlen(nostd) + strlen(libm) + strlen(cfile) + strlen(binary)
                + 2 * strlen(TK_RT_DIR) + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
-               + strlen("/assert/assert.c") + strlen(libflags) + 96;   // fixed flags incl. -w/-std/-ferror-limit + quotes
+               + strlen("/assert/assert.c") + strlen(libflags) + strlen(sec) + 96;   // fixed flags incl. -w/-std/-ferror-limit + quotes
     char *cmd = tk_alloc(cap);
     // -w: silence warnings on generated C (machine output). -ferror-limit=0 still shows every genuine ERROR.
     snprintf(cmd, cap,
-             "%s -std=c23 -w -ferror-limit=0%s%s -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\"%s%s -o \"%s\"",
-             cc, xflags, nostd, TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, libm, libflags, binary);
+             "%s -std=c23 -w -ferror-limit=0%s%s -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\"%s%s%s -o \"%s\"",
+             cc, xflags, nostd, TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, libm, libflags, sec, binary);
     int rc = system(cmd);
     tk_free0(cmd);
     tk_free0(libflags);
+    if (secflag) tk_free0(secflag);
+    if (plistp)  tk_free0(plistp);
     if (ccprog) tk_free0(ccprog);
     return rc;
 }
@@ -276,8 +316,11 @@ static int tk_backend(const char *label, const char *stem, tk_tprogram prog, con
     if (f == NULL) { tk_free0(emitted.as.value); tk_free0(cfile); tk_free0(binp); return fail(label, "cannot write generated C to the output directory"); }
     size_t srclen = strlen(emitted.as.value);
     size_t wrote = fwrite(emitted.as.value, 1, srclen, f);
-    fclose(f);
     tk_free0(emitted.as.value);
+    // C7.1k — append the build-metadata C so every binary carries its identity (what(1)/strings).
+    char *meta = tk_emit_meta(m.name, m.version, m.suffix, m.description);
+    if (meta != NULL) { fwrite(meta, 1, strlen(meta), f); tk_free0(meta); }
+    fclose(f);
     if (wrote != srclen) { tk_free0(cfile); tk_free0(binp); return fail(label, "short write on generated C"); }
 
     int rc = run_cc(cfile, binp, m);
@@ -451,7 +494,7 @@ static char *cstr_of(tk_str s) {
 // mangling case fails with codegen's honest message (no silent mis-emit).
 // =========================================================================
 int tk_compile_project(const char *dir, const char *out_dir) {
-    return tk_compile_project_g(dir, out_dir, true, false);
+    return tk_compile_project_g(dir, out_dir, false);
 }
 
 // strip_tests — a copy of the program WITHOUT `#test` functions (D4): a release binary must not
@@ -475,23 +518,14 @@ static bool has_tests(tk_tprogram prog) {
     return false;
 }
 
-// tk_compile_project_g — the build with the D4 TEST GATE (STRICT). gate=true (default `teko build`):
-// assemble WITH the `.tkt` tests; if tests exist they MUST assemble, run, all pass, AND meet the
-// coverage threshold — else the build is BLOCKED (no graceful degradation). The ONLY skip is a
-// project with NO `#test` functions. gate=false (`--no-test`, the bootstrap self-build) is the
-// plain production front-end. (Mirrors project.tks compile_project_g.)
-int tk_compile_project_g(const char *dir, const char *out_dir, bool gate, bool gen_cov) {
+// tk_compile_project_g — the build with the D4 TEST GATE (ALWAYS ON; `--no-test` is IGNORED for a
+// build — a release MUST run its tests). Assemble WITH the `.tkt` tests; if tests exist they MUST
+// assemble, run, all pass, AND meet the coverage threshold — else the build is BLOCKED (no graceful
+// degradation). The ONLY skip is a project with NO `#test` functions. (Mirrors project.tks
+// compile_project_g.)
+int tk_compile_project_g(const char *dir, const char *out_dir, bool gen_cov) {
     tk_tprogram prog;
     tk_manifest m;
-
-    if (!gate) {
-        int rc = project_frontend(dir, &prog, &m, false);
-        if (rc != 0) return rc;
-        char *stem = cstr_of(m.name);
-        rc = tk_backend(dir, stem, prog, out_dir, m);
-        tk_free0(stem);
-        return rc;
-    }
 
     // D4 gate (STRICT): enter the project ONCE, assemble WITH the tests. A failure to assemble/
     // typecheck (production code OR test files) is a hard BUILD FAILURE when tests are present.
@@ -511,19 +545,19 @@ int tk_compile_project_g(const char *dir, const char *out_dir, bool gate, bool g
         // FUNCTION, LINE, or BRANCH coverage is below its floor.
         uint64_t fcov = tk_vm_coverage_pct(prog);
         if (fcov < m.cov_functions) {
-            fprintf(stderr, "teko: %s: function coverage %llu%% is below the %llu%% floor ([coverage] functions) — add tests (or `--no-test`)\n",
+            fprintf(stderr, "teko: %s: function coverage %llu%% is below the %llu%% floor ([coverage] functions) — add tests\n",
                     dir, (unsigned long long)fcov, (unsigned long long)m.cov_functions);
             return 1;
         }
         uint64_t lcov = tk_vm_line_coverage_pct(prog);
         if (lcov < m.cov_lines) {
-            fprintf(stderr, "teko: %s: line coverage %llu%% is below the %llu%% floor ([coverage] lines) — add tests (or `--no-test`)\n",
+            fprintf(stderr, "teko: %s: line coverage %llu%% is below the %llu%% floor ([coverage] lines) — add tests\n",
                     dir, (unsigned long long)lcov, (unsigned long long)m.cov_lines);
             return 1;
         }
         uint64_t bcov = tk_vm_branch_coverage_pct(prog);
         if (bcov < m.cov_branches) {
-            fprintf(stderr, "teko: %s: branch coverage %llu%% is below the %llu%% floor ([coverage] branches) — add tests (or `--no-test`)\n",
+            fprintf(stderr, "teko: %s: branch coverage %llu%% is below the %llu%% floor ([coverage] branches) — add tests\n",
                     dir, (unsigned long long)bcov, (unsigned long long)m.cov_branches);
             return 1;
         }
