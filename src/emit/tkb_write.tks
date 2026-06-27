@@ -290,7 +290,19 @@ fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
         parser::VariantBody as v => write_typeexpr(write_u8(buf, 2), t, v.type_expr)
         parser::AliasBody as a   => write_typeexpr(write_u8(buf, 3), t, a.alias)
         parser::ExternBody       => write_u8(buf, 4)
-        parser::FlagsBody as f   => write_strs(write_u8(buf, 5), t, f.members)
+        parser::FlagsBody as f   => {   // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
+            mut sb = write_u64(write_u8(buf, 5), f.members.len to u64)
+            mut i = 0
+            loop {
+                if i >= f.members.len { break }
+                sb = write_u32(sb, st_find(t, f.members[i]))
+                let v = f.values[i]
+                sb = write_u64(sb, (v >> 64) to u64)   // hi
+                sb = write_u64(sb, (v & 0xFFFFFFFFFFFFFFFF) to u64)   // lo
+                i++
+            }
+            sb
+        }
     }
 }
 

@@ -545,7 +545,26 @@ fn read_typebody(r: Reader, table: []str) -> RTypeBody | error {
     if tag.value == 2 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::VariantBody { type_expr = te.value } } }
     if tag.value == 3 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::AliasBody { alias = te.value } } }
     if tag.value == 4 { return RTypeBody { r = tag.r; value = parser::ExternBody { } } }
-    if tag.value == 5 { let ms = match read_strs(tag.r, table)     { RStrs as x => x; error as e => return e };     return RTypeBody { r = ms.r; value = parser::FlagsBody { members = ms.value } } }
+    if tag.value == 5 {
+        // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
+        let n = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
+        mut rr = n.r
+        mut names: []str = teko::list::empty()
+        mut vals: []u128 = teko::list::empty()
+        mut i = 0
+        loop {
+            if i >= n.value { break }
+            let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
+            let hi = match read_u64(nm.r)          { RU64 as x => x; error as e => return e }
+            let lo = match read_u64(hi.r)          { RU64 as x => x; error as e => return e }
+            let v = ((hi.value to u128) << 64) | (lo.value to u128)
+            names = teko::list::push(names, nm.value)
+            vals = teko::list::push(vals, v)
+            rr = lo.r
+            i++
+        }
+        return RTypeBody { r = rr; value = parser::FlagsBody { members = names; values = vals } }
+    }
     error { message = "bad typebody tag in .tkb" }
 }
 fn read_typedecl(r: Reader, table: []str) -> RTypeDecl | error {

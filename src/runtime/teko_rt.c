@@ -353,7 +353,18 @@ _Noreturn void tk_exit(int32_t code) { exit(code); }
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
 _Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }
-_Noreturn void tk_panic_cast(void)     { tk_panic("impossible conversion"); }
+// (C1.7-CAST) Global cast-location set by codegen just before every tk_to_* call.
+// line==0 means position unknown (position setter was skipped).
+uint32_t _tk_cast_loc_line = 0;
+uint32_t _tk_cast_loc_col  = 0;
+_Noreturn void tk_panic_cast(void) {
+    if (_tk_cast_loc_line) {
+        char buf[32];
+        snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)_tk_cast_loc_line, (unsigned)_tk_cast_loc_col);
+        fputs(buf, stderr);
+    }
+    tk_panic("impossible conversion");
+}
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
 
 // (C1.7) positioned OOB — print "line:col: " (same shape as the VM's vm_panic_pos), then the

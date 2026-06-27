@@ -221,7 +221,17 @@ static tk_bytes write_typebody(tk_bytes b, tk_strtable t, tk_type_body tb) {
         case TK_BODY_VARIANT: return write_typeexpr(tk_write_u8(b, 2), t, tb.as.variant_body.type_expr);
         case TK_BODY_ALIAS:   return write_typeexpr(tk_write_u8(b, 3), t, tb.as.alias_body.alias);
         case TK_BODY_EXTERN:  return tk_write_u8(b, 4);
-        case TK_BODY_FLAGS:   return write_strs(tk_write_u8(b, 5), t, tb.as.flags_body.members, tb.as.flags_body.n_members);
+        case TK_BODY_FLAGS: {                                                    // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
+            b = tk_write_u8(b, 5);
+            b = tk_write_u64(b, (uint64_t)tb.as.flags_body.n_members);
+            for (size_t i = 0; i < tb.as.flags_body.n_members; i += 1) {
+                b = tk_write_u32(b, tk_st_find(t, tb.as.flags_body.members[i]));
+                unsigned __int128 v = tb.as.flags_body.values ? tb.as.flags_body.values[i] : ((unsigned __int128)1 << i);
+                b = tk_write_u64(b, (uint64_t)(v >> 64));   // hi
+                b = tk_write_u64(b, (uint64_t)v);           // lo
+            }
+            return b;
+        }
     }
     return b;
 }

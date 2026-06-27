@@ -27,6 +27,9 @@ tk_texpr_result tk_xferr(tk_error e)   { return (tk_texpr_result){ .ok = false, 
 #define xerr  tk_xerr
 #define xferr tk_xferr
 
+// ---- forward declarations for is_flags_named (defined below, used in type_binary/type_unary) ----
+static bool is_flags_named(tk_type t, tk_type_table table);  // (C8.3) fwd — defined at line ~463; used before it
+
 // ---- file-local predicates (B.22 core — see expr.tks) ----
 bool is_bool(tk_type t)      { return t.tag == TK_TYPE_PRIM && t.as.prim == TK_PRIM_BOOL; }
 bool is_integer(tk_type t)   { return t.tag == TK_TYPE_PRIM && tk_prim_is_int(t.as.prim); }
@@ -88,7 +91,16 @@ static tk_texpr_result type_binary(tk_binary b, tk_env env, tk_type_table table)
                                         tk_type_render(lt), tk_type_render(rt)));
         return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = lt, .as.binary = { b.op, box(l.as.value), box(r.as.value) } });
     }
-    if (op_is_arith_bitwise(b.op)) {   // the bitwise/% remainder (%, & | ^) — integer-only
+    if (op_is_arith_bitwise(b.op)) {   // the bitwise/% remainder (%, & | ^) — integer-only (or same-flags for & | ^)
+        // (C8.3) flags bitwise: & | ^ on two values of the SAME flags type → result is that flags type.
+        // % (remainder) is NOT allowed on flags (arithmetic).
+        if ((b.op == TK_TOKEN_AMP || b.op == TK_TOKEN_PIPE || b.op == TK_TOKEN_CARET)
+            && is_flags_named(lt, table)) {
+            if (!tk_type_eq(&lt, &rt))
+                return xferr(tk_error_types(tk_error_make("flags bitwise operands must be the same flags type"),
+                                            tk_type_render(lt), tk_type_render(rt)));
+            return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = lt, .as.binary = { b.op, box(l.as.value), box(r.as.value) } });
+        }
         if (!is_integer(lt)) return xerr("bitwise/remainder needs an integer (not a float — B.38)");
         if (!tk_type_eq(&lt, &rt))   // (C1.8) expected = left's type, actual = right's
             return xferr(tk_error_types(tk_error_make("operands must be the same type (no promotion — B.22)"),
@@ -110,8 +122,8 @@ static tk_texpr_result type_unary(tk_unary u, tk_env env, tk_type_table table) {
         if (!is_numeric(ot)) return xerr("unary `-` needs a numeric operand (int or float)");
         return xok((tk_texpr){ .tag = TK_TEXPR_UNARY, .type = ot, .as.unary = { u.op, box(o.as.value) } });
     }
-    if (u.op == TK_TOKEN_TILDE) {   // bitwise complement: integer-only (no float bit-flip — B.38)
-        if (!is_integer(ot)) return xerr("unary `~` needs an integer (not a float — B.38)");
+    if (u.op == TK_TOKEN_TILDE) {   // bitwise complement: integer-only OR flags (C8.3) — no float bit-flip (B.38)
+        if (!is_integer(ot) && !is_flags_named(ot, table)) return xerr("unary `~` needs an integer or a flags type (not a float — B.38)");
         return xok((tk_texpr){ .tag = TK_TEXPR_UNARY, .type = ot, .as.unary = { u.op, box(o.as.value) } });
     }
     if (u.op == TK_TOKEN_BANG) {
@@ -449,6 +461,12 @@ static bool is_enum_named(tk_type t, tk_type_table table) {
     if (t.tag != TK_TYPE_NAMED) return false;
     tk_decl_result d = tk_type_table_find(table, t.as.named.name);
     return d.ok && d.as.value.body.tag == TK_BODY_ENUM;
+}
+// (C8.3) is `t` a NAMED type whose declaration is a `flags`?
+static bool is_flags_named(tk_type t, tk_type_table table) {
+    if (t.tag != TK_TYPE_NAMED) return false;
+    tk_decl_result d = tk_type_table_find(table, t.as.named.name);
+    return d.ok && d.as.value.body.tag == TK_BODY_FLAGS;
 }
 // (E7) an INTEGER cast endpoint: an int prim, or `byte` (= u8). Floats/bool excluded.
 static bool is_int_cast_end(tk_type t) {
@@ -798,6 +816,89 @@ static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table 
 static tk_texpr_result type_if(tk_if_expr f, tk_env env, tk_type_table table);
 static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table table);
 
+// (C8.3) ---- flags helper method calls: recv.has/all/any/none/add/remove(mask) ----
+// Lowered to synthetic TAST nodes at checker time:
+//   add(mask)    -> recv | mask        (TK_TEXPR_BINARY, flags type)
+//   remove(mask) -> recv & ~mask       (TK_TEXPR_BINARY with nested UNARY, flags type)
+//   has(mask)    -> (recv & mask) == mask  (TK_TEXPR_COMPARE, bool)
+//   all(mask)    -> synonym of has
+//   any(mask)    -> (recv & mask) != 0_flags  ... lowered via TK_TEXPR_COMPARE
+//   none(mask)   -> (recv & mask) == 0_flags
+// For any/none the "0" value problem: we emit a synthetic call node `teko::flags::<method>`
+// so codegen can lower it properly. add/remove are lowered now; bool-returning ones are
+// emitted as synthetic calls with a `teko::flags` namespace for the codegen crumb to lower.
+static tk_texpr_result type_flags_method(tk_method_call mc, tk_env env, tk_type_table table) {
+    tk_texpr_result recv = tk_typer_expr(*mc.receiver, env, table);
+    if (!recv.ok) return recv;
+    tk_type rt = recv.as.value.type;
+    if (!is_flags_named(rt, table))
+        return xerr("method call on a non-flags receiver (flags methods: has/all/any/none/add/remove)");
+    if (mc.nargs != 1)
+        return xerr("flags methods take exactly one argument (the mask)");
+    tk_texpr_result mask = tk_typer_expr(mc.args[0], env, table);
+    if (!mask.ok) return mask;
+    if (!tk_type_eq(&rt, &mask.as.value.type))
+        return xferr(tk_error_types(tk_error_make("flags method argument must be the same flags type as the receiver"),
+                                    tk_type_render(rt), tk_type_render(mask.as.value.type)));
+
+    bool is_has  = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"has",    3 });
+    bool is_all  = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"all",    3 });
+    bool is_any  = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"any",    3 });
+    bool is_none = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"none",   4 });
+    bool is_add  = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"add",    3 });
+    bool is_rem  = tk_str_eq(mc.method, (tk_str){ (const tk_byte *)"remove", 6 });
+
+    if (!is_has && !is_all && !is_any && !is_none && !is_add && !is_rem)
+        return xerr("unknown flags method (has/all/any/none/add/remove)");
+
+    // add(mask) -> recv | mask
+    if (is_add)
+        return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = rt,
+                               .as.binary = { TK_TOKEN_PIPE, box(recv.as.value), box(mask.as.value) } });
+
+    // remove(mask) -> recv & ~mask
+    if (is_rem) {
+        tk_texpr notmask = { .tag = TK_TEXPR_UNARY, .type = rt,
+                             .as.unary = { TK_TOKEN_TILDE, box(mask.as.value) } };
+        return xok((tk_texpr){ .tag = TK_TEXPR_BINARY, .type = rt,
+                               .as.binary = { TK_TOKEN_AMP, box(recv.as.value), box(notmask) } });
+    }
+
+    // has/all/any/none: lower to (recv & mask) as the inner binary, then emit a TK_TEXPR_COMPARE.
+    // has/all: (recv & mask) == mask  → compare[first=(recv&mask), rest=[{==, mask_copy}]]
+    // any:     (recv & mask) != mask  [codegen sees != and knows: any = not none]
+    //          actually: any = (recv & mask) != 0_same_type — but we cannot express "zero of a
+    //          flags type" as a literal here (flags are NAMED, not integers at this level).
+    //          We lower any/none identically to has/none with a special synthetic comparison
+    //          using a fabricated ZERO node (TK_TEXPR_NUMBER with value 0, type = flags — the
+    //          codegen/VM will see the flags NAMED type and cast 0 accordingly).
+    // none:    (recv & mask) == 0_same_type
+    tk_texpr andexpr = { .tag = TK_TEXPR_BINARY, .type = rt,
+                         .as.binary = { TK_TOKEN_AMP, box(recv.as.value), box(mask.as.value) } };
+
+    if (is_has || is_all) {
+        // (recv & mask) == mask  — compare with mask (a second typed copy of the mask arg)
+        tk_texpr mask2 = mask.as.value;   // a value copy — safe (no heap ownership issue at checker level)
+        tk_tcmp_term *rest = tk_alloc(sizeof *rest); if (!rest) abort();
+        rest[0] = (tk_tcmp_term){ .op = TK_TOKEN_EQEQ, .operand = box(mask2) };
+        return xok((tk_texpr){ .tag = TK_TEXPR_COMPARE,
+                               .type = tk_prim_t(TK_PRIM_BOOL),
+                               .as.compare = { box(andexpr), rest, 1 } });
+    }
+
+    // any/none: compare (recv & mask) against a zero-valued flags literal.
+    // Represent zero as a TK_TEXPR_NUMBER (value 0, type = flags NAMED). Codegen for the C
+    // backend will emit the cast to the flags enum type; the VM lowering reads the ordinal.
+    // This is the same pattern as enum ordinal casts (E7).
+    tk_texpr zero = { .tag = TK_TEXPR_NUMBER, .type = rt, .as.number = { .is_float = false, .value = 0 } };
+    tk_token_kind cmp_op = is_none ? TK_TOKEN_EQEQ : TK_TOKEN_NE;
+    tk_tcmp_term *rest = tk_alloc(sizeof *rest); if (!rest) abort();
+    rest[0] = (tk_tcmp_term){ .op = cmp_op, .operand = box(zero) };
+    return xok((tk_texpr){ .tag = TK_TEXPR_COMPARE,
+                           .type = tk_prim_t(TK_PRIM_BOOL),
+                           .as.compare = { box(andexpr), rest, 1 } });
+}
+
 // ---- the expression dispatch (the evolved check_expr) ----
 // ---- `Enum::Member` as a VALUE (value-level enum paths) ----
 // The path is the enum type (all but the last segment) + the member (last segment). Resolve the
@@ -805,21 +906,35 @@ static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table tab
 // carrying the resolved enum name + member ordinal so both backends lower without re-lookup.
 static tk_texpr_result type_path_expr(tk_path_expr pe, tk_type_table table) {
     tk_path p = pe.path;
-    if (p.len < 2) return xerr("a path expression must name an enum member (`Enum::Member`)");
+    if (p.len < 2) return xerr("a path expression must name an enum or flags member (`Type::Member`)");
     tk_str member = p.segments[p.len - 1].name;
-    tk_path enum_path = { .segments = p.segments, .len = p.len - 1 };   // the enum type = path minus the member
-    tk_type_result et = resolve_named(enum_path, table);
+    tk_path type_path = { .segments = p.segments, .len = p.len - 1 };   // the type = path minus the member
+    tk_type_result et = resolve_named(type_path, table);
     if (!et.ok) return xferr(et.as.error);
-    if (et.as.value.tag != TK_TYPE_NAMED) return xerr("`Enum::Member` requires a named enum type");
+    if (et.as.value.tag != TK_TYPE_NAMED) return xerr("`Type::Member` requires a named enum or flags type");
     tk_decl_result decl = tk_type_table_find(table, et.as.value.as.named.name);
-    if (!decl.ok) return xerr("unknown type in an `Enum::Member` path");
-    if (decl.as.value.body.tag != TK_BODY_ENUM) return xerr("`Type::Member` requires an `enum` type");
-    tk_enum_body eb = decl.as.value.body.as.enum_body;
-    for (size_t i = 0; i < eb.n_members; i += 1)
-        if (tk_str_eq(eb.members[i], member))
-            return xok((tk_texpr){ .tag = TK_TEXPR_PATH, .type = et.as.value,
-                                   .as.path = { et.as.value.as.named.name, member, (uint64_t)i } });
-    return xerr("no such member in the enum");
+    if (!decl.ok) return xerr("unknown type in a `Type::Member` path");
+    if (decl.as.value.body.tag == TK_BODY_ENUM) {
+        tk_enum_body eb = decl.as.value.body.as.enum_body;
+        for (size_t i = 0; i < eb.n_members; i += 1)
+            if (tk_str_eq(eb.members[i], member))
+                return xok((tk_texpr){ .tag = TK_TEXPR_PATH, .type = et.as.value,
+                                       .as.path = { et.as.value.as.named.name, member, (uint64_t)i } });
+        return xerr("no such member in the enum");
+    }
+    if (decl.as.value.body.tag == TK_BODY_FLAGS) {
+        // (C8.3) flags member: ordinal = member index; the value is 1 << i (power-of-2).
+        // Max 128 members enforced here (u128 cap); ordinal encodes the BIT INDEX (not the value).
+        tk_flags_body fb = decl.as.value.body.as.flags_body;
+        if (fb.n_members > 128)
+            return xerr("flags type has more than 128 members (u128 overflow)");
+        for (size_t i = 0; i < fb.n_members; i += 1)
+            if (tk_str_eq(fb.members[i], member))
+                return xok((tk_texpr){ .tag = TK_TEXPR_PATH, .type = et.as.value,
+                                       .as.path = { et.as.value.as.named.name, member, (uint64_t)i } });
+        return xerr("no such member in the flags type");
+    }
+    return xerr("`Type::Member` requires an `enum` or `flags` type");
 }
 
 // (C1-POS) inner dispatch — the raw switch. The public tk_typer_expr (below) wraps this to
@@ -864,7 +979,16 @@ static tk_texpr_result type_dispatch(tk_expr e, tk_env env, tk_type_table table)
         case TK_EXPR_SAFE_FIELD_ACCESS: return type_safe_field_access(e.as.safe_field_access, env, table);
         case TK_EXPR_COALESCE:     return type_coalesce(e.as.coalesce, env, table);
         case TK_EXPR_CAST:         return type_cast(e.as.cast, env, table);
-        case TK_EXPR_METHOD_CALL:  return xerr("method typing is deferred (B.29 / M.4)");
+        case TK_EXPR_METHOD_CALL:  {
+            // (C8.3) flags helper methods are typed here; all other method calls remain deferred.
+            tk_method_call mc = e.as.method_call;
+            if (mc.receiver) {
+                tk_texpr_result recv_probe = tk_typer_expr(*mc.receiver, env, table);
+                if (recv_probe.ok && is_flags_named(recv_probe.as.value.type, table))
+                    return type_flags_method(mc, env, table);
+            }
+            return xerr("method typing is deferred (B.29 / M.4)");
+        }
         case TK_EXPR_PATH:         return type_path_expr(e.as.path, table);   // Enum::Member as a value
         case TK_EXPR_STRUCT_LIT:   return type_struct_lit(e.as.struct_lit, env, table);   // W4a
         case TK_EXPR_INDEX:        return type_index(e.as.index, env, table);            // W5-idx

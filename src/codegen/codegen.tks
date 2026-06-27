@@ -1063,9 +1063,24 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
 
     // float -> int: ALWAYS guarded (ruling §5: truncate toward zero; panic on
     // NaN/inf/out-of-range). Helper: tk_to_<dst>_from_<fsrc>. Single-eval.
+    // (C1.7-CAST) When the cast node carries a position, wrap in a GNU statement-expression
+    // that sets _tk_cast_loc_line/_tk_cast_loc_col before the call so tk_panic_cast prints it.
     if prim_both && cg_prim_is_float(src) && cg_prim_is_int(dst) {
         let dtag = match prim_int_tag(dst)   { str as t => t; error as err => return err }
         let fsrc = match prim_float_tag(src) { str as t => t; error as err => return err }
+        if e.line != 0 {
+            mut out = cb(buf, "({ _tk_cast_loc_line = ")
+            out = cb(out, teko::u64_to_str(e.line to u64))
+            out = cb(out, "; _tk_cast_loc_col = ")
+            out = cb(out, teko::u64_to_str(e.col to u64))
+            out = cb(out, "; tk_to_")
+            out = cb(out, dtag)
+            out = cb(out, "_from_")
+            out = cb(out, fsrc)
+            out = cb(out, "(")
+            out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+            return cb(out, "); })")
+        }
         mut out = cb(buf, "tk_to_")
         out = cb(out, dtag)
         out = cb(out, "_from_")
@@ -1077,8 +1092,20 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
     // int -> int: range-checked IFF it may narrow. The carrier is picked by SOURCE
     // signedness so it holds the source losslessly: signed -> i128 carrier ("_s");
     // unsigned -> u128 carrier ("_u"). Single-eval.
+    // (C1.7-CAST) Same positioned-wrapper pattern as float->int above.
     if prim_both && cg_prim_is_int(src) && cg_prim_is_int(dst) && cast_may_lose(src, dst) {
         let dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
+        if e.line != 0 {
+            mut out = cb(buf, "({ _tk_cast_loc_line = ")
+            out = cb(out, teko::u64_to_str(e.line to u64))
+            out = cb(out, "; _tk_cast_loc_col = ")
+            out = cb(out, teko::u64_to_str(e.col to u64))
+            out = cb(out, "; tk_to_")
+            out = cb(out, dtag)
+            if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
+            out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+            return cb(out, "); })")
+        }
         mut out = cb(buf, "tk_to_")
         out = cb(out, dtag)
         if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }

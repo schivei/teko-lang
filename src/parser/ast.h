@@ -203,7 +203,11 @@ typedef struct {                                                   // Function (
 typedef struct { tk_str name; tk_type_expr type_ann; } tk_field;
 typedef struct { tk_field *fields; size_t n_fields; }  tk_struct_body;
 typedef struct { tk_str  *members; size_t n_members; } tk_enum_body;    // member names, in order
-typedef struct { tk_str  *members; size_t n_members; } tk_flags_body;   // member names, in order (power-of-2 auto-assigned at checker time; C8.3)
+typedef struct {
+    tk_str            *members;  // member names, in order
+    size_t             n_members;
+    unsigned __int128 *values;   // (C8.6) power-of-2 value per member (member i → 1<<i); set by checker (C8.3); NULL before check
+} tk_flags_body;                 // member names + auto-assigned power-of-2 values (C8.3 assigns; C8.6 serializes)
 typedef struct { tk_type_expr type_expr; }             tk_variant_body; // a union (A.8)
 typedef struct { tk_type_expr alias; }                 tk_alias_body;   // `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity)
 typedef struct { int _unused; }                        tk_extern_body;  // `extern type Name` — an OPAQUE foreign handle (C7.1a; lowers to `void *`)

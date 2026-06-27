@@ -1092,9 +1092,18 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             if (prim_both && cg_prim_is_float(src) && cg_prim_is_int(dst)) {
                 const char *dtag = prim_int_tag(dst);
                 const char *fsrc = prim_float_tag(src);
-                cb(b, "tk_to_"); cb(b, dtag); cb(b, "_from_"); cb(b, fsrc); cb(b, "(");
-                if (!emit_expr(b, inner, err)) return false;
-                cb(b, ")");
+                // (C1.7-CAST) Wrap in statement-expression to set cast location before the call.
+                if (e->line) {
+                    cb(b, "({ _tk_cast_loc_line = "); cb_u64_dec(b, e->line);
+                    cb(b, "; _tk_cast_loc_col = ");  cb_u64_dec(b, e->col);
+                    cb(b, "; tk_to_"); cb(b, dtag); cb(b, "_from_"); cb(b, fsrc); cb(b, "(");
+                    if (!emit_expr(b, inner, err)) return false;
+                    cb(b, "); })");
+                } else {
+                    cb(b, "tk_to_"); cb(b, dtag); cb(b, "_from_"); cb(b, fsrc); cb(b, "(");
+                    if (!emit_expr(b, inner, err)) return false;
+                    cb(b, ")");
+                }
                 return true;
             }
             // int -> int: range-checked iff it may narrow.
@@ -1103,10 +1112,20 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 const char *dtag = prim_int_tag(dst);
                 // Carrier picked by SOURCE signedness so it holds the source losslessly:
                 //   signed source -> __int128 carrier ("_s"); unsigned -> unsigned __int128 ("_u").
-                cb(b, "tk_to_"); cb(b, dtag);
-                cb(b, cg_prim_is_signed_int(src) ? "_s(" : "_u(");
-                if (!emit_expr(b, inner, err)) return false;
-                cb(b, ")");
+                // (C1.7-CAST) Wrap in statement-expression to set cast location before the call.
+                if (e->line) {
+                    cb(b, "({ _tk_cast_loc_line = "); cb_u64_dec(b, e->line);
+                    cb(b, "; _tk_cast_loc_col = ");  cb_u64_dec(b, e->col);
+                    cb(b, "; tk_to_"); cb(b, dtag);
+                    cb(b, cg_prim_is_signed_int(src) ? "_s(" : "_u(");
+                    if (!emit_expr(b, inner, err)) return false;
+                    cb(b, "); })");
+                } else {
+                    cb(b, "tk_to_"); cb(b, dtag);
+                    cb(b, cg_prim_is_signed_int(src) ? "_s(" : "_u(");
+                    if (!emit_expr(b, inner, err)) return false;
+                    cb(b, ")");
+                }
                 return true;
             }
             // Everything else (int->float widen, float->float, widening int->int,

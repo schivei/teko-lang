@@ -324,7 +324,21 @@ static tk_type_body read_typebody(tk_reader *r, tk_strs t) {
         case 2: tb.tag = TK_BODY_VARIANT; tb.as.variant_body.type_expr = read_typeexpr(r, t); return tb;
         case 3: tb.tag = TK_BODY_ALIAS;   tb.as.alias_body.alias = read_typeexpr(r, t); return tb;
         case 4: tb.tag = TK_BODY_EXTERN;  return tb;
-        case 5: tb.tag = TK_BODY_FLAGS;   tb.as.flags_body.members = read_strs(r, t, &tb.as.flags_body.n_members); return tb;
+        case 5: {                                                                  // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
+            tb.tag = TK_BODY_FLAGS;
+            uint64_t n = tk_read_u64(r);
+            tk_str *members = tk_alloc((n ? n : 1) * sizeof *members); if (!members) abort();
+            unsigned __int128 *values = tk_alloc((n ? n : 1) * sizeof *values); if (!values) abort();
+            for (uint64_t i = 0; i < n; i += 1) {
+                members[i] = tk_read_str(r, t);
+                uint64_t hi = tk_read_u64(r), lo = tk_read_u64(r);
+                values[i] = ((unsigned __int128)hi << 64) | (unsigned __int128)lo;
+            }
+            tb.as.flags_body.members = members;
+            tb.as.flags_body.n_members = (size_t)n;
+            tb.as.flags_body.values = values;
+            return tb;
+        }
     }
     r->ok = false; return tb;
 }

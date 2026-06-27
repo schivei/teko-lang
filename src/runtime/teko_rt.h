@@ -277,9 +277,13 @@ _Noreturn void tk_panic_cast(void);       // "impossible conversion" (the `x to 
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 // (C1.7) positioned OOB panic — prefix "line:col: " then the canonical OOB panic. codegen passes
 // the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates like the VM
-// (vm_panic_oob_at). Native cast/div0 positioning is deferred (cast = 48 inline tk_to_* helpers;
-// the div0 codegen guard is unwired — B3b) — a later "native panic positioning" pass (global loc).
+// (vm_panic_oob_at).
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col);
+// (C1.7-CAST) positioned cast panic — same shape as tk_panic_oob_at. codegen wraps every
+// tk_to_* call in a statement-expression that sets these globals first; tk_panic_cast reads them.
+// When line==0 the plain "impossible conversion" message is emitted (position unknown).
+extern uint32_t _tk_cast_loc_line;
+extern uint32_t _tk_cast_loc_col;
 
 // teko::assert (the injected testing assertions) lives in its own C seed —
 // src/assert/assert.{c,h} (canonical: src/assert/assert.tks). Generated programs that
