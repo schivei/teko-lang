@@ -44,6 +44,12 @@ tk_str tk_str_of_bytes(tk_str bytes);
 tk_str tk_one_byte(tk_byte c);
 tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c);
 tk_str tk_ftoa(double x);
+// tk_str_slice is a static inline in text.h (included above); the rest link from teko_rt.c.
+tk_str tk_str_slice_to(tk_str s, uint64_t end);
+tk_str tk_str_slice_from(tk_str s, uint64_t start);
+uint64_t tk_str_len(tk_str s);
+bool tk_str_ends_with(tk_str s, tk_str suffix);
+bool tk_str_contains(tk_str s, tk_str needle);
 void teko__assert__is_true(bool c);
 void teko__assert__is_false(bool c);
 void teko__assert__str_contains(tk_str hay, tk_str needle);
@@ -589,6 +595,47 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         *out = v_str(tk_ftoa(a.as.fl.f));
         return true;
     }
+    // str STDLIB surface — the SAME runtime symbols native codegen lowers to, so VM==native.
+    if (seg_is(last, "concat") || seg_is(last, "str_concat")) {
+        tk_value a = tk_vm_eval_expr(&args[0], env), b = tk_vm_eval_expr(&args[1], env);
+        *out = v_str(tk_str_concat(a.as.s, b.as.s)); return true;
+    }
+    if (seg_is(last, "concat3")) {
+        tk_value a = tk_vm_eval_expr(&args[0], env), b = tk_vm_eval_expr(&args[1], env), c = tk_vm_eval_expr(&args[2], env);
+        *out = v_str(tk_str_concat3(a.as.s, b.as.s, c.as.s)); return true;
+    }
+    if (seg_is(last, "slice")) {
+        tk_value s = tk_vm_eval_expr(&args[0], env), a = tk_vm_eval_expr(&args[1], env), b = tk_vm_eval_expr(&args[2], env);
+        *out = v_str(tk_str_slice(s.as.s, (uint64_t)v_as_u128(a), (uint64_t)v_as_u128(b))); return true;
+    }
+    if (seg_is(last, "slice_to")) {
+        tk_value s = tk_vm_eval_expr(&args[0], env), n = tk_vm_eval_expr(&args[1], env);
+        *out = v_str(tk_str_slice_to(s.as.s, (uint64_t)v_as_u128(n))); return true;
+    }
+    if (seg_is(last, "slice_from")) {
+        tk_value s = tk_vm_eval_expr(&args[0], env), n = tk_vm_eval_expr(&args[1], env);
+        *out = v_str(tk_str_slice_from(s.as.s, (uint64_t)v_as_u128(n))); return true;
+    }
+    if (seg_is(last, "len")) {
+        tk_value s = tk_vm_eval_expr(&args[0], env);
+        *out = v_int(tk_str_len(s.as.s), false, 64); return true;
+    }
+    if (seg_is(last, "ends_with")) {
+        tk_value a = tk_vm_eval_expr(&args[0], env), b = tk_vm_eval_expr(&args[1], env);
+        *out = v_bool(tk_str_ends_with(a.as.s, b.as.s)); return true;
+    }
+    if (seg_is(last, "contains")) {
+        tk_value a = tk_vm_eval_expr(&args[0], env), b = tk_vm_eval_expr(&args[1], env);
+        *out = v_bool(tk_str_contains(a.as.s, b.as.s)); return true;
+    }
+    if (seg_is(last, "i64_to_str")) {
+        tk_value n = tk_vm_eval_expr(&args[0], env);
+        *out = v_str(tk_i64_to_str((int64_t)v_as_i128(n))); return true;
+    }
+    if (seg_is(last, "u64_to_str")) {
+        tk_value n = tk_vm_eval_expr(&args[0], env);
+        *out = v_str(tk_u64_to_str((uint64_t)v_as_u128(n))); return true;
+    }
     return false;
 }
 
@@ -770,6 +817,14 @@ static bool cmp_pair(tk_value l, tk_token_kind op, tk_value r) {
             case TK_TOKEN_EQEQ: return l.as.b == r.as.b;
             case TK_TOKEN_NE:   return l.as.b != r.as.b;
             default: vm_unsupported("ordered comparison on bool not yet supported");
+        }
+    }
+    if (l.tag == TK_VAL_STR && r.tag == TK_VAL_STR) {   // byte-equality (the lexer/parser tests compare text)
+        bool eq = name_eq(l.as.s, r.as.s);
+        switch (op) {
+            case TK_TOKEN_EQEQ: return eq;
+            case TK_TOKEN_NE:   return !eq;
+            default: vm_unsupported("ordered comparison on str not supported");
         }
     }
     vm_unsupported("comparison on these value kinds not yet supported");
