@@ -274,32 +274,45 @@ fn compile_project_g(dir: str, out_dir: str, gate: bool) -> i32 {
         let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
         return backend(dir, fe.manifest.name, out_dir, fe.prog)
     }
-    // D4 gate: enter the project ONCE, then assemble WITH the tests.
+    // D4 gate (STRICT): enter the project ONCE, assemble WITH the tests. If `.tkt` tests exist they
+    // MUST assemble, RUN, all pass, AND meet the coverage threshold — otherwise the build is BLOCKED.
+    // The ONLY skip is a project with NO tests (no `#test`): then the gate is ignored and we build.
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => {} }
     match frontend_body(true, false) {
         Frontend as fe => {
-            let trc = vm::run_tests(fe.prog)   // a failed assertion panics here (fail-fast) → bars the build
+            if !has_tests(fe.prog) {
+                // No tests at all → ignore the gate, build the production program (no test code present).
+                return backend(dir, fe.manifest.name, out_dir, fe.prog)
+            }
+            let trc = vm::run_tests(fe.prog)   // a failed assertion panics here (fail-fast) → BLOCKS the build
             if trc != 0 { return trc }
-            // D4 coverage floor (80%): bar if the tests cover < 80% of production functions
-            // (→ 100 when there are no production functions).
+            // D4 coverage floor (80%): tests that cover < 80% of production functions BLOCK the build.
             let cov = vm::coverage_pct(fe.prog)
             if cov < 80 {
-                return fail(dir, teko::str::concat3("test coverage ", teko::str::u64_to_str(cov), "% is below the 80% floor — add tests or build with `--no-test`"))
+                return fail(dir, teko::str::concat3("test coverage ", teko::str::u64_to_str(cov), "% is below the 80% floor — add tests (or `--no-test`)"))
             }
             backend(dir, fe.manifest.name, out_dir, strip_tests(fe.prog))
         }
-        // The `.tkt` tests could not be ASSEMBLED/typechecked in this compiler (e.g. they use a
-        // feature this build doesn't support yet). That must NOT block native compilation: WARN
-        // loudly and build WITHOUT the gate (same chdir — no second chdir). A test that RUNS and
-        // fails an assertion still bars (above). This is the honest "tests not runnable here" path.
-        error as e => {
-            teko::io::eprintln(teko::str::concat3("teko: ", dir, teko::str::concat3(": tests not runnable (", e.message, ") — building without the test gate")))
-            match frontend_body(false, true) {
-                Frontend as fe => backend(dir, fe.manifest.name, out_dir, fe.prog)
-                error as e2 => return fail(dir, e2.message)
-            }
-        }
+        // `.tkt` tests (or the production code) could not be ASSEMBLED/typechecked. With tests present,
+        // that is a hard BUILD FAILURE — no graceful degradation (the gate is strict; only a project
+        // with NO `.tkt` files skips tests). Use `--no-test` to bypass explicitly.
+        error as e => return fail(dir, e.message)
     }
+}
+
+// has_tests — does the program contain any `#test` function? (The gate runs iff this is true; a
+// project with NO tests builds unconditionally — the "no .tkt → ignore tests" rule.)
+fn has_tests(prog: checker::TProgram) -> bool {
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if f.is_test { return true } }
+            _ => {}
+        }
+        i++
+    }
+    false
 }
 
 // CLI helpers (mirror main.c::parse_out_dir; here because main.tks is the virtual-main and holds no

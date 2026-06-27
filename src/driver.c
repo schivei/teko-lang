@@ -405,11 +405,19 @@ static tk_tprogram strip_tests(tk_tprogram prog) {
     return (tk_tprogram){ .items = kept, .nitems = k };
 }
 
-// tk_compile_project_g — the build with the D4 TEST GATE. gate=true (default `teko build`):
-// assemble WITH the `.tkt` tests, run them on the VM FIRST (fail-fast — a failed assertion aborts
-// the build before emission), THEN codegen the production program (tests stripped). gate=false
-// (`teko build --no-test`, used by the bootstrap self-build whose corpus tests are not yet
-// VM-runnable) is the plain production front-end. (Mirrors project.tks compile_project_g.)
+// has_tests — does the program contain any `#test` function? (The gate runs iff this is true; a
+// project with NO tests builds unconditionally — the "no .tkt → ignore tests" rule.)
+static bool has_tests(tk_tprogram prog) {
+    for (size_t i = 0; i < prog.nitems; i += 1)
+        if (prog.items[i].tag == TK_TITEM_FUNCTION && prog.items[i].as.function.is_test) return true;
+    return false;
+}
+
+// tk_compile_project_g — the build with the D4 TEST GATE (STRICT). gate=true (default `teko build`):
+// assemble WITH the `.tkt` tests; if tests exist they MUST assemble, run, all pass, AND meet the
+// coverage threshold — else the build is BLOCKED (no graceful degradation). The ONLY skip is a
+// project with NO `#test` functions. gate=false (`--no-test`, the bootstrap self-build) is the
+// plain production front-end. (Mirrors project.tks compile_project_g.)
 int tk_compile_project_g(const char *dir, const char *out_dir, bool gate) {
     tk_tprogram prog;
     tk_manifest m;
@@ -423,26 +431,24 @@ int tk_compile_project_g(const char *dir, const char *out_dir, bool gate) {
         return rc;
     }
 
-    // D4 gate: enter the project ONCE, then assemble WITH the tests.
+    // D4 gate (STRICT): enter the project ONCE, assemble WITH the tests. A failure to assemble/
+    // typecheck (production code OR test files) is a hard BUILD FAILURE when tests are present.
     if (chdir(dir) != 0) return fail(dir, "cannot enter project directory");
-    if (frontend_body(dir, &prog, &m, true, false) == 0) {
-        int trc = tk_vm_run_tests(prog);   // a failed assertion aborts here (fail-fast) → bars the build
+    int frc = frontend_body(dir, &prog, &m, true, false);
+    if (frc != 0) return frc;   // assembly/typecheck failed → BLOCK (the diagnostic already printed)
+
+    if (has_tests(prog)) {
+        int trc = tk_vm_run_tests(prog);   // a failed assertion aborts here (fail-fast) → BLOCKS the build
         if (trc != 0) return trc;
         uint64_t cov = tk_vm_coverage_pct(prog);   // D4 coverage floor (80%)
         if (cov < 80) {
-            fprintf(stderr, "teko: %s: test coverage %llu%% is below the 80%% floor — add tests or build with `--no-test`\n",
+            fprintf(stderr, "teko: %s: test coverage %llu%% is below the 80%% floor — add tests (or `--no-test`)\n",
                     dir, (unsigned long long)cov);
             return 1;
         }
         prog = strip_tests(prog);          // a release binary carries no test code
-    } else {
-        // The `.tkt` tests could not be ASSEMBLED/typechecked in this compiler (e.g. they use a
-        // feature this build doesn't support yet). That must NOT block native compilation: WARN and
-        // build WITHOUT the gate, on the SAME chdir (a quiet retry — no second chdir). A test that
-        // RUNS and fails an assertion still bars (above).
-        fprintf(stderr, "teko: %s: tests not runnable here — building without the test gate\n", dir);
-        if (frontend_body(dir, &prog, &m, false, true) != 0) return fail(dir, "build failed");
     }
+    // else: no `#test` functions → ignore the gate, build the production program.
 
     // --- backend (F2): lower the checked merged program to C, build it natively ---
     char *stem = cstr_of(m.name);
