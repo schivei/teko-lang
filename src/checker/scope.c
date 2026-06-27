@@ -260,6 +260,10 @@ tk_type_result tk_builtin_fn(tk_str name) {
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &str_slice_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
+    if (name_is(name, "os")) {                                        // teko::os() -> str — C7.1f
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = NULL, .nparams = 0, .ret = &str_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
     if (name_is(name, "print") || name_is(name, "println") || name_is(name, "write") || name_is(name, "ewrite") || name_is(name, "eprint") || name_is(name, "eprintln")) {
         tk_type ft = { .tag = TK_TYPE_FUNC,
                        .as.func = { .params = &str_t, .nparams = 1, .ret = &void_t } };

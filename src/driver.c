@@ -198,50 +198,50 @@ static int fail_diag(tk_error e) {
 // manifest `name`, not from any single input file.
 // =========================================================================
 
+static char *cstr_of(tk_str s);   // (defined below — used by run_cc for the [extern] cc/target/sysroot knobs)
+
 // Run the host C compiler over `cfile`, producing `binary`. Returns 0 on success.
-static int run_cc(const char *cfile, const char *binary, tk_strs libs) {
-    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println
-    // (teko_rt.c) plus teko__assert__* (the teko::assert seed, src/assert/assert.c), so
-    // the host cc must see the runtime dir (-I) and compile BOTH seed sources (M.5 — one
-    // reuse-the-host-toolchain cc invocation, no extra build system).
-    //   cc -std=c23 -I"<rt>" -I"<src>/assert" "<file.c>" "<rt>/teko_rt.c" \
-    //      "<src>/assert/assert.c" -o "<bin>"
-    // The generated C does `#include "assert.h"`, so cc must also see src/assert (-I).
-    // Quote every path to tolerate spaces. cap covers the fixed text + both rt-dir copies
-    // (the -I and the source path) + two src-dir copies (the -I and assert.c) + suffixes.
-    // C7.1e: the [extern.libs] link flags (" -l<name>", a leading `lib` stripped). Placed AFTER
-    // the sources so the linker resolves their symbols (link order). Mirrors project.tks run_cc.
+static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
+    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println (teko_rt.c) plus
+    // teko__assert__* (src/assert/assert.c), so the host cc must see the runtime dir (-I) and compile
+    // BOTH seed sources (M.5 — one reuse-the-host-toolchain cc invocation). Quote every path.
+    // C7.1f: [extern] cross/driver knobs — cc override, -target, --sysroot, -nostdlib (freestanding).
+    char *ccprog = m.cc.len ? cstr_of(m.cc) : NULL;
+    const char *cc = ccprog ? ccprog : "cc";
+    char xflags[1024]; xflags[0] = '\0'; size_t xo = 0;
+    if (m.target.len)  { char *t = cstr_of(m.target);  xo += (size_t)snprintf(xflags + xo, sizeof xflags - xo, " -target %s", t); tk_free0(t); }
+    if (m.sysroot.len) { char *s = cstr_of(m.sysroot); xo += (size_t)snprintf(xflags + xo, sizeof xflags - xo, " --sysroot \"%s\"", s); tk_free0(s); }
+    const char *nostd = m.freestanding ? " -nostdlib" : "";
+    const char *libm  = m.freestanding ? "" : " -lm";
+    // C7.1e: the [extern.libs] RESOLVED link flags (`-l<name>` / paths / raw), already produced by
+    // the manifest. Appended verbatim AFTER the sources so the linker resolves them (link order).
     size_t libcap = 1;
-    for (size_t i = 0; i < libs.len; i++) libcap += libs.ptr[i].len + 4;   // " -l" + name
+    for (size_t i = 0; i < m.link_flags.len; i++) libcap += m.link_flags.ptr[i].len + 2;   // " " + flag
     char *libflags = tk_alloc(libcap);
-    if (libflags == NULL) abort();
     libflags[0] = '\0';
     size_t lo = 0;
-    for (size_t i = 0; i < libs.len; i++) {
-        const tk_byte *p = libs.ptr[i].ptr; size_t n = libs.ptr[i].len;
-        if (n > 3 && p[0] == 'l' && p[1] == 'i' && p[2] == 'b') { p += 3; n -= 3; }   // strip leading "lib"
-        lo += (size_t)snprintf(libflags + lo, libcap - lo, " -l%.*s", (int)n, (const char *)p);
+    for (size_t i = 0; i < m.link_flags.len; i++) {
+        lo += (size_t)snprintf(libflags + lo, libcap - lo, " %.*s",
+                               (int)m.link_flags.ptr[i].len, (const char *)m.link_flags.ptr[i].ptr);
     }
-    size_t cap = strlen(cfile) + strlen(binary) + 2 * strlen(TK_RT_DIR)
-               + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
+    size_t cap = strlen(cc) + strlen(xflags) + strlen(nostd) + strlen(libm) + strlen(cfile) + strlen(binary)
+               + 2 * strlen(TK_RT_DIR) + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
                + strlen("/assert/assert.c") + strlen(libflags) + 96;   // fixed flags incl. -w/-std/-ferror-limit + quotes
     char *cmd = tk_alloc(cap);
-    if (cmd == NULL) abort();
-    // -w: silence warnings on generated C (it is machine output — its parenthesization,
-    // exhaustiveness and literal widths are the codegen's contract, not the user's to read).
-    // -ferror-limit=0 still shows every genuine ERROR (a real codegen bug must surface).
+    // -w: silence warnings on generated C (machine output). -ferror-limit=0 still shows every genuine ERROR.
     snprintf(cmd, cap,
-             "cc -std=c23 -w -ferror-limit=0 -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\" -lm%s -o \"%s\"",
-             TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, libflags, binary);
+             "%s -std=c23 -w -ferror-limit=0%s%s -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\"%s%s -o \"%s\"",
+             cc, xflags, nostd, TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, libm, libflags, binary);
     int rc = system(cmd);
     tk_free0(cmd);
     tk_free0(libflags);
+    if (ccprog) tk_free0(ccprog);
     return rc;
 }
 
 // Lower → write .c → invoke cc → report. `stem` is the output path (no extension);
 // `label` is what the diagnostics name (the project dir/name). Returns 0 on success.
-static int tk_backend(const char *label, const char *stem, tk_tprogram prog, const char *out_dir, tk_strs libs) {
+static int tk_backend(const char *label, const char *stem, tk_tprogram prog, const char *out_dir, tk_manifest m) {
     tk_cstr_result emitted = tk_emit_c(prog);
     if (!emitted.ok) return fail(label, emitted.as.error.message);
 
@@ -269,7 +269,7 @@ static int tk_backend(const char *label, const char *stem, tk_tprogram prog, con
     tk_free0(emitted.as.value);
     if (wrote != srclen) { tk_free0(cfile); tk_free0(binp); return fail(label, "short write on generated C"); }
 
-    int rc = run_cc(cfile, binp, libs);
+    int rc = run_cc(cfile, binp, m);
     tk_free0(cfile);
     if (rc != 0) { tk_free0(binp); return fail(label, "cc failed to build the generated C"); }
 
@@ -441,7 +441,7 @@ int tk_compile_project_g(const char *dir, const char *out_dir, bool gate, bool g
         int rc = project_frontend(dir, &prog, &m, false);
         if (rc != 0) return rc;
         char *stem = cstr_of(m.name);
-        rc = tk_backend(dir, stem, prog, out_dir, m.extern_libs);
+        rc = tk_backend(dir, stem, prog, out_dir, m);
         tk_free0(stem);
         return rc;
     }
@@ -486,7 +486,7 @@ int tk_compile_project_g(const char *dir, const char *out_dir, bool gate, bool g
 
     // --- backend (F2): lower the checked merged program to C, build it natively ---
     char *stem = cstr_of(m.name);
-    int rc = tk_backend(dir, stem, prog, out_dir, m.extern_libs);
+    int rc = tk_backend(dir, stem, prog, out_dir, m);
     tk_free0(stem);
     return rc;
 }

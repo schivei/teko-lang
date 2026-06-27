@@ -500,6 +500,23 @@ tk_str *tk_rt_args(uint64_t *n) {
     return out;
 }
 
+// (C7.1f) the HOST operating system — "macos" / "linux" / "windows" (else "unknown"). Drives the
+// per-OS [extern.*] resolution and the `#os(...)` conditional-compilation guard. A compile-time
+// constant (the bootstrap/self-host runs ON the host it builds for; cross-target overrides via
+// the manifest `[extern] target`). [teko::os]
+tk_str tk_rt_os(void) {
+#if defined(__APPLE__)
+    static const char *s = "macos";
+#elif defined(_WIN32)
+    static const char *s = "windows";
+#elif defined(__linux__)
+    static const char *s = "linux";
+#else
+    static const char *s = "unknown";
+#endif
+    return (tk_str){ (const tk_byte *)s, strlen(s) };
+}
+
 // D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,
 // deduped on insert (the id count is bounded by the project's function count, so linear dedup is
 // fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct

@@ -148,6 +148,8 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n);
 // tk_set_args must run first (the generated `main` calls it before the virtual-main body).
 void    tk_set_args(int argc, char **argv);
 tk_str *tk_rt_args(uint64_t *n);
+// (C7.1f) the host OS name: "macos"/"linux"/"windows"/"unknown" (teko::os; per-OS resolution + `#os`).
+tk_str tk_rt_os(void);
 
 // D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
 // record which production functions executed during a `teko test` run WITHOUT a Teko

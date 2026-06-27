@@ -64,7 +64,7 @@ static bool key_is(tk_str k, const char *lit) {
 }
 
 // --- which table are we in? --------------------------------------------------
-typedef enum { SEC_ROOT, SEC_ARTIFACT, SEC_DEPS, SEC_ALIASES, SEC_COVERAGE, SEC_EXTERN_LIBS, SEC_OTHER } section;
+typedef enum { SEC_ROOT, SEC_ARTIFACT, SEC_DEPS, SEC_ALIASES, SEC_COVERAGE, SEC_EXTERN, SEC_EXTERN_LIBS, SEC_OTHER } section;
 
 static tk_manifest_result fail(const char *msg) {
     return (tk_manifest_result){ .ok = false, .as.error = tk_error_make(msg) };
@@ -75,6 +75,37 @@ static uint64_t read_int(tk_str s, size_t p) {
     uint64_t n = 0;
     while (p < s.len && s.ptr[p] >= '0' && s.ptr[p] <= '9') { n = n * 10 + (uint64_t)(s.ptr[p] - '0'); p++; }
     return n;
+}
+
+// --- [extern.libs] resolution (C7.1e): array values + element → cc link flag -----------------
+static bool starts_with(tk_str s, const char *p) {
+    size_t i = 0;
+    for (; p[i]; i++) { if (i >= s.len || s.ptr[i] != (tk_byte)p[i]) return false; }
+    return true;
+}
+static bool ends_with_lit(tk_str s, const char *suf) {
+    size_t n = strlen(suf);
+    return s.len >= n && memcmp(s.ptr + (s.len - n), suf, n) == 0;
+}
+// does `s` name a direct library FILE (a path or a known extension), vs a `-l` lib name?
+static bool has_path(tk_str s) {
+    for (size_t i = 0; i < s.len; i++) if (s.ptr[i] == '/') return true;
+    return ends_with_lit(s, ".a") || ends_with_lit(s, ".so") || ends_with_lit(s, ".dylib")
+        || ends_with_lit(s, ".dll") || ends_with_lit(s, ".o") || ends_with_lit(s, ".lib");
+}
+// resolve one [extern.libs] element (or empty-array key) to a cc link flag (C7.1e): `-flag` / a
+// path|*.a → verbatim ; `static:`/`shared:` prefix stripped (mode deferred — Linux) ; bare → `-l<name>`
+// (a leading `lib` stripped). Mirrors manifest.tks mf_extern_flag.
+static tk_str extern_flag(tk_str s) {
+    if (s.len > 0 && s.ptr[0] == '-') return s;
+    if (has_path(s)) return s;
+    const tk_byte *p = s.ptr; size_t n = s.len;
+    if (starts_with(s, "static:"))      { p += 7; n -= 7; }
+    else if (starts_with(s, "shared:")) { p += 7; n -= 7; }
+    if (n > 3 && p[0] == 'l' && p[1] == 'i' && p[2] == 'b') { p += 3; n -= 3; }   // strip leading "lib"
+    tk_byte *buf = tk_alloc(n + 2);
+    buf[0] = '-'; buf[1] = 'l'; if (n) memcpy(buf + 2, p, n);
+    return (tk_str){ buf, n + 2 };
 }
 
 tk_manifest_result tk_parse_manifest(tk_str src) {
@@ -89,7 +120,11 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
         .cov_functions = 80,  // D4 floors — default 80 when [coverage] / its keys are absent
         .cov_lines    = 80,
         .cov_branches = 80,
-        .extern_libs  = tk_strs_empty(),   // [extern.libs] keys — libraries to link (C7.1e)
+        .link_flags   = tk_strs_empty(),   // [extern.libs] resolved cc link flags (C7.1e)
+        .cc           = (tk_str){ NULL, 0 },   // [extern] scalars (C7.1f) — cross/driver knobs
+        .target       = (tk_str){ NULL, 0 },
+        .sysroot      = (tk_str){ NULL, 0 },
+        .freestanding = false,
     };
     bool have_name = false, have_source = false;
     section sec = SEC_ROOT;
@@ -112,29 +147,30 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
             size_t ke;
             tk_str name = read_key(line, i + 1, &ke);
             size_t j = skip_spaces(line, ke);
-            if (at(line, j) != ']') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("malformed table header (expected ']')"); }
+            if (at(line, j) != ']') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("malformed table header (expected ']')"); }
             if      (key_is(name, "artifact"))     sec = SEC_ARTIFACT;
             else if (key_is(name, "dependencies")) sec = SEC_DEPS;
             else if (key_is(name, "aliases"))      sec = SEC_ALIASES;
             else if (key_is(name, "coverage"))     sec = SEC_COVERAGE;
             else if (key_is(name, "extern.libs"))  sec = SEC_EXTERN_LIBS;   // C7.1e: libraries to link
-            else                                   sec = SEC_OTHER;         // [extern] scalars (search/prefer/…) — deferred
+            else if (key_is(name, "extern"))       sec = SEC_EXTERN;        // C7.1f: cc/target/sysroot/freestanding
+            else                                   sec = SEC_OTHER;         // [extern.search] / unknown — deferred
             continue;
         }
 
         // a `key = value` pair
         size_t ke;
         tk_str key = read_key(line, i, &ke);
-        if (key.len == 0) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("malformed line (expected a key or '[table]')"); }
+        if (key.len == 0) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("malformed line (expected a key or '[table]')"); }
         size_t eq = skip_spaces(line, ke);
-        if (at(line, eq) != '=') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("malformed key/value (expected '=')"); }
+        if (at(line, eq) != '=') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("malformed key/value (expected '=')"); }
         size_t v = skip_spaces(line, eq + 1);
 
         switch (sec) {
         case SEC_ROOT: {
             // name / source / version / suffix are top-level quoted strings.
             tk_str val; size_t ve;
-            if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("expected a quoted string value"); }
+            if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string value"); }
             if      (key_is(key, "name"))    { m.name = val;   have_name = true; }
             else if (key_is(key, "source"))  { m.source = val; have_source = true; }
             else if (key_is(key, "version")) { m.version = val; }
@@ -153,28 +189,50 @@ tk_manifest_result tk_parse_manifest(tk_str src) {
             // `kind = "binary"` → Executable; anything else (incl. "library") → Library.
             if (key_is(key, "kind")) {
                 tk_str val; size_t ve;
-                if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("expected a quoted string value"); }
+                if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string value"); }
                 m.artifact = key_is(val, "binary") ? TK_ARTIFACT_EXECUTABLE : TK_ARTIFACT_LIBRARY;
             }
             break;
         }
         case SEC_DEPS:    m.deps    = tk_strs_push(m.deps, key);    break;
         case SEC_ALIASES: m.aliases = tk_strs_push(m.aliases, key); break;
+        case SEC_EXTERN: {
+            // [extern] scalars (C7.1f): cc/target/sysroot are quoted strings; freestanding is a bool.
+            if (key_is(key, "cc") || key_is(key, "target") || key_is(key, "sysroot")) {
+                tk_str val; size_t ve;
+                if (!read_quoted(line, v, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string value"); }
+                if      (key_is(key, "cc"))     m.cc = val;
+                else if (key_is(key, "target")) m.target = val;
+                else                            m.sysroot = val;
+            } else if (key_is(key, "freestanding")) {
+                m.freestanding = (at(line, v) == 't');   // `true` → true, else false
+            }
+            break;
+        }
         case SEC_EXTERN_LIBS: {
-            // `name = []` — link `-l<name>`. A non-empty link-spec (multi-lib / paths /
-            // static:/shared:) is a LATER gap (C7.1e+): declare each library as its own key.
-            if (at(line, v) != '[') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("expected '[' for an [extern.libs] value (e.g. `z = []`)"); }
-            size_t after = skip_spaces(line, v + 1);
-            if (at(line, after) != ']') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("non-empty [extern.libs] link-spec not yet supported — declare each library as its own `name = []` key (C7.1e)"); }
-            m.extern_libs = tk_strs_push(m.extern_libs, key);
+            // `name = [ <spec…> ]` → resolved cc link flags. Empty `[]` → `-l<name>`; each element via
+            // extern_flag (bare → `-l`, path/`*.a` → file, `-flag` → verbatim). Mirrors manifest.tks.
+            if (at(line, v) != '[') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected '[' for an [extern.libs] value (e.g. `z = []`)"); }
+            size_t q = skip_spaces(line, v + 1);
+            if (at(line, q) == ']') { m.link_flags = tk_strs_push(m.link_flags, extern_flag(key)); break; }   // [] → -l<key>
+            for (;;) {
+                tk_str val; size_t ve;
+                if (!read_quoted(line, q, &val, &ve)) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected a quoted string in an [extern.libs] array"); }
+                m.link_flags = tk_strs_push(m.link_flags, extern_flag(val));
+                q = skip_spaces(line, ve);
+                tk_byte ac = at(line, q);
+                if (ac == ']') break;
+                if (ac != ',') { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("expected ',' or ']' in an [extern.libs] array"); }
+                q = skip_spaces(line, q + 1);
+            }
             break;
         }
         case SEC_OTHER:   break;   // an unrecognized table — keys ignored (M.5)
         }
     }
 
-    if (!have_name)   { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("manifest missing required field 'name'"); }
-    if (!have_source) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.extern_libs); return fail("manifest missing required field 'source'"); }
+    if (!have_name)   { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("manifest missing required field 'name'"); }
+    if (!have_source) { tk_strs_free(m.deps); tk_strs_free(m.aliases); tk_strs_free(m.link_flags); return fail("manifest missing required field 'source'"); }
 
     return (tk_manifest_result){ .ok = true, .as.value = m };
 }

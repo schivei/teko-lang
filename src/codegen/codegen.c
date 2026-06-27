@@ -1277,6 +1277,7 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "as_ptr"))        builtin = "tk_as_ptr";         // (str) -> ptr (raw bytes; borrows, pair with `.len`)
                     else if (seg_is(last, "as_cstr"))       builtin = "tk_cstr_dup";       // (str) -> ptr (fresh NUL-terminated copy)
                     else if (seg_is(last, "str_from_cstr")) builtin = "tk_str_from_cstr";  // (ptr) -> str (copy a C string back)
+                    else if (seg_is(last, "os"))            builtin = "tk_rt_os";         // () -> str (host OS — C7.1f)
                     // (err_loc/err_typed handled DEGRADED at the top of this CALL case — native
                     //  error is message-only; the error-struct representation is a Phase-6 follow-on.)
                 }

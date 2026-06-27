@@ -369,8 +369,8 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 | **C7.1b** `extern` checker typing (prims+`ptr`/`uptr`/`void` only) | `chk` | C7.1a |
 | **C7.1c** `extern` codegen emit (C extern proto + call; Teko-name→C-symbol) | `cg` | C7.1a |
 | **C7.1d** `extern` VM handling (defer/stub like the other host bottoms) | `vm` | C7.1a |
-| **C7.1e** `.tkp` `[extern.libs] name = []` → driver `-l<name>` (✅ macOS); full array vocab + `search`/`prefer`/`cc`/`target`/`sysroot` deferred | `build`(manifest), `driver`/`build` | C7.0 |
-| **C7.1f** per-OS symbol/lib resolution + `#os(...)` conditional-compile guard *(Linux/Windows)* | `build`, `L`, `P`, `chk`, `cg` | C7.1a–e · **follow-on** |
+| **C7.1e** `.tkp` `[extern.libs]` FULL array vocab → cc link flags (✅ macOS: empty/bare/multi/path/`-flag`; resolved in manifest → `link_flags`); `[extern.search]`/`prefer`/`static:`/`shared:` mode/`cc`/`target`/`sysroot` deferred (per-OS) | `build`(manifest), `driver`/`build` | C7.0 |
+| **C7.1f** `os()` builtin (✅ `tk_rt_os`) + `[extern]` cc/target/sysroot/freestanding (✅ — cross-build VERIFIED via x86_64-darwin/Rosetta); remaining: per-OS `[extern.search]`/`[extern.libs.<os>]`/static-shared + `#os(...)` conditional-compile *(Linux/Windows binary exec needs cross-toolchain/CI)* | `build`, `L`, `P`, `chk`, `cg`, `rt` | C7.1a–e |
 | **C7.1g** `ptr`/`uptr` opaque transport types (✅) + `extern type` opaque handle (→ `void*`) (✅) | `chk`, `cg`, `ast`, `P` | C7.1a–c |
 | **C7.1i** marshalling primitives `teko::mem::as_ptr`/`as_cstr`/`str_from_cstr`/`bytes_from_ptr` (✅ — complete set; `bytes_from_ptr` via `tk_ffi_bytes`→`tk_slice_byte` lift) | `chk`, `cg`, `rt` | C7.1g |
 | **C7.1h** pointer-family future: `ptr<T>` (deref behind `#repr(C)`) + `ptr ≡ ptr<void>` | — | **S4 generics** |
