@@ -254,16 +254,40 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             loop {
                 if i >= targs.len { break }
                 mut a = targs[i]
-                if !assignable_to(a.type, f.params[i], table) {
-                    // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
-                    if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
-                    a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
-                } else {
-                    // A non-variant widen (T→T?, empty()→[]T, exact) ADOPTS the param type; a case→VARIANT
-                    // widen KEEPS its case type so emit_call wraps it into the variant rep (emit_as).
-                    let pt_is_variant = match expand_variant(f.params[i], table) { Variant => true; _ => false }
-                    if !pt_is_variant {
-                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
+                // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T —
+                // the compiler takes the reference (codegen emits `&`). Requires a `mut` variable (you
+                // can't reference an immutable binding — there'd be nothing to mutate). A value ALREADY
+                // of type `ref<T>` (e.g. forwarding a ref param) takes the normal assignable path below.
+                mut auto_reffed = false
+                match f.params[i] {
+                    Reference as rf => {
+                        if !assignable_to(a.type, f.params[i], table) && type_eq(a.type, rf.inner) {
+                            match a.kind {
+                                TVar as v => match lookup_binding(env, v.name) {
+                                    ValBinding as vb => {
+                                        if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a reference needs a mutable target)" } }
+                                        auto_reffed = true   // keep a.type = T; emit_call emits `&` (param is ref<T>)
+                                    }
+                                    error => return error { message = "auto-ref requires a mutable variable (a `mut` binding)" }
+                                }
+                                _ => return error { message = "a `ref<T>` argument must be a mutable variable (a `mut` binding) — only an lvalue can be referenced" }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if !auto_reffed {
+                    if !assignable_to(a.type, f.params[i], table) {
+                        // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
+                        if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
+                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
+                    } else {
+                        // A non-variant widen (T→T?, empty()→[]T, exact) ADOPTS the param type; a case→VARIANT
+                        // widen KEEPS its case type so emit_call wraps it into the variant rep (emit_as).
+                        let pt_is_variant = match expand_variant(f.params[i], table) { Variant => true; _ => false }
+                        if !pt_is_variant {
+                            a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
+                        }
                     }
                 }
                 args = teko::list::push(args, a)
@@ -491,6 +515,17 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
             return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U32 }; line = 0; col = 0 }
         }
         return error { message = "no such field on error (message/file/expected/actual: str; line/col: u32)" }
+    }
+    // (MEM-1b-ii) `Ref<T>.value` — the deref: reading `r.value` yields the referenced T. A Reference
+    // has no struct body and exposes ONLY `.value` (the pointed-to value); any other field is an error.
+    match recv.type {
+        Reference as rf => {
+            if fa.field == "value" {
+                return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = rf.inner; line = 0; col = 0 }
+            }
+            return error { message = "a reference (`Ref<T>`) exposes only `.value` (the referenced value)" }
+        }
+        _ => {}
     }
     let name = match recv.type {
         Named as n => n.name

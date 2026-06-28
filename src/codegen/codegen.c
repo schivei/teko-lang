@@ -1449,8 +1449,17 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 if (i > 0) cb(b, ", ");
                 if (cf != NULL && i < cf->nparams && cf->params[i].type_ann.tag == TK_TEXPR_NAMED) {
                     tk_path pp = cf->params[i].type_ann.as.named.path;
-                    tk_type exp = { .tag = TK_TYPE_NAMED, .as.named.name = pp.segments[pp.len - 1].name };
-                    if (!emit_as(b, exp, &e->as.call.args[i], err)) return false;
+                    tk_str pn = pp.segments[pp.len - 1].name;
+                    // (MEM-1b-ii) a `Ref<T>` param: AUTO-REF a non-reference arg of the pointed type
+                    // (`&x`); forward an already-reference arg plainly. NOT emit_as (Ref is not a user
+                    // variant). The checker proved the arg is a `mut` lvalue.
+                    if (seg_is(pn, "Ref")) {
+                        if (e->as.call.args[i].type.tag != TK_TYPE_REF) cb(b, "&");
+                        if (!emit_expr(b, &e->as.call.args[i], err)) return false;
+                    } else {
+                        tk_type exp = { .tag = TK_TYPE_NAMED, .as.named.name = pn };
+                        if (!emit_as(b, exp, &e->as.call.args[i], err)) return false;
+                    }
                 } else if (!emit_expr(b, &e->as.call.args[i], err)) return false;
             }
             cb(b, ")");
@@ -1477,6 +1486,14 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                 cb(b, ").");
                 cb_str(b, f);
                 cb(b, ")");
+                return true;
+            }
+            // (MEM-1b-ii) `Ref<T>.value` deref — the reference lowers to a bare `<T> *`, so `.value`
+            // reads `(*recv)` (the receiver IS the pointer; `.value` is its dereference).
+            if (rt.tag == TK_TYPE_REF && seg_is(e->as.field_access.field, "value")) {
+                cb(b, "(*(");
+                if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
+                cb(b, "))");
                 return true;
             }
             // auto-box: reading a recursive back-edge field derefs the heap pointer.

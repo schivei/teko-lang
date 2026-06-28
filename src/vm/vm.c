@@ -1170,6 +1170,16 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
     // FFI surface (the same deferred host edge as the io/fs bottoms). Stop HONESTLY (M.3), never
     // synthesize a value, and point at the native path. (Mirrors vm.tks eval_call.)
     if (fn->is_extern) vm_unsupported("an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)");
+    // (MEM-1b-ii) A `Ref<T>` parameter takes a reference (auto-ref `&x`). The value-semantic VM env
+    // binds args BY VALUE — no aliasing cell — so a write through `r.value` wouldn't reach the caller,
+    // making VM ≠ native. Per the VM==native-BEHAVIOR mandate, stop HONESTLY (M.3): Ref<T> runs
+    // natively (`teko build`); the VM aliasing cell is DEFERRED to after the native-byte backend.
+    for (size_t i = 0; i < fn->nparams; i += 1) {
+        tk_type_expr ta = fn->params[i].type_ann;
+        if (ta.tag == TK_TEXPR_NAMED && ta.as.named.path.len > 0
+            && seg_is(ta.as.named.path.segments[ta.as.named.path.len - 1].name, "Ref"))
+            vm_unsupported("`Ref<T>` is not yet executable in the VM (reference aliasing) — runs natively via `teko build`; VM support deferred to after the native-byte backend");
+    }
     if (!fn->is_test) tk_cov_mark(fn_idx);   // D3 — globally unique index (not line) avoids cross-file collisions
 
     // A fresh root frame — no closure capture (flat functions, like codegen's C). Bind each

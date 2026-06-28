@@ -293,6 +293,19 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     // a fitting literal that adopts it (C6) — same rule as binding/return/assign (single source of truth).
     for (size_t i = 0; i < args.len; i += 1) {
         tk_type pt = ft.as.func.params[i];
+        // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T — the
+        // compiler takes the reference (codegen emits `&`). Requires a `mut` variable. A value already
+        // of type `ref<T>` takes the normal widen path below.
+        if (pt.tag == TK_TYPE_REF && !tk_widens_into(args.ptr[i].type, pt, table)
+            && tk_type_eq(&args.ptr[i].type, pt.as.ref.inner)) {
+            if (args.ptr[i].tag != TK_TEXPR_VAR)
+                return xerr("a `ref<T>` argument must be a mutable variable (a `mut` binding) — only an lvalue can be referenced");
+            tk_binding_result b = tk_env_lookup_binding(env, args.ptr[i].as.var.name);
+            if (!b.ok) return xerr("auto-ref requires a mutable variable (a `mut` binding)");
+            if (!b.as.value.is_mut)
+                return xerr("cannot take a reference to an immutable binding — declare it `mut` (a reference needs a mutable target)");
+            continue;   // keep arg type = T; emit_call emits `&` (param is ref<T>)
+        }
         if (!tk_widens_into(args.ptr[i].type, pt, table)) {
             if (!tk_literal_adopts(args.ptr[i], pt))
                 return xferr(tk_error_types(tk_error_make("argument type mismatch"),
@@ -559,6 +572,15 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
                                    .as.field_access = { box(recv.as.value), fa.field } });
         }
         return xerr("no such field on error (message/file/expected/actual: str; line/col: u32)");
+    }
+    // (MEM-1b-ii) `Ref<T>.value` — the deref: reading `r.value` yields the referenced T. A Reference
+    // exposes ONLY `.value`; any other field is an error.
+    if (recv.as.value.type.tag == TK_TYPE_REF) {
+        if (tk_str_eq(fa.field, (tk_str){ (const tk_byte *)"value", 5 })) {
+            return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = *recv.as.value.type.as.ref.inner,
+                                   .as.field_access = { box(recv.as.value), fa.field } });
+        }
+        return xerr("a reference (`Ref<T>`) exposes only `.value` (the referenced value)");
     }
     if (recv.as.value.type.tag != TK_TYPE_NAMED) return xerr("field access requires a struct receiver");
     tk_decl_result decl = tk_type_table_find(table, recv.as.value.type.as.named.name);

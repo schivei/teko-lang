@@ -1463,7 +1463,17 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
                     match cf.params[j].type_ann {
                         parser::NamedType as nt => {
                             let pn = nt.path.segments[nt.path.segments.len - 1].name
-                            out = match emit_as_r(out, prog, ret_type, checker::Named { name = pn }, c.args[j]) { []byte as o => o; error as err => return err }
+                            // (MEM-1b-ii) a `Ref<T>` param: AUTO-REF a non-reference arg of the pointed
+                            // type (`&x`); forward an already-reference arg plainly. NOT emit_as_r (Ref
+                            // is not a user variant). `&` takes the address of the `mut` lvalue (the
+                            // checker proved it's a `mut` variable).
+                            if pn == "Ref" {
+                                let arg_is_ref = match c.args[j].type { checker::Reference => true; _ => false }
+                                if !arg_is_ref { out = cb(out, "&") }
+                                out = match emit_expr_ret(out, prog, ret_type, c.args[j]) { []byte as o => o; error as err => return err }
+                            } else {
+                                out = match emit_as_r(out, prog, ret_type, checker::Named { name = pn }, c.args[j]) { []byte as o => o; error as err => return err }
+                            }
                             wrapped = true
                         }
                         _ => { }
@@ -1499,6 +1509,14 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
         oe = cb(oe, ").")
         oe = cb_str(oe, fa.field)
         return cb(oe, ")")
+    }
+    // (MEM-1b-ii) `Ref<T>.value` deref — the reference lowers to a bare `<T> *`, so `.value` reads
+    // `(*recv)`. (The receiver `r` is itself the pointer; `.value` is its dereference.)
+    let is_ref = match fa.receiver.type { checker::Reference => true; _ => false }
+    if is_ref && fa.field == "value" {
+        mut or = cb(buf, "(*(")
+        or = match emit_expr(or, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        return cb(or, "))")
     }
     // auto-box: reading a recursive back-edge field derefs the heap pointer.
     let fa_boxed = match fa.receiver.type {

@@ -1600,6 +1600,28 @@ fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Ven
 // explicit `return e` OR (NORMAL) the body's TRAILING value (B.20 — implicit return); a
 // `-> void` fn (or one that falls off the end without a value) produces NO Value: the call is
 // a statement whose result is discarded — there is no `Unit`.
+// (MEM-1b-ii) Honest-stop if a function takes a `Ref<T>` parameter. The value-semantic VM env binds
+// args BY VALUE — it has no aliasing cell — so a write through `r.value` would not reach the caller,
+// making VM ≠ native. Per the VM==native-BEHAVIOR mandate, stop HONESTLY (M.3) rather than give a
+// wrong answer: `Ref<T>` runs NATIVELY (`teko build`); the VM aliasing cell is DEFERRED to after the
+// native-byte backend. (The corpus uses no `Ref<T>`, so this never fires today.) Shared by both call
+// paths (eval_call value-position + call_value statement-position).
+fn ref_param_honest_stop(f: checker::TFunction) {
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        match f.params[i].type_ann {
+            parser::NamedType as nt => {
+                if nt.path.segments[nt.path.segments.len - 1].name == "Ref" {
+                    panic("vm: `Ref<T>` is not yet executable in the VM (reference aliasing) — runs natively via `teko build`; VM support deferred to after the native-byte backend")
+                }
+            }
+            _ => {}
+        }
+        i = i + 1
+    }
+}
+
 fn eval_call(c: checker::TCall, env: Venv) -> Value {
     // A builtin that RAN (`true`) is `-> void`, so there is no Value to yield: a void call
     // only appears in statement position, and reaching here in value position is an honest
@@ -1627,6 +1649,7 @@ fn eval_call(c: checker::TCall, env: Venv) -> Value {
     // FFI surface (the same deferred host edge as the io/fs bottoms). Stop HONESTLY (M.3), never
     // synthesize a value, and point at the native path.
     if f.is_extern { panic("vm: an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)") }
+    ref_param_honest_stop(f)   // (MEM-1b-ii) Ref<T> runs natively; VM aliasing deferred
     if !f.is_test { teko::cov_mark(h.idx) }   // D3 — globally-unique items index (not line) avoids cross-file collisions
     // Bind each parameter to its evaluated argument in a FRESH root frame (no closure capture —
     // flat M0 functions, like codegen's C). Args evaluate in the CALLER's env, then enter the
@@ -1847,6 +1870,7 @@ fn call_value(c: checker::TCall, env: Venv) -> Value? {
     // C7.1a — extern has no Teko body; the VM has no FFI surface. Honest stop (M.3), same as
     // eval_call (this is the STATEMENT-position call path vm.c folds into its single eval_call).
     if f.is_extern { panic("vm: an `extern` function cannot run in the VM (foreign C call) — use `teko build` to compile it natively (C7.1a)") }
+    ref_param_honest_stop(f)   // (MEM-1b-ii) Ref<T> runs natively; VM aliasing deferred
     if !f.is_test { teko::cov_mark(h.idx) }   // D3 — globally-unique items index (parity with eval_call)
     // A FRESH root frame with each parameter bound to its evaluated argument (args evaluate in the
     // CALLER's env, then enter the callee's frame positionally) — the SAME setup as eval_call. Without
