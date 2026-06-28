@@ -5,9 +5,64 @@
 // namespace (LEGISLATION §181–188; namespaces = directories, source root invisible).
 #include "discover.h"
 
-#include <dirent.h>    // M.1 host-IO boundary: opendir/readdir/closedir
 #include <string.h>    // strlen, memcpy, strcmp
 #include <stdlib.h>    // malloc, free, abort
+
+// M.1 host-IO boundary: directory enumeration.
+// On Windows, provide a minimal POSIX-compatible DIR/dirent shim using the
+// Win32 FindFirstFileA/FindNextFileA/FindClose API so the walk() logic below
+// is identical on all platforms.
+#ifdef _WIN32
+#include <windows.h>
+
+typedef struct { char d_name[MAX_PATH]; } tk_dirent;
+typedef struct {
+    HANDLE          hFind;
+    WIN32_FIND_DATAA wfd;
+    bool            first;
+    tk_dirent       dent;
+} TK_DIR;
+
+static TK_DIR *tk_opendir(const char *path) {
+    // Append "\*" to search for all entries under path.
+    size_t plen = strlen(path);
+    if (plen + 3 > MAX_PATH) return NULL;   // path too long for Windows API
+    char pattern[MAX_PATH];
+    memcpy(pattern, path, plen);
+    pattern[plen] = '\\'; pattern[plen + 1] = '*'; pattern[plen + 2] = '\0';
+    TK_DIR *d = (TK_DIR *)malloc(sizeof *d);
+    if (!d) return NULL;
+    d->hFind = FindFirstFileA(pattern, &d->wfd);
+    if (d->hFind == INVALID_HANDLE_VALUE) { free(d); return NULL; }
+    d->first = true;
+    return d;
+}
+static tk_dirent *tk_readdir(TK_DIR *d) {
+    if (d->first) {
+        d->first = false;
+    } else if (!FindNextFileA(d->hFind, &d->wfd)) {
+        return NULL;
+    }
+    size_t n = strlen(d->wfd.cFileName);
+    if (n >= MAX_PATH) n = MAX_PATH - 1;
+    memcpy(d->dent.d_name, d->wfd.cFileName, n);
+    d->dent.d_name[n] = '\0';
+    return &d->dent;
+}
+static void tk_closedir(TK_DIR *d) {
+    if (d->hFind != INVALID_HANDLE_VALUE) FindClose(d->hFind);
+    free(d);
+}
+
+#define DIR      TK_DIR
+#define dirent   tk_dirent
+#define opendir  tk_opendir
+#define readdir  tk_readdir
+#define closedir tk_closedir
+
+#else
+#include <dirent.h>    // opendir/readdir/closedir (POSIX)
+#endif
 
 // --- heap-owned strings (process-lifetime, arena-style — M.5) -----------------
 //
