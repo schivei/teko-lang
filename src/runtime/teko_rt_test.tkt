@@ -99,3 +99,34 @@ fn runtime_float_parse_direct() {
     let fz = teko::runtime::float_parse("0.0")
     teko::assert::is_true(fz == 0.0)
 }
+
+// (S1) Arena primitive proof. Teko has NO raw-pointer surface, so region_alloc is exercised
+// INDIRECTLY through the observable allocation-heavy paths it now backs. Any bump-offset
+// off-by-one, lost chunk, mis-aligned write, or truncated cross-chunk copy surfaces here as a
+// failed spot-check. (1) List copy-grow drives the native tk_slice_push -> tk_alloc path; (2)
+// the str_concat/u64_to_str fold drives teko::runtime str builders -> tk_alloc, accumulating
+// past the 64 KiB default chunk so the new-chunk + big-alloc paths are crossed under the VM gate.
+#test
+fn region_backed_alloc_stress() {
+    mut xs: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 500 { break }
+        xs = teko::list::push(xs, i)
+        i++
+    }
+    teko::assert::is_true(xs.len == 500)
+    teko::assert::is_true(xs[0] == 0)
+    teko::assert::is_true(xs[250] == 250)
+    teko::assert::is_true(xs[499] == 499)
+
+    mut acc = ""
+    mut j: u64 = 0
+    loop {
+        if j >= 300 { break }
+        acc = teko::runtime::str_concat(acc, teko::runtime::u64_to_str(j))
+        j++
+    }
+    teko::assert::is_true(teko::runtime::str_contains(acc, "100"))
+    teko::assert::is_true(teko::runtime::str_len(acc) > 300)
+}

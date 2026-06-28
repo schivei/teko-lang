@@ -7,12 +7,19 @@
 #include <string.h>    // memcpy — for tk_alloc_copy
 #include <stdint.h>    // uint32_t — diagnostic source positions (C1.3)
 
-// ── The allocation SEAM (S0 — TEKO_EVOLUTION_DESIGN §5; the swap point for S1 arenas) ──
-// One choke point for every dynamic allocation in the seed. Today these are thin
-// wrappers over malloc/realloc/free; when arenas (S1) land, the bodies become
-// region_alloc with NO call-site change — the swap is mechanical, exactly here.
-// OOM PANICS (abort — M.1 fail-loud, never a NULL handed back; matches the existing
-// `if (p == NULL) abort();` discipline so callers may drop their own NULL checks).
+// ── The allocation SEAM (S0 — TEKO_EVOLUTION_DESIGN §5; the swap point for arenas) ──
+// One choke point for every dynamic allocation in the COMPILER/VM seed. These are thin
+// wrappers over malloc/realloc/free, with INTERNAL linkage (static inline) — deliberately
+// distinct from the runtime's extern tk_alloc (teko_rt.c). (S1) The runtime seam now
+// bump-allocates from a root region; this compiler seam STAYS on libc, because TK_LIST
+// grows via tk_realloc0 and frees via tk_free0 — and the arena has no per-block size
+// header, so a drop-in realloc is impossible without threading old-size through every
+// list site (an S2-scope migration). Swapping tk_alloc here while realloc0/free0 stay on
+// libc would feed arena memory to libc realloc/free = heap corruption (M.1 forbids it).
+// So the compiler-side swap is DEFERRED TO S2, where lists move wholesale onto
+// region_alloc + a size-aware grow; until then only the four bodies below change, never a
+// call site. OOM PANICS (abort — M.1 fail-loud, never a NULL handed back; matches the
+// existing `if (p == NULL) abort();` discipline so callers may drop their own NULL checks).
 static inline void *tk_alloc(size_t size) {
     void *p = malloc(size == 0 ? 1 : size);   // 0-byte alloc → 1 (a real, freeable pointer)
     if (p == NULL) { abort(); }

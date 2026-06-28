@@ -8,8 +8,9 @@
 #endif
 #include "teko_rt.h"
 #include <stdio.h>    // fwrite, fputc, fputs, stdout, stderr
-#include <stdlib.h>   // abort, malloc, _Exit
+#include <stdlib.h>   // abort, malloc, free, _Exit
 #include <string.h>   // memcpy
+#include <stddef.h>   // max_align_t, offsetof — arena chunk alignment (S1; also via teko_rt.h)
 #include <signal.h>   // signal — native crash backtraces (C1.9)
 // execinfo (backtrace) exists on macOS + glibc, but NOT musl (the Alpine/Linux pipeline). Guard it
 // so the runtime is musl-portable (C7.1f); without it the backtrace degrades to a one-line notice.
@@ -299,10 +300,75 @@ tk_str tk_f64_g17(double x) {
     return (tk_str){ buf, len };
 }
 
+// ── Arena allocation (S1) — bump allocator over a chunk-list. See teko_rt.h. ──
+// Each chunk is one malloc'd block: a header + payload, bump-filled by `used`. The
+// `max_align_t data[]` flexible member forces the payload base to max_align_t alignment,
+// so rounding `used` up to that alignment aligns every sub-allocation exactly as malloc
+// would. Chunks are libc-malloc'd, so tk_region_drop's free() on each is heap-correct (no
+// arena interior pointer is ever passed to libc free). NOTE: the seed is single-threaded;
+// the lazy root init (tk_g_root) is not synchronized — revisit at S8 (concurrency).
+struct tk_chunk { struct tk_chunk *next; size_t cap; size_t used; max_align_t data[]; };
+struct tk_region { struct tk_chunk *head; };
+_Static_assert(offsetof(struct tk_chunk, data) % _Alignof(max_align_t) == 0,
+               "chunk payload base must be max_align_t-aligned");
+
+// Allocate a chunk with `payload` usable bytes; NULL on OOM (the caller decides retry/panic).
+static struct tk_chunk *tk_chunk_try(size_t payload) {
+    struct tk_chunk *c = malloc(offsetof(struct tk_chunk, data) + payload);
+    if (c != NULL) { c->next = NULL; c->cap = payload; c->used = 0; }
+    return c;
+}
+
+tk_region *tk_region_new(void) {
+    tk_region *r = malloc(sizeof *r);          // the region header is itself a libc block
+    if (r == NULL) tk_panic("out of memory");  // (so tk_region_drop can free() it)
+    r->head = NULL;                            // lazy: the first alloc creates the head chunk
+    return r;
+}
+
+void *tk_region_alloc(tk_region *r, size_t n) {
+    if (n == 0) n = 1;                              // n→1: a zero-size alloc yields a distinct pointer
+    size_t align = _Alignof(max_align_t);
+    size_t an = (n + (align - 1)) & ~(align - 1);   // round the request up to alignment
+    if (r->head != NULL) {                          // fits in the current chunk?
+        size_t base = (r->head->used + (align - 1)) & ~(align - 1);
+        if (base <= r->head->cap && an <= r->head->cap - base) {
+            r->head->used = base + an;
+            return (char *)r->head->data + base;
+        }
+    }
+    // New chunk. Ordinary requests get the default chunk (so subsequent small allocs share
+    // it); a request larger than the default gets a chunk just big enough. If the (possibly
+    // large) chunk malloc fails, retry at the exact request size before panicking, so any
+    // allocation the old malloc(n) could satisfy still succeeds (keeps OOM near the old edge).
+    size_t want = an > TK_REGION_DEFAULT_CHUNK ? an : TK_REGION_DEFAULT_CHUNK;
+    struct tk_chunk *c = tk_chunk_try(want);
+    if (c == NULL && want != an) c = tk_chunk_try(an);
+    if (c == NULL) tk_panic("out of memory");       // M.1 — identical message to the old tk_alloc
+    c->used = an;
+    c->next = r->head;
+    r->head = c;
+    return (char *)c->data;                          // base 0 is max_align_t-aligned (flexible member)
+}
+
+void tk_region_drop(tk_region *r) {
+    if (r == NULL) return;                           // NULL-tolerant
+    struct tk_chunk *c = r->head;
+    while (c != NULL) { struct tk_chunk *next = c->next; free(c); c = next; }
+    free(r);
+}
+
+static tk_region *tk_g_root = NULL;   // single-threaded seed (S8 revisit); lazy + idempotent
+tk_region *tk_region_root(void) {
+    if (tk_g_root == NULL) tk_g_root = tk_region_new();
+    return tk_g_root;
+}
+
 void *tk_alloc(size_t n) {
-    void *p = malloc(n ? n : 1);   // n→1 so a zero-size alloc still yields a unique pointer
-    if (p == NULL) tk_panic("out of memory");
-    return p;
+    // (S1) Route through the process root region: bump-allocated, never dropped = today's
+    // malloc-everywhere leak (M.5). OOM still panics (M.1, never NULL). Same contract as the
+    // S0 malloc(n?n:1), only the bytes now come from a region chunk instead of libc directly.
+    return tk_region_alloc(tk_region_root(), n);
 }
 
 void tk_print(tk_str s) {

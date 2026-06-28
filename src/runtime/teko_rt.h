@@ -81,10 +81,37 @@ TK_RT_LIST(tk_byte,   tk_byte_list)    // []byte  — byte builder, str of bytes
 TK_RT_LIST(tk_str,    tk_str_list)     // []str   — string accumulator lists (argv, paths, …)
 TK_RT_LIST(int64_t,   tk_i64_list)     // []i64   — integer accumulator lists
 
-// tk_alloc — the allocation seam (S0). malloc(n) (n→1 when 0 so the result is unique); tk_panic
-// on OOM (M.1). Generated code allocates through this: slice copy-append AND the auto-boxed
-// recursive-value-type back-edges (tk_alloc(sizeof *p)). The S2 arena campaign swaps this seam.
+// tk_alloc — the allocation seam (S0→S1). Hands back a fresh, uniquely-addressable,
+// max_align_t-aligned block of ≥ n usable bytes (n→1 when 0 so the result is unique);
+// tk_panic on OOM (M.1, never NULL). Generated code allocates through this: slice
+// copy-append AND the auto-boxed recursive-value-type back-edges (tk_alloc(sizeof *p)).
+// (S1) The body now bump-allocates from the process ROOT region (tk_region_root) instead
+// of calling malloc directly — the swap is mechanical, the contract is unchanged, and the
+// root is never dropped so the leak profile is identical to malloc-everywhere (M.5).
+// LINKAGE NOTE: this is the EXTERN runtime tk_alloc, distinct from core.h's static-inline
+// tk_alloc (internal linkage, used by the compiler/VM TUs over libc). The two never merge;
+// do NOT give core.h's tk_alloc external linkage nor #include this header into a vm.c-linked
+// TU — that would route VM allocations to the arena while their tk_free0 stays libc (corruption).
 void *tk_alloc(size_t n);
+
+// ── Arena allocation (S1 — TEKO_EVOLUTION_DESIGN §5.2: arena primitive + root region) ──
+// A bump-allocator REGION: a chunk-list of malloc'd blocks, sub-allocated by a bump offset.
+// No per-object metadata, no free-list (M.0 metal/no-GC). region_alloc results are
+// max_align_t-aligned (malloc's own guarantee), so every type that was malloc-stored stays
+// correctly aligned. OOM panics (M.1, never NULL). region_drop bulk-frees the whole span in
+// one pass (the S2 keystone). The process ROOT region (tk_region_root) is never dropped in
+// S1 → its memory lives for the whole process = today's malloc-everywhere leak (M.5
+// leak-tolerant), so routing tk_alloc through it is behavior-preserving (the only divergence
+// is the OOM boundary, which shifts by the per-chunk header — still fail-loud, M.1).
+// S1 reroutes ONLY this runtime seam; core.h's compiler seam stays on libc until S2's
+// realloc-aware list migration (the arena has no per-block size header, so a drop-in realloc
+// needs old-size threaded through TK_LIST — an S2-scope change).
+#define TK_REGION_DEFAULT_CHUNK (64u * 1024u)   // default chunk payload (bytes)
+typedef struct tk_region tk_region;             // opaque — full struct lives in teko_rt.c
+tk_region *tk_region_new(void);                 // a fresh empty region (default chunk size)
+void      *tk_region_alloc(tk_region *r, size_t n);  // bump-allocate n (n→1), aligned; OOM→panic
+void       tk_region_drop(tk_region *r);        // bulk-free every chunk + the region (NULL-tolerant)
+tk_region *tk_region_root(void);                // the process root region (lazy; never dropped in S1)
 
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
