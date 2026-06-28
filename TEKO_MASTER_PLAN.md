@@ -576,6 +576,7 @@ start until the previous wave's integration gate passes: **build green + VM==nat
 | | **C11.2** quality sweep — checker | `chk`, `match`, `collect`, `res`, `scope`, `tast` | | |
 | | **C11.3** quality sweep — codegen + vm | `cg`, `vm` | | |
 | | **C11.4** quality sweep — emit + runtime + build + assert + main | `tkb`, `rt`, `build`, `assert`, `main` | **4** | DRY ✓ · KISS ✓ · SOLID ✓ · YAGNI ✓ · 12F-III/V/IX/XI/XII ✓ · comments `/** */` · VM==native |
+| **W16** | **C12.1** self-host RAW byte-identity — make the codegen temp-name (gensym) scheme deterministic in BOTH `codegen.c` and `codegen.tks` (today both use `buf.len`, which requires byte-for-byte-identical emission at every sampling point; a single sub-byte timing diff cascades into all temp NUMBERS). gen-1 (C bootstrap) vs gen-2 (self-hosted) currently differ ONLY in temp numbers (temp-normalized AND all-number-normalized diff = 0; 178 tests × 3 gens). NOTE: gen-2 == gen-3 ALREADY (self-hosted compiler is a stable FIXPOINT) — the divergence is only the one-time C→self-host transition. Verify via MULTI-GENERATION convergence (gen-1==gen-2==gen-3==…). *(deps: self-host green ✅; defer codegen parity ✅ commit 52a544a)* | `cg` | **1** | gen-1 == gen-2 byte-identical + 178 tests × N gens |
 
 **Deferred ceilings (never enter the sequence):** borrow-solver / lifetime-variable system; region-polymorphism. Implicit-copy-on-escape → tribunal (lean: NO). *(async/await → W14; M:N scheduler → W13 — both removed from deferred.)*
 
