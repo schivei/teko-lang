@@ -35,6 +35,8 @@ tk_tprogram_result tk_deserialize_program(const tk_byte *data, size_t len);
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
 #include <unistd.h>          // chdir (run the project path from its own root — A3)
+#include <spawn.h>           // posix_spawnp — safer cc invocation without shell
+#include <sys/wait.h>        // waitpid, WIFEXITED, WEXITSTATUS
 #include <sys/stat.h>        // mkdir — the native build output dir (./bin)
 #include <dirent.h>          // opendir/readdir — find the single *.tkp manifest
 
@@ -242,64 +244,103 @@ static bool write_macos_plist(const char *path, tk_manifest m) {
 
 // Run the host C compiler over `cfile`, producing `binary`. Returns 0 on success.
 static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
-    // F3: the generated C does `#include "teko_rt.h"` and calls tk_print/tk_println (teko_rt.c) plus
-    // teko__assert__* (src/assert/assert.c), so the host cc must see the runtime dir (-I) and compile
-    // BOTH seed sources (M.5 — one reuse-the-host-toolchain cc invocation). Quote every path.
-    // C7.1f: [extern] cross/driver knobs — cc override, -target, --sysroot, -nostdlib (freestanding).
+    // F3: build argv for posix_spawnp — mirrors driver.tks::run_cc's teko::process::run(argv).
+    // Passing paths as argv elements (no shell) eliminates shell-injection risk.
     char *ccprog = m.cc.len ? cstr_of(m.cc) : NULL;
     const char *cc = ccprog ? ccprog : "cc";
-    char xflags[1024]; xflags[0] = '\0'; size_t xo = 0;
-    if (m.target.len)  { char *t = cstr_of(m.target);  xo += (size_t)snprintf(xflags + xo, sizeof xflags - xo, " -target %s", t); tk_free0(t); }
-    if (m.sysroot.len) { char *s = cstr_of(m.sysroot); xo += (size_t)snprintf(xflags + xo, sizeof xflags - xo, " --sysroot \"%s\"", s); tk_free0(s); }
-    const char *nostd = m.freestanding ? " -nostdlib" : "";
-    const char *libm  = m.freestanding ? "" : " -lm";
-    // C7.1e: the [extern.libs] RESOLVED link flags (`-l<name>` / paths / raw), already produced by
-    // the manifest. Appended verbatim AFTER the sources so the linker resolves them (link order).
-    // C7.1f: the DEFERRED per-OS [extern.libs.<os>] flags — appended only when their OS matches the
-    // target (host, or `[extern] target`). Resolved HERE (native), so manifest parse stays host-independent.
+    char *target_str  = m.target.len  ? cstr_of(m.target)  : NULL;
+    char *sysroot_str = m.sysroot.len ? cstr_of(m.sysroot) : NULL;
     tk_str tos = target_os_of(m);
-    size_t libcap = 1;
-    for (size_t i = 0; i < m.link_flags.len; i++) libcap += m.link_flags.ptr[i].len + 2;   // " " + flag
-    for (size_t i = 0; i < m.os_lib_flag.len; i++) if (os_str_eq(m.os_lib_os.ptr[i], tos)) libcap += m.os_lib_flag.ptr[i].len + 2;
-    char *libflags = tk_alloc(libcap);
-    libflags[0] = '\0';
-    size_t lo = 0;
-    for (size_t i = 0; i < m.link_flags.len; i++) {
-        lo += (size_t)snprintf(libflags + lo, libcap - lo, " %.*s",
-                               (int)m.link_flags.ptr[i].len, (const char *)m.link_flags.ptr[i].ptr);
-    }
-    for (size_t i = 0; i < m.os_lib_flag.len; i++) {
-        if (!os_str_eq(m.os_lib_os.ptr[i], tos)) continue;
-        lo += (size_t)snprintf(libflags + lo, libcap - lo, " %.*s",
-                               (int)m.os_lib_flag.ptr[i].len, (const char *)m.os_lib_flag.ptr[i].ptr);
-    }
-    // C7.1k: on macOS, embed an Info.plist section so the Mach-O carries native version metadata.
-    // Best-effort — a plist write failure must not break the build. (Windows VERSIONINFO follows.)
-    char *secflag = NULL, *plistp = NULL;
+
+    // C7.1k: macOS Info.plist section for Mach-O version metadata.
+    char *plistp = NULL, *secarg = NULL;
     if (tos.len == 5 && memcmp(tos.ptr, "macos", 5) == 0) {
         size_t pl = strlen(binary) + strlen(".Info.plist") + 1;
         plistp = tk_alloc(pl);
         snprintf(plistp, pl, "%s.Info.plist", binary);
         if (write_macos_plist(plistp, m)) {
-            size_t sl = strlen(" -Wl,-sectcreate,__TEXT,__info_plist,") + strlen(plistp) + 1;
-            secflag = tk_alloc(sl);
-            snprintf(secflag, sl, " -Wl,-sectcreate,__TEXT,__info_plist,%s", plistp);
+            size_t sl = strlen("-Wl,-sectcreate,__TEXT,__info_plist,") + strlen(plistp) + 1;
+            secarg = tk_alloc(sl);
+            snprintf(secarg, sl, "-Wl,-sectcreate,__TEXT,__info_plist,%s", plistp);
         }
     }
-    const char *sec = secflag ? secflag : "";
-    size_t cap = strlen(cc) + strlen(xflags) + strlen(nostd) + strlen(libm) + strlen(cfile) + strlen(binary)
-               + 2 * strlen(TK_RT_DIR) + 2 * strlen(TK_SRC_DIR) + strlen("/assert") + strlen("/teko_rt.c")
-               + strlen("/assert/assert.c") + strlen(libflags) + strlen(sec) + 96;   // fixed flags incl. -w/-std/-ferror-limit + quotes
-    char *cmd = tk_alloc(cap);
-    // -w: silence warnings on generated C (machine output). -ferror-limit=0 still shows every genuine ERROR.
-    snprintf(cmd, cap,
-             "%s -std=c23 -w -ferror-limit=0%s%s -I\"%s\" -I\"%s/assert\" \"%s\" \"%s/teko_rt.c\" \"%s/assert/assert.c\"%s%s%s -o \"%s\"",
-             cc, xflags, nostd, TK_RT_DIR, TK_SRC_DIR, cfile, TK_RT_DIR, TK_SRC_DIR, libm, libflags, sec, binary);
-    int rc = system(cmd);
-    tk_free0(cmd);
-    tk_free0(libflags);
-    if (secflag) tk_free0(secflag);
-    if (plistp)  tk_free0(plistp);
+
+    // Build -I and source path strings (combined -I<dir> form, no shell quoting needed).
+    char *i_rt = tk_alloc(strlen(TK_RT_DIR) + 3);
+    snprintf(i_rt, strlen(TK_RT_DIR) + 3, "-I%s", TK_RT_DIR);
+    char *i_assert = tk_alloc(strlen(TK_SRC_DIR) + 10);
+    snprintf(i_assert, strlen(TK_SRC_DIR) + 10, "-I%s/assert", TK_SRC_DIR);
+    char *rt_c = tk_alloc(strlen(TK_RT_DIR) + 12);
+    snprintf(rt_c, strlen(TK_RT_DIR) + 12, "%s/teko_rt.c", TK_RT_DIR);
+    char *assert_c = tk_alloc(strlen(TK_SRC_DIR) + 18);
+    snprintf(assert_c, strlen(TK_SRC_DIR) + 18, "%s/assert/assert.c", TK_SRC_DIR);
+
+    // Convert per-OS link flags to cstrs.
+    size_t nos_lib = 0;
+    for (size_t i = 0; i < m.os_lib_flag.len; i++)
+        if (os_str_eq(m.os_lib_os.ptr[i], tos)) nos_lib++;
+    char **os_flags = nos_lib ? tk_alloc(nos_lib * sizeof(char *)) : NULL;
+    size_t of = 0;
+    for (size_t i = 0; i < m.os_lib_flag.len; i++) {
+        if (!os_str_eq(m.os_lib_os.ptr[i], tos)) continue;
+        os_flags[of++] = cstr_of(m.os_lib_flag.ptr[i]);
+    }
+
+    // Convert [extern.libs] link flags to cstrs.
+    char **lf = m.link_flags.len ? tk_alloc(m.link_flags.len * sizeof(char *)) : NULL;
+    for (size_t i = 0; i < m.link_flags.len; i++)
+        lf[i] = cstr_of(m.link_flags.ptr[i]);
+
+    // Assemble argv: fixed flags + optional target/sysroot + includes + sources + libs + output.
+    size_t max_args = 24 + m.link_flags.len + nos_lib;
+    char **argv = tk_alloc(max_args * sizeof(char *));
+    size_t argc = 0;
+
+    argv[argc++] = (char *)cc;
+    argv[argc++] = "-std=c23";
+    argv[argc++] = "-w";
+    argv[argc++] = "-ferror-limit=0";
+    if (target_str)  { argv[argc++] = "-target";    argv[argc++] = target_str; }
+    if (sysroot_str) { argv[argc++] = "--sysroot";  argv[argc++] = sysroot_str; }
+    if (m.freestanding) argv[argc++] = "-nostdlib";
+    argv[argc++] = i_rt;
+    argv[argc++] = i_assert;
+    argv[argc++] = (char *)cfile;
+    argv[argc++] = rt_c;
+    argv[argc++] = assert_c;
+    if (!m.freestanding) argv[argc++] = "-lm";
+    for (size_t i = 0; i < m.link_flags.len; i++) argv[argc++] = lf[i];
+    for (size_t i = 0; i < nos_lib;           i++) argv[argc++] = os_flags[i];
+    if (secarg) argv[argc++] = secarg;
+    argv[argc++] = "-o";
+    argv[argc++] = (char *)binary;
+    argv[argc]   = NULL;
+
+    // Invoke the host compiler directly (no shell) via posix_spawnp.
+    // environ is POSIX-standard but not always declared in <unistd.h> on all platforms.
+    extern char **environ;
+    int rc = -1;
+    pid_t pid;
+    if (posix_spawnp(&pid, cc, NULL, NULL, argv, environ) == 0) {
+        int status = 0;
+        if (waitpid(pid, &status, 0) == pid)
+            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    if (lf) {
+        for (size_t i = 0; i < m.link_flags.len; i++) tk_free0(lf[i]);
+        tk_free0(lf);
+    }
+    if (os_flags) {
+        for (size_t i = 0; i < nos_lib; i++) tk_free0(os_flags[i]);
+        tk_free0(os_flags);
+    }
+    tk_free0(argv);
+    tk_free0(i_rt); tk_free0(i_assert); tk_free0(rt_c); tk_free0(assert_c);
+    if (target_str)  tk_free0(target_str);
+    if (sysroot_str) tk_free0(sysroot_str);
+    if (secarg) tk_free0(secarg);
+    if (plistp) tk_free0(plistp);
     if (ccprog) tk_free0(ccprog);
     return rc;
 }

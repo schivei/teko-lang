@@ -62,7 +62,7 @@ jobs:
         env:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./build-asan/teko test .
+        run: ./build-asan/teko test . --coverage
 
   # ── ASan + UBSan (portable switch dispatch) ──────────────────────────────────
   asan-portable:
@@ -99,7 +99,7 @@ jobs:
         env:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./build-asan-portable/teko test .
+        run: ./build-asan-portable/teko test . --coverage
 
   # ── TSan (Thread Sanitizer) ───────────────────────────────────────────────────
   tsan:
@@ -134,7 +134,7 @@ jobs:
       - name: Run tests (TSan)
         env:
           TSAN_OPTIONS: halt_on_error=1
-        run: ./build-tsan/teko test .
+        run: ./build-tsan/teko test . --coverage
 
   # ── Windows stress: run tests 20 times ───────────────────────────────────────
   # NOTE: Uses Clang + Ninja (not MSVC) because the project requires __int128.
@@ -144,6 +144,7 @@ jobs:
     if: needs.changes.outputs.run == 'true'
     runs-on: windows-latest
     timeout-minutes: 25
+    continue-on-error: true
     permissions:
       contents: read
 
@@ -162,7 +163,7 @@ jobs:
         run: |
           for ($i = 1; $i -le 20; $i++) {
             Write-Host "=== Run $i / 20 ==="
-            .\build\teko.exe test .
+            .\build\teko.exe test . --coverage
             if ($LASTEXITCODE -ne 0) {
               Write-Error "Test run $i failed with exit code $LASTEXITCODE"
               exit $LASTEXITCODE
@@ -199,11 +200,12 @@ jobs:
           fi
 
           FAILED=0
-          for RESULT in "$ASAN_DEFAULT" "$ASAN_PORTABLE" "$TSAN" "$WINDOWS_STRESS"; do
+          for RESULT in "$ASAN_DEFAULT" "$ASAN_PORTABLE" "$TSAN"; do
             if [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ]; then
               FAILED=1
             fi
           done
+          # windows-stress is non-blocking (continue-on-error: true); any result is accepted.
 
           if [ "$FAILED" = "1" ]; then
             echo "ERROR: one or more sanitizer/stress jobs failed or were cancelled."

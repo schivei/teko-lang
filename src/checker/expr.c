@@ -313,7 +313,7 @@ static __int128 s_min(tk_prim_kind k) {
         case TK_PRIM_I16:  return (__int128)INT64_C(-32768);
         case TK_PRIM_I32:  return (__int128)INT64_C(-2147483648);
         case TK_PRIM_I64:  return (__int128)INT64_MIN;
-        default:           return (__int128)1 << 127;   // I128 min = -2^127
+        default:           return (__int128)INT64_MIN * ((__int128)1 << 64);   // I128 min = -2^127
     }
 }
 static __int128 s_max(tk_prim_kind k) {
@@ -322,7 +322,7 @@ static __int128 s_max(tk_prim_kind k) {
         case TK_PRIM_I16:  return (__int128)INT64_C(32767);
         case TK_PRIM_I32:  return (__int128)INT64_C(2147483647);
         case TK_PRIM_I64:  return (__int128)INT64_MAX;
-        default:           return ~((__int128)1 << 127);   // I128 max = 2^127-1
+        default:           return ~((__int128)INT64_MIN * ((__int128)1 << 64));   // I128 max = 2^127-1
     }
 }
 // does an INTEGER literal `v` fit the integer prim `k`? (B.38 — extended to 128-bit.)
