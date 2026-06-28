@@ -997,11 +997,11 @@ static tk_value eval_compare(const tk_texpr *e, tk_venv *env) {
 // Closed signed-range bounds [lo, hi] of a SIGNED int prim at `width` bits, on the
 // 128-bit signed axis (i8..i128).
 static __int128 i_min_of(int width) {
-    if (width >= 128) return (__int128)1 << 127;   // INT128_MIN
+    if (width >= 128) return (__int128)INT64_MIN * ((__int128)1 << 64);   // -2^127
     return -(((__int128)1) << (width - 1));
 }
 static __int128 i_max_of(int width) {
-    if (width >= 128) return ~((__int128)1 << 127);   // INT128_MAX
+    if (width >= 128) return ~((__int128)INT64_MIN * ((__int128)1 << 64));   // 2^127-1
     return (((__int128)1) << (width - 1)) - 1;
 }
 // Max value of an UNSIGNED int prim at `width` bits, on the 128-bit unsigned axis.
