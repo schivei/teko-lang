@@ -118,43 +118,16 @@ add_library(teko_bootstrap STATIC
 # teko__assert__*), so the compiler binary itself links teko_rt.c — the same source the
 # driver also hands to the host cc for generated programs. It is kept an EXE source (not in
 # the lib) so it is never double-linked into the generated programs the driver builds.
-add_executable(teko main.c src/driver.c src/runtime/teko_rt.c)
+add_executable(teko main.c src/driver.c src/runtime/teko_rt.c src/win32_int128_builtins.c)
 target_link_libraries(teko PRIVATE teko_bootstrap)
 # vm.c calls floor() via the f64 arithmetic path; Linux requires explicit -lm linkage.
 if(UNIX AND NOT APPLE)
     target_link_libraries(teko PRIVATE m)
 endif()
-# Clang on Windows (MSVC ABI target) does not automatically link compiler-rt builtins.
-# The teko VM uses __int128 for 128-bit integer arithmetic, which requires software-emulation
-# helpers (__divti3, __udivti3, __modti3, __umodti3, __floattidf, …) from compiler-rt.
-# Ask clang where its runtime dir is and link the matching builtins library.
-if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    execute_process(
-        COMMAND ${CMAKE_C_COMPILER} --print-runtime-dir
-        OUTPUT_VARIABLE TK_CLANG_RT_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
-        set(TK_CLANG_RT_ARCH "aarch64")
-    else()
-        set(TK_CLANG_RT_ARCH "x86_64")
-    endif()
-    # LLVM 15+ per-target layout: runtime dir IS the target-triple dir; filename has no arch suffix.
-    # Older layout: clang_rt.builtins-<arch>.lib inside a windows/ subdir (also found via --print-runtime-dir).
-    # Try no-suffix first (matches LLVM 15+ on GitHub Actions windows-latest / windows-11-arm runners).
-    if(EXISTS "${TK_CLANG_RT_DIR}/clang_rt.builtins.lib")
-        set(TK_BUILTINS_LIB "${TK_CLANG_RT_DIR}/clang_rt.builtins.lib")
-    elseif(EXISTS "${TK_CLANG_RT_DIR}/clang_rt.builtins-${TK_CLANG_RT_ARCH}.lib")
-        set(TK_BUILTINS_LIB "${TK_CLANG_RT_DIR}/clang_rt.builtins-${TK_CLANG_RT_ARCH}.lib")
-    else()
-        set(TK_BUILTINS_LIB "")
-    endif()
-    if(TK_BUILTINS_LIB)
-        target_link_libraries(teko PRIVATE "${TK_BUILTINS_LIB}")
-    else()
-        message(WARNING "teko: compiler-rt builtins not found in ${TK_CLANG_RT_DIR}; __int128 arithmetic may fail to link")
-    endif()
-endif()
+# src/win32_int128_builtins.c provides __divti3/__udivti3/__modti3/__umodti3/
+# __floattidf/__floatuntidf/__fixdfti/__fixunsdfti — the compiler-rt builtins
+# needed for __int128 arithmetic on Windows. Clang on MSVC ABI does not
+# auto-link these; the file is all-#ifdef _WIN32 so it is a no-op on POSIX.
 # The VM interpreter uses deep C recursion when running the Teko parser/lexer during
 # `teko test` (each Teko function call adds ~4 C frames; parsing 66 files × recursive
 # descent easily exceeds the default 8MB main-thread stack). Set to 64MB to give enough room.
