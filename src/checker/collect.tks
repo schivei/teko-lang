@@ -22,11 +22,12 @@ fn collect_types(items: []parser::Item) -> TypeTable {
 
 // a function's signature as a FuncType (resolve its param + return types).
 fn func_type(f: parser::Function, table: TypeTable) -> Type | error {
+    let tbl = type_param_table(f.type_params, "", table)   // (S4) the fn's generic type-params, opaque, in scope
     mut params: []Type = teko::list::empty()
     mut i = 0
     loop {
         if i >= f.params.len { break }
-        let pt = match resolve_type(f.params[i].type_ann, table) {
+        let pt = match resolve_type(f.params[i].type_ann, tbl) {
             Type as t  => t
             error as e => return e
         }
@@ -36,7 +37,7 @@ fn func_type(f: parser::Function, table: TypeTable) -> Type | error {
     // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty no_type() placeholder, NOT a
     // value type, so it must not be resolved. Mirrors typer.tks's function typer.
     let ret = if f.has_return {
-        match resolve_type(f.return_type, table) { Type as t => t; error as e => return e }
+        match resolve_type(f.return_type, tbl) { Type as t => t; error as e => return e }
     } else {
         Void { }
     }
@@ -161,11 +162,12 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
             TFunction as f => {
                 // Build the Func type from the resolved return_type + param type annotations.
                 // We resolve param types now (against the merged table `t`) just like collect_funcs.
+                let dtbl = type_param_table(f.type_params, "", t)   // (S4) no-op for concrete deps
                 mut params: []Type = teko::list::empty()
                 mut pi: u64 = 0
                 loop {
                     if pi >= f.params.len { break }
-                    let pt = match resolve_type(f.params[pi].type_ann, t) { Type as ty => ty; error as err => return err }
+                    let pt = match resolve_type(f.params[pi].type_ann, dtbl) { Type as ty => ty; error as err => return err }
                     params = teko::list::push(params, pt)
                     pi++
                 }

@@ -150,6 +150,24 @@ tk_decl_result tk_type_table_find(tk_type_table table, tk_str name) {
     return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
 }
 
+// (S4) extend the table with generic type-params as OPAQUE nominal types (an unconstrained T has
+// no members/operators → operating on it fails at the definition; no reflection). Prepended so a
+// type-param shadows a same-named user type. Empty → unchanged. (resolve.tks: type_param_table.)
+tk_type_table tk_type_param_table(tk_str *type_params, size_t n_type_params, tk_str ns, tk_type_table table) {
+    if (n_type_params == 0) return table;
+    tk_type_table tbl = tk_type_table_empty();
+    for (size_t i = 0; i < n_type_params; i += 1) {
+        // namespace = the USING namespace so the W-vis-enforce check (check_modules) treats the
+        // type-param as a LOCAL type, not a bare cross-namespace reference.
+        tk_type_decl d = { .name = type_params[i], .type_params = NULL, .n_type_params = 0,
+                           .body = { .tag = TK_BODY_EXTERN, .as.extern_body = { 0 } },
+                           .vis = TK_VIS_PRIVATE, .has_doc = false, .doc = (tk_str){0}, .line = 0, .col = 0 };
+        tbl = tk_type_table_push(tbl, (tk_type_reg){ .name = type_params[i], .namespace = ns, .vis = TK_VIS_PRIVATE, .decl = d });
+    }
+    for (size_t j = 0; j < table.len; j += 1) { tbl = tk_type_table_push(tbl, table.ptr[j]); }
+    return tbl;
+}
+
 // non-static: shared with match.c (the typed pattern checker resolves case/struct names — C7).
 tk_type_result resolve_named(tk_path path, tk_type_table table) {
     if (path.len == 0)   // M.1: an empty path is an internal invariant break — an honest error, never a crash

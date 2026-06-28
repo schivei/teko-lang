@@ -19,6 +19,9 @@ tk_error tk_error_named(const char *msg, tk_str name);
 
 tk_decl_result tk_type_table_find(tk_type_table table, tk_str name);
 tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table);
+// (S4) extend the table with generic type-params as OPAQUE nominal types (see resolve.c). Used by
+// collect (func sigs), check_modules (vis check), and typer (bodies). Empty → table unchanged.
+tk_type_table tk_type_param_table(tk_str *type_params, size_t n_type_params, tk_str ns, tk_type_table table);
 tk_type_result resolve_named(tk_path path, tk_type_table table);   // shared with match.c (C7)
 // B.14 — a NAMED type that refers to a `variant` decl → its expanded TK_TYPE_VARIANT (members
 // stay NAMED, so it terminates); anything else is returned unchanged. Lets assignability and

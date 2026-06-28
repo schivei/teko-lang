@@ -17,9 +17,10 @@ static tk_type_table collect_types(tk_item *items, size_t n) {
 }
 
 static tk_type_result func_type(tk_function f, tk_type_table table) {
+    tk_type_table tbl = tk_type_param_table(f.type_params, f.n_type_params, (tk_str){0}, table);   // (S4) opaque type-params in scope
     tk_type *params = NULL; size_t n = 0;
     for (size_t i = 0; i < f.nparams; i += 1) {
-        tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
+        tk_type_result pt = tk_resolve_type(f.params[i].type_ann, tbl);
         if (!pt.ok) { tk_free0(params); return pt; }
         params = tk_realloc0(params, (n + 1) * sizeof *params);
         if (!params) abort();
@@ -29,7 +30,7 @@ static tk_type_result func_type(tk_function f, tk_type_table table) {
     // (a NAMED type-expr with an empty path), which must NOT be resolved (it is not a value type).
     // Mirrors typer.c's function typer (`if (!f.has_return) return void_t()`).
     tk_type_result ret = f.has_return
-        ? tk_resolve_type(f.return_type, table)
+        ? tk_resolve_type(f.return_type, tbl)
         : (tk_type_result){ .ok = true, .as.value = (tk_type){ .tag = TK_TYPE_VOID } };
     if (!ret.ok) { tk_free0(params); return ret; }
     tk_type *rp = tk_alloc(sizeof *rp); if (!rp) abort(); *rp = ret.as.value;
@@ -119,11 +120,12 @@ tk_collected_result tk_seed_from_dep(tk_tprogram dep, tk_type_table table, tk_en
         tk_tfunction f = dep.items[j].as.function;
 
         // Build param types by resolving the param type annotations against `table`.
+        tk_type_table dtbl = tk_type_param_table(f.type_params, f.n_type_params, (tk_str){0}, table);   // (S4) no-op for concrete deps
         tk_type *params = NULL; size_t np = 0;
         bool ok = true;
         tk_error err = {0};
         for (size_t k = 0; k < f.nparams; k += 1) {
-            tk_type_result pt = tk_resolve_type(f.params[k].type_ann, table);
+            tk_type_result pt = tk_resolve_type(f.params[k].type_ann, dtbl);
             if (!pt.ok) { ok = false; err = pt.as.error; break; }
             params = tk_realloc0(params, (np + 1) * sizeof *params);
             params[np++] = pt.as.value;

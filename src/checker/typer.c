@@ -361,9 +361,10 @@ static bool teko_rt_type_ok(tk_type t) {
 
 tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table table) {
     tk_env local = env;
+    tk_type_table tbl = tk_type_param_table(f.type_params, f.n_type_params, (tk_str){0}, table);   // (S4) opaque type-params in scope
     bool is_teko_rt = f.is_extern && str_eq(f.from_lib, "teko_rt");   // C7.2: bypass for Teko's own runtime
     for (size_t i = 0; i < f.nparams; i += 1) {           // params immutable (B.21)
-        tk_type_result pt = tk_resolve_type(f.params[i].type_ann, table);
+        tk_type_result pt = tk_resolve_type(f.params[i].type_ann, tbl);
         if (!pt.ok) return (tk_tfunction_result){ .ok = false, .as.error = pt.as.error };
         if (f.is_extern && !is_teko_rt && !extern_type_ok(pt.as.value, table)) {
             return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)") };
@@ -373,7 +374,7 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
         }
         local = tk_env_define(local, f.params[i].name, pt.as.value, false);
     }
-    tk_type ret = function_return(f, table);
+    tk_type ret = function_return(f, tbl);
     if (f.is_extern) {
         // a bodyless foreign declaration: no body to check / return-analyze. Validate the
         // return marshals (void = no value is fine; else prim/byte only for now).
@@ -382,13 +383,13 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
         if (!ret_ok) {
             return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)") };
         }
-        tk_tfunction ef = { .name = f.name, .params = f.params, .nparams = f.nparams,
+        tk_tfunction ef = { .name = f.name, .type_params = f.type_params, .n_type_params = f.n_type_params, .params = f.params, .nparams = f.nparams,
                             .return_type = ret, .body = NULL, .nbody = 0,
                             .vis = f.vis, .has_doc = f.has_doc, .doc = f.doc, .is_test = f.is_test,
                             .is_extern = true, .c_symbol = f.c_symbol, .from_lib = f.from_lib };
         return (tk_tfunction_result){ .ok = true, .as.value = ef };
     }
-    tk_typed_block_result tb = tk_type_block(f.body, f.nbody, local, table);
+    tk_typed_block_result tb = tk_type_block(f.body, f.nbody, local, tbl);
     if (!tb.ok) return (tk_tfunction_result){ .ok = false, .as.error = tb.as.error };
     { tk_error e = check_returns(tb.as.value.stmts, tb.as.value.n, ret, table);        // C5: each `return e` matches
       if (!ret_is_ok(e)) return (tk_tfunction_result){ .ok = false, .as.error = e }; }   // (C1.8) carries expected/actual
@@ -397,7 +398,7 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
     { tk_str seen[TK_MAX_LABELS]; size_t nseen = 0;                                  // W5-cf-2: loop labels resolve + are unique
       const char *why = check_labels(tb.as.value.stmts, tb.as.value.n, NULL, false, seen, &nseen);
       if (why) return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make(why) }; }
-    tk_tfunction tf = { .name = f.name, .params = f.params, .nparams = f.nparams,
+    tk_tfunction tf = { .name = f.name, .type_params = f.type_params, .n_type_params = f.n_type_params, .params = f.params, .nparams = f.nparams,
                         .return_type = ret, .body = tb.as.value.stmts, .nbody = tb.as.value.n,
                         .vis = f.vis, .has_doc = f.has_doc, .doc = f.doc, .is_test = f.is_test };
     return (tk_tfunction_result){ .ok = true, .as.value = tf };

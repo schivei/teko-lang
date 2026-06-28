@@ -110,6 +110,7 @@ struct tk_tstatement {
 // --- typed items + program (mirror the checker's Item/Program — E5c) ---
 typedef struct {
     tk_str         name;
+    tk_str        *type_params; size_t n_type_params;   // (S4) generic type-parameter names (0 for a non-generic fn); monomorphized before codegen
     tk_param      *params; size_t nparams;   // immutable (B.21), carried unchanged
     tk_type        return_type;              // void when there is no `-> ret` (M.3)
     tk_tstatement *body;   size_t nbody;

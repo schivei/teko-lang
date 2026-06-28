@@ -18,6 +18,34 @@ fn type_table_find(table: TypeTable, name: str) -> parser::TypeDecl | error {
     error { message = "not a user type" }
 }
 
+// (S4) Extend the type table with generic type-params as OPAQUE nominal types, so a generic
+// signature/body resolves with `T` abstract. An unconstrained `T` has no members/operators, so
+// OPERATING on it (`x.foo`, `a > b`) fails at the definition (M.1 fail-loud, no reflection) — only
+// opaque usage (store/pass/return/hold/match-bind) is allowed (constraints unlock ops at S6). The
+// monomorph pass substitutes each `Named{T}` with the concrete arg before codegen. PREPENDED so a
+// type-param SHADOWS a same-named user type within the generic. Empty type_params → table unchanged.
+// Used by collect (func sigs), check_modules (vis check), and typer (bodies). (C: tk_type_param_table.)
+pub fn type_param_table(type_params: []str, ns: str, table: TypeTable) -> TypeTable {
+    if type_params.len == 0 { return table }
+    mut tbl: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        // namespace = the USING namespace so the W-vis-enforce cross-namespace/visibility check (check_modules)
+        // treats the type-param as a LOCAL type, not a bare cross-namespace reference.
+        let d = parser::TypeDecl { name = type_params[i], type_params = teko::list::empty(), body = parser::ExternBody { }, vis = parser::Visibility::Private, has_doc = false, doc = "", line = 0, col = 0 }
+        tbl = teko::list::push(tbl, TypeReg { name = type_params[i], namespace = ns, vis = parser::Visibility::Private, decl = d })
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= table.len { break }
+        tbl = teko::list::push(tbl, table[j])
+        j++
+    }
+    tbl
+}
+
 // resolve a NAMED type (a path) to a semantic Type: built-in or user type.
 fn resolve_named(path: parser::Path, table: TypeTable) -> Type | error {
     // M.1: an empty path is an internal invariant break — an honest error, never an out-of-bounds.
