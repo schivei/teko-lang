@@ -827,6 +827,177 @@ fn resolves_ref_generic() {
     teko::assert::is_true(match resolve_type(ttype_named("Ref"), empty_table()) { error => true; _ => false })
 }
 
+// ---------------------------------------------------------------------------
+// MEM Step 0 — the checker ESCAPE GATE. A `Ref<T>` is memory-safe BY CONSTRUCTION: the ONLY
+// permitted flow is PARAMETER PASS-DOWN. These tests drive the checker functions DIRECTLY,
+// asserting each forbidden position yields `error` and the allowed forms still succeed.
+// Structure/error-only assertions (VM-safe; no message-string match — the VM drops a
+// self-recursive match arm's string prefix; mirrors resolves_ref_generic's discipline).
+// ---------------------------------------------------------------------------
+
+// a `Ref<INNER>` type-expr where INNER is itself a (hand-built) type-expr.
+fn ref_te_of(inner: parser::TypeExpr) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), inner) }
+}
+// a `Ref<NAME>` type-expr over a plain named type.
+fn ref_te(name: str) -> parser::TypeExpr { ref_te_of(ttype_named(name)) }
+
+// (MEM Step 0, R1) SCALAR-ONLY inner — Ref of any non-scalar is an error; Ref<scalar> succeeds.
+#test
+fn mem_ref_scalar_only_inner() {
+    // Ref<i64> (a scalar prim) → Reference. (allowed) — descend like resolves_ref_generic (VM-safe).
+    teko::assert::is_true(match resolve_type(ref_te("i64"), empty_table()) { Reference as r => match r.inner { Prim => true; _ => false }; _ => false })
+    // Ref<Foo> (a struct/Named inner — VM-reliable) → error.
+    teko::assert::is_true(match resolve_type(ref_te("Foo"), foo_table()) { error => true; _ => false })
+    // NOTE: Ref<[]i64>, Ref<i64?>, Ref<Ref<i64>>, Ref<ptr<i64>> are ALSO rejected by R1 NATIVELY
+    // (the inner is a Slice/Optional/Reference/Ptr, not a Prim), but are NOT asserted in the VM:
+    // the VM's transparent-field-descent matches a single-field wrapper by its INNER type, so a
+    // `match wrapper { Prim => … }` is unreliable for those inners (see resolves_ref_generic). The
+    // native engine (`teko build`) enforces them; collection/variant/struct-field cases below cover
+    // the stored-reference rule independently.
+}
+
+// (MEM Step 0, R2) NOT NULLABLE — `Ref<…>?` is an error.
+// VM NOTE: a CONSTRUCTED `Ref<scalar>` value cannot be discriminated in the VM (the VM's
+// transparent-field-descent collapses a single-field wrapper to its inner), so an isolated
+// `Ref<i64>?` rejection is observable only NATIVELY (the C twin's `in.tag == TK_TYPE_REF` check
+// and the native self-host enforce it). To assert the OPTIONAL position is gated in the VM too,
+// we use a Named inner (`Ref<Foo>`): R1 rejects it at construction (VM-reliable Named check) and
+// the error propagates out of the OptionalType arm — proving `?`-of-reference never resolves.
+#test
+fn mem_ref_not_nullable() {
+    let ref_opt = parser::OptionalType { inner = ref_te("Foo") }
+    teko::assert::is_true(match resolve_type(ref_opt, foo_table()) { error => true; _ => false })
+}
+
+// (MEM Step 0, R3) NOT a RETURN type — a function returning a reference is an error; the same fn
+// returning i64 type-checks. VM NOTE (see R2): the scalar-inner `-> Ref<i64>` rejection is checked
+// NATIVELY by the C twin (`ret.tag == TK_TYPE_REF`) + native self-host; here a Named inner
+// (`-> Ref<Foo>`) makes R1 reject the return type VM-reliably, proving the return position is gated.
+#test
+fn mem_ref_not_return_type() {
+    let body = teko::list::push(teko::list::empty(), parser::Return { has_value = true; value = e_num(0) })
+    match type_function(mk_fn("f", ref_te("Foo"), body), empty_env(), foo_table()) { TFunction => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    let body2 = teko::list::push(teko::list::empty(), parser::Return { has_value = true; value = e_num(0) })
+    match type_function(mk_fn("f", named_t("i64"), body2), empty_env(), empty_table()) { TFunction => teko::assert::is_true(true); error => teko::assert::is_true(false) }
+}
+
+// (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
+// (validate_type_decls); a struct with a scalar field collects fine. VM NOTE (see R2): the field
+// uses a Named inner (`Ref<Foo>`) so R1's VM-reliable rejection drives the collect error; the
+// scalar-inner field (`Ref<i64>`) is rejected NATIVELY by the C twin's `tag == TK_TYPE_REF`.
+#test
+fn mem_ref_not_struct_field() {
+    let fld = parser::Field { name = "r"; type_ann = ref_te("Foo") }
+    let decl = parser::TypeDecl { name = "Holder"; type_params = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld) }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    // include Foo so `Ref<Foo>`'s inner resolves to a Named (not "unknown type").
+    mut items: []parser::Item = teko::list::push(teko::list::empty(), parser::Item { content = foo_decl(); namespace = ""; file = "" })
+    items = teko::list::push(items, parser::Item { content = decl; namespace = ""; file = "" })
+    teko::assert::is_true(match collect(parser::Program { items = items }) { error => true; _ => false })
+    // a plain scalar field collects without error.
+    let okfld = parser::Field { name = "n"; type_ann = named_t("i64") }
+    let okdecl = parser::TypeDecl { name = "Holder2"; type_params = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), okfld) }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    let okitems: []parser::Item = teko::list::push(teko::list::empty(), parser::Item { content = okdecl; namespace = ""; file = "" })
+    teko::assert::is_true(match collect(parser::Program { items = okitems }) { Collected => true; _ => false })
+}
+
+// (MEM Step 0, R4) NOT a SLICE ELEMENT / VARIANT MEMBER — `[]Ref<…>` and `Ref<…> | T` reject.
+// VM NOTE (see R2): Named inner (`Ref<Foo>`) so R1's VM-reliable rejection drives the error out of
+// the SliceType / UnionType arm; scalar-inner element/member is rejected NATIVELY by the C twin's
+// `el.tag == TK_TYPE_REF` / `m.tag == TK_TYPE_REF` checks.
+#test
+fn mem_ref_not_collection_or_variant() {
+    // []Ref<Foo> → error.
+    teko::assert::is_true(match resolve_type(parser::SliceType { element = ref_te("Foo") }, foo_table()) { error => true; _ => false })
+    // Ref<Foo> | i64 → error (a reference may not be a variant member).
+    let members: []parser::TypeExpr = teko::list::push(teko::list::push(teko::list::empty(), ref_te("Foo")), ttype_named("i64"))
+    teko::assert::is_true(match resolve_type(parser::UnionType { members = members }, foo_table()) { error => true; _ => false })
+}
+
+// (MEM Step 0, R5) NOT a let/mut/const BINDING type — `let r: Ref<…> = …` is an error; a scalar
+// binding still succeeds. VM NOTE (see R2): Named inner (`Ref<Foo>`) so R1's VM-reliable rejection
+// drives the binding-annotation error; the scalar-inner local (`let r: Ref<i64>`) is rejected
+// NATIVELY by the C twin's `bound.tag == TK_TYPE_REF` check in type_binding.
+#test
+fn mem_ref_not_binding_type() {
+    let env = define(empty_env(), "src", Named { name = "Foo" }, true)
+    let bad = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "r" }; has_type = true; type_ann = ref_te("Foo"); value = e_var("src") }
+    match type_binding(bad, env, foo_table()) { TypedStmt => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    // a plain scalar binding still type-checks.
+    let okb = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "n" }; has_type = true; type_ann = named_t("i64"); value = e_num(0) }
+    match type_binding(okb, empty_env(), empty_table()) { TypedStmt => teko::assert::is_true(true); error => teko::assert::is_true(false) }
+}
+
+// (MEM Step 0, ALLOWED) a `Ref<i64>` function PARAMETER type-checks — the one permitted ref
+// position (parameter pass-down). Build `fn f(r: Ref<i64>) -> i64 { 0 }` directly.
+#test
+fn mem_ref_param_allowed() {
+    let p = parser::Param { name = "r"; type_ann = ref_te("i64") }
+    let params = teko::list::push(teko::list::empty(), p)
+    let body = teko::list::push(teko::list::empty(), parser::Return { has_value = true; value = e_num(0) })
+    let f = parser::Function { name = "f"; type_params = teko::list::empty(); params = params; has_return = true; return_type = named_t("i64"); body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = "" }
+    match type_function(f, empty_env(), empty_table()) { TFunction => teko::assert::is_true(true); error => teko::assert::is_true(false) }
+}
+
+// (MEM Step 0, R4 — INFERRED) the HOLE: an unannotated array LITERAL whose elements are references
+// (e.g. `let xs = [r, r]`) must be rejected even with NO `: []Ref<…>` annotation. We drive
+// type_array_lit DIRECTLY with `[r, r]` over an env where `r : Reference{inner}` — the joined
+// element type is a bare `Reference`, so type_contains_ref(et) fires and the literal is `error`.
+// VM-safe: `et` is a BARE Reference (type_join of two equal Refs returns the Ref), so the match
+// hits the `Reference => true` arm directly (no cross-wrapper descent ambiguity). A normal scalar
+// array `[1, 2, 3]` still type-checks to `[]i64`. This is the adversarial-probe regression test.
+#test
+fn mem_ref_not_inferred_array_element() {
+    // an env where `r` is a reference (the kind a `Ref<i64>` parameter binds in a real body).
+    let env = define(empty_env(), "r", Reference { inner = i64t() }, false)
+    let two = teko::list::push(teko::list::push(teko::list::empty(), parser::ArrayElem { is_spread = false; expr = e_var("r") }), parser::ArrayElem { is_spread = false; expr = e_var("r") })
+    // `[r, r]` — an INFERRED ref collection → error (no annotation needed).
+    match type_array_lit(parser::ArrayLit { elements = two }, env, empty_table()) { TExpr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    // positive control: a plain scalar array `[1, 2, 3]` still type-checks to a slice.
+    mut nums: []parser::ArrayElem = teko::list::empty()
+    nums = teko::list::push(nums, parser::ArrayElem { is_spread = false; expr = e_num(1) })
+    nums = teko::list::push(nums, parser::ArrayElem { is_spread = false; expr = e_num(2) })
+    nums = teko::list::push(nums, parser::ArrayElem { is_spread = false; expr = e_num(3) })
+    match type_array_lit(parser::ArrayLit { elements = nums }, empty_env(), empty_table()) {
+        TExpr as te => teko::assert::is_true(match te.type { Slice => true; _ => false })
+        error => teko::assert::is_true(false)
+    }
+}
+
+// (MEM Step 0, R4 — `in`) the `in` operator has its OWN element path (it does NOT build an
+// ArrayLit), so `a in [a, b]` over reference operands must be rejected by type_in's own gate.
+// Driven directly: `r in [r]` over an env where `r : Reference` → error. A scalar `n in [n]`
+// still type-checks to bool.
+#test
+fn mem_ref_not_in_operand() {
+    let env = define(empty_env(), "r", Reference { inner = i64t() }, false)
+    let set = teko::list::push(teko::list::empty(), e_var("r"))
+    match type_in(parser::InExpr { lhs = e_var("r"); elems = set }, env, empty_table()) { TExpr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    // positive control: a scalar `in` still type-checks to bool.
+    let nenv = define(empty_env(), "n", i64t(), false)
+    let nset = teko::list::push(teko::list::empty(), e_var("n"))
+    match type_in(parser::InExpr { lhs = e_var("n"); elems = nset }, nenv, empty_table()) {
+        TExpr as te => teko::assert::is_true(match te.type { Prim as p => p.kind == PrimKind::Bool; _ => false })
+        error => teko::assert::is_true(false)
+    }
+}
+
+// (MEM Step 0, R5 — INFERRED) a binding whose value INFERS to a ref collection is rejected even
+// without an annotation: `let xs = [r, r]` flows through type_array_lit (rejected) within
+// type_binding. The bound-type contains-ref gate also guards a hand-built ref-collection value.
+// A plain scalar binding `let n = 0` still type-checks.
+#test
+fn mem_ref_not_inferred_binding() {
+    let env = define(empty_env(), "r", Reference { inner = i64t() }, false)
+    let two = teko::list::push(teko::list::push(teko::list::empty(), parser::ArrayElem { is_spread = false; expr = e_var("r") }), parser::ArrayElem { is_spread = false; expr = e_var("r") })
+    let arr = ek(parser::ArrayLit { elements = two })
+    let bad = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "xs" }; has_type = false; type_ann = named_t("i64"); value = arr }
+    match type_binding(bad, env, empty_table()) { TypedStmt => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    // positive control: a plain scalar binding still type-checks.
+    let okb = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "n" }; has_type = false; type_ann = named_t("i64"); value = e_num(0) }
+    match type_binding(okb, empty_env(), empty_table()) { TypedStmt => teko::assert::is_true(true); error => teko::assert::is_true(false) }
+}
+
 // (S4 type-generics) the instantiation pass stamps a concrete decl for a written `Box<i64>` use.
 #test
 fn instantiate_types_stamps_concrete_decl() {

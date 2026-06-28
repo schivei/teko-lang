@@ -245,6 +245,12 @@ tk_subst_result tk_unify(tk_type pattern, tk_type arg, tk_subst s, tk_type_table
             if (!tk_is_type_param(pattern.as.named.name, s.params, s.n_params)) return (tk_subst_result){ .ok = true, .as.value = s };
             if (type_has_void_sentinel_c(arg))
                 return (tk_subst_result){ .ok = false, .as.error = tk_error_named("cannot infer type parameter from an untyped empty slice / null — annotate the argument", pattern.as.named.name) };
+            // (MEM Step 0, B) ESCAPE GATE — a reference can NEVER be the INFERRED binding for a type
+            // parameter: `id(r)` where r: Ref<i64> would stamp `int64_t * id__g__ref_i64(int64_t *)`,
+            // returning a raw reference that outlives its target. Mirror of the written-arg gate in
+            // resolve_generic_inst (A); same message.
+            if (arg.tag == TK_TYPE_REF)
+                return (tk_subst_result){ .ok = false, .as.error = tk_error_make("a reference cannot be a generic type argument (it would be stored/escape)") };
             tk_type *ex = subst_find_c(s, pattern.as.named.name);
             if (ex) {
                 if (tk_type_eq(ex, &arg)) return (tk_subst_result){ .ok = true, .as.value = s };
@@ -378,6 +384,12 @@ static tk_type_result resolve_generic_inst(tk_path path, tk_type_expr *args, siz
         tk_type_result in = tk_resolve_type(args[0], table);
         if (!in.ok) return in;
         if (in.as.value.tag == TK_TYPE_VOID) return (tk_type_result){ .ok = false, .as.error = tk_error_make("`Ref<void>` is invalid — void is not a value (M.3)") };
+        // (MEM Step 0, R1) ESCAPE GATE — SCALAR-ONLY inner. A `Ref<T>` is memory-safe by construction
+        // only when its target is a scalar PRIMITIVE (TK_TYPE_PRIM): a non-scalar (struct/Named, slice,
+        // optional, variant, func, ptr, ref) could carry interior pointers whose lifetime we cannot
+        // track without an escape solver, so it is rejected here at construction.
+        if (in.as.value.tag != TK_TYPE_PRIM)
+            return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference may only target a scalar primitive (`Ref<i64>` etc.) — not a struct, collection, optional, variant, function, or pointer") };
         tk_type t = { .tag = TK_TYPE_REF, .as.ref.inner = box(in.as.value) };
         return (tk_type_result){ .ok = true, .as.value = t };
     }
@@ -385,6 +397,13 @@ static tk_type_result resolve_generic_inst(tk_path path, tk_type_expr *args, siz
     for (size_t i = 0; i < nargs; i += 1) {
         tk_type_result a = tk_resolve_type(args[i], table);
         if (!a.ok) return a;
+        // (MEM Step 0, A) ESCAPE GATE — a reference can NEVER be a generic type ARGUMENT: carrying a
+        // `Ref<T>` into a user generic would stamp it into a struct field / return position (e.g.
+        // `Box<Ref<i64>>` → `struct { value: int64_t * }` returned by value) and escape. The template
+        // itself is validated pre-instantiation (R1–R5); the only way a Reference enters a stamped
+        // decl/fn is via a type-arg — blocked here (written) and in tk_unify (inferred).
+        if (a.as.value.tag == TK_TYPE_REF)
+            return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be a generic type argument (it would be stored/escape)") };
         argtypes[i] = a.as.value;
     }
     tk_decl_result d = tk_type_table_find(table, name);
@@ -653,6 +672,9 @@ tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
         case TK_TEXPR_SLICE: {
             tk_type_result el = tk_resolve_type(*te.as.slice.element, table);
             if (!el.ok) return el;
+            // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a collection element.
+            if (el.as.value.tag == TK_TYPE_REF)
+                return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
             tk_type t = { .tag = TK_TYPE_SLICE, .as.slice.element = box(el.as.value) };
             return (tk_type_result){ .ok = true, .as.value = t };
         }
@@ -671,6 +693,11 @@ tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
                     tk_free0(members);
                     return (tk_type_result){ .ok = false, .as.error = tk_error_make("a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`") };
                 }
+                // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a variant member.
+                if (m.as.value.tag == TK_TYPE_REF) {
+                    tk_free0(members);
+                    return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
+                }
                 members = tk_realloc0(members, (n + 1) * sizeof *members);
                 if (!members) abort();
                 members[n] = m.as.value; n += 1;
@@ -688,6 +715,9 @@ tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
             // (void is not a value — M.3); both guarded for honesty.
             if (in.as.value.tag == TK_TYPE_VOID)
                 return (tk_type_result){ .ok = false, .as.error = tk_error_make("`void` cannot be made optional (`void?`) — void is not a value (M.3)") };
+            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
+            if (in.as.value.tag == TK_TYPE_REF)
+                return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be nullable (a ref is never null, R2)") };
             if (in.as.value.tag == TK_TYPE_OPTIONAL)
                 return in;   // `T??` collapses to `T?`
             tk_type t = { .tag = TK_TYPE_OPTIONAL, .as.optional.inner = box(in.as.value) };

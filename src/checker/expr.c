@@ -812,6 +812,10 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
     tk_texpr_result lhs = tk_typer_expr(*n.lhs, env, table); if (!lhs.ok) return lhs;
     tk_type lt = lhs.as.value.type;
     if (tk_type_is_void(&lt)) return xerr("a `void` expression cannot be an operand (M.1)");
+    // (MEM Step 0, R4) ESCAPE GATE — `in` has its own element path (it does NOT build an ArrayLit),
+    // so the literal-form gate doesn't reach it. A reference may not be an `in` operand (lhs or set
+    // element): the [a, b] set is a value-position collection of refs. Mirror in typer.tks::type_in.
+    if (tk_type_contains_ref(&lt)) return xerr("a reference cannot be stored in a struct/variant/collection");
     tk_texpr *elems = NULL;
     if (n.nelems > 0) { elems = tk_alloc(n.nelems * sizeof *elems); if (!elems) abort(); }
     for (size_t i = 0; i < n.nelems; i += 1) {
@@ -820,6 +824,10 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
         if (tk_type_is_void(&e.as.value.type)) {
             tk_free0(elems);
             return xerr("a `void` expression cannot be an operand (M.1)");
+        }
+        if (tk_type_contains_ref(&e.as.value.type)) {
+            tk_free0(elems);
+            return xerr("a reference cannot be stored in a struct/variant/collection");
         }
         if (!is_comparable(lt, e.as.value.type)) {
             tk_free0(elems);
@@ -874,6 +882,13 @@ static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table 
         }
         elems[i]   = e.as.value;
         spreads[i] = a.elements[i].is_spread;
+    }
+    // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
+    // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
+    // element here (e.g. `[r, r]`) only surfaces now. Also rejects `a in [a, b]` (its `[a, b]`).
+    if (a.nelements != 0 && tk_type_contains_ref(&et)) {
+        tk_free0(elems); tk_free0(spreads);
+        return xerr("a reference cannot be stored in a struct/variant/collection");
     }
     // an EMPTY `[]` is the SENTINEL slice (element == NULL, like teko::list::empty()) — it unifies
     // with any concrete slice via a binding annotation. A non-empty array carries its joined element.

@@ -770,12 +770,17 @@ fn type_interp(in: parser::Interp, env: Env, table: TypeTable) -> TExpr | error 
 fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
     let lhs = match type_expr(n.lhs, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(lhs.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    // (MEM Step 0, R4) ESCAPE GATE — `in` has its own element path (it does NOT build an ArrayLit),
+    // so the literal-form gate doesn't reach it. A reference may not be an `in` operand (lhs or set
+    // element): the [a, b] set is a value-position collection of refs. Mirror in expr.c::type_in.
+    if type_contains_ref(lhs.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
     mut elems: []TExpr = teko::list::empty()
     mut i = 0
     loop {
         if i >= n.elems.len { break }
         let el = match type_expr(n.elems[i], env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(el.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        if type_contains_ref(el.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
         if !is_comparable(lhs.type, el.type) { return error { message = "`in` element is not comparable to the left-hand operand" } }
         elems = teko::list::push(elems, el)
         i++
@@ -813,6 +818,10 @@ fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | er
         elems = teko::list::push(elems, TArrayElem { is_spread = ae.is_spread; expr = el })
         i++
     }
+    // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
+    // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
+    // element here (e.g. `[r, r]`) only surfaces now. This also rejects `a in [a, b]` (its `[a, b]`).
+    if type_contains_ref(et) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
     TExpr { kind = TArrayLit { elements = elems }; type = Slice { element = et }; line = 0; col = 0 }
 }
 
@@ -1143,6 +1152,11 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     if bound_is_sentinel_slice {
         return error { message = "an empty list needs a known element type; annotate the binding (e.g. `mut xs: []i32 = teko::list::empty()`)" }
     }
+    // (MEM Step 0, R5) ESCAPE GATE — a reference cannot be bound to a LOCAL (parameter-only in this
+    // version). Binding a ref to a let/mut/const would let it outlive its target via the local; the
+    // only permitted ref handle is a function PARAMETER (which never reaches type_binding). The
+    // contains-ref check also catches an INFERRED `[]Ref` / `Ref?` bound from ANY source.
+    if type_contains_ref(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     let node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v }
     match b.target {
         parser::SimpleName as sn   => TypedStmt { node = node; env = define(env, sn.name, bound, bind_is_mut(b.kind)) }
@@ -1169,6 +1183,10 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     }
     if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    // (MEM Step 0, R5) ESCAPE GATE — a plain `name = <…>` assign may not move a reference into a
+    // local (even nested in a slice/optional/variant). This is the assign twin of the binding gate;
+    // the `.value` deref-assign path above is exempt (it writes THROUGH a ref, which is allowed).
+    if type_contains_ref(tb.type) || type_contains_ref(v.type) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
     // that adopts it (C6) — same rule as an annotated binding (the single source of truth).
     if !assignable_to(v.type, tb.type, table) {
@@ -1578,6 +1596,9 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
         i++
     }
     let ret = match function_return(f, tbl) { Type as t => t; error as e => return e }
+    // (MEM Step 0, R3) ESCAPE GATE — a function cannot RETURN a reference (pass-down only): a
+    // returned ref would outlive its caller-stack target. References flow only DOWN as params.
+    match ret { Reference => return error { message = "a function cannot return a reference (pass-down only)" }; _ => {} }
     if f.is_extern {
         // an extern is a bodyless foreign declaration (no body to check / return-analyze).
         // Validate the return marshals (void = no value is fine; else prim/byte only for now).

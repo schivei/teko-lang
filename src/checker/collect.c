@@ -54,8 +54,40 @@ tk_type_table tk_type_table_of(tk_tprogram prog) {
     return table;
 }
 
+// (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a struct FIELD, variant member, slice
+// element, or alias target. tk_resolve_type already rejects a Reference inside a slice/optional/
+// union (R4 there), so this catches the BARE-position cases: `struct { f: Ref<i64> }` and a
+// transparent alias `type R = Ref<i64>`. Runs once per program over every declared type body.
+// Mirror of collect.tks::validate_type_decls. Returns ok=true on success; ok=false carries the error.
+static tk_type_result validate_type_decls(tk_type_table table) {
+    for (size_t i = 0; i < table.len; i += 1) {
+        tk_type_decl decl = table.ptr[i].decl;
+        // (S4) the decl's own generic type-params, opaque, in scope — so a generic body field `T`
+        // resolves to Named{T} (not "unknown type"); mirrors func_type. A `Ref<T>` field is still
+        // rejected by R1 (its inner is a Named, not a scalar Prim).
+        tk_type_table tbl = tk_type_param_table(decl.type_params, decl.n_type_params, (tk_str){0}, table);
+        tk_type_body body = decl.body;
+        if (body.tag == TK_BODY_STRUCT) {
+            for (size_t f = 0; f < body.as.struct_body.n_fields; f += 1) {
+                tk_type_result r = tk_resolve_type(body.as.struct_body.fields[f].type_ann, tbl);
+                if (!r.ok) return r;
+                if (r.as.value.tag == TK_TYPE_REF)
+                    return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
+            }
+        } else if (body.tag == TK_BODY_ALIAS) {
+            tk_type_result r = tk_resolve_type(body.as.alias_body.alias, tbl);
+            if (!r.ok) return r;
+            if (r.as.value.tag == TK_TYPE_REF)
+                return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
+        }
+    }
+    return (tk_type_result){ .ok = true };
+}
+
 tk_collected_result tk_collect(tk_program program) {
     tk_type_table table = collect_types(program.items, program.len);
+    tk_type_result vr = validate_type_decls(table);   // (MEM Step 0, R4)
+    if (!vr.ok) return (tk_collected_result){ .ok = false, .as.error = vr.as.error };
     tk_env env = tk_env_empty();
     for (size_t i = 0; i < program.len; i += 1) {
         if (program.items[i].tag == TK_ITEM_FUNCTION) {
@@ -84,6 +116,9 @@ tk_collected_result tk_collect_with_seed(tk_program program, tk_collected seed) 
                 .vis = td.vis, .decl = td });
         }
     }
+
+    tk_type_result vr = validate_type_decls(table);   // (MEM Step 0, R4)
+    if (!vr.ok) return (tk_collected_result){ .ok = false, .as.error = vr.as.error };
 
     // Pass 2: add project's function signatures to the env.
     for (size_t i = 0; i < program.len; i += 1) {

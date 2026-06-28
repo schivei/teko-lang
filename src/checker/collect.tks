@@ -85,9 +85,48 @@ pub fn type_table_of(prog: TProgram) -> TypeTable {
     table
 }
 
+// (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a struct FIELD, variant member, slice
+// element, or alias target. `resolve_type` already rejects a Reference inside a slice/optional/
+// union (R4 there), so this catches the BARE-position cases: `struct { f: Ref<i64> }` and a
+// transparent alias `type R = Ref<i64>`. Runs once per program over every declared type body.
+fn validate_type_decls(table: TypeTable) -> error? {
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        let decl = table[i].decl
+        // (S4) the decl's own generic type-params, opaque, in scope — so a generic body field `T`
+        // resolves to `Named{T}` (not "unknown type"); mirrors func_type's type-param handling. A
+        // `Ref<T>` field is still rejected by R1 (its inner is a Named, not a scalar Prim).
+        let tbl = type_param_table(decl.type_params, "", table)
+        match decl.body {
+            parser::StructBody as sb => {
+                mut f = 0
+                loop {
+                    if f >= sb.fields.len { break }
+                    match resolve_type(sb.fields[f].type_ann, tbl) {
+                        Type as ft => match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                        error as e => return e
+                    }
+                    f++
+                }
+            }
+            parser::AliasBody as ab => {
+                match resolve_type(ab.alias, tbl) {
+                    Type as at => match at { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                    error as e => return e
+                }
+            }
+            _ => {}
+        }
+        i++
+    }
+    null
+}
+
 // pass 1: types first, then function signatures — the top-level environment.
 fn collect(program: parser::Program) -> Collected | error {
     let table = collect_types(program.items)
+    match validate_type_decls(table) { error as e => return e; null => {} }   // (MEM Step 0, R4)
     let env = match collect_funcs(program.items, table) {
         Env as e     => e
         error as err => return err
@@ -112,6 +151,7 @@ fn collect_with_seed(program: parser::Program, seed: Collected) -> Collected | e
         }
         i++
     }
+    match validate_type_decls(table) { error as e => return e; null => {} }   // (MEM Step 0, R4)
     // Augment the env with the project's function signatures (dep fns already in seed.env).
     mut env = seed.env
     mut j = 0

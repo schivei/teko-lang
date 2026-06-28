@@ -256,6 +256,11 @@ pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | er
             if type_has_void_sentinel(arg) {
                 return error { message = $"cannot infer type parameter {n.name} from an untyped empty slice / null — annotate the argument" }
             }
+            // (MEM Step 0, B) ESCAPE GATE — a reference can NEVER be the INFERRED binding for a type
+            // parameter: `id(r)` where r: Ref<i64> would stamp `int64_t * id__g__ref_i64(int64_t *)`,
+            // returning a raw reference that outlives its target. Mirror of the written-arg gate in
+            // resolve_generic_inst (A); same message.
+            match arg { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => {} }
             match subst_find(s, n.name) {
                 Type as existing => {
                     if type_eq(existing, arg) { s }
@@ -304,6 +309,8 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
                 Type as t  => t
                 error as e => return e
             }
+            // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a collection element.
+            match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
             Slice { element = el }
         }
         parser::UnionType as ut => {
@@ -318,9 +325,10 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
                 // M.1/rules 2 & 3: a variant member must be a COMPLETE type — never
                 // `void` (not a value) and never nullable (`T?` — disjoint domain).
                 match m {
-                    Void     => return error { message = "a variant member may not be `void`" }
-                    Optional => return error { message = "a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`" }
-                    _        => {}
+                    Void      => return error { message = "a variant member may not be `void`" }
+                    Optional  => return error { message = "a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`" }
+                    Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }   // (MEM Step 0, R4)
+                    _         => {}
                 }
                 members = teko::list::push(members, m)
                 i++
@@ -335,10 +343,12 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
                 error as e => return e
             }
             // `void?` is illegal (void is not a value — M.3); `T??` collapses to `T?`.
+            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
             match in {
-                Void     => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
-                Optional => return in    // `T??` collapses to `T?`
-                _        => Optional { inner = in }
+                Void      => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
+                Reference => return error { message = "a reference cannot be nullable (a ref is never null, R2)" }
+                Optional  => return in    // `T??` collapses to `T?`
+                _         => Optional { inner = in }
             }
         }
     }
@@ -412,13 +422,27 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable) -> Type | error
     if name == "Ref" {
         if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
         let argt = match resolve_type(nt.args[0], table) { Type as t => t; error as e => return e }
-        match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => return Reference { inner = argt } }
+        match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => {} }
+        // (MEM Step 0, R1) ESCAPE GATE — SCALAR-ONLY inner. A `Ref<T>` is memory-safe by construction
+        // only when its target is a scalar PRIMITIVE (a `Prim`): a non-scalar (struct/Named, slice,
+        // optional, variant, func, ptr, ref) could carry interior pointers whose lifetime we cannot
+        // track without an escape solver, so it is rejected here at construction.
+        match argt {
+            Prim => return Reference { inner = argt }
+            _    => return error { message = "a reference may only target a scalar primitive (`Ref<i64>` etc.) — not a struct, collection, optional, variant, function, or pointer" }
+        }
     }
     mut argtypes: []Type = teko::list::empty()
     mut i = 0
     loop {
         if i >= nt.args.len { break }
         let a = match resolve_type(nt.args[i], table) { Type as t => t; error as e => return e }
+        // (MEM Step 0, A) ESCAPE GATE — a reference can NEVER be a generic type ARGUMENT: carrying a
+        // `Ref<T>` into a user generic would stamp it into a struct field / return position (e.g.
+        // `Box<Ref<i64>>` → `struct { value: int64_t * }` returned by value) and escape. The template
+        // itself is validated pre-instantiation (R1–R5); the only way a Reference enters a stamped
+        // decl/fn is via a type-arg — blocked here (written) and in unify (inferred).
+        match a { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => {} }
         argtypes = teko::list::push(argtypes, a)
         i++
     }

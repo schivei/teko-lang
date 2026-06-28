@@ -157,3 +157,30 @@ fn types_eq(xs: []Type, ys: []Type) -> bool {
     }
     true
 }
+
+// (MEM Step 0) ESCAPE-GATE PREDICATE — does `t` carry a Reference anywhere a value can be stored?
+// The invariant: a Reference may appear ONLY as a bare scalar function PARAMETER; in EVERY other
+// value position it is forbidden, even nested. So this returns true if t IS a Reference, OR a Slice
+// whose element contains a ref, OR an Optional whose inner contains a ref, OR a Variant any of whose
+// members contains a ref. Recursive. The annotated forms are already caught by resolve (R2/R4), but
+// an INFERRED slice/optional element (e.g. `let xs = [r, r]`) only surfaces here. C: tk_type_contains_ref.
+fn type_contains_ref(t: Type) -> bool {
+    match t {
+        Reference  => true
+        Slice as s => type_contains_ref(s.element)
+        Optional as o => type_contains_ref(o.inner)
+        Variant as v => types_contain_ref(v.members)
+        _ => false
+    }
+}
+
+// any-of helper for type_contains_ref over a variant's member list.
+fn types_contain_ref(xs: []Type) -> bool {
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if type_contains_ref(xs[i]) { return true }
+        i++
+    }
+    false
+}

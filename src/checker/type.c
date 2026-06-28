@@ -10,6 +10,26 @@ static bool tk_types_eq(const tk_type *xs, size_t nx, const tk_type *ys, size_t 
     return true;
 }
 
+// (MEM Step 0) ESCAPE-GATE PREDICATE — does `t` carry a Reference anywhere a value can be stored?
+// The invariant: a Reference may appear ONLY as a bare scalar function PARAMETER; in EVERY other
+// value position it is forbidden, even nested. So this returns true if t IS a Reference, OR a Slice
+// whose element contains a ref, OR an Optional whose inner contains a ref, OR a Variant any of whose
+// members contains a ref. Recursive. The annotated forms are already caught by resolve (R2/R4), but
+// an INFERRED slice/optional element (e.g. `let xs = [r, r]`) only surfaces here. .tks: type_contains_ref.
+bool tk_type_contains_ref(const tk_type *t) {
+    if (t == NULL) return false;   // a SENTINEL slice/optional (NULL element/inner) holds no ref
+    switch (t->tag) {
+        case TK_TYPE_REF:      return true;
+        case TK_TYPE_SLICE:    return tk_type_contains_ref(t->as.slice.element);
+        case TK_TYPE_OPTIONAL: return tk_type_contains_ref(t->as.optional.inner);
+        case TK_TYPE_VARIANT:
+            for (size_t i = 0; i < t->as.variant.len; i += 1)
+                if (tk_type_contains_ref(&t->as.variant.members[i])) return true;
+            return false;
+        default: return false;
+    }
+}
+
 bool tk_type_eq(const tk_type *a, const tk_type *b) {
     if (a->tag != b->tag) return false;          // different shapes → not equal
     switch (a->tag) {

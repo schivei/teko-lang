@@ -106,6 +106,11 @@ struct tk_type {
 
 bool tk_type_eq(const tk_type *a, const tk_type *b);
 
+// (MEM Step 0) ESCAPE-GATE PREDICATE — true if `t` carries a Reference in any value-storing
+// position (the type itself, or nested inside a slice element / optional inner / variant member).
+// .tks twin: type_contains_ref. Used to reject an INFERRED ref array / ref binding / ref assign.
+bool tk_type_contains_ref(const tk_type *t);
+
 // `void` is the return-only marker (M.3): a `Func.ret` may be void, but void may
 // never be a value, a binding type, or a variant member (enforced in the checker).
 // This predicate is what the checker (Z2a) calls to recognize/reject void.

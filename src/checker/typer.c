@@ -126,6 +126,12 @@ static tk_typed_stmt_result type_binding(tk_binding b, tk_env env, tk_type_table
     // error: no silent element-less slice, no codegen back-inference (collections ruling #4).
     if (bound.tag == TK_TYPE_SLICE && bound.as.slice.element == NULL)
         return smsg("an empty list needs a known element type; annotate the binding (e.g. `mut xs: []i32 = teko::list::empty()`)");
+    // (MEM Step 0, R5) ESCAPE GATE — a reference cannot be bound to a LOCAL (parameter-only in this
+    // version). Binding a ref to a let/mut/const would let it outlive its target via the local; the
+    // only permitted ref handle is a function PARAMETER (which never reaches type_binding). The
+    // contains-ref check also catches an INFERRED `[]Ref` / `Ref?` bound from ANY source.
+    if (tk_type_contains_ref(&bound))
+        return smsg("a reference cannot be bound to a local (parameter-only in this version)");
     tk_tstatement node = { .tag = TK_TSTMT_BINDING, .as.binding = { b.kind, b.target, bound, v.as.value } };
     if (b.target.tag == TK_BIND_SIMPLE)
         return sok(node, tk_env_define(env, b.target.as.simple.name, bound, tk_bind_is_mut(b.kind)));
@@ -156,6 +162,11 @@ static tk_typed_stmt_result type_assign(tk_assign a, tk_env env, tk_type_table t
     // that adopts it (C6) — same rule as an annotated binding. On success the value adopts the target
     // type so a downstream pass (and codegen's wrap) sees the slot type, not the bare case.
     tk_type target = tb.as.value.type;
+    // (MEM Step 0, R5) ESCAPE GATE — a plain `name = <…>` assign may not move a reference into a
+    // local (even nested in a slice/optional/variant). This is the assign twin of the binding gate;
+    // the `.value` deref-assign path above is exempt (it writes THROUGH a ref, which is allowed).
+    if (tk_type_contains_ref(&target) || tk_type_contains_ref(&v.as.value.type))
+        return smsg("a reference cannot be bound to a local (parameter-only in this version)");
     if (!assignable_to(v.as.value.type, target, table)) {
         if (!tk_literal_adopts(v.as.value, target))   // (C1.8) expected = target, actual = value
             return sfail(tk_error_types(tk_error_make("assigned value does not match the target type"),
@@ -401,6 +412,10 @@ tk_tfunction_result tk_type_function(tk_function f, tk_env env, tk_type_table ta
         local = tk_env_define(local, f.params[i].name, pt.as.value, false);
     }
     tk_type ret = function_return(f, tbl);
+    // (MEM Step 0, R3) ESCAPE GATE — a function cannot RETURN a reference (pass-down only): a
+    // returned ref would outlive its caller-stack target. References flow only DOWN as params.
+    if (ret.tag == TK_TYPE_REF)
+        return (tk_tfunction_result){ .ok = false, .as.error = tk_error_make("a function cannot return a reference (pass-down only)") };
     if (f.is_extern) {
         // a bodyless foreign declaration: no body to check / return-analyze. Validate the
         // return marshals (void = no value is fine; else prim/byte only for now).
