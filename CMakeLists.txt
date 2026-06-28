@@ -139,11 +139,20 @@ if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     else()
         set(TK_CLANG_RT_ARCH "x86_64")
     endif()
-    set(TK_BUILTINS_LIB "${TK_CLANG_RT_DIR}/clang_rt.builtins-${TK_CLANG_RT_ARCH}.lib")
-    if(EXISTS "${TK_BUILTINS_LIB}")
+    # LLVM 15+ per-target layout: runtime dir IS the target-triple dir; filename has no arch suffix.
+    # Older layout: clang_rt.builtins-<arch>.lib inside a windows/ subdir (also found via --print-runtime-dir).
+    # Try no-suffix first (matches LLVM 15+ on GitHub Actions windows-latest / windows-11-arm runners).
+    if(EXISTS "${TK_CLANG_RT_DIR}/clang_rt.builtins.lib")
+        set(TK_BUILTINS_LIB "${TK_CLANG_RT_DIR}/clang_rt.builtins.lib")
+    elseif(EXISTS "${TK_CLANG_RT_DIR}/clang_rt.builtins-${TK_CLANG_RT_ARCH}.lib")
+        set(TK_BUILTINS_LIB "${TK_CLANG_RT_DIR}/clang_rt.builtins-${TK_CLANG_RT_ARCH}.lib")
+    else()
+        set(TK_BUILTINS_LIB "")
+    endif()
+    if(TK_BUILTINS_LIB)
         target_link_libraries(teko PRIVATE "${TK_BUILTINS_LIB}")
     else()
-        message(WARNING "teko: compiler-rt builtins not found at ${TK_BUILTINS_LIB}; __int128 arithmetic may fail to link")
+        message(WARNING "teko: compiler-rt builtins not found in ${TK_CLANG_RT_DIR}; __int128 arithmetic may fail to link")
     endif()
 endif()
 # The VM interpreter uses deep C recursion when running the Teko parser/lexer during
