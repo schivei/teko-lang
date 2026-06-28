@@ -16,24 +16,32 @@
 #include <stdio.h>
 #include <string.h>     // strlen, strcmp, strrchr, memcpy
 #include <signal.h>     // signal — fatal-signal handler (crash stack traces)
-#include <execinfo.h>   // backtrace, backtrace_symbols_fd
 #include <stdlib.h>     // _Exit (async-signal-safe)
+#ifndef _WIN32
+#include <execinfo.h>   // backtrace, backtrace_symbols_fd (POSIX: Linux/macOS only)
+#endif
 
 // CRASH STACK TRACE (M.1/M.3 — fail loud, be honest about WHERE). On a fatal signal (a genuine
 // internal compiler bug — a NULL/OOB deref, a bad arithmetic), print a C stack trace to stderr and
 // exit 128+signo, instead of dying silently with a bare exit code. NOT SIGABRT: abort() is the
 // INTENTIONAL honest-barrier path (tk_panic / *_unsupported already printed their message). Uses
-// backtrace_symbols_fd (async-signal-safe; no malloc).
+// backtrace_symbols_fd (async-signal-safe; no malloc) on POSIX; Windows prints a notice instead.
 static void tk_crash_handler(int sig) {
+#ifndef _WIN32
     void *frames[64];
     int n = backtrace(frames, 64);
     fputs("\nteko: FATAL signal — internal compiler crash (M.1). C stack trace:\n", stderr);
     backtrace_symbols_fd(frames, n, 2 /* stderr */);
+#else
+    fputs("\nteko: FATAL signal — internal compiler crash (M.1). Stack trace unavailable on Windows.\n", stderr);
+#endif
     _Exit(128 + sig);
 }
 static void tk_install_crash_handler(void) {
     signal(SIGSEGV, tk_crash_handler);
-    signal(SIGBUS,  tk_crash_handler);
+#ifndef _WIN32
+    signal(SIGBUS,  tk_crash_handler);   // not defined on Windows
+#endif
     signal(SIGILL,  tk_crash_handler);
     signal(SIGFPE,  tk_crash_handler);
 }

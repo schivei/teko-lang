@@ -15,7 +15,7 @@
 #ifdef _WIN32
 #include <windows.h>
 
-typedef struct { char d_name[MAX_PATH]; } tk_dirent;
+typedef struct tk_dirent { char d_name[MAX_PATH]; } tk_dirent;
 typedef struct {
     HANDLE          hFind;
     WIN32_FIND_DATAA wfd;
