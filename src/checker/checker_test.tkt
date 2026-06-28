@@ -725,3 +725,32 @@ fn checker_scope_module_helpers() {
     teko::assert::is_true(join_n(p, 1) == "teko")
     teko::assert::is_true(join_n(p, 2) == "teko::checker")
 }
+
+// (S4) generics inference primitives — subst_type / unify / collect_sig_type_params.
+#test
+fn subst_unify_inference() {
+    let tbl: TypeTable = teko::list::empty()
+    let params: []str = teko::list::push(teko::list::empty(), "T")
+    let s0 = Subst { params = params; names = teko::list::empty(); types = teko::list::empty() }
+    let patT: Type = Named { name = "T" }
+
+    // unify Named{T} ~ i64 binds T=i64; subst_type then yields i64.
+    let s1 = match unify(patT, i64t(), s0, tbl) { Subst as x => x; error => s0 }
+    teko::assert::is_true(prim_is(subst_type(patT, s1), PrimKind::I64))
+    // a non-type-param Named passes through subst unchanged.
+    teko::assert::is_true(match subst_type(Named { name = "Other" }, s1) { Named as n => n.name == "Other"; _ => false })
+
+    // unify []T ~ []str binds T=str; subst []T → []str (structural recursion).
+    let patSlice: Type = Slice { element = Named { name = "T" } }
+    let s2 = match unify(patSlice, Slice { element = Str { } }, s0, tbl) { Subst as x => x; error => s0 }
+    teko::assert::is_true(match subst_type(patSlice, s2) { Slice as sl => match sl.element { Str => true; _ => false }; _ => false })
+
+    // a Void-sentinel arg (empty()/null) cannot pin a type-param → unify errors.
+    teko::assert::is_true(match unify(patSlice, Slice { element = Void { } }, s0, tbl) { Subst => false; error => true })
+
+    // collect_sig_type_params over Func{(T) -> T} → ["T"] (deduped).
+    let sig: Type = Func { params = teko::list::push(teko::list::empty(), Named { name = "T" }); ret = Named { name = "T" } }
+    let tps = collect_sig_type_params(sig, tbl, teko::list::empty())
+    teko::assert::is_true(tps.len == 1)
+    teko::assert::is_true(tps[0] == "T")
+}

@@ -168,6 +168,90 @@ tk_type_table tk_type_param_table(tk_str *type_params, size_t n_type_params, tk_
     return tbl;
 }
 
+// ── (S4) generics inference: subst + unify (resolve.tks twins) ───────────────────────────────────
+static tk_type *tk_clone_type(tk_type t) { tk_type *p = tk_alloc(sizeof *p); *p = t; return p; }
+static bool is_type_param_c(tk_str name, tk_str *params, size_t np) {
+    for (size_t i = 0; i < np; i += 1) if (name_eq(params[i], name)) return true;
+    return false;
+}
+static tk_type *subst_find_c(tk_subst s, tk_str name) {
+    for (size_t i = 0; i < s.n_bind; i += 1) if (name_eq(s.names[i], name)) return &s.types[i];
+    return NULL;
+}
+static bool type_has_void_sentinel_c(tk_type t) {
+    if (t.tag == TK_TYPE_VOID) return true;
+    if (t.tag == TK_TYPE_SLICE)    return t.as.slice.element->tag == TK_TYPE_VOID;
+    if (t.tag == TK_TYPE_OPTIONAL) return t.as.optional.inner->tag == TK_TYPE_VOID;
+    return false;
+}
+tk_type tk_subst_type(tk_type t, tk_subst s) {
+    switch (t.tag) {
+        case TK_TYPE_NAMED: { tk_type *b = subst_find_c(s, t.as.named.name); return b ? *b : t; }
+        case TK_TYPE_SLICE: { tk_type e = tk_subst_type(*t.as.slice.element, s); return (tk_type){ .tag = TK_TYPE_SLICE, .as.slice = { tk_clone_type(e) } }; }
+        case TK_TYPE_OPTIONAL: { tk_type e = tk_subst_type(*t.as.optional.inner, s); return (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional = { tk_clone_type(e) } }; }
+        case TK_TYPE_VARIANT: {
+            size_t n = t.as.variant.len; tk_type *ms = tk_alloc((n ? n : 1) * sizeof *ms);
+            for (size_t i = 0; i < n; i += 1) ms[i] = tk_subst_type(t.as.variant.members[i], s);
+            return (tk_type){ .tag = TK_TYPE_VARIANT, .as.variant = { ms, n } };
+        }
+        case TK_TYPE_FUNC: {
+            size_t n = t.as.func.nparams; tk_type *ps = n ? tk_alloc(n * sizeof *ps) : NULL;
+            for (size_t i = 0; i < n; i += 1) ps[i] = tk_subst_type(t.as.func.params[i], s);
+            tk_type ret = tk_subst_type(*t.as.func.ret, s);
+            return (tk_type){ .tag = TK_TYPE_FUNC, .as.func = { ps, n, tk_clone_type(ret) } };
+        }
+        default: return t;   // Prim, Byte, Str, Error, Void, Ptr, Uptr
+    }
+}
+tk_subst_result tk_unify(tk_type pattern, tk_type arg, tk_subst s, tk_type_table table) {
+    (void)table;
+    switch (pattern.tag) {
+        case TK_TYPE_NAMED: {
+            if (!is_type_param_c(pattern.as.named.name, s.params, s.n_params)) return (tk_subst_result){ .ok = true, .as.value = s };
+            if (type_has_void_sentinel_c(arg))
+                return (tk_subst_result){ .ok = false, .as.error = tk_error_named("cannot infer type parameter from an untyped empty slice / null — annotate the argument", pattern.as.named.name) };
+            tk_type *ex = subst_find_c(s, pattern.as.named.name);
+            if (ex) {
+                if (tk_type_eq(ex, &arg)) return (tk_subst_result){ .ok = true, .as.value = s };
+                return (tk_subst_result){ .ok = false, .as.error = tk_error_named("type parameter inferred as conflicting types", pattern.as.named.name) };
+            }
+            size_t n = s.n_bind;
+            tk_str  *nn = tk_alloc((n + 1) * sizeof *nn);
+            tk_type *nt = tk_alloc((n + 1) * sizeof *nt);
+            for (size_t i = 0; i < n; i += 1) { nn[i] = s.names[i]; nt[i] = s.types[i]; }
+            nn[n] = pattern.as.named.name; nt[n] = arg;
+            return (tk_subst_result){ .ok = true, .as.value = { .params = s.params, .n_params = s.n_params, .names = nn, .types = nt, .n_bind = n + 1 } };
+        }
+        case TK_TYPE_SLICE:
+            if (arg.tag == TK_TYPE_SLICE) return tk_unify(*pattern.as.slice.element, *arg.as.slice.element, s, table);
+            return (tk_subst_result){ .ok = true, .as.value = s };
+        case TK_TYPE_OPTIONAL:
+            if (arg.tag == TK_TYPE_OPTIONAL) return tk_unify(*pattern.as.optional.inner, *arg.as.optional.inner, s, table);
+            return (tk_subst_result){ .ok = true, .as.value = s };
+        default:
+            return (tk_subst_result){ .ok = true, .as.value = s };
+    }
+}
+void tk_collect_sig_type_params(tk_type t, tk_type_table table, tk_str **names, size_t *n) {
+    switch (t.tag) {
+        case TK_TYPE_NAMED: {
+            tk_decl_result d = tk_type_table_find(table, t.as.named.name);
+            if (d.ok) return;                                          // a user type
+            if (is_type_param_c(t.as.named.name, *names, *n)) return;  // dedup
+            *names = tk_realloc0(*names, (*n + 1) * sizeof **names);
+            (*names)[*n] = t.as.named.name; *n += 1;
+            return;
+        }
+        case TK_TYPE_SLICE:    tk_collect_sig_type_params(*t.as.slice.element, table, names, n); return;
+        case TK_TYPE_OPTIONAL: tk_collect_sig_type_params(*t.as.optional.inner, table, names, n); return;
+        case TK_TYPE_VARIANT:  for (size_t i = 0; i < t.as.variant.len; i += 1) tk_collect_sig_type_params(t.as.variant.members[i], table, names, n); return;
+        case TK_TYPE_FUNC:
+            for (size_t i = 0; i < t.as.func.nparams; i += 1) tk_collect_sig_type_params(t.as.func.params[i], table, names, n);
+            tk_collect_sig_type_params(*t.as.func.ret, table, names, n); return;
+        default: return;
+    }
+}
+
 // non-static: shared with match.c (the typed pattern checker resolves case/struct names — C7).
 tk_type_result resolve_named(tk_path path, tk_type_table table) {
     if (path.len == 0)   // M.1: an empty path is an internal invariant break — an honest error, never a crash

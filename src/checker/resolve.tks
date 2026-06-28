@@ -191,6 +191,101 @@ fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
     Variant { members = m2 }
 }
 
+// ── (S4) generics inference: subst + unify ───────────────────────────────────────────────────
+// A type-param → concrete-type binding (parallel arrays). `params` is the generic's type-param
+// universe; `names`/`types` are the bindings discovered by unify. Used by type_call (call result
+// type) and the monomorph pass (stamping). (C: tk_subst.)
+pub type Subst = struct { params: []str; names: []str; types: []Type }
+
+fn is_type_param(name: str, params: []str) -> bool {
+    mut i = 0
+    loop { if i >= params.len { break }; if params[i] == name { return true }; i++ }
+    false
+}
+
+fn subst_find(s: Subst, name: str) -> Type? {
+    mut i = 0
+    loop { if i >= s.names.len { break }; if s.names[i] == name { return s.types[i] }; i++ }
+    null
+}
+
+// substitute each BOUND type-param Named{Tp} by its concrete type. TOTAL over Type cases; structural
+// recursion. A Named that is not a bound param passes through unchanged. (C: tk_subst_type.)
+pub fn subst_type(t: Type, s: Subst) -> Type {
+    match t {
+        Named as n    => match subst_find(s, n.name) { Type as ct => ct; null => t }
+        Slice as sl   => Slice { element = subst_type(sl.element, s) }
+        Optional as o => Optional { inner = subst_type(o.inner, s) }
+        Variant as v  => {
+            mut ms: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
+            Variant { members = ms }
+        }
+        Func as f     => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, subst_type(f.params[i], s)); i++ }
+            Func { params = ps; ret = subst_type(f.ret, s) }
+        }
+        _             => t   // Prim, Byte, Str, Error, Void, Ptr, Uptr — leaves
+    }
+}
+
+// a non-concrete Void SENTINEL (`empty()` → []Void, bare `null` → Void?)? Such a type cannot pin a
+// type-param (it concretizes only in a typed slot — M.2 no-guessing). (C: tk_type_has_void_sentinel.)
+fn type_has_void_sentinel(t: Type) -> bool {
+    match t {
+        Void          => true
+        Slice as sl   => match sl.element { Void => true; _ => false }
+        Optional as o => match o.inner { Void => true; _ => false }
+        _             => false
+    }
+}
+
+// unify a param PATTERN (may contain type-param Named's) against a concrete ARG type, extending the
+// Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a future refinement).
+// `[]T`/`T?` unify their element/inner by structure. REJECT a Void-sentinel arg (cannot pin T —
+// M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens elsewhere).
+// (C: tk_unify.)
+pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | error {
+    match pattern {
+        Named as n => {
+            if !is_type_param(n.name, s.params) { return s }
+            if type_has_void_sentinel(arg) {
+                return error { message = $"cannot infer type parameter {n.name} from an untyped empty slice / null — annotate the argument" }
+            }
+            match subst_find(s, n.name) {
+                Type as existing => {
+                    if type_eq(existing, arg) { s }
+                    else { error { message = $"type parameter {n.name} inferred as conflicting types" } }
+                }
+                null => Subst { params = s.params; names = teko::list::push(s.names, n.name); types = teko::list::push(s.types, arg) }
+            }
+        }
+        Slice as sl   => match arg { Slice as asl => unify(sl.element, asl.element, s, table); _ => s }
+        Optional as o => match arg { Optional as ao => unify(o.inner, ao.inner, s, table); _ => s }
+        _             => s
+    }
+}
+
+// the type-param names that appear in a function signature: a Named whose name is NOT a registered
+// user type (type-params live only in the per-fn scope, never the global table). In order, deduped.
+// (C: tk_collect_sig_type_params.)
+pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str) -> []str {
+    match t {
+        Named as n => match type_table_find(table, n.name) {
+            parser::TypeDecl => acc
+            error            => if is_type_param(n.name, acc) { acc } else { teko::list::push(acc, n.name) }
+        }
+        Slice as sl   => collect_sig_type_params(sl.element, table, acc)
+        Optional as o => collect_sig_type_params(o.inner, table, acc)
+        Variant as v  => { mut a = acc; mut i = 0; loop { if i >= v.members.len { break }; a = collect_sig_type_params(v.members[i], table, a); i++ }; a }
+        Func as f     => { mut a = acc; mut i = 0; loop { if i >= f.params.len { break }; a = collect_sig_type_params(f.params[i], table, a); i++ }; collect_sig_type_params(f.ret, table, a) }
+        _             => acc
+    }
+}
+
 // resolve a syntactic TypeExpr to a pure semantic Type (recursive — B.8).
 pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
     match te {
