@@ -452,7 +452,11 @@ pub fn monomorphize(prog: TProgram, table: TypeTable) -> TProgram | error {
     mut g = 0
     loop {
         if g >= prog.items.len { break }
-        match prog.items[g] { TFunction as f => { if f.type_params.len > 0 { any_generic = true } }; _ => {} }
+        match prog.items[g] {
+            TFunction as f        => { if f.type_params.len > 0 { any_generic = true } }
+            parser::TypeDecl as d => { if d.type_params.len > 0 { any_generic = true } }   // (S4) generic type-decl
+            _                     => {}
+        }
         g++
     }
     if !any_generic { return prog }
@@ -480,6 +484,11 @@ pub fn monomorphize(prog: TProgram, table: TypeTable) -> TProgram | error {
                 let w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
                 kept = teko::list::push(kept, w.stmt)
                 queue = mono_inst_concat(queue, w.insts)
+            }
+            parser::TypeDecl as d => {
+                // (S4) DROP a generic type-decl TEMPLATE (`type Box<T>`); its concrete instances are
+                // appended below from the table. A non-generic decl passes through unchanged.
+                if d.type_params.len == 0 { kept = teko::list::push(kept, prog.items[i]) }
             }
             _ => kept = teko::list::push(kept, prog.items[i])
         }
@@ -519,5 +528,29 @@ pub fn monomorphize(prog: TProgram, table: TypeTable) -> TProgram | error {
         kept = teko::list::push(kept, sf)
     }
 
+    // (S4 type-generics) APPEND the concrete type-decl INSTANCES stamped by the instantiation pass
+    // (the `__g__`-marked table entries), so codegen emits the concrete struct/variant. Generic
+    // templates were dropped above. Dedup vs kept (a dep may already carry an instance).
+    let insts2 = table_generic_instances(table)
+    mut ii = 0
+    loop {
+        if ii >= insts2.len { break }
+        let d = insts2[ii]
+        ii++
+        if mono_kept_has_type(kept, d.name) { continue }
+        kept = teko::list::push(kept, d)
+    }
+
     TProgram { items = kept }
+}
+
+// does `kept` already contain a type-decl named `name`? (dedup for appended generic instances.)
+fn mono_kept_has_type(kept: []TItem, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= kept.len { break }
+        match kept[i] { parser::TypeDecl as d => { if teko::runtime::str_eq(d.name, name) { return true } }; _ => {} }
+        i++
+    }
+    false
 }

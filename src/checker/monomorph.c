@@ -394,11 +394,21 @@ static bool mono_block(tk_tstatement *stmts, size_t n, tk_subst s, tk_tprogram p
 }
 
 // ── the driver ───────────────────────────────────────────────────────────────────────────
+// does `kept` already hold a type-decl named `name`? (dedup for appended generic instances.)
+static bool mono_kept_has_type(tk_titem *kept, size_t n, tk_str name) {
+    for (size_t i = 0; i < n; i += 1)
+        if (kept[i].tag == TK_TITEM_TYPE_DECL && mono_name_eq(kept[i].as.type_decl.name, name)) return true;
+    return false;
+}
+
 tk_tprogram_result tk_monomorphize(tk_tprogram prog, tk_type_table table) {
     // NO-OP GUARD: no generic function → return UNCHANGED (byte-identical for the non-generic corpus).
     bool any_generic = false;
-    for (size_t i = 0; i < prog.nitems; i += 1)
-        if (prog.items[i].tag == TK_TITEM_FUNCTION && prog.items[i].as.function.n_type_params > 0) any_generic = true;
+    for (size_t i = 0; i < prog.nitems; i += 1) {
+        tk_titem it = prog.items[i];
+        if (it.tag == TK_TITEM_FUNCTION  && it.as.function.n_type_params > 0)  any_generic = true;
+        if (it.tag == TK_TITEM_TYPE_DECL && it.as.type_decl.n_type_params > 0) any_generic = true;   // (S4) generic type-decl
+    }
     if (!any_generic) return (tk_tprogram_result){ .ok = true, .as.value = prog };
 
     tk_subst empty_s = { .params = NULL, .n_params = 0, .names = NULL, .types = NULL, .n_bind = 0 };
@@ -427,8 +437,11 @@ tk_tprogram_result tk_monomorphize(tk_tprogram prog, tk_type_table table) {
             if (!mono_tstmt(it.as.statement, empty_s, prog, table, &st, &queue, &err))
                 return (tk_tprogram_result){ .ok = false, .as.error = err };
             KEEP(((tk_titem){ .tag = TK_TITEM_STATEMENT, .as.statement = st }));
+        } else if (it.tag == TK_TITEM_TYPE_DECL) {
+            // (S4) DROP a generic type-decl TEMPLATE; its concrete instances are appended below.
+            if (it.as.type_decl.n_type_params == 0) KEEP(it);
         } else {
-            KEEP(it);   // TypeDecl / UseDecl pass through
+            KEEP(it);   // UseDecl pass through
         }
     }
 
@@ -462,8 +475,16 @@ tk_tprogram_result tk_monomorphize(tk_tprogram prog, tk_type_table table) {
         sf.from_lib = (tk_str){ .ptr = (const tk_byte *)"", .len = 0 };
         KEEP(((tk_titem){ .tag = TK_TITEM_FUNCTION, .as.function = sf }));
     }
-    #undef KEEP
 
     (void)mono_box_type;   // (reserved helper; keeps the parallel with the .tks type boxing)
+    // (S4 type-generics) APPEND concrete type-decl INSTANCES stamped by the instantiation pass (the
+    // `__g__`-marked table entries), so codegen emits the concrete struct/variant. Dedup vs kept.
+    tk_type_decl *insts2 = NULL; size_t ninsts2 = 0;
+    tk_table_generic_instances(table, &insts2, &ninsts2);
+    for (size_t ii = 0; ii < ninsts2; ii += 1) {
+        if (mono_kept_has_type(kept, nkept, insts2[ii].name)) continue;
+        KEEP(((tk_titem){ .tag = TK_TITEM_TYPE_DECL, .as.type_decl = insts2[ii] }));
+    }
+    #undef KEEP
     return (tk_tprogram_result){ .ok = true, .as.value = { .items = kept, .nitems = nkept } };
 }

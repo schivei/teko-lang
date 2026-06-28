@@ -63,4 +63,9 @@ tk_str tk_generic_inst_name(tk_str base, tk_type *args, size_t nargs);
 // resolve.tks::instantiate_types.
 tk_type_table tk_instantiate_types(tk_program program, tk_type_table table);
 
+// (S4) `__g__`-instance name test + the stamped generic-type instance decls in a table (for the
+// mono pass to emit as items). Mirror of resolve.tks name_is_g_instance / table_generic_instances.
+bool tk_name_is_g_instance(tk_str name);
+void tk_table_generic_instances(tk_type_table table, tk_type_decl **out, size_t *n);
+
 #endif // TK_CHECK_RESOLVE_H

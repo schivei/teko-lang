@@ -491,6 +491,28 @@ tk_type_table tk_instantiate_types(tk_program program, tk_type_table table) {
     return tbl;
 }
 
+// does `name` carry the `__g__` generic-instance infix? Mirror of resolve.tks::name_is_g_instance.
+bool tk_name_is_g_instance(tk_str name) {
+    if (name.len < 5) return false;
+    for (size_t i = 0; i + 5 <= name.len; i += 1)
+        if (name.ptr[i] == '_' && name.ptr[i+1] == '_' && name.ptr[i+2] == 'g' && name.ptr[i+3] == '_' && name.ptr[i+4] == '_')
+            return true;
+    return false;
+}
+
+// (S4) the concrete generic-type INSTANCE decls stamped into the table (`__g__`-marked entries), for
+// the mono pass to emit as program items. Out-pointer list (Teko returns a slice). Mirror of
+// resolve.tks::table_generic_instances.
+void tk_table_generic_instances(tk_type_table table, tk_type_decl **out, size_t *n) {
+    *out = NULL; *n = 0;
+    for (size_t i = 0; i < table.len; i += 1) {
+        if (tk_name_is_g_instance(table.ptr[i].name) && table.ptr[i].decl.n_type_params == 0) {
+            *out = tk_realloc0(*out, (*n + 1) * sizeof **out); if (!*out) abort();
+            (*out)[*n] = table.ptr[i].decl; *n += 1;
+        }
+    }
+}
+
 // A NAMED type referring to a `variant` decl → its expanded TK_TYPE_VARIANT. A variant decl's
 // body IS a union type-expr (A | B | …), so tk_resolve_type on it yields the VARIANT with its
 // members; the members resolve to NAMED (resolve_named keeps user types nominal), so this
