@@ -22,10 +22,31 @@ fn parse_type_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     ParsedType { node = node, next = p }
 }
 
-// A named type is a path: `u64`, `lexer::Token` (nominal — B.13).
+// A named type is a path: `u64`, `lexer::Token` (nominal — B.13). It may carry generic type
+// ARGUMENTS `<T1, T2, …>` (S4 type-generics — `Box<i64>`, `Result<i64, str>`). Inference-only:
+// type-args appear ONLY in a type position, never as a call turbofish.
+//
+// The `<…>` is parsed SPECULATIVELY and backtracks if it is not a closed argument list: the cast
+// target is a type-PRIMARY (`x to i64 < y`), so a bare `<` after a type name must stay available as
+// the comparison operator. Single-level only for now — a compound close (`>>`/`>=`/`>>=`, i.e.
+// NESTED generics like `Box<Box<i64>>`) does not close with a plain `>`, so it backtracks (nested
+// type-args are a later crumb — the close-split).
 fn parse_named(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     let pp = match parse_path(tokens, pos) { ParsedPath as x => x; error as e => return e }
-    ParsedType { node = NamedType { path = pp.node, args = teko::list::empty() }, next = pp.next }
+    let plain = ParsedType { node = NamedType { path = pp.node, args = teko::list::empty() }, next = pp.next }
+    if !is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) { return plain }
+    mut args: []TypeExpr = teko::list::empty()
+    mut p = pp.next + 1
+    loop {
+        let a = match parse_type(tokens, p) { ParsedType as x => x; error => return plain }   // not a type → backtrack
+        args = teko::list::push(args, a.node)
+        p = a.next
+        if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
+        else if is_kind_at(tokens, p, lexer::TokenKind::Gt) {
+            return ParsedType { node = NamedType { path = pp.node, args = args }, next = p + 1 }
+        }
+        else { return plain }   // no closing `>` (or a compound close) → backtrack
+    }
 }
 
 // `[]T` — `pos` is at `[` (parse_type_primary checked). The element is a PRIMARY, so

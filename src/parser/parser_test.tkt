@@ -66,6 +66,54 @@ fn parses_slice_and_nesting() {
     }
 }
 
+// is `t` a single-segment NamedType named `name` with `nargs` generic type-arguments? (S4)
+fn named_with_args(t: TypeExpr, name: str, nargs: u64) -> bool {
+    match t {
+        NamedType as n => n.path.segments.len == 1 && n.path.segments[0].name == name && n.args.len == nargs
+        _              => false
+    }
+}
+
+#test
+fn parses_generic_type_args() {
+    // Box<i64> → NamedType "Box" with one type-arg (named i64).
+    let t = match type_of("Box<i64>") { TypeExpr as x => x; error => return }
+    teko::assert::is_true(named_with_args(t, "Box", 1 to u64))
+    match t {
+        NamedType as n => teko::assert::is_true(named_is(n.args[0], "i64"))
+        _              => teko::assert::is_true(false)
+    }
+    // Result<i64, str> → two type-args.
+    let r = match type_of("Result<i64, str>") { TypeExpr as x => x; error => return }
+    teko::assert::is_true(named_with_args(r, "Result", 2 to u64))
+    // []Box<i64> → a slice whose element is Box<i64>.
+    let s = match type_of("[]Box<i64>") { TypeExpr as x => x; error => return }
+    match s {
+        SliceType as sl => teko::assert::is_true(named_with_args(sl.element, "Box", 1 to u64))
+        _               => teko::assert::is_true(false)
+    }
+    // Box<i64>? → an optional wrapping Box<i64>.
+    let o = match type_of("Box<i64>?") { TypeExpr as x => x; error => return }
+    match o {
+        OptionalType as ot => teko::assert::is_true(named_with_args(ot.inner, "Box", 1 to u64))
+        _                  => teko::assert::is_true(false)
+    }
+    // a plain name keeps zero args (no regression).
+    let p = match type_of("u64") { TypeExpr as x => x; error => return }
+    teko::assert::is_true(named_with_args(p, "u64", 0 to u64))
+}
+
+#test
+fn generic_lt_backtracks_to_comparison() {
+    // `x to i64 < y` is a COMPARISON of a cast, NOT a generic on i64 — the speculative type-args
+    // parse must backtrack and leave `<` to the comparison operator (cast target is a type-primary).
+    teko::assert::is_true(!expr_errors("x to i64 < y"))
+    match expr_of("x to i64 < y") {
+        Compare as c => teko::assert::is_true(c.rest.len == 1)
+        _            => teko::assert::is_true(false)
+    }
+}
+
 #test
 fn parses_union_and_single() {
     // happy: A | B (arity 2), A | B | C (arity 3); a single primary is NOT wrapped (M.5).
