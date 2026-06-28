@@ -34,11 +34,15 @@ tk_tprogram_result tk_deserialize_program(const tk_byte *data, size_t len);
 #include <stdio.h>           // fopen/fread/fclose, fprintf, printf
 #include <stdlib.h>          // malloc, realloc, free
 #include <string.h>          // strrchr, strcmp, memcpy
+#ifdef _WIN32
+#include "win32_compat.h"    // chdir→_chdir, mkdir, getcwd, setenv, dirent shim, tk_win32_spawnvp
+#else
 #include <unistd.h>          // chdir (run the project path from its own root — A3)
 #include <spawn.h>           // posix_spawnp — safer cc invocation without shell
 #include <sys/wait.h>        // waitpid, WIFEXITED, WEXITSTATUS
 #include <sys/stat.h>        // mkdir — the native build output dir (./bin)
 #include <dirent.h>          // opendir/readdir — find the single *.tkp manifest
+#endif
 
 // F3: where the minimal execution runtime (teko_rt.h/.c) lives. CMake injects the
 // absolute path; a non-CMake `cc`-built teko falls back to the in-tree dir.
@@ -316,16 +320,26 @@ static int run_cc(const char *cfile, const char *binary, tk_manifest m) {
     argv[argc++] = (char *)binary;
     argv[argc]   = NULL;
 
-    // Invoke the host compiler directly (no shell) via posix_spawnp.
-    // environ is POSIX-standard but not always declared in <unistd.h> on all platforms.
-    extern char **environ;
+    // Invoke the host compiler directly (no shell).
+    // On Windows: _spawnvp(_P_WAIT) is synchronous and returns the exit code directly.
+    // On POSIX: posix_spawnp + waitpid.
     int rc = -1;
-    pid_t pid;
-    if (posix_spawnp(&pid, cc, NULL, NULL, argv, environ) == 0) {
-        int status = 0;
-        if (waitpid(pid, &status, 0) == pid)
-            rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#ifdef _WIN32
+    {
+        int w = tk_win32_spawnvp(cc, argv);
+        if (w != -1) rc = w;
     }
+#else
+    {
+        extern char **environ;
+        pid_t pid;
+        if (posix_spawnp(&pid, cc, NULL, NULL, argv, environ) == 0) {
+            int status = 0;
+            if (waitpid(pid, &status, 0) == pid)
+                rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
+    }
+#endif
 
     if (lf) {
         for (size_t i = 0; i < m.link_flags.len; i++) tk_free0(lf[i]);

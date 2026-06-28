@@ -17,10 +17,14 @@
 #include <execinfo.h> // backtrace, backtrace_symbols_fd (C1.9)
 #define TK_HAVE_BACKTRACE 1
 #endif
+#ifdef _WIN32
+#include "../win32_compat.h"  // chdir→_chdir, mkdir, getcwd, setenv, dirent shim, tk_win32_spawnvp
+#else
 #include <unistd.h>   // chdir, fork, execvp, _exit (host FFI bottoms)
 #include <sys/wait.h> // waitpid — teko::process::run
 #include <dirent.h>   // opendir/readdir — teko::fs::list_dir
 #include <sys/stat.h> // mkdir — teko::fs::mkdir (build output dir)
+#endif
 #include <errno.h>    // errno/EEXIST — mkdir idempotence
 
 // (C1.9 / E4) NATIVE STACK TRACES. A generated Teko program links this runtime; on a panic (M.1)
@@ -512,6 +516,11 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
     char **cargv = (char **)tk_alloc((n + 1) * sizeof *cargv);
     for (uint64_t i = 0; i < n; i += 1) cargv[i] = tk_cstr(argv[i]);
     cargv[n] = NULL;
+#ifdef _WIN32
+    // _spawnvp(_P_WAIT) is synchronous: blocks until the child exits, returns its exit code.
+    int w = tk_win32_spawnvp(cargv[0], cargv);
+    return (w == -1) ? 127 : (int32_t)(int8_t)w;
+#else
     pid_t pid = fork();
     if (pid < 0) return 127;
     if (pid == 0) {                      // child: exec; on failure exit 127 (POSIX convention)
@@ -522,6 +531,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
     if (waitpid(pid, &status, 0) < 0) return 127;
     if (WIFEXITED(status)) return (int32_t)(int8_t)WEXITSTATUS(status);
     return 127;
+#endif
 }
 
 // Captured process argv (the generated `main` calls tk_set_args before the virtual-main body).
