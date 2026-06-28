@@ -3602,6 +3602,16 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: checker::
             if c.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, c.label); cb(out, "_cont;\n") }
             else { cb(out, "continue;\n") }
         }
+        // (C7.18) defer { stmts } — registers the cleanup block; executed LIFO before every
+        // function exit (return or trailing-value). The C twin uses a global defer stack
+        // (g_cg_defers) reset per function; the Teko twin emits a comment (no mutable global).
+        // In practice the native backend handles defer via the C twin's stack; this branch
+        // is reached only by the self-host compiler when compiling code that USES defer.
+        checker::TDeferStmt => {
+            // The Teko codegen cannot easily carry a mutable defer stack through functional
+            // emit_stmt. Emit an honest stop for defer in the Teko codegen path.
+            error { message = "codegen: defer statement not yet supported in the self-hosted codegen path (use the C backend)" }
+        }
     }
 }
 
@@ -3997,6 +4007,7 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement) -> CgType
             checker::TReturn as r  => { if r.has_value { s = cg_collect_expr_opts(s, r.value) } }
             checker::TLoopStmt as l => { s = cg_collect_block_opts(s, l.body) }
             checker::TExprStmt as es => { s = cg_collect_expr_opts(s, es.expr) }
+            checker::TDeferStmt as d => { s = cg_collect_block_opts(s, d.body) }
             _ => { }
         }
         i++

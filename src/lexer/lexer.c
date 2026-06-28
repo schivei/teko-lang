@@ -254,6 +254,7 @@ static tk_token_kind keyword_kind(tk_str text) {
     if (tk_str_eq_lit(text, "break"))    return TK_TOKEN_BREAK;
     if (tk_str_eq_lit(text, "continue")) return TK_TOKEN_CONTINUE;
     if (tk_str_eq_lit(text, "return"))   return TK_TOKEN_RETURN;
+    if (tk_str_eq_lit(text, "defer"))    return TK_TOKEN_DEFER;   // scoped cleanup block (C7.18)
     if (tk_str_eq_lit(text, "match"))    return TK_TOKEN_MATCH;
     if (tk_str_eq_lit(text, "when"))     return TK_TOKEN_WHEN;
     if (tk_str_eq_lit(text, "in"))       return TK_TOKEN_IN;    // the membership operator (x in [ … ]) — Phase 2

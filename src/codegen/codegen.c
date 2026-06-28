@@ -235,6 +235,13 @@ static tk_tprogram g_cg_prog;   // set once at the top of tk_emit_c (mirror of v
 // of a `T | error` function lands in the tk_u_ variant, not as a bare member.
 static tk_type g_cg_ret_type;
 
+// (C7.18) Per-function defer stack: accumulated as emit_stmt encounters TK_TSTMT_DEFER nodes,
+// emitted LIFO before every `return` and at the function's trailing exit. Reset at the top of
+// emit_function. Panic does NOT drain the defer stack (simplifies implementation).
+#define TK_CG_MAX_DEFERS 256
+static const tk_tstatement *g_cg_defers[TK_CG_MAX_DEFERS];   // deferred blocks in push order
+static size_t                g_cg_ndefers;                    // count; reset per function
+
 // Forward decl — variant_member_name (the member's bare last path segment; the union
 // field name + the source of the UPPERCASE tag suffix) is defined with the type-decl
 // emitter below, but the W5b variant scans above need it too.
@@ -832,6 +839,7 @@ static bool cg_expr_diverges(const tk_texpr *e) {
 static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err);
 static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
                       tk_type ret_type, const char *indent, const char **err);
+static bool emit_defers(cbuf *b, const char *indent, const char **err);  // (C7.18) fwd
 // W5b — emit `value` into a slot whose EXPECTED type is `expected`. When `expected` is a
 // (named) variant and `value`'s type is one of its case members, WRAP the value into the
 // variant's `tag + union` representation; otherwise emit the value plainly. (The VM needs
@@ -2804,8 +2812,12 @@ static bool emit_exprstmt_tail(cbuf *b, const tk_texpr *x, bool in_main,
         cb(b, indent);
         if (!emit_expr(b, x, err)) return false;
         cb(b, ";\n");
+        // (C7.18) Drain defers at the end of a void-returning function body.
+        if (!emit_defers(b, indent, err)) return false;
         return true;
     }
+    // (C7.18) Drain defers before the implicit trailing-value return.
+    if (!emit_defers(b, indent, err)) return false;
     cb(b, indent);
     if (in_main) {
         cb(b, "return (int)(");
@@ -2859,6 +2871,22 @@ static bool emit_if_stmt(cbuf *b, const tk_texpr *e, bool in_main,
     return true;
 }
 
+// (C7.18) Emit all accumulated deferred blocks in LIFO order (last registered runs first).
+// Called before every `return` statement and before the implicit trailing-value exit.
+static bool emit_defers(cbuf *b, const char *indent, const char **err) {
+    if (g_cg_ndefers == 0) return true;
+    size_t i = g_cg_ndefers;
+    while (i > 0) {
+        i -= 1;
+        const tk_tstatement *ds = g_cg_defers[i];
+        for (size_t j = 0; j < ds->as.defer_stmt.nbody; j += 1) {
+            if (!emit_stmt(b, &ds->as.defer_stmt.body[j], /*in_main=*/false,
+                           (tk_type){ .tag = TK_TYPE_VOID }, indent, err)) return false;
+        }
+    }
+    return true;
+}
+
 static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
                       tk_type ret_type, const char *indent, const char **err) {
     switch (s->tag) {
@@ -2904,6 +2932,8 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
         }
 
         case TK_TSTMT_RETURN: {
+            // (C7.18) Drain the defer stack LIFO before returning.
+            if (!emit_defers(b, indent, err)) return false;
             cb(b, indent);
             if (!s->as.ret.has_value) {
                 cb(b, in_main ? "return 0;\n" : "return;\n");
@@ -2919,6 +2949,14 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
                 if (!emit_as(b, ret_type, &s->as.ret.value, err)) return false;
                 cb(b, ";\n");
             }
+            return true;
+        }
+
+        case TK_TSTMT_DEFER: {
+            // (C7.18) Register the deferred block; execute it later (LIFO) before every exit.
+            if (g_cg_ndefers >= TK_CG_MAX_DEFERS)
+                return fail_node(err, "codegen: too many defer blocks in a single function (limit 256)");
+            g_cg_defers[g_cg_ndefers++] = s;
             return true;
         }
 
@@ -3010,7 +3048,8 @@ static bool cg_stmt_c_terminates(const tk_tstatement *s) {
 }
 
 static bool emit_function(cbuf *b, tk_tfunction f, const char **err) {
-    g_cg_ret_type = f.return_type;   // so a return inside a value-form match/if wraps correctly
+    g_cg_ret_type  = f.return_type;   // so a return inside a value-form match/if wraps correctly
+    g_cg_ndefers   = 0;               // (C7.18) reset the per-function defer stack
     if (!emit_function_sig(b, f, err)) return false;
     cb(b, " {\n");
     // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
@@ -3362,6 +3401,7 @@ static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, s
             case TK_TSTMT_RETURN:  if (s->as.ret.has_value) cg_collect_expr_opts(set, &s->as.ret.value); break;
             case TK_TSTMT_LOOP:    cg_collect_block_opts(set, s->as.loop_stmt.body, s->as.loop_stmt.nbody); break;
             case TK_TSTMT_EXPR:    cg_collect_expr_opts(set, &s->as.expr_stmt.expr); break;
+            case TK_TSTMT_DEFER:   cg_collect_block_opts(set, s->as.defer_stmt.body, s->as.defer_stmt.nbody); break;
             default: break;   // BREAK/CONTINUE carry no expr
         }
     }

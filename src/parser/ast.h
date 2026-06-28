@@ -155,17 +155,24 @@ typedef struct { bool has_value; tk_expr value; }               tk_return;    //
 typedef struct { tk_str label; tk_statement *body; size_t nbody; } tk_loop_stmt; // loop [NAME] { … } (M.5); label empty (len 0) = unlabeled
 typedef struct { tk_str label; }                                tk_jump;      // break [NAME] / continue [NAME]; label empty = innermost loop
 typedef struct { tk_expr expr; }                                tk_expr_stmt; // a bare expression on its own line
+// `defer { stmts }` (C7.18) — scoped cleanup block; executes LIFO at ANY scope exit
+// (normal return, early return inside a loop, break out of a function).
+// Panic does NOT run deferred blocks (simplifies implementation).
+// Nested `defer` is rejected by the checker.
+typedef struct { tk_statement *body; size_t nbody; } tk_defer_stmt;
 
 struct tk_statement {
     enum { TK_STMT_BINDING, TK_STMT_ASSIGN, TK_STMT_RETURN,
-           TK_STMT_LOOP, TK_STMT_BREAK, TK_STMT_CONTINUE, TK_STMT_EXPR } tag;
+           TK_STMT_LOOP, TK_STMT_BREAK, TK_STMT_CONTINUE, TK_STMT_EXPR,
+           TK_STMT_DEFER } tag;
     union {
-        tk_binding   binding;
-        tk_assign    assign;
-        tk_return    ret;
-        tk_loop_stmt loop_stmt;
-        tk_expr_stmt expr_stmt;
-        tk_jump      jump;          // BREAK, CONTINUE — optional loop label
+        tk_binding    binding;
+        tk_assign     assign;
+        tk_return     ret;
+        tk_loop_stmt  loop_stmt;
+        tk_expr_stmt  expr_stmt;
+        tk_jump       jump;          // BREAK, CONTINUE — optional loop label
+        tk_defer_stmt defer_stmt;    // DEFER — the cleanup block
     } as;
 };
 

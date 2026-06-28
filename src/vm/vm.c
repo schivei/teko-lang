@@ -455,6 +455,15 @@ static bool vm_str_eq(tk_str a, tk_str b) {
 // The whole program (so a call expr can find a top-level function by name).
 static tk_tprogram g_prog;
 
+// (C7.18) Per-call-frame defer stack: a simple linked list of deferred blocks.
+// Pushed as exec_stmt encounters TK_TSTMT_DEFER; drained LIFO at function exit.
+// `g_vm_defer_top` points at the current call frame's stack; eval_call saves/restores it.
+typedef struct tk_vm_defer_node {
+    const tk_tstatement *stmt;      // the TK_TSTMT_DEFER node (carries its body)
+    struct tk_vm_defer_node *next;  // older entry (toward the bottom of the stack)
+} tk_vm_defer_node;
+static tk_vm_defer_node *g_vm_defer_top = NULL;   // current call frame's defer stack top
+
 // forward decls
 static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env);
 static tk_flow  tk_vm_exec_block(const tk_tstatement *body, size_t n, tk_venv *env);
@@ -1135,9 +1144,24 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
         tk_value av = tk_vm_eval_expr(&args[i], env);
         env_define(&fenv, fn->params[i].name, av);
     }
+    // (C7.18) Save the caller's defer stack; this call frame gets a fresh one.
+    tk_vm_defer_node *saved_defer_top = g_vm_defer_top;
+    g_vm_defer_top = NULL;
     tk_cov_enter(fn_idx);   // D3-branch — attribute body branches to this fn (no-op unless coverage on)
     tk_flow fl = tk_vm_exec_block(fn->body, fn->nbody, &fenv);
     tk_cov_leave();
+    // (C7.18) Drain the current frame's defer stack LIFO before exit.
+    // Panic does NOT drain (simplifies implementation — defers registered before panic don't run).
+    {
+        tk_vm_defer_node *d = g_vm_defer_top;
+        while (d != NULL) {
+            tk_vm_defer_node *next = d->next;
+            tk_vm_exec_block(d->stmt->as.defer_stmt.body, d->stmt->as.defer_stmt.nbody, &fenv);
+            tk_free0(d);
+            d = next;
+        }
+    }
+    g_vm_defer_top = saved_defer_top;   // restore caller's defer stack
     env_free(&fenv);
     // Coerce the returned value into the declared return type: a `T` returned from a `-> T?`
     // fn present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot. A NONE
@@ -1710,6 +1734,15 @@ static tk_flow exec_stmt(const tk_tstatement *s, tk_venv *env) {
         }
         case TK_TSTMT_BREAK:    return (tk_flow){ .kind = TK_FLOW_BREAK,    .label = s->as.jump.label };
         case TK_TSTMT_CONTINUE: return (tk_flow){ .kind = TK_FLOW_CONTINUE, .label = s->as.jump.label };
+        case TK_TSTMT_DEFER: {
+            // (C7.18) Push this defer block onto the current frame's defer stack.
+            tk_vm_defer_node *node = tk_alloc(sizeof *node);
+            if (node == NULL) abort();
+            node->stmt = s;
+            node->next = g_vm_defer_top;
+            g_vm_defer_top = node;
+            return flow_normal();
+        }
     }
     vm_unsupported("unknown statement not yet supported");
 }
@@ -1924,6 +1957,7 @@ static void cov_walk_stmt(const tk_tstatement *st, cov_walk_t *w) {
         case TK_TSTMT_RETURN:  if (st->as.ret.has_value) cov_walk_expr(&st->as.ret.value, w); break;
         case TK_TSTMT_LOOP:    cov_walk_block(st->as.loop_stmt.body, st->as.loop_stmt.nbody, w); break;
         case TK_TSTMT_EXPR:    cov_walk_expr(&st->as.expr_stmt.expr, w); break;
+        case TK_TSTMT_DEFER:   cov_walk_block(st->as.defer_stmt.body, st->as.defer_stmt.nbody, w); break;
         default: break;   // break/continue
     }
 }

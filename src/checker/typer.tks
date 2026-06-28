@@ -1092,6 +1092,23 @@ fn type_statement(s: parser::Statement, env: Env, table: TypeTable) -> TypedStmt
         parser::BreakStmt as b    => TypedStmt { node = TBreakStmt { label = b.label }; env = env }
         parser::ContinueStmt as c => TypedStmt { node = TContinueStmt { label = c.label }; env = env }
         parser::ExprStmt as es => type_exprstmt(es, env, table)
+        parser::DeferStmt as d => {
+            // Validate: defer block may not directly contain return, break, or nested defer.
+            mut vi: u64 = 0
+            loop {
+                if vi >= d.body.len { break }
+                match d.body[vi] {
+                    parser::Return     => return error { message = "defer block may not return" }
+                    parser::BreakStmt  => return error { message = "defer block may not break" }
+                    parser::DeferStmt  => return error { message = "nested defer is not allowed" }
+                    _                  => {}
+                }
+                vi++
+            }
+            // Type-check the body in void context; bindings are scoped inside (don't leak env).
+            let tb = match type_block(d.body, env, table) { TypedBlock as x => x; error as e => return e }
+            TypedStmt { node = TDeferStmt { body = tb.stmts }; env = env }
+        }
     }
 }
 

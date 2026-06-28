@@ -178,6 +178,23 @@ tk_typed_stmt_result tk_type_statement(tk_statement s, tk_env env, tk_type_table
         case TK_STMT_BREAK:    return sok((tk_tstatement){ .tag = TK_TSTMT_BREAK,    .as.jump = { .label = s.as.jump.label } }, env);
         case TK_STMT_CONTINUE: return sok((tk_tstatement){ .tag = TK_TSTMT_CONTINUE, .as.jump = { .label = s.as.jump.label } }, env);
         case TK_STMT_EXPR:     return type_exprstmt(s.as.expr_stmt, env, table);
+        case TK_STMT_DEFER: {
+            // Validate: defer block may not directly contain return, break, or nested defer.
+            for (size_t i = 0; i < s.as.defer_stmt.nbody; i += 1) {
+                tk_statement inner = s.as.defer_stmt.body[i];
+                if (inner.tag == TK_STMT_RETURN)
+                    return (tk_typed_stmt_result){ .ok = false, .as.error = tk_error_make("defer block may not return") };
+                if (inner.tag == TK_STMT_BREAK)
+                    return (tk_typed_stmt_result){ .ok = false, .as.error = tk_error_make("defer block may not break") };
+                if (inner.tag == TK_STMT_DEFER)
+                    return (tk_typed_stmt_result){ .ok = false, .as.error = tk_error_make("nested defer is not allowed") };
+            }
+            // Type-check the body in void context; bindings are scoped inside (don't leak env).
+            tk_typed_block_result tb = tk_type_block(s.as.defer_stmt.body, s.as.defer_stmt.nbody, env, table);
+            if (!tb.ok) return sfail(tb.as.error);
+            tk_tstatement node = { .tag = TK_TSTMT_DEFER, .as.defer_stmt = { .body = tb.as.value.stmts, .nbody = tb.as.value.n } };
+            return sok(node, env);
+        }
     }
     return smsg("unknown statement");
 }

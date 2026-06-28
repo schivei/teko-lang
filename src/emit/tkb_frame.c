@@ -111,6 +111,7 @@ static void collect_tstmt(tk_strtable *t, const tk_tstatement *s) {
         case TK_TSTMT_BREAK:
         case TK_TSTMT_CONTINUE: tk_st_intern(t, s->as.jump.label); break;
         case TK_TSTMT_EXPR:     collect(t, &s->as.expr_stmt.expr); break;
+        case TK_TSTMT_DEFER:    collect_tstmts(t, s->as.defer_stmt.body, s->as.defer_stmt.nbody); break;
     }
 }
 

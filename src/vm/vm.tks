@@ -175,7 +175,11 @@ type Slot = struct { name: str; val: Value }
 // `prog` carries the typed program so `find_function` can resolve user calls. The C twin uses a
 // file-global `g_prog`; Teko has NO mutable globals (M.0), so the program rides the env (threaded
 // through every frame, exactly like codegen threads its emit context).
-pub type Venv  = struct { slots: []Slot; prog: checker::TProgram }
+// (C7.18) A deferred block body (list of TStatements). Used in the defer stack below.
+pub type DeferBody = struct { body: []checker::TStatement }
+// (C7.18) Per-call-frame defer accumulator. Pushed as exec_stmt encounters TDeferStmt;
+// drained LIFO in eval_call after exec_block completes. Panic does NOT drain.
+pub type Venv  = struct { slots: []Slot; prog: checker::TProgram; defers: []DeferBody }
 
 // find — newest-first scan so a later binding SHADOWS an earlier one (the checker's rule). The
 // checker guarantees every read binds, so a miss is an internal invariant break → panic (M.1),
@@ -192,7 +196,17 @@ fn find(env: Venv, name: str) -> Slot {
 
 // define — push a fresh slot (shadowing). Returns the grown env (functional, like emit/*).
 pub fn define(env: Venv, name: str, val: Value) -> Venv {
-    Venv { slots= teko::list::push(env.slots, Slot { name= name, val= val }); prog= env.prog }
+    Venv { slots= teko::list::push(env.slots, Slot { name= name, val= val }); prog= env.prog; defers= env.defers }
+}
+
+// (C7.18) push_defer — register a deferred body onto the env's defer stack.
+fn push_defer(env: Venv, body: []checker::TStatement) -> Venv {
+    Venv { slots= env.slots; prog= env.prog; defers= teko::list::push(env.defers, DeferBody { body= body }) }
+}
+
+// (C7.18) fresh_env — a fresh call-frame env (no slots, no defers, same prog).
+fn fresh_env(prog: checker::TProgram) -> Venv {
+    Venv { slots= teko::list::empty(); prog= prog; defers= teko::list::empty() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1132,7 @@ fn exec_match(e: checker::TExpr, env: Venv) -> FlowEnv {
                         // run the arm body; POP its bindings/locals back to the outer scope (keeping
                         // outer-`mut` mutations, which mutate_slot writes at their index in [0, base)).
                         let bo = exec_block(arm.body, pm.env)
-                        return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog } }
+                        return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog; defers= bo.env.defers } }
                     }
                 }
                 i++   // discard this arm's bindings and try the next
@@ -1472,7 +1486,7 @@ fn mutate_slot(env: Venv, name: str, op: lexer::TokenKind, rhs: Value) -> Venv {
         else        { rebuilt = teko::list::push(rebuilt, env.slots[j]) }
         j++
     }
-    Venv { slots= rebuilt; prog= env.prog }
+    Venv { slots= rebuilt; prog= env.prog; defers= env.defers }
 }
 
 // exit_code_of — the process exit code from the virtual-main's final value, the .tks twin of
@@ -1604,7 +1618,7 @@ fn eval_call(c: checker::TCall, env: Venv) -> Value {
     // Bind each parameter to its evaluated argument in a FRESH root frame (no closure capture —
     // flat M0 functions, like codegen's C). Args evaluate in the CALLER's env, then enter the
     // callee's frame by the param's name (positional). (B-vm — VM function parameters.)
-    mut fenv = Venv { slots = teko::list::empty(); prog = env.prog }
+    mut fenv = fresh_env(env.prog)
     mut ai = 0
     loop {
         if ai >= f.params.len { break }
@@ -1616,8 +1630,18 @@ fn eval_call(c: checker::TCall, env: Venv) -> Value {
     // present-wraps (REBOOT §202), mirroring codegen's emit_as on the return slot.
     // D3-branch: push h.idx so branches inside f.body attribute to THIS fn (no-op unless coverage on).
     teko::cov_enter(h.idx)
-    let fl = exec_block(f.body, fenv).flow
+    let fe = exec_block(f.body, fenv)
     teko::cov_leave()
+    // (C7.18) Drain the call frame's defer stack LIFO before returning.
+    // Panic does NOT drain deferred blocks.
+    mut drained_env = fe.env
+    mut di = drained_env.defers.len
+    loop {
+        if di == 0 { break }
+        di--
+        drained_env = exec_block(drained_env.defers[di].body, drained_env).env
+    }
+    let fl = fe.flow
     match fl {
         VmReturn as ret => coerce_to(ret.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)
         Normal as nm  => coerce_to(nm.value ?? panic("vm: void fn call used as a value (internal: checker should reject)"), f.return_type)  // W5a — implicit trailing value (B.20)
@@ -1742,6 +1766,10 @@ fn exec_stmt(s: checker::TStatement, env: Venv) -> Step {
         }
         checker::TBreakStmt as b    => Exit { flow= Break { label= b.label }; env= env }
         checker::TContinueStmt as c => Exit { flow= Continue { label= c.label }; env= env }
+        // (C7.18) A defer statement registers the block; it executes LIFO at function exit.
+        // The VM drains the defer list in eval_call after exec_block completes.
+        // Panic does NOT drain deferred blocks.
+        checker::TDeferStmt as d    => Stepped { env= push_defer(env, d.body); value= null }
     }
 }
 
@@ -1811,7 +1839,7 @@ fn call_value(c: checker::TCall, env: Venv) -> Value? {
     // CALLER's env, then enter the callee's frame positionally) — the SAME setup as eval_call. Without
     // this a statement-position call (e.g. `tokens = push(tokens, stamp(...))` reaching a helper) runs
     // the body with NO params bound → `unbound variable` for the first param read.
-    mut fenv = Venv { slots = teko::list::empty(); prog = env.prog }
+    mut fenv = fresh_env(env.prog)
     mut ai = 0
     loop {
         if ai >= f.params.len { break }
@@ -1820,9 +1848,17 @@ fn call_value(c: checker::TCall, env: Venv) -> Value? {
         ai = ai + 1
     }
     teko::cov_enter(h.idx)   // D3-branch — attribute body branches to this fn (no-op unless coverage on)
-    let fl = exec_block(f.body, fenv).flow
+    let fe2 = exec_block(f.body, fenv)
     teko::cov_leave()
-    match fl {
+    // (C7.18) Drain the call frame's defer stack LIFO before returning.
+    mut drained_env2 = fe2.env
+    mut di2 = drained_env2.defers.len
+    loop {
+        if di2 == 0 { break }
+        di2--
+        drained_env2 = exec_block(drained_env2.defers[di2].body, drained_env2).env
+    }
+    match fe2.flow {
         VmReturn as ret => ret.value                      // explicit `return e` (or bare return -> null)
         Normal as nm  => nm.value                       // W5a — implicit trailing value (B.20); null if none
         _             => null                            // break/continue can't escape a fn body
@@ -1872,7 +1908,7 @@ fn run_loop(mylabel: str, body: []checker::TStatement, env: Venv) -> LoopOut {
             }
             i = i + 1
         }
-        cur = Venv { slots = loop_outer(e.slots, base); prog = e.prog }   // keep outer mutations; drop locals
+        cur = Venv { slots = loop_outer(e.slots, base); prog = e.prog; defers= cur.defers }   // keep outer mutations; drop locals
         if exited {
             match exflow {
                 VmReturn as ret => return LoopOut { flow = ret; env = cur }
@@ -1907,12 +1943,12 @@ fn exec_if(e: checker::TExpr, env: Venv) -> FlowEnv {
             if c {
                 teko::cov_branch(e.line, e.col, 0)
                 let bo = exec_block(f.then_blk, env)
-                return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog } }
+                return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog; defers= bo.env.defers } }
             }
             teko::cov_branch(e.line, e.col, 1)
             if f.has_else {
                 let bo = exec_block(f.else_blk, env)
-                return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog } }
+                return FlowEnv { flow= bo.flow; env= Venv { slots= loop_outer(bo.env.slots, base); prog= bo.env.prog; defers= bo.env.defers } }
             }
             FlowEnv { flow= Normal { value= null }; env= env }    // if-without-else taken false: no value, env unchanged
         }
@@ -1926,7 +1962,7 @@ fn exec_if(e: checker::TExpr, env: Venv) -> FlowEnv {
 // the end -> 0. Top-level functions are callable (run only when called, never on their own).
 // ---------------------------------------------------------------------------
 exp fn run(prog: checker::TProgram) -> i32 {
-    mut env = Venv { slots = teko::list::empty(); prog = prog }
+    mut env = fresh_env(prog)
     mut last: Value? = null      // W5a — the last NORMAL top-level statement's trailing value (B.20)
     mut i = 0
     loop {
@@ -2192,7 +2228,7 @@ exp fn run_tests_cov(prog: checker::TProgram, record_branches: bool, write_xml: 
                 if f.is_test {
                     let label = if f.namespace.len != 0 { teko::str::concat3(f.namespace, "::", f.name) } else { f.name }
                     teko::io::print(teko::str::concat3("test ", label, " ... "))
-                    let fenv = Venv { slots = teko::list::empty(); prog = prog }
+                    let fenv = fresh_env(prog)
                     teko::cov_enter(i to u64)   // attribute the test body's own lines/branches to the test (NOT prod fn 0)
                     let _ = exec_block(f.body, fenv)   // a failed assert panics here (fail-fast); normal completion = pass
                     teko::cov_leave()

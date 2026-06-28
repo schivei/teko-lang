@@ -257,6 +257,10 @@ static tk_tstatement read_tstmt(tk_reader *r, tk_strs t) {
         case 4: s.tag = TK_TSTMT_BREAK;    s.as.jump.label = tk_read_str(r, t); return s;
         case 5: s.tag = TK_TSTMT_CONTINUE; s.as.jump.label = tk_read_str(r, t); return s;
         case 6: s.tag = TK_TSTMT_EXPR;     s.as.expr_stmt.expr = tk_read_texpr(r, t); return s;
+        case 7:                             // TDeferStmt (C7.18): body ([]TStatement)
+            s.tag = TK_TSTMT_DEFER;
+            s.as.defer_stmt.body = read_tstmts(r, t, &s.as.defer_stmt.nbody);
+            return s;
     }
     r->ok = false; return s;
 }

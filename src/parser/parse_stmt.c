@@ -55,6 +55,17 @@ tk_parsed_stmt_result tk_parse_statement(const tk_token *t, size_t n, size_t pos
         tk_statement s = { .tag = TK_STMT_CONTINUE, .as.jump = { .label = label } };
         return (tk_parsed_stmt_result){ .ok = true, .as.value = { .node = s, .next = next } };
     }
+    if (tk_is_kind_at(t, n, pos, TK_TOKEN_DEFER)) {
+        // `defer { stmts }` — a mandatory block must follow immediately (C7.18).
+        size_t lbrace = pos + 1;
+        if (!tk_is_kind_at(t, n, lbrace, TK_TOKEN_LBRACE)) {
+            return (tk_parsed_stmt_result){ .ok = false, .as.error = tk_err_at(t, n, lbrace, "expected '{' after `defer`") };
+        }
+        tk_parsed_block_result blk = tk_parse_block(t, n, lbrace);
+        if (!blk.ok) { return (tk_parsed_stmt_result){ .ok = false, .as.error = blk.as.error }; }
+        tk_statement s = { .tag = TK_STMT_DEFER, .as.defer_stmt = { .body = blk.as.value.statements, .nbody = blk.as.value.n } };
+        return (tk_parsed_stmt_result){ .ok = true, .as.value = { .node = s, .next = blk.as.value.next } };
+    }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_LET) || tk_is_kind_at(t, n, pos, TK_TOKEN_MUT) || tk_is_kind_at(t, n, pos, TK_TOKEN_CONST)) {
         return parse_binding(t, n, pos);
     }

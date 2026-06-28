@@ -91,7 +91,7 @@ struct tk_texpr {
 // --- typed statements ---
 typedef enum {
     TK_TSTMT_BINDING, TK_TSTMT_ASSIGN, TK_TSTMT_RETURN, TK_TSTMT_LOOP,
-    TK_TSTMT_BREAK, TK_TSTMT_CONTINUE, TK_TSTMT_EXPR,
+    TK_TSTMT_BREAK, TK_TSTMT_CONTINUE, TK_TSTMT_EXPR, TK_TSTMT_DEFER,
 } tk_tstatement_tag;
 
 struct tk_tstatement {
@@ -103,6 +103,7 @@ struct tk_tstatement {
         struct { tk_str label; tk_tstatement *body; size_t nbody; }                          loop_stmt;   // label empty = unlabeled
         struct { tk_str label; }                                                             jump;        // BREAK/CONTINUE — label empty = innermost
         struct { tk_texpr expr; }                                                            expr_stmt;
+        struct { tk_tstatement *body; size_t nbody; }                                       defer_stmt;  // DEFER (C7.18) — the cleanup block
     } as;
 };
 

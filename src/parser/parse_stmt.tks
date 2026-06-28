@@ -39,6 +39,15 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> ParsedStmt | error {
         if is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) { label = tokens[pos + 1].text; next = pos + 2 }
         return ParsedStmt { node = ContinueStmt { label = label }, next = next }
     }
+    if is_kind_at(tokens, pos, lexer::TokenKind::Defer) {
+        // `defer { stmts }` — a mandatory block must follow immediately (C7.18).
+        let lbrace = pos + 1
+        if !is_kind_at(tokens, lbrace, lexer::TokenKind::LBrace) {
+            return err_at(tokens, lbrace, "expected '{' after `defer`")
+        }
+        let blk = match parse_block(tokens, lbrace) { ParsedBlock as x => x; error as e => return e }
+        return ParsedStmt { node = DeferStmt { body = blk.statements }, next = blk.next }
+    }
     if is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) || is_kind_at(tokens, pos, lexer::TokenKind::Const) {
         return parse_binding(tokens, pos)
     }

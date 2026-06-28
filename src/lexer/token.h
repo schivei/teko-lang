@@ -34,6 +34,7 @@ typedef enum {
     TK_TOKEN_BREAK,
     TK_TOKEN_CONTINUE,
     TK_TOKEN_RETURN,
+    TK_TOKEN_DEFER,    // `defer` — scoped cleanup block (C7.18)
     TK_TOKEN_MATCH,
     TK_TOKEN_WHEN,
     TK_TOKEN_AS,

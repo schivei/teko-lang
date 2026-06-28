@@ -168,6 +168,7 @@ static tk_bytes write_tstatement(tk_bytes b, tk_strtable t, const tk_tstatement 
         case TK_TSTMT_BREAK:    return tk_write_u32(tk_write_u8(b, 4), tk_st_find(t, s->as.jump.label));
         case TK_TSTMT_CONTINUE: return tk_write_u32(tk_write_u8(b, 5), tk_st_find(t, s->as.jump.label));
         case TK_TSTMT_EXPR:     return tk_write_texpr(tk_write_u8(b, 6), t, &s->as.expr_stmt.expr);
+        case TK_TSTMT_DEFER:    return write_tstatements(tk_write_u8(b, 7), t, s->as.defer_stmt.body, s->as.defer_stmt.nbody);  // tag=7: body ([]TStatement)
     }
     return b;
 }
