@@ -117,7 +117,7 @@ compile+link gate which is now the milestone reached.
 **Work:** make each a real, fully-wired function — checker + codegen + VM + `teko_rt` (real `teko::text` functions with C twins, or fully-wired builtins). No recognize-and-defer.
 **Exit:** every str/byte builtin the corpus calls compiles to native AND runs in the VM, equal results; current CHECK-phase walls past these clear.
 
-### Phase 4 — C↔.tks mirroring audit  *(§A.3)*
+### Phase 4 — C↔.tks mirroring audit  *(§A.3)*  ✅ DONE (standing per-commit discipline)
 **Goal:** the legislator "smells" incomplete mirroring; confirm and close it.
 **Work:** audit every `.c`/`.h` against its `.tks` twin (e.g. `typer.tks` was missing `builtin_fn`; `expr.c` bool+out vs typer.tks marker variant). Reconcile any lingering W5-cf-2 / corpus `.tks` mirror debt.
 **Exit:** a mechanical diff finds zero behavioral divergence between any C file and its `.tks`.
@@ -156,7 +156,7 @@ compile+link gate which is now the milestone reached.
 **Exit:** `teko .` produces a working native binary of the compiler; VM==native across the corpus regression set.
 **Note:** the native self-build is the single largest remaining effort (full C emission for a 65-file compiler) — expect many codegen walls beyond B-cg2; grind incrementally with regressions + per-feature smoke tests as the safety net.
 
-### Phase 7 — Host independence  *(INDEPENDENCE Eixos A/C/D + BINARY cleanup)*
+### Phase 7 — Host independence  *(INDEPENDENCE Eixos A/C/D + BINARY cleanup)*  ✅ DONE
 **Goal:** the compiler reaches the host without C-side scaffolding; tests gate emission.
 **Work (in order):**
 1. **C1.0 `extern`/FFI form — ✅ RATIFIED 2026-06-27** (see LEGISLATION §"FFI / `extern`"; master-plan C7.0) → **C1.1** extern primitive (single `OP_CALL_EXTERN` → platform convention), **macOS+libc first**, then Linux, then Windows; per-OS `.tkp` resolution + `#os(...)` guard are legislated-now / implemented as follow-ons.
@@ -170,7 +170,7 @@ compile+link gate which is now the milestone reached.
 6. Crumb **M2** `driver.tks` falls out once C2* + A5 exist (future C4 deliverable).
 **Exit:** `teko build`/`run`/`test` operate via Teko host surfaces; the test+coverage gate runs before any emission.
 
-### Phase 8 — FLAGS (bitflag enums)  *(§A.7)*
+### Phase 8 — FLAGS (bitflag enums)  *(§A.7)*  ✅ DONE
 **Goal:** a flags type — "an enum with another keyword."
 **Spec (frozen):**
 - Distinct **keyword** (e.g. `flags`); members are names like an enum.
@@ -181,12 +181,12 @@ compile+link gate which is now the milestone reached.
 **Work:** full pipeline — `flags` keyword (lexer) + parser + AST + checker (power-of-two assignment, u128 size guard, bitwise-op typing, helper resolution) + codegen (emit as the u128-fitting unsigned int + helpers) + VM + `.tkb` + ALL `.tks` mirrors.
 **Exit:** a `flags` decl auto-assigns powers of two, rejects >u128 span, supports bitwise + helpers, VM==native.
 
-### Phase 9 — SEC  *(task #53 = CORRECTION_PLAN §14 = INDEPENDENCE C5)*
+### Phase 9 — SEC  *(task #53 = CORRECTION_PLAN §14 = INDEPENDENCE C5)*  ✅ DONE
 **Goal:** security/guard evaluation after corrections close.
 **Work:** SAST gate + capability/sandboxing audit of the `exp` / `extern` / syscall surface.
 **Exit:** the security gate runs in CI; the FFI/syscall surface is audited.
 
-### Phase 10 — EVOLUTION campaign S1–S9  *(EVOLUTION_DESIGN/JUSTIFICATION; POST-SELF-HOST; R1/R2 ratified)*
+### Phase 10 — EVOLUTION campaign S1–S9  *(EVOLUTION_DESIGN/JUSTIFICATION; POST-SELF-HOST; R1/R2 ratified)*  🔶 IN FLIGHT (S1/S3/S4 ✅, S2 per-fn ✅; rest ⬜)
 **Goal:** build the foundation keystone-first, in dependency order, against real self-hosted data (M.4).
 **Hard ordering invariant:** arenas (S1–S2) before ref (S3) and before DI / collections storage; generics (S4) before real collections (S7); Map (S7) forces constraints (S6); single-task arenas+ref (S1–S3) before concurrency (S8); concurrency is independent of generics.
 **Stages:**
@@ -201,7 +201,7 @@ compile+link gate which is now the milestone reached.
 **Reserved (don't freeze syntax until parser + real duplication data exist):** arena/scope surface, the three `ref` positions, the five concurrency primitives.
 **Deferred ceilings (keep deferred):** borrow-solver / lifetime-variable system; region-polymorphism. **Tribunal micro-decision:** implicit copy-out of a very small escaping value (default lean: NO implicit copy). *(async/await → S10/W14; M:N scheduler → S8/W13 — both removed from deferred and scheduled.)*
 
-### Phase 11 — Code quality sweep  *(§A.5 — LAST)*
+### Phase 11 — Code quality sweep  *(§A.5 — LAST)*  ⬜ TODO (W15)
 **Goal:** settle the corpus permanently: kill redundancy, enforce simplicity, validate architectural boundaries, and normalize documentation. Every principle below is applied once, to stable code, so it never has to be re-applied.
 
 **Principles (applied in order within each file, then comment hygiene last):**
@@ -296,7 +296,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 ---
 
-## Phase 1 — Diagnostics axis
+## Phase 1 — Diagnostics axis ✅ DONE
 
 > **Tribunal rulings (2026-06-25, during R1.1) — the plan revised against reality:**
 > 1. **C1.1 + C1.4 + C1.5 are MERGED into `C1-POS` (expr-position plumbing).** Discovery: Teko's
@@ -328,7 +328,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Revised rounds:** R1.1 `{C1.2, C1.3}` ✅ → **R1.2 `{C1-POS, C1.7}`** (C1-POS dominates; C1.7 parallel on `rt`) → R1.3 `{C1.6, C1.8, C1.9}` (w3, after C1-POS).
 
-## Phase 2 — `in` operator
+## Phase 2 — `in` operator ✅ DONE
 
 | Crumb | Owns | Dep |
 |-------|------|-----|
@@ -341,7 +341,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds:** R2.1 `{C2.1}` (w1) → R2.2 `{C2.2}` (w1) → R2.3 `{C2.3, C2.4, C2.5, C2.6}` (w4). ✅ **DONE** (workflow `p2-in-operator`: frontend then parallel checker/codegen/vm/tkb + adversarial review). `x in [a,b,…]`→bool, single-eval LHS (GNU stmt-expr), comparison precedence, special `[…]` membership-set (no array literal). VM==native: `3 in [1,2,3]`→true, `9 in […]`/`x in []`→false, `b'e' in [b'e',b'E']`→true. **3 reviewer fixes applied:** (1) self-host regression — `in` added to `is_name_at` (cursor) AND pattern bind-names (parse_pattern) so the corpus's `in` identifiers/bindings still parse (the `to` precedent); (2) empty-set VM==native — codegen now evaluates the LHS once for `[]` too; (3) `revalidate` gained the `TK_TEXPR_IN`/`TInExpr` case (-Wswitch + non-exhaustive `.tks` match fixed). Build clean; regressions 5/6; self-host wall restored to `lexer.tks:461` (CHECK).
 
-## Phase 3 — str/byte stdlib as real mirrored fns
+## Phase 3 — str/byte stdlib as real mirrored fns ✅ DONE
 
 | Crumb | Owns | Dep |
 |-------|------|-----|
@@ -352,7 +352,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds:** R3.1 `{C3.1, C3.4}` (w2) → R3.2 `{C3.2, C3.3}` (w2). ✅ **DONE** (workflow `p3-stdlib`): wired the 4 missing builtins — `str_of_bytes`/`str` (`[]byte`→str), `one_byte` (byte→str), `str_concat3`, `ftoa` (f64→str) — runtime (teko_rt) + codegen + VM + mirrors. **Reviewer fix:** `str`/`str_of_bytes` codegen bridges the `[]byte` value (which lowers to the struct `tk_slice_byte`, a DISTINCT C type from `tk_str`) to a `tk_str` at the call site (single-eval) before `tk_str_of_bytes` copies it — was a latent cc error. Verified VM==native: `str_concat3("ab","cd","ef").len`=6, `ftoa(1.5).len`=3, `one_byte`/1-elem `str_of_bytes`=1. Build clean; regressions 5/6; parses all 64. **⚠ Surfaced a PRE-EXISTING bug (task #57, slice value-layer): `teko::list::push` does NOT accumulate past one element** (`push(push(empty,a),b).len`==1, should be 2) in BOTH VM and native — a major Phase-6/self-host blocker (the corpus builds strings via `push` everywhere). NOT a Phase-3 regression (Phase 3 didn't touch `emit_list_push`/VM push).
 
-## Phase 4 — C↔.tks mirroring audit *(read-mostly; partitioned by directory → fully parallel)*
+## Phase 4 — C↔.tks mirroring audit ✅ DONE (now a standing per-commit discipline) *(read-mostly; partitioned by directory → fully parallel)*
 
 | Crumb | Owns | Dep | Status |
 |-------|------|-----|--------|
@@ -363,7 +363,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds:** R4.1 ✅ MAINTAINED — continuous per-commit discipline (SUPREME RULE); no pending discrete sweep.
 
-## Phase 5 — Definite-assignment / init analysis *(single subsystem → mostly serial)*
+## Phase 5 — Definite-assignment / init analysis ✅ DONE *(single subsystem → mostly serial)*
 
 | Crumb | Owns | Dep | Status |
 |-------|------|-----|--------|
@@ -372,7 +372,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds:** R5.1 ✅ `{C5.1}` → R5.2 ✅ `{C5.2}` — `src/checker/initanalysis.{tks,c,h}` delivered; gate GREEN; both twins byte-identical in behavior.
 
-## Phase 6 — Finish self-host → working `teko .` *(milestone; `cg`/`vm` serialize across rounds)*
+## Phase 6 — Finish self-host → working `teko .` ✅ DONE *(milestone; `cg`/`vm` serialize across rounds)*
 
 | Crumb | Owns | Dep | Status |
 |-------|------|-----|--------|
@@ -397,7 +397,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 - **Variant-widening in a struct-literal field is NOT yet supported by the checker.** `S { kind = A {} }` where `kind: K` and `K = variant A | B` → "field value does not match the field's declared type". The ENTIRE struct-wrapper AST (`TExpr { kind = TNumber{…} }`, and now `Expr { kind = Number{…} }`) needs this. A real Phase-6 checker feature.
 - **`match` convention over a struct-wrapper is unsettled.** typer.tks now uses `match e.kind { Case }` (matching the variant field — safe under any model); codegen.tks/vm.tks use bare `match e { Case }` over the struct `TExpr` (pre-existing). Phase 6 must confirm which the checker accepts and unify (prefer `.kind` — sound under both).
 
-## Phase 7 — Host independence *(gated by the C7.0 tribunal decision; Phase 6 done)*
+## Phase 7 — Host independence ✅ DONE (residual R7.8b–R7.12 folded into the cross-phase waves W1–W6, all ✅) *(gated by the C7.0 tribunal decision; Phase 6 done)*
 
 > **C7.0 — `extern`/FFI form — ✅ RATIFIED 2026-06-27** (TRIBUNAL DECISION). Form: `extern fn name(p) -> r = "symbol" from "lib"` (bodyless; `from` optional→libc; `freestanding` makes it mandatory); `ptr`-only marshalling; one `OP_CALL_EXTERN` → platform convention; library resolution indirected through `.tkp [extern.libs]` (array vocabulary `[]`/name/`static:`|`shared:`/path/`-flag`) + `[extern.search]` (`-L`, per-OS soft-drop) + `prefer` + `cc`/`target`/`sysroot` (musl-ready); cross-OS name-diffs resolve in the `.tkp`, shape-diffs need the general `#os(...)` guard. Full clause: **LEGISLATION §"FFI / `extern`"**. **Staging: macOS+libc FIRST, then Linux, then Windows;** per-OS `.tkp` resolution and `#os(...)` are legislated now / implemented as follow-ons.
 
@@ -458,7 +458,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 - **C7.18** (`defer`) ✅ → cross-phase **W5** (solo wave — owns all single-owner files; after C1.7-CAST ✅)
 - **C7.1j** (CI — LAST) → cross-phase **W6** (after Phase 8 ✅ + C9.2 ✅ + defer ✅)
 
-## Phase 8 — FLAGS
+## Phase 8 — FLAGS ✅ DONE
 
 | Crumb | Owns | Dep | Status |
 |-------|------|-----|--------|
@@ -471,7 +471,7 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds (cross-phase wave schedule):** C8.1 → **W1** · C8.2 → **W2** · C8.3/C8.5/C8.6 → **W3** · C8.4 → **W4** (see master sequence table).
 
-## Phase 9 — SEC
+## Phase 9 — SEC ✅ DONE
 
 | Crumb | Owns | Dep |
 |-------|------|-----|
@@ -480,28 +480,30 @@ into **rounds** (parallel waves). The goal is **maximum agent concurrency** with
 
 **Rounds (cross-phase wave schedule):** C9.2 → **W4** · C9.1 → **W6** (see master sequence table).
 
-## Phase 10 — Evolution S1–S10 *(POST-SELF-HOST; each S-stage is its own sub-project — detailed crumbs are drafted AT stage start against real data, M.4)*
+## Phase 10 — Evolution S1–S10 🔶 IN FLIGHT (S1 ✅, S4 ✅, S3 ✅, S2 per-fn ✅ / block ⬜; S4c/S5/S6/S7/S8/S9/S10 ⬜) *(POST-SELF-HOST; each S-stage is its own sub-project — detailed crumbs are drafted AT stage start against real data, M.4)*
 
 Stage-level dependency waves (the hard-ordering invariant). Generics (S4) runs parallel to arenas (S1–S3); closures (S4c) unlock after S4; async/await (S10) is the capstone.
 
-| Stage-crumb | Dep |
-|-------------|-----|
-| **C10.S1** arena primitive + root region | S0 seam (done) |
-| **C10.S4** generics (unconstrained, monomorphization) | — |
-| **C10.S4c** closures — `fn` literals with lexical capture; value-capturing first (environment struct + fn-ptr pair); reference-capturing after S3 `ref`. Full pipeline: parser `\|params\| body` syntax; checker captures types + infer; codegen closure struct emission; VM closure values. | S4 |
-| **C10.S2 ★** scope regions + escape check *(tribunal ratifies one-depth-compare)* | S1 |
-| **C10.S3** `ref` (mutable-target only, R2) | S2 |
-| **C10.S5** DI lifetimes → arenas | S2 (+S3) |
-| **C10.S6** constraints (positive; `!` only prims/sealed) | S4 + real Map need |
-| **C10.S7** dynamic collections (append, Map, Set; out-region param) | S4, S6, S2/S3 |
-| **C10.S8** concurrency capstone — `scope{}`/`spawn` (routine launch); `channel<T>`/`send`/`recv`; **`Mutex<T>`** (lock/unlock, poisoning on panic); **`Semaphore`** (acquire/release, counting); **`RWMutex`** (concurrent reads, exclusive write); **`WaitGroup`** (add/done/wait); **thread-control** (`thread::spawn` → `JoinHandle`, join, detach, park/unpark); **M:N scheduler** (lightweight routine → OS thread fan-out; work-stealing queue) | S2, S3 |
-| **C10.S9** LTS cleanup (Parsed×14→Result<T>; unify parse/to_string) | S4 |
-| **C10.S10** async/await — coroutine-based non-blocking I/O; `async fn`/`await expr`; Teko runtime event loop (epoll/kqueue/IOCP); cancellation via scope; composable with channels + Mutex | S8 |
+*(Status mirrors the master-sequence wave table below — same legend: ✅ done · 🔶 in flight · ⬜ TODO.)*
+
+| Status | Stage-crumb | Dep | Wave |
+|--------|-------------|-----|------|
+| ✅ | **C10.S1** arena primitive + root region | S0 seam (done) | W7 |
+| ✅ | **C10.S4** generics (unconstrained, monomorphization) | — | W7 |
+| ✅ | **C10.S3** `ref` (mutable-target only) — **delivered as `Ref<T>` in MEM-1** (the `ref` keyword became the `Ref<T>` type) | S2 | W8 |
+| 🔶 | **C10.S2 ★** scope regions + escape check — **per-FUNCTION regions DONE (MEM-1/W8)**; block-scoped regions remain (W9) | S1 | W8 (fn) / W9 (block) |
+| ⬜ | **C10.S4c** closures — `fn` literals with lexical capture; value-capturing first (environment struct + fn-ptr pair); reference-capturing after S3. Full pipeline: parser `\|params\| body` syntax; checker captures types + infer; codegen closure struct emission; VM closure values. | S4 | W10 |
+| ⬜ | **C10.S5** DI lifetimes → arenas (`#singleton`/`#scoped`/`#transient`) | S2 (+S3) | W10 |
+| ⬜ | **C10.S6** constraints (positive; `!` only prims/sealed) | S4 + real Map need | W11 |
+| ⬜ | **C10.S7** dynamic collections (append, Map, Set; out-region param) | S4, S6, S2/S3 | W12 |
+| ⬜ | **C10.S8** concurrency capstone — `scope{}`/`spawn` (routine launch); `channel<T>`/`send`/`recv`; **`Mutex<T>`** (lock/unlock, poisoning on panic); **`Semaphore`** (acquire/release, counting); **`RWMutex`** (concurrent reads, exclusive write); **`WaitGroup`** (add/done/wait); **thread-control** (`thread::spawn` → `JoinHandle`, join, detach, park/unpark); **M:N scheduler** (lightweight routine → OS thread fan-out; work-stealing queue) | S2, S3 | W13 |
+| ⬜ | **C10.S9** LTS cleanup (Parsed×14→Result<T>; unify parse/to_string) | S4 | W13 |
+| ⬜ | **C10.S10** async/await — coroutine-based non-blocking I/O; `async fn`/`await expr`; Teko runtime event loop (epoll/kqueue/IOCP); cancellation via scope; composable with channels + Mutex | S8 | W14 |
 
 **Waves (cross-phase schedule):** S1+S4 → **W7** · S4c → **W8** · S2 ★ → **W9** · S3+S5 → **W10** · S6 → **W11** · S7 → **W12** · S8+S9 → **W13** · S10 → **W14** (see master sequence table).
 *(Keep deferred ceilings deferred: borrow-solver / lifetime-variable system; region-polymorphism. Implicit-copy-on-escape → tribunal (lean: NO). M:N scheduler and async/await are NOW IN SEQUENCE — no longer deferred.)*
 
-## Phase 11 — Code quality sweep *(LAST; read-mostly; partitioned by directory → fully parallel)*
+## Phase 11 — Code quality sweep ⬜ TODO (W15) *(LAST; read-mostly; partitioned by directory → fully parallel)*
 
 Each crumb applies the full principle stack (DRY + KISS + SOLID + YAGNI + 12-Factor + comment hygiene) to its file partition. Order within a file: DRY → KISS → SOLID/ISP/DIP → YAGNI → 12-Factor checks → comment hygiene. Files within a crumb are disjoint → all four crumbs run in parallel.
 
@@ -596,6 +598,8 @@ start until the previous wave's integration gate passes: **build green + VM==nat
 - **VM wrapper-descent** — VM `type_eq` can't distinguish same-inner single-field wrappers (`Ref`/`Ptr`/`Optional`/`Slice`); NATIVE is correct via tags. VM-only (tests); keep VM tests nominal-direct. [[teko-vm-wrapper-descent-bug]]
 - **`tk_opt_<T>` typedef gap** — a struct's UNREAD optional self-ref field (`next: Node?`) doesn't register its `tk_opt_<T>` typedef → cc fails. The `Ref<T?>`-param case was fixed; the general field case remains. Pre-existing codegen; fix during a codegen pass.
 - **nullable generic args** (`Box<i64?>`/`List<Foo?>`/`Ref<i64?>`) — ✅ **SUPPORTED** (user reversal 2026-06-29; the brief prohibition was never implemented). The divergence behind them was a PRE-EXISTING VM bug — struct-literal construction didn't present-wrap an optional field from a bare value — now FIXED with native parity (`coerce_to` on the declared field type; mirrors `emit_struct_init`'s per-field `emit_as`). The `<T?>`/`<T: C?>` DECLARATION ban stays. [[teko-generics-constraints-rules]]
+- **bare `T` → `T?` parameter** — `take(v)` where `v: i64` and `take(x: i64?)`: the checker accepts it (widens the arg), but the VM panics AND native `cc` fails (both reject it). A well-typed program neither backend runs. Surfaced 2026-06-29 by the present-wrap red-team. NEEDS A LAW-FIRST DECISION (checker rejects the bare arg, OR both backends present-wrap at the call site) — must be fixed on BOTH engines together or not at all. Flagged as a background task. NOT the struct-literal case (that one is fixed — commit 28d6870).
+- **`[]T` → `[]T?` slice covariance** — an array of bare elements flowing into an optional-element slice slot is NOT present-wrapped per element: NATIVE emits garbage (`.present` unset), the VM panics. Both backends broken (distinct from the scalar struct-field bug). Same for `[]case`→`[]variant`. Surfaced 2026-06-29; flagged as a background task — fix codegen rebuild loop + VM `coerce_to` TOGETHER with tests (a single-backend fix would create a fresh VM≠native divergence).
 - **#41 namespace-aware TYPE resolution** — latent (corpus has zero cross-namespace type-name collisions); revisit if a collision is introduced.
 
 **Deferred ceilings (never enter the sequence):** borrow-solver / lifetime-variable system; region-polymorphism. Implicit-copy-on-escape → tribunal (lean: NO). *(async/await → W14; M:N scheduler → W13 — both removed from deferred.)*
