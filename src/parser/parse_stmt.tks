@@ -10,10 +10,10 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
         // `return` with an optional value: bare `return` ends at a separator or `}`.
         let after = pos + 1
         if !has_token(tokens, after) || is_sep(tokens, after) || is_kind_at(tokens, after, lexer::TokenKind::RBrace) {
-            return Parsed<Statement> { node = Return { has_value = false, value = Expr { kind = Number { is_float = false, value = 0, fval = 0.0 }, line = 0, col = 0 } }, next = after }   // (C1-POS) placeholder value — gated by has_value, position unknown (0)
+            return Parsed<Statement> { node = Return { has_value = false; value = Expr { kind = Number { is_float = false; value = 0; fval = 0.0 }; line = 0; col = 0 } }; next = after }   // (C1-POS) placeholder value — gated by has_value, position unknown (0)
         }
         let v = match parse_expr(tokens, after) { Parsed<Expr> as x => x; error as e => return e }
-        return Parsed<Statement> { node = Return { has_value = true, value = v.node }, next = v.next }
+        return Parsed<Statement> { node = Return { has_value = true; value = v.node }; next = v.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Loop) {
         // optional label: `loop NAME { … }` (an IDENT right after `loop`, before the brace)
@@ -24,20 +24,20 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
             return err_at(tokens, lbrace, "expected '{' after `loop`")
         }
         let blk = match parse_block(tokens, lbrace) { ParsedList<Statement> as x => x; error as e => return e }
-        return Parsed<Statement> { node = LoopStmt { label = label, body = blk.items }, next = blk.next }
+        return Parsed<Statement> { node = LoopStmt { label = label; body = blk.items }; next = blk.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Break) {
         // optional label on the SAME line: `break NAME` (a separator would tokenize between)
         mut label = ""
         mut next = pos + 1
         if is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) { label = tokens[pos + 1].text; next = pos + 2 }
-        return Parsed<Statement> { node = BreakStmt { label = label }, next = next }
+        return Parsed<Statement> { node = BreakStmt { label = label }; next = next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Continue) {
         mut label = ""
         mut next = pos + 1
         if is_kind_at(tokens, pos + 1, lexer::TokenKind::Ident) { label = tokens[pos + 1].text; next = pos + 2 }
-        return Parsed<Statement> { node = ContinueStmt { label = label }, next = next }
+        return Parsed<Statement> { node = ContinueStmt { label = label }; next = next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Defer) {
         // `defer { stmts }` — a mandatory block must follow immediately (C7.18).
@@ -46,7 +46,7 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
             return err_at(tokens, lbrace, "expected '{' after `defer`")
         }
         let blk = match parse_block(tokens, lbrace) { ParsedList<Statement> as x => x; error as e => return e }
-        return Parsed<Statement> { node = DeferStmt { body = blk.items }, next = blk.next }
+        return Parsed<Statement> { node = DeferStmt { body = blk.items }; next = blk.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) || is_kind_at(tokens, pos, lexer::TokenKind::Const) {
         return parse_binding(tokens, pos)
@@ -68,10 +68,10 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
     if is_kind_at(tokens, pos, lexer::TokenKind::Ident) &&
        (is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) || is_kind_at(tokens, pos + 1, lexer::TokenKind::MinusMinus)) {
         let op = if is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) { lexer::TokenKind::PlusEq } else { lexer::TokenKind::MinusEq }
-        return Parsed<Statement> { node = Assign { name = tokens[pos].text, op = op, value = Expr { kind = Number { is_float = false, value = 1, fval = 0.0 }, line = 0, col = 0 }, deref = false }, next = pos + 2 }   // (C1-POS) synthesized `1` for the `i++`/`i--` desugar — not stamped in the C twin (position unknown, 0)
+        return Parsed<Statement> { node = Assign { name = tokens[pos].text; op = op; value = Expr { kind = Number { is_float = false; value = 1; fval = 0.0 }; line = 0; col = 0 }; deref = false }; next = pos + 2 }   // (C1-POS) synthesized `1` for the `i++`/`i--` desugar — not stamped in the C twin (position unknown, 0)
     }
     let e = match parse_expr(tokens, pos) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = ExprStmt { expr = e.node }, next = e.next }
+    Parsed<Statement> { node = ExprStmt { expr = e.node }; next = e.next }
 }
 
 // a `{ … }` block: a sequence of statements, `;`/newline separated; empty `{ }` allowed;
@@ -90,22 +90,22 @@ fn parse_block(tokens: []lexer::Token, pos: u64) -> ParsedList<Statement> | erro
         }
         p = skip_seps(tokens, p)
     }
-    ParsedList<Statement> { items = stmts, next = p + 1 }   // consume `}`
+    ParsedList<Statement> { items = stmts; next = p + 1 }   // consume `}`
 }
 
 // a placeholder TypeExpr for an absent annotation (never read — gated by has_type).
 fn no_type() -> TypeExpr {
-    NamedType { path = Path { segments = teko::list::empty() }, args = teko::list::empty() }
+    NamedType { path = Path { segments = teko::list::empty() }; args = teko::list::empty() }
 }
 
 // an optional `: T` annotation. Absent → has_type=false (type_ann a placeholder). `pos`
 // is where the `:` would be.
 fn parse_annotation(tokens: []lexer::Token, pos: u64) -> Annotation | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::Colon) {
-        return Annotation { has_type = false, type_ann = no_type(), next = pos }
+        return Annotation { has_type = false; type_ann = no_type(); next = pos }
     }
     let ty = match parse_type(tokens, pos + 1) { ParsedType as x => x; error as e => return e }
-    Annotation { has_type = true, type_ann = ty.node, next = ty.next }
+    Annotation { has_type = true; type_ann = ty.node; next = ty.next }
 }
 
 // `let|mut|const TARGET [: T] = value` (B.13, B.21). TARGET is a name or a destructure
@@ -121,7 +121,7 @@ fn parse_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error 
         return err_at(tokens, ann.next, "expected '=' in a binding")
     }
     let v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Binding { kind = kind, target = tgt.node, has_type = ann.has_type, type_ann = ann.type_ann, value = v.node }, next = v.next }
+    Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; value = v.node }; next = v.next }
 }
 
 // a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
@@ -129,7 +129,7 @@ fn parse_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error 
 fn parse_bind_target(tokens: []lexer::Token, pos: u64) -> Parsed<BindTarget> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::LBrace) {
         let names = match parse_field_names(tokens, pos) { ParsedList<str> as x => x; error as e => return e }
-        return Parsed<BindTarget> { node = DestructurePattern { names = names.items }, next = names.next }
+        return Parsed<BindTarget> { node = DestructurePattern { names = names.items }; next = names.next }
     }
     // `let _ = expr` — DISCARD binding: evaluate the value for effect, bind nothing. A SIMPLE
     // target named "_" (the wildcard); codegen lowers it to `(void)(expr);` (no C variable, so
@@ -137,7 +137,7 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64) -> Parsed<BindTarget> | e
     if !is_name_at(tokens, pos) && !is_kind_at(tokens, pos, lexer::TokenKind::Underscore) {
         return err_at(tokens, pos, "expected a name, `_`, or `{ … }` after `let`/`mut`/`const`")
     }
-    Parsed<BindTarget> { node = SimpleName { name = tokens[pos].text }, next = pos + 1 }
+    Parsed<BindTarget> { node = SimpleName { name = tokens[pos].text }; next = pos + 1 }
 }
 
 // `name op= value` (B.4 — assignment is statement-only). Simple-name target; the op
@@ -146,7 +146,7 @@ fn parse_assign(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error {
     let name = tokens[pos].text
     let op = kind_at(tokens, pos + 1)
     let v = match parse_expr(tokens, pos + 2) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Assign { name = name, op = op, value = v.node, deref = false }, next = v.next }
+    Parsed<Statement> { node = Assign { name = name; op = op; value = v.node; deref = false }; next = v.next }
 }
 
 // (MEM-1b-ii) `name.value op= value` — write THROUGH a reference. `pos` is at the ref name; tokens
@@ -156,7 +156,7 @@ fn parse_ref_assign(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | err
     let name = tokens[pos].text
     let op = kind_at(tokens, pos + 3)   // the assign op AFTER `.value`
     let v = match parse_expr(tokens, pos + 4) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Assign { name = name, op = op, value = v.node, deref = true }, next = v.next }
+    Parsed<Statement> { node = Assign { name = name; op = op; value = v.node; deref = true }; next = v.next }
 }
 
 // (added to parse_statement, P4d; labels — M.5)

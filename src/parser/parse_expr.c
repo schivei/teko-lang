@@ -60,7 +60,7 @@ static tk_parsed_args_result parse_call_args(const tk_token *t, size_t n, size_t
     return (tk_parsed_args_result){ .ok = true, .as.value = { .items = args, .n_args = na, .next = p + 1 } };
 }
 
-// `Name { field = value (, | ; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
+// `Name { field = value (; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
 // Field VALUES parse with struct allowed (they sit inside the literal's braces).
 // (W9.4) `type_args`/`nargs` are the explicit construction-site generic args (NULL/0 for the bare
 // `Name { … }` form). `pos` is at the `{`.
@@ -85,10 +85,10 @@ static tk_parsed_result parse_struct_lit(const tk_token *t, size_t n, size_t pos
         tk_strvec_push(&names, &nn, fname);
         tk_exprs_push(&vals, &nv, v.as.value.node);
         p = v.as.value.next;
-        if (tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { p = tk_skip_seps(t, n, p + 1); }       // `,` (+ optional newlines)
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, p, "struct literal fields are separated by ';', not ','") }; }
         else if (tk_is_sep(t, n, p))               { p = tk_skip_seps(t, n, p); }            // `;` / newline
         else if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }
-        else return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ',', ';', a newline, or '}' after a struct-literal field") };
+        else return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ';', a newline, or '}' after a struct-literal field") };
         if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }                              // trailing separator
     }
     tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_STRUCT_LIT, .as.struct_lit = { .type_path = type_path, .type_args = type_args, .nargs = nargs, .field_names = names, .field_vals = vals, .nfields = nn } }, t, pos);

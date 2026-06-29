@@ -10,7 +10,7 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64) -> ParsedList<Expr> | error
     mut p = skip_seps(tokens, pos + 1)              // consume `(`, skip leading newlines (multi-line args)
     mut args: []Expr = teko::list::empty()
     if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
-        return ParsedList<Expr> { items = args, next = p + 1 }
+        return ParsedList<Expr> { items = args; next = p + 1 }
     }
     loop {
         let a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }   // inside `(` … `)` — struct literals allowed
@@ -23,17 +23,17 @@ fn parse_call_args(tokens: []lexer::Token, pos: u64) -> ParsedList<Expr> | error
     if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
         return err_at(tokens, p, "expected ')' to close the argument list")
     }
-    ParsedList<Expr> { items = args, next = p + 1 }
+    ParsedList<Expr> { items = args; next = p + 1 }
 }
 
-// `Name { field = value (, | ; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
+// `Name { field = value (; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
 // Field VALUES parse with struct allowed (they sit inside the literal's braces).
 // (W9.4) `type_args` are the explicit construction-site generic args (empty for the bare
 // `Name { … }` form). `pos` is at the `{`.
 fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args: []TypeExpr) -> Parsed<Expr> | error {
     mut p = skip_seps(tokens, pos + 1)             // consume `{`, skip leading separators
     if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {     // empty literal `Name { }`
-        return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path, type_args = type_args, field_names = teko::list::empty(), field_vals = teko::list::empty() }, line = tokens[pos].line, col = tokens[pos].col }, next = p + 1 }
+        return Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = teko::list::empty(); field_vals = teko::list::empty() }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
     }
     mut names: []str = teko::list::empty()
     mut vals: []Expr = teko::list::empty()
@@ -50,17 +50,17 @@ fn parse_struct_lit(tokens: []lexer::Token, pos: u64, type_path: Path, type_args
         vals = teko::list::push(vals, v.node)
         p = v.next
         if is_kind_at(tokens, p, lexer::TokenKind::Comma) {
-            p = skip_seps(tokens, p + 1)           // `,` (+ optional newlines)
+            return err_at(tokens, p, "struct literal fields are separated by ';', not ','")
         } else if is_sep(tokens, p) {
             p = skip_seps(tokens, p)               // `;` / newline
         } else if is_kind_at(tokens, p, lexer::TokenKind::RBrace) {
             break
         } else {
-            return err_at(tokens, p, "expected ',', ';', a newline, or '}' after a struct-literal field")
+            return err_at(tokens, p, "expected ';', a newline, or '}' after a struct-literal field")
         }
         if is_kind_at(tokens, p, lexer::TokenKind::RBrace) { break }   // trailing separator
     }
-    Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path, type_args = type_args, field_names = names, field_vals = vals }, line = tokens[pos].line, col = tokens[pos].col }, next = p + 1 }
+    Parsed<Expr> { node = Expr { kind = StructLit { type_path = type_path; type_args = type_args; field_names = names; field_vals = vals }; line = tokens[pos].line; col = tokens[pos].col }; next = p + 1 }
 }
 
 // ---- string interpolation `$"…{expr}…"` (self-host parity) ----
@@ -79,7 +79,7 @@ fn piece_escape(raw: str, i: u64, bytes: []byte) -> EscPiece | error {
         b'0'  => 0x00
         _     => return error { message = "unknown escape in interpolated string" }
     }
-    EscPiece { bytes = teko::list::push(bytes, v to byte), next = i + 2 }   // the decoded escape value is a byte (all fit u8)
+    EscPiece { bytes = teko::list::push(bytes, v to byte); next = i + 2 }   // the decoded escape value is a byte (all fit u8)
 }
 
 // Parse a `$"…"` Interp token's RAW inner text into the Interp node: literal pieces (escapes
@@ -126,7 +126,7 @@ fn parse_interp(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
         i++
     }
     pieces = teko::list::push(pieces, str(cur))           // the trailing literal piece
-    Parsed<Expr> { node = Expr { kind = Interp { pieces = pieces, holes = holes }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+    Parsed<Expr> { node = Expr { kind = Interp { pieces = pieces; holes = holes }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
 
 // the LEAF: a literal, a name/path/call, `( expr )`, or an `if`/`match` expression (B.20/B.15).
@@ -138,41 +138,41 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
     if k == lexer::TokenKind::Number {
         let txt = tokens[pos].text
         // a FLOAT token carries fval (via lit_float); an INT token carries value (via lit_int) — mirror parse_expr.c.
-        let num = if lit_is_float(txt) { Number { is_float = true, value = 0, fval = lit_float(txt) } }
-                  else { Number { is_float = false, value = lit_int(txt), fval = 0.0 } }
-        return Parsed<Expr> { node = Expr { kind = num, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        let num = if lit_is_float(txt) { Number { is_float = true; value = 0; fval = lit_float(txt) } }
+                  else { Number { is_float = false; value = lit_int(txt); fval = 0.0 } }
+        return Parsed<Expr> { node = Expr { kind = num; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Str {
-        return Parsed<Expr> { node = Expr { kind = StrLit { text = tokens[pos].text }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        return Parsed<Expr> { node = Expr { kind = StrLit { text = tokens[pos].text }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Interp {
         return parse_interp(tokens, pos)   // $"…{expr}…" — split the raw text into pieces + hole exprs
     }
     if k == lexer::TokenKind::Byte {
-        return Parsed<Expr> { node = Expr { kind = ByteLit { value = lit_byte(tokens[pos].text) }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        return Parsed<Expr> { node = Expr { kind = ByteLit { value = lit_byte(tokens[pos].text) }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::True {
-        return Parsed<Expr> { node = Expr { kind = BoolLit { value = true }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        return Parsed<Expr> { node = Expr { kind = BoolLit { value = true }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::False {
-        return Parsed<Expr> { node = Expr { kind = BoolLit { value = false }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        return Parsed<Expr> { node = Expr { kind = BoolLit { value = false }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Null {
-        return Parsed<Expr> { node = Expr { kind = NullLit { }, line = tokens[pos].line, col = tokens[pos].col }, next = pos + 1 }
+        return Parsed<Expr> { node = Expr { kind = NullLit { }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::LParen {
         let inner = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as e => return e }   // inside `(` … `)` — struct literals allowed
         if !is_kind_at(tokens, inner.next, lexer::TokenKind::RParen) {
             return err_at(tokens, inner.next, "expected ')' to close a parenthesized expression")
         }
-        return Parsed<Expr> { node = inner.node, next = inner.next + 1 }    // grouping is transparent
+        return Parsed<Expr> { node = inner.node; next = inner.next + 1 }    // grouping is transparent
     }
     if k == lexer::TokenKind::LBracket {
         // `[ e0, ..e1, e2, … ]` — an array/slice literal (Increment B+, C6.7 spread). Each
         // element may be prefixed with `..` to mark it as a spread (is_spread=true). The checker
         // unifies non-spread element types and flattens spread operands.
         let aer = match parse_array_elems(tokens, pos) { ParsedList<ArrayElem> as x => x; error as e => return e }
-        return Parsed<Expr> { node = Expr { kind = ArrayLit { elements = aer.items }, line = tokens[pos].line, col = tokens[pos].col }, next = aer.next }
+        return Parsed<Expr> { node = Expr { kind = ArrayLit { elements = aer.items }; line = tokens[pos].line; col = tokens[pos].col }; next = aer.next }
     }
     if k == lexer::TokenKind::If {
         return parse_if(tokens, pos)
@@ -184,7 +184,7 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
         let pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }
         if is_kind_at(tokens, pp.next, lexer::TokenKind::LParen) {
             let ca = match parse_call_args(tokens, pp.next) { ParsedList<Expr> as x => x; error as e => return e }
-            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node, args = ca.items }, line = tokens[pos].line, col = tokens[pos].col }, next = ca.next }
+            return Parsed<Expr> { node = Expr { kind = Call { callee = pp.node; args = ca.items }; line = tokens[pos].line; col = tokens[pos].col }; next = ca.next }
         }
         // (W9.4) explicit type-args at construction `Name<i64> { … }` — SPECULATIVE: parse `<…>`,
         // and commit to a typed struct literal ONLY when a `{` follows the closed list (so `a < b`
@@ -204,9 +204,9 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
             return parse_struct_lit(tokens, pp.next, pp.node, teko::list::empty())
         }
         if pp.node.segments.len == 1 {
-            return Parsed<Expr> { node = Expr { kind = Var { name = pp.node.segments[0].name }, line = tokens[pos].line, col = tokens[pos].col }, next = pp.next }
+            return Parsed<Expr> { node = Expr { kind = Var { name = pp.node.segments[0].name }; line = tokens[pos].line; col = tokens[pos].col }; next = pp.next }
         }
-        return Parsed<Expr> { node = Expr { kind = PathExpr { path = pp.node }, line = tokens[pos].line, col = tokens[pos].col }, next = pp.next }
+        return Parsed<Expr> { node = Expr { kind = PathExpr { path = pp.node }; line = tokens[pos].line; col = tokens[pos].col }; next = pp.next }
     }
     err_at(tokens, pos, "expected an expression")
 }
@@ -230,9 +230,9 @@ fn parse_coalesce(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parse
     let first = match parse_or(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     if is_kind_at(tokens, first.next, lexer::TokenKind::QQ) {
         let rhs = match parse_coalesce(tokens, skip_seps(tokens, first.next + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)   // right-assoc → recurse
-        return Parsed<Expr> { node = Expr { kind = Coalesce { left = first.node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }, next = rhs.next }
+        return Parsed<Expr> { node = Expr { kind = Coalesce { left = first.node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }; next = rhs.next }
     }
-    Parsed<Expr> { node = first.node, next = first.next }
+    Parsed<Expr> { node = first.node; next = first.next }
 }
 
 // postfix: a chain of `.field` and `.method(args)` after an atom (tightest after the
@@ -251,7 +251,7 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
             if !is_kind_at(tokens, idx.next, lexer::TokenKind::RBracket) {
                 return err_at(tokens, idx.next, "expected ']' to close a subscript index")
             }
-            node = Expr { kind = Index { receiver = node, index = idx.node }, line = tokens[pos].line, col = tokens[pos].col }
+            node = Expr { kind = Index { receiver = node; index = idx.node }; line = tokens[pos].line; col = tokens[pos].col }
             p = idx.next + 1
             continue
         }
@@ -261,7 +261,7 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
                 return err_at(tokens, p + 1, "expected a field name after '?.'")
             }
             let name = tokens[p + 1].text
-            node = Expr { kind = SafeFieldAccess { receiver = node, field = name }, line = tokens[pos].line, col = tokens[pos].col }
+            node = Expr { kind = SafeFieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }
             p = p + 2
             continue
         }
@@ -272,14 +272,14 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
         let name = tokens[p + 1].text
         if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
             let ca = match parse_call_args(tokens, p + 2) { ParsedList<Expr> as x => x; error as e => return e }
-            node = Expr { kind = MethodCall { receiver = node, method = name, args = ca.items }, line = tokens[pos].line, col = tokens[pos].col }
+            node = Expr { kind = MethodCall { receiver = node; method = name; args = ca.items }; line = tokens[pos].line; col = tokens[pos].col }
             p = ca.next
         } else {
-            node = Expr { kind = FieldAccess { receiver = node, field = name }, line = tokens[pos].line, col = tokens[pos].col }
+            node = Expr { kind = FieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }
             p = p + 2
         }
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // prefix unary `- ~ !` (right-assoc: `!!a` is `!(!a)`). Below `to`.
@@ -287,7 +287,7 @@ fn parse_unary(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<E
     if is_unary(tokens, pos) {
         let op = kind_at(tokens, pos)
         let operand = match parse_unary(tokens, pos + 1, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
-        return Parsed<Expr> { node = Expr { kind = Unary { op = op, operand = operand.node }, line = tokens[pos].line, col = tokens[pos].col }, next = operand.next }
+        return Parsed<Expr> { node = Expr { kind = Unary { op = op; operand = operand.node }; line = tokens[pos].line; col = tokens[pos].col }; next = operand.next }
     }
     parse_postfix(tokens, pos, allow_struct)
 }
@@ -301,10 +301,10 @@ fn parse_cast(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
     loop {
         if !is_kind_at(tokens, p, lexer::TokenKind::To) { break }
         let ty = match parse_type_primary(tokens, p + 1) { ParsedType as x => x; error as e => return e }
-        node = Expr { kind = Cast { expr = node, target = ty.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Cast { expr = node; target = ty.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = ty.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // level 3 — shift `<< >>` (left-assoc; the tightest binary, just above cast).
@@ -316,10 +316,10 @@ fn parse_shift(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<E
         if !is_shift(tokens, p) { break }
         let op = kind_at(tokens, p)
         let rhs = match parse_cast(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        node = Expr { kind = Binary { op = op, left = node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // level 4 — multiplicative `* / %` and bitwise `&` (left-assoc).
@@ -331,10 +331,10 @@ fn parse_multiplicative(tokens: []lexer::Token, pos: u64, allow_struct: bool) ->
         if !is_multiplicative(tokens, p) { break }
         let op = kind_at(tokens, p)
         let rhs = match parse_shift(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        node = Expr { kind = Binary { op = op, left = node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // level 5 — additive `+ -` and bitwise `| ^` (left-assoc).
@@ -346,10 +346,10 @@ fn parse_additive(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parse
         if !is_additive(tokens, p) { break }
         let op = kind_at(tokens, p)
         let rhs = match parse_multiplicative(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        node = Expr { kind = Binary { op = op, left = node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Binary { op = op; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // `[ e0, ..e1, e2, … ]` — array literal element collector (C6.7). `pos` is at `[`. Each element
@@ -360,7 +360,7 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64) -> ParsedList<ArrayElem> 
     mut p = skip_seps(tokens, pos + 1)              // consume `[`, skip leading newlines
     mut elems: []ArrayElem = teko::list::empty()
     if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {   // empty `[]`
-        return ParsedList<ArrayElem> { items = elems, next = p + 1 }
+        return ParsedList<ArrayElem> { items = elems; next = p + 1 }
     }
     loop {
         mut is_spread = false
@@ -384,7 +384,7 @@ fn parse_array_elems(tokens: []lexer::Token, pos: u64) -> ParsedList<ArrayElem> 
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the array literal")
     }
-    ParsedList<ArrayElem> { items = elems, next = p + 1 }
+    ParsedList<ArrayElem> { items = elems; next = p + 1 }
 }
 
 // `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`
@@ -395,7 +395,7 @@ fn parse_in_elems(tokens: []lexer::Token, pos: u64) -> ParsedList<Expr> | error 
     mut p = skip_seps(tokens, pos + 1)              // consume `[`, skip leading newlines (multi-line set)
     mut elems: []Expr = teko::list::empty()
     if is_kind_at(tokens, p, lexer::TokenKind::RBracket) {   // empty set `[]` → always false
-        return ParsedList<Expr> { items = elems, next = p + 1 }
+        return ParsedList<Expr> { items = elems; next = p + 1 }
     }
     loop {
         let a = match parse_expr(tokens, p) { Parsed<Expr> as x => x; error as e => return e }   // inside `[` … `]` — struct literals allowed
@@ -408,7 +408,7 @@ fn parse_in_elems(tokens: []lexer::Token, pos: u64) -> ParsedList<Expr> | error 
     if !is_kind_at(tokens, p, lexer::TokenKind::RBracket) {
         return err_at(tokens, p, "expected ']' to close the `in` membership set")
     }
-    ParsedList<Expr> { items = elems, next = p + 1 }
+    ParsedList<Expr> { items = elems; next = p + 1 }
 }
 
 // level 6 — comparison. A CHAIN `a < b < c` is kept as written (M.3): a first + a list
@@ -426,7 +426,7 @@ fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Par
             return err_at(tokens, ip, "expected '[' to begin the `in` membership set")
         }
         let set = match parse_in_elems(tokens, ip) { ParsedList<Expr> as x => x; error as e => return e }
-        return Parsed<Expr> { node = Expr { kind = InExpr { lhs = first.node, elems = set.items }, line = tokens[pos].line, col = tokens[pos].col }, next = set.next }
+        return Parsed<Expr> { node = Expr { kind = InExpr { lhs = first.node; elems = set.items }; line = tokens[pos].line; col = tokens[pos].col }; next = set.next }
     }
     mut terms: []CmpTerm = teko::list::empty()
     mut p = first.next
@@ -434,11 +434,11 @@ fn parse_comparison(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Par
         if !is_comparison(tokens, p) { break }
         let op = kind_at(tokens, p)
         let rhs = match parse_additive(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        terms = teko::list::push(terms, CmpTerm { op = op, operand = rhs.node })
+        terms = teko::list::push(terms, CmpTerm { op = op; operand = rhs.node })
         p = rhs.next
     }
-    if terms.len == 0 { return Parsed<Expr> { node = first.node, next = p } }
-    Parsed<Expr> { node = Expr { kind = Compare { first = first.node, rest = terms }, line = tokens[pos].line, col = tokens[pos].col }, next = p }
+    if terms.len == 0 { return Parsed<Expr> { node = first.node; next = p } }
+    Parsed<Expr> { node = Expr { kind = Compare { first = first.node; rest = terms }; line = tokens[pos].line; col = tokens[pos].col }; next = p }
 }
 
 // level 7 — logical AND `&&` (left-assoc).
@@ -449,10 +449,10 @@ fn parse_and(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Exp
     loop {
         if !is_andand(tokens, p) { break }
         let rhs = match parse_comparison(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        node = Expr { kind = Binary { op = lexer::TokenKind::AndAnd, left = node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Binary { op = lexer::TokenKind::AndAnd; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
 
 // level 8 — logical OR `||` (left-assoc, the loosest; the ladder's top).
@@ -463,8 +463,8 @@ fn parse_or(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Expr
     loop {
         if !is_oror(tokens, p) { break }
         let rhs = match parse_and(tokens, skip_seps(tokens, p + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)
-        node = Expr { kind = Binary { op = lexer::TokenKind::OrOr, left = node, right = rhs.node }, line = tokens[pos].line, col = tokens[pos].col }
+        node = Expr { kind = Binary { op = lexer::TokenKind::OrOr; left = node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }
         p = rhs.next
     }
-    Parsed<Expr> { node = node, next = p }
+    Parsed<Expr> { node = node; next = p }
 }
