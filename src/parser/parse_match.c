@@ -27,7 +27,7 @@ static tk_parsed_arms_result parse_arms(const tk_token *t, size_t n, size_t pos)
     if (na == 0) {
         return (tk_parsed_arms_result){ .ok = false, .as.error = tk_err_at(t, n, p, "a `match` needs at least one arm") };
     }
-    return (tk_parsed_arms_result){ .ok = true, .as.value = { .arms = arms, .n_arms = na, .next = p + 1 } };
+    return (tk_parsed_arms_result){ .ok = true, .as.value = { .items = arms, .n_arms = na, .next = p + 1 } };
 }
 
 tk_parsed_result parse_match(const tk_token *t, size_t n, size_t pos) {
@@ -39,7 +39,7 @@ tk_parsed_result parse_match(const tk_token *t, size_t n, size_t pos) {
     tk_parsed_arms_result arms = parse_arms(t, n, subj.as.value.next);
     if (!arms.ok) { return (tk_parsed_result){ .ok = false, .as.error = arms.as.error }; }
     tk_expr e = { .tag = TK_EXPR_MATCH, .as.match_expr = { .subject = tk_box_expr(subj.as.value.node),
-        .arms = arms.as.value.arms, .narms = arms.as.value.n_arms } };
+        .arms = arms.as.value.items, .narms = arms.as.value.n_arms } };
     e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `match` keyword's position
     return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = arms.as.value.next } };
 }

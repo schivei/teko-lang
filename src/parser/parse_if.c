@@ -29,7 +29,7 @@ tk_parsed_block_result tk_parse_if_body(const tk_token *t, size_t n, size_t pos,
     if (!s.ok) { return (tk_parsed_block_result){ .ok = false, .as.error = s.as.error }; }
     tk_statement *one = NULL; size_t n1 = 0;
     tk_stmts_push(&one, &n1, s.as.value.node);
-    return (tk_parsed_block_result){ .ok = true, .as.value = { .statements = one, .n = n1, .next = s.as.value.next } };
+    return (tk_parsed_block_result){ .ok = true, .as.value = { .items = one, .n = n1, .next = s.as.value.next } };
 }
 
 tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
@@ -45,7 +45,7 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
     size_t q = tk_skip_seps(t, n, then_next);
     if (!tk_is_kind_at(t, n, q, TK_TOKEN_ELSE)) {
         tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
-            .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
+            .then_blk = tb.as.value.items, .nthen = tb.as.value.n,
             .has_else = false, .else_blk = NULL, .nelse = 0 } };
         e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = then_next } };
@@ -59,7 +59,7 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
         tk_statement es = { .tag = TK_STMT_EXPR, .as.expr_stmt = { .expr = elif.as.value.node } };
         tk_stmts_push(&eb, &neb, es);
         tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
-            .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
+            .then_blk = tb.as.value.items, .nthen = tb.as.value.n,
             .has_else = true, .else_blk = eb, .nelse = neb } };
         e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = elif.as.value.next } };
@@ -69,8 +69,8 @@ tk_parsed_result parse_if(const tk_token *t, size_t n, size_t pos) {
     tk_parsed_block_result ebk = tk_parse_if_body(t, n, q + 1, "expected '{', `if`, or a newline after `else`");
     if (!ebk.ok) { return (tk_parsed_result){ .ok = false, .as.error = ebk.as.error }; }
     tk_expr e = { .tag = TK_EXPR_IF, .as.if_expr = { .cond = tk_box_expr(cond.as.value.node),
-        .then_blk = tb.as.value.statements, .nthen = tb.as.value.n,
-        .has_else = true, .else_blk = ebk.as.value.statements, .nelse = ebk.as.value.n } };
+        .then_blk = tb.as.value.items, .nthen = tb.as.value.n,
+        .has_else = true, .else_blk = ebk.as.value.items, .nelse = ebk.as.value.n } };
     e.line = t[pos].line; e.col = t[pos].col;   // (C1-POS) the `if` keyword's position
     return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = ebk.as.value.next } };
 }

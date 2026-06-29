@@ -90,7 +90,7 @@ static tk_parsed_pattern_result parse_pattern_primary(const tk_token *t, size_t 
         if (nargs == 0 && tk_is_kind_at(t, n, after, TK_TOKEN_LBRACE)) {   // field destructure has no type-args (W9.4 scope = bind only)
             tk_parsed_names_result fns = parse_field_names(t, n, after);
             if (!fns.ok) { return (tk_parsed_pattern_result){ .ok = false, .as.error = fns.as.error }; }
-            tk_pattern fp = { .tag = TK_PAT_FIELD, .as.field = { .type_name = pp.as.value.node, .fields = fns.as.value.names, .n_fields = fns.as.value.n_names } };
+            tk_pattern fp = { .tag = TK_PAT_FIELD, .as.field = { .type_name = pp.as.value.node, .fields = fns.as.value.items, .n_fields = fns.as.value.n_names } };
             return (tk_parsed_pattern_result){ .ok = true, .as.value = { .node = fp, .next = fns.as.value.next } };
         }
         tk_pattern p = { .tag = TK_PAT_BIND, .as.bind = { .type_name = pp.as.value.node, .has_binding = false, .binding = (tk_str){0}, .type_args = type_args, .nargs = nargs } };
@@ -140,7 +140,7 @@ tk_parsed_names_result parse_field_names(const tk_token *t, size_t n, size_t pos
     size_t p = tk_skip_seps(t, n, pos + 1);   // consume `{`, skip leading separators
     tk_str *names = NULL; size_t nn = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) {
-        return (tk_parsed_names_result){ .ok = true, .as.value = { .names = names, .n_names = 0, .next = p + 1 } };
+        return (tk_parsed_names_result){ .ok = true, .as.value = { .items = names, .n_names = 0, .next = p + 1 } };
     }
     for (;;) {
         if (!tk_is_name_at(t, n, p)) {
@@ -155,5 +155,5 @@ tk_parsed_names_result parse_field_names(const tk_token *t, size_t n, size_t pos
         p = tk_skip_seps(t, n, p);
         if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }   // trailing separator
     }
-    return (tk_parsed_names_result){ .ok = true, .as.value = { .names = names, .n_names = nn, .next = p + 1 } };   // consume `}`
+    return (tk_parsed_names_result){ .ok = true, .as.value = { .items = names, .n_names = nn, .next = p + 1 } };   // consume `}`
 }

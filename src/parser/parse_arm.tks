@@ -8,7 +8,7 @@ fn parse_guard(tokens: []lexer::Token, pos: u64) -> Guard | error {
     if !is_kind_at(tokens, pos, lexer::TokenKind::When) {
         return Guard { has_when = false, guard = Expr { kind = Number { is_float = false, value = 0, fval = 0.0 }, line = 0, col = 0 }, next = pos }   // (C1-POS) placeholder guard — gated by has_when, position unknown (0)
     }
-    let g = match parse_expr(tokens, pos + 1) { Parsed as x => x; error as e => return e }
+    let g = match parse_expr(tokens, pos + 1) { Parsed<Expr> as x => x; error as e => return e }
     Guard { has_when = true, guard = g.node, next = g.next }
 }
 
@@ -16,8 +16,8 @@ fn parse_guard(tokens: []lexer::Token, pos: u64) -> Guard | error {
 // an `if` then/else branch (B.20): a `{ … }` block, or one bracketless statement right after
 // `=>` (`=> expr`, `=> return x`, `=> break`, `=> continue`). The `when` guard does NOT
 // count for exhaustiveness (M.1).
-fn parse_arm(tokens: []lexer::Token, pos: u64) -> ParsedArm | error {
-    let pat = match parse_pattern(tokens, pos) { ParsedPattern as x => x; error as e => return e }
+fn parse_arm(tokens: []lexer::Token, pos: u64) -> Parsed<Arm> | error {
+    let pat = match parse_pattern(tokens, pos) { Parsed<Pattern> as x => x; error as e => return e }
     let g = match parse_guard(tokens, pat.next) { Guard as x => x; error as e => return e }
     if !is_kind_at(tokens, g.next, lexer::TokenKind::FatArrow) {
         return err_at(tokens, g.next, "expected '=>' after a match pattern")
@@ -27,10 +27,10 @@ fn parse_arm(tokens: []lexer::Token, pos: u64) -> ParsedArm | error {
     // (`=> expr`) parses one statement directly (an `if` branch's bracketless body sits on
     // the NEXT line, but an arm's follows `=>` on the SAME line).
     let body = if is_kind_at(tokens, bpos, lexer::TokenKind::LBrace) || is_sep(tokens, bpos) {
-        match parse_if_body(tokens, bpos, "expected '{' or a body after '=>'") { ParsedBlock as x => x; error as e => return e }
+        match parse_if_body(tokens, bpos, "expected '{' or a body after '=>'") { ParsedList<Statement> as x => x; error as e => return e }
     } else {
-        let s = match parse_statement(tokens, bpos) { ParsedStmt as x => x; error as e => return e }
-        ParsedBlock { statements = teko::list::push(teko::list::empty(), s.node), next = s.next }
+        let s = match parse_statement(tokens, bpos) { Parsed<Statement> as x => x; error as e => return e }
+        ParsedList<Statement> { items = teko::list::push(teko::list::empty(), s.node), next = s.next }
     }
-    ParsedArm { node = Arm { pattern = pat.node, has_when = g.has_when, guard = g.guard, body = body.statements }, next = body.next }
+    Parsed<Arm> { node = Arm { pattern = pat.node, has_when = g.has_when, guard = g.guard, body = body.items }, next = body.next }
 }

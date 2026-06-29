@@ -39,7 +39,7 @@ tk_parsed_uses_result parse_use_header(const tk_token *t, size_t n, size_t pos) 
         }
         p = tk_skip_seps(t, n, p);
     }
-    return (tk_parsed_uses_result){ .ok = true, .as.value = { .uses = uses, .n_uses = nu, .next = p } };
+    return (tk_parsed_uses_result){ .ok = true, .as.value = { .items = uses, .n_uses = nu, .next = p } };
 }
 
 tk_parsed_main_file_result tk_parse_main_file(const tk_token *t, size_t n, size_t pos) {
@@ -62,6 +62,6 @@ tk_parsed_main_file_result tk_parse_main_file(const tk_token *t, size_t n, size_
         }
         p = tk_skip_seps(t, n, p);
     }
-    tk_main_file mf = { .uses = hdr.as.value.uses, .n_uses = hdr.as.value.n_uses, .body = body, .n_body = nb };
+    tk_main_file mf = { .uses = hdr.as.value.items, .n_uses = hdr.as.value.n_uses, .body = body, .n_body = nb };
     return (tk_parsed_main_file_result){ .ok = true, .as.value = { .node = mf, .next = p } };
 }

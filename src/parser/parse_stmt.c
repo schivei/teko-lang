@@ -40,7 +40,7 @@ tk_parsed_stmt_result tk_parse_statement(const tk_token *t, size_t n, size_t pos
         }
         tk_parsed_block_result blk = tk_parse_block(t, n, lbrace);
         if (!blk.ok) { return (tk_parsed_stmt_result){ .ok = false, .as.error = blk.as.error }; }
-        tk_statement s = { .tag = TK_STMT_LOOP, .as.loop_stmt = { .label = label, .body = blk.as.value.statements, .nbody = blk.as.value.n } };
+        tk_statement s = { .tag = TK_STMT_LOOP, .as.loop_stmt = { .label = label, .body = blk.as.value.items, .nbody = blk.as.value.n } };
         return (tk_parsed_stmt_result){ .ok = true, .as.value = { .node = s, .next = blk.as.value.next } };
     }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_BREAK)) {
@@ -64,7 +64,7 @@ tk_parsed_stmt_result tk_parse_statement(const tk_token *t, size_t n, size_t pos
         }
         tk_parsed_block_result blk = tk_parse_block(t, n, lbrace);
         if (!blk.ok) { return (tk_parsed_stmt_result){ .ok = false, .as.error = blk.as.error }; }
-        tk_statement s = { .tag = TK_STMT_DEFER, .as.defer_stmt = { .body = blk.as.value.statements, .nbody = blk.as.value.n } };
+        tk_statement s = { .tag = TK_STMT_DEFER, .as.defer_stmt = { .body = blk.as.value.items, .nbody = blk.as.value.n } };
         return (tk_parsed_stmt_result){ .ok = true, .as.value = { .node = s, .next = blk.as.value.next } };
     }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_LET) || tk_is_kind_at(t, n, pos, TK_TOKEN_MUT) || tk_is_kind_at(t, n, pos, TK_TOKEN_CONST)) {
@@ -112,7 +112,7 @@ tk_parsed_block_result tk_parse_block(const tk_token *t, size_t n, size_t pos) {
         }
         p = tk_skip_seps(t, n, p);
     }
-    return (tk_parsed_block_result){ .ok = true, .as.value = { .statements = stmts, .n = ns, .next = p + 1 } };   // consume `}`
+    return (tk_parsed_block_result){ .ok = true, .as.value = { .items = stmts, .n = ns, .next = p + 1 } };   // consume `}`
 }
 
 tk_type_expr no_type(void) {
@@ -132,7 +132,7 @@ static tk_parsed_target_result parse_bind_target(const tk_token *t, size_t n, si
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_LBRACE)) {
         tk_parsed_names_result names = parse_field_names(t, n, pos);
         if (!names.ok) { return (tk_parsed_target_result){ .ok = false, .as.error = names.as.error }; }
-        tk_bind_target tgt = { .tag = TK_BIND_DESTRUCTURE, .as.destructure = { .names = names.as.value.names, .nnames = names.as.value.n_names } };
+        tk_bind_target tgt = { .tag = TK_BIND_DESTRUCTURE, .as.destructure = { .names = names.as.value.items, .nnames = names.as.value.n_names } };
         return (tk_parsed_target_result){ .ok = true, .as.value = { .node = tgt, .next = names.as.value.next } };
     }
     // `let _ = expr` — DISCARD binding: evaluate the value for effect, bind nothing. A SIMPLE

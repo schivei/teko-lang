@@ -43,7 +43,7 @@ static tk_parsed_args_result parse_call_args(const tk_token *t, size_t n, size_t
     size_t p = tk_skip_seps(t, n, pos + 1);             // consume `(`, skip leading newlines (multi-line args)
     tk_expr *args = NULL; size_t na = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
-        return (tk_parsed_args_result){ .ok = true, .as.value = { .args = args, .n_args = 0, .next = p + 1 } };
+        return (tk_parsed_args_result){ .ok = true, .as.value = { .items = args, .n_args = 0, .next = p + 1 } };
     }
     for (;;) {
         tk_parsed_result a = parse_expr_a(t, n, p, true);   // inside `(` … `)` — struct literals allowed
@@ -57,7 +57,7 @@ static tk_parsed_args_result parse_call_args(const tk_token *t, size_t n, size_t
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
         return (tk_parsed_args_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ')' to close the argument list") };
     }
-    return (tk_parsed_args_result){ .ok = true, .as.value = { .args = args, .n_args = na, .next = p + 1 } };
+    return (tk_parsed_args_result){ .ok = true, .as.value = { .items = args, .n_args = na, .next = p + 1 } };
 }
 
 // `Name { field = value (, | ; | newline)* }` — a struct VALUE literal (W4a). `pos` is at `{`.
@@ -242,7 +242,7 @@ static tk_parsed_result parse_atom(const tk_token *t, size_t n, size_t pos, bool
         tk_parsed_array_elems_result aer = parse_array_elems(t, n, pos);
         if (!aer.ok) { return (tk_parsed_result){ .ok = false, .as.error = aer.as.error }; }
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_ARRAY, .as.array = {
-            .elements = aer.as.value.elems, .nelements = aer.as.value.n_elems } }, t, pos);
+            .elements = aer.as.value.items, .nelements = aer.as.value.n_elems } }, t, pos);
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = aer.as.value.next } };
     }
     if (k == TK_TOKEN_IF)    { return parse_if(t, n, pos); }
@@ -254,7 +254,7 @@ static tk_parsed_result parse_atom(const tk_token *t, size_t n, size_t pos, bool
             tk_parsed_args_result ca = parse_call_args(t, n, pp.as.value.next);
             if (!ca.ok) { return (tk_parsed_result){ .ok = false, .as.error = ca.as.error }; }
             tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_CALL, .as.call = { .callee = pp.as.value.node,
-                .args = ca.as.value.args, .nargs = ca.as.value.n_args } }, t, pos);
+                .args = ca.as.value.items, .nargs = ca.as.value.n_args } }, t, pos);
             return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = ca.as.value.next } };
         }
         // (W9.4) explicit type-args at construction `Name<i64> { … }` — SPECULATIVE: parse `<…>`,
@@ -322,7 +322,7 @@ static tk_parsed_result parse_postfix(const tk_token *t, size_t n, size_t pos, b
             tk_parsed_args_result ca = parse_call_args(t, n, p + 2);
             if (!ca.ok) { return (tk_parsed_result){ .ok = false, .as.error = ca.as.error }; }
             tk_expr m = tk_at((tk_expr){ .tag = TK_EXPR_METHOD_CALL, .as.method_call = { .receiver = tk_box_expr(node),
-                .method = name, .args = ca.as.value.args, .nargs = ca.as.value.n_args } }, t, pos);
+                .method = name, .args = ca.as.value.items, .nargs = ca.as.value.n_args } }, t, pos);
             node = m; p = ca.as.value.next;
         } else {
             tk_expr f = tk_at((tk_expr){ .tag = TK_EXPR_FIELD_ACCESS, .as.field_access = { .receiver = tk_box_expr(node), .field = name } }, t, pos);
@@ -411,7 +411,7 @@ static tk_parsed_array_elems_result parse_array_elems(const tk_token *t, size_t 
     size_t p = tk_skip_seps(t, n, pos + 1);              // consume `[`, skip leading newlines
     tk_array_elem *elems = NULL; size_t ne = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {     // empty `[]`
-        return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .elems = elems, .n_elems = 0, .next = p + 1 } };
+        return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .items = elems, .n_elems = 0, .next = p + 1 } };
     }
     for (;;) {
         bool is_spread = false;
@@ -435,7 +435,7 @@ static tk_parsed_array_elems_result parse_array_elems(const tk_token *t, size_t 
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {
         return (tk_parsed_array_elems_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ']' to close the array literal") };
     }
-    return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .elems = elems, .n_elems = ne, .next = p + 1 } };
+    return (tk_parsed_array_elems_result){ .ok = true, .as.value = { .items = elems, .n_elems = ne, .next = p + 1 } };
 }
 
 // `[ e0, e1, … ]` — the membership SET, the RHS of `in` (Phase 2). `pos` is at `[`. Empty `[]`
@@ -446,7 +446,7 @@ static tk_parsed_args_result parse_in_elems(const tk_token *t, size_t n, size_t 
     size_t p = tk_skip_seps(t, n, pos + 1);             // consume `[`, skip leading newlines (multi-line set)
     tk_expr *elems = NULL; size_t ne = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {    // empty set `[]` → always false
-        return (tk_parsed_args_result){ .ok = true, .as.value = { .args = elems, .n_args = 0, .next = p + 1 } };
+        return (tk_parsed_args_result){ .ok = true, .as.value = { .items = elems, .n_args = 0, .next = p + 1 } };
     }
     for (;;) {
         tk_parsed_result a = parse_expr_a(t, n, p, true);   // inside `[` … `]` — struct literals allowed
@@ -460,7 +460,7 @@ static tk_parsed_args_result parse_in_elems(const tk_token *t, size_t n, size_t 
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_RBRACKET)) {
         return (tk_parsed_args_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ']' to close the `in` membership set") };
     }
-    return (tk_parsed_args_result){ .ok = true, .as.value = { .args = elems, .n_args = ne, .next = p + 1 } };
+    return (tk_parsed_args_result){ .ok = true, .as.value = { .items = elems, .n_args = ne, .next = p + 1 } };
 }
 
 static tk_parsed_result parse_comparison(const tk_token *t, size_t n, size_t pos, bool as_) {
@@ -478,7 +478,7 @@ static tk_parsed_result parse_comparison(const tk_token *t, size_t n, size_t pos
         tk_parsed_args_result set = parse_in_elems(t, n, ip);
         if (!set.ok) { return (tk_parsed_result){ .ok = false, .as.error = set.as.error }; }
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_IN, .as.in_expr = {
-            .lhs = tk_box_expr(first.as.value.node), .elems = set.as.value.args, .nelems = set.as.value.n_args } }, t, pos);
+            .lhs = tk_box_expr(first.as.value.node), .elems = set.as.value.items, .nelems = set.as.value.n_args } }, t, pos);
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = set.as.value.next } };
     }
     tk_cmp_term *terms = NULL; size_t nt = 0;

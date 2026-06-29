@@ -20,34 +20,40 @@
 #include <stddef.h>         // size_t
 
 // =========================================================================
-// The Parsed* result family (parser/result.tks). Each carries the parsed node (a
-// single node uses `node`; a list uses a descriptive field) + the resume index `next`.
+// The Parsed* result family (parser/result.tks). The Teko side is now TWO generics:
+// `Parsed<T>` ({ node: T; next }) and `ParsedList<T>` ({ items: []T; next }). C has
+// no generics, so this header is the HAND-MONOMORPHIZED mirror: one concrete typedef
+// per instance. A `Parsed<T>` instance carries `node`+`next`; a `ParsedList<T>`
+// instance carries `items` (the payload pointer) + its element count + `next`.
 // =========================================================================
-typedef struct { tk_expr      node;       size_t next; } tk_parsed;          // an expression
-typedef struct { tk_statement node;       size_t next; } tk_parsed_stmt;     // a statement
+// --- Parsed<T> instances (single node + resume index) ---
+typedef struct { tk_expr      node;       size_t next; } tk_parsed;          // Parsed<Expr>
+typedef struct { tk_statement node;       size_t next; } tk_parsed_stmt;     // Parsed<Statement>
+typedef struct { tk_decl      node;       size_t next; } tk_parsed_decl;     // Parsed<Decl> (R-main)
+typedef struct { tk_type_body node;       size_t next; } tk_parsed_body;     // Parsed<TypeBody>
+typedef struct { tk_pattern   node;       size_t next; } tk_parsed_pattern;  // Parsed<Pattern>
+typedef struct { tk_arm       node;       size_t next; } tk_parsed_arm;      // Parsed<Arm>
+typedef struct { tk_bind_target node; size_t next; } tk_parsed_target;       // Parsed<BindTarget>
+typedef struct { tk_path      node;       size_t next; } tk_parsed_path;     // Parsed<Path> (a::b::c)
+// --- ParsedList<T> instances (payload `items` + element count + resume index) ---
+typedef struct { tk_statement *items; size_t n;        size_t next; } tk_parsed_block;       // ParsedList<Statement> — a `{ … }` block
+typedef struct { tk_arm      *items;  size_t n_arms;   size_t next; } tk_parsed_arms;        // ParsedList<Arm> — a `{ arm; … }` arm list
+typedef struct { tk_expr     *items;  size_t n_args;   size_t next; } tk_parsed_args;        // ParsedList<Expr> — call arguments
+typedef struct { tk_param    *items;  size_t n_params; size_t next; } tk_parsed_params;      // ParsedList<Param> — function parameters
+typedef struct { tk_str      *items;  size_t n_names;  size_t next; } tk_parsed_names;       // ParsedList<str> — a `{ … }` field-name list
+typedef struct { tk_field    *items;  size_t n_fields; size_t next; } tk_parsed_fields;      // ParsedList<Field> — a struct field list
+typedef struct { tk_array_elem *items; size_t n_elems; size_t next; } tk_parsed_array_elems; // ParsedList<ArrayElem> — array literal elements (with spread support)
+// --- OUTLIERS (extra `pending_gt` / different fields — left concrete on both sides) ---
 typedef struct { tk_type_expr node;       size_t next; size_t pending_gt; } tk_parsed_type;     // a type expr; pending_gt = extra `>` left by a compound `>>` close (S4 nested generics)
 typedef struct { tk_type_expr *args; size_t nargs; size_t next; size_t pending_gt; } tk_parsed_type_args; // (W9.4) a `<T1, T2, …>` arg list at a construction/pattern site; pending_gt = extra `>` left by a `>>` close
-typedef struct { tk_decl      node;       size_t next; } tk_parsed_decl;     // a top-level declaration (R-main)
-typedef struct { tk_statement *statements; size_t n; size_t next; } tk_parsed_block;  // a `{ … }` block
-typedef struct { tk_type_body node;       size_t next; } tk_parsed_body;     // a struct/enum/variant body
-typedef struct { tk_pattern   node;       size_t next; } tk_parsed_pattern;  // a match pattern
-typedef struct { tk_arm       node;       size_t next; } tk_parsed_arm;      // a match arm
-typedef struct { tk_arm      *arms;   size_t n_arms;   size_t next; } tk_parsed_arms;   // a `{ arm; … }` arm list
-typedef struct { tk_expr     *args;   size_t n_args;   size_t next; } tk_parsed_args;   // call arguments
-typedef struct { tk_param    *params; size_t n_params; size_t next; } tk_parsed_params; // function parameters
-typedef struct { tk_bind_target node; size_t next; } tk_parsed_target;       // a binding target
-typedef struct { tk_str      *names;  size_t n_names;  size_t next; } tk_parsed_names;  // a `{ … }` field-name list
-typedef struct { tk_path      node;       size_t next; } tk_parsed_path;     // an expression path a::b::c
-typedef struct { tk_field    *fields; size_t n_fields; size_t next; } tk_parsed_fields; // a struct field list
-typedef struct { tk_array_elem *elems; size_t n_elems; size_t next; } tk_parsed_array_elems; // array literal elements (with spread support)
 typedef struct { bool has_when; tk_expr guard;        size_t next; } tk_guard;          // an optional `when`
 typedef struct { bool has_type; tk_type_expr type_ann; size_t next; } tk_annotation;    // an optional `: T`
 
-// --- file-level results (parse_file.tks: ParsedUse/ParsedUses/ParsedMainFile + module) ---
-typedef struct { tk_use_decl  node;  size_t next; }              tk_parsed_use;        // one `use`
-typedef struct { tk_use_decl *uses;  size_t n_uses; size_t next; } tk_parsed_uses;     // a `use` header
-typedef struct { tk_main_file node;  size_t next; }              tk_parsed_main_file;  // a parsed main.tks
-typedef struct { tk_module    node;  size_t next; }              tk_parsed_module;     // a parsed module
+// --- file-level results (parse_file.tks) ---
+typedef struct { tk_use_decl  node;  size_t next; }              tk_parsed_use;        // Parsed<UseDecl> — one `use`
+typedef struct { tk_use_decl *items;  size_t n_uses; size_t next; } tk_parsed_uses;    // ParsedList<UseDecl> — a `use` header
+typedef struct { tk_main_file node;  size_t next; }              tk_parsed_main_file;  // Parsed<MainFile> — a parsed main.tks
+typedef struct { tk_module    node;  size_t next; }              tk_parsed_module;     // Parsed<Module> — a parsed module
 
 // result stamps (Parsed* | error)
 TK_RESULT(tk_parsed,            tk_parsed_result);

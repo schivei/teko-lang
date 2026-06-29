@@ -20,7 +20,7 @@ static tk_parsed_params_result parse_params(const tk_token *t, size_t n, size_t 
     size_t p = pos + 1;                                  // consume `(`
     tk_param *params = NULL; size_t np = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
-        return (tk_parsed_params_result){ .ok = true, .as.value = { .params = params, .n_params = 0, .next = p + 1 } };
+        return (tk_parsed_params_result){ .ok = true, .as.value = { .items = params, .n_params = 0, .next = p + 1 } };
     }
     for (;;) {
         if (!tk_is_name_at(t, n, p)) {
@@ -40,7 +40,7 @@ static tk_parsed_params_result parse_params(const tk_token *t, size_t n, size_t 
     if (!tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
         return (tk_parsed_params_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ')' to close the parameter list") };
     }
-    return (tk_parsed_params_result){ .ok = true, .as.value = { .params = params, .n_params = np, .next = p + 1 } };
+    return (tk_parsed_params_result){ .ok = true, .as.value = { .items = params, .n_params = np, .next = p + 1 } };
 }
 
 // (S4) An OPTIONAL generic type-parameter list `<T, U, …>` after a fn/type NAME (parse_decl.tks
@@ -48,7 +48,7 @@ static tk_parsed_params_result parse_params(const tk_token *t, size_t n, size_t 
 // already committed the parse to a decl); a decl list never nests, so it closes with a single `>`.
 static tk_parsed_names_result parse_type_params(const tk_token *t, size_t n, size_t pos) {
     if (!tk_is_kind_at(t, n, pos, TK_TOKEN_LT)) {
-        return (tk_parsed_names_result){ .ok = true, .as.value = { .names = NULL, .n_names = 0, .next = pos } };
+        return (tk_parsed_names_result){ .ok = true, .as.value = { .items = NULL, .n_names = 0, .next = pos } };
     }
     size_t p = pos + 1;
     tk_str *names = NULL; size_t nn = 0;
@@ -67,7 +67,7 @@ static tk_parsed_names_result parse_type_params(const tk_token *t, size_t n, siz
         else if (tk_is_kind_at(t, n, p, TK_TOKEN_GT)) { p += 1; break; }
         else { return (tk_parsed_names_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ',' or '>' in a type-parameter list") }; }
     }
-    return (tk_parsed_names_result){ .ok = true, .as.value = { .names = names, .n_names = nn, .next = p } };
+    return (tk_parsed_names_result){ .ok = true, .as.value = { .items = names, .n_names = nn, .next = p } };
 }
 
 tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos, bool is_test, tk_str os_guard) {
@@ -122,7 +122,7 @@ tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos,
             }
             from_lib = t[p].text; p += 1;
         }
-        tk_function ef = { .name = name, .type_params = tps.as.value.names, .n_type_params = tps.as.value.n_names, .params = ps.as.value.params, .nparams = ps.as.value.n_params,
+        tk_function ef = { .name = name, .type_params = tps.as.value.items, .n_type_params = tps.as.value.n_names, .params = ps.as.value.items, .nparams = ps.as.value.n_params,
             .has_return = has_return, .return_type = ret,
             .body = NULL, .nbody = 0,
             .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col, .is_test = is_test,
@@ -135,9 +135,9 @@ tk_parsed_decl_result tk_parse_function(const tk_token *t, size_t n, size_t pos,
     }
     tk_parsed_block_result blk = tk_parse_block(t, n, p);
     if (!blk.ok) { return (tk_parsed_decl_result){ .ok = false, .as.error = blk.as.error }; }
-    tk_function f = { .name = name, .type_params = tps.as.value.names, .n_type_params = tps.as.value.n_names, .params = ps.as.value.params, .nparams = ps.as.value.n_params,
+    tk_function f = { .name = name, .type_params = tps.as.value.items, .n_type_params = tps.as.value.n_names, .params = ps.as.value.items, .nparams = ps.as.value.n_params,
         .has_return = has_return, .return_type = ret,
-        .body = blk.as.value.statements, .nbody = blk.as.value.n,
+        .body = blk.as.value.items, .nbody = blk.as.value.n,
         .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col, .is_test = is_test,
         .is_extern = false, .c_symbol = (tk_str){0}, .from_lib = (tk_str){0}, .os_guard = os_guard };
     tk_decl d = { .tag = TK_DECL_FUNCTION, .as.function = f };
@@ -148,7 +148,7 @@ static tk_parsed_fields_result parse_fields(const tk_token *t, size_t n, size_t 
     size_t p = tk_skip_seps(t, n, pos + 1);   // consume `{`, skip leading separators
     tk_field *fields = NULL; size_t nf = 0;
     if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) {
-        return (tk_parsed_fields_result){ .ok = true, .as.value = { .fields = fields, .n_fields = 0, .next = p + 1 } };
+        return (tk_parsed_fields_result){ .ok = true, .as.value = { .items = fields, .n_fields = 0, .next = p + 1 } };
     }
     for (;;) {
         if (!tk_is_name_at(t, n, p)) {
@@ -169,7 +169,7 @@ static tk_parsed_fields_result parse_fields(const tk_token *t, size_t n, size_t 
         p = tk_skip_seps(t, n, p);
         if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }   // trailing separator
     }
-    return (tk_parsed_fields_result){ .ok = true, .as.value = { .fields = fields, .n_fields = nf, .next = p + 1 } };
+    return (tk_parsed_fields_result){ .ok = true, .as.value = { .items = fields, .n_fields = nf, .next = p + 1 } };
 }
 
 static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t pos) {
@@ -179,7 +179,7 @@ static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t
         }
         tk_parsed_fields_result fs = parse_fields(t, n, pos + 1);
         if (!fs.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = fs.as.error }; }
-        tk_type_body b = { .tag = TK_BODY_STRUCT, .as.struct_body = { .fields = fs.as.value.fields, .n_fields = fs.as.value.n_fields } };
+        tk_type_body b = { .tag = TK_BODY_STRUCT, .as.struct_body = { .fields = fs.as.value.items, .n_fields = fs.as.value.n_fields } };
         return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = fs.as.value.next } };
     }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_ENUM)) {
@@ -188,7 +188,7 @@ static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t
         }
         tk_parsed_names_result ms = parse_field_names(t, n, pos + 1);
         if (!ms.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = ms.as.error }; }
-        tk_type_body b = { .tag = TK_BODY_ENUM, .as.enum_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
+        tk_type_body b = { .tag = TK_BODY_ENUM, .as.enum_body = { .members = ms.as.value.items, .n_members = ms.as.value.n_names } };
         return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = ms.as.value.next } };
     }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_FLAGS)) {
@@ -197,7 +197,7 @@ static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t
         }
         tk_parsed_names_result ms = parse_field_names(t, n, pos + 1);
         if (!ms.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = ms.as.error }; }
-        tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
+        tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.items, .n_members = ms.as.value.n_names } };
         return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = ms.as.value.next } };
     }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_VARIANT)) {
@@ -237,7 +237,7 @@ tk_parsed_decl_result tk_parse_type_decl(const tk_token *t, size_t n, size_t pos
     if (is_extern) {
         // `extern type Name` — an OPAQUE foreign handle: no `= <body>`, lowers to `void *`.
         tk_type_body eb = { .tag = TK_BODY_EXTERN, .as.extern_body = { 0 } };
-        tk_type_decl etd = { .name = name, .type_params = tps.as.value.names, .n_type_params = tps.as.value.n_names, .body = eb, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
+        tk_type_decl etd = { .name = name, .type_params = tps.as.value.items, .n_type_params = tps.as.value.n_names, .body = eb, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
         tk_decl ed = { .tag = TK_DECL_TYPE, .as.type_decl = etd };
         return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = ed, .next = p } };
     }
@@ -246,7 +246,7 @@ tk_parsed_decl_result tk_parse_type_decl(const tk_token *t, size_t n, size_t pos
     }
     tk_parsed_body_result body = parse_type_body(t, n, p + 1);
     if (!body.ok) { return (tk_parsed_decl_result){ .ok = false, .as.error = body.as.error }; }
-    tk_type_decl td = { .name = name, .type_params = tps.as.value.names, .n_type_params = tps.as.value.n_names, .body = body.as.value.node, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
+    tk_type_decl td = { .name = name, .type_params = tps.as.value.items, .n_type_params = tps.as.value.n_names, .body = body.as.value.node, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
     tk_decl d = { .tag = TK_DECL_TYPE, .as.type_decl = td };
     return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = d, .next = body.as.value.next } };
 }
@@ -274,7 +274,7 @@ static tk_parsed_decl_result tk_parse_flags_decl(const tk_token *t, size_t n, si
     }
     tk_parsed_names_result ms = parse_field_names(t, n, p);
     if (!ms.ok) { return (tk_parsed_decl_result){ .ok = false, .as.error = ms.as.error }; }
-    tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.names, .n_members = ms.as.value.n_names } };
+    tk_type_body b = { .tag = TK_BODY_FLAGS, .as.flags_body = { .members = ms.as.value.items, .n_members = ms.as.value.n_names } };
     tk_type_decl td = { .name = name, .body = b, .vis = vis, .has_doc = has_doc, .doc = doc, .line = name_line, .col = name_col };
     tk_decl d = { .tag = TK_DECL_TYPE, .as.type_decl = td };
     return (tk_parsed_decl_result){ .ok = true, .as.value = { .node = d, .next = ms.as.value.next } };
@@ -343,6 +343,6 @@ tk_parsed_module_result tk_parse_module(const tk_token *t, size_t n, size_t pos)
         }
         p = tk_skip_seps(t, n, p);
     }
-    tk_module m = { .uses = hdr.as.value.uses, .n_uses = hdr.as.value.n_uses, .decls = decls, .n_decls = nd };
+    tk_module m = { .uses = hdr.as.value.items, .n_uses = hdr.as.value.n_uses, .decls = decls, .n_decls = nd };
     return (tk_parsed_module_result){ .ok = true, .as.value = { .node = m, .next = p } };
 }

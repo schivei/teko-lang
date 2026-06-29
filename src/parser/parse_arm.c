@@ -42,10 +42,10 @@ tk_parsed_arm_result tk_parse_arm(const tk_token *t, size_t n, size_t pos) {
         if (!s.ok) { return (tk_parsed_arm_result){ .ok = false, .as.error = s.as.error }; }
         tk_statement *one = NULL; size_t n1 = 0;
         tk_stmts_push(&one, &n1, s.as.value.node);
-        body = (tk_parsed_block_result){ .ok = true, .as.value = { .statements = one, .n = n1, .next = s.as.value.next } };
+        body = (tk_parsed_block_result){ .ok = true, .as.value = { .items = one, .n = n1, .next = s.as.value.next } };
     }
     if (!body.ok) { return (tk_parsed_arm_result){ .ok = false, .as.error = body.as.error }; }
     tk_arm arm = { .pattern = pat.as.value.node, .has_when = g.as.value.has_when, .guard = g.as.value.guard,
-                   .body = body.as.value.statements, .nbody = body.as.value.n };
+                   .body = body.as.value.items, .nbody = body.as.value.n };
     return (tk_parsed_arm_result){ .ok = true, .as.value = { .node = arm, .next = body.as.value.next } };
 }
