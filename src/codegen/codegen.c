@@ -1054,17 +1054,51 @@ static bool emit_stmt_value(cbuf *b, const tk_tstatement *s, tk_type slot, const
 // Emit a BRANCH block (the `if`-value then/else): all but the last statement normally, the
 // LAST via emit_stmt_value (its trailing value -> `sink`). An empty branch yields nothing
 // (the checker forbids a value-typed empty branch).
-// S2 (DEFERRED — value-position arm regions): a value-form branch yields its tail to `sink` OUTSIDE
-// the branch; arm regions here would need region/escape context threaded through the whole expression
-// emitter, which the functional Teko twin cannot mirror — so value-branch bindings fall back to the
-// enclosing/root region (W8 leak-safe, never a UAF), keeping both twins byte-aligned. (Statement-
-// position branches DO get arm regions via emit_block_region.)
+// S2 (value-position arm regions — W9): when the branch has a provably BLOCK-LOCAL binding
+// (queried with is_value=TRUE, so the predicate EXCLUDES any binding flowing into the tail value
+// or used as an assign-RHS), open the branch's OWN `_tkbrN` arena region for those NON-tail
+// block-locals and drop it at the branch's exit. CRITICAL ORDERING (the W9 trap): the tail value
+// flows to `sink` (an ENCLOSING temp) via emit_stmt_value FIRST, then the region is dropped — so
+// the yielded value is fully materialized into the enclosing region before its non-tail siblings
+// are freed (never a UAF). The is_value=TRUE predicate guarantees a binding read in the tail is NOT
+// block-local, so it routes to the enclosing region and `sink` never points into `_tkbrN`. No
+// block-local binding ⇒ no region ⇒ byte-identical to the pre-W9 value-branch output.
 static bool emit_branch_value(cbuf *b, const tk_tstatement *body, size_t n, tk_type slot,
                               const char *sink, const char *indent, const char **err) {
+    bool want_block = cg_block_has_block_local(body, n, /*is_value=*/true)
+                      && g_cg_block_depth < TK_CG_MAX_BLOCK_REGIONS;
+    const char *region = "";
+    const tk_tstatement *saved_blk = g_cg_cur_block; size_t saved_bn = g_cg_cur_block_n; bool saved_bv = g_cg_cur_block_is_value;
+    if (want_block) {
+        // Open the value-arm region. Name by buffer length at the creation point (the deterministic
+        // `_tkbr<len>` uniquifier — matches the Teko twin's out.len read without a counter).
+        snprintf(g_cg_block_names[g_cg_block_depth], sizeof g_cg_block_names[g_cg_block_depth], "_tkbr%zu", (size_t)b->len);
+        region = g_cg_block_names[g_cg_block_depth];
+        cb(b, indent); cb(b, "tk_region *"); cb(b, region); cb(b, " = tk_region_new();\n");
+        g_cg_block_stack[g_cg_block_depth].name  = region;
+        g_cg_block_stack[g_cg_block_depth].label = (tk_str){ .ptr = NULL, .len = 0 };
+        g_cg_block_stack[g_cg_block_depth].is_loop = false;   // an ARM region is never a break/continue target
+        g_cg_block_depth += 1;
+        // is_value=TRUE: a binding flowing into the tail value is NOT block-local (routes to enclosing).
+        g_cg_cur_block = body; g_cg_cur_block_n = n; g_cg_cur_block_is_value = true;
+    }
     for (size_t i = 0; i + 1 < n; i += 1)
-        if (!emit_stmt(b, &body[i], /*in_main=*/false, (tk_type){ .tag = TK_TYPE_VOID }, indent, err)) return false;
+        if (!emit_stmt(b, &body[i], /*in_main=*/false, (tk_type){ .tag = TK_TYPE_VOID }, indent, err)) {
+            if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; }
+            return false;
+        }
     if (n > 0)
-        if (!emit_stmt_value(b, &body[n - 1], slot, sink, indent, err)) return false;
+        // Materialize the TAIL value into `sink` (enclosing) BEFORE the region drop (W9 ordering).
+        if (!emit_stmt_value(b, &body[n - 1], slot, sink, indent, err)) {
+            if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; }
+            return false;
+        }
+    if (want_block) {
+        // Tail is materialized into the enclosing `sink`; now drop the arm region (idempotent + nulled).
+        cb(b, indent); cb(b, "tk_region_drop("); cb(b, region); cb(b, "); "); cb(b, region); cb(b, " = NULL;\n");
+        g_cg_block_depth -= 1;
+        g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv;
+    }
     return true;
 }
 
@@ -1083,31 +1117,25 @@ static bool emit_if_value(cbuf *b, const tk_texpr *e, const char **err) {
     // MEM Step 1: a value-form `if` is a SUB-EXPRESSION — emit its branch statements FRAMELESS
     // (the Teko twin's emit_branch_value/emit_stmt_value thread frame=""), so a binding inside a
     // value-branch never frame-routes. Save/restore the active frame around the whole expansion.
-    // S2: likewise clear the current block context (the Teko value-form emitters pass an empty
-    // cur_block) so a binding inside a value-form branch never block-routes — byte-identical twins.
-    // (Value-position arm regions are DEFERRED — see emit_branch_value/emit_arm_value.)
+    // S2/W9: the block context (g_cg_escaping/g_cg_fn_body/g_cg_block_depth) STAYS LIVE so each
+    // value-branch can open its OWN arm region for its block-local NON-tail bindings (emit_branch_value).
+    // The Teko twin threads the SAME context (escaping/regions/fn_body) into its emit_branch_value.
     const char *saved = g_cg_frame; g_cg_frame = "";
-    // S2: a value-form sub-expression never participates in block regions (the Teko twin's
-    // emit_branch_value passes empty block context + empty fn_body). Clear/restore the whole block
-    // context so a loop inside a value-form branch opens no region in EITHER twin (byte-identical).
-    const tk_tstatement *saved_blk = g_cg_cur_block; g_cg_cur_block = NULL;
-    size_t saved_depth = g_cg_block_depth; g_cg_block_depth = 0;
-    const tk_tstatement *saved_fnb = g_cg_fn_body; size_t saved_fnn = g_cg_fn_nbody; g_cg_fn_body = NULL; g_cg_fn_nbody = 0;
     // Freeze a unique temp name (buffer length is about to change as we append).
     char tmp[32];
     snprintf(tmp, sizeof tmp, "_tk%zu", (size_t)b->len);
     cb(b, "({ ");
-    if (!emit_type(b, e->type, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+    if (!emit_type(b, e->type, err)) { g_cg_frame = saved; return false; }
     cb(b, " "); cb(b, tmp); cb(b, "; if (");
-    if (!emit_expr(b, e->as.if_expr.cond, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+    if (!emit_expr(b, e->as.if_expr.cond, err)) { g_cg_frame = saved; return false; }
     cb(b, ") {\n");
     if (!emit_branch_value(b, e->as.if_expr.then_blk, e->as.if_expr.nthen, e->type, tmp, "    ", err))
-        { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+        { g_cg_frame = saved; return false; }
     cb(b, "} else {\n");
     if (!emit_branch_value(b, e->as.if_expr.else_blk, e->as.if_expr.nelse, e->type, tmp, "    ", err))
-        { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+        { g_cg_frame = saved; return false; }
     cb(b, "} "); cb(b, tmp); cb(b, "; })");
-    g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn;
+    g_cg_frame = saved;
     return true;
 }
 
@@ -2847,27 +2875,54 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
     // ret_type is the FUNCTION's return type (not VOID): a non-last statement may itself be a
     // `return e` (e.g. `_ => { if cond { return error{…} }; v }`), and that `return` must wrap its
     // value into the fn's return slot (g_cg_ret_type) — a VOID slot left an error returned bare.
-    // S2 (DEFERRED — value-position arm regions): a value-form arm yields a TAIL value used OUTSIDE the
-    // arm (→ `sink`). Opening an arm region here would require threading the region/escape context
-    // through the WHOLE expression emitter; the FUNCTIONAL Teko twin (emit_expr has no region params,
-    // no mutable globals) cannot mirror that without a pervasive call-site change, so value-position arm
-    // regions are deferred (the arm's bindings fall back to the enclosing/root region — W8 leak-safe,
-    // never a UAF), keeping the C and Teko twins byte-aligned. Only STATEMENT-position arms get regions.
+    // S2 (value-position arm regions — W9): when the arm body has a provably BLOCK-LOCAL binding
+    // (is_value=TRUE → the predicate EXCLUDES any binding flowing into the tail value / assign-RHS),
+    // open the arm's OWN `_tkbrN` region for those NON-tail block-locals. CRITICAL ORDERING (W9 trap):
+    // the tail value is materialized into `sink` (an ENCLOSING temp) FIRST, then the region is dropped —
+    // so the yielded value is fully in the enclosing region before its non-tail siblings are freed
+    // (never a UAF). No block-local binding ⇒ no region ⇒ byte-identical to the pre-W9 value-arm output.
+    bool want_block = cg_block_has_block_local(body, n, /*is_value=*/true)
+                      && g_cg_block_depth < TK_CG_MAX_BLOCK_REGIONS;
+    const char *region = "";
+    const tk_tstatement *saved_blk = g_cg_cur_block; size_t saved_bn = g_cg_cur_block_n; bool saved_bv = g_cg_cur_block_is_value;
+    if (want_block) {
+        snprintf(g_cg_block_names[g_cg_block_depth], sizeof g_cg_block_names[g_cg_block_depth], "_tkbr%zu", (size_t)b->len);
+        region = g_cg_block_names[g_cg_block_depth];
+        cb(b, commit_indent); cb(b, "tk_region *"); cb(b, region); cb(b, " = tk_region_new();\n");
+        g_cg_block_stack[g_cg_block_depth].name  = region;
+        g_cg_block_stack[g_cg_block_depth].label = (tk_str){ .ptr = NULL, .len = 0 };
+        g_cg_block_stack[g_cg_block_depth].is_loop = false;   // an ARM region is never a break/continue target
+        g_cg_block_depth += 1;
+        g_cg_cur_block = body; g_cg_cur_block_n = n; g_cg_cur_block_is_value = true;
+    }
     for (size_t i = 0; i + 1 < n; i += 1)
-        if (!emit_stmt(b, &body[i], /*in_main=*/false, g_cg_ret_type, commit_indent, err)) return false;
-    if (n == 0) return fail_node(err, "codegen: empty match arm body in value position");
+        if (!emit_stmt(b, &body[i], /*in_main=*/false, g_cg_ret_type, commit_indent, err)) {
+            if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; }
+            return false;
+        }
+    if (n == 0) { return fail_node(err, "codegen: empty match arm body in value position"); }
     const tk_tstatement *last = &body[n - 1];
-    if (last->tag != TK_TSTMT_EXPR)
+    if (last->tag != TK_TSTMT_EXPR) {
+        if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; }
         return fail_node(err, "codegen: non-value trailing statement in a match arm used as a value");
+    }
     cb(b, commit_indent); cb(b, sink); cb(b, " = (");
     // A trailing diverging expr (`=> panic(…)` / `exit(…)` — _Noreturn void, not a `return`) can't
     // be assigned to the sink. Emit it as `(panic(…), (T){0})`: the call diverges, the zero-of-T
     // makes the assignment type-check (unreachable). Mirrors the `??` diverging-fallback lowering.
     if (cg_expr_diverges(&last->as.expr_stmt.expr)) {
-        if (!emit_expr(b, &last->as.expr_stmt.expr, err)) return false;
-        cb(b, ", ("); if (!emit_type(b, match_e->type, err)) return false; cb(b, "){0}");   // sink's `( … )` closes it
-    } else if (!emit_as(b, match_e->type, &last->as.expr_stmt.expr, err)) return false;
-    cb(b, "); break;\n");
+        if (!emit_expr(b, &last->as.expr_stmt.expr, err)) { if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; } return false; }
+        cb(b, ", ("); if (!emit_type(b, match_e->type, err)) { if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; } return false; } cb(b, "){0}");   // sink's `( … )` closes it
+    } else if (!emit_as(b, match_e->type, &last->as.expr_stmt.expr, err)) { if (want_block) { g_cg_block_depth -= 1; g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv; } return false; }
+    cb(b, ");");
+    if (want_block) {
+        // Tail is materialized into the enclosing `sink`; drop the arm region BEFORE the `break`
+        // (idempotent + nulled for overlap safety) so the per-arm allocations are freed on commit.
+        cb(b, " tk_region_drop("); cb(b, region); cb(b, "); "); cb(b, region); cb(b, " = NULL;");
+        g_cg_block_depth -= 1;
+        g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv;
+    }
+    cb(b, " break;\n");
     return true;
 }
 
@@ -2878,48 +2933,45 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
 static bool emit_match_value(cbuf *b, const tk_texpr *e, const char **err) {
     // MEM Step 1: a value-form `match` is a SUB-EXPRESSION — emit its arm statements FRAMELESS
     // (the Teko twin's emit_arm_value threads frame=""). Save/restore around the whole expansion.
-    // S2: clear the whole block context (the Teko value-form emitter passes empty block context +
-    // empty fn_body) so a binding inside a value-form arm never block-routes — byte-identical twins.
-    // (Value-position arm regions are DEFERRED — see emit_arm_value.)
+    // S2/W9: the block context (g_cg_escaping/g_cg_fn_body/g_cg_block_depth) STAYS LIVE so each
+    // value-arm can open its OWN arm region for its block-local NON-tail bindings (emit_arm_value).
+    // The Teko twin threads the SAME context (escaping/regions/fn_body) into its emit_arm_value.
     const char *saved = g_cg_frame; g_cg_frame = "";
-    const tk_tstatement *saved_blk = g_cg_cur_block; g_cg_cur_block = NULL;
-    size_t saved_depth = g_cg_block_depth; g_cg_block_depth = 0;
-    const tk_tstatement *saved_fnb = g_cg_fn_body; size_t saved_fnn = g_cg_fn_nbody; g_cg_fn_body = NULL; g_cg_fn_nbody = 0;
     // Freeze unique temp names (buffer length is the functional uniquifier — see emit_if_value).
     char subj[40], res[40];
     snprintf(subj, sizeof subj, "_s%zu", (size_t)b->len);
     snprintf(res,  sizeof res,  "_r%zu", (size_t)b->len + 1);   // +1 so it differs from subj
     tk_type subjT = e->as.match_expr.subject->type;   // for optional / variant pattern lowering
     cb(b, "({ ");
-    if (!emit_type(b, e->as.match_expr.subject->type, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+    if (!emit_type(b, e->as.match_expr.subject->type, err)) { g_cg_frame = saved; return false; }
     cb(b, " "); cb(b, subj); cb(b, " = (");
-    if (!emit_expr(b, e->as.match_expr.subject, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+    if (!emit_expr(b, e->as.match_expr.subject, err)) { g_cg_frame = saved; return false; }
     cb(b, "); ");
-    if (!emit_type(b, e->type, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+    if (!emit_type(b, e->type, err)) { g_cg_frame = saved; return false; }
     cb(b, " "); cb(b, res); cb(b, "; do {\n");
     for (size_t i = 0; i < e->as.match_expr.narms; i += 1) {
         const tk_tarm *arm = &e->as.match_expr.arms[i];
         cb(b, "    if (");
-        if (!cg_emit_pat_test(b, &arm->pattern, subj, subjT, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+        if (!cg_emit_pat_test(b, &arm->pattern, subj, subjT, err)) { g_cg_frame = saved; return false; }
         cb(b, ") {\n");
-        if (!cg_emit_pat_binds(b, &arm->pattern, subj, subjT, "        ", err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+        if (!cg_emit_pat_binds(b, &arm->pattern, subj, subjT, "        ", err)) { g_cg_frame = saved; return false; }
         const char *commit_indent = "        ";
         if (arm->has_when) {
             cb(b, "        if (");
-            if (!emit_expr(b, arm->guard, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+            if (!emit_expr(b, arm->guard, err)) { g_cg_frame = saved; return false; }
             cb(b, ") {\n");
             commit_indent = "            ";
         }
         // The arm body is a BLOCK (B.20): its trailing value flows into _r (wrapped to the
         // match result type), or a diverging arm (`=> return e`) emits real control flow.
-        if (!emit_arm_value(b, e, arm->body, arm->nbody, res, commit_indent, err)) { g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn; return false; }
+        if (!emit_arm_value(b, e, arm->body, arm->nbody, res, commit_indent, err)) { g_cg_frame = saved; return false; }
         if (arm->has_when) cb(b, "        }\n");
         cb(b, "    }\n");
     }
     // Exhaustiveness is guaranteed by the checker; the chain always commits before falling
     // through. (No default needed — a fall-through cannot happen for a well-typed program.)
     cb(b, "    } while (0); "); cb(b, res); cb(b, "; })");
-    g_cg_frame = saved; g_cg_cur_block = saved_blk; g_cg_block_depth = saved_depth; g_cg_fn_body = saved_fnb; g_cg_fn_nbody = saved_fnn;
+    g_cg_frame = saved;
     return true;
 }
 

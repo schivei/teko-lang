@@ -973,7 +973,7 @@ pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
 // read-only `prog` through the expr/stmt chain (the same functional-vs-static divergence the
 // file header notes for cbuf*→[]byte and err**→|error). It is needed only at the variant
 // frontier (emit_as / the match emitters), but the chain that can reach those carries it.
-fn emit_div_mod(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary) -> []byte | error {
+fn emit_div_mod(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let prim = match e.type {
         checker::Prim as p => p
         _                  => return error { message = "codegen: division/modulo on a non-primitive type not yet supported" }
@@ -992,9 +992,9 @@ fn emit_div_mod(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: chec
     if b.op == lexer::TokenKind::Slash { out = cb(out, "tk_div_") } else { out = cb(out, "tk_mod_") }
     out = cb(out, tag)
     out = cb(out, "(")
-    out = match emit_expr(out, prog, b.left)  { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body)  { []byte as o => o; error as err => return err }
     out = cb(out, ", ")
-    out = match emit_expr(out, prog, b.right) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ")")
 }
 
@@ -1004,7 +1004,7 @@ fn emit_div_mod(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: chec
 // without it they compile to the plain C operator — zero overhead.
 // Float +,-,* fall through to emit_binary's plain-C path (float overflow ≠ panic).
 // (C: the `if (bop == TK_TOKEN_PLUS || …)` block inside TK_TEXPR_BINARY.)
-fn emit_arith(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary) -> []byte | error {
+fn emit_arith(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let prim = match e.type {
         checker::Prim as p => p
         _                  => return error { message = "codegen: arithmetic on a non-primitive type not yet supported" }
@@ -1022,18 +1022,18 @@ fn emit_arith(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checke
     mut out = cb(buf, fn_prefix)
     out = cb(out, tag)
     out = cb(out, "(")
-    out = match emit_expr(out, prog, b.left)  { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body)  { []byte as o => o; error as err => return err }
     out = cb(out, ", ")
-    out = match emit_expr(out, prog, b.right) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ")")
 }
 
 // emit_binary — a TBinary. `/` and `%` go through emit_div_mod; `+`, `-`, `*`
 // on integer prims go through emit_arith (C7.15 overflow guards); everything
 // else emits plain C `(L op R)`. (C: TK_TEXPR_BINARY branch of emit_expr.)
-fn emit_binary(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary) -> []byte | error {
+fn emit_binary(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: checker::TBinary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     if b.op == lexer::TokenKind::Slash || b.op == lexer::TokenKind::Percent {
-        return emit_div_mod(buf, prog, e, b)
+        return emit_div_mod(buf, prog, e, b, escaping, regions, fn_body)
     }
     // C7.15 — +,-,* on integer prims: route through overflow-guarded helpers.
     if b.op == lexer::TokenKind::Plus || b.op == lexer::TokenKind::Minus || b.op == lexer::TokenKind::Star {
@@ -1041,31 +1041,31 @@ fn emit_binary(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: check
             checker::Prim as p => cg_prim_is_int(p.kind)
             _                  => false
         }
-        if is_int_prim { return emit_arith(buf, prog, e, b) }
+        if is_int_prim { return emit_arith(buf, prog, e, b, escaping, regions, fn_body) }
     }
     let op = match binop_c(b.op) { str as s => s; error as err => return err }
     mut out = cb(buf, "(")
-    out = match emit_expr(out, prog, b.left) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.left, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
     out = cb(out, op)
     out = cb(out, " ")
-    out = match emit_expr(out, prog, b.right) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ")")
 }
 
 // emit_unary — a TUnary -> `(op X)`. (C: TK_TEXPR_UNARY branch.)
-fn emit_unary(buf: []byte, prog: checker::TProgram, u: checker::TUnary) -> []byte | error {
+fn emit_unary(buf: []byte, prog: checker::TProgram, u: checker::TUnary, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let op = match unop_c(u.op) { str as s => s; error as err => return err }
     mut out = cb(buf, "(")
     out = cb(out, op)
-    out = match emit_expr(out, prog, u.operand) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, u.operand, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ")")
 }
 
 // emit_compare — a TCompare -> chained `a<b<c` => `((a<b) && (b<c))` over ADJACENT
 // operands. A lone subject (no rest) is degenerate: emit it bare. (C: TK_TEXPR_COMPARE.)
-fn emit_compare(buf: []byte, prog: checker::TProgram, c: checker::TCompare) -> []byte | error {
-    if c.rest.len == 0 { return emit_expr(buf, prog, c.first) }
+fn emit_compare(buf: []byte, prog: checker::TProgram, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    if c.rest.len == 0 { return emit_expr_ctx(buf, prog, checker::Void { }, c.first, escaping, regions, fn_body) }
     mut out = cb(buf, "(")
     mut prev = c.first
     mut i = 0
@@ -1083,17 +1083,17 @@ fn emit_compare(buf: []byte, prog: checker::TProgram, c: checker::TCompare) -> [
             out = cb(out, "(")
             if term.op == lexer::TokenKind::Ne { out = cb(out, "!") }
             out = cb(out, "tk_str_eq(")
-            out = match emit_expr(out, prog, prev) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ", ")
-            out = match emit_expr(out, prog, term.operand) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, "))")
         } else {
             out = cb(out, "(")
-            out = match emit_expr(out, prog, prev) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, " ")
             out = cb(out, op)
             out = cb(out, " ")
-            out = match emit_expr(out, prog, term.operand) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ")")
         }
         prev = term.operand
@@ -1108,7 +1108,7 @@ fn emit_compare(buf: []byte, prog: checker::TProgram, c: checker::TCompare) -> [
 // the operand is emitted once. The carrier is picked by SOURCE signedness so it holds
 // the source losslessly: signed -> int64_t carrier ("_s"); unsigned -> uint64_t ("_u").
 // (C: TK_TEXPR_CAST branch.)
-fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCast) -> []byte | error {
+fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let inner = c.expr
     // Extract source/dest prims when both sides are primitive (else: a plain C cast).
     let dst_opt = match e.type     { checker::Prim as p => p.kind; _ => checker::PrimKind::Bool }
@@ -1137,7 +1137,7 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             out = cb(out, "_from_")
             out = cb(out, fsrc)
             out = cb(out, "(")
-            out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             return cb(out, "); })")
         }
         mut out = cb(buf, "tk_to_")
@@ -1145,7 +1145,7 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
         out = cb(out, "_from_")
         out = cb(out, fsrc)
         out = cb(out, "(")
-        out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         return cb(out, ")")
     }
     // int -> int: range-checked IFF it may narrow. The carrier is picked by SOURCE
@@ -1162,13 +1162,13 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
             out = cb(out, "; tk_to_")
             out = cb(out, dtag)
             if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
-            out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             return cb(out, "); })")
         }
         mut out = cb(buf, "tk_to_")
         out = cb(out, dtag)
         if cg_prim_is_signed_int(src) { out = cb(out, "_s(") } else { out = cb(out, "_u(") }
-        out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         return cb(out, ")")
     }
     // Everything else (int->float widen, float->float narrow, widening int->int,
@@ -1176,7 +1176,7 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
     mut out = cb(buf, "((")
     out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }   // target rides the node's .type
     out = cb(out, ")(")
-    out = match emit_expr(out, prog, inner) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, "))")
 }
 
@@ -1224,7 +1224,7 @@ fn get_push_elem(e: checker::TExpr, c: checker::TCall) -> checker::Type | error 
 // `[]elem`. type_assign may overwrite the call's type to the sentinel when assigning push(xs,i)
 // back to a sentinel-typed xs; get_push_elem recovers the element. Lower to an inline
 // copy-append GNU stmt-expr. (C: the `push` arm.)
-fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall) -> []byte | error {
+fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let elem = match get_push_elem(e, c) { checker::Type as t => t; error as err => return err }
     let bN = $"_sb{buf.len}"
     let iN = $"_si{buf.len + 1}"
@@ -1237,11 +1237,11 @@ fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: ch
     out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
     out = cb(out, " "); out = cb(out, bN); out = cb(out, " = ")
     // Use emit_as so a sentinel empty() base-arg is lowered to the concrete empty literal.
-    out = match emit_as(out, prog, checker::Slice { element = elem }, c.args[0]) { []byte as o => o; error as err => return err }
+    out = match emit_as(out, prog, checker::Slice { element = elem }, c.args[0], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "; ")
     out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
     out = cb(out, " "); out = cb(out, iN); out = cb(out, " = ")
-    out = match emit_as(out, prog, elem, c.args[1]) { []byte as o => o; error as err => return err }
+    out = match emit_as(out, prog, elem, c.args[1], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "; uint64_t "); out = cb(out, lN); out = cb(out, "; ")
     out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
     out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = (")
@@ -1258,7 +1258,7 @@ fn emit_list_push(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: ch
 // emit_call — a TCall. The callee path -> a C identifier joined by "__" (single-segment
 // in M0). Non-shadowable built-ins `print`/`println` (bare, or under `teko`) map to
 // tk_print/tk_println. (C: TK_TEXPR_CALL branch.)
-fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall) -> []byte | error {
+fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let p = c.callee
     // teko::list::empty / push — the SLICE (collection) builtins, FIXED+COPY. `empty()`
     // (sentinel) is normally wrapped by emit_as into a concrete slot literal; reaching here
@@ -1272,7 +1272,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             return emit_list_empty(buf, e)
         }
         if llast == "push" {
-            return emit_list_push(buf, prog, e, c)
+            return emit_list_push(buf, prog, e, c, escaping, regions, fn_body)
         }
         return error { message = "codegen: this teko::list builtin not yet supported (only empty/push — fixed+copy)" }
     }
@@ -1284,21 +1284,21 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
         if pe == "err_loc" {
             // tk_error_loc(e, line, col) — returns a copy with line/col set.
             mut oe = cb(buf, "tk_error_loc(")
-            oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             oe = cb(oe, ", (uint32_t)(")
-            oe = match emit_expr(oe, prog, c.args[1]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[1], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             oe = cb(oe, "), (uint32_t)(")
-            oe = match emit_expr(oe, prog, c.args[2]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[2], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             return cb(oe, "))")
         }
         if pe == "err_typed" {
             // tk_error_types(e, expected, actual) — returns a copy with expected/actual set.
             mut oe = cb(buf, "tk_error_types(")
-            oe = match emit_expr(oe, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             oe = cb(oe, ", ")
-            oe = match emit_expr(oe, prog, c.args[1]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[1], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             oe = cb(oe, ", ")
-            oe = match emit_expr(oe, prog, c.args[2]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, c.args[2], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             return cb(oe, ")")
         }
         // Phase 3 — `str`/`str_of_bytes` (([]byte) -> str). A []byte lowers to the generated struct
@@ -1312,7 +1312,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             o = cb(o, " ")
             o = cb(o, sb)
             o = cb(o, " = ")
-            o = match emit_expr(o, prog, c.args[0]) { []byte as r => r; error as err => return err }
+            o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             o = cb(o, "; tk_str_of_bytes((tk_str){ (const tk_byte *)")
             o = cb(o, sb)
             o = cb(o, ".ptr, ")
@@ -1328,19 +1328,19 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
         let l = p.segments[p.segments.len - 1].name
         let addr2 = (p.segments.len == 1) || (p.segments[0].name == "teko")
         if addr2 {
-            if l == "read_file"     { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_read_file") }
-            if l == "var"           { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_getenv") }
-            if l == "write_file"       { return emit_host_ffi(buf, prog, e, c, "ures",           "tk_rt_write_file") }
-            if l == "write_file_bytes" { return emit_host_ffi(buf, prog, e, c, "ures_byteslice", "tk_rt_write_file_bytes") }   // C7.12: []byte → file
-            if l == "chdir"         { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_chdir") }
-            if l == "mkdir"         { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_mkdir") }
-            if l == "cwd"           { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_getcwd") }
-            if l == "set_var"       { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_setenv") }
-            if l == "list_dir"      { return emit_host_ffi(buf, prog, e, c, "slres",  "tk_rt_list_dir") }
-            if l == "last_index_of" { return emit_host_ffi(buf, prog, e, c, "u64res", "tk_rt_last_index_of") }
-            if l == "args"          { return emit_host_ffi(buf, prog, e, c, "args",   "tk_rt_args") }
-            if l == "run"           { return emit_host_ffi(buf, prog, e, c, "run",    "tk_rt_run") }
-            if l == "bytes_from_ptr" { return emit_host_ffi(buf, prog, e, c, "bytes", "tk_bytes_from_ptr") }   // (C7.1a) ptr+len -> []byte (slice-lift)
+            if l == "read_file"     { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_read_file", escaping, regions, fn_body) }
+            if l == "var"           { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_getenv", escaping, regions, fn_body) }
+            if l == "write_file"       { return emit_host_ffi(buf, prog, e, c, "ures",           "tk_rt_write_file", escaping, regions, fn_body) }
+            if l == "write_file_bytes" { return emit_host_ffi(buf, prog, e, c, "ures_byteslice", "tk_rt_write_file_bytes", escaping, regions, fn_body) }   // C7.12: []byte → file
+            if l == "chdir"         { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_chdir", escaping, regions, fn_body) }
+            if l == "mkdir"         { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_mkdir", escaping, regions, fn_body) }
+            if l == "cwd"           { return emit_host_ffi(buf, prog, e, c, "sres",   "tk_rt_getcwd", escaping, regions, fn_body) }
+            if l == "set_var"       { return emit_host_ffi(buf, prog, e, c, "ures",   "tk_rt_setenv", escaping, regions, fn_body) }
+            if l == "list_dir"      { return emit_host_ffi(buf, prog, e, c, "slres",  "tk_rt_list_dir", escaping, regions, fn_body) }
+            if l == "last_index_of" { return emit_host_ffi(buf, prog, e, c, "u64res", "tk_rt_last_index_of", escaping, regions, fn_body) }
+            if l == "args"          { return emit_host_ffi(buf, prog, e, c, "args",   "tk_rt_args", escaping, regions, fn_body) }
+            if l == "run"           { return emit_host_ffi(buf, prog, e, c, "run",    "tk_rt_run", escaping, regions, fn_body) }
+            if l == "bytes_from_ptr" { return emit_host_ffi(buf, prog, e, c, "bytes", "tk_bytes_from_ptr", escaping, regions, fn_body) }   // (C7.1a) ptr+len -> []byte (slice-lift)
         }
     }
     // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
@@ -1470,9 +1470,9 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
                             if pn == "Ref" {
                                 let arg_is_ref = match c.args[j].type { checker::Reference => true; _ => false }
                                 if !arg_is_ref { out = cb(out, "&") }
-                                out = match emit_expr_ret(out, prog, ret_type, c.args[j]) { []byte as o => o; error as err => return err }
+                                out = match emit_expr_ctx(out, prog, ret_type, c.args[j], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                             } else {
-                                out = match emit_as_r(out, prog, ret_type, checker::Named { name = pn }, c.args[j]) { []byte as o => o; error as err => return err }
+                                out = match emit_as_r(out, prog, ret_type, checker::Named { name = pn }, c.args[j], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                             }
                             wrapped = true
                         }
@@ -1487,7 +1487,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
                                 parser::NamedType as int_nt => checker::Named { name = int_nt.path.segments[int_nt.path.segments.len - 1].name }
                                 _ => c.args[j].type
                             }
-                            out = match emit_as_r(out, prog, ret_type, checker::Optional { inner = inner_t }, c.args[j]) { []byte as o => o; error as err => return err }
+                            out = match emit_as_r(out, prog, ret_type, checker::Optional { inner = inner_t }, c.args[j], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                             wrapped = true
                         }
                         _ => { }
@@ -1497,7 +1497,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             error => { }
         }
         if !wrapped {
-            out = match emit_expr_ret(out, prog, ret_type, c.args[j]) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, ret_type, c.args[j], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         }
         j++
     }
@@ -1507,11 +1507,11 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
 // emit_field_access — a TFieldAccess -> `(recv.field)`. (C: TK_TEXPR_FIELD_ACCESS branch.)
 // W5-idx — `.len`: a `str` lowers to the runtime tk_str's `.len` member (`(recv).len`); a
 // slice's `.len` reads its tk_slice_<elem> `.len` member (same {ptr,len} shape as tk_str -> u64).
-fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAccess) -> []byte | error {
+fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let is_slice = match fa.receiver.type { checker::Slice => true; _ => false }
     if is_slice && fa.field == "len" {
         mut o = cb(buf, "(")   // `.len` of a tk_slice_<elem> — same {ptr,len} shape as tk_str -> u64
-        o = match emit_expr(o, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         return cb(o, ".len)")
     }
     // E2 (native): error values are now the full tk_error struct (E2-NATIVE), so
@@ -1519,7 +1519,7 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
     let is_error = match fa.receiver.type { checker::Error => true; _ => false }
     if is_error {
         mut oe = cb(buf, "((")
-        oe = match emit_expr(oe, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        oe = match emit_expr_ctx(oe, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         oe = cb(oe, ").")
         oe = cb_str(oe, fa.field)
         return cb(oe, ")")
@@ -1529,7 +1529,7 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
     let is_ref = match fa.receiver.type { checker::Reference => true; _ => false }
     if is_ref && fa.field == "value" {
         mut or = cb(buf, "(*(")
-        or = match emit_expr(or, prog, fa.receiver) { []byte as r => r; error as err => return err }
+        or = match emit_expr_ctx(or, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         return cb(or, "))")
     }
     // auto-box: reading a recursive back-edge field derefs the heap pointer.
@@ -1543,7 +1543,7 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
     mut out = cb(buf, "(")
     if fa_boxed { out = cb(out, "*") }
     out = cb(out, "(")
-    out = match emit_expr(out, prog, fa.receiver) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, fa.receiver, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, ".")
     out = cb_str(out, fa.field)
     cb(out, "))")
@@ -1552,12 +1552,12 @@ fn emit_field_access(buf: []byte, prog: checker::TProgram, fa: checker::TFieldAc
 // emit_safe_field_access — `recv?.field` (REBOOT §203). ({ <optTy> _oN = (recv); _oN.present
 //   ? (<resTy>){ .present = true, .value = _oN.value.<field> } : (<resTy>){ .present = false }; })
 // The node's `.type` is the result optional `(field)?`; the receiver type is `T?`. (C: TK_TEXPR_SAFE_FIELD_ACCESS.)
-fn emit_safe_field_access(buf: []byte, prog: checker::TProgram, e: checker::TExpr, sfa: checker::TSafeFieldAccess) -> []byte | error {
+fn emit_safe_field_access(buf: []byte, prog: checker::TProgram, e: checker::TExpr, sfa: checker::TSafeFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let tmp = fresh_named("_o", buf.len to i64)
     mut out = cb(buf, "({ ")
     out = match emit_type(out, sfa.receiver.type) { []byte as o => o; error as err => return err }
     out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
-    out = match emit_expr(out, prog, sfa.receiver) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, sfa.receiver, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? (")
     out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
     out = cb(out, "){ .present = true, .value = "); out = cb(out, tmp); out = cb(out, ".value.")
@@ -1581,12 +1581,12 @@ fn cg_expr_diverges(e: checker::TExpr) -> bool {
     }
 }
 
-fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: checker::TCoalesce) -> []byte | error {
+fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: checker::TCoalesce, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let tmp = fresh_named("_c", buf.len to i64)
     mut out = cb(buf, "({ ")
     out = match emit_type(out, co.left.type) { []byte as o => o; error as err => return err }
     out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
-    out = match emit_expr(out, prog, co.left) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, co.left, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? ")
     // a's inner `_cN.value` into the result: plain if result is `T`, PRESENT-wrapped if `T?`.
     match e.type {
@@ -1607,12 +1607,12 @@ fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: ch
         // a diverging fallback (panic/exit) yields no value — emit the _Noreturn call then a
         // zero-of-result so the C `?:` type-checks (the zero is unreachable).
         out = cb(out, "(")
-        out = match emit_expr(out, prog, co.right) { []byte as o => o; error as err => return err }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, co.right, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         out = cb(out, ", (")
         out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
         out = cb(out, "){0})")
     } else {
-        out = match emit_as(out, prog, e.type, co.right) { []byte as o => o; error as err => return err }
+        out = match emit_as(out, prog, e.type, co.right, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     }
     out = cb(out, "; })")
     out
@@ -1626,7 +1626,7 @@ fn emit_coalesce(buf: []byte, prog: checker::TProgram, e: checker::TExpr, co: ch
 // index PANICS with the SAME message as the VM's eval_index (M.1). A slice receiver uses the
 // SAME bounds-checked shape, with the element C type substituted for tk_byte and reading
 // `(recv).ptr[i]` with a `(tk_panic_oob(), (<elem>){0})` fallback. (C: the TK_TEXPR_INDEX branch.)
-fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: checker::TIndex) -> []byte | error {
+fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: checker::TIndex, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     // slice subscript: the SAME bounds-checked stmt-expr as str, with the element type
     // substituted for tk_byte and a 0-of-element fallback after the panic.
     match ix.receiver.type {
@@ -1642,15 +1642,15 @@ fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: check
             so = cb(so, " const *")
             so = cb(so, lstmp)
             so = cb(so, " = (")
-            so = match emit_expr(so, prog, ix.receiver) { []byte as o => o; error as err => return err }
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             so = cb(so, ").ptr; uint64_t ")
             so = cb(so, litmp)
             so = cb(so, " = (uint64_t)(")
-            so = match emit_expr(so, prog, ix.index) { []byte as o => o; error as err => return err }
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.index, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             so = cb(so, "); ")
             so = cb(so, litmp)
             so = cb(so, " < (")
-            so = match emit_expr(so, prog, ix.receiver) { []byte as o => o; error as err => return err }
+            so = match emit_expr_ctx(so, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             so = cb(so, ").len ? ")
             so = cb(so, lstmp)
             so = cb(so, "[")
@@ -1673,11 +1673,11 @@ fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: check
     mut out = cb(buf, "({ tk_str ")
     out = cb(out, stmp)
     out = cb(out, " = ")
-    out = match emit_expr(out, prog, ix.receiver) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.receiver, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "; uint64_t ")
     out = cb(out, itmp)
     out = cb(out, " = (uint64_t)(")
-    out = match emit_expr(out, prog, ix.index) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ix.index, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "); ")
     out = cb(out, itmp)
     out = cb(out, " < ")
@@ -1702,10 +1702,10 @@ fn emit_index(buf: []byte, prog: checker::TProgram, e: checker::TExpr, ix: check
 // The EMPTY set `x in []` still EVALUATES the lhs once (single-eval), then yields false — so a
 // side-effecting lhs runs identically in the VM (which evaluates the lhs before its zero-iteration
 // loop). VM==native even for `[]`. (C: the TK_TEXPR_IN branch of emit_expr.)
-fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte | error {
+fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     if ie.elems.len == 0 {
         mut z = cb(buf, "({ (void)(")
-        z = match emit_expr(z, prog, ie.lhs) { []byte as o => o; error as err => return err }
+        z = match emit_expr_ctx(z, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         return cb(z, "); 0; })")
     }
     let tmp = $"_inv{buf.len}"
@@ -1714,7 +1714,7 @@ fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte
     out = cb(out, " ")
     out = cb(out, tmp)
     out = cb(out, " = ")
-    out = match emit_expr(out, prog, ie.lhs) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, ie.lhs, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "; ")
     mut i = 0
     loop {
@@ -1723,7 +1723,7 @@ fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte
         out = cb(out, "(")
         out = cb(out, tmp)
         out = cb(out, " == ")
-        out = match emit_expr(out, prog, ie.elems[i]) { []byte as o => o; error as err => return err }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, ie.elems[i], escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         out = cb(out, ")")
         i++
     }
@@ -1734,7 +1734,7 @@ fn emit_in(buf: []byte, prog: checker::TProgram, ie: checker::TInExpr) -> []byte
 // concrete empty literal. Plain elements: allocate N slots, fill by index via emit_as.
 // Spread elements (`..xs`): when present, build via tk_slice_push into a dynamic accumulator
 // (mirrors the slow path in the C twin codegen.c — see its TK_TEXPR_ARRAY / has_spread branch).
-fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: checker::TArrayLit) -> []byte | error {
+fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: checker::TArrayLit, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let elem = match e.type { checker::Slice as s => s.element; _ => return error { message = "codegen: array literal is not a slice type (internal)" } }
     if a.elements.len == 0 {
         mut z = cb(buf, "(")
@@ -1763,7 +1763,7 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
         loop {
             if i >= a.elements.len { break }
             out = cb(out, pN); out = cb(out, "["); out = cb_u128_digits(out, i to u128); out = cb(out, "] = ")
-            out = match emit_as(out, prog, elem, a.elements[i].expr) { []byte as o => o; error as err => return err }
+            out = match emit_as(out, prog, elem, a.elements[i].expr, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, "; ")
             i++
         }
@@ -1792,7 +1792,7 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
             let jN   = $"_sj{tag}_{i}"
             out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
             out = cb(out, " "); out = cb(out, subN); out = cb(out, " = ")
-            out = match emit_expr(out, prog, ae.expr) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, ae.expr, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, "; ")
             out = cb(out, "for (uint64_t "); out = cb(out, jN); out = cb(out, " = 0; ")
             out = cb(out, jN); out = cb(out, " < "); out = cb(out, subN); out = cb(out, ".len; ")
@@ -1812,7 +1812,7 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
             let tmpN = $"_sitm{tag}_{i}"
             out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
             out = cb(out, " "); out = cb(out, tmpN); out = cb(out, " = ")
-            out = match emit_as(out, prog, elem, ae.expr) { []byte as o => o; error as err => return err }
+            out = match emit_as(out, prog, elem, ae.expr, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, "; ")
             out = match emit_type(out, elem) { []byte as o => o; error as err => return err }
             out = cb(out, " *"); out = cb(out, spN); out = cb(out, " = (")
@@ -1843,7 +1843,7 @@ fn emit_piece_lit(buf: []byte, piece: str) -> []byte {
     out = cb_i64(out, piece.len to i64)
     cb(out, " }")
 }
-fn emit_interp(buf: []byte, prog: checker::TProgram, in: checker::TInterp) -> []byte | error {
+fn emit_interp(buf: []byte, prog: checker::TProgram, in: checker::TInterp, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let nsegs = in.pieces.len + in.holes.len      // total segments (pieces interleaved with holes)
     mut out = buf
     // open one tk_str_concat( for each segment after the first (nsegs - 1 of them).
@@ -1858,12 +1858,12 @@ fn emit_interp(buf: []byte, prog: checker::TProgram, in: checker::TInterp) -> []
         } else {                                  // a HOLE (segment 2*i+1 → hole i)
             let h = in.holes[k / 2]
             match h.type {
-                checker::Str => { out = match emit_expr(out, prog, h) { []byte as o => o; error as err => return err } }
+                checker::Str => { out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body) { []byte as o => o; error as err => return err } }
                 checker::Prim as p => {
                     if !cg_prim_is_int(p.kind) { return error { message = "codegen: interpolation hole must be a str or an integer" } }
                     if cg_prim_is_signed_int(p.kind) { out = cb(out, "tk_i64_to_str((int64_t)(") }
                     else { out = cb(out, "tk_u64_to_str((uint64_t)(") }
-                    out = match emit_expr(out, prog, h) { []byte as o => o; error as err => return err }
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, h, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                     out = cb(out, "))")
                 }
                 _ => return error { message = "codegen: interpolation hole must be a str or an integer" }
@@ -1913,8 +1913,8 @@ fn cg_find_struct_field_type(prog: checker::TProgram, sname: str, fname: str) ->
 // (`error { message = … }`). E2-NATIVE: `error` is now the runtime tk_error struct
 // (teko_rt.h); `error { message = s }` emits tk_error_make(s) which fills the other
 // diagnostic fields with zero defaults (C1.3 additive). (C: TK_TEXPR_STRUCT_INIT branch.)
-fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit) -> []byte | error {
-    return emit_struct_init_framed(buf, prog, e, si, "")
+fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    return emit_struct_init_framed(buf, prog, e, si, "", escaping, regions, fn_body)
 }
 
 // emit_struct_init_framed — emit_struct_init with the auto-box ALLOCATOR parameterized (MEM Step
@@ -1925,7 +1925,7 @@ fn emit_struct_init(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si:
 // function's exit edge — used ONLY for a binding the escape check PROVED frame-local (escape.tks).
 // NESTED struct-inits (field values via emit_expr) stay on root: mixing frame + root in one value
 // is SAFE (root cells just leak), so soundness holds while the frame frees the provable subset.
-fn emit_struct_init_framed(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit, frame: str) -> []byte | error {
+fn emit_struct_init_framed(buf: []byte, prog: checker::TProgram, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let name = match e.type {
         checker::Named as nm => nm.name
         // E2-NATIVE: `error { message = s }` → tk_error_make(s); the checker ensures exactly
@@ -1933,7 +1933,7 @@ fn emit_struct_init_framed(buf: []byte, prog: checker::TProgram, e: checker::TEx
         checker::Error       => {
             if si.field_vals.len != 1 { return error { message = "codegen: error value must have exactly the `message` field (internal)" } }
             mut oe = cb(buf, "tk_error_make(")
-            oe = match emit_expr(oe, prog, si.field_vals[0]) { []byte as r => r; error as err => return err }
+            oe = match emit_expr_ctx(oe, prog, checker::Void { }, si.field_vals[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
             return cb(oe, ")")
         }
         _           => return error { message = "codegen: struct literal with a non-named type not yet supported" }
@@ -2046,8 +2046,8 @@ fn emit_struct_init_framed(buf: []byte, prog: checker::TProgram, e: checker::TEx
                 null => { }
             }
             match exp_t {
-                checker::Void => { out = match emit_expr(out, prog, fv) { []byte as o => o; error as err => return err } }
-                _ => { out = match emit_as(out, prog, exp_t, fv) { []byte as o => o; error as err => return err } }
+                checker::Void => { out = match emit_expr_ctx(out, prog, checker::Void { }, fv, escaping, regions, fn_body) { []byte as o => o; error as err => return err } }
+                _ => { out = match emit_as(out, prog, exp_t, fv, escaping, regions, fn_body) { []byte as o => o; error as err => return err } }
             }
         }
         if boxed { out = cb(out, "; "); out = cb(out, bxN); out = cb(out, "; })") }
@@ -2093,7 +2093,12 @@ fn fresh_tmp_name(buf_len: i64) -> str {
 // matching the VM (eval_expr's TIfExpr stops on a divergent branch). A value-carrying expr
 // statement -> `<sink> = <expr>;`. Anything else (void expr-stmt, loop, binding, assign) ->
 // emitted normally (no value). (C: `emit_stmt_value`.)
-fn emit_stmt_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, s: checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
+// `escaping`/`regions`/`fn_body` thread the enclosing block-region context: a non-tail statement
+// that is itself a value-position sub-expression (or a nested if/match) gets the live context so it
+// can open its own arm region — and a TBinding non-tail block-local routes to the arm region opened
+// by emit_branch_value. The TAIL value (the `sink =` line) is emitted with cur_block_is_value=TRUE
+// so a binding flowing into it is NOT block-local (routes to the enclosing region — the W9 trap).
+fn emit_stmt_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, s: checker::TStatement, slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, cur_block: []checker::TStatement) -> []byte | error {
     match s {
         checker::TReturn       => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
         checker::TBreakStmt    => error { message = "codegen: control flow inside an `if` used as a sub-expression not yet supported" }
@@ -2101,8 +2106,8 @@ fn emit_stmt_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type
         checker::TExprStmt as es => {
             if is_void_type(es.expr.type) {
                 // A non-value statement in an if-value branch: thread ret_type so an embedded return wraps.
-                // (Sub-expression context — frameless: no per-edge drop here, MEM Step 1 first cut.)
-                return emit_stmt(buf, s, false, prog, ret_type, indent, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
+                // Frameless (frame="") but the block-region context rides so a nested value-if opens a region.
+                return emit_stmt(buf, s, false, prog, ret_type, indent, "", escaping, regions, fn_body, cur_block, true)
             }
             mut out = cb(buf, indent)
             out = cb(out, sink)
@@ -2110,28 +2115,59 @@ fn emit_stmt_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type
             // wrap the branch value into the if's RESULT type (`slot`) — a bare case / `[]case` / null
             // lands in the variant/optional/slice result; emit_as_r threads ret_type so a diverging
             // value-form-match arm inside the branch (`… => return e`) wraps into the FUNCTION's slot.
-            out = match emit_as_r(out, prog, ret_type, slot, es.expr) { []byte as o => o; error as err => return err }
+            // The tail value rides the ENCLOSING region context (regions threaded) so a value-if nested
+            // in the tail can open its own region; a binding flowing in here is excluded by is_value=true.
+            out = match emit_as_r(out, prog, ret_type, slot, es.expr, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             cb(out, ";\n")
         }
-        _ => emit_stmt(buf, s, false, prog, ret_type, indent, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
+        _ => emit_stmt(buf, s, false, prog, ret_type, indent, "", escaping, regions, fn_body, cur_block, true)
     }
 }
 
 // emit_branch_value — emit a BRANCH block (the `if`-value then/else): all but the last
 // statement normally, the LAST via emit_stmt_value (its trailing value -> `sink`). An empty
 // branch yields nothing (the checker forbids a value-typed empty branch). (C: `emit_branch_value`.)
-fn emit_branch_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str) -> []byte | error {
-    mut out = buf
+// S2/W9: when the branch has a provably BLOCK-LOCAL binding (queried with is_value=TRUE — the
+// predicate EXCLUDES any binding flowing into the tail value / used as an assign-RHS), open the
+// branch's OWN `_tkbr<len>` region for those NON-tail block-locals and drop it at the branch's exit.
+// CRITICAL ORDERING (the W9 trap): the tail value flows to `sink` (an ENCLOSING temp) via
+// emit_stmt_value FIRST, THEN the region drops — so the yielded value is fully materialized into the
+// enclosing region before its non-tail siblings are freed (never a UAF). No block-local binding ⇒ no
+// region ⇒ byte-identical to the pre-W9 value-branch output. (C: `emit_branch_value`.)
+fn emit_branch_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    let want_block = cg_block_has_block_local(escaping, fn_body, body, true) && regions.len < 64
+    if !want_block {
+        // No block-local binding: emit exactly as the pre-W9 path (no region), but with live context.
+        mut out = buf
+        mut i = 0
+        loop {
+            if i + 1 >= body.len { break }
+            out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regions, fn_body, teko::list::empty(), false) { []byte as o => o; error as err => return err }
+            i++
+        }
+        if body.len > 0 {
+            out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regions, fn_body, teko::list::empty()) { []byte as o => o; error as err => return err }
+        }
+        return out
+    }
+    // Open the value-arm region (named `_tkbr<len>` — the deterministic out.len uniquifier).
+    let region = fresh_named("_tkbr", buf.len to i64)
+    mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new();\n")
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false })
     mut i = 0
     loop {
         if i + 1 >= body.len { break }
-        // ret_type (not Void) so a non-last `return e` in the branch wraps into the function's slot.
-        out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false) { []byte as o => o; error as err => return err }
+        // Non-tail statements: cur_block=body + is_value=true (via emit_stmt_value's _ default? no —
+        // these go through emit_stmt directly here with cur_block_is_value=true so block-locals route).
+        out = match emit_stmt(out, body[i], false, prog, ret_type, indent, "", escaping, regs2, fn_body, body, true) { []byte as o => o; error as err => return err }
         i++
     }
     if body.len > 0 {
-        out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent) { []byte as o => o; error as err => return err }
+        // Materialize the TAIL value into `sink` (enclosing) BEFORE the region drop (W9 ordering).
+        out = match emit_stmt_value(out, prog, ret_type, body[body.len - 1], slot, sink, indent, escaping, regs2, fn_body, body) { []byte as o => o; error as err => return err }
     }
+    // Tail is in the enclosing `sink`; drop the arm region (idempotent + nulled for overlap safety).
+    out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
     out
 }
 
@@ -2142,22 +2178,25 @@ fn emit_branch_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Ty
 // cc -std=c23). (VM parity: eval_expr's TIfExpr runs exec_if and yields the taken branch's
 // trailing NORMAL value; a divergent branch is an honest stop — see emit_stmt_value.)
 // (C: `emit_if_value`.)
-fn emit_if_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, f: checker::TIfExpr) -> []byte | error {
+fn emit_if_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, f: checker::TIfExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     if !f.has_else { return error { message = "codegen: if-without-else used as a value not yet supported" } }
     // The temp name is `_tk<buflen>` frozen at the CURRENT length (the buffer is about to
     // grow). Capture it once and reuse it for the declaration AND the trailing read, so both
     // spell the same identifier.
+    // S2/W9: `escaping`/`regions`/`fn_body` thread the enclosing block-region context so each branch
+    // can open its OWN arm region for its block-local NON-tail bindings (emit_branch_value). The C
+    // twin reads the same from its live globals (g_cg_escaping/g_cg_block_stack/g_cg_fn_body).
     let tmp = fresh_tmp_name(buf.len to i64)
     mut out = cb(buf, "({ ")
     out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
     out = cb(out, tmp)
     out = cb(out, "; if (")
-    out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, ") {\n")
-    out = match emit_branch_value(out, prog, ret_type, f.then_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, ret_type, f.then_blk, e.type, tmp, "    ", escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "} else {\n")
-    out = match emit_branch_value(out, prog, ret_type, f.else_blk, e.type, tmp, "    ") { []byte as o => o; error as err => return err }
+    out = match emit_branch_value(out, prog, ret_type, f.else_blk, e.type, tmp, "    ", escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "} ")
     out = cb(out, tmp)
     cb(out, "; })")
@@ -2304,7 +2343,7 @@ fn cg_wrap_open(buf: []byte, v: checker::Type, mkey: str) -> []byte | error {
 // `expected` (the caller guards with cg_var_reaches and otherwise emits plainly); `T? | error`
 // is an illegal type here, so reachability is a separate predicate rather than a `null` result.
 // (C: `emit_variant_wrap`.)
-fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr) -> []byte | error {
+fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
     let n = cg_var_nmem(prog, expected)
     // pass 1 — DIRECT: value's key matches a member of `expected`.
@@ -2328,7 +2367,7 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Ty
             if cg_var_reaches(prog, mt, vkey, 16) {
                 let mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
                 mut out = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
-                out = match emit_variant_wrap(out, prog, ret_type, mt, value) { []byte as o => o; error as err => return err }   // recurse into the member variant
+                out = match emit_variant_wrap(out, prog, ret_type, mt, value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }   // recurse into the member variant
                 return cb(out, " }")
             }
         }
@@ -2423,7 +2462,7 @@ fn cg_wrap_elem_str(buf: []byte, prog: checker::TProgram, expected: checker::Typ
 // the result struct is bound to one temp, then both arms read it. `kind` selects the shape:
 // "sres"(str|error) "ures"(error?) "slres"([]str|error) "u64res"(u64|error) "args" "run".
 // (C: `emit_host_ffi`.)
-fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str) -> []byte | error {
+fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker::TCall, kind: str, rtfn: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let t = $"_h{buf.len}"                  // unique temp per call site
     let str_t = checker::Str { }
     let err_t = checker::Error { }
@@ -2455,9 +2494,9 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = cb(o, " = ")
         o = cb(o, rtfn)
         o = cb(o, "(")
-        o = match emit_expr(o, prog, c.args[0]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         o = cb(o, ", ")
-        o = match emit_expr(o, prog, c.args[1]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[1], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         o = cb(o, "); (")
         o = match cg_slice_typename(o, byte_t) { []byte as r => r; error as err => return err }
         o = cb(o, "){ .ptr = ")
@@ -2473,7 +2512,7 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = cb(o, " ")
         o = cb(o, t)
         o = cb(o, " = ")
-        o = match emit_expr(o, prog, c.args[0]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         o = cb(o, "; ")
         o = cb(o, rtfn)
         o = cb(o, "(")
@@ -2493,13 +2532,13 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = cb(o, " ")
         o = cb(o, t)
         o = cb(o, "s = ")
-        o = match emit_expr(o, prog, c.args[1]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[1], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         o = cb(o, "; tk_ffi_ures ")
         o = cb(o, t)
         o = cb(o, "r = ")
         o = cb(o, rtfn)
         o = cb(o, "(")
-        o = match emit_expr(o, prog, c.args[0]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         o = cb(o, ", ")
         o = cb(o, t)
         o = cb(o, "s.ptr, (uint64_t)")
@@ -2529,7 +2568,7 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
     loop {
         if i >= c.args.len { break }
         if i > 0 { o = cb(o, ", ") }
-        o = match emit_expr(o, prog, c.args[i]) { []byte as r => r; error as err => return err }
+        o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[i], escaping, regions, fn_body) { []byte as r => r; error as err => return err }
         i++
     }
     o = cb(o, "); ")
@@ -2587,11 +2626,11 @@ fn cg_type_mangle_eq(a: checker::Type, c: checker::Type) -> bool {
 // in a return context, so a diverging value-form-match arm inside `value` cannot occur). The C uses
 // a `g_cg_ret_type` STATIC for that; here ret_type is THREADED (Teko has no module-mutable), so a
 // return-context caller (binding/assign/return/tail/arm sink) uses emit_as_r to pass it down.
-fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value: checker::TExpr) -> []byte | error {
-    emit_as_r(buf, prog, checker::Void { }, expected, value)
+fn emit_as(buf: []byte, prog: checker::TProgram, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    emit_as_r(buf, prog, checker::Void { }, expected, value, escaping, regions, fn_body)
 }
 
-fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr) -> []byte | error {
+fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     // OPTIONAL slot (REBOOT_PLAN §202): wrap the value into the slot's tk_opt_<inner> struct.
     //   * a bare `null`           → (tk_opt_<inner>){ .present = false }
     //   * an already-optional val → emitted plainly (it IS a tk_opt_<inner>)
@@ -2610,12 +2649,12 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
                         _ => { }
                     }
                     match value.type {
-                        checker::Optional => return emit_expr_ret(buf, prog, ret_type, value)   // already optional → pass through
+                        checker::Optional => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body)   // already optional → pass through
                         _ => {
                             mut o1 = cb(buf, "(")
                             o1 = match cg_opt_typename(o1, opt.inner) { []byte as o => o; error as err => return err }
                             o1 = cb(o1, "){ .present = true, .value = ")
-                            o1 = match emit_as_r(o1, prog, ret_type, opt.inner, value) { []byte as o => o; error as err => return err }
+                            o1 = match emit_as_r(o1, prog, ret_type, opt.inner, value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                             return cb(o1, " }")
                         }
                     }
@@ -2663,7 +2702,7 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
                         mut o = cb(buf, "({ ")
                         o = match cg_slice_typename(o, U) { []byte as r => r; error as err => return err }
                         o = cb(o, " "); o = cb(o, sv); o = cb(o, " = ")
-                        o = match emit_expr_ret(o, prog, ret_type, value) { []byte as r => r; error as err => return err }
+                        o = match emit_expr_ctx(o, prog, ret_type, value, escaping, regions, fn_body) { []byte as r => r; error as err => return err }
                         o = cb(o, "; ")
                         o = match emit_type(o, T) { []byte as r => r; error as err => return err }
                         o = cb(o, " *"); o = cb(o, rp); o = cb(o, " = (")
@@ -2683,7 +2722,7 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
                         o = cb(o, "){ .ptr = "); o = cb(o, rp); o = cb(o, ", .len = "); o = cb(o, sv); o = cb(o, ".len }; })")
                         return o
                     }
-                    return emit_expr_ret(buf, prog, ret_type, value)
+                    return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body)
                 }
             }
         }
@@ -2695,14 +2734,14 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
     // `expected` (it IS the whole variant, or `expected` isn't a variant), the value is emitted
     // plainly. (C: the variant arm of emit_as via emit_variant_wrap.)
     let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
-    if vkey == "" { return emit_expr_ret(buf, prog, ret_type, value) }
+    if vkey == "" { return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body) }
     let is_variant_slot = match expected { checker::Variant => true; checker::Named => true; _ => false }
     if is_variant_slot {
         if cg_var_reaches(prog, expected, vkey, 16) {
-            return emit_variant_wrap(buf, prog, ret_type, expected, value)
+            return emit_variant_wrap(buf, prog, ret_type, expected, value, escaping, regions, fn_body)
         }
     }
-    emit_expr_ret(buf, prog, ret_type, value)
+    emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body)
 }
 
 // cg_emit_lit_pattern — emit an AST LITERAL pattern bound as a C constant comparable to the
@@ -3154,7 +3193,7 @@ fn cg_block_diverges_jump(stmts: []checker::TStatement) -> bool {
 // control flow (a `return …;` leaves the whole function) and never commits to `sink`. A break/
 // continue divergence is an HONEST STOP (it can't escape a stmt-expr), the same frontier the VM
 // enforces (eval_match). (C: `emit_arm_value`.)
-fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, match_e: checker::TExpr, body: []checker::TStatement, sink: str, ci: str) -> []byte | error {
+fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, match_e: checker::TExpr, body: []checker::TStatement, sink: str, ci: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     if cg_block_diverges_jump(body) {
         return error { message = "codegen: break/continue inside a `match` used as a sub-expression not yet supported" }
     }
@@ -3162,33 +3201,46 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type,
         // `return`-divergence: emit every statement as-is; the trailing `return e` (or a diverging
         // trailing if/match) leaves the ENCLOSING FUNCTION — so its value wraps into the FUNCTION's
         // return type (ret_type, the C's g_cg_ret_type), NOT the match result type. No `sink =` /
-        // `break`. (C: emit_arm_value's diverging branch.)
+        // `break`. No arm region here (the arm never commits to `sink`; a `return` inside drops all
+        // active regions via the region-stack helpers). (C: emit_arm_value's diverging branch.)
         mut out = buf
         mut i = 0
         loop {
             if i + 1 >= body.len { break }
-            out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false) { []byte as o => o; error as err => return err }
+            out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regions, fn_body, teko::list::empty(), false) { []byte as o => o; error as err => return err }
             i++
         }
         let last = body[body.len - 1]
         return match last {
             checker::TExprStmt as es => match es.expr.kind {
-                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty())
-                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty())
-                _              => emit_stmt(out, last, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
+                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, fn_body)
+                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", escaping, fn_body)
+                _              => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, teko::list::empty(), false)
             }
-            _ => emit_stmt(out, last, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
+            _ => emit_stmt(out, last, false, prog, ret_type, ci, "", escaping, regions, fn_body, teko::list::empty(), false)
         }
     }
     // Value form: all-but-last normally; the trailing value → `sink` (wrapped), then `break`.
     // ret_type is the FUNCTION's return type (not Void): a non-last statement may itself be a
     // `return e` (e.g. `_ => { if cond { return error{…} }; v }`), and that `return` must wrap its
     // value into the fn's return slot — a Void slot left an error returned bare.
+    // S2/W9: when the arm body has a provably BLOCK-LOCAL binding (is_value=TRUE → the predicate
+    // EXCLUDES any binding flowing into the tail value / assign-RHS), open the arm's OWN `_tkbr<len>`
+    // region for those NON-tail block-locals. ORDERING (W9 trap): the tail value is materialized into
+    // `sink` (enclosing) FIRST, then the region drops BEFORE the `break`. No block-local ⇒ no region ⇒
+    // byte-identical to the pre-W9 value-arm output. (C: emit_arm_value.)
+    let want_block = cg_block_has_block_local(escaping, fn_body, body, true) && regions.len < 64
+    let region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
+    let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false }) } else { regions }
+    let cur = if want_block { body } else { teko::list::empty() }
     mut out = buf
+    if want_block {
+        out = cb(out, ci); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new();\n")
+    }
     mut i = 0
     loop {
         if i + 1 >= body.len { break }
-        out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false) { []byte as o => o; error as err => return err }
+        out = match emit_stmt(out, body[i], false, prog, ret_type, ci, "", escaping, regs2, fn_body, cur, want_block) { []byte as o => o; error as err => return err }
         i++
     }
     if body.len == 0 { return error { message = "codegen: empty match arm body in value position" } }
@@ -3201,15 +3253,22 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type,
             // A trailing diverging expr (`=> panic(…)` / `exit(…)` — _Noreturn void, not a `return`)
             // can't be assigned to the sink. Emit `(panic(…), (T){0})`: the call diverges, the
             // zero-of-T makes the assignment type-check (unreachable). Mirrors the `??` fallback.
+            // The tail rides the ENCLOSING region context (regs2 is is_value=true → block-locals
+            // excluded, so a binding read here routes to the enclosing region, never `_tkbr<len>`).
             if cg_expr_diverges(es.expr) {
-                out = match emit_expr(out, prog, es.expr) { []byte as o => o; error as err => return err }
+                out = match emit_expr_ctx(out, prog, checker::Void { }, es.expr, escaping, regs2, fn_body) { []byte as o => o; error as err => return err }
                 out = cb(out, ", (")
                 out = match emit_type(out, match_e.type) { []byte as o => o; error as err => return err }
                 out = cb(out, "){0}")             // sink's `( … )` closes it
             } else {
-                out = match emit_as_r(out, prog, ret_type, match_e.type, es.expr) { []byte as o => o; error as err => return err }
+                out = match emit_as_r(out, prog, ret_type, match_e.type, es.expr, escaping, regs2, fn_body) { []byte as o => o; error as err => return err }
             }
-            cb(out, "); break;\n")
+            out = cb(out, ");")
+            if want_block {
+                // Tail is materialized into the enclosing `sink`; drop the arm region BEFORE the `break`.
+                out = cb(out, " tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;")
+            }
+            cb(out, " break;\n")
         }
         _ => error { message = "codegen: non-value trailing statement in a match arm used as a value" }
     }
@@ -3223,7 +3282,10 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type,
 // The non-`else` `if` chain gives the VM's first-match-with-guard order; a failed guard
 // falls through to the next arm. Exhaustiveness (checker-guaranteed) means the chain always
 // commits before the `while (0)` exits. (C: `emit_match_value`.)
-fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, m: checker::TMatchExpr) -> []byte | error {
+fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, m: checker::TMatchExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    // S2/W9: `escaping`/`regions`/`fn_body` thread the enclosing block-region context so each value-arm
+    // can open its OWN arm region for its block-local NON-tail bindings (emit_arm_value). The subject
+    // and guards are emitted in the SAME enclosing context (the C twin reads its live globals there).
     let subj = fresh_named("_s", buf.len to i64)
     let res  = fresh_named("_r", buf.len to i64 + 1)   // +1 so it differs from subj
     let subjT = m.subject.type   // for optional / variant pattern lowering
@@ -3232,7 +3294,7 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Typ
     out = cb(out, " ")
     out = cb(out, subj)
     out = cb(out, " = (")
-    out = match emit_expr(out, prog, m.subject) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, "); ")
     out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }
     out = cb(out, " ")
@@ -3249,13 +3311,13 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Typ
         mut ci = "        "
         if arm.has_when {
             out = cb(out, "        if (")
-            out = match emit_expr(out, prog, arm.guard) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ") {\n")
             ci = "            "
         }
         // the arm body is a BLOCK (B.20): its trailing value flows into _r (wrapped to the
         // match result type), or a diverging arm (`=> return e`) emits real control flow.
-        out = match emit_arm_value(out, prog, ret_type, e, arm.body, res, ci) { []byte as o => o; error as err => return err }
+        out = match emit_arm_value(out, prog, ret_type, e, arm.body, res, ci, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         if arm.has_when { out = cb(out, "        }\n") }
         out = cb(out, "    }\n")
         i++
@@ -3286,7 +3348,7 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
     out = cb(out, " ")
     out = cb(out, subj)
     out = cb(out, " = (")
-    out = match emit_expr(out, prog, m.subject) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, ");\n")
     mut i = 0
     loop {
@@ -3301,7 +3363,7 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         if arm.has_when {
             out = cb(out, inner2)
             out = cb(out, "if (")
-            out = match emit_expr(out, prog, arm.guard) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ") {\n")
             ci = cb_indent_deeper(inner2)
         }
@@ -3350,7 +3412,7 @@ fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
     out = cb(out, " ")
     out = cb(out, subj)
     out = cb(out, " = (")
-    out = match emit_expr(out, prog, m.subject) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, m.subject, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, ");\n")
     mut i = 0
     loop {
@@ -3365,7 +3427,7 @@ fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         if arm.has_when {
             out = cb(out, inner2)
             out = cb(out, "if (")
-            out = match emit_expr(out, prog, arm.guard) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, arm.guard, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ") {\n")
             ci = cb_indent_deeper(inner2)
         }
@@ -3442,39 +3504,47 @@ fn emit_number(buf: []byte, e: checker::TExpr, n: checker::TNumber) -> []byte | 
 // DIVERGES via `return e` wraps that value into the FUNCTION return type, not the match-result
 // type (emit_arm_value). Every other expr ignores it. (C: `emit_expr`.)
 fn emit_expr(buf: []byte, prog: checker::TProgram, e: checker::TExpr) -> []byte | error {
-    emit_expr_ret(buf, prog, checker::Void { }, e)
+    emit_expr_ctx(buf, prog, checker::Void { }, e, teko::list::empty(), teko::list::empty(), teko::list::empty())
 }
 // emit_expr_ret — emit_expr carrying the enclosing function return type for value-form match
-// diverging arms. emit_expr is the `ret_type = void` convenience wrapper (most callers are not
-// inside a diverging value-form arm, so the threaded type is unused there).
+// diverging arms. (S2/W9: the region/escape context defaults empty — a caller with NO enclosing
+// block region, e.g. a sub-expression of a frameless construct, gets no value-arm region.)
 fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr) -> []byte | error {
+    emit_expr_ctx(buf, prog, ret_type, e, teko::list::empty(), teko::list::empty(), teko::list::empty())
+}
+// emit_expr_ctx — the real dispatch. S2/W9: `escaping`/`regions`/`fn_body` thread the enclosing
+// block-region context (the functional twin of the C's g_cg_escaping/g_cg_block_stack/g_cg_fn_body
+// globals) so a value-position `if`/`match` REACHED FROM HERE can open its OWN arm region for its
+// block-local NON-tail bindings (emit_if_value/emit_match_value → emit_branch_value/emit_arm_value).
+// Every other expr just forwards the context unchanged. (C: `emit_expr` — globals, no threading.)
+fn emit_expr_ctx(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     match e.kind {
         checker::TNumber as n      => emit_number(buf, e, n)
         checker::TVar as v         => cb_ident(buf, v.name)
-        checker::TBinary as b      => emit_binary(buf, prog, e, b)
-        checker::TUnary as u       => emit_unary(buf, prog, u)
-        checker::TCompare as c     => emit_compare(buf, prog, c)
-        checker::TCast as c        => emit_cast(buf, prog, e, c)
-        checker::TCall as cl       => emit_call(buf, prog, ret_type, e, cl)
-        checker::TFieldAccess as fa => emit_field_access(buf, prog, fa)
-        checker::TStructInit as si  => emit_struct_init(buf, prog, e, si)
+        checker::TBinary as b      => emit_binary(buf, prog, e, b, escaping, regions, fn_body)
+        checker::TUnary as u       => emit_unary(buf, prog, u, escaping, regions, fn_body)
+        checker::TCompare as c     => emit_compare(buf, prog, c, escaping, regions, fn_body)
+        checker::TCast as c        => emit_cast(buf, prog, e, c, escaping, regions, fn_body)
+        checker::TCall as cl       => emit_call(buf, prog, ret_type, e, cl, escaping, regions, fn_body)
+        checker::TFieldAccess as fa => emit_field_access(buf, prog, fa, escaping, regions, fn_body)
+        checker::TStructInit as si  => emit_struct_init(buf, prog, e, si, escaping, regions, fn_body)
         checker::TStrLit as s      => emit_strlit(buf, s)
         checker::TByteLit as by    => cb_i64(buf, by.value to i64)   // byte == uint8_t; emit its decimal value (0..255)
         // bool literal (W2) — FULL support: bool already flows through both backends, so
         // emit the C `true`/`false` keyword (C type is `bool`). (C: TK_TEXPR_BOOL branch.)
         checker::TBoolLit as bl    => cb(buf, if bl.value { "true" } else { "false" })
-        checker::TIfExpr as f      => emit_if_value(buf, prog, ret_type, e, f)   // W5a — `if` as a value (GNU stmt-expr)
-        checker::TMatchExpr as m   => emit_match_value(buf, prog, ret_type, e, m)   // W5b — `match` as a value (GNU stmt-expr)
+        checker::TIfExpr as f      => emit_if_value(buf, prog, ret_type, e, f, escaping, regions, fn_body)   // W5a — `if` as a value (GNU stmt-expr)
+        checker::TMatchExpr as m   => emit_match_value(buf, prog, ret_type, e, m, escaping, regions, fn_body)   // W5b — `match` as a value (GNU stmt-expr)
         // null / ?. / ?? — the OPTIONAL value model (REBOOT_PLAN §202/§203; tk_opt_<inner>).
         // A bare `null` in raw expression position has the SENTINEL optional type: it cannot be
         // emitted alone — its concrete type comes from the destination slot via emit_as.
         checker::TNullLit          => error { message = "codegen: a bare `null` needs a known optional type from context (use it where a `T?` is expected)" }
-        checker::TSafeFieldAccess as sfa => emit_safe_field_access(buf, prog, e, sfa)
-        checker::TCoalesce as co   => emit_coalesce(buf, prog, e, co)
-        checker::TIndex as ix      => emit_index(buf, prog, e, ix)   // W5-idx — subscript recv[index] (str + slice, bounds-checked)
-        checker::TInterp as in     => emit_interp(buf, prog, in)     // $"…{expr}…" — nested tk_str_concat over pieces + holes
-        checker::TInExpr as ie     => emit_in(buf, prog, ie)         // Phase 2 — `<lhs> in [ … ]` membership (single-eval, OR of `==`)
-        checker::TArrayLit as a    => emit_array_lit(buf, prog, e, a)   // [ e0, e1, … ] (Increment B+) — build a tk_slice_<elem>
+        checker::TSafeFieldAccess as sfa => emit_safe_field_access(buf, prog, e, sfa, escaping, regions, fn_body)
+        checker::TCoalesce as co   => emit_coalesce(buf, prog, e, co, escaping, regions, fn_body)
+        checker::TIndex as ix      => emit_index(buf, prog, e, ix, escaping, regions, fn_body)   // W5-idx — subscript recv[index] (str + slice, bounds-checked)
+        checker::TInterp as in     => emit_interp(buf, prog, in, escaping, regions, fn_body)     // $"…{expr}…" — nested tk_str_concat over pieces + holes
+        checker::TInExpr as ie     => emit_in(buf, prog, ie, escaping, regions, fn_body)         // Phase 2 — `<lhs> in [ … ]` membership (single-eval, OR of `==`)
+        checker::TArrayLit as a    => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body)   // [ e0, e1, … ] (Increment B+) — build a tk_slice_<elem>
         checker::TPathExpr as pe   => {
             // Enum::Member → C enum constant `TK_E_<UPPER enum>_<UPPER member>`.
             // Flags::Member → pre-emitted C constant `tk_t_<Name>_<UPPER member>` (power-of-2).
@@ -3626,7 +3696,7 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: check
             if !f.has_else { return emit_if_stmt(buf, f, in_main, prog, ret_type, indent, escaping, teko::list::empty(), fn_body, teko::list::empty(), false) }
             mut out = cb(buf, indent)
             out = cb(out, "if (")
-            out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
+            out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, ") {\n")
             let inner = cb_indent_deeper(indent)
             out = match emit_block_tail(out, f.then_blk, in_main, prog, ret_type, inner, "", escaping, fn_body) { []byte as o => o; error as err => return err }
@@ -3642,7 +3712,7 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: check
         _ => {
             if is_void_type(x.type) {   // a void expr-statement carries no value → run for effect
                 mut out = cb(buf, indent)
-                out = match emit_expr(out, prog, x) { []byte as o => o; error as err => return err }
+                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
                 return cb(out, ";\n")
             }
             // MEM Step 1: the tail value-return EDGE — drop the frame region before the implicit
@@ -3652,11 +3722,11 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: check
             out = cb(out, indent)
             if in_main {
                 out = cb(out, "return (int)(")
-                out = match emit_expr(out, prog, x) { []byte as o => o; error as err => return err }
+                out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
                 return cb(out, ");\n")
             }
             out = cb(out, "return ")
-            out = match emit_as_r(out, prog, ret_type, ret_type, x) { []byte as o => o; error as err => return err }   // W5b — wrap a case value into a variant return slot (ret_type threaded for diverging arms)
+            out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }   // W5b — wrap a case value into a variant return slot (ret_type threaded for diverging arms)
             cb(out, ";\n")
         }
     }
@@ -3695,7 +3765,7 @@ fn emit_block_tail(buf: []byte, body: []checker::TStatement, in_main: bool, prog
 fn emit_if_stmt(buf: []byte, f: checker::TIfExpr, in_main: bool, prog: checker::TProgram, ret_type: checker::Type, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     mut out = cb(buf, indent)
     out = cb(out, "if (")
-    out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
+    out = match emit_expr_ctx(out, prog, checker::Void { }, f.cond, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, ") {\n")
     let inner = cb_indent_deeper(indent)
     // S2 — each statement-position branch gets its OWN arm region (emit_block_region) for its provably
@@ -3725,7 +3795,7 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, b
     if name == "_" {
         mut dout = cb(buf, indent)
         dout = cb(dout, "(void)(")
-        dout = match emit_as_r(dout, prog, ret_type, b.bound, b.value) { []byte as o => o; error as err => return err }
+        dout = match emit_as_r(dout, prog, ret_type, b.bound, b.value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         return cb(dout, ");\n")
     }
     mut out = cb(buf, indent)
@@ -3749,7 +3819,7 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, b
     if regions.len > 0 && cur_block.len > 0 && cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) {
         match b.value.kind {
             checker::TStructInit as si => {
-                out = match emit_struct_init_framed(out, prog, b.value, si, regions[regions.len - 1].name) { []byte as o => o; error as err => return err }
+                out = match emit_struct_init_framed(out, prog, b.value, si, regions[regions.len - 1].name, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                 return cb(out, ";\n")
             }
             _ => { }
@@ -3758,7 +3828,7 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, b
     if frame.len > 0 && checker::binding_is_frame_local(escaping, b) && cg_same_named_struct(b.bound, b.value.type) {
         match b.value.kind {
             checker::TStructInit as si => {
-                out = match emit_struct_init_framed(out, prog, b.value, si, frame) { []byte as o => o; error as err => return err }
+                out = match emit_struct_init_framed(out, prog, b.value, si, frame, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                 return cb(out, ";\n")
             }
             _ => { }
@@ -3767,12 +3837,12 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, b
     // W5b — if the binding's declared type is a variant and the value is a case member, WRAP it into
     // the variant repr (`let s: Shape = Circle { … }`). emit_as_r threads ret_type so a value-form
     // `match`/`if` value with a diverging `return` arm wraps that return into the FUNCTION's slot.
-    out = match emit_as_r(out, prog, ret_type, b.bound, b.value) { []byte as o => o; error as err => return err }
+    out = match emit_as_r(out, prog, ret_type, b.bound, b.value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
 }
 
 // emit_assign — a TAssign -> `x op= v;`. (C: TK_TSTMT_ASSIGN branch.)
-fn emit_assign(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, a: checker::TAssign, indent: str) -> []byte | error {
+fn emit_assign(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     let op = match assignop_c(a.op) { str as s => s; error as err => return err }
     mut out = cb(buf, indent)
     // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle `r` IS the pointer, so the
@@ -3791,14 +3861,14 @@ fn emit_assign(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, a:
     // `T?`, a fitting literal — exactly like a binding (emit_as_r threads ret_type for a diverging
     // value-form arm). Without this, `node = OptionalType { … }` (node: TypeExpr, a variant)
     // emitted the case's fields under the variant's C type → a field-designator error.
-    out = match emit_as_r(out, prog, ret_type, a.bound, a.value) { []byte as o => o; error as err => return err }
+    out = match emit_as_r(out, prog, ret_type, a.bound, a.value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
 }
 
 // emit_return — a TReturn. In main, `return n` -> `return (int)(n);` (early process
 // exit) and a bare `return` -> `return 0;`; in a fn, the plain `return [v];`.
 // (C: TK_TSTMT_RETURN branch.)
-fn emit_return(buf: []byte, prog: checker::TProgram, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, regions: []RegionFrame) -> []byte | error {
+fn emit_return(buf: []byte, prog: checker::TProgram, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
     // S2 — a `return` leaves EVERY enclosing loop, so drop all active block regions first (innermost-
     // first), THEN the frame region. The return value is escaping ⇒ in root ⇒ safe to read post-drop.
     mut out = cg_drop_all_regions(buf, indent, regions)
@@ -3814,12 +3884,12 @@ fn emit_return(buf: []byte, prog: checker::TProgram, r: checker::TReturn, in_mai
     }
     if in_main {
         out = cb(out, "return (int)(")
-        out = match emit_expr(out, prog, r.value) { []byte as o => o; error as err => return err }
+        out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         return cb(out, ");\n")
     }
     out = cb(out, "return ")
     // W5b — wrap a case value into a variant return slot.
-    out = match emit_as_r(out, prog, ret_type, ret_type, r.value) { []byte as o => o; error as err => return err }
+    out = match emit_as_r(out, prog, ret_type, ret_type, r.value, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
 }
 
@@ -3887,8 +3957,8 @@ fn cb_indent_deeper(indent: str) -> str {
 fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: checker::TProgram, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     match s {
         checker::TBinding as b      => emit_binding(buf, prog, ret_type, b, indent, frame, escaping, regions, fn_body, cur_block, cur_block_is_value)
-        checker::TAssign as a       => emit_assign(buf, prog, ret_type, a, indent)
-        checker::TReturn as r       => emit_return(buf, prog, r, in_main, ret_type, indent, frame, regions)
+        checker::TAssign as a       => emit_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body)
+        checker::TReturn as r       => emit_return(buf, prog, r, in_main, ret_type, indent, frame, escaping, regions, fn_body)
         checker::TExprStmt as es    => {
             // W5a — an `if` in statement position runs as CONTROL FLOW (mirrors the VM's
             // exec_stmt → exec_if), so break/continue/return inside a branch propagate. W5b —
@@ -3898,7 +3968,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: checker::
                 checker::TMatchExpr as m => emit_match_stmt(buf, prog, es.expr, m, in_main, ret_type, indent, escaping, regions, fn_body, cur_block, cur_block_is_value)
                 _ => {
                     mut out = cb(buf, indent)
-                    out = match emit_expr(out, prog, es.expr) { []byte as o => o; error as err => return err }
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, es.expr, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
                     cb(out, ";\n")
                 }
             }

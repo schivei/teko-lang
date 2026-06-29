@@ -643,7 +643,7 @@ fn cgt_emit_as_direct() {
     let n = cgt_num_i64(7)
     let dst = checker::Prim { kind = checker::PrimKind::I64 }
     // emit_as(buf, prog, expected, value) → emit_as_r with Void ret_type
-    let result = match emit_as(cgt_empty(), prog, dst, n) { []byte as o => str(o); error => "" }
+    let result = match emit_as(cgt_empty(), prog, dst, n, teko::list::empty(), teko::list::empty(), teko::list::empty()) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(result, "7"))
 }
 
@@ -675,6 +675,67 @@ fn cgt_emit_if_value() {
     // emit_if_value produces a GNU stmt-expr `({ ... })`
     teko::assert::is_true(result.len > 0)
     teko::assert::is_true(teko::str::contains(result, "if"))
+}
+
+// ---------------------------------------------------------------------------
+// Group M2: S2/W9 — VALUE-position arm regions. A value `if`/`match` arm with a NON-tail
+//   binding takes the value-arm path (emit_branch_value / emit_arm_value) and yields its tail
+//   to the enclosing sink. With NO escape context (emit_expr threads empty escaping/regions/
+//   fn_body) NO region is opened — so the output is the pre-W9 value-form, byte-identical: the
+//   `sink = (…); break;` commit with no `tk_region_new`. (The genuine region-opening path is
+//   covered end-to-end by the value-arm regression examples — the predicate needs the live
+//   per-function escape set, which only the full build pipeline supplies.)
+// ---------------------------------------------------------------------------
+#test
+fn cgt_emit_value_arm_no_region_when_no_context() {
+    let prog = cgt_prog()
+    // if (true) { let tmp = 5; tmp } else { 0 }  — a value `if` whose then-branch has a non-tail
+    // binding + a tail read. emit_branch_value runs; with empty escape context no region opens.
+    let bind_tmp: checker::TStatement = checker::TBinding {
+        kind   = parser::BindKind::Let
+        target = parser::SimpleName { name = "tmp" }
+        bound  = checker::Prim { kind = checker::PrimKind::I64 }
+        value  = cgt_num_i64(5)
+    }
+    let tail_read: checker::TStatement = cgt_stmt(cgt_e_var("tmp"))
+    mut then_blk: []checker::TStatement = teko::list::push(teko::list::empty(), bind_tmp)
+    then_blk = teko::list::push(then_blk, tail_read)
+    let else_blk: []checker::TStatement = teko::list::push(teko::list::empty(), cgt_stmt(cgt_num_i64(0)))
+    let if_e = checker::TIfExpr { cond = cgt_e_bool_t(); then_blk = then_blk; has_else = true; else_blk = else_blk }
+    let e_if = checker::TExpr { kind = if_e; type = checker::Prim { kind = checker::PrimKind::I64 }; line = 0; col = 0 }
+    let result = match emit_expr(cgt_empty(), prog, e_if) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(result.len > 0)
+    teko::assert::is_true(teko::str::contains(result, "tmp"))
+    // No live escape context ⇒ no value-arm region opened (leak-safe pre-W9 output).
+    teko::assert::is_true(!teko::str::contains(result, "tk_region_new"))
+}
+
+// A value `match` arm with a non-tail binding takes emit_arm_value's value path: the tail value
+// commits with `_rN = (…); break;`. No escape context ⇒ no region (byte-identical to pre-W9).
+#test
+fn cgt_emit_value_match_arm_commits_tail() {
+    let prog = cgt_prog()
+    let bind_tmp: checker::TStatement = checker::TBinding {
+        kind   = parser::BindKind::Let
+        target = parser::SimpleName { name = "tmp" }
+        bound  = checker::Prim { kind = checker::PrimKind::I64 }
+        value  = cgt_num_i64(7)
+    }
+    let arm_lit: parser::Pattern = parser::LiteralPattern {
+        value = parser::Expr { kind = parser::Number { is_float = false; value = 1 to i128; fval = 0.0 }; line = 0; col = 0 }
+    }
+    mut arm_body: []checker::TStatement = teko::list::push(teko::list::empty(), bind_tmp)
+    arm_body = teko::list::push(arm_body, cgt_stmt(cgt_e_var("tmp")))
+    let arm1 = checker::TArm { pattern = arm_lit; has_when = false; guard = cgt_num_i64(0); body = arm_body }
+    let arm_w = checker::TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(teko::list::empty(), cgt_stmt(cgt_num_i64(0))) }
+    mut arms: []checker::TArm = teko::list::push(teko::list::empty(), arm1)
+    arms = teko::list::push(arms, arm_w)
+    let m_e = checker::TMatchExpr { subject = cgt_num_i64(1); arms = arms }
+    let e_m = checker::TExpr { kind = m_e; type = checker::Prim { kind = checker::PrimKind::I64 }; line = 0; col = 0 }
+    let result = match emit_expr(cgt_empty(), prog, e_m) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(result.len > 0)
+    teko::assert::is_true(teko::str::contains(result, "break;"))
+    teko::assert::is_true(!teko::str::contains(result, "tk_region_new"))
 }
 
 // ---------------------------------------------------------------------------
