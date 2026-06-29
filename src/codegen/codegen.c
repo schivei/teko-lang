@@ -1506,6 +1506,25 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                         tk_type exp = { .tag = TK_TYPE_NAMED, .as.named.name = pn };
                         if (!emit_as(b, exp, &e->as.call.args[i], err)) return false;
                     }
+                } else if (cf != NULL && i < cf->nparams && cf->params[i].type_ann.tag == TK_TEXPR_OPTIONAL
+                           && cf->params[i].type_ann.as.optional.inner != NULL) {
+                    // A `T?` param: present-wrap a bare `T` arg (uniform with field/return positions).
+                    // The checker (type_call) kept the arg's NARROW type for a bare→optional widen, so
+                    // emit_as sees a non-optional value and wraps it; an already-optional / null arg
+                    // passes through emit_as unchanged (never double-wrapped). The inner expected type
+                    // is NAMED from the param's inner type_ann (so a NAMED inner mangles to the param's
+                    // opt struct); for any other inner shape (prim, …) the arg's own type is the inner
+                    // (exact-match widen), which mangles identically to the param's inner.
+                    const tk_type_expr *ite = cf->params[i].type_ann.as.optional.inner;
+                    tk_type elemT;
+                    if (ite->tag == TK_TEXPR_NAMED) {
+                        tk_path ip = ite->as.named.path;
+                        elemT = (tk_type){ .tag = TK_TYPE_NAMED, .as.named.name = ip.segments[ip.len - 1].name };
+                    } else {
+                        elemT = e->as.call.args[i].type;
+                    }
+                    tk_type exp = { .tag = TK_TYPE_OPTIONAL, .as.optional.inner = &elemT };
+                    if (!emit_as(b, exp, &e->as.call.args[i], err)) return false;
                 } else if (!emit_expr(b, &e->as.call.args[i], err)) return false;
             }
             cb(b, ")");
@@ -2133,6 +2152,29 @@ static bool emit_variant_wrap_str(cbuf *b, tk_type expected, tk_type vtype, cons
     tk_free0(vkey.ptr); return false;
 }
 
+// cg_wrap_elem_str — wrap a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
+// into the slice element target type `T` (= `expected`), for the emit_as slice-covariance rebuild.
+// Three cases, uniform with emit_as's value-position wrapping:
+//   * T is OPTIONAL  → present-wrap: (tk_opt_<inner>){ .present = true, .value = <recurse into inner> }
+//                      (the inner may itself be a variant the element reaches, so recurse).
+//   * T is a VARIANT the element's key reaches → variant-wrap (emit_variant_wrap_str).
+//   * otherwise (same type) → false: the caller emits `cexpr` bare.
+// Returns false (with *err == NULL) when no wrap applies; false with *err set on a real error.
+static bool cg_wrap_elem_str(cbuf *b, tk_type expected, tk_type vtype, const char *cexpr, const char **err) {
+    if (expected.tag == TK_TYPE_OPTIONAL && expected.as.optional.inner != NULL) {
+        tk_type inner = *expected.as.optional.inner;
+        cb(b, "("); if (!cg_opt_typename(b, inner, err)) return false;
+        cb(b, "){ .present = true, .value = ");
+        size_t before = b->len;
+        bool wrapped = cg_wrap_elem_str(b, inner, vtype, cexpr, err);   // the inner may need its own wrap
+        if (*err != NULL) return false;
+        if (!wrapped) { b->len = before; cb(b, cexpr); }
+        cb(b, " }");
+        return true;
+    }
+    return emit_variant_wrap_str(b, expected, vtype, cexpr, err);
+}
+
 // Lift a host-FFI primitive's fixed-ABI result (teko_rt.h) into the program's result type.
 // The runtime can't name the generated sum/optional/slice structs (this header is included
 // before them), so codegen builds them here: call the primitive, then construct `e->type`
@@ -2295,7 +2337,7 @@ static bool emit_as(cbuf *b, tk_type expected, const tk_texpr *value, const char
             cb(b, "for (uint64_t "); cb(b, ri); cb(b, " = 0; "); cb(b, ri); cb(b, " < "); cb(b, sv); cb(b, ".len; "); cb(b, ri); cb(b, " += 1) { ");
             cb(b, rp); cb(b, "["); cb(b, ri); cb(b, "] = ");
             char elem[96]; snprintf(elem, sizeof elem, "%s.ptr[%s]", sv, ri);
-            if (!emit_variant_wrap_str(b, T, U, elem, err)) { if (*err) return false; cb(b, elem); }
+            if (!cg_wrap_elem_str(b, T, U, elem, err)) { if (*err) return false; cb(b, elem); }
             cb(b, "; } ("); if (!cg_slice_typename(b, T, err)) return false;
             cb(b, "){ .ptr = "); cb(b, rp); cb(b, ", .len = "); cb(b, sv); cb(b, ".len }; })");
             return true;

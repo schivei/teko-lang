@@ -718,11 +718,32 @@ fn vm_struct_field_type(prog: checker::TProgram, sname: str, fname: str) -> pars
 // are already coerced by eval_array. (C: mirrors native's per-field emit_as expected-slot.)
 fn vm_field_coerce_type(prog: checker::TProgram, sname: str, fname: str) -> checker::Type {
     match vm_struct_field_type(prog, sname, fname) {
-        parser::TypeExpr as fte => match fte {
-            parser::OptionalType => checker::Optional { inner = checker::Void { } }
-            _ => checker::Void { }
-        }
+        // OptionalType field → present-wrap; SliceType field → element-wise rebuild (a `[]T?` field
+        // present-wraps each element); every other shape → no-op. Shared with vm_param_coerce_type so
+        // field and call-arg slots wrap uniformly. (Native parity with emit_struct_init's emit_as.)
+        parser::TypeExpr as fte => vm_param_coerce_type(fte)
         null => checker::Void { }
+    }
+}
+
+// vm_param_coerce_type — the coerce-slot type for a call PARAMETER, from its declared TypeExpr (the
+// param twin of vm_field_coerce_type, but RECURSIVE so a `[]T?` param rebuilds its elements). An
+// OptionalType yields `Optional` so coerce_to PRESENT-wraps a bare `T` arg into `T?`; a SliceType
+// yields `Slice` whose element is the recursively-built coerce type so coerce_to rebuilds element-wise
+// (a `[]T?` present-wraps each element); a `[]T` whose element needs no wrap collapses to `Void` (the
+// no-op, so it stays IDENTICAL to the C path). Every other shape yields `Void`. The `-> checker::Type`
+// return widens each arm into the Type variant rep. (Native parity with emit_as's call-arg wrap.)
+fn vm_param_coerce_type(ann: parser::TypeExpr) -> checker::Type {
+    match ann {
+        parser::OptionalType => checker::Optional { inner = checker::Void { } }
+        parser::SliceType as st => {
+            let elt = vm_param_coerce_type(st.element)
+            match elt {
+                checker::Void => checker::Void { }                 // []T with no element wrap → no-op
+                _             => checker::Slice { element = elt }
+            }
+        }
+        _ => checker::Void { }
     }
 }
 
@@ -1448,6 +1469,26 @@ fn coerce_to(v: Value, t: checker::Type) -> Value {
         checker::Optional => {
             match v { OptVal => v; _ => OptVal { present = true; inner = v } }
         }
+        // SLICE slot covariance (the VM twin of codegen's emit_as slice rebuild): a `[]U` value
+        // flowing into a `[]T` slot REBUILDS element-wise, coerce_to-ing each element into T. The
+        // recursion composes (an OPTIONAL element → present-wrap each element; same-type element → a
+        // no-op copy). A sentinel element (`Void`) leaves the value untouched (no per-element type).
+        checker::Slice as sl => match sl.element {
+            checker::Void => v
+            _ => match v {
+                []Value as xs => {
+                    mut out: []Value = teko::list::empty()
+                    mut i = 0
+                    loop {
+                        if i >= xs.len { break }
+                        out = teko::list::push(out, coerce_to(xs[i], sl.element))
+                        i++
+                    }
+                    out
+                }
+                _ => v
+            }
+        }
         _ => v
     }
 }
@@ -1842,7 +1883,12 @@ fn bind_call_args(f: checker::TFunction, c: checker::TCall, env: Venv) -> BoundA
         } else {
             argval = eval_expr(c.args[ai], caller)
         }
-        fenv = define(fenv, f.params[ai].name, argval ?? panic("vm: argument produced no value (internal)"))
+        // Present-wrap a bare `T` arg into a `T?` param (uniform with field/return — the VM twin of
+        // codegen's call-arg emit_as). coerce_to reads only the type tag: an OptionalType param →
+        // Optional triggers the present-wrap; coerce_to no-ops on an already-optional value (no
+        // double-wrap) and on every non-optional param. (Mirrors vm_field_coerce_type's shape.)
+        let pcoerce = vm_param_coerce_type(f.params[ai].type_ann)
+        fenv = define(fenv, f.params[ai].name, coerce_to(argval ?? panic("vm: argument produced no value (internal)"), pcoerce))
         ai = ai + 1
     }
     BoundArgs { fenv= fenv; caller= caller }

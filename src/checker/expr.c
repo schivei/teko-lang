@@ -311,9 +311,13 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
                 return xferr(tk_error_types(tk_error_make("argument type mismatch"),
                                             tk_type_render(pt), tk_type_render(args.ptr[i].type)));
             args.ptr[i].type = pt;   // a fitting numeric literal ADOPTS the param type (leaf retyped) — C6
-        } else if (tk_expand_variant(pt, table).tag != TK_TYPE_VARIANT) {
-            // A non-variant widen (T→T?, empty()→[]T, exact) ADOPTS the param type; a case→VARIANT
-            // widen KEEPS its case type so emit_call wraps it into the variant rep (emit_as).
+        } else if (tk_expand_variant(pt, table).tag != TK_TYPE_VARIANT
+                   && !(pt.tag == TK_TYPE_OPTIONAL && args.ptr[i].type.tag != TK_TYPE_OPTIONAL)) {
+            // A non-variant widen (empty()→[]T, exact, already-optional→T?) ADOPTS the param type; a
+            // case→VARIANT widen KEEPS its case type so emit_call wraps it into the variant rep
+            // (emit_as). A bare T→T? widen (param OPTIONAL, arg NOT optional) ALSO keeps its narrow
+            // type, so codegen/VM see a non-optional value and present-wrap it (uniform with field/
+            // return positions). An already-optional arg (U?→T?) stays adopt — never double-wrapped.
             args.ptr[i].type = pt;
         }
     }

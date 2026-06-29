@@ -303,6 +303,16 @@ static tk_value v_some(tk_value inner) {
 // no-op. This is the VM twin of codegen's emit_as optional wrapping.
 static tk_value coerce_to(tk_value v, tk_type t) {
     if (t.tag == TK_TYPE_OPTIONAL && v.tag != TK_VAL_OPT) return v_some(v);
+    // SLICE slot covariance (the VM twin of codegen's emit_as slice rebuild): a `[]U` value flowing
+    // into a `[]T` slot REBUILDS element-wise, coerce_to-ing each element into T. Recursion composes
+    // (an OPTIONAL element → present-wrap each element; same-type element → no-op copy). A bare-null
+    // element type (NULL) leaves elements untouched (no per-element type to coerce into).
+    if (t.tag == TK_TYPE_SLICE && t.as.slice.element != NULL && v.tag == TK_VAL_LIST) {
+        tk_value out = v_list_empty();
+        for (size_t i = 0; i < v.as.list.len; i += 1)
+            out = v_list_push(out.as.list, coerce_to(v.as.list.ptr[i], *t.as.slice.element));
+        return out;
+    }
     return v;
 }
 
@@ -1201,6 +1211,25 @@ static bool fn_has_ref_param(const tk_tfunction *fn) {
     return false;
 }
 
+// param_coerce_type — the coerce-slot type for a call PARAMETER, built from its declared TypeExpr (the
+// param twin of field_coerce_type, but RECURSIVE so a `[]T?` param rebuilds its elements). An
+// OptionalType → TK_TYPE_OPTIONAL (coerce_to PRESENT-wraps a bare `T`); a SliceType → TK_TYPE_SLICE
+// whose element is the recursively-built coerce type (coerce_to rebuilds element-wise so a `[]T?`
+// present-wraps each element); every other shape → TK_TYPE_VOID (coerce_to's no-op). The inner/element
+// is heap-allocated (leak-tolerant — M.5 process-lifetime). Mirrors vm.tks param_coerce_type.
+static tk_type param_coerce_type(tk_type_expr ann) {
+    if (ann.tag == TK_TEXPR_OPTIONAL)
+        return (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional = { NULL } };
+    if (ann.tag == TK_TEXPR_SLICE && ann.as.slice.element != NULL) {
+        tk_type elt = param_coerce_type(*ann.as.slice.element);
+        if (elt.tag == TK_TYPE_VOID) return (tk_type){ .tag = TK_TYPE_VOID };   // []T with no element wrap → no-op
+        tk_type *el = tk_alloc(sizeof *el); if (!el) abort();
+        *el = elt;
+        return (tk_type){ .tag = TK_TYPE_SLICE, .as.slice = { el } };
+    }
+    return (tk_type){ .tag = TK_TYPE_VOID };
+}
+
 // (MEM Step 2/3) bind_call_args — bind `fn`'s parameters to the call's arguments in `fenv`. For a
 // `Ref<T>` parameter the checker guarantees the argument is either a `mut` scalar lvalue (a TVar —
 // AUTO-REF: promote it to a cell, pass v_ref(cell)) or a value already of reference type (FORWARD:
@@ -1225,7 +1254,12 @@ static void bind_call_args(const tk_tfunction *fn, const tk_texpr *args, size_t 
             }
         } else {
             tk_value av = tk_vm_eval_expr(&args[i], env);
-            env_define(fenv, fn->params[i].name, av);
+            // Present-wrap a bare `T` arg into a `T?` param, and rebuild a `[]U` arg into a `[]T` param
+            // element-wise (uniform with field/return — the VM twin of codegen's call-arg emit_as).
+            // coerce_to no-ops on an already-optional value (no double-wrap), on a same-type element,
+            // and on every non-wrapping param. (Mirrors param_coerce_type built from the type_ann.)
+            tk_type pcoerce = param_coerce_type(fn->params[i].type_ann);
+            env_define(fenv, fn->params[i].name, coerce_to(av, pcoerce));
         }
     }
 }
@@ -1392,9 +1426,10 @@ static tk_type field_coerce_type(tk_str sname, tk_str fname) {
         tk_struct_body sb = td.body.as.struct_body;
         for (size_t j = 0; j < sb.n_fields; j += 1) {
             if (!name_eq(sb.fields[j].name, fname)) continue;
-            if (sb.fields[j].type_ann.tag == TK_TEXPR_OPTIONAL)
-                return (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional = { NULL } };
-            return (tk_type){ .tag = TK_TYPE_VOID };
+            // OptionalType field → present-wrap; SliceType field → element-wise rebuild (a `[]T?` field
+            // present-wraps each element); every other shape → no-op. Shared with param_coerce_type so
+            // field and call-arg slots wrap uniformly. (Native parity with emit_struct_init's emit_as.)
+            return param_coerce_type(sb.fields[j].type_ann);
         }
         return (tk_type){ .tag = TK_TYPE_VOID };
     }

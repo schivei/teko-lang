@@ -327,3 +327,94 @@ fn struct_lit_variant_field_from_bare_case() {
     let got = match h.item { CaseA as a => a.n; CaseB as b => b.m }
     teko::assert::is_true(got == 5)
 }
+
+// ---------------------------------------------------------------------------
+// Call-argument present-wrap parity (GAP 1) — a bare (non-optional) value passed where the parameter
+// is `T?` must PRESENT-wrap at the call, so the callee's `?? / ?.` sees a PRESENT (not a non-optional
+// → "coalesce left operand is not optional" stop). Native parity with emit_as's per-arg wrap; both
+// engines run these (VM gate + `teko build`). Covers a primitive inner (i64?), a NAMED inner (Foo?),
+// and an ALREADY-optional arg (i64? into i64?) which must NOT double-wrap.
+// ---------------------------------------------------------------------------
+
+type PwFoo = struct { n: i64 }
+fn pw_take(x: i64?) -> i64 { x ?? 0 }
+fn pw_take_named(p: PwFoo?) -> i64 { (p?.n ?? 0) }
+
+// (a) a bare i64 into an `i64?` param → `?? d` gets the VALUE (7), not the default.
+#test
+fn call_arg_bare_prim_present_wraps() {
+    let v: i64 = 7
+    teko::assert::is_true(pw_take(v) == 7)        // present-wrapped 7 → `?? 0` yields 7
+}
+
+// (b) a bare NAMED `Foo` into a `Foo?` param → `p?.n ?? 0` gets the field (7).
+#test
+fn call_arg_bare_named_present_wraps() {
+    teko::assert::is_true(pw_take_named(PwFoo { n = 7 }) == 7)   // present Foo → `?.n` reads 7
+}
+
+// (c) an ALREADY-optional `i64?` arg into an `i64?` param → still correct, NOT double-wrapped (one
+//     `??` unwraps to the value; a double-wrap would leave a PRESENT(PRESENT 5) and yield wrongly).
+#test
+fn call_arg_already_optional_not_double_wrapped() {
+    let already: i64? = 5
+    teko::assert::is_true(pw_take(already) == 5)   // single PRESENT 5 → `?? 0` yields 5
+    let none: i64? = null
+    teko::assert::is_true(pw_take(none) == 0)      // NONE passes through → `?? 0` yields the default
+}
+
+// ---------------------------------------------------------------------------
+// Slice-element present-wrap / covariance parity (GAP 2) — a `[]T` flowing into a `[]T?` slot must
+// PRESENT-wrap each element (so `xs[i] ?? d` gets the value); a `[]case` into a `[]variant` must still
+// variant-wrap each element; a `[]T` into a `[]T` is a no-op copy. Native parity with emit_as's slice
+// rebuild (cg_wrap_elem_str) / the VM's coerce_to slice case. Covers binding, param, and field slots.
+// ---------------------------------------------------------------------------
+
+fn pw_make_ints() -> []i64 {
+    teko::list::push(teko::list::push(teko::list::empty(), 11), 22)
+}
+fn pw_sum_opt(xs: []i64?) -> i64 { (xs[0] ?? 0) + (xs[1] ?? 0) }
+type PwOptSliceHolder = struct { xs: []i64? }
+
+// (d-binding) []i64 → []i64? BINDING → element `?? d` gets each value (11 + 22 = 33).
+#test
+fn slice_bare_to_opt_binding_present_wraps() {
+    let opt_list: []i64? = pw_make_ints()
+    teko::assert::is_true((opt_list[0] ?? 0) == 11)
+    teko::assert::is_true((opt_list[1] ?? 0) == 22)
+}
+
+// (d-param) []i64 → []i64? PARAM → callee `?? d` over each element gets the value (33).
+#test
+fn slice_bare_to_opt_param_present_wraps() {
+    teko::assert::is_true(pw_sum_opt(pw_make_ints()) == 33)
+}
+
+// (d-field) []i64 → []i64? FIELD → read-back element `?? d` gets the value.
+#test
+fn slice_bare_to_opt_field_present_wraps() {
+    let h = PwOptSliceHolder { xs = pw_make_ints() }
+    teko::assert::is_true((h.xs[0] ?? 0) == 11)
+    teko::assert::is_true((h.xs[1] ?? 0) == 22)
+}
+
+// (e) []case → []variant covariance still works — each element matches its case after the rebuild.
+fn pw_make_cases() -> []CaseA {
+    teko::list::push(teko::list::push(teko::list::empty(), CaseA { n = 3 }), CaseA { n = 4 })
+}
+#test
+fn slice_case_to_variant_covariance_holds() {
+    let widened: []AorB = pw_make_cases()
+    let a0 = match widened[0] { CaseA as a => a.n; CaseB as b => b.m }
+    let a1 = match widened[1] { CaseA as a => a.n; CaseB as b => b.m }
+    teko::assert::is_true(a0 == 3)
+    teko::assert::is_true(a1 == 4)
+}
+
+// (f) []T → []T is a NO-OP copy — same element type, no wrap, values intact.
+#test
+fn slice_same_type_noop_copy_holds() {
+    let copy: []i64 = pw_make_ints()
+    teko::assert::is_true(copy[0] == 11)
+    teko::assert::is_true(copy[1] == 22)
+}

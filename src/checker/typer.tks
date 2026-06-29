@@ -282,10 +282,15 @@ fn type_call(c: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                         if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
                         a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
                     } else {
-                        // A non-variant widen (T→T?, empty()→[]T, exact) ADOPTS the param type; a case→VARIANT
-                        // widen KEEPS its case type so emit_call wraps it into the variant rep (emit_as).
+                        // A non-variant widen (empty()→[]T, exact, already-optional→T?) ADOPTS the param
+                        // type; a case→VARIANT widen KEEPS its case type so emit_call wraps it into the
+                        // variant rep (emit_as). A bare T→T? widen (param OPTIONAL, arg NOT optional) ALSO
+                        // keeps its narrow type so codegen/VM present-wrap it (uniform with field/return).
                         let pt_is_variant = match expand_variant(f.params[i], table) { Variant => true; _ => false }
-                        if !pt_is_variant {
+                        let pt_is_opt = match f.params[i] { Optional => true; _ => false }
+                        let arg_is_opt = match a.type { Optional => true; _ => false }
+                        let bare_to_opt = pt_is_opt && !arg_is_opt
+                        if !pt_is_variant && !bare_to_opt {
                             a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
                         }
                     }

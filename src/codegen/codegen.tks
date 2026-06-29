@@ -1476,6 +1476,20 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
                             }
                             wrapped = true
                         }
+                        // A `T?` param: present-wrap a bare `T` arg (uniform with field/return). The
+                        // checker kept the arg's NARROW type for a bare→optional widen, so emit_as wraps
+                        // it; an already-optional / null arg passes through emit_as unchanged. The inner
+                        // expected type is NAMED from the param's inner type_ann (so a NAMED inner mangles
+                        // to the param's opt struct); any other inner shape (prim, …) uses the arg's own
+                        // type, which mangles identically to the param's inner (exact-match widen).
+                        parser::OptionalType as ot => {
+                            let inner_t = match ot.inner {
+                                parser::NamedType as int_nt => checker::Named { name = int_nt.path.segments[int_nt.path.segments.len - 1].name }
+                                _ => c.args[j].type
+                            }
+                            out = match emit_as_r(out, prog, ret_type, checker::Optional { inner = inner_t }, c.args[j]) { []byte as o => o; error as err => return err }
+                            wrapped = true
+                        }
                         _ => { }
                     }
                 }
@@ -2364,6 +2378,44 @@ fn emit_variant_wrap_str(buf: []byte, prog: checker::TProgram, expected: checker
     error { message = "codegen: emit_variant_wrap_str on an unreachable case (internal — caller must guard with cg_var_reaches)" }
 }
 
+// cg_wrap_elem_str — wrap a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
+// into the slice element target `T` (= `expected`), for the emit_as slice-covariance rebuild. Uniform
+// with emit_as's value-position wrapping:
+//   * T is OPTIONAL  → present-wrap: (tk_opt_<inner>){ .present = true, .value = <recurse into inner> }
+//   * T is a VARIANT the element's key reaches → variant-wrap (emit_variant_wrap_str)
+//   * otherwise (same type) → emit `cexpr` bare.
+// (C: `cg_wrap_elem_str`.)
+fn cg_wrap_elem_str(buf: []byte, prog: checker::TProgram, expected: checker::Type, vtype: checker::Type, cexpr: str) -> []byte | error {
+    match expected {
+        checker::Optional as opt => {
+            match opt.inner {
+                checker::Void => return cb(buf, cexpr)   // sentinel inner — bare (should not occur)
+                _ => {
+                    mut o = cb(buf, "(")
+                    o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
+                    o = cb(o, "){ .present = true, .value = ")
+                    o = match cg_wrap_elem_str(o, prog, opt.inner, vtype, cexpr) { []byte as r => r; error as err => return err }   // the inner may need its own wrap
+                    return cb(o, " }")
+                }
+            }
+        }
+        _ => { }
+    }
+    // not optional → variant-wrap when the element's key reaches T, else emit it bare (the same
+    // reachability guard the C caller applies before emit_variant_wrap_str).
+    let ukey = match cg_member_key_str(vtype) { str as s => s; error => "" }
+    let wrappable = match expected {
+        checker::Variant => ukey != "" && cg_var_reaches(prog, expected, ukey, 16)
+        checker::Named => ukey != "" && cg_var_reaches(prog, expected, ukey, 16)
+        _ => false
+    }
+    if wrappable {
+        emit_variant_wrap_str(buf, prog, expected, vtype, cexpr)
+    } else {
+        cb(buf, cexpr)   // not wrapped — bare element
+    }
+}
+
 // emit_host_ffi — lift a host-FFI primitive's fixed-ABI result (teko_rt.h) into the program's
 // result type. The runtime can't name the generated sum/optional/slice structs (its header is
 // included before them), so codegen builds them here: call the primitive, then construct
@@ -2622,20 +2674,10 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
                         o = cb(o, "for (uint64_t "); o = cb(o, ri); o = cb(o, " = 0; "); o = cb(o, ri); o = cb(o, " < "); o = cb(o, sv); o = cb(o, ".len; "); o = cb(o, ri); o = cb(o, " += 1) { ")
                         o = cb(o, rp); o = cb(o, "["); o = cb(o, ri); o = cb(o, "] = ")
                         let elem = teko::str::concat(sv, teko::str::concat(".ptr[", teko::str::concat(ri, "]")))
-                        // guard exactly as emit_variant_wrap's callers do: wrap only when U's key is
-                        // reachable in the T variant; otherwise emit the bare element (`T? | error` is
-                        // illegal, so reachability is a separate predicate — mirrors the C `*err` check).
-                        let ukey = match cg_member_key_str(U) { str as s => s; error => "" }
-                        let wrappable = match T {
-                            checker::Variant => ukey != "" && cg_var_reaches(prog, T, ukey, 16)
-                            checker::Named => ukey != "" && cg_var_reaches(prog, T, ukey, 16)
-                            _ => false
-                        }
-                        if wrappable {
-                            o = match emit_variant_wrap_str(o, prog, T, U, elem) { []byte as r => r; error as err => return err }
-                        } else {
-                            o = cb(o, elem)   // not wrapped — bare element
-                        }
+                        // wrap each U-element into T: present-wrap when T is OPTIONAL, variant-wrap when
+                        // U's key reaches the T variant, else the bare element (cg_wrap_elem_str — the
+                        // twin of the C helper; mirrors emit_as's value-position wrapping per element).
+                        o = match cg_wrap_elem_str(o, prog, T, U, elem) { []byte as r => r; error as err => return err }
                         o = cb(o, "; } (")
                         o = match cg_slice_typename(o, T) { []byte as r => r; error as err => return err }
                         o = cb(o, "){ .ptr = "); o = cb(o, rp); o = cb(o, ", .len = "); o = cb(o, sv); o = cb(o, ".len }; })")
