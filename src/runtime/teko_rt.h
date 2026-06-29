@@ -112,6 +112,12 @@ tk_region *tk_region_new(void);                 // a fresh empty region (default
 void      *tk_region_alloc(tk_region *r, size_t n);  // bump-allocate n (n→1), aligned; OOM→panic
 void       tk_region_drop(tk_region *r);        // bulk-free every chunk + the region (NULL-tolerant; idempotent on a re-walk — head is cleared before free; callers MUST null their handle after, as the freed region must not be reused)
 tk_region *tk_region_root(void);                // the process root region (lazy; never dropped in S1)
+// (W9.3b) tk_regions_free_all — free EVERY still-live region (the root + every live scoped frame/block
+// region) and empty the registry. Called at the termination choke points (tk_panic*, tk_exit, and an
+// atexit hook lazily registered in tk_region_root) so that an abnormal exit/panic does not leak the
+// stack-local scoped regions that a diverging path skips dropping. Idempotent: after it runs the
+// registry is empty, so a second call (e.g. atexit after an explicit panic/exit call) is a no-op.
+void       tk_regions_free_all(void);
 
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);

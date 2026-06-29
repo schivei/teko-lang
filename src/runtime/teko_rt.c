@@ -308,7 +308,9 @@ tk_str tk_f64_g17(double x) {
 // arena interior pointer is ever passed to libc free). NOTE: the seed is single-threaded;
 // the lazy root init (tk_g_root) is not synchronized — revisit at S8 (concurrency).
 struct tk_chunk { struct tk_chunk *next; size_t cap; size_t used; max_align_t data[]; };
-struct tk_region { struct tk_chunk *head; };
+// (W9.3b) `reg_next` is an INTRUSIVE link into the GLOBAL live-region registry (tk_g_regs) — no extra
+// allocation. tk_region_new prepends; tk_region_drop unlinks; tk_regions_free_all walks + frees all.
+struct tk_region { struct tk_chunk *head; struct tk_region *reg_next; };
 _Static_assert(offsetof(struct tk_chunk, data) % _Alignof(max_align_t) == 0,
                "chunk payload base must be max_align_t-aligned");
 
@@ -319,10 +321,17 @@ static struct tk_chunk *tk_chunk_try(size_t payload) {
     return c;
 }
 
+// (W9.3b) the GLOBAL registry of live regions (single-threaded seed; S8 revisits concurrency). A
+// region is on this list from tk_region_new until tk_region_drop or tk_regions_free_all removes it.
+static tk_region *tk_g_regs = NULL;
+static tk_region *tk_g_root = NULL;   // single-threaded seed (S8 revisit); lazy + idempotent (the root is also on tk_g_regs)
+
 tk_region *tk_region_new(void) {
     tk_region *r = malloc(sizeof *r);          // the region header is itself a libc block
     if (r == NULL) tk_panic("out of memory");  // (so tk_region_drop can free() it)
     r->head = NULL;                            // lazy: the first alloc creates the head chunk
+    r->reg_next = tk_g_regs;                   // (W9.3b) prepend onto the live-region registry
+    tk_g_regs = r;
     return r;
 }
 
@@ -353,15 +362,51 @@ void *tk_region_alloc(tk_region *r, size_t n) {
 
 void tk_region_drop(tk_region *r) {
     if (r == NULL) return;                           // NULL-tolerant
+    // (W9.3b) unlink from the live-region registry FIRST, so tk_regions_free_all can never see (and
+    // double-free) a region that a normal scope exit already dropped. Single-linked-list removal.
+    if (tk_g_regs == r) {
+        tk_g_regs = r->reg_next;
+    } else {
+        for (tk_region *p = tk_g_regs; p != NULL; p = p->reg_next) {
+            if (p->reg_next == r) { p->reg_next = r->reg_next; break; }
+        }
+    }
+    r->reg_next = NULL;
     struct tk_chunk *c = r->head;
     r->head = NULL;                                  // MEM Step-1 idempotency: clear before free so a re-entrant/second walk frees nothing
     while (c != NULL) { struct tk_chunk *next = c->next; free(c); c = next; }
     free(r);
 }
 
-static tk_region *tk_g_root = NULL;   // single-threaded seed (S8 revisit); lazy + idempotent
+// (W9.3b) free EVERY still-live region (root + every live scoped frame/block region) and empty the
+// registry. Idempotent + re-entrancy-safe: it detaches the whole list into a local FIRST, then frees
+// each off the local — so tk_region_drop's registry-unlink (which it calls indirectly? no — we free
+// chunks directly here) and any re-entrant call both see an empty registry. We free chunks + headers
+// directly (NOT via tk_region_drop) to avoid the O(n) per-region registry search on a list we already
+// own end-to-end. A second call is a no-op (the registry is empty). Hooked at the termination choke
+// points: tk_panic* (abort skips atexit), tk_exit, and the lazy atexit below (normal return / exit()).
+void tk_regions_free_all(void) {
+    tk_region *r = tk_g_regs;
+    tk_g_regs = NULL;                                // empty the registry BEFORE freeing (re-entrancy)
+    tk_g_root = NULL;                                // the root is on the list; it is freed below too
+    while (r != NULL) {
+        tk_region *rnext = r->reg_next;
+        struct tk_chunk *c = r->head;
+        while (c != NULL) { struct tk_chunk *cnext = c->next; free(c); c = cnext; }
+        free(r);
+        r = rnext;
+    }
+}
+
 tk_region *tk_region_root(void) {
-    if (tk_g_root == NULL) tk_g_root = tk_region_new();
+    if (tk_g_root == NULL) {
+        tk_g_root = tk_region_new();
+        // (W9.3b) register the leak-clean termination hook ONCE (the root is created exactly once per
+        // process, lazily). atexit fires on normal main return AND on libc exit() (tk_exit's path), so
+        // a NORMALLY-terminating program is leak-clean too; tk_regions_free_all is idempotent, so the
+        // explicit tk_exit/tk_panic calls plus this hook never double-free.
+        atexit(tk_regions_free_all);
+    }
     return tk_g_root;
 }
 
@@ -405,6 +450,7 @@ _Noreturn void tk_panic(const char *msg) {
     fputs(msg, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
+    tk_regions_free_all();   // (W9.3b) abort() skips atexit — free the arena regions explicitly first
     abort();
 }
 
@@ -419,10 +465,13 @@ _Noreturn void tk_panic_str(tk_str msg) {
     fwrite(msg.ptr, 1, msg.len, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
+    tk_regions_free_all();   // (W9.3b) abort() skips atexit — free the arena regions explicitly first
     abort();
 }
 // the Teko-level `exit(<int>)` — end the program with a status code (no panic message).
-_Noreturn void tk_exit(int32_t code) { exit(code); }
+// (W9.3b) free every live arena region before exiting so a diverging exit() is leak-clean (the atexit
+// hook would also fire, but the explicit call keeps the contract local + obvious; free_all is idempotent).
+_Noreturn void tk_exit(int32_t code) { tk_regions_free_all(); exit(code); }
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
 _Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }
