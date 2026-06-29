@@ -4289,7 +4289,11 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement) -> CgType
         if i >= stmts.len { break }
         match stmts[i] {
             checker::TBinding as b => { s = cg_collect_type_opts(s, b.bound); s = cg_collect_expr_opts(s, b.value) }
-            checker::TAssign as a  => { s = cg_collect_expr_opts(s, a.value) }
+            // collect a.bound too (the target's declared type — the SAME present-wrap target as the
+            // VM's coerce_to(a.bound)): a deref-assign `r.value = v` through a `Ref<T?>` has bound=`T?`,
+            // and that optional's tk_opt_<T> typedef must be emitted even when the value's own type is a
+            // bare `T` (widened) — mirrors the TBinding arm collecting b.bound.
+            checker::TAssign as a  => { s = cg_collect_type_opts(s, a.bound); s = cg_collect_expr_opts(s, a.value) }
             checker::TReturn as r  => { if r.has_value { s = cg_collect_expr_opts(s, r.value) } }
             checker::TLoopStmt as l => { s = cg_collect_block_opts(s, l.body) }
             checker::TExprStmt as es => { s = cg_collect_expr_opts(s, es.expr) }

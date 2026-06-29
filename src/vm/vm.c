@@ -1876,7 +1876,11 @@ static tk_flow exec_stmt(const tk_tstatement *s, tk_venv *env) {
                 tk_value rv = rslot->has_cell ? cell_get(rslot->cell_id) : rslot->val;
                 if (rv.tag != TK_VAL_REF) vm_unsupported("deref-assign target is not a reference (internal: checker should reject)");
                 tk_value cur = cell_get(rv.as.ref.cell);
-                cell_set(rv.as.ref.cell, compound_apply(cur, op, rhs, &s->as.assign.value));
+                // present-wrap the FINAL value into the ref's inner type (s->as.assign.bound) before the
+                // cell write — same coercion the binding path uses (REBOOT §202). For a `Ref<T?>` this
+                // makes a deref-WRITE store a PRESENT optional, so a later `?? / ?.` read does not see a
+                // bare value (the VM==native divergence: native's deref-assign emit_as already wraps).
+                cell_set(rv.as.ref.cell, coerce_to(compound_apply(cur, op, rhs, &s->as.assign.value), s->as.assign.bound));
                 return flow_normal();
             }
             tk_slot *slot = env_find(env, s->as.assign.name);
@@ -2060,7 +2064,11 @@ uint64_t tk_vm_coverage_pct(tk_tprogram prog) {
 // ---------------------------------------------------------------------------
 typedef struct { char *p; size_t len, cap; } cov_sb;
 static void cov_sb_bytes(cov_sb *b, const char *s, size_t n) {
-    if (b->len + n + 1 > b->cap) {
+    // grow when full OR when the buffer is still unallocated (b->p == NULL ⇒ first use). The explicit
+    // NULL check makes the post-grow `b->p` provably non-NULL for the trailing memcpy (closes a
+    // clang-analyzer core.NullDereference path; behaviour is unchanged — a NULL p only ever coincides
+    // with cap == 0, which already forces the grow).
+    if (b->p == NULL || b->len + n + 1 > b->cap) {
         size_t nc = b->cap ? b->cap : 8192;
         while (nc < b->len + n + 1) nc *= 2;
         char *g = (char *)tk_alloc(nc); if (!g) abort();

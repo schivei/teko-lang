@@ -384,12 +384,20 @@ static tk_type_result resolve_generic_inst(tk_path path, tk_type_expr *args, siz
         tk_type_result in = tk_resolve_type(args[0], table);
         if (!in.ok) return in;
         if (in.as.value.tag == TK_TYPE_VOID) return (tk_type_result){ .ok = false, .as.error = tk_error_make("`Ref<void>` is invalid — void is not a value (M.3)") };
-        // (MEM Step 0, R1) ESCAPE GATE — SCALAR-ONLY inner. A `Ref<T>` is memory-safe by construction
-        // only when its target is a scalar PRIMITIVE (TK_TYPE_PRIM): a non-scalar (struct/Named, slice,
-        // optional, variant, func, ptr, ref) could carry interior pointers whose lifetime we cannot
-        // track without an escape solver, so it is rejected here at construction.
-        if (in.as.value.tag != TK_TYPE_PRIM)
-            return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference may only target a scalar primitive (`Ref<i64>` etc.) — not a struct, collection, optional, variant, function, or pointer") };
+        // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
+        // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
+        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; VM cell_set), and read by
+        // `r.value` (native `(*r)`; VM cell_get). Under the cell-IDENTITY model both are observationally
+        // identical in VM and native, exactly like scalars. So PRIM, BYTE, STR, NAMED (struct/enum/
+        // variant), SLICE, OPTIONAL and VARIANT are all allowed. REJECT only the NON-values / aliasing
+        // hazards: VOID (above — not a value), REF (no ref-to-ref), PTR/UPTR (raw FFI addresses), FUNC.
+        switch (in.as.value.tag) {
+            case TK_TYPE_REF:  return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot target another reference (`Ref<Ref<T>>` is invalid)") };
+            case TK_TYPE_PTR:  return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)") };
+            case TK_TYPE_UPTR: return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)") };
+            case TK_TYPE_FUNC: return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot target a function (`Ref<(…)->…>` is invalid)") };
+            default: break;
+        }
         tk_type t = { .tag = TK_TYPE_REF, .as.ref.inner = box(in.as.value) };
         return (tk_type_result){ .ok = true, .as.value = t };
     }

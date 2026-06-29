@@ -34,7 +34,11 @@
 typedef struct { char *ptr; size_t len; size_t cap; } cbuf;
 
 static void cbuf_reserve(cbuf *b, size_t extra) {
-    if (b->len + extra + 1 <= b->cap) return;   // +1 for the NUL
+    // grow when the request fits AND the buffer is already allocated; an unallocated buffer
+    // (b->ptr == NULL ⇒ first use) always grows so the post-reserve b->ptr is provably non-NULL
+    // for callers' trailing writes (closes a clang-analyzer core.NullDereference path; behaviour
+    // is unchanged — a NULL ptr only ever coincides with cap == 0, which already forces a grow).
+    if (b->ptr != NULL && b->len + extra + 1 <= b->cap) return;   // +1 for the NUL
     size_t ncap = b->cap == 0 ? 256 : b->cap;
     while (b->len + extra + 1 > ncap) ncap *= 2;
     char *np = tk_realloc0(b->ptr, ncap);
@@ -3581,7 +3585,11 @@ static void cg_collect_block_opts(cg_opt_set *set, const tk_tstatement *stmts, s
         const tk_tstatement *s = &stmts[i];
         switch (s->tag) {
             case TK_TSTMT_BINDING: cg_collect_type_opts(set, s->as.binding.bound); cg_collect_expr_opts(set, &s->as.binding.value); break;
-            case TK_TSTMT_ASSIGN:  cg_collect_expr_opts(set, &s->as.assign.value); break;
+            // collect assign.bound too (the target's declared type — the SAME present-wrap target as the
+            // VM's coerce_to(bound)): a deref-assign `r.value = v` through a `Ref<T?>` has bound=`T?`, and
+            // that optional's tk_opt_<T> typedef must be emitted even when the value's own type is a bare
+            // `T` (widened) — mirrors the BINDING arm collecting binding.bound.
+            case TK_TSTMT_ASSIGN:  cg_collect_type_opts(set, s->as.assign.bound); cg_collect_expr_opts(set, &s->as.assign.value); break;
             case TK_TSTMT_RETURN:  if (s->as.ret.has_value) cg_collect_expr_opts(set, &s->as.ret.value); break;
             case TK_TSTMT_LOOP:    cg_collect_block_opts(set, s->as.loop_stmt.body, s->as.loop_stmt.nbody); break;
             case TK_TSTMT_EXPR:    cg_collect_expr_opts(set, &s->as.expr_stmt.expr); break;

@@ -1940,7 +1940,11 @@ fn exec_stmt(s: checker::TStatement, env: Venv) -> Step {
             if a.deref {
                 let rv = match read_var(env, a.name) { RefVal as r => r; _ => panic("vm: deref-assign target is not a reference (internal: checker should reject)") }
                 let cur = cell_get(env.cells, rv.cell)
-                let newval = compound_apply(cur, a.op, rhs)
+                // present-wrap the FINAL value into the ref's inner type (`a.bound`) before the cell
+                // write — same coercion the binding path uses (REBOOT §202). For a `Ref<T?>` this makes
+                // a deref-WRITE store a PRESENT optional, so a later `?? / ?.` read does not see a bare
+                // value (the VM==native divergence: native's deref-assign emit_as already wraps).
+                let newval = coerce_to(compound_apply(cur, a.op, rhs), a.bound)
                 let env2 = with_cells(env, cell_set(env.cells, rv.cell, newval))
                 Stepped { env= env2; value= null }
             } else {

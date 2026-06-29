@@ -423,13 +423,20 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable) -> Type | error
         if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
         let argt = match resolve_type(nt.args[0], table) { Type as t => t; error as e => return e }
         match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => {} }
-        // (MEM Step 0, R1) ESCAPE GATE — SCALAR-ONLY inner. A `Ref<T>` is memory-safe by construction
-        // only when its target is a scalar PRIMITIVE (a `Prim`): a non-scalar (struct/Named, slice,
-        // optional, variant, func, ptr, ref) could carry interior pointers whose lifetime we cannot
-        // track without an escape solver, so it is rejected here at construction.
+        // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
+        // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
+        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; VM cell_set), and read
+        // by `r.value` (native `(*r)`; VM cell_get). Under the cell-IDENTITY model both are
+        // observationally identical in VM and native, exactly like scalars. So Prim, Byte, Str,
+        // Named (struct/enum/variant), Slice, Optional and Variant are all allowed. REJECT only the
+        // NON-values / aliasing hazards: Void (already above — not a value), Reference (no ref-to-ref),
+        // Ptr/Uptr (raw FFI addresses), Func (a function value carries no replaceable storage).
         match argt {
-            Prim => return Reference { inner = argt }
-            _    => return error { message = "a reference may only target a scalar primitive (`Ref<i64>` etc.) — not a struct, collection, optional, variant, function, or pointer" }
+            Reference => return error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
+            Ptr       => return error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Uptr      => return error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Func      => return error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+            _         => return Reference { inner = argt }
         }
     }
     mut argtypes: []Type = teko::list::empty()

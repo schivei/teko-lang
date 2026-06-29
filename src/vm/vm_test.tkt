@@ -190,3 +190,93 @@ fn ref_then_plain_mutation_holds() {
     bump(x)                                // x -> 42 (still aliasable)
     teko::assert::is_true(x == 42)
 }
+
+// ---------------------------------------------------------------------------
+// W9a — NON-SCALAR `Ref<T>` EXECUTES in the VM == native. The escape gate now allows a NON-scalar
+// inner (struct/Named, slice). Teko has NO field/index assignment, so a non-scalar ref is ONLY
+// mutated by WHOLE-`.value` REPLACEMENT (`r.value = newWhole` — VM cell_set of a StructVal/[]Value;
+// native `*r = newWhole` struct/slice copy) and read by `r.value`/`r.value.field` (VM cell_get;
+// native `(*r)`). Under the cell-identity model these are observationally identical in BOTH engines,
+// exactly like scalars. These run on the VM AND compile native (`teko build`) — results must match.
+// ---------------------------------------------------------------------------
+
+// a small value struct — the non-scalar ref target.
+type Point = struct { x: i64; y: i64 }
+
+// whole-`.value` REPLACE of a struct ref: `r.value = Point{…}`. Reads `r.value.y`, writes the whole.
+fn setx(r: Ref<Point>, v: i64) { r.value = Point { x = v; y = r.value.y } }
+#test
+fn ref_struct_whole_replace_holds() {
+    mut p = Point { x = 1; y = 2 }
+    setx(p, 42)                                  // whole-replace through the ref
+    teko::assert::is_true(p.x == 42)             // the new x reached the caller's `p`
+    teko::assert::is_true(p.y == 2)              // y preserved by the read-then-rebuild
+}
+
+// reading a struct ref's field (the deref READ path on a non-scalar) inside the callee, then
+// folding the read INTO a whole-replace — exercises r.value.x / r.value.y reads in statement
+// position (the VM's executable Ref position). `collapse` sets x = x+y, y = 0.
+fn collapse(r: Ref<Point>) { r.value = Point { x = r.value.x + r.value.y; y = 0 } }
+#test
+fn ref_struct_read_field_holds() {
+    mut p = Point { x = 10; y = 5 }
+    collapse(p)                                  // reads r.value.x and r.value.y through the cell
+    teko::assert::is_true(p.x == 15)             // 10 + 5
+    teko::assert::is_true(p.y == 0)
+}
+
+// whole-`.value` REPLACE of a slice ref: grow the slice by pushing through the ref. `push` returns a
+// NEW slice; the whole `.value` is replaced with it (the only way to mutate — no index-assign).
+fn push1(r: Ref<[]i64>, v: i64) { r.value = teko::list::push(r.value, v) }
+#test
+fn ref_slice_whole_replace_holds() {
+    mut xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, 7)
+    push1(xs, 8)                                 // grow through the ref
+    push1(xs, 9)
+    teko::assert::is_true(xs.len == 3)           // the caller's slice grew (whole-replace)
+    teko::assert::is_true(xs[0] == 7)
+    teko::assert::is_true(xs[1] == 8)
+    teko::assert::is_true(xs[2] == 9)
+}
+
+// the SAME struct var aliased by TWO refs in one call: both writes compose on the one cell (the
+// non-scalar twin of ref_same_var_aliased_holds — proves cell identity for a StructVal target).
+fn bump_both_x(a: Ref<Point>, b: Ref<Point>) {
+    a.value = Point { x = a.value.x + 1; y = a.value.y }
+    b.value = Point { x = b.value.x + 10; y = b.value.y }
+}
+#test
+fn ref_struct_same_var_aliased_holds() {
+    mut p = Point { x = 0; y = 99 }
+    bump_both_x(p, p)                            // both refs alias p's one cell
+    teko::assert::is_true(p.x == 11)            // +1 then +10 compose on the shared cell
+    teko::assert::is_true(p.y == 99)            // y untouched
+}
+
+// ---------------------------------------------------------------------------
+// W9a fix — a deref-WRITE through a `Ref<T?>` (an OPTIONAL inner) must PRESENT-wrap the value
+// before the cell write (the binding/return present-wrap, via coerce_to(a.bound)). Without it the
+// VM stored a BARE value and a later `?? / ?.` read PANICKED ("coalesce left operand is not
+// optional") while native (deref-assign emit_as) was correct — a VM==native divergence. These
+// run statement-position so the write+read execute in the VM gate; native (`teko build`) agrees.
+// ---------------------------------------------------------------------------
+
+// (1) Ref<i64?>: write a bare value through the ref; a `??` read must see PRESENT, not panic.
+fn set_opt_scalar(r: Ref<i64?>) { r.value = 55 }
+#test
+fn ref_opt_scalar_write_then_read_holds() {
+    mut o: i64? = null
+    set_opt_scalar(o)                            // bare 55 written THROUGH the ref → present-wrapped
+    teko::assert::is_true((o ?? 0) == 55)        // ?? unwraps the PRESENT 55 (no panic)
+}
+
+// (2) Ref<Point?>: write a present Point through the ref; a `?.` field read must see it.
+fn set_opt_struct(r: Ref<Point?>) { r.value = Point { x = 7; y = 9 } }
+#test
+fn ref_opt_struct_write_then_read_holds() {
+    mut p: Point? = null
+    set_opt_struct(p)                            // present Point written THROUGH the ref
+    teko::assert::is_true((p?.x ?? 0) == 7)      // ?.x reaches into the PRESENT Point
+    teko::assert::is_true((p?.y ?? 0) == 9)
+}
