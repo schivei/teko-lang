@@ -3173,8 +3173,8 @@ fn emit_arm_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Type,
         let last = body[body.len - 1]
         return match last {
             checker::TExprStmt as es => match es.expr.kind {
-                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty())
-                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty())
+                checker::TIfExpr as _    => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty())
+                checker::TMatchExpr as _ => emit_exprstmt_tail(out, es.expr, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty())
                 _              => emit_stmt(out, last, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
             }
             _ => emit_stmt(out, last, false, prog, ret_type, ci, "", teko::list::empty(), teko::list::empty(), teko::list::empty(), teko::list::empty(), false)
@@ -3273,7 +3273,7 @@ fn emit_match_value(buf: []byte, prog: checker::TProgram, ret_type: checker::Typ
 // fire. A failed `when` guard naturally falls through to the next arm (the goto is INSIDE the
 // guard block). `ret_type` threads the fn return type so a tail arm body that yields a case value
 // into a variant return slot is wrapped (emit_as). (C: `emit_match_tail`.)
-fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, fn_body: []checker::TStatement) -> []byte | error {
+fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: checker::TMatchExpr, in_main: bool, ret_type: checker::Type, indent: str, escaping: []str, fn_body: []checker::TStatement) -> []byte | error {
     let subj = fresh_named("_s", buf.len to i64)
     let done = teko::str::concat(fresh_named("tk_mt", buf.len to i64 + 1), "_done")   // unique commit label (str concat — no `+` on str)
     let subjT = m.subject.type   // for optional / variant pattern lowering
@@ -3308,8 +3308,10 @@ fn emit_match_tail(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         // the arm body is a BLOCK in TAIL position (B.20): emit it as a tail block — its
         // trailing value becomes a `return`, and an explicit return/break/continue inside it
         // emits real C control flow (mirrors the VM running the arm block flow-aware).
-        // (Frameless first cut: a return inside an arm leaks the frame region — SAFE, M.5.)
-        out = match emit_block_tail(out, arm.body, in_main, prog, ret_type, ci, "", teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
+        // (Frameless: a return inside an arm leaks the frame region — SAFE, M.5.) S2 — the REAL
+        // `escaping` is threaded (NOT empty) so a statement-arm inside this match arm gets correct
+        // block-locality (matches the C twin's global g_cg_escaping; empty would false-positive).
+        out = match emit_block_tail(out, arm.body, in_main, prog, ret_type, ci, "", escaping, fn_body) { []byte as o => o; error as err => return err }
         // FIRST match wins → jump past the remaining arms. After a diverging body (return/exit/
         // panic) this is dead code (cc sees the generated C with `-w`); after a non-diverging
         // void body it is the line that stops later arms from also firing.
@@ -3370,7 +3372,9 @@ fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
         // run the arm body BLOCK for effect (value discarded); break/continue/return inside it
         // propagate via C's own semantics. Thread ret_type so `return null` inside an arm
         // wraps null correctly into the enclosing function's return slot.
-        out = match emit_block(out, arm.body, in_main, prog, ret_type, ci, escaping, regions, fn_body, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
+        // S2 — the arm body gets its OWN arm region for its block-local bindings (emit_block_region),
+        // dropped at the arm's fall-through / via the region stack on break/continue/return.
+        out = match emit_block_region(out, arm.body, in_main, prog, ret_type, ci, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
         out = cb(out, ci)
         out = cb(out, "goto ")
         out = cb(out, done)
@@ -3501,7 +3505,10 @@ fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, 
 // to its loop so a labeled break/continue drops exactly the regions it crosses. The per-block escape
 // query is checker::binding_is_block_local. SAFETY IS ABSOLUTE — a binding is block-routed ONLY when
 // proven block-local; otherwise it falls back to the frame/root (W8 = a leak, never a UAF).
-type RegionFrame = struct { name: str; label: str }
+// `is_loop` distinguishes a LOOP-body region (a valid break/continue target) from an ARM-body region
+// (an if-then/if-else/match-arm block region — S2 arms): a break/continue CROSSES an arm region (drops
+// it) but STOPS only AT the innermost matching loop region, never at an arm region.
+type RegionFrame = struct { name: str; label: str; is_loop: bool }
 
 // cg_drop_regions_to — drop (innermost-first) every loop-body region from the top of the stack DOWN
 // TO & INCLUDING the loop whose label matches `label` (empty = innermost loop). For break/continue:
@@ -3514,7 +3521,9 @@ fn cg_drop_regions_to(buf: []byte, indent: str, regions: []RegionFrame, label: s
         if k == 0 { break }
         let r = regions[k - 1]
         out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
-        let is_target = if label.len == 0 { true } else { r.label == label }
+        // Stop only AT a LOOP region (arm regions are always crossed): bare label → the innermost
+        // loop; a named label → that loop. An arm region is dropped but never the break/continue target.
+        let is_target = r.is_loop && (if label.len == 0 { true } else { r.label == label })
         if is_target { return out }
         k = k - 1
     }
@@ -3572,6 +3581,29 @@ fn emit_block(buf: []byte, body: []checker::TStatement, in_main: bool, prog: che
     out
 }
 
+// emit_block_region — S2: emit an ARM block (if-then / if-else / match-arm body) in STATEMENT
+// position. Treated EXACTLY like a loop body except the region is an ARM region (is_loop=false): it
+// is opened at block entry when the block has a provably block-local binding (is_value=false — a
+// statement-arm yields no consumed value), block-locals route to it, and it is dropped on the normal
+// fall-through past the arm. break/continue/return inside the arm drop it via the region-stack
+// helpers (break/continue CROSS it down to the target loop; return drops everything). No block-local
+// binding ⇒ no region ⇒ byte-identical to emit_block (the pre-S2 statement-arm path). (C: emit_block_region.)
+fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, prog: checker::TProgram, ret_type: checker::Type, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> []byte | error {
+    let want_block = cg_block_has_block_local(escaping, fn_body, body, false) && regions.len < 64
+    if !want_block { return emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, teko::list::empty(), false) }
+    // Open the arm region. Name by the buffer length at the creation point (the deterministic
+    // `_tkbr<len>` uniquifier — matches the C twin's b->len read without a counter).
+    let region = fresh_named("_tkbr", buf.len to i64)
+    mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new();\n")
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false })
+    // Emit the body with THIS block as the current block context (so block-local bindings route to
+    // `region`) and the augmented region stack.
+    out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, body, false) { []byte as o => o; error as err => return err }
+    // Normal fall-through exit edge: drop the arm region (idempotent + nulled for overlap safety).
+    out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")
+    out
+}
+
 // emit_exprstmt_tail — W5a: emit a TRAILING expr-statement (a block's last statement) as an
 // IMPLICIT RETURN of its value (mirrors the VM: a block's trailing NORMAL value is the
 // function's/main's value — B.20). A trailing `if` is lowered as DIRECT control flow (each
@@ -3581,29 +3613,32 @@ fn emit_block(buf: []byte, body: []checker::TStatement, in_main: bool, prog: che
 // which the checker types as a statement but the VM still drains for its branch value). A void
 // expr-statement, or any non-expr trailing statement, emits normally (no value).
 // (C: `emit_exprstmt_tail`.)
-fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: checker::TProgram, ret_type: checker::Type, indent: str, frame: str, fn_body: []checker::TStatement) -> []byte | error {
+fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: checker::TProgram, ret_type: checker::Type, indent: str, frame: str, escaping: []str, fn_body: []checker::TStatement) -> []byte | error {
     match x.kind {
         checker::TIfExpr as f => {
             // A trailing if/else returns on each branch; the frame region is NOT threaded into the
             // branch tails (frame="" → those returns simply LEAK the region — SAFE, M.5), keeping
-            // this first cut's drop-routing confined to the linear top-level path.
+            // this first cut's drop-routing confined to the linear top-level path. S2 — the REAL
+            // `escaping` set IS threaded so a statement-arm inside a tail branch (emit_block_region via
+            // emit_if_stmt/emit_match_stmt) gets the correct block-locality (matches the C twin's global
+            // g_cg_escaping — without it the predicate sees an empty set and false-positives a region).
             // No else branch: emit as a control-flow statement; fall-through handled by caller's default return.
-            if !f.has_else { return emit_if_stmt(buf, f, in_main, prog, ret_type, indent, teko::list::empty(), teko::list::empty(), fn_body, teko::list::empty(), false) }
+            if !f.has_else { return emit_if_stmt(buf, f, in_main, prog, ret_type, indent, escaping, teko::list::empty(), fn_body, teko::list::empty(), false) }
             mut out = cb(buf, indent)
             out = cb(out, "if (")
             out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
             out = cb(out, ") {\n")
             let inner = cb_indent_deeper(indent)
-            out = match emit_block_tail(out, f.then_blk, in_main, prog, ret_type, inner, "", teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
+            out = match emit_block_tail(out, f.then_blk, in_main, prog, ret_type, inner, "", escaping, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, indent)
             out = cb(out, "} else {\n")
-            out = match emit_block_tail(out, f.else_blk, in_main, prog, ret_type, inner, "", teko::list::empty(), fn_body) { []byte as o => o; error as err => return err }
+            out = match emit_block_tail(out, f.else_blk, in_main, prog, ret_type, inner, "", escaping, fn_body) { []byte as o => o; error as err => return err }
             out = cb(out, indent)
             cb(out, "}\n")
         }
         // W5b — a trailing `match` lowers as a control-flow `if` chain whose arms `return`
         // (mirrors the trailing `if`); each arm body is wrapped to the return slot via emit_as.
-        checker::TMatchExpr as m => emit_match_tail(buf, prog, x, m, in_main, ret_type, indent, fn_body)
+        checker::TMatchExpr as m => emit_match_tail(buf, prog, x, m, in_main, ret_type, indent, escaping, fn_body)
         _ => {
             if is_void_type(x.type) {   // a void expr-statement carries no value → run for effect
                 mut out = cb(buf, indent)
@@ -3645,7 +3680,7 @@ fn emit_block_tail(buf: []byte, body: []checker::TStatement, in_main: bool, prog
     if body.len == 0 { return out }
     let last = body[body.len - 1]
     match last {
-        checker::TExprStmt as es => emit_exprstmt_tail(out, es.expr, in_main, prog, ret_type, indent, frame, fn_body)
+        checker::TExprStmt as es => emit_exprstmt_tail(out, es.expr, in_main, prog, ret_type, indent, frame, escaping, fn_body)
         _ => emit_stmt(out, last, in_main, prog, ret_type, indent, frame, escaping, teko::list::empty(), fn_body, teko::list::empty(), false)
     }
 }
@@ -3663,14 +3698,15 @@ fn emit_if_stmt(buf: []byte, f: checker::TIfExpr, in_main: bool, prog: checker::
     out = match emit_expr(out, prog, f.cond) { []byte as o => o; error as err => return err }
     out = cb(out, ") {\n")
     let inner = cb_indent_deeper(indent)
-    // S2: thread the loop-body region stack + block context UNCHANGED into the branches (mirrors the
-    // C twin, which leaves g_cg_cur_block on the enclosing loop) so a break/continue/return inside a
-    // branch drops the right regions and a branch binding tests against the enclosing loop body.
-    out = match emit_block(out, f.then_blk, in_main, prog, ret_type, inner, escaping, regions, fn_body, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
+    // S2 — each statement-position branch gets its OWN arm region (emit_block_region) for its provably
+    // block-local bindings, dropped at the branch's fall-through / via the region stack on break/
+    // continue/return. A branch with no block-local binding opens none → byte-identical. (The enclosing
+    // `regions`/`fn_body` are threaded so a break/continue/return inside a branch drops the right regions.)
+    out = match emit_block_region(out, f.then_blk, in_main, prog, ret_type, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     if f.has_else {
         out = cb(out, indent)
         out = cb(out, "} else {\n")
-        out = match emit_block(out, f.else_blk, in_main, prog, ret_type, inner, escaping, regions, fn_body, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
+        out = match emit_block_region(out, f.else_blk, in_main, prog, ret_type, inner, escaping, regions, fn_body) { []byte as o => o; error as err => return err }
     }
     out = cb(out, indent)
     cb(out, "}\n")
@@ -3811,7 +3847,7 @@ fn emit_loop(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: checker::T
     mut regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new();\n")
-        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label })
+        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true })
     }
     // emit the body with THIS block as the current block context (so a block-local binding routes to
     // `region`) and the augmented region stack (so break/continue/return drop the right regions).

@@ -258,9 +258,12 @@ static const char   *g_cg_frame = "";
 // per-block escape query is tk_binding_is_block_local (escape.h). SAFETY IS ABSOLUTE — a binding is
 // block-routed ONLY when proven block-local; otherwise it falls back to the frame/root (W8 = leak).
 #define TK_CG_MAX_BLOCK_REGIONS 64
-typedef struct { const char *name; tk_str label; } cg_block_region;   // a loop-body region on the stack
+// `is_loop` distinguishes a LOOP-body region (a valid break/continue target) from an ARM-body region
+// (an if-then/if-else/match-arm block region — S2 arms): a break/continue CROSSES an arm region (drops
+// it) but STOPS only AT the innermost matching loop region, never at an arm region.
+typedef struct { const char *name; tk_str label; bool is_loop; } cg_block_region;   // a block region on the stack
 static cg_block_region g_cg_block_stack[TK_CG_MAX_BLOCK_REGIONS];
-static size_t          g_cg_block_depth   = 0;   // active loop-body regions, innermost last
+static size_t          g_cg_block_depth   = 0;   // active block-body regions, innermost last
 static char            g_cg_block_names[TK_CG_MAX_BLOCK_REGIONS][24];   // backing store for `_tkbr<len>`
 // The function body + the CURRENT block being emitted — for tk_binding_is_block_local read counts.
 static const tk_tstatement *g_cg_fn_body  = NULL;
@@ -277,8 +280,10 @@ static void cg_drop_block_regions_to(cbuf *b, const char *indent, tk_str label) 
     for (size_t k = g_cg_block_depth; k > 0; k -= 1) {
         cg_block_region r = g_cg_block_stack[k - 1];
         cb(b, indent); cb(b, "tk_region_drop("); cb(b, r.name); cb(b, "); "); cb(b, r.name); cb(b, " = NULL;\n");
-        bool is_target = (label.len == 0) || (r.label.len == label.len
-            && (label.len == 0 || memcmp(r.label.ptr, label.ptr, label.len) == 0));
+        // Stop only AT a LOOP region (arm regions are always crossed): bare label → the innermost
+        // loop; a named label → that loop. An arm region is dropped but never the break/continue target.
+        bool is_target = r.is_loop && ((label.len == 0) || (r.label.len == label.len
+            && memcmp(r.label.ptr, label.ptr, label.len) == 0));
         if (is_target) return;   // stop AT the loop being exited/continued (inclusive)
     }
 }
@@ -1006,6 +1011,10 @@ static bool emit_match_stmt(cbuf *b, const tk_texpr *e, bool in_main, tk_type re
 // declared here so the match value form (emit_arm_value) can route a diverging arm.
 static bool emit_block(cbuf *b, const tk_tstatement *body, size_t n, bool in_main,
                        tk_type ret_type, const char *indent, const char **err);
+// emit_block_region — S2: emit an ARM block (if-then/if-else/match-arm body) in STATEMENT position,
+// opening its OWN `_tkbrN` region when it has a provably block-local binding, dropped on fall-through.
+static bool emit_block_region(cbuf *b, const tk_tstatement *body, size_t n, bool in_main,
+                              tk_type ret_type, const char *indent, const char **err);
 static bool emit_block_tail(cbuf *b, const tk_tstatement *body, size_t n, bool in_main,
                             tk_type ret_type, const char *indent, const char **err);
 static bool emit_exprstmt_tail(cbuf *b, const tk_texpr *x, bool in_main,
@@ -1045,6 +1054,11 @@ static bool emit_stmt_value(cbuf *b, const tk_tstatement *s, tk_type slot, const
 // Emit a BRANCH block (the `if`-value then/else): all but the last statement normally, the
 // LAST via emit_stmt_value (its trailing value -> `sink`). An empty branch yields nothing
 // (the checker forbids a value-typed empty branch).
+// S2 (DEFERRED — value-position arm regions): a value-form branch yields its tail to `sink` OUTSIDE
+// the branch; arm regions here would need region/escape context threaded through the whole expression
+// emitter, which the functional Teko twin cannot mirror — so value-branch bindings fall back to the
+// enclosing/root region (W8 leak-safe, never a UAF), keeping both twins byte-aligned. (Statement-
+// position branches DO get arm regions via emit_block_region.)
 static bool emit_branch_value(cbuf *b, const tk_tstatement *body, size_t n, tk_type slot,
                               const char *sink, const char *indent, const char **err) {
     for (size_t i = 0; i + 1 < n; i += 1)
@@ -1071,6 +1085,7 @@ static bool emit_if_value(cbuf *b, const tk_texpr *e, const char **err) {
     // value-branch never frame-routes. Save/restore the active frame around the whole expansion.
     // S2: likewise clear the current block context (the Teko value-form emitters pass an empty
     // cur_block) so a binding inside a value-form branch never block-routes — byte-identical twins.
+    // (Value-position arm regions are DEFERRED — see emit_branch_value/emit_arm_value.)
     const char *saved = g_cg_frame; g_cg_frame = "";
     // S2: a value-form sub-expression never participates in block regions (the Teko twin's
     // emit_branch_value passes empty block context + empty fn_body). Clear/restore the whole block
@@ -2832,6 +2847,12 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
     // ret_type is the FUNCTION's return type (not VOID): a non-last statement may itself be a
     // `return e` (e.g. `_ => { if cond { return error{…} }; v }`), and that `return` must wrap its
     // value into the fn's return slot (g_cg_ret_type) — a VOID slot left an error returned bare.
+    // S2 (DEFERRED — value-position arm regions): a value-form arm yields a TAIL value used OUTSIDE the
+    // arm (→ `sink`). Opening an arm region here would require threading the region/escape context
+    // through the WHOLE expression emitter; the FUNCTIONAL Teko twin (emit_expr has no region params,
+    // no mutable globals) cannot mirror that without a pervasive call-site change, so value-position arm
+    // regions are deferred (the arm's bindings fall back to the enclosing/root region — W8 leak-safe,
+    // never a UAF), keeping the C and Teko twins byte-aligned. Only STATEMENT-position arms get regions.
     for (size_t i = 0; i + 1 < n; i += 1)
         if (!emit_stmt(b, &body[i], /*in_main=*/false, g_cg_ret_type, commit_indent, err)) return false;
     if (n == 0) return fail_node(err, "codegen: empty match arm body in value position");
@@ -2857,6 +2878,9 @@ static bool emit_arm_value(cbuf *b, const tk_texpr *match_e, const tk_tstatement
 static bool emit_match_value(cbuf *b, const tk_texpr *e, const char **err) {
     // MEM Step 1: a value-form `match` is a SUB-EXPRESSION — emit its arm statements FRAMELESS
     // (the Teko twin's emit_arm_value threads frame=""). Save/restore around the whole expansion.
+    // S2: clear the whole block context (the Teko value-form emitter passes empty block context +
+    // empty fn_body) so a binding inside a value-form arm never block-routes — byte-identical twins.
+    // (Value-position arm regions are DEFERRED — see emit_arm_value.)
     const char *saved = g_cg_frame; g_cg_frame = "";
     const tk_tstatement *saved_blk = g_cg_cur_block; g_cg_cur_block = NULL;
     size_t saved_depth = g_cg_block_depth; g_cg_block_depth = 0;
@@ -2993,7 +3017,9 @@ static bool emit_match_stmt(cbuf *b, const tk_texpr *e, bool in_main, tk_type re
         // Run the arm body BLOCK for effect (value discarded); any break/continue/return
         // inside it propagates via C's own semantics. Thread ret_type so `return null`
         // inside an arm wraps null correctly into the enclosing function's return slot.
-        if (!emit_block(b, arm->body, arm->nbody, in_main, ret_type, ci, err)) return false;
+        // S2 — the arm body gets its OWN arm region for its block-local bindings (emit_block_region),
+        // dropped at the arm's fall-through / via the region stack on break/continue/return.
+        if (!emit_block_region(b, arm->body, arm->nbody, in_main, ret_type, ci, err)) return false;
         cb(b, ci); cb(b, "goto "); cb(b, done); cb(b, ";\n");   // first match wins → stop the search
         if (arm->has_when) { cb(b, inner2); cb(b, "}\n"); }
         cb(b, inner); cb(b, "}\n");
@@ -3020,6 +3046,41 @@ static bool emit_block(cbuf *b, const tk_tstatement *body, size_t n, bool in_mai
         if (!emit_stmt(b, &body[i], in_main, ret_type, indent, err)) { g_cg_frame = saved; return false; }
     }
     g_cg_frame = saved;
+    return true;
+}
+
+// emit_block_region — S2: emit an ARM block (if-then / if-else / match-arm body) in STATEMENT
+// position. Treated EXACTLY like a loop body except the region is an ARM region (is_loop=false): it
+// is opened at block entry when the block has a provably block-local binding (is_value=false — a
+// statement-arm yields no consumed value), block-locals route to it, and it is dropped on the normal
+// fall-through past the arm. break/continue/return inside the arm drop it via the region-stack
+// helpers (a break/continue CROSSES it down to the target loop; a return drops everything). No
+// block-local binding ⇒ no region ⇒ byte-identical to emit_block (the pre-S2 statement-arm path).
+static bool emit_block_region(cbuf *b, const tk_tstatement *body, size_t n, bool in_main,
+                              tk_type ret_type, const char *indent, const char **err) {
+    bool want_block = cg_block_has_block_local(body, n, /*is_value=*/false)
+                      && g_cg_block_depth < TK_CG_MAX_BLOCK_REGIONS;
+    if (!want_block) return emit_block(b, body, n, in_main, ret_type, indent, err);
+    // Open the arm region. Name by the buffer length at the creation point (the deterministic
+    // `_tkbr<len>` uniquifier — matches the Teko twin's out.len read without a counter).
+    snprintf(g_cg_block_names[g_cg_block_depth], sizeof g_cg_block_names[g_cg_block_depth], "_tkbr%zu", (size_t)b->len);
+    const char *region = g_cg_block_names[g_cg_block_depth];
+    cb(b, indent); cb(b, "tk_region *"); cb(b, region); cb(b, " = tk_region_new();\n");
+    g_cg_block_stack[g_cg_block_depth].name  = region;
+    g_cg_block_stack[g_cg_block_depth].label = (tk_str){ .ptr = NULL, .len = 0 };
+    g_cg_block_stack[g_cg_block_depth].is_loop = false;   // an ARM region is never a break/continue target
+    g_cg_block_depth += 1;
+    // Emit the body with THIS block as the current block context (so block-local bindings route to
+    // `region`) and the augmented region stack. emit_block clears g_cg_frame (sub-scope leaks the
+    // frame — SAFE). Save/restore the prior block context for nesting.
+    const tk_tstatement *saved_blk = g_cg_cur_block; size_t saved_bn = g_cg_cur_block_n; bool saved_bv = g_cg_cur_block_is_value;
+    g_cg_cur_block = body; g_cg_cur_block_n = n; g_cg_cur_block_is_value = false;
+    bool ok = emit_block(b, body, n, in_main, ret_type, indent, err);
+    g_cg_cur_block = saved_blk; g_cg_cur_block_n = saved_bn; g_cg_cur_block_is_value = saved_bv;
+    if (!ok) { g_cg_block_depth -= 1; return false; }
+    // Normal fall-through exit edge: drop the arm region (idempotent + nulled for overlap safety).
+    cb(b, indent); cb(b, "tk_region_drop("); cb(b, region); cb(b, "); "); cb(b, region); cb(b, " = NULL;\n");
+    g_cg_block_depth -= 1;
     return true;
 }
 
@@ -3117,11 +3178,14 @@ static bool emit_if_stmt(cbuf *b, const tk_texpr *e, bool in_main,
     if (!emit_expr(b, e->as.if_expr.cond, err)) return false;
     cb(b, ") {\n");
     char inner[64]; snprintf(inner, sizeof inner, "%s    ", indent);
-    if (!emit_block(b, e->as.if_expr.then_blk, e->as.if_expr.nthen, in_main, ret_type, inner, err))
+    // S2 — each statement-position branch gets its OWN arm region (emit_block_region) for its
+    // provably block-local bindings, dropped at the branch's fall-through / via the region stack on
+    // break/continue/return. A branch with no block-local binding opens none → byte-identical.
+    if (!emit_block_region(b, e->as.if_expr.then_blk, e->as.if_expr.nthen, in_main, ret_type, inner, err))
         return false;
     if (e->as.if_expr.has_else) {
         cb(b, indent); cb(b, "} else {\n");
-        if (!emit_block(b, e->as.if_expr.else_blk, e->as.if_expr.nelse, in_main, ret_type, inner, err))
+        if (!emit_block_region(b, e->as.if_expr.else_blk, e->as.if_expr.nelse, in_main, ret_type, inner, err))
             return false;
     }
     cb(b, indent); cb(b, "}\n");
@@ -3293,6 +3357,7 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
                 cb(b, inner); cb(b, "tk_region *"); cb(b, region); cb(b, " = tk_region_new();\n");
                 g_cg_block_stack[g_cg_block_depth].name  = region;
                 g_cg_block_stack[g_cg_block_depth].label = lbl;
+                g_cg_block_stack[g_cg_block_depth].is_loop = true;   // a loop region IS a break/continue target
                 g_cg_block_depth += 1;
             }
             // Emit the body with THIS block as the current block context (so block-local bindings
@@ -4230,6 +4295,13 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
     size_t last_stmt = prog.nitems;   // sentinel: no loose statements
     for (size_t i = 0; i < prog.nitems; i += 1)
         if (prog.items[i].tag == TK_TITEM_STATEMENT) last_stmt = i;
+    // S2 — reset the per-function block-region context for the virtual main: empty fn_body + empty
+    // block context so a statement-arm in main computes block-locality against an EMPTY fn_body
+    // (total reads = 0 ⇒ never block-local ⇒ no region), matching the Teko twin which threads empty
+    // escaping/fn_body into the main path. (Main is virtual: statements + `use` only.)
+    g_cg_fn_body = NULL; g_cg_fn_nbody = 0; g_cg_block_depth = 0;
+    g_cg_cur_block = NULL; g_cg_cur_block_n = 0; g_cg_cur_block_is_value = false;
+    g_cg_escaping = (tk_escape_set){0};
     // main captures argv so teko::env::args() (tk_rt_args) can return it; tk_set_args first.
     cb(&b, "int main(int argc, char **argv) {\n");
     cb(&b, "    tk_set_args(argc, argv);\n");
