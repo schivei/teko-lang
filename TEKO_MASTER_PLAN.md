@@ -595,7 +595,7 @@ start until the previous wave's integration gate passes: **build green + VM==nat
 **⚠️ KNOWN LIMITATIONS (documented; native correct / not blocking):**
 - **VM wrapper-descent** — VM `type_eq` can't distinguish same-inner single-field wrappers (`Ref`/`Ptr`/`Optional`/`Slice`); NATIVE is correct via tags. VM-only (tests); keep VM tests nominal-direct. [[teko-vm-wrapper-descent-bug]]
 - **`tk_opt_<T>` typedef gap** — a struct's UNREAD optional self-ref field (`next: Node?`) doesn't register its `tk_opt_<T>` typedef → cc fails. The `Ref<T?>`-param case was fixed; the general field case remains. Pre-existing codegen; fix during a codegen pass.
-- **compound op through `Ref<T?>`** — moot (nullable generic args, incl. `Ref<T?>`, are now PROHIBITED — see [[teko-generics-constraints-rules]]).
+- **nullable generic args** (`Box<i64?>`/`List<Foo?>`/`Ref<i64?>`) — ✅ **SUPPORTED** (user reversal 2026-06-29; the brief prohibition was never implemented). The divergence behind them was a PRE-EXISTING VM bug — struct-literal construction didn't present-wrap an optional field from a bare value — now FIXED with native parity (`coerce_to` on the declared field type; mirrors `emit_struct_init`'s per-field `emit_as`). The `<T?>`/`<T: C?>` DECLARATION ban stays. [[teko-generics-constraints-rules]]
 - **#41 namespace-aware TYPE resolution** — latent (corpus has zero cross-namespace type-name collisions); revisit if a collision is introduced.
 
 **Deferred ceilings (never enter the sequence):** borrow-solver / lifetime-variable system; region-polymorphism. Implicit-copy-on-escape → tribunal (lean: NO). *(async/await → W14; M:N scheduler → W13 — both removed from deferred.)*
