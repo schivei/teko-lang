@@ -602,7 +602,7 @@ start until the previous wave's integration gate passes: **build green + VM==nat
 | | **C11.2** quality sweep — checker | `chk`, `match`, `collect`, `res`, `scope`, `tast` | | |
 | | **C11.3** quality sweep — codegen + vm | `cg`, `vm` | | |
 | | **C11.4** quality sweep — emit + runtime + build + assert + main | `tkb`, `rt`, `build`, `assert`, `main` | **4** | DRY ✓ · KISS ✓ · SOLID ✓ · YAGNI ✓ · 12F-III/V/IX/XI/XII ✓ · comments `/** */` · VM==native |
-| **W16** | **C12.1** self-host RAW byte-identity — make the codegen temp-name (gensym) scheme deterministic in BOTH `codegen.c` and `codegen.tks` (today both use `buf.len`, which requires byte-for-byte-identical emission at every sampling point; a single sub-byte timing diff cascades into all temp NUMBERS). gen-1 (C bootstrap) vs gen-2 (self-hosted) currently differ ONLY in temp numbers (temp-normalized AND all-number-normalized diff = 0; 178 tests × 3 gens). NOTE: gen-2 == gen-3 ALREADY (self-hosted compiler is a stable FIXPOINT) — the divergence is only the one-time C→self-host transition. Verify via MULTI-GENERATION convergence (gen-1==gen-2==gen-3==…). *(deps: self-host green ✅; defer codegen parity ✅ commit 52a544a)* | `cg` | **1** | gen-1 == gen-2 byte-identical + 178 tests × N gens |
+| ~~**W16**~~ | ❌ **DROPPED (user 2026-06-30) — OBVIATED, will NOT execute.** It chased raw gen-1==gen-2 byte-identity of the EMITTED C. But (a) gen-2==gen-3 is ALREADY byte-identical (stable fixpoint — the meaningful property), and (b) the native-byte backend RETIRES C emission entirely, so "g1==g2 of the C" loses its object. Not deferred — obviated. | — | — | dropped (no C emission post native backend) |
 
 ### ⚙️ IMPLEMENTATION PARALLELIZATION (re-derived 2026-06-30 — after the full OOP / DI / async / constraints design)
 
@@ -632,7 +632,7 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 - **`teko::env` as `Map<str,str?>`** — needs Map.
 - **async/concurrency S8** — needs OOP + closures✅ + arena-tree + DI (Context). Sub-PARALLEL: (a) `async`/`await` + `Intent` core; (b) `teko::threading` run/routines/Channels; (c) `teko::sync` Mutex/RwLock/Semaphore/Atomic/Once/Barrier; (d) `teko::Context`.
 
-**🟢 ROUND 6 — finalize (LAST):** **quality sweep** (DRY/KISS/SOLID + comment-hygiene, whole corpus) · **W16 byte-identity** (deterministic gensym).
+**🟢 ROUND 6 — finalize (LAST):** **quality sweep** (DRY/KISS/SOLID + comment-hygiene, whole corpus). *(W16 byte-identity DROPPED — obviated by the native backend; gen-2==gen-3 already holds.)*
 
 **Critical path:** GATE → A1 → CLASS/IF → C2 → DI → S8. W11 constraints join at D2; collections gate `env` and feed async types. **Widest parallelism:** Rounds 1, 3, 4, and the async sub-parts in Round 5.
 
@@ -641,7 +641,7 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 **⏸️ DEFERRED (intentionally postponed; will revisit):**
 - ✅ ~~**value-position `Ref` in the VM**~~ **DONE** (`b18b634`, 2026-06-29) — `let y = bump(x)` (ref-mutating call whose result is consumed) now RUNS in the VM == native (scalar + non-scalar); `eval_expr` cell-threading landed, no more honest-stop. (Was deferred here; resolved.)
 - **`Ref<T>` struct representation `{ value: ptr<T>? }`** — today `Ref<T>` lowers to a bare `<T> *`. The struct-with-nullable-pointer/metadata rep is the shape for when a nullable ref / region metadata is actually needed. **NOTE (2026-06-30): DI/lifetimes are now DESIGNED (W10c) and use a SEPARATE handle `LazyRef<T>`, not this — so this rep stays "if needed" for region metadata, no longer gated on DI.**
-- **W16 raw gen-1==gen-2 byte-identity** — gen-2==gen-3 IS byte-identical (stable fixpoint); only the one-time C→self-host transition differs by cosmetic gensym numbers (temp-normalized diff = 0). Deterministic-gensym scheme deferred to W16.
+- ❌ ~~**W16 raw gen-1==gen-2 byte-identity**~~ **DROPPED (user 2026-06-30)** — gen-2==gen-3 is already byte-identical (the meaningful fixpoint); the native-byte backend retires C emission, obviating raw g1==g2-of-the-C. Not deferred — won't execute.
 - **C-emission reps are provisional** — `ptr<T>`/`Ref<T>`/regions are shaped by the transpile-to-C backend; likely reworked at the future native-byte backend (not yet scheduled).
 
 **🚧 BLOCKED (needs a prerequisite):**
@@ -649,7 +649,7 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 
 **⚠️ KNOWN LIMITATIONS (documented; native correct / not blocking):**
 - **VM wrapper-descent** — VM `type_eq` can't distinguish same-inner single-field wrappers (`Ref`/`Ptr`/`Optional`/`Slice`); NATIVE is correct via tags. VM-only (tests); keep VM tests nominal-direct. [[teko-vm-wrapper-descent-bug]]
-- **`tk_opt_<T>` typedef gap** — a struct's UNREAD optional self-ref field (`next: Node?`) doesn't register its `tk_opt_<T>` typedef → cc fails. The `Ref<T?>`-param case was fixed; the general field case remains. Pre-existing codegen; fix during a codegen pass.
+- 🔧 **`tk_opt_<T>` typedef gap — FIX IN PROGRESS (2026-06-30, user: "it's a bug, not deferred").** Root-caused: `cg_emit_types_ordered` collects optional/slice/variant typedefs from functions+statements only, SKIPPING `TK_TITEM_TYPE_DECL` → a struct field's optional type that never surfaces in an expression gets no `tk_opt_<T>` typedef → cc fails ("unknown type tk_opt_Node"). REPRODUCED. Fix = a `cg_te_to_type` converter + collect TYPE_DECL field type-anns LAST (dedup → corpus byte-identical preserved), both twins. Verify-both gate in flight.
 - **nullable generic args** (`Box<i64?>`/`List<Foo?>`/`Ref<i64?>`) — ✅ **SUPPORTED** (user reversal 2026-06-29; the brief prohibition was never implemented). The divergence behind them was a PRE-EXISTING VM bug — struct-literal construction didn't present-wrap an optional field from a bare value — now FIXED with native parity (`coerce_to` on the declared field type; mirrors `emit_struct_init`'s per-field `emit_as`). The `<T?>`/`<T: C?>` DECLARATION ban stays. [[teko-generics-constraints-rules]]
 - ✅ ~~bare `T` → `T?` parameter~~ **FIXED** (commit bb32be7) — law-first ruling (present-wrap, by uniformity with field/return positions): checker keeps the arg's narrow type for a bare→optional widen, codegen call-loop + VM `bind_call_args` present-wrap. VM==native, both engines.
 - ✅ ~~`[]T` → `[]T?` slice covariance~~ **FIXED** (commit bb32be7) — codegen `cg_wrap_elem_str` present-wraps optional elements (variant covariance preserved); VM `coerce_to` gains a Slice rebuild case. Field/param/binding/return positions all rebuild `[]T?` uniformly. 8 new tests, gen-2==gen-3 byte-identical.
