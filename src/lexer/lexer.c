@@ -391,6 +391,8 @@ static tk_scan_result read_string_body(tk_str source, size_t pos, size_t inner,
                     p += 2;
                     continue;
                 }
+                if (depth == 0 && c == '{' && at(source, p + 1) == '{') { p += 2; continue; }   // `{{` literal — depth unchanged
+                if (depth == 0 && c == '}' && at(source, p + 1) == '}') { p += 2; continue; }   // `}}` literal — depth unchanged
                 if (c == '{') { depth += 1; p += 1; continue; }
                 if (c == '}') { if (depth > 0) depth -= 1; p += 1; continue; }
                 if (depth == 0 && str_close_at(source, p, multiline)) {
@@ -410,6 +412,12 @@ static tk_scan_result read_string_body(tk_str source, size_t pos, size_t inner,
         for (;;) {
             if (p >= source.len) { tk_lex_bytes_free(bytes); return scan_err_at(source, pos, "unterminated interpolated string"); }
             tk_byte c = source.ptr[p];
+            if (depth == 0 && c == '{' && at(source, p + 1) == '{') {   // `{{` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = tk_lex_bytes_push(bytes, '{'); bytes = tk_lex_bytes_push(bytes, '{'); p += 2; continue;
+            }
+            if (depth == 0 && c == '}' && at(source, p + 1) == '}') {   // `}}` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = tk_lex_bytes_push(bytes, '}'); bytes = tk_lex_bytes_push(bytes, '}'); p += 2; continue;
+            }
             if (c == '{') { depth += 1; bytes = tk_lex_bytes_push(bytes, c); p += 1; continue; }
             if (c == '}') { if (depth > 0) depth -= 1; bytes = tk_lex_bytes_push(bytes, c); p += 1; continue; }
             if (c == '"' && depth == 0) {

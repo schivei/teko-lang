@@ -361,6 +361,8 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
                     p = p + 2
                     continue
                 }
+                if depth == 0 && c == b'{' && at(source, p + 1) == b'{' { p = p + 2; continue }   // `{{` literal — depth unchanged
+                if depth == 0 && c == b'}' && at(source, p + 1) == b'}' { p = p + 2; continue }   // `}}` literal — depth unchanged
                 if c == b'{' { depth = depth + 1; p++; continue }
                 if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
                 if depth == 0 && str_close_at(source, p, multiline) {
@@ -377,6 +379,12 @@ fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_ver
         loop {
             if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
             let c = source[p]
+            if depth == 0 && c == b'{' && at(source, p + 1) == b'{' {   // `{{` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = teko::list::push(bytes, b'{'); bytes = teko::list::push(bytes, b'{'); p = p + 2; continue
+            }
+            if depth == 0 && c == b'}' && at(source, p + 1) == b'}' {   // `}}` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = teko::list::push(bytes, b'}'); bytes = teko::list::push(bytes, b'}'); p = p + 2; continue
+            }
             if c == b'{' { depth = depth + 1; bytes = teko::list::push(bytes, c); p++; continue }
             if c == b'}' { if depth > 0 { depth = depth - 1 }; bytes = teko::list::push(bytes, c); p++; continue }
             if c == b'"' && depth == 0 {

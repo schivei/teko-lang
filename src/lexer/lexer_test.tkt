@@ -189,3 +189,22 @@ fn interp_raw_token_text_is_resolved() {
     // multi-line verbatim: lone `"` literal — `$@"""a"b{1}c"""` → inner `a"b{1}c`.
     teko::assert::is_true(one_str_text("$@\"\"\"a\"b{1}c\"\"\"") == "a\"b{1}c")
 }
+
+// `{{`/`}}` doubling: the LEXER finds the closing quote correctly even with unbalanced literal
+// braces at depth 0. Plain Interp keeps the raw VIEW (parser collapses `{{`→`{`); verbatim
+// InterpRaw PRESERVES `{{`/`}}` as two bytes AS-IS (parser still does the collapse).
+#test
+fn lexes_brace_doubling_close_finding() {
+    // plain interp: `$"a{{b}}c"` is ONE Interp token (close found; braces balanced literal).
+    teko::assert::is_true(kinds_eq("$\"a{{b}}c\"", [TokenKind::Interp]))
+    // plain interp UNBALANCED literal brace before the close: `$"a{{"` — close still found.
+    teko::assert::is_true(kinds_eq("$\"a{{\"", [TokenKind::Interp]))
+    // plain interp token text is the raw VIEW (parser decodes): `$"a{{b}}c"` → `a{{b}}c`.
+    teko::assert::is_true(one_str_text("$\"a{{b}}c\"") == "a{{b}}c")
+    // plain interp ending in a literal brace: `$"a{{"` → view `a{{`.
+    teko::assert::is_true(one_str_text("$\"a{{\"") == "a{{")
+    // verbatim interp PRESERVES `{{`/`}}` as two bytes: `$@"{{x}}"` → inner `{{x}}`.
+    teko::assert::is_true(one_str_text("$@\"{{x}}\"") == "{{x}}")
+    // order-free verbatim: `@$"{{x}}"` → inner `{{x}}` (preserved for the parser to collapse).
+    teko::assert::is_true(one_str_text("@$\"{{x}}\"") == "{{x}}")
+}

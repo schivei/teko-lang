@@ -160,6 +160,9 @@ static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos, bo
                 return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, pos, "unknown escape in interpolated string") }; }
             i = ni; continue;
         }
+        // `{{` → one literal `{`, `}}` → one literal `}` (doubling at brace-depth 0 only).
+        if (c == '{' && i + 1 < raw.len && raw.ptr[i + 1] == '{') { piece_push(&cur, '{'); i += 2; continue; }
+        if (c == '}' && i + 1 < raw.len && raw.ptr[i + 1] == '}') { piece_push(&cur, '}'); i += 2; continue; }
         if (c == '{') {
             // close the literal piece BEFORE this hole.
             tk_strvec_push(&pieces, &npieces, piece_to_str(&cur));
