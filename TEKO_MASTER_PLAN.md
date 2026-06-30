@@ -199,7 +199,7 @@ compile+link gate which is now the milestone reached.
 - **S8** concurrency CAPSTONE (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`→`T|error`; 1:1 OS threads first).
 - **S9** LTS cleanup (collapse `Parsed<T> ×14` → `Result<T>`; unify per-type `parse`/`to_string`).
 **Reserved (don't freeze syntax until parser + real duplication data exist):** arena/scope surface, the three `ref` positions, the five concurrency primitives.
-**Deferred ceilings (keep deferred):** borrow-solver / lifetime-variable system; region-polymorphism. **Tribunal micro-decision:** implicit copy-out of a very small escaping value (default lean: NO implicit copy). *(async/await → S10/W14; M:N scheduler → S8/W13 — both removed from deferred and scheduled.)*
+**Deferred ceilings (keep deferred):** borrow-solver / lifetime-variable system; region-polymorphism. **Tribunal micro-decision:** implicit copy-out of a very small escaping value (default lean: NO implicit copy). *(async/await + concurrency → unified in **S8/ASYNC**, DESIGNED 2026-06-30, no longer deferred; old separate S10/W14 + S8/W13 rows superseded; M:N scheduler is a later backing under the same surface, 1:1 threads first.)*
 
 ### Phase 11 — Code quality sweep  *(§A.5 — LAST)*  ⬜ TODO (W15)
 **Goal:** settle the corpus permanently: kill redundancy, enforce simplicity, validate architectural boundaries, and normalize documentation. Every principle below is applied once, to stable code, so it never has to be re-applied.
@@ -639,8 +639,8 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 ### DEFERRED · BLOCKED · KNOWN LIMITATIONS (the single consolidated list — everything `⏸️`/`🚧`/`⚠️`)
 
 **⏸️ DEFERRED (intentionally postponed; will revisit):**
-- **value-position `Ref` in the VM** — `let y = bump(x)` (a ref-mutating call whose result is consumed) honest-stops in the VM; native runs it. STATEMENT-position is complete (covers the brevity refactors). Full fix = thread the cell store through `eval_expr` (large ripple). Revisit when a corpus/user need arises or at the native-byte backend.
-- **`Ref<T>` struct representation `{ value: ptr<T>? }`** — today `Ref<T>` lowers to a bare `<T> *`. The struct-with-nullable-pointer rep is the shape for when a nullable ref / metadata is actually needed (W10 lifetime annotations / DI). "If needed."
+- ✅ ~~**value-position `Ref` in the VM**~~ **DONE** (`b18b634`, 2026-06-29) — `let y = bump(x)` (ref-mutating call whose result is consumed) now RUNS in the VM == native (scalar + non-scalar); `eval_expr` cell-threading landed, no more honest-stop. (Was deferred here; resolved.)
+- **`Ref<T>` struct representation `{ value: ptr<T>? }`** — today `Ref<T>` lowers to a bare `<T> *`. The struct-with-nullable-pointer/metadata rep is the shape for when a nullable ref / region metadata is actually needed. **NOTE (2026-06-30): DI/lifetimes are now DESIGNED (W10c) and use a SEPARATE handle `LazyRef<T>`, not this — so this rep stays "if needed" for region metadata, no longer gated on DI.**
 - **W16 raw gen-1==gen-2 byte-identity** — gen-2==gen-3 IS byte-identical (stable fixpoint); only the one-time C→self-host transition differs by cosmetic gensym numbers (temp-normalized diff = 0). Deterministic-gensym scheme deferred to W16.
 - **C-emission reps are provisional** — `ptr<T>`/`Ref<T>`/regions are shaped by the transpile-to-C backend; likely reworked at the future native-byte backend (not yet scheduled).
 
@@ -657,6 +657,6 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 
 **Deferred ceilings (never enter the sequence):** borrow-solver / lifetime-variable system; region-polymorphism. Implicit-copy-on-escape → tribunal (lean: NO). *(async/await + concurrency → unified in **S8/ASYNC**, DESIGNED 2026-06-30, no longer deferred; old separate W13/W14 rows superseded; M:N scheduler is a later backing under the same surface, 1:1 threads first.)*
 
-**Bottlenecks:** `cg`/`vm`/`rt`/`tkb`/`chk` serialize across waves (single-owner). New-namespace files (W7–W14) have no concurrency constraint. Wave widths 1–5 are capped by these bottlenecks, not by agent count.
+**Bottlenecks:** `cg`/`vm`/`rt`/`tkb`/`chk` serialize across waves (single-owner) — these gate the parallel rounds in "⚙️ IMPLEMENTATION PARALLELIZATION" above. New-namespace files (`teko::collections`/`teko::threading`/`teko::sync`/`src/async`) have no concurrency constraint. Round widths are capped by these bottlenecks, not by agent count.
 
 **STANDING (from W8 on, user 2026-06-28):** ① **RAISE TEST COVERAGE every wave** — fold coverage into each step (don't lower the `teko.tkp [coverage]` floor; add tests that hit NEW branches) so no dedicated catch-up step is needed. ② **Build code via AGENTS** (draft + I integrate/gate; worktree isolation unreliable on this repo). ③ **SECURITY-FIRST** for the memory model (memory-safety by construction). ④ Continue waves autonomously (commit+push+fix-CI) until a real tension → HALT + surface.
