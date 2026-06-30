@@ -225,6 +225,29 @@ bool tk_str_contains(tk_str s, tk_str needle);
 // renderer as tk_ftoa, exposed under the `f64_g17` name the checker/codegen reference).
 tk_str tk_f64_g17(double x);
 
+// --- ROUND 0: UTF-8 codepoint operations (char_at / str_slice_chars / is_alpha / is_digit /
+//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks, vm.c/.tks. ---
+//
+// tk_char_at — the UTF-8 codepoint at 0-based codepoint index i in s. Panics if out of range.
+// Returns a tk_char view INTO s.ptr (no copy); the caller must ensure s outlives the result.
+tk_char tk_char_at(tk_str s, int64_t i);
+// tk_str_slice_chars — the substring from codepoint index `from` (inclusive) to `to` (exclusive),
+// returned as a FRESH owned str (copied). Panics if from > to or to > len_chars(s). (M.1)
+tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to);
+// tk_is_alpha — true if the codepoint is a Unicode letter. For single-byte ASCII uses isalpha(3);
+// for multibyte codepoints (lead byte ≥ 0x80) returns true (simplified ROUND 0 rule).
+bool tk_is_alpha(tk_char c);
+// tk_is_digit — true iff the codepoint is an ASCII decimal digit '0'–'9'.
+bool tk_is_digit(tk_char c);
+// tk_is_space — true iff the codepoint is ASCII whitespace (' ', '\t', '\n', '\r', '\f', '\v').
+bool tk_is_space(tk_char c);
+// tk_to_lower — ASCII lowercase: 'A'–'Z' → 'a'–'z'; non-ASCII chars are returned unchanged.
+// Returns a tk_char that either borrows the source bytes (non-ASCII) or a static 1-byte store
+// (ASCII — the result is valid for the program lifetime).
+tk_char tk_to_lower(tk_char c);
+// tk_to_upper — ASCII uppercase: 'a'–'z' → 'A'–'Z'; non-ASCII chars are returned unchanged.
+tk_char tk_to_upper(tk_char c);
+
 // =========================================================================
 // Host-FFI + arithmetic bottoms (Phase 7 / scope.c builtin_fn surface).
 //

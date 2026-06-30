@@ -1706,9 +1706,20 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     else if (seg_is(last, "slice_to"))    builtin = "tk_str_slice_to";   // (str,u64) -> str
                     else if (seg_is(last, "slice_from"))  builtin = "tk_str_slice_from"; // (str,u64) -> str
                     else if (seg_is(last, "len"))         builtin = "tk_str_len";        // (str) -> u64
-                    else if (seg_is(last, "chars"))       builtin = "tk_str_chars";      // (str) -> []char
-                    else if (seg_is(last, "len_chars"))   builtin = "tk_str_len_chars";  // (str) -> i64
-                    else if (seg_is(last, "ends_with"))   builtin = "tk_str_ends_with";  // (str,str) -> bool
+                    else if (seg_is(last, "chars"))              builtin = "tk_str_chars";         // (str) -> []char
+                    else if (seg_is(last, "len_chars"))          builtin = "tk_str_len_chars";     // (str) -> i64
+                    // ROUND 0: UTF-8 codepoint operations.
+                    // `char_at` and `str_slice_chars` are unique names (no user-function conflicts).
+                    // `is_alpha`, `is_digit`, `is_space`, `to_lower`, `to_upper` share names with
+                    // lexer.tks private helpers — guard with call_ns.len==0 (no resolved user fn).
+                    else if (seg_is(last, "char_at"))            builtin = "tk_char_at";           // (str, i64) -> char
+                    else if (seg_is(last, "str_slice_chars"))    builtin = "tk_str_slice_chars";   // (str, i64, i64) -> str
+                    else if (seg_is(last, "is_alpha") && e->as.call.call_ns.len == 0)   builtin = "tk_is_alpha";    // (char) -> bool
+                    else if (seg_is(last, "is_digit") && e->as.call.call_ns.len == 0)   builtin = "tk_is_digit";    // (char) -> bool
+                    else if (seg_is(last, "is_space") && e->as.call.call_ns.len == 0)   builtin = "tk_is_space";    // (char) -> bool
+                    else if (seg_is(last, "to_lower") && e->as.call.call_ns.len == 0)   builtin = "tk_to_lower";    // (char) -> char
+                    else if (seg_is(last, "to_upper") && e->as.call.call_ns.len == 0)   builtin = "tk_to_upper";    // (char) -> char
+                    else if (seg_is(last, "ends_with"))          builtin = "tk_str_ends_with";     // (str,str) -> bool
                     else if (seg_is(last, "contains"))    builtin = "tk_str_contains";   // (str,str) -> bool
                     // (last_index_of returns u64|error → lifted by emit_host_ffi above, not here)
                     else if (seg_is(last, "i64_to_str"))  builtin = "tk_i64_to_str";     // (i64) -> str

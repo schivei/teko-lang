@@ -152,6 +152,11 @@ tk_type_result tk_builtin_fn(tk_str name) {
     static tk_type bytes_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &byte_elem };  // []byte
     static tk_type char_elem = { .tag = TK_TYPE_CHAR };
     static tk_type char_slice_t = { .tag = TK_TYPE_SLICE, .as.slice.element = &char_elem };  // []char
+    static tk_type char_t = { .tag = TK_TYPE_CHAR };   // char (for char_at/to_lower/to_upper return + char-param builtins)
+    // (str, i64) — char_at / str_slice_chars first two params
+    static tk_type str_i64_p[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I64 } };
+    // (str, i64, i64) — str_slice_chars params
+    static tk_type str_i64_i64_p[3] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I64 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_I64 } };
     static tk_type slice_p[3] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 } };
     static tk_type str3_t[3]  = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_STR } };
     static tk_type str_u64_p[2] = { { .tag = TK_TYPE_STR }, { .tag = TK_TYPE_PRIM, .as.prim = TK_PRIM_U64 } };  // (str, u64)
@@ -198,6 +203,35 @@ tk_type_result tk_builtin_fn(tk_str name) {
     }
     if (name_is(name, "len_chars")) {                                 // str::len_chars(str) -> i64
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &i64_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    // --- ROUND 0: UTF-8 codepoint operations ---
+    if (name_is(name, "char_at")) {                                   // char_at(str, i64) -> char
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str_i64_p, .nparams = 2, .ret = &char_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "str_slice_chars")) {                           // str_slice_chars(str, i64, i64) -> str
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = str_i64_i64_p, .nparams = 3, .ret = &str_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "is_alpha")) {                                  // is_alpha(char) -> bool
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &char_t, .nparams = 1, .ret = &bool_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "is_digit")) {                                  // is_digit(char) -> bool
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &char_t, .nparams = 1, .ret = &bool_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "is_space")) {                                  // is_space(char) -> bool
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &char_t, .nparams = 1, .ret = &bool_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "to_lower")) {                                  // to_lower(char) -> char
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &char_t, .nparams = 1, .ret = &char_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
+    if (name_is(name, "to_upper")) {                                  // to_upper(char) -> char
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &char_t, .nparams = 1, .ret = &char_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
     if (name_is(name, "ends_with")) {                                 // str::ends_with(str, str) -> bool

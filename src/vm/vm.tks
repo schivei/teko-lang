@@ -618,6 +618,120 @@ fn try_str_builtin(callee: parser::Path, args: []checker::TExpr, env: Venv) -> V
         }
         return char_list
     }
+    // --- ROUND 0: UTF-8 codepoint operations ---
+    // char_at — (str, i64) -> char. Walk codepoints to index i, return the UTF-8 slice as a str
+    // (VM char representation). Panics if out of range (mirrors tk_char_at).
+    if last == "char_at" {
+        let s = as_str(ev_val(args[0], env))
+        let idx = as_int(ev_val(args[1], env)) to u64
+        let slen = teko::len(s)
+        mut pos: u64 = 0
+        mut ci: u64 = 0
+        mut found: str = ""
+        mut ok = false
+        loop {
+            if pos >= slen { break }
+            let b0 = s[pos] to u64
+            let w: u64 = if b0 < 0x80 to u64 { 1 to u64 }
+                         else if b0 < 0xC0 to u64 { 1 to u64 }
+                         else if b0 < 0xE0 to u64 { 2 to u64 }
+                         else if b0 < 0xF0 to u64 { 3 to u64 }
+                         else { 4 to u64 }
+            let end = if pos + w > slen { slen } else { pos + w }
+            if ci == idx { found = teko::slice(s, pos, end); ok = true; break }
+            ci = ci + 1
+            pos = end
+        }
+        if !ok { panic("char_at: codepoint index out of range") }
+        return found
+    }
+    // str_slice_chars — (str, i64, i64) -> str. Walk to byte offsets for `from`/`to` codepoints,
+    // return a fresh substring str. Mirrors tk_str_slice_chars.
+    if last == "str_slice_chars" {
+        let s = as_str(ev_val(args[0], env))
+        let from = as_int(ev_val(args[1], env)) to u64
+        let to   = as_int(ev_val(args[2], env)) to u64
+        let slen = teko::len(s)
+        mut pos: u64 = 0
+        mut ci: u64 = 0
+        mut byte_from: u64 = 0
+        mut byte_to: u64 = 0
+        mut found_from = false
+        mut found_to   = false
+        loop {
+            if ci == from { byte_from = pos; found_from = true }
+            if ci == to   { byte_to   = pos; found_to   = true; break }
+            if pos >= slen { break }
+            let b0 = s[pos] to u64
+            let w: u64 = if b0 < 0x80 to u64 { 1 to u64 }
+                         else if b0 < 0xC0 to u64 { 1 to u64 }
+                         else if b0 < 0xE0 to u64 { 2 to u64 }
+                         else if b0 < 0xF0 to u64 { 3 to u64 }
+                         else { 4 to u64 }
+            let end = if pos + w > slen { slen } else { pos + w }
+            ci = ci + 1
+            pos = end
+        }
+        // handle the case where `to` == codepoint count (end of string)
+        if !found_to { if ci == to { byte_to = pos; found_to = true } }
+        if !found_from || !found_to { panic("str_slice_chars: codepoint index out of range") }
+        return teko::slice(s, byte_from, byte_to)
+    }
+    // is_alpha — (char) -> bool. char in VM is a str. Extract first byte; non-ASCII → true.
+    // GUARD: if the first argument evaluates to a non-str value (e.g., byte/int from a user
+    // function named is_alpha), return null so the caller falls through to user fn resolution.
+    if last == "is_alpha" {
+        let arg0 = ev_val(args[0], env)
+        match arg0 { str => { } ; _ => return null }   // non-str arg → fall through to user fn
+        let s = as_str(arg0)
+        let slen = teko::len(s)
+        if slen == 0 to u64 { return false }
+        let b = s[0 to u64] to u64
+        if b >= 0x80 to u64 { return true }   // non-ASCII → letter (ROUND 0 simplification)
+        return (b >= 0x41 to u64 && b <= 0x5A to u64) || (b >= 0x61 to u64 && b <= 0x7A to u64)
+    }
+    // is_digit — (char) -> bool. ASCII '0'–'9' only; multibyte → false. Same guard.
+    if last == "is_digit" {
+        let arg0 = ev_val(args[0], env)
+        match arg0 { str => { } ; _ => return null }   // non-str arg → fall through to user fn
+        let s = as_str(arg0)
+        let slen = teko::len(s)
+        if slen == 0 to u64 { return false }
+        let b = s[0 to u64] to u64
+        return b >= 0x30 to u64 && b <= 0x39 to u64
+    }
+    // is_space — (char) -> bool. ASCII whitespace only; multibyte → false. Same guard.
+    if last == "is_space" {
+        let arg0 = ev_val(args[0], env)
+        match arg0 { str => { } ; _ => return null }   // non-str arg → fall through to user fn
+        let s = as_str(arg0)
+        let slen = teko::len(s)
+        if slen == 0 to u64 { return false }
+        let b = s[0 to u64] to u64
+        return b == 0x20 to u64 || b == 0x09 to u64 || b == 0x0A to u64 || b == 0x0D to u64 || b == 0x0C to u64 || b == 0x0B to u64
+    }
+    // to_lower — (char) -> char. ASCII 'A'–'Z' → 'a'–'z'; non-ASCII unchanged. Same guard.
+    if last == "to_lower" {
+        let arg0 = ev_val(args[0], env)
+        match arg0 { str => { } ; _ => return null }   // non-str arg → fall through to user fn
+        let s = as_str(arg0)
+        let slen = teko::len(s)
+        if slen == 0 to u64 { return s }
+        let b = s[0 to u64] to u64
+        if b >= 0x41 to u64 && b <= 0x5A to u64 { return teko::one_byte((b + 0x20 to u64) to byte) }
+        return s
+    }
+    // to_upper — (char) -> char. ASCII 'a'–'z' → 'A'–'Z'; non-ASCII unchanged. Same guard.
+    if last == "to_upper" {
+        let arg0 = ev_val(args[0], env)
+        match arg0 { str => { } ; _ => return null }   // non-str arg → fall through to user fn
+        let s = as_str(arg0)
+        let slen = teko::len(s)
+        if slen == 0 to u64 { return s }
+        let b = s[0 to u64] to u64
+        if b >= 0x61 to u64 && b <= 0x7A to u64 { return teko::one_byte((b - 0x20 to u64) to byte) }
+        return s
+    }
     if last == "ends_with"   { return teko::ends_with(as_str(ev_val(args[0], env)), as_str(ev_val(args[1], env))) }
     if last == "contains"    { return teko::contains(as_str(ev_val(args[0], env)), as_str(ev_val(args[1], env))) }
     // str_* prefixed aliases — teko::runtime::str_* forms (last segment = "str_eq", "str_len", etc.).

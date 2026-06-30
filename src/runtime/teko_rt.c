@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #endif
 #include "teko_rt.h"
+#include <ctype.h>    // isalpha (ROUND 0 UTF-8 codepoint ops)
 #include <stdio.h>    // fwrite, fputc, fputs, stdout, stderr
 #include <stdlib.h>   // abort, malloc, free, _Exit
 #include <string.h>   // memcpy
@@ -356,6 +357,134 @@ tk_str tk_f64_g17(double x) {
     if (buf == NULL) tk_panic("out of memory (f64_g17)");
     if (len) memcpy(buf, tmp, len);
     return (tk_str){ buf, len };
+}
+
+// --- ROUND 0: UTF-8 codepoint operations ---
+
+// tk_char_at — return the tk_char at 0-based codepoint index i in s. Panics if out of range.
+// The returned tk_char borrows INTO s.ptr (no copy).
+tk_char tk_char_at(tk_str s, int64_t i) {
+    if (i < 0) tk_panic("char_at: negative codepoint index");
+    uint64_t idx = (uint64_t)i;
+    size_t pos = 0;
+    uint64_t ci = 0;
+    while (pos < s.len) {
+        size_t w = utf8_lead_len(s.ptr[pos]);
+        if (w > s.len - pos) w = s.len - pos;  // clamp at string end
+        if (ci == idx) return (tk_char){ (uint8_t *)(s.ptr + pos), (uint64_t)w };
+        ci  += 1;
+        pos += w;
+    }
+    tk_panic("char_at: codepoint index out of range");
+}
+
+// tk_str_slice_chars — substring from codepoint index `from` (inclusive) to `to` (exclusive),
+// returned as a fresh owned str (copied). Panics if from > to or to > codepoint count.
+tk_str tk_str_slice_chars(tk_str s, int64_t from, int64_t to) {
+    if (from < 0 || to < 0) tk_panic("str_slice_chars: negative codepoint index");
+    uint64_t ufrom = (uint64_t)from, uto = (uint64_t)to;
+    if (ufrom > uto) tk_panic("str_slice_chars: from > to");
+    // walk to byte offsets for `from` and `to`
+    size_t byte_from = 0, byte_to = 0;
+    uint64_t ci = 0;
+    size_t pos = 0;
+    while (pos <= s.len) {
+        if (ci == ufrom) byte_from = pos;
+        if (ci == uto)   { byte_to = pos; break; }
+        if (pos == s.len) {
+            // ran out of codepoints before reaching `to`
+            tk_panic("str_slice_chars: codepoint index out of range");
+        }
+        size_t w = utf8_lead_len(s.ptr[pos]);
+        if (w > s.len - pos) w = s.len - pos;
+        ci  += 1;
+        pos += w;
+    }
+    if (ufrom > uto) tk_panic("str_slice_chars: from > to (post-walk)"); // unreachable but defensive
+    size_t n = byte_to - byte_from;
+    tk_byte *buf = malloc(n ? n : 1);
+    if (buf == NULL) tk_panic("out of memory (str_slice_chars)");
+    if (n) memcpy(buf, s.ptr + byte_from, n);
+    return (tk_str){ buf, n };
+}
+
+// tk_is_alpha — true if the codepoint is a Unicode letter. ASCII: uses isalpha(3).
+// Multibyte (lead byte >= 0x80): returns true (simplified ROUND 0 rule — all non-ASCII are
+// treated as letters; a future round may consult Unicode tables).
+bool tk_is_alpha(tk_char c) {
+    if (c.len == 0) return false;
+    uint8_t b0 = c.ptr[0];
+    if (b0 < 0x80) return (bool)isalpha((unsigned char)b0);
+    return true;  // non-ASCII codepoint → treated as letter (ROUND 0 simplification)
+}
+
+// tk_is_digit — true iff the codepoint is an ASCII decimal digit '0'–'9'. Multibyte → false.
+bool tk_is_digit(tk_char c) {
+    if (c.len == 0) return false;
+    uint8_t b0 = c.ptr[0];
+    if (b0 < 0x80) return b0 >= (uint8_t)'0' && b0 <= (uint8_t)'9';
+    return false;
+}
+
+// tk_is_space — true iff the codepoint is ASCII whitespace. Multibyte → false.
+bool tk_is_space(tk_char c) {
+    if (c.len == 0) return false;
+    uint8_t b0 = c.ptr[0];
+    if (b0 < 0x80) return b0 == ' ' || b0 == '\t' || b0 == '\n'
+                       || b0 == '\r' || b0 == '\f' || b0 == '\v';
+    return false;
+}
+
+// Static lowercase lookup table for ASCII (used by tk_to_lower / tk_to_upper).
+// Avoids calling tolower/toupper which are locale-dependent.
+static const uint8_t tk_ascii_lower[128] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,'0','1','2','3','4','5','6','7','8','9',
+    58,59,60,61,62,63,64,
+    'a','b','c','d','e','f','g','h','i','j','k','l','m',
+    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    91,92,93,94,95,96,
+    'a','b','c','d','e','f','g','h','i','j','k','l','m',
+    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    123,124,125,126,127
+};
+static const uint8_t tk_ascii_upper[128] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,
+    32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,'0','1','2','3','4','5','6','7','8','9',
+    58,59,60,61,62,63,64,
+    'A','B','C','D','E','F','G','H','I','J','K','L','M',
+    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+    91,92,93,94,95,96,
+    'A','B','C','D','E','F','G','H','I','J','K','L','M',
+    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+    123,124,125,126,127
+};
+
+// Per-ASCII-character static byte stores for tk_to_lower / tk_to_upper.
+// These are valid for the program lifetime so returned tk_char views are always safe.
+static uint8_t tk_lower_byte[128];
+static uint8_t tk_upper_byte[128];
+
+// tk_to_lower — ASCII lowercase. Non-ASCII chars returned unchanged (borrowed view).
+tk_char tk_to_lower(tk_char c) {
+    if (c.len == 0) return c;
+    uint8_t b0 = c.ptr[0];
+    if (b0 < 0x80) {
+        tk_lower_byte[b0] = tk_ascii_lower[b0];
+        return (tk_char){ &tk_lower_byte[b0], 1 };
+    }
+    return c;  // non-ASCII: return unchanged
+}
+
+// tk_to_upper — ASCII uppercase. Non-ASCII chars returned unchanged (borrowed view).
+tk_char tk_to_upper(tk_char c) {
+    if (c.len == 0) return c;
+    uint8_t b0 = c.ptr[0];
+    if (b0 < 0x80) {
+        tk_upper_byte[b0] = tk_ascii_upper[b0];
+        return (tk_char){ &tk_upper_byte[b0], 1 };
+    }
+    return c;  // non-ASCII: return unchanged
 }
 
 // ── Arena allocation (S1) — bump allocator over a chunk-list. See teko_rt.h. ──

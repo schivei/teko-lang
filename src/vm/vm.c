@@ -60,6 +60,14 @@ typedef struct { uint8_t *ptr; uint64_t len; } tk_char;  // mirrors teko_rt.h
 typedef struct { tk_char *ptr; uint64_t len; } tk_slice_char;
 tk_slice_char tk_str_chars(tk_str s);
 uint64_t      tk_str_len_chars(tk_str s);
+// ROUND 0 UTF-8 codepoint operations (linked from teko_rt.c).
+tk_char  tk_char_at(tk_str s, int64_t i);
+tk_str   tk_str_slice_chars(tk_str s, int64_t from, int64_t to);
+bool     tk_is_alpha(tk_char c);
+bool     tk_is_digit(tk_char c);
+bool     tk_is_space(tk_char c);
+tk_char  tk_to_lower(tk_char c);
+tk_char  tk_to_upper(tk_char c);
 void teko__assert__is_true(bool c);
 void teko__assert__is_false(bool c);
 void teko__assert__str_contains(tk_str hay, tk_str needle);
@@ -784,6 +792,84 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         if (sv.tag != TK_VAL_STR) vm_unsupported("len_chars on a non-str value (internal: checker should reject)");
         uint64_t n = tk_str_len_chars(sv.as.s);
         *out = v_int((unsigned __int128)n, true, 64); return true;
+    }
+    // --- ROUND 0: UTF-8 codepoint operations ---
+    // char_at — (str, i64) -> char. In the VM, char values are TK_VAL_STR.
+    if (seg_is(last, "char_at")) {
+        if (nargs != 2) vm_unsupported("char_at expects exactly two arguments (str, i64)");
+        tk_value sv = tk_vm_eval_expr(&args[0], env);
+        tk_value iv = tk_vm_eval_expr(&args[1], env);
+        if (sv.tag != TK_VAL_STR) vm_unsupported("char_at: first argument must be str");
+        int64_t idx = (int64_t)(unsigned __int128)v_as_u128(iv);
+        tk_char ch = tk_char_at(sv.as.s, idx);
+        // copy codepoint bytes into a fresh owned str so the VM char value outlives `sv`
+        tk_byte *buf = tk_alloc(ch.len ? ch.len : 1);
+        if (ch.len) memcpy(buf, ch.ptr, ch.len);
+        *out = v_str((tk_str){ buf, ch.len }); return true;
+    }
+    // str_slice_chars — (str, i64, i64) -> str. Returns a fresh owned str slice by codepoint.
+    if (seg_is(last, "str_slice_chars")) {
+        if (nargs != 3) vm_unsupported("str_slice_chars expects exactly three arguments (str, i64, i64)");
+        tk_value sv   = tk_vm_eval_expr(&args[0], env);
+        tk_value fromv = tk_vm_eval_expr(&args[1], env);
+        tk_value tov   = tk_vm_eval_expr(&args[2], env);
+        if (sv.tag != TK_VAL_STR) vm_unsupported("str_slice_chars: first argument must be str");
+        int64_t from = (int64_t)(unsigned __int128)v_as_u128(fromv);
+        int64_t to   = (int64_t)(unsigned __int128)v_as_u128(tov);
+        *out = v_str(tk_str_slice_chars(sv.as.s, from, to)); return true;
+    }
+    // is_alpha — (char) -> bool. In the VM, char is a TK_VAL_STR; extract first byte.
+    // GUARD: if the first argument is NOT a str (e.g., a byte/int from lexer's own is_alpha),
+    // fall through so the user-defined function is found instead (avoids shadowing lexer.tks).
+    if (seg_is(last, "is_alpha")) {
+        if (nargs != 1) return false;  // wrong arity → fall through to user fn
+        tk_value cv = tk_vm_eval_expr(&args[0], env);
+        if (cv.tag != TK_VAL_STR) return false;  // not a char value → fall through to user fn
+        tk_str cs = cv.as.s;
+        tk_char ch = { (uint8_t *)cs.ptr, cs.len };
+        *out = v_bool(tk_is_alpha(ch)); return true;
+    }
+    // is_digit — (char) -> bool. Same guard as is_alpha.
+    if (seg_is(last, "is_digit")) {
+        if (nargs != 1) return false;
+        tk_value cv = tk_vm_eval_expr(&args[0], env);
+        if (cv.tag != TK_VAL_STR) return false;  // byte/int → user fn's is_digit
+        tk_str cs = cv.as.s;
+        tk_char ch = { (uint8_t *)cs.ptr, cs.len };
+        *out = v_bool(tk_is_digit(ch)); return true;
+    }
+    // is_space — (char) -> bool. Same guard.
+    if (seg_is(last, "is_space")) {
+        if (nargs != 1) return false;
+        tk_value cv = tk_vm_eval_expr(&args[0], env);
+        if (cv.tag != TK_VAL_STR) return false;
+        tk_str cs = cv.as.s;
+        tk_char ch = { (uint8_t *)cs.ptr, cs.len };
+        *out = v_bool(tk_is_space(ch)); return true;
+    }
+    // to_lower — (char) -> char. Returns a fresh str so VM char value is stable. Same guard.
+    if (seg_is(last, "to_lower")) {
+        if (nargs != 1) return false;
+        tk_value cv = tk_vm_eval_expr(&args[0], env);
+        if (cv.tag != TK_VAL_STR) return false;
+        tk_str cs = cv.as.s;
+        tk_char ch = { (uint8_t *)cs.ptr, cs.len };
+        tk_char res = tk_to_lower(ch);
+        tk_byte *buf = tk_alloc(res.len ? res.len : 1);
+        if (res.len) memcpy(buf, res.ptr, res.len);
+        *out = v_str((tk_str){ buf, res.len }); return true;
+    }
+    // to_upper — (char) -> char. Same guard.
+    if (seg_is(last, "to_upper")) {
+        if (nargs != 1) return false;
+        tk_value cv = tk_vm_eval_expr(&args[0], env);
+        if (cv.tag != TK_VAL_STR) return false;
+        tk_str cs = cv.as.s;
+        tk_char ch = { (uint8_t *)cs.ptr, cs.len };
+        tk_char res = tk_to_upper(ch);
+        tk_byte *buf = tk_alloc(res.len ? res.len : 1);
+        if (res.len) memcpy(buf, res.ptr, res.len);
+        *out = v_str((tk_str){ buf, res.len }); return true;
     }
     if (seg_is(last, "ends_with")) {
         tk_value a = tk_vm_eval_expr(&args[0], env), b = tk_vm_eval_expr(&args[1], env);
