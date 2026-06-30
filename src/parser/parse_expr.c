@@ -143,7 +143,9 @@ static size_t piece_escape(tk_str raw, size_t i, tk_piece_buf *b, bool *ok) {
 //   literal pieces (escapes decoded) interleaved with hole expressions.
 // Each `{…}` hole is RE-LEXED (tk_tokenize on the hole's source substring) and parsed as a
 // FULL Teko expression (tk_parse_expr). npieces == nholes + 1.
-static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos) {
+// `verbatim` (InterpRaw): literal bytes are appended AS-IS (no escape decoding) — a `\` is a
+// literal byte; the lexer has already collapsed single-line `""`→`"`. Holes split identically.
+static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos, bool verbatim) {
     tk_str raw = t[pos].text;
     tk_str   *pieces = NULL; size_t npieces = 0;
     tk_expr  *holes  = NULL; size_t nholes  = 0;
@@ -152,7 +154,7 @@ static tk_parsed_result parse_interp(const tk_token *t, size_t n, size_t pos) {
     for (;;) {
         if (i >= raw.len) break;
         tk_byte c = raw.ptr[i];
-        if (c == '\\') {
+        if (!verbatim && c == '\\') {
             bool ok; size_t ni = piece_escape(raw, i, &cur, &ok);
             if (!ok) { tk_free0(cur.ptr); tk_free0(pieces); tk_free0(holes);
                 return (tk_parsed_result){ .ok = false, .as.error = tk_err_at(t, n, pos, "unknown escape in interpolated string") }; }
@@ -275,7 +277,10 @@ static tk_parsed_result parse_atom(const tk_token *t, size_t n, size_t pos, bool
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = pos + 1 } };
     }
     if (k == TK_TOKEN_INTERP) {
-        return parse_interp(t, n, pos);   // $"…{expr}…" — split the raw text into pieces + hole exprs
+        return parse_interp(t, n, pos, false);   // $"…{expr}…" — split, escapes ON
+    }
+    if (k == TK_TOKEN_INTERP_RAW) {
+        return parse_interp(t, n, pos, true);    // $@"…{expr}…" — split, literal bytes VERBATIM
     }
     if (k == TK_TOKEN_BYTE) {
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_BYTE, .as.byte = { .value = tk_lit_byte(t[pos].text) } }, t, pos);

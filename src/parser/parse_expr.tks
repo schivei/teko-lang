@@ -85,7 +85,9 @@ fn piece_escape(raw: str, i: u64, bytes: []byte) -> EscPiece | error {
 // Parse a `$"…"` Interp token's RAW inner text into the Interp node: literal pieces (escapes
 // decoded) interleaved with hole expressions. Each `{…}` hole is RE-LEXED (lexer::tokenize on
 // the hole's source substring) and parsed as a FULL expression. pieces.len == holes.len + 1.
-fn parse_interp(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
+// `verbatim` (InterpRaw): literal bytes are appended AS-IS (no escape decoding) — a `\` is a
+// literal byte; the lexer has already collapsed single-line `""`→`"`. Holes split identically.
+fn parse_interp(tokens: []lexer::Token, pos: u64, verbatim: bool) -> Parsed<Expr> | error {
     let raw = tokens[pos].text
     mut pieces: []str = teko::list::empty()
     mut holes: []Expr = teko::list::empty()
@@ -94,7 +96,7 @@ fn parse_interp(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
     loop {
         if i >= raw.len { break }
         let c = raw[i]
-        if c == b'\\' {
+        if !verbatim && c == b'\\' {
             let ep = match piece_escape(raw, i, cur) { EscPiece as x => x; error as e => return e }
             cur = ep.bytes
             i = ep.next
@@ -210,7 +212,10 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
         return Parsed<Expr> { node = Expr { kind = StrLit { text = tokens[pos].text }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
     }
     if k == lexer::TokenKind::Interp {
-        return parse_interp(tokens, pos)   // $"…{expr}…" — split the raw text into pieces + hole exprs
+        return parse_interp(tokens, pos, false)   // $"…{expr}…" — split, escapes ON
+    }
+    if k == lexer::TokenKind::InterpRaw {
+        return parse_interp(tokens, pos, true)    // $@"…{expr}…" — split, literal bytes VERBATIM
     }
     if k == lexer::TokenKind::Byte {
         return Parsed<Expr> { node = Expr { kind = ByteLit { value = lit_byte(tokens[pos].text) }; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }

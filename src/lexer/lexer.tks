@@ -317,16 +317,110 @@ fn str_of_bytes(xs: []byte) -> str {
 
 // --- string & byte literals ---
 
-// `"` at pos. Collect bytes until the closing `"`, decoding escapes.
-pub fn read_str(source: str, pos: u64) -> Scan | error {
-    mut p = pos + 1                          // past the opening quote
+// ---- the UNIFIED string reader: two ORTHOGONAL prefix modifiers × two delimiters ----
+//
+// A string START is an optional run of `$`/`@` (each at most once, ANY order: `$@` == `@$`)
+// followed by the opening delimiter `"` (single-line) or `"""` (multi-line). The eight
+// combinations are all valid; `$` and `@` COMPOSE freely (C# `$@"…"`).
+//   `$`  = interpolation (holes `{expr}`, literal braces `{{`/`}}`).
+//   `@`  = verbatim / raw  (NO escape processing — a `\` is a literal byte).
+// One unified body scanner is parameterized by (has_interp, has_verbatim, multiline).
+// Non-interp → fully-decoded Str; interp → Interp (parser decodes escapes) or InterpRaw
+// (parser does NOT decode escapes).
+//
+// InterpRaw REPRESENTATION (the parser splits it the same way as Interp, but appends literal
+// bytes verbatim): for SINGLE-line verbatim the lexer copies the inner text to FRESH bytes,
+// applying the depth-0-outside-holes `""`→`"` collapse while leaving `\` and the hole `{…}`
+// spans intact; for MULTI-line verbatim the inner text is copied AS-IS (a lone `"`/`""` is
+// literal — only `"""` closes). Thus the `""`-collapse lives ONLY here, in the lexer, so the
+// parser can treat single- vs multi-line InterpRaw uniformly. For non-verbatim Interp the
+// raw-VIEW + parser-decodes-escapes path is unchanged.
+
+// the closing delimiter matches at `p`? (three quotes if multiline, else one).
+fn str_close_at(source: str, p: u64, multiline: bool) -> bool {
+    if source[p] != b'"' { return false }
+    if !multiline { return true }
+    at(source, p + 1) == b'"' && at(source, p + 2) == b'"'
+}
+
+// the UNIFIED string body scanner. `inner` is the first byte AFTER the opening delimiter;
+// (has_interp, has_verbatim, multiline) select the four behaviours.
+fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_verbatim: bool, multiline: bool) -> Scan | error {
+    mut delim: u64 = 1
+    if multiline { delim = 3 }
+    if has_interp {
+        if !has_verbatim {
+            // plain interp → keep the zero-copy raw-VIEW; the parser decodes escapes.
+            mut p = inner
+            mut depth: u64 = 0                    // brace nesting inside holes
+            loop {
+                if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
+                let c = source[p]
+                if !multiline && c == b'\\' {     // an escape — skip the next byte too (single-line only)
+                    if p + 1 >= source.len { return scan_err_at(source, pos, "unterminated escape in interpolated string") }
+                    p = p + 2
+                    continue
+                }
+                if c == b'{' { depth = depth + 1; p++; continue }
+                if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
+                if depth == 0 && str_close_at(source, p, multiline) {
+                    return Scan { token = Token { kind = TokenKind::Interp; text = slice(source, inner, p); line = 0; col = 0 }; next = p + delim }
+                }
+                p++
+            }
+        }
+        // VERBATIM interp → emit FRESH inner bytes (single-line collapses `""`→`"` at depth 0;
+        // multi-line copies as-is). `\` stays literal; hole `{…}` spans are copied intact.
+        mut p = inner
+        mut depth: u64 = 0
+        mut bytes: []byte = teko::list::empty()
+        loop {
+            if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
+            let c = source[p]
+            if c == b'{' { depth = depth + 1; bytes = teko::list::push(bytes, c); p++; continue }
+            if c == b'}' { if depth > 0 { depth = depth - 1 }; bytes = teko::list::push(bytes, c); p++; continue }
+            if c == b'"' && depth == 0 {
+                if !multiline {
+                    if at(source, p + 1) == b'"' {    // doubled quote → one literal `"`, continue
+                        bytes = teko::list::push(bytes, b'"')
+                        p = p + 2
+                        continue
+                    }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+                }
+                if str_close_at(source, p, true) {    // only `"""` closes; a lone `"`/`""` is literal
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 3 }
+                }
+            }
+            bytes = teko::list::push(bytes, c)        // every other byte (incl `\` and `\n`) is literal
+            p++
+        }
+    }
+    // NON-INTERP: fully decode to a Str token.
+    mut p = inner
     mut bytes: []byte = teko::list::empty()
     loop {
-        if p >= source.len { return error { message = "unterminated string literal" } }
+        if p >= source.len { return scan_err_at(source, pos, "unterminated string literal") }
         let c = source[p]
-        if c == b'"' {
-            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+        if has_verbatim {
+            // verbatim: NO escapes. SINGLE-line `""`→`"` (a doubled quote is content, NOT a close —
+            // checked BEFORE str_close_at); multi-line a lone `"`/`""` is literal.
+            if !multiline && c == b'"' && at(source, p + 1) == b'"' {
+                bytes = teko::list::push(bytes, b'"')
+                p = p + 2
+                continue
+            }
+            if str_close_at(source, p, multiline) {
+                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+            }
+            bytes = teko::list::push(bytes, c)        // every other byte (incl `\` and `\n`) is literal
+            p++
+            continue
         }
+        if str_close_at(source, p, multiline) {
+            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+        }
+        // plain (escapes on).
         if c == b'\\' {
             let e = match escape_byte(source, p) {
                 EscByte as eb => eb
@@ -336,87 +430,44 @@ pub fn read_str(source: str, pos: u64) -> Scan | error {
             p = e.next
             continue
         }
-        bytes = teko::list::push(bytes, c)   // a literal byte (ASCII or UTF-8 cont.)
+        bytes = teko::list::push(bytes, c)            // a literal byte (ASCII or UTF-8 cont.)
         p++
     }
 }
 
-// `@"…"` at pos (`@` at pos, `"` at pos+1). A RAW / VERBATIM string (C# model): NO escape
-// processing — a `\` is a LITERAL byte. The ONLY special sequence is a doubled quote `""`,
-// which means one literal `"` byte (then scanning continues). A raw string MAY contain
-// newlines (the literal newline byte is included). `@""` is the empty string. Produces a
-// plain Str token carrying the final bytes — downstream sees an ordinary `str` literal.
-fn read_raw_str(source: str, pos: u64) -> Scan | error {
-    mut p = pos + 2                          // past `@"` — the first inner byte
-    mut bytes: []byte = teko::list::empty()
+// recognize a string START at `pos`: an optional run of `$`/`@` (each ≤1, any order) then a
+// `"`. On match, scan the prefix flags + delimiter and dispatch to read_string_body. Mirrors
+// the C twin's read_string; the caller (next_token) checks for a `"`/`$`/`@` lead first.
+fn read_string(source: str, pos: u64) -> Scan | error {
+    mut has_interp = false
+    mut has_verbatim = false
+    mut p = pos
     loop {
-        if p >= source.len { return scan_err_at(source, pos, "unterminated raw string literal") }
-        let c = source[p]
-        if c == b'"' {
-            if at(source, p + 1) == b'"' {   // doubled quote → one literal `"`, continue
-                bytes = teko::list::push(bytes, b'"')
-                p = p + 2
-                continue
-            }
-            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
-        }
-        bytes = teko::list::push(bytes, c)   // every other byte (incl `\` and `\n`) is literal
-        p++
+        let c = at(source, p)
+        if c == b'$' { if has_interp { break }; has_interp = true; p = p + 1; continue }
+        if c == b'@' { if has_verbatim { break }; has_verbatim = true; p = p + 1; continue }
+        break
     }
+    // the caller only routes here when a string start is certain (a `"` follows the prefix run).
+    let multiline = at(source, p + 1) == b'"' && at(source, p + 2) == b'"'
+    let inner = if multiline { p + 3 } else { p + 1 }
+    read_string_body(source, pos, inner, has_interp, has_verbatim, multiline)
 }
 
-// `"""…"""` at pos (three quotes). A MULTI-LINE string: spans lines (literal newlines
-// included), collecting bytes until the closing `"""`. A single `"` or double `""` inside
-// is LITERAL — only `"""` closes. Escapes are processed NORMALLY (reuse `escape_byte`, as
-// `read_str` does): `\n`, `\t`, `\"`, etc. work as in a normal string. `""""""` is the
-// empty string. Produces a plain Str token — downstream sees an ordinary `str` literal.
-fn read_multiline_str(source: str, pos: u64) -> Scan | error {
-    mut p = pos + 3                          // past the opening `"""`
-    mut bytes: []byte = teko::list::empty()
+// is there a string START at `pos`? an optional `$`/`@` prefix run (each ≤1, any order)
+// then a `"`. Used by next_token to decide between the unified string reader and falling
+// through (a bare `$`/`@` not so followed is an unexpected character via read_symbol).
+fn is_string_start(source: str, pos: u64) -> bool {
+    mut has_interp = false
+    mut has_verbatim = false
+    mut p = pos
     loop {
-        if p >= source.len { return scan_err_at(source, pos, "unterminated multi-line string literal") }
-        let c = source[p]
-        // the closing delimiter is three quotes; one or two quotes are literal content.
-        if c == b'"' && at(source, p + 1) == b'"' && at(source, p + 2) == b'"' {
-            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 3 }
-        }
-        if c == b'\\' {                      // escapes processed as in a normal string
-            let e = match escape_byte(source, p) {
-                EscByte as eb => eb
-                error as err  => return err
-            }
-            bytes = teko::list::push(bytes, e.value)
-            p = e.next
-            continue
-        }
-        bytes = teko::list::push(bytes, c)   // a literal byte (incl a lone `"`, `""`, or `\n`)
-        p++
+        let c = at(source, p)
+        if c == b'$' { if has_interp { break }; has_interp = true; p = p + 1; continue }
+        if c == b'@' { if has_verbatim { break }; has_verbatim = true; p = p + 1; continue }
+        break
     }
-}
-
-// `$"…"` at pos (`$` at pos, `"` at pos+1). Scan the RAW inner text between the quotes —
-// holes `{…}` and escapes are LEFT ENCODED; the parser splits the raw span into literal
-// pieces + hole expressions. The token's text is a VIEW into the source. A `"` terminates
-// ONLY at brace-depth 0 (a string inside a hole would not end it), and `\"` is skipped.
-fn read_interp(source: str, pos: u64) -> Scan | error {
-    let start = pos + 2                       // past `$"` — the first inner byte
-    mut p = start
-    mut depth: u64 = 0                        // brace nesting inside holes
-    loop {
-        if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
-        let c = source[p]
-        if c == b'\\' {                       // an escape — skip the next byte too
-            if p + 1 >= source.len { return scan_err_at(source, pos, "unterminated escape in interpolated string") }
-            p = p + 2
-            continue
-        }
-        if c == b'{' { depth = depth + 1; p++; continue }
-        if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
-        if c == b'"' && depth == 0 {          // the closing quote (outside any hole)
-            return Scan { token = Token { kind = TokenKind::Interp; text = slice(source, start, p); line = 0; col = 0 }; next = p + 1 }
-        }
-        p++
-    }
+    at(source, p) == b'"'
 }
 
 // `b'…'`: pos points at `b`, `'` at pos+1. One byte (raw or escaped) then a closing `'`.
@@ -512,17 +563,13 @@ fn next_token(source: str, pos: u64) -> Scan | error {
     let c = source[pos]
     // a byte literal `b'…'` — `b` would otherwise begin an identifier
     if c == b'b' && at(source, pos + 1) == b'\'' { return read_byte_lit(source, pos) }
-    // an interpolated string `$"…"` — `$` is otherwise an unexpected character
-    if c == b'$' && at(source, pos + 1) == b'"' { return read_interp(source, pos) }
-    // a raw / verbatim string `@"…"` — `@` is otherwise an unexpected character
-    if c == b'@' && at(source, pos + 1) == b'"' { return read_raw_str(source, pos) }
+    // a string literal: an optional `$`/`@` prefix run (each ≤1, any order) then `"` / `"""`.
+    // Covers `"`, `$"`, `@"`, `$@"`, `@$"` and the `"""` variants — the unified reader. A bare
+    // `$`/`@` not followed (after the prefix run) by a quote is NOT a string start.
+    if (c == b'"' || c == b'$' || c == b'@') && is_string_start(source, pos) { return read_string(source, pos) }
     if is_digit(c) { return read_number(source, pos) }
     if is_alpha(c) { return keyword_or_ident(source, pos) }
     if c == b'_'   { return read_underscore(source, pos) }
-    // a multi-line string `"""…"""` — three quotes; MUST precede the single-`"` read_str,
-    // else read_str would see an empty `""` and stop at the second quote.
-    if c == b'"' && at(source, pos + 1) == b'"' && at(source, pos + 2) == b'"' { return read_multiline_str(source, pos) }
-    if c == b'"'   { return read_str(source, pos) }
     read_symbol(source, pos)
 }
 

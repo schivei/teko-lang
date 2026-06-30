@@ -144,3 +144,48 @@ fn rejects_unterminated_raw_and_multiline() {
     teko::assert::is_true(is_error("@\"abc"))          // unterminated raw string
     teko::assert::is_true(is_error("\"\"\"abc"))       // unterminated multi-line string
 }
+
+// ---- orthogonal prefix modifiers ($ × @) × delimiters (single/multi) ----
+
+#test
+fn lexes_orthogonal_string_modifiers() {
+    // plain single: escapes ON — `"a\nb"` → a <LF> b.
+    teko::assert::is_true(one_str_text("\"a\\nb\"") == "a\nb")
+    // verbatim single: `@"a\nb"` → a \ n b (backslash literal).
+    teko::assert::is_true(one_str_text("@\"a\\nb\"") == "a\\nb")
+    // verbatim single doubled-quote collapse: `@"a""b"` → a " b.
+    teko::assert::is_true(one_str_text("@\"a\"\"b\"") == "a\"b")
+    // multi plain: `"""a\nb"""` → a <LF> b (escapes on).
+    teko::assert::is_true(one_str_text("\"\"\"a\\nb\"\"\"") == "a\nb")
+    // multi verbatim: `@"""a\nb"""` → a \ n b (backslash literal).
+    teko::assert::is_true(one_str_text("@\"\"\"a\\nb\"\"\"") == "a\\nb")
+    // multi verbatim: a lone `"` is literal — `@"""a"b"""` → a " b (NO `""`→`"` collapse).
+    teko::assert::is_true(one_str_text("@\"\"\"a\"b\"\"\"") == "a\"b")
+}
+
+// the kinds of the (interp) string + a trailing newline token — `$"…"` / `$@"…"`.
+#test
+fn lexes_interp_token_kinds() {
+    // plain interpolation → Interp.
+    teko::assert::is_true(kinds_eq("$\"x{1}y\"", [TokenKind::Interp]))
+    // verbatim interpolation `$@"…"` → InterpRaw (order: $ then @).
+    teko::assert::is_true(kinds_eq("$@\"x{1}y\"", [TokenKind::InterpRaw]))
+    // order-free: `@$"…"` is the SAME as `$@"…"` → InterpRaw.
+    teko::assert::is_true(kinds_eq("@$\"x{1}y\"", [TokenKind::InterpRaw]))
+    // multi-line verbatim interpolation `$@"""…"""` → InterpRaw.
+    teko::assert::is_true(kinds_eq("$@\"\"\"x{1}y\"\"\"", [TokenKind::InterpRaw]))
+    // multi-line plain interpolation `$"""…"""` → Interp.
+    teko::assert::is_true(kinds_eq("$\"\"\"x{1}y\"\"\"", [TokenKind::Interp]))
+}
+
+// the InterpRaw token's text is the FRESH inner bytes the lexer already resolved:
+// single-line verbatim has the `""`→`"` collapse applied; multi-line is as-is.
+#test
+fn interp_raw_token_text_is_resolved() {
+    // `$@"a""b{1}c"` → inner text `a"b{1}c` (collapse applied; hole span intact, backslash N/A).
+    teko::assert::is_true(one_str_text("$@\"a\"\"b{1}c\"") == "a\"b{1}c")
+    // backslash literal in verbatim interp: `$@"x{1}\ny"` → inner `x{1}\ny`.
+    teko::assert::is_true(one_str_text("$@\"x{1}\\ny\"") == "x{1}\\ny")
+    // multi-line verbatim: lone `"` literal — `$@"""a"b{1}c"""` → inner `a"b{1}c`.
+    teko::assert::is_true(one_str_text("$@\"\"\"a\"b{1}c\"\"\"") == "a\"b{1}c")
+}

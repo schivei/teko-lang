@@ -153,6 +153,15 @@ typedef enum {
     //     for exclusive ranges and spread expressions. `..=` (inclusive range) is still
     //     TK_TOKEN_DOTDOTEQ and is matched first by the 3-byte maximal-munch check.
     TK_TOKEN_DOTDOT,        // `..` — bare range / spread (exclusive; `..=` remains TK_TOKEN_DOTDOTEQ)
+
+    // --- VERBATIM interpolation `$@"…"` / `@$"…"` (orthogonal modifiers). APPENDED LAST
+    //     (ordinal stability — never a stored op, so its ordinal is never serialized). Like
+    //     TK_TOKEN_INTERP, but the `@` (verbatim) modifier is also present: the parser splits
+    //     the inner text into pieces + holes the SAME way, but appends literal bytes VERBATIM
+    //     (no escape decoding). The lexer has already resolved single- vs multi-line `""`
+    //     handling into the token's FRESH `.text` (single-line `""`→`"` collapse applied;
+    //     multi-line copied as-is), so the parser treats the two uniformly.
+    TK_TOKEN_INTERP_RAW,    // `$@"…{expr}…"` — a verbatim interpolated string (fresh inner bytes)
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW

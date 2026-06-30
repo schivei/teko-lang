@@ -345,24 +345,129 @@ static tk_str one_byte(tk_byte b) {
 
 // --- string & byte literals ---
 
-// `"` at pos. Collect bytes until the closing `"`, decoding escapes.
-static tk_scan_result read_str(tk_str source, size_t pos) {
-    size_t p = pos + 1;                          // past the opening quote
-    tk_lex_bytes bytes = tk_lex_bytes_empty();           // TK_LIST over tk_byte (text.h via core)
+// ---- the UNIFIED string reader: two ORTHOGONAL prefix modifiers × two delimiters ----
+//
+// A string START is an optional run of `$`/`@` (each at most once, ANY order: `$@` == `@$`)
+// followed by the opening delimiter `"` (single-line) or `"""` (multi-line). The eight
+// combinations are all valid; `$` and `@` COMPOSE freely (C# `$@"…"`).
+//   `$`  = interpolation (holes `{expr}`, literal braces `{{`/`}}`).
+//   `@`  = verbatim / raw  (NO escape processing — a `\` is a literal byte).
+// The reader scans the prefix flags, the delimiter, then ONE unified body scanner
+// parameterized by (has_interp, has_verbatim, multiline). Non-interp → fully-decoded Str;
+// interp → Interp (parser decodes escapes) or InterpRaw (parser does NOT decode escapes).
+//
+// InterpRaw REPRESENTATION (the parser splits it the same way as Interp, but appends literal
+// bytes verbatim): for SINGLE-line verbatim the lexer copies the inner text to FRESH bytes,
+// applying the depth-0-outside-holes `""`→`"` collapse while leaving `\` and the hole `{…}`
+// spans intact; for MULTI-line verbatim the inner text is copied AS-IS (a lone `"`/`""` is
+// literal — only `"""` closes; NO `""`→`"` collapse). Thus the `""`-collapse lives ONLY here,
+// in the lexer, so the parser can treat single- vs multi-line InterpRaw uniformly.
+// For non-verbatim Interp the OLD raw-VIEW + parser-decodes-escapes path is unchanged.
+
+// the closing delimiter matches at `p`? (three quotes if multiline, else one).
+static bool str_close_at(tk_str source, size_t p, bool multiline) {
+    if (source.ptr[p] != '"') return false;
+    if (!multiline) return true;
+    return at(source, p + 1) == '"' && at(source, p + 2) == '"';
+}
+
+// the UNIFIED string body scanner. `inner` is the first byte AFTER the opening delimiter;
+// (has_interp, has_verbatim, multiline) select the four behaviours. Mirrors lexer.tks
+// `read_string_body`.
+static tk_scan_result read_string_body(tk_str source, size_t pos, size_t inner,
+                                       bool has_interp, bool has_verbatim, bool multiline) {
+    size_t delim = multiline ? 3 : 1;
+    if (has_interp) {
+        // INTERP: produce a token whose `.text` the parser will split into pieces + holes.
+        if (!has_verbatim) {
+            // plain interp → keep the existing zero-copy raw-VIEW; the parser decodes escapes.
+            size_t p = inner;
+            size_t depth = 0;                         // brace nesting inside holes
+            for (;;) {
+                if (p >= source.len) return scan_err_at(source, pos, "unterminated interpolated string");
+                tk_byte c = source.ptr[p];
+                if (!multiline && c == '\\') {        // an escape — skip the next byte too (single-line only)
+                    if (p + 1 >= source.len) return scan_err_at(source, pos, "unterminated escape in interpolated string");
+                    p += 2;
+                    continue;
+                }
+                if (c == '{') { depth += 1; p += 1; continue; }
+                if (c == '}') { if (depth > 0) depth -= 1; p += 1; continue; }
+                if (depth == 0 && str_close_at(source, p, multiline)) {
+                    return scan_ok((tk_scan){
+                        .token = (tk_token){ .kind = TK_TOKEN_INTERP, .text = tk_str_slice(source, inner, p) },
+                        .next  = p + delim,
+                    });
+                }
+                p += 1;
+            }
+        }
+        // VERBATIM interp → emit FRESH inner bytes (single-line collapses `""`→`"` at depth 0;
+        // multi-line copies as-is). `\` stays literal; hole `{…}` spans are copied intact.
+        size_t p = inner;
+        size_t depth = 0;
+        tk_lex_bytes bytes = tk_lex_bytes_empty();
+        for (;;) {
+            if (p >= source.len) { tk_lex_bytes_free(bytes); return scan_err_at(source, pos, "unterminated interpolated string"); }
+            tk_byte c = source.ptr[p];
+            if (c == '{') { depth += 1; bytes = tk_lex_bytes_push(bytes, c); p += 1; continue; }
+            if (c == '}') { if (depth > 0) depth -= 1; bytes = tk_lex_bytes_push(bytes, c); p += 1; continue; }
+            if (c == '"' && depth == 0) {
+                if (!multiline) {
+                    if (at(source, p + 1) == '"') {   // doubled quote → one literal `"`, continue
+                        bytes = tk_lex_bytes_push(bytes, '"');
+                        p += 2;
+                        continue;
+                    }
+                    tk_str text = str_of_bytes(bytes.ptr, bytes.len);
+                    tk_lex_bytes_free(bytes);
+                    return scan_ok((tk_scan){ .token = (tk_token){ .kind = TK_TOKEN_INTERP_RAW, .text = text }, .next = p + 1 });
+                }
+                if (str_close_at(source, p, true)) {  // only `"""` closes; a lone `"`/`""` is literal
+                    tk_str text = str_of_bytes(bytes.ptr, bytes.len);
+                    tk_lex_bytes_free(bytes);
+                    return scan_ok((tk_scan){ .token = (tk_token){ .kind = TK_TOKEN_INTERP_RAW, .text = text }, .next = p + 3 });
+                }
+            }
+            bytes = tk_lex_bytes_push(bytes, c);      // every other byte (incl `\` and `\n`) is literal
+            p += 1;
+        }
+    }
+    // NON-INTERP: fully decode to a Str token.
+    size_t p = inner;
+    tk_lex_bytes bytes = tk_lex_bytes_empty();
     for (;;) {
         if (p >= source.len) {
             tk_lex_bytes_free(bytes);
-            return scan_err("unterminated string literal");
+            return scan_err_at(source, pos, "unterminated string literal");
         }
         tk_byte c = source.ptr[p];
-        if (c == '"') {
+        if (has_verbatim) {
+            // verbatim: NO escapes. SINGLE-line `""`→`"` (so a doubled quote is content, NOT a
+            // close — must be checked BEFORE str_close_at); multi-line a lone `"`/`""` is literal.
+            if (!multiline && c == '"' && at(source, p + 1) == '"') {
+                bytes = tk_lex_bytes_push(bytes, '"');
+                p += 2;
+                continue;
+            }
+            if (str_close_at(source, p, multiline)) {
+                tk_str text = str_of_bytes(bytes.ptr, bytes.len);
+                tk_lex_bytes_free(bytes);
+                return scan_ok((tk_scan){ .token = (tk_token){ .kind = TK_TOKEN_STR, .text = text }, .next = p + delim });
+            }
+            bytes = tk_lex_bytes_push(bytes, c);      // every other byte (incl `\` and `\n`) is literal
+            p++;
+            continue;
+        }
+        if (str_close_at(source, p, multiline)) {
             tk_str text = str_of_bytes(bytes.ptr, bytes.len);
             tk_lex_bytes_free(bytes);
             return scan_ok((tk_scan){
                 .token = (tk_token){ .kind = TK_TOKEN_STR, .text = text },
-                .next  = p + 1,
+                .next  = p + delim,
             });
         }
+        // plain (escapes on).
         if (c == '\\') {
             tk_esc_result e = escape_byte(source, p);
             if (!e.ok) { tk_lex_bytes_free(bytes); return scan_err(e.as.error.message); }
@@ -370,107 +475,41 @@ static tk_scan_result read_str(tk_str source, size_t pos) {
             p = e.as.value.next;
             continue;
         }
-        bytes = tk_lex_bytes_push(bytes, c);         // a literal byte (ASCII or UTF-8 cont.)
+        bytes = tk_lex_bytes_push(bytes, c);          // a literal byte (ASCII or UTF-8 cont.)
         p++;
     }
 }
 
-// `@"…"` at pos (`@` at pos, `"` at pos+1). A RAW / VERBATIM string (C# model): NO escape
-// processing — a `\` is a LITERAL byte. The ONLY special sequence is a doubled quote `""`,
-// which means one literal `"` byte (then scanning continues). A raw string MAY contain
-// newlines (the literal newline byte is included). `@""` is the empty string. Produces a
-// plain Str token carrying the final bytes — downstream sees an ordinary `str` literal.
-static tk_scan_result read_raw_str(tk_str source, size_t pos) {
-    size_t p = pos + 2;                          // past `@"` — the first inner byte
-    tk_lex_bytes bytes = tk_lex_bytes_empty();
+// recognize a string START at `pos`: an optional run of `$`/`@` (each ≤1, any order) then a
+// `"`. On match, scan the prefix flags + delimiter and dispatch to read_string_body. The
+// caller only routes here once is_string_start confirmed a `"` follows the prefix run.
+// Mirrors lexer.tks `read_string`.
+static tk_scan_result read_string(tk_str source, size_t pos) {
+    bool has_interp = false, has_verbatim = false;
+    size_t p = pos;
     for (;;) {
-        if (p >= source.len) {
-            tk_lex_bytes_free(bytes);
-            return scan_err_at(source, pos, "unterminated raw string literal");
-        }
-        tk_byte c = source.ptr[p];
-        if (c == '"') {
-            if (at(source, p + 1) == '"') {      // doubled quote → one literal `"`, continue
-                bytes = tk_lex_bytes_push(bytes, '"');
-                p += 2;
-                continue;
-            }
-            tk_str text = str_of_bytes(bytes.ptr, bytes.len);
-            tk_lex_bytes_free(bytes);
-            return scan_ok((tk_scan){
-                .token = (tk_token){ .kind = TK_TOKEN_STR, .text = text },
-                .next  = p + 1,
-            });
-        }
-        bytes = tk_lex_bytes_push(bytes, c);     // every other byte (incl `\` and `\n`) is literal
-        p++;
+        tk_byte c = at(source, p);
+        if (c == '$') { if (has_interp) break; has_interp = true; p += 1; continue; }
+        if (c == '@') { if (has_verbatim) break; has_verbatim = true; p += 1; continue; }
+        break;
     }
+    bool multiline = at(source, p + 1) == '"' && at(source, p + 2) == '"';
+    size_t inner = p + (multiline ? 3 : 1);
+    return read_string_body(source, pos, inner, has_interp, has_verbatim, multiline);
 }
 
-// `"""…"""` at pos (three quotes). A MULTI-LINE string: spans lines (literal newlines
-// included), collecting bytes until the closing `"""`. A single `"` or double `""` inside
-// is LITERAL — only `"""` closes. Escapes are processed NORMALLY (reuse escape_byte, as
-// read_str does): `\n`, `\t`, `\"`, etc. work as in a normal string. `""""""` is the empty
-// string. Produces a plain Str token — downstream sees an ordinary `str` literal.
-static tk_scan_result read_multiline_str(tk_str source, size_t pos) {
-    size_t p = pos + 3;                          // past the opening `"""`
-    tk_lex_bytes bytes = tk_lex_bytes_empty();
+// is there a string START at `pos`? an optional `$`/`@` prefix run (each ≤1, any order) then a
+// `"`. Mirrors lexer.tks `is_string_start`.
+static bool is_string_start(tk_str source, size_t pos) {
+    bool has_interp = false, has_verbatim = false;
+    size_t p = pos;
     for (;;) {
-        if (p >= source.len) {
-            tk_lex_bytes_free(bytes);
-            return scan_err_at(source, pos, "unterminated multi-line string literal");
-        }
-        tk_byte c = source.ptr[p];
-        // the closing delimiter is three quotes; one or two quotes are literal content.
-        if (c == '"' && at(source, p + 1) == '"' && at(source, p + 2) == '"') {
-            tk_str text = str_of_bytes(bytes.ptr, bytes.len);
-            tk_lex_bytes_free(bytes);
-            return scan_ok((tk_scan){
-                .token = (tk_token){ .kind = TK_TOKEN_STR, .text = text },
-                .next  = p + 3,
-            });
-        }
-        if (c == '\\') {                         // escapes processed as in a normal string
-            tk_esc_result e = escape_byte(source, p);
-            if (!e.ok) { tk_lex_bytes_free(bytes); return scan_err(e.as.error.message); }
-            bytes = tk_lex_bytes_push(bytes, e.as.value.value);
-            p = e.as.value.next;
-            continue;
-        }
-        bytes = tk_lex_bytes_push(bytes, c);     // a literal byte (incl a lone `"`, `""`, or `\n`)
-        p++;
+        tk_byte c = at(source, p);
+        if (c == '$') { if (has_interp) break; has_interp = true; p += 1; continue; }
+        if (c == '@') { if (has_verbatim) break; has_verbatim = true; p += 1; continue; }
+        break;
     }
-}
-
-// `$"…"` at pos (`$` at pos, `"` at pos+1). Scan the RAW inner text between the quotes —
-// holes `{…}` and escapes are LEFT ENCODED; the parser splits the raw span into literal
-// pieces + hole expressions (parse_expr's INTERP case). The token's `.text` is a VIEW into
-// the source (like Str's span before decode; the parser decodes each literal piece). A `"`
-// terminates ONLY at brace-depth 0 (so a string literal inside a hole would not end it),
-// and `\"` is skipped (an escaped quote stays inside the content). Mirrors lexer.tks
-// `read_interp`.
-static tk_scan_result read_interp(tk_str source, size_t pos) {
-    size_t start = pos + 2;                       // past `$"` — the first inner byte
-    size_t p = start;
-    size_t depth = 0;                             // brace nesting inside holes
-    for (;;) {
-        if (p >= source.len) return scan_err_at(source, pos, "unterminated interpolated string");
-        tk_byte c = source.ptr[p];
-        if (c == '\\') {                          // an escape — skip the next byte too
-            if (p + 1 >= source.len) return scan_err_at(source, pos, "unterminated escape in interpolated string");
-            p += 2;
-            continue;
-        }
-        if (c == '{') { depth += 1; p += 1; continue; }
-        if (c == '}') { if (depth > 0) depth -= 1; p += 1; continue; }
-        if (c == '"' && depth == 0) {             // the closing quote (outside any hole)
-            return scan_ok((tk_scan){
-                .token = (tk_token){ .kind = TK_TOKEN_INTERP, .text = tk_str_slice(source, start, p) },
-                .next  = p + 1,
-            });
-        }
-        p += 1;
-    }
+    return at(source, p) == '"';
 }
 
 // `b'…'`: pos points at `b`, `'` at pos+1. One byte (raw or escaped) then a closing `'`.
@@ -570,17 +609,15 @@ static tk_scan_result next_token(tk_str source, size_t pos) {
     tk_byte c = source.ptr[pos];
     // a byte literal `b'…'` — `b` would otherwise begin an identifier
     if (c == 'b' && at(source, pos + 1) == '\'') return read_byte_lit(source, pos);
-    // an interpolated string `$"…"` — `$` is otherwise an unexpected character
-    if (c == '$' && at(source, pos + 1) == '"') return read_interp(source, pos);
-    // a raw / verbatim string `@"…"` — `@` is otherwise an unexpected character
-    if (c == '@' && at(source, pos + 1) == '"') return read_raw_str(source, pos);
+    // a string literal: an optional `$`/`@` prefix run (each ≤1, any order) then `"` / `"""`.
+    // Covers `"`, `$"`, `@"`, `$@"`, `@$"` and the `"""` variants — the unified reader. A bare
+    // `$`/`@` not followed (after the prefix run) by a quote is NOT a string start (matched=false).
+    if ((c == '"' || c == '$' || c == '@') && is_string_start(source, pos)) {
+        return read_string(source, pos);
+    }
     if (is_digit(c)) return scan_ok(read_number(source, pos));
     if (is_alpha(c)) return scan_ok(keyword_or_ident(source, pos));
     if (c == '_')    return scan_ok(read_underscore(source, pos));
-    // a multi-line string `"""…"""` — three quotes; MUST precede the single-`"` read_str,
-    // else read_str would see an empty `""` and stop at the second quote.
-    if (c == '"' && at(source, pos + 1) == '"' && at(source, pos + 2) == '"') return read_multiline_str(source, pos);
-    if (c == '"')    return read_str(source, pos);
     return read_symbol(source, pos);
 }
 
