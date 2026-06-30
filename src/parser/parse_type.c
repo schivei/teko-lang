@@ -91,9 +91,44 @@ static tk_parsed_type_result parse_slice(const tk_token *t, size_t n, size_t pos
         .as.value = { .node = ty, .next = e.as.value.next, .pending_gt = e.as.value.pending_gt } };
 }
 
+// (W10a) a function/closure VALUE type `(A, B) -> R` — `pos` is at `(`. NO `fn` keyword. The
+// parameter list is comma-separated types (empty `()` allowed); `->` is mandatory; the return type
+// is parsed greedily via tk_parse_type (so `(i64) -> A | B` returns `A | B`, mirroring fn-decl
+// returns). pending_gt is threaded from the return so a function type nests inside a generic arg
+// (`List<(i64) -> Box<i64>>`). A `(` is unambiguous in a type position (there is no type grouping).
+static tk_parsed_type_result parse_function_type(const tk_token *t, size_t n, size_t pos) {
+    tk_type_expr *params = NULL; size_t nparams = 0;
+    size_t p = pos + 1;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) {
+        p += 1;
+    } else {
+        for (;;) {
+            tk_parsed_type_result a = tk_parse_type(t, n, p);
+            if (!a.ok) { return a; }
+            tk_types_push(&params, &nparams, a.as.value.node);
+            p = a.as.value.next;
+            if (tk_is_kind_at(t, n, p, TK_TOKEN_COMMA)) { p += 1; continue; }
+            if (tk_is_kind_at(t, n, p, TK_TOKEN_RPAREN)) { p += 1; break; }
+            return (tk_parsed_type_result){ .ok = false,
+                .as.error = tk_err_at(t, n, p, "expected ',' or ')' in a function type's parameter list '(A, B) -> R'") };
+        }
+    }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_ARROW)) {
+        return (tk_parsed_type_result){ .ok = false,
+            .as.error = tk_err_at(t, n, p, "a function type '(A, B) -> R' needs '->' before the return type") };
+    }
+    tk_parsed_type_result ret = tk_parse_type(t, n, p + 1);
+    if (!ret.ok) { return ret; }
+    tk_type_expr *boxed_ret = tk_box_type(ret.as.value.node);
+    tk_type_expr ty = { .tag = TK_TEXPR_FUNC, .as.func = { .params = params, .nparams = nparams, .ret = boxed_ret } };
+    return (tk_parsed_type_result){ .ok = true,
+        .as.value = { .node = ty, .next = ret.as.value.next, .pending_gt = ret.as.value.pending_gt } };
+}
+
 tk_parsed_type_result parse_type_primary(const tk_token *t, size_t n, size_t pos) {
     tk_parsed_type_result base =
         tk_is_kind_at(t, n, pos, TK_TOKEN_LBRACKET) ? parse_slice(t, n, pos)
+      : tk_is_kind_at(t, n, pos, TK_TOKEN_LPAREN)   ? parse_function_type(t, n, pos)
                                                     : parse_named(t, n, pos);
     if (!base.ok) { return base; }
     size_t p = base.as.value.next;

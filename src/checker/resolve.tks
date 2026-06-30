@@ -335,6 +335,26 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
             }
             Variant { members = members }
         }
+        // (W10a) FunctionType `(A, B) -> R` → Func { params; ret }. The return MAY be `void`
+        // (a function value can return nothing); params must be COMPLETE value types (void/ref
+        // rejected — a ref cannot be stored, R4; void is not a value, M.3).
+        parser::FunctionType as fnt => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= fnt.params.len { break }
+                let pt = match resolve_type(fnt.params[i], table) { Type as t => t; error as e => return e }
+                match pt {
+                    Void      => return error { message = "a function type parameter may not be `void` (M.3)" }
+                    Reference => return error { message = "a reference cannot be a function-type parameter (a ref cannot escape, R4)" }
+                    _         => {}
+                }
+                ps = teko::list::push(ps, pt)
+                i++
+            }
+            let rt = match resolve_type(fnt.ret, table) { Type as t => t; error as e => return e }
+            return Func { params = ps; ret = rt }
+        }
         parser::OptionalType as ot => {
             // OptionalType `T?` → Optional { inner } (REBOOT_PLAN §202). The variant case
             // above already rejects an optional as a variant member; here we just build it.
@@ -557,6 +577,12 @@ fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeEx
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_texpr_names(ut.members[i], params, args)); i++ }
             parser::UnionType { members = ms }
         }
+        parser::FunctionType as fnt => {   // (W10a) recurse into params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_texpr_names(fnt.params[i], params, args)); i++ }
+            parser::FunctionType { params = nps; ret = subst_texpr_names(fnt.ret, params, args) }
+        }
     }
 }
 
@@ -588,6 +614,7 @@ fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr) -> []parse
         parser::SliceType as st    => out = collect_texpr_insts(st.element, out)
         parser::OptionalType as ot => out = collect_texpr_insts(ot.inner, out)
         parser::UnionType as ut    => { mut i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
+        parser::FunctionType as fnt => { mut i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }   // (W10a)
     }
     out
 }
@@ -835,6 +862,12 @@ fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable) -> parser::TypeE
             mut i = 0
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, normalize_inst_texpr(ut.members[i], table)); i++ }
             parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) normalize params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, normalize_inst_texpr(fnt.params[i], table)); i++ }
+            parser::FunctionType { params = nps; ret = normalize_inst_texpr(fnt.ret, table) }
         }
     }
 }

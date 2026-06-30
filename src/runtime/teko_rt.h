@@ -47,6 +47,16 @@ typedef struct {
     size_t         len;   // length in BYTES
 } tk_str;
 
+// closure / function VALUE (W10a). The uniform runtime representation of a value of a function
+// type `(A, B) -> R`: a code pointer plus a captured-environment pointer. For a NAMED fn used as a
+// value (W10a) `env` is NULL and `fn` is the C function's address; calls cast `fn` back to the
+// statically-known C signature `R (*)(A, B)` and invoke it. The `env` field is reserved for W10b
+// capturing closures (so the struct shape never changes when captures land).
+typedef struct {
+    void *fn;     // the code pointer (a C function address)
+    void *env;    // captured environment (NULL for a named fn / non-capturing closure)
+} tk_closure;
+
 // error — the Teko built-in error-as-value (E2-NATIVE). Mirrors core.h's tk_error so that
 // generated programs carry full diagnostic adornments in native just as the VM does.
 // A message-only `error { message = "…" }` literal leaves file/line/col/expected/actual

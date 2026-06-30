@@ -119,7 +119,12 @@ fn type_to_texpr(t: Type) -> parser::TypeExpr {
         Reference as r => parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), type_to_texpr(r.inner)) }   // (MEM-1b)
         Void          => mono_named_texpr("void")
         Variant       => mono_named_texpr("variant")
-        Func          => mono_named_texpr("func")
+        Func as f     => {   // (W10a) reconstruct a FunctionType `(A, B) -> R` (not a placeholder name)
+            mut ps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, type_to_texpr(f.params[i])); i++ }
+            parser::FunctionType { params = ps; ret = type_to_texpr(f.ret) }
+        }
     }
 }
 fn mono_named_texpr(name: str) -> parser::TypeExpr {
@@ -151,6 +156,12 @@ fn subst_typeexpr(te: parser::TypeExpr, s: Subst) -> parser::TypeExpr {
             mut i = 0
             loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_typeexpr(ut.members[i], s)); i++ }
             parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) substitute through params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_typeexpr(fnt.params[i], s)); i++ }
+            parser::FunctionType { params = nps; ret = subst_typeexpr(fnt.ret, s) }
         }
     }
 }
@@ -257,9 +268,9 @@ fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable) -> WExpr | e
                     // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
                     let newcallee = rewrite_last_segment(cl.callee, mangled)
                     let rec = MonoInst { fn_name = bare; mangled = mangled; s = sub }
-                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
                 }
-                null => WExpr { expr = TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns }; type = nt; line = e.line; col = e.col }; insts = acc }
+                null => WExpr { expr = TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type }; type = nt; line = e.line; col = e.col }; insts = acc }
             }
         }
         TIfExpr as f => {

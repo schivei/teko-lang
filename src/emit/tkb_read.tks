@@ -241,7 +241,9 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
     }
     if tag.value == 1 {
         let nm = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
-        return RTExpr { r = nm.r; value = checker::TExpr { kind = checker::TVar { name = nm.value }; type = ty.value; line = 0; col = 0 } }
+        let isf = match read_u8(nm.r) { RByte as x => x; error as e => return e }   // (W10a) is_func
+        let fns = match tkb_read_str(isf.r, table) { RStr as x => x; error as e => return e }   // (W10a) func_ns
+        return RTExpr { r = fns.r; value = checker::TExpr { kind = checker::TVar { name = nm.value; is_func = isf.value != 0; func_ns = fns.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 2 {
         let s = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
@@ -270,7 +272,7 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
     if tag.value == 7 {
         let cal = match read_path(tag.r, table)   { RPath as x => x; error as e => return e }
         let ar  = match read_texprs(cal.r, table) { RTExprs as x => x; error as e => return e }
-        return RTExpr { r = ar.r; value = checker::TExpr { kind = checker::TCall { callee = cal.value; args = ar.value; call_ns = "" }; type = ty.value; line = 0; col = 0 } }
+        return RTExpr { r = ar.r; value = checker::TExpr { kind = checker::TCall { callee = cal.value; args = ar.value; call_ns = ""; is_closure_call = false; callee_type = checker::Void { } }; type = ty.value; line = 0; col = 0 } }   // (W10a) call_ns/closure fields re-derived on re-check (codec is expression-level only)
     }
     if tag.value == 8 {
         // (C7.16) IF: inverse of write tag 8 — cond (texpr) + then_blk + has_else (u8) + else_blk.
@@ -516,6 +518,11 @@ fn read_typeexpr(r: Reader, table: []str) -> RTypeExpr | error {
     if tag.value == 1 { let e = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeExpr { r = e.r;  value = parser::SliceType { element = e.value } } }
     if tag.value == 2 { let xs = match read_typeexprs(tag.r, table) { RTypeExprs as x => x; error as e => return e }; return RTypeExpr { r = xs.r; value = parser::UnionType { members = xs.value } } }
     if tag.value == 3 { let i = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeExpr { r = i.r;  value = parser::OptionalType { inner = i.value } } }
+    if tag.value == 4 {   // (W10a) tag 4: params then ret
+        let ps = match read_typeexprs(tag.r, table) { RTypeExprs as x => x; error as e => return e }
+        let rt = match read_typeexpr(ps.r, table)    { RTypeExpr as x => x; error as e => return e }
+        return RTypeExpr { r = rt.r; value = parser::FunctionType { params = ps.value; ret = rt.value } }
+    }
     error { message = "bad typeexpr tag in .tkb" }
 }
 fn read_params(r: Reader, table: []str) -> RParams | error {

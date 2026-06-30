@@ -146,7 +146,13 @@ static tk_type_expr type_to_texpr(tk_type t) {
         }
         case TK_TYPE_VOID:     return mono_named_texpr("void");
         case TK_TYPE_VARIANT:  return mono_named_texpr("variant");
-        case TK_TYPE_FUNC:     return mono_named_texpr("func");
+        case TK_TYPE_FUNC: {   // (W10a) reconstruct a FunctionType `(A, B) -> R` (not a placeholder name)
+            tk_type_expr *ps = NULL; size_t np = 0;
+            for (size_t i = 0; i < t.as.func.nparams; i += 1)
+                tk_types_push(&ps, &np, type_to_texpr(t.as.func.params[i]));
+            tk_type_expr *ret = tk_box_type(type_to_texpr(*t.as.func.ret));
+            return (tk_type_expr){ .tag = TK_TEXPR_FUNC, .as.func = { .params = ps, .nparams = np, .ret = ret } };
+        }
     }
     return mono_named_texpr("type");
 }
@@ -172,6 +178,12 @@ static tk_type_expr subst_typeexpr(tk_type_expr te, tk_subst s) {
             tk_type_expr *ms = NULL; size_t n = 0;
             for (size_t i = 0; i < te.as.uni.len; i += 1) tk_types_push(&ms, &n, subst_typeexpr(te.as.uni.members[i], s));
             return (tk_type_expr){ .tag = TK_TEXPR_UNION, .as.uni = { ms, n } };
+        }
+        case TK_TEXPR_FUNC: {   // (W10a) substitute through params + return
+            tk_type_expr *ps = NULL; size_t np = 0;
+            for (size_t i = 0; i < te.as.func.nparams; i += 1) tk_types_push(&ps, &np, subst_typeexpr(te.as.func.params[i], s));
+            tk_type_expr *ret = te.as.func.ret ? tk_box_type(subst_typeexpr(*te.as.func.ret, s)) : NULL;
+            return (tk_type_expr){ .tag = TK_TEXPR_FUNC, .as.func = { .params = ps, .nparams = np, .ret = ret } };
         }
     }
     return te;

@@ -62,8 +62,12 @@ TK_LIST(tk_tarm,       tk_tarm_list)
 
 // ---- leaves ----
 static tk_texpr_result type_var(tk_var v, tk_env env) {
-    tk_type_result t = tk_env_lookup(env, v.name); if (!t.ok) return xferr(t.as.error);
-    return xok((tk_texpr){ .tag = TK_TEXPR_VAR, .type = t.as.value, .as.var = { v.name } });
+    tk_binding_result b = tk_env_lookup_binding(env, v.name); if (!b.ok) return xferr(b.as.error);
+    // (W10a) a bare reference to a top-level FUNCTION used as a VALUE: only tk_env_define_fn sets a
+    // non-empty ns, so `ns != "" && type is Func` uniquely identifies a fn reference (a local of
+    // closure type has ns=""). It lowers to a tk_closure literal; a plain local emits its name.
+    bool is_fn = b.as.value.ns.len > 0 && b.as.value.type.tag == TK_TYPE_FUNC;
+    return xok((tk_texpr){ .tag = TK_TEXPR_VAR, .type = b.as.value.type, .as.var = { v.name, is_fn, b.as.value.ns } });
 }
 
 // ---- operators (same B.22 regimes as check_binary/unary/compare) ----
@@ -253,6 +257,7 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     }
     tk_type_result ftr = tk_env_lookup_call(env, c.callee);   // (#41) namespace-aware: a local or a
                                                               // same-namespace fn (unqualified) / the qualified ns
+    bool in_scope = ftr.ok;   // (W10a) found in the env (a local/param or a user fn) — NOT a builtin fallback
     // (#49) the resolved target's namespace drives the mangled C name. Only a USER function (found
     // in the env) carries one; a builtin (fallback below) leaves it empty → codegen's call-map path.
     tk_str call_ns = ftr.ok ? tk_env_call_ns(env, c.callee) : (tk_str){0};
@@ -321,8 +326,12 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
             args.ptr[i].type = pt;
         }
     }
+    // (W10a) a CLOSURE call: the callee resolved IN-scope to a function type whose binding is a LOCAL
+    // (call_ns empty — only a top-level fn carries one). It is a `tk_closure` VALUE, so codegen calls
+    // through `((R(*)(A,B))f.fn)(args)` using the Func type (ft) for the cast.
+    bool is_closure = in_scope && call_ns.len == 0;
     return xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = *ft.as.func.ret,
-                           .as.call = { c.callee, args.ptr, args.len, call_ns } });
+                           .as.call = { c.callee, args.ptr, args.len, call_ns, is_closure, ft } });
 }
 
 // ---- cast `to` (C2): a DEFINED conversion is allowed; loss is caught, never silent (M.1) ----

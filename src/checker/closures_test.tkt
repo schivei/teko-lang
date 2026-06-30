@@ -1,0 +1,53 @@
+// src/checker/closures_test.tkt — (W10a) function-VALUE / closure-TYPE coverage. Exercises the
+// whole W10a vertical on the VM in BOTH engines (the build/test gate): the `(A, B) -> R` type
+// (no `fn` keyword), a named fn used as a VALUE (→ a tk_closure / FuncVal), passing it as an
+// argument, binding it to a local of closure type, calling THROUGH a closure value (a param or a
+// local), and returning a function value from a function. Proves parse → resolve → check →
+// monomorph → VM all handle the function type + closure call correctly.
+
+// a transparent alias for a function type — resolves to the same Func as the inline `(i64,i64)->i64`.
+type ClBinOp = (i64, i64) -> i64
+
+// plain named functions, used both directly AND as values.
+fn cl_add(a: i64, b: i64) -> i64 { return a + b }
+fn cl_mul(a: i64, b: i64) -> i64 { return a * b }
+
+// a HIGHER-ORDER function: the parameter `f` is a function VALUE; `f(a, b)` is a CLOSURE CALL
+// (the callee is a local of function type), invoked through its code pointer.
+fn cl_apply(f: (i64, i64) -> i64, a: i64, b: i64) -> i64 { return f(a, b) }
+
+// the alias form in parameter position (must resolve identically to the inline type).
+fn cl_apply_alias(f: ClBinOp, a: i64, b: i64) -> i64 { return f(a, b) }
+
+// RETURN a function value (a named fn escaping by-copy, env = NULL — always memory-safe).
+fn cl_pick(use_add: bool) -> ClBinOp {
+    let chosen = if use_add { cl_add } else { cl_mul }
+    return chosen
+}
+
+#test fn closure_named_fn_passed_and_called() {
+    // a named fn passed as a value, then called through the param.
+    teko::assert::is_true(cl_apply(cl_add, 2, 3) == 5)
+    teko::assert::is_true(cl_apply(cl_mul, 4, 5) == 20)
+}
+
+#test fn closure_alias_param_type() {
+    // the alias `ClBinOp` in param position behaves identically.
+    teko::assert::is_true(cl_apply_alias(cl_add, 10, 7) == 17)
+}
+
+#test fn closure_bound_to_local_then_called() {
+    // a named fn bound to a LOCAL of closure type, then called THROUGH the local.
+    let op: ClBinOp = cl_add
+    teko::assert::is_true(op(6, 9) == 15)
+    let op2: (i64, i64) -> i64 = cl_mul
+    teko::assert::is_true(op2(3, 6) == 18)
+}
+
+#test fn closure_returned_from_fn() {
+    // a function VALUE returned from a function, then called through a local.
+    let g = cl_pick(true)
+    teko::assert::is_true(g(8, 8) == 16)
+    let h = cl_pick(false)
+    teko::assert::is_true(h(8, 8) == 64)
+}

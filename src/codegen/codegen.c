@@ -621,7 +621,10 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
         case TK_TYPE_VARIANT: return cg_variant_typename(b, t, err);
         // `error` — the runtime tk_error struct (E2-NATIVE; teko_rt.h). Full diagnostic fields.
         case TK_TYPE_ERROR:   cb(b, "tk_error"); return true;
-        case TK_TYPE_FUNC:    return fail_node(err, "codegen: function type not yet supported");
+        // (W10a) a function/closure VALUE type `(A, B) -> R` lowers to the uniform runtime
+        // `tk_closure { void *fn; void *env; }` (teko_rt.h). The per-signature C type is only
+        // needed at the CALL site (a cast on `.fn`), never as storage — one struct serves all.
+        case TK_TYPE_FUNC:    cb(b, "tk_closure"); return true;
         // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
         // unsigned. Never dereferenced in Teko; only crosses the extern boundary.
         // (S-mem) `ptr<T>` → `<T> *`; opaque ptr (NULL inner) → `void *`.
@@ -637,6 +640,24 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
             cb(b, " *"); return true;
     }
     return fail_node(err, "codegen: unknown type not yet supported");
+}
+
+// (W10a) the C function-pointer SIGNATURE for a closure call's cast: `R (*)(A, B)`. Built from the
+// callee's resolved Func type so `((R(*)(A,B))f.fn)(args)` invokes the code pointer with the right
+// ABI. Empty params → `(void)`. (Teko twin: cg_emit_fnptr_sig.)
+static bool cg_emit_fnptr_sig(cbuf *b, tk_type t, const char **err) {
+    if (t.tag != TK_TYPE_FUNC) return fail_node(err, "codegen: closure call on a non-function type (internal)");
+    if (!emit_type(b, *t.as.func.ret, err)) return false;
+    cb(b, " (*)(");
+    if (t.as.func.nparams == 0) { cb(b, "void"); }
+    else {
+        for (size_t i = 0; i < t.as.func.nparams; i += 1) {
+            if (i > 0) cb(b, ", ");
+            if (!emit_type(b, t.as.func.params[i], err)) return false;
+        }
+    }
+    cb(b, ")");
+    return true;
 }
 
 // The deterministic mangle SUFFIX for an optional's inner type (used in tk_opt_<suffix>).
@@ -807,6 +828,7 @@ static void cg_texpr_mangle(cbuf *b, tk_type_expr te) {
         case TK_TEXPR_SLICE:    cb(b, "slice_"); cg_texpr_mangle(b, *te.as.slice.element); return;
         case TK_TEXPR_OPTIONAL: cb(b, "opt_");   cg_texpr_mangle(b, *te.as.optional.inner); return;
         case TK_TEXPR_UNION:    cb(b, "variant"); return;
+        case TK_TEXPR_FUNC:     cb(b, "func"); return;   // (W10a) matches checker type_mangle's Func fragment
     }
 }
 
@@ -868,6 +890,8 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             cb(b, "tk_opt_");
             return cg_opt_mangle_texpr(b, *te.as.optional.inner, err);
         }
+        // (W10a) a function-type field/param annotation → the uniform `tk_closure` (teko_rt.h).
+        case TK_TEXPR_FUNC: cb(b, "tk_closure"); return true;
     }
     return fail_node(err, "codegen: unknown type expression not yet supported");
 }
@@ -1234,6 +1258,14 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
         }
 
         case TK_TEXPR_VAR:
+            // (W10a) a bare top-level-fn reference used as a VALUE → a `tk_closure` literal carrying
+            // the C function's address (env = NULL; named fns capture nothing). A local emits its name.
+            if (e->as.var.is_func) {
+                cb(b, "(tk_closure){ (void*)&");
+                cb_fn_name(b, e->as.var.func_ns, e->as.var.name);
+                cb(b, ", (void*)0 }");
+                return true;
+            }
             cb_ident(b, e->as.var.name);
             return true;
 
@@ -1635,8 +1667,16 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
                     // call agree and same-named functions across namespaces never collide.
                     cb_fn_name(b, e->as.call.call_ns, p.segments[p.len - 1].name);
                 }
+            } else if (e->as.call.is_closure_call) {
+                // (W10a) call THROUGH a tk_closure VALUE: `((R(*)(A,B))name.fn)` — the cast restores
+                // the statically-known ABI before invoking the code pointer; the arg list follows.
+                cb(b, "((");
+                if (!cg_emit_fnptr_sig(b, e->as.call.callee_type, err)) return false;
+                cb(b, ")");
+                cb_ident(b, p.segments[p.len - 1].name);
+                cb(b, ".fn)");
             } else {
-                // No resolved namespace (a local fn-value, or a name not carried) → the bare
+                // No resolved namespace (a builtin, or a name not carried) → the bare
                 // (keyword-escaped) last segment.
                 cb_ident(b, p.segments[p.len - 1].name);
             }

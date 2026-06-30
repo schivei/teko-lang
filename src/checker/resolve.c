@@ -452,6 +452,13 @@ static tk_type_expr subst_texpr_names(tk_type_expr te, tk_str *params, size_t np
                 tk_types_push(&ms, &nm, subst_texpr_names(te.as.uni.members[i], params, nparams, args, nargs));
             return (tk_type_expr){ .tag = TK_TEXPR_UNION, .as.uni = { .members = ms, .len = nm } };
         }
+        case TK_TEXPR_FUNC: {   // (W10a) recurse into params + return
+            tk_type_expr *nps = NULL; size_t np = 0;
+            for (size_t i = 0; i < te.as.func.nparams; i += 1)
+                tk_types_push(&nps, &np, subst_texpr_names(te.as.func.params[i], params, nparams, args, nargs));
+            tk_type_expr *nr = te.as.func.ret ? tk_box_type(subst_texpr_names(*te.as.func.ret, params, nparams, args, nargs)) : NULL;
+            return (tk_type_expr){ .tag = TK_TEXPR_FUNC, .as.func = { .params = nps, .nparams = np, .ret = nr } };
+        }
     }
     return te;
 }
@@ -484,6 +491,10 @@ static void collect_texpr_insts(tk_type_expr te, tk_type_expr **acc, size_t *n) 
         case TK_TEXPR_SLICE:    if (te.as.slice.element)  collect_texpr_insts(*te.as.slice.element, acc, n); break;
         case TK_TEXPR_OPTIONAL: if (te.as.optional.inner) collect_texpr_insts(*te.as.optional.inner, acc, n); break;
         case TK_TEXPR_UNION:    for (size_t i = 0; i < te.as.uni.len; i += 1) collect_texpr_insts(te.as.uni.members[i], acc, n); break;
+        case TK_TEXPR_FUNC:     // (W10a) recurse into params + return
+            for (size_t i = 0; i < te.as.func.nparams; i += 1) collect_texpr_insts(te.as.func.params[i], acc, n);
+            if (te.as.func.ret) collect_texpr_insts(*te.as.func.ret, acc, n);
+            break;
     }
 }
 static void collect_body_insts(tk_type_body body, tk_type_expr **acc, size_t *n) {
@@ -689,6 +700,13 @@ static tk_type_expr normalize_inst_texpr(tk_type_expr te, tk_type_table table) {
                 tk_types_push(&ms, &nm, normalize_inst_texpr(te.as.uni.members[i], table));
             return (tk_type_expr){ .tag = TK_TEXPR_UNION, .as.uni = { .members = ms, .len = nm } };
         }
+        case TK_TEXPR_FUNC: {   // (W10a) normalize params + return
+            tk_type_expr *nps = NULL; size_t np = 0;
+            for (size_t i = 0; i < te.as.func.nparams; i += 1)
+                tk_types_push(&nps, &np, normalize_inst_texpr(te.as.func.params[i], table));
+            tk_type_expr *nr = te.as.func.ret ? tk_box_type(normalize_inst_texpr(*te.as.func.ret, table)) : NULL;
+            return (tk_type_expr){ .tag = TK_TEXPR_FUNC, .as.func = { .params = nps, .nparams = np, .ret = nr } };
+        }
     }
     return te;
 }
@@ -871,6 +889,23 @@ tk_type_result tk_resolve_type(tk_type_expr te, tk_type_table table) {
                 members[n] = m.as.value; n += 1;
             }
             tk_type t = { .tag = TK_TYPE_VARIANT, .as.variant = { members, n } };
+            return (tk_type_result){ .ok = true, .as.value = t };
+        }
+        case TK_TEXPR_FUNC: {
+            // (W10a) FunctionType `(A, B) -> R` → TK_TYPE_FUNC{ params; ret }. The return MAY be
+            // `void` (a function value can return nothing); params must be COMPLETE value types
+            // (void/ref rejected — a ref cannot escape, R4; void is not a value, M.3).
+            size_t np = te.as.func.nparams; tk_type *ps = np ? tk_alloc(np * sizeof *ps) : NULL;
+            for (size_t i = 0; i < np; i += 1) {
+                tk_type_result p = tk_resolve_type(te.as.func.params[i], table);
+                if (!p.ok) { tk_free0(ps); return p; }
+                if (p.as.value.tag == TK_TYPE_VOID) { tk_free0(ps); return (tk_type_result){ .ok = false, .as.error = tk_error_make("a function type parameter may not be `void` (M.3)") }; }
+                if (p.as.value.tag == TK_TYPE_REF)  { tk_free0(ps); return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be a function-type parameter (a ref cannot escape, R4)") }; }
+                ps[i] = p.as.value;
+            }
+            tk_type_result rt = tk_resolve_type(*te.as.func.ret, table);
+            if (!rt.ok) { tk_free0(ps); return rt; }
+            tk_type t = { .tag = TK_TYPE_FUNC, .as.func = { ps, np, box(rt.as.value) } };
             return (tk_type_result){ .ok = true, .as.value = t };
         }
         case TK_TEXPR_OPTIONAL: {

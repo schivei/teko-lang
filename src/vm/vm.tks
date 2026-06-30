@@ -79,10 +79,16 @@ type OptVal = struct { present: bool; inner: Value? }
 // `.value` read/write goes through `cell_get`/`cell_set`; the C twin is the TK_VAL_REF tag.
 type RefVal = struct { cell: u64 }
 
+// FuncVal (W10a) — a function/closure VALUE: the (namespace, name) of the target function. A named
+// fn used as a value carries no captured environment (the W10b capture env will extend this). A
+// closure call evaluates its callee to a FuncVal and invokes that function with the call's args.
+// The C twin is the TK_VAL_FUNC tag.
+type FuncVal = struct { ns: str; name: str }
+
 type Value = variant u8 | u16 | u32 | u64 | u128
            | i8 | i16 | i32 | i64 | i128
            | f16 | f32 | f64
-           | bool | byte | str | []Value | StructVal | OptVal | RefVal
+           | bool | byte | str | []Value | StructVal | OptVal | RefVal | FuncVal
 
 // ---------------------------------------------------------------------------
 // CONTROL FLOW. The exits a block can produce — mirrors the C `tk_flow`
@@ -963,6 +969,7 @@ fn vm_texpr_mangle(te: parser::TypeExpr) -> str {
         parser::SliceType as st    => teko::str::concat("slice_", vm_texpr_mangle(st.element))
         parser::OptionalType as ot => teko::str::concat("opt_", vm_texpr_mangle(ot.inner))
         parser::UnionType          => "variant"
+        parser::FunctionType       => "func"   // (W10a) matches checker type_mangle's Func fragment
     }
 }
 fn vm_texpr_inst_name(base: str, args: []parser::TypeExpr) -> str {
@@ -1023,6 +1030,7 @@ fn val_type_matches(subj: Value, name: str) -> bool {
         StructVal as sv => sv.type_name == name    // a named case / `error`
         OptVal => false
         RefVal => false                            // (MEM Step 2/3) a `Ref<T>` value is never pattern-matched (escape-gated, param-only)
+        FuncVal => false                           // (W10a) a function value is never pattern-matched
     }
 }
 
@@ -1468,7 +1476,9 @@ fn eval_expr(e: checker::TExpr, env: Venv) -> EvalRes {
     match e.kind {
         // Leaf reads — pure, env unchanged. (MEM Step 4: every non-call leaf threads `env` back as-is.)
         checker::TNumber as n   => EvalRes { value= num_of_prim(n, e.type); env= env }   // a concrete u8…i128 / f16…f64 from the node's type (float iff n.is_float)
-        checker::TVar as v      => EvalRes { value= read_var(env, v.name); env= env }     // checker guarantees it binds; cell-backed (Ref aliasing target) reads through the cell
+        // (W10a) a bare top-level-fn reference used as a VALUE → a FuncVal (no captured env). A plain
+        // local/param reads its bound value (cell-backed reads thread through the cell).
+        checker::TVar as v      => if v.is_func { EvalRes { value= FuncVal { ns= v.func_ns; name= v.name }; env= env } } else { EvalRes { value= read_var(env, v.name); env= env } }
         checker::TStrLit as s   => EvalRes { value= s.text; env= env }            // a `str` member of Value
         checker::TByteLit as b  => EvalRes { value= b.value; env= env }           // a `byte` member of Value
         checker::TBoolLit as bl => EvalRes { value= bl.value; env= env }                  // bool literal (W2) — FULL: a `bool` member of Value
@@ -2060,7 +2070,16 @@ fn eval_call(c: checker::TCall, env: Venv) -> EvalRes {
     // teko::fs::* host-surface builtins (list_dir). Recognized before user-fn resolution;
     // null == not a fs builtin, fall through. (Mirrors vm.c's list_dir handler.)
     match try_fs_builtin(c.callee, c.args, env) { Value as v => return EvalRes { value= v; env= env }; null => {} }
-    let h = find_function(env, c.callee)   // resolved by LAST segment (cross-ns ok); honest stop if unknown
+    // (W10a) a CLOSURE call: the callee is a LOCAL bound to a FuncVal — resolve THAT function and
+    // invoke it with the call's args (no captured env in W10a). Otherwise resolve the callee path.
+    let h = if c.is_closure_call {
+        match read_var(env, c.callee.segments[c.callee.segments.len - 1].name) {
+            FuncVal as fv => find_function(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) })
+            _ => panic("vm: closure call on a non-function value (internal: checker should reject)")
+        }
+    } else {
+        find_function(env, c.callee)   // resolved by LAST segment (cross-ns ok); honest stop if unknown
+    }
     let f = h.func
     // C7.1a — an `extern` is a foreign C function with NO Teko body; the tree-walking VM has no
     // FFI surface (the same deferred host edge as the io/fs bottoms). Stop HONESTLY (M.3), never
@@ -2362,7 +2381,16 @@ fn call_value(c: checker::TCall, env: Venv) -> StmtVal {
     match try_err_builtin(c.callee, c.args, env)  { Value as v => return StmtVal { value= v; env= env }; null => {} }
     match try_str_builtin(c.callee, c.args, env)  { Value as v => return StmtVal { value= v; env= env }; null => {} }
     match try_fs_builtin(c.callee, c.args, env)   { Value as v => return StmtVal { value= v; env= env }; null => {} }
-    let h = find_function(env, c.callee)
+    // (W10a) a CLOSURE call in statement position: callee is a LOCAL bound to a FuncVal — resolve THAT
+    // function (no captured env in W10a). Otherwise resolve the callee path.
+    let h = if c.is_closure_call {
+        match read_var(env, c.callee.segments[c.callee.segments.len - 1].name) {
+            FuncVal as fv => find_function(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) })
+            _ => panic("vm: closure call on a non-function value (internal: checker should reject)")
+        }
+    } else {
+        find_function(env, c.callee)
+    }
     let f = h.func
     // C7.1a — extern has no Teko body; the VM has no FFI surface. Honest stop (M.3), same as
     // eval_call (this is the STATEMENT-position call path vm.c folds into its single eval_call).

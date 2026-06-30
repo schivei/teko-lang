@@ -58,7 +58,7 @@ tk_bytes tk_write_texpr(tk_bytes b, tk_strtable t, const tk_texpr *te) {
             __builtin_memcpy(&fbits, &te->as.number.fval, sizeof fbits);
             return tk_write_u64(b, fbits);
         }
-        case TK_TEXPR_VAR:    return tk_write_u32(tk_write_u8(b, 1), tk_st_find(t, te->as.var.name));
+        case TK_TEXPR_VAR:    return tk_write_u32(tk_write_u8(tk_write_u32(tk_write_u8(b, 1), tk_st_find(t, te->as.var.name)), te->as.var.is_func ? 1 : 0), tk_st_find(t, te->as.var.func_ns));   // (W10a) name, is_func, func_ns
         case TK_TEXPR_STR:    return tk_write_u32(tk_write_u8(b, 2), tk_st_find(t, te->as.str.text));
         case TK_TEXPR_BYTE:   return tk_write_u8(tk_write_u8(b, 3), te->as.byte.value);
         case TK_TEXPR_BINARY:
@@ -200,6 +200,7 @@ static tk_bytes write_typeexpr(tk_bytes b, tk_strtable t, tk_type_expr te) {
         case TK_TEXPR_SLICE:    return write_typeexpr(tk_write_u8(b, 1), t, *te.as.slice.element);
         case TK_TEXPR_UNION:    return write_typeexprs(tk_write_u8(b, 2), t, te.as.uni.members, te.as.uni.len);
         case TK_TEXPR_OPTIONAL: return write_typeexpr(tk_write_u8(b, 3), t, *te.as.optional.inner);
+        case TK_TEXPR_FUNC:     return write_typeexpr(write_typeexprs(tk_write_u8(b, 4), t, te.as.func.params, te.as.func.nparams), t, *te.as.func.ret);   // (W10a) tag 4: params then ret
     }
     return b;
 }

@@ -153,7 +153,7 @@ _Noreturn static void vm_panic_oob_at (const tk_texpr *e) { vm_panic_pos(e->line
 // =========================================================================
 typedef struct tk_value tk_value;
 
-typedef enum { TK_VAL_INT, TK_VAL_FLOAT, TK_VAL_BOOL, TK_VAL_STR, TK_VAL_LIST, TK_VAL_STRUCT, TK_VAL_OPT, TK_VAL_REF } tk_value_tag;
+typedef enum { TK_VAL_INT, TK_VAL_FLOAT, TK_VAL_BOOL, TK_VAL_STR, TK_VAL_LIST, TK_VAL_STRUCT, TK_VAL_OPT, TK_VAL_REF, TK_VAL_FUNC } tk_value_tag;   // (W10a) TK_VAL_FUNC = a function/closure value
 
 // the value list — TK_LIST over tk_value (core.h convention). Declared after tk_value.
 typedef struct { tk_value *ptr; size_t len; size_t cap; } tk_value_list;
@@ -191,6 +191,9 @@ struct tk_value {
         // an auto-ref PROMOTES the origin var to a cell, this carries the cell index, and `.value`
         // read/write goes through cell_get/cell_set (the .tks twin is the RefVal variant member).
         struct { uint64_t cell; } ref;
+        // FUNC (W10a) — a function/closure value: the target function's (namespace, name). A named fn
+        // used as a value carries no captured env (W10b capture extends this). The .tks twin is FuncVal.
+        struct { tk_str ns; tk_str name; } func;
     } as;
 };
 
@@ -1296,6 +1299,19 @@ static tk_flow run_user_fn(const tk_tfunction *fn, size_t fn_idx, tk_venv *fenv)
     return fl;
 }
 
+// (W10a) resolve a CLOSURE call's target function: the callee is a LOCAL bound to a TK_VAL_FUNC
+// value (a named fn used as a value). Read that local, then resolve the function by its name (no
+// captured env in W10a). Shared by call_value (statement) and eval_call (value). (Mirrors vm.tks.)
+static const tk_tfunction *closure_target(const tk_texpr *e, tk_venv *env, size_t *out_idx) {
+    tk_path p = e->as.call.callee;
+    tk_slot *cs = env_find(env, p.segments[p.len - 1].name);
+    tk_value cv = (cs && cs->has_cell) ? cell_get(cs->cell_id) : (cs ? cs->val : (tk_value){0});
+    if (cs == NULL || cv.tag != TK_VAL_FUNC) vm_unsupported("closure call on a non-function value (internal: checker should reject)");
+    tk_segment fseg = { cv.as.func.name };
+    tk_path fp = { &fseg, 1 };
+    return find_function(fp, out_idx);
+}
+
 // call_value — a call in STATEMENT position (the .tks twin's call_value). (MEM Step 2/3) This is the
 // path that SUPPORTS `Ref<T>` aliasing: auto-ref promotes the caller's `mut` lvalue to a (global) cell
 // and the callee writes through it, so `bump(x)` mutates `x`. The C cell store is global/shared, so
@@ -1310,7 +1326,7 @@ static bool call_value(const tk_texpr *e, tk_venv *env, tk_value *out) {
     if (try_builtin_call(p, args, nargs, env, out)) return true;   // `-> void` builtin (or value builtin) — no ref args
 
     size_t fn_idx;
-    const tk_tfunction *fn = find_function(p, &fn_idx);
+    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function(p, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal
     if (fn == NULL) {
         static char buf[256];
         tk_str last = p.segments[p.len - 1].name;
@@ -1340,7 +1356,7 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
     if (try_builtin_call(p, args, nargs, env, &out)) return out;
 
     size_t fn_idx;
-    const tk_tfunction *fn = find_function(p, &fn_idx);
+    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function(p, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal
     if (fn == NULL) {
         // HOST-FFI FRONTIER (not a checker bug): the checker accepts host-FFI/builtin calls
         // because the native backend lowers them; the VM has no host surface (Phase 7). Stop
@@ -1408,6 +1424,7 @@ static tk_str vm_texpr_mangle(tk_type_expr te) {
         case TK_TEXPR_SLICE:    return tk_str_concat((tk_str){ (const tk_byte *)"slice_", 6 }, vm_texpr_mangle(*te.as.slice.element));
         case TK_TEXPR_OPTIONAL: return tk_str_concat((tk_str){ (const tk_byte *)"opt_", 4 }, vm_texpr_mangle(*te.as.optional.inner));
         case TK_TEXPR_UNION:    return (tk_str){ (const tk_byte *)"variant", 7 };
+        case TK_TEXPR_FUNC:     return (tk_str){ (const tk_byte *)"func", 4 };   // (W10a) matches checker type_mangle's Func fragment
     }
     return (tk_str){ NULL, 0 };
 }
@@ -1768,6 +1785,9 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
             return norm_int((unsigned __int128)e->as.number.value, prim_is_signed(k), prim_width(k));
         }
         case TK_TEXPR_VAR: {
+            // (W10a) a bare top-level-fn reference used as a VALUE → a function value (no captured env).
+            if (e->as.var.is_func)
+                return (tk_value){ .tag = TK_VAL_FUNC, .as.func = { e->as.var.func_ns, e->as.var.name } };
             tk_slot *s = env_find(env, e->as.var.name);
             if (s == NULL) vm_unsupported("reference to an unbound variable (internal: checker should reject)");
             // (MEM Step 2/3) a CELL-BACKED slot (a `Ref<T>` aliasing target whose `mut` value was

@@ -45,7 +45,7 @@ struct tk_texpr {
     uint32_t     line, col;   // (C1-POS/E1) source position, copied from the untyped tk_expr; 0 = unknown
     union {
         struct { bool is_float; __int128 value; double fval; }       number;  // raw literal value; `.type` decides width/float-kind (N1/N2). C bootstrap uses __int128.
-        struct { tk_str name; }                                      var;
+        struct { tk_str name; bool is_func; tk_str func_ns; }        var;   // (W10a) is_func = a bare top-level-fn reference used as a VALUE → tk_closure literal; func_ns = the fn's declaring namespace (C-symbol mangle)
         struct { tk_str text; }                                      str;
         struct { tk_byte value; }                                    byte;
         struct { bool value; }                                       boolean; // TK_TEXPR_BOOL — `.type` is bool prim (LEGISLATION §75)
@@ -53,7 +53,7 @@ struct tk_texpr {
         struct { tk_token_kind op; tk_texpr *left, *right; }         binary;
         struct { tk_token_kind op; tk_texpr *operand; }             unary;
         struct { tk_texpr *first; tk_tcmp_term *rest; size_t nrest; } compare;
-        struct { tk_path callee; tk_texpr *args; size_t nargs; tk_str call_ns; } call;  // call_ns: resolved target's namespace ("" = builtin/local → no mangle) (#41/#49)
+        struct { tk_path callee; tk_texpr *args; size_t nargs; tk_str call_ns; bool is_closure_call; tk_type callee_type; } call;  // call_ns: resolved target's namespace ("" = builtin/local → no mangle) (#41/#49). (W10a) is_closure_call = callee is a LOCAL of function type (a tk_closure VALUE) → call through `((R(*)(A,B))f.fn)(args)` using callee_type (the Func) for the cast
         struct { tk_texpr *cond; tk_tstatement *then_blk; size_t nthen;
                  bool has_else; tk_tstatement *else_blk; size_t nelse; } if_expr;
         struct { tk_texpr *subject; tk_tarm *arms; size_t narms; }    match_expr;

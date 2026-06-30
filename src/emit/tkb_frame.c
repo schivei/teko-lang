@@ -31,7 +31,7 @@ static void collect_type(tk_strtable *t, tk_type ty) {
 static void collect(tk_strtable *t, const tk_texpr *te) {
     collect_type(t, te->type);
     switch (te->tag) {
-        case TK_TEXPR_VAR: tk_st_intern(t, te->as.var.name); break;
+        case TK_TEXPR_VAR: tk_st_intern(t, te->as.var.name); tk_st_intern(t, te->as.var.func_ns); break;   // (W10a) intern func_ns too
         case TK_TEXPR_STR: tk_st_intern(t, te->as.str.text); break;
         case TK_TEXPR_BINARY: collect(t, te->as.binary.left); collect(t, te->as.binary.right); break;
         case TK_TEXPR_UNARY:  collect(t, te->as.unary.operand); break;
@@ -133,6 +133,7 @@ static void collect_typeexpr(tk_strtable *t, tk_type_expr te) {
         case TK_TEXPR_SLICE:    collect_typeexpr(t, *te.as.slice.element); break;
         case TK_TEXPR_UNION:    collect_typeexprs(t, te.as.uni.members, te.as.uni.len); break;
         case TK_TEXPR_OPTIONAL: collect_typeexpr(t, *te.as.optional.inner); break;
+        case TK_TEXPR_FUNC:     collect_typeexprs(t, te.as.func.params, te.as.func.nparams); if (te.as.func.ret) collect_typeexpr(t, *te.as.func.ret); break;   // (W10a)
     }
 }
 static void collect_params(tk_strtable *t, const tk_param *xs, size_t n) {

@@ -4,9 +4,38 @@ use teko::lexer
 
 // A primary type: a slice `[]T` or a named path. (Members of a `|` union and a
 // slice's element are primaries — the union level is `parse_type` below.)
+// (W10a) a function/closure VALUE type `(A, B) -> R` — `pos` is at `(`. NO `fn` keyword. The
+// parameter list is comma-separated types (empty `()` allowed); `->` is mandatory; the return type
+// is parsed greedily via `parse_type` (so `(i64) -> A | B` returns `A | B`, mirroring fn-decl
+// returns). `pending_gt` is threaded from the return so a function type nests inside a generic arg
+// (`List<(i64) -> Box<i64>>`). A `(` is unambiguous in a type position (there is no type grouping).
+fn parse_function_type(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
+    mut params: []TypeExpr = teko::list::empty()
+    mut p = pos + 1
+    if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        p = p + 1
+    } else {
+        loop {
+            let a = match parse_type(tokens, p) { ParsedType as x => x; error as e => return e }
+            params = teko::list::push(params, a.node)
+            p = a.next
+            if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
+            else if is_kind_at(tokens, p, lexer::TokenKind::RParen) { p = p + 1; break }
+            else { return err_at(tokens, p, "expected ',' or ')' in a function type's parameter list '(A, B) -> R'") }
+        }
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::Arrow) {
+        return err_at(tokens, p, "a function type '(A, B) -> R' needs '->' before the return type")
+    }
+    let ret = match parse_type(tokens, p + 1) { ParsedType as x => x; error as e => return e }
+    ParsedType { node = FunctionType { params = params; ret = ret.node }; next = ret.next; pending_gt = ret.pending_gt }
+}
+
 fn parse_type_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     let base = if is_kind_at(tokens, pos, lexer::TokenKind::LBracket) {
         match parse_slice(tokens, pos) { ParsedType as x => x; error as e => return e }
+    } else if is_kind_at(tokens, pos, lexer::TokenKind::LParen) {
+        match parse_function_type(tokens, pos) { ParsedType as x => x; error as e => return e }
     } else {
         match parse_named(tokens, pos) { ParsedType as x => x; error as e => return e }
     }

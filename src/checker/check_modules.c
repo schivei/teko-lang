@@ -131,6 +131,12 @@ static const char *check_texpr(tk_type_expr te, tk_str ref_ns, tk_type_table tab
                 if (e) return e;
             }
             return NULL;
+        case TK_TEXPR_FUNC:   // (W10a) check every param + the return
+            for (size_t i = 0; i < te.as.func.nparams; i += 1) {
+                const char *e = check_texpr(te.as.func.params[i], ref_ns, table, al);
+                if (e) return e;
+            }
+            return te.as.func.ret ? check_texpr(*te.as.func.ret, ref_ns, table, al) : NULL;
     }
     return NULL;
 }

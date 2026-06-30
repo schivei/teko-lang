@@ -422,6 +422,7 @@ fn cg_te_reaches_byvalue(prog: checker::TProgram, te: parser::TypeExpr, to: str,
             false
         }
         parser::SliceType => false   // a slice is a pointer — not a by-value edge
+        parser::FunctionType => false   // (W10a) a function pointer — not a by-value aggregate edge
     }
 }
 // cg_name_reaches_byvalue — does named type `from` reach named type `to` through by-value edges?
@@ -523,7 +524,11 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         // VARIANT (`A | B | …`) — the generated tk_u_<keys> tagged-union struct (B-cg2). Its
         // typedef is stamped in the prelude. A Named variant decl is reached via Named, not here.
         checker::Variant as va => cg_variant_typename(buf, va)
-        checker::Func      => error { message = "codegen: function type not yet supported" }
+        // (W10a) a function/closure VALUE type `(A, B) -> R` lowers to the uniform runtime
+        // `tk_closure { void *fn; void *env; }` (teko_rt.h). The per-signature C type is only
+        // needed at the CALL site (a cast on `.fn`), never as a storage type — so one struct
+        // serves every function type.
+        checker::Func      => cb(buf, "tk_closure")
         // `error` — the runtime tk_error struct (E2-NATIVE; teko_rt.h). Full diagnostic fields.
         checker::Error     => cb(buf, "tk_error")
         // (C7.1a) opaque FFI transport types — `ptr` is a bare `void *`, `uptr` a word-size
@@ -536,6 +541,29 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
         checker::Uptr      => cb(buf, "uintptr_t")
         // (MEM-1b) Ref<T> → a bare `<T> *` today ("C pointer without `*`/`&`"; struct wrapper waits for W9+ metadata).
         checker::Reference as r => cb(match emit_type(buf, r.inner) { []byte as o => o; error as e => return e }, " *")
+    }
+}
+
+// (W10a) the C function-pointer SIGNATURE for a closure call's cast: `R (*)(A, B)`. Built from the
+// callee's resolved Func type so `((R(*)(A,B))f.fn)(args)` invokes the code pointer with the right
+// ABI. Empty params → `(void)`. (C: `cg_emit_fnptr_sig`.)
+fn cg_emit_fnptr_sig(buf: []byte, t: checker::Type) -> []byte | error {
+    match t {
+        checker::Func as f => {
+            mut out = match emit_type(buf, f.ret) { []byte as o => o; error as e => return e }
+            out = cb(out, " (*)(")
+            if f.params.len == 0 { out = cb(out, "void") } else {
+                mut i = 0
+                loop {
+                    if i >= f.params.len { break }
+                    if i > 0 { out = cb(out, ", ") }
+                    out = match emit_type(out, f.params[i]) { []byte as o => o; error as e => return e }
+                    i++
+                }
+            }
+            cb(out, ")")
+        }
+        _ => error { message = "codegen: closure call on a non-function type (internal)" }
     }
 }
 
@@ -727,6 +755,7 @@ fn cg_texpr_mangle(te: parser::TypeExpr) -> str {
         parser::SliceType as st    => teko::str::concat("slice_", cg_texpr_mangle(st.element))
         parser::OptionalType as ot => teko::str::concat("opt_", cg_texpr_mangle(ot.inner))
         parser::UnionType          => "variant"
+        parser::FunctionType       => "func"   // (W10a) matches checker type_mangle's Func fragment
     }
 }
 // `<base>__g__<arg0>[__<arg1>…]` over type-arg exprs (matches checker::generic_inst_name).
@@ -790,6 +819,8 @@ fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr) ->
         parser::UnionType as ut => cg_variant_typename_texpr(buf, ut)
         // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
         parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "tk_opt_"), ot.inner)
+        // (W10a) a function-type field/param annotation → the uniform `tk_closure` (teko_rt.h).
+        parser::FunctionType => cb(buf, "tk_closure")
     }
 }
 
@@ -1441,8 +1472,16 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             // and same-named functions across namespaces never collide.
             out = cb_fn_name(out, c.call_ns, p.segments[p.segments.len - 1].name)
         }
+    } else if c.is_closure_call {
+        // (W10a) call THROUGH a tk_closure VALUE: `((R(*)(A,B))name.fn)` — the cast restores the
+        // statically-known ABI before invoking the code pointer. The arg list (`(…)`) follows below.
+        out = cb(out, "((")
+        out = match cg_emit_fnptr_sig(out, c.callee_type) { []byte as o => o; error as e => return e }
+        out = cb(out, ")")
+        out = cb_ident(out, p.segments[p.segments.len - 1].name)
+        out = cb(out, ".fn)")
     } else {
-        // No resolved namespace (a local fn-value, or a name not carried) -> the bare
+        // No resolved namespace (a builtin, or a name not carried) -> the bare
         // (keyword-escaped) last segment.
         out = cb_ident(out, p.segments[p.segments.len - 1].name)
     }
@@ -3577,7 +3616,13 @@ fn emit_expr_ret(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, 
 fn emit_expr_ctx(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     match e.kind {
         checker::TNumber as n      => emit_number(buf, e, n)
-        checker::TVar as v         => cb_ident(buf, v.name)
+        // (W10a) a bare top-level-fn reference used as a VALUE → a `tk_closure` literal carrying the
+        // C function's address (env = NULL; named fns capture nothing). A plain local emits its name.
+        checker::TVar as v         => if v.is_func {
+            cb(cb_fn_name(cb(buf, "(tk_closure){ (void*)&"), v.func_ns, v.name), ", (void*)0 }")
+        } else {
+            cb_ident(buf, v.name)
+        }
         checker::TBinary as b      => emit_binary(buf, prog, e, b, escaping, regions, fn_body, dctx)
         checker::TUnary as u       => emit_unary(buf, prog, u, escaping, regions, fn_body, dctx)
         checker::TCompare as c     => emit_compare(buf, prog, c, escaping, regions, fn_body, dctx)
@@ -4833,6 +4878,7 @@ fn cg_texpr_ready(em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr) -> bool {
         parser::OptionalType as ot => cg_opt_emitted_key(em, set, match cg_opt_mangle_texpr_str(ot.inner) { str as s => s; error => "" })
         parser::SliceType => true   // pointer (slice typedef pre-emitted)
         parser::UnionType as ut => cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(teko::list::empty(), ut) { []byte as o => str(o); error => "" })
+        parser::FunctionType => true   // (W10a) tk_closure is a runtime type — always ready
     }
 }
 // Is a named decl's body emittable now (all its by-value field/member deps already emitted)?

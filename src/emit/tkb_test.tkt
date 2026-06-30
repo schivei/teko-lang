@@ -44,7 +44,7 @@ fn tkb_roundtrip_cast() {
 #test
 fn tkb_roundtrip_field_access() {
     // S1b: TFieldAccess { receiver = (TVar s : Named Foo); field = "token" } : u8 — round-trips exactly.
-    let recv = checker::TExpr { kind = checker::TVar { name = "s" }; type = checker::Named { name = "Foo" }; line = 0; col = 0 }
+    let recv = checker::TExpr { kind = checker::TVar { name = "s"; is_func = false; func_ns = "" }; type = checker::Named { name = "Foo" }; line = 0; col = 0 }
     let orig = checker::TExpr { kind = checker::TFieldAccess { receiver = recv; field = "token" }; type = u8ty(); line = 0; col = 0 }
     match deserialize(serialize(orig)) {
         checker::TExpr as got => match got.kind {
@@ -84,8 +84,8 @@ fn tkb_roundtrip_arraylit() {
 fn tkb_roundtrip_arraylit_spread() {
     // C6.7: ArrayLit with a spread element [..xs, y] — is_spread flag survives round-trip.
     // xs has type []i64 (the spread slice); y is a plain i64 element.
-    let xs_expr = checker::TExpr { kind = checker::TVar { name = "xs" }; type = checker::Slice { element = i64ty() }; line = 0; col = 0 }
-    let y_expr  = checker::TExpr { kind = checker::TVar { name = "y"  }; type = i64ty(); line = 0; col = 0 }
+    let xs_expr = checker::TExpr { kind = checker::TVar { name = "xs"; is_func = false; func_ns = "" }; type = checker::Slice { element = i64ty() }; line = 0; col = 0 }
+    let y_expr  = checker::TExpr { kind = checker::TVar { name = "y"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
     let ae_spread = checker::TArrayElem { is_spread = true;  expr = xs_expr }
     let ae_plain  = checker::TArrayElem { is_spread = false; expr = y_expr }
     let elems = teko::list::push(teko::list::push(teko::list::empty(), ae_spread), ae_plain)
@@ -130,7 +130,7 @@ fn tkb_roundtrip_structinit() {
 #test
 fn tkb_roundtrip_coalesce() {
     // C7.16: (a ?? 0) round-trips (collect now recurses left + right).
-    let left = checker::TExpr { kind = checker::TVar { name = "a" }; type = i64ty(); line = 0; col = 0 }
+    let left = checker::TExpr { kind = checker::TVar { name = "a"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
     let orig = checker::TExpr { kind = checker::TCoalesce { left = left; right = tnum(0) }; type = i64ty(); line = 0; col = 0 }
     match deserialize(serialize(orig)) {
         checker::TExpr as got => match got.kind {
@@ -165,7 +165,7 @@ fn tkb_roundtrip_pathexpr() {
 fn tkb_roundtrip_ifexpr() {
     // C7.16: `if true { let x: i64 = 1; x; return x } else { return 0 }` round-trips (statements + IF).
     let cond = checker::TExpr { kind = checker::TBoolLit { value = true }; type = boolty(); line = 0; col = 0 }
-    let xref = checker::TExpr { kind = checker::TVar { name = "x" }; type = i64ty(); line = 0; col = 0 }
+    let xref = checker::TExpr { kind = checker::TVar { name = "x"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
     mut thenb: []checker::TStatement = teko::list::empty()
     thenb = teko::list::push(thenb, checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "x" }; bound = i64ty(); value = tnum(1) })
     thenb = teko::list::push(thenb, checker::TExprStmt { expr = xref })
@@ -239,7 +239,7 @@ fn tkb_roundtrip_program() {
     let td = parser::TypeDecl { name = "Point"; type_params = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld) }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 1; col = 1 }
     // fn id(n: i64) -> i64 { return n }
     let prm = parser::Param { name = "n"; type_ann = nt("i64") }
-    let nref = checker::TExpr { kind = checker::TVar { name = "n" }; type = i64ty(); line = 0; col = 0 }
+    let nref = checker::TExpr { kind = checker::TVar { name = "n"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
     mut body: []checker::TStatement = teko::list::empty()
     body = teko::list::push(body, checker::TReturn { has_value = true; value = nref })
     let fn1 = checker::TFunction { name = "id"; type_params = teko::list::empty(); params = teko::list::push(teko::list::empty(), prm); return_type = i64ty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; namespace = "m"; file = "m.tks"; line = 2; col = 1; is_test = false; is_extern = false; c_symbol = ""; from_lib = "" }
@@ -280,7 +280,7 @@ fn tkb_roundtrip_program() {
 fn tkb_roundtrip_matchexpr() {
     // C7.16: `match x { 0 => return 1; Foo as y => return 2; _ => return 3 }` round-trips (match + 3 pattern kinds).
     let voidx = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }   // placeholder guard (has_when=false)
-    let subj = checker::TExpr { kind = checker::TVar { name = "x" }; type = i64ty(); line = 0; col = 0 }
+    let subj = checker::TExpr { kind = checker::TVar { name = "x"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
     let lit0 = parser::Expr { kind = parser::Number { is_float = false; value = 0; fval = 0.0 }; line = 0; col = 0 }
     mut body0: []checker::TStatement = teko::list::push(teko::list::empty(), checker::TReturn { has_value = true; value = tnum(1) })
     let arm0 = checker::TArm { pattern = parser::LiteralPattern { value = lit0 }; has_when = false; guard = voidx; body = body0 }

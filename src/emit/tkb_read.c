@@ -102,7 +102,7 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
             __builtin_memcpy(&e.as.number.fval, &fbits, sizeof fbits);
             return e;
         }
-        case 1: e.tag = TK_TEXPR_VAR;    e.as.var.name  = tk_read_str(r, t); return e;
+        case 1: e.tag = TK_TEXPR_VAR;    e.as.var.name  = tk_read_str(r, t); e.as.var.is_func = tk_read_u8(r) != 0; e.as.var.func_ns = tk_read_str(r, t); return e;   // (W10a) name, is_func, func_ns
         case 2: e.tag = TK_TEXPR_STR;    e.as.str.text  = tk_read_str(r, t); return e;
         case 3: e.tag = TK_TEXPR_BYTE;   e.as.byte.value = tk_read_u8(r); return e;
         case 4: e.tag = TK_TEXPR_BINARY; e.as.binary.op = kind_of(tk_read_u8(r));
@@ -301,6 +301,12 @@ static tk_type_expr read_typeexpr(tk_reader *r, tk_strs t) {
         case 1: te.tag = TK_TEXPR_SLICE;    te.as.slice.element = tk_box_type(read_typeexpr(r, t)); return te;
         case 2: te.tag = TK_TEXPR_UNION;    te.as.uni.members = read_typeexprs(r, t, &te.as.uni.len); return te;
         case 3: te.tag = TK_TEXPR_OPTIONAL; te.as.optional.inner = tk_box_type(read_typeexpr(r, t)); return te;
+        case 4: {   // (W10a) tag 4: params then ret
+            te.tag = TK_TEXPR_FUNC;
+            te.as.func.params = read_typeexprs(r, t, &te.as.func.nparams);
+            te.as.func.ret = tk_box_type(read_typeexpr(r, t));
+            return te;
+        }
     }
     r->ok = false; return te;
 }

@@ -91,7 +91,7 @@ fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
                                       (n.value >> 64) to u64),          // hi
                                   (n.value & 0xFFFFFFFFFFFFFFFF) to u64),// lo
                               teko::f64_bits(n.fval))                    // f64 -> u64 bit pattern
-        checker::TVar as v      => write_u32(write_u8(b, 1), st_find(t, v.name))
+        checker::TVar as v      => write_u32(write_u8(write_u32(write_u8(b, 1), st_find(t, v.name)), (if v.is_func { 1 } else { 0 }) to byte), st_find(t, v.func_ns))   // (W10a) name, is_func, func_ns
         checker::TStrLit as s   => write_u32(write_u8(b, 2), st_find(t, s.text))
         checker::TByteLit as bl => write_u8(write_u8(b, 3), bl.value)
         checker::TBinary as bn  => write_texpr(write_texpr(write_u8(write_u8(b, 4), kind_byte(bn.op)), t, bn.left), t, bn.right)
@@ -261,6 +261,7 @@ fn write_typeexpr(buf: []byte, t: StrTable, te: parser::TypeExpr) -> []byte {
         parser::SliceType as s    => write_typeexpr(write_u8(buf, 1), t, s.element)
         parser::UnionType as u    => write_typeexprs(write_u8(buf, 2), t, u.members)
         parser::OptionalType as o => write_typeexpr(write_u8(buf, 3), t, o.inner)
+        parser::FunctionType as f => write_typeexpr(write_typeexprs(write_u8(buf, 4), t, f.params), t, f.ret)   // (W10a) tag 4: params then ret
     }
 }
 
