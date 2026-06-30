@@ -99,3 +99,48 @@ fn lexes_dot_access() {
     teko::assert::is_true(kinds_eq("..",  [TokenKind::DotDot]))         // spread prefix (C6.7)
     teko::assert::is_true(kinds_eq("..=", [TokenKind::DotDotEq]))      // range (maximal munch wins)
 }
+
+// --- raw / verbatim strings `@"…"` and multi-line strings `"""…"""` ---
+// Both forms produce a plain TokenKind::Str carrying the DECODED bytes (the lexer
+// already decodes — read_str stores final bytes, not a source view).
+
+// the text (decoded bytes) of the single token of `source`, or "" on failure.
+fn one_str_text(source: str) -> str {
+    let toks = match tokenize(source) {
+        []Token as ts => ts
+        error       => return ""
+    }
+    if toks.len != 1 { return "" }
+    toks[0].text
+}
+
+#test
+fn lexes_raw_string_literal() {
+    // a raw string is a single Str token.
+    teko::assert::is_true(kinds_eq("@\"abc\"", [TokenKind::Str]))
+    // backslash stays LITERAL: `@"a\nb"` decodes to the 4 bytes  a \ n b.
+    teko::assert::is_true(one_str_text("@\"a\\nb\"") == "a\\nb")
+    // a doubled quote `""` inside is one literal `"`: `@"a""b"` → `a"b`.
+    teko::assert::is_true(one_str_text("@\"a\"\"b\"") == "a\"b")
+    // empty raw string `@""`.
+    teko::assert::is_true(one_str_text("@\"\"") == "")
+}
+
+#test
+fn lexes_multiline_string_literal() {
+    // a multi-line string is a single Str token; it spans ≥2 lines (literal newline).
+    teko::assert::is_true(kinds_eq("\"\"\"a\nb\"\"\"", [TokenKind::Str]))
+    teko::assert::is_true(one_str_text("\"\"\"a\nb\"\"\"") == "a\nb")
+    // a lone `"` inside is LITERAL (only `"""` closes).
+    teko::assert::is_true(one_str_text("\"\"\"a\"b\"\"\"") == "a\"b")
+    // escapes are processed normally: `\t` → a tab byte.
+    teko::assert::is_true(one_str_text("\"\"\"a\\tb\"\"\"") == "a\tb")
+    // empty multi-line string `""""""` (six quotes).
+    teko::assert::is_true(one_str_text("\"\"\"\"\"\"") == "")
+}
+
+#test
+fn rejects_unterminated_raw_and_multiline() {
+    teko::assert::is_true(is_error("@\"abc"))          // unterminated raw string
+    teko::assert::is_true(is_error("\"\"\"abc"))       // unterminated multi-line string
+}
