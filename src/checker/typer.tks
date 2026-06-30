@@ -24,6 +24,11 @@ fn type_strlit(s: parser::StrLit) -> TExpr {
 fn type_bytelit(b: parser::ByteLit) -> TExpr {
     TExpr { kind = TByteLit { value = b.value }; type = Byte { }; line = 0; col = 0 }
 }
+
+// a char literal `c'x'` types as `char` (its OWN tag); the raw UTF-8 bytes ride the node.
+fn type_charlit(c: parser::CharLit) -> TExpr {
+    TExpr { kind = TCharLit { bytes = c.bytes }; type = Char { }; line = 0; col = 0 }
+}
 fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool prim (LEGISLATION §75)
     TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
@@ -96,6 +101,7 @@ fn lam_collect_expr(e: parser::Expr, refs: Ref<[]str>, bound: Ref<[]str>) -> voi
         parser::Number            => { }
         parser::StrLit            => { }
         parser::ByteLit           => { }
+        parser::CharLit           => { }
         parser::BoolLit           => { }
         parser::NullLit           => { }
         parser::PathExpr          => { }
@@ -605,10 +611,32 @@ fn is_int_cast_end(t: Type) -> bool {
     }
 }
 
+// (UTF-8 increment 1) `char to <int>` — the EXPLICIT decode of a codepoint to its scalar value.
+// Allowed for u32 (the natural codepoint width), and trivially for the wider unsigned/signed ints
+// that hold any codepoint (u64/i64). The REVERSE (`<int> to char`, an encode) is a later increment.
+fn is_char_decode_target(t: Type) -> bool {
+    match t {
+        Prim as p => p.kind == PrimKind::U32 || p.kind == PrimKind::U64 || p.kind == PrimKind::I64
+        _         => false
+    }
+}
+
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
     let target = match resolve_type(c.target, table) { Type as t => t; error as e => return e }
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
+    // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
+    // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors expr.c type_cast.)
+    match inner.type {
+        Char => {
+            if is_char_decode_target(target) {
+                return TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }
+            }
+            return error { message = "a `char` may only be cast to u32/u64/i64 (its codepoint value); other casts are not defined" }
+        }
+        _ => {}
+    }
     // (E7) enum ↔ integer ORDINAL cast: an enum value → its ordinal integer, an integer → the enum
     // member (the `(byte)k` / `(TokenKind)b` the .tkb serializer relies on). cast_check is prim-only,
     // so handle this pair here (it has the type table to detect an enum); the result type is the
@@ -1023,6 +1051,7 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
         parser::Number as n    => type_number(n)
         parser::StrLit as s    => type_strlit(s)
         parser::ByteLit as b   => type_bytelit(b)
+        parser::CharLit as c   => type_charlit(c)
         parser::BoolLit as bl  => type_boollit(bl)
         parser::NullLit as nl  => type_nulllit(nl)
         parser::Var as v       => type_var(v, env)

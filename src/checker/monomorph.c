@@ -59,6 +59,7 @@ static tk_str mono_type_mangle(tk_type t) {
         case TK_TYPE_PRIM:     return mono_cstr(mono_prim_name(t.as.prim));
         case TK_TYPE_STR:      return mono_cstr("str");
         case TK_TYPE_BYTE:     return mono_cstr("byte");
+        case TK_TYPE_CHAR:     return mono_cstr("char");
         case TK_TYPE_NAMED:    return t.as.named.name;
         case TK_TYPE_SLICE:    { tk_str e = mono_type_mangle(*t.as.slice.element);   return mono_concat(mono_cstr("slice_"), e); }
         case TK_TYPE_OPTIONAL: { tk_str e = mono_type_mangle(*t.as.optional.inner); return mono_concat(mono_cstr("opt_"),   e); }
@@ -126,6 +127,7 @@ static tk_type_expr type_to_texpr(tk_type t) {
         case TK_TYPE_PRIM:     return mono_named_texpr(mono_prim_name(t.as.prim));
         case TK_TYPE_STR:      return mono_named_texpr("str");
         case TK_TYPE_BYTE:     return mono_named_texpr("byte");
+        case TK_TYPE_CHAR:     return mono_named_texpr("char");
         case TK_TYPE_ERROR:    return mono_named_texpr("error");
         case TK_TYPE_NAMED:    return mono_named_texpr_str(t.as.named.name);
         case TK_TYPE_SLICE:    return (tk_type_expr){ .tag = TK_TEXPR_SLICE, .as.slice = { tk_box_type(type_to_texpr(*t.as.slice.element)) } };
@@ -215,6 +217,7 @@ static bool mono_texpr(tk_texpr e, tk_subst s, tk_tprogram prog, tk_type_table t
     r.type = tk_subst_type(e.type, s);
     switch (e.tag) {
         case TK_TEXPR_NUMBER: case TK_TEXPR_VAR: case TK_TEXPR_STR: case TK_TEXPR_BYTE:
+        case TK_TEXPR_CHAR:
         case TK_TEXPR_BOOL: case TK_TEXPR_NULL: case TK_TEXPR_PATH:
             break;   // leaves — only the type is substituted
         case TK_TEXPR_BINARY: {

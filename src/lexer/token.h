@@ -162,6 +162,10 @@ typedef enum {
     //     handling into the token's FRESH `.text` (single-line `""`→`"` collapse applied;
     //     multi-line copied as-is), so the parser treats the two uniformly.
     TK_TOKEN_INTERP_RAW,    // `$@"…{expr}…"` — a verbatim interpolated string (fresh inner bytes)
+    // char literal `c'…'` (UTF-8 codepoint). Appended LAST for ordinal stability (a Char token is
+    // never a stored operator, so its ordinal is never serialized to `.tkb`). Its `.text` is the
+    // codepoint's raw UTF-8 bytes (1–4), already validated by the lexer.
+    TK_TOKEN_CHAR,          // `c'x'` — one UTF-8 codepoint (1–4 bytes)
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW

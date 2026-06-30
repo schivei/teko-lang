@@ -61,6 +61,7 @@ const char *tk_type_render(tk_type t) {
     switch (t.tag) {
         case TK_TYPE_PRIM:  return dup_cstr(prim_name(t.as.prim));
         case TK_TYPE_BYTE:  return dup_cstr("byte");
+        case TK_TYPE_CHAR:  return dup_cstr("char");
         case TK_TYPE_STR:   return dup_cstr("str");
         case TK_TYPE_ERROR: return dup_cstr("error");
         case TK_TYPE_VOID:  return dup_cstr("void");
@@ -338,6 +339,7 @@ tk_str tk_type_mangle(tk_type t) {
         case TK_TYPE_PRIM:     return rt_cstr(prim_name(t.as.prim));
         case TK_TYPE_STR:      return rt_cstr("str");
         case TK_TYPE_BYTE:     return rt_cstr("byte");
+        case TK_TYPE_CHAR:     return rt_cstr("char");
         case TK_TYPE_NAMED:    return t.as.named.name;
         case TK_TYPE_SLICE:    return rt_concat(rt_cstr("slice_"),
                                    t.as.slice.element  ? tk_type_mangle(*t.as.slice.element)  : rt_cstr("void"));

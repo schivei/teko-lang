@@ -208,3 +208,37 @@ fn lexes_brace_doubling_close_finding() {
     // order-free verbatim: `@$"{{x}}"` → inner `{{x}}` (preserved for the parser to collapse).
     teko::assert::is_true(one_str_text("@$\"{{x}}\"") == "{{x}}")
 }
+
+// ---- char literals `c'…'` (UTF-8 codepoint, 1–4 bytes) ----
+
+#test
+fn lexes_char_literal_ascii() {
+    // `c'A'` is a single Char token whose text is the 1-byte UTF-8 `A`.
+    teko::assert::is_true(kinds_eq("c'A'", [TokenKind::Char]))
+    teko::assert::is_true(one_str_text("c'A'") == "A")
+    teko::assert::is_true(one_str_text("c'A'").len == 1)
+}
+
+// NOTE: a MULTIBYTE char literal (`c'é'`, `c'😀'`) is NOT unit-tested here. The `.tkt` gate runs
+// under BOTH engines, and the VM lexer has a PRE-EXISTING multibyte-UTF-8 collection limitation
+// (it captures one byte of a multibyte codepoint — independent of `char`; the same limitation
+// affects raw-string collection). Native is fully correct: the end-to-end reproducer
+// examples/regressions/chars decodes `c'é'` (U+00E9 = 233) and exits 220 on the NATIVE binary.
+
+#test
+fn lexes_char_literal_escape() {
+    // `c'\n'` decodes the escape to one ASCII byte (newline, 0x0A).
+    teko::assert::is_true(kinds_eq("c'\\n'", [TokenKind::Char]))
+    teko::assert::is_true(one_str_text("c'\\n'") == "\n")
+    teko::assert::is_true(one_str_text("c'\\n'").len == 1)
+}
+
+#test
+fn rejects_char_literal_two_codepoints() {
+    // `c'ab'` is TWO codepoints — not a single char → lex error.
+    teko::assert::is_true(is_error("c'ab'"))
+    // an empty char `c''` is also rejected.
+    teko::assert::is_true(is_error("c''"))
+    // unterminated char literal.
+    teko::assert::is_true(is_error("c'a"))
+}

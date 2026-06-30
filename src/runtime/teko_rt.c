@@ -210,6 +210,24 @@ tk_str tk_one_byte(tk_byte c) {
     return (tk_str){ buf, 1 };
 }
 
+// tk_char_to_u32 — decode a `char` (1–4 UTF-8 bytes) to its scalar codepoint. The bytes are valid
+// UTF-8 by construction (the lexer validated the `c'…'` literal), so a straight lead+continuation
+// decode is sufficient. A 0-length char is impossible (the lexer rejects it) — returns 0 if seen.
+uint32_t tk_char_to_u32(tk_char c) {
+    if (c.len == 0) return 0;
+    uint8_t b0 = c.ptr[0];
+    if (b0 <= 0x7F) return b0;                                  // 1 byte (ASCII)
+    if (c.len == 2) return ((uint32_t)(b0 & 0x1F) << 6)
+                         |  (uint32_t)(c.ptr[1] & 0x3F);
+    if (c.len == 3) return ((uint32_t)(b0 & 0x0F) << 12)
+                         | ((uint32_t)(c.ptr[1] & 0x3F) << 6)
+                         |  (uint32_t)(c.ptr[2] & 0x3F);
+    return ((uint32_t)(b0 & 0x07) << 18)                        // 4 bytes
+         | ((uint32_t)(c.ptr[1] & 0x3F) << 12)
+         | ((uint32_t)(c.ptr[2] & 0x3F) << 6)
+         |  (uint32_t)(c.ptr[3] & 0x3F);
+}
+
 // tk_str_concat3 — a ++ b ++ c via two tk_str_concat steps. Each step allocates a fresh
 // owned buffer (the intermediate a++b is leaked — M.5 short-lived).
 tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c) {

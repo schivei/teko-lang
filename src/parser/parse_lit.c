@@ -82,3 +82,9 @@ bool tk_lit_is_float(tk_str text) {
 tk_byte tk_lit_byte(tk_str text) {
     return text.ptr[0];
 }
+
+// a Char token's text IS the codepoint's raw UTF-8 bytes (the lexer decoded escapes and
+// validated exactly one codepoint). The literal node carries them verbatim.
+tk_str tk_lit_char(tk_str text) {
+    return text;
+}

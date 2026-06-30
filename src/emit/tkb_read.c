@@ -73,6 +73,7 @@ tk_type tk_read_type(tk_reader *r, tk_strs t) {
         case 11: return (tk_type){ .tag = TK_TYPE_UPTR };   // (C7.1a) tag 11 = uptr
         case 12: return (tk_type){ .tag = TK_TYPE_PTR, .as.ptr.inner = box(tk_read_type(r, t)) };   // tag 12 = ptr<T> (S-mem)
         case 13: return (tk_type){ .tag = TK_TYPE_REF, .as.ref.inner = box(tk_read_type(r, t)) };   // (MEM-1b) tag 13 = ref<T>
+        case 14: return (tk_type){ .tag = TK_TYPE_CHAR };   // (UTF-8 increment 1) tag 14 = char
     }
     r->ok = false; return (tk_type){ .tag = TK_TYPE_VOID };
 }
@@ -210,6 +211,7 @@ tk_texpr tk_read_texpr(tk_reader *r, tk_strs t) {
             e.as.array.elements = es; e.as.array.nelements = (size_t)na; e.as.array.is_spread = sp;
             return e;
         }
+        case 23: e.tag = TK_TEXPR_CHAR; e.as.char_lit.bytes = tk_read_str(r, t); return e;   // (UTF-8 increment 1) tag 23 = char literal
     }
     r->ok = false; return e;
 }

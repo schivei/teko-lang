@@ -490,6 +490,40 @@ fn read_byte_lit(source: str, pos: u64) -> Scan | error {
     Scan { token = Token { kind = TokenKind::Byte; text = one_byte(v.value); line = 0; col = 0 }; next = v.next + 1 }
 }
 
+// expected UTF-8 codepoint length (1–4) from the LEAD byte, or 0 if `b` is not a valid lead.
+// Mirrors the lead-byte classification of teko::text::valid_utf8 (RFC 3629 ranges).
+fn utf8_codepoint_len(b: byte) -> u64 {
+    if b <= 0x7F { return 1 }                 // ASCII — single byte
+    if b >= 0xC2 && b <= 0xDF { return 2 }
+    if b >= 0xE0 && b <= 0xEF { return 3 }
+    if b >= 0xF0 && b <= 0xF4 { return 4 }
+    0                                          // 0x80..0xC1, 0xF5..0xFF — never a valid lead
+}
+
+// `c'…'`: pos points at `c`, `'` at pos+1. Collects bytes (each raw byte OR an escape decoded to
+// one ASCII byte) up to a closing `'`, then VALIDATES they form EXACTLY ONE UTF-8 codepoint.
+// `c'A'`=1 byte, `c'é'`=2, `c'😀'`=4, `c'\n'`=one escaped byte. The token's text is the raw UTF-8.
+fn read_char_lit(source: str, pos: u64) -> Scan | error {
+    let inner = pos + 2                       // past `c'`
+    if inner >= source.len { return error { message = "unterminated char literal" } }
+    mut bytes: []byte = teko::list::empty()
+    mut p = inner
+    loop {
+        if p >= source.len { return error { message = "expected closing ' in char literal" } }
+        if source[p] == b'\'' { break }       // closing quote
+        let v = match byte_value(source, p) {
+            ByteVal as bv => bv
+            error as err  => return err
+        }
+        bytes = teko::list::push(bytes, v.value)
+        p = v.next
+    }
+    if bytes.len == 0 { return error { message = "empty char literal — a char must be exactly one codepoint" } }
+    if !teko::text::valid_utf8(bytes) { return error { message = "invalid UTF-8 in char literal" } }
+    if utf8_codepoint_len(bytes[0]) != bytes.len { return error { message = "char literal must be exactly one codepoint" } }
+    Scan { token = Token { kind = TokenKind::Char; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+}
+
 // --- symbols: operators, delimiters, punctuation (maximal munch — B.23) ---
 
 fn read_symbol(source: str, pos: u64) -> Scan | error {
@@ -571,6 +605,8 @@ fn next_token(source: str, pos: u64) -> Scan | error {
     let c = source[pos]
     // a byte literal `b'…'` — `b` would otherwise begin an identifier
     if c == b'b' && at(source, pos + 1) == b'\'' { return read_byte_lit(source, pos) }
+    // a char literal `c'…'` — `c` would otherwise begin an identifier
+    if c == b'c' && at(source, pos + 1) == b'\'' { return read_char_lit(source, pos) }
     // a string literal: an optional `$`/`@` prefix run (each ≤1, any order) then `"` / `"""`.
     // Covers `"`, `$"`, `@"`, `$@"`, `@$"` and the `"""` variants — the unified reader. A bare
     // `$`/`@` not followed (after the prefix run) by a quote is NOT a string start.

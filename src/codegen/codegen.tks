@@ -499,6 +499,9 @@ fn emit_type(buf: []byte, t: checker::Type) -> []byte | error {
     match t {
         checker::Prim as p => emit_prim(buf, p.kind)
         checker::Byte      => cb(buf, "uint8_t")
+        // CHAR — a UTF-8 codepoint; runtime layout == the byte-slice `tk_char` (teko_rt.h),
+        // the SAME {uint8_t*,uint64_t} shape as tk_slice_byte. Distinct only by the checker tag.
+        checker::Char      => cb(buf, "tk_char")
         // VOID is the return-only marker (M.3): a `-> void` function lowers to C `void`.
         // The checker (Z2a) forbids void as a value/binding/variant member, so reaching
         // here is always a Func.ret position.
@@ -634,6 +637,7 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
             checker::PrimKind::F64 => cb(buf, "f64"); checker::PrimKind::Bool => cb(buf, "bool")
         }
         checker::Byte  => cb(buf, "byte")
+        checker::Char  => cb(buf, "char")
         checker::Str   => cb(buf, "str")
         checker::Error => cb(buf, "error")
         checker::Named as nm => cb_str(buf, nm.name)
@@ -663,6 +667,7 @@ fn cg_opt_mangle_str(inner: checker::Type) -> str | error {
             checker::PrimKind::F64 => "f64"; checker::PrimKind::Bool => "bool"
         }
         checker::Byte  => "byte"
+        checker::Char  => "char"
         checker::Str   => "str"
         checker::Error => "error"
         checker::Named as nm => nm.name
@@ -831,6 +836,7 @@ fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr) ->
             else if last == "f64"   { return cb(buf, "double") }
             else if last == "bool"  { return cb(buf, "bool") }
             else if last == "byte"  { return cb(buf, "uint8_t") }
+            else if last == "char"  { return cb(buf, "tk_char") }   // UTF-8 codepoint (byte-slice layout)
             else if last == "str"   { return cb(buf, "tk_str") }
             else if last == "error" { return cb(buf, "tk_error") }   // error → runtime tk_error struct (E2-NATIVE)
             else if last == "ptr"   { if nt.args.len > 0 { return cb(match emit_type_expr(buf, prog, nt.args[0]) { []byte as o => o; error as e => return e }, " *") } else { return cb(buf, "void *") } }   // ptr<T> → <T> * ; ptr → void *
@@ -1191,6 +1197,20 @@ fn emit_cast(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: checker
     }
     let dst = dst_opt
     let src = src_opt
+
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — DECODE the codepoint via the runtime
+    // tk_char_to_u32, then a plain C cast to the (possibly wider/signed) target. The checker
+    // already restricted the target; the decoded value always fits. (C: emit_expr CAST char branch.)
+    match inner.type {
+        checker::Char => {
+            mut out = cb(buf, "((")
+            out = match emit_type(out, e.type) { []byte as o => o; error as err => return err }   // target rides the node's .type
+            out = cb(out, ")tk_char_to_u32(")
+            out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            return cb(out, "))")
+        }
+        _ => {}
+    }
 
     // float -> int: ALWAYS guarded (ruling §5: truncate toward zero; panic on
     // NaN/inf/out-of-range). Helper: tk_to_<dst>_from_<fsrc>. Single-eval.
@@ -2139,6 +2159,16 @@ fn emit_strlit(buf: []byte, s: checker::TStrLit) -> []byte | error {
     out = cb_cstr_escaped(out, s.text)
     out = cb(out, "\", ")
     out = cb_i64(out, s.text.len to i64)
+    cb(out, " }")
+}
+
+// emit_charlit — a TCharLit -> a tk_char {ptr,len} compound literal over the codepoint's static
+// UTF-8 bytes (same explicit-length form as TStrLit; the bytes are read-only). (C: TK_TEXPR_CHAR.)
+fn emit_charlit(buf: []byte, ch: checker::TCharLit) -> []byte | error {
+    mut out = cb(buf, "(tk_char){ (uint8_t *)\"")
+    out = cb_cstr_escaped(out, ch.bytes)
+    out = cb(out, "\", ")
+    out = cb_i64(out, ch.bytes.len to i64)
     cb(out, " }")
 }
 
@@ -3669,6 +3699,7 @@ fn emit_expr_ctx(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, 
         checker::TStructInit as si  => emit_struct_init(buf, prog, e, si, escaping, regions, fn_body, dctx)
         checker::TStrLit as s      => emit_strlit(buf, s)
         checker::TByteLit as by    => cb_i64(buf, by.value to i64)   // byte == uint8_t; emit its decimal value (0..255)
+        checker::TCharLit as ch    => emit_charlit(buf, ch)         // char — a tk_char {ptr,len} compound literal over its static UTF-8 bytes
         // bool literal (W2) — FULL support: bool already flows through both backends, so
         // emit the C `true`/`false` keyword (C type is `bool`). (C: TK_TEXPR_BOOL branch.)
         checker::TBoolLit as bl    => cb(buf, if bl.value { "true" } else { "false" })

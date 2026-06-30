@@ -594,6 +594,9 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
     switch (t.tag) {
         case TK_TYPE_PRIM: return emit_prim(b, t.as.prim, err);
         case TK_TYPE_BYTE: cb(b, "uint8_t"); return true;
+        // CHAR — a UTF-8 codepoint; its runtime layout is the byte-slice `tk_char` (teko_rt.h),
+        // the SAME {uint8_t*,uint64_t} shape as tk_slice_byte. Distinct only by the checker tag.
+        case TK_TYPE_CHAR: cb(b, "tk_char"); return true;
         // VOID is the return-only marker (M.3): a `-> void` function lowers to C `void`.
         // The checker (Z2a) forbids void as a value/binding/variant member, so reaching
         // here is always a Func.ret position.
@@ -731,6 +734,7 @@ static bool cg_opt_mangle(cbuf *b, tk_type inner, const char **err) {
             }
             return fail_node(err, "codegen: unknown prim in optional inner");
         case TK_TYPE_BYTE:  cb(b, "byte");  return true;
+        case TK_TYPE_CHAR:  cb(b, "char");  return true;
         case TK_TYPE_STR:   cb(b, "str");   return true;
         case TK_TYPE_ERROR: cb(b, "error"); return true;
         case TK_TYPE_NAMED: cb_str(b, inner.as.named.name); return true;
@@ -906,6 +910,7 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             else if (seg_is(last, "f64"))   { cb(b, "double");            return true; }
             else if (seg_is(last, "bool"))  { cb(b, "bool");              return true; }
             else if (seg_is(last, "byte"))  { cb(b, "uint8_t");           return true; }
+            else if (seg_is(last, "char"))  { cb(b, "tk_char");           return true; }   // UTF-8 codepoint (byte-slice layout)
             else if (seg_is(last, "str"))   { cb(b, "tk_str");            return true; }
             else if (seg_is(last, "error")) { cb(b, "tk_error"); return true; }   // error → runtime tk_error struct (E2-NATIVE)
             else if (seg_is(last, "ptr"))   {   // ptr<T> → <T> * ; ptr → void *
@@ -1437,6 +1442,17 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             //                    is allowed (ruling §5).
             // Single-eval: the operand is emitted exactly once in every path.
             const tk_texpr *inner = e->as.cast.expr;
+            // (UTF-8 increment 1) `char to u32`/u64/i64 — DECODE the codepoint via the runtime
+            // tk_char_to_u32, then a plain C cast to the (possibly wider/signed) target. The
+            // checker already restricted the target; decode yields a value that always fits.
+            if (inner->type.tag == TK_TYPE_CHAR) {
+                cb(b, "((");
+                if (!emit_type(b, e->type, err)) return false;   // target rides the node's .type
+                cb(b, ")tk_char_to_u32(");
+                if (!emit_expr(b, inner, err)) return false;
+                cb(b, "))");
+                return true;
+            }
             bool prim_both = e->type.tag == TK_TYPE_PRIM && inner->type.tag == TK_TYPE_PRIM;
             tk_prim_kind dst = prim_both ? e->type.as.prim : TK_PRIM_BOOL;
             tk_prim_kind src = prim_both ? inner->type.as.prim : TK_PRIM_BOOL;
@@ -1837,6 +1853,17 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // byte == uint8_t; emit its decimal value (0..255).
             cb_i64(b, (int64_t)e->as.byte.value);
             return true;
+
+        case TK_TEXPR_CHAR: {
+            // char — a tk_char {ptr,len} compound literal over the codepoint's static UTF-8 bytes
+            // (same explicit-length form as TK_TEXPR_STR; the bytes are read-only, never written).
+            cb(b, "(tk_char){ (uint8_t *)\"");
+            cb_cstr_escaped(b, e->as.char_lit.bytes);
+            cb(b, "\", ");
+            cb_i64(b, (int64_t)e->as.char_lit.bytes.len);
+            cb(b, " }");
+            return true;
+        }
 
         case TK_TEXPR_BOOL:
             // bool literal (W2) — bool already flows through both backends, so this is

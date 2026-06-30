@@ -58,6 +58,7 @@ static void mark_expr(tk_texpr e, bool escaping, tk_escape_set *acc) {
         case TK_TEXPR_NUMBER:
         case TK_TEXPR_STR:
         case TK_TEXPR_BYTE:
+        case TK_TEXPR_CHAR:
         case TK_TEXPR_BOOL:
         case TK_TEXPR_NULL:
         case TK_TEXPR_PATH:
@@ -279,6 +280,7 @@ static size_t count_reads_expr(tk_texpr e, tk_str name) {
         case TK_TEXPR_NUMBER:
         case TK_TEXPR_STR:
         case TK_TEXPR_BYTE:
+        case TK_TEXPR_CHAR:
         case TK_TEXPR_BOOL:
         case TK_TEXPR_NULL:
         case TK_TEXPR_PATH:

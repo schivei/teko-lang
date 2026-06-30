@@ -35,6 +35,7 @@ bool tk_type_eq(const tk_type *a, const tk_type *b) {
     switch (a->tag) {
         case TK_TYPE_PRIM:  return a->as.prim == b->as.prim;
         case TK_TYPE_BYTE:  return true;
+        case TK_TYPE_CHAR:  return true;   // char == char only (tag-equality already checked above)
         case TK_TYPE_STR:   return true;
         case TK_TYPE_ERROR: return true;   // the native `error` (lowercase in Teko)
         case TK_TYPE_VOID:  return true;   // return-only marker (M.3); legal only as Func.ret

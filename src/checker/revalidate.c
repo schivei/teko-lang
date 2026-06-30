@@ -29,6 +29,7 @@ tk_check_result tk_validate_texpr(const tk_texpr *te) {
             return node_is(te->type, prim(te->as.number.is_float ? TK_PRIM_F64 : TK_PRIM_I64));
         case TK_TEXPR_STR:    return node_is(te->type, (tk_type){ .tag = TK_TYPE_STR });
         case TK_TEXPR_BYTE:   return node_is(te->type, (tk_type){ .tag = TK_TYPE_BYTE });
+        case TK_TEXPR_CHAR:   return node_is(te->type, (tk_type){ .tag = TK_TYPE_CHAR });   // c'x' — `.type` is char
         case TK_TEXPR_BOOL:   return node_is(te->type, prim(TK_PRIM_BOOL));   // true/false (LEGISLATION §75)
         case TK_TEXPR_NULL:                                          // null — its type is the inferred `T?` (REBOOT §202)
             if (te->type.tag != TK_TYPE_OPTIONAL) return cfail("corrupt: `null` typed as a non-optional");

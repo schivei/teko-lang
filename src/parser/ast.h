@@ -47,6 +47,7 @@ typedef struct { bool is_float; __int128 value; double fval; } tk_number;       
 typedef struct { tk_str name; }                              tk_var;           // a variable reference
 typedef struct { tk_str text; }                              tk_str_lit;       // "…"
 typedef struct { tk_byte value; }                            tk_byte_lit;      // b'x'
+typedef struct { tk_str bytes; }                             tk_char_lit;      // c'x' — one UTF-8 codepoint (raw bytes)
 typedef struct { bool value; }                               tk_bool_lit;      // true / false (LEGISLATION §75)
 typedef struct { char _unused; }                             tk_null_lit;      // null (REBOOT_PLAN §202) — no payload; typed `T?` by the checker
 typedef struct { tk_token_kind op; tk_expr *left, *right; }  tk_binary;        // any binary op
@@ -101,6 +102,7 @@ typedef enum {
     TK_EXPR_IN,       // <expr> in [ … ] — membership test (Phase 2)
     TK_EXPR_ARRAY,    // [ e0, e1, … ] — slice/array literal (Increment B+)
     TK_EXPR_LAMBDA,   // (W10) (params) => body — anonymous closure literal
+    TK_EXPR_CHAR,     // c'x' — one UTF-8 codepoint literal
 } tk_expr_kind;
 
 struct tk_expr {
@@ -111,6 +113,7 @@ struct tk_expr {
         tk_var          var;           // TK_EXPR_VAR
         tk_str_lit      str;           // TK_EXPR_STR
         tk_byte_lit     byte;          // TK_EXPR_BYTE
+        tk_char_lit     char_lit;      // TK_EXPR_CHAR
         tk_bool_lit     boolean;       // TK_EXPR_BOOL
         tk_null_lit     null_lit;      // TK_EXPR_NULL
         tk_binary       binary;        // TK_EXPR_BINARY

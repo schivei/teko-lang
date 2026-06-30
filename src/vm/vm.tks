@@ -1499,6 +1499,7 @@ fn eval_expr(e: checker::TExpr, env: Venv) -> EvalRes {
         }
         checker::TStrLit as s   => EvalRes { value= s.text; env= env }            // a `str` member of Value
         checker::TByteLit as b  => EvalRes { value= b.value; env= env }           // a `byte` member of Value
+        checker::TCharLit as ch => EvalRes { value= ch.bytes; env= env }          // char — its UTF-8 bytes ride the `str` member (distinct by tag; VM==native)
         checker::TBoolLit as bl => EvalRes { value= bl.value; env= env }                  // bool literal (W2) — FULL: a `bool` member of Value
         checker::TBinary as b   => eval_binary(b, e.type, e.line, e.col, env)
         checker::TUnary as u    => eval_unary(u, e.type, env)
@@ -1950,6 +1951,34 @@ fn eval_binary(b: checker::TBinary, ty: checker::Type, line: u32, col: u32, env:
     EvalRes { value= iv; env= cur }
 }
 
+// vm_char_to_u32 — decode a char Value (its UTF-8 bytes ride the `str` member) to its scalar
+// codepoint. Mirrors the native runtime tk_char_to_u32 (a lead+continuation decode; the bytes are
+// valid UTF-8 by construction — the lexer validated the literal). A 0-length char never occurs.
+fn vm_char_to_u32(v: Value) -> u32 {
+    match v {
+        str as s => {
+            if s.len == 0 { return 0 }
+            let b0 = s[0]
+            let u0 = b0 to u32
+            if b0 <= 0x7F { return u0 }
+            if s.len == 2 {
+                let u1 = s[1] to u32
+                return ((u0 & 0x1F) << 6) | (u1 & 0x3F)
+            }
+            if s.len == 3 {
+                let u1 = s[1] to u32
+                let u2 = s[2] to u32
+                return ((u0 & 0x0F) << 12) | ((u1 & 0x3F) << 6) | (u2 & 0x3F)
+            }
+            let u1 = s[1] to u32
+            let u2 = s[2] to u32
+            let u3 = s[3] to u32
+            ((u0 & 0x07) << 18) | ((u1 & 0x3F) << 12) | ((u2 & 0x3F) << 6) | (u3 & 0x3F)
+        }
+        _ => panic("vm: char-decode on a non-str value (internal: char rides the str carrier)")
+    }
+}
+
 // eval_cast — `x to T` over the Tier-1 numeric set (plan §5). Four cases:
 //   * float->float: a plain reinterpret at the dest width (rounding noted).
 //   * int->float:   every in-range int is representable in the VM-debug `f64` carrier.
@@ -1961,10 +1990,22 @@ fn eval_cast(c: checker::TCast, ty: checker::Type, line: u32, col: u32, env: Ven
     // num_prim_of maps a cast endpoint to its effective numeric prim: a Prim is itself, a
     // `byte` is U8 (B.36 — byte is a u8 newtype), so `s[i] to i32` (a byte source — W5-idx)
     // casts as u8->i32. Any other type (str/named/…) is the honest non-numeric cast frontier.
-    let dst = num_prim_of(ty); let src = num_prim_of(c.expr.type)
-    let sflt = prim_float(src); let dflt = prim_float(dst)
     let xe = eval_expr(c.expr, env)   // (MEM Step 4) thread the operand's env once
     let cur = xe.env
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — DECODE the codepoint (its UTF-8 bytes, carried as
+    // the `str` Value) to its scalar value, normalized to the target int. Mirrors tk_char_to_u32 (the
+    // native runtime helper) and codegen's char-cast branch (VM==native). The checker restricted the
+    // target, so the decoded codepoint always fits.
+    match c.expr.type {
+        checker::Char => {
+            let dtgt = num_prim_of(ty)
+            let cp = vm_char_to_u32(xe.value)
+            return EvalRes { value= norm_int(cp to i128, prim_signed(dtgt), prim_width(dtgt)); env= cur }
+        }
+        _ => {}
+    }
+    let dst = num_prim_of(ty); let src = num_prim_of(c.expr.type)
+    let sflt = prim_float(src); let dflt = prim_float(dst)
     if sflt && dflt {
         return EvalRes { value= float_val(as_float(xe.value), prim_width(dst)); env= cur }
     }

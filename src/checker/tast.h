@@ -26,6 +26,7 @@ typedef enum {
     TK_TEXPR_PATH,                                         // Enum::Member as a VALUE — `.type` is the NAMED enum
     TK_TEXPR_ARRAY,                                        // [ e0, e1, … ] — slice/array literal (Increment B+); `.type` is []T
     TK_TEXPR_LAMBDA,                                       // (W10) (params) => body — typed closure literal; `.type` is the Func type
+    TK_TEXPR_CHAR,                                         // c'x' — one UTF-8 codepoint literal; `.type` is `char`
 } tk_texpr_tag;
 
 // (W10) a typed closure literal. params/body/captures/ret as in tast.tks::TLambda; `lift_id` names
@@ -61,6 +62,7 @@ struct tk_texpr {
         struct { tk_str name; bool is_func; tk_str func_ns; }        var;   // (W10a) is_func = a bare top-level-fn reference used as a VALUE → tk_closure literal; func_ns = the fn's declaring namespace (C-symbol mangle)
         struct { tk_str text; }                                      str;
         struct { tk_byte value; }                                    byte;
+        struct { tk_str bytes; }                                     char_lit; // TK_TEXPR_CHAR — `.type` is `char`; the codepoint's raw UTF-8 bytes
         struct { bool value; }                                       boolean; // TK_TEXPR_BOOL — `.type` is bool prim (LEGISLATION §75)
         struct { char _unused; }                                     null_lit; // TK_TEXPR_NULL — `.type` is the inferred TK_TYPE_OPTIONAL (REBOOT §202)
         struct { tk_token_kind op; tk_texpr *left, *right; }         binary;

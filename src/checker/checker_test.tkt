@@ -33,6 +33,23 @@ fn types_leaves() {
     match s.type { Str => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
     let b = type_bytelit(parser::ByteLit { value = b'A' })
     match b.type { Byte => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+    // a char literal `c'A'` types as `char` (its own tag, distinct from byte / str).
+    let c = type_charlit(parser::CharLit { bytes = "A" })
+    match c.type { Char => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+    match c.kind { TCharLit as tc => teko::assert::is_true(tc.bytes == "A"); _ => teko::assert::is_true(false) }
+}
+
+#test
+fn types_char_cast_to_u32() {
+    // `c'A' to u32` — the explicit codepoint decode types as u32 (the cast's target).
+    let cast = parser::Cast { expr = ek(parser::CharLit { bytes = "A" }); target = named_t("u32") }
+    let tc = match type_cast(cast, empty_env(), empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(tc.type, PrimKind::U32))
+    // the cast's inner node is the char literal.
+    match tc.kind { TCast as cc => match cc.expr.type { Char => teko::assert::is_true(true); _ => teko::assert::is_true(false) }; _ => teko::assert::is_true(false) }
+    // `c'A' to str` is NOT a defined char cast → error.
+    let bad = parser::Cast { expr = ek(parser::CharLit { bytes = "A" }); target = named_t("str") }
+    match type_cast(bad, empty_env(), empty_table()) { error => teko::assert::is_true(true); TExpr => teko::assert::is_true(false) }
 }
 
 #test

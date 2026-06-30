@@ -1132,6 +1132,29 @@ static tk_value eval_cast(const tk_texpr *e, tk_venv *env) {
     const tk_texpr *inner = e->as.cast.expr;
     tk_value iv = tk_vm_eval_expr(inner, env);
 
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — DECODE the codepoint (its UTF-8 bytes, carried as
+    // the str value) to its scalar value, normalized to the target int. Mirrors tk_char_to_u32 (the
+    // native runtime helper) and codegen's char-cast branch (VM==native). The checker restricted the
+    // target to u32/u64/i64, so the decoded codepoint always fits.
+    if (inner->type.tag == TK_TYPE_CHAR) {
+        if (iv.tag != TK_VAL_STR) vm_unsupported("cast of a non-char value not yet supported");
+        tk_str s = iv.as.s;
+        uint32_t cp = 0;
+        if (s.len != 0) {
+            uint8_t b0 = s.ptr[0];
+            if (b0 <= 0x7F)        cp = b0;
+            else if (s.len == 2)   cp = ((uint32_t)(b0 & 0x1F) << 6)  |  (uint32_t)(s.ptr[1] & 0x3F);
+            else if (s.len == 3)   cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(s.ptr[1] & 0x3F) << 6)
+                                                                      |  (uint32_t)(s.ptr[2] & 0x3F);
+            else                   cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(s.ptr[1] & 0x3F) << 12)
+                                                                      | ((uint32_t)(s.ptr[2] & 0x3F) << 6)
+                                                                      |  (uint32_t)(s.ptr[3] & 0x3F);
+        }
+        tk_prim_kind ctgt;
+        if (!cast_prim_of(e->type, &ctgt)) vm_unsupported("char cast to a non-numeric target (internal)");
+        return norm_int((unsigned __int128)cp, prim_is_signed(ctgt), prim_width(ctgt));
+    }
+
     // Both sides must be numeric (int/float, with `byte` counting as u8 — B.36). Bool<->num
     // and str casts are not in M0 — the honest frontier. Mirrors codegen's prim_both path,
     // which also lets a byte source ride the plain C cast (a tk_byte is a uint8_t).
@@ -1826,6 +1849,7 @@ static tk_value tk_vm_eval_expr(const tk_texpr *e, tk_venv *env) {
         }
         case TK_TEXPR_STR:  return v_str(e->as.str.text);
         case TK_TEXPR_BYTE: return v_int((uint64_t)e->as.byte.value, false, 8);   // byte == u8 rep
+        case TK_TEXPR_CHAR: return v_str(e->as.char_lit.bytes);   // char — the codepoint's UTF-8 bytes (same str carrier; distinct by the checker tag, VM==native)
         case TK_TEXPR_PATH: return v_int((unsigned __int128)e->as.path.ordinal, false, 64);   // Enum::Member → its ordinal (u64); codegen's C enum auto-numbers identically
 
         // bool literal (W2) — FULL support (bool already flows through the value model).

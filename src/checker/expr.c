@@ -525,10 +525,26 @@ static bool is_int_cast_end(tk_type t) {
     return t.tag == TK_TYPE_PRIM && tk_prim_is_int(t.as.prim);
 }
 
+// (UTF-8 increment 1) `char to <int>` — the EXPLICIT decode of a codepoint to its scalar value.
+// Allowed for u32 (the natural codepoint width), and trivially for u64/i64 (which hold any
+// codepoint). The REVERSE (`<int> to char`, an encode) is a later increment.
+static bool is_char_decode_target(tk_type t) {
+    return t.tag == TK_TYPE_PRIM &&
+           (t.as.prim == TK_PRIM_U32 || t.as.prim == TK_PRIM_U64 || t.as.prim == TK_PRIM_I64);
+}
+
 static tk_texpr_result type_cast(tk_cast c, tk_env env, tk_type_table table) {
     tk_texpr_result inner = tk_typer_expr(*c.expr, env, table); if (!inner.ok) return inner;
     if (tk_type_is_void(&inner.as.value.type)) return xerr("a `void` expression cannot be cast (M.1)");
     tk_type_result tgt = tk_resolve_type(c.target, table);     if (!tgt.ok) return xferr(tgt.as.error);
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
+    // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
+    // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors typer.tks type_cast.)
+    if (inner.as.value.type.tag == TK_TYPE_CHAR) {
+        if (is_char_decode_target(tgt.as.value))
+            return xok((tk_texpr){ .tag = TK_TEXPR_CAST, .type = tgt.as.value, .as.cast = { box(inner.as.value) } });
+        return xerr("a `char` may only be cast to u32/u64/i64 (its codepoint value); other casts are not defined");
+    }
     // (E7) enum ↔ integer ORDINAL cast: an enum value → its ordinal integer, and an integer → the
     // enum member (the `(tk_byte)k` / `(tk_token_kind)b` the .tkb serializer relies on). cast_reason
     // is prim-only, so handle this pair here (it has the type table to detect an enum); the result
@@ -1169,6 +1185,7 @@ static tk_texpr_result type_dispatch(tk_expr e, tk_env env, tk_type_table table)
         }
         case TK_EXPR_STR:    return xok((tk_texpr){ .tag = TK_TEXPR_STR,  .type = (tk_type){ .tag = TK_TYPE_STR },  .as.str  = { e.as.str.text } });
         case TK_EXPR_BYTE:   return xok((tk_texpr){ .tag = TK_TEXPR_BYTE, .type = (tk_type){ .tag = TK_TYPE_BYTE }, .as.byte = { e.as.byte.value } });
+        case TK_EXPR_CHAR:   return xok((tk_texpr){ .tag = TK_TEXPR_CHAR, .type = (tk_type){ .tag = TK_TYPE_CHAR }, .as.char_lit = { e.as.char_lit.bytes } });
         case TK_EXPR_BOOL:   // `true`/`false` — the bool prim (LEGISLATION §75)
             return xok((tk_texpr){ .tag = TK_TEXPR_BOOL, .type = tk_prim_t(TK_PRIM_BOOL),
                                    .as.boolean = { e.as.boolean.value } });

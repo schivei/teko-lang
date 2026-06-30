@@ -289,6 +289,10 @@ static tk_parsed_result parse_atom(const tk_token *t, size_t n, size_t pos, bool
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_BYTE, .as.byte = { .value = tk_lit_byte(t[pos].text) } }, t, pos);
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = pos + 1 } };
     }
+    if (k == TK_TOKEN_CHAR) {
+        tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_CHAR, .as.char_lit = { .bytes = tk_lit_char(t[pos].text) } }, t, pos);
+        return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = pos + 1 } };
+    }
     if (k == TK_TOKEN_TRUE || k == TK_TOKEN_FALSE) {
         tk_expr e = tk_at((tk_expr){ .tag = TK_EXPR_BOOL, .as.boolean = { .value = (k == TK_TOKEN_TRUE) } }, t, pos);
         return (tk_parsed_result){ .ok = true, .as.value = { .node = e, .next = pos + 1 } };

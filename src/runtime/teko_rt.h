@@ -47,6 +47,15 @@ typedef struct {
     size_t         len;   // length in BYTES
 } tk_str;
 
+// char — a UTF-8 codepoint (1–4 bytes). DISTINCT type (its own checker tag), but its runtime
+// layout is the SAME byte-slice shape the codegen lifts a `[]byte` to (`{uint8_t*,uint64_t}` ==
+// tk_slice_byte). A `c'…'` literal lowers to a static byte array + this view. Decode to the scalar
+// codepoint via tk_char_to_u32 (the explicit `char to u32`/u64/i64 cast).
+typedef struct {
+    uint8_t  *ptr;        // the codepoint's UTF-8 bytes
+    uint64_t  len;        // length in BYTES (1–4)
+} tk_char;
+
 // closure / function VALUE (W10a). The uniform runtime representation of a value of a function
 // type `(A, B) -> R`: a code pointer plus a captured-environment pointer. For a NAMED fn used as a
 // value (W10a) `env` is NULL and `fn` is the C function's address; calls cast `fn` back to the
@@ -172,6 +181,9 @@ tk_str tk_u64_to_str(uint64_t v);
 tk_str tk_str_of_bytes(tk_str bytes);
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c);
+// tk_char_to_u32 — decode a `char` (its 1–4 UTF-8 bytes) to the scalar codepoint value. The bytes
+// are valid UTF-8 by construction (the lexer validated the literal), so this is a pure decode.
+uint32_t tk_char_to_u32(tk_char c);
 // tk_str_concat3 — a ++ b ++ c in a fresh owned buffer (two tk_str_concat steps).
 tk_str tk_str_concat3(tk_str a, tk_str b, tk_str c);
 // tk_ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str.

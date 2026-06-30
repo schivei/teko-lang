@@ -33,6 +33,7 @@ static void collect(tk_strtable *t, const tk_texpr *te) {
     switch (te->tag) {
         case TK_TEXPR_VAR: tk_st_intern(t, te->as.var.name); tk_st_intern(t, te->as.var.func_ns); break;   // (W10a) intern func_ns too
         case TK_TEXPR_STR: tk_st_intern(t, te->as.str.text); break;
+        case TK_TEXPR_CHAR: tk_st_intern(t, te->as.char_lit.bytes); break;   // (UTF-8 increment 1) intern the codepoint's UTF-8 bytes
         case TK_TEXPR_BINARY: collect(t, te->as.binary.left); collect(t, te->as.binary.right); break;
         case TK_TEXPR_UNARY:  collect(t, te->as.unary.operand); break;
         case TK_TEXPR_COMPARE:

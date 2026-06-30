@@ -122,6 +122,7 @@ tk_type_result tk_builtin_type(tk_str name) {
     else if (name_is(name, "f64"))   t = prim(TK_PRIM_F64);    // native floats (B.38)
     else if (name_is(name, "bool"))  t = prim(TK_PRIM_BOOL);
     else if (name_is(name, "byte"))  t = (tk_type){ .tag = TK_TYPE_BYTE };
+    else if (name_is(name, "char"))  t = (tk_type){ .tag = TK_TYPE_CHAR };   // a UTF-8 codepoint (distinct from byte / []byte)
     else if (name_is(name, "str"))   t = (tk_type){ .tag = TK_TYPE_STR };
     else if (name_is(name, "error")) t = (tk_type){ .tag = TK_TYPE_ERROR };
     else if (name_is(name, "void"))  t = (tk_type){ .tag = TK_TYPE_VOID };   // (C7.2) explicit void return annotation in extern fn declarations

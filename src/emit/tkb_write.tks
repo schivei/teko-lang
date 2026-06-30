@@ -27,6 +27,7 @@ fn write_type(buf: []byte, t: StrTable, ty: checker::Type) -> []byte {
         checker::Ptr as p     => match p.inner { null => write_u8(buf, 10); checker::Type as it => write_type(write_u8(buf, 12), t, it) }   // tag 10 = opaque ptr; tag 12 = ptr<T> (S-mem)
         checker::Uptr         => write_u8(buf, 11)                                  // (C7.1a) tag 11 = uptr
         checker::Reference as r => write_type(write_u8(buf, 13), t, r.inner)        // (MEM-1b) tag 13 = Ref<T>
+        checker::Char         => write_u8(buf, 14)                                  // (UTF-8 increment 1) tag 14 = char — APPENDED (no reorder)
     }
 }
 
@@ -181,6 +182,8 @@ fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
         // (the corpus has no lambdas; tests run in the VM directly), so this is a minimal aligned form —
         // like `call_ns`, the full body/params are re-derived on re-typing, not round-tripped.
         checker::TLambda as lam => write_u64(write_u8(b, 22), lam.lift_id)
+        // (UTF-8 increment 1) CharLit: tag 23 + the codepoint's UTF-8 bytes (interned u32).
+        checker::TCharLit as ch => write_u32(write_u8(b, 23), st_find(t, ch.bytes))
     }
 }
 

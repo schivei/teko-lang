@@ -33,6 +33,7 @@ tk_bytes tk_write_type(tk_bytes b, tk_strtable t, tk_type ty) {
                                                        : tk_write_u8(b, 10);                                    // tag 10 = opaque ptr (S-mem)
         case TK_TYPE_UPTR:    return tk_write_u8(b, 11);  // (C7.1a) tag 11 = uptr
         case TK_TYPE_REF:     return tk_write_type(tk_write_u8(b, 13), t, *ty.as.ref.inner);   // (MEM-1b) tag 13 = ref<T>
+        case TK_TYPE_CHAR:    return tk_write_u8(b, 14);  // (UTF-8 increment 1) tag 14 = char — APPENDED (no reorder)
     }
     return b;
 }
@@ -140,6 +141,8 @@ tk_bytes tk_write_texpr(tk_bytes b, tk_strtable t, const tk_texpr *te) {
                 b = tk_write_texpr(tk_write_u8(b, sp), t, &te->as.array.elements[i]);
             }
             return b;
+        case TK_TEXPR_LAMBDA: return tk_write_u64(tk_write_u8(b, 22), te->as.lambda.lift_id);   // (W10) tag 22 — minimal aligned form (lift_id; mirror of tkb_write.tks)
+        case TK_TEXPR_CHAR:   return tk_write_u32(tk_write_u8(b, 23), tk_st_find(t, te->as.char_lit.bytes));   // (UTF-8 increment 1) tag 23 — char literal (interned UTF-8 bytes)
     }
     return b;
 }

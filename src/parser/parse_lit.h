@@ -22,5 +22,7 @@ double tk_lit_float(tk_str text);
 bool tk_lit_is_float(tk_str text);
 // A Byte token's text is the already-decoded octet (the lexer resolved it).
 tk_byte tk_lit_byte(tk_str text);
+// A Char token's text IS the codepoint's raw UTF-8 bytes (the lexer resolved + validated it).
+tk_str  tk_lit_char(tk_str text);
 
 #endif // TK_PARSER_PARSE_LIT_H

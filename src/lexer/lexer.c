@@ -535,6 +535,47 @@ static tk_scan_result read_byte_lit(tk_str source, size_t pos) {
     });
 }
 
+// expected UTF-8 codepoint length (1–4) from the LEAD byte, or 0 if `b` is not a valid lead.
+// Mirrors the lead-byte classification of text.c's valid_utf8 (RFC 3629 ranges).
+static size_t utf8_codepoint_len(tk_byte b) {
+    if (b <= 0x7F) return 1;                      // ASCII — single byte
+    if (b >= 0xC2 && b <= 0xDF) return 2;
+    if (b >= 0xE0 && b <= 0xEF) return 3;
+    if (b >= 0xF0 && b <= 0xF4) return 4;
+    return 0;                                     // 0x80..0xC1, 0xF5..0xFF — never a valid lead
+}
+
+// `c'…'`: pos points at `c`, `'` at pos+1. Collects bytes (each raw byte OR an escape decoded to
+// one ASCII byte) up to a closing `'`, then VALIDATES they form EXACTLY ONE UTF-8 codepoint.
+// `c'A'`=1 byte, `c'é'`=2, `c'😀'`=4, `c'\n'`=one escaped byte. The token's text is the raw UTF-8.
+static tk_scan_result read_char_lit(tk_str source, size_t pos) {
+    size_t inner = pos + 2;                       // past `c'`
+    if (inner >= source.len) return scan_err("unterminated char literal");
+    tk_lex_bytes bytes = tk_lex_bytes_empty();
+    size_t p = inner;
+    for (;;) {
+        if (p >= source.len) { tk_lex_bytes_free(bytes); return scan_err("expected closing ' in char literal"); }
+        if (source.ptr[p] == '\'') break;         // closing quote
+        tk_byteval_result v = byte_value(source, p);
+        if (!v.ok) { tk_lex_bytes_free(bytes); return scan_err(v.as.error.message); }
+        bytes = tk_lex_bytes_push(bytes, v.as.value.value);
+        p = v.as.value.next;
+    }
+    if (bytes.len == 0) { tk_lex_bytes_free(bytes); return scan_err("empty char literal — a char must be exactly one codepoint"); }
+    tk_str_result r = tk_str_from_utf8(bytes.ptr, bytes.len);   // validates UTF-8 (zero-copy view on success)
+    if (!r.ok) { tk_lex_bytes_free(bytes); return scan_err("invalid UTF-8 in char literal"); }
+    if (utf8_codepoint_len(bytes.ptr[0]) != bytes.len) {
+        tk_lex_bytes_free(bytes);
+        return scan_err("char literal must be exactly one codepoint");
+    }
+    tk_str text = str_of_bytes(bytes.ptr, bytes.len);          // FRESH bytes (own the codepoint)
+    tk_lex_bytes_free(bytes);
+    return scan_ok((tk_scan){
+        .token = (tk_token){ .kind = TK_TOKEN_CHAR, .text = text },
+        .next  = p + 1,
+    });
+}
+
 // --- symbols: operators, delimiters, punctuation (maximal munch — B.23) ---
 
 static tk_scan_result read_symbol(tk_str source, size_t pos) {
@@ -617,6 +658,8 @@ static tk_scan_result next_token(tk_str source, size_t pos) {
     tk_byte c = source.ptr[pos];
     // a byte literal `b'…'` — `b` would otherwise begin an identifier
     if (c == 'b' && at(source, pos + 1) == '\'') return read_byte_lit(source, pos);
+    // a char literal `c'…'` — `c` would otherwise begin an identifier
+    if (c == 'c' && at(source, pos + 1) == '\'') return read_char_lit(source, pos);
     // a string literal: an optional `$`/`@` prefix run (each ≤1, any order) then `"` / `"""`.
     // Covers `"`, `$"`, `@"`, `$@"`, `@$"` and the `"""` variants — the unified reader. A bare
     // `$`/`@` not followed (after the prefix run) by a quote is NOT a string start (matched=false).

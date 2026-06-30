@@ -76,7 +76,7 @@ static inline unsigned tk_prim_width(tk_prim_kind k) {
 //  - OPTIONAL added: the built-in unary type-former `T?` (nullability complete in
 //    the seed, Z3=a). A variant member may NOT be optional — enforced in Z2a.
 typedef enum {
-    TK_TYPE_PRIM, TK_TYPE_BYTE, TK_TYPE_STR, TK_TYPE_SLICE,
+    TK_TYPE_PRIM, TK_TYPE_BYTE, TK_TYPE_CHAR, TK_TYPE_STR, TK_TYPE_SLICE,
     TK_TYPE_NAMED, TK_TYPE_VARIANT, TK_TYPE_FUNC, TK_TYPE_ERROR,
     TK_TYPE_OPTIONAL,  // T? — built-in nullable former (like Slice []T)
     TK_TYPE_VOID,      // return-only marker; legal ONLY as Func.ret
@@ -100,7 +100,7 @@ struct tk_type {
         struct { tk_type *inner; }              optional;    // TK_TYPE_OPTIONAL — T?
         struct { tk_type *inner; }              ptr;         // TK_TYPE_PTR — ptr<T> (inner NULL = opaque ptr ≡ ptr<void> ≡ *void)
         struct { tk_type *inner; }              ref;         // TK_TYPE_REF — ref<T> — the referenced type (never NULL)
-        // BYTE, STR, ERROR, VOID carry no payload
+        // BYTE, CHAR, STR, ERROR, VOID carry no payload  (CHAR — a UTF-8 codepoint; runtime layout == []byte, distinct by tag)
     } as;
 };
 
