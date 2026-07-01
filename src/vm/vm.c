@@ -1095,11 +1095,34 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
 // sets *out_idx to the g_prog.items index (a globally unique coverage ID). M0 calls are
 // single-segment identifiers joined by "__" in codegen; here we match the joined path against
 // a function name. Single-segment is the common case; multi-segment user calls are honest-deferred.
-static const tk_tfunction *find_function(tk_path p, size_t *out_idx) {
+//
+// BUGFIX (VM name-resolution / cross-namespace collision): a bare last-segment match, with NO
+// namespace disambiguation, silently resolves to the WRONG function whenever two DIFFERENT
+// namespaces declare a same-named fn (e.g. two modules each define their own `parse_atom`,
+// with different arities/signatures) — the FIRST same-named fn anywhere in program-item order
+// wins, corrupting the call regardless of which module the caller actually meant. This bled
+// into completely unrelated tests once a source file introducing such a collision was added to
+// the corpus. The checker ALREADY resolves the correct target namespace per call-site (TCall's
+// call_ns, tast.h/tast.tks) — this now HONORS it: when `call_ns` is non-empty, prefer an exact
+// (namespace, name) match; only fall back to the old last-segment-anywhere scan when call_ns is
+// empty (a local/unqualified/builtin call has no namespace to disambiguate) or no such
+// namespaced function exists (defensive — never turns a previously-resolvable call into a
+// failure). Mirrors vm.tks::find_function (SUPREME RULE — both engines fixed together).
+static const tk_tfunction *find_function_ns(tk_path p, tk_str call_ns, size_t *out_idx) {
     if (p.len == 0) return NULL;
     // Match by the LAST segment — a cross-namespace call qualifies (`ns::fn`), and the seed
     // resolves names by last segment (like resolve_named for types). W5 unblocks cross-ns calls.
     tk_str name = p.segments[p.len - 1].name;
+    if (call_ns.len != 0) {
+        for (size_t i = 0; i < g_prog.nitems; i += 1) {
+            if (g_prog.items[i].tag != TK_TITEM_FUNCTION) continue;
+            const tk_tfunction *f = &g_prog.items[i].as.function;
+            if (name_eq(f->namespace, call_ns) && name_eq(f->name, name)) {
+                if (out_idx) *out_idx = i;
+                return f;
+            }
+        }
+    }
     for (size_t i = 0; i < g_prog.nitems; i += 1) {
         if (g_prog.items[i].tag != TK_TITEM_FUNCTION) continue;
         if (name_eq(g_prog.items[i].as.function.name, name)) {
@@ -1108,6 +1131,12 @@ static const tk_tfunction *find_function(tk_path p, size_t *out_idx) {
         }
     }
     return NULL;
+}
+// find_function — the no-namespace-hint convenience form (call_ns unknown/inapplicable): behaves
+// exactly like the OLD last-segment-anywhere scan. Kept as a thin wrapper so call sites that
+// genuinely have no resolved namespace (none today, but a safe default) stay honest.
+static const tk_tfunction *find_function(tk_path p, size_t *out_idx) {
+    return find_function_ns(p, (tk_str){0}, out_idx);
 }
 
 // =========================================================================
@@ -1561,7 +1590,10 @@ static const tk_tfunction *closure_target(const tk_texpr *e, tk_venv *env, size_
     if (cs == NULL || cv.tag != TK_VAL_FUNC) vm_unsupported("closure call on a non-function value (internal: checker should reject)");
     tk_segment fseg = { cv.as.func.name };
     tk_path fp = { &fseg, 1 };
-    return find_function(fp, out_idx);
+    // A named-fn VALUE carries its OWN declaring namespace (cv.as.func.ns, set when the TVar
+    // reference was evaluated — is_func's func_ns) — use it to disambiguate a same-named fn in
+    // another namespace, same fix as the direct-call sites below.
+    return find_function_ns(fp, cv.as.func.ns, out_idx);
 }
 
 // call_value — a call in STATEMENT position (the .tks twin's call_value). (MEM Step 2/3) This is the
@@ -1579,7 +1611,7 @@ static bool call_value(const tk_texpr *e, tk_venv *env, tk_value *out) {
     if (e->as.call.is_closure_call && try_lambda_call(e, env, out)) return true;   // (W10) a lambda value runs its own body
 
     size_t fn_idx;
-    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function(p, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal
+    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function_ns(p, e->as.call.call_ns, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal; direct call → namespace-disambiguated (BUGFIX above)
     if (fn == NULL) {
         static char buf[256];
         tk_str last = p.segments[p.len - 1].name;
@@ -1610,7 +1642,7 @@ static tk_value eval_call(const tk_texpr *e, tk_venv *env) {
     if (e->as.call.is_closure_call && try_lambda_call(e, env, &out)) return out;   // (W10) a lambda value runs its own body
 
     size_t fn_idx;
-    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function(p, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal
+    const tk_tfunction *fn = e->as.call.is_closure_call ? closure_target(e, env, &fn_idx) : find_function_ns(p, e->as.call.call_ns, &fn_idx);   // (W10a) closure call → resolve through the local FuncVal; direct call → namespace-disambiguated (BUGFIX above)
     if (fn == NULL) {
         // HOST-FFI FRONTIER (not a checker bug): the checker accepts host-FFI/builtin calls
         // because the native backend lowers them; the VM has no host surface (Phase 7). Stop
