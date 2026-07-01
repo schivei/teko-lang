@@ -389,6 +389,7 @@ static tk_pack_result resolve_defargs(tk_type ft, tk_expr *args, tk_str *arg_nam
 // every arg) as part of its normal argument pass. Flags-typed receivers keep the PRE-EXISTING
 // "deferred" error for anything type_flags_method doesn't itself already handle (unchanged).
 static tk_texpr_result type_method_call(tk_method_call mc, tk_env env, tk_type_table table) {
+    if (!mc.receiver) return xerr("internal: a MethodCall must have a receiver");   // SAST guard — the parser always sets it; defensive against a null field
     tk_texpr_result recv_r = tk_typer_expr(*mc.receiver, env, table);
     if (!recv_r.ok) return recv_r;
     tk_type recv_t = recv_r.as.value.type;
