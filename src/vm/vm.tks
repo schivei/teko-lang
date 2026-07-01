@@ -2029,9 +2029,32 @@ fn eval_compare(c: checker::TCompare, env: Venv) -> EvalRes {
 // twin returns the index via an out-param (`find_function(p, &fn_idx)`); Teko has no out-params, so
 // the pair rides a struct. Using the ITEM INDEX (not f.line) for cov_mark avoids cross-FILE line
 // collisions (two functions at the same line in different files would otherwise share one ID).
+//
+// BUGFIX (VM name-resolution / cross-namespace collision — mirrors vm.c's find_function_ns): a
+// bare last-segment match, with NO namespace disambiguation, silently resolves to the WRONG
+// function whenever two DIFFERENT namespaces declare a same-named fn (e.g. two modules each
+// define their own `parse_atom`, with different arities/signatures) — the FIRST same-named fn
+// anywhere in program-item order wins, corrupting the call regardless of which module the caller
+// actually meant; this bled into completely unrelated tests once such a collision entered the
+// corpus. The checker already resolves the call-site's target namespace (TCall.call_ns) — honor
+// it: when `call_ns` is non-empty, prefer an exact (namespace, name) match, falling back to the
+// old last-segment-anywhere scan when call_ns is empty (a local/unqualified/builtin call has no
+// namespace to disambiguate) or no such namespaced function exists (defensive — never turns a
+// previously-resolvable call into a failure).
 type FnHit = struct { func: checker::TFunction; idx: u64 }
-fn find_function(env: Venv, callee: parser::Path) -> FnHit {
+fn find_function_ns(env: Venv, callee: parser::Path, call_ns: str) -> FnHit {
     let name = callee.segments[callee.segments.len - 1].name
+    if call_ns.len > 0 {
+        mut j: u64 = 0
+        loop {
+            if j >= env.prog.items.len { break }
+            match env.prog.items[j] {
+                checker::TFunction as f => { if f.namespace == call_ns && f.name == name { return FnHit { func = f; idx = j } } }
+                _              => {}
+            }
+            j++
+        }
+    }
     mut i = 0
     loop {
         if i >= env.prog.items.len { break }
@@ -2042,6 +2065,11 @@ fn find_function(env: Venv, callee: parser::Path) -> FnHit {
         i++
     }
     panic(teko::str::concat3("vm: `", name, "` is a host function the VM cannot run (use `teko build` to compile natively)"))
+}
+// find_function — the no-namespace-hint convenience form (call_ns unknown/inapplicable): behaves
+// exactly like the OLD last-segment-anywhere scan.
+fn find_function(env: Venv, callee: parser::Path) -> FnHit {
+    find_function_ns(env, callee, "")
 }
 
 // mutate_slot — a compound/plain assignment to the NEWEST slot named `name`, the .tks twin of
@@ -2397,11 +2425,11 @@ fn eval_call(c: checker::TCall, env: Venv) -> EvalRes {
     }
     let h = if c.is_closure_call {
         match read_var(env, c.callee.segments[c.callee.segments.len - 1].name) {
-            FuncVal as fv => find_function(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) })
+            FuncVal as fv => find_function_ns(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) }, fv.ns)
             _ => panic("vm: closure call on a non-function value (internal: checker should reject)")
         }
     } else {
-        find_function(env, c.callee)   // resolved by LAST segment (cross-ns ok); honest stop if unknown
+        find_function_ns(env, c.callee, c.call_ns)   // namespace-disambiguated (BUGFIX); honest stop if unknown
     }
     let f = h.func
     // C7.1a — an `extern` is a foreign C function with NO Teko body; the tree-walking VM has no
@@ -2714,11 +2742,11 @@ fn call_value(c: checker::TCall, env: Venv) -> StmtVal {
     }
     let h = if c.is_closure_call {
         match read_var(env, c.callee.segments[c.callee.segments.len - 1].name) {
-            FuncVal as fv => find_function(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) })
+            FuncVal as fv => find_function_ns(env, parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = fv.name }) }, fv.ns)
             _ => panic("vm: closure call on a non-function value (internal: checker should reject)")
         }
     } else {
-        find_function(env, c.callee)
+        find_function_ns(env, c.callee, c.call_ns)   // namespace-disambiguated (BUGFIX)
     }
     let f = h.func
     // C7.1a — extern has no Teko body; the VM has no FFI surface. Honest stop (M.3), same as
