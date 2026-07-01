@@ -343,59 +343,73 @@ tk_str tk_ftoa(double x) {
 }
 
 // --- Format spec helpers ($"{x:F2}" / $"{x:[fmt]}") ---
-// All produce fresh malloc'd str; tk_panic on OOM. snprintf into a 128-byte stack buffer
-// (all formatted numbers fit); then copy into a heap str.
-static tk_str fmt_from_buf(char *tmp, int n) {
+// All produce fresh malloc'd str; tk_panic on OOM. snprintf into a fixed stack buffer, then copy
+// into a heap str. CRITICAL: snprintf returns the number of chars it WOULD have written (excluding
+// the NUL), which can EXCEED the buffer for a large precision/width (e.g. $"{x:F500}"). Copying that
+// count out of the buffer is a stack over-read (CWE-125). `cap` is the buffer's byte size; snprintf
+// always NUL-terminates within cap, so the valid printable content is at most cap-1 bytes and the
+// copy length is clamped to that. Absurd precisions therefore TRUNCATE rather than over-read — safe
+// and sane (a double carries ~17 significant digits; asking for hundreds is meaningless).
+static tk_str fmt_from_buf(char *tmp, int n, size_t cap) {
     if (n < 0) n = 0;
     size_t len = (size_t)n;
+    size_t max = (cap > 0) ? cap - 1 : 0;   // snprintf wrote at most cap-1 bytes + NUL
+    if (len > max) len = max;
     tk_byte *buf = malloc(len ? len : 1);
     if (buf == NULL) tk_panic("out of memory (fmt)");
     if (len) memcpy(buf, tmp, len);
     return (tk_str){ buf, len };
 }
 static int fmt_parse_prec(tk_str spec, int def) {
-    // parse optional trailing digits from spec (e.g. "F2" → 2, "F" → def)
+    // parse optional trailing digits from spec (e.g. "F2" → 2, "F" → def). Cap accumulation so a huge
+    // spec ("F99999999999") can't overflow `int` (signed-overflow UB); the output is clamped downstream
+    // regardless, so any value past the cap formats identically (a truncated string).
     int p = def; size_t i = 0;
     while (i < spec.len && (spec.ptr[i] < '0' || spec.ptr[i] > '9')) i++;
-    if (i < spec.len) { p = 0; while (i < spec.len && spec.ptr[i] >= '0' && spec.ptr[i] <= '9') { p = p * 10 + (spec.ptr[i] - '0'); i++; } }
+    if (i < spec.len) { p = 0; while (i < spec.len && spec.ptr[i] >= '0' && spec.ptr[i] <= '9') { if (p < 1000000) p = p * 10 + (spec.ptr[i] - '0'); i++; } }
     return p;
 }
-tk_str tk_fmt_f(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*f", prec, val)); }
-tk_str tk_fmt_d(int64_t val, int width) { char tmp[64]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%0*" PRId64, width, val)); }
-tk_str tk_fmt_x_upper(uint64_t val) { char tmp[32]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%" PRIX64, val)); }
-tk_str tk_fmt_x_lower(uint64_t val) { char tmp[32]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%" PRIx64, val)); }
-tk_str tk_fmt_e(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*e", prec, val)); }
-tk_str tk_fmt_g(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*g", prec, val)); }
+tk_str tk_fmt_f(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*f", prec, val), sizeof tmp); }
+tk_str tk_fmt_d(int64_t val, int width) { char tmp[64]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%0*" PRId64, width, val), sizeof tmp); }
+tk_str tk_fmt_x_upper(uint64_t val) { char tmp[32]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%" PRIX64, val), sizeof tmp); }
+tk_str tk_fmt_x_lower(uint64_t val) { char tmp[32]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%" PRIx64, val), sizeof tmp); }
+tk_str tk_fmt_e(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*e", prec, val), sizeof tmp); }
+tk_str tk_fmt_g(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*g", prec, val), sizeof tmp); }
 tk_str tk_fmt_b(uint64_t val) {
     char tmp[65]; int i = 0;
     if (val == 0) { tmp[i++] = '0'; } else { for (int b = 63; b >= 0; b--) { if ((val >> (unsigned)b) & 1u) { for (; b >= 0; b--) tmp[i++] = (char)('0' + ((val >> (unsigned)b) & 1u)); break; } } }
-    return fmt_from_buf(tmp, i);
+    return fmt_from_buf(tmp, i, sizeof tmp);
 }
-tk_str tk_fmt_p(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*f%%", prec, val * 100.0)); }
+tk_str tk_fmt_p(double val, int prec) { char tmp[128]; return fmt_from_buf(tmp, snprintf(tmp, sizeof tmp, "%.*f%%", prec, val * 100.0), sizeof tmp); }
 tk_str tk_fmt_n_f(double val, int prec) {
     // Format with thousands separator: format without first, then insert commas.
     char tmp[128]; int n = snprintf(tmp, sizeof tmp, "%.*f", prec, val);
-    if (n <= 0) return fmt_from_buf(tmp, n);
+    if (n <= 0) return fmt_from_buf(tmp, n, sizeof tmp);
+    // CLAMP: snprintf returns the would-have-written count; a large precision can make it exceed the
+    // buffer. Bound `n` to the bytes actually present (cap-1) BEFORE using it as a read/write loop
+    // bound, else the loops below over-read `tmp` and over-write `out`.
+    if (n > (int)sizeof tmp - 1) n = (int)sizeof tmp - 1;
     // find decimal point (if any)
     int dot = n; for (int k = 0; k < n; k++) { if (tmp[k] == '.') { dot = k; break; } }
-    char out[160]; int o = 0, start = (tmp[0] == '-') ? 1 : 0;
+    // out must hold n digits + up to n/3 commas + a sign: sizeof out >= 127 + 43 + 1 with room to spare.
+    char out[192]; int o = 0, start = (tmp[0] == '-') ? 1 : 0;
     if (tmp[0] == '-') out[o++] = '-';
-    int int_len = dot - start;
     for (int k = start; k < dot; k++) {
         int pos = dot - k - 1;
         out[o++] = tmp[k];
         if (pos > 0 && pos % 3 == 0) out[o++] = ',';
     }
     for (int k = dot; k < n; k++) out[o++] = tmp[k];
-    return fmt_from_buf(out, o);
+    return fmt_from_buf(out, o, sizeof out);
 }
 tk_str tk_fmt_n_i(int64_t val) {
     char tmp[32]; int n = snprintf(tmp, sizeof tmp, "%" PRId64, val);
-    if (n <= 0) return fmt_from_buf(tmp, n);
+    if (n <= 0) return fmt_from_buf(tmp, n, sizeof tmp);
+    if (n > (int)sizeof tmp - 1) n = (int)sizeof tmp - 1;   // clamp (int64 always fits, but be uniform)
     char out[48]; int o = 0, start = (tmp[0] == '-') ? 1 : 0;
     if (tmp[0] == '-') out[o++] = '-';
     for (int k = start; k < n; k++) { int pos = n - k - 1; out[o++] = tmp[k]; if (pos > 0 && pos % 3 == 0) out[o++] = ','; }
-    return fmt_from_buf(out, o);
+    return fmt_from_buf(out, o, sizeof out);
 }
 // Dynamic dispatchers: parse first char of spec (case-insensitive) + optional digits.
 tk_str tk_fmt_dyn_f64(double val, tk_str spec) {

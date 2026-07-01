@@ -433,9 +433,14 @@ static int tk_backend(const char *label, const char *stem, tk_tprogram prog, con
 
         FILE *fp = fopen(tkl_path, "wb");
         if (fp == NULL) { tk_free0(zip_bytes.ptr); return fail(label, "cannot write .tkl to the output directory"); }
-        fwrite(zip_bytes.ptr, 1, zip_bytes.len, fp);
-        fclose(fp);
+        size_t zwrote = fwrite(zip_bytes.ptr, 1, zip_bytes.len, fp);
+        int zclose = fclose(fp);   // fclose flushes — a flush failure surfaces here, not in fwrite
         tk_free0(zip_bytes.ptr);
+        // A short write / flush failure (ENOSPC, quota, I/O error) leaves a truncated .tkl on disk;
+        // fail LOUDLY instead of reporting success (mirrors the generated-C path below and the .tks
+        // twin project.tks). Silently succeeding here left a corrupt package a later build would
+        // reject with a misleading "bad .tkl" ZIP-parse error.
+        if (zwrote != zip_bytes.len || zclose != 0) return fail(label, "short write on .tkl package");
 
         printf("teko: %s: packaged %s\n", label, tkl_path);
         return 0;
