@@ -246,8 +246,18 @@ mais diferente das outras.
 
 - **`TEKO_ROADMAP_INDEPENDENCE.md` (C3):** este documento é o detalhamento de C3;
   a linha C3 lá passa a apontar para cá.
-- **`TEKO_MASTER_PLAN.md`:** este roadmap entra como um novo eixo agendado (não mais
-  "não agendado"), citado na seção de fases futuras.
+- **`TEKO_MASTER_PLAN.md`:** tracked como **ROUND N** (independente/paralelo,
+  não bloqueia nem é bloqueado pela sequência crítica GATE→ROUND 0→…→ROUND 6).
+  Adicionado à lista de ROUNDs em 2026-07-01 depois de uma auditoria apontar que
+  esse trabalho só existia como prosa solta (bucket `⏸️ DEFERRED`), desconectada do
+  mecanismo de tracking real do projeto.
+- **PR #39 (ROUND 2, OOP CLASS) já toca `src/codegen/*`** — correção: uma versão
+  anterior deste plano afirmou erroneamente que #39 não tocava codegen. Na
+  verdade #39 adicionou tratamento de `TK_BODY_CLASS` em `emit_type_decl`
+  (layout de struct para CLASS, só modelo-de-dados). Não é conflito de design
+  (é lógica aditiva num arquivo irmão de `src/codegen/native/*`, que ainda nem
+  existe), mas quem começar a execução do ROUND N precisa rebasear por cima dos
+  commits de codegen do ROUND 2, não assumir o arquivo intocado.
 - **SUPREME RULE:** todo arquivo novo (`lir.c`, `isel_*.c`, `enc_*.c`, `obj_*.c`,
   `stackify_wasm.c`, `native_emit.c`) nasce com seu par `.tks` no mesmo commit/PR,
   sem exceção.
