@@ -420,6 +420,15 @@ static tk_texpr_result type_method_call(tk_method_call mc, tk_env env, tk_type_t
     if (!found) return xferr(tk_error_named("no such method on struct", mc.method));
     bool is_instance = mfn.nparams > 0 && !mfn.params[0].has_type;
     if (!is_instance) return xferr(tk_error_named("static method — call it as StructName::method(…), not recv.method(…)", mc.method));
+    // (W10b.CLASS residual — intern visibility) a private (default) method is reachable only
+    // from its OWN declaring class's code, or — if `intern` — a subclass's too. Struct methods
+    // stay all-public (W10b.0.A) — this check only fires for a class receiver.
+    if (td.as.value.body.tag == TK_BODY_CLASS) {
+        tk_member_owner_result owner = tk_find_method_owner(struct_name, table, mc.method);
+        if (!owner.ok) return xferr(owner.as.error);
+        if (!tk_member_accessible(owner.as.value, env.owner_type, table))
+            return xferr(tk_error_named("method is private to its declaring class", mc.method));
+    }
     tk_segment *segs = tk_alloc(2 * sizeof *segs); if (!segs) abort();
     segs[0] = (tk_segment){ .name = struct_name };
     segs[1] = (tk_segment){ .name = mc.method };
@@ -472,6 +481,21 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     if (!ftr.ok) return (tk_texpr_result){ .ok = false, .as.error = tk_error_named("unknown function", name) };
     tk_type ft = ftr.as.value;
     if (ft.tag != TK_TYPE_FUNC) return xerr("not a function");
+    // (W10b.CLASS residual — intern visibility) a STATIC call (`ClassName::method(…)`) is
+    // reachable under the SAME rule as an instance dot-call — check it here too, routed through
+    // the resolved call namespace. `call_ns` names a real class only for a class method; any
+    // other qualified/unqualified call (an ordinary namespaced function) is a silent no-op
+    // (tk_find_class_body errors → skipped).
+    if (call_ns.len > 0) {
+        tk_str cls = tk_class_name_from_method_ns(call_ns);
+        tk_classbody_result cbr = tk_find_class_body(cls, table);
+        if (cbr.ok) {
+            tk_member_owner_result owner = tk_find_method_owner(cls, table, name);
+            if (!owner.ok) return xferr(owner.as.error);
+            if (!tk_member_accessible(owner.as.value, env.owner_type, table))
+                return xferr(tk_error_named("method is private to its declaring class", name));
+        }
+    }
     tk_expr *dargs = c.args; size_t ndargs = c.nargs;
     if (ft.as.func.variadic) {
         tk_pack_result pr = pack_variadic_args(ft, c.args, c.nargs, env, table);
@@ -839,9 +863,10 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
     // (W10b.CLASS) a class's fields are read exactly like a struct's; increment 2 uses the
     // EFFECTIVE (base-inherited) field set.
     tk_struct_body fa_sb;
+    bool fa_is_class = decl.as.value.body.tag == TK_BODY_CLASS;
     if (decl.as.value.body.tag == TK_BODY_STRUCT) {
         fa_sb = decl.as.value.body.as.struct_body;
-    } else if (decl.as.value.body.tag == TK_BODY_CLASS) {
+    } else if (fa_is_class) {
         tk_fieldsvec_result eff = tk_effective_class_fields(decl.as.value.body.as.class_body, table);
         if (!eff.ok) return xferr(eff.as.error);
         fa_sb = (tk_struct_body){ .fields = eff.as.value.ptr, .n_fields = eff.as.value.len, .methods = NULL, .n_methods = 0 };
@@ -850,6 +875,14 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
     }
     tk_type_result ft = field_type(fa_sb, fa.field, table);
     if (!ft.ok) return xerr("no such field");
+    // (W10b.CLASS residual — intern visibility) a private (default) field is reachable only
+    // from its OWN declaring class's code, or — if `intern` — a subclass's too.
+    if (fa_is_class) {
+        tk_member_owner_result owner = tk_find_field_owner(recv.as.value.type.as.named.name, table, fa.field);
+        if (!owner.ok) return xferr(owner.as.error);
+        if (!tk_member_accessible(owner.as.value, env.owner_type, table))
+            return xferr(tk_error_named("field is private to its declaring class", fa.field));
+    }
     return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = ft.as.value,
                            .as.field_access = { box(recv.as.value), fa.field } });
 }
@@ -897,9 +930,10 @@ static tk_texpr_result type_safe_field_access(tk_safe_field_access sfa, tk_env e
     // (W10b.CLASS) a class's fields are read exactly like a struct's; increment 2 uses the
     // EFFECTIVE (base-inherited) field set.
     tk_struct_body sfa_sb;
+    bool sfa_is_class = decl.as.value.body.tag == TK_BODY_CLASS;
     if (decl.as.value.body.tag == TK_BODY_STRUCT) {
         sfa_sb = decl.as.value.body.as.struct_body;
-    } else if (decl.as.value.body.tag == TK_BODY_CLASS) {
+    } else if (sfa_is_class) {
         tk_fieldsvec_result eff = tk_effective_class_fields(decl.as.value.body.as.class_body, table);
         if (!eff.ok) return xferr(eff.as.error);
         sfa_sb = (tk_struct_body){ .fields = eff.as.value.ptr, .n_fields = eff.as.value.len, .methods = NULL, .n_methods = 0 };
@@ -908,6 +942,14 @@ static tk_texpr_result type_safe_field_access(tk_safe_field_access sfa, tk_env e
     }
     tk_type_result ft = field_type(sfa_sb, sfa.field, table);
     if (!ft.ok) return xerr("no such field");
+    // (W10b.CLASS residual — intern visibility) a private (default) field is reachable only
+    // from its OWN declaring class's code, or — if `intern` — a subclass's too.
+    if (sfa_is_class) {
+        tk_member_owner_result owner = tk_find_field_owner(inner.as.named.name, table, sfa.field);
+        if (!owner.ok) return xferr(owner.as.error);
+        if (!tk_member_accessible(owner.as.value, env.owner_type, table))
+            return xferr(tk_error_named("field is private to its declaring class", sfa.field));
+    }
     // the result is `(field-type)?` — null-propagating; an already-optional field stays as-is.
     tk_type result = ft.as.value.tag == TK_TYPE_OPTIONAL ? ft.as.value
                    : (tk_type){ .tag = TK_TYPE_OPTIONAL, .as.optional.inner = tk_box_type_val(ft.as.value) };

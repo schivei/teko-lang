@@ -175,6 +175,67 @@ tk_methodsvec_result tk_effective_class_methods(tk_class_body cb, tk_type_table 
     return (tk_methodsvec_result){ .ok = true, .as.value = { .ptr = out, .len = n_out } };
 }
 
+// (W10b.CLASS residual — intern visibility) is `class_name` the same as, or a (transitive)
+// SUBCLASS of, `ancestor_name`? Mirror of collect.tks::is_subclass_of.
+bool tk_is_subclass_of(tk_str class_name, tk_str ancestor_name, tk_type_table table) {
+    if (tk_str_eq(class_name, ancestor_name)) return true;
+    tk_classbody_result cb = tk_find_class_body(class_name, table);
+    if (!cb.ok) return false;
+    if (!cb.as.value.has_base) return false;
+    return tk_is_subclass_of(cb.as.value.base_name, ancestor_name, table);
+}
+
+// (W10b.CLASS residual — intern visibility) find field/method declaring class + reach, walking
+// `class_name`'s own members first, then its base chain. Mirror of
+// collect.tks::find_field_owner / find_method_owner.
+tk_member_owner_result tk_find_field_owner(tk_str class_name, tk_type_table table, tk_str field_name) {
+    tk_classbody_result cb = tk_find_class_body(class_name, table);
+    if (!cb.ok) return (tk_member_owner_result){ .ok = false, .as.error = cb.as.error };
+    for (size_t i = 0; i < cb.as.value.n_fields; i += 1) {
+        if (tk_str_eq(cb.as.value.fields[i].name, field_name)) {
+            tk_member_owner mo = { .declaring_class = class_name, .vis = cb.as.value.fields[i].vis, .is_intern = cb.as.value.fields[i].is_intern };
+            return (tk_member_owner_result){ .ok = true, .as.value = mo };
+        }
+    }
+    if (cb.as.value.has_base) return tk_find_field_owner(cb.as.value.base_name, table, field_name);
+    return (tk_member_owner_result){ .ok = false, .as.error = tk_error_named("internal: field not found in class chain", field_name) };
+}
+tk_member_owner_result tk_find_method_owner(tk_str class_name, tk_type_table table, tk_str method_name) {
+    tk_classbody_result cb = tk_find_class_body(class_name, table);
+    if (!cb.ok) return (tk_member_owner_result){ .ok = false, .as.error = cb.as.error };
+    for (size_t i = 0; i < cb.as.value.n_methods; i += 1) {
+        if (tk_str_eq(cb.as.value.methods[i].name, method_name)) {
+            tk_member_owner mo = { .declaring_class = class_name, .vis = cb.as.value.methods[i].vis, .is_intern = cb.as.value.methods[i].is_intern };
+            return (tk_member_owner_result){ .ok = true, .as.value = mo };
+        }
+    }
+    if (cb.as.value.has_base) return tk_find_method_owner(cb.as.value.base_name, table, method_name);
+    return (tk_member_owner_result){ .ok = false, .as.error = tk_error_named("internal: method not found in class chain", method_name) };
+}
+
+// (W10b.CLASS residual — intern visibility) is `owner`'s member reachable from code whose OWN
+// declaring class is `accessor_type` (empty — not inside any class method)? Mirror of
+// collect.tks::member_accessible.
+bool tk_member_accessible(tk_member_owner owner, tk_str accessor_type, tk_type_table table) {
+    if (owner.vis == TK_VIS_PUB || owner.vis == TK_VIS_EXP) return true;
+    // TK_VIS_PRIVATE (the class default)
+    if (accessor_type.len == 0) return false;
+    if (tk_str_eq(accessor_type, owner.declaring_class)) return true;
+    if (owner.is_intern) return tk_is_subclass_of(accessor_type, owner.declaring_class, table);
+    return false;
+}
+
+// (W10b.CLASS residual — intern visibility) recover the bare CLASS NAME from a method's
+// registered pseudo-namespace ("<owning-ns>::<ClassName>", or bare "<ClassName>" at the top
+// level — collect.c's method_ns convention) — the class name is always the LAST "::"-segment.
+// Mirror of collect.tks::class_name_from_method_ns.
+tk_str tk_class_name_from_method_ns(tk_str ns) {
+    size_t cut = 0;
+    for (size_t i = 0; i + 1 < ns.len; i += 1)
+        if (ns.ptr[i] == ':' && ns.ptr[i + 1] == ':') cut = i + 2;
+    return (tk_str){ ns.ptr + cut, ns.len - cut };
+}
+
 // (W10b.CLASS increment 2) validate ONE class's inheritance/override declarations. Mirror of
 // collect.tks::validate_class_decl.
 static tk_type_result validate_class_decl(tk_class_body cb, tk_type_table table) {

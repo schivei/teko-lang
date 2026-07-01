@@ -455,8 +455,12 @@ static tk_error surface_at(tk_str file, uint32_t line, uint32_t col, tk_error in
 // RECEIVER param (has_type=false, only ever index 0) binds to Named{struct_name} instead of
 // going through tk_resolve_type (its type is implicit, never written by the user).
 static tk_tfunction_result type_method(tk_function f, tk_str struct_name, tk_env env, tk_type_table table,
-                                        bool has_base_binding, tk_str base_binding_name, tk_str base_name) {
-    tk_env local = env;
+                                        bool has_base_binding, tk_str base_binding_name, tk_str base_name,
+                                        tk_str declaring_class) {
+    // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
+    // checked against `declaring_class` (see type_struct_methods's own comment on why this can
+    // differ from `struct_name`), NOT `struct_name` — set before typing the body below.
+    tk_env local = tk_env_with_owner(env, declaring_class);
     tk_type_table tbl = tk_type_param_table(f.type_params, f.n_type_params, (tk_str){0}, table);
     bool is_teko_rt = f.is_extern && str_eq(f.from_lib, "teko_rt");
     // (W10b.CLASS) `class Base(parent) { … }` — the NAMED BINDING an instance method uses to
@@ -572,6 +576,7 @@ static bool type_struct_methods(tk_type_decl td, tk_str item_ns, tk_str file, tk
     tk_function *methods; size_t n_methods;
     bool has_base_binding = false; tk_str base_binding_name = {0}; tk_str base_name = {0};
     tk_function *own_methods = NULL; size_t n_own_methods = 0;   // (W10b.CLASS) methods declared DIRECTLY on td
+    bool is_class = false;
     if (td.body.tag == TK_BODY_STRUCT) {
         methods = td.body.as.struct_body.methods; n_methods = td.body.as.struct_body.n_methods;
     } else if (td.body.tag == TK_BODY_CLASS) {
@@ -582,6 +587,7 @@ static bool type_struct_methods(tk_type_decl td, tk_str item_ns, tk_str file, tk
         base_binding_name = td.body.as.class_body.base_binding_name;
         base_name = td.body.as.class_body.base_name;
         own_methods = td.body.as.class_body.methods; n_own_methods = td.body.as.class_body.n_methods;
+        is_class = true;
     } else {
         return true;
     }
@@ -598,7 +604,15 @@ static bool type_struct_methods(tk_type_decl td, tk_str item_ns, tk_str file, tk
         bool is_own = false;
         for (size_t oi = 0; oi < n_own_methods; oi += 1) if (tk_str_eq(own_methods[oi].name, methods[mi].name)) { is_own = true; break; }
         bool use_base_binding = has_base_binding && is_own;
-        tk_tfunction_result mf = type_method(methods[mi], td.name, env, table, use_base_binding, base_binding_name, base_name);
+        // (W10b.CLASS residual — intern visibility) the ACCESSOR context for THIS method body's
+        // OWN field/method accesses: the class that ORIGINALLY DECLARED it — NEVER td.name when
+        // the two differ, for the exact same reason as the base-binding fix above.
+        tk_str declaring_class = td.name;
+        if (is_class) {
+            tk_member_owner_result mo = tk_find_method_owner(td.name, table, methods[mi].name);
+            if (mo.ok) declaring_class = mo.as.value.declaring_class;
+        }
+        tk_tfunction_result mf = type_method(methods[mi], td.name, env, table, use_base_binding, base_binding_name, base_name, declaring_class);
         if (!mf.ok) {
             uint32_t el = mf.as.error.line ? mf.as.error.line : methods[mi].line;
             uint32_t ec = mf.as.error.line ? mf.as.error.col  : methods[mi].col;

@@ -236,6 +236,87 @@ pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []par
     out
 }
 
+// (W10b.CLASS residual — intern visibility) is `class_name` the same as, or a (transitive)
+// SUBCLASS of, `ancestor_name`? Used to decide whether an `intern` (subclass-visible) member is
+// reachable from `class_name`'s own code.
+pub fn is_subclass_of(class_name: str, ancestor_name: str, table: TypeTable) -> bool {
+    if class_name == ancestor_name { return true }
+    match find_class_body(class_name, table) {
+        parser::ClassBody as cb => if cb.has_base { is_subclass_of(cb.base_name, ancestor_name, table) } else { false }
+        error => false
+    }
+}
+
+// a member's REACH: which class's OWN code declared it (walking up the base chain to find it —
+// an override "moves" the declaration to the overriding class, since that class's OWN body is
+// what's actually reachable there), plus its `vis`/`is_intern` AT that declaration.
+pub type MemberOwner = struct { declaring_class: str; vis: parser::Visibility; is_intern: bool }
+
+// (W10b.CLASS residual — intern visibility) find field `field_name`'s declaring class + reach,
+// walking `class_name`'s own fields first, then its base chain.
+pub fn find_field_owner(class_name: str, table: TypeTable, field_name: str) -> MemberOwner | error {
+    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    mut i = 0
+    loop {
+        if i >= cb.fields.len { break }
+        if cb.fields[i].name == field_name { return MemberOwner { declaring_class = class_name; vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern } }
+        i++
+    }
+    if cb.has_base { return find_field_owner(cb.base_name, table, field_name) }
+    error { message = $"internal: field '{field_name}' not found in {class_name}'s class chain" }
+}
+
+// (W10b.CLASS residual — intern visibility) find method `method_name`'s declaring class + reach
+// (mirrors find_field_owner — an override's OWN vis/is_intern governs at that point in the chain).
+pub fn find_method_owner(class_name: str, table: TypeTable, method_name: str) -> MemberOwner | error {
+    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    mut i = 0
+    loop {
+        if i >= cb.methods.len { break }
+        if cb.methods[i].name == method_name { return MemberOwner { declaring_class = class_name; vis = cb.methods[i].vis; is_intern = cb.methods[i].is_intern } }
+        i++
+    }
+    if cb.has_base { return find_method_owner(cb.base_name, table, method_name) }
+    error { message = $"internal: method '{method_name}' not found in {class_name}'s class chain" }
+}
+
+// (W10b.CLASS residual — intern visibility) is `owner`'s member reachable from code whose OWN
+// declaring class is `accessor_type` ("" — not inside any class method, e.g. free-function or
+// top-level code)? `pub`/`exp` are reachable from anywhere; a private (default) member is
+// reachable only from its OWN declaring class's code, or — if `is_intern` — from a (transitive)
+// subclass's code too.
+pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTable) -> bool {
+    match owner.vis {
+        parser::Visibility::Pub => true
+        parser::Visibility::Exp => true
+        parser::Visibility::Private => {
+            if accessor_type == "" { return false }
+            if accessor_type == owner.declaring_class { return true }
+            if owner.is_intern { return is_subclass_of(accessor_type, owner.declaring_class, table) }
+            false
+        }
+    }
+}
+
+// (W10b.CLASS residual — intern visibility) recover the bare CLASS NAME from a method's
+// registered pseudo-namespace ("<owning-ns>::<ClassName>", or bare "<ClassName>" at the top
+// level — collect_funcs's method_ns convention) — the class name is always the LAST "::"-segment.
+// Used to route a STATIC call (`ClassName::method(…)`)'s visibility check the same way an
+// instance dot-call already is. A manual scan (not `teko::str::last_index_of`, a HOST-ONLY
+// function the VM cannot interpret — this runs inside the checker itself, which the VM DOES
+// interpret when `.tkt` unit tests exercise it directly, e.g. checker_test.tkt).
+pub fn class_name_from_method_ns(ns: str) -> str {
+    mut last_sep: i64 = -1
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= ns.len { break }
+        if ns[i] == b':' && ns[i + 1] == b':' { last_sep = i to i64 }
+        i++
+    }
+    if last_sep < 0 { return ns }
+    teko::str::slice_from(ns, (last_sep to u64) + 2)
+}
+
 // (W10b.CLASS increment 2) validate ONE class's inheritance/override declarations:
 //  - a base class must exist, be a class, and be `abstract`/`virtual` (NOT sealed — a sealed
 //    class is final, per ClassKind's doc).
