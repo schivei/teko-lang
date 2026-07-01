@@ -1305,23 +1305,27 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
     // element): the [a, b] set is a value-position collection of refs. Mirror in typer.tks::type_in.
     if (tk_type_contains_ref(&lt)) return xerr("a reference cannot be stored in a struct/variant/collection");
     tk_texpr *elems = NULL;
-    if (n.nelems > 0) { elems = tk_alloc(n.nelems * sizeof *elems); if (!elems) abort(); }
-    for (size_t i = 0; i < n.nelems; i += 1) {
-        tk_texpr_result e = tk_typer_expr(n.elems[i], env, table);
-        if (!e.ok) { tk_free0(elems); return e; }
-        if (tk_type_is_void(&e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("a `void` expression cannot be an operand (M.1)");
+    if (n.nelems > 0) {
+        elems = tk_alloc(n.nelems * sizeof *elems); if (!elems) abort();
+        // Loop nested inside the allocation guard (not a sibling `if`+`for` pair) so the
+        // analyzer can see `elems` is non-NULL for every index this loop actually reaches.
+        for (size_t i = 0; i < n.nelems; i += 1) {
+            tk_texpr_result e = tk_typer_expr(n.elems[i], env, table);
+            if (!e.ok) { tk_free0(elems); return e; }
+            if (tk_type_is_void(&e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("a `void` expression cannot be an operand (M.1)");
+            }
+            if (tk_type_contains_ref(&e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("a reference cannot be stored in a struct/variant/collection");
+            }
+            if (!is_comparable(lt, e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("`in` element is not comparable to the left-hand operand");
+            }
+            elems[i] = e.as.value;
         }
-        if (tk_type_contains_ref(&e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("a reference cannot be stored in a struct/variant/collection");
-        }
-        if (!is_comparable(lt, e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("`in` element is not comparable to the left-hand operand");
-        }
-        elems[i] = e.as.value;
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_IN, .type = tk_prim_t(TK_PRIM_BOOL),
                            .as.in_expr = { box(lhs.as.value), elems, n.nelems } });
@@ -1334,42 +1338,44 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
 static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table table) {
     tk_texpr  *elems    = NULL;
     bool      *spreads  = NULL;
+    tk_type et = (tk_type){ .tag = TK_TYPE_VOID };   // sentinel for an empty `[]`
     if (a.nelements > 0) {
         elems   = tk_alloc(a.nelements * sizeof *elems);   if (!elems)   abort();
         spreads = tk_alloc(a.nelements * sizeof *spreads); if (!spreads) abort();
-    }
-    tk_type et = (tk_type){ .tag = TK_TYPE_VOID };   // sentinel for an empty `[]`
-    for (size_t i = 0; i < a.nelements; i += 1) {
-        tk_texpr_result e = tk_typer_expr(*a.elements[i].expr, env, table);
-        if (!e.ok) { tk_free0(elems); tk_free0(spreads); return e; }
-        if (a.elements[i].is_spread) {
-            // spread element: expr must be a `[]T` slice; contribute T as the element type
-            if (e.as.value.type.tag != TK_TYPE_SLICE) {
-                tk_free0(elems); tk_free0(spreads);
-                return xerr("a spread element (`..xs`) must be a slice (`[]T`)");
-            }
-            if (e.as.value.type.as.slice.element == NULL) {
-                tk_free0(elems); tk_free0(spreads);
-                return xerr("a spread element cannot be an untyped empty slice");
-            }
-            tk_type spread_elem = *e.as.value.type.as.slice.element;
-            if (tk_type_is_void(&et)) { et = spread_elem; }   // first contributor
-            else {
-                tk_type j;
-                if (!tk_type_join(et, spread_elem, table, &j)) {
+        // Loop nested inside the SAME allocation guard (not a sibling `if`+`for` pair) so the
+        // analyzer can see `elems`/`spreads` are non-NULL for every index this loop reaches.
+        for (size_t i = 0; i < a.nelements; i += 1) {
+            tk_texpr_result e = tk_typer_expr(*a.elements[i].expr, env, table);
+            if (!e.ok) { tk_free0(elems); tk_free0(spreads); return e; }
+            if (a.elements[i].is_spread) {
+                // spread element: expr must be a `[]T` slice; contribute T as the element type
+                if (e.as.value.type.tag != TK_TYPE_SLICE) {
                     tk_free0(elems); tk_free0(spreads);
-                    return xerr("spread element type does not match the array element type");
+                    return xerr("a spread element (`..xs`) must be a slice (`[]T`)");
                 }
-                et = j;
+                if (e.as.value.type.as.slice.element == NULL) {
+                    tk_free0(elems); tk_free0(spreads);
+                    return xerr("a spread element cannot be an untyped empty slice");
+                }
+                tk_type spread_elem = *e.as.value.type.as.slice.element;
+                if (tk_type_is_void(&et)) { et = spread_elem; }   // first contributor
+                else {
+                    tk_type j;
+                    if (!tk_type_join(et, spread_elem, table, &j)) {
+                        tk_free0(elems); tk_free0(spreads);
+                        return xerr("spread element type does not match the array element type");
+                    }
+                    et = j;
+                }
+            } else {
+                // plain element: original logic
+                if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); tk_free0(spreads); return xerr("a `void` expression cannot be an array element (M.1)"); }
+                if (tk_type_is_void(&et)) { et = e.as.value.type; }   // first contributor
+                else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); tk_free0(spreads); return xerr("array elements have different types"); } et = j; }
             }
-        } else {
-            // plain element: original logic
-            if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); tk_free0(spreads); return xerr("a `void` expression cannot be an array element (M.1)"); }
-            if (tk_type_is_void(&et)) { et = e.as.value.type; }   // first contributor
-            else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); tk_free0(spreads); return xerr("array elements have different types"); } et = j; }
+            elems[i]   = e.as.value;
+            spreads[i] = a.elements[i].is_spread;
         }
-        elems[i]   = e.as.value;
-        spreads[i] = a.elements[i].is_spread;
     }
     // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
     // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
