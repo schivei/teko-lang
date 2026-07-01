@@ -166,6 +166,11 @@ typedef enum {
     // never a stored operator, so its ordinal is never serialized to `.tkb`). Its `.text` is the
     // codepoint's raw UTF-8 bytes (1–4), already validated by the lexer.
     TK_TOKEN_CHAR,          // `c'x'` — one UTF-8 codepoint (1–4 bytes)
+    // `params` keyword — a variadic-parameter modifier (2026-07-01 ruling). Appended LAST for
+    // ordinal stability (never a stored operator, so its ordinal is never serialized to `.tkb`).
+    // A REAL reserved keyword (not contextual like `from`): `fn f(a: T, params b: []T2) -> R`
+    // marks the LAST parameter as variadic.
+    TK_TOKEN_PARAMS,        // `params` — variadic-parameter modifier keyword
 } tk_token_kind;
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW
