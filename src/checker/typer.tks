@@ -197,6 +197,12 @@ fn flatten_tilde_chain(e: parser::Expr, acc: []parser::Expr) -> []parser::Expr {
 fn tilde_str_lit_text(e: parser::Expr) -> str? {
     match e.kind {
         parser::StrLit as s => s.text
+        // (2026-07-01) `$"no holes"` / `$@"""no holes"""` — interpolated syntax with ZERO holes
+        // (the `verbatim` escaping flag is already resolved into `pieces` by parse time, so a
+        // 0-hole Interp is indistinguishable from a plain literal here). Rare in practice (why
+        // use `$`/`$@` with nothing to interpolate?), but foldable, so fold it — max compile-time
+        // optimization per the user's explicit ask.
+        parser::Interp as it => if it.holes.len == 0 && it.pieces.len == 1 { it.pieces[0] } else { null }
         _ => null
     }
 }

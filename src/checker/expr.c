@@ -99,14 +99,27 @@ static tk_str tilde_concat_lit(tk_str a, tk_str b) {
     if (b.len) memcpy(buf + a.len, b.ptr, b.len);
     return (tk_str){ buf, n };
 }
+// (2026-07-01) `$"no holes"` / `$@"""no holes"""` — interpolated syntax with ZERO holes (the
+// `verbatim` escaping flag is already resolved into `pieces` by parse time, so a 0-hole Interp
+// is indistinguishable from a plain literal here). Rare in practice, but foldable — max
+// compile-time optimization per the user's explicit ask.
+static bool tilde_piece_lit_text(tk_expr e, tk_str *out) {
+    if (e.tag == TK_EXPR_STR) { *out = e.as.str.text; return true; }
+    if (e.tag == TK_EXPR_INTERP && e.as.interp.nholes == 0 && e.as.interp.npieces == 1) {
+        *out = e.as.interp.pieces[0]; return true;
+    }
+    return false;
+}
 static void fold_tilde_pieces(tk_expr *pieces, size_t npieces, tk_expr **out, size_t *nout) {
     size_t i = 0;
     while (i < npieces) {
-        if (pieces[i].tag == TK_EXPR_STR) {
-            tk_str merged = pieces[i].as.str.text;
+        tk_str t0;
+        if (tilde_piece_lit_text(pieces[i], &t0)) {
+            tk_str merged = t0;
             size_t j = i + 1;
-            while (j < npieces && pieces[j].tag == TK_EXPR_STR) {
-                merged = tilde_concat_lit(merged, pieces[j].as.str.text);
+            tk_str tj;
+            while (j < npieces && tilde_piece_lit_text(pieces[j], &tj)) {
+                merged = tilde_concat_lit(merged, tj);
                 j += 1;
             }
             tk_exprs_push(out, nout, (tk_expr){ .tag = TK_EXPR_STR, .line = pieces[i].line, .col = pieces[i].col, .as.str = { merged } });
