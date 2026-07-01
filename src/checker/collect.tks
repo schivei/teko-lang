@@ -122,6 +122,21 @@ fn collect_funcs(items: []parser::Item, table: TypeTable) -> Env | error {
                             mi++
                         }
                     }
+                    // (W10b.CLASS increment 1) same registration as a struct method — the receiver
+                    // is still Named{class_name} (by-value); a Ref<T> receiver is a later increment.
+                    parser::ClassBody as cb => {
+                        let method_ns = if items[i].namespace == "" { td.name } else { items[i].namespace ~ "::" ~ td.name }
+                        mut mi = 0
+                        loop {
+                            if mi >= cb.methods.len { break }
+                            let mft = match method_func_type(cb.methods[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, cb.methods[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -181,6 +196,17 @@ fn validate_type_decls(table: TypeTable) -> error? {
                 match resolve_type(ab.alias, tbl) {
                     Type as at => match at { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
                     error as e => return e
+                }
+            }
+            parser::ClassBody as cb => {   // (W10b.CLASS) same R4 escape-gate as a struct's fields
+                mut f = 0
+                loop {
+                    if f >= cb.fields.len { break }
+                    match resolve_type(cb.fields[f].type_ann, tbl) {
+                        Type as ft => match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                        error as e => return e
+                    }
+                    f++
                 }
             }
             _ => {}
@@ -244,6 +270,20 @@ fn collect_with_seed(program: parser::Program, seed: Collected) -> Collected | e
                                 error as e => return e
                             }
                             env = define_fn(env, sb.methods[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
+                    // (W10b.CLASS increment 1) mirrors collect_funcs' class-method registration
+                    parser::ClassBody as cb => {
+                        let method_ns = if program.items[j].namespace == "" { td.name } else { program.items[j].namespace ~ "::" ~ td.name }
+                        mut mi = 0
+                        loop {
+                            if mi >= cb.methods.len { break }
+                            let mft = match method_func_type(cb.methods[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, cb.methods[mi].name, mft, method_ns)
                             mi++
                         }
                     }

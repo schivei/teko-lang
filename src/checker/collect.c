@@ -144,6 +144,13 @@ static tk_type_result validate_type_decls(tk_type_table table) {
             if (!r.ok) return r;
             if (r.as.value.tag == TK_TYPE_REF)
                 return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
+        } else if (body.tag == TK_BODY_CLASS) {   // (W10b.CLASS) same R4 escape-gate as a struct's fields
+            for (size_t f = 0; f < body.as.class_body.n_fields; f += 1) {
+                tk_type_result r = tk_resolve_type(body.as.class_body.fields[f].type_ann, tbl);
+                if (!r.ok) return r;
+                if (r.as.value.tag == TK_TYPE_REF)
+                    return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be stored in a struct/variant/collection") };
+            }
         }
     }
     return (tk_type_result){ .ok = true };
@@ -170,6 +177,18 @@ tk_collected_result tk_collect(tk_program program) {
             tk_str method_ns = owning_ns.len == 0 ? td.name : collect_str_concat(collect_str_concat(owning_ns, (tk_str){ .ptr = (const tk_byte *)"::", .len = 2 }), td.name);
             for (size_t mi = 0; mi < td.body.as.struct_body.n_methods; mi += 1) {
                 tk_function mf = td.body.as.struct_body.methods[mi];
+                tk_type_result mft = method_func_type(mf, td.name, table);
+                if (!mft.ok) return (tk_collected_result){ .ok = false, .as.error = mft.as.error };
+                env = tk_env_define_fn(env, mf.name, mft.as.value, method_ns);
+            }
+        } else if (program.items[i].tag == TK_ITEM_TYPE_DECL && program.items[i].as.type_decl.body.tag == TK_BODY_CLASS) {
+            // (W10b.CLASS increment 1) same registration as a struct method — the receiver is
+            // still Named{class_name} (by-value); a Ref<T> receiver is a later increment.
+            tk_type_decl td = program.items[i].as.type_decl;
+            tk_str owning_ns = program.items[i].namespace;
+            tk_str method_ns = owning_ns.len == 0 ? td.name : collect_str_concat(collect_str_concat(owning_ns, (tk_str){ .ptr = (const tk_byte *)"::", .len = 2 }), td.name);
+            for (size_t mi = 0; mi < td.body.as.class_body.n_methods; mi += 1) {
+                tk_function mf = td.body.as.class_body.methods[mi];
                 tk_type_result mft = method_func_type(mf, td.name, table);
                 if (!mft.ok) return (tk_collected_result){ .ok = false, .as.error = mft.as.error };
                 env = tk_env_define_fn(env, mf.name, mft.as.value, method_ns);
@@ -213,6 +232,17 @@ tk_collected_result tk_collect_with_seed(tk_program program, tk_collected seed) 
             tk_str method_ns = owning_ns.len == 0 ? td.name : collect_str_concat(collect_str_concat(owning_ns, (tk_str){ .ptr = (const tk_byte *)"::", .len = 2 }), td.name);
             for (size_t mi = 0; mi < td.body.as.struct_body.n_methods; mi += 1) {
                 tk_function mf = td.body.as.struct_body.methods[mi];
+                tk_type_result mft = method_func_type(mf, td.name, table);
+                if (!mft.ok) return (tk_collected_result){ .ok = false, .as.error = mft.as.error };
+                env = tk_env_define_fn(env, mf.name, mft.as.value, method_ns);
+            }
+        } else if (program.items[i].tag == TK_ITEM_TYPE_DECL && program.items[i].as.type_decl.body.tag == TK_BODY_CLASS) {
+            // (W10b.CLASS increment 1) mirrors tk_collect's class-method registration
+            tk_type_decl td = program.items[i].as.type_decl;
+            tk_str owning_ns = program.items[i].namespace;
+            tk_str method_ns = owning_ns.len == 0 ? td.name : collect_str_concat(collect_str_concat(owning_ns, (tk_str){ .ptr = (const tk_byte *)"::", .len = 2 }), td.name);
+            for (size_t mi = 0; mi < td.body.as.class_body.n_methods; mi += 1) {
+                tk_function mf = td.body.as.class_body.methods[mi];
                 tk_type_result mft = method_func_type(mf, td.name, table);
                 if (!mft.ok) return (tk_collected_result){ .ok = false, .as.error = mft.as.error };
                 env = tk_env_define_fn(env, mf.name, mft.as.value, method_ns);

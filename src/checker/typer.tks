@@ -492,14 +492,20 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
     if is_flags_named(recv_t, table) { return error { message = "method typing is deferred (B.29 / M.4)" } }
     let struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
     let decl = match type_table_find(table, struct_name) { parser::TypeDecl as td => td; error => return error { message = "method typing is deferred (B.29 / M.4)" } }
-    let sb = match decl.body { parser::StructBody as sb => sb; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
-    if sb.methods.len == 0 { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
+    // (W10b.CLASS increment 1) a class's instance dot-call reuses this SAME desugar — only the
+    // methods list's source differs; a class's methods are otherwise typed exactly like a struct's.
+    let methods = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb  => cb.methods
+        _ => return error { message = "method typing is deferred (B.29 / M.4)" }
+    }
+    if methods.len == 0 { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
     mut mi: u64 = 0
     mut found = false
-    mut mfn = sb.methods[0]   // placeholder; overwritten below iff `found` (Teko has no uninitialized values)
+    mut mfn = methods[0]   // placeholder; overwritten below iff `found` (Teko has no uninitialized values)
     loop {
-        if mi >= sb.methods.len { break }
-        if sb.methods[mi].name == mc.method { found = true; mfn = sb.methods[mi]; break }
+        if mi >= methods.len { break }
+        if methods[mi].name == mc.method { found = true; mfn = methods[mi]; break }
         mi++
     }
     if !found { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
@@ -872,11 +878,11 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
 // `Named` type to its `TypeDecl` body and read the field's declared type. Receiver must be a struct.
 
 // find a field by name in a struct body and resolve its annotation (M.3 — exact).
-fn field_type(sb: parser::StructBody, field: str, table: TypeTable) -> Type | error {
+fn field_type(fields: []parser::Field, field: str, table: TypeTable) -> Type | error {
     mut i = 0
     loop {
-        if i >= sb.fields.len { break }
-        if sb.fields[i].name == field { return resolve_type(sb.fields[i].type_ann, table) }
+        if i >= fields.len { break }
+        if fields[i].name == field { return resolve_type(fields[i].type_ann, table) }
         i++
     }
     error { message = $"no such field: {field}" }
@@ -923,7 +929,8 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
         error          => return error { message = $"unknown type for field access: {name}" }
     }
     let ft = match decl.body {
-        parser::StructBody as sb => match field_type(sb, fa.field, table) { Type as t => t; error as e => return e }
+        parser::StructBody as sb => match field_type(sb.fields, fa.field, table) { Type as t => t; error as e => return e }
+        parser::ClassBody as cb  => match field_type(cb.fields, fa.field, table) { Type as t => t; error as e => return e }   // (W10b.CLASS increment 1)
         _                => return error { message = $"type {name} is not a struct (no fields)" }
     }
     TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft; line = 0; col = 0 }
@@ -947,7 +954,8 @@ fn type_safe_field_access(sfa: parser::SafeFieldAccess, env: Env, table: TypeTab
         error          => return error { message = $"unknown type for safe field access: {name}" }
     }
     let ft = match decl.body {
-        parser::StructBody as sb => match field_type(sb, sfa.field, table) { Type as t => t; error as e => return e }
+        parser::StructBody as sb => match field_type(sb.fields, sfa.field, table) { Type as t => t; error as e => return e }
+        parser::ClassBody as cb  => match field_type(cb.fields, sfa.field, table) { Type as t => t; error as e => return e }   // (W10b.CLASS increment 1)
         _                => return error { message = $"type {name} is not a struct (no fields)" }
     }
     // the result is `(field)?` — an already-optional field stays as-is (no double-wrap).
@@ -1052,18 +1060,22 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
         }
         name = mname
     }
-    let sb = match decl.body {
-        parser::StructBody as s => s
+    // (W10b.CLASS increment 1) `Name { … }` also constructs a class instance — a class's fields
+    // are typed identically to a struct's; the "who may construct me" restriction (a class's
+    // literal legal only inside its own static factory) is a LATER increment, not enforced yet.
+    let sb_fields = match decl.body {
+        parser::StructBody as s => s.fields
+        parser::ClassBody as c  => c.fields
         _               => return error { message = $"struct-literal target {name} is not a struct" }
     }
-    if sl.field_names.len != sb.fields.len { return error { message = "a struct literal must set exactly the declared fields (count mismatch)" } }
+    if sl.field_names.len != sb_fields.len { return error { message = "a struct literal must set exactly the declared fields (count mismatch)" } }
 
     mut names: []str = teko::list::empty()
     mut vals: []TExpr = teko::list::empty()
     mut d = 0
     loop {
-        if d >= sb.fields.len { break }
-        let fname = sb.fields[d].name
+        if d >= sb_fields.len { break }
+        let fname = sb_fields[d].name
         // locate the provided value for this declared field (count its hits for missing/dup checks).
         mut found = sl.field_names.len
         mut hits = 0
@@ -1075,7 +1087,7 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
         }
         if hits == 0 { return error { message = "a struct literal is missing a declared field" } }
         if hits > 1 { return error { message = "a struct literal sets a field more than once" } }
-        let ft = match resolve_type(sb.fields[d].type_ann, table) { Type as t => t; error as e => return e }
+        let ft = match resolve_type(sb_fields[d].type_ann, table) { Type as t => t; error as e => return e }
         // thread the field's type as EXPECTED so a nested generic constructor (`value = Box { … }`)
         // targets its concrete instance (S4). Non-struct-lit values type exactly as before.
         mut val = match type_value_expected(sl.field_vals[found], ft, env, table) { TExpr as te => te; error as e => return e }
@@ -2148,23 +2160,26 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
 // from both type_program and type_program_with_deps' main loops, alongside the ordinary
 // TypeDecl pass-through — a struct with methods contributes MULTIPLE TItems, not one.
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable) -> []TItem | error {
-    mut out: []TItem = teko::list::empty()
+    // (W10b.CLASS increment 1) a class's methods are typed/stamped by this SAME pass — only the
+    // methods list's source differs; a class method is otherwise identical to a struct method.
+    mut methods: []parser::Function = teko::list::empty()
     match td.body {
-        parser::StructBody as sb => {
-            let method_ns = if item_ns == "" { td.name } else { item_ns ~ "::" ~ td.name }
-            mut mi = 0
-            loop {
-                if mi >= sb.methods.len { break }
-                let mf = match type_method(sb.methods[mi], td.name, env, table) {
-                    TFunction as x => x
-                    error as e => return surface_at(file, sb.methods[mi].line, sb.methods[mi].col, e)
-                }
-                let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = sb.methods[mi].line; col = sb.methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib }
-                out = teko::list::push(out, stamped)
-                mi++
-            }
-        }
+        parser::StructBody as sb => { methods = sb.methods }
+        parser::ClassBody as cb  => { methods = cb.methods }
         _ => {}
+    }
+    mut out: []TItem = teko::list::empty()
+    let method_ns = if item_ns == "" { td.name } else { item_ns ~ "::" ~ td.name }
+    mut mi = 0
+    loop {
+        if mi >= methods.len { break }
+        let mf = match type_method(methods[mi], td.name, env, table) {
+            TFunction as x => x
+            error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
+        }
+        let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib }
+        out = teko::list::push(out, stamped)
+        mi++
     }
     out
 }

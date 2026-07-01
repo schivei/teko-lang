@@ -397,11 +397,21 @@ static tk_texpr_result type_method_call(tk_method_call mc, tk_env env, tk_type_t
     tk_str struct_name = recv_t.as.named.name;
     tk_decl_result td = tk_type_table_find(table, struct_name);
     if (!td.ok) return xerr("method typing is deferred (B.29 / M.4)");
-    if (td.as.value.body.tag != TK_BODY_STRUCT) return xerr("method typing is deferred (B.29 / M.4)");
-    tk_struct_body sb = td.as.value.body.as.struct_body;
+    // (W10b.CLASS increment 1) a class's instance dot-call reuses this SAME desugar — only the
+    // methods list's source differs; a class's methods are otherwise typed exactly like a struct's.
+    tk_function *methods; size_t n_methods;
+    if (td.as.value.body.tag == TK_BODY_STRUCT) {
+        methods = td.as.value.body.as.struct_body.methods;
+        n_methods = td.as.value.body.as.struct_body.n_methods;
+    } else if (td.as.value.body.tag == TK_BODY_CLASS) {
+        methods = td.as.value.body.as.class_body.methods;
+        n_methods = td.as.value.body.as.class_body.n_methods;
+    } else {
+        return xerr("method typing is deferred (B.29 / M.4)");
+    }
     bool found = false; tk_function mfn = {0};
-    for (size_t i = 0; i < sb.n_methods; i += 1) {
-        if (tk_str_eq(sb.methods[i].name, mc.method)) { found = true; mfn = sb.methods[i]; break; }
+    for (size_t i = 0; i < n_methods; i += 1) {
+        if (tk_str_eq(methods[i].name, mc.method)) { found = true; mfn = methods[i]; break; }
     }
     if (!found) return xferr(tk_error_named("no such method on struct", mc.method));
     bool is_instance = mfn.nparams > 0 && !mfn.params[0].has_type;
@@ -822,8 +832,16 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
     if (recv.as.value.type.tag != TK_TYPE_NAMED) return xerr("field access requires a struct receiver");
     tk_decl_result decl = tk_type_table_find(table, recv.as.value.type.as.named.name);
     if (!decl.ok) return xerr("unknown type for field access");
-    if (decl.as.value.body.tag != TK_BODY_STRUCT) return xerr("type is not a struct (no fields)");
-    tk_type_result ft = field_type(decl.as.value.body.as.struct_body, fa.field, table);
+    // (W10b.CLASS increment 1) a class's fields are read exactly like a struct's.
+    tk_struct_body fa_sb;
+    if (decl.as.value.body.tag == TK_BODY_STRUCT) {
+        fa_sb = decl.as.value.body.as.struct_body;
+    } else if (decl.as.value.body.tag == TK_BODY_CLASS) {
+        fa_sb = (tk_struct_body){ .fields = decl.as.value.body.as.class_body.fields, .n_fields = decl.as.value.body.as.class_body.n_fields, .methods = NULL, .n_methods = 0 };
+    } else {
+        return xerr("type is not a struct (no fields)");
+    }
+    tk_type_result ft = field_type(fa_sb, fa.field, table);
     if (!ft.ok) return xerr("no such field");
     return xok((tk_texpr){ .tag = TK_TEXPR_FIELD_ACCESS, .type = ft.as.value,
                            .as.field_access = { box(recv.as.value), fa.field } });
@@ -869,8 +887,16 @@ static tk_texpr_result type_safe_field_access(tk_safe_field_access sfa, tk_env e
         return xerr("safe field access on a non-struct optional is not yet supported (the struct-field layer is pending — M.3)");
     tk_decl_result decl = tk_type_table_find(table, inner.as.named.name);
     if (!decl.ok) return xerr("unknown type for safe field access");
-    if (decl.as.value.body.tag != TK_BODY_STRUCT) return xerr("type is not a struct (no fields)");
-    tk_type_result ft = field_type(decl.as.value.body.as.struct_body, sfa.field, table);
+    // (W10b.CLASS increment 1) a class's fields are read exactly like a struct's.
+    tk_struct_body sfa_sb;
+    if (decl.as.value.body.tag == TK_BODY_STRUCT) {
+        sfa_sb = decl.as.value.body.as.struct_body;
+    } else if (decl.as.value.body.tag == TK_BODY_CLASS) {
+        sfa_sb = (tk_struct_body){ .fields = decl.as.value.body.as.class_body.fields, .n_fields = decl.as.value.body.as.class_body.n_fields, .methods = NULL, .n_methods = 0 };
+    } else {
+        return xerr("type is not a struct (no fields)");
+    }
+    tk_type_result ft = field_type(sfa_sb, sfa.field, table);
     if (!ft.ok) return xerr("no such field");
     // the result is `(field-type)?` — null-propagating; an already-optional field stays as-is.
     tk_type result = ft.as.value.tag == TK_TYPE_OPTIONAL ? ft.as.value
@@ -978,20 +1004,29 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
         if (!decl.ok) return xerr("internal: generic instance was not stamped");
         name = mname;
     }
-    if (decl.as.value.body.tag != TK_BODY_STRUCT) return xerr("struct-literal target is not a struct");
-    tk_struct_body sb = decl.as.value.body.as.struct_body;
-    if (sl.nfields != sb.n_fields) return xerr("a struct literal must set exactly the declared fields (count mismatch)");
+    // (W10b.CLASS increment 1) `Name { … }` also constructs a class instance — a class's fields
+    // are typed identically to a struct's; the "who may construct me" restriction (a class's
+    // literal legal only inside its own static factory) is a LATER increment, not enforced yet.
+    tk_field *sb_fields; size_t sb_n_fields;
+    if (decl.as.value.body.tag == TK_BODY_STRUCT) {
+        sb_fields = decl.as.value.body.as.struct_body.fields; sb_n_fields = decl.as.value.body.as.struct_body.n_fields;
+    } else if (decl.as.value.body.tag == TK_BODY_CLASS) {
+        sb_fields = decl.as.value.body.as.class_body.fields; sb_n_fields = decl.as.value.body.as.class_body.n_fields;
+    } else {
+        return xerr("struct-literal target is not a struct");
+    }
+    if (sl.nfields != sb_n_fields) return xerr("a struct literal must set exactly the declared fields (count mismatch)");
 
-    tk_str  *names = tk_alloc((sb.n_fields ? sb.n_fields : 1) * sizeof *names); if (!names) abort();
-    tk_texpr *vals = tk_alloc((sb.n_fields ? sb.n_fields : 1) * sizeof *vals); if (!vals) abort();
-    for (size_t d = 0; d < sb.n_fields; d += 1) {
-        tk_str fname = sb.fields[d].name;
+    tk_str  *names = tk_alloc((sb_n_fields ? sb_n_fields : 1) * sizeof *names); if (!names) abort();
+    tk_texpr *vals = tk_alloc((sb_n_fields ? sb_n_fields : 1) * sizeof *vals); if (!vals) abort();
+    for (size_t d = 0; d < sb_n_fields; d += 1) {
+        tk_str fname = sb_fields[d].name;
         size_t found = sl.nfields, hits = 0;          // locate the provided value for this declared field
         for (size_t i = 0; i < sl.nfields; i += 1)
             if (tk_str_eq(sl.field_names[i], fname)) { found = i; hits += 1; }
         if (hits == 0) { tk_free0(names); tk_free0(vals); return xerr("a struct literal is missing a declared field"); }
         if (hits > 1)  { tk_free0(names); tk_free0(vals); return xerr("a struct literal sets a field more than once"); }
-        tk_type_result ft = tk_resolve_type(sb.fields[d].type_ann, table);
+        tk_type_result ft = tk_resolve_type(sb_fields[d].type_ann, table);
         if (!ft.ok) { tk_free0(names); tk_free0(vals); return xferr(ft.as.error); }
         // thread the field's type as EXPECTED so a nested generic constructor (`value = Box { … }`)
         // targets its concrete instance (S4). Non-struct-lit values type exactly as before.
@@ -1021,7 +1056,7 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_STRUCT_INIT,
                            .type = (tk_type){ .tag = TK_TYPE_NAMED, .as.named.name = name },
-                           .as.struct_init = { names, vals, sb.n_fields } });
+                           .as.struct_init = { names, vals, sb_n_fields } });
 }
 
 // (W10) free-variable collection for a closure body — mirror of typer.tks lam_collect_*. Collects the

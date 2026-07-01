@@ -304,7 +304,124 @@ static tk_parsed_struct_body_result parse_fields(const tk_token *t, size_t n, si
     return (tk_parsed_struct_body_result){ .ok = true, .as.value = { .fields = fields, .n_fields = nf, .methods = methods, .n_methods = nm, .next = p + 1 } };
 }
 
+// (W10b.CLASS) Is the class-body item at `pos` a METHOD (`fn …`, past any doc/vis/intern/
+// dispatch modifiers) or a plain field? Mirrors struct_item_is_method's lookahead, plus the
+// class-only `intern`/`abstract`/`virtual`/`override` modifiers tk_parse_function itself consumes.
+static bool class_item_is_method(const tk_token *t, size_t n, size_t pos) {
+    size_t k = pos;
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_DOC)) { k += 1; }
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_PUB)) { k += 1; }
+    else if (tk_is_kind_at(t, n, k, TK_TOKEN_EXP)) { k += 1; }
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_INTERN)) { k += 1; }
+    if (tk_is_kind_at(t, n, k, TK_TOKEN_ABSTRACT)) { k += 1; }
+    else if (tk_is_kind_at(t, n, k, TK_TOKEN_VIRTUAL)) { k += 1; }
+    else if (tk_is_kind_at(t, n, k, TK_TOKEN_OVERRIDE)) { k += 1; }
+    return tk_is_kind_at(t, n, k, TK_TOKEN_FN);
+}
+// `{ [pub|exp]? [intern]? name: T; … }` interleaved with methods — a class body's member list.
+// Unlike a struct, a bare field defaults to TK_VIS_PRIVATE (encapsulation is the class default;
+// `pub`/`intern` widen).
+static tk_parsed_struct_body_result parse_class_fields(const tk_token *t, size_t n, size_t pos) {
+    size_t p = tk_skip_seps(t, n, pos + 1);   // consume `{`, skip leading separators
+    tk_field *fields = NULL; size_t nf = 0;
+    tk_function *methods = NULL; size_t nm = 0;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) {
+        return (tk_parsed_struct_body_result){ .ok = true, .as.value = { .fields = fields, .n_fields = 0, .methods = methods, .n_methods = 0, .next = p + 1 } };
+    }
+    for (;;) {
+        if (class_item_is_method(t, n, p)) {
+            tk_parsed_decl_result m = tk_parse_function(t, n, p, false, (tk_str){0}, true);
+            if (!m.ok) { return (tk_parsed_struct_body_result){ .ok = false, .as.error = m.as.error }; }
+            if (m.as.value.node.tag != TK_DECL_FUNCTION) {
+                return (tk_parsed_struct_body_result){ .ok = false, .as.error = tk_err_at(t, n, p, "internal: a class method must parse to a Function") };
+            }
+            tk_functions_push(&methods, &nm, m.as.value.node.as.function);
+            p = m.as.value.next;
+        } else {
+            tk_visibility fvis = TK_VIS_PRIVATE;
+            if (tk_is_kind_at(t, n, p, TK_TOKEN_PUB)) { fvis = TK_VIS_PUB; p += 1; }
+            else if (tk_is_kind_at(t, n, p, TK_TOKEN_EXP)) { fvis = TK_VIS_EXP; p += 1; }
+            bool fintern = false;
+            if (tk_is_kind_at(t, n, p, TK_TOKEN_INTERN)) { fintern = true; p += 1; }
+            if (!tk_is_name_at(t, n, p)) {
+                return (tk_parsed_struct_body_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected a field name or a method (`fn …`)") };
+            }
+            tk_str name = t[p].text;
+            if (!tk_is_kind_at(t, n, p + 1, TK_TOKEN_COLON)) {
+                return (tk_parsed_struct_body_result){ .ok = false, .as.error = tk_err_at(t, n, p + 1, "expected ':' after a field name") };
+            }
+            tk_parsed_type_result ty = tk_parse_type(t, n, p + 2);
+            if (!ty.ok) { return (tk_parsed_struct_body_result){ .ok = false, .as.error = ty.as.error }; }
+            tk_fields_push(&fields, &nf, (tk_field){ .name = name, .type_ann = ty.as.value.node, .vis = fvis, .is_intern = fintern });
+            p = ty.as.value.next;
+        }
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }
+        if (!tk_is_sep(t, n, p)) {
+            return (tk_parsed_struct_body_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected ';', a newline, or '}' after a class member") };
+        }
+        p = tk_skip_seps(t, n, p);
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_RBRACE)) { break; }   // trailing separator
+    }
+    return (tk_parsed_struct_body_result){ .ok = true, .as.value = { .fields = fields, .n_fields = nf, .methods = methods, .n_methods = nm, .next = p + 1 } };
+}
+
+// `[abstract|virtual] class [Base[(binding)]] [& I1 & I2 …] { members }`. `pos` is at
+// `abstract`/`virtual`/`class` (the caller has already dispatched on one of these). SEALED
+// (no modifier) is Teko's default class kind (final + instantiable) — see tk_class_kind's doc.
+static tk_parsed_body_result parse_class_body(const tk_token *t, size_t n, size_t pos) {
+    size_t p = pos;
+    tk_class_kind kind = TK_CLASS_SEALED;
+    if (tk_is_kind_at(t, n, p, TK_TOKEN_ABSTRACT)) { kind = TK_CLASS_ABSTRACT; p += 1; }
+    else if (tk_is_kind_at(t, n, p, TK_TOKEN_VIRTUAL)) { kind = TK_CLASS_VIRTUAL; p += 1; }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_CLASS)) {
+        return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected `class`") };
+    }
+    p += 1;
+    bool has_base = false; tk_str base_name = (tk_str){0};
+    bool has_base_binding = false; tk_str base_binding_name = (tk_str){0};
+    if (tk_is_name_at(t, n, p)) {
+        has_base = true;
+        base_name = t[p].text;
+        p += 1;
+        if (tk_is_kind_at(t, n, p, TK_TOKEN_LPAREN)) {
+            if (!tk_is_name_at(t, n, p + 1)) {
+                return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, p + 1, "expected a base-binding name after '('") };
+            }
+            has_base_binding = true;
+            base_binding_name = t[p + 1].text;
+            if (!tk_is_kind_at(t, n, p + 2, TK_TOKEN_RPAREN)) {
+                return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, p + 2, "expected ')' after the base-binding name") };
+            }
+            p += 3;
+        }
+    }
+    tk_str *implements = NULL; size_t n_implements = 0;
+    for (;;) {
+        if (!tk_is_kind_at(t, n, p, TK_TOKEN_AMP)) { break; }
+        if (!tk_is_name_at(t, n, p + 1)) {
+            return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, p + 1, "expected an interface name after '&'") };
+        }
+        tk_strvec_push(&implements, &n_implements, t[p + 1].text);
+        p += 2;
+    }
+    if (!tk_is_kind_at(t, n, p, TK_TOKEN_LBRACE)) {
+        return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, p, "expected '{' for the class body") };
+    }
+    tk_parsed_struct_body_result fs = parse_class_fields(t, n, p);
+    if (!fs.ok) { return (tk_parsed_body_result){ .ok = false, .as.error = fs.as.error }; }
+    tk_class_body cb = { .kind = kind, .has_base = has_base, .base_name = base_name,
+                          .has_base_binding = has_base_binding, .base_binding_name = base_binding_name,
+                          .implements = implements, .n_implements = n_implements,
+                          .fields = fs.as.value.fields, .n_fields = fs.as.value.n_fields,
+                          .methods = fs.as.value.methods, .n_methods = fs.as.value.n_methods };
+    tk_type_body b = { .tag = TK_BODY_CLASS, .as.class_body = cb };
+    return (tk_parsed_body_result){ .ok = true, .as.value = { .node = b, .next = fs.as.value.next } };
+}
+
 static tk_parsed_body_result parse_type_body(const tk_token *t, size_t n, size_t pos) {
+    if (tk_is_kind_at(t, n, pos, TK_TOKEN_CLASS) || tk_is_kind_at(t, n, pos, TK_TOKEN_ABSTRACT) || tk_is_kind_at(t, n, pos, TK_TOKEN_VIRTUAL)) {
+        return parse_class_body(t, n, pos);
+    }
     if (tk_is_kind_at(t, n, pos, TK_TOKEN_STRUCT)) {
         if (!tk_is_kind_at(t, n, pos + 1, TK_TOKEN_LBRACE)) {
             return (tk_parsed_body_result){ .ok = false, .as.error = tk_err_at(t, n, pos + 1, "expected '{' after `struct`") };
