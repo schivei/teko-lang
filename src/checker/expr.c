@@ -137,7 +137,14 @@ static tk_texpr_result type_tilde_chain(tk_binary b, tk_env env, tk_type_table t
     tk_expr *folded = NULL; size_t nfolded = 0;
     fold_tilde_pieces(raw, nraw, &folded, &nfolded);
     if (nfolded == 1) { return tk_typer_expr(folded[0], env, table); }   // whole chain was literals — a single literal, no runtime call
-    tk_segment segs[3] = { { .name = { (const tk_byte *)"teko", 4 } }, { .name = { (const tk_byte *)"string", 6 } }, { .name = { (const tk_byte *)"concat", 6 } } };
+    // (fix, 2026-07-01) `segs` MUST outlive this function: the returned tk_texpr's callee path
+    // keeps this pointer (type_call copies c.callee BY VALUE, but a tk_path's `.segments` stays a
+    // pointer) and is read much later at emit time. A stack-local array here dangles once this
+    // function returns -- undetected by earlier single-function tests, but corrupted by ANY
+    // further type-checking stack activity (e.g. a second function's calls), producing garbage
+    // segment names at codegen. Heap-allocate so the path survives past this call.
+    static const tk_segment tilde_segs_lit[3] = { { .name = { (const tk_byte *)"teko", 4 } }, { .name = { (const tk_byte *)"string", 6 } }, { .name = { (const tk_byte *)"concat", 6 } } };
+    tk_segment *segs = tk_alloc_copy(tilde_segs_lit, sizeof tilde_segs_lit);
     tk_call call = { .callee = { .segments = segs, .len = 3 }, .args = folded, .nargs = nfolded };
     // `concat`'s own arg-widening (type_call, below) already requires every piece to be `str` —
     // a non-str `~` operand fails there with a clear message, no separate check needed here.
