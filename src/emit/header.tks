@@ -1,0 +1,158 @@
+// src/emit/header.tks  (namespace 'teko::emit')
+//
+// E-emit-a — the `.tkh` HEADER-BUILDING DRIVER. Given a CHECKED typed program, keep
+// only the EXPORTED (`vis == exp`) items, build their export signatures, assemble a
+// `Header`, and emit it. This is the check → header → `.tkh` emission path; the full
+// read → lex → parse → check pipeline + codegen stays deferred (M.4 — nothing is
+// built on the incomplete). The Header model + `emit_tkh`/`read_tkh` live in tkh.tks;
+// `resolve_type` (turning syntactic annotations into resolved semantic `Type`) is the
+// checker's. M.5 — this module ADDS no codec primitive; it only walks + collects.
+
+use teko::checker
+use teko::parser
+
+// --- a function's export signature: each Param's annotation resolved (M.3 — exact) ---
+fn build_fnsig(f: checker::TFunction, table: checker::TypeTable) -> FnSig | error {
+    mut params: []SigParam = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = match checker::resolve_type(f.params[i].type_ann, table) {
+            checker::Type as t  => t
+            error as e => return e
+        }
+        params = teko::list::push(params, SigParam { name = f.params[i].name; type = pt })
+        i++
+    }
+    // ret is already a resolved Type on the TFunction (return_type); docs are carried.
+    FnSig { name = f.name; params = params; ret = f.return_type; has_doc = f.has_doc; doc = f.doc }
+}
+
+// --- a struct's export fields: each Field's annotation resolved (M.3 — exact) ---
+fn build_sigfields(fields: []parser::Field, table: checker::TypeTable) -> []SigField | error {
+    mut out: []SigField = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= fields.len { break }
+        let ft = match checker::resolve_type(fields[i].type_ann, table) {
+            checker::Type as t  => t
+            error as e => return e
+        }
+        out = teko::list::push(out, SigField { name = fields[i].name; type = ft })
+        i++
+    }
+    out
+}
+
+// --- a type's export interface, by shape (B.14 — struct/enum/variant) ---
+// Per `shape`, exactly one of fields/members/cases is meaningful; the others are empty.
+fn build_tyexport(d: parser::TypeDecl, table: checker::TypeTable) -> TyExport | error {
+    match d.body {
+        parser::StructBody as sb => {
+            let fields = match build_sigfields(sb.fields, table) {
+                []SigField as fs => fs
+                error as e     => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Struct
+                fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc
+            }
+        }
+        parser::EnumBody as eb => {
+            TyExport {
+                name = d.name; shape = TyShape::Enum
+                fields = teko::list::empty(); members = eb.members; cases = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc
+            }
+        }
+        parser::VariantBody as vb => {
+            // resolve the union's syntactic type_expr → a semantic Variant; its members are the cases.
+            let rt = match checker::resolve_type(vb.type_expr, table) {
+                checker::Type as t  => t
+                error as e => return e
+            }
+            let cases = match rt {
+                checker::Variant as v => v.members
+                _            => return error { message = "an exported variant's body did not resolve to a union" }
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Variant
+                fields = teko::list::empty(); members = teko::list::empty(); cases = cases
+                has_doc = d.has_doc; doc = d.doc
+            }
+        }
+        parser::AliasBody => {
+            // Exporting a TRANSPARENT alias in the `.tkh` is a LATER gap (the header has no
+            // alias shape yet). An honest stop — never reached by the pub-only validation path.
+            error { message = "exporting a type alias in the header is not yet supported" }
+        }
+        parser::ExternBody => {
+            // (C7.1a) exporting an `extern type` opaque handle in the `.tkh` is a LATER gap. Honest stop.
+            error { message = "exporting an extern type in the header is not yet supported" }
+        }
+        parser::FlagsBody => {
+            // (C8.4) exporting a `flags` type in the `.tkh` is deferred to C8.4. Honest stop.
+            error { message = "exporting a flags type in the header is not yet supported" }
+        }
+        parser::ClassBody as cb => {
+            // (W10b.CLASS increment 1) same field-export shape as a struct — no inheritance/statics
+            // surfaced in the .tkh yet; reuses TyShape::Struct since the C layout is identical too.
+            let fields = match build_sigfields(cb.fields, table) {
+                []SigField as fs => fs
+                error as e     => return e
+            }
+            TyExport {
+                name = d.name; shape = TyShape::Struct
+                fields = fields; members = teko::list::empty(); cases = teko::list::empty()
+                has_doc = d.has_doc; doc = d.doc
+            }
+        }
+    }
+}
+
+// --- THE DRIVER: walk the typed program, keep only `exp` items, build the Header ---
+fn build_header(prog: checker::TProgram, table: checker::TypeTable) -> Header | error {
+    mut types: []TyExport = teko::list::empty()
+    mut fns: []FnSig = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if f.vis == parser::Visibility::Exp {   // only `exp` reaches the .tkh (pub is project-internal)
+                    let sig = match build_fnsig(f, table) {
+                        FnSig as s => s
+                        error as e => return e
+                    }
+                    fns = teko::list::push(fns, sig)
+                }
+            }
+            parser::TypeDecl as d => {
+                if d.vis == parser::Visibility::Exp {   // only `exp` reaches the .tkh
+                    let te = match build_tyexport(d, table) {
+                        TyExport as t => t
+                        error as e    => return e
+                    }
+                    types = teko::list::push(types, te)
+                }
+            }
+            parser::UseDecl   => {}    // not part of the exported surface — skip
+            checker::TStatement => {}   // a loose top-level statement is never exported — skip
+        }
+        i++
+    }
+    Header { types = types; fns = fns }
+}
+
+// --- the check → header → `.tkh` emission path: build the Header, then emit it (M.4) ---
+// A header is ALWAYS emitted, even with NO exports: an empty surface yields an empty Header
+// (0 types, 0 fns) and a well-formed `.tkh` that honestly states "nothing is exported" —
+// never nothing at all (a consumer must always find a readable interface, M.3).
+fn emit_program(prog: checker::TProgram, table: checker::TypeTable) -> []byte | error {
+    let header = match build_header(prog, table) {
+        Header as h => h
+        error as e  => return e
+    }
+    emit_tkh(header)
+}

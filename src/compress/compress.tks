@@ -1,0 +1,275 @@
+// src/compress/compress.tks  (namespace 'teko::compress')
+//
+// C7.12 — pure-Teko ZIP-STORE writer for `.tkl` package output.
+//
+// Produces a standard ZIP archive (PKZIP format) using method=0 (STORE — no compression).
+// All entries are stored verbatim; the archive is fully deterministic (no timestamps, no
+// filesystem metadata, no host-OS variance). Mirrors zip.c exactly.
+//
+// Public surface:
+//   type ZipEntry = struct { name: str; data: []byte }
+//   pub fn write_zip(entries: []ZipEntry) -> []byte
+
+// --- CRC-32 (polynomial 0xEDB88320, reflected / little-endian standard) ---
+
+// Build one row of the 256-entry CRC-32 table.
+fn crc32_row(i: u32) -> u32 {
+    mut crc = i
+    mut k = 0
+    loop {
+        if k >= 8 { break }
+        if (crc & 1) != 0 {
+            crc = (crc >> 1) ^ 0xEDB88320
+        } else {
+            crc = crc >> 1
+        }
+        k++
+    }
+    crc
+}
+
+// CRC-32 of a byte slice. `init` is the running CRC (pass 0xFFFFFFFF to start; XOR
+// the final result with 0xFFFFFFFF to get the standard CRC-32 value).
+fn crc32_of(data: []byte) -> u32 {
+    mut crc: u32 = 0xFFFFFFFF
+    mut i = 0
+    loop {
+        if i >= data.len { break }
+        let byte_val = data[i] to u32
+        let idx = (crc ^ byte_val) & 0xFF
+        crc = crc32_row(idx) ^ (crc >> 8)
+        i++
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+// --- low-level little-endian write helpers (mirrors tkb_buf.tks) ---
+
+fn zip_u16(buf: []byte, x: u32) -> []byte {
+    mut b = buf
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b
+}
+
+fn zip_u32(buf: []byte, x: u32) -> []byte {
+    mut b = buf
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
+    b
+}
+
+// Append raw bytes (a []byte slice) into the growing output buffer.
+fn zip_bytes(buf: []byte, src: []byte) -> []byte {
+    mut b = buf
+    mut i = 0
+    loop {
+        if i >= src.len { break }
+        b = teko::list::push(b, src[i])
+        i++
+    }
+    b
+}
+
+// Append a str's bytes into the output buffer (filename fields).
+fn zip_str(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i = 0
+    loop {
+        if i >= s.len { break }
+        b = teko::list::push(b, s[i])
+        i++
+    }
+    b
+}
+
+// --- ZIP format constants ---
+//
+// Local file header  signature: 0x04034B50  ("PK\x03\x04")
+// Central dir header signature: 0x02014B50  ("PK\x01\x02")
+// End of central dir signature: 0x06054B50  ("PK\x05\x06")
+//
+// version_needed  = 20  (2.0 — deflate/store baseline)
+// version_made_by = 20  (2.0; host OS = 0 = MS-DOS/generic)
+// method          = 0   (STORE — no compression)
+// flags           = 0   (no encryption, no UTF-8 flag needed for pure-ASCII names)
+// mod_time        = 0
+// mod_date        = 0x4A21  (2025-01-01: year 2025–1980=45, month 1, day 1 → (45<<9)|(1<<5)|1 = 0x5A21)
+//                            Wait: year 45 = 0b101101 = 0x2D; (0x2D << 9)|(1<<5)|1 = 0x5A21
+//                            Use 0x5A21 (2025-01-01) for determinism.
+
+// DOS date for 2025-01-01: year=(2025-1980)=45=0b101101, month=1, day=1
+// Packed: (45 << 9) | (1 << 5) | 1 = 23040 | 32 | 1 = 23073 = 0x5A21
+// DOS time: 00:00:00 → 0
+
+// --- per-entry bookkeeping for the central directory ---
+type ZipCDEntry = struct {
+    name:   str      // filename
+    crc32:  u32      // CRC-32 of the uncompressed data
+    size:   u32      // uncompressed (= compressed) size in bytes
+    offset: u32      // byte offset of the local header from start of archive
+}
+
+// --- public types ---
+pub type ZipEntry = struct { name: str; data: []byte }
+
+// --- read_zip: parse a ZIP-STORE archive and return its entries as []ZipEntry ---
+//
+// Minimal PKZIP local-file-header walker. Reads only the local file headers (signature
+// 0x04034B50 = "PK\x03\x04") and their file data — enough to extract the entries in order.
+// Does NOT parse the central directory (that is the source-of-truth for a complete ZIP, but
+// STORE archives produced by write_zip are self-consistent: the local headers carry the full
+// filename, size, and CRC). Returns the list of extracted entries, or an error if the data
+// is malformed or not a ZIP archive.
+//
+// Usage: given the raw bytes of a .tkl package, extract its entries:
+//   let entries = match read_zip(data) { []ZipEntry as e => e; error as e => return e }
+pub fn read_zip(data: []byte) -> []ZipEntry | error {
+    mut pos: u64 = 0
+    mut result: []ZipEntry = teko::list::empty()
+
+    loop {
+        // Need at least 30 bytes for a local file header (without filename / extra).
+        if pos + 30 > data.len { break }
+
+        // Local file header signature: 0x50 0x4B 0x03 0x04 ("PK\x03\x04")
+        if data[pos] != 0x50 || data[pos + 1] != 0x4B || data[pos + 2] != 0x03 || data[pos + 3] != 0x04 {
+            // Not a local file header — may be central directory or end record; stop.
+            break
+        }
+
+        // Skip: version needed (2), flags (2), method (2), mod time (2), mod date (2),
+        //        CRC-32 (4), compressed size (4), uncompressed size (4)  = 22 bytes, offset from sig start = 4.
+        // Compressed size is at offset 18 from the signature (local header field offset 18).
+        let comp_size = (data[pos + 18] to u32) | ((data[pos + 19] to u32) << 8) | ((data[pos + 20] to u32) << 16) | ((data[pos + 21] to u32) << 24)
+
+        // Filename length at offset 26; extra field length at offset 28 (both u16 LE).
+        let fname_len = (data[pos + 26] to u64) | ((data[pos + 27] to u64) << 8)
+        let extra_len = (data[pos + 28] to u64) | ((data[pos + 29] to u64) << 8)
+
+        // Data begins after: 30-byte fixed header + fname_len + extra_len.
+        let header_end = pos + 30 + fname_len + extra_len
+        if header_end + (comp_size to u64) > data.len {
+            return error { message = "truncated ZIP entry data" }
+        }
+
+        // Extract the filename (bytes pos+30 .. pos+30+fname_len).
+        mut name_bytes: []byte = teko::list::empty()
+        mut fi: u64 = 0
+        loop {
+            if fi >= fname_len { break }
+            name_bytes = teko::list::push(name_bytes, data[pos + 30 + fi])
+            fi++
+        }
+        let entry_name = str(name_bytes)
+
+        // Extract the file data (bytes header_end .. header_end + comp_size).
+        mut entry_data: []byte = teko::list::empty()
+        mut di: u64 = 0
+        loop {
+            if di >= (comp_size to u64) { break }
+            entry_data = teko::list::push(entry_data, data[header_end + di])
+            di++
+        }
+
+        result = teko::list::push(result, ZipEntry { name = entry_name; data = entry_data })
+        pos = header_end + (comp_size to u64)
+    }
+
+    result
+}
+
+// --- write_zip: assemble a complete ZIP archive and return it as []byte ---
+pub fn write_zip(entries: []ZipEntry) -> []byte {
+    mut buf: []byte = teko::list::empty()
+    mut cd: []ZipCDEntry = teko::list::empty()
+
+    // --- Phase 1: local file headers + file data ---
+    mut i = 0
+    loop {
+        if i >= entries.len { break }
+        let entry = entries[i]
+        let crc   = crc32_of(entry.data)
+        let sz    = entry.data.len to u32
+        let off   = buf.len to u32        // byte offset of THIS local header
+
+        // Local File Header (30 bytes + filename)
+        // signature  PK\x03\x04
+        buf = teko::list::push(buf, 0x50 to byte)
+        buf = teko::list::push(buf, 0x4B to byte)
+        buf = teko::list::push(buf, 0x03 to byte)
+        buf = teko::list::push(buf, 0x04 to byte)
+        buf = zip_u16(buf, 20)           // version needed: 2.0
+        buf = zip_u16(buf, 0)            // general purpose bit flag
+        buf = zip_u16(buf, 0)            // compression method: STORE
+        buf = zip_u16(buf, 0)            // last mod file time: 00:00:00
+        buf = zip_u16(buf, 0x5A21)      // last mod file date: 2025-01-01
+        buf = zip_u32(buf, crc)          // CRC-32
+        buf = zip_u32(buf, sz)           // compressed size   (= uncompressed, method 0)
+        buf = zip_u32(buf, sz)           // uncompressed size
+        buf = zip_u16(buf, entry.name.len to u32)  // filename length
+        buf = zip_u16(buf, 0)            // extra field length
+        buf = zip_str(buf, entry.name)   // filename
+
+        // File data
+        buf = zip_bytes(buf, entry.data)
+
+        // Record the central-directory info for phase 2
+        cd = teko::list::push(cd, ZipCDEntry { name = entry.name; crc32 = crc; size = sz; offset = off })
+        i++
+    }
+
+    // --- Phase 2: central directory ---
+    let cd_offset = buf.len to u32     // byte offset where central directory begins
+    mut j = 0
+    loop {
+        if j >= cd.len { break }
+        let rec = cd[j]
+
+        // Central Directory File Header (46 bytes + filename)
+        // signature PK\x01\x02
+        buf = teko::list::push(buf, 0x50 to byte)
+        buf = teko::list::push(buf, 0x4B to byte)
+        buf = teko::list::push(buf, 0x01 to byte)
+        buf = teko::list::push(buf, 0x02 to byte)
+        buf = zip_u16(buf, 20)           // version made by: 2.0
+        buf = zip_u16(buf, 20)           // version needed: 2.0
+        buf = zip_u16(buf, 0)            // general purpose bit flag
+        buf = zip_u16(buf, 0)            // compression method: STORE
+        buf = zip_u16(buf, 0)            // last mod file time
+        buf = zip_u16(buf, 0x5A21)      // last mod file date: 2025-01-01
+        buf = zip_u32(buf, rec.crc32)    // CRC-32
+        buf = zip_u32(buf, rec.size)     // compressed size
+        buf = zip_u32(buf, rec.size)     // uncompressed size
+        buf = zip_u16(buf, rec.name.len to u32)   // filename length
+        buf = zip_u16(buf, 0)            // extra field length
+        buf = zip_u16(buf, 0)            // file comment length
+        buf = zip_u16(buf, 0)            // disk number start
+        buf = zip_u16(buf, 0)            // internal file attributes
+        buf = zip_u32(buf, 0)            // external file attributes
+        buf = zip_u32(buf, rec.offset)   // relative offset of local header
+        buf = zip_str(buf, rec.name)     // filename
+
+        j++
+    }
+
+    let cd_size = (buf.len to u32) - cd_offset   // size of the central directory in bytes
+
+    // --- Phase 3: end of central directory record (22 bytes) ---
+    // signature PK\x05\x06
+    buf = teko::list::push(buf, 0x50 to byte)
+    buf = teko::list::push(buf, 0x4B to byte)
+    buf = teko::list::push(buf, 0x05 to byte)
+    buf = teko::list::push(buf, 0x06 to byte)
+    buf = zip_u16(buf, 0)                         // disk number
+    buf = zip_u16(buf, 0)                         // disk with start of central dir
+    buf = zip_u16(buf, entries.len to u32)        // entries on this disk
+    buf = zip_u16(buf, entries.len to u32)        // total entries
+    buf = zip_u32(buf, cd_size)                   // size of central directory
+    buf = zip_u32(buf, cd_offset)                 // offset of central directory
+    buf = zip_u16(buf, 0)                         // archive comment length
+
+    buf
+}

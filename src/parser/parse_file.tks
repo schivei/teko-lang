@@ -1,0 +1,70 @@
+// src/parser/parse_file.tks   (namespace 'teko::parser')
+
+// File-level parsers reuse the Parsed<T>/ParsedList<T> generics (result.tks):
+// Parsed<UseDecl> (one `use`), ParsedList<UseDecl> (a `use` header), Parsed<MainFile>.
+use teko::lexer
+
+// does the token at `pos` start a top-level declaration (`fn` or `type`)? (Shared with
+// parse_module — R-main-c.)
+fn is_decl_start(tokens: []lexer::Token, pos: u64) -> bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Fn) || is_kind_at(tokens, pos, lexer::TokenKind::Type) || is_kind_at(tokens, pos, lexer::TokenKind::Extern)
+}
+
+// `use a::b::c [as alias]` (B.33). `pos` is at `use`.
+fn parse_use(tokens: []lexer::Token, pos: u64) -> Parsed<UseDecl> | error {
+    let pp = match parse_path(tokens, pos + 1) { Parsed<Path> as x => x; error as e => return e }
+    mut has_alias = false
+    mut alias = ""
+    mut p = pp.next
+    if is_kind_at(tokens, p, lexer::TokenKind::As) {
+        if !is_kind_at(tokens, p + 1, lexer::TokenKind::Ident) {
+            return err_at(tokens, p + 1, "expected a name after `as` in a `use`")
+        }
+        has_alias = true
+        alias = tokens[p + 1].text
+        p = p + 2
+    }
+    Parsed<UseDecl> { node = UseDecl { path = pp.node; has_alias = has_alias; alias = alias }; next = p }
+}
+
+// the `use` header: zero or more `use` decls at the top, separator-terminated. Returns the
+// uses and the position where the body/decls begin. (Shared with parse_module.)
+fn parse_use_header(tokens: []lexer::Token, pos: u64) -> ParsedList<UseDecl> | error {
+    mut p = skip_seps(tokens, pos)
+    mut uses: []UseDecl = teko::list::empty()
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::Use) { break }
+        let u = match parse_use(tokens, p) { Parsed<UseDecl> as x => x; error as e => return e }
+        uses = teko::list::push(uses, u.node)
+        p = u.next
+        if !has_token(tokens, p) { break }
+        if !is_sep(tokens, p) {
+            return err_at(tokens, p, "expected ';' or a newline after a `use`")
+        }
+        p = skip_seps(tokens, p)
+    }
+    ParsedList<UseDecl> { items = uses; next = p }
+}
+
+// main.tks: the `use` header, then the VIRTUAL MAIN's body (statements). Rejects any
+// type/function declaration. `pos` is 0 (file start).
+pub fn parse_main_file(tokens: []lexer::Token, pos: u64) -> Parsed<MainFile> | error {
+    let hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
+    mut p = skip_seps(tokens, hdr.next)
+    mut body: []Statement = teko::list::empty()
+    loop {
+        if !has_token(tokens, p) { break }
+        if is_decl_start(tokens, p) {
+            return err_at(tokens, p, "main.tks is a virtual main: it may not declare types or functions (only `use` + statements)")
+        }
+        let s = match parse_statement(tokens, p) { Parsed<Statement> as x => x; error as e => return e }
+        body = teko::list::push(body, s.node)
+        p = s.next
+        if !has_token(tokens, p) { break }
+        if !is_sep(tokens, p) {
+            return err_at(tokens, p, "expected ';' or a newline after a statement")
+        }
+        p = skip_seps(tokens, p)
+    }
+    Parsed<MainFile> { node = MainFile { uses = hdr.items; body = body }; next = p }
+}

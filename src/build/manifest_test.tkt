@@ -1,0 +1,112 @@
+// src/build/manifest_test.tkt — tests for teko::build manifest reader. #test collected.
+// (Uses bare `assert`, the current .tkt convention; teko::assert migration is crumb B2.)
+
+// did the parse succeed?
+fn parses(src: str) -> bool {
+    match parse_manifest(src) { Manifest => true; error => false }
+}
+
+#test
+fn parses_executable_manifest() {
+    // name + source + `[artifact] kind = "binary"` → Binary.
+    let src = "name = \"app\"\nsource = \"src\"\n[artifact]\nkind = \"binary\"\n"
+    match parse_manifest(src) {
+        Manifest as m => {
+            teko::assert::is_true(m.name == "app")
+            teko::assert::is_true(m.source == "src")
+            teko::assert::is_true(m.artifact == Artifact::Binary)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn parses_artifact_kinds() {
+    // (C7.1m) the four artifact kinds: binary | static | shared | package; unknown/absent → Binary.
+    let stat = "name = \"l\"\nsource = \"src\"\n[artifact]\nkind = \"static\"\n"
+    let shar = "name = \"l\"\nsource = \"src\"\n[artifact]\nkind = \"shared\"\n"
+    let pkg  = "name = \"l\"\nsource = \"src\"\n[artifact]\nkind = \"package\"\n"
+    let dflt = "name = \"l\"\nsource = \"src\"\n"                                   // no [artifact] → Binary
+    match parse_manifest(stat) { Manifest as m => teko::assert::is_true(m.artifact == Artifact::Static);  error => teko::assert::is_true(false) }
+    match parse_manifest(shar) { Manifest as m => teko::assert::is_true(m.artifact == Artifact::Shared);  error => teko::assert::is_true(false) }
+    match parse_manifest(pkg)  { Manifest as m => teko::assert::is_true(m.artifact == Artifact::Package); error => teko::assert::is_true(false) }
+    match parse_manifest(dflt) { Manifest as m => teko::assert::is_true(m.artifact == Artifact::Binary);  error => teko::assert::is_true(false) }
+}
+
+#test
+fn parses_deps_and_aliases() {
+    let src = "name = \"app\"\nsource = \"src\"\n[dependencies]\nhttp = \"1.0\"\njson = \"2.0\"\n[aliases]\nio = \"teko::io\"\n"
+    match parse_manifest(src) {
+        Manifest as m => {
+            teko::assert::is_true(m.deps.len == 2)
+            teko::assert::is_true(m.aliases.len == 1)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn parses_metadata_and_coverage() {
+    // version / suffix / description (root keys), [platforms] targets array, [coverage] integer
+    // floors, and an unknown section (ignored — M.5). (C7.1k: description + platforms.)
+    let src = "name = \"app\"\nsource = \"src\"\nversion = \"1.2.3.0\"\nsuffix = \"rc1\"\ndescription = \"a demo app\"\n[platforms]\ntargets = [\"macos\", \"linux\"]\n[coverage]\nfunctions = 70\nlines = 60\nbranches = 55\n[whatever]\nignored = \"yes\"\n"
+    match parse_manifest(src) {
+        Manifest as m => {
+            teko::assert::is_true(m.version == "1.2.3.0")
+            teko::assert::is_true(m.suffix == "rc1")
+            teko::assert::is_true(m.description == "a demo app")
+            teko::assert::is_true(m.platforms.len == 2)
+            teko::assert::is_true(m.platforms[0] == "macos")
+            teko::assert::is_true(m.platforms[1] == "linux")
+            teko::assert::is_true(m.cov_functions == 70)
+            teko::assert::is_true(m.cov_lines == 60)
+            teko::assert::is_true(m.cov_branches == 55)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn parses_extern_libs_and_per_os() {
+    // [extern] cc/target/sysroot/freestanding scalars; [extern.libs] links on every OS (link_flags);
+    // [extern.libs.<os>] is DEFERRED, keyed by OS (os_lib_os/os_lib_flag) and selected at link time —
+    // so parse stays host-independent (the VM never calls the host `os()`). (C7.1e/C7.1f)
+    let src = "name = \"app\"\nsource = \"src\"\n[extern]\ncc = \"clang\"\ntarget = \"x86_64-linux-gnu\"\nsysroot = \"/opt/sys\"\nfreestanding = true\n[extern.libs]\nz = []\nfw = [\"-framework\", \"Security\", \"static:foo\", \"shared:bar\", \"/usr/lib/libbaz.a\", \"libcurl\"]\n[extern.libs.linux]\ndl = []\n[extern.libs.macos]\nm = [\"libssl.so\"]\n"
+    match parse_manifest(src) {
+        Manifest as m => {
+            teko::assert::is_true(m.cc == "clang")
+            teko::assert::is_true(m.target == "x86_64-linux-gnu")
+            teko::assert::is_true(m.sysroot == "/opt/sys")
+            teko::assert::is_true(m.freestanding)
+            // global [extern.libs] → link_flags, in source order. Each element resolves via mf_extern_flag:
+            // `[]`→`-l<key>`, `-flag`→verbatim, bare→`-l`, `static:`/`shared:`→stripped, path/`*.a`→file.
+            teko::assert::is_true(m.link_flags.len == 7)
+            teko::assert::is_true(m.link_flags[0] == "-lz")
+            teko::assert::is_true(m.link_flags[1] == "-framework")
+            teko::assert::is_true(m.link_flags[2] == "-lSecurity")
+            teko::assert::is_true(m.link_flags[3] == "-lfoo")
+            teko::assert::is_true(m.link_flags[4] == "-lbar")
+            teko::assert::is_true(m.link_flags[5] == "/usr/lib/libbaz.a")
+            teko::assert::is_true(m.link_flags[6] == "-lcurl")
+            // per-OS [extern.libs.<os>] → deferred, in source order (NOT filtered by host at parse time).
+            teko::assert::is_true(m.os_lib_os.len == 2)
+            teko::assert::is_true(m.os_lib_flag.len == 2)
+            teko::assert::is_true(m.os_lib_os[0] == "linux")
+            teko::assert::is_true(m.os_lib_flag[0] == "-ldl")
+            teko::assert::is_true(m.os_lib_os[1] == "macos")
+            teko::assert::is_true(m.os_lib_flag[1] == "libssl.so")
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn rejects_malformed() {
+    // a missing required field → honest error (M.3).
+    teko::assert::is_false(parses("source = \"src\"\n"))              // no name
+    teko::assert::is_false(parses("name = \"app\"\n"))                // no source
+    // a malformed line → honest error.
+    teko::assert::is_false(parses("name \"app\"\nsource = \"src\"\n")) // missing '='
+    // a valid one still parses.
+    teko::assert::is_true(parses("name = \"app\"\nsource = \"src\"\n"))
+}

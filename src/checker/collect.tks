@@ -1,0 +1,576 @@
+// src/checker/collect.tks  (namespace 'teko::checker') — pass 1 (forward refs).
+
+use teko::parser
+
+// the top-level environment after collecting: user types + function signatures.
+type Collected = struct { types: TypeTable; env: Env }
+
+// gather ALL user type declarations first (so a forward reference resolves).
+fn collect_types(items: []parser::Item) -> TypeTable {
+    mut table: []TypeReg = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; namespace = items[i].namespace; vis = td.vis; decl = td }) }
+            _              => {}
+        }
+        i++
+    }
+    table
+}
+
+// a function's signature as a FuncType (resolve its param + return types).
+fn func_type(f: parser::Function, table: TypeTable) -> Type | error {
+    let tbl = type_param_table(f.type_params, "", table)   // (S4) the fn's generic type-params, opaque, in scope
+    mut params: []Type = teko::list::empty()
+    mut param_names: []str = teko::list::empty()
+    mut defaults: []parser::Expr = teko::list::empty()
+    mut n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — the first has_default param's index; TRAILING-ONLY (rule A) means every param after it also defaults
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = match resolve_type(f.params[i].type_ann, tbl) {
+            Type as t  => t
+            error as e => return e
+        }
+        params = teko::list::push(params, pt)
+        param_names = teko::list::push(param_names, f.params[i].name)
+        if f.params[i].has_default {
+            if n_required == f.params.len { n_required = i to u64 }   // first defaulted param found
+            defaults = teko::list::push(defaults, f.params[i].default_expr)
+        }
+        i++
+    }
+    // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty no_type() placeholder, NOT a
+    // value type, so it must not be resolved. Mirrors typer.tks's function typer.
+    let ret = if f.has_return {
+        match resolve_type(f.return_type, tbl) { Type as t => t; error as e => return e }
+    } else {
+        Void { }
+    }
+    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+}
+
+// (OOP A1, 2026-07-01) a struct METHOD's signature as a FuncType. Mirrors func_type, except the
+// RECEIVER param (has_type=false, only ever index 0) resolves to Named{struct_name} — its type
+// is IMPLICIT (the enclosing struct), never written by the user, so it can't go through
+// resolve_type like an ordinary annotated param.
+fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable) -> Type | error {
+    let tbl = type_param_table(f.type_params, "", table)
+    mut params: []Type = teko::list::empty()
+    mut param_names: []str = teko::list::empty()
+    mut defaults: []parser::Expr = teko::list::empty()
+    mut n_required: u64 = f.params.len
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = if !f.params[i].has_type {
+            Named { name = struct_name }
+        } else {
+            match resolve_type(f.params[i].type_ann, tbl) { Type as t => t; error as e => return e }
+        }
+        params = teko::list::push(params, pt)
+        param_names = teko::list::push(param_names, f.params[i].name)
+        if f.params[i].has_default {
+            if n_required == f.params.len { n_required = i to u64 }
+            defaults = teko::list::push(defaults, f.params[i].default_expr)
+        }
+        i++
+    }
+    let ret = if f.has_return {
+        match resolve_type(f.return_type, tbl) { Type as t => t; error as e => return e }
+    } else {
+        Void { }
+    }
+    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+}
+
+// register every top-level function's signature (now that all type names exist). (OOP A1) also
+// registers each struct's methods, under a namespace key of "<owning-ns>::<StructName>" (bare
+// StructName at the top level) — `lookup_call`'s qualifier match compares only the LAST segment,
+// so `StructName::method(…)` resolves through the SAME #41 machinery as any other qualified call,
+// with zero new resolution code. Instance dot-calls (`recv.method(…)`) desugar into exactly this
+// same qualified-call shape (see typer.tks::type_method_call) before ever reaching lookup_call.
+fn collect_funcs(items: []parser::Item, table: TypeTable) -> Env | error {
+    mut env = env_empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::Function as f => {
+                let ft = match func_type(f, table) {
+                    Type as t  => t
+                    error as e => return e
+                }
+                env = define_fn(env, f.name, ft, items[i].namespace)   // #41: carry the fn's ns
+            }
+            parser::TypeDecl as td => {
+                match td.body {
+                    parser::StructBody as sb => {
+                        let method_ns = if items[i].namespace == "" { td.name } else { items[i].namespace ~ "::" ~ td.name }
+                        mut mi = 0
+                        loop {
+                            if mi >= sb.methods.len { break }
+                            let mft = match method_func_type(sb.methods[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, sb.methods[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
+                    // (W10b.CLASS) same registration as a struct method — the receiver is still
+                    // Named{class_name} (by-value); a Ref<T> receiver is a later increment. Registers
+                    // the EFFECTIVE (base-inherited + own/overridden) methods (increment 2), so an
+                    // inherited-but-not-overridden method is callable as DerivedClass::method(…) too.
+                    parser::ClassBody as cb => {
+                        let method_ns = if items[i].namespace == "" { td.name } else { items[i].namespace ~ "::" ~ td.name }
+                        let eff = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
+                        mut mi = 0
+                        loop {
+                            if mi >= eff.len { break }
+                            let mft = match method_func_type(eff[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, eff[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        i++
+    }
+    env
+}
+
+// C7.12 — reconstruct a TypeTable from a TYPED program's pass-through TypeDecl items.
+// Used by the package backend (project.tks::backend) which has a TProgram, not a
+// parser::Program. The namespace field is set to "" — sufficient for resolve_type (name
+// resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
+pub fn type_table_of(prog: TProgram) -> TypeTable {
+    mut table: []TypeReg = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as td => {
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; vis = td.vis; decl = td })
+            }
+            _ => {}
+        }
+        i++
+    }
+    table
+}
+
+// (W10b.CLASS increment 2) look up a class's own parser::ClassBody by name (error if unknown or not a class).
+pub fn find_class_body(name: str, table: TypeTable) -> parser::ClassBody | error {
+    let decl = match type_table_find(table, name) {
+        parser::TypeDecl as td => td
+        error          => return error { message = $"unknown base class: {name}" }
+    }
+    match decl.body {
+        parser::ClassBody as cb => cb
+        _               => return error { message = $"{name} is not a class" }
+    }
+}
+
+// (W10b.CLASS increment 2) a class's EFFECTIVE fields: the base's effective fields (recursively),
+// followed by its own — structural inheritance by field-flattening (composition, no embedded C
+// object/vtable yet). Used everywhere a class's data shape matters (construction, field access,
+// codegen struct layout) so a derived instance carries every ancestor's field too.
+pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable) -> []parser::Field | error {
+    mut base: []parser::Field = teko::list::empty()
+    if cb.has_base {
+        let base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+        base = match effective_class_fields(base_cb, table) { []parser::Field as f => f; error as e => return e }
+    }
+    mut out: []parser::Field = base
+    mut i = 0
+    loop { if i >= cb.fields.len { break }; out = teko::list::push(out, cb.fields[i]); i++ }
+    out
+}
+
+// (W10b.CLASS increment 2) a class's EFFECTIVE methods: the base's effective methods (recursively),
+// each REPLACED by an `override` of the same name if this class declares one, plus this class's
+// own NEW methods appended. This is how a derived instance can call an inherited method it never
+// re-declares (`derived.baseMethod()`) — the caller (collect_funcs/type_struct_methods/
+// type_method_call) always re-types/re-stamps against the CURRENT class's own name, so an
+// inherited method's body is retyped (and re-emitted) once per class that effectively owns it.
+pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []parser::Function | error {
+    mut base: []parser::Function = teko::list::empty()
+    if cb.has_base {
+        let base_cb = match find_class_body(cb.base_name, table) { parser::ClassBody as b => b; error as e => return e }
+        base = match effective_class_methods(base_cb, table) { []parser::Function as f => f; error as e => return e }
+    }
+    mut out: []parser::Function = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= base.len { break }
+        mut m = base[i]
+        mut j = 0
+        loop {
+            if j >= cb.methods.len { break }
+            if cb.methods[j].name == m.name { m = cb.methods[j] }
+            j++
+        }
+        out = teko::list::push(out, m)
+        i++
+    }
+    mut k = 0
+    loop {
+        if k >= cb.methods.len { break }
+        mut is_new = true
+        mut bi = 0
+        loop { if bi >= base.len { break }; if base[bi].name == cb.methods[k].name { is_new = false; break }; bi++ }
+        if is_new { out = teko::list::push(out, cb.methods[k]) }
+        k++
+    }
+    out
+}
+
+// (W10b.CLASS residual — intern visibility) is `class_name` the same as, or a (transitive)
+// SUBCLASS of, `ancestor_name`? Used to decide whether an `intern` (subclass-visible) member is
+// reachable from `class_name`'s own code.
+pub fn is_subclass_of(class_name: str, ancestor_name: str, table: TypeTable) -> bool {
+    if class_name == ancestor_name { return true }
+    match find_class_body(class_name, table) {
+        parser::ClassBody as cb => if cb.has_base { is_subclass_of(cb.base_name, ancestor_name, table) } else { false }
+        error => false
+    }
+}
+
+// a member's REACH: which class's OWN code declared it (walking up the base chain to find it —
+// an override "moves" the declaration to the overriding class, since that class's OWN body is
+// what's actually reachable there), plus its `vis`/`is_intern` AT that declaration.
+pub type MemberOwner = struct { declaring_class: str; vis: parser::Visibility; is_intern: bool }
+
+// (W10b.CLASS residual — intern visibility) find field `field_name`'s declaring class + reach,
+// walking `class_name`'s own fields first, then its base chain.
+pub fn find_field_owner(class_name: str, table: TypeTable, field_name: str) -> MemberOwner | error {
+    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    mut i = 0
+    loop {
+        if i >= cb.fields.len { break }
+        if cb.fields[i].name == field_name { return MemberOwner { declaring_class = class_name; vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern } }
+        i++
+    }
+    if cb.has_base { return find_field_owner(cb.base_name, table, field_name) }
+    error { message = $"internal: field '{field_name}' not found in {class_name}'s class chain" }
+}
+
+// (W10b.CLASS residual — intern visibility) find method `method_name`'s declaring class + reach
+// (mirrors find_field_owner — an override's OWN vis/is_intern governs at that point in the chain).
+pub fn find_method_owner(class_name: str, table: TypeTable, method_name: str) -> MemberOwner | error {
+    let cb = match find_class_body(class_name, table) { parser::ClassBody as b => b; error as e => return e }
+    mut i = 0
+    loop {
+        if i >= cb.methods.len { break }
+        if cb.methods[i].name == method_name { return MemberOwner { declaring_class = class_name; vis = cb.methods[i].vis; is_intern = cb.methods[i].is_intern } }
+        i++
+    }
+    if cb.has_base { return find_method_owner(cb.base_name, table, method_name) }
+    error { message = $"internal: method '{method_name}' not found in {class_name}'s class chain" }
+}
+
+// (W10b.CLASS residual — intern visibility) is `owner`'s member reachable from code whose OWN
+// declaring class is `accessor_type` ("" — not inside any class method, e.g. free-function or
+// top-level code)? `pub`/`exp` are reachable from anywhere; a private (default) member is
+// reachable only from its OWN declaring class's code, or — if `is_intern` — from a (transitive)
+// subclass's code too.
+pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTable) -> bool {
+    match owner.vis {
+        parser::Visibility::Pub => true
+        parser::Visibility::Exp => true
+        parser::Visibility::Private => {
+            if accessor_type == "" { return false }
+            if accessor_type == owner.declaring_class { return true }
+            if owner.is_intern { return is_subclass_of(accessor_type, owner.declaring_class, table) }
+            false
+        }
+    }
+}
+
+// (W10b.CLASS residual — intern visibility) recover the bare CLASS NAME from a method's
+// registered pseudo-namespace ("<owning-ns>::<ClassName>", or bare "<ClassName>" at the top
+// level — collect_funcs's method_ns convention) — the class name is always the LAST "::"-segment.
+// Used to route a STATIC call (`ClassName::method(…)`)'s visibility check the same way an
+// instance dot-call already is. A manual scan (not `teko::str::last_index_of`, a HOST-ONLY
+// function the VM cannot interpret — this runs inside the checker itself, which the VM DOES
+// interpret when `.tkt` unit tests exercise it directly, e.g. checker_test.tkt).
+pub fn class_name_from_method_ns(ns: str) -> str {
+    mut last_sep: i64 = -1
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= ns.len { break }
+        if ns[i] == b':' && ns[i + 1] == b':' { last_sep = i to i64 }
+        i++
+    }
+    if last_sep < 0 { return ns }
+    teko::str::slice_from(ns, (last_sep to u64) + 2)
+}
+
+// (W10b.CLASS increment 2) validate ONE class's inheritance/override declarations:
+//  - a base class must exist, be a class, and be `abstract`/`virtual` (NOT sealed — a sealed
+//    class is final, per ClassKind's doc).
+//  - an `override` method must match an existing method in the base's EFFECTIVE methods, and
+//    that base method must itself be overridable (`abstract`/`virtual`/already `override`).
+fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error? {
+    if cb.has_base {
+        let base_decl = match type_table_find(table, cb.base_name) {
+            parser::TypeDecl as td => td
+            error          => return error { message = $"unknown base class: {cb.base_name}" }
+        }
+        let base_cb = match base_decl.body {
+            parser::ClassBody as b => b
+            _               => return error { message = $"{cb.base_name} is not a class" }
+        }
+        match base_cb.kind {
+            parser::ClassKind::Sealed => return error { message = $"cannot inherit from `{cb.base_name}` — it is sealed (only `abstract`/`virtual` classes can be a base)" }
+            _ => {}
+        }
+    }
+    let base_methods = if cb.has_base {
+        match find_class_body(cb.base_name, table) {
+            parser::ClassBody as b => match effective_class_methods(b, table) { []parser::Function as f => f; error as e => return e }
+            error as e => return e
+        }
+    } else {
+        teko::list::empty()
+    }
+    mut i = 0
+    loop {
+        if i >= cb.methods.len { break }
+        let m = cb.methods[i]
+        if m.is_override {
+            mut found: parser::Function? = null
+            mut j = 0
+            loop {
+                if j >= base_methods.len { break }
+                if base_methods[j].name == m.name { found = base_methods[j]; break }
+                j++
+            }
+            match found {
+                null => return error { message = $"'{m.name}' has no matching base method to override" }
+                parser::Function as bm => {
+                    let overridable = bm.is_abstract || bm.is_virtual || bm.is_override
+                    if !overridable { return error { message = $"'{m.name}' overrides a base method that is not `abstract`/`virtual`" } }
+                    if bm.params.len != m.params.len { return error { message = $"'{m.name}' override must have the same parameter count as the base method" } }
+                }
+            }
+        }
+        i++
+    }
+    null
+}
+
+// (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a struct FIELD, variant member, slice
+// element, or alias target. `resolve_type` already rejects a Reference inside a slice/optional/
+// union (R4 there), so this catches the BARE-position cases: `struct { f: Ref<i64> }` and a
+// transparent alias `type R = Ref<i64>`. Runs once per program over every declared type body.
+fn validate_type_decls(table: TypeTable) -> error? {
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        let decl = table[i].decl
+        // (S4) the decl's own generic type-params, opaque, in scope — so a generic body field `T`
+        // resolves to `Named{T}` (not "unknown type"); mirrors func_type's type-param handling. A
+        // `Ref<T>` field is still rejected by R1 (its inner is a Named, not a scalar Prim).
+        let tbl = type_param_table(decl.type_params, "", table)
+        match decl.body {
+            parser::StructBody as sb => {
+                mut f = 0
+                loop {
+                    if f >= sb.fields.len { break }
+                    match resolve_type(sb.fields[f].type_ann, tbl) {
+                        Type as ft => match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                        error as e => return e
+                    }
+                    f++
+                }
+            }
+            parser::AliasBody as ab => {
+                match resolve_type(ab.alias, tbl) {
+                    Type as at => match at { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                    error as e => return e
+                }
+            }
+            parser::ClassBody as cb => {   // (W10b.CLASS) same R4 escape-gate as a struct's fields
+                mut f = 0
+                loop {
+                    if f >= cb.fields.len { break }
+                    match resolve_type(cb.fields[f].type_ann, tbl) {
+                        Type as ft => match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+                        error as e => return e
+                    }
+                    f++
+                }
+                match validate_class_decl(cb, table) { error as e => return e; null => {} }   // (W10b.CLASS increment 2)
+            }
+            _ => {}
+        }
+        i++
+    }
+    null
+}
+
+// pass 1: types first, then function signatures — the top-level environment.
+fn collect(program: parser::Program) -> Collected | error {
+    let table = collect_types(program.items)
+    match validate_type_decls(table) { error as e => return e; null => {} }   // (MEM Step 0, R4)
+    let env = match collect_funcs(program.items, table) {
+        Env as e     => e
+        error as err => return err
+    }
+    Collected { types = table; env = env }
+}
+
+// C7.10 — collect with a pre-seeded (table, env). Adds the project's type decls on top of
+// the seeded table, then adds the project's function signatures on top of the seeded env.
+// Used by type_program_with_deps to inject dep items before type-checking the project.
+fn collect_with_seed(program: parser::Program, seed: Collected) -> Collected | error {
+    // Augment the table with the project's type decls (dep types already in seed.types).
+    mut table = seed.types
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        match program.items[i].content {
+            parser::TypeDecl as td => {
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = program.items[i].namespace; vis = td.vis; decl = td })
+            }
+            _ => {}
+        }
+        i++
+    }
+    match validate_type_decls(table) { error as e => return e; null => {} }   // (MEM Step 0, R4)
+    // Augment the env with the project's function signatures (dep fns already in seed.env).
+    mut env = seed.env
+    mut j = 0
+    loop {
+        if j >= program.items.len { break }
+        match program.items[j].content {
+            parser::Function as f => {
+                let ft = match func_type(f, table) {
+                    Type as t  => t
+                    error as e => return e
+                }
+                env = define_fn(env, f.name, ft, program.items[j].namespace)
+            }
+            parser::TypeDecl as td => {
+                match td.body {   // (OOP A1) mirror collect_funcs' struct-method registration
+                    parser::StructBody as sb => {
+                        let method_ns = if program.items[j].namespace == "" { td.name } else { program.items[j].namespace ~ "::" ~ td.name }
+                        mut mi = 0
+                        loop {
+                            if mi >= sb.methods.len { break }
+                            let mft = match method_func_type(sb.methods[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, sb.methods[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
+                    // (W10b.CLASS) mirrors collect_funcs' class-method registration (increment 2:
+                    // registers the EFFECTIVE, base-inherited methods too)
+                    parser::ClassBody as cb => {
+                        let method_ns = if program.items[j].namespace == "" { td.name } else { program.items[j].namespace ~ "::" ~ td.name }
+                        let eff = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
+                        mut mi = 0
+                        loop {
+                            if mi >= eff.len { break }
+                            let mft = match method_func_type(eff[mi], td.name, table) {
+                                Type as t  => t
+                                error as e => return e
+                            }
+                            env = define_fn(env, eff[mi].name, mft, method_ns)
+                            mi++
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        j++
+    }
+    Collected { types = table; env = env }
+}
+
+// C7.10 — pre-seed the collection environment from an already-typed dep TProgram.
+// Adds the dep's type declarations to `table` and the dep's function signatures to `env`.
+// This gives the project's type_program access to dep types and functions without re-typing
+// the dep's bodies (which are already verified). The dep's namespace is preserved on each entry.
+fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error {
+    mut t = table
+    mut e = env
+    // Pass 1: register type declarations (so function param types can resolve against them).
+    mut i: u64 = 0
+    loop {
+        if i >= dep.items.len { break }
+        match dep.items[i] {
+            parser::TypeDecl as td => {
+                // Carry the dep item's namespace (the dep's own module path — already set when packed).
+                // find_ns_of_titem extracts it from the dep's TItem.
+                let ns = dep_item_ns(dep.items[i])
+                t = teko::list::push(t, TypeReg { name = td.name; namespace = ns; vis = td.vis; decl = td })
+            }
+            _ => {}
+        }
+        i++
+    }
+    // Pass 2: register function signatures using the now-complete type table.
+    mut j: u64 = 0
+    loop {
+        if j >= dep.items.len { break }
+        match dep.items[j] {
+            TFunction as f => {
+                // Build the Func type from the resolved return_type + param type annotations.
+                // We resolve param types now (against the merged table `t`) just like collect_funcs.
+                let dtbl = type_param_table(f.type_params, "", t)   // (S4) no-op for concrete deps
+                mut params: []Type = teko::list::empty()
+                mut param_names: []str = teko::list::empty()
+                mut defaults: []parser::Expr = teko::list::empty()
+                mut n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — see func_type
+                mut pi: u64 = 0
+                loop {
+                    if pi >= f.params.len { break }
+                    let pt = match resolve_type(f.params[pi].type_ann, dtbl) { Type as ty => ty; error as err => return err }
+                    params = teko::list::push(params, pt)
+                    param_names = teko::list::push(param_names, f.params[pi].name)
+                    if f.params[pi].has_default {
+                        if n_required == f.params.len { n_required = pi }
+                        defaults = teko::list::push(defaults, f.params[pi].default_expr)
+                    }
+                    pi++
+                }
+                let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+                let ft = Func { params = params; ret = f.return_type; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+                e = define_fn(e, f.name, ft, f.namespace)
+            }
+            _ => {}
+        }
+        j++
+    }
+    Collected { types = t; env = e }
+}
+
+// dep_item_ns — extract the namespace string from a TItem. TFunction carries it directly;
+// TypeDecl and UseDecl items use "" (the dep's top-level namespace) since we do not have
+// a wrapping Item here. For C7.10, type decls are the dep's public types — namespace "" is
+// fine for resolve_type (which ignores namespace; W-vis-enforce is not re-run for deps).
+fn dep_item_ns(item: TItem) -> str {
+    match item {
+        TFunction as f       => f.namespace
+        parser::TypeDecl     => ""
+        parser::UseDecl      => ""
+        TStatement           => ""
+    }
+}

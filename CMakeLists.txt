@@ -1,271 +1,166 @@
-cmake_minimum_required(VERSION 3.25)
-project(teko C)
+# CMakeLists.txt — Teko bootstrap (the C23 mirror of the spec).
+#
+# This tree was MATERIALIZED from the canonical spec-as-source markdown
+# (TEKO_SOURCE.md + TEKO_CHECKER.md): every fenced code block was moved into its
+# own file under src/. Two coexisting layers live here:
+#   * .tks / .tkt — the canonical Teko source (lexer→parser→checker→emit), the
+#     real language; a future Teko toolchain compiles these.
+#   * .h / .c     — the C23 bootstrap mirror of the same algorithms.
+#
+# NOTE (M.4 — do not build on the incomplete): the C mirror is NOT yet a complete,
+# linkable program — the pipeline (read→lex→parse→check→codegen) is not wired, there
+# is no main, and the parser C mirror is partial (headers). (The lexer C mirror is
+# now materialized — token.h/lexer.h/lexer.c — and compiles clean.) This file
+# establishes the PROJECT STRUCTURE; it is
+# intentionally not expected to compile/link as-is. Targets are listed so the tree is
+# navigable and ready to be wired incrementally.
+
+cmake_minimum_required(VERSION 3.20)
+project(teko_bootstrap LANGUAGES C)
 
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
-# --- Native Dependency Manager (Unity) ---
-include(FetchContent)
-FetchContent_Declare(
-        unity
-        GIT_REPOSITORY https://github.com/ThrowTheSwitch/Unity
-        GIT_TAG        v2.6.1
-)
-FetchContent_MakeAvailable(unity)
+# All modules see the source root as the include base (headers are referenced as
+# "type.h", "scope.h", … within a module, and "../parser/ast.h" across modules).
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# 1. Core compiler engine sources (everything in src/ except the main entry point).
-#    Listed explicitly on purpose: GLOB_RECURSE does not re-trigger CMake when files
-#    are added/removed, which causes stale builds. When you add a new .c file under
-#    src/, add it to this list.
+# --- C mirror translation units, grouped by module ---------------------------
+# (Header-only modules — core, parser (ast.h/result.h) — contribute include paths
+#  only; they have no .c yet.)
 
-# Native cryptography (Phase 13) — embedded runtime primitives, the single source of
-# truth. Shared between teko_core (compiler + KAT suite) and teko_rt (the archive linked
-# into produced native binaries via the hosted runner). When you add a crypto .c, add it
-# here once.
-set(TEKO_CRYPTO_SOURCES
-        src/runtime/teko_crypto_sha2.c
-        src/runtime/teko_crypto_md5.c
-        src/runtime/teko_crypto_sha1.c
-        src/runtime/teko_crypto_sha512.c
-        src/runtime/teko_crypto_hmac.c
-        src/runtime/teko_crypto_sha3.c
-        src/runtime/teko_crypto_blake3.c
-        src/runtime/teko_crypto_random.c
-        src/runtime/teko_crypto_hkdf.c
-        src/runtime/teko_crypto_pbkdf2.c
-        src/runtime/teko_crypto_chacha20.c
-        src/runtime/teko_crypto_poly1305.c
-        src/runtime/teko_crypto_chachapoly.c
-        src/runtime/teko_crypto_aes.c
-        src/runtime/teko_crypto_aes_modes.c
-        src/runtime/teko_crypto_aes_gcm.c
-        src/runtime/teko_crypto_scrypt.c
-        src/runtime/teko_crypto_blake2b.c
-        src/runtime/teko_crypto_argon2.c
-        src/runtime/teko_crypto_fe25519.c
-        src/runtime/teko_crypto_x25519.c
-        src/runtime/teko_crypto_ed25519.c
-        src/runtime/teko_uuid.c
-        src/runtime/teko_crypto_bn.c
-        src/runtime/teko_crypto_ec.c
-        src/runtime/teko_crypto_ecc.c
-        src/runtime/teko_crypto_p256.c
-        src/runtime/teko_crypto_p384.c
-        src/runtime/teko_crypto_rsa.c
-)
+set(TEKO_TEXT_SOURCES
+    src/text/text.c)
 
-set(CORE_SOURCES
-        # Frontend: lexer + parser modules
-        src/lexer.c
-        src/lexer_string.c
-        src/parser.c
-        src/parser_async_control.c
-        src/parser_concurrent.c
-        src/parser_di.c
-        src/parser_extensions.c
-        src/parser_ffi.c
-        src/parser_generics.c
-        src/parser_messaging.c
-        src/parser_statements.c
-        src/parser_string.c
-        src/parser_types.c
-        src/parser_visibility.c
-        # Semantics + symbols + type checking
-        src/semantic_concurrent.c
-        src/semantic_struct.c
-        src/symbol_table.c
-        src/type_checker.c
-        # Intermediate language + bytecode codegen
-        src/codegen_li.c
-        src/codegen_li_wasm.c
-        src/frontend_interop.c
-        src/codegen_aot.c
-        src/teko_il.c
-        # Virtual machine + runtime
-        src/vm_core.c
-        src/vm_arena.c
-        src/vm_concurrency.c
-        src/vm_debug.c
-        src/vm_intrinsics.c
-        src/vm_scheduler.c
-        src/runtime/teko_arena.c
-        src/runtime/teko_channel.c
-        src/runtime/teko_duplex.c
-        src/runtime/teko_delayed.c
-        src/runtime/teko_broadcast.c
-        src/runtime/teko_shared.c
-        src/runtime/teko_retry.c
-        src/runtime/teko_time.c
-        src/runtime/teko_object.c
-        src/runtime/teko_array.c
-        src/runtime/teko_iarray.c
-        src/runtime/teko_vtable.c
-        src/runtime/teko_convert.c
-        src/runtime/teko_convert_f64.c
-        src/runtime/teko_decimal.c
-        src/runtime/teko_mem_sys.c
-        src/runtime/teko_thread.c
-        # Native cryptography (Phase 13) — embedded runtime primitives (shared list)
-        ${TEKO_CRYPTO_SOURCES}
-        # Tooling: target detection, SDK, LSP, project manager
-        src/teko_target.c
-        src/teko_sdk.c
-        src/teko_lsp.c
-        src/project_manager.c
-        # Metal backend orchestrator + optimizer
-        src/codegen/codegen_metal.c
-        src/codegen/codegen_opt.c
-        # Shared per-family emitter cores (de-duplicated)
-        src/codegen/emit_x86_64_sysv_common.c
-        src/codegen/emit_arm64_gas_common.c
-        # Phase 13 native runner: libc-hosted, assemble-able host-arch emitter
-        src/codegen/emit_native_hosted.c
-        # Native static linker (tld): object/executable format writers
-        src/codegen/tld_elf.c
-        src/codegen/tld_elf_arch.c
-        src/codegen/tld_elf_reloc.c
-        src/codegen/tld_macho.c
-        src/codegen/tld_pe.c
-        src/codegen/tld_symbols.c
-        src/codegen/tld_wasm.c
-        # Per-target instruction emitters
-        src/codegen/apple/emit_darwin_arm64.c
-        src/codegen/apple/emit_darwin_x86_64.c
-        src/codegen/bare_metal/emit_wasm.c
-        src/codegen/bsd_unix/emit_freebsd_arm64.c
-        src/codegen/bsd_unix/emit_freebsd_x86_64.c
-        src/codegen/linux/emit_linux_arm32.c
-        src/codegen/linux/emit_linux_arm64.c
-        src/codegen/linux/emit_linux_mips.c
-        src/codegen/linux/emit_linux_ppc64.c
-        src/codegen/linux/emit_linux_riscv32.c
-        src/codegen/linux/emit_linux_riscv64.c
-        src/codegen/linux/emit_linux_riscv_common.c
-        src/codegen/linux/emit_linux_x86.c
-        src/codegen/linux/emit_linux_x86_64.c
-        src/codegen/windows/emit_win_arm64.c
-        src/codegen/windows/emit_win_x86.c
-        src/codegen/windows/emit_win_x86_64.c
-)
+# teko::assert — the C seed of assert.tks (the injected testing assertions). Shared by the
+# VM (linked via the lib) and generated programs (driver.c hands it to the host cc).
+set(TEKO_ASSERT_SOURCES
+    src/assert/assert.c)
 
-# Create the internal static library with the entire compiler engine
-add_library(teko_core STATIC ${CORE_SOURCES})
+# teko::build — the `.tkp` manifest reader (crumb A1). The FIRST .c under src/build.
+set(TEKO_BUILD_SOURCES
+    src/build/tkp_rule.c
+    src/build/manifest.c
+    src/build/discover.c
+    src/build/assemble.c)
 
-# Ensure visibility of includes in relative subdirectories
-target_include_directories(teko_core PRIVATE src)
+set(TEKO_LEXER_SOURCES
+    src/lexer/lexer.c)
 
-# 2. TARGET 1: The Official Compiler (Production Entry Point)
-add_executable(teko src/main.c)
-target_link_libraries(teko PRIVATE teko_core)
-target_include_directories(teko PRIVATE src)
+set(TEKO_PARSER_SOURCES
+    src/parser/ast.c
+    src/parser/cursor.c
+    src/parser/optokens.c
+    src/parser/parse_lit.c
+    src/parser/parse_path.c
+    src/parser/parse_type.c
+    src/parser/parse_pattern.c
+    src/parser/parse_expr.c
+    src/parser/parse_if.c
+    src/parser/parse_match.c
+    src/parser/parse_arm.c
+    src/parser/parse_stmt.c
+    src/parser/parse_decl.c
+    src/parser/parse_file.c)
 
-# 2b. TARGET: teko_rt — the native runtime archive linked into produced executables.
-#     A `teko build --target=<native>` binary links against libteko_rt.a; it carries
-#     the surface ABI shims (teko_rt_emit, and the crypto wrappers added in Sub-phase B)
-#     over the portable C crypto runtime (the single source of truth). Self-contained so
-#     produced binaries need nothing else.
-add_library(teko_rt STATIC runtime/native/teko_rt.c runtime/native/teko_rt_sched.c src/runtime/teko_duplex.c src/runtime/teko_delayed.c src/runtime/teko_broadcast.c src/runtime/teko_shared.c src/runtime/teko_retry.c src/runtime/teko_time.c src/runtime/teko_object.c src/runtime/teko_array.c src/runtime/teko_iarray.c src/runtime/teko_vtable.c src/runtime/teko_convert.c src/runtime/teko_convert_f64.c src/runtime/teko_decimal.c ${TEKO_CRYPTO_SOURCES})
-target_include_directories(teko_rt PRIVATE runtime/native src/runtime src)
-if (WIN32)
-    target_link_libraries(teko_rt PRIVATE bcrypt) # CSPRNG: BCryptGenRandom
+set(TEKO_CHECKER_SOURCES
+    src/checker/type.c
+    src/checker/scope.c
+    src/checker/resolve.c
+    src/checker/collect.c
+    src/checker/match.c
+    src/checker/expr.c
+    src/checker/typer.c
+    src/checker/check_modules.c
+    src/checker/initanalysis.c
+    src/checker/monomorph.c
+    src/checker/escape.c
+    src/checker/revalidate.c)
+
+set(TEKO_EMIT_SOURCES
+    src/emit/tkb_buf.c
+    src/emit/tkb_frame.c
+    src/emit/tkb_write.c
+    src/emit/tkb_read.c
+    src/emit/tkh.c
+    src/emit/header.c
+    src/compress/compress.c)   # C7.12: ZIP-STORE .tkl writer (teko::compress)
+
+# --- F2: the C backend (codegen) — lowers the checked typed tree to C source ---
+set(TEKO_CODEGEN_SOURCES
+    src/codegen/codegen.c)
+
+# --- Eixo D: the VM / interpreter — the test/debug execution engine (Stage-1) ---
+# Tree-walks the checked typed tree directly (no .tkb, no codegen); mirrors codegen
+# semantics. `teko run` executes a program on it; D2 will run tests on it.
+set(TEKO_VM_SOURCES
+    src/vm/vm.c)
+
+# The bootstrap mirror as one static library. The whole C front-end + checker + emit
+# compiles (F0 done); the default build now archives it, guarding the mirror against
+# compile regressions. It is not yet linked into an executable — the driver (F1) will
+# link `teko` against it once the pipeline is wired.
+add_library(teko_bootstrap STATIC
+    ${TEKO_TEXT_SOURCES}
+    ${TEKO_ASSERT_SOURCES}
+    ${TEKO_BUILD_SOURCES}
+    ${TEKO_LEXER_SOURCES}
+    ${TEKO_PARSER_SOURCES}
+    ${TEKO_CHECKER_SOURCES}
+    ${TEKO_EMIT_SOURCES}
+    ${TEKO_CODEGEN_SOURCES}
+    ${TEKO_VM_SOURCES})
+
+# --- F1: the driver — path-to-first-binary -----------------------------------
+# `teko` is now the REAL driver: read -> lex -> parse -> reconcile -> check, wired in
+# src/driver.c and linked against the bootstrap mirror library. (Codegen/emit is F2;
+# success here means the front-end pipeline ran and the program type-checked.)
+# The VM (`teko run`) calls the execution-runtime symbols (tk_print/tk_panic_*/
+# teko__assert__*), so the compiler binary itself links teko_rt.c — the same source the
+# driver also hands to the host cc for generated programs. It is kept an EXE source (not in
+# the lib) so it is never double-linked into the generated programs the driver builds.
+add_executable(teko main.c src/driver.c src/runtime/teko_rt.c src/win32_int128_builtins.c)
+target_link_libraries(teko PRIVATE teko_bootstrap)
+# vm.c calls floor() via the f64 arithmetic path; Linux requires explicit -lm linkage.
+if(UNIX AND NOT APPLE)
+    target_link_libraries(teko PRIVATE m)
+endif()
+# src/win32_int128_builtins.c provides __divti3/__udivti3/__modti3/__umodti3/
+# __floattidf/__floatuntidf/__fixdfti/__fixunsdfti — the compiler-rt builtins
+# needed for __int128 arithmetic on Windows. Clang on MSVC ABI does not
+# auto-link these; the file is all-#ifdef _WIN32 so it is a no-op on POSIX.
+# The VM interpreter uses deep C recursion when running the Teko parser/lexer during
+# `teko test` (each Teko function call adds ~4 C frames; parsing 66 files × recursive
+# descent easily exceeds the default 8MB main-thread stack). Set to 64MB to give enough room.
+if(APPLE)
+    target_link_options(teko PRIVATE "-Wl,-stack_size,0x4000000")
+elseif(WIN32)
+    # lld-link /STACK:reserve — 64 MB, matching Linux/macOS.  Without this the
+    # 1 MB Windows default overflows mid-test and the process exits with code 1.
+    target_link_options(teko PRIVATE "-Wl,/STACK:67108864")
+elseif(UNIX)
+    target_link_options(teko PRIVATE "-Wl,-z,stacksize=67108864")
 endif()
 
-# 3. TARGET 2: The Isolated Test Suite (Test Entry Point).
-#    Also listed explicitly. When you add a new test .c file, add it here.
-set(TEST_SOURCES
-        tests/test_main.c
-        tests/test_async.c
-        tests/test_codegen_li.c
-        tests/test_concurrent.c
-        tests/test_di_semantics.c
-        tests/test_messaging.c
-        tests/test_project.c
-        tests/test_semantics.c
-        tests/test_statement.c
-        tests/test_strings.c
-        tests/test_lexer_phase12.c
-        tests/test_target.c
-        tests/test_teko_il.c
-        tests/test_tooling.c
-        tests/test_type_checker.c
-        tests/test_types.c
-        tests/test_visibility.c
-        tests/test_ffi.c
-        tests/test_generics.c
-        tests/test_extensions.c
-        tests/test_codegen_aot.c
-        tests/test_vm_arena.c
-        tests/test_vm_concurrency.c
-        tests/test_vm_core.c
-        tests/test_vm_debug.c
-        tests/test_vm_scheduler.c
-        tests/codegen/test_codegen_apple.c
-        tests/codegen/test_codegen_cse.c
-        tests/codegen/test_codegen_dce.c
-        tests/codegen/test_codegen_emitters_arithmetic.c
-        tests/codegen/test_codegen_embedded.c
-        tests/codegen/test_codegen_folding.c
-        tests/codegen/test_codegen_linker.c
-        tests/codegen/test_codegen_linker_arch.c
-        tests/codegen/test_codegen_linker_e2e.c
-        tests/codegen/test_codegen_linker_macho.c
-        tests/codegen/test_codegen_linker_pe.c
-        tests/codegen/test_codegen_linker_reloc.c
-        tests/codegen/test_codegen_linker_wasm.c
-        tests/codegen/test_codegen_linux.c
-        tests/codegen/test_codegen_opt.c
-        tests/codegen/test_codegen_symbols.c
-        tests/codegen/test_codegen_unix.c
-        tests/codegen/test_codegen_windows.c
-        tests/runtime/test_runtime_arena.c
-        tests/runtime/test_runtime_channel.c
-        tests/runtime/test_runtime_mem.c
-        tests/runtime/test_runtime_thread.c
-        tests/runtime/test_duplex.c
-        tests/runtime/test_delayed.c
-        tests/runtime/test_broadcast.c
-        tests/runtime/test_shared.c
-        tests/runtime/test_retry.c
-        tests/runtime/test_time.c
-        tests/runtime/test_object.c
-        tests/runtime/test_vtable.c
-        tests/runtime/test_convert.c
-        tests/runtime/test_convert_f64.c
-        tests/runtime/test_decimal.c
-        tests/runtime/test_crypto_sha2.c
-        tests/runtime/test_crypto_md5.c
-        tests/runtime/test_crypto_sha1.c
-        tests/runtime/test_crypto_sha512.c
-        tests/runtime/test_crypto_hmac.c
-        tests/runtime/test_crypto_sha3.c
-        tests/runtime/test_crypto_blake3.c
-        tests/runtime/test_crypto_random.c
-        tests/runtime/test_crypto_hkdf.c
-        tests/runtime/test_crypto_pbkdf2.c
-        tests/runtime/test_crypto_chacha20.c
-        tests/runtime/test_crypto_poly1305.c
-        tests/runtime/test_crypto_chachapoly.c
-        tests/runtime/test_crypto_aes.c
-        tests/runtime/test_crypto_aes_modes.c
-        tests/runtime/test_crypto_aes_gcm.c
-        tests/runtime/test_crypto_scrypt.c
-        tests/runtime/test_crypto_blake2b.c
-        tests/runtime/test_crypto_argon2.c
-        tests/runtime/test_crypto_x25519.c
-        tests/runtime/test_crypto_ed25519.c
-        tests/runtime/test_uuid.c
-        tests/runtime/test_crypto_bn.c
-        tests/runtime/test_crypto_p256.c
-        tests/runtime/test_crypto_p384.c
-        tests/runtime/test_crypto_rsa.c
-)
-add_executable(teko_tests ${TEST_SOURCES})
-target_link_libraries(teko_tests PRIVATE teko_core unity)
-target_include_directories(teko_tests PRIVATE src)
+# F3: the generated programs link the minimal execution runtime (libteko_rt).
+# teko needs the runtime's location to pass -I and the runtime source to the host cc.
+target_compile_definitions(teko PRIVATE
+    TK_RT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
+    TK_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-# Phase 13.3a: the native CSPRNG uses BCryptGenRandom on Windows (bcrypt.lib). Other
-# platforms route to arc4random_buf / getrandom / /dev/urandom (no extra link needed).
-if (WIN32)
-    target_link_libraries(teko PRIVATE bcrypt)
-    target_link_libraries(teko_tests PRIVATE bcrypt)
-endif()
+# --- SELF-HOST: the native build of teko's OWN corpus — THE end-to-end validation ----------
+# `teko build .` runs the full pipeline (read → lex → parse → check → native codegen → cc link),
+# emitting ./bin/teko. This is the gating proof: if this fails, the native backend is not coherent,
+# so nothing downstream is guaranteed. Run it with:  cmake --build build --target selfhost
+# (equivalently, by hand:  ./build/teko build .  from the project root → ./bin/teko).
+add_custom_target(selfhost
+    # The self-build runs the D4 test gate like any other build (`--no-test` is no longer honored —
+    # a release must run its tests). The compiler's own `.tkt` corpus is VM-runnable and passes in
+    # both vm.c (build/teko) and vm.tks (bin/teko). (See TEKO_MASTER_PLAN.md Phase 7 D4.)
+    COMMAND $<TARGET_FILE:teko> build ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS teko
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "self-host: native build of teko's own corpus -> ./bin/teko (THE validation gate)"
+    USES_TERMINAL
+    VERBATIM)

@@ -1,0 +1,360 @@
+// src/checker/match.tks  (namespace 'teko::checker')
+
+use teko::parser
+
+// (C7b) is `name` a member of the enum body?
+fn enum_has_member(eb: parser::EnumBody, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= eb.members.len { break }
+        if eb.members[i] == name { return true }
+        i++
+    }
+    false
+}
+
+// (C7b) ENUM-subject pattern check: a bare/qualified path pattern names a MEMBER (enum members
+// carry NO data). `U8` and `PrimKind::U8` both name member "U8" (by the LAST path segment, like the
+// `Type::Member` enum-value form). `_` matches anything; an Alt checks each option; `as x` binds the
+// whole enum value. (Mirror of match.c check_enum_pattern.)
+fn check_enum_pattern(p: parser::Pattern, subject: Type, eb: parser::EnumBody, env: Env, table: TypeTable) -> Env | error {
+    match p {
+        parser::WildcardPattern   => env
+        parser::BindPattern as bp => {
+            if bp.is_slice { return error { message = "a slice pattern cannot match an enum value" } }
+            let name = bp.type_name.segments[bp.type_name.segments.len - 1].name
+            if !enum_has_member(eb, name) { return error { message = $"not a member of the enum: {name}" } }
+            if bp.has_binding { define(env, bp.binding, subject, false) }   // `as x` — the enum value
+            else { env }                                                    // bare member — binds nothing
+        }
+        parser::AltPattern as ap  => {
+            mut i = 0
+            loop {
+                if i >= ap.options.len { break }
+                match ap.options[i] {
+                    parser::BindPattern as bp => { if bp.has_binding { return error { message = "an alternative (`|`) cannot bind; use a separate arm" } } }
+                    _                 => {}
+                }
+                match check_enum_pattern(ap.options[i], subject, eb, env, table) { Env => {}; error as e => return e }
+                i++
+            }
+            env
+        }
+        _ => error { message = "an enum subject needs member patterns (`U8`) or `_`" }
+    }
+}
+
+// validate a pattern against the subject; return the env extended with bindings.
+fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) -> Env | error {
+    // OPTIONAL subject `T?` (REBOOT_PLAN §202): `null` matches the NONE case (binds nothing);
+    // any OTHER pattern matches the PRESENT case and is checked against the inner `T`.
+    match subject {
+        Optional as opt => {
+            match p {
+                parser::NullPattern => return env                        // NONE — binds nothing
+                _                   => return check_pattern(p, opt.inner, env, table)   // PRESENT — check vs inner
+            }
+        }
+        _ => {}
+    }
+    // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
+    // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
+    match subject {
+        Named as n => {
+            match type_table_find(table, n.name) {
+                parser::TypeDecl as td => {
+                    match td.body {
+                        parser::EnumBody as eb => return check_enum_pattern(p, subject, eb, env, table)
+                        _                      => {}
+                    }
+                }
+                error => {}
+            }
+        }
+        _ => {}
+    }
+    match p {
+        parser::NullPattern       => return error { message = "`null` pattern requires an optional subject (`T?`) — REBOOT_PLAN §202" }
+        parser::WildcardPattern   => env
+        parser::BindPattern as bp => {
+            // `[]T as x` resolves the slice TYPE-expr; a path bind resolves the named/builtin case.
+            let ct = match bind_pattern_type(bp, table) { Type as t => t; error as e => return e }
+            if !bp.has_binding { return env }      // bare case / `as _` discard — binds nothing
+            define(env, bp.binding, ct, false)     // `Type as name` → name : the case type (match-binding immutable — B.21)
+        }
+        parser::LiteralPattern as lp => {
+            // a numeric literal pattern adopts the subject's numeric type, so `match b { 0xE0 => … }`
+            // matches a `byte` subject (byte = u8) — parity with value-position literal adoption.
+            let lt = match type_expr(lp.value, env, table) { TExpr as te => te; error as e => return e }
+            if !type_eq(lt.type, subject) && !literal_adopts(lt, subject) { return error { message = "literal pattern does not match the subject type" } }
+            env
+        }
+        parser::FieldPattern as fp => {
+            // C7a: variant axis `Type { f; g }` — resolve to a struct, bind each field IMMUTABLE (B.21).
+            let nt = match resolve_named(fp.type_name, table) { Type as t => t; error as e => return e }
+            let name = match nt {
+                Named as n => n.name
+                _          => return error { message = "field pattern requires a struct type" }
+            }
+            let decl = match type_table_find(table, name) {
+                parser::TypeDecl as td => td
+                error          => return error { message = $"unknown type in field pattern: {name}" }
+            }
+            let sb_fields = match decl.body {
+                parser::StructBody as s => s.fields
+                parser::ClassBody as c  => c.fields   // (W10b.CLASS increment 1)
+                _               => return error { message = $"type {name} is not a struct (no fields)" }
+            }
+            mut e2 = env
+            mut i = 0
+            loop {
+                if i >= fp.fields.len { break }
+                let ft = match field_type(sb_fields, fp.fields[i], table) { Type as t => t; error as e => return e }
+                e2 = define(e2, fp.fields[i], ft, false)      // B.21 — match-binding immutable
+                i++
+            }
+            e2
+        }
+        parser::RangePattern as rp => {
+            // C7a: `lo ..= hi` — each bound type_eq's the subject OR is a fitting literal that adopts
+            // it (so `0x80 ..= 0xBF` over a `byte` subject is fine), AND the subject is an integer
+            // (M.1/M.2). Mirrors match.c's `!type_eq && !literal_adopts` bound check.
+            let lo = match type_expr(rp.lo, env, table) { TExpr as te => te; error as e => return e }
+            let hi = match type_expr(rp.hi, env, table) { TExpr as te => te; error as e => return e }
+            if !type_eq(lo.type, subject) && !literal_adopts(lo, subject) { return error { message = "range lower bound does not match the subject type" } }
+            if !type_eq(hi.type, subject) && !literal_adopts(hi, subject) { return error { message = "range upper bound does not match the subject type" } }
+            // an integer subject — an int prim OR `byte` (= u8); a float range is rejected (B.38).
+            let int_subject = match subject { Byte => true; _ => is_integer(subject) }
+            if !int_subject { return error { message = "range pattern requires an integer subject (B.38 — not a float)" } }
+            env       // binds nothing
+        }
+        parser::AltPattern as ap => {
+            // C7a: `a | b | …` — each option checked against the subject; NO option may bind (settled axis rule).
+            mut i = 0
+            loop {
+                if i >= ap.options.len { break }
+                let opt = ap.options[i]
+                match opt {
+                    parser::BindPattern as bp => { if bp.has_binding { return error { message = "an alternative (`|`) cannot bind; use a separate arm" } } }
+                    parser::FieldPattern      => return error { message = "an alternative (`|`) cannot bind; use a separate arm" }
+                    _                 => {}
+                }
+                // recurse for validation (the subject must accept each option); discard the env — Alt binds nothing.
+                match check_pattern(opt, subject, env, table) { Env => {}; error as e => return e }
+                i++
+            }
+            env       // binds nothing
+        }
+    }
+}
+
+// --- exhaustiveness (B.15) ---
+
+// an UNGUARDED `_` covers everything; a guarded `_ when g` does NOT (B.15 — `when` excluded).
+fn has_wildcard(arms: []parser::Arm) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern { parser::WildcardPattern => return true; _ => {} }
+        }
+        i++
+    }
+    false
+}
+
+// the case-name(s) a variant pattern selects: a single Bind/Field, or EACH bare option of an Alt.
+// A slice bind (`[]T as x`) names NO nominal case (its type_name is empty) — it is skipped here
+// (and the empty-path read avoided); it is covered by some_arm_covers_type instead.
+// (W9.4) the case-name a single bind names: the resolved INSTANCE name `Gen__g__i64` when it carries
+// explicit type-args, else the bare last path segment. Mirrors bind_pattern_type's instance resolution
+// so exhaustiveness over a `variant Gen<i64> | …` covers the `Gen<i64> as x` arm by the member's name.
+fn bind_case_name(bp: parser::BindPattern, table: TypeTable) -> str {
+    if bp.type_args.len > 0 {
+        let ct = match bind_pattern_type(bp, table) { Type as t => t; error => Void { } }
+        match ct {
+            Named as n => return n.name
+            _          => {}
+        }
+    }
+    bp.type_name.segments[bp.type_name.segments.len - 1].name
+}
+
+fn arm_case_names(p: parser::Pattern, table: TypeTable) -> []str {
+    match p {
+        parser::BindPattern as bp  => {
+            if bp.is_slice { teko::list::empty() }
+            else { teko::list::push(teko::list::empty(), bind_case_name(bp, table)) }
+        }
+        parser::FieldPattern as fp => teko::list::push(teko::list::empty(), fp.type_name.segments[fp.type_name.segments.len - 1].name)
+        parser::AltPattern as ap   => {
+            mut names: []str = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= ap.options.len { break }
+                match ap.options[i] {
+                    parser::BindPattern as bp  => { if !bp.is_slice { names = teko::list::push(names, bind_case_name(bp, table)) } }
+                    parser::FieldPattern as fp => { names = teko::list::push(names, fp.type_name.segments[fp.type_name.segments.len - 1].name) }
+                    _                  => {}
+                }
+                i++
+            }
+            names
+        }
+        _ => teko::list::empty()
+    }
+}
+
+// Resolve the type a BIND pattern denotes: `[]T as x` → the slice type, else the named/builtin path.
+// (W9.4) `Foo<i64> as x` carries explicit type-args → resolve the concrete instance `Foo__g__i64`
+// (validates arity / rejects non-generic-with-args), so exhaustiveness/binding use the stamped type.
+fn bind_pattern_type(bp: parser::BindPattern, table: TypeTable) -> Type | error {
+    if bp.is_slice {
+        match bp.slice_type {
+            parser::TypeExpr as st => resolve_type(st, table)
+            null                   => error { message = "internal: slice pattern missing its slice type" }
+        }
+    } else if bp.type_args.len > 0 {
+        resolve_type(parser::NamedType { path = bp.type_name; args = bp.type_args }, table)
+    } else {
+        resolve_named(bp.type_name, table)
+    }
+}
+
+// Does some UNGUARDED arm cover variant member `mem` by resolved-TYPE equality? Covers the
+// non-nominal members of a `T | error` style variant (prim/byte/str/slice/error) — the arm is a
+// bind whose resolved type equals the member. NAMED (nominal) members use some_arm_names instead.
+fn some_arm_covers_type(arms: []parser::Arm, mem: Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern {
+                parser::BindPattern as bp => {
+                    match bind_pattern_type(bp, table) { Type as t => { if type_eq(t, mem) { return true } }; error => {} }
+                }
+                parser::AltPattern as ap => {
+                    mut j = 0
+                    loop {
+                        if j >= ap.options.len { break }
+                        match ap.options[j] {
+                            parser::BindPattern as bp => { match bind_pattern_type(bp, table) { Type as t => { if type_eq(t, mem) { return true } }; error => {} } }
+                            _                 => {}
+                        }
+                        j++
+                    }
+                }
+                _ => {}
+            }
+        }
+        i++
+    }
+    false
+}
+
+// is `name` covered by some UNGUARDED arm (directly via Bind/Field, or via an Alt option)?
+fn some_arm_names(arms: []parser::Arm, name: str, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            let names = arm_case_names(arms[i].pattern, table)
+            mut j = 0
+            loop {
+                if j >= names.len { break }
+                if names[j] == name { return true }
+                j++
+            }
+        }
+        i++
+    }
+    false
+}
+
+// every member of the variant must be covered by some unguarded arm: NAMED (nominal) members by
+// name; non-nominal members (prim/byte/str/slice/error — the `T | error` idiom) by resolved-type.
+fn variant_covered(arms: []parser::Arm, members: []Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        match members[i] {
+            Named as nm => { if !some_arm_names(arms, nm.name, table) { return false } }
+            _           => { if !some_arm_covers_type(arms, members[i], table) { return false } }
+        }
+        i++
+    }
+    true
+}
+
+// (C7b) every member of the enum must be covered by some unguarded arm (by name).
+fn enum_covered(arms: []parser::Arm, eb: parser::EnumBody, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= eb.members.len { break }
+        if !some_arm_names(arms, eb.members[i], table) { return false }
+        i++
+    }
+    true
+}
+
+// is the NONE case (a `null` pattern) covered by some UNGUARDED arm?
+fn some_arm_is_null(arms: []parser::Arm) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern { parser::NullPattern => return true; _ => {} }
+        }
+        i++
+    }
+    false
+}
+
+// is the PRESENT case of an optional `T?` covered? A bare bind/wildcard (un-`null`, unguarded)
+// covers the whole present value; otherwise fall back to ordinary exhaustiveness over the inner
+// (e.g. a variant inner). Mirrors the C twin's present_case_covered (REBOOT_PLAN §202).
+fn present_case_covered(arms: []parser::Arm, inner: Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !arms[i].has_when {
+            match arms[i].pattern {
+                parser::WildcardPattern => return true
+                parser::BindPattern as bp => { if bp.type_name.segments.len > 0 { return true } }   // `T as x` / `T`
+                _ => {}
+            }
+        }
+        i++
+    }
+    exhaustive(arms, inner, table)
+}
+
+// a `_` covers all; an optional `T?` is exhaustive iff `null` AND the present case are covered
+// (REBOOT_PLAN §202); otherwise a Variant subject must have every case named. A NAMED variant
+// subject is first expanded to its Variant cases (B.14/B.15) so `match s { Circle … }` over a
+// `Shape = Circle | …` covers exhaustively.
+fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable) -> bool {
+    if has_wildcard(arms) { return true }
+    match subject {       // an ENUM subject — exhaustive iff EVERY member is named (C7b)
+        Named as n => {
+            match type_table_find(table, n.name) {
+                parser::TypeDecl as td => {
+                    match td.body {
+                        parser::EnumBody as eb => return enum_covered(arms, eb, table)
+                        _                      => {}
+                    }
+                }
+                error => {}
+            }
+        }
+        _ => {}
+    }
+    match subject {       // an optional `T?` — `null` + present coverage (REBOOT §202)
+        Optional as opt => return some_arm_is_null(arms) && present_case_covered(arms, opt.inner, table)
+        _ => {}
+    }
+    match expand_variant(subject, table) {       // a NAMED variant → its Variant cases (B.14/B.15)
+        Variant as v => variant_covered(arms, v.members, table)
+        _            => false
+    }
+}

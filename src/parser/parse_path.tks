@@ -1,0 +1,22 @@
+// src/parser/parse_path.tks   (namespace 'teko::parser')
+// A path: one or more Idents joined by `::` (B.14). At least one segment; fails (B.1)
+// if there is no leading Ident. Shared by NamedType and by call callees.
+use teko::lexer
+fn parse_path(tokens: []lexer::Token, pos: u64) -> Parsed<Path> | error {
+    if !is_name_at(tokens, pos) {   // a path's first segment may be a contextual keyword (`type`/`to`) used as a name
+        return err_at(tokens, pos, "expected a name")
+    }
+    mut segs: []Segment = teko::list::empty()
+    segs = teko::list::push(segs, Segment { name = tokens[pos].text })
+    mut p = pos + 1
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::ColonColon) { break }
+        // consume `::`, then demand a name after it
+        if !is_kind_at(tokens, p + 1, lexer::TokenKind::Ident) {
+            return err_at(tokens, p + 1, "expected a name after '::'")
+        }
+        segs = teko::list::push(segs, Segment { name = tokens[p + 1].text })
+        p = p + 2
+    }
+    Parsed<Path> { node = Path { segments = segs }; next = p }
+}

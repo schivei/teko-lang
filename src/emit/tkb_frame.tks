@@ -1,0 +1,319 @@
+// src/emit/tkb_frame.tks  (namespace 'teko::emit')
+
+use teko::checker
+use teko::parser
+
+// write_u64 lives in tkb_buf.tks (same `teko::emit` namespace) — lo u32 then hi u32, the same
+// LE byte run this file used to spell inline. ONE definition (DRY; the generated C must have a
+// single `teko__emit__write_u64`, and a duplicate fn name in one namespace is not allowed).
+
+fn append_bytes(dst: []byte, src: []byte) -> []byte {
+    mut b = dst
+    mut i = 0
+    loop {
+        if i >= src.len { break }
+        b = teko::list::push(b, src[i])
+        i++
+    }
+    b
+}
+
+// --- collect every string into the table (pre-pass; mirrors the write helpers) ---
+
+fn collect_type_list(t: StrTable, xs: []checker::Type) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_type_strings(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_type_strings(t: StrTable, ty: checker::Type) -> StrTable {
+    match ty {
+        checker::Named as n   => st_intern(t, n.name).table
+        checker::Slice as s   => collect_type_strings(t, s.element)
+        checker::Variant as v => collect_type_list(t, v.members)
+        checker::Func as f    => collect_type_strings(collect_type_list(t, f.params), f.ret)
+        _            => t
+    }
+}
+
+fn collect_path(t: StrTable, p: parser::Path) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= p.segments.len { break }
+        tab = st_intern(tab, p.segments[i].name).table
+        i++
+    }
+    tab
+}
+
+fn collect_texprs(t: StrTable, xs: []checker::TExpr) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_strings(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+// C6.7: collect strings from []TArrayElem — the is_spread flag carries no string, only recurse .expr.
+fn collect_array_elems(t: StrTable, xs: []checker::TArrayElem) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_strings(tab, xs[i].expr)
+        i++
+    }
+    tab
+}
+
+fn collect_terms(t: StrTable, ts: []checker::TCmpTerm) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= ts.len { break }
+        tab = collect_strings(tab, ts[i].operand)
+        i++
+    }
+    tab
+}
+
+// intern each interpolation piece (a literal str), in order. ($"…{expr}…" — frame collect.)
+fn collect_pieces(t: StrTable, ps: []str) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= ps.len { break }
+        tab = st_intern(tab, ps[i]).table
+        i++
+    }
+    tab
+}
+
+// (C7.16) collect a BindTarget's name(s).
+fn collect_bindtarget(t: StrTable, bt: parser::BindTarget) -> StrTable {
+    match bt {
+        parser::SimpleName as s => st_intern(t, s.name).table
+        parser::DestructurePattern as d => collect_pieces(t, d.names)
+    }
+}
+
+// (C7.16) collect a []TStatement (mirrors write_tstatements).
+fn collect_tstatements(t: StrTable, xs: []checker::TStatement) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_tstatement(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+// (C7.16) collect a TStatement's strings (mirrors write_tstatement).
+fn collect_tstatement(t: StrTable, s: checker::TStatement) -> StrTable {
+    match s {
+        checker::TBinding as bd     => collect_strings(collect_type_strings(collect_bindtarget(t, bd.target), bd.bound), bd.value)
+        checker::TAssign as a       => collect_strings(collect_type_strings(st_intern(t, a.name).table, a.bound), a.value)
+        checker::TReturn as r       => collect_strings(t, r.value)
+        checker::TLoopStmt as l      => collect_tstatements(st_intern(t, l.label).table, l.body)
+        checker::TBreakStmt as br    => st_intern(t, br.label).table
+        checker::TContinueStmt as c  => st_intern(t, c.label).table
+        checker::TExprStmt as e      => collect_strings(t, e.expr)
+        checker::TDeferStmt as d     => collect_tstatements(t, d.body)
+    }
+}
+
+// (C7.16) intern a struct-init's field names AND recurse each field value (write order = this order).
+fn collect_structinit(t: StrTable, si: checker::TStructInit) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= si.field_names.len { break }
+        tab = st_intern(tab, si.field_names[i]).table
+        tab = collect_strings(tab, si.field_vals[i])
+        i++
+    }
+    tab
+}
+
+fn collect_strings(t: StrTable, te: checker::TExpr) -> StrTable {
+    let t1 = collect_type_strings(t, te.type)        // the node's type may name things
+    match te.kind {
+        checker::TVar as v     => st_intern(st_intern(t1, v.name).table, v.func_ns).table   // (W10a) intern func_ns too
+        checker::TStrLit as s  => st_intern(t1, s.text).table
+        checker::TCharLit as ch => st_intern(t1, ch.bytes).table   // (UTF-8 increment 1) intern the codepoint's UTF-8 bytes
+        checker::TBinary as b  => collect_strings(collect_strings(t1, b.left), b.right)
+        checker::TUnary as u   => collect_strings(t1, u.operand)
+        checker::TCompare as c => collect_terms(collect_strings(t1, c.first), c.rest)
+        checker::TCall as cl   => collect_texprs(collect_path(t1, cl.callee), cl.args)
+        checker::TCast as c    => collect_strings(t1, c.expr)                                    // S1a — recurse into the inner expr
+        checker::TFieldAccess as f => st_intern(collect_strings(t1, f.receiver), f.field).table  // S1b — receiver AND the field name (must intern)
+        checker::TInterp as in => collect_texprs(collect_pieces(t1, in.pieces), in.holes)        // $"…{expr}…" — intern pieces, recurse holes
+        // (C7.16) the kinds previously dropped to `_` — their strings/sub-exprs MUST be interned or the
+        // writer's st_find returns the not-found sentinel and the node fails to round-trip.
+        checker::TSafeFieldAccess as sf => st_intern(collect_strings(t1, sf.receiver), sf.field).table
+        checker::TCoalesce as co => collect_strings(collect_strings(t1, co.left), co.right)
+        checker::TStructInit as si => collect_structinit(t1, si)
+        checker::TIndex as ix => collect_strings(collect_strings(t1, ix.receiver), ix.index)
+        checker::TInExpr as ie => collect_texprs(collect_strings(t1, ie.lhs), ie.elems)
+        checker::TArrayLit as a => collect_array_elems(t1, a.elements)
+        checker::TPathExpr as pe => st_intern(st_intern(t1, pe.enum_name).table, pe.member).table
+        // (C7.16) IF: collect cond + both statement blocks. (TMatchExpr stays tag-only until the
+        // pattern codec lands.) TNumber/TByteLit/TBoolLit/TNullLit carry no strings → `_`.
+        checker::TIfExpr as iff => collect_tstatements(collect_tstatements(collect_strings(t1, iff.cond), iff.then_blk), iff.else_blk)
+        checker::TMatchExpr as m => collect_tarms(collect_strings(t1, m.subject), m.arms)
+        _             => t1
+    }
+}
+
+// (C7.16) PROGRAM-FRAMING collect pass (mirrors the write_* framing helpers).
+fn collect_typeexprs(t: StrTable, xs: []parser::TypeExpr) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_typeexpr(tab, xs[i]); i++ }
+    tab
+}
+fn collect_typeexpr(t: StrTable, te: parser::TypeExpr) -> StrTable {
+    match te {
+        parser::NamedType as n    => collect_path(t, n.path)
+        parser::SliceType as s    => collect_typeexpr(t, s.element)
+        parser::UnionType as u    => collect_typeexprs(t, u.members)
+        parser::OptionalType as o => collect_typeexpr(t, o.inner)
+        parser::FunctionType as f => collect_typeexpr(collect_typeexprs(t, f.params), f.ret)   // (W10a)
+    }
+}
+fn collect_params(t: StrTable, xs: []parser::Param) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_typeexpr(st_intern(tab, xs[i].name).table, xs[i].type_ann); i++ }
+    tab
+}
+fn collect_fields(t: StrTable, xs: []parser::Field) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_typeexpr(st_intern(tab, xs[i].name).table, xs[i].type_ann); i++ }
+    tab
+}
+fn collect_typebody(t: StrTable, tb: parser::TypeBody) -> StrTable {
+    match tb {
+        parser::StructBody as s  => collect_fields(t, s.fields)
+        parser::EnumBody as e    => collect_pieces(t, e.members)
+        parser::FlagsBody as f   => collect_pieces(t, f.members)
+        parser::VariantBody as v => collect_typeexpr(t, v.type_expr)
+        parser::AliasBody as a   => collect_typeexpr(t, a.alias)
+        parser::ExternBody       => t
+        parser::ClassBody as c   => collect_fields(t, c.fields)   // (W10b.CLASS) methods not yet collected, same pre-existing gap as struct methods
+    }
+}
+fn collect_typedecl(t: StrTable, d: parser::TypeDecl) -> StrTable {
+    st_intern(collect_typebody(st_intern(t, d.name).table, d.body), d.doc).table
+}
+fn collect_usedecl(t: StrTable, u: parser::UseDecl) -> StrTable {
+    st_intern(collect_path(t, u.path), u.alias).table
+}
+fn collect_tfunction(t: StrTable, f: checker::TFunction) -> StrTable {
+    mut tab = st_intern(t, f.name).table
+    tab = collect_params(tab, f.params)
+    tab = collect_type_strings(tab, f.return_type)
+    tab = collect_tstatements(tab, f.body)
+    tab = st_intern(tab, f.doc).table
+    tab = st_intern(tab, f.namespace).table
+    tab = st_intern(tab, f.file).table
+    tab = st_intern(tab, f.c_symbol).table
+    st_intern(tab, f.from_lib).table
+}
+fn collect_titems(t: StrTable, xs: []checker::TItem) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_titem(tab, xs[i]); i++ }
+    tab
+}
+fn collect_titem(t: StrTable, it: checker::TItem) -> StrTable {
+    match it {
+        checker::TFunction as f  => collect_tfunction(t, f)
+        parser::TypeDecl as d    => collect_typedecl(t, d)
+        parser::UseDecl as u     => collect_usedecl(t, u)
+        checker::TStatement as s => collect_tstatement(t, s)
+    }
+}
+fn collect_program(t: StrTable, prog: checker::TProgram) -> StrTable { collect_titems(t, prog.items) }
+
+// (C7.16) MATCH FRAMING collect — pattern-expr / Pattern / TArm.
+fn collect_pexpr(t: StrTable, e: parser::Expr) -> StrTable {
+    match e.kind {
+        parser::StrLit as s => st_intern(t, s.text).table
+        _ => t                                              // Number/ByteLit carry no interned string
+    }
+}
+fn collect_patterns(t: StrTable, xs: []parser::Pattern) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_pattern(tab, xs[i]); i++ }
+    tab
+}
+fn collect_pattern(t: StrTable, p: parser::Pattern) -> StrTable {
+    match p {
+        parser::LiteralPattern as l => collect_pexpr(t, l.value)
+        parser::RangePattern as r   => collect_pexpr(collect_pexpr(t, r.lo), r.hi)
+        parser::AltPattern as a     => collect_patterns(t, a.options)
+        parser::BindPattern as bp => {
+            mut tab = st_intern(collect_path(t, bp.type_name), bp.binding).table
+            match bp.slice_type { parser::TypeExpr as st => collect_typeexpr(tab, st); null => tab }
+        }
+        parser::FieldPattern as f   => collect_pieces(collect_path(t, f.type_name), f.fields)
+        parser::WildcardPattern     => t
+        parser::NullPattern         => t
+    }
+}
+fn collect_tarms(t: StrTable, xs: []checker::TArm) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_tarm(tab, xs[i]); i++ }
+    tab
+}
+fn collect_tarm(t: StrTable, a: checker::TArm) -> StrTable {
+    mut tab = collect_pattern(t, a.pattern)
+    if a.has_when { tab = collect_strings(tab, a.guard) }
+    collect_tstatements(tab, a.body)
+}
+
+// --- the frame: header (magic + version + hash) + the body ---
+
+fn serialize(te: checker::TExpr) -> []byte {
+    let table = collect_strings(st_empty(), te)
+    let body = write_texpr(write_strtable(teko::list::empty(), table), table, te)
+    let h = fnv1a(body, 0)
+    mut out: []byte = teko::list::empty()
+    out = write_u8(out, b'T')
+    out = write_u8(out, b'K')
+    out = write_u8(out, b'B')
+    out = write_u8(out, 0)
+    out = write_u32(out, 1)                          // version 1 = a single TExpr
+    out = write_u64(out, h)                          // FNV-1a of the body
+    append_bytes(out, body)
+}
+
+// (C7.16) serialize a whole typed PROGRAM. Same frame, VERSION 2 (program tree) so the reader
+// can't confuse it with a version-1 single-expr `.tkb`. The KEYSTONE for `.tkl` packaging (C7.12).
+fn serialize_program(prog: checker::TProgram) -> []byte {
+    let table = collect_program(st_empty(), prog)
+    let body = write_program(write_strtable(teko::list::empty(), table), table, prog)
+    let h = fnv1a(body, 0)
+    mut out: []byte = teko::list::empty()
+    out = write_u8(out, b'T')
+    out = write_u8(out, b'K')
+    out = write_u8(out, b'B')
+    out = write_u8(out, 0)
+    out = write_u32(out, 2)                          // version 2 = a program tree
+    out = write_u64(out, h)
+    append_bytes(out, body)
+}

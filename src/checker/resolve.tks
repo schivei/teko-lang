@@ -1,0 +1,918 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+
+use teko::parser
+
+// a registered user type: name + the NAMESPACE it was declared in (A3 provenance) + its
+// VISIBILITY (private/pub/exp) + its parsed declaration. namespace/vis drive W-vis-enforce.
+type TypeReg   = struct { name: str; namespace: str; vis: parser::Visibility; decl: parser::TypeDecl }
+pub type TypeTable = []TypeReg
+
+// find a user type by name; error if not registered.
+fn type_table_find(table: TypeTable, name: str) -> parser::TypeDecl | error {
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].name == name { return table[i].decl }
+        i++
+    }
+    error { message = "not a user type" }
+}
+
+// (S4) Extend the type table with generic type-params as OPAQUE nominal types, so a generic
+// signature/body resolves with `T` abstract. An unconstrained `T` has no members/operators, so
+// OPERATING on it (`x.foo`, `a > b`) fails at the definition (M.1 fail-loud, no reflection) — only
+// opaque usage (store/pass/return/hold/match-bind) is allowed (constraints unlock ops at S6). The
+// monomorph pass substitutes each `Named{T}` with the concrete arg before codegen. PREPENDED so a
+// type-param SHADOWS a same-named user type within the generic. Empty type_params → table unchanged.
+// Used by collect (func sigs), check_modules (vis check), and typer (bodies). (C: tk_type_param_table.)
+pub fn type_param_table(type_params: []str, ns: str, table: TypeTable) -> TypeTable {
+    if type_params.len == 0 { return table }
+    mut tbl: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        // namespace = the USING namespace so the W-vis-enforce cross-namespace/visibility check (check_modules)
+        // treats the type-param as a LOCAL type, not a bare cross-namespace reference.
+        let d = parser::TypeDecl { name = type_params[i]; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::ExternBody { }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+        tbl = teko::list::push(tbl, TypeReg { name = type_params[i]; namespace = ns; vis = parser::Visibility::Private; decl = d })
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= table.len { break }
+        tbl = teko::list::push(tbl, table[j])
+        j++
+    }
+    tbl
+}
+
+// resolve a NAMED type (a path) to a semantic Type: built-in or user type.
+fn resolve_named(path: parser::Path, table: TypeTable) -> Type | error {
+    // M.1: an empty path is an internal invariant break — an honest error, never an out-of-bounds.
+    if path.segments.len == 0 { return error { message = "internal: empty type path (a void/missing type used where a value type is required)" } }
+    let name = path.segments[path.segments.len - 1].name   // seed: last segment
+    match builtin_type(name) {                  // u8…u64, byte, str, error, …
+        Type as t => return t
+        error     => {}
+    }
+    match type_table_find(table, name) {        // a user struct/enum/variant/alias
+        // A TRANSPARENT alias `type Name = <type-expr>` resolves THROUGH to the aliased type
+        // (self-host parity): `TypeTable = []TypeReg` → a Slice, `Foo = Circle` → its Named
+        // struct, etc. struct/enum/variant decls stay NOMINAL (a bare Named of `name`).
+        parser::TypeDecl as td => {
+            match td.body {
+                parser::AliasBody as ab => return resolve_type(ab.alias, table)
+                _                       => return Named { name = name }
+            }
+        }
+        error    => {}
+    }
+    error { message = $"unknown type: {name}" }
+}
+
+// A NAMED type referring to a `variant` decl → its expanded Variant. A variant decl's body IS
+// a union type-expr (A | B | …), so resolve_type on it yields the Variant with its members; the
+// members resolve to Named (resolve_named keeps user types nominal), so this terminates and does
+// NOT recurse into nested named variants. Anything else returns unchanged.
+fn expand_variant(t: Type, table: TypeTable) -> Type {
+    let name = match t {
+        Named as n => n.name
+        _          => return t          // not a named type → unchanged
+    }
+    let decl = match type_table_find(table, name) {
+        parser::TypeDecl as td => td
+        error          => return t      // not a user type → unchanged
+    }
+    match decl.body {
+        parser::VariantBody as vb => {
+            match resolve_type(vb.type_expr, table) {
+                Type as ex => ex            // the variant body's union → its Variant
+                error      => t             // unresolvable → unchanged (honest fallback, like the C `ex.ok ? … : t`)
+            }
+        }
+        _ => t                          // a struct/enum decl, not a variant → unchanged
+    }
+}
+
+// (#41-followon) Does a value of `from` WIDEN into `to`? The single source of truth for value-
+// position widening, shared by the return/trailing-value/assign/binding check (assignable_to
+// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14 + present-wrap §202):
+//   • type equality,
+//   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
+//   • `T` into `T?` (and `U?`/sentinel into `T?`),
+//   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
+// Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
+fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
+    if type_eq(from, to) { return true }
+    if depth <= 0 { return false }
+    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
+    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
+    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
+    match to {
+        Optional as opt => {
+            if widens_into_at(from, opt.inner, table, depth - 1) { return true }   // T (or a case of T) → T?
+            match from { Optional => return true; _ => {} }                        // U? / sentinel → T?
+        }
+        _ => {}
+    }
+    match expand_variant(from, table) {        // a VARIANT source decomposes into its members
+        Variant as fv => {
+            mut i = 0
+            loop {
+                if i >= fv.members.len { break }
+                if !widens_into_at(fv.members[i], to, table, depth - 1) { return false }
+                i++
+            }
+            return true
+        }
+        _ => {}
+    }
+    // COVARIANT value slices: `[]A` widens into `[]B` iff A widens into B (value/copy semantics —
+    // sound; a sentinel `Void` element is already accepted by type_eq above). `[]Str` fits `[]Type`.
+    match from {
+        Slice as fs => match to {
+            Slice as ts => return widens_into_at(fs.element, ts.element, table, depth - 1)
+            _           => {}
+        }
+        _ => {}
+    }
+    match expand_variant(to, table) {        // a NAMED variant → its Variant (so cases widen in)
+        Variant as tv => {
+            mut j = 0
+            loop {
+                if j >= tv.members.len { break }
+                if widens_into_at(from, tv.members[j], table, depth - 1) { return true }
+                j++
+            }
+            false
+        }
+        _ => false
+    }
+}
+fn widens_into(from: Type, to: Type, table: TypeTable) -> bool { widens_into_at(from, to, table, 16) }
+
+// (#41-followon) Collect `t`'s members into `acc` for a union JOIN: an INLINE variant contributes
+// its members (flattened); anything else contributes itself. Deduped by type_eq. Named variants
+// stay NOMINAL (consistent with how `Type | error` keeps `Type` named). (Mirror of resolve.c.)
+fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
+    match t {
+        Variant as v => {
+            mut out = acc
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                out = union_collect(out, v.members[i], table)
+                i++
+            }
+            out
+        }
+        _ => {
+            mut i = 0
+            loop {
+                if i >= acc.len { break }
+                if type_eq(acc[i], t) { return acc }   // dedup
+                i++
+            }
+            teko::list::push(acc, t)
+        }
+    }
+}
+
+// (#41-followon) The JOIN (least-upper-bound) of two arm/branch types for match/`if` value
+// unification (B.20). If either widens into the other, the WIDER one; otherwise the UNION variant
+// `a | b` (members flattened + deduped) — the branch values are bare cases that each widen into
+// this union, which in turn widens into any wider declared return variant. (Mirror of resolve.c.)
+fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
+    if type_eq(a, b) { return a }
+    if widens_into(a, b, table) { return b }
+    if widens_into(b, a, table) { return a }
+    let m1 = union_collect(teko::list::empty(), a, table)
+    let m2 = union_collect(m1, b, table)
+    Variant { members = m2 }
+}
+
+// ── (S4) generics inference: subst + unify ───────────────────────────────────────────────────
+// A type-param → concrete-type binding (parallel arrays). `params` is the generic's type-param
+// universe; `names`/`types` are the bindings discovered by unify. Used by type_call (call result
+// type) and the monomorph pass (stamping). (C: tk_subst.)
+pub type Subst = struct { params: []str; names: []str; types: []Type }
+
+fn is_type_param(name: str, params: []str) -> bool {
+    mut i = 0
+    loop { if i >= params.len { break }; if params[i] == name { return true }; i++ }
+    false
+}
+
+fn subst_find(s: Subst, name: str) -> Type? {
+    mut i = 0
+    loop { if i >= s.names.len { break }; if s.names[i] == name { return s.types[i] }; i++ }
+    null
+}
+
+// substitute each BOUND type-param Named{Tp} by its concrete type. TOTAL over Type cases; structural
+// recursion. A Named that is not a bound param passes through unchanged. (C: tk_subst_type.)
+pub fn subst_type(t: Type, s: Subst) -> Type {
+    match t {
+        Named as n    => match subst_find(s, n.name) { Type as ct => ct; null => t }
+        Slice as sl   => Slice { element = subst_type(sl.element, s) }
+        Optional as o => Optional { inner = subst_type(o.inner, s) }
+        Reference as r => Reference { inner = subst_type(r.inner, s) }   // (MEM-1b) Ref<T> substitutes its referenced type
+        Variant as v  => {
+            mut ms: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
+            Variant { members = ms }
+        }
+        Func as f     => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, subst_type(f.params[i], s)); i++ }
+            Func { params = ps; ret = subst_type(f.ret, s) ; variadic = false ; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+        _             => t   // Prim, Byte, Char, Str, Error, Void, Ptr, Uptr — leaves
+    }
+}
+
+// a non-concrete Void SENTINEL (`empty()` → []Void, bare `null` → Void?)? Such a type cannot pin a
+// type-param (it concretizes only in a typed slot — M.2 no-guessing). (C: tk_type_has_void_sentinel.)
+fn type_has_void_sentinel(t: Type) -> bool {
+    match t {
+        Void          => true
+        Slice as sl   => match sl.element { Void => true; _ => false }
+        Optional as o => match o.inner { Void => true; _ => false }
+        _             => false
+    }
+}
+
+// unify a param PATTERN (may contain type-param Named's) against a concrete ARG type, extending the
+// Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a future refinement).
+// `[]T`/`T?` unify their element/inner by structure. REJECT a Void-sentinel arg (cannot pin T —
+// M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens elsewhere).
+// (C: tk_unify.)
+pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | error {
+    match pattern {
+        Named as n => {
+            if !is_type_param(n.name, s.params) { return s }
+            if type_has_void_sentinel(arg) {
+                return error { message = $"cannot infer type parameter {n.name} from an untyped empty slice / null — annotate the argument" }
+            }
+            // (MEM Step 0, B) ESCAPE GATE — a reference can NEVER be the INFERRED binding for a type
+            // parameter: `id(r)` where r: Ref<i64> would stamp `int64_t * id__g__ref_i64(int64_t *)`,
+            // returning a raw reference that outlives its target. Mirror of the written-arg gate in
+            // resolve_generic_inst (A); same message.
+            match arg { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => {} }
+            match subst_find(s, n.name) {
+                Type as existing => {
+                    if type_eq(existing, arg) { s }
+                    else { error { message = $"type parameter {n.name} inferred as conflicting types" } }
+                }
+                null => Subst { params = s.params; names = teko::list::push(s.names, n.name); types = teko::list::push(s.types, arg) }
+            }
+        }
+        Slice as sl   => match arg { Slice as asl => unify(sl.element, asl.element, s, table); _ => s }
+        Optional as o => match arg { Optional as ao => unify(o.inner, ao.inner, s, table); _ => s }
+        Reference as r => match arg { Reference as ar => unify(r.inner, ar.inner, s, table); _ => s }   // (MEM-1b)
+        _             => s
+    }
+}
+
+// the type-param names that appear in a function signature: a Named whose name is NOT a registered
+// user type (type-params live only in the per-fn scope, never the global table). In order, deduped.
+// (C: tk_collect_sig_type_params.)
+pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str) -> []str {
+    match t {
+        Named as n => match type_table_find(table, n.name) {
+            parser::TypeDecl => acc
+            error            => if is_type_param(n.name, acc) { acc } else { teko::list::push(acc, n.name) }
+        }
+        Slice as sl   => collect_sig_type_params(sl.element, table, acc)
+        Optional as o => collect_sig_type_params(o.inner, table, acc)
+        Reference as r => collect_sig_type_params(r.inner, table, acc)   // (MEM-1b) Ref<T> may carry a type-param
+        Variant as v  => { mut a = acc; mut i = 0; loop { if i >= v.members.len { break }; a = collect_sig_type_params(v.members[i], table, a); i++ }; a }
+        Func as f     => { mut a = acc; mut i = 0; loop { if i >= f.params.len { break }; a = collect_sig_type_params(f.params[i], table, a); i++ }; collect_sig_type_params(f.ret, table, a) }
+        _             => acc
+    }
+}
+
+// resolve a syntactic TypeExpr to a pure semantic Type (recursive — B.8).
+pub fn resolve_type(te: parser::TypeExpr, table: TypeTable) -> Type | error {
+    match te {
+        // A plain name resolves as before; generic type-ARGUMENTS `Box<i64>` (S4 type-generics)
+        // resolve to the nominal instance `Named{Box__g__i64}` — the concrete decl is stamped by the
+        // instantiation pass / mono (blocker #1: reuse the Named case, no new Type variant).
+        parser::NamedType as nt => {
+            if nt.args.len == 0 { resolve_named(nt.path, table) }
+            else { resolve_generic_inst(nt, table) }
+        }
+        parser::SliceType as st => {
+            let el = match resolve_type(st.element, table) {
+                Type as t  => t
+                error as e => return e
+            }
+            // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a collection element.
+            match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => {} }
+            Slice { element = el }
+        }
+        parser::UnionType as ut => {
+            mut members: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= ut.members.len { break }
+                let m = match resolve_type(ut.members[i], table) {
+                    Type as t  => t
+                    error as e => return e
+                }
+                // M.1/rules 2 & 3: a variant member must be a COMPLETE type — never
+                // `void` (not a value) and never nullable (`T?` — disjoint domain).
+                match m {
+                    Void      => return error { message = "a variant member may not be `void`" }
+                    Optional  => return error { message = "a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`" }
+                    Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }   // (MEM Step 0, R4)
+                    _         => {}
+                }
+                members = teko::list::push(members, m)
+                i++
+            }
+            Variant { members = members }
+        }
+        // (W10a) FunctionType `(A, B) -> R` → Func { params; ret ; variadic = false }. The return MAY be `void`
+        // (a function value can return nothing); params must be COMPLETE value types (void/ref
+        // rejected — a ref cannot be stored, R4; void is not a value, M.3).
+        parser::FunctionType as fnt => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= fnt.params.len { break }
+                let pt = match resolve_type(fnt.params[i], table) { Type as t => t; error as e => return e }
+                match pt {
+                    Void      => return error { message = "a function type parameter may not be `void` (M.3)" }
+                    Reference => return error { message = "a reference cannot be a function-type parameter (a ref cannot escape, R4)" }
+                    _         => {}
+                }
+                ps = teko::list::push(ps, pt)
+                i++
+            }
+            let rt = match resolve_type(fnt.ret, table) { Type as t => t; error as e => return e }
+            return Func { params = ps; ret = rt ; variadic = false ; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+        parser::OptionalType as ot => {
+            // OptionalType `T?` → Optional { inner } (REBOOT_PLAN §202). The variant case
+            // above already rejects an optional as a variant member; here we just build it.
+            let in = match resolve_type(ot.inner, table) {
+                Type as t  => t
+                error as e => return e
+            }
+            // `void?` is illegal (void is not a value — M.3); `T??` collapses to `T?`.
+            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
+            match in {
+                Void      => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
+                Reference => return error { message = "a reference cannot be nullable (a ref is never null, R2)" }
+                Optional  => return in    // `T??` collapses to `T?`
+                _         => Optional { inner = in }
+            }
+        }
+    }
+}
+
+// (C1.8) the surface spelling of a prim kind — the same names builtin_type accepts (scope.tks),
+// so a rendered mismatch reads in the user's own vocabulary. Mirror of resolve.c::prim_name.
+fn prim_name(k: PrimKind) -> str {
+    match k {
+        U8 => "u8"; U16 => "u16"; U32 => "u32"; U64 => "u64"; U128 => "u128"
+        I8 => "i8"; I16 => "i16"; I32 => "i32"; I64 => "i64"; I128 => "i128"
+        F16 => "f16"; F32 => "f32"; F64 => "f64"
+        Bool => "bool"
+    }
+}
+
+// (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Prim → its
+// surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → the name, Slice →
+// "slice_"+elem, Optional → "opt_"+inner. Total — always yields a symbol-safe fragment. Shared by
+// resolve (type instantiation) and the mono pass so a use and its stamped decl agree byte-for-byte.
+// (C: tk_type_mangle.)
+pub fn type_mangle(t: Type) -> str {
+    match t {
+        Prim as p     => prim_name(p.kind)
+        Str           => "str"
+        Byte          => "byte"
+        Char          => "char"
+        Named as n    => n.name
+        Slice as sl   => teko::str::concat("slice_", type_mangle(sl.element))
+        Optional as o => teko::str::concat("opt_", type_mangle(o.inner))
+        Error         => "error"
+        Void          => "void"
+        Ptr as p      => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", type_mangle(t)) }
+        Uptr          => "uptr"
+        Reference as r => teko::str::concat("ref_", type_mangle(r.inner))   // (MEM-1b)
+        Variant       => "variant"
+        Func          => "func"
+    }
+}
+
+// (S4) the mangled name of a generic INSTANCE: `<base>__g__<arg0>[__<arg1>…]` over the args IN
+// ORDER. The `__g__` infix marks a stamped symbol (no user name may contain it). (C: tk_generic_inst_name.)
+pub fn generic_inst_name(base: str, args: []Type) -> str {
+    mut out = teko::str::concat(base, "__g__")
+    mut i = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { out = teko::str::concat(out, "__") }
+        out = teko::str::concat(out, type_mangle(args[i]))
+        i++
+    }
+    out
+}
+
+// (S4) `Box<i64>` → the nominal instance `Named{Box__g__i64}`. Resolves every type-argument, then
+// validates against the generic decl's arity (the decl must exist, be generic, same count). The
+// concrete decl (fields with T→arg substituted) is stamped by the instantiation pass / mono.
+fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable) -> Type | error {
+    let name = nt.path.segments[nt.path.segments.len - 1].name
+    // (S-mem) the builtin generic `ptr<T>` → a typed pointer `Ptr{inner}`. `ptr<void>` ≡ the opaque
+    // `ptr` (void isn't a value type) → null inner. Not a user decl, handled before the table lookup.
+    if name == "ptr" {
+        if nt.args.len != 1 { return error { message = "`ptr<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table) { Type as t => t; error as e => return e }
+        match argt { Void => return Ptr { inner = null }; _ => return Ptr { inner = argt } }
+    }
+    // (MEM-1b) the compiler-known generic struct `Ref<T>` → the SAFE reference `Ref{inner}` (the safe
+    // surface OVER the raw `ptr<T>`). Capitalized (a struct-like named type, reusing generics — no
+    // keyword). Unlike `ptr`, a ref is never null and never opaque, so `Ref<void>` is rejected (void
+    // is not a value) and `Ref` requires a type argument. Not a user decl — reserved, handled before
+    // the table lookup.
+    if name == "Ref" {
+        if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table) { Type as t => t; error as e => return e }
+        match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => {} }
+        // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
+        // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
+        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; VM cell_set), and read
+        // by `r.value` (native `(*r)`; VM cell_get). Under the cell-IDENTITY model both are
+        // observationally identical in VM and native, exactly like scalars. So Prim, Byte, Str,
+        // Named (struct/enum/variant), Slice, Optional and Variant are all allowed. REJECT only the
+        // NON-values / aliasing hazards: Void (already above — not a value), Reference (no ref-to-ref),
+        // Ptr/Uptr (raw FFI addresses), Func (a function value carries no replaceable storage).
+        match argt {
+            Reference => return error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
+            Ptr       => return error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Uptr      => return error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Func      => return error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+            _         => return Reference { inner = argt }
+        }
+    }
+    mut argtypes: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= nt.args.len { break }
+        let a = match resolve_type(nt.args[i], table) { Type as t => t; error as e => return e }
+        // (MEM Step 0, A) ESCAPE GATE — a reference can NEVER be a generic type ARGUMENT: carrying a
+        // `Ref<T>` into a user generic would stamp it into a struct field / return position (e.g.
+        // `Box<Ref<i64>>` → `struct { value: int64_t * }` returned by value) and escape. The template
+        // itself is validated pre-instantiation (R1–R5); the only way a Reference enters a stamped
+        // decl/fn is via a type-arg — blocked here (written) and in unify (inferred).
+        match a { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => {} }
+        argtypes = teko::list::push(argtypes, a)
+        i++
+    }
+    match type_table_find(table, name) {
+        parser::TypeDecl as td => {
+            if td.type_params.len == 0 {
+                return error { message = $"type `{name}` is not generic but was given type arguments" }
+            }
+            if td.type_params.len != nt.args.len {
+                return error { message = $"generic type `{name}` expects a different number of type arguments" }
+            }
+            Named { name = generic_inst_name(name, argtypes) }
+        }
+        error => error { message = $"unknown generic type: {name}" }
+    }
+}
+
+// (C1.8) render a semantic Type to a human string for diagnostics ("expected X, found Y"):
+//   prims → "i32"/… , "byte", "str", "error", "void", slice → "[]<elem>", optional → "<inner>?",
+//   variant → "A | B | …", named → "<name>". Recursion builds slice/optional/variant bottom-up.
+// Mirror of resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it
+// never touches the surface `error` value), so it is materialized now, not deferred to E2.
+// (A SENTINEL slice/optional — a `Void`-marker element/inner, the untyped `empty()` / bare `null`
+//  — renders its hole as "_", matching the C twin's NULL-pointer case.)
+pub fn type_render(t: Type) -> str {
+    match t {
+        Prim as p     => prim_name(p.kind)
+        Byte          => "byte"
+        Char          => "char"
+        Str           => "str"
+        Error         => "error"
+        Void          => "void"
+        Named as n    => n.name
+        Slice as s    => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
+        Optional as o => match o.inner   { Void => "_?";  _ => $"{type_render(o.inner)}?" }
+        Variant as v  => render_members(v.members)
+        Func as f     => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+        Ptr as p      => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
+        Uptr          => "uptr"           // (C7.1a) opaque word-size unsigned
+        Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
+    }
+}
+
+// (C1.8) render a function type "(p0, p1, …) -> ret" — mirror of the FUNC branch of
+// resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
+fn render_func(f: Func) -> str {
+    mut params = ""
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if i > 0 { params = $"{params}, " }
+        params = $"{params}{type_render(f.params[i])}"
+        i++
+    }
+    $"({params}) -> {type_render(f.ret)}"
+}
+
+// (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the
+// variant branch of resolve.c::tk_type_render.
+fn render_members(members: []Type) -> str {
+    if members.len == 0 { return "<empty variant>" }
+    mut out = type_render(members[0])
+    mut i = 1
+    loop {
+        if i >= members.len { break }
+        out = $"{out} | {type_render(members[i])}"
+        i++
+    }
+    out
+}
+
+// ── (S4) type-generic INSTANTIATION pass ────────────────────────────────────────────────────────
+// Discover every WRITTEN generic-type use `Box<i64>` across the program and STAMP a concrete decl
+// `Box__g__i64 = struct { value: i64 }` into the TypeTable BEFORE typing, so field-access and
+// struct-init see concrete fields. No generic type used → the table is returned UNCHANGED (the
+// non-generic corpus is unperturbed). The stamped name reuses generic_inst_name, so a USE
+// (resolve_generic_inst) and its stamped decl agree byte-for-byte. (C: tk_instantiate_types.)
+//
+// SCOPE (this crumb): instantiation sites are fn params/returns, type-decl bodies (struct/variant/
+// alias), and binding ANNOTATIONS (recursing loop/defer blocks). Casts and if/match-nested bindings
+// are not yet walked (a later crumb) — those surface as an "unknown type" at typing, not silently.
+
+// substitute type-parameter NAMES with their argument type-exprs throughout a (syntactic) type-expr.
+fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeExpr) -> parser::TypeExpr {
+    match te {
+        parser::NamedType as nt => {
+            if nt.path.segments.len == 1 && nt.args.len == 0 {
+                let nm = nt.path.segments[0].name
+                mut k = 0
+                loop {
+                    if k >= params.len { break }
+                    if params[k] == nm { return args[k] }
+                    k++
+                }
+            }
+            mut nargs: []parser::TypeExpr = teko::list::empty()
+            mut j = 0
+            loop { if j >= nt.args.len { break }; nargs = teko::list::push(nargs, subst_texpr_names(nt.args[j], params, args)); j++ }
+            parser::NamedType { path = nt.path; args = nargs }
+        }
+        parser::SliceType as st    => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
+        parser::OptionalType as ot => parser::OptionalType { inner = subst_texpr_names(ot.inner, params, args) }
+        parser::UnionType as ut    => {
+            mut ms: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_texpr_names(ut.members[i], params, args)); i++ }
+            parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) recurse into params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_texpr_names(fnt.params[i], params, args)); i++ }
+            parser::FunctionType { params = nps; ret = subst_texpr_names(fnt.ret, params, args) }
+        }
+    }
+}
+
+// substitute the type-params throughout a type-decl BODY (struct fields / variant / alias).
+fn subst_body_names(body: parser::TypeBody, params: []str, args: []parser::TypeExpr) -> parser::TypeBody {
+    match body {
+        parser::StructBody as sb => {
+            mut nf: []parser::Field = teko::list::empty()
+            mut i = 0
+            loop { if i >= sb.fields.len { break }; nf = teko::list::push(nf, parser::Field { name = sb.fields[i].name; type_ann = subst_texpr_names(sb.fields[i].type_ann, params, args) ; vis = parser::Visibility::Pub; is_intern = false }); i++ }
+            parser::StructBody { fields = nf ; methods = teko::list::empty() }
+        }
+        parser::VariantBody as vb => parser::VariantBody { type_expr = subst_texpr_names(vb.type_expr, params, args) }
+        parser::AliasBody as ab   => parser::AliasBody { alias = subst_texpr_names(ab.alias, params, args) }
+        _                         => body   // enum / flags / extern carry no type-exprs
+    }
+}
+
+// collect every generic-type USE (a NamedType carrying args) reachable in a type-expr — innermost
+// first, so a nested `Box<i64>` inside `[]Box<i64>` is stamped before the enclosing use.
+fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match te {
+        parser::NamedType as nt => {
+            mut i = 0
+            loop { if i >= nt.args.len { break }; out = collect_texpr_insts(nt.args[i], out); i++ }
+            if nt.args.len > 0 { out = teko::list::push(out, te) }
+        }
+        parser::SliceType as st    => out = collect_texpr_insts(st.element, out)
+        parser::OptionalType as ot => out = collect_texpr_insts(ot.inner, out)
+        parser::UnionType as ut    => { mut i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
+        parser::FunctionType as fnt => { mut i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }   // (W10a)
+    }
+    out
+}
+
+fn collect_body_insts(body: parser::TypeBody, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match body {
+        parser::StructBody as sb  => { mut i = 0; loop { if i >= sb.fields.len { break }; out = collect_texpr_insts(sb.fields[i].type_ann, out); i++ } }
+        parser::VariantBody as vb => out = collect_texpr_insts(vb.type_expr, out)
+        parser::AliasBody as ab   => out = collect_texpr_insts(ab.alias, out)
+        _                         => {}
+    }
+    out
+}
+
+fn collect_stmts_insts(stmts: []parser::Statement, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    mut i = 0
+    loop { if i >= stmts.len { break }; out = collect_stmt_insts(stmts[i], out); i++ }
+    out
+}
+
+// (W9.4) collect the generic instance a construction-site / bind-pattern type-arg list names: synthesize
+// the NamedType `<path><args>` and run it through collect_texpr_insts (which pushes it AND recurses into
+// the args), so `Foo<i64>{…}` / `Foo<i64> as x` get `Foo__g__i64` stamped exactly like an annotation.
+fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    if args.len == 0 { return acc }
+    collect_texpr_insts(parser::NamedType { path = path; args = args }, acc)
+}
+
+// (W9.4) walk an expression for construction-site type-args (`Foo<i64>{…}`) and nested patterns.
+fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match e.kind {
+        parser::StructLit as sl => {
+            out = collect_site_args(sl.type_path, sl.type_args, out)
+            mut i = 0
+            loop { if i >= sl.field_vals.len { break }; out = collect_expr_insts(sl.field_vals[i], out); i++ }
+        }
+        parser::Binary as b  => { out = collect_expr_insts(b.left, out); out = collect_expr_insts(b.right, out) }
+        parser::Unary as u   => out = collect_expr_insts(u.operand, out)
+        parser::Compare as c => {
+            out = collect_expr_insts(c.first, out)
+            mut i = 0
+            loop { if i >= c.rest.len { break }; out = collect_expr_insts(c.rest[i].operand, out); i++ }
+        }
+        parser::Call as call => { mut i = 0; loop { if i >= call.args.len { break }; out = collect_expr_insts(call.args[i], out); i++ } }
+        parser::IfExpr as f  => {
+            out = collect_expr_insts(f.cond, out)
+            out = collect_stmts_insts(f.then_blk, out)
+            if f.has_else { out = collect_stmts_insts(f.else_blk, out) }
+        }
+        parser::MatchExpr as m => {
+            out = collect_expr_insts(m.subject, out)
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                out = collect_pattern_insts(m.arms[i].pattern, out)
+                if m.arms[i].has_when { out = collect_expr_insts(m.arms[i].guard, out) }
+                out = collect_stmts_insts(m.arms[i].body, out)
+                i++
+            }
+        }
+        parser::FieldAccess as fa => out = collect_expr_insts(fa.receiver, out)
+        parser::SafeFieldAccess as sfa => out = collect_expr_insts(sfa.receiver, out)
+        parser::Coalesce as co => { out = collect_expr_insts(co.left, out); out = collect_expr_insts(co.right, out) }
+        parser::MethodCall as mc => {
+            out = collect_expr_insts(mc.receiver, out)
+            mut i = 0
+            loop { if i >= mc.args.len { break }; out = collect_expr_insts(mc.args[i], out); i++ }
+        }
+        parser::Cast as ct => out = collect_expr_insts(ct.expr, out)
+        parser::Index as ix => { out = collect_expr_insts(ix.receiver, out); out = collect_expr_insts(ix.index, out) }
+        parser::Interp as ip => { mut i = 0; loop { if i >= ip.holes.len { break }; out = collect_expr_insts(ip.holes[i], out); i++ } }
+        parser::InExpr as ie => {
+            out = collect_expr_insts(ie.lhs, out)
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; out = collect_expr_insts(ie.elems[i], out); i++ }
+        }
+        parser::ArrayLit as al => { mut i = 0; loop { if i >= al.elements.len { break }; out = collect_expr_insts(al.elements[i].expr, out); i++ } }
+        _ => {}   // leaves (Number/Var/StrLit/ByteLit/BoolLit/NullLit/PathExpr) carry no type-args
+    }
+    out
+}
+
+// (W9.4) walk a pattern for bind-pattern type-args (`Foo<i64> as x`, incl alt options).
+fn collect_pattern_insts(p: parser::Pattern, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match p {
+        parser::BindPattern as bp => { if !bp.is_slice { out = collect_site_args(bp.type_name, bp.type_args, out) } }
+        parser::AltPattern as ap  => { mut i = 0; loop { if i >= ap.options.len { break }; out = collect_pattern_insts(ap.options[i], out); i++ } }
+        _ => {}
+    }
+    out
+}
+
+fn collect_stmt_insts(s: parser::Statement, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match s {
+        parser::Binding as b   => { if b.has_type { out = collect_texpr_insts(b.type_ann, out) }; out = collect_expr_insts(b.value, out) }
+        parser::Assign as a    => out = collect_expr_insts(a.value, out)
+        parser::Return as r    => { if r.has_value { out = collect_expr_insts(r.value, out) } }
+        parser::ExprStmt as es => out = collect_expr_insts(es.expr, out)
+        parser::LoopStmt as l  => out = collect_stmts_insts(l.body, out)
+        parser::DeferStmt as d => out = collect_stmts_insts(d.body, out)
+        _                      => {}
+    }
+    out
+}
+
+fn collect_item_insts(it: parser::Item, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match it.content {
+        parser::Function as f => {
+            mut i = 0
+            loop { if i >= f.params.len { break }; out = collect_texpr_insts(f.params[i].type_ann, out); i++ }
+            if f.has_return { out = collect_texpr_insts(f.return_type, out) }
+            out = collect_stmts_insts(f.body, out)
+        }
+        parser::TypeDecl as td => out = collect_body_insts(td.body, out)
+        parser::Statement as s => out = collect_stmt_insts(s, out)
+        _                      => {}
+    }
+    out
+}
+
+// THE PASS: collect instantiation sites, then stamp each concrete decl into the table (dedup by
+// mangled name), scanning each stamped body for transitive instantiations until the worklist drains.
+pub fn instantiate_types(program: parser::Program, table: TypeTable) -> TypeTable {
+    mut work: []parser::TypeExpr = teko::list::empty()
+    mut i = 0
+    loop { if i >= program.items.len { break }; work = collect_item_insts(program.items[i], work); i++ }
+    if work.len == 0 { return table }   // no generic type used → unchanged (corpus-safe)
+    mut tbl = table
+    mut wi = 0
+    loop {
+        if wi >= work.len { break }
+        let te = work[wi]
+        wi++
+        match te {
+            parser::NamedType as nt => {
+                if nt.args.len == 0 { continue }
+                let name = nt.path.segments[nt.path.segments.len - 1].name
+                // resolve args → concrete types for the mangled name; an unresolved arg (e.g. a
+                // type-param inside a generic body) means this site concretizes only when the OUTER
+                // generic is instantiated — skip it here.
+                mut argtypes: []Type = teko::list::empty()
+                mut ok = true
+                mut a = 0
+                loop {
+                    if a >= nt.args.len { break }
+                    match resolve_type(nt.args[a], tbl) { Type as t => argtypes = teko::list::push(argtypes, t); error => { ok = false; break } }
+                    a++
+                }
+                if !ok { continue }
+                let mangled = generic_inst_name(name, argtypes)
+                match type_table_find(tbl, mangled) { parser::TypeDecl => continue; error => {} }   // already stamped
+                match type_table_find(tbl, name) {
+                    parser::TypeDecl as gen => {
+                        if gen.type_params.len != nt.args.len { continue }   // arity error surfaces at resolve
+                        let nbody = subst_body_names(gen.body, gen.type_params, nt.args)
+                        let stamped = parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col }
+                        tbl = teko::list::push(tbl, TypeReg { name = mangled; namespace = ""; vis = gen.vis; decl = stamped })
+                        work = collect_body_insts(nbody, work)   // transitive instantiations in the stamped body
+                    }
+                    error => continue   // unknown base type → reported at typing
+                }
+            }
+            _ => continue
+        }
+    }
+    // (W9.4) normalize generic-INSTANCE references in the stamped bodies to bare stamped names, so
+    // codegen / VM / TKB (reading the syntactic body) agree with the resolved value types.
+    normalize_table_instances(tbl)
+}
+
+// does `name` carry the `__g__` generic-instance infix? (the collision-proof marker a stamped
+// instance name uses; no user symbol may contain it.) (C: tk_name_is_g_instance.)
+pub fn name_is_g_instance(name: str) -> bool {
+    if name.len < 5 { return false }
+    mut i = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' { return true }
+        i++
+    }
+    false
+}
+
+// (S4) the concrete generic-type INSTANCE decls stamped into the table (the `__g__`-marked entries),
+// for the mono pass to emit as program items so codegen sees the concrete struct/variant. TypeReg is
+// file-private, so this accessor exposes just the decls. (C: tk_table_generic_instances.)
+pub fn table_generic_instances(table: TypeTable) -> []parser::TypeDecl {
+    mut out: []parser::TypeDecl = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_is_g_instance(table[i].name) {
+            if table[i].decl.type_params.len == 0 { out = teko::list::push(out, table[i].decl) }
+        }
+        i++
+    }
+    out
+}
+
+// (W9.4) NORMALIZE generic-INSTANCE references in a (syntactic) type-expr to the BARE stamped name.
+// A `Base<args>` reference where `Base` is a user-defined generic (so it resolves to a stamped
+// `Base__g__<mangle>` instance) is rewritten to a bare `NamedType{[Base__g__mangle]}` with NO args,
+// so codegen / VM / TKB (which read the SYNTACTIC declaration body) carry the SAME stamped name the
+// RESOLVED value type carries. A type-PARAMETER name (`T`, args_len == 0) is NOT rewritten; builtin
+// `ptr<T>`/`Ref<T>` (which resolve to Ptr/Ref, not a Named instance) keep their structural shape and
+// their args are normalized recursively. NO-OP when the expr carries no generic-instance reference.
+// (C: tk_normalize_inst_texpr.)
+fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable) -> parser::TypeExpr {
+    match te {
+        parser::NamedType as nt => {
+            if nt.args.len > 0 {
+                // does this `Base<args>` resolve to a stamped user generic instance? (resolve_type
+                // → resolve_generic_inst yields Named{Base__g__mangle}; ptr/Ref yield Ptr/Ref.)
+                match resolve_type(te, table) {
+                    Type as rt => {
+                        match rt {
+                            Named as rn => {
+                                if name_is_g_instance(rn.name) {
+                                    let seg = parser::Segment { name = rn.name }
+                                    return parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), seg) }; args = teko::list::empty() }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    error => {}
+                }
+            }
+            // not a stamped instance (plain name, type-param, or builtin) → recurse into the args.
+            mut nargs: []parser::TypeExpr = teko::list::empty()
+            mut j = 0
+            loop { if j >= nt.args.len { break }; nargs = teko::list::push(nargs, normalize_inst_texpr(nt.args[j], table)); j++ }
+            parser::NamedType { path = nt.path; args = nargs }
+        }
+        parser::SliceType as st    => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
+        parser::OptionalType as ot => parser::OptionalType { inner = normalize_inst_texpr(ot.inner, table) }
+        parser::UnionType as ut    => {
+            mut ms: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, normalize_inst_texpr(ut.members[i], table)); i++ }
+            parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) normalize params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, normalize_inst_texpr(fnt.params[i], table)); i++ }
+            parser::FunctionType { params = nps; ret = normalize_inst_texpr(fnt.ret, table) }
+        }
+    }
+}
+
+// (W9.4) normalize generic-instance references throughout a type-decl BODY. (C: normalize_inst_body.)
+fn normalize_inst_body(body: parser::TypeBody, table: TypeTable) -> parser::TypeBody {
+    match body {
+        parser::StructBody as sb => {
+            mut nf: []parser::Field = teko::list::empty()
+            mut i = 0
+            loop { if i >= sb.fields.len { break }; nf = teko::list::push(nf, parser::Field { name = sb.fields[i].name; type_ann = normalize_inst_texpr(sb.fields[i].type_ann, table) ; vis = parser::Visibility::Pub; is_intern = false }); i++ }
+            parser::StructBody { fields = nf ; methods = teko::list::empty() }
+        }
+        parser::VariantBody as vb => parser::VariantBody { type_expr = normalize_inst_texpr(vb.type_expr, table) }
+        parser::AliasBody as ab   => parser::AliasBody { alias = normalize_inst_texpr(ab.alias, table) }
+        _                         => body
+    }
+}
+
+// (W9.4) normalize generic-instance references throughout a type-decl. Used by the typer to rewrite
+// BOTH the stamped instances (in the table) AND every non-generic decl item (e.g. `Wrap` whose
+// variant member is `Gen<i64>`), so the syntactic body codegen/VM read agrees with the resolved
+// type. A NO-OP when the body has no generic-instance reference. (C: tk_normalize_inst_decl.)
+pub fn normalize_inst_decl(d: parser::TypeDecl, table: TypeTable) -> parser::TypeDecl {
+    parser::TypeDecl { name = d.name; type_params = d.type_params; type_constraints = d.type_constraints; body = normalize_inst_body(d.body, table); vis = d.vis; has_doc = d.has_doc; doc = d.doc; line = d.line; col = d.col }
+}
+
+// (W9.4) normalize EVERY stamped generic-instance decl's body in the table, so table_generic_instances
+// (which the mono pass emits as program items) carries bare stamped names. Non-`__g__` entries (the
+// templates + ordinary decls) pass through unchanged here; ordinary decls are normalized as program
+// ITEMS by the typer (their bodies do not live in the emitted table). (C: tk_normalize_table_instances.)
+pub fn normalize_table_instances(table: TypeTable) -> TypeTable {
+    mut out: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_is_g_instance(table[i].name) {
+            let nd = normalize_inst_decl(table[i].decl, table)
+            out = teko::list::push(out, TypeReg { name = table[i].name; namespace = table[i].namespace; vis = table[i].vis; decl = nd })
+        } else {
+            out = teko::list::push(out, table[i])
+        }
+        i++
+    }
+    out
+}

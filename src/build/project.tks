@@ -1,0 +1,642 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → VM, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end, then diverge at the
+// backend (codegen→cc) vs the VM.
+
+use teko::parser
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::vm
+
+// =========================================================================
+// project_dir_of — mirror main.c::project_dir_of. Resolve a project ARGUMENT to its
+// directory: a `.tkp` path resolves to its CONTAINING directory ("." when it has no path
+// separator); anything else is taken as the directory as-is.
+// =========================================================================
+fn project_dir_of(arg: str) -> str {
+    if !teko::str::ends_with(arg, ".tkp") {
+        return arg
+    }
+    match teko::str::last_index_of(arg, "/") {
+        u64 as i => teko::str::slice_to(arg, i)   // ".../foo.tkp" → ".../" stem before the last slash
+        error    => "."                           // no separator → the current directory
+    }
+}
+
+// =========================================================================
+// The shared front-end result — Teko's stand-in for project_frontend's two out-params.
+// =========================================================================
+type Frontend = struct {
+    prog:     checker::TProgram
+    manifest: Manifest
+}
+
+// Report a stage failure to stderr in the driver's canonical form and return status 1.
+// An empty path means the message already carries its own file:line:col (a per-file
+// assemble / checker diagnostic) — print it bare, with no redundant location prefix.
+fn fail(path: str, message: str) -> i32 {
+    if path == "" {
+        teko::io::eprint(teko::str::concat("teko: ", message))
+    } else {
+        teko::io::eprint(teko::str::concat("teko: ", path, teko::str::concat(": ", message)))
+    }
+    1
+}
+
+// =========================================================================
+// find_manifest — mirror driver.c::find_manifest. Scan the CURRENT directory for the
+// single `<name>.tkp` manifest (self-describing — glob the extension, don't hardcode a
+// name). Yields the manifest filename, or an error when there is none / more than one.
+// (Contained host edge — M.1; the dir listing is the deferred teko::fs::list_dir FFI.)
+// =========================================================================
+fn find_manifest() -> str | error {
+    let entries = match teko::fs::list_dir(".") { []str as e => e; error as e => return e }
+    mut found = ""
+    mut count: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let name = entries[i]
+        if teko::str::ends_with(name, ".tkp") {
+            found = name
+            count = count + 1
+        }
+        i++
+    }
+    if count != 1 {
+        return error { message = "no single .tkp manifest in project directory" }
+    }
+    found
+}
+
+// =========================================================================
+// project_frontend — mirror driver.c::project_frontend. Enter `dir` (so relative `source`
+// and discovered paths resolve from the root), find + read + parse the single `<name>.tkp`,
+// discover the source tree, inject the project-root `main.tks` (tagged with the manifest
+// name as namespace), report the file → namespace map, assemble all files into ONE merged
+// program, and type-check the WHOLE thing together (M.1). Returns the checked program +
+// the manifest, or the first error.
+// =========================================================================
+fn project_frontend(dir: str) -> Frontend | error { project_frontend_sel(dir, false) }
+
+// project_frontend_sel — the front-end with a test selector. `include_tests=true` (the `teko
+// test` path) assembles the `.tkt` test files INTO the merged program so their `#test` functions
+// are typed + available to the VM runner; `false` is the production build/run front-end.
+fn project_frontend_sel(dir: str, include_tests: bool) -> Frontend | error {
+    // Enter the project root so relative source paths resolve (the contained host edge).
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => {} }   // error? — null = success
+    frontend_body(include_tests, false)
+}
+
+// (C7.1f) #os conditional compilation — the TARGET OS for guard selection: derived from the
+// `[extern] target` triple when set, else the host `teko::os()`.
+fn target_os(m: Manifest) -> str {
+    if m.target.len > 0 {
+        if teko::str::contains(m.target, "linux") { return "linux" }
+        if teko::str::contains(m.target, "darwin") || teko::str::contains(m.target, "macos") || teko::str::contains(m.target, "apple") { return "macos" }
+        if teko::str::contains(m.target, "windows") || teko::str::contains(m.target, "mingw") || teko::str::contains(m.target, "w64") { return "windows" }
+    }
+    teko::os()
+}
+
+// (C7.1f) drop every `#os("…")`-guarded function whose guard ≠ the target OS, so only the current
+// platform's variant compiles. Unguarded items (os_guard == "") always pass through.
+fn prune_os(program: parser::Program, tos: str) -> parser::Program {
+    mut kept: []parser::Item = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        let it = program.items[i]
+        mut keep = true
+        match it.content {
+            parser::Function as f => { if f.os_guard != "" && f.os_guard != tos { keep = false } }
+            _ => {}
+        }
+        if keep { kept = teko::list::push(kept, it) }
+        i++
+    }
+    parser::Program { items = kept }
+}
+
+// =========================================================================
+// C7.10 — DEP LOADING: load each dep's .tkl package, extract its .tkb, deserialize
+// the TProgram, and return all dep items concatenated. The dep items are prepended to
+// the project's own items so they land in scope before the main code is type-checked.
+// Search strategy: look for `<dep>-*.tkl` in a `packages/` subdirectory of the project
+// root (cwd after the front-end chdir). If not found, return an honest error.
+// =========================================================================
+
+// load_dep_program — load one dep by package name, returning its TProgram.
+// Searches `packages/<name>-*.tkl` (takes the first match) in the current directory.
+fn load_dep_program(dep: str) -> checker::TProgram | error {
+    // List the packages/ directory to find `<dep>-*.tkl`.
+    let entries = match teko::fs::list_dir("packages") {
+        []str as e => e
+        error      => return error { message = teko::str::concat("teko: dep '", dep, "': packages/ directory not found — place .tkl packages in packages/") }
+    }
+    mut tkl_path = ""
+    mut ei: u64 = 0
+    loop {
+        if ei >= entries.len { break }
+        let e = entries[ei]
+        // Match `<dep>-*.tkl` — must start with `<dep>-` and end with `.tkl`.
+        let prefix = teko::str::concat(dep, "-")
+        let has_prefix = e.len >= prefix.len && teko::str::slice_to(e, prefix.len) == prefix
+        if has_prefix && teko::str::ends_with(e, ".tkl") {
+            tkl_path = teko::str::concat("packages/", e)
+            break
+        }
+        ei++
+    }
+    if tkl_path == "" {
+        return error { message = teko::str::concat("teko: dep '", dep, "': package not found (looked in packages/)") }
+    }
+
+    // Read the .tkl bytes (the file is a ZIP archive — binary, not UTF-8, but read_file
+    // returns the raw bytes as a str; we treat each byte via s[i]).
+    let raw_str = match teko::io::read_file(tkl_path) {
+        str as s => s
+        error    => return error { message = teko::str::concat("teko: dep '", dep, "': cannot read .tkl file") }
+    }
+    // Convert str → []byte (s[i] → byte).
+    mut raw: []byte = teko::list::empty()
+    mut ri: u64 = 0
+    loop {
+        if ri >= raw_str.len { break }
+        raw = teko::list::push(raw, raw_str[ri])
+        ri++
+    }
+
+    // Unzip — find the `<dep>.tkb` entry.
+    let zip_entries = match compress::read_zip(raw) {
+        []compress::ZipEntry as es => es
+        error as e                 => return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': bad .tkl (ZIP parse error): ", e.message)) }
+    }
+    let tkb_name = teko::str::concat(dep, ".tkb")
+    mut tkb_data: []byte = teko::list::empty()
+    mut found_tkb = false
+    mut zi: u64 = 0
+    loop {
+        if zi >= zip_entries.len { break }
+        if zip_entries[zi].name == tkb_name {
+            tkb_data = zip_entries[zi].data
+            found_tkb = true
+            break
+        }
+        zi++
+    }
+    if !found_tkb {
+        return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': .tkl does not contain ", teko::str::concat(tkb_name, ""))) }
+    }
+
+    // Deserialize the TProgram from the .tkb bytes.
+    match emit::deserialize_program(tkb_data) {
+        checker::TProgram as p => p
+        error as e             => return error { message = teko::str::concat("teko: dep '", dep, teko::str::concat("': .tkb deserialization failed: ", e.message)) }
+    }
+}
+
+// load_deps_program — load all deps listed in the manifest and return a TProgram containing
+// all their items. Returns an empty TProgram if m.deps is empty (no [dependencies] → silent skip).
+// The dep items carry their own namespaces and are injected into the type-check environment
+// via type_program_with_deps (not re-typed).
+fn load_deps_program(m: Manifest) -> checker::TProgram | error {
+    mut all_items: []checker::TItem = teko::list::empty()
+    mut di: u64 = 0
+    loop {
+        if di >= m.deps.len { break }
+        let dep_prog = match load_dep_program(m.deps[di]) {
+            checker::TProgram as p => p
+            error as e             => return e
+        }
+        mut ii: u64 = 0
+        loop {
+            if ii >= dep_prog.items.len { break }
+            all_items = teko::list::push(all_items, dep_prog.items[ii])
+            ii++
+        }
+        di++
+    }
+    checker::TProgram { items = all_items }
+}
+
+// frontend_body — the front-end AFTER the chdir (manifest → discover → assemble → check),
+// operating in the CURRENT directory. Split out so the D4 gate can retry it WITHOUT tests after a
+// test-assembly failure, on the SAME chdir (no second `teko::env::chdir`, which would fail for a
+// relative project dir already entered). `quiet` suppresses the file-map print (the gate's retry
+// already printed it on the failed first attempt).
+fn frontend_body(include_tests: bool, quiet: bool) -> Frontend | error {
+    // --- find + read + parse the manifest (the single <name>.tkp at the root — A1) ---
+    let mname = match find_manifest() { str as n => n; error as e => return e }
+    let mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
+    let m = match parse_manifest(mtext) { Manifest as x => x; error as e => return e }
+
+    // --- discover the source tree (A2) ---
+    mut files = match discover(m.name, m.source) { []SourceFile as f => f; error as e => return e }
+
+    // The entry MainFile lives at the PROJECT ROOT, not under `source` (discover walks only
+    // `source`). Inject it into the file set so the merged program has an entry, tagged with
+    // the bare root namespace (provenance). Skip it if absent (a library).
+    match teko::io::read_file("main.tks") {
+        str => files = teko::list::push(files, SourceFile { path = "main.tks"; namespace = m.name })
+        error => {}
+    }
+
+    // --- C7.9: A4 main-file rule — Binary REQUIRES main.tks; library kinds FORBID it ---
+    mut has_main = false
+    mut mi: u64 = 0
+    loop {
+        if mi >= files.len { break }
+        if teko::str::ends_with(files[mi].path, "main.tks") { has_main = true; break }
+        mi = mi + 1
+    }
+    match check_main_file_rule(m.artifact, has_main) { Artifact => {}; error as e => return e }
+
+    // --- report the discovered file → namespace map (the project's surface) ---
+    if !quiet { teko::io::println(teko::str::concat("teko: project '", m.name, teko::str::concat("' (source=", m.source, ")"))) }
+    mut fi: u64 = 0
+    loop {
+        if quiet { break }
+        if fi >= files.len { break }
+        let f = files[fi]
+        teko::io::println(teko::str::concat("  ", f.path, teko::str::concat("\t-> ", f.namespace)))
+        fi++
+    }
+
+    // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
+    // assemble bakes file:line:col into the message, so report with an empty path (W-loc).
+    let program = match assemble_sel(files, include_tests) { parser::Program as p => p; error as e => return e }
+
+    // --- C7.1f: keep only the target OS's `#os("…")` function variants (conditional compilation) ---
+    let selected = prune_os(program, target_os(m))
+
+    // --- C7.10: load dep .tkl packages and prepend their typed items before type-checking ---
+    // The dep's TProgram items carry their own namespaces (set when they were originally checked);
+    // we pre-seed the collection environment with them so the project's code can call dep functions
+    // and reference dep types. m.deps is empty when there is no [dependencies] section → no-op.
+    let dep_prog = match load_deps_program(m) { checker::TProgram as p => p; error as e => return e }
+
+    // --- check the WHOLE merged program (M.1 — whole program checked together) ---
+    // With deps: use type_program_with_deps to inject dep signatures before type-checking.
+    // Without deps: falls back to the standard type_program (dep_prog.items is empty).
+    let checked = match checker::type_program_with_deps(selected, dep_prog) { checker::TProgram as c => c; error as e => return e }
+
+    Frontend { prog = checked; manifest = m }
+}
+
+// =========================================================================
+// rt_dir / run_cc / backend — the native BACKEND wiring (F2/F3), mirroring driver.c's
+// tk_backend. Emit C for the checked program, write it at the project root (the front-end
+// has chdir'd there), invoke the host `cc`, produce the native binary. The output stem is
+// the manifest `name`.
+// =========================================================================
+
+// F3 — where the minimal execution runtime (teko_rt.{h,c}) lives. Resolution order: the
+// TK_RT_DIR env override (what CMake bakes into the C bootstrap), else probe the in-tree
+// candidates by reading their `teko_rt.h` — `src/runtime` (the teko project layout) then
+// `runtime`. (A general install resolves via TK_RT_DIR; bundling the runtime is Phase 7.)
+fn rt_dir() -> str {
+    match teko::env::var("TK_RT_DIR") {
+        str as d => d
+        error    => {
+            match teko::io::read_file("src/runtime/teko_rt.h") { str => return "src/runtime"; error => {} }
+            match teko::io::read_file("runtime/teko_rt.h")     { str => return "runtime"; error => {} }
+            "src/runtime"   // best-effort default
+        }
+    }
+}
+
+// The teko::assert C SEED lives beside the runtime (sibling dir `<parent of rt>/assert`); the
+// generated C does `#include "assert.h"` and may reference teko__assert__* (the seed is WEAK, so
+// it is harmless when the program self-defines teko::assert). Mirror driver.c's `-I <src>/assert`.
+fn assert_dir(rt: str) -> str {
+    match teko::str::last_index_of(rt, "/") {
+        u64 as i => teko::str::concat(teko::str::slice_to(rt, i), "/assert")   // <parent>/assert
+        error    => "assert"
+    }
+}
+
+// Run the host C compiler over `cfile`, producing `binary`. Full parity with driver.c::run_cc: cc
+// sees the runtime + assert dirs (-I) and compiles BOTH seed sources (teko_rt.c + assert.c) plus
+// -lm, in one reuse-the-host-toolchain invocation (M.5). Returns the cc exit code.
+fn run_cc(cfile: str, binary: str, m: Manifest) -> i32 {
+    let rt = rt_dir()
+    let asrt = assert_dir(rt)
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, if m.cc.len > 0 { m.cc } else { "cc" })   // C7.1f: [extern] cc override
+    argv = teko::list::push(argv, "-std=c23")
+    argv = teko::list::push(argv, "-w")               // silence warnings on generated C (machine output)
+    argv = teko::list::push(argv, "-ferror-limit=0")  // show every genuine error (clang)
+    if m.target.len > 0  { argv = teko::list::push(teko::list::push(argv, "-target"), m.target) }      // C7.1f: cross target triple
+    if m.sysroot.len > 0 { argv = teko::list::push(teko::list::push(argv, "--sysroot"), m.sysroot) }   // C7.1f: cross sysroot
+    if m.freestanding    { argv = teko::list::push(argv, "-nostdlib") }                                 // C7.1f: drop implicit libc
+    argv = teko::list::push(argv, "-I")
+    argv = teko::list::push(argv, rt)
+    argv = teko::list::push(argv, "-I")
+    argv = teko::list::push(argv, asrt)
+    argv = teko::list::push(argv, cfile)
+    argv = teko::list::push(argv, teko::str::concat(rt, "/teko_rt.c"))
+    argv = teko::list::push(argv, teko::str::concat(asrt, "/assert.c"))
+    if !m.freestanding { argv = teko::list::push(argv, "-lm") }   // libm (skipped under freestanding)
+    // C7.1e: the [extern.libs] resolved link flags (`-l<name>` / paths / raw flags), appended AFTER
+    // the sources so the linker resolves their symbols (link order). Already resolved by the manifest.
+    mut li = 0
+    loop {
+        if li >= m.link_flags.len { break }
+        argv = teko::list::push(argv, m.link_flags[li])
+        li = li + 1
+    }
+    // C7.1f: the DEFERRED per-OS [extern.libs.<os>] flags — appended only when their OS matches the
+    // target (host, or `[extern] target`). Resolved HERE (native), so manifest parse stays host-independent.
+    let tos = target_os(m)
+    mut oi = 0
+    loop {
+        if oi >= m.os_lib_os.len { break }
+        if m.os_lib_os[oi] == tos { argv = teko::list::push(argv, m.os_lib_flag[oi]) }
+        oi = oi + 1
+    }
+    // C7.1k: on macOS, embed an Info.plist section so the Mach-O carries native version metadata
+    // (mdls / `Get Info` / `otool -s __TEXT __info_plist`). Best-effort — a plist write failure must
+    // not break the build. (Windows VERSIONINFO + a Linux ELF note are the staged follow-ons.)
+    if tos == "macos" {
+        let plist = teko::str::concat(binary, ".Info.plist")
+        match teko::io::write_file(plist, plist_xml(m)) {
+            null  => { argv = teko::list::push(argv, teko::str::concat("-Wl,-sectcreate,__TEXT,__info_plist,", plist)) }
+            error => {}
+        }
+    }
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, binary)
+    teko::process::run(argv)
+}
+
+// (C7.1k) plist_xml — a minimal macOS Info.plist carrying the project's identity, embedded into the
+// Mach-O `__TEXT,__info_plist` section by run_cc. Fields must be plain text (no XML metacharacters);
+// the seed's own metadata is. (XML-escaping of arbitrary metadata is a follow-on.)
+fn plist_xml(m: Manifest) -> str {
+    let ver  = if m.version != "" { m.version } else { "0.0.0.0" }
+    let info = if m.description != "" { teko::str::concat(m.name, " — ", m.description) } else { m.name }
+    teko::str::concat(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n",
+        teko::str::concat(
+            teko::str::concat("  <key>CFBundleName</key><string>", m.name, "</string>\n"),
+            teko::str::concat(
+                teko::str::concat("  <key>CFBundleIdentifier</key><string>org.teko.", m.name, "</string>\n"),
+                teko::str::concat(
+                    teko::str::concat("  <key>CFBundleShortVersionString</key><string>", ver, "</string>\n"),
+                    teko::str::concat(
+                        teko::str::concat("  <key>CFBundleVersion</key><string>", ver, "</string>\n"),
+                        teko::str::concat("  <key>CFBundleGetInfoString</key><string>", info, "</string>\n</dict>\n</plist>\n"))))))
+}
+
+// Lower → write .c → invoke cc → report. Returns 0 on success. `stem` is the output binary name
+// (the manifest `name`); artifacts go to `out_dir`/<stem>{.c,} (default "bin", or the `-o <dir>`
+// argument), created at the project root (cwd after the front-end chdir'd). Mirrors driver.c.
+fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+    // (C7.1m) artifact-kind dispatch. Binary → the native executable backend below. The library kinds
+    // are HONEST STOPS until their increments land (M.3 — no fake artifact): static/shared = native
+    // lib output (ar / -shared); package = a `.tkl` ZIP of .tkh+.tkb+.tsym, which needs the PROGRAM-
+    // level `.tkb` typed-tree codec (today the `.tkb` is expression-only) — the keystone next step.
+    if m.artifact == Artifact::Static {
+        return fail(dir, "static library output (.a) is not yet implemented — planned (C7.1m)")
+    }
+    if m.artifact == Artifact::Shared {
+        return fail(dir, "shared library output (.dylib/.so/.dll) is not yet implemented — planned (C7.1m)")
+    }
+    if m.artifact == Artifact::Package {
+        // C7.12: emit .tkh + .tkb (+ best-effort .tsym) → ZIP-STORE → <out_dir>/<name>-<version>.tkl
+        // trim a trailing `/` from the output dir (mirrors the Binary path below).
+        let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
+        match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => {} }
+        // .tkh — exported interface (type signatures + docs for `exp` items)
+        let table = checker::type_table_of(prog)
+        let tkh_bytes = match emit::emit_program(prog, table) {
+            []byte as b => b
+            error as e  => return fail(dir, e.message)
+        }
+        // .tkb — whole-program typed tree (C7.16 codec)
+        let tkb_bytes = emit::serialize_program(prog)
+        // .tsym — symbol map (best-effort; always added when available)
+        let tsym_str = codegen::tk_emit_tsym(prog)
+        mut tsym_bytes: []byte = teko::list::empty()
+        mut k = 0
+        loop {
+            if k >= tsym_str.len { break }
+            tsym_bytes = teko::list::push(tsym_bytes, tsym_str[k])
+            k++
+        }
+        // assemble the archive entries: <name>.tkh, <name>.tkb, <name>.tsym
+        mut entries: []compress::ZipEntry = teko::list::empty()
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkh"); data = tkh_bytes })
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkb"); data = tkb_bytes })
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tsym"); data = tsym_bytes })
+        let zip_bytes = compress::write_zip(entries)
+        // <out_dir>/<name>-<version>.tkl
+        let ver = if m.version == "" { "0.0.0" } else { m.version }
+        let tkl_name = teko::str::concat(m.name, "-", teko::str::concat(ver, ".tkl"))
+        let tkl_path = teko::str::concat(od, "/", tkl_name)
+        match teko::io::write_file_bytes(tkl_path, zip_bytes) {
+            error as e => return fail(dir, e.message)
+            null       => {}
+        }
+        teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": packaged ", tkl_path, "")))
+        return 0
+    }
+    let emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
+    // C7.1k — append the build-metadata C so every binary carries its identity (what(1)/strings).
+    let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
+    // trim a trailing `/` from the output dir so `-o ./bin/build/` doesn't yield `./bin/build//teko`.
+    let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => {} }   // idempotent — error? null = success
+    let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))   // <out_dir>/<stem>.c
+    let binp = teko::str::concat(od, "/", stem)                             // <out_dir>/<stem>
+    match teko::io::write_file(cfile, csrc) {
+        error as e => return fail(dir, e.message)
+        null       => {}                              // error? — null = success
+    }
+    if run_cc(cfile, binp, m) != 0 {
+        return fail(dir, "cc failed to build the generated C")
+    }
+    // E3 — write the symbol map beside the binary (best-effort; a write error never fails the build —
+    // the .tsym is debug metadata for the E4 native stack-trace, not the artifact).
+    match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => {}; null => {} }
+    teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, "")))
+    0
+}
+
+// =========================================================================
+// compile_project — mirror driver.c::tk_compile_project (the `teko build <dir>` entry).
+// Front-end (manifest → discover → assemble → check), then the native backend over the
+// merged program. The output binary stem is the manifest `name`.
+// =========================================================================
+// If TK_RT_DIR is unset, probe the in-tree runtime relative to the CURRENT cwd (before any chdir)
+// and pin TK_RT_DIR to its ABSOLUTE path, so run_cc still finds teko_rt.c after the front-end
+// chdir's into the target project (which may live anywhere). A general install pre-sets TK_RT_DIR;
+// runtime BUNDLING is Phase 7.
+fn ensure_rt_dir_abs() {
+    match teko::env::var("TK_RT_DIR") { str => return; error => {} }   // already set — honor it
+    let cwd = match teko::env::cwd() { str as c => c; error => return }
+    mut rel = ""
+    match teko::io::read_file(teko::str::concat(cwd, "/src/runtime/teko_rt.h")) { str => rel = "src/runtime"; error => {} }
+    if rel == "" {
+        match teko::io::read_file(teko::str::concat(cwd, "/runtime/teko_rt.h")) { str => rel = "runtime"; error => {} }
+    }
+    if rel == "" { return }                                           // not found — run_cc surfaces a clear cc error
+    match teko::env::set_var("TK_RT_DIR", teko::str::concat(cwd, "/", rel)) { error => {}; null => {} }
+}
+
+fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false) }
+
+// strip_tests — the production program WITHOUT `#test` functions (D4): a release binary must
+// not carry test code. Tests are excluded from codegen; everything else passes through.
+fn strip_tests(prog: checker::TProgram) -> checker::TProgram {
+    mut kept: []checker::TItem = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        mut drop = false
+        match prog.items[i] {
+            checker::TFunction as f => { if f.is_test { drop = true } }
+            _ => {}
+        }
+        if !drop { kept = teko::list::push(kept, prog.items[i]) }
+        i++
+    }
+    checker::TProgram { items = kept }
+}
+
+// compile_project_g — the build with the D4 TEST GATE (ALWAYS ON; `--no-test` is IGNORED for a
+// build — a release MUST run its tests). Assemble WITH the `.tkt` tests, run them on the VM FIRST
+// (fail-fast — a failed assertion panics, aborting the build before any emission), THEN codegen the
+// production program (tests stripped). The ONLY skip is a project with NO `#test` functions. (D4 —
+// tests gate emission; release bars on fail.)
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool) -> i32 {
+    ensure_rt_dir_abs()   // pin the runtime to an absolute path BEFORE the front-end chdir's
+    // D4 gate (STRICT): enter the project ONCE, assemble WITH the tests. If `.tkt` tests exist they
+    // MUST assemble, RUN, all pass, AND meet the coverage threshold — otherwise the build is BLOCKED.
+    // The ONLY skip is a project with NO tests (no `#test`): then the gate is ignored and we build.
+    match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => {} }
+    match frontend_body(true, false) {
+        Frontend as fe => {
+            if !has_tests(fe.prog) {
+                // No tests at all → ignore the gate, build the production program (no test code present).
+                return backend(dir, fe.manifest.name, out_dir, fe.prog, fe.manifest)
+            }
+            // The gate ALWAYS records lines+branches (for the floors); `--coverage` additionally emits
+            // <out_dir>/cobertura.xml (mkdir the dir first — idempotent). A failed assert panics here
+            // (fail-fast) → BLOCKS the build.
+            let cov_path = if gen_cov { let _ = teko::fs::mkdir(out_dir); teko::str::concat(out_dir, "/cobertura.xml") } else { "" }
+            let trc = vm::run_tests_cov(fe.prog, true, gen_cov, cov_path)
+            if trc != 0 { return trc }
+            // D4 coverage floors (from the `.tkp` [coverage] section; default 80/80/80): the build is
+            // BLOCKED when FUNCTION, LINE, or BRANCH coverage is below its floor.
+            let fcov = vm::coverage_pct(fe.prog)
+            if fcov < fe.manifest.cov_functions {
+                return fail(dir, $"function coverage {fcov}% is below the {fe.manifest.cov_functions}% floor ([coverage] functions) — add tests")
+            }
+            let lcov = vm::line_coverage_pct(fe.prog)
+            if lcov < fe.manifest.cov_lines {
+                return fail(dir, $"line coverage {lcov}% is below the {fe.manifest.cov_lines}% floor ([coverage] lines) — add tests")
+            }
+            let bcov = vm::branch_coverage_pct(fe.prog)
+            if bcov < fe.manifest.cov_branches {
+                return fail(dir, $"branch coverage {bcov}% is below the {fe.manifest.cov_branches}% floor ([coverage] branches) — add tests")
+            }
+            backend(dir, fe.manifest.name, out_dir, strip_tests(fe.prog), fe.manifest)
+        }
+        // `.tkt` tests (or the production code) could not be ASSEMBLED/typechecked. With tests present,
+        // that is a hard BUILD FAILURE — no graceful degradation (the gate is strict; only a project
+        // with NO `.tkt` files skips tests).
+        error as e => return fail(dir, e.message)
+    }
+}
+
+// has_tests — does the program contain any `#test` function? (The gate runs iff this is true; a
+// project with NO tests builds unconditionally — the "no .tkt → ignore tests" rule.)
+fn has_tests(prog: checker::TProgram) -> bool {
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if f.is_test { return true } }
+            _ => {}
+        }
+        i++
+    }
+    false
+}
+
+// CLI helpers (mirror main.c::parse_out_dir; here because main.tks is the virtual-main and holds no
+// `fn`s). `-o <dir>` may appear anywhere after the subcommand: `teko . -o ./out`.
+
+// the build OUTPUT directory from the args (`-o <dir>`), or "bin" by default.
+fn out_dir_of(args: []str, start: u64) -> str {
+    mut i = start
+    loop {
+        if i >= args.len { break }
+        if args[i] == "-o" {
+            if i + 1 < args.len { return args[i + 1] }
+        }
+        i = i + 1
+    }
+    "bin"
+}
+
+// does `--coverage` appear in the args? (write a Cobertura `cobertura.xml` next to the build output.)
+fn coverage_of(args: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == "--coverage" { return true }
+        i = i + 1
+    }
+    false
+}
+
+// the FIRST non-flag positional (the project) from `start`, or "" if none (the caller reports).
+fn project_arg_of(args: []str, start: u64) -> str {
+    mut i = start
+    loop {
+        if i >= args.len { break }
+        if args[i] == "-o" { i = i + 2 }            // skip `-o` and its value
+        else if args[i] == "--no-test" { i = i + 1 }   // skip the gate flag (D4)
+        else { return args[i] }
+    }
+    ""
+}
+
+// =========================================================================
+// run_project — mirror driver.c::tk_run_project (the `teko run <dir>` entry, debug
+// profile). Same front-end as the build, but INTERPRET the checked merged tree on the VM
+// (vm::run) instead of codegen → cc. The exit code is the virtual-main's (a panic exits
+// non-zero from inside the VM with a "teko: panic: …" message).
+// =========================================================================
+fn run_project(dir: str) -> i32 {
+    let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    vm::run(fe.prog)
+}
+
+// =========================================================================
+// test_project — the `teko test <dir>` entry (D2). Same front-end as run, but ASSEMBLED WITH
+// the `.tkt` test files, then the VM runs every `#test` function (vm::run_tests) instead of the
+// virtual-main. Fail-fast: a failed assertion panics from inside the VM (non-zero exit); all
+// pass → exit 0. An empty suite (no `#test`) is not a failure.
+// =========================================================================
+// `gen_cov` (from `--coverage`) writes a Cobertura report to <cwd>/cobertura.xml (the project root,
+// since the front-end has chdir'd into the project; `teko test` has no `-o` output dir).
+fn test_project(dir: str, gen_cov: bool) -> i32 {
+    let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    if gen_cov { vm::run_tests_cov(fe.prog, true, true, "cobertura.xml") } else { vm::run_tests(fe.prog) }
+}

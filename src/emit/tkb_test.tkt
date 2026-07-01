@@ -1,0 +1,326 @@
+// src/emit/tkb_test.tkt — tests for the .tkb codec (S1a/S1b). #test functions (no main).
+// Current Teko: typed nodes are module-qualified (`checker::`) and carry all fields (line/col).
+
+use teko::checker
+use teko::parser
+use teko::lexer
+
+fn u8ty()   -> checker::Type { checker::Prim { kind = checker::PrimKind::U8 } }
+fn i64ty()  -> checker::Type { checker::Prim { kind = checker::PrimKind::I64 } }
+fn boolty() -> checker::Type { checker::Prim { kind = checker::PrimKind::Bool } }
+// a one-segment NamedType type-annotation (e.g. `i64`).
+fn nt(name: str) -> parser::TypeExpr { parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() } }
+fn tnum(v: i128) -> checker::TExpr { checker::TExpr { kind = checker::TNumber { is_float = false; value = v; fval = 0.0 }; type = i64ty(); line = 0; col = 0 } }
+// drop the last byte of a `[]byte` (str's `slice` is text-only) — shared by header_test (same ns).
+fn drop_last(b: []byte) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i + 1 >= b.len { break }; out = teko::list::push(out, b[i]); i = i + 1 }
+    out
+}
+
+#test
+fn tkb_roundtrip_cast() {
+    // S1a: TCast { expr = (TNumber : i64) } : u8 — exact round-trip (tag 10 + type + inner).
+    let orig = checker::TExpr { kind = checker::TCast { expr = tnum(7) }; type = u8ty(); line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.type {
+            checker::Prim as p => {
+                teko::assert::is_true(p.kind == checker::PrimKind::U8)
+                match got.kind {
+                    checker::TCast as c => match c.expr.kind {
+                        checker::TNumber as n => teko::assert::is_true(n.value == 7)
+                        _ => teko::assert::is_true(false)
+                    }
+                    _ => teko::assert::is_true(false)
+                }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_field_access() {
+    // S1b: TFieldAccess { receiver = (TVar s : Named Foo); field = "token" } : u8 — round-trips exactly.
+    let recv = checker::TExpr { kind = checker::TVar { name = "s"; is_func = false; func_ns = "" }; type = checker::Named { name = "Foo" }; line = 0; col = 0 }
+    let orig = checker::TExpr { kind = checker::TFieldAccess { receiver = recv; field = "token" }; type = u8ty(); line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TFieldAccess as f => {
+                teko::assert::is_true(f.field == "token")
+                match f.receiver.kind { checker::TVar as v => teko::assert::is_true(v.name == "s"); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_arraylit() {
+    // C6.7: ArrayLit [1, 2] round-trips — elements are TArrayElem (is_spread=false, expr=TExpr).
+    let ae1 = checker::TArrayElem { is_spread = false; expr = tnum(1) }
+    let ae2 = checker::TArrayElem { is_spread = false; expr = tnum(2) }
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), ae1), ae2)
+    let orig = checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = i64ty(); line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TArrayLit as a => {
+                teko::assert::is_true(a.elements.len == 2)
+                teko::assert::is_true(!a.elements[0].is_spread)
+                teko::assert::is_true(!a.elements[1].is_spread)
+                match a.elements[0].expr.kind { checker::TNumber as n => teko::assert::is_true(n.value == 1); _ => teko::assert::is_true(false) }
+                match a.elements[1].expr.kind { checker::TNumber as n => teko::assert::is_true(n.value == 2); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_arraylit_spread() {
+    // C6.7: ArrayLit with a spread element [..xs, y] — is_spread flag survives round-trip.
+    // xs has type []i64 (the spread slice); y is a plain i64 element.
+    let xs_expr = checker::TExpr { kind = checker::TVar { name = "xs"; is_func = false; func_ns = "" }; type = checker::Slice { element = i64ty() }; line = 0; col = 0 }
+    let y_expr  = checker::TExpr { kind = checker::TVar { name = "y"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
+    let ae_spread = checker::TArrayElem { is_spread = true;  expr = xs_expr }
+    let ae_plain  = checker::TArrayElem { is_spread = false; expr = y_expr }
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), ae_spread), ae_plain)
+    let slice_ty = checker::Slice { element = i64ty() }
+    let orig = checker::TExpr { kind = checker::TArrayLit { elements = elems }; type = slice_ty; line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TArrayLit as a => {
+                teko::assert::is_true(a.elements.len == 2)
+                // first element: spread (..xs)
+                teko::assert::is_true(a.elements[0].is_spread)
+                match a.elements[0].expr.kind { checker::TVar as v => teko::assert::is_true(v.name == "xs"); _ => teko::assert::is_true(false) }
+                // second element: plain (y)
+                teko::assert::is_true(!a.elements[1].is_spread)
+                match a.elements[1].expr.kind { checker::TVar as v => teko::assert::is_true(v.name == "y"); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_structinit() {
+    // C7.16: StructInit P { x = 5 } round-trips (collect now interns field names + recurses values).
+    let names = teko::list::push(teko::list::empty(), "x")
+    let vals  = teko::list::push(teko::list::empty(), tnum(5))
+    let orig = checker::TExpr { kind = checker::TStructInit { field_names = names; field_vals = vals }; type = checker::Named { name = "P" }; line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TStructInit as si => {
+                teko::assert::is_true(si.field_names.len == 1)
+                teko::assert::is_true(si.field_names[0] == "x")
+                match si.field_vals[0].kind { checker::TNumber as n => teko::assert::is_true(n.value == 5); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_coalesce() {
+    // C7.16: (a ?? 0) round-trips (collect now recurses left + right).
+    let left = checker::TExpr { kind = checker::TVar { name = "a"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
+    let orig = checker::TExpr { kind = checker::TCoalesce { left = left; right = tnum(0) }; type = i64ty(); line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TCoalesce as co => {
+                match co.left.kind  { checker::TVar as v    => teko::assert::is_true(v.name == "a"); _ => teko::assert::is_true(false) }
+                match co.right.kind { checker::TNumber as n => teko::assert::is_true(n.value == 0); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_pathexpr() {
+    // C7.16: Color::Red round-trips (collect now interns enum_name + member; ordinal u64).
+    let orig = checker::TExpr { kind = checker::TPathExpr { enum_name = "Color"; member = "Red"; ordinal = 2 }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
+    match deserialize(serialize(orig)) {
+        checker::TExpr as got => match got.kind {
+            checker::TPathExpr as pe => {
+                teko::assert::is_true(pe.enum_name == "Color")
+                teko::assert::is_true(pe.member == "Red")
+                teko::assert::is_true(pe.ordinal == 2)
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_ifexpr() {
+    // C7.16: `if true { let x: i64 = 1; x; return x } else { return 0 }` round-trips (statements + IF).
+    let cond = checker::TExpr { kind = checker::TBoolLit { value = true }; type = boolty(); line = 0; col = 0 }
+    let xref = checker::TExpr { kind = checker::TVar { name = "x"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
+    mut thenb: []checker::TStatement = teko::list::empty()
+    thenb = teko::list::push(thenb, checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "x" }; bound = i64ty(); value = tnum(1) })
+    thenb = teko::list::push(thenb, checker::TExprStmt { expr = xref })
+    thenb = teko::list::push(thenb, checker::TReturn { has_value = true; value = xref })
+    mut elseb: []checker::TStatement = teko::list::empty()
+    elseb = teko::list::push(elseb, checker::TReturn { has_value = true; value = tnum(0) })
+    let iff = checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = thenb; has_else = true; else_blk = elseb }; type = i64ty(); line = 0; col = 0 }
+    match deserialize(serialize(iff)) {
+        checker::TExpr as got => match got.kind {
+            checker::TIfExpr as f => {
+                teko::assert::is_true(f.has_else)
+                teko::assert::is_true(f.then_blk.len == 3)
+                teko::assert::is_true(f.else_blk.len == 1)
+                match f.then_blk[0] {
+                    checker::TBinding as bd => {
+                        teko::assert::is_true(bd.kind == parser::BindKind::Let)
+                        match bd.target { parser::SimpleName as sn => teko::assert::is_true(sn.name == "x"); _ => teko::assert::is_true(false) }
+                        match bd.value.kind { checker::TNumber as n => teko::assert::is_true(n.value == 1); _ => teko::assert::is_true(false) }
+                    }
+                    _ => teko::assert::is_true(false)
+                }
+                match f.then_blk[2] { checker::TReturn as r => teko::assert::is_true(r.has_value); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_loop_stmts() {
+    // C7.16: `if true { loop outer { a = 1; break; continue outer } }` — TLoopStmt/TAssign/TBreak/TContinue.
+    let cond = checker::TExpr { kind = checker::TBoolLit { value = true }; type = boolty(); line = 0; col = 0 }
+    mut body: []checker::TStatement = teko::list::empty()
+    body = teko::list::push(body, checker::TAssign { name = "a"; op = lexer::TokenKind::Assign; bound = i64ty(); value = tnum(1); deref = false })
+    body = teko::list::push(body, checker::TBreakStmt { label = "" })
+    body = teko::list::push(body, checker::TContinueStmt { label = "outer" })
+    mut thenb: []checker::TStatement = teko::list::empty()
+    thenb = teko::list::push(thenb, checker::TLoopStmt { label = "outer"; body = body })
+    let iff = checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = thenb; has_else = false; else_blk = teko::list::empty() }; type = i64ty(); line = 0; col = 0 }
+    match deserialize(serialize(iff)) {
+        checker::TExpr as got => match got.kind {
+            checker::TIfExpr as f => {
+                teko::assert::is_true(!f.has_else)
+                teko::assert::is_true(f.then_blk.len == 1)
+                match f.then_blk[0] {
+                    checker::TLoopStmt as l => {
+                        teko::assert::is_true(l.label == "outer")
+                        teko::assert::is_true(l.body.len == 3)
+                        match l.body[0] { checker::TAssign as a => { teko::assert::is_true(a.name == "a"); teko::assert::is_true(a.op == lexer::TokenKind::Assign) }; _ => teko::assert::is_true(false) }
+                        match l.body[1] { checker::TBreakStmt as b => teko::assert::is_true(b.label == ""); _ => teko::assert::is_true(false) }
+                        match l.body[2] { checker::TContinueStmt as c => teko::assert::is_true(c.label == "outer"); _ => teko::assert::is_true(false) }
+                    }
+                    _ => teko::assert::is_true(false)
+                }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_program() {
+    // C7.16: a whole TProgram (use + struct typedecl + function) round-trips via serialize_program.
+    // use teko::lexer
+    let upath = parser::Path { segments = teko::list::push(teko::list::push(teko::list::empty(), parser::Segment { name = "teko" }), parser::Segment { name = "lexer" }) }
+    let use1 = parser::UseDecl { path = upath; has_alias = false; alias = "" }
+    // type Point = struct { x: i64 }
+    let fld = parser::Field { name = "x"; type_ann = nt("i64") ; vis = parser::Visibility::Pub; is_intern = false }
+    let td = parser::TypeDecl { name = "Point"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld) ; methods = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 1; col = 1 }
+    // fn id(n: i64) -> i64 { return n }
+    let prm = parser::Param { name = "n"; has_type = true; type_ann = nt("i64"); is_params = false ; has_default = false; default_expr = parser::no_expr() }
+    let nref = checker::TExpr { kind = checker::TVar { name = "n"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
+    mut body: []checker::TStatement = teko::list::empty()
+    body = teko::list::push(body, checker::TReturn { has_value = true; value = nref })
+    let fn1 = checker::TFunction { name = "id"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::push(teko::list::empty(), prm); return_type = i64ty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; namespace = "m"; file = "m.tks"; line = 2; col = 1; is_test = false; is_extern = false; c_symbol = ""; from_lib = "" }
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, use1)
+    items = teko::list::push(items, td)
+    items = teko::list::push(items, fn1)
+    let prog = checker::TProgram { items = items }
+    match deserialize_program(serialize_program(prog)) {
+        checker::TProgram as got => {
+            teko::assert::is_true(got.items.len == 3)
+            match got.items[0] { parser::UseDecl as u => { teko::assert::is_true(u.path.segments.len == 2); teko::assert::is_true(u.path.segments[1].name == "lexer") }; _ => teko::assert::is_true(false) }
+            match got.items[1] {
+                parser::TypeDecl as d => {
+                    teko::assert::is_true(d.name == "Point")
+                    teko::assert::is_true(d.vis == parser::Visibility::Pub)
+                    match d.body { parser::StructBody as s => { teko::assert::is_true(s.fields.len == 1); teko::assert::is_true(s.fields[0].name == "x") }; _ => teko::assert::is_true(false) }
+                }
+                _ => teko::assert::is_true(false)
+            }
+            match got.items[2] {
+                checker::TFunction as f => {
+                    teko::assert::is_true(f.name == "id")
+                    teko::assert::is_true(f.params.len == 1)
+                    teko::assert::is_true(f.params[0].name == "n")
+                    teko::assert::is_true(f.namespace == "m")
+                    teko::assert::is_true(f.body.len == 1)
+                    match f.body[0] { checker::TReturn as r => teko::assert::is_true(r.has_value); _ => teko::assert::is_true(false) }
+                }
+                _ => teko::assert::is_true(false)
+            }
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_roundtrip_matchexpr() {
+    // C7.16: `match x { 0 => return 1; Foo as y => return 2; _ => return 3 }` round-trips (match + 3 pattern kinds).
+    let voidx = checker::TExpr { kind = checker::TNullLit { }; type = checker::Void { }; line = 0; col = 0 }   // placeholder guard (has_when=false)
+    let subj = checker::TExpr { kind = checker::TVar { name = "x"; is_func = false; func_ns = "" }; type = i64ty(); line = 0; col = 0 }
+    let lit0 = parser::Expr { kind = parser::Number { is_float = false; value = 0; fval = 0.0 }; line = 0; col = 0 }
+    mut body0: []checker::TStatement = teko::list::push(teko::list::empty(), checker::TReturn { has_value = true; value = tnum(1) })
+    let arm0 = checker::TArm { pattern = parser::LiteralPattern { value = lit0 }; has_when = false; guard = voidx; body = body0 }
+    let foopath = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Foo" }) }
+    mut body1: []checker::TStatement = teko::list::push(teko::list::empty(), checker::TReturn { has_value = true; value = tnum(2) })
+    let arm1 = checker::TArm { pattern = parser::BindPattern { type_name = foopath; has_binding = true; binding = "y"; is_slice = false; slice_type = null; type_args = teko::list::empty() }; has_when = false; guard = voidx; body = body1 }
+    mut body2: []checker::TStatement = teko::list::push(teko::list::empty(), checker::TReturn { has_value = true; value = tnum(3) })
+    let arm2 = checker::TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = voidx; body = body2 }
+    mut arms: []checker::TArm = teko::list::empty()
+    arms = teko::list::push(arms, arm0)
+    arms = teko::list::push(arms, arm1)
+    arms = teko::list::push(arms, arm2)
+    let m = checker::TExpr { kind = checker::TMatchExpr { subject = subj; arms = arms }; type = i64ty(); line = 0; col = 0 }
+    match deserialize(serialize(m)) {
+        checker::TExpr as got => match got.kind {
+            checker::TMatchExpr as mm => {
+                teko::assert::is_true(mm.arms.len == 3)
+                match mm.subject.kind { checker::TVar as v => teko::assert::is_true(v.name == "x"); _ => teko::assert::is_true(false) }
+                match mm.arms[0].pattern { parser::LiteralPattern as l => match l.value.kind { parser::Number as n => teko::assert::is_true(n.value == 0); _ => teko::assert::is_true(false) }; _ => teko::assert::is_true(false) }
+                match mm.arms[1].pattern {
+                    parser::BindPattern as bp => {
+                        teko::assert::is_true(bp.has_binding)
+                        teko::assert::is_true(bp.binding == "y")
+                        teko::assert::is_true(bp.type_name.segments[0].name == "Foo")
+                    }
+                    _ => teko::assert::is_true(false)
+                }
+                match mm.arms[2].pattern { parser::WildcardPattern => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+            }
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn tkb_tamper_caught() {
+    // barrier (M.1): a corrupted body (last byte dropped) fails the FNV-1a hash check → error.
+    let orig  = checker::TExpr { kind = checker::TCast { expr = tnum(7) }; type = u8ty(); line = 0; col = 0 }
+    let bytes = serialize(orig)
+    let short = drop_last(bytes)
+    match deserialize(short) { checker::TExpr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}

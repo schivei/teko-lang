@@ -1,0 +1,697 @@
+// src/vm/vm_test.tkt — tests for teko::vm (the D1 typed-tree VM). #test collected (no `main`).
+//
+// These exercise the VM's value/expression semantics through `teko::assert::is_true`, the
+// exact builtin the VM itself recognizes and routes to the runtime (so a passing test is
+// also a round-trip through the VM's print/assert path). The barrier (panic) cases — ÷0,
+// impossible cast, false assertion — are verified END-TO-END through the real front-end +
+// VM in the crumb's VERIFY step (a panic-capture harness does not exist in the runner yet,
+// M.3), and via their NEGATION here where it is expressible.
+
+// Integer arithmetic at the node's prim — the VM's eval_binary over a fixed-width carrier.
+#test
+fn arithmetic_holds() {
+    teko::assert::is_true(6 * 7 == 42)
+    teko::assert::is_true(100 - 58 == 42)
+    teko::assert::is_true(84 / 2 == 42)       // checked div, non-zero divisor: no panic
+    teko::assert::is_true(85 % 43 == 42)      // checked mod, non-zero divisor: no panic
+}
+
+// Chained comparison lowers to AND over adjacent pairs (eval_compare) — same as codegen.
+#test
+fn chained_compare_holds() {
+    teko::assert::is_true(1 < 2)
+    teko::assert::is_true(1 < 2 < 3)          // (1<2) && (2<3)
+    teko::assert::is_false(3 < 2 < 1)         // (3<2) is false → whole chain false
+}
+
+// Logical &&/|| short-circuit on bool (eval_binary's logical path).
+#test
+fn logical_holds() {
+    teko::assert::is_true((1 < 2) && (2 < 3))
+    teko::assert::is_true((1 < 2) || (3 < 2))
+    teko::assert::is_false((1 < 2) && (3 < 2))
+}
+
+// Lossless / widening cast emits no guard and preserves the value (eval_cast fast path).
+#test
+fn widening_cast_holds() {
+    let small: u8 = 200
+    teko::assert::is_true((small to u32) == 200)
+}
+
+// Narrowing cast that FITS the target does NOT panic (the guard passes through).
+#test
+fn narrowing_cast_in_range_holds() {
+    let n: u32 = 200
+    teko::assert::is_true((n to u8) == 200)   // 200 ≤ 255 → fits u8, no "impossible conversion"
+}
+
+// Unary minus / bitwise-not at width (eval_unary), and a let binding read back (env).
+#test
+fn unary_and_binding_holds() {
+    let x: i32 = 42
+    teko::assert::is_true(-x == -42)
+    let m: u8 = 0
+    teko::assert::is_true((~m) == 255)        // ~0 at u8 width == 0xFF
+}
+
+// defer does not prevent the enclosing function from returning the correct value (C7.18).
+// The defer body (a no-op let binding) runs at scope exit; the return value is unaffected.
+#test
+fn defer_does_not_break_return() {
+    let x = with_defer()
+    teko::assert::is_true(x == 42)
+}
+
+fn with_defer() -> i32 {
+    defer { let _cleanup = 0 }
+    return 42
+}
+
+// defer with an early return still fires (C7.18 inline-at-exit strategy).
+#test
+fn defer_fires_on_early_return() {
+    let y = early_return_with_defer(true)
+    teko::assert::is_true(y == 1)
+    let z = early_return_with_defer(false)
+    teko::assert::is_true(z == 2)
+}
+
+fn early_return_with_defer(flag: bool) -> i32 {
+    defer { let _d = 0 }
+    if flag { return 1 }
+    return 2
+}
+
+// (W9.3 part 2) A `defer` that MUTATES the variable being RETURNED must run BEFORE the return value
+// is captured — VM must match native (RATIFIED). `return acc` after `defer { acc = acc + 9 }` is 9.
+#test
+fn defer_mutates_returned_var() {
+    teko::assert::is_true(defer_then_return() == 9)
+}
+
+fn defer_then_return() -> i64 {
+    mut acc = 0
+    defer { acc = acc + 9 }
+    return acc
+}
+
+// (W9.3 part 2) The TRAILING-value (implicit return) variant: the fn-body's defers fire BEFORE the
+// trailing expr is evaluated, so a defer that mutates the trailing var is observed. native == 6.
+#test
+fn defer_mutates_trailing_value() {
+    teko::assert::is_true(top_fn_defer() == 6)
+}
+
+fn top_fn_defer() -> i64 {
+    mut acc = 0
+    defer { acc = acc + 1 }
+    acc = acc + 5
+    acc
+}
+
+// ---------------------------------------------------------------------------
+// MEM Step 2/3 — `Ref<T>` EXECUTES in the VM (was an honest-stop). A `Ref<T>` param is an
+// auto-ref'd `mut` scalar lvalue: `bump(x)` PROMOTES `x` to the env cell store, `r.value = …`
+// writes through the cell, and the caller's `x` observes the write. Behaviour is IDENTICAL to
+// the native (`teko build`) path; only speed differs. These exercise the cell-store + RefVal
+// paths (cell_alloc/get/set, auto-ref promotion, deref read/write, the env cell threading).
+// ---------------------------------------------------------------------------
+
+// the canonical case (converted from the former honest-stop): bump(x) mutates x through a Ref.
+fn bump(r: Ref<i64>) { r.value = r.value + 1 }
+#test
+fn ref_bump_holds() {
+    mut x: i64 = 41
+    bump(x)
+    teko::assert::is_true(x == 42)        // the write through the ref reached the caller's `x`
+}
+
+// compound deref-assign (`r.value += …`) and a plain deref-assign through the same ref.
+fn add_through_ref(r: Ref<i64>, n: i64) { r.value += n }
+fn set_through_ref(r: Ref<i64>, n: i64) { r.value = n }
+#test
+fn ref_compound_and_set_hold() {
+    mut x: i64 = 10
+    add_through_ref(x, 5)
+    teko::assert::is_true(x == 15)        // 10 += 5
+    set_through_ref(x, 99)
+    teko::assert::is_true(x == 99)        // plain deref store
+}
+
+// reading `r.value` (the deref READ) inside a callee that mutates a DIFFERENT scalar through the
+// arithmetic of the read — exercises the deref READ path (cell_get) alongside a deref write.
+fn double_in_place(r: Ref<i64>) { r.value = r.value + r.value }   // reads .value twice, writes once
+#test
+fn ref_read_holds() {
+    mut x: i64 = 7
+    double_in_place(x)                     // 7 + 7
+    teko::assert::is_true(x == 14)
+}
+
+// FORWARDING a ref param to another ref param: the inner write reaches the original `x`.
+fn forward_then_bump(r: Ref<i64>) { bump(r) }     // pass the ref param straight through
+#test
+fn ref_forwarding_holds() {
+    mut x: i64 = 100
+    forward_then_bump(x)
+    teko::assert::is_true(x == 101)
+}
+
+// MULTIPLE refs in one call, each aliasing a distinct caller var — no cross-talk.
+fn swap_add(a: Ref<i64>, b: Ref<i64>) { a.value = a.value + 1; b.value = b.value + 10 }
+#test
+fn ref_multiple_holds() {
+    mut p: i64 = 1
+    mut q: i64 = 2
+    swap_add(p, q)
+    teko::assert::is_true(p == 2)
+    teko::assert::is_true(q == 12)
+}
+
+// the SAME var aliased twice (both params point at the one cell): writes compose on one storage.
+fn add_both(a: Ref<i64>, b: Ref<i64>) { a.value = a.value + 1; b.value = b.value + 1 }
+#test
+fn ref_same_var_aliased_holds() {
+    mut x: i64 = 0
+    add_both(x, x)                         // both refs alias x's one cell
+    teko::assert::is_true(x == 2)          // +1 then +1 on the shared cell
+}
+
+// a ref written inside an IF body (the cell threading must survive FlowEnv branch-merge).
+fn bump_if(r: Ref<i64>, cond: bool) { if cond { r.value = r.value + 1 } else { r.value = r.value - 1 } }
+#test
+fn ref_in_if_holds() {
+    mut x: i64 = 50
+    bump_if(x, true)
+    teko::assert::is_true(x == 51)
+    mut y: i64 = 50
+    bump_if(y, false)
+    teko::assert::is_true(y == 49)
+}
+
+// a ref written inside a LOOP body (cell threading must survive the loop's env rebuild).
+fn add_n_times(r: Ref<i64>, n: i64) {
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        r.value = r.value + 1
+        i = i + 1
+    }
+}
+#test
+fn ref_in_loop_holds() {
+    mut x: i64 = 0
+    add_n_times(x, 5)
+    teko::assert::is_true(x == 5)          // five increments through the ref inside the loop
+}
+
+// caller-side: the origin var is still a normal `mut` after the ref call — further plain
+// mutation continues from the ref-mutated value (the slot stays cell-backed, reads stay correct).
+#test
+fn ref_then_plain_mutation_holds() {
+    mut x: i64 = 0
+    bump(x)                                // x -> 1 (through the cell)
+    x = x + 40                             // plain assign on the cell-backed slot: 1 + 40
+    teko::assert::is_true(x == 41)
+    bump(x)                                // x -> 42 (still aliasable)
+    teko::assert::is_true(x == 42)
+}
+
+// ---------------------------------------------------------------------------
+// W9a — NON-SCALAR `Ref<T>` EXECUTES in the VM == native. The escape gate now allows a NON-scalar
+// inner (struct/Named, slice). Teko has NO field/index assignment, so a non-scalar ref is ONLY
+// mutated by WHOLE-`.value` REPLACEMENT (`r.value = newWhole` — VM cell_set of a StructVal/[]Value;
+// native `*r = newWhole` struct/slice copy) and read by `r.value`/`r.value.field` (VM cell_get;
+// native `(*r)`). Under the cell-identity model these are observationally identical in BOTH engines,
+// exactly like scalars. These run on the VM AND compile native (`teko build`) — results must match.
+// ---------------------------------------------------------------------------
+
+// a small value struct — the non-scalar ref target.
+type Point = struct { x: i64; y: i64 }
+
+// whole-`.value` REPLACE of a struct ref: `r.value = Point{…}`. Reads `r.value.y`, writes the whole.
+fn setx(r: Ref<Point>, v: i64) { r.value = Point { x = v; y = r.value.y } }
+#test
+fn ref_struct_whole_replace_holds() {
+    mut p = Point { x = 1; y = 2 }
+    setx(p, 42)                                  // whole-replace through the ref
+    teko::assert::is_true(p.x == 42)             // the new x reached the caller's `p`
+    teko::assert::is_true(p.y == 2)              // y preserved by the read-then-rebuild
+}
+
+// reading a struct ref's field (the deref READ path on a non-scalar) inside the callee, then
+// folding the read INTO a whole-replace — exercises r.value.x / r.value.y reads in statement
+// position (the VM's executable Ref position). `collapse` sets x = x+y, y = 0.
+fn collapse(r: Ref<Point>) { r.value = Point { x = r.value.x + r.value.y; y = 0 } }
+#test
+fn ref_struct_read_field_holds() {
+    mut p = Point { x = 10; y = 5 }
+    collapse(p)                                  // reads r.value.x and r.value.y through the cell
+    teko::assert::is_true(p.x == 15)             // 10 + 5
+    teko::assert::is_true(p.y == 0)
+}
+
+// whole-`.value` REPLACE of a slice ref: grow the slice by pushing through the ref. `push` returns a
+// NEW slice; the whole `.value` is replaced with it (the only way to mutate — no index-assign).
+fn push1(r: Ref<[]i64>, v: i64) { r.value = teko::list::push(r.value, v) }
+#test
+fn ref_slice_whole_replace_holds() {
+    mut xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, 7)
+    push1(xs, 8)                                 // grow through the ref
+    push1(xs, 9)
+    teko::assert::is_true(xs.len == 3)           // the caller's slice grew (whole-replace)
+    teko::assert::is_true(xs[0] == 7)
+    teko::assert::is_true(xs[1] == 8)
+    teko::assert::is_true(xs[2] == 9)
+}
+
+// the SAME struct var aliased by TWO refs in one call: both writes compose on the one cell (the
+// non-scalar twin of ref_same_var_aliased_holds — proves cell identity for a StructVal target).
+fn bump_both_x(a: Ref<Point>, b: Ref<Point>) {
+    a.value = Point { x = a.value.x + 1; y = a.value.y }
+    b.value = Point { x = b.value.x + 10; y = b.value.y }
+}
+#test
+fn ref_struct_same_var_aliased_holds() {
+    mut p = Point { x = 0; y = 99 }
+    bump_both_x(p, p)                            // both refs alias p's one cell
+    teko::assert::is_true(p.x == 11)            // +1 then +10 compose on the shared cell
+    teko::assert::is_true(p.y == 99)            // y untouched
+}
+
+// ---------------------------------------------------------------------------
+// W9a fix — a deref-WRITE through a `Ref<T?>` (an OPTIONAL inner) must PRESENT-wrap the value
+// before the cell write (the binding/return present-wrap, via coerce_to(a.bound)). Without it the
+// VM stored a BARE value and a later `?? / ?.` read PANICKED ("coalesce left operand is not
+// optional") while native (deref-assign emit_as) was correct — a VM==native divergence. These
+// run statement-position so the write+read execute in the VM gate; native (`teko build`) agrees.
+// ---------------------------------------------------------------------------
+
+// (1) Ref<i64?>: write a bare value through the ref; a `??` read must see PRESENT, not panic.
+fn set_opt_scalar(r: Ref<i64?>) { r.value = 55 }
+#test
+fn ref_opt_scalar_write_then_read_holds() {
+    mut o: i64? = null
+    set_opt_scalar(o)                            // bare 55 written THROUGH the ref → present-wrapped
+    teko::assert::is_true((o ?? 0) == 55)        // ?? unwraps the PRESENT 55 (no panic)
+}
+
+// (2) Ref<Point?>: write a present Point through the ref; a `?.` field read must see it.
+fn set_opt_struct(r: Ref<Point?>) { r.value = Point { x = 7; y = 9 } }
+#test
+fn ref_opt_struct_write_then_read_holds() {
+    mut p: Point? = null
+    set_opt_struct(p)                            // present Point written THROUGH the ref
+    teko::assert::is_true((p?.x ?? 0) == 7)      // ?.x reaches into the PRESENT Point
+    teko::assert::is_true((p?.y ?? 0) == 9)
+}
+
+// ---------------------------------------------------------------------------
+// Struct-literal present-wrap parity — a struct-LITERAL field whose declared type is `T?` set from
+// a BARE (non-optional) value must PRESENT-wrap at construction, so a later `?? / ?.` over that
+// field sees a PRESENT (not a non-optional → "coalesce left operand is not optional" stop). This is
+// native parity with emit_struct_init's per-field emit_as. Both engines run these (VM gate + `teko
+// build`); results must match. Covers the non-generic struct, the generic-stamped struct (Box<i64?>),
+// the bare null (stays NONE), and a VARIANT field set from a bare case (no VM wrapper — case IS the
+// variant value, discriminated by name at match).
+// ---------------------------------------------------------------------------
+
+// (a) NON-GENERIC struct, optional field set from a bare value → `??` sees PRESENT.
+type OptHolder = struct { value: i64? }
+#test
+fn struct_lit_opt_field_from_bare_present() {
+    let f = OptHolder { value = 7 }              // bare 7 into a `i64?` field → present-wrapped
+    teko::assert::is_true((f.value ?? 0) == 7)   // `??` unwraps PRESENT 7 (no panic)
+}
+
+// (b) the bare `null` sentinel stays NONE → `??` yields the default.
+#test
+fn struct_lit_opt_field_from_null_is_none() {
+    let f = OptHolder { value = null }           // null → NONE
+    teko::assert::is_true((f.value ?? 3) == 3)   // NONE → default 3
+}
+
+// (c) GENERIC struct stamped `Box<i64?>` — the stamped decl's `value` field is `i64?`; a bare 7
+//     must present-wrap exactly like the non-generic case (monomorph rewrites the field type).
+type OptBox<T> = struct { value: T }
+#test
+fn struct_lit_generic_opt_field_from_bare_present() {
+    let b: OptBox<i64?> = OptBox { value = 7 }   // bare 7 into the stamped `i64?` field
+    teko::assert::is_true((b.value ?? 0) == 7)   // `??` unwraps PRESENT 7 (no panic)
+}
+
+// (d) a VARIANT field set from a BARE case: the VM stores the case value directly (it IS the variant
+//     value, discriminated by type_name at match — no wrapper). Construct + read-back via `match`.
+type CaseA = struct { n: i64 }
+type CaseB = struct { m: i64 }
+type AorB  = variant CaseA | CaseB
+type VarHolder = struct { item: AorB }
+#test
+fn struct_lit_variant_field_from_bare_case() {
+    let h = VarHolder { item = CaseA { n = 5 } }     // bare case into a variant field
+    let got = match h.item { CaseA as a => a.n; CaseB as b => b.m }
+    teko::assert::is_true(got == 5)
+}
+
+// ---------------------------------------------------------------------------
+// Call-argument present-wrap parity (GAP 1) — a bare (non-optional) value passed where the parameter
+// is `T?` must PRESENT-wrap at the call, so the callee's `?? / ?.` sees a PRESENT (not a non-optional
+// → "coalesce left operand is not optional" stop). Native parity with emit_as's per-arg wrap; both
+// engines run these (VM gate + `teko build`). Covers a primitive inner (i64?), a NAMED inner (Foo?),
+// and an ALREADY-optional arg (i64? into i64?) which must NOT double-wrap.
+// ---------------------------------------------------------------------------
+
+type PwFoo = struct { n: i64 }
+fn pw_take(x: i64?) -> i64 { x ?? 0 }
+fn pw_take_named(p: PwFoo?) -> i64 { (p?.n ?? 0) }
+
+// (a) a bare i64 into an `i64?` param → `?? d` gets the VALUE (7), not the default.
+#test
+fn call_arg_bare_prim_present_wraps() {
+    let v: i64 = 7
+    teko::assert::is_true(pw_take(v) == 7)        // present-wrapped 7 → `?? 0` yields 7
+}
+
+// (b) a bare NAMED `Foo` into a `Foo?` param → `p?.n ?? 0` gets the field (7).
+#test
+fn call_arg_bare_named_present_wraps() {
+    teko::assert::is_true(pw_take_named(PwFoo { n = 7 }) == 7)   // present Foo → `?.n` reads 7
+}
+
+// (c) an ALREADY-optional `i64?` arg into an `i64?` param → still correct, NOT double-wrapped (one
+//     `??` unwraps to the value; a double-wrap would leave a PRESENT(PRESENT 5) and yield wrongly).
+#test
+fn call_arg_already_optional_not_double_wrapped() {
+    let already: i64? = 5
+    teko::assert::is_true(pw_take(already) == 5)   // single PRESENT 5 → `?? 0` yields 5
+    let none: i64? = null
+    teko::assert::is_true(pw_take(none) == 0)      // NONE passes through → `?? 0` yields the default
+}
+
+// ---------------------------------------------------------------------------
+// Slice-element present-wrap / covariance parity (GAP 2) — a `[]T` flowing into a `[]T?` slot must
+// PRESENT-wrap each element (so `xs[i] ?? d` gets the value); a `[]case` into a `[]variant` must still
+// variant-wrap each element; a `[]T` into a `[]T` is a no-op copy. Native parity with emit_as's slice
+// rebuild (cg_wrap_elem_str) / the VM's coerce_to slice case. Covers binding, param, and field slots.
+// ---------------------------------------------------------------------------
+
+fn pw_make_ints() -> []i64 {
+    teko::list::push(teko::list::push(teko::list::empty(), 11), 22)
+}
+fn pw_sum_opt(xs: []i64?) -> i64 { (xs[0] ?? 0) + (xs[1] ?? 0) }
+type PwOptSliceHolder = struct { xs: []i64? }
+
+// (d-binding) []i64 → []i64? BINDING → element `?? d` gets each value (11 + 22 = 33).
+#test
+fn slice_bare_to_opt_binding_present_wraps() {
+    let opt_list: []i64? = pw_make_ints()
+    teko::assert::is_true((opt_list[0] ?? 0) == 11)
+    teko::assert::is_true((opt_list[1] ?? 0) == 22)
+}
+
+// (d-param) []i64 → []i64? PARAM → callee `?? d` over each element gets the value (33).
+#test
+fn slice_bare_to_opt_param_present_wraps() {
+    teko::assert::is_true(pw_sum_opt(pw_make_ints()) == 33)
+}
+
+// (d-field) []i64 → []i64? FIELD → read-back element `?? d` gets the value.
+#test
+fn slice_bare_to_opt_field_present_wraps() {
+    let h = PwOptSliceHolder { xs = pw_make_ints() }
+    teko::assert::is_true((h.xs[0] ?? 0) == 11)
+    teko::assert::is_true((h.xs[1] ?? 0) == 22)
+}
+
+// (e) []case → []variant covariance still works — each element matches its case after the rebuild.
+fn pw_make_cases() -> []CaseA {
+    teko::list::push(teko::list::push(teko::list::empty(), CaseA { n = 3 }), CaseA { n = 4 })
+}
+#test
+fn slice_case_to_variant_covariance_holds() {
+    let widened: []AorB = pw_make_cases()
+    let a0 = match widened[0] { CaseA as a => a.n; CaseB as b => b.m }
+    let a1 = match widened[1] { CaseA as a => a.n; CaseB as b => b.m }
+    teko::assert::is_true(a0 == 3)
+    teko::assert::is_true(a1 == 4)
+}
+
+// (f) []T → []T is a NO-OP copy — same element type, no wrap, values intact.
+#test
+fn slice_same_type_noop_copy_holds() {
+    let copy: []i64 = pw_make_ints()
+    teko::assert::is_true(copy[0] == 11)
+    teko::assert::is_true(copy[1] == 22)
+}
+
+// ===========================================================================
+// W9.3 — SCOPE-SCOPED `defer { … }` (Zig/Swift-style, per-block, NOT Go's per-function).
+// A defer registered inside a block fires at THAT block's exit (loop body → per iteration; if/match
+// arm → arm exit), LIFO within a block, innermost-block-first across nesting, and on
+// return/break/continue crossing blocks each crossed block fires its own defers. Observed via an
+// outer `mut` the defer body assigns to (the env threads the write back out — the only side-effect a
+// defer body can carry, since it may not return/break/nest a defer). These run on the VM gate; the
+// SAME programs are compiled to native in the W9.3 reproducer projects and produce identical results
+// (VM == NATIVE — the headline gate). The self-hosted .tks codegen fully supports scope-level
+// (nested) defers — it emits byte-identical C to codegen.c (W9.3) — so a defer-using corpus program
+// would compile fine; these tests just keep their defers inline in `#test` fns for clarity.
+
+// (a) a defer in a LOOP body fires ONCE PER ITERATION — the count equals the iteration count.
+#test
+fn defer_in_loop_fires_per_iteration() {
+    mut c: i64 = 0
+    mut i = 0
+    loop {
+        if i >= 5 { break }
+        defer { c = c + 1 }   // fires at EACH iteration's end
+        i = i + 1
+    }
+    teko::assert::is_true(c == 5)   // 5 iterations → 5 defer firings
+}
+
+// (b) a defer in an IF arm fires at the ARM's exit (not the function's).
+#test
+fn defer_in_if_arm_fires_at_arm_exit() {
+    mut c: i64 = 0
+    if c == 0 {
+        defer { c = c + 1 }   // fires when the then-arm exits
+        c = c + 10            // ran BEFORE the defer
+    }
+    c = c + 100               // ran AFTER the arm (defer already fired)
+    teko::assert::is_true(c == 111)   // 10 (body) + 1 (defer at arm exit) + 100 (after)
+}
+
+// (c) LIFO within a block — the LAST-registered defer fires FIRST. Order is observable via mixing a
+// multiply and an add: 5 *10 (last-registered, fires first) → 50, then +1 (first-registered) → 51.
+#test
+fn defer_lifo_within_block() {
+    mut c: i64 = 0
+    if c == 0 {
+        defer { c = c + 1 }    // registered FIRST → fires LAST
+        defer { c = c * 10 }   // registered LAST  → fires FIRST
+        c = 5
+    }
+    teko::assert::is_true(c == 51)
+}
+
+// (d) a defer fires on BREAK …
+#test
+fn defer_fires_on_break() {
+    mut c: i64 = 0
+    loop {
+        defer { c = c + 1 }   // fires before the break leaves the loop body
+        break
+    }
+    teko::assert::is_true(c == 1)
+}
+
+// … on CONTINUE (the continue-path iteration still fires its defer) …
+#test
+fn defer_fires_on_continue() {
+    mut c: i64 = 0
+    mut i = 0
+    loop {
+        if i >= 3 { break }
+        i = i + 1
+        defer { c = c + 1 }       // fires at each iteration end, incl. via continue
+        if i == 2 { continue }    // this iteration ends via continue → defer still fires
+    }
+    teko::assert::is_true(c == 3)   // 3 iterations, defer fires every time
+}
+
+// … and a break crossing a NESTED loop scope fires the inner loop-body defer as that scope unwinds —
+// the SAME crossed-scope unwinding path a `return` from inside a loop takes (exec_block drains its
+// defers on ANY non-NORMAL flow). The return-VALUE-crossing-a-loop case is covered natively in the
+// W9.3 reproducer project (a Ref<T> return-from-loop is not VM-runnable in value position).
+#test
+fn defer_fires_on_return_from_loop() {
+    mut c: i64 = 0
+    loop {
+        loop {
+            defer { c = c + 1 }   // inner loop-body defer — fires as the inner break crosses this scope
+            break                 // exits the INNER loop (its body defer fires on the way out)
+        }
+        defer { c = c * 10 }      // outer loop-body defer — fires at the outer iteration's end
+        break
+    }
+    // inner break unwinds firing +1 → 1; the outer loop's exit fires *10 → 10.
+    teko::assert::is_true(c == 10)
+}
+
+// (e) a top-level FUNCTION defer still fires at fn exit (back-compat with the old function-scoped form).
+#test
+fn defer_fn_level_back_compat() {
+    mut c: i64 = 0
+    if c == 0 {
+        defer { c = c + 1 }
+        c = c + 10
+    }
+    teko::assert::is_true(c == 11)   // 10 (body) + 1 (block-exit defer)
+}
+
+// (f) NESTED blocks — the INNER defer fires before the OUTER. A loop body (outer scope) holds an if
+// arm (inner scope); each has a defer. The inner (arm) defer fires at the arm's exit, BEFORE the
+// outer (loop-body) defer fires at the iteration's end. Order is encoded multiplicatively:
+// value 3 → arm exit *2 = 6 → loop-body exit +1 = 7.
+#test
+fn defer_nested_inner_before_outer() {
+    mut c: i64 = 0
+    loop {
+        defer { c = c + 1 }       // OUTER (loop body) → fires at iteration end
+        if true {
+            defer { c = c * 2 }   // INNER (arm) → fires at arm exit FIRST
+            c = 3
+        }
+        break
+    }
+    teko::assert::is_true(c == 7)
+}
+
+// (g) NO-REGION value-position `match` arm with a defer that mutates an arm-local. The arm body needs
+// no heap region (the binding is a SCALAR, want_block==false), so this exercises the no-region value-
+// arm defer path: the tail value `a` (==10) is captured into the match sink FIRST, THEN the arm's
+// defer fires (a→13, discarded). RATIFIED: tail-then-defer, opposite of a fn return. native == VM == 10.
+// (Before the W9.3 no-region fix this emitted broken C — the defer landed outside the arm's stmt-expr.)
+#test
+fn defer_value_match_arm_no_region() {
+    teko::assert::is_true(value_arm_defer(0) == 10)
+}
+
+fn value_arm_defer(sel: i64) -> i64 {
+    let r = match sel { 0 => { mut a = 10; defer { a = a + 3 }; a }; _ => 0 }
+    r
+}
+
+// (h) A SIBLING defer-bearing function compiled AFTER the no-region value-arm fn must build correctly
+// and return its own value (proves the value-arm's registered defer did NOT leak forward / corrupt the
+// per-function defer count). `sib_after_value_arm` is a FUNCTION return: its defer fires BEFORE the
+// return value is captured (the ratified fn-return ordering — opposite of the value-arm), so acc==1.
+#test
+fn defer_value_arm_no_corruption_of_sibling() {
+    teko::assert::is_true(value_arm_defer(0) == 10)
+    teko::assert::is_true(sib_after_value_arm() == 1)
+}
+
+fn sib_after_value_arm() -> i64 {
+    mut acc = 0
+    defer { acc = acc + 1 }
+    return acc
+}
+
+// (i) WITH-REGION value-arm: the arm both initializes a block-local struct (forces want_block==true,
+// a `_tkbr` region) AND has a defer mutating a scalar tail-local. The region path already captured the
+// tail before firing the defer; this guards that path against regression. native == VM == 10.
+type VadBox = struct { v: i64 }
+
+#test
+fn defer_value_match_arm_with_region() {
+    teko::assert::is_true(value_arm_defer_region(0) == 10)
+}
+
+fn value_arm_defer_region(sel: i64) -> i64 {
+    let r = match sel {
+        0 => { let bx = VadBox { v = 99 }; mut a = 10; defer { a = a + bx.v }; a }
+        _ => 0
+    }
+    r
+}
+
+// ---------------------------------------------------------------------------
+// MEM Step 4 — `Ref<T>` calls in VALUE POSITION execute in the VM == native (was an honest-stop:
+// the value-functional `eval_expr` had no env-return channel, so a value-position ref call's cell
+// writes were lost; MEM Step 4 threads the env out of eval_expr (EvalRes), so the auto-ref'd cell
+// write reaches the caller exactly as in statement position). The C twin runs these via its global
+// cell store. Each test runs on the VM (`teko test`) AND compiles native (`teko build`) — the
+// results MUST match (the native binary is the oracle: e.g. `let y=bumpr(x); y+x` → 84).
+// ---------------------------------------------------------------------------
+
+// the value-returning ref bump: writes through the ref AND yields the new value (the trailing expr).
+fn bumpr(r: Ref<i64>) -> i64 { r.value = r.value + 1; r.value }
+
+// (1) scalar Ref<i64> in value position: `let y = bumpr(x)` — y is the returned new value (42), and
+// x ALSO observes the write (42). y + x == 84. The headline native-oracle case.
+#test
+fn ref_value_position_let_holds() {
+    mut x: i64 = 41
+    let y = bumpr(x)                       // value-position ref call: mutates x AND yields the value
+    teko::assert::is_true(y == 42)         // the returned trailing value
+    teko::assert::is_true(x == 42)         // the write through the ref reached the caller's `x`
+    teko::assert::is_true(y + x == 84)     // native oracle: 84
+}
+
+// (2) a ref call nested as a CALL ARGUMENT: `add1(bumpr(x))`. The nested ref write must reach `x`.
+fn add1(n: i64) -> i64 { n + 1 }
+#test
+fn ref_value_position_nested_arg_holds() {
+    mut x: i64 = 41
+    let r = add1(bumpr(x))                 // bumpr(x): x→42, yields 42; add1(42)=43
+    teko::assert::is_true(r == 43)
+    teko::assert::is_true(x == 42)         // the nested ref write reached the caller
+}
+
+// (3) a ref call as a BINARY OPERAND: `bumpr(x) + 1`. The operand's write must reach `x`.
+#test
+fn ref_value_position_binary_operand_holds() {
+    mut x: i64 = 41
+    let r = bumpr(x) + 1                    // bumpr(x): x→42, yields 42; 42 + 1 = 43
+    teko::assert::is_true(r == 43)
+    teko::assert::is_true(x == 42)
+}
+
+// (4) TWO ref calls in one binary expression: `bumpr(x) + bumpr(x)`. Both alias x's one cell; the
+// mutations compose LEFT-then-RIGHT (matching native's left-to-right operand eval): 42 + 43 == 85,
+// and x ends at 43. This proves the env (cell store) THREADS between the two operand evals.
+#test
+fn ref_value_position_two_calls_order_holds() {
+    mut x: i64 = 41
+    let r = bumpr(x) + bumpr(x)            // left: x→42 yields 42; right: x→43 yields 43; 42+43=85
+    teko::assert::is_true(r == 85)
+    teko::assert::is_true(x == 43)         // two composed writes on the shared cell
+}
+
+// (5) a value-position ref call whose result is MATCHED, then a subsequent read of the mutated var:
+// both reflect the mutation. `match bumpr(x) { 42 => … }` and then `x == 42`.
+#test
+fn ref_value_position_match_subject_holds() {
+    mut x: i64 = 41
+    let tag = match bumpr(x) {            // bumpr(x): x→42, yields 42
+        42 => 1
+        _  => 0
+    }
+    teko::assert::is_true(tag == 1)        // the matched value was the new 42
+    teko::assert::is_true(x == 42)         // and the mutation is visible after the match
+}
+
+// (6) NON-SCALAR Ref<Point> in value position: a value-returning struct-ref fn used in `let`.
+// `setget(p, 42)` whole-replaces p.x with 42 and RETURNS the new p.x (42). p observes the write.
+fn setget(r: Ref<Point>, v: i64) -> i64 { r.value = Point { x = v; y = r.value.y }; r.value.x }
+#test
+fn ref_value_position_struct_holds() {
+    mut p = Point { x = 1; y = 2 }
+    let got = setget(p, 42)                // value-position non-scalar ref call
+    teko::assert::is_true(got == 42)       // the returned new x
+    teko::assert::is_true(p.x == 42)       // the whole-replace reached the caller's `p`
+    teko::assert::is_true(p.y == 2)        // y preserved
+}
