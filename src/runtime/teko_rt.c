@@ -204,6 +204,12 @@ tk_str tk_str_of_bytes(tk_str bytes) {
     return (tk_str){ buf, n };
 }
 
+// tk_bytes_of_str — zero-copy view of a str's bytes as a tk_slice_byte. Same ptr and len,
+// reinterpret-cast from const to mutable pointer; the slice is read-only in practice.
+tk_slice_byte tk_bytes_of_str(tk_str s) {
+    return (tk_slice_byte){ (tk_byte *)s.ptr, s.len };
+}
+
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c) {
     tk_byte *buf = malloc(1);

@@ -197,6 +197,10 @@ tk_type_result tk_builtin_fn(tk_str name) {
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &u64_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };
     }
+    if (name_is(name, "bytes_of_str")) {                             // bytes_of_str(str) -> []byte
+        tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &bytes_t } };
+        return (tk_type_result){ .ok = true, .as.value = ft };
+    }
     if (name_is(name, "chars")) {                                     // str::chars(str) -> []char
         tk_type ft = { .tag = TK_TYPE_FUNC, .as.func = { .params = &str_t, .nparams = 1, .ret = &char_slice_t } };
         return (tk_type_result){ .ok = true, .as.value = ft };

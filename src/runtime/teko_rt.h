@@ -56,6 +56,14 @@ typedef struct {
     uint64_t  len;        // length in BYTES (1–4)
 } tk_char;
 
+// tk_slice_byte — the runtime layout of a `[]byte` slice. Same {ptr,len} shape as tk_char
+// (both are byte arrays). Pre-declared here so tk_bytes_of_str can use it in teko_rt.h
+// without depending on the generated program's per-file typedef.
+typedef struct {
+    tk_byte  *ptr;
+    uint64_t  len;
+} tk_slice_byte;
+
 // closure / function VALUE (W10a). The uniform runtime representation of a value of a function
 // type `(A, B) -> R`: a code pointer plus a captured-environment pointer. For a NAMED fn used as a
 // value (W10a) `env` is NULL and `fn` is the C function's address; calls cast `fn` back to the
@@ -181,6 +189,9 @@ tk_str tk_u64_to_str(uint64_t v);
 tk_str tk_str_of_bytes(tk_str bytes);
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c);
+// tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
+// pointing into the same memory. The caller must not outlive the originating str allocation.
+tk_slice_byte tk_bytes_of_str(tk_str s);
 // tk_char_to_u32 — decode a `char` (its 1–4 UTF-8 bytes) to the scalar codepoint value. The bytes
 // are valid UTF-8 by construction (the lexer validated the literal), so this is a pure decode.
 uint32_t tk_char_to_u32(tk_char c);

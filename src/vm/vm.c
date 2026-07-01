@@ -704,6 +704,21 @@ static bool try_builtin_call(tk_path p, const tk_texpr *args, size_t nargs,
         *out = v_str(tk_str_of_bytes(view));   // COPIES the bytes into a fresh owned str
         return true;
     }
+    // bytes_of_str — (str) -> []byte. Build a TK_VAL_LIST of u8 INT values, mirroring the
+    // inverse of the str_of_bytes path above (there: list of INT → str; here: str → list of INT).
+    if (seg_is(last, "bytes_of_str")) {
+        if (nargs != 1) vm_unsupported("bytes_of_str expects exactly one argument (a str)");
+        tk_value a = tk_vm_eval_expr(&args[0], env);
+        if (a.tag != TK_VAL_STR) vm_unsupported("bytes_of_str on a non-str value (internal: checker should reject)");
+        tk_str s = a.as.s;
+        tk_value list = v_list_empty();
+        for (size_t i = 0; i < s.len; i++) {
+            tk_value bv = v_int((uint64_t)s.ptr[i], false, 8);   // byte == u8 rep (width=8, unsigned)
+            list = v_list_push(list.as.list, bv);
+        }
+        *out = list;
+        return true;
+    }
     // one_byte — (byte) -> str. A fresh 1-byte str holding the byte value.
     if (seg_is(last, "one_byte")) {
         if (nargs != 1) vm_unsupported("one_byte expects exactly one argument (a byte)");
