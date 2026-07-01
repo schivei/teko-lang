@@ -626,12 +626,12 @@ All design is SETTLED: W10b OOP, DEFARGS, W10c DI, W11 constraints (sans `!`), c
 - Independent of the OOP/DI/async chain (only needs the GATE), sequenced FIRST by choice. *(files: `lexer`,`P`,`ast`,`chk`,`cg`,`vm`,`src/text/`,`src/time/`)*
 
 **🟢 ROUND 1 — independent features (PARALLEL; each its own lexer→checker→cg→vm pipeline):**
-- **DEFARGS** (default-args + named-call) — prereq for OOP "no overloading" (no new token, `=`).
-- **flags** — self-contained (`flags` kw).
-- **`in` operator** (array-only) — self-contained.
-- **W11/S6 constraints** (positive + `(A&B)|C`, **NO `!`**) — checker/generics; independent of OOP.
-- **OOP A1** (method model: receiver = 1st untyped param; struct=value/immutable, class=auto-`Ref`) — the OOP foundation.
-- **arena-tree extension** (S2 parent-ptr + per-arena `type→instance` registry) — runtime/codegen; needed later by DI `#scoped`.
+- ✅ **flags** — DONE, see Phase 8 (self-contained, `flags` kw). *(struck from ROUND 1 2026-07-01 audit — stale duplicate text, no work remains.)*
+- ✅ **`in` operator** — DONE, see Phase 2 (array-only). *(struck from ROUND 1 2026-07-01 audit — stale duplicate text, no work remains.)*
+- ⬜ **DEFARGS** (default-args + named-call) — prereq for OOP "no overloading" (no new token, `=`). Design SETTLED (memory `teko-default-args-named-call`), zero implementation as of 2026-07-01 audit (`tk_param` has no default field).
+- ⬜ **W11/S6 constraints** (positive + `(A&B)|C`, **NO `!`**) — checker/generics; independent of OOP. Design SETTLED (memory `teko-generics-constraints-rules`), zero implementation as of 2026-07-01 audit (`type_params` still a bare name array, no `{name,constraint}` pair).
+- ⬜ **OOP A1** (method model: receiver = 1st untyped param; struct=value/immutable, class=auto-`Ref`) — the OOP foundation. Design SETTLED for structs/interfaces (memory `teko-oop-w10b-design`), the class-vs-interface-values unit (W10b.0.B) still open; zero implementation as of 2026-07-01 audit (no `class` token anywhere).
+- ⬜ **arena-tree extension** (S2 parent-ptr + per-arena `type→instance` registry) — runtime/codegen; needed later by DI `#scoped`. S1 (bump-allocator + flat global region registry) is DONE (memory `teko-s1-arena`); S2's parent-ptr TREE + per-arena registry not started as of 2026-07-01 audit.
 
 **🟢 ROUND 2 — OOP backbone (needs A1):** **B2** statics/factories · **CLASS** (kinds, inheritance, virtual/override/abstract, base-binding) · **IF** interfaces · **B5** composition (folds into A1). *(DEFARGS feeds CLASS factories.)*
 
