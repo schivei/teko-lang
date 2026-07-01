@@ -10,6 +10,13 @@ fn ek(k: parser::ExprKind) -> parser::Expr { parser::Expr { kind = k; line = 0; 
 fn e_num(v: i128) -> parser::Expr { ek(parser::Number { is_float = false; value = v; fval = 0.0 }) }
 fn e_var(name: str) -> parser::Expr { ek(parser::Var { name = name }) }
 fn e_str(t: str)    -> parser::Expr { ek(parser::StrLit { text = t }) }
+// DEFARGS (2026-07-01) — an all-positional arg_names array of length n, for tests unrelated to named-call.
+fn pos_names(n: u64) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= n { break }; out = teko::list::push(out, ""); i++ }
+    out
+}
 fn st(e: parser::Expr) -> parser::Statement { parser::ExprStmt { expr = e } }   // an expr-statement
 fn one_stmt(e: parser::Expr) -> []parser::Statement { teko::list::push(teko::list::empty(), st(e)) }
 fn path1(name: str) -> parser::Path { parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) } }
@@ -178,7 +185,7 @@ fn types_call() {
     let params: []Type = teko::list::push(teko::list::empty(), u32t())
     let env = define(env0, "f", Func { params = params; ret = boolt() ; variadic = false }, false)
     let args: []parser::Expr = teko::list::push(teko::list::empty(), e_var("x"))
-    let tcall = match type_call(parser::Call { callee = path1("f"); args = args }, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let tcall = match type_call(parser::Call { callee = path1("f"); args = args; arg_names = pos_names(args.len) }, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
     teko::assert::is_true(prim_is(tcall.type, PrimKind::Bool))
     match tcall.kind { TCall as cc => teko::assert::is_true(cc.args.len == 1); _ => teko::assert::is_true(false) }
 }
@@ -844,14 +851,14 @@ fn types_chars_and_len_chars_builtins() {
     match builtin_fn("len_chars") { Type => teko::assert::is_true(true); error => teko::assert::is_true(false) }
     // type_call: chars("abc") must type as []char (Slice { element = Char {} }).
     let str_args: []parser::Expr = teko::list::push(teko::list::empty(), e_str("abc"))
-    let tc = match type_call(parser::Call { callee = path1("chars"); args = str_args }, empty_env(), empty_table()) {
+    let tc = match type_call(parser::Call { callee = path1("chars"); args = str_args; arg_names = pos_names(str_args.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
     match tc.type { Slice as sl => match sl.element { Char => teko::assert::is_true(true); _ => teko::assert::is_true(false) }; _ => teko::assert::is_true(false) }
     // type_call: len_chars("abc") must type as i64.
     let str_args2: []parser::Expr = teko::list::push(teko::list::empty(), e_str("abc"))
-    let tlc = match type_call(parser::Call { callee = path1("len_chars"); args = str_args2 }, empty_env(), empty_table()) {
+    let tlc = match type_call(parser::Call { callee = path1("len_chars"); args = str_args2; arg_names = pos_names(str_args2.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
@@ -873,7 +880,7 @@ fn types_round0_char_ops_builtins() {
 
     // type_call: char_at("hello", 1i64) must type as char.
     let str_i64_args: []parser::Expr = teko::list::push(teko::list::push(teko::list::empty(), e_str("hello")), e_num(1))
-    let tca = match type_call(parser::Call { callee = path1("char_at"); args = str_i64_args }, empty_env(), empty_table()) {
+    let tca = match type_call(parser::Call { callee = path1("char_at"); args = str_i64_args; arg_names = pos_names(str_i64_args.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
@@ -881,7 +888,7 @@ fn types_round0_char_ops_builtins() {
 
     // type_call: str_slice_chars("hello", 1i64, 3i64) must type as str.
     let ssc_args: []parser::Expr = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), e_str("hello")), e_num(1)), e_num(3))
-    let tssc = match type_call(parser::Call { callee = path1("str_slice_chars"); args = ssc_args }, empty_env(), empty_table()) {
+    let tssc = match type_call(parser::Call { callee = path1("str_slice_chars"); args = ssc_args; arg_names = pos_names(ssc_args.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
@@ -889,7 +896,7 @@ fn types_round0_char_ops_builtins() {
 
     // type_call: is_alpha(char_literal) must type as bool.
     let char_args: []parser::Expr = teko::list::push(teko::list::empty(), ek(parser::CharLit { bytes = "a" }))
-    let tia = match type_call(parser::Call { callee = path1("is_alpha"); args = char_args }, empty_env(), empty_table()) {
+    let tia = match type_call(parser::Call { callee = path1("is_alpha"); args = char_args; arg_names = pos_names(char_args.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
@@ -897,7 +904,7 @@ fn types_round0_char_ops_builtins() {
 
     // type_call: to_lower(char_literal) must type as char.
     let char_args2: []parser::Expr = teko::list::push(teko::list::empty(), ek(parser::CharLit { bytes = "A" }))
-    let ttl = match type_call(parser::Call { callee = path1("to_lower"); args = char_args2 }, empty_env(), empty_table()) {
+    let ttl = match type_call(parser::Call { callee = path1("to_lower"); args = char_args2; arg_names = pos_names(char_args2.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
@@ -905,7 +912,7 @@ fn types_round0_char_ops_builtins() {
 
     // type_call: to_upper(char_literal) must type as char.
     let char_args3: []parser::Expr = teko::list::push(teko::list::empty(), ek(parser::CharLit { bytes = "a" }))
-    let ttu = match type_call(parser::Call { callee = path1("to_upper"); args = char_args3 }, empty_env(), empty_table()) {
+    let ttu = match type_call(parser::Call { callee = path1("to_upper"); args = char_args3; arg_names = pos_names(char_args3.len) }, empty_env(), empty_table()) {
         TExpr as e => e
         error => { teko::assert::is_true(false); return }
     }
