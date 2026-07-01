@@ -166,12 +166,12 @@ typedef enum {
     // never a stored operator, so its ordinal is never serialized to `.tkb`). Its `.text` is the
     // codepoint's raw UTF-8 bytes (1–4), already validated by the lexer.
     TK_TOKEN_CHAR,          // `c'x'` — one UTF-8 codepoint (1–4 bytes)
-    // `params` keyword — a variadic-parameter modifier (2026-07-01 ruling). Appended LAST for
-    // ordinal stability (never a stored operator, so its ordinal is never serialized to `.tkb`).
-    // A REAL reserved keyword (not contextual like `from`): `fn f(a: T, params b: []T2) -> R`
-    // marks the LAST parameter as variadic.
-    TK_TOKEN_PARAMS,        // `params` — variadic-parameter modifier keyword
 } tk_token_kind;
+// `params` — variadic-parameter modifier (2026-07-01 ruling) is NOT a reserved token: like `from`
+// (FFI `extern` position), it stays a normal TK_TOKEN_IDENT and is matched CONTEXTUALLY by the
+// parser at the parameter-declaration position (`text_is(t[p].text, "params")`). A real reserved
+// keyword would collide with the ~295 existing uses of `params` as a plain identifier/field name
+// across the self-hosted corpus (e.g. `gf.params`, `lam.params`) — see parse_decl.c/.tks.
 
 // tk_token — mirrors token.tks `Token`: a kind + the source text span (a str VIEW
 // for most kinds; a FRESH decoded str for Str/Byte literals) + its 1-based source
