@@ -25,6 +25,52 @@
 
 ---
 
+## Prior art em `main` (herança pré-reboot, NÃO portada para `chore/reboot`)
+
+`main` já tem uma tentativa de extensão VS Code (`extensions/vscode/`) e um esqueleto JetBrains
+(`extensions/jetbrains/com.schivei.teko/`, TextMate-only — fora do escopo de editores deste roadmap,
+mas confirma que "gramática compartilhada" é o caminho certo). **Nenhum dos dois existe em
+`chore/reboot`** — o reboot do front-end (`REBOOT_PLAN.md`) não os carregou. Auditoria do que está lá,
+para reaproveitar o que serve e não repetir o que não serve:
+
+- **`language-configuration.json`** — comentários (`//`, `/* */`), brackets, auto-closing e
+  surrounding pairs. **Genérico e reaproveitável tal como está** (não depende de keywords específicas).
+- **`syntaxes/teko.tmLanguage.json`** — gramática TextMate **escrita à mão** (30 linhas), não gerada.
+  Está **desatualizada contra a legislação atual**: lista `for`/`switch`/`when`/`service`/`handler`/
+  `decorates`/`command`/`notification`/`query`/`raised`/`where`/`with` (construções de uma fase anterior
+  do projeto, hoje removidas ou nunca canônicas — ver [[teko-only-loop]]/[[teko-no-match-on-bool]] na
+  memória: Teko só tem `loop`, não `for`/`switch`) e não lista `loop`/`match`/`variant`/o vocabulário
+  atual. **Não portar esta gramática tal qual** — é exatamente a divergência manual que o Eixo A existe
+  para evitar; regerar do zero via A1→A2 a partir do lexer real de `chore/reboot`.
+- **`src/extension.js` — comandos `teko.run`/`teko.build`.** Invocam o compilador via
+  `child_process.exec` com o caminho **interpolado numa string de shell**:
+  `` cp.exec(`"${compilerPath}" run "${tkpPath}"`, …) ``. **Achado de segurança:** isso é uma superfície
+  de **injeção de comando** — um caminho de workspace contendo aspas, `` ` ``, `$()` ou `;` escapa a
+  interpolação e executa no shell do usuário. Ao portar (Eixo D2), substituir por `execFile`/`spawn` com
+  **argv em array** (nunca concatenação de string para shell) — não é uma reescrita cosmética, é a
+  correção do problema.
+- **`src/extension.js` — client LSP.** Registra um `vscode-languageclient` cujo `serverOptions` chama
+  `<compilerPath> check` como se fosse o processo do language server. **Esse subcomando não existe** —
+  nem no compilador antigo de `main`, nem no compilador atual de `chore/reboot` — e, mesmo que existisse,
+  nada indica que falaria o protocolo LSP (JSON-RPC sobre stdio) exigido pelo `LanguageClient`. É um
+  client sem servidor: o wiring existe, o servidor (Eixo C — `teko-lsp`) nunca foi construído. Ao portar,
+  **não reativar este wiring até o Eixo C entregar um `teko-lsp` real** — do contrário a extensão anuncia
+  um recurso (intellisense) que silenciosamente não funciona.
+- **Correção de segurança já aplicada em `main` (commit `48eb91c`, Dependabot).** A `devDependency`
+  obsoleta `vscode` (`^1.1.37`) puxava `minimist` (prototype pollution crítico), `mocha`, `mkdirp`,
+  `http-proxy-agent` e `diff`/`minimatch` vulneráveis; foi trocada por `@types/vscode` (`^1.75.0`,
+  alinhado ao `engines.vscode`), zerando o `npm audit`. As dependências de **produção**
+  (`vscode-languageclient`, `minimatch`, `glob`) já estavam limpas — essa correção é válida e deve ser
+  preservada ao reconstruir `tooling/vscode/package.json` (não reintroduzir a `devDependency` `vscode`
+  antiga).
+
+> **Resumo para quem for portar:** aproveitar `language-configuration.json`; descartar e regerar a
+> gramática TextMate (Eixo A/B1); descartar o `cp.exec` de string e o wiring do `LanguageClient` tal
+> como estão (Eixo D1/D2, ambos precisam ser refeitos — um por segurança, outro por não ter servidor);
+> manter a lição da correção de dependência (`@types/vscode`, não `vscode`).
+
+---
+
 ## Eixo A — Fonte única de léxico para realce (evita 4 cópias divergentes)
 
 **Cânone:** a lista de keywords/operadores/literais/comentários é definida **uma vez**, lida do lexer
@@ -47,7 +93,7 @@ real, e cada editor consome uma **saída gerada**, nunca uma cópia digitada à 
 
 | # | Entrega | Estado |
 |---|---|---|
-| B1 | **VS Code** — gramática TextMate embutida (consome A2) + `language-configuration.json` (comentários `//`/`/* */`, pares de bracket/aspas, indentação por bloco). | falta (dep A2) |
+| B1 | **VS Code** — gramática TextMate embutida (consome A2) + `language-configuration.json` (comentários `//`/`/* */`, pares de bracket/aspas, indentação por bloco). | falta em `chore/reboot` (dep A2) — existe esqueleto em `main:extensions/vscode/`, mas com gramática manual e desatualizada; ver "Prior art" acima. Reaproveitar só o `language-configuration.json`. |
 | B2 | **Vim/Neovim** — `syntax/teko.vim` (consome A3), `ftdetect/teko.vim` mapeando `.tks`/`.tkt` → filetype `teko` e `.tkp` → `toml` (o manifesto já É TOML — `TEKO_ROADMAP_INDEPENDENCE.md` Eixo A). *Opcional/futuro:* gramática Tree-sitter (`queries/teko/highlights.scm`) para Neovim ≥0.9, mais precisa que regex. | falta (dep A3) |
 | B3 | **Emacs** — `teko-mode.el`, modo maior derivado de `prog-mode`, `teko-font-lock-keywords` (consome A4) + `syntax-table` para comentários/strings + `.tkp` associado a `toml-mode` se instalado. | falta (dep A4) |
 | B4 | **Nano** — `teko.nanorc` (consome A5): keywords, tipos primitivos, comentários de linha/bloco, strings/interpolação. Sem contexto/aninhamento — aceita falso-positivo ocasional (limite conhecido do Nano). | falta (dep A5) |
@@ -83,8 +129,8 @@ imediatamente.
 
 | # | Entrega | Estado |
 |---|---|---|
-| D1 | **VS Code — client LSP** — extensão contribui `vscode-languageclient`, conecta a `teko-lsp` via stdio, ativa para linguagem `teko` (`.tks`/`.tkt`) e `toml`+schema para `.tkp`. | falta (dep C1) |
-| D2 | **VS Code — tasks + problemMatcher** — comandos "Teko: Build" / "Teko: Run" / "Teko: Test" chamando a CLI; `problemMatcher` `^teko: (.*):(\d+):(\d+): (.*)$` casa o formato hoje emitido. | falta (sem dependência — CLI já existe) |
+| D1 | **VS Code — client LSP** — extensão contribui `vscode-languageclient`, conecta a `teko-lsp` via stdio, ativa para linguagem `teko` (`.tks`/`.tkt`) e `toml`+schema para `.tkp`. | falta (dep C1) — `main:extensions/vscode/src/extension.js` já tem o `LanguageClient` registrado, mas apontando para um subcomando `check` inexistente/sem protocolo LSP; **não portar o wiring, refazer quando C1 existir**. |
+| D2 | **VS Code — tasks + problemMatcher** — comandos "Teko: Build" / "Teko: Run" / "Teko: Test" chamando a CLI via **Tasks API** (nunca `child_process.exec` com string interpolada); `problemMatcher` `^teko: (.*):(\d+):(\d+): (.*)$` casa o formato hoje emitido. | falta (sem dependência — CLI já existe) — `main:extensions/vscode/src/extension.js` tem `teko.run`/`teko.build` via `cp.exec` de string (achado de segurança: injeção de comando — ver "Prior art" acima); a versão nova troca por `execFile`/`spawn` com argv-array ou pela Tasks API nativa do VS Code. |
 | D3 | **Vim/Neovim — client LSP** — `nvim-lspconfig` (Neovim nativo) ou `vim-lsp`/`ale` (Vim 8+), apontando para o binário `teko-lsp`. `:make`: `makeprg=teko\ build\ %:h`, `errorformat=teko\\:\\ %f:%l:%c:\\ %m`. | client: falta (dep C1) · `:make`: falta (sem dependência) |
 | D4 | **Emacs — client LSP** — `eglot` (nativo desde Emacs 29) ou `lsp-mode`, apontando para `teko-lsp`. `compile-command="teko build ."` + `compilation-error-regexp-alist` casando o mesmo formato. | client: falta (dep C1) · `compile`: falta (sem dependência) |
 | D5 | **Nano — fluxo manual** — sem client LSP nem task runner nativos; documentar rodar `teko build|run|test .` no terminal ao lado do editor. Só documentação, sem código. | falta |
@@ -108,7 +154,7 @@ tooling/
 | # | Entrega | Estado |
 |---|---|---|
 | E1 | Criar a árvore `tooling/` acima (esqueletos vazios, sem lógica). | falta |
-| E2 | **VS Code** — empacotar `.vsix` (`vsce package`); instalação local sempre suportada; publicação no Marketplace é decisão aberta. | falta (dep B1, D1, D2) |
+| E2 | **VS Code** — empacotar `.vsix` (`vsce package`); instalação local sempre suportada; publicação no Marketplace é decisão aberta. Metadados (`publisher: schivei`, `name: teko`) podem ser reaproveitados de `main:extensions/vscode/package.json`. | falta (dep B1, D1, D2) |
 | E3 | **Vim/Neovim** — plugin instalável por gerenciador padrão (`vim-plug`/`packer.nvim`/`lazy.nvim`) apontando para `tooling/vim/`; sem gerenciador, `:set rtp+=` manual. | falta (dep B2, D3) |
 | E4 | **Emacs** — pacote via `use-package :load-path` apontando para `tooling/emacs/`; publicação em MELPA é decisão aberta (futuro). | falta (dep B3, D4) |
 | E5 | **Nano** — arquivo único; instalação = `include "~/.nano/teko.nanorc"` em `~/.nanorc`, documentado, sem instalador. | falta (dep B4) |
@@ -122,6 +168,14 @@ tooling/
 - `teko-lsp` reaproveita `src/lexer`/`src/parser`/`src/checker` como biblioteca — proibido reimplementar
   análise léxica/semântica em paralelo dentro do servidor.
 - Nano recebe só cores (Eixo B) + doc de build manual (D5) — sem API de plugin, não é uma lacuna a fechar.
+- **Nenhuma invocação de processo externo a partir de um editor usa concatenação de string para shell**
+  (`cp.exec`/`os.system`/equivalentes com template string). Sempre `execFile`/`spawn` com argv em array,
+  ou a API de Tasks nativa do editor. **Motivo:** achado de segurança na prova de conceito em
+  `main:extensions/vscode/src/extension.js` (caminho de workspace interpolado em `cp.exec`, sem
+  sanitização — injeção de comando). Aplica-se a D2/D3/D4 igualmente.
+- **Gramática de cores nunca é portada manualmente de `main`** — mesmo onde `main` já tem um arquivo
+  pronto (`teko.tmLanguage.json`), ele é descartado e regerado pelo Eixo A, porque foi escrito à mão e já
+  está comprovadamente desatualizado contra a legislação atual (ver "Prior art").
 
 **Abertas (a decidir quando o crumb chegar):**
 - **Linguagem de implementação do `teko-lsp`:** o gate nativo self-host ainda não fecha (`TEKO_MASTER_PLAN.md`
