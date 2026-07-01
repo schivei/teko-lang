@@ -2129,10 +2129,19 @@ fn teko_rt_type_ok(t: Type) -> bool {
 // (OOP A1, 2026-07-01) type-check a struct METHOD's BODY. Mirrors type_function, except the
 // RECEIVER param (has_type=false, only ever index 0) binds to Named{struct_name} instead of
 // going through resolve_type (its type is implicit, never written by the user).
-fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable) -> TFunction | error {
+fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str) -> TFunction | error {
     mut local = env
     let tbl = type_param_table(f.type_params, "", table)
     let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"
+    // (W10b.CLASS) `class Base(parent) { … }` — the NAMED BINDING an instance method uses to
+    // reach the base object. Only meaningful for an INSTANCE method (has a receiver); a class's
+    // static methods never chain/inherit, so there is no base object to bind there. The binding
+    // is a REINTERPRET of the SAME receiver pointer as the base type — sound because
+    // effective_class_fields lays out the base's fields as a PREFIX of the derived struct
+    // (field-flattening composition, increment 2), so a `tk_t_Derived *` and a `tk_t_Base *`
+    // pointing at the SAME address read identical bytes for every base field.
+    let is_instance_method = f.params.len > 0 && !f.params[0].has_type
+    let inject_base_binding = has_base_binding && is_instance_method
     // codegen reads TFunction.params[i].type_ann DIRECTLY (the syntactic node, not the checked
     // Type) to emit a C signature — so the receiver's placeholder type_ann (no_type(), from
     // parsing) must be REWRITTEN to a real Named(struct_name) TypeExpr before it ever reaches
@@ -2166,6 +2175,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         local = define(local, f.params[i].name, pt, false)
         i++
     }
+    if inject_base_binding { local = define(local, base_binding_name, Named { name = base_name }, false) }
     let ret = match function_return(f, tbl) { Type as t => t; error as e => return e }
     match ret { Reference => return error { message = "a function cannot return a reference (pass-down only)" }; _ => {} }
     if f.is_extern {
@@ -2185,7 +2195,28 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     match check_trailing_value(tb.stmts, ret, table) { null => {}; error as e => return e }
     let lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
     if lc.failed { return error { message = lc.message } }
-    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = tb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = ""; from_lib = "" }
+    // (W10b.CLASS) PREPEND the base-binding as the method body's FIRST statement (a synthetic
+    // `let <binding> = (<self> to <Base>)` — a plain reinterpret-cast the checker's own `to`
+    // syntax would never allow between two unrelated Named types, but this node bypasses that
+    // source-level restriction entirely; codegen's cast fallback just emits the C pointer cast).
+    // Checked ABOVE the injection (check_returns/check_trailing_value/check_labels all read the
+    // ORIGINAL body) since it changes nothing about return/trailing-value/label semantics.
+    let body = if inject_base_binding {
+        let receiver_name = f.params[0].name
+        let cast_val = TExpr {
+            kind = TCast { expr = TExpr { kind = TVar { name = receiver_name; is_func = false; func_ns = "" }; type = Named { name = struct_name }; line = 0; col = 0 } }
+            type = Named { name = base_name }
+            line = 0; col = 0
+        }
+        let bind_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = base_binding_name }; bound = Named { name = base_name }; value = cast_val }
+        mut prefixed: []TStatement = teko::list::push(teko::list::empty(), bind_stmt)
+        mut si = 0
+        loop { if si >= tb.stmts.len { break }; prefixed = teko::list::push(prefixed, tb.stmts[si]); si++ }
+        prefixed
+    } else {
+        tb.stmts
+    }
+    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = ""; from_lib = "" }
 }
 
 fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
@@ -2249,9 +2280,20 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
     // (no vtable/dispatch yet). An `abstract fn` signature (no body, never overridden by THIS
     // class) has nothing to emit — skipped.
     mut methods: []parser::Function = teko::list::empty()
+    mut has_base_binding = false
+    mut base_binding_name = ""
+    mut base_name = ""
+    mut own_names: []str = teko::list::empty()   // (W10b.CLASS) methods declared DIRECTLY on td — the base-binding is only ever injected for these (see below)
     match td.body {
         parser::StructBody as sb => { methods = sb.methods }
-        parser::ClassBody as cb  => { methods = match effective_class_methods(cb, table) { []Function as f => f; error as e => return e } }
+        parser::ClassBody as cb  => {
+            methods = match effective_class_methods(cb, table) { []Function as f => f; error as e => return e }
+            has_base_binding = cb.has_base_binding
+            base_binding_name = cb.base_binding_name
+            base_name = cb.base_name
+            mut oi = 0
+            loop { if oi >= cb.methods.len { break }; own_names = teko::list::push(own_names, cb.methods[oi].name); oi++ }
+        }
         _ => {}
     }
     mut out: []TItem = teko::list::empty()
@@ -2260,7 +2302,14 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
     loop {
         if mi >= methods.len { break }
         if methods[mi].is_abstract { mi++; continue }
-        let mf = match type_method(methods[mi], td.name, env, table) {
+        // (W10b.CLASS) the base-binding is injected ONLY for a method DECLARED DIRECTLY on THIS
+        // class (own or an override) — a PURELY inherited method (never touched by this class)
+        // keeps its ORIGINAL declaring class's own context; re-typing it under a DIFFERENT
+        // derived class must NOT inject a binding that method's body never asked for (it would
+        // either be spuriously unused, or — worse — silently shadow an ancestor's OWN binding of
+        // the same name in a 3+-level chain).
+        let use_base_binding = has_base_binding && str_set_has(own_names, methods[mi].name)
+        let mf = match type_method(methods[mi], td.name, env, table, use_base_binding, base_binding_name, base_name) {
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
