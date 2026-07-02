@@ -3942,6 +3942,34 @@ static bool emit_stmt(cbuf *b, const tk_tstatement *s, bool in_main,
             const char *op = assignop_c(s->as.assign.op);
             if (op == NULL) return fail_node(err, "codegen: assignment operator not yet supported");
             cb(b, indent);
+            // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift
+            // count is C UB natively, while the VM (#49, compound_apply) computes a DEFINED
+            // width-masked result. Rewrite as `lvalue = tk_shl_<w>(lvalue, rhs)` / tk_shr_<w>,
+            // routing through the SAME teko_rt.h helpers the binary `<<`/`>>` operator uses.
+            // SAFE to evaluate the lvalue twice: the assign-statement grammar (parse_stmt.c)
+            // admits only two lvalue shapes — a bare identifier (`s->as.assign.name`), or (when
+            // `deref`) a Ref<T> handle's `(*name)` pointer dereference — never a struct field
+            // path, an array index, or a call. Both forms are pure, side-effect-free symbol
+            // lookups, so re-emitting the lvalue text a second time is cost-free and safe.
+            if (s->as.assign.op == TK_TOKEN_SHLEQ || s->as.assign.op == TK_TOKEN_SHREQ) {
+                if (s->as.assign.bound.tag != TK_TYPE_PRIM || !cg_prim_is_int(s->as.assign.bound.as.prim))
+                    return fail_node(err, "codegen: shift-assign on a non-integer type not yet supported");
+                const char *tag = prim_int_tag(s->as.assign.bound.as.prim);
+                if (tag == NULL) return fail_node(err, "codegen: shift-assign on a non-integer type not yet supported");
+                if (s->as.assign.deref) { cb(b, "(*"); cb_ident(b, s->as.assign.name); cb(b, ")"); }
+                else cb_ident(b, s->as.assign.name);
+                cb(b, " = ");
+                cb(b, s->as.assign.op == TK_TOKEN_SHLEQ ? "tk_shl_" : "tk_shr_");
+                cb(b, tag);
+                cb(b, "(");
+                if (s->as.assign.deref) { cb(b, "(*"); cb_ident(b, s->as.assign.name); cb(b, ")"); }
+                else cb_ident(b, s->as.assign.name);
+                cb(b, ", ");
+                if (!emit_expr(b, &s->as.assign.value, err)) return false;
+                cb(b, ")");
+                cb(b, ";\n");
+                return true;
+            }
             // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle IS the pointer, so
             // the lvalue is `(*r)`. (`Ref<T>` lowers to `<T> *`; deref-assign is a plain pointer store.)
             if (s->as.assign.deref) { cb(b, "(*"); cb_ident(b, s->as.assign.name); cb(b, ")"); }

@@ -1367,3 +1367,33 @@ fn masked_shift_out_of_range_count() {
     let f: u8 = 128
     teko::assert::is_true((f >> 7) == 1)              // count == width-1 (boundary, still in range)
 }
+
+// #61 — the COMPOUND-ASSIGN shift forms (`<<=`/`>>=`) must apply the SAME width-(-1) mask as
+// the binary `<<`/`>>` operator (#49), in BOTH engines. Native codegen used to emit the raw C
+// `<<=`/`>>=` compound operator for these, which is UB for an out-of-range count even though
+// the plain binary path (and the VM's compound_apply) was already fixed. `x <<= 40` on an i32
+// must mask to `40 & 31 == 8` -> 256, and a u8 `<<= 200` guards the historical "mask by a fixed
+// 127" VM bug: `200 & 7 == 0`, so the value must be UNCHANGED, not shifted by (200 & 127) == 72.
+// NOTE: each `mut` initializer is an explicit `to <T>` cast (not a bare literal) — a bare
+// integer literal types to a DEFAULT i64 leaf (N1/N2) and, on a `mut` binding, that leaf's
+// width is what the VM's runtime slot value carries; a subsequent compound-assign's width mask
+// (compound_apply, keyed off the LEFT operand's OWN runtime width) would then read 64 instead
+// of the annotated width. This is a pre-existing checker/VM literal-adoption gap unrelated to
+// #61 (native codegen already declares the correctly-narrow C type from the annotation
+// regardless), so the cast sidesteps it rather than masks it.
+#test
+fn masked_compound_assign_shift_out_of_range_count() {
+    mut x: i32 = 1 to i32
+    x <<= 40
+    teko::assert::is_true(x == 256)               // 40 & 31 == 8 -> 1 << 8 == 256
+    mut y: u8 = 1 to u8
+    y <<= 200
+    teko::assert::is_true(y == 1)                 // 200 & 7 == 0 -> 1 << 0 == 1 (mask-127 regression guard: 200 & 127 == 72, would be 0)
+    mut z: u64 = 256 to u64
+    z >>= 65
+    teko::assert::is_true(z == 128)               // 65 & 63 == 1 -> 256 >> 1 == 128
+    // in-range control — the mask must be a NO-OP when the count already fits the width.
+    mut w: i32 = 1 to i32
+    w <<= 3
+    teko::assert::is_true(w == 8)
+}
