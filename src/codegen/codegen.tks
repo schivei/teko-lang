@@ -4666,6 +4666,50 @@ fn emit_binding(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, b
 fn emit_assign(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, a: checker::TAssign, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let op = match assignop_c(a.op) { str as s => s; error as err => return err }
     mut out = cb(buf, indent)
+    // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
+    // is C UB natively, while the VM (#49, compound_apply) computes a DEFINED width-masked
+    // result. Rewrite as `lvalue = tk_shl_<w>(lvalue, rhs)` / tk_shr_<w>, routing through the
+    // SAME teko_rt.h helpers the binary `<<`/`>>` operator uses (emit_shift). SAFE to evaluate
+    // the lvalue twice: the assign-statement grammar (parse_stmt) admits only two lvalue shapes
+    // — a bare identifier (`a.name`), or (when `a.deref`) a Ref<T> handle's `(*name)` pointer
+    // dereference — never a struct field path, an array index, or a call. Both forms are pure,
+    // side-effect-free symbol lookups, so re-emitting the lvalue text a second time is cost-free.
+    if a.op == lexer::TokenKind::ShlEq || a.op == lexer::TokenKind::ShrEq {
+        let prim = match a.bound {
+            checker::Prim as p => p
+            _                  => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        if !cg_prim_is_int(prim.kind) {
+            return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        let tag = match prim_int_tag(prim.kind) {
+            str as t  => t
+            error     => return error { message = "codegen: shift-assign on a non-integer type not yet supported" }
+        }
+        let fn_prefix = if a.op == lexer::TokenKind::ShlEq { "tk_shl_" } else { "tk_shr_" }
+        if a.deref {
+            out = cb(out, "(*")
+            out = cb_ident(out, a.name)
+            out = cb(out, ")")
+        } else {
+            out = cb_ident(out, a.name)
+        }
+        out = cb(out, " = ")
+        out = cb(out, fn_prefix)
+        out = cb(out, tag)
+        out = cb(out, "(")
+        if a.deref {
+            out = cb(out, "(*")
+            out = cb_ident(out, a.name)
+            out = cb(out, ")")
+        } else {
+            out = cb_ident(out, a.name)
+        }
+        out = cb(out, ", ")
+        out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        out = cb(out, ")")
+        return cb(out, ";\n")
+    }
     // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle `r` IS the pointer, so the
     // lvalue is `(*r)`. (`Ref<T>` lowers to a bare `<T> *`; deref-assign is a plain C pointer store.)
     if a.deref {
