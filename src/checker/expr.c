@@ -529,16 +529,20 @@ static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
         tk_str *param_tps = NULL; size_t n_pt = 0;
         for (size_t i = 0; i < ft.as.func.nparams; i += 1) tk_collect_sig_type_params(ft.as.func.params[i], table, &param_tps, &n_pt);
         for (size_t i = 0; i < n_all; i += 1)
-            if (!tk_is_type_param(all_tps[i], param_tps, n_pt))
+            if (!tk_is_type_param(all_tps[i], param_tps, n_pt)) {
+                tk_free0(all_tps); tk_free0(param_tps);
                 return xferr(tk_error_named("cannot infer type parameter (it appears only in the return type; annotate the call)", all_tps[i]));
+            }
         tk_subst s = { .params = param_tps, .n_params = n_pt, .names = NULL, .types = NULL, .n_bind = 0 };
         for (size_t i = 0; i < args.len; i += 1) {   // args.len == nparams (arity checked above); bound by the list so args.ptr[i] is in range
             tk_subst_result u = tk_unify(ft.as.func.params[i], args.ptr[i].type, s, table);
-            if (!u.ok) return xferr(u.as.error);
+            if (!u.ok) { tk_free0(all_tps); tk_free0(param_tps); return xferr(u.as.error); }
             s = u.as.value;
         }
         tk_type result = tk_subst_type(*ft.as.func.ret, s);
-        return xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = result, .as.call = { c.callee, args.ptr, args.len, call_ns } });
+        tk_texpr_result ret = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = result, .as.call = { c.callee, args.ptr, args.len, call_ns } });
+        tk_free0(all_tps); tk_free0(param_tps);
+        return ret;
     }
     // NON-generic: each argument must WIDEN into the parameter's type (B.14 case→variant, T→T?) OR be
     // a fitting literal that adopts it (C6) — same rule as binding/return/assign (single source of truth).
@@ -1304,28 +1308,28 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
     // so the literal-form gate doesn't reach it. A reference may not be an `in` operand (lhs or set
     // element): the [a, b] set is a value-position collection of refs. Mirror in typer.tks::type_in.
     if (tk_type_contains_ref(&lt)) return xerr("a reference cannot be stored in a struct/variant/collection");
-    // Allocate `nelems ? nelems : 1` so `elems` is UNCONDITIONALLY non-NULL after the abort guard
-    // (tk_alloc never returns NULL — OOM panics). This makes the non-NULL-ness a constraint on the
-    // POINTER ITSELF that clang-analyzer can see, silencing a false-positive core.NullDereference on
-    // `elems[i]` below (the analyzer does not correlate `elems != NULL` with `i < nelems`). The extra
-    // 1-element alloc when nelems==0 is harmless (the loop never runs). No behavioral change.
-    tk_texpr *elems = tk_alloc((n.nelems ? n.nelems : 1) * sizeof *elems); if (!elems) abort();
-    for (size_t i = 0; i < n.nelems; i += 1) {
-        tk_texpr_result e = tk_typer_expr(n.elems[i], env, table);
-        if (!e.ok) { tk_free0(elems); return e; }
-        if (tk_type_is_void(&e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("a `void` expression cannot be an operand (M.1)");
+    tk_texpr *elems = NULL;
+    if (n.nelems > 0) {
+        elems = tk_alloc(n.nelems * sizeof *elems); if (!elems) abort();
+        // Loop nested inside the allocation guard (not a sibling `if`+`for` pair) so the
+        // analyzer can see `elems` is non-NULL for every index this loop actually reaches.
+        for (size_t i = 0; i < n.nelems; i += 1) {
+            tk_texpr_result e = tk_typer_expr(n.elems[i], env, table);
+            if (!e.ok) { tk_free0(elems); return e; }
+            if (tk_type_is_void(&e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("a `void` expression cannot be an operand (M.1)");
+            }
+            if (tk_type_contains_ref(&e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("a reference cannot be stored in a struct/variant/collection");
+            }
+            if (!is_comparable(lt, e.as.value.type)) {
+                tk_free0(elems);
+                return xerr("`in` element is not comparable to the left-hand operand");
+            }
+            elems[i] = e.as.value;
         }
-        if (tk_type_contains_ref(&e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("a reference cannot be stored in a struct/variant/collection");
-        }
-        if (!is_comparable(lt, e.as.value.type)) {
-            tk_free0(elems);
-            return xerr("`in` element is not comparable to the left-hand operand");
-        }
-        elems[i] = e.as.value;
     }
     return xok((tk_texpr){ .tag = TK_TEXPR_IN, .type = tk_prim_t(TK_PRIM_BOOL),
                            .as.in_expr = { box(lhs.as.value), elems, n.nelems } });
@@ -1336,44 +1340,46 @@ static tk_texpr_result type_in(tk_in n, tk_env env, tk_type_table table) {
 // annotation adopts it. Spread elements (`..xs`) must type as `[]T`; their element type T is widened
 // into the array's unified element type. C twin's mirror: type_array_lit in typer.tks.
 static tk_texpr_result type_array_lit(tk_array_lit a, tk_env env, tk_type_table table) {
-    // `nelements ? nelements : 1` — unconditionally non-NULL after the abort guard, so clang-analyzer
-    // sees `elems`/`spreads` are non-NULL when indexed below (silences a false-positive
-    // core.NullDereference; the analyzer doesn't correlate the pointer with `i < nelements`). Harmless
-    // 1-elem alloc when nelements==0 (loop never runs). No behavioral change.
-    tk_texpr  *elems   = tk_alloc((a.nelements ? a.nelements : 1) * sizeof *elems);   if (!elems)   abort();
-    bool      *spreads = tk_alloc((a.nelements ? a.nelements : 1) * sizeof *spreads); if (!spreads) abort();
+    tk_texpr  *elems    = NULL;
+    bool      *spreads  = NULL;
     tk_type et = (tk_type){ .tag = TK_TYPE_VOID };   // sentinel for an empty `[]`
-    for (size_t i = 0; i < a.nelements; i += 1) {
-        tk_texpr_result e = tk_typer_expr(*a.elements[i].expr, env, table);
-        if (!e.ok) { tk_free0(elems); tk_free0(spreads); return e; }
-        if (a.elements[i].is_spread) {
-            // spread element: expr must be a `[]T` slice; contribute T as the element type
-            if (e.as.value.type.tag != TK_TYPE_SLICE) {
-                tk_free0(elems); tk_free0(spreads);
-                return xerr("a spread element (`..xs`) must be a slice (`[]T`)");
-            }
-            if (e.as.value.type.as.slice.element == NULL) {
-                tk_free0(elems); tk_free0(spreads);
-                return xerr("a spread element cannot be an untyped empty slice");
-            }
-            tk_type spread_elem = *e.as.value.type.as.slice.element;
-            if (tk_type_is_void(&et)) { et = spread_elem; }   // first contributor
-            else {
-                tk_type j;
-                if (!tk_type_join(et, spread_elem, table, &j)) {
+    if (a.nelements > 0) {
+        elems   = tk_alloc(a.nelements * sizeof *elems);   if (!elems)   abort();
+        spreads = tk_alloc(a.nelements * sizeof *spreads); if (!spreads) abort();
+        // Loop nested inside the SAME allocation guard (not a sibling `if`+`for` pair) so the
+        // analyzer can see `elems`/`spreads` are non-NULL for every index this loop reaches.
+        for (size_t i = 0; i < a.nelements; i += 1) {
+            tk_texpr_result e = tk_typer_expr(*a.elements[i].expr, env, table);
+            if (!e.ok) { tk_free0(elems); tk_free0(spreads); return e; }
+            if (a.elements[i].is_spread) {
+                // spread element: expr must be a `[]T` slice; contribute T as the element type
+                if (e.as.value.type.tag != TK_TYPE_SLICE) {
                     tk_free0(elems); tk_free0(spreads);
-                    return xerr("spread element type does not match the array element type");
+                    return xerr("a spread element (`..xs`) must be a slice (`[]T`)");
                 }
-                et = j;
+                if (e.as.value.type.as.slice.element == NULL) {
+                    tk_free0(elems); tk_free0(spreads);
+                    return xerr("a spread element cannot be an untyped empty slice");
+                }
+                tk_type spread_elem = *e.as.value.type.as.slice.element;
+                if (tk_type_is_void(&et)) { et = spread_elem; }   // first contributor
+                else {
+                    tk_type j;
+                    if (!tk_type_join(et, spread_elem, table, &j)) {
+                        tk_free0(elems); tk_free0(spreads);
+                        return xerr("spread element type does not match the array element type");
+                    }
+                    et = j;
+                }
+            } else {
+                // plain element: original logic
+                if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); tk_free0(spreads); return xerr("a `void` expression cannot be an array element (M.1)"); }
+                if (tk_type_is_void(&et)) { et = e.as.value.type; }   // first contributor
+                else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); tk_free0(spreads); return xerr("array elements have different types"); } et = j; }
             }
-        } else {
-            // plain element: original logic
-            if (tk_type_is_void(&e.as.value.type)) { tk_free0(elems); tk_free0(spreads); return xerr("a `void` expression cannot be an array element (M.1)"); }
-            if (tk_type_is_void(&et)) { et = e.as.value.type; }   // first contributor
-            else { tk_type j; if (!tk_type_join(et, e.as.value.type, table, &j)) { tk_free0(elems); tk_free0(spreads); return xerr("array elements have different types"); } et = j; }
+            elems[i]   = e.as.value;
+            spreads[i] = a.elements[i].is_spread;
         }
-        elems[i]   = e.as.value;
-        spreads[i] = a.elements[i].is_spread;
     }
     // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
     // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
