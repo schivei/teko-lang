@@ -467,6 +467,28 @@ static bool cg_is_interface_named(tk_str name) {
     return d != NULL && d->body.tag == TK_BODY_INTERFACE;
 }
 
+// (#98) is `name` a POLYMORPHIC BASE — a non-sealed class (`abstract`/`virtual`)? A base-typed
+// value lowers to the SAME fat pointer `{ data, vtable }` as an interface value (a companion
+// `tk_base_<name>` typedef), so a Sub→Base upcast + base-typed dispatch reuse the D3 machinery.
+static bool cg_is_polymorphic_base(tk_str name) {
+    const tk_type_decl *d = cg_find_decl(name);
+    if (d == NULL || d->body.tag != TK_BODY_CLASS) return false;
+    return d->body.as.class_body.kind != TK_CLASS_SEALED;
+}
+
+// (#98) does class `sub` reach ANCESTOR class `want` through the base chain (transitively)?
+// Codegen mirror of the checker's subclass_reaches — used to decide when a class value at a
+// base-typed slot is a STRICT-subclass upcast (needs the fat-pointer wrap). Hop-bounded.
+static bool cg_subclass_reaches(tk_str sub, tk_str want, int depth) {
+    if (depth <= 0) return false;
+    const tk_type_decl *d = cg_find_decl(sub);
+    if (d == NULL || d->body.tag != TK_BODY_CLASS) return false;
+    const tk_class_body *cb2 = &d->body.as.class_body;
+    if (!cb2->has_base) return false;
+    if (cg_name_eq(cb2->base_name, want)) return true;
+    return cg_subclass_reaches(cb2->base_name, want, depth - 1);
+}
+
 // (W10b.D3, generalized from increment 4's destruct lookup) does `class_name` provide a method
 // named `method` (own or inherited — tk_type_struct_methods stamps EVERY effective method under
 // the OWNING class's own namespace, so searching for a tk_tfunction named `method` whose
@@ -801,6 +823,10 @@ static bool emit_type(cbuf *b, tk_type t, const char **err) {
         // (W10b.CLASS increment 3) a CLASS is a REFERENCE type — every use (locals, call-arg
         // types read off .type, …) lowers to a pointer, same rule as emit_type_expr.
         case TK_TYPE_NAMED:
+            // (#98) a POLYMORPHIC-BASE-typed slot is the fat pointer `tk_base_<name>` (data +
+            // vtable), NOT the raw object pointer — so a Sub→Base upcast + base-typed dispatch
+            // reuse the D3 fat pointer. (An interface-typed slot is likewise its fat typedef.)
+            if (cg_is_polymorphic_base(t.as.named.name)) { cb(b, "tk_base_"); cb_str(b, t.as.named.name); return true; }
             mangle_type_name(b, (tk_str){ NULL, 0 }, t.as.named.name);
             if (cg_is_class_named(t.as.named.name)) cb(b, " *");
             return true;
@@ -1130,6 +1156,10 @@ static bool emit_type_expr(cbuf *b, tk_type_expr te, const char **err) {
             // the ONE place that decision fans out from: params, returns, fields, locals all call
             // emit_type_expr, so a class becomes `tk_t_Name *` everywhere with no special-casing
             // at each call site.
+            // (#98) a POLYMORPHIC-BASE-typed annotation (`s: Animal`, `-> Animal`, a field of base
+            // type) is the fat pointer `tk_base_<name>`, matching emit_type — so a base-typed
+            // param/return/field reuses the D3 fat pointer. A sealed class stays a raw pointer.
+            if (cg_is_polymorphic_base(last)) { cb(b, "tk_base_"); cb_str(b, last); return true; }
             if (cg_is_class_named(last)) { mangle_type_name(b, (tk_str){ NULL, 0 }, last); cb(b, " *"); return true; }
             // a user-defined named aggregate -> its mangled typedef name (matches emit_type).
             mangle_type_name(b, (tk_str){ NULL, 0 }, last);
@@ -1321,10 +1351,13 @@ static bool emit_iface_call(cbuf *b, const tk_texpr *e, const char **err) {
         return fail_node(err, "codegen: malformed interface-dispatch node (internal)");
     tk_str iface = p.segments[p.len - 2].name;
     char t[40]; snprintf(t, sizeof t, "_tid%zu", (size_t)b->len);
-    cb(b, "({ ");
-    mangle_type_name(b, (tk_str){ NULL, 0 }, iface);
-    cb(b, " "); cb(b, t); cb(b, " = ");
     tk_type iface_t = { .tag = TK_TYPE_NAMED, .as.named.name = iface };
+    cb(b, "({ ");
+    // (#98) the receiver temp's C type is the fat-pointer typedef of the dispatch target — the
+    // interface typedef `tk_t_<iface>` OR, for a base-class dispatch, `tk_base_<base>`. Route
+    // through emit_type (not raw mangle_type_name, which would emit the base's OBJECT struct).
+    if (!emit_type(b, iface_t, err)) return false;
+    cb(b, " "); cb(b, t); cb(b, " = ");
     if (!emit_as(b, iface_t, &e->as.call.args[0], err)) return false;
     cb(b, "; ((");
     if (!emit_type(b, *ift.as.func.ret, err)) return false;
@@ -2159,6 +2192,20 @@ static bool emit_expr(cbuf *b, const tk_texpr *e, const char **err) {
             // (W10b.CLASS increment 3) a class receiver is ALWAYS a pointer (reference semantics) —
             // `recv.field` needs a deref first (`(*recv).field`, i.e. C's `recv->field`).
             if (rt.tag == TK_TYPE_NAMED && cg_is_class_named(rt.as.named.name)) {
+                // (#98) a POLYMORPHIC-BASE-typed receiver is the fat pointer `tk_base_<B>` (data +
+                // vtable), not a raw object pointer — extract `.data`, cast to the base's raw
+                // `tk_t_<B> *`, then deref: `((*((tk_t_<B> *)(<recv>).data)).<field>)`. A plain
+                // (raw-pointer) class receiver stays `((*(<recv>)).<field>)`.
+                if (cg_is_polymorphic_base(rt.as.named.name)) {
+                    cb(b, "((*((");
+                    mangle_type_name(b, (tk_str){ NULL, 0 }, rt.as.named.name);
+                    cb(b, " *)(");
+                    if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
+                    cb(b, ").data)).");
+                    cb_str(b, e->as.field_access.field);
+                    cb(b, ")");
+                    return true;
+                }
                 cb(b, "((*(");
                 if (!emit_expr(b, e->as.field_access.receiver, err)) return false;
                 cb(b, ")).");
@@ -3140,12 +3187,46 @@ static bool emit_as(cbuf *b, tk_type expected, const tk_texpr *value, const char
         && value->type.tag == TK_TYPE_NAMED && cg_is_class_named(value->type.as.named.name)) {
         cb(b, "(");
         mangle_type_name(b, (tk_str){ NULL, 0 }, expected.as.named.name);
-        cb(b, "){ .data = (void *)(");
-        if (!emit_expr(b, value, err)) return false;
-        cb(b, "), .vtable = tk_vt_");
+        cb(b, "){ .data = ");
+        // (#98) if the value is ALREADY a base fat pointer (`tk_base_<vn>`, a polymorphic base
+        // that ALSO implements this interface), its object pointer already lives in `.data` —
+        // extract it (`(<v>).data`) rather than `(void *)(<v>)` (which would cast the two-word struct).
+        if (cg_is_polymorphic_base(value->type.as.named.name)) {
+            cb(b, "(");
+            if (!emit_expr(b, value, err)) return false;
+            cb(b, ").data");
+        } else {
+            cb(b, "(void *)(");
+            if (!emit_expr(b, value, err)) return false;
+            cb(b, ")");
+        }
+        cb(b, ", .vtable = tk_vt_");
         cb_str(b, value->type.as.named.name); cb(b, "_"); cb_str(b, expected.as.named.name);
         cb(b, " }");
         return true;
+    }
+    // (#98) SUB→BASE upcast: a raw class instance upcasts into the base's fat pointer `tk_base_<B>`
+    // — the object pointer rides `.data`, the (subclass, base) static vtable rides `.vtable`.
+    // Fires when `expected` is a polymorphic base B and the value is either a STRICT subclass of B
+    // (`Dog`→`Animal`) OR a RAW construction of B itself (a factory's `return B{}` into the base
+    // ret slot) — a value ALREADY of the base fat-pointer type (a bound base local: TVar/field/etc)
+    // passes through unwrapped (its C rep is already `tk_base_<B>`). The concrete class picks the
+    // vtable, so a subclass override dispatches correctly through the base value.
+    if (expected.tag == TK_TYPE_NAMED && cg_is_polymorphic_base(expected.as.named.name)
+        && value->type.tag == TK_TYPE_NAMED && cg_is_class_named(value->type.as.named.name)) {
+        bool is_strict_sub = !cg_name_eq(value->type.as.named.name, expected.as.named.name)
+            && cg_subclass_reaches(value->type.as.named.name, expected.as.named.name, 64);
+        bool is_raw_self = cg_name_eq(value->type.as.named.name, expected.as.named.name)
+            && value->tag == TK_TEXPR_STRUCT_INIT;
+        if (is_strict_sub || is_raw_self) {
+            cb(b, "(tk_base_"); cb_str(b, expected.as.named.name);
+            cb(b, "){ .data = (void *)(");
+            if (!emit_expr(b, value, err)) return false;
+            cb(b, "), .vtable = tk_vt_");
+            cb_str(b, value->type.as.named.name); cb(b, "_"); cb_str(b, expected.as.named.name);
+            cb(b, " }");
+            return true;
+        }
     }
     // (fix/selfhost-arm-join-widen) ARM-JOIN WIDEN: an `if`/`match` USED AS A VALUE whose two arms
     // are DIFFERENT members of a WIDER annotated variant. The checker's type_join infers the NARROW
@@ -5526,6 +5607,14 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
             cb(&b, " ");
             mangle_type_name(&b, (tk_str){ NULL, 0 }, d.name);
             cb(&b, ";\n");
+            // (#98) a POLYMORPHIC base ALSO gets a companion FAT-POINTER typedef
+            // `tk_base_<name>` — the D3 `{ data, vtable }` two-word rep a base-typed
+            // slot lowers to. (A sealed class needs none — it is never a base.)
+            if (d.body.tag == TK_BODY_CLASS && d.body.as.class_body.kind != TK_CLASS_SEALED) {
+                cb(&b, "typedef struct { void *data; void *const *vtable; } tk_base_");
+                cb_str(&b, d.name);
+                cb(&b, ";\n");
+            }
         }
         // (W10b.D3) an INTERFACE (contract) value is a data+vtable FAT POINTER — the tk_closure-
         // shaped two-word rep. It embeds nothing and nothing orders before it, so the FULL typedef
@@ -5573,24 +5662,49 @@ tk_cstr_result tk_emit_c(tk_tprogram prog) {
             for (size_t ii = 0; ii < prog.nitems; ii += 1) {
                 if (prog.items[ii].tag != TK_TITEM_TYPE_DECL) continue;
                 tk_type_decl idd = prog.items[ii].as.type_decl;
-                if (idd.body.tag != TK_BODY_INTERFACE) continue;
-                if (!tk_type_conforms_to(cd.name, idd.name, vt_table)) continue;
-                tk_methodsvec_result ms = tk_iface_methods_by_name(idd.name, vt_table);
-                if (!ms.ok) { tk_free0(b.ptr); return cg_err("codegen: interface method list failed (internal)"); }
-                cb(&b, "static void *const tk_vt_");
-                cb_str(&b, cd.name); cb(&b, "_"); cb_str(&b, idd.name);
-                cb(&b, "[] = {");
-                if (ms.as.value.len == 0) cb(&b, " (void *)0");   // a methodless contract still gets a (never-indexed) one-slot table
-                for (size_t mi = 0; mi < ms.as.value.len; mi += 1) {
-                    tk_str mns;
-                    if (!cg_find_method_ns(cd.name, ms.as.value.ptr[mi].name, &mns)) {
-                        tk_free0(b.ptr);
-                        return cg_err("codegen: conforming class is missing an interface method's stamped function (internal)");
+                if (idd.body.tag == TK_BODY_INTERFACE && tk_type_conforms_to(cd.name, idd.name, vt_table)) {
+                    tk_methodsvec_result ms = tk_iface_methods_by_name(idd.name, vt_table);
+                    if (!ms.ok) { tk_free0(b.ptr); return cg_err("codegen: interface method list failed (internal)"); }
+                    cb(&b, "static void *const tk_vt_");
+                    cb_str(&b, cd.name); cb(&b, "_"); cb_str(&b, idd.name);
+                    cb(&b, "[] = {");
+                    if (ms.as.value.len == 0) cb(&b, " (void *)0");   // a methodless contract still gets a (never-indexed) one-slot table
+                    for (size_t mi = 0; mi < ms.as.value.len; mi += 1) {
+                        tk_str mns;
+                        if (!cg_find_method_ns(cd.name, ms.as.value.ptr[mi].name, &mns)) {
+                            tk_free0(b.ptr);
+                            return cg_err("codegen: conforming class is missing an interface method's stamped function (internal)");
+                        }
+                        cb(&b, mi == 0 ? " (void *)&" : ", (void *)&");
+                        cb_fn_name(&b, mns, ms.as.value.ptr[mi].name);
                     }
-                    cb(&b, mi == 0 ? " (void *)&" : ", (void *)&");
-                    cb_fn_name(&b, mns, ms.as.value.ptr[mi].name);
+                    cb(&b, " };\n");
                 }
-                cb(&b, " };\n");
+                // (#98) per-(class, BASE) vtable — `tk_vt_<Sub>_<Base>` — for every
+                // POLYMORPHIC base `cd` IS-A (itself included, so a self-upcast of a
+                // directly-instantiable virtual base resolves too). Slot i is the
+                // base's i-th EFFECTIVE method (base_vtable_slot agrees). Each slot
+                // points at THIS class's stamped method (the override, if any).
+                bool idd_is_poly_base = cg_is_polymorphic_base(idd.name);
+                bool cd_is_a = cg_name_eq(cd.name, idd.name) || cg_subclass_reaches(cd.name, idd.name, 64);
+                if (idd_is_poly_base && cd_is_a) {
+                    tk_methodsvec_result bms = tk_base_vtable_methods(idd.name, vt_table);
+                    if (!bms.ok) { tk_free0(b.ptr); return cg_err("codegen: base method list failed (internal)"); }
+                    cb(&b, "static void *const tk_vt_");
+                    cb_str(&b, cd.name); cb(&b, "_"); cb_str(&b, idd.name);
+                    cb(&b, "[] = {");
+                    if (bms.as.value.len == 0) cb(&b, " (void *)0");
+                    for (size_t bmi = 0; bmi < bms.as.value.len; bmi += 1) {
+                        tk_str bmns;
+                        if (!cg_find_method_ns(cd.name, bms.as.value.ptr[bmi].name, &bmns)) {
+                            tk_free0(b.ptr);
+                            return cg_err("codegen: subclass is missing a base method's stamped function (internal)");
+                        }
+                        cb(&b, bmi == 0 ? " (void *)&" : ", (void *)&");
+                        cb_fn_name(&b, bmns, bms.as.value.ptr[bmi].name);
+                    }
+                    cb(&b, " };\n");
+                }
             }
         }
         cb(&b, "\n");
