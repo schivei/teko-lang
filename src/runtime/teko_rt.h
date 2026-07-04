@@ -35,7 +35,7 @@
         xs.len = xs.len + 1;                                                  \
         return xs;                                                            \
     }                                                                         \
-    static inline void Name##_free(Name xs) { free(xs.ptr); }
+    __attribute__((unused)) static inline void Name##_free(Name xs) { free(xs.ptr); }   /* (#151) many instantiations never free (arena-era callers) — not a warning */
 
 // byte — one octet (mirrors src/text/text.h's tk_byte; same rep).
 typedef uint8_t tk_byte;
@@ -146,6 +146,10 @@ tk_region *tk_region_new(tk_region *parent);    // a fresh empty region (default
 void      *tk_region_alloc(tk_region *r, size_t n);  // bump-allocate n (n→1), aligned; OOM→panic
 void       tk_region_drop(tk_region *r);        // bulk-free every chunk + the region (NULL-tolerant; idempotent on a re-walk — head is cleared before free; callers MUST null their handle after, as the freed region must not be reused)
 tk_region *tk_region_root(void);                // the process root region (lazy; never dropped in S1; parent = NULL — the tree root)
+// (#109 test-gate memory) checkpoint/rewind the ROOT region's bump position, bulk-freeing everything
+// it allocated in between. Balanced push/pop; used by the test-gate runner to bound per-test memory.
+void       tk_arena_push(void);                 // save the root region's current bump position
+void       tk_arena_pop(void);                  // free every root-region chunk allocated since the matching push
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the
@@ -370,6 +374,8 @@ tk_str tk_rt_os(void);
 // (e.g. "0.0.1.0-bootstrap"). Compiled from the TEKO_VERSION_STRING define injected by both build
 // paths (CMake for the bootstrap, run_cc for self-host), never a runtime file read. (teko::env::version)
 tk_str tk_rt_version(void);
+// (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
+uint64_t tk_peak_rss(void);
 
 // ---- Date/Time placeholder types (ROUND 0) ----
 // Five value types: DateTime (signed ns since Unix epoch), TimeSpan (signed ns duration),
@@ -446,6 +452,20 @@ bool     tk_cov_line_hit(uint64_t fn, uint32_t line);      // report query
 // `elem` points at one element of `esz` bytes; `*out_len` receives the new length; returns the
 // (possibly same) data pointer.
 void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len);
+// (S2 Level-1) region-aware variant — the grown buffer is allocated in `region` (a function frame
+// region `_tkfr`) instead of the process root, so a NON-escaping slice's whole buffer history is
+// bulk-freed when the frame drops. `tk_slice_push` is the root-region wrapper over this. Codegen
+// emits this only for a slice binding the escape analysis proves frame-local.
+void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len, tk_region *region);
+// (#148 S2 Level-2) free-old-on-grow variant — for a self-append whose chain the checker PROVED
+// linear: on a copy-grow the old buffer is PARKED on the free-list for reuse (realloc parity).
+void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len);
+// (#148 R2) bulk byte-append with free-old-on-grow BY DECREE (the linear cb emitter chain) — one
+// memcpy per fragment; the old buffer parks for reuse the moment a grow replaces it.
+void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len);
+// (mem::free) tk_free_block — park an explicitly freed root-arena block for same-size REUSE
+// (the `teko::mem::free` []T-arm lowering: `tk_free_block(s.ptr, s.len * sizeof(elem))`).
+void tk_free_block(void *p, uint64_t bytes);
 
 // --- arithmetic FFI over the i128 carrier (sign-aware) + float bit-patterns ---
 // div/rem: truncated division/remainder; sgn selects signed vs unsigned interpretation.

@@ -140,7 +140,7 @@ fn mono_type_mangle(t: Type) -> str {
         Str           => "str"
         Byte          => "byte"
         Char          => "char"
-        Named as n    => n.name
+        Named as n    => name_last_segment(n.name)   // (#109 W3) BARE — the generic-FN instance symbol `fn__g__<arg>` stays a valid C identifier; stamp + call site both use this, so they agree
         Slice as sl   => { let e = mono_type_mangle(sl.element); teko::str::concat("slice_", e) }
         Optional as o => { let e = mono_type_mangle(o.inner); teko::str::concat("opt_", e) }
         Error         => "error"
@@ -580,13 +580,15 @@ fn mono_tstmt(st: TStatement, s: Subst, items: []TItem, table: TypeTable) -> WSt
 
 // rewrite a block (a []TStatement). (C: mono_block.)
 fn mono_block(stmts: []TStatement, s: Subst, items: []TItem, table: TypeTable) -> WBlock | error {
+    // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
+    // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
     mut out: []TStatement = teko::list::empty()
     mut acc: []MonoInst = teko::list::empty()
     mut i = 0
     loop {
         if i >= stmts.len { break }
         let ws = match mono_tstmt(stmts[i], s, items, table) { WStmt as w => w; error as er => return er }
-        out = teko::list::push(out, ws.stmt)
+        out = teko::mem::push_fo(out, ws.stmt)
         acc = mono_inst_concat(acc, ws.insts)
         i++
     }

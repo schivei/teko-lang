@@ -269,7 +269,12 @@ static bool type_list_builtin(tk_call c, tk_env env, tk_type_table table, tk_tex
     if (c.callee.len < 2) return false;
     tk_str last = c.callee.segments[c.callee.len - 1].name;
     tk_str prev = c.callee.segments[c.callee.len - 2].name;
-    if (!seg_lit(prev, "list")) return false;
+    // (#148 R3) teko::mem::push_fo — push with FREE-OLD BY DECREE. Same typing/semantics as
+    // teko::list::push; the CALLER asserts the base is a linear chain (the old buffer is dead
+    // after the grow), so native codegen frees it (tk_slice_push_fo). TEKO_MEM_PARANOID is the
+    // fiscal: a wrong decree poisons instead of parking and the gate fails loudly. (Mirror typer.tks.)
+    bool is_pushfo = seg_lit(prev, "mem") && seg_lit(last, "push_fo");
+    if (!seg_lit(prev, "list") && !is_pushfo) return false;
     bool rooted = (c.callee.len == 2) || seg_lit(c.callee.segments[0].name, "teko");
     if (!rooted) return false;
 
@@ -280,7 +285,7 @@ static bool type_list_builtin(tk_call c, tk_env env, tk_type_table table, tk_tex
         *out = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = st, .as.call = { c.callee, NULL, 0 } });
         return true;
     }
-    if (seg_lit(last, "push")) {
+    if (seg_lit(last, "push") || is_pushfo) {
         if (c.nargs != 2) { *out = xerr("teko::list::push expects two arguments (slice, item)"); return true; }
         tk_texpr_result s = tk_typer_expr(c.args[0], env, table); if (!s.ok) { *out = s; return true; }
         tk_texpr_result x = tk_typer_expr(c.args[1], env, table); if (!x.ok) { *out = x; return true; }
@@ -561,7 +566,7 @@ static tk_texpr_result type_method_call(tk_method_call mc, tk_env env, tk_type_t
         }
     }
     tk_segment *segs = tk_alloc(2 * sizeof *segs); if (!segs) abort();
-    segs[0] = (tk_segment){ .name = struct_name };
+    segs[0] = (tk_segment){ .name = tk_name_last_segment(struct_name) };   // (#109 W3) BARE class segment — lookup_call's ends-with qualifier rule matches the registered "ns::Class" method-ns
     segs[1] = (tk_segment){ .name = mc.method };
     tk_expr *cargs = tk_alloc((mc.nargs + 1) * sizeof *cargs); if (!cargs) abort();
     cargs[0] = *mc.receiver;
@@ -572,9 +577,36 @@ static tk_texpr_result type_method_call(tk_method_call mc, tk_env env, tk_type_t
     return type_call(synthetic, env, table);
 }
 
+// (mem::free ruling 2026-07-03) `teko::mem::free<T>(target: []T | Ref<T>) -> void` — manual opt-in
+// dealloc; ONE builtin over a SUM of the two heap shapes, arm dispatched STATICALLY by the arg type.
+// Target must be a MUTABLE VARIABLE (the lowering scrubs it at the free site → no direct UAF).
+// Mirror of typer.tks::type_mem_free. Returns true iff this was a `mem::free` call.
+static bool type_mem_free(tk_call c, tk_env env, tk_type_table table, tk_texpr_result *out) {
+    if (c.callee.len < 2) return false;
+    tk_str last = c.callee.segments[c.callee.len - 1].name;
+    tk_str prev = c.callee.segments[c.callee.len - 2].name;
+    if (!seg_lit(last, "free") || !seg_lit(prev, "mem")) return false;
+    bool rooted = (c.callee.len == 2) || seg_lit(c.callee.segments[0].name, "teko");
+    if (!rooted) return false;
+    if (c.nargs != 1) { *out = xerr("teko::mem::free expects one argument (a mutable `[]T` or class variable)"); return true; }
+    tk_texpr_result a = tk_typer_expr(c.args[0], env, table); if (!a.ok) { *out = a; return true; }
+    if (a.as.value.tag != TK_TEXPR_VAR) { *out = xerr("teko::mem::free requires a mutable variable — the value must have a binding to invalidate"); return true; }
+    tk_binding_result b = tk_env_lookup_binding(env, a.as.value.as.var.name); if (!b.ok) { *out = xferr(b.as.error); return true; }
+    if (!b.as.value.is_mut) { *out = xerr("cannot free an immutable binding — declare it `mut` (free invalidates the binding)"); return true; }
+    bool is_heap = a.as.value.type.tag == TK_TYPE_SLICE
+                || (a.as.value.type.tag == TK_TYPE_NAMED && tk_is_class_name(a.as.value.type.as.named.name, table));
+    if (!is_heap) { *out = xerr("teko::mem::free target must be a `[]T` slice or a class instance — it owns no freeable heap block"); return true; }
+    tk_texpr *args = tk_alloc(sizeof *args); if (!args) abort();
+    args[0] = a.as.value;
+    tk_type vt = { .tag = TK_TYPE_VOID };
+    *out = xok((tk_texpr){ .tag = TK_TEXPR_CALL, .type = vt, .as.call = { c.callee, args, 1 } });
+    return true;
+}
+
 static tk_texpr_result type_call(tk_call c, tk_env env, tk_type_table table) {
     tk_texpr_result lb;
     if (type_list_builtin(c, env, table, &lb)) return lb;   // teko::list::empty / push (generic)
+    if (type_mem_free(c, env, table, &lb)) return lb;       // teko::mem::free (manual dealloc — []T | class)
     tk_str name = c.callee.segments[c.callee.len - 1].name;
     // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
     // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
@@ -993,9 +1025,9 @@ static tk_texpr_result type_cast(tk_cast c, tk_env env, tk_type_table table) {
 // tk_str_eq is declared in text.h (via type.h) and implemented in teko_rt.c.
 
 // non-static: shared with match.c (the FieldPattern case forward-declares it — C7a).
-tk_type_result field_type(tk_struct_body sb, tk_str field, tk_type_table table) {
+tk_type_result field_type(tk_struct_body sb, tk_str field, tk_type_table table, tk_str ref_ns) {
     for (size_t i = 0; i < sb.n_fields; i += 1)
-        if (tk_str_eq(sb.fields[i].name, field)) return tk_resolve_type(sb.fields[i].type_ann, table, (tk_str){0});   // (#109 W1) field-annotation lookup on a resolved struct — no referencing ns
+        if (tk_str_eq(sb.fields[i].name, field)) return tk_resolve_type(sb.fields[i].type_ann, table, ref_ns);   // (#109 W2) field annotation resolves in the struct's OWN ns (its declaring namespace)
     return (tk_type_result){ .ok = false, .as.error = tk_error_named("no such field", field) };
 }
 
@@ -1058,7 +1090,7 @@ static tk_texpr_result type_field_access(tk_field_access fa, tk_env env, tk_type
     } else {
         return xferr(tk_error_woven1("type ", recv.as.value.type.as.named.name, " is not a struct (no fields)"));
     }
-    tk_type_result ft = field_type(fa_sb, fa.field, table);
+    tk_type_result ft = field_type(fa_sb, fa.field, table, type_ns_of(table, recv.as.value.type.as.named.name));
     if (!ft.ok) return xferr(ft.as.error);
     // (W10b.CLASS residual — intern visibility) a private (default) field is reachable only
     // from its OWN declaring class's code, or — if `intern` — a subclass's too.
@@ -1189,7 +1221,7 @@ static tk_texpr_result type_safe_field_access(tk_safe_field_access sfa, uint32_t
     if (decl.as.value.body.tag != TK_BODY_STRUCT)
         return xferr(tk_error_woven1("type ", inner.as.named.name, " is not a struct (no fields)"));
     tk_struct_body sfa_sb = decl.as.value.body.as.struct_body;
-    tk_type_result ft = field_type(sfa_sb, sfa.field, table);
+    tk_type_result ft = field_type(sfa_sb, sfa.field, table, type_ns_of(table, inner.as.named.name));
     if (!ft.ok) return xferr(ft.as.error);
     // the result is `(field-type)?` — null-propagating; an already-optional field stays as-is.
     tk_type result = ft.as.value.tag == TK_TYPE_OPTIONAL ? ft.as.value
@@ -1310,7 +1342,7 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
         tk_type_result git = tk_resolve_type(gte, table, env.cur_ns);   // (#109 W1) ref_ns = the literal's enclosing namespace
         if (!git.ok) return xferr(git.as.error);
         if (git.as.value.tag != TK_TYPE_NAMED) return xerr("explicit type-arguments did not resolve to a struct instance");
-        if (expected.tag == TK_TYPE_NAMED && name_has_generic_base(expected.as.named.name, name)
+        if (expected.tag == TK_TYPE_NAMED && name_has_generic_base(expected.as.named.name, tk_name_last_segment(name))   // (#109 W3) BARE base — the generic instance name is bare
             && !tk_str_eq(expected.as.named.name, git.as.value.as.named.name))
             return xerr("the explicit type-arguments at construction disagree with the annotated type");
         expected = git.as.value;   // retarget below as if annotated
@@ -1322,7 +1354,7 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
         if (expected.tag != TK_TYPE_NAMED)
             return xerr("cannot infer the type arguments of a generic struct here — annotate it (e.g. `let x: Box<…> = …`)");
         tk_str mname = expected.as.named.name;
-        if (!name_has_generic_base(mname, name)) return xerr("struct literal does not match the annotated type");
+        if (!name_has_generic_base(mname, tk_name_last_segment(name))) return xerr("struct literal does not match the annotated type");   // (#109 W3) BARE base
         decl = tk_type_table_find(table, mname, (tk_str){0});   // (#109 W1) generic-instance lookup on a resolved name — no referencing ns
         if (!decl.ok) return xerr("internal: generic instance was not stamped");
         name = mname;
@@ -1343,7 +1375,7 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
         // (empty outside any method) — a purely inherited method keeps its ORIGINAL declaring
         // class (type_struct_methods), so a base factory constructing the base stays legal when
         // re-typed under a derived class. Structs are pure value data: their literals stay free.
-        if (!tk_str_eq(env.owner_type, name))
+        if (!tk_str_eq(tk_name_last_segment(env.owner_type), tk_name_last_segment(name)))   // (#109 W3) compare bare last-segments
             return xferr(tk_error_named("a class literal is only legal inside the class's own methods — construct it via a static factory", name));
         tk_fieldsvec_result eff = tk_effective_class_fields(decl.as.value.body.as.class_body, table);
         if (!eff.ok) return xferr(eff.as.error);
@@ -1369,7 +1401,7 @@ tk_texpr_result tk_type_struct_lit(tk_struct_lit sl, tk_type expected, tk_env en
             if (tk_str_eq(sl.field_names[i], fname)) { found = i; hits += 1; }
         if (hits == 0) { tk_free0(names); tk_free0(vals); return xerr("a struct literal is missing a declared field"); }
         if (hits > 1)  { tk_free0(names); tk_free0(vals); return xerr("a struct literal sets a field more than once"); }
-        tk_type_result ft = tk_resolve_type(sb_fields[d].type_ann, table, (tk_str){0});   // (#109 W1) field-annotation lookup on a resolved struct — no referencing ns
+        tk_type_result ft = tk_resolve_type(sb_fields[d].type_ann, table, type_ns_of(table, name));   // (#109 W2) field annotation resolves in the struct's OWN ns
         if (!ft.ok) { tk_free0(names); tk_free0(vals); return xferr(ft.as.error); }
         // thread the field's type as EXPECTED so a nested generic constructor (`value = Box { … }`)
         // targets its concrete instance (S4). Non-struct-lit values type exactly as before.
@@ -2096,7 +2128,7 @@ static tk_texpr_result type_match(tk_match_expr m, tk_env env, tk_type_table tab
         if (!have_type) { first = t; have_type = true; }
         else if (!tk_type_join(first, t, table, &first)) return xerr("the `match` arms have different types");   // widen (a case joins into its variant)
     }
-    if (!tk_exhaustive(m.arms, m.narms, s.as.value.type, table)) return xerr("non-exhaustive `match` (cover all cases or add `_`)");
+    if (!tk_exhaustive(m.arms, m.narms, s.as.value.type, table, env.cur_ns)) return xerr("non-exhaustive `match` (cover all cases or add `_`)");
     tk_type result = have_type ? first : tk_void_t();   // all arms diverge → void
     return xok((tk_texpr){ .tag = TK_TEXPR_MATCH, .type = result, .as.match_expr = { box(s.as.value), arms.ptr, arms.len } });
 }

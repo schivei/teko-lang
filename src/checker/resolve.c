@@ -95,10 +95,12 @@ const char *tk_type_render(tk_type t) {
         case TK_TYPE_ERROR: return dup_cstr("error");
         case TK_TYPE_VOID:  return dup_cstr("void");
         case TK_TYPE_NAMED: {
-            // a nominal user type — its declared name verbatim.
-            size_t n = t.as.named.name.len;
+            // a nominal user type — its bare declared name. (#109 W3) strip a canonical "ns::Name" to
+            // "Name" for readable diagnostics (mirror of resolve.tks type_render name_last_segment).
+            tk_str seg = tk_name_last_segment(t.as.named.name);
+            size_t n = seg.len;
             char *out = tk_alloc(n + 1); if (!out) abort();
-            if (n != 0) memcpy(out, t.as.named.name.ptr, n);
+            if (n != 0) memcpy(out, seg.ptr, n);
             out[n] = '\0';
             return out;
         }
@@ -201,14 +203,197 @@ static tk_type *box(tk_type t) {
     return p;
 }
 
+// (#109 W3) the CANONICAL name of a type: "ns::Name" (bare at root). Mirror of resolve.tks::qualify.
+tk_str tk_qualify(tk_str ns, tk_str name) {
+    if (ns.len == 0) return name;
+    return rt_concat(rt_concat(ns, rt_cstr("::")), name);
+}
+// (#148) tk_qualify_eq — does `name` equal tk_qualify(ns, bare) WITHOUT building the string?
+// Mirror of resolve.tks::qualify_eq (the hot table scans concatenated per candidate per lookup).
+bool tk_qualify_eq(tk_str ns, tk_str bare, tk_str name) {
+    if (ns.len == 0) return name_eq(bare, name);
+    if (name.len != ns.len + 2 + bare.len) return false;
+    if (memcmp(name.ptr, ns.ptr, ns.len) != 0) return false;
+    if (name.ptr[ns.len] != ':' || name.ptr[ns.len + 1] != ':') return false;
+    return bare.len == 0 || memcmp(name.ptr + ns.len + 2, bare.ptr, bare.len) == 0;
+}
+// (#109 W3) the bare last "::"-segment of a (possibly canonical) name. Mirror of resolve.tks::name_last_segment.
+tk_str tk_name_last_segment(tk_str name) {
+    int64_t last_sep = -1;
+    for (size_t i = 0; i + 1 < name.len; i += 1) {
+        if (name.ptr[i] == ':' && name.ptr[i + 1] == ':') last_sep = (int64_t)i;
+    }
+    if (last_sep < 0) return name;
+    return tk_str_slice(name, (uint64_t)last_sep + 2, name.len);
+}
+// (#109 W3) the namespace qualifier (before the final "::"). Mirror of resolve.tks::name_qualifier.
+tk_str tk_name_qualifier(tk_str name) {
+    int64_t last_sep = -1;
+    for (size_t i = 0; i + 1 < name.len; i += 1) {
+        if (name.ptr[i] == ':' && name.ptr[i + 1] == ':') last_sep = (int64_t)i;
+    }
+    if (last_sep < 0) return rt_cstr("");
+    return tk_str_slice(name, 0, (uint64_t)last_sep);
+}
+// (#109 W3) a symbol-safe fragment of a canonical name: each "::" → "__". Mirror of resolve.tks::mangle_ns_frag.
+tk_str tk_mangle_ns_frag(tk_str name) {
+    tk_str out = rt_cstr("");
+    size_t start = 0, i = 0;
+    while (i + 1 < name.len) {
+        if (name.ptr[i] == ':' && name.ptr[i + 1] == ':') {
+            out = rt_concat(rt_concat(out, tk_str_slice(name, start, i)), rt_cstr("__"));
+            i += 2; start = i;
+        } else {
+            i += 1;
+        }
+    }
+    return rt_concat(out, tk_str_slice(name, start, name.len));
+}
+
 tk_decl_result tk_type_table_find(tk_type_table table, tk_str name, tk_str ref_ns) {
-    (void)ref_ns;   // (#109 W1) reserved for the R0-R5 rules (W2)
+    (void)ref_ns;   // (#109) resolved-name probe — namespace-blind (every caller passes ref_ns = "")
     for (size_t i = 0; i < table.len; i += 1) {
-        if (name_eq(table.ptr[i].name, name)) {
+        // (#109 W3) exact; OR the entry's qualified form == a canonical query; OR the entry's bare
+        // last-segment == a bare query (a bare decl field probing a CANONICAL-keyed type_table_of table).
+        if (name_eq(table.ptr[i].name, name) || tk_qualify_eq(table.ptr[i].namespace, table.ptr[i].name, name) || name_eq(tk_name_last_segment(table.ptr[i].name), name)) {   // (#148) allocation-free qualified compare
             return (tk_decl_result){ .ok = true, .as.value = table.ptr[i].decl };
         }
     }
     return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
+}
+
+// (#109 W2) does `s` end with `suffix`? Local byte-compare twin of teko::runtime::str_ends_with,
+// kept in-file to keep the module DAG tight (like rt_cstr/rt_concat). An empty suffix always matches.
+static bool str_ends_with(tk_str s, tk_str suffix) {
+    if (suffix.len > s.len) return false;
+    return memcmp(s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
+}
+
+// (#109 W2) does the qualifier `qual` select namespace `ns`? True when `ns` equals it OR ends with
+// "::" ~ qual — so `emit` matches `teko::emit`, and `teko::emit` matches exactly (R0). Mirror of
+// resolve.tks::qualifier_selects_ns.
+static bool qualifier_selects_ns(tk_str ns, tk_str qual) {
+    if (name_eq(ns, qual)) return true;
+    tk_str sep = rt_concat(rt_cstr("::"), qual);
+    return str_ends_with(ns, sep);
+}
+
+// (#109 W2) join a path's FIRST `count` segments with "::" — the qualifier of a qualified reference.
+// Mirror of resolve.tks::path_qualifier.
+static tk_str path_qualifier(tk_path path, size_t count) {
+    tk_str out = rt_cstr("");
+    for (size_t i = 0; i < count; i += 1) {
+        if (i == 0) out = path.segments[i].name;
+        else        out = rt_concat(rt_concat(out, rt_cstr("::")), path.segments[i].name);
+    }
+    return out;
+}
+
+// (#109 W2) the namespaces a bare name is declared in, joined with ", " ("" → "<top-level>"). Used
+// only for the R3/R4 fail-loud diagnostics. Mirror of resolve.tks::namespaces_declaring.
+static tk_str namespaces_declaring(tk_type_table table, tk_str name) {
+    tk_str out = rt_cstr("");
+    for (size_t i = 0; i < table.len; i += 1) {
+        if (name_eq(table.ptr[i].name, name)) {
+            tk_str label = table.ptr[i].namespace.len == 0 ? rt_cstr("<top-level>") : table.ptr[i].namespace;
+            out = out.len == 0 ? label : rt_concat(rt_concat(out, rt_cstr(", ")), label);
+        }
+    }
+    return out;
+}
+
+// (#109 W2) the DECLARING namespace of a type by its (resolved) name — first match, "" if unknown.
+// Shared across the checker so a field / method-signature source annotation resolves in the type's
+// OWN namespace, not the code site's. Mirror of resolve.tks::type_ns_of.
+tk_str type_ns_of(tk_type_table table, tk_str name) {
+    for (size_t i = 0; i < table.len; i += 1) {
+        // (#109 W3) `name` may be canonical "ns::Name" or a bare `__g__` instance — match exact OR the qualified form.
+        if (name_eq(table.ptr[i].name, name) || tk_qualify_eq(table.ptr[i].namespace, table.ptr[i].name, name)) return table.ptr[i].namespace;   // (#148) allocation-free qualified compare
+    }
+    return rt_cstr("");
+}
+
+// (#109 W2) the namespace-aware SOURCE-reference resolver — R0-R5. See resolve.tks::resolve_type_ref
+// for the rule text. R1/R2 are handled by the callers before this point. Here: R3 (bare = strict
+// own-ns, cross-ns bare = fail-loud) and R4/R0 (qualified = last + qualifier, ambiguity = fail-loud).
+static tk_decl_result resolve_type_ref(tk_path path, tk_type_table table, tk_str ref_ns) {
+    if (path.len == 0) return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
+    tk_str last = path.segments[path.len - 1].name;
+    if (path.len == 1) {
+        // R3 — BARE: strict own-namespace resolution.
+        for (size_t i = 0; i < table.len; i += 1) {
+            if (name_eq(table.ptr[i].name, last) && name_eq(table.ptr[i].namespace, ref_ns)) {
+                return (tk_decl_result){ .ok = true, .as.value = table.ptr[i].decl };
+            }
+        }
+        // (R1/root) a generic type-PARAM (registered at "") and a root-level ("") type are bare-visible
+        // from ANY namespace — "" is the global root scope. Resolve it before the collision error.
+        if (ref_ns.len != 0) {
+            for (size_t k = 0; k < table.len; k += 1) {
+                if (name_eq(table.ptr[k].name, last) && table.ptr[k].namespace.len == 0) {
+                    return (tk_decl_result){ .ok = true, .as.value = table.ptr[k].decl };
+                }
+            }
+        }
+        for (size_t j = 0; j < table.len; j += 1) {
+            if (name_eq(table.ptr[j].name, last)) {
+                tk_str nss  = namespaces_declaring(table, last);
+                tk_str here = ref_ns.len == 0 ? rt_cstr("<top-level>") : ref_ns;
+                size_t cap = 128 + last.len * 2 + here.len + nss.len;
+                char *buf = tk_alloc(cap); if (!buf) abort();
+                snprintf(buf, cap, "type '%.*s' is not visible bare from namespace '%.*s' \xe2\x80\x94 it is declared in: %.*s. Qualify it (`ns::%.*s`) or reference it from its own namespace.",
+                         (int)last.len, (const char *)last.ptr, (int)here.len, (const char *)here.ptr,
+                         (int)nss.len, (const char *)nss.ptr, (int)last.len, (const char *)last.ptr);
+                return (tk_decl_result){ .ok = false, .as.error = tk_error_make(buf) };
+            }
+        }
+        return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
+    }
+    // R4 / R0 — QUALIFIED: match last segment + qualifier; unique winner, else ambiguity/unknown.
+    tk_str qual = path_qualifier(path, path.len - 1);
+    long winner_idx = -1;
+    tk_str matched_ns = rt_cstr("");
+    bool ambiguous = false;
+    for (size_t i = 0; i < table.len; i += 1) {
+        if (name_eq(table.ptr[i].name, last) && qualifier_selects_ns(table.ptr[i].namespace, qual)) {
+            if (winner_idx >= 0 && !name_eq(table.ptr[i].namespace, matched_ns)) {
+                ambiguous = true;
+            } else {
+                winner_idx = (long)i;
+                matched_ns = table.ptr[i].namespace;
+            }
+        }
+    }
+    if (ambiguous) {
+        tk_str nss = namespaces_declaring(table, last);
+        size_t cap = 160 + qual.len + last.len * 2 + nss.len;
+        char *buf = tk_alloc(cap); if (!buf) abort();
+        snprintf(buf, cap, "ambiguous type reference '%.*s::%.*s' \xe2\x80\x94 the qualifier matches more than one namespace (%.*s). Use the absolute path (`teko::\xe2\x80\xa6::%.*s`).",
+                 (int)qual.len, (const char *)qual.ptr, (int)last.len, (const char *)last.ptr,
+                 (int)nss.len, (const char *)nss.ptr, (int)last.len, (const char *)last.ptr);
+        return (tk_decl_result){ .ok = false, .as.error = tk_error_make(buf) };
+    }
+    if (winner_idx >= 0) return (tk_decl_result){ .ok = true, .as.value = table.ptr[winner_idx].decl };
+    return (tk_decl_result){ .ok = false, .as.error = tk_error_make("not a user type") };
+}
+
+// (#109 W2) the DECLARING namespace of the type `path` resolves to (mirrors resolve_type_ref's winning
+// match) — the namespace a TRANSPARENT alias's body must resolve in. Returns "" for a root/builtin/
+// unknown path (its body resolves at root). Mirror of resolve.tks::type_ref_ns.
+static tk_str type_ref_ns(tk_path path, tk_type_table table, tk_str ref_ns) {
+    if (path.len == 0) return rt_cstr("");
+    tk_str last = path.segments[path.len - 1].name;
+    if (path.len == 1) {
+        for (size_t i = 0; i < table.len; i += 1) {
+            if (name_eq(table.ptr[i].name, last) && name_eq(table.ptr[i].namespace, ref_ns)) return ref_ns;   // R3 own-ns match → its own ns
+        }
+        return rt_cstr("");   // R1/root ("") match, or unknown → root scope
+    }
+    tk_str qual = path_qualifier(path, path.len - 1);
+    for (size_t j = 0; j < table.len; j += 1) {
+        if (name_eq(table.ptr[j].name, last) && qualifier_selects_ns(table.ptr[j].namespace, qual)) return table.ptr[j].namespace;
+    }
+    return rt_cstr("");
 }
 
 // (W10b.D2, issue #99) is the constraint EXACTLY a single INTERFACE atom `<T: I>`? If so, yields I's
@@ -356,15 +541,48 @@ void tk_collect_sig_type_params(tk_type t, tk_type_table table, tk_str **names, 
 }
 
 // non-static: shared with match.c (the typed pattern checker resolves case/struct names — C7).
-// (#109 W1) `ref_ns` = the referencing namespace; threaded down unchanged (reserved for W2's R0-R5).
+// (#109 order fix) split a SOURCE-WRITTEN type name string on "::" into a tk_path — so an
+// `implements`/`extends` entry or a trait-derive probe (bare "Reader" or qualified "io::Reader")
+// can ride the R0-R5 resolver like any other source reference. (Mirror resolve.tks::name_to_path.)
+static tk_path name_to_path(tk_str name) {
+    tk_segment *segs = NULL; size_t n = 0;
+    tk_str rest = name;
+    for (;;) {
+        long long sep = -1;
+        for (uint64_t i = 0; i + 1 < rest.len; i += 1) {
+            if (rest.ptr[i] == ':' && rest.ptr[i + 1] == ':') { sep = (long long)i; break; }
+        }
+        if (sep < 0) break;
+        segs = tk_realloc0(segs, (n + 1) * sizeof *segs); if (!segs) abort();
+        segs[n].name = tk_str_slice(rest, 0, (uint64_t)sep); n += 1;
+        rest = tk_str_slice(rest, (uint64_t)sep + 2, rest.len);
+    }
+    segs = tk_realloc0(segs, (n + 1) * sizeof *segs); if (!segs) abort();
+    segs[n].name = rest; n += 1;
+    return (tk_path){ .segments = segs, .len = n };
+}
+
+// (#109 order fix) the string-shaped twins of resolve_type_ref / type_ref_ns — used by collect's
+// `implements`/`extends`/trait-derive walks, so a bare name never resolves by table-scan order.
+// (Mirror resolve.tks::resolve_name_ref / resolved_name_ns.)
+tk_decl_result tk_resolve_name_ref(tk_str name, tk_type_table table, tk_str ref_ns) {
+    return resolve_type_ref(name_to_path(name), table, ref_ns);
+}
+tk_str tk_resolved_name_ns(tk_str name, tk_type_table table, tk_str ref_ns) {
+    return type_ref_ns(name_to_path(name), table, ref_ns);
+}
+
+// (#109 W2) `ref_ns` = the referencing namespace; drives the R0-R5 rules via resolve_type_ref.
 tk_type_result resolve_named(tk_path path, tk_type_table table, tk_str ref_ns) {
-    (void)ref_ns;   // (#109 W1) reserved for the R0-R5 rules (W2)
     if (path.len == 0)   // M.1: an empty path is an internal invariant break — an honest error, never a crash
         return (tk_type_result){ .ok = false, .as.error = tk_error_make("internal: empty type path (a void/missing type used where a value type is required)") };
     tk_str name = path.segments[path.len - 1].name;       // seed: last segment
-    tk_type_result bt = tk_builtin_type(name);            // u8…u64, byte, str, error
-    if (bt.ok) return bt;
-    tk_decl_result ut = tk_type_table_find(table, name, ref_ns);  // a user type
+    // R2 — a BUILTIN resolves only for a BARE reference; a qualified path can never name a builtin.
+    if (path.len == 1) {
+        tk_type_result bt = tk_builtin_type(name);        // u8…u64, byte, str, error
+        if (bt.ok) return bt;
+    }
+    tk_decl_result ut = resolve_type_ref(path, table, ref_ns);   // R0/R3/R4 — a user type
     if (ut.ok) {
         // A TRANSPARENT alias `type Name = <type-expr>` resolves THROUGH to the aliased type
         // (self-host parity): `TypeTable = []TypeReg` → a SLICE, `Foo = Circle` → its NAMED
@@ -376,7 +594,7 @@ tk_type_result resolve_named(tk_path path, tk_type_table table, tk_str ref_ns) {
             if (alias_depth > 64)
                 return (tk_type_result){ .ok = false, .as.error = tk_error_make("type alias resolves cyclically (self-referential alias chain)") };
             alias_depth += 1;
-            tk_type_result r = tk_resolve_type(ut.as.value.body.as.alias_body.alias, table, ref_ns);
+            tk_type_result r = tk_resolve_type(ut.as.value.body.as.alias_body.alias, table, type_ref_ns(path, table, ref_ns));   // (#109 W2) alias body resolves in the alias's OWN ns, not the referencing ns
             alias_depth -= 1;
             return r;
         }
@@ -390,10 +608,17 @@ tk_type_result resolve_named(tk_path path, tk_type_table table, tk_str ref_ns) {
         // (W10b.D3) an interface IS a value type now — a contract-typed value (data + vtable fat
         // pointer, the tk_closure-shaped rep). It resolves NOMINALLY like any other named type;
         // the upcast/dispatch rules live in tk_widens_into + the method-call typer.
-        tk_type t = { .tag = TK_TYPE_NAMED, .as.named.name = name };
+        // (#109 W3) the Named carries the CANONICAL "ns::Name" (the resolved decl's own ns). A stamped
+        // generic `__g__` instance is already globally unique → stays BARE (matching tk_type_item).
+        tk_str cn = tk_name_is_g_instance(name) ? name : tk_qualify(type_ref_ns(path, table, ref_ns), name);
+        tk_type t = { .tag = TK_TYPE_NAMED, .as.named.name = cn };
         return (tk_type_result){ .ok = true, .as.value = t };
     }
-    return (tk_type_result){ .ok = false, .as.error = tk_error_named("unknown type", name) };
+    // R3/R4 fail-loud diagnostics (cross-namespace collision, ambiguity) propagate verbatim; the
+    // plain "not a user type" sentinel becomes the caller-facing "unknown type" message.
+    if (ut.as.error.message && strcmp(ut.as.error.message, "not a user type") == 0)
+        return (tk_type_result){ .ok = false, .as.error = tk_error_named("unknown type", name) };
+    return (tk_type_result){ .ok = false, .as.error = ut.as.error };
 }
 
 // (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Mirror of
@@ -405,7 +630,7 @@ tk_str tk_type_mangle(tk_type t) {
         case TK_TYPE_STR:      return rt_cstr("str");
         case TK_TYPE_BYTE:     return rt_cstr("byte");
         case TK_TYPE_CHAR:     return rt_cstr("char");
-        case TK_TYPE_NAMED:    return t.as.named.name;
+        case TK_TYPE_NAMED:    return tk_name_last_segment(t.as.named.name);   // (#109 W3) BARE last-segment — slice/opt/generic-inst suffixes stay bare (only DIRECT tk_t_ typedefs carry the canonical ns)
         case TK_TYPE_SLICE:    return rt_concat(rt_cstr("slice_"),
                                    t.as.slice.element  ? tk_type_mangle(*t.as.slice.element)  : rt_cstr("void"));
         case TK_TYPE_OPTIONAL: return rt_concat(rt_cstr("opt_"),
@@ -435,7 +660,6 @@ tk_str tk_generic_inst_name(tk_str base, tk_type *args, size_t nargs) {
 // (S4) `Box<i64>` → `Named{Box__g__i64}`: resolve the args, validate the generic decl's arity.
 // Mirror of resolve.tks::resolve_generic_inst.
 static tk_type_result resolve_generic_inst(tk_path path, tk_type_expr *args, size_t nargs, tk_type_table table, tk_str ref_ns) {
-    (void)ref_ns;   // (#109 W1) reserved for the R0-R5 rules (W2); threaded to every tk_resolve_type arg + the table lookup
     tk_str name = path.segments[path.len - 1].name;
     // (S-mem) builtin generic `ptr<T>` → `Ptr{inner}`; `ptr<void>` ≡ opaque ptr → NULL inner.
     if (name.len == 3 && memcmp(name.ptr, "ptr", 3) == 0) {
@@ -482,9 +706,14 @@ static tk_type_result resolve_generic_inst(tk_path path, tk_type_expr *args, siz
             return (tk_type_result){ .ok = false, .as.error = tk_error_make("a reference cannot be a generic type argument (it would be stored/escape)") };
         argtypes[i] = a.as.value;
     }
-    tk_decl_result d = tk_type_table_find(table, name, ref_ns);
-    if (!d.ok)
-        return (tk_type_result){ .ok = false, .as.error = tk_error_named("unknown generic type", name) };
+    tk_decl_result d = resolve_type_ref(path, table, ref_ns);   // (#109 W2) R0/R3/R4 over the WRITTEN path
+    if (!d.ok) {
+        // R3/R4 fail-loud diagnostics propagate verbatim; the plain "not a user type" sentinel
+        // becomes the generic-specific "unknown generic type" message.
+        if (d.as.error.message && strcmp(d.as.error.message, "not a user type") == 0)
+            return (tk_type_result){ .ok = false, .as.error = tk_error_named("unknown generic type", name) };
+        return (tk_type_result){ .ok = false, .as.error = d.as.error };
+    }
     if (d.as.value.n_type_params == 0)
         return (tk_type_result){ .ok = false, .as.error = tk_error_woven1("type `", name, "` is not generic but was given type arguments") };
     if (d.as.value.n_type_params != nargs)
@@ -703,7 +932,7 @@ tk_type_table tk_instantiate_types(tk_program program, tk_type_table table) {
         tk_type *argtypes = te.as.named.args_len ? tk_alloc(te.as.named.args_len * sizeof *argtypes) : NULL;
         bool ok = true;
         for (size_t a = 0; a < te.as.named.args_len; a += 1) {
-            tk_type_result r = tk_resolve_type(te.as.named.args[a], tbl, (tk_str){0});   // (#109 W1) program-wide inst pass — no single referencing ns
+            tk_type_result r = tk_resolve_type(te.as.named.args[a], tbl, type_ns_of(tbl, name));   // (#109 W2) resolve args in the generic base's OWN ns (its args are written alongside it)
             if (!r.ok) { ok = false; break; }
             argtypes[a] = r.as.value;
         }
@@ -717,7 +946,7 @@ tk_type_table tk_instantiate_types(tk_program program, tk_type_table table) {
         tk_type_body nbody = subst_body_names(gen.body, gen.type_params, gen.n_type_params, te.as.named.args, te.as.named.args_len);
         tk_type_decl stamped = { .name = mangled, .type_params = NULL, .n_type_params = 0, .body = nbody,
                                  .vis = gen.vis, .has_doc = false, .doc = (tk_str){0}, .line = gen.line, .col = gen.col };
-        tbl = tk_type_table_push(tbl, (tk_type_reg){ .name = mangled, .namespace = (tk_str){0}, .vis = gen.vis, .decl = stamped });
+        tbl = tk_type_table_push(tbl, (tk_type_reg){ .name = mangled, .namespace = type_ns_of(tbl, name), .vis = gen.vis, .decl = stamped });   // (#109 W2) stamp in the generic base's ns so the substituted body's bare field types resolve there
         collect_body_insts(nbody, &work, &nwork);   // transitive instantiations in the stamped body
     }
     // (W9.4) normalize generic-INSTANCE references in the stamped bodies to bare stamped names, so
@@ -758,7 +987,7 @@ static tk_type_expr normalize_inst_texpr(tk_type_expr te, tk_type_table table) {
     switch (te.tag) {
         case TK_TEXPR_NAMED: {
             if (te.as.named.args_len > 0) {
-                tk_type_result r = tk_resolve_type(te, table, (tk_str){0});   // (#109 W1) instance-normalization probe — no referencing ns
+                tk_type_result r = tk_resolve_type(te, table, type_ns_of(table, te.as.named.path.segments[te.as.named.path.len - 1].name));   // (#109 W2) normalization probe resolves in the generic base's OWN ns
                 if (r.ok && r.as.value.tag == TK_TYPE_NAMED && tk_name_is_g_instance(r.as.value.as.named.name)) {
                     tk_segment *segs = NULL; size_t ns = 0;
                     tk_segs_push(&segs, &ns, (tk_segment){ .name = r.as.value.as.named.name });
@@ -848,7 +1077,7 @@ tk_type tk_expand_variant(tk_type t, tk_type_table table) {
     if (t.tag != TK_TYPE_NAMED) return t;
     tk_decl_result d = tk_type_table_find(table, t.as.named.name, (tk_str){0});   // (#109 W1) resolved-name probe, no referencing ns
     if (!d.ok || d.as.value.body.tag != TK_BODY_VARIANT) return t;
-    tk_type_result ex = tk_resolve_type(d.as.value.body.as.variant_body.type_expr, table, (tk_str){0});   // (#109 W1) expanded body has no distinct referencing ns
+    tk_type_result ex = tk_resolve_type(d.as.value.body.as.variant_body.type_expr, table, type_ns_of(table, t.as.named.name));   // (#109 W2) variant body resolves in the variant's OWN ns
     return ex.ok ? ex.as.value : t;
 }
 
@@ -947,7 +1176,7 @@ bool tk_subclass_reaches(tk_str sub, tk_str want, tk_type_table table, int depth
     if (!d.ok || d.as.value.body.tag != TK_BODY_CLASS) return false;
     tk_class_body cb = d.as.value.body.as.class_body;
     if (!cb.has_base) return false;
-    if (name_eq(cb.base_name, want)) return true;
+    if (name_eq(tk_name_last_segment(cb.base_name), tk_name_last_segment(want))) return true;   /* (#109 W3) compare bare */
     return tk_subclass_reaches(cb.base_name, want, table, depth - 1);
 }
 
@@ -966,7 +1195,7 @@ static bool iface_extends_reaches(tk_str sub, tk_str want, tk_type_table table, 
     if (!d.ok || d.as.value.body.tag != TK_BODY_INTERFACE) return false;
     tk_interface_body ib = d.as.value.body.as.interface_body;
     for (size_t i = 0; i < ib.n_extends; i += 1) {
-        if (name_eq(ib.extends[i], want)) return true;
+        if (name_eq(tk_name_last_segment(ib.extends[i]), tk_name_last_segment(want))) return true;   /* (#109 W3) compare bare */
         if (iface_extends_reaches(ib.extends[i], want, table, depth - 1)) return true;
     }
     return false;
@@ -997,7 +1226,7 @@ bool tk_type_conforms_to(tk_str name, tk_str iface, tk_type_table table) {
             return false;
         }
         for (size_t i = 0; i < n_impls; i += 1) {
-            if (name_eq(impls[i], iface)) return true;
+            if (name_eq(tk_name_last_segment(impls[i]), tk_name_last_segment(iface))) return true;   /* (#109 W3) compare bare */
             if (iface_extends_reaches(impls[i], iface, table, 64)) return true;
         }
         if (!has_base) return false;
