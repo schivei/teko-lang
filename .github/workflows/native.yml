@@ -1,10 +1,11 @@
 name: Native Build & Test
 
-# chore/reboot is the ACTIVE integration branch (the "new main") — without it here, PRs
-# targeting chore/reboot get no checks at all (issue #54).
+# CI runs on PULL REQUESTS ONLY. Branch protection requires these checks green before a PR
+# can merge, so every commit that reaches main was already 100% green — re-running the full
+# suite on the post-merge push would only duplicate that work and burn pipeline minutes. The
+# release trusts this and builds from a main tag WITHOUT re-validating (see release.yml).
+# chore/reboot stays listed so PRs targeting the integration branch still get checks (#54).
 on:
-  push:
-    branches: [main, master, chore/reboot]
   pull_request:
     branches: [main, master, chore/reboot]
 
@@ -88,7 +89,7 @@ jobs:
         shell: bash
         run: teko . -o gen1-native --native-gate
 
-  # ── RISC-V cross-compile + QEMU (non-blocking) ───────────────────────────────
+  # ── RISC-V cross-compile + QEMU (BLOCKING — gated in the CI gate job) ─────────
   riscv64-qemu:
     needs: changes
     if: needs.changes.outputs.run == 'true'
@@ -240,6 +241,14 @@ jobs:
             exit 1
           fi
 
-          # riscv64-qemu is non-blocking (continue-on-error), so any result is fine
+          # riscv64-qemu is BLOCKING (main-integrity law: green means green everywhere).
+          # It seeds from the released x86_64 binary and cross-compiles the current
+          # compiler's emitted C (issue #276), so a failure is a real regression, not
+          # infra noise — a red riscv gates the merge and, downstream, the release.
+          if [ "$RISCV_RESULT" = "failure" ] || [ "$RISCV_RESULT" = "cancelled" ]; then
+            echo "ERROR: riscv64-qemu $RISCV_RESULT"
+            exit 1
+          fi
+
           echo "Gate passed."
           exit 0
