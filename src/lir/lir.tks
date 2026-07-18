@@ -140,10 +140,39 @@ pub type LBlock = struct { id: u32; params: []u32; insts: []LInst }
     during lowering (functional threading — no mutable module state). */
 pub type LFunc = struct { symbol: str; n_params: u32; param_types: []LType; ret_type: LType; blocks: []LBlock; next_vreg: u32 }
 
-/** LRodata — one read-only data entry: its already-final symbol + the raw bytes (a string
-    literal's UTF-8, or an interpolation piece's UTF-8). Referenced by `LGlobalAddr`
-    (A1-4, #382). */
-pub type LRodata = struct { symbol: str; bytes: []byte }
+/**
+ * LDataReloc — one rodata-INTERNAL pointer field (#594 T-B1): the byte `offset`,
+ * within the owning `LRodata` blob, of a pointer-width slot that must be relocated
+ * to hold the address of the rodata datum named `target`. This is the LIR carrier
+ * for the data→data relocation the current toolchain cannot yet emit; a Tier-B
+ * aggregate const (e.g. an ABI descriptor with `[]u32` slice fields) will produce
+ * one per slice/pointer field in T-B6. No lowering produces one in T-B1, so every
+ * `LRodata.relocs` is empty and the backend behavior is byte-identical.
+ *
+ * @since #594 T-B1
+ */
+pub type LDataReloc = struct { offset: u32; target: str }
+
+/**
+ * data_reloc — build an `LDataReloc` for a pointer slot at byte `offset` inside a
+ * rodata blob that targets rodata symbol `target` (#594 T-B1).
+ *
+ * @param offset  the pointer slot's byte offset within its `LRodata` blob
+ * @param target  the final rodata symbol name the slot must point to
+ * @return        the data-relocation entry
+ * @since #594 T-B1
+ */
+pub fn data_reloc(offset: u32, target: str) -> LDataReloc {
+    LDataReloc { offset = offset; target = target }
+}
+
+/** LRodata — one read-only data entry: its already-final symbol, the raw bytes (a
+    string literal's UTF-8, an interpolation piece, or a Tier-A aggregate const's
+    serialized image), and its internal pointer relocations (#594 T-B1 — EMPTY for
+    every entry the compiler produces today; a Tier-B aggregate const populates it
+    from T-B6, and T-B2..T-B5 teach the writers/VM to emit/resolve them). Referenced
+    by `LGlobalAddr` (A1-4, #382). */
+pub type LRodata = struct { symbol: str; bytes: []byte; relocs: []LDataReloc }
 
 /** LGlobal — one mutable/immutable top-level datum: its symbol, machine class, and
     initializer image. No A1-4 lowering produces one yet (top-level consts are a later

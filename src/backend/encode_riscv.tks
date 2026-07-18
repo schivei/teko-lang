@@ -1818,6 +1818,13 @@ pub type RelocRiscv = struct {
      * rodata `PcRelHi20` target's `.rodata` offset folded on by the writer.
      */
     addend: i64
+    /**
+     * sect — which section this relocation's patched field lives in (#594 T-B1):
+     * `Text` (the historical default — `offset` is `.text`-base-relative), or
+     * `Rodata` (a data→data pointer whose `offset` is rodata-base-relative,
+     * emitted only from T-B2 on). Every reloc the encoder builds today is `Text`.
+     */
+    sect: RelocSect
 }
 
 /**
@@ -2196,7 +2203,7 @@ fn finalize_func_riscv(symbol: str, acc: FuncEmitRiscv, offsets: []BlockOffsetRi
         let w = match resolve_word_riscv(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
         out_words = teko::list::push(out_words, w)
         if ew.has_reloc {
-            relocs = teko::list::push(relocs, RelocRiscv { offset = (i to u32) * RISCV_WORD_BYTES; sym = ew.reloc_sym; kind = ew.reloc_kind; addend = 0 to i64 })
+            relocs = teko::list::push(relocs, RelocRiscv { offset = (i to u32) * RISCV_WORD_BYTES; sym = ew.reloc_sym; kind = ew.reloc_kind; addend = 0 to i64; sect = RelocSect::Text })
         }
         i++
     }
@@ -2319,7 +2326,7 @@ fn rebase_relocs_riscv(acc: []RelocRiscv, relocs: []RelocRiscv, base: u32) -> []
     loop {
         if i >= relocs.len { break }
         let r = relocs[i]
-        out = teko::list::push(out, RelocRiscv { offset = r.offset + base; sym = r.sym; kind = r.kind; addend = r.addend })
+        out = teko::list::push(out, RelocRiscv { offset = r.offset + base; sym = r.sym; kind = r.kind; addend = r.addend; sect = r.sect })
         i++
     }
     out
@@ -2488,7 +2495,7 @@ fn collect_undefined_riscv(defined: []Symbol, relocs: []RelocRiscv) -> []Symbol 
 pub fn encode_module_riscv(abi: AbiDescriptor, m: MModuleRiscv) -> EncodedModuleRiscv | error {
     if m.globals.len > (0 to u64) { return honest_globals_riscv() }
     let mt = match encode_functions_riscv(abi, m.funcs) { ModuleTextRiscv as x => x; error as e => return e }
-    let rod = encode_rodata(m.rodata)
+    let rod = match encode_rodata(m.rodata) { ModuleRodata as x => x; error as e => return e }
     let local_defined = concat_symbols(rod.syms, mt.labels)
     let defined = concat_symbols(local_defined, mt.syms)
     let undef = collect_undefined_riscv(defined, mt.relocs)

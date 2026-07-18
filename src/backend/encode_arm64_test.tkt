@@ -1261,6 +1261,7 @@ fn straight_line_exit_encodes_with_bl_reloc() {
     teko::assert::is_true(e.relocs[0].offset == (4 to u32))
     teko::assert::is_true(e.relocs[0].sym == "tk_exit")
     teko::assert::is_true(kind_name(e.relocs[0].kind) == "Call")
+    teko::assert::is_true(e.relocs[0].sect == RelocSect::Text)   // T-B1: todo reloc real é Text
 }
 
 #test
@@ -1659,7 +1660,7 @@ fn em_stop(m: MModule) -> str {
  * @return []lir::LRodata  the one-entry rodata table
  */
 fn rodata_of(sym: str, bs: []byte) -> []lir::LRodata {
-    teko::list::push(teko::list::empty(), lir::LRodata { symbol = sym; bytes = bs })
+    teko::list::push(teko::list::empty(), lir::LRodata { symbol = sym; bytes = bs; relocs = teko::list::empty() })
 }
 
 /**
@@ -1848,7 +1849,7 @@ fn empty_module_encodes_to_empty_everything() {
 fn module_interns_rodata_into_const() {
     let r0 = teko::list::push(teko::list::push(teko::list::push(l_bytes(), 0x68 to byte), 0x69 to byte), 0 to byte)
     let r1 = teko::list::push(teko::list::push(l_bytes(), 0x41 to byte), 0 to byte)
-    let rodata = teko::list::push(rodata_of("s0", r0), lir::LRodata { symbol = "s1"; bytes = r1 })
+    let rodata = teko::list::push(rodata_of("s0", r0), lir::LRodata { symbol = "s1"; bytes = r1; relocs = teko::list::empty() })
     let f = one_block_func("main", i1(RET_INST))
     let funcs = teko::list::push(teko::list::empty(), f)
     let e = em(module_with_rodata(funcs, rodata))
@@ -1896,4 +1897,35 @@ fn module_globals_honest_stops() {
 fn module_propagates_function_honest_stop() {
     let f = one_block_func("main", i1(falu_inst(MFAluOp::FAdd, true, fp(0), fp(1), fp(2))))
     teko::assert::str_contains(em_stop(add_mfunc(empty_mmodule(), f)), "A4-fp")
+}
+
+/**
+ * T-B1: a rodata entry carrying an internal-pointer relocation makes
+ * `encode_module` honest-stop (the data→data reloc only lands in T-B2..T-B5) —
+ * proves the `LDataReloc` wiring reaches the encoder gate end-to-end.
+ */
+#test
+fn tb1_data_reloc_honest_stops() {
+    let rod = teko::list::push(teko::list::empty(), lir::LRodata { symbol = "k"; bytes = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]; relocs = teko::list::push(teko::list::empty(), lir::data_reloc(0 to u32, "other")) })
+    match encode_module(aapcs64(), module_with_rodata(teko::list::empty(), rod)) {
+        EncodedModule => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "T-B")
+    }
+}
+
+/**
+ * T-B1: an EMPTY `relocs` list is inert — the same blob encodes exactly as the
+ * pre-T-B1 flat-bytes rodata (the ok arm, bytes preserved).
+ */
+#test
+fn tb1_empty_relocs_is_inert() {
+    let rod = teko::list::push(teko::list::empty(), lir::LRodata { symbol = "k"; bytes = [0x68 to byte, 0x69 to byte]; relocs = teko::list::empty() })
+    match encode_module(aapcs64(), module_with_rodata(teko::list::empty(), rod)) {
+        EncodedModule as em => {
+            teko::assert::is_true(em.rodata.len == 2)
+            teko::assert::is_true(em.rodata[0] == (0x68 to byte))
+            teko::assert::is_true(em.rodata[1] == (0x69 to byte))
+        }
+        error => teko::assert::is_true(false)
+    }
 }
