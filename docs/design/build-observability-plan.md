@@ -509,6 +509,122 @@ substituído por (a).
 
 ---
 
+## Proposta do owner — C base compartilhado + delta de teste (.h + link)
+
+Forma refinada (evoluiu de "`#include` do .c" → "`teko.h` + compilação separada + link"):
+emitir o C de PRODUÇÃO uma vez (`teko.c` + `teko.h`); o TU de teste passa a `#include
+"teko.h"` e conter SÓ testes + delta + test-main (TU minúsculo); produção compila para um
+`teko.o` LINKÁVEL; binário de teste = `teko.o(instrumentado) + teko_test.o` linkados;
+diferenças de cobertura por macro (`-DTEKO_COV`).
+
+### Fatos do código (confirmados)
+
+- **Privados JÁ são EXTERNAL + mangled-únicos.** `emit_function_sig` (`codegen.tks:6393-6419`)
+  NÃO emite `static` — só `extern` para protótipo foreign (6396) e `__attribute__((noinline))`
+  para auto-recursiva (6395). Todo símbolo é `teko__<ns>__<name>` (#49,
+  `cb_fn_name`/`mangle_type_name`, globalmente único). **→ a tag `TK_LINKAGE static/vazio` do
+  owner é DESNECESSÁRIA hoje: não há função file-static para expor. O `teko.h` só precisa dos
+  protótipos (o pass de protótipos já existe em `tk_emit_c`, ~`codegen.tks:8630`) e os testes
+  linkam contra `teko.o` sem nenhuma mudança de linkage. Zero colisão (mangling único).**
+- **Sem `__LINE__`/`__FILE__` no C emitido** (grep vazio em `codegen.tks`). Release sem `-g`
+  (`build_cc_argv` debug=false). **→ macro de cobertura VAZIA deixa os MESMOS tokens
+  pós-preprocessor → mesmo código de máquina → `teko.o` de release BYTE-IDÊNTICO ao de hoje.**
+- **Cobertura é INLINE e indexada por ÍNDICE de item.** `CgMode={Program;TestPlain;TestCov}`
+  (`codegen.tks:50`); `CovCtx` (65-70) carrega `fn_idx` = índice do fn de produção em
+  `prog.items`; `emit_cov_line/branch` (105-134) emitem `tk_cov_line_at(fn_idx,line)` só se
+  `ctx.on`; prólogo `tk_cov_mark(cov_idx)` (`emit_function_cov`, 6649-6652); `Program`/
+  `TestPlain` usam `cov_off()` → 0 marcas → byte-idêntico.
+- **A caminhada de floors usa `fe.prog` = `mono(com_testes)`** (`project.tks:1488/1492/1507`).
+- **Empírico** (main 0.3.0.21, seed 0.3.0.16, CI=1): front-end ~49s; depois **bloco silencioso
+  único de codegen+write+cc >240s e contando** (dominante). O split codegen-vs-cc **continua
+  não medido** — sem instrumentação de fase, codegen→write→cc é um bloco mudo só. **O crumb 1
+  (START/settle em `codegen`/`emit C`/`cc`) é a FERRAMENTA de medição desse split.**
+
+### 1. Visibilidade
+
+Resolvida por construção (fato 1): funções já external+únicas; `teko.h` = os type-decls + o
+pass de protótipos extraídos para header. Delta chama privados de produção livremente (são
+external). A `TK_LINKAGE` é futuro-proofing barato (expandir p/ nada hoje) caso um dia o
+codegen emita alguma função `static` — mas NÃO é necessária agora. Ressalva: file-statics que
+EXISTEM (`tk_build_meta` `codegen.tks:299`; literais static em corpos) ficam dentro do
+`teko.o` e não são referenciados entre TUs → sem problema.
+
+### 2. Contabilidade honesta do CC
+
+No CI fresh-build o `cc` NÃO diminui: `teko.o` (release, macros vazias) + `teko_cov.o`
+(produção instrumentada) + `teko_test.o` (delta minúsculo) → produção ainda passa 2× pelo cc,
+IGUAL a hoje (release.c + test.c-que-contém-produção). O que GANHA:
+  (i) **codegen do TU de teste vira o DELTA** (não re-emite a produção inteira) — a produção é
+      emitida 1× (base) em vez de 2× → **~metade do codegen de produção**, o ganho real SE
+      codegen dominar;
+  (ii) fonte única do C de produção (manutenção);
+  (iii) incrementalidade dev-local (reusar `teko.o` se `teko.c`+defines não mudam) — INÚTIL no
+      CI fresh (frio) e marginal no dev (editar produção regenera `teko.c`);
+  (iv) paralelismo dos dois cc — `teko::process::run` é SÍNCRONO, sem spawn async → só futuro.
+Quantificação: front-end ~49s vs bloco codegen+cc >240s. Se codegen ≈ metade do bloco, a
+proposta economiza um passe de produção (~dezenas–>100s). **Depende do split que o crumb 1
+mede.**
+
+### 3. Cobertura (o crux) — release byte-idêntico CONFIRMADO, com um NÓ de indexação
+
+Release `teko.o` = `cc teko.c` com `TK_COV_*` vazias → tokens idênticos aos de hoje → objeto
+byte-idêntico (fato 2). Gate `teko_cov.o` = `cc teko.c -DTEKO_COV` → marcas ativas.
+**NÓ de integração:** `cov_idx` = índice do fn em `prog.items`. A base `teko.c` que gera o
+`teko.o` de release DEVE vir do programa de release (`mono(sem_testes)`) para o objeto ser
+byte-idêntico — então os `cov_idx` da base são índices de `sem_testes`. Mas a caminhada de
+floors hoje usa `mono(com_testes)` (`project.tks:1488`). **Os índices DIVERGEM** (itens de
+teste intercalados deslocam os índices absolutos). A proposta EXIGE alinhar a base de
+indexação da cobertura: ou (a) a caminhada de floors passa a usar o programa base
+(`sem_testes` — o que semanticamente até faz mais sentido: cobertura mede PRODUÇÃO), ou (b)
+re-chavear a cobertura por NOME MANGLED em vez de índice (refactor maior). É custo real, não
+trivial — sinalizado.
+
+### 4. Delta
+
+`delta = mono(com_testes) ∖ mono(sem_testes)` por nome mangled = `#test` + helpers de `.tkt` +
+instâncias genéricas só-de-teste (`foo<TSóDeTeste>`). Vive em `teko_test.c`, chama produção via
+protótipos de `teko.h` + link contra `teko.o`. **Funciona SÓ porque produção é external+única
+(fato 1);** sem o header/link, TUs separados não se enxergariam. O set-diff é determinístico
+(conjunto); ORDEM é irrelevante (gate é descartável, fora do fixpoint). Risco menor: corpo de
+`foo<TSóDeTeste>` que referencie um file-static de produção — não ocorre no codegen atual
+(literais são compound literals/local static), mas registrar.
+
+### 5. Alinhamento 0.4 (sobrevive à aposentadoria do C)
+
+O `.h`/`#define` é a REALIZAÇÃO C de um conceito backend-agnóstico:
+**emitir o INTERMEDIÁRIO de produção uma vez, produzir o objeto DUAS vezes parametrizado por
+cobertura (on/off), e linkar o delta como objeto separado via símbolos external únicos.**
+- C: intermediário = texto `teko.c`; toggle = `-DTEKO_COV`; dois objetos via cc; link.
+- Native (0.4): intermediário = LIR (`lower_program`); toggle = flag de cov no LIR→máquina;
+  dois `.o` (limpo p/ release, instrumentado p/ gate); `link_object` já lida com `.o` external
+  (`finish_native_object`/`link_object`, `project.tks:1204/743`). Os símbolos mangled únicos
+  (fato 1) são o que faz o link cross-objeto funcionar nos DOIS backends.
+- **Ressalva honesta:** hoje o gate SEMPRE usa o TU C (`run_native_gate`→`tk_emit_c_test`→
+  `run_cc`, `project.tks:1531/1534`), MESMO com `--backend=native`. Então para um release
+  NATIVE não há `teko.c` compartilhado entre release(.o native) e gate(.c) → o
+  compartilhamento C-#define **só beneficia o release C** (o caminho do fixpoint hoje). Em 0.4,
+  com gate também native, o conceito mapeia p/ dois `.o` native.
+
+### 6. Veredito revisado + encaixe
+
+- É uma **restruturação de CODEGEN — ONDA PRÓPRIA pós-observabilidade**, NÃO um crumb de
+  stderr. **Não bloqueia** os crumbs só-stderr (1-3) nem os de front-end (3/4b).
+- **Depende** de ter `mono(com)` E `mono(sem)` — que os crumbs 3/4b já produzem. Encaixa
+  DEPOIS deles (é dedup de codegen, ortogonal à dedup de front-end; os ganhos EMPILHAM).
+- **Payoff condicionado ao split codegen-vs-cc que o crumb 1 mede.** Dado o bloco >240s, é
+  plausível que codegen seja grande → alto valor; mas se o cc dominar, a proposta **não reduz
+  cc** (2× produção continua) e o custo estrutural (macros no emissor + re-baseline do golden
+  `gen2.c` + nó de indexação da cobertura) não compensa.
+- **Fixpoint:** o TEXTO de `teko.c` muda (marcas-macro + `#define` no topo → novo golden + bump
+  de seed — mudança ESTRUTURAL do artefato, ritual pesado); o OBJETO/binário de release fica
+  byte-idêntico (fato 2). Ritual = gate de fixpoint do CI valida o novo golden.
+- **Recomendação:** (i) landar crumb 1 e MEDIR o split; (ii) só então decidir. Se codegen
+  dominar, agendar como onda de codegen pós-observabilidade (independente do const wave), como
+  ponte natural para o modelo de dois-objetos do 0.4. Se cc dominar, DESPRIORIZAR (ganho pequeno
+  perto do custo/risco) e focar em front-end (3/4b) + observabilidade.
+
+---
+
 ## C. SEQUÊNCIA DE CRUMBS (menor risco → maior)
 
 Legenda risco: **baixo** = só stderr; **estrutural** = assinatura/CLI/codegen. Todos
@@ -608,6 +724,13 @@ já no seed: enums+`==`, structs, closures/`ProgressFn` já usados).
 - Regressão: round-trip `deserialize(serialize)==prog` (espelha `emit/tkb_test.tkt`);
   garantir que build default NÃO produz `.tkc` (fixpoint intacto).
 - Risco: baixo PORQUE não fiado no default. Independe do const wave.
+
+### Onda própria (pós-observabilidade, NÃO um crumb de stderr)
+- **C base compartilhado + delta (.h + link):** ver seção "Proposta do owner". Dedup de
+  CODEGEN (produção emitida 1×), ortogonal a 3/4b (dedup de front-end). Gated na medição do
+  split codegen-vs-cc pelo crumb 1. Custo: macros de cov no emissor + re-baseline do golden
+  `gen2.c` + nó de indexação da cobertura. Ponte para o modelo dois-objetos do 0.4. Só agendar
+  se o crumb 1 provar codegen dominante.
 
 **Pontos rituais (gate cheio deve passar):** fim do crumb 5 (fixpoint após tocar codegen),
 fim do crumb 6 (CLI + goldens de help), fim do crumb 7 (`diff_c_own`/native regressions),
