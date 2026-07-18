@@ -771,3 +771,40 @@ fim do crumb 8 (provar que default não emite `.tkc`).
   de produção no gate) esbarra no mecanismo de dep, que trata a base como pré-monomorfizada e
   não instancia genéricos com novos argumentos de tipo — exigiria cirurgia no checker, fora de
   escopo. REPORTADO.
+
+---
+
+## VALIDAÇÃO EMPÍRICA A/B (2026-07-18, container Linux, gcc, CI=1)
+
+Bancada: fonte da `main` 0.3.0.21 em duas cópias limpas (P1/P2); compilador C1 =
+main sem patch, C2 = main + crumbs 1-3, ambos buildados pelo seed 0.3.0.16.
+
+### Baseline (C1 × P1, pipeline atual): 595.3s, ~90% em silêncio
+- `monomorph ✓` @29.5s → **406.4s de silêncio** → primeiro `test … ok` (Gap 1);
+- último teste → **131.6s de silêncio** → settle `codegen 4499/4499 121.5s ✓`
+  (Gap 2 ≈ 10s de re-front-end quiet + Gap 3 = codegen sem START);
+- `emit C ✓` → 13.9s mudo → `cc ✓`.
+
+### Com crumbs 1-3 (C2 × P2): 600.6s (custo ≈ zero) — nenhum trecho anônimo
+- Toda fase anuncia no START (Plain) e assenta com tempo+✓: `emit test` 382.1s,
+  `cc test` 26.9s, release `checker 4460/4460` 6.2s (REPORTADO — antes mudo;
+  4460 vs 7484 itens do gate = o `filter_tkt` em ação), `monomorph 0/0` 2.8s,
+  `codegen` 124.3s, `cc` 12.5s.
+- **O split que faltava, medido pelas próprias fases**: `emit test` (codegen do
+  TU de teste) = 382s vs `cc test` = 27s → **codegen ≈ 93% do Gap 1** — a
+  dominância do codegen está confirmada em produção (reforça o crumb 5 e a
+  onda base+delta). O silêncio restante é INTERNO a fases anunciadas
+  (heartbeat, crumbs 4-6).
+
+### Byte-identidade (fixpoint): ✅
+`cmp P1/bin/teko.c P2/bin/teko.c` → **IDÊNTICOS (8.473.049 bytes)**; o TU de
+teste também. A prova estática da abordagem (a) confirmada empiricamente.
+
+### Escada local de seeds (bootstrap sem download)
+O seed 0.3.0.16 NÃO compila a umbrella (const em uso no fonte desde o crumb 9),
+mas a cadeia local replica o CI sem nenhum seed externo:
+`0.3.0.16 (binário) → main/0.3.0.21 (pulo direto) → 8521a1b/0.3.0.22 (bump #1,
+suporte a const, fonte ainda sem uso) → aa32910/0.3.0.23 (bump #2) → branch`.
+Cada degrau `teko build . --no-verify` (~3min); degraus preservados como
+binários (`seeds/teko-0.3.0.NN`). Procedimento canônico para agents validarem
+a umbrella localmente.
