@@ -28,34 +28,42 @@ downstream é cravado além do que AL1 provar/dimensionar.
 
 | # | Crumb | Sub-onda | Tamanho | Behavior | Ritual |
 |---|---|---|---|---|---|
-| **AL1** | Prova: instrumentação discriminante + censo (push-sites, let-mutantes, níveis) | proof | M | preserva (obs off = zero custo) | fixpoint + probe RODA em self-build, relatório máquina-legível + blast-radius medido |
-| **AL0** | **Const-ificação: build-and-return const → `const X=[...]` em rodata, ZERO construção** | MIGRAÇÃO (early, paralelo) | M (sem máquina nova) | muda C do compilador (runtime→rodata) | fixpoint por sub-lote + probe: copy-grow do site → 0 |
+| **AL1** ✅ | Prova: instrumentação + censo — **FECHADO** (`al1-proof-report.md`) | proof | M | preserva | storm de colisão CONFIRMADO (2,58M misses), copy-grow 1,14 GB distribuído |
+| **AL0** | Const-ificação build-and-return → `const X=[...]` — por HONESTIDADE/W15 (5 sites) | early-paralelo | S | muda C do compilador (runtime→rodata) | fixpoint por sub-lote |
+| **AL4a** | **Interning/memoização de nomes manglados (ACHADO NOVO)** | early-paralelo | M | preserva-tudo (string idêntica, só cacheia) | fixpoint + probe: allocs de `cg_variant_typename_str` → ~milhares |
 | **F1** | **Borrow mutável seguro `&x`** (superfície do `ref`/spine já legislados) | FUNDAÇÃO | L | preserva alvo; muda C do próprio compilador | fixpoint verde; spine `is_unique_at` autoriza |
 | **F2** | `let` imutável PROFUNDO (aperto: sem index-write/grow de `let`) | FUNDAÇÃO | S/M | preserva (só 7 index-write hoje) | fixpoint + gate rejeita `grow(&let_x)` |
 | **F3** | Array/slice Model A: `[N]T` = `{ptr,len,cap}`, sem zero-fill, growable | FUNDAÇÃO | L | preserva alvo; muda rep interno | fixpoint + probe: cap-hits, zero MISS em tamanho conhecido |
-| **AL2** | Endurecer push-cache — PALIATIVO (ponte até F1/AL3 removerem a tabela) | throughput | S/M | preserva | probe: `other-ptr` misses no buffer grande → ~0 |
-| **AL3** | **CURA: ref-push `push(&x,v)`** — fim do value-thread e da `tk_push_cache` | throughput | L | preserva alvo; muda C do compilador | fixpoint + probe: `copy_amp(emit) → ~1.0` |
-| **AL4** | Writers nativos (`EmitWriter` = `[chunk]T` em stack, sem buffer 8.5MB) | throughput | M | preserva | probe: pico RSS + tempo emit |
-| **AL5** | Region-per-phase (arena por fase; dona da região onde `[N]T` soft aloca) | throughput | M/L | preserva | probe: reclaim-ratio ↑, RSS ↓, zero regressão |
-| **AL6** | Migração de fonte por nível: `mut []T=[]`+push / `[N]T` / `[...]` / `const` | MIGRAÇÃO | M mecânico (grande) | preserva alvo; muda C do compilador | fixpoint por sub-lote via PONTE de coexistência + probe |
+| **AL3** | **CURA, o lever GLOBAL: ref-push `push(&x,v)`** — fim do value-thread e da `tk_push_cache` | throughput | L | preserva alvo; muda C do compilador | fixpoint + probe: `copy_amp(emit) → ~1.0` |
+| **AL4b** | Str-builder "stream-não-concat" (resto dos 15,5M buffers; absorve writers nativos) | throughput | M | preserva | probe: dark-matter str MB ↓, pico RSS ↓ |
+| **AL5** | Region-per-phase — **ELEVADO** (reclaim 0%, 1,7 GB root) | throughput | M/L | preserva | probe: reclaim-ratio ↑, RSS ↓, zero regressão |
+| **AL6** | Migração de fonte por nível: `[a,b,c]` / `[N]T` / ref-push (restante) | MIGRAÇÃO | M mecânico (grande) | preserva alvo; muda C do compilador | fixpoint por sub-lote via PONTE de coexistência + probe |
 
-**Ordem:** AL1 → **AL0 (const-ificação, EARLY, em PARALELO à fundação)** → [F1 → F2 → F3] →
-AL2 → AL3 → AL4 → AL5 → AL6. AL0 é o topo do espectro de migração (§8) mas roda cedo e em
-paralelo porque **não precisa de máquina nova** (literais + `const` T-B6 já no seed) e é o
-**provável maior speedup, mais barato** — a "dor real" do owner: eliminar o push que constrói
-constante em runtime. A FUNDAÇÃO é pré-requisito do ref-push; AL6 migra o resto dos ~1383
-push-sites, gradual pela ponte.
+**Ordem (REORDENADA pós-AL1):** AL1 (feito) → **[AL0 + AL4a em paralelo, cedo, sem máquina
+nova]** → [F1 → F2 → F3] → AL3 (o lever global) → AL4b → AL5 → AL6. **AL2 (endurecer
+push-cache) SAIU**: a prova mostrou que os grows >1MB já são saudáveis (a eviction
+size-aware protege o buffer grande) e o AL3 remove o cache global de vez — o paliativo não
+compra nada que a ponte de coexistência do AL3 não entregue melhor. AL0 e AL4a são
+semi-independentes do ref-push, grandes/baratos, sem máquina nova → arrancam cedo. A
+FUNDAÇÃO habilita o ref-push (AL3), o lever central (fix WHOLESALE, não pontual — o copy-grow
+está DISTRIBUÍDO por todo o checker+codegen).
 
-**A hipótese-âncora (confirmada em file:line, §2) e A CURA.** O `push` do runtime já é
-amortizado; a doença é que `[]byte`/`[]T` é um valor `{ptr,len}` **sem `cap`**, então o
-append amortizado depende de uma **tabela lateral GLOBAL** (`tk_push_cache`, 65536 buckets,
-`teko_rt.c:2091-2094`) keyed por ponteiro — finita → **colisões** → clobber do slot do
-buffer de saída → copy-grow multi-MB (o próprio código documenta "the 11.5 GB fix",
-`teko_rt.c:2155-2160`). **A CURA (owner): `push` recebe um BORROW, não um valor.**
-`teko::list::push(&x, v)` muta `x` in-place pelo borrow → acaba o value-thread
-`xs = push(xs,x)` → o `cap` vive no valor mutado in-place → **a tabela global e as cópias
-defensivas somem por construção**, não por heurística. É o núcleo do AL3, agora surfaced
-pela LINGUAGEM (borrow seguro), não por um cache de runtime.
+**A hipótese-âncora — CONFIRMADA pela prova (`al1-proof-report.md`, FECHADO 2026-07-19).** O
+`push` do runtime já é amortizado; a doença é que `[]byte`/`[]T` é um valor `{ptr,len}` **sem
+`cap`**, então o append amortizado depende de uma **tabela lateral GLOBAL** (`tk_push_cache`,
+65536 buckets, `teko_rt.c:2091-2094`) keyed por ponteiro — finita → **colisões**. A prova
+mediu **2.579.369 misses `other-ptr`** (colisão de slot) e **1,14 GB de copy-grow**,
+DISTRIBUÍDO por todo o checker+codegen (inline_rw_block 117MB, type_param_table 108MB,
+resolve_type 71MB, cg_lift_block 59MB, mono_block, type_block, cb_byte, cg_name_reaches_
+byvalue). **Sem vilão único → a CURA é GLOBAL, não pontual: `push` recebe um BORROW, não um
+valor.** `teko::list::push(&x, v)` muta `x` in-place → acaba o value-thread `xs=push(xs,x)` →
+o `cap` vive no objeto mutado in-place → **a tabela global e as cópias defensivas somem por
+construção**. É o AL3, surfaced pela LINGUAGEM (borrow seguro), migrado WHOLESALE via ponte.
+A prova também achou (a) **AL4a**: `cg_variant_typename_str` reconstrói a MESMA string
+determinística **6,65M de vezes** — pede interning, não só str-builder (crumb novo, cedo);
+(b) **AL5 elevado**: reclaim 0%, 1,7 GB de root nunca liberado; (c) **AL0 rebaixado**: só 5
+sites const-ificáveis — mantido por HONESTIDADE/W15 ("código não mente sobre o que é"), não
+perf. **AL2 (endurecer cache) descartado**: grows >1MB já saudáveis, AL3 remove o cache.
 
 ---
 
@@ -96,15 +104,21 @@ forma de dar ao `push` acesso ao objeto-com-`cap` sem copiá-lo.
 
 ---
 
-## 3. AL1 — a PROVA (medição). Roda ANTES de tudo. Agora também mede o BLAST RADIUS.
+## 3. AL1 — a PROVA (medição). **FECHADA** — ver `al1-proof-report.md`.
+
+**Veredito (2026-07-19): storm CONFIRMADO.** 2.579.369 misses `other-ptr` (colisão de slot),
+copy-grow total 1,14 GB, 310 MB / 15,5M buffers de str dark-matter, root reclaim 0,0% / 1,7
+GB. Detalhe/atribuição por função e a reordenação de crumbs que a prova forçou: ver o
+relatório. O que segue (§3.1–3.4) é a metodologia com que a prova foi levantada, retida para
+reprodutibilidade.
 
 ### 3.1 Metodologia e veredito
 
-Self-build com `TEKO_ARENA_OBS` ligado. **Veredito**: hipótese de colisão/cópia PROVADA
-sse `copy_amp(emit) > 4×log2(output_bytes)` E a coluna ">1MB" do histograma de miss-reason
-é dominada por `other-ptr` (colisão) ou `len` (aliasing); REFUTADA se dominada por
-`cap-full` (doublings sãos → villain é dark-matter/str-concat, §3.2). `copy_amp` = bytes
-copiados em copy-grows / bytes do output final; sadio ≈ `log2(n)`.
+Self-build com `TEKO_ARENA_OBS` ligado, binário simbolizado (`cc -g -rdynamic`, sem strip).
+**Veredito** (aplicado): hipótese de colisão/cópia PROVADA sse `copy_amp(emit) >
+4×log2(output_bytes)` E a coluna ">1MB" do histograma de miss-reason é dominada por
+`other-ptr` (colisão) ou `len` (aliasing); REFUTADA se dominada por `cap-full`. **Resultado:
+`other-ptr` domina (2,58M) → PROVADO.**
 
 ### 3.2 Causas alternativas que AL1 DISTINGUE (testar, não presumir)
 
@@ -245,30 +259,66 @@ sites a `mut` primeiro (behavior-preserving).
 Ritual: fixpoint (rep interno muda, C do alvo preservado) + probe: zero MISS em site de
 tamanho conhecido; peak-RSS de stack-alloc.
 
+### 4.4 AL4a — interning/memoização de nomes manglados (ACHADO NOVO da prova) — EARLY, PARALELO
+
+**Não existia no design original — a prova o revelou.** Alvo nomeado, RA-medido: o codegen
+reconstrói a MESMA string manglada, determinística, milhões de vezes:
+`cg_variant_typename_str` **6,65M allocs / 99 MB**, `cg_opt_key` 2,85M / 20 MB,
+`cg_variant_key` 1,03M / 22 MB, `checker::qualify` 1,1M / 17 MB. Como o nome manglado de um
+tipo é DETERMINÍSTICO, computa-se **1× por tipo distinto e cacheia** (memo table type→str):
+6,65M+2,85M+1,03M allocs → ~milhares. **Memoização/interning, não só str-builder.**
+Semi-independente do ref-push, GRANDE e BARATO, sem máquina nova → **arranca CEDO, em paralelo
+à FUNDAÇÃO e ao AL0**. Behavior: **preserva-tudo** (a string entregue é byte-idêntica; só some
+a recomputação). Ritual: fixpoint + probe: allocs de `cg_variant_typename_str` no dark-matter
+→ ~milhares.
+
+```teko
+/**
+ * Cache de memoização type→nome-manglado. O nome manglado de um tipo é DETERMINÍSTICO, então
+ * `cg_variant_typename_str` (medido: 6,65M chamadas reconstruindo a MESMA string) computa uma
+ * vez por tipo distinto e serve o intern nas demais. Chave = a identidade estrutural do tipo;
+ * valor = a string manglada (arena-owned, vive a fase de codegen). Preserva-tudo: a string
+ * servida é byte-idêntica à recomputada.
+ *
+ * @param cache o intern de nomes manglados (mutado por & — F1; ou map threaded pré-F1)
+ * @param t     o tipo cujo nome manglado se quer
+ * @return      o nome manglado interned (computado 1×, servido N×)
+ * @since 0.x (#AL4a)
+ */
+pub fn variant_typename_interned(cache: &ManglingIntern, t: Type) -> str
+```
+
 ---
 
 ## 5. Sub-onda THROUGHPUT — consome a fundação
 
-### 5.1 AL2 — endurecer a push-cache (PALIATIVO, S/M)
+> **AL2 (endurecer push-cache) DESCARTADO pós-prova.** A prova mostrou grows >1MB saudáveis
+> (58 cap-full — a eviction size-aware já protege o buffer grande); o storm são milhões de
+> buffers PEQUENOS, e AL3 remove o cache global de vez. Um paliativo de cache não compra nada
+> que a ponte de coexistência do AL3 não entregue melhor. Não há AL2.
 
-Só se AL1 mostrar colisão viva porém limitada. Tabela maior / N-way / per-região.
-**Explicitamente ponte** — F1/AL3 removem a tabela para o caminho de builder. Ritual: probe
-`other-ptr` misses no buffer grande → ~0.
+### 5.1 AL3 — a CURA, o lever GLOBAL: ref-push `push(&x, v)` (L)
 
-### 5.2 AL3 — a CURA: ref-push `push(&x, v)` (L)
+O núcleo, surfaced por F1. **A prova provou que é WHOLESALE**: o copy-grow (1,14 GB) está
+DISTRIBUÍDO por todo o checker+codegen (inline_rw_block 117MB, type_param_table 108MB,
+resolve_type 71MB, cg_lift_block 59MB, mono_block 58MB, type_block 56MB, cb_byte 43MB,
+cg_name_reaches_byvalue 41MB) — sem vilão único, logo migra TODO push-site, não um hotspot.
+O value-thread `x = push(x,v)` vira `push(&x, v)`; o `cap` vive no objeto mutado in-place; **a
+tk_push_cache e a cópia defensiva somem por construção**. Emit: `cb`/`append_fo`
+(`codegen.tks:141-160`) muta o buffer por `&`. Consome F3 (`{ptr,len,cap}`) e F1 (o borrow).
+Behavior-preserving no alvo; muda o C do compilador. Ritual: fixpoint + probe
+`copy_amp(emit) → ~1.0`; emit KB/s cumpre a barra (§9). Blast (~1383 sites) pela PONTE (§6).
 
-O núcleo, surfaced por F1. O value-thread `x = push(x,v)` vira `push(&x, v)`; o `cap` vive no
-objeto mutado in-place; **a tk_push_cache e a cópia defensiva somem por construção**. Emit:
-`cb`/`append_fo` (`codegen.tks:141-160`) passa a mutar o buffer por `&` em vez de threaded
-value — o codegen não muda de FONTE além do `&`, e para de copiar. Consome F3
-(`{ptr,len,cap}`) e F1 (o borrow). Behavior-preserving no alvo; muda o C do compilador.
-Ritual: fixpoint + probe `copy_amp(emit) → ~1.0`; emit KB/s cumpre a barra (§9). Blast pela
-PONTE (§6).
+### 5.2 AL4b — str-builder "stream-não-concat" (M)
 
-### 5.3 AL4 — writers nativos (M)
-
-`EmitWriter` = um `[chunk]T` frame-local em **stack** (F3), fixo e pequeno, flushed ao fd — em
-vez de 8.5MB em memória. Remove o maior alvo de colisão. Ritual: probe pico RSS + tempo emit.
+A prova achou **310 MB em 15,5M buffers** de str/format malloc'd (dark-matter). Depois que
+AL4a (§4.4) tira os nomes manglados recomputados, o RESTO (`cg_format_c` 1,6M, `member_key`)
+segue a regra owner **"stream, não concat"**: escrever fragmentos num writer/stream e
+materializar UMA vez, do tamanho final conhecido (alloc única) — NÃO concatenar em memória
+(concat realoca como push). Absorve os "writers nativos": `EmitWriter` = um `[chunk]byte`
+frame-local em **stack** (F3), fixo e pequeno, flushed ao fd — nunca um valor multi-MB para
+colidir. As entradas "2 allocs" grandes (`tk_emit_c_mode`, `run_native_gate`) JÁ são o padrão
+bom — **não mexer**. Ritual: probe dark-matter str MB ↓ + pico RSS ↓.
 
 ```teko
 /**
@@ -279,17 +329,18 @@ vez de 8.5MB em memória. Remove o maior alvo de colisão. Ritual: probe pico RS
  * @param w o writer (mutado in-place por &)
  * @param s os bytes a emitir
  * @return  void, ou error num write curto/falho (M.1)
- * @since 0.x (#AL4)
+ * @since 0.x (#AL4b)
  */
 pub fn ew_write(w: &EmitWriter, s: str) -> void | error
 ```
 
-### 5.4 AL5 — region-per-phase (M/L)
+### 5.3 AL5 — region-per-phase (M/L) — ELEVADO pela prova
 
-Cada fase recebe uma `tk_region` própria, dropada em um passo no fim — remove a acumulação
-root process-lifetime. Primitivas existem (`teko_rt.h:148-152`; reclaim observável
+**A prova elevou AL5**: reclaim ratio **0,0%** — **1.698 MB de root nunca liberado**. Cada
+fase recebe uma `tk_region` própria, dropada em um passo no fim — remove a acumulação root
+process-lifetime. Primitivas já existem (`teko_rt.h:148-152`; reclaim observável
 `teko_rt.c:1078-1086`). Dona da região onde `[N]T` soft aloca (F3). Ritual: probe
-reclaim-ratio ↑, RSS ↓, zero regressão (diff VM==native + fixpoint).
+reclaim-ratio ↑ (de 0%), RSS ↓, zero regressão (diff VM==native + fixpoint).
 
 ---
 
@@ -314,9 +365,9 @@ teste identicamente antes e depois). Marcação por crumb:
 - **Preserva-alvo, muda-C-do-compilador** (gen2==gen3 entre si; C emitido para o corpus-alvo
   byte-idêntico): F1, F3, AL3, AL6 (níveis push/`[N]T`). Prova: golden do corpus-alvo + diff
   VM==native + fixpoint.
-- **Preserva tudo**: AL1, AL2, F2 (≤7 sites), AL4, AL5.
-- **Muda-bytes-com-justificativa-medida**: **AL0** const-ificação (runtime→rodata) — probe: o
-  copy-grow daquele site → 0 no dump RA1.
+- **Preserva tudo**: AL1, AL4a (string idêntica, só cacheia), F2 (≤7 sites), AL4b, AL5.
+- **Muda-bytes-com-justificativa**: **AL0** const-ificação (runtime→rodata, 5 sites — por
+  honestidade/W15, não perf).
 
 ---
 
@@ -338,21 +389,24 @@ o peso de custo por site.
 
 ---
 
-## 8. Migração de fonte por nível de conhecimento — AL0 (const, o topo) + AL6 (resto)
+## 8. Migração de fonte por nível de conhecimento — AL0 (const) + AL6 (resto)
 
-O owner: **o maior ganho NÃO é otimizar push — é ELIMINAR o push que constrói uma constante
-em runtime.** Por isso a const-ificação (AL0) é crumb de PRIMEIRA CLASSE e EARLY, não o rabo
-do AL6. Espectro de 4 níveis, do topo (mais ganho, mais barato) pra baixo:
+Espectro de 4 níveis. **A prova recalibrou a expectativa**: a const-ificação (AL0) NÃO é a
+dor de perf (só 5 sites, ~1,4 KB rodata) — ~92% dos push-sites são genuinamente dinâmicos, o
+que confirma o AL3 (ref-push) como o lever. AL0 fica por **HONESTIDADE/W15**, não perf.
 
 | Nível | Conhecimento | Crumb | Sintaxe | O que morre |
 |---|---|---|---|---|
-| **const** | build-and-return const (nullary/args const, sem arg de runtime) | **AL0** | `const X = [...]` | **TUDO — rodata, construída ZERO vezes** (T-B6, já no seed) |
+| **const** | build-and-return const (nullary/args const, sem arg de runtime) | **AL0** | `const X = [...]` | rodata, construída ZERO vezes (T-B6) — **5 sites, honestidade** |
 | itens | valores fixos, não-const | AL6 | `[t1, t2, t3]` | a construção (um malloc dimensionado, `codegen.tks:2865-2887`) |
 | tamanho | sei o tamanho, não os itens | AL6 | `mut [N]T = []` + índice/push | os copy-grows (cap=N semeado, zero MISS) |
-| dinâmico | nada (loop runtime, tamanho desconhecido) | AL6 | `mut []T = []` + `push(&x, v)` | a CÓPIA (ref-push, cap no objeto) |
+| dinâmico | nada (loop runtime, tamanho desconhecido) | AL6 | `mut []T = []` + `push(&x, v)` | a CÓPIA (ref-push, cap no objeto) — **~92% dos sites** |
 
-### 8.1 AL0 — const-ificação (a dor real do owner). PRIMEIRA CLASSE, EARLY, PARALELO.
+### 8.1 AL0 — const-ificação: por HONESTIDADE/W15 (5 sites), não perf. EARLY, PARALELO.
 
+**Princípio owner "código não mente sobre o que é":** um produtor determinístico de dado fixo
+É `const`, não função — obrigatório por honestidade, independente do ganho. A prova mediu só
+**5 sites** const-ificáveis (não a dor de perf que se supunha), mas mantém-se pela lei.
 **Padrão-alvo:** uma função que só CONSTRÓI-E-RETORNA um array fixo — nullary, ou com args
 const, resultado compile-time-constante, **sem depender de nenhum arg de runtime** — vira
 `const X = [...]` em rodata, **construída ZERO vezes** no processo. É o padrão das tabelas de
