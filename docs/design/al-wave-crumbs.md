@@ -146,9 +146,161 @@ Ritual: fixpoint + probe: allocs de `cg_variant_typename_str` no dark-matter →
 ## FUNDAÇÃO (pré-requisito do ref-push) — a rascunhar
 
 - **F1** — borrow mutável seguro `&x` (grafia A: dessugar pra `Reference` existente,
-  spine `is_unique_at` autoriza) · L · preserva-alvo/muda-C-do-compilador
+  spine `is_unique_at` autoriza) · L · preserva-alvo/muda-C-do-compilador — **CRUMBS ABAIXO**
 - **F2** — `let` imutável profundo (auto-enforçado; ~7 sites, baixo risco) · S/M · preserva
 - **F3** — array Model A `[N]T` `{ptr,len,cap}` sem zero-fill · L · preserva-alvo/muda-rep
+
+### F1 — sequência de crumbs (design PRONTO, 2026-07-19; owner-ruled, não reabrir)
+
+**Estado atual (file:line — a máquina JÁ existe, `&x` só a torna explícita na superfície):**
+- `Reference = struct { inner: Type }`, never-null R2, C rep `<T> *` — `src/checker/type.tks:90`
+  (nota `:82-88`). Superfície = `Ref<T>` (um `NamedType` segmento "Ref").
+- **Auto-ref JÁ acontece HOJE, só que IMPLÍCITO em posição de argumento** — `src/checker/
+  typer.tks:1170-1191`: param `Reference` + arg `mut` lvalue (`TVar`) do tipo apontado ⇒
+  `auto_reffed=true`, mantém `a.type=T`, rejeita binding imutável (`:1181`). Codegen emite o `&`
+  em `src/codegen/codegen.tks:2518-2525`; `Reference` lowera pra `<T> *` (`codegen.tks:1000-1001`,
+  `:1314`). **F1 = expor esse auto-ref como o operador `&x`, sem sintaxe de tomada de ref hoje.**
+- Parser: NÃO há prefixo `&`/`*` hoje — `&` (Amp) é SÓ binário bitwise no nível multiplicativo
+  (`src/parser/optokens.tks:25`, `parse_multiplicative` `src/parser/parse_expr.tks:511`); o unário é
+  só `- ~ !` (`optokens.tks:9-13`). Um `&` em posição de PREFIXO é inambíguo (binário só ocorre
+  após operando esquerdo). `*`/deref NÃO muda em F1 (prospecção, §12 do doc-mãe).
+- Spine (#331): queries PURAS já existem — `is_unique_at(s, binding) -> bool`
+  (`src/checker/spine.tks:1484`), `ref_target_outlives(s, borrow, referent) -> bool` (`:1438`),
+  `BorrowedFrom = BfNone|BfParam|BfLocal|BfTop` (`:146`). A relaxação **L2a** (`bf := BfLocal` no
+  ÚNICO sítio sintático de borrow de um ref-bind local) está descrita `:21-23,:139-143,:1268,:1352`
+  — é EXATAMENTE a máquina do `mut y = &x`. F1 é o CONSUMO (PR-2/PR-3), não a query.
+- Escape-gate: `type_contains_ref` (`src/checker/type.tks:163-177`) proíbe `Reference` em toda
+  posição que NÃO seja param escalar bare — é o que hoje bloqueia o sink `mut y = &x`. F1.3 relaxa
+  UM caso (ref-bind local mutação-through-ref), spine-autorizado.
+- **Lei: SEM tensão.** `TEKO_LEGISLATION.md` (nota pointer-family) já legisla "The SAFE, region-
+  checked, never-null, Teko-internal reference is `ref` (evolution S3) — orthogonal to the unsafe
+  foreign `ptr`". `&x` é a superfície do `ref` SEGURO (checado pelo spine), não um sigil unsafe
+  novo. `*`/deref fica unsafe (não tocado). **Nenhuma nota de lei nova, nenhum HALT.**
+
+**Behavior:** TODOS os crumbs são ADITIVOS — nada no corpus USA `&x` ainda ⇒ o C emitido pro
+alvo é byte-idêntico e o fixpoint gen2==gen3 vale INALTERADO. O C do PRÓPRIO compilador só ganha
+código morto (caminhos novos não exercitados pelo self-build) até AL3/AL6 migrarem sites.
+
+| # | Crumb | Tam | Ritual |
+|---|---|---|---|
+| **F1.1** | Parser: prefixo `&x` como expr de borrow → AST | S | build verde + parser_test.tkt |
+| **F1.2** | Checker: tipar `&x` → `Reference<T>` (mut/shared inferido); rejeitar `&(let)` mutável | M | checker_test.tkt + fixpoint |
+| **F1.3** | Spine: autorizar borrow exclusivo (`is_unique_at`) + lifetime (`ref_target_outlives`); L2a `bf:=BfLocal`; relaxar escape-gate p/ o sink `mut y=&x` | M | spine_test.tkt + fixpoint verde |
+| **F1.4** | Codegen: lower `Borrow` → address-of `&` | S | codegen_test.tkt + diff VM==native |
+| **F1.5** | Ponte: `teko::list::grow(&x, v)` (coexistência, sem migrar sites) | S | list_test.tkt + fixpoint |
+| **F1.6** | Fixtures de regressão + fixpoint verde (prova de aditividade) | S | **RITUAL: fixpoint gen2==gen3 INALTERADO** |
+
+**F1.1 — Parser.** Append um membro NOVO ao fim de `ExprKind` (append = tags estáveis, TKB
+byte-layout preservado; "código não mente" — um nó honesto, não `Unary{op=Amp}` sobrecarregado):
+
+```teko
+/**
+ * A borrow expression `&x` — take a SAFE, exclusive-temporary, lifetime-bounded reference to the
+ * mutable lvalue `x` (grafia A: desugars to the existing `Reference`; NOT a raw pointer, NOT
+ * `unsafe`). The mutability (exclusive-mut vs shared) is INFERRED by the checker from `x`'s binding
+ * and the target parameter — there is no `&mut`. Only the leading-`&` prefix position produces this
+ * node; a binary `a & b` (bitwise-and, multiplicative level) is unchanged.
+ *
+ * @field operand  the borrowed lvalue (a `Var`/`FieldAccess`/`Index` path; checked to be an lvalue)
+ * @since 0.x (#AL/F1)
+ */
+Borrow: struct { operand: Expr }
+```
+
+Em `parse_unary` (`src/parser/parse_expr.tks:472`), ANTES do `is_unary`: se `tokens[pos].kind ==
+lexer::TokenKind::Amp`, consumir e produzir `Expr { kind = Borrow { operand = <parse_unary(pos+1)> } }`.
+Precedência = unário (right-assoc, acima de `to`), igual `- ~ !`. `is_unary`/`is_multiplicative`
+INALTERADOS (o binário `&` continua no nível multiplicativo; o prefixo é resolvido antes de descer).
+
+**F1.2 — Checker.** No typer de expressão, um braço `Borrow as b =>`: resolver `b.operand` como
+lvalue, achar o binding (reusar `lookup_binding`, `typer.tks:1179`), extrair `T`, produzir
+`TExpr { type = Reference { inner = T } }`. **Inferência mut/shared** (sem `&mut`): reusar VERBATIM
+a lógica de `typer.tks:1181` — `let`/binding imutável ⇒ borrow SHARED (permitido só em posição de
+param shared; `&(let)` numa posição mutável ⇒ ERRO "cannot take a mutable reference to immutable
+`x` — declare it `mut`"); `mut` binding + posição de param mutável ⇒ borrow MUT. O `&x` em posição
+de ARGUMENTO é o caso behavior-preserving (é o auto-ref implícito de hoje, agora explícito) — faça
+ESTE primeiro. O sink local `mut y = &x` fica gated por F1.3.
+
+```teko
+/**
+ * Type a borrow expression `&x` (F1.2). Resolves the operand to an lvalue, reads its binding, and
+ * yields a `Reference{inner=T}`. Mutability is INFERRED, not spelled: an immutable (`let`/non-`mut`)
+ * target in a mutable position is rejected here; a `mut` target yields the exclusive-mut borrow the
+ * spine (F1.3) then authorizes. Reuses the existing auto-ref mutability check (typer.tks:1181).
+ *
+ * @param b     the `Borrow` AST node (`&operand`)
+ * @param env   the binding environment (for the operand's mutability + type)
+ * @param mut_pos  true iff the borrow sits in a mutable-borrow position (param wants `Ref<T>` mut)
+ * @return      the typed borrow (`Reference{inner=T}`), or a type error (immutable target, non-lvalue)
+ * @throws      error when the operand is not a `mut` lvalue in a mutable position, or not an lvalue
+ * @since 0.x (#AL/F1.2)
+ */
+fn type_borrow_expr(b: parser::Borrow, env: Env, mut_pos: bool) -> TExpr | error
+```
+
+**F1.3 — Spine.** No sítio de borrow (o nó `Borrow` OU o ref-bind local `mut y = &x`), CONSUMIR as
+queries que já existem: para um borrow MUT, exigir `is_unique_at(spine, cell_of(spine, x))` (senão
+ERRO exclusivo-XOR-shared: "cannot borrow `x` mutably — it is already aliased here"); exigir
+`ref_target_outlives(spine, borrow_cell, referent_cell)` (lifetime-bound). Estender o `bf_transfer`
+(`spine.tks:1268,1352,1384`) pra semear `bf(y) := BfLocal(name_of(x))` no sítio sintático do `&x`
+(a relaxação L2a já legislada). Relaxar `type_contains_ref`/o escape-gate (`type.tks:169`) pra
+ADMITIR um `Reference` num ref-bind LOCAL quando o spine prova outlives+unique — o fix do
+sink-to-value. **Prova de não-quebra (§4.1 doc-mãe):** os casos que hoje dependem da cópia são
+LEITURAS (valor copiado por design); a preservação de alias só afeta o caminho mut-exclusivo, que
+HOJE nem existe como borrow (mutação é sempre value-thread `x=push(x)`) ⇒ nenhum caso existente
+depende da cópia num borrow mutável.
+
+**F1.4 — Codegen.** Braço `Borrow as b =>` em `emit_expr_ctx`: emitir `&` + `emit_expr(b.operand)`
+— idêntico ao `&` já emitido no auto-ref (`codegen.tks:2524`). O ref-bind local `mut y = &x` lowera
+`y` como `<T> *` (o `Reference` já lowera assim, `codegen.tks:1000,1314`) inicializado com `&x`; um
+uso `y.value`/write-through já lowera via o caminho RefDeref existente (`codegen.tks:2584,5832`).
+Zero rep novo.
+
+**F1.5 — Ponte de coexistência** (só ENTREGA a capacidade; AL3 muta in-place, F3 dá o `cap`). Nome
+NOVO (`grow`), NÃO overload de `push` — evita ambiguidade de resolução e mantém `push` value-form
+byte-idêntico (§6 recomenda nome novo). Corpo honesto que COMPILA HOJE, write-through preservando
+semântica de valor (o `cap`-no-objeto vem em F3/AL3; aqui a ponte só troca a assinatura):
+
+```teko
+/**
+ * Grow `x` by appending `v`, mutating `x` IN-PLACE through the exclusive mutable borrow `&x` (F1
+ * bridge). This is the coexistence signature for the ref-push migration (AL3): it lives ALONGSIDE
+ * the untouched value-thread `push(xs, v) -> []T` so no unmigrated site changes. F1's body writes
+ * through the reference (`x.value = push(x.value, v)`) — behavior-identical to the value form; the
+ * cap-in-object win that removes the global tk_push_cache lands with F3+AL3, not here. Migration is
+ * gradual, fixpoint-green per sub-lote (§6); a final rename to `push` is optional once all sites move.
+ *
+ * @param x  the target slice, borrowed mutably and exclusively (`&x`) — spine `is_unique_at` proven
+ * @param v  the element to append
+ * @return   void — the mutation is the effect; nothing to re-assign (kills the `x = push(x)` thread)
+ * @throws   panic if cap overflows u64 (M.1 fail-loud) — reached only once F3's cap-doubling lands
+ * @since 0.x (#AL/F1.5 bridge; in-place cap = AL3)
+ */
+pub fn grow[T](x: &[]T, v: T) -> void
+```
+
+**F1.6 — Fixtures + ritual.** `.tkt` colocados (o padrão do repo: `src/<mod>/<mod>_test.tkt`, testes
+Teko com assert), MAIS 1–2 programas end-to-end rodados VM e native pra paridade de exit code:
+
+| Fixture | Onde | Entrada | Esperado (VM==native) |
+|---|---|---|---|
+| borrow-parse | `src/parser/parser_test.tkt` | `&x` prefixo → `Borrow{Var}`; `a & b` → `Binary` | AST correta; exit 0 |
+| borrow-mut-ok | `src/checker/checker_test.tkt` | `mut x=…; grow(&x, v)` | tipa `Reference`; exit 0 |
+| borrow-let-reject | `src/checker/checker_test.tkt` | `let x=…; grow(&x, v)` | erro "immutable"; exit ≠0 (gate rejeita) |
+| borrow-alias-reject | `src/checker/spine_test.tkt` | dois borrows mut vivos de `x` | `is_unique_at`=false → erro exclusivo-XOR |
+| borrow-outlives | `src/checker/spine_test.tkt` | `mut y=&x` sink local | `ref_target_outlives`=true; escape-gate admite |
+| borrow-codegen | `src/codegen/codegen_test.tkt` | `grow(&x, v)` | emite `&x`; `<T> *`; diff VM==native byte-idêntico |
+| e2e-noop | programa end-to-end | corpus que NÃO usa `&x` | **fixpoint gen2==gen3 INALTERADO** |
+
+**RITUAL de F1 (o que prova aditividade):** (1) fixpoint gen2==gen3 verde e INALTERADO — nada no
+corpus usa `&x`, então o C emitido pro alvo é byte-idêntico; (2) golden do corpus-alvo + diff
+VM==native; (3) suites `_test.tkt` novas verdes. NÃO deve haver mudança em bytes emitidos pro alvo
+(F1 é aditivo); qualquer diff no golden do alvo é REGRESSÃO, não esperado.
+
+**Risco/tensão:** nenhuma tensão de lei (carve-out `ref` já legislado; `*` não tocado). Risco único
+= o escape-gate relaxado (F1.3) admitir um `Reference` que dangla — MITIGADO por gate: o sink local
+só passa quando `ref_target_outlives` E `is_unique_at` provam; a máquina de prova já existe (#331).
+`&x` em posição de argumento (F1.2) é estritamente o auto-ref de hoje tornado explícito ⇒ risco ~0.
 
 ## THROUGHPUT (consome a fundação) — a rascunhar
 
