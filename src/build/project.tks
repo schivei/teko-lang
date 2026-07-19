@@ -253,13 +253,40 @@ fn checker_tick_fn(phase: Phase, last: Ref<u64>, total_cell: Ref<u64>) -> checke
 }
 
 /**
- * Run the checker + monomorphization phases over `selected` (with `dep_prog`'s
- * signatures pre-seeded), reporting BOTH as their own timed `teko build`
- * observability phases: `checker` ticks a live "N/M items" counter as
+ * module_const_count — the number of module-level `checker::TConstDecl` items on a typed
+ * program's item surface: the upfront total the `consteval` phase renders, since
+ * `inline_consts` visits exactly the module consts and the count is known before the
+ * pass runs (post-inline the scalar consts are dropped from the surface, so it must be
+ * taken BEFORE).
+ *
+ * @param prog  the typed program about to be const-inlined
+ * @return      the module-level const count
+ */
+fn module_const_count(prog: checker::TProgram) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TConstDecl => { n++ }
+            _ => { }
+        }
+        i++
+    }
+    n
+}
+
+/**
+ * Run the checker, monomorphization, and const-inlining phases over `selected` (with
+ * `dep_prog`'s signatures pre-seeded), reporting ALL THREE as their own timed
+ * `teko build` observability phases: `checker` ticks a live "N/M items" counter as
  * `type_program_with_deps_pre_mono` types each top-level item; `monomorph` settles
  * once with the resulting instance count (its fixpoint queue has no cheap upfront
  * total, so it renders as a count-up rather than a running "N/M" — see
- * `count_only_text`). Extracted from `frontend_body` to keep that function flat.
+ * `count_only_text`); `consteval` settles with the module-const count
+ * (`module_const_count`), so an `inline_consts` failure (e.g. a const reference
+ * cycle) reports under its OWN label instead of re-ending the already-settled
+ * `monomorph` phase. Extracted from `frontend_body` to keep that function flat.
  *
  * @param selected  the OS-pruned, un-typed merged program
  * @param dep_prog  the already-typed dependency program (empty when depless)
@@ -292,10 +319,16 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
     }
     let instances = if checked.items.len > pre.prog.items.len { checked.items.len - pre.prog.items.len } else { 0 }
     phase_end_ok(mono_phase, count_unit_text(instances, instances, "instances"))
+
+    let consts_total = module_const_count(checked)
+    let consteval_phase = phase_begin("consteval", count_unit_text(0, consts_total, "consts"), mode)
     match checker::inline_consts(checked) {
-        checker::TProgram as inlined => inlined
+        checker::TProgram as inlined => {
+            phase_end_ok(consteval_phase, count_unit_text(consts_total, consts_total, "consts"))
+            inlined
+        }
         error as e => {
-            phase_end_fail(mono_phase, count_only_text(0, "instances"), e.message)
+            phase_end_fail(consteval_phase, count_unit_text(0, consts_total, "consts"), e.message)
             return e
         }
     }
