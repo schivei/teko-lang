@@ -5066,3 +5066,27 @@ fn mem_free_accepts_region_handle() {
         error => teko::assert::is_true(false)
     }
 }
+
+/** borrow_of_mut_var_types_to_reference — `&x` types to `Reference { inner = <operand type> }`
+    when `x` is a `mut` local (AL wave F1.2). */
+#test
+fn borrow_of_mut_var_types_to_reference() {
+    let env = define(empty_env(), "x", u32t(), true)
+    let b = parser::Borrow { operand = e_var("x") }
+    let te = match type_expr(ek(b), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.type {
+        Reference as r => teko::assert::is_true(prim_is(r.inner, PrimKind::U32))
+        _ => teko::assert::is_true(false)
+    }
+    match te.kind { TBorrow as tb => teko::assert::is_true(prim_is(tb.operand.type, PrimKind::U32)); _ => teko::assert::is_true(false) }
+}
+
+/** borrow_of_immutable_var_is_error — `&x` over an IMMUTABLE binding is rejected: a reference
+    would have no way to mutate its pointee (AL wave F1.2; F2's `&(let)` rejection is enforced
+    right here, at the borrow site). */
+#test
+fn borrow_of_immutable_var_is_error() {
+    let env = define(empty_env(), "x", u32t(), false)
+    let b = parser::Borrow { operand = e_var("x") }
+    match type_expr(ek(b), env, empty_table()) { TExpr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+}

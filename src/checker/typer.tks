@@ -2525,20 +2525,32 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env) -> TExpr | e
 }
 
 /**
- * type_borrow_expr — type the prefix `&x` safe-borrow expression (AL wave F1). STUB (F1.1):
- * the `Borrow` node is parsed and threaded through the front-end, but real typing to
- * `Reference<T>` (mutability inferred from the operand binding + the consuming position, and
- * the `&(let)`-in-mutable-position rejection that auto-enforces F2) lands in F1.2. Until then
- * a `&x` in source is a located error — but the corpus uses none, so this never fires and the
- * front-end stays byte-identical (additive).
+ * type_borrow_expr — type the prefix `&x` safe-borrow expression (AL wave F1.2). The operand must
+ * be an LVALUE (currently: a bare variable — field/index lvalues are deferred to a later crumb) AND
+ * a `mut` binding: taking a reference to an immutable local would give the reference no way to
+ * mutate anything, and `&(let)` in a mutable-consuming position must be rejected (F2) — both are
+ * enforced HERE, at the borrow site, the same rule the auto-ref path (`f.params[i] as Reference`
+ * above) already applies to an implicit `ref<T>` argument. The resolved type is `Reference { inner =
+ * operand.type }`.
  *
  * @param b      the parsed borrow node
  * @param env    the type environment
  * @param table  the type table
- * @return       the typed borrow (F1.2), or the not-yet-supported error (F1.1)
+ * @return       the typed borrow, or an error naming the non-mutable/non-lvalue operand
+ * @throws       when the operand fails to type, is not a bare `TVar`, or names a non-`mut` binding
  */
 fn type_borrow_expr(b: parser::Borrow, env: Env, table: TypeTable) -> TExpr | error {
-    error { message = "`&x` safe borrow is parsed but not yet type-checked (AL wave F1.2)" }
+    let to = match type_expr(b.operand, env, table) { TExpr as x => x; error as e => return e }
+    match to.kind {
+        TVar as v => match lookup_binding(env, v.name) {
+            ValBinding as vb => {
+                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a borrow needs a mutable target)" } }
+                TExpr { kind = TBorrow { operand = to }; type = Reference { inner = to.type }; line = 0; col = 0 }
+            }
+            error as e => e
+        }
+        _ => error { message = "only a mutable variable can be borrowed with `&` (an lvalue) — got a non-lvalue expression" }
+    }
 }
 
 // (C1-POS) inner dispatch — the raw match over the untyped Expr's `kind`. The public type_expr
