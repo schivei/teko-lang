@@ -1187,28 +1187,69 @@ fn cg_member_key_str(m: checker::Type) -> str | error {
     if cg_is_c_keyword(k) { teko::str::concat(k, "_") } else { k }
 }
 
-// cg_member_key — append a resolved member's key to a buffer. (C: `cg_member_key`.)
-fn cg_member_key(buf: []byte, m: checker::Type) -> []byte | error {
-    cb(buf, match cg_member_key_str(m) { str as s => s; error as e => return e })
+/**
+ * Report whether a resolved variant member's mangled KEY collides with a C keyword — the
+ * allocation-free predicate that drives the trailing-`_` escape in the buffer-emitting
+ * `cg_member_key`. Only a bare leaf key can be a keyword: a composite member (`Optional`,
+ * `Slice`) always carries an `opt_`/`slice_` prefix, so it never collides; a `Prim` yields a
+ * keyword only for `Bool` (`bool`), a `Char` yields `char`, and a `Named` is tested against its
+ * last path segment. Mirrors `cg_is_c_keyword(cg_member_key_str(m))` byte-for-byte without
+ * building the key string.
+ *
+ * @param m  the resolved member type whose emitted key is examined
+ * @return   true when the key equals a C keyword and thus needs a trailing `_`
+ */
+fn cg_member_key_is_c_keyword(m: checker::Type) -> bool {
+    match m {
+        checker::Prim as p => match p.kind {
+            checker::PrimKind::Bool => true
+            _ => false
+        }
+        checker::Char => true
+        checker::Named as nm => cg_is_c_keyword(checker::name_last_segment(nm.name))
+        _ => false
+    }
 }
 
-// cg_variant_typename_str — the deterministic C type NAME of an INLINE variant `A | B | …`:
-// `tk_u_` then each member's key joined by `_`, in SOURCE ORDER. (C: `cg_variant_typename`.)
-fn cg_variant_typename_str(v: checker::Variant) -> str | error {
-    mut name = "tk_u"
+/**
+ * Append a resolved variant member's C-identifier-safe KEY directly to `buf`, with ZERO
+ * throwaway `str` (AL4a-1): the key text is written straight into the byte buffer via
+ * `cg_opt_mangle` (which already handles the `slice_<elem>` member shape), then a trailing `_`
+ * is appended when the key collides with a C keyword so the union field, the `.as.<key>`
+ * construction, and the destructure all agree. Byte-identical to the retired build-then-append
+ * path (`cb(buf, cg_member_key_str(m))`).
+ *
+ * @param buf  the C-symbol byte buffer to append to
+ * @param m    the resolved member type whose key is emitted
+ * @return     the extended buffer
+ * @throws     when the member is an untyped empty slice/optional with no known element type
+ */
+fn cg_member_key(buf: []byte, m: checker::Type) -> []byte | error {
+    let out = match cg_opt_mangle(buf, m) { []byte as o => o; error as e => return e }
+    if cg_member_key_is_c_keyword(m) { cb(out, "_") } else { out }
+}
+
+/**
+ * Append the deterministic C type NAME of an INLINE variant `A | B | …` directly to `buf`, with
+ * ZERO throwaway `str` (AL4a-1): emit `tk_u`, then for each member in SOURCE ORDER emit `_`
+ * followed by that member's key straight into the buffer. Byte-identical to the retired
+ * build-then-append path that composed the whole name with `teko::str::concat`.
+ *
+ * @param buf  the C-symbol byte buffer to append to
+ * @param v    the inline variant whose `tk_u_<keys>` name is emitted
+ * @return     the extended buffer
+ * @throws     when a member's key cannot be mangled (untyped empty slice/optional element)
+ */
+fn cg_variant_typename(buf: []byte, v: checker::Variant) -> []byte | error {
+    mut out = cb(buf, "tk_u")
     mut i = 0
     loop {
         if i >= v.members.len { break }
-        let k = match cg_member_key_str(v.members[i]) { str as s => s; error as e => return e }
-        name = teko::str::concat(name, "_", k)
+        out = cb(out, "_")
+        out = match cg_member_key(out, v.members[i]) { []byte as o => o; error as e => return e }
         i++
     }
-    name
-}
-
-// cg_variant_typename — append the inline-variant tk_u_<keys> name to a buffer. (C: `cg_variant_typename`.)
-fn cg_variant_typename(buf: []byte, v: checker::Variant) -> []byte | error {
-    cb(buf, match cg_variant_typename_str(v) { str as s => s; error as e => return e })
+    out
 }
 
 // cg_emit_variant_ctype — emit the C TYPE for any variant-shaped resolved type: a Named
