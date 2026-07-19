@@ -73,6 +73,42 @@ justificar. Behavior: muda-C-do-compilador (5 sites).
 - **Produtor parametrizado** (arg de runtime) → CONTINUA função com literais internos.
 - **Chamador que muta**: `mut c = CONSTANTE` (cópia eager, valor já existente) + `grow(&c,…)`.
 
+#### AL0 — spec de implementação (auditoria de const-eval)
+**NÃO é edit mecânico.** O const-eval (`consteval_form.tks::is_const_expr`) aceita HOJE:
+literais (Tier 0), cast (1), unário `~`/`-` + binário `+ - * / % & | ^ << >>` (2), ref a
+const nomeada + membro enum/flags (3), literal array/struct/variant com componentes const
+(4), call SÓ na allowlist FECHADA `{preg, teko::f64_from_bits, teko::f32_from_bits}` (5).
+**REJEITA**: `TIndex` (`GZIP_MAGIC[0]`), loop/range, qualquer call fora da allowlist.
+
+Veredito por alvo:
+- **`fixed_litlen_lengths` (inflate.tks:253) → MANTER como gerador.** Perf ~0 (é a lib de
+  compress, NÃO o hot-path de emit); um literal de 288 valores destrói a legibilidade das
+  ranges do RFC 1951; "código não mente" é FRACO aqui (é genuinamente um mapeamento
+  range→comprimento, honestamente um gerador). Const exigiria range-expansion no const-eval
+  (extensão real, não mecânica) sem ganho.
+- **`fixed_dist_lengths` (inflate.tks:272) → MANTER como gerador** (irmão do acima; perf ~0).
+  Um `const [5,5,…]` de 32 valores é viável HOJE (Tier-4) mas repetitivo; manter por
+  consistência e legibilidade. (Se o owner insistir na honestidade, é literal-32, trivial.)
+- **`gzip_header` (gzip.tks:33) → PRECISA ESTENDER const-eval.** Usa `GZIP_MAGIC[0..1]`
+  (`TIndex` de const — rejeitado) E chama `gzip_cm_deflate()` (fora da allowlist). Para
+  const-ificar sem duplicar o magic (D39): (i) **Tier-6 novo: `TIndex` de const agregada por
+  índice const-expr**; (ii) trocar `gzip_cm_deflate()` por um `const GZIP_CM_DEFLATE: byte = 8
+  to byte` (ele já é `{ 8 to byte }`). Então `const GZIP_HEADER: []byte = [GZIP_MAGIC[0],
+  GZIP_MAGIC[1], GZIP_CM_DEFLATE, 0 to byte, …]`.
+- **`wasm_preamble` (objfile_wasm.tks:172) → PRECISA ESTENDER const-eval** (mesmo Tier-6
+  `TIndex`-de-const para `WASM_MAGIC[0..3]`; `WASM_VERSION_1` já é Tier-3 OK).
+- **`wasm_narrow_msg_bytes` (stackify.tks:4503) → PRECISA ESTENDER const-eval** (str→[]byte em
+  posição const) OU manter gerador. Um byte-array literal perde a string legível; a extensão
+  limpa é permitir `const MSG: []byte = "…"` (coerção str→bytes const).
+
+**Conclusão AL0:** o gargalo é uma **extensão de const-eval (Tier-6: `TIndex` de const
+agregada por índice const-expr; opcional str→[]byte)** — um crumb próprio, não um sweep. 2
+dos 5 alvos (Huffman) ficam como geradores (perf 0, legibilidade). 3 dependem da extensão.
+Ganho de perf ~zero; o valor é honestidade/W15 + o Tier-6 reusável. **Nenhum chamador muta
+os 5** (todos retornam e o consumidor lê) → ref direto, sem `mut c = CONST`.
+
+---
+
 ### AL4a — Interning/memoização de nomes manglados (ACHADO NOVO da prova) · M · CEDO
 **Alvo nomeado (RA-medido):** `cg_variant_typename_str` reconstrói a MESMA string
 determinística **6,65 MILHÕES de vezes** (99 MB); `cg_opt_key` 2,85M (20 MB);
@@ -81,6 +117,29 @@ determinística **6,65 MILHÕES de vezes** (99 MB); `cg_opt_key` 2,85M (20 MB);
 1,03M allocs → ~milhares. **Semi-independente do ref-push, grande E barato** → entra CEDO, em
 paralelo à fundação (como o AL0). Behavior: preserva-tudo (só cacheia; a string é idêntica).
 Ritual: fixpoint + probe: allocs de `cg_variant_typename_str` no dark-matter → ~milhares.
+
+**Design do cache (spec):**
+- **Keyed por:** a IDENTIDADE ESTRUTURAL do tipo. `Map<V>` (collections/map.tks) é keyed por
+  `str` → key = um **hash estrutural u64 em hex curto**, computado por um FOLD recursivo
+  barato sobre o `Type`/`Variant` (SEM alocação por nó, ao contrário do concat). Value = o
+  nome manglado memoizado. **Hit verificado por igualdade estrutural de tipo** (a máquina de
+  equality de `type.tks`) para descartar colisão de hash. O nome é função PURA determinística
+  do tipo → a key estrutural o determina unicamente.
+- **Onde vive:** um CAMPO no contexto de codegen (`CgCtx`), NÃO global de módulo — per-build,
+  sem estado cross-build, thread-safe no futuro. `checker::qualify` vive no checker → intern
+  SEPARADO no contexto do checker. Threaded por `&` quando F1 aterrissar; pré-F1, um `Map`
+  threaded/retornado (funciona hoje).
+- **Invalidação:** NENHUMA — o nome manglado é estável durante todo o build; o intern vive a
+  fase de codegen e morre com ela (região da fase, AL5).
+- **Sites que consultam:** os 5 produtores viram `if hit = intern_lookup(&cache, t) { return
+  hit }; let s = <compute atual>; intern_insert(&cache, t, s); s` — `cg_variant_typename_str`
+  (1197), `cg_member_key_str` (~1180), `cg_opt_mangle_str`/`cg_opt_key`, `cg_variant_key`
+  (codegen); `checker::qualify` (intern do checker).
+- **Prova behavior-preserving:** a string memoizada é LITERALMENTE o retorno do compute
+  inalterado na 1ª ocorrência; um hit só retorna quando a igualdade estrutural bate, e o
+  compute é função pura determinística do tipo → cacheada == recomputada, byte-a-byte.
+  **Preserva-tudo.** A win: troca 6,65M concats por 6,65M folds-de-hash baratos + ~milhares
+  de concats (só nos misses).
 
 ---
 
