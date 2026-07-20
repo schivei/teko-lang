@@ -121,6 +121,41 @@ fn cv_bool(v: bool) -> ConstValue { ConstValue { kind = CVBool { v = v } } }
 fn cv_bytes(data: []byte) -> ConstValue { ConstValue { kind = CVBytes { data = data } } }
 
 /**
+ * AggConstMap — the module-level AGGREGATE-const resolution table the Layer-1c (CF4) index fold
+ * reads: three PARALLEL lists (names / namespaces / collapsed initializers) over every module
+ * aggregate const, in dependency order, exactly as `build_aggregate_map` (`consteval.tks`) already
+ * produces. A `TVar` receiver of a const `TIndex` is resolved by a `(name, namespace)` lookup keyed
+ * on the reference's `func_ns` — the SAME key `inline_rw_var` uses — so the index fold and the
+ * type-checker never diverge. This table resolves ONLY module aggregate consts; a fn-value, a local
+ * binding, and a scalar const are never in it, so the CF3 fn-value/scalar invariants are untouched.
+ *
+ * @since #comptime-fold
+ */
+pub type AggConstMap = ScalarConstMap
+
+/**
+ * cv_agg — wrap an ordered list of child comptime values into an aggregate ConstValue (the
+ * constructor for `CVAgg`). The children are in declaration/index order, so `eval_index_expr` reads
+ * `elems[i]` directly.
+ *
+ * @param elems  the child comptime values, in order
+ * @return       the aggregate ConstValue
+ * @since #comptime-fold
+ */
+fn cv_agg(elems: []ConstValue) -> ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
+
+/**
+ * agg_empty — an empty `AggConstMap` (no module aggregate consts recorded): the stopgap the fold
+ * spine passes to `eval_const` until CF4b threads the real map, and the resolution table for a
+ * program that declares no aggregate const. Every lookup misses, so an index over a `TVar` receiver
+ * is left runtime.
+ *
+ * @return  an `AggConstMap` with empty parallel lists
+ * @since #comptime-fold
+ */
+fn agg_empty() -> AggConstMap { ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
+
+/**
  * width_mask — the low-`w`-bits mask (2^w - 1) as a u128, the ceiling of an unsigned
  * value of width `w` and the modulus a width-`w` operation reduces modulo. Width 128 is
  * the all-ones u128 (its `1 << 128` cannot be spelled), every other width builds the
@@ -288,20 +323,24 @@ fn neg_literal_bits(value: i128, w: u32) -> u128 {
  * @param e      the typed, provably-const expression to evaluate
  * @param table  the type table (to classify a callee / resolve a referenced type)
  * @param env    the environment resolving a name to a const/binding + its value
+ * @param agg    the module-aggregate resolution table (resolves a `TVar` index receiver, Layer 1c)
  * @return       the computed comptime value, or a located error (overflow / ÷0 /
  *               out-of-range / a non-const form reaching this evaluator)
  * @since #comptime-fold
  */
-pub fn eval_const(e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
+pub fn eval_const(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
     match e.kind {
         TNumber as n => eval_number(n, e)
         TBoolLit as b => cv_bool(b.value)
         TByteLit as by => cv_int(by.value to u128, Byte { })
         TCharLit as ch => cv_bytes(bytes_of_str(ch.bytes))
         TStrLit as s => cv_bytes(bytes_of_str(s.text))
-        TCast as c => eval_cast_expr(c, e, table, env)
-        TUnary as u => eval_unary_expr(u, e, table, env)
-        TBinary as bi => eval_binary_expr(bi, e, table, env)
+        TCast as c => eval_cast_expr(c, e, table, env, agg)
+        TUnary as u => eval_unary_expr(u, e, table, env, agg)
+        TBinary as bi => eval_binary_expr(bi, e, table, env, agg)
+        TVar as v => eval_agg_ref(v, e, table, env, agg)
+        TArrayLit as a => eval_array_agg(a, table, env, agg)
+        TIndex as ix => eval_index_expr(ix, e, table, env, agg)
         _ => const_form_error("this expression is not a Tier-0..2 scalar constant the comptime fold evaluates yet (#comptime-fold)", e)
     }
 }
@@ -391,11 +430,12 @@ fn eval_float_literal(fval: f64, t: Type, e: TExpr) -> ConstValue | error {
  * @param e      the enclosing expression (its type is the cast target; positions errors)
  * @param table  the type table (forwarded to the operand fold)
  * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand fold)
  * @return       the converted comptime value, or a located error
  * @since #comptime-fold
  */
-fn eval_cast_expr(c: TCast, e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
-    match eval_const(c.expr, table, env) {
+fn eval_cast_expr(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(c.expr, table, env, agg) {
         error as x => return x
         ConstValue as v => apply_cast(v, e.type, e)
     }
@@ -509,17 +549,18 @@ fn cast_max(dst: IntInfo) -> u128 {
  * @param e      the enclosing expression (its type; positions any error)
  * @param table  the type table (forwarded to the operand evaluator)
  * @param env    the environment (module consts + provably-const locals)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand evaluator)
  * @return       the evaluated comptime value, or a located error
  * @since #comptime-fold
  */
-fn eval_unary_expr(u: TUnary, e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
+fn eval_unary_expr(u: TUnary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
     if u.op == lexer::TokenKind::Minus {
         match u.operand.kind {
             TNumber as n => if !n.is_float { return eval_int_literal((0 to i128) - n.value, e.type, e) }
             _ => { }
         }
     }
-    match eval_const(u.operand, table, env) {
+    match eval_const(u.operand, table, env, agg) {
         error as x => return x
         ConstValue as v => apply_unary(u.op, v, e)
     }
@@ -639,13 +680,14 @@ fn float_negate(cf: CVFloat, e: TExpr) -> ConstValue | error {
  * @param e      the enclosing expression (positions any error)
  * @param table  the type table (forwarded to the operand folds)
  * @param env    the environment (forwarded to the operand folds)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand folds)
  * @return       the folded value, or a located error
  * @since #comptime-fold
  */
-fn eval_binary_expr(bi: TBinary, e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
-    match eval_const(bi.left, table, env) {
+fn eval_binary_expr(bi: TBinary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.left, table, env, agg) {
         error as x => return x
-        ConstValue as lv => eval_binary_right(bi, lv, e, table, env)
+        ConstValue as lv => eval_binary_right(bi, lv, e, table, env, agg)
     }
 }
 
@@ -658,13 +700,164 @@ fn eval_binary_expr(bi: TBinary, e: TExpr, table: TypeTable, env: Env) -> ConstV
  * @param e      the enclosing expression (positions any error)
  * @param table  the type table (forwarded to the right-operand fold)
  * @param env    the environment (forwarded to the right-operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the right-operand fold)
  * @return       the folded value, or a located error
  * @since #comptime-fold
  */
-fn eval_binary_right(bi: TBinary, lv: ConstValue, e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
-    match eval_const(bi.right, table, env) {
+fn eval_binary_right(bi: TBinary, lv: ConstValue, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.right, table, env, agg) {
         error as y => return y
         ConstValue as rv => apply_binary(bi.op, lv, rv, e)
+    }
+}
+
+/**
+ * agg_const_init — resolve the collapsed initializer of the module aggregate const named
+ * `(name, ns)` in `agg`, or null when no such const is recorded (a fn-value, a local, a scalar
+ * const, or a different-module name never resolves — the fold then leaves the index runtime). A thin
+ * `(name, ns)`-keyed lookup over the parallel lists, mirroring `scalar_const_init` (`consteval.tks`).
+ *
+ * @param agg   the module-aggregate resolution table
+ * @param name  the reference's name
+ * @param ns    the reference's resolved namespace (`func_ns`)
+ * @return      the const's collapsed initializer, or null
+ * @since #comptime-fold
+ */
+fn agg_const_init(agg: AggConstMap, name: str, ns: str) -> TExpr? {
+    mut i: u64 = 0
+    loop {
+        if i >= agg.names.len { break }
+        if agg.names[i] == name && agg.nss[i] == ns { return agg.inits[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * eval_agg_ref — evaluate a `TVar` reference that names a module-level aggregate const: resolve its
+ * collapsed initializer through `agg` and evaluate that (Layer 1c). A function-value reference
+ * (`is_func`) is never a const aggregate; a name absent from `agg` (a local, a scalar, a
+ * different-module name) is a soft `const_form_error` located at `e` — the `cf_agg_value`/
+ * `cf_can_index` gate proves the shape before the fold calls `eval_const`, so this arm never spuriously
+ * rejects a program: a non-foldable receiver simply stays runtime.
+ *
+ * @param v      the reference node
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the initializer eval)
+ * @param env    the environment (forwarded to the initializer eval)
+ * @param agg    the module-aggregate resolution table
+ * @return       the aggregate comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_agg_ref(v: TVar, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    if v.is_func { return const_form_error("comptime fold: a function value is not a const aggregate (#comptime-fold)", e) }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => const_form_error("comptime fold: this reference is not a module aggregate const (#comptime-fold)", e)
+        TExpr as init => eval_const(init, table, env, agg)
+    }
+}
+
+/**
+ * eval_array_agg — evaluate an array/slice literal's elements to a `CVAgg`, recursing `eval_const`
+ * into each element expression (Layer 1c). A spread element is not const-foldable in CF4 and makes
+ * the aggregate non-const; its presence — rejected by `cf_agg_value` before the fold reaches here —
+ * is a located error on the direct-eval path. Element order is index order.
+ *
+ * @param a      the typed array literal
+ * @param table  the type table (forwarded to each element eval)
+ * @param env    the environment (forwarded to each element eval)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the aggregate comptime value, or the first located element error
+ * @since #comptime-fold
+ */
+fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    mut elems: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return error { message = "comptime fold: a spread element is not a const aggregate (#comptime-fold)" } }
+        let v = match eval_const(a.elements[i].expr, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+        elems = teko::list::push(elems, v)
+        i++
+    }
+    cv_agg(elems)
+}
+
+/**
+ * eval_index_expr — evaluate a `TIndex` of a const aggregate at a const index (Layer 1c): evaluate
+ * the receiver (which must yield a `CVAgg`) and the index (which must yield a `CVInt`), then read the
+ * element. A negative index or an index `>= elems.len` is a LOCATED COMPILE ERROR (M.1;
+ * LEGISLATION:148) — a hazard the compiler can already see. A non-aggregate receiver or non-integer
+ * index reaching here is a located error (the `cf_can_index` gate proves the shape before the fold
+ * calls `eval_const`).
+ *
+ * @param ix     the typed index expression
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the child evals)
+ * @param env    the environment (forwarded to the child evals)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the element comptime value, or a located error (out-of-range / shape)
+ * @since #comptime-fold
+ */
+fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    let recv = match eval_const(ix.receiver, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    let idx = match eval_const(ix.index, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    match recv.kind {
+        CVAgg as ag => eval_index_at(ag, idx, e)
+        _ => const_form_error("comptime fold: index receiver is not a const aggregate (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_at — read element `idx` of the folded aggregate `ag`: the index must be a `CVInt` with a
+ * representable non-negative value strictly below `ag.elems.len`; a negative or out-of-range index is
+ * a located compile error (M.1). The bounds hazard the compiler can already see fails loudly at
+ * comptime, never as a silent wrap or a deferred runtime trap.
+ *
+ * @param ag   the folded aggregate value
+ * @param idx  the folded index value (must be a `CVInt`)
+ * @param e    the enclosing expression (positions any error)
+ * @return     the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_at(ag: CVAgg, idx: ConstValue, e: TExpr) -> ConstValue | error {
+    match idx.kind {
+        CVInt as ci => eval_index_pick(ag, ci, e)
+        _ => const_form_error("comptime fold: index is not a const integer (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_pick — the bounds-checked element read: recover the index's signed carrier, reject a
+ * negative or unrepresentable value, reject an index at or beyond the aggregate length, then return
+ * the element. Every rejection is a located M.1 compile error.
+ *
+ * @param ag  the folded aggregate value
+ * @param ci  the folded index integer
+ * @param e   the enclosing expression (positions any error)
+ * @return    the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_pick(ag: CVAgg, ci: CVInt, e: TExpr) -> ConstValue | error {
+    let iv = match index_carrier(ci) { null => return const_form_error("comptime fold: index is out of range (#comptime-fold)", e); i128 as v => v }
+    if iv < (0 to i128) { return const_form_error("comptime fold: a negative index is out of range (#comptime-fold)", e) }
+    if (iv to u128) >= (ag.elems.len to u128) { return const_form_error("comptime fold: index is out of range for the aggregate length (#comptime-fold)", e) }
+    ag.elems[iv to u64]
+}
+
+/**
+ * index_carrier — the signed i128 value a const index `CVInt` denotes, or null when the value has no
+ * i128 form (a u128 whose magnitude exceeds i128-max — necessarily an out-of-range index). Reuses
+ * `int_info`/`cv_int_to_i128`, the same reconstruction `literal_of` uses.
+ *
+ * @param ci  the folded index integer
+ * @return    the index's i128 value, or null when unrepresentable
+ * @since #comptime-fold
+ */
+fn index_carrier(ci: CVInt) -> i128? {
+    match int_info(ci.ty) {
+        error => null
+        IntInfo as info => cv_int_to_i128(ci.bits, info)
     }
 }
 
@@ -1184,6 +1377,136 @@ fn cf_cast_operand_ok(e: TExpr) -> bool {
 }
 
 /**
+ * cf_agg_value — true iff `e` is a const AGGREGATE the index fold may evaluate: an in-tree
+ * `TArrayLit` whose every element is a foldable const (`cf_int_value`, or a nested `cf_agg_value`), or
+ * a `TVar` (non-`is_func`) naming a module aggregate const in `agg`. A fn-value reference, a local
+ * binding, a spread element, or any runtime leaf returns false, so the index stays runtime. The gate
+ * that keeps `eval_const` from being called on a non-const receiver (the aggregate mirror of
+ * `cf_int_value`).
+ *
+ * @param e    the receiver expression to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is a foldable const aggregate
+ * @since #comptime-fold
+ */
+fn cf_agg_value(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TArrayLit as a => cf_array_elems_const(a, agg)
+        TVar as v => cf_var_is_agg_const(v, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_var_is_agg_const — true iff `v` is a non-function reference naming a module aggregate const
+ * recorded in `agg`. A fn-value (`is_func`) is never a const aggregate; a name absent from `agg` (a
+ * local, a scalar const, a different-module name) is not foldable.
+ *
+ * @param v    the reference node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `v` resolves to a module aggregate const
+ * @since #comptime-fold
+ */
+fn cf_var_is_agg_const(v: TVar, agg: AggConstMap) -> bool {
+    if v.is_func { return false }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => false
+        TExpr => true
+    }
+}
+
+/**
+ * cf_array_elems_const — true iff every element of the array literal `a` is a foldable const (a
+ * `cf_int_value` scalar or a nested `cf_agg_value`) and none is a spread. Any runtime or spread
+ * element makes the whole aggregate non-const, so the index stays runtime.
+ *
+ * @param a    the typed array literal
+ * @param agg  the module-aggregate resolution table (for a nested aggregate element)
+ * @return     whether every element is a foldable const
+ * @since #comptime-fold
+ */
+fn cf_array_elems_const(a: TArrayLit, agg: AggConstMap) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return false }
+        if !cf_element_const(a.elements[i].expr, agg) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * cf_element_const — true iff the array element `e` is a foldable const: a scalar integer op-tree
+ * (`cf_int_value`) or a nested const aggregate (`cf_agg_value`).
+ *
+ * @param e    the element expression
+ * @param agg  the module-aggregate resolution table (for a nested aggregate element)
+ * @return     whether `e` is a foldable const element
+ * @since #comptime-fold
+ */
+fn cf_element_const(e: TExpr, agg: AggConstMap) -> bool {
+    if cf_int_value(e) { return true }
+    cf_agg_value(e, agg)
+}
+
+/**
+ * cf_can_index — true iff the whole `TIndex` folds: a foldable const-aggregate receiver
+ * (`cf_agg_value`) AND a foldable const-integer index (`cf_int_value`). When false the index is
+ * rebuilt around its folded children (stays runtime), preserving today's behavior for a runtime index
+ * or receiver.
+ *
+ * @param ix   the typed index expression
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the index expression is fully const-foldable
+ * @since #comptime-fold
+ */
+fn cf_can_index(ix: TIndex, agg: AggConstMap) -> bool {
+    cf_agg_value(ix.receiver, agg) && cf_int_value(ix.index)
+}
+
+/**
+ * cf_fold_int — the fold's integer-evaluability gate: `cf_int_value` EXTENDED with a
+ * `TIndex`-of-const-aggregate arm (agg-aware), so an enclosing cast or op-tree over a const index
+ * collapses to a single literal (`(G[0] to u64) to i32` -> `31`, not `((31 to byte) to u64) to i32`).
+ * Kept SEPARATE from `cf_int_value` so the CF3 local-binding recording gate (`lp_record_simple`) — the
+ * `seed_from_dep_qualified_value_const_and_fn` guard — keeps the name-free `cf_int_value` untouched.
+ *
+ * @param e    the typed expression to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is an integer op-tree (possibly over a const index) the fold may evaluate
+ * @since #comptime-fold
+ */
+fn cf_fold_int(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TNumber as n => !n.is_float && cf_is_int_type(e.type)
+        TByteLit => true
+        TCast as c => cf_is_int_type(e.type) && cf_fold_cast_operand(c.expr, agg)
+        TUnary as u => is_const_unary_op(u.op) && cf_fold_int(u.operand, agg)
+        TBinary as b => is_const_binary_op(b.op) && cf_fold_int(b.left, agg) && cf_fold_int(b.right, agg)
+        TIndex as ix => cf_can_index(ix, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_fold_cast_operand — the fold's cast-operand gate: a bare boolean literal (the sole
+ * `bool -> numeric` cast) or an integer op-tree the fold evaluates (`cf_fold_int`, so a const index
+ * under a cast collapses). The agg-aware mirror of `cf_cast_operand_ok`.
+ *
+ * @param e    the cast operand to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the operand is a foldable integer op-tree or a bare boolean literal
+ * @since #comptime-fold
+ */
+fn cf_fold_cast_operand(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TBoolLit => true
+        _ => cf_fold_int(e, agg)
+    }
+}
+
+/**
  * i128_max_as_u128 — the largest signed-i128 value (2^127 - 1) as a u128, the ceiling above which an
  * unsigned comptime integer has NO `TNumber` literal form (the parser's `Number.value` carrier is an
  * i128, and `value_fits` admits an unsigned literal only when it is non-negative — a u128 whose top
@@ -1302,7 +1625,7 @@ pub fn fold_expr(e: TExpr, table: TypeTable, env: Env) -> TExpr | error {
  */
 fn fold_op_node(e: TExpr, table: TypeTable, env: Env) -> TExpr | error {
     if !cf_int_value(e) { return fold_children(e, table, env) }
-    match eval_const(e, table, env) {
+    match eval_const(e, table, env, agg_empty()) {
         error as x => return x
         ConstValue as v => fold_splice(v, e, table, env)
     }
@@ -3116,7 +3439,7 @@ fn cf_interp_foldable(in: TInterp) -> bool {
  * @since #comptime-fold
  */
 fn cf_hole_bytes(hole: TExpr, sp: TFSpec, table: TypeTable, env: Env) -> []byte | error {
-    match eval_const(hole, table, env) {
+    match eval_const(hole, table, env, agg_empty()) {
         error as x => return x
         ConstValue as v => comptime_format(v, sp, hole.type)
     }

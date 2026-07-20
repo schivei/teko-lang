@@ -76,7 +76,7 @@ fn cf_cast(e: TExpr, t: Type) -> TExpr { te(TCast { expr = e }, t) }
  * @param want  the expected two's-complement bits
  */
 fn cf_int_is(e: TExpr, want: u128) {
-    match eval_const(e, empty_table(), empty_env()) {
+    match eval_const(e, empty_table(), empty_env(), empty_agg()) {
         ConstValue as v => match v.kind {
             CVInt as ci => teko::assert::is_true(ci.bits == want)
             _ => teko::assert::is_true(false)
@@ -92,7 +92,7 @@ fn cf_int_is(e: TExpr, want: u128) {
  * @param want  the expected boolean
  */
 fn cf_bool_is(e: TExpr, want: bool) {
-    match eval_const(e, empty_table(), empty_env()) {
+    match eval_const(e, empty_table(), empty_env(), empty_agg()) {
         ConstValue as v => match v.kind {
             CVBool as cb => teko::assert::is_true(cb.v == want)
             _ => teko::assert::is_true(false)
@@ -108,7 +108,7 @@ fn cf_bool_is(e: TExpr, want: bool) {
  * @param want  the expected raw IEEE bits
  */
 fn cf_float_is(e: TExpr, want: u64) {
-    match eval_const(e, empty_table(), empty_env()) {
+    match eval_const(e, empty_table(), empty_env(), empty_agg()) {
         ConstValue as v => match v.kind {
             CVFloat as cf => teko::assert::is_true(cf.bits == want && !cf.is_f32)
             _ => teko::assert::is_true(false)
@@ -124,7 +124,7 @@ fn cf_float_is(e: TExpr, want: u64) {
  * @param e  the const expression that must fail to fold
  */
 fn cf_is_error(e: TExpr) {
-    match eval_const(e, empty_table(), empty_env()) {
+    match eval_const(e, empty_table(), empty_env(), empty_agg()) {
         error => teko::assert::is_true(true)
         ConstValue => teko::assert::is_true(false)
     }
@@ -1236,4 +1236,153 @@ fn fold_interp_dynamic_spec_stays() {
         }
         _ => teko::assert::is_true(false)
     }
+}
+
+/**
+ * empty_agg — an empty `AggConstMap` (no module aggregate consts recorded), the CF4a companion to
+ * `empty_env()`/`empty_table()` for a fold-test call site that resolves no `TVar` receiver.
+ *
+ * @return  an `AggConstMap` with empty parallel lists
+ */
+fn empty_agg() -> AggConstMap { ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
+
+/**
+ * cf_byte_lit — a `to byte` cast of the integer `v` (the fixture-D element shape `0x1F to byte`), a
+ * foldable const byte element for the index-fold unit matrix.
+ *
+ * @param v  the byte value (i128 carrier)
+ * @return   the typed `v to byte` cast expression
+ */
+fn cf_byte_lit(v: i128) -> TExpr { cf_cast(cf_num(v, u64t()), bytet()) }
+
+/**
+ * cf_byte_array — an in-tree `[]byte` array-literal typed expression over the byte-cast elements
+ * `elems`, the CF4a const-aggregate receiver (both the inline-receiver case and the hand-built
+ * module-aggregate map's collapsed initializer).
+ *
+ * @param elems  the array's element expressions, in index order
+ * @return       the typed array-literal expression
+ */
+fn cf_byte_array(elems: []TExpr) -> TExpr {
+    mut es: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= elems.len { break }
+        es = teko::list::push(es, TArrayElem { is_spread = false; expr = elems[i] })
+        i++
+    }
+    te(TArrayLit { elements = es }, bytet())
+}
+
+/**
+ * cf_agg_g — a hand-built `AggConstMap` recording `const G: []byte = [0x1F to byte, 0x8B to byte]` in
+ * namespace `teko::checker`, the fixture-D receiver the CF4a index-fold resolves a `TVar G` against.
+ *
+ * @return  the module-aggregate resolution table holding `G`
+ */
+fn cf_agg_g() -> AggConstMap {
+    let init = cf_byte_array(teko::list::push(teko::list::push(teko::list::empty(), cf_byte_lit(0x1F)), cf_byte_lit(0x8B)))
+    ScalarConstMap { names = teko::list::push(teko::list::empty(), "G"); nss = teko::list::push(teko::list::empty(), "teko::checker"); inits = teko::list::push(teko::list::empty(), init) }
+}
+
+/**
+ * cf_g_index — the typed `G[i]` index expression: a `TVar G` receiver indexed by the const integer
+ * `i` (typed `t`), the CF4a module-aggregate-index shape.
+ *
+ * @param i  the index value (i128 carrier)
+ * @param t  the index's integer type
+ * @return   the typed `G[i]` index expression
+ */
+fn cf_g_index(i: i128, t: Type) -> TExpr { te(TIndex { receiver = cf_var("G", bytet()); index = cf_num(i, t) }, bytet()) }
+
+/**
+ * cf_index_is — assert `eval_const` over the map `agg` folds the index expression `ix` to an integer
+ * whose bits equal `want`.
+ *
+ * @param ix    the index expression to fold
+ * @param agg   the module-aggregate resolution table
+ * @param want  the expected element's two's-complement bits
+ */
+fn cf_index_is(ix: TExpr, agg: AggConstMap, want: u128) {
+    match eval_const(ix, empty_table(), empty_env(), agg) {
+        ConstValue as v => match v.kind {
+            CVInt as ci => teko::assert::is_true(ci.bits == want)
+            _ => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * cf_index_errors — assert `eval_const` over the map `agg` rejects the index expression `ix` with a
+ * located error (an out-of-range or negative const index — M.1).
+ *
+ * @param ix   the index expression that must fail to fold
+ * @param agg  the module-aggregate resolution table
+ */
+fn cf_index_errors(ix: TExpr, agg: AggConstMap) {
+    match eval_const(ix, empty_table(), empty_env(), agg) {
+        error => teko::assert::is_true(true)
+        ConstValue => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * eval_const_folds_module_agg_index — the CF4a mandate case: `G[0]`/`G[1]` over a hand-built
+ * `AggConstMap` for `const G: []byte = [0x1F, 0x8B]` fold to the byte elements `0x1F`/`0x8B`.
+ */
+#test
+fn eval_const_folds_module_agg_index() {
+    let agg = cf_agg_g()
+    cf_index_is(cf_g_index(0 to i128, u64t()), agg, 0x1F to u128)
+    cf_index_is(cf_g_index(1 to i128, u64t()), agg, 0x8B to u128)
+}
+
+/**
+ * eval_const_index_out_of_range_errors — an index at the aggregate length (`G[2]` over a len-2 `G`)
+ * is a located compile error (M.1), never a silent wrap or a runtime trap.
+ */
+#test
+fn eval_const_index_out_of_range_errors() {
+    cf_index_errors(cf_g_index(2 to i128, u64t()), cf_agg_g())
+}
+
+/**
+ * eval_const_negative_index_errors — a negative const index (`G[-1]`) is a located compile error
+ * (M.1).
+ */
+#test
+fn eval_const_negative_index_errors() {
+    cf_index_errors(cf_g_index(-1 to i128, i64t()), cf_agg_g())
+}
+
+/**
+ * eval_const_folds_inline_arraylit_index — an in-tree `TArrayLit` receiver folds with an EMPTY map:
+ * `[10 to byte, 20 to byte][1]` evaluates to `20`, proving the no-map literal-receiver path.
+ */
+#test
+fn eval_const_folds_inline_arraylit_index() {
+    let arr = cf_byte_array(teko::list::push(teko::list::push(teko::list::empty(), cf_byte_lit(10 to i128)), cf_byte_lit(20 to i128)))
+    let ix = te(TIndex { receiver = arr; index = cf_num(1 to i128, u64t()) }, bytet())
+    cf_index_is(ix, empty_agg(), 20 to u128)
+}
+
+/**
+ * cf_can_index_rejects_runtime_index — a runtime index (a `TVar i`, not a const integer) makes
+ * `cf_can_index` false, so the index stays runtime (the negative boundary the fold gate enforces).
+ */
+#test
+fn cf_can_index_rejects_runtime_index() {
+    let ix = TIndex { receiver = cf_var("G", bytet()); index = cf_var("i", u64t()) }
+    teko::assert::is_true(!cf_can_index(ix, cf_agg_g()))
+}
+
+/**
+ * cf_can_index_rejects_runtime_receiver — a runtime receiver (a param `a`, absent from the map) makes
+ * `cf_can_index` false, so `a[0]` stays runtime.
+ */
+#test
+fn cf_can_index_rejects_runtime_receiver() {
+    let ix = TIndex { receiver = cf_var("a", bytet()); index = cf_num(0 to i128, u64t()) }
+    teko::assert::is_true(!cf_can_index(ix, empty_agg()))
 }
