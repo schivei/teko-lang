@@ -207,6 +207,16 @@ pub type FileSystem = struct {
      * (`teko::compress::inflate` for Deflate, `gzip_decompress` for Gzip, verbatim for None),
      * so the caller never sees compression.
      *
+     * DECOMPRESSION TIMING (owner 2026-07-20, ruling 7): inflation is LAZY — it happens on
+     * THIS `read` call, for THIS file only. Nothing decompresses at program load; an embedded
+     * file that is never read is never inflated (it stays compressed in rodata, paying zero
+     * runtime cost). A `None` entry returns its rodata bytes directly (no inflate; may be a
+     * slice into rodata with no allocation).
+     * NO HIDDEN CACHE (integrator-pinned, veto-open): each `read` re-inflates — the `FileSystem`
+     * is `const` rodata and MUST stay pure (M.3: it is data, not an object with hidden mutable
+     * state); a caller that reads the same file repeatedly holds the result itself. A memoizing
+     * cache would need mutable state outside the const and is deliberately NOT part of the type.
+     *
      * @param path  the project-relative logical path, exactly as it resolved at build time
      * @return      the file's decompressed bytes, or null when absent
      * @throws      never at the type level — a corrupt embedded stream is a build-time
