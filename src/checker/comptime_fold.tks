@@ -507,7 +507,29 @@ fn cast_max(dst: IntInfo) -> u128 {
  * @return       the folded value, or a located error
  * @since #comptime-fold
  */
+/**
+ * eval_unary_expr — evaluate a unary comptime expression. A leading `-` on an integer literal is a
+ * NEGATIVE LITERAL, not a negation OPERATION applied to a positive one: `-9223372036854775808` IS
+ * i64::MIN, whose positive magnitude `2^63` has no i64 form, so evaluating the operand in isolation
+ * would overflow even though the literal is in range. That form is encoded directly — the negated
+ * value `-N` range-checked against the whole expression's type via `encode_int_literal`'s negative
+ * path (the type checker's own negative-literal rule, `typer.tks`). Every other unary (`-2.5` over a
+ * float, `~x`, `-x` over a non-literal) takes the general evaluate-then-`apply_unary` path.
+ *
+ * @param u      the unary expression
+ * @param e      the enclosing expression (its type; positions any error)
+ * @param table  the type table (forwarded to the operand evaluator)
+ * @param env    the environment (module consts + provably-const locals)
+ * @return       the evaluated comptime value, or a located error
+ * @since #comptime-fold
+ */
 fn eval_unary_expr(u: TUnary, e: TExpr, table: TypeTable, env: Env) -> ConstValue | error {
+    if u.op == lexer::TokenKind::Minus {
+        match u.operand.kind {
+            TNumber as n => if !n.is_float { return eval_int_literal((0 to i128) - n.value, e.type, e) }
+            _ => { }
+        }
+    }
     match eval_const(u.operand, table, env) {
         error as x => return x
         ConstValue as v => apply_unary(u.op, v, e)

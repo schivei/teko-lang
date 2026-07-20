@@ -285,6 +285,24 @@ fn fold_negate() {
 }
 
 /**
+ * fold_negative_min_literal — a leading `-` on an integer literal is a NEGATIVE LITERAL, not a
+ * negation of a positive one: the most-negative signed value of the `i8`/`i16`/`i32` families, whose
+ * positive magnitude `2^(w-1)` has NO signed form, folds to its exact two's-complement bits (`0x80…0`).
+ * The evaluator encodes the negated value against the whole type rather than range-checking the
+ * un-negatable positive operand in isolation (owner ruling 2026-07-20: the negative is a literal, not
+ * an operation — mirrors the type checker's negative-literal rule). Before the fix this raised a
+ * spurious "integer literal is out of range". `i64::MIN` (`-9223372036854775808`, whose bare `2^63`
+ * magnitude is not itself writable as a plain literal) is covered end-to-end by the
+ * `comptime_fold_format_oracle` regression, which folds it through the real parser.
+ */
+#test
+fn fold_negative_min_literal() {
+    cf_int_is(cf_un(lexer::TokenKind::Minus, cf_num(128 to i128, i8t()), i8t()), 128 to u128)
+    cf_int_is(cf_un(lexer::TokenKind::Minus, cf_num(32768 to i128, i16t()), i16t()), 32768 to u128)
+    cf_int_is(cf_un(lexer::TokenKind::Minus, cf_num(2147483648 to i128, i32t()), i32t()), 2147483648 to u128)
+}
+
+/**
  * fold_float_ops — f64 literals and `+ - * /` fold through IEEE bits (byte-exact vs
  * `teko::f64_bits`), and a float divide by zero is a compile error.
  */
@@ -1167,6 +1185,35 @@ fn fold_interp_float_hole_stays() {
                 _ => teko::assert::is_true(false)
             }
         }
+        _ => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * comptime_format_declines_nominal_hole_type — a hole whose type is NOMINAL (a user type: a
+ * date/time, any `Named`) is OUTSIDE the fold whitelist (`Str`/`Char`/`Byte`/int/bool), so
+ * `comptime_format` returns a located error under the natural (`TFSpecNone`) render and `fold_interp`
+ * leaves the interpolation as a runtime format. Locks in the owner constraint (2026-07-20): comptime
+ * formatting of a date/time is NEVER attempted — date formatting stays at runtime, like float.
+ */
+#test
+fn comptime_format_declines_nominal_hole_type() {
+    match comptime_format(cf_cvint(0 to u128, i64t()), cf_spec_none(), Named { name = "DateTime" }) {
+        error => teko::assert::is_true(true)
+        _ => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * comptime_format_declines_date_like_spec — a date/time format spec (lead char outside the integer
+ * fold whitelist `x`/`X`/`b`/`d`/`n`, e.g. a `yyyy`-style date pattern) is not recognized by the
+ * comptime formatter, so `comptime_format` errors and the interpolation stays runtime — a date FORMAT
+ * spec is never folded even on an integer-carried value (owner constraint 2026-07-20).
+ */
+#test
+fn comptime_format_declines_date_like_spec() {
+    match comptime_format(cf_cvint(0 to u128, i64t()), cf_spec_static("yyyy"), i64t()) {
+        error => teko::assert::is_true(true)
         _ => teko::assert::is_true(false)
     }
 }
