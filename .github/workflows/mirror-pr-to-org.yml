@@ -30,12 +30,13 @@ concurrency:
 
 jobs:
   mirror:
-    # fork only; head is any branch EXCEPT the seed itself or main
+    # fork only; head is any branch EXCEPT the seed itself or main. The umbrella head
+    # (remodel/**) IS mirrored — it is pushed under a non-protected alias (see the resolve
+    # step) so the org's branch protection on remodel/** never rejects the push.
     if: >-
       github.repository == 'schivei/teko-lang' &&
       github.event.pull_request.head.ref != 'seed/linux-x86_64' &&
-      github.event.pull_request.head.ref != 'main' &&
-      github.event.pull_request.head.ref != 'remodel/emit-throughput'
+      github.event.pull_request.head.ref != 'main'
     runs-on: ubuntu-latest
     env:
       ORG: teko-org/teko-lang
@@ -64,12 +65,27 @@ jobs:
           # push URL below, so the push would resolve as github-actions[bot] and be denied 403.
           persist-credentials: false
 
-      - name: Push the head branch to the org (same name)
+      - name: Resolve the org head branch (alias the protected umbrella head)
+        run: |
+          set -eu
+          # The org protects remodel/** (branch rule: "changes must be made through a pull
+          # request" — GH013), so a DIRECT push of remodel/emit-throughput to the org is rejected
+          # and no PR can be opened from it. Push the umbrella head under a NON-protected alias
+          # (promote/<tail>) and open the org PR from that alias instead. Any other head keeps its
+          # own name (feature branches aren't protected on the org).
+          case "$HEAD_REF" in
+            remodel/*) ORG_HEAD="promote/${HEAD_REF#remodel/}" ;;
+            *)         ORG_HEAD="$HEAD_REF" ;;
+          esac
+          echo "ORG_HEAD=$ORG_HEAD" >> "$GITHUB_ENV"
+          echo "org head branch = $ORG_HEAD  (fork head = $HEAD_REF)"
+
+      - name: Push the head branch to the org (under its org-head name)
         run: |
           set -eu
           git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" \
-            "HEAD:refs/heads/${HEAD_REF}" --force-with-lease || \
-            git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" "HEAD:refs/heads/${HEAD_REF}"
+            "HEAD:refs/heads/${ORG_HEAD}" --force-with-lease || \
+            git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" "HEAD:refs/heads/${ORG_HEAD}"
 
       - name: Open (or update) the identical org PR
         env:
@@ -79,13 +95,13 @@ jobs:
           BODY_FULL="${BODY}
 
 ---
-Mirrored from ${GITHUB_REPOSITORY}#${NUM} (fork). Titles/bodies kept in sync for the org-side merge."
-          EXIST="$(gh pr list --repo "$ORG" --head "$HEAD_REF" --base "$BASE_REF" --state open --json number --jq '.[0].number' || true)"
+Mirrored from ${GITHUB_REPOSITORY}#${NUM} (fork, head \`${HEAD_REF}\`). Titles/bodies kept in sync for the org-side merge."
+          EXIST="$(gh pr list --repo "$ORG" --head "$ORG_HEAD" --base "$BASE_REF" --state open --json number --jq '.[0].number' || true)"
           if [ -n "${EXIST:-}" ]; then
             gh pr edit "$EXIST" --repo "$ORG" --title "$TITLE" --body "$BODY_FULL"
             echo "Updated org PR #$EXIST"
           else
-            gh pr create --repo "$ORG" --head "$HEAD_REF" --base "$BASE_REF" \
+            gh pr create --repo "$ORG" --head "$ORG_HEAD" --base "$BASE_REF" \
               --title "$TITLE" --body "$BODY_FULL" --draft
-            echo "Opened org draft PR ($HEAD_REF -> $BASE_REF)"
+            echo "Opened org draft PR ($ORG_HEAD -> $BASE_REF)"
           fi
