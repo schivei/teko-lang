@@ -92,16 +92,22 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
         run: |
           set -eu
-          BODY_FULL="${BODY}
-
----
-Mirrored from ${GITHUB_REPOSITORY}#${NUM} (fork, head \`${HEAD_REF}\`). Titles/bodies kept in sync for the org-side merge."
+          # Build the mirrored body in a FILE via printf %s — the fork PR body ($BODY) is arbitrary
+          # Markdown (backticks, quotes, $, newlines); interpolating it into an inline double-quoted
+          # assignment broke the shell parse ("unexpected EOF looking for matching quote"). printf %s
+          # takes each value as a literal argument, and --body-file avoids re-quoting entirely.
+          BODY_FILE="$RUNNER_TEMP/org-pr-body.md"
+          {
+            printf '%s\n\n---\n' "$BODY"
+            printf 'Mirrored from %s#%s (fork, head `%s`). Titles/bodies kept in sync for the org-side merge.\n' \
+              "$GITHUB_REPOSITORY" "$NUM" "$HEAD_REF"
+          } > "$BODY_FILE"
           EXIST="$(gh pr list --repo "$ORG" --head "$ORG_HEAD" --base "$BASE_REF" --state open --json number --jq '.[0].number' || true)"
           if [ -n "${EXIST:-}" ]; then
-            gh pr edit "$EXIST" --repo "$ORG" --title "$TITLE" --body "$BODY_FULL"
+            gh pr edit "$EXIST" --repo "$ORG" --title "$TITLE" --body-file "$BODY_FILE"
             echo "Updated org PR #$EXIST"
           else
             gh pr create --repo "$ORG" --head "$ORG_HEAD" --base "$BASE_REF" \
-              --title "$TITLE" --body "$BODY_FULL" --draft
+              --title "$TITLE" --body-file "$BODY_FILE" --draft
             echo "Opened org draft PR ($ORG_HEAD -> $BASE_REF)"
           fi
