@@ -11,6 +11,13 @@
 # so WITHOUT the secret this fails loud (never silently no-ops, never fabricates a PR).
 #
 # Scope: fork repo only; base = seed/linux-x86_64; head ≠ seed/linux-x86_64 and head ≠ main.
+#
+# ORG RULESET (learned the hard way): teko-org protects remodel/** and the promote/** alias with
+# "changes must be made through a pull request" (GH013). That blocks UPDATES to an existing org
+# branch — even a fast-forward — so a stable alias can be created once but never advanced. The
+# umbrella head is therefore mirrored to a UNIQUE per-commit org branch (promote/<tail>--<sha7>):
+# every push is a fresh CREATE (allowed). The PR step closes the previous mirror PR so exactly one
+# current org PR remains. Feature-branch heads (not protected on the org) keep their own name.
 name: Mirror PR to org
 
 on:
@@ -41,6 +48,7 @@ jobs:
     env:
       ORG: teko-org/teko-lang
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       BASE_REF: ${{ github.event.pull_request.base.ref }}
       TITLE: ${{ github.event.pull_request.title }}
       BODY: ${{ github.event.pull_request.body }}
@@ -65,29 +73,54 @@ jobs:
           # push URL below, so the push would resolve as github-actions[bot] and be denied 403.
           persist-credentials: false
 
-      - name: Resolve the org head branch (alias the protected umbrella head)
+      - name: Resolve the org head branch (unique per-commit for the protected umbrella head)
         run: |
           set -eu
-          # The org protects remodel/** (branch rule: "changes must be made through a pull
-          # request" — GH013), so a DIRECT push of remodel/emit-throughput to the org is rejected
-          # and no PR can be opened from it. Push the umbrella head under a NON-protected alias
-          # (promote/<tail>) and open the org PR from that alias instead. Any other head keeps its
-          # own name (feature branches aren't protected on the org).
+          # The org protects remodel/** AND the promote/** alias (ruleset: "changes must be made
+          # through a pull request" — GH013). That rule blocks UPDATES to an existing org branch —
+          # even a fast-forward — so a STABLE alias can be created ONCE but never advanced. To keep
+          # the org PR current, mint a UNIQUE per-commit branch (promote/<tail>--<sha7>): every push
+          # is a fresh CREATE (allowed), never a blocked update. The PR step closes the prior
+          # unique branch's PR so exactly one current org PR remains. Non-umbrella heads (feature
+          # branches, not protected on the org) keep their own name and are pushed in place.
           case "$HEAD_REF" in
-            remodel/*) ORG_HEAD="promote/${HEAD_REF#remodel/}" ;;
-            *)         ORG_HEAD="$HEAD_REF" ;;
+            remodel/*)
+              TAIL="${HEAD_REF#remodel/}"
+              SHORT="$(printf '%s' "$HEAD_SHA" | cut -c1-7)"
+              echo "ORG_HEAD=promote/${TAIL}--${SHORT}" >> "$GITHUB_ENV"
+              echo "ORG_HEAD_PREFIX=promote/${TAIL}--" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "ORG_HEAD=${HEAD_REF}" >> "$GITHUB_ENV"
+              echo "ORG_HEAD_PREFIX=" >> "$GITHUB_ENV"
+              ;;
           esac
-          echo "ORG_HEAD=$ORG_HEAD" >> "$GITHUB_ENV"
-          echo "org head branch = $ORG_HEAD  (fork head = $HEAD_REF)"
 
-      - name: Push the head branch to the org (under its org-head name)
+      - name: Push the head branch to the org (create under its org-head name)
         run: |
           set -eu
-          git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" \
-            "HEAD:refs/heads/${ORG_HEAD}" --force-with-lease || \
-            git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" "HEAD:refs/heads/${ORG_HEAD}"
+          echo "org head branch = ${ORG_HEAD}  (fork head = ${HEAD_REF})"
+          # A unique per-commit umbrella branch is always a fresh create. A same-name feature head
+          # may already exist and be a fast-forward; keep the force-with-lease→plain fallback for it.
+          # Tolerate a rejected push ONLY when the branch already exists at this exact SHA (a
+          # re-delivered event): the PR step can still run against it. Any other failure is fatal.
+          if git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" \
+               "HEAD:refs/heads/${ORG_HEAD}" --force-with-lease 2>/tmp/pusherr || \
+             git push "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" \
+               "HEAD:refs/heads/${ORG_HEAD}" 2>>/tmp/pusherr; then
+            echo "pushed ${ORG_HEAD}"
+          else
+            cat /tmp/pusherr >&2
+            REMOTE_SHA="$(git ls-remote "https://x-access-token:${ORG_TOKEN}@github.com/${ORG}.git" "refs/heads/${ORG_HEAD}" | cut -f1)"
+            if [ "$REMOTE_SHA" = "$(git rev-parse HEAD)" ]; then
+              echo "branch ${ORG_HEAD} already at this SHA (re-delivery) — continuing"
+            else
+              echo "::error::push of ${ORG_HEAD} to $ORG failed and the branch is not already at this SHA."
+              exit 1
+            fi
+          fi
 
-      - name: Open (or update) the identical org PR
+      - name: Open the org PR (close any superseded mirror PR)
         env:
           GH_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
         run: |
@@ -99,9 +132,20 @@ jobs:
           BODY_FILE="$RUNNER_TEMP/org-pr-body.md"
           {
             printf '%s\n\n---\n' "$BODY"
-            printf 'Mirrored from %s#%s (fork, head `%s`). Titles/bodies kept in sync for the org-side merge.\n' \
-              "$GITHUB_REPOSITORY" "$NUM" "$HEAD_REF"
+            printf 'Mirrored from %s#%s (fork, head `%s` @ %s). One current org PR per umbrella push.\n' \
+              "$GITHUB_REPOSITORY" "$NUM" "$HEAD_REF" "$HEAD_SHA"
           } > "$BODY_FILE"
+          # Close any older open mirror PR for this umbrella (unique-branch model → keep newest only),
+          # best-effort deleting its stale org branch. Skipped for same-name feature heads (no prefix).
+          if [ -n "${ORG_HEAD_PREFIX:-}" ]; then
+            OLD="$(gh pr list --repo "$ORG" --base "$BASE_REF" --state open --json number,headRefName \
+                     --jq ".[] | select(.headRefName|startswith(\"$ORG_HEAD_PREFIX\")) | select(.headRefName != \"$ORG_HEAD\") | .number" || true)"
+            for n in $OLD; do
+              gh pr close "$n" --repo "$ORG" --delete-branch \
+                --comment "Superseded by a newer mirror of the umbrella head (${ORG_HEAD})." || true
+              echo "closed superseded org PR #$n"
+            done
+          fi
           EXIST="$(gh pr list --repo "$ORG" --head "$ORG_HEAD" --base "$BASE_REF" --state open --json number --jq '.[0].number' || true)"
           if [ -n "${EXIST:-}" ]; then
             gh pr edit "$EXIST" --repo "$ORG" --title "$TITLE" --body-file "$BODY_FILE"
