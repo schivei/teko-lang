@@ -464,3 +464,98 @@ fn pt_checked_program_of_reports_consteval_cycle_under_own_phase() {
         error => teko::assert::is_true(true)
     }
 }
+
+/**
+ * cov_validation_of detects `--cov-validation` anywhere on the line and is absent otherwise — the
+ * opt-in that flips the D4 coverage floors from a warning to a hard failure (owner ruling 0.3.0.29).
+ */
+#test
+fn pt_cov_validation_of_detects_the_flag() {
+    teko::assert::is_true(cov_validation_of(args_of("build", "--cov-validation", ".")))
+    teko::assert::is_true(cov_validation_of(args_of("--cov-validation", "build", ".")))
+    teko::assert::is_false(cov_validation_of(args_of("build", ".", "-o")))
+    teko::assert::is_false(cov_validation_of(args_of("test", ".", "")))
+}
+
+/**
+ * per_test_cov_of detects `--per-test-cov` anywhere on the line and is absent otherwise — the
+ * dev-time per-test attribution knob (owner ruling 0.3.0.29 — the T2 lever), off by default.
+ */
+#test
+fn pt_per_test_cov_of_detects_the_flag() {
+    teko::assert::is_true(per_test_cov_of(args_of("test", "--per-test-cov", ".")))
+    teko::assert::is_true(per_test_cov_of(args_of("--per-test-cov", "test", ".")))
+    teko::assert::is_false(per_test_cov_of(args_of("test", ".", "--coverage")))
+    teko::assert::is_false(per_test_cov_of(args_of("build", ".", "")))
+}
+
+/**
+ * project_arg_of skips the two 0.3.0.29 coverage knobs (`--cov-validation`, `--per-test-cov`) — both
+ * value-less flags — so neither is ever mistaken for the project positional.
+ */
+#test
+fn pt_project_arg_of_skips_the_coverage_knobs() {
+    teko::assert::is_true(project_arg_of(args_of("--cov-validation", ".", ""), 0) == ".")
+    teko::assert::is_true(project_arg_of(args_of("--per-test-cov", ".", ""), 0) == ".")
+    teko::assert::is_true(project_arg_of(args_of(".", "--cov-validation", "--per-test-cov"), 0) == ".")
+}
+
+/**
+ * unmet_coverage_floors reports NOTHING when every measured percentage meets or exceeds its floor
+ * (equal counts as met — the comparison is strict `<`), and reports one message PER unmet floor, in
+ * the fixed functions → lines → branches order, each naming the offending metric.
+ */
+#test
+fn pt_unmet_coverage_floors_flags_only_the_low_metrics() {
+    teko::assert::is_true(unmet_coverage_floors(50, 50, 49, 50, 50, 49).len == 0)
+    teko::assert::is_true(unmet_coverage_floors(90, 90, 90, 50, 50, 49).len == 0)
+    let all_low = unmet_coverage_floors(10, 20, 30, 50, 50, 49)
+    teko::assert::is_true(all_low.len == 3)
+    teko::assert::str_contains(all_low[0], "function coverage 10%")
+    teko::assert::str_contains(all_low[1], "line coverage 20%")
+    teko::assert::str_contains(all_low[2], "branch coverage 30%")
+    let only_branch = unmet_coverage_floors(80, 80, 40, 50, 50, 49)
+    teko::assert::is_true(only_branch.len == 1)
+    teko::assert::str_contains(only_branch[0], "branch coverage 40%")
+}
+
+/**
+ * coverage_floor_blocks encodes the whole `--cov-validation` policy: a run BELOW a floor is a
+ * non-blocking pass by default (validation off → never blocks) and a hard failure only when
+ * validation is opted in; a run that MEETS every floor never blocks regardless of the flag.
+ */
+#test
+fn pt_coverage_floor_blocks_is_opt_in() {
+    let below = unmet_coverage_floors(10, 10, 10, 50, 50, 49)
+    let met = unmet_coverage_floors(90, 90, 90, 50, 50, 49)
+    teko::assert::is_false(coverage_floor_blocks(below, false))
+    teko::assert::is_true(coverage_floor_blocks(below, true))
+    teko::assert::is_false(coverage_floor_blocks(met, false))
+    teko::assert::is_false(coverage_floor_blocks(met, true))
+}
+
+/**
+ * per_test_cov_row_str renders one attribution row in the stable, greppable shape the T2
+ * investigation parses: `per-test-cov <label> functions=<f>% lines=<l>% branches=<b>%`.
+ */
+#test
+fn pt_per_test_cov_row_str_shape() {
+    let r = PerTestCoverage { label = "teko::demo::t1"; functions = 42; lines = 37; branches = 25 }
+    teko::assert::is_true(per_test_cov_row_str(r) == "per-test-cov teko::demo::t1 functions=42% lines=37% branches=25%")
+}
+
+/**
+ * per_test_cov_report_str prints the fixed header then one newline-terminated row per test, in order.
+ * An empty row set yields the header alone — the report shape the `--per-test-cov` fixture asserts.
+ */
+#test
+fn pt_per_test_cov_report_str_shape() {
+    teko::assert::is_true(per_test_cov_report_str(teko::list::empty()) == "teko: per-test coverage attribution\n")
+    mut rows: []PerTestCoverage = teko::list::empty()
+    rows = teko::list::push(rows, PerTestCoverage { label = "a"; functions = 10; lines = 20; branches = 30 })
+    rows = teko::list::push(rows, PerTestCoverage { label = "b"; functions = 1; lines = 2; branches = 3 })
+    let out = per_test_cov_report_str(rows)
+    teko::assert::str_contains(out, "teko: per-test coverage attribution\n")
+    teko::assert::str_contains(out, "per-test-cov a functions=10% lines=20% branches=30%\n")
+    teko::assert::str_contains(out, "per-test-cov b functions=1% lines=2% branches=3%\n")
+}
