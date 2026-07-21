@@ -1519,7 +1519,7 @@ fn ensure_rt_dir_abs() {
  *  @param out_dir  the build output directory (`-o`, default "bin")
  *  @return         0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C) }
+fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C, false) }
 
 // (#148) report_peak — the compiler prints its own memory cost at the end of a successful build
 // (peak RSS via teko::mem::peak_rss; 0 = unavailable on this host → print suppressed).
@@ -1588,23 +1588,111 @@ fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i128, backe
     codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start)
 }
 
-/** Check the D4 coverage floors (from the `.tkp` [coverage] section; default 80/80/80) against
- *  `fe`'s recorded function/line/branch coverage. Returns 0 when every floor is met, else the
- *  first failing floor's `fail` status (BLOCKED — the build stops here). Extracted from run_gate
- *  so each floor check is one guard clause instead of three nested arms. */
+/**
+ * The human-readable messages for every D4 coverage floor a run fails to meet, in the fixed order
+ * functions → lines → branches. Empty (len 0) when every floor holds. The SINGLE source of the
+ * floor-comparison logic and its wording, shared by the strict enforcement path
+ * (`coverage_gate_result` fails on the first) and the non-blocking path (`warn_coverage_floors`
+ * prints them all) so both agree exactly on which floors are unmet. Takes the floors as explicit
+ * values (not a `Manifest`) so the comparison is a pure, directly-testable function.
+ *
+ * @param fcov     the measured function-coverage percentage
+ * @param lcov     the measured line-coverage percentage
+ * @param bcov     the measured branch-coverage percentage
+ * @param floor_f  the [coverage] functions floor percentage
+ * @param floor_l  the [coverage] lines floor percentage
+ * @param floor_b  the [coverage] branches floor percentage
+ * @return         one message per unmet floor (functions, then lines, then branches); empty when all hold
+ */
+fn unmet_coverage_floors(fcov: u64, lcov: u64, bcov: u64, floor_f: u64, floor_l: u64, floor_b: u64) -> []str {
+    mut msgs: []str = teko::list::empty()
+    if fcov < floor_f {
+        msgs = teko::list::push(msgs, $"function coverage {fcov}% is below the {floor_f}% floor ([coverage] functions) — add tests")
+    }
+    if lcov < floor_l {
+        msgs = teko::list::push(msgs, $"line coverage {lcov}% is below the {floor_l}% floor ([coverage] lines) — add tests")
+    }
+    if bcov < floor_b {
+        msgs = teko::list::push(msgs, $"branch coverage {bcov}% is below the {floor_b}% floor ([coverage] branches) — add tests")
+    }
+    msgs
+}
+
+/**
+ * The unmet-floor messages for `fe`'s recorded function/line/branch coverage against the `.tkp`
+ * [coverage] floors (default 50/50/49). Thin wrapper over `unmet_coverage_floors` that reads the
+ * three measured percentages off the coverage sinks and the three floors off the manifest.
+ *
+ * @param fe  the assembled front-end product (checked program + manifest with the floors)
+ * @return    one message per unmet floor; empty when every floor holds
+ */
+fn coverage_floor_misses(fe: Frontend) -> []str {
+    unmet_coverage_floors(coverage::coverage_pct(fe.prog), coverage::line_coverage_pct(fe.prog), coverage::branch_coverage_pct(fe.prog), fe.manifest.cov_functions, fe.manifest.cov_lines, fe.manifest.cov_branches)
+}
+
+/**
+ * The D4 coverage-floor POLICY as a pure predicate: does an unmet floor BLOCK the gate? Only when
+ * enforcement is opted into (`cov_validation`) AND at least one floor is unmet (owner ruling
+ * 0.3.0.29). The single source of the "warn vs fail" decision, exercised directly by the
+ * regression tests for both paths.
+ *
+ * @param misses          the unmet-floor messages (from `coverage_floor_misses`)
+ * @param cov_validation  `--cov-validation` — enforcement opted in
+ * @return                true iff the gate must FAIL (enforce on AND a floor unmet); false = warn/pass
+ */
+fn coverage_floor_blocks(misses: []str, cov_validation: bool) -> bool {
+    cov_validation && misses.len > 0
+}
+
+/**
+ * Check the D4 coverage floors STRICTLY (the `--cov-validation` path): 0 when every floor holds,
+ * else the FIRST unmet floor's `fail` status (BLOCKED — the build stops here). This is the historic
+ * enforcing behavior, now reached only under opt-in validation (owner ruling 0.3.0.29: floors are
+ * non-blocking by default — see `enforce_coverage_floors`).
+ *
+ * @param dir  the project directory (for the diagnostic prefix)
+ * @param fe   the assembled front-end product (checked program + manifest floors)
+ * @return     0 when every floor holds, else 1 with the first unmet floor reported to stderr
+ * @throws     the first unmet floor's message when any of functions/lines/branches is below its floor
+ */
 fn coverage_gate_result(dir: str, fe: Frontend) -> i32 {
-    let fcov = coverage::coverage_pct(fe.prog)
-    if fcov < fe.manifest.cov_functions {
-        return fail(dir, $"function coverage {fcov}% is below the {fe.manifest.cov_functions}% floor ([coverage] functions) — add tests")
+    let misses = coverage_floor_misses(fe)
+    if coverage_floor_blocks(misses, true) { return fail(dir, misses[0]) }
+    0
+}
+
+/**
+ * Print every unmet coverage floor as a NON-BLOCKING warning to stderr (the default path when
+ * `--cov-validation` is absent — owner ruling 0.3.0.29). Each message is prefixed `teko: warning:`
+ * and the build/gate proceeds regardless; only `--cov-validation` turns these into a failure.
+ *
+ * @param misses  the unmet-floor messages (from `coverage_floor_misses`); empty prints nothing
+ */
+fn warn_coverage_floors(misses: []str) {
+    mut i: u64 = 0
+    loop {
+        if i >= misses.len { break }
+        teko::io::eprintln(teko::str::concat("teko: warning: ", misses[i]))
+        i = i + 1
     }
-    let lcov = coverage::line_coverage_pct(fe.prog)
-    if lcov < fe.manifest.cov_lines {
-        return fail(dir, $"line coverage {lcov}% is below the {fe.manifest.cov_lines}% floor ([coverage] lines) — add tests")
-    }
-    let bcov = coverage::branch_coverage_pct(fe.prog)
-    if bcov < fe.manifest.cov_branches {
-        return fail(dir, $"branch coverage {bcov}% is below the {fe.manifest.cov_branches}% floor ([coverage] branches) — add tests")
-    }
+}
+
+/**
+ * Apply the D4 coverage-floor policy under the `--cov-validation` opt-in (owner ruling 0.3.0.29:
+ * the floors are a NON-BLOCKING warning by default; enforcement is opt-in). With `cov_validation`
+ * true an unmet floor FAILS the gate (`coverage_gate_result`, the historic behavior); with it false
+ * an unmet floor only WARNS (`warn_coverage_floors`) and the gate passes. The tests-pass gate itself
+ * is unaffected — only this coverage-FLOOR enforcement is made opt-in.
+ *
+ * @param dir             the project directory (for the diagnostic prefix)
+ * @param fe              the assembled front-end product (checked program + manifest floors)
+ * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on an unmet floor
+ * @return                0 unless `cov_validation` is set AND a floor is unmet, in which case 1
+ * @throws                under `cov_validation`, the first unmet floor's message
+ */
+fn enforce_coverage_floors(dir: str, fe: Frontend, cov_validation: bool) -> i32 {
+    if cov_validation { return coverage_gate_result(dir, fe) }
+    warn_coverage_floors(coverage_floor_misses(fe))
     0
 }
 
@@ -1707,13 +1795,14 @@ fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i128, ba
  *  @param tty      render the release rebuild's backend phases' in-place `\r` updates
  *  @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
  *  @param backend  the resolved code-generation backend (`--backend`, default `Backend::C`)
- *  @return         0 when every test passes, every floor is met, and the release build succeeds
+ *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ *  @return         0 when every test passes, the floor policy is satisfied, and the release build succeeds
  *  @since #265 */
-fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend) -> i32 {
+fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend, cov_validation: bool) -> i32 {
     let trc = run_native_gate(dir, out_dir, fe.prog, fe.manifest, tty)
     if trc != 0 { return trc }
     report_native_coverage(fe.prog)
-    let gate_rc = coverage_gate_result(dir, fe)
+    let gate_rc = enforce_coverage_floors(dir, fe, cov_validation)
     if gate_rc != 0 { return gate_rc }
     if gen_cov {
         let xml = coverage::cov_cobertura(fe.prog)
@@ -1737,10 +1826,11 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
  * @param tty      render the release rebuild's backend phases' in-place `\r` updates
  * @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
  * @param backend  the resolved code-generation backend (`--backend`, default `Backend::C`)
+ * @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
  * @return         0 when the gate passes and the release build succeeds, else the failing status
  */
-fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend) -> i32 {
-    run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend)
+fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend, cov_validation: bool) -> i32 {
+    run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation)
 }
 
 /** No `#test` functions at all: ignore the gate, build the production program straight from the
@@ -1767,9 +1857,10 @@ fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: b
  *  @param opt          the cc optimization level (`--release`/`--opt=<n>`; 0 = dev/CI default, 2 = release seed)
  *  @param no_tty       `--no-tty` — force the plain, non-interactive observability output even on a terminal
  *  @param backend      the resolved code-generation backend (`--backend`, default `Backend::C`)
+ *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning (0.3.0.29)
  *  @return             0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend) -> i32 {
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool) -> i32 {
     ensure_rt_dir_abs()
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     let tty = output_is_tty(no_tty)
@@ -1783,7 +1874,7 @@ fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt
             if !has_tests(fe.prog) {
                 return build_no_tests_present(dir, out_dir, fe, opt, tty, start, backend)
             }
-            run_gate(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend)
+            run_gate(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation)
         }
         error as e => return fail(dir, e.message)
     }
@@ -1847,6 +1938,25 @@ fn no_verify_of(args: []str) -> bool {
 }
 
 /**
+ * Does `--cov-validation` appear in the args? (Owner ruling 0.3.0.29.) The D4 coverage floors are a
+ * NON-BLOCKING warning by default; this flag opts INTO strict enforcement — an unmet floor then FAILS
+ * the build/test gate (`enforce_coverage_floors`), the historic behavior. The tests-pass gate is
+ * always mandatory and unaffected; only the coverage-FLOOR enforcement is gated behind this flag.
+ *
+ * @param args  the full CLI argument vector
+ * @return      true iff `--cov-validation` appears anywhere in `args`
+ */
+fn cov_validation_of(args: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == "--cov-validation" { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
  * does `--no-tty` appear in the args? (BUILD-OUTPUT OBSERVABILITY.) FORCES the plain,
  * non-interactive phase output (no `\r` in-place updates, one settled line per phase)
  * even when stdout IS a real terminal — a manual override of `output_is_tty`'s
@@ -1868,7 +1978,8 @@ fn no_tty_of(args: []str) -> bool {
 
 /** project_arg_of — the FIRST non-flag positional (the project) from `start`, or "" if none (the
  *  caller reports). Skips `-o <dir>` (and its value), `--no-test` (D4; currently ignored),
- *  `--no-verify` (#249 lever A), `--native-gate` (#265, now an inert no-op), `--release`,
+ *  `--no-verify` (#249 lever A), `--cov-validation` (the 0.3.0.29 coverage-floor knob),
+ *  `--native-gate` (#265, now an inert no-op), `--release`,
  *  `--opt=<n>` (the optimization axis), `--no-tty` (BUILD-OUTPUT OBSERVABILITY), and `--backend`
  *  (D1/#390: both the `--backend <value>` two-token form and the `--backend=<value>` single-token
  *  form) — every recognized build flag — so none of them is mistaken for the project. `--vm-gate`
@@ -1886,6 +1997,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
         if args[i] == "-o" { i = i + 2 }
         else if args[i] == "--no-test" { i = i + 1 }
         else if args[i] == "--no-verify" { i = i + 1 }
+        else if args[i] == "--cov-validation" { i = i + 1 }
         else if args[i] == "--native-gate" { i = i + 1 }
         else if args[i] == "--release" { i = i + 1 }
         else if args[i] == "--no-tty" { i = i + 1 }
@@ -1980,15 +2092,17 @@ fn run_project(dir: str, backend: Backend) -> i32 {
 /**
  * The `teko test <dir>` entry (D2, post-VM): assemble WITH the `.tkt` tests, then run every
  * `#test` NATIVELY via the #265 native gate (emit a test-profile C TU, compile with `run_cc`,
- * run the child fail-fast — a failed assert panics with a non-zero exit, M.1), and enforce the
- * D4 coverage floors. Unlike `teko build`, it emits NO release binary. `--coverage` writes a
- * Cobertura report to `<cwd>/cobertura.xml` (the project root — `teko test` has no `-o`).
+ * run the child fail-fast — a failed assert panics with a non-zero exit, M.1), then apply the
+ * D4 coverage-floor policy (`--cov-validation` enforces; otherwise warns — owner ruling 0.3.0.29).
+ * Unlike `teko build`, it emits NO release binary. `--coverage` writes a Cobertura report to
+ * `<cwd>/cobertura.xml` (the project root — `teko test` has no `-o`).
  *
- * @param dir      the project directory (already the cwd; the front-end chdir'd in)
- * @param gen_cov  `--coverage` — write the Cobertura report next to the project root
- * @return         0 when every test passes and the floors hold, else the failing status
+ * @param dir             the project directory (already the cwd; the front-end chdir'd in)
+ * @param gen_cov         `--coverage` — write the Cobertura report next to the project root
+ * @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ * @return                0 when every test passes and the floor policy holds, else the failing status
  */
-fn test_project(dir: str, gen_cov: bool) -> i32 {
+fn test_project(dir: str, gen_cov: bool, cov_validation: bool) -> i32 {
     ensure_rt_dir_abs()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
@@ -1998,5 +2112,5 @@ fn test_project(dir: str, gen_cov: bool) -> i32 {
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
         teko::io::println("teko: wrote coverage report cobertura.xml")
     }
-    coverage_gate_result(dir, fe)
+    enforce_coverage_floors(dir, fe, cov_validation)
 }
