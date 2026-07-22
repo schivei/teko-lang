@@ -181,67 +181,6 @@ fn loop_if_then(cond: Expr, then: Statement, line: u32, col: u32) -> Statement {
 }
 
 /**
- * loop_nullary_call — a nullary call expression `name()`, positioned at (`line`, `col`) — the
- * iterator pull `_it()` at the top of a for-each body (#517, §5.4).
- *
- * @param name  the callee name (the iterator temp)
- * @param line  the source line to stamp
- * @param col   the source column to stamp
- * @return      the `name()` call expression
- */
-fn loop_nullary_call(name: str, line: u32, col: u32) -> Expr {
-    let path = Path { segments = teko::list::push(teko::list::empty(), Segment { name = name }) }
-    Expr { kind = Call { callee = path; args = teko::list::empty(); arg_names = teko::list::empty(); type_args = teko::list::empty() }; line = line; col = col }
-}
-
-/**
- * loop_null_break_arm — the `null => break` arm of a for-each pull: when the iterator is exhausted
- * (`null`), leave the loop (#517, §5.4).
- *
- * @return  the `null => break` match arm
- */
-fn loop_null_break_arm() -> Arm {
-    Arm { pattern = NullPattern { }; has_when = false; guard = no_expr(); body = teko::list::push(teko::list::empty(), loop_break()) }
-}
-
-/**
- * loop_elem_bind_arm — the PLACEHOLDER present-value arm of a for-each pull. `_ as x` (a type-free
- * discard-then-capture) is banned as USER syntax (owner ruling: `_` is a discard, `as x` a capture —
- * a semantic contradiction) — `parse_pattern_primary` rejects it at parse time. This function still
- * builds the SAME `BindPattern` shape (an empty `type_name`, unreachable from any valid source text)
- * as an INTERNAL MARKER ONLY: the checker's `resolve_foreach_arm` (typer.tks) rewrites it, before any
- * pattern-matching/exhaustiveness/codegen ever observes it, into a REAL `T as x` bind using the
- * iterator's resolved element type `T` (known at for-each-typing time from `_it : () -> T?`) — the
- * existing, sound named-bind mechanism, unchanged (#517, §5.4).
- *
- * @param elem_name  the hygienic element temp the checker will bind
- * @param body       the element-binding body (loop-local copy binding(s) + user statements)
- * @return           the placeholder `=> { … }` match arm, pending checker completion
- */
-fn loop_elem_bind_arm(elem_name: str, body: []Statement) -> Arm {
-    let pat = BindPattern { type_name = Path { segments = teko::list::empty() }; has_binding = true; binding = elem_name; is_slice = false; slice_type = null; type_args = teko::list::empty() }
-    Arm { pattern = pat; has_when = false; guard = no_expr(); body = body }
-}
-
-/**
- * loop_match_pull — the for-each pull statement `match _it() { null => break; <placeholder> => { … } }`
- * at the TOP of the body, so `continue` re-pulls (advances) the iterator (#517, §5.4).
- *
- * @param it_name    the iterator temp (the closure `() -> T?`)
- * @param elem_name  the hygienic element temp
- * @param body       the element-binding body
- * @param line       the loop keyword's source line
- * @param col        the loop keyword's source column
- * @return           the pull `match` statement
- */
-fn loop_match_pull(it_name: str, elem_name: str, body: []Statement, line: u32, col: u32) -> Statement {
-    mut arms = teko::list::push(teko::list::empty(), loop_null_break_arm())
-    arms = teko::list::push(arms, loop_elem_bind_arm(elem_name, body))
-    let m = Expr { kind = MatchExpr { subject = loop_nullary_call(it_name, line, col); arms = arms }; line = line; col = col }
-    ExprStmt { expr = m }
-}
-
-/**
  * parse_loop_infinite — `[LABEL:] loop { … }`: the head is empty; the body is the parsed block
  * verbatim and `init` is empty (#517).
  *
@@ -430,10 +369,10 @@ fn parse_loop_three_part(tokens: []lexer::Token, tgt: Parsed<BindTarget>, ann: A
 }
 
 /**
- * loop_field_access — a field-read expression `<recv>.<field>`, positioned at (`line`, `col`) — one
- * per-field extraction of a for-each destructure (`mut a = _elem.a`) (#517, §5.5).
+ * loop_field_access — a field-read expression `<recv>.<field>`, positioned at (`line`, `col`) — the
+ * slice for-each's `<src>.len` high-endpoint read (#0.3.0.29).
  *
- * @param recv_name  the receiver variable name (the element temp)
+ * @param recv_name  the receiver variable name (the slice source / capture temp)
  * @param field      the field to read
  * @param line       the source line to stamp
  * @param col        the source column to stamp
@@ -441,80 +380,6 @@ fn parse_loop_three_part(tokens: []lexer::Token, tgt: Parsed<BindTarget>, ann: A
  */
 fn loop_field_access(recv_name: str, field: str, line: u32, col: u32) -> Expr {
     Expr { kind = FieldAccess { receiver = loop_var(recv_name, line, col); field = field }; line = line; col = col }
-}
-
-/**
- * loop_destructure_binds — expand a for-each destructure target `{ a; b }` to per-field loop-local
- * copies `mut a = _elem.a; mut b = _elem.b`, then the user body. Reuses field-access + simple
- * bindings (NOT the incomplete B.13 general destructure path); each field type is inferred and an
- * unknown field name is the checker's "no such field" error (#517, §5.5).
- *
- * @param names      the destructured field names, in order
- * @param elem_name  the hygienic element temp bound by the `_ as` pattern
- * @param body       the parsed user body
- * @param line       the loop keyword's source line
- * @param col        the loop keyword's source column
- * @return           the element-binding body (per-field copies + user statements)
- */
-fn loop_destructure_binds(names: []str, elem_name: str, body: []Statement, line: u32, col: u32) -> []Statement {
-    mut binds: []Statement = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= names.len { break }
-        binds = teko::list::push(binds, loop_mut_binding(names[i], loop_field_access(elem_name, names[i], line, col)))
-        i++
-    }
-    loop_append_all(binds, body)
-}
-
-/**
- * loop_foreach_bind_body — build a for-each arm's element-binding body: bind the user's target to a
- * loop-local COPY of the yielded element (`<elem>`), then the user statements. A SimpleName binds
- * `mut x = <elem>`; a destructure expands to per-field `mut a = <elem>.a` copies. All copies, no
- * write-back — owner 2026-07-12 (#517, §5.4/§5.5).
- *
- * @param tgt        the parsed bind-target (SimpleName or DestructurePattern)
- * @param elem_name  the hygienic element temp bound by the `_ as` pattern
- * @param ann        the parsed `: T` annotation (applied to a SimpleName copy binding)
- * @param body       the parsed user body
- * @param line       the loop keyword's source line
- * @param col        the loop keyword's source column
- * @return           the element-binding body
- */
-fn loop_foreach_bind_body(tgt: BindTarget, elem_name: str, ann: Annotation, body: []Statement, line: u32, col: u32) -> []Statement {
-    match tgt {
-        SimpleName as sn => prepend_stmt(loop_counter_binding(sn.name, loop_var(elem_name, line, col), ann.has_type, ann.type_ann), body)
-        DestructurePattern as dp => loop_destructure_binds(dp.names, elem_name, body, line, col)
-    }
-}
-
-/**
- * parse_loop_foreach — `[LABEL:] loop mut x [: T] in <it> { B }` where `<it> : () -> T?` is a
- * closure iterator (§5.4): desugar to `init = [mut _it = <it>]` and a body that pulls at the TOP —
- * `match _it() { null => break; _ as _elem => { mut x = _elem; ...B } }` — so `continue` re-pulls
- * (advances). A raw collection (not callable) fails typing at `_it()` (the deferred case) (#517).
- *
- * @param tokens  the token stream
- * @param tgt     the parsed bind-target
- * @param ann     the parsed `: T` annotation (applied to the copy binding)
- * @param it      the already-parsed iterable expression (its `.next` is the body `{`)
- * @param label   the UPPER_SNAKE prefix label, or "" when unlabeled
- * @param line    the loop keyword's source line
- * @param col     the loop keyword's source column
- * @return        the parsed loop statement, or a parse error
- */
-fn parse_loop_foreach(tokens: []lexer::Token, tgt: Parsed<BindTarget>, ann: Annotation, it: Parsed<Expr>, label: str, line: u32, col: u32) -> Parsed<Statement> | error {
-    if !is_kind_at(tokens, it.next, lexer::TokenKind::LBrace) {
-        return err_at(tokens, it.next, "expected '{' after the loop iterable")
-    }
-    let blk = match parse_block(tokens, it.next) { ParsedList<Statement> as x => x; error as e => return e }
-    let elem_name = loop_temp("elem", line, col)
-    let it_name = loop_temp("it", line, col)
-    let bind_body = loop_foreach_bind_body(tgt.node, elem_name, ann, blk.items, line, col)
-    let pull = loop_match_pull(it_name, elem_name, bind_body, line, col)
-    let init: []Statement = teko::list::push(teko::list::empty(), loop_mut_binding(it_name, it.node))
-    let body: []Statement = teko::list::push(teko::list::empty(), pull)
-    Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
 }
 
 /**
@@ -840,9 +705,11 @@ fn loop_expr_root_name_of_var(e: Expr) -> str {
 
 /**
  * parse_loop_binding — parse a `mut <bind-target> [: T]` loop head, then dispatch on the separator:
- * `in` with a `..`/`..=` iterable is a range (§5.2); any other `in` is a closure-iterator for-each
- * (§5.4, `parse_loop_foreach`); `=` is a 3-part head (§5.3, `parse_loop_three_part`). Binding is
- * `mut` only (#517).
+ * `in` with a `..`/`..=` iterable is a range (§5.2); `=` is a 3-part head (§5.3,
+ * `parse_loop_three_part`). A `mut` binding with any other `in` iterable is rejected with the
+ * inherited-mutability diagnostic (a for-each element's mutability comes from its container, so `mut`
+ * is dropped — the read-only / write-back for-each is the un-`mut` slice form, `parse_loop_foreach_slice`
+ * dispatched from `parse_loop`, §5.4). Binding is `mut` only (#517).
  *
  * @param tokens   the token stream
  * @param mut_pos  the position of the `mut` keyword (just past `loop`)
