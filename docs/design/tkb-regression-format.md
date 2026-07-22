@@ -68,6 +68,11 @@ When (entry verb — classifies the kind, no value):
 - `compilation fails` → `TkrKind::CompileFail` (assert the BUILD fails)
 - `it traps` may be written as `Then it traps` → `TkrKind::Trap` (non-zero exit only)
 
+Given (compile-fail source selection — the negative path only):
+- `source` = `"cases/<f>.tks"` → the standalone source file this `compilation fails` scenario
+  compiles (see §5.1). Present ONLY in a `compile_fail` project, where scenarios have no
+  shared built artifact and each row targets a distinct FAILING source.
+
 Then (expected observable outputs):
 - `exit` = `<int>` → `Tkr.exit`
 - `stdout` = `"…"` → `Tkr.stdout` (Literal)
@@ -120,6 +125,26 @@ substituted steps are lowered to a `Tkr`, and the built binary is RUN with that 
 Substitution is purely textual and happens BEFORE the `mf_read_*` value lexers see the
 line, so a placeholder may sit anywhere inside a quoted string or an array element.
 
+### 5.1 Compile-fail Outlines (the negative path — compile-per-scenario)
+
+A `compilation fails` scenario has NO run phase and NO shared built artifact, so the
+compile-once rule does NOT apply to it: each scenario compiles its own `Given source
+"cases/<f>.tks"` standalone and asserts the build fails (+ the `Then diagnostic` substring).
+A `compile_fail` project is therefore a single project directory whose `.tkb` Outline names a
+distinct failing source per row — ONE spec, N failing compiles, no run:
+
+```
+  Feature: compile_fail_diag — the rejected-construct diagnostics
+    Scenario Outline: <name> is rejected with its pinned message
+      Given source "<file>"
+      When compilation fails
+      Then diagnostic = "<msg>"
+      Examples:
+        | name                | file                        | msg                                                        |
+        | lit_u8_overflow     | cases/lit_u8_overflow.tks   | literal out of range for the annotated type (M.1 — fail early) |
+        | lit_neg_unsigned    | cases/lit_neg_unsigned.tks  | a negative literal cannot be annotated as an unsigned type (M.1) |
+```
+
 ## 6. Per-os-arch routing: the `on "<os-arch>"` prefix
 
 A `Then` step may be prefixed `on "<os-arch>"` to route the expectation into a
@@ -171,9 +196,23 @@ Reconciliation rule (HEX vs SHA256):
 
 ## 10. Fixtures the format ships with (0.3.0.30)
 
-- 5 passing `.tkb` + 2 failing `.tkb` (the failing pair proves the runner REPORTS a
-  mismatch, mirroring the `regressions-fail/` demo).
-- Meta-tests (`#test` in `src/build/tkb_test.tkt`) asserting: parse round-trips; a
-  Scenario lowers to the expected `Tkr`; an Outline expands to the expected `[]Tkr`;
-  verdict PARITY between a `.tkb` scenario and the equivalent hand-written `.tkr`
-  (identical `RegrOutcome`); and that a retained `.tkr` still passes unchanged.
+Per the owner revision (see `regressives-full-stack-0.3.0.30.md`), the regressive surface is
+**the compiler-regressor (the self-host + `teko test .` + fixpoint gate, R0) + THREE curated
+`.tkb` projects** — NOT a 1:1 migration of the old shell-harness fixtures. The `.tkb` format
+ships with those three projects:
+
+- **P1 `rt_behavior`** — a run-and-check Outline over fold-opaque argv operands (arith /
+  bitwise / shift-masked / compare / concat / foreach / `ids[i]=v`); exit + stdout oracles.
+- **P2 `host_cli_io`** — a run-and-check Outline over host surface + CLI `--` passthrough +
+  a file-IO roundtrip; exit + stdout/stderr text + one HEX-docstring byte golden.
+- **P3 `compile_fail_diag`** — the compile-per-scenario Outline of §5.1 pinning the 6 unique
+  rejection diagnostics.
+
+P1/P2 also carry a deliberately-FAILING scenario each (guarded behind a `gate = false`
+sibling or a dedicated failing demo) proving the runner REPORTS a mismatch, mirroring the
+`regressions-fail/` demo.
+
+Meta-tests (`#test` in `src/build/tkb_test.tkt`) assert: parse round-trips; a Scenario lowers
+to the expected `Tkr`; an Outline expands to the expected `[]Tkr`; a HEX docstring decodes
+control bytes; verdict PARITY between a `.tkb` scenario and the equivalent hand-written `.tkr`
+(identical `RegrOutcome`); and that a retained `.tkr` still passes unchanged.
