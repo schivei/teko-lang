@@ -332,7 +332,7 @@ fn run_one_regressive(exe: str, regr_dir: str, tkr_name: str, prefix: str) -> Re
     let name = match regressive_name(regr_dir) { str as s => s; error as e => return regr_fail(e.message) }
     let binp = regr_dir ~ "/bin/" ~ name
     let run = run_captured(argv_with_args(binp, t.args), t.stdin, prefix ~ ".run")
-    check_run(t, "host", run)
+    check_run(t, HOST_TARGET, run)
 }
 
 /**
@@ -412,6 +412,13 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
 }
 
 /**
+ * TEKO_IN_REGRESSION_VAR — the environment-variable key of the anti-recursion sentinel: set once a
+ * regression phase opens so a nested `teko test` (a regressive that itself built the compiler) cannot
+ * re-enter discovery. Pinned here so the probe (`env::var`) and the set (`env::set_var`) never drift.
+ */
+const TEKO_IN_REGRESSION_VAR: str = "TEKO_IN_REGRESSION"
+
+/**
  * run_regression_phase — the anti-recursion wrapper the `teko test` driver calls: it REFUSES to
  * start a regression phase when `TEKO_IN_REGRESSION` is already set (so a regressive that itself
  * built the compiler cannot re-enter discovery — the structural belt is that regressives are built,
@@ -424,8 +431,8 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
  * @since 0.3.0.29
  */
 fn run_regression_phase(exe: str, m: Manifest) -> i32 {
-    match teko::env::var("TEKO_IN_REGRESSION") { str => return 0; error => { } }
-    match teko::env::set_var("TEKO_IN_REGRESSION", "1") { error => { }; null => { } }
+    match teko::env::var(TEKO_IN_REGRESSION_VAR) { str => return 0; error => { } }
+    match teko::env::set_var(TEKO_IN_REGRESSION_VAR, "1") { error => { }; null => { } }
     run_regression_sources(exe, m)
 }
 
