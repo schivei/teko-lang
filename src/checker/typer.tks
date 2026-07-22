@@ -1498,6 +1498,27 @@ fn field_type(fields: []parser::Field, field: str, table: TypeTable, ref_ns: str
     error { message = $"no such field: {field}" }
 }
 
+/**
+ * require_narrowed — the null-union C5 deref fence (base §3d/§3f). Using a `T | null` (any
+ * null-bearing union) payload AS a bare member — a field read, or the `.value` deref of a
+ * `Ref<T> | null` — is REJECTED until the union has been narrowed to its bare member, the SAME
+ * narrowing invariant an unmatched `T | error` obeys. The two accepted narrowing scopes rebind the
+ * value to its bare member BEFORE this point (a `match` arm's pattern binding; the flow-narrowed
+ * branch of an equality guard), so reaching here with a still-`Variant` null-bearing type means the
+ * use is un-narrowed. Directs the author to the sanctioned narrowing forms.
+ *
+ * @param t  the receiver's resolved (still-union) type
+ * @return   the error demanding narrowing before the bare-member use
+ * @throws   error always (this is the reject path; the caller only calls it on a null-bearing union)
+ * @since 0.3.0.30 (null-union C5)
+ */
+fn require_narrowed(t: Type) -> error {
+    if is_ref_null_variant(t) {
+        return error { message = "cannot dereference a `Ref<T> | null` — narrow it to a bare `Ref<T>` first (`match r { null => …; Ref<T> as v => v.value }`), the deref fence keeping the never-null reference promise sound" }
+    }
+    error { message = "cannot use `.` on a `T | null` value before narrowing — narrow it first (`match x { null => …; T as v => v.… }`)" }
+}
+
 fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TExpr | error {
     let recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
     // `.len` on a `str` or a slice (`[]T`) -> u64 (W5-idx). This precedes the struct-field
@@ -1534,6 +1555,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
     // and point at the sanctioned readers (`?.`/`??`) instead of the generic struct message.
     match recv.type {
         Optional => return error { message = "cannot use `.` on a nullable value (`T?`) — read it with `?.` or `??` (REBOOT_PLAN §203)" }
+        Variant => if variant_has_null_member(recv.type) { return require_narrowed(recv.type) }
         _ => { }
     }
     let name = match recv.type {
@@ -3404,7 +3426,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     }
     match bound {
         Reference => { }
-        _ => if type_contains_ref(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
+        _ => if type_contains_ref(bound) && !is_ref_null_variant(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
     if !env.fn_unsafe && unsafe_carrying(bound, table) {
         return error { message = "safe fn binds a local of unsafe type — mark the enclosing fn `unsafe fn` or bind only safe types (§2: unsafe data cannot be held by a safe local)" }
@@ -4561,6 +4583,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, false) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
     let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     match ret { Reference => return error { message = "a function cannot return a reference (pass-down only)" }; _ => { } }
+    if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
         let ret_ok = if is_teko_rt {
             teko_rt_type_ok(ret)
@@ -4816,20 +4839,27 @@ fn check_ref_storability_match(m: TMatchExpr, spine: Spine) -> error? {
 }
 
 /**
- * Gate a `TBinding`: only a bare-`Reference`-bound `SimpleName` is a ref-to-local (nested-ref bounds
- * were rejected inline); check the spine. A destructure names no single ref cell.
+ * Gate a `TBinding`: a bare-`Reference`-bound `SimpleName`, OR a `Ref<T> | null`-bound `SimpleName`
+ * whose initializer is itself a live reference (a `&x` borrow or a ref-param alias — null-union C5
+ * lifting the "references are parameter-only" restriction for the two-member ref-null shape), is a
+ * ref-to-local; the spine must prove the borrow's referent outlives it. A `Ref<T> | null` local
+ * initialized to `null` borrows nothing and cannot dangle, so it is admitted without an outlives
+ * proof. A destructure names no single ref cell.
  *
- * @param TBinding b  the typed binding
- * @param Spine spine  the function's spine fact
- * @return error?  null when sound, else the reject error
+ * @param b      the typed binding
+ * @param spine  the function's spine fact
+ * @return       null when sound, else the R5 reject error
+ * @throws       error when the ref-to-local's referent does not provably outlive the borrow
  */
 fn check_ref_bind_storable(b: TBinding, spine: Spine) -> error? {
-    match b.bound {
-        Reference => match b.target {
-            parser::SimpleName as sn => ref_borrow_or_error(spine, sn.name, b.value)
-            parser::DestructurePattern => null
-        }
-        _ => null
+    let is_ref_bind = match b.bound {
+        Reference => true
+        _ => is_ref_null_variant(b.bound) && type_contains_ref(b.value.type)
+    }
+    if !is_ref_bind { return null }
+    match b.target {
+        parser::SimpleName as sn => ref_borrow_or_error(spine, sn.name, b.value)
+        parser::DestructurePattern => null
     }
 }
 
@@ -4935,6 +4965,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
     // (MEM Step 0, R3) ESCAPE GATE — a function cannot RETURN a reference (pass-down only): a
     // returned ref would outlive its caller-stack target. References flow only DOWN as params.
     match ret { Reference => return error { message = "a function cannot return a reference (pass-down only)" }; _ => { } }
+    if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
         // an extern is a bodyless foreign declaration (no body to check / return-analyze).
         // Validate the return marshals (void = no value is fine; else prim/byte only for now).
