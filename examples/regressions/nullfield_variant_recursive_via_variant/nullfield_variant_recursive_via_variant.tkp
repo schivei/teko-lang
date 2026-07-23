@@ -1,0 +1,16 @@
+# Regression (0.3.1 null-union C6): a RECURSIVE value-type cycle closed through a `variant | null`
+# struct field whose payload is itself a VARIANT. `Tree = Leaf | Node`, `Node { child: Tree | null }`
+# — the cycle runs Tree(variant) -> Node(struct member, by value) -> child: `Tree | null` -> Tree. The
+# self-recursion detector must walk the VARIANT'S MEMBERS (not only struct fields) to see the back-edge;
+# otherwise `Tree | null` (a small-min-byte variant, non-recursive by the struct-only walk) falls to
+# InlineTag, embeds `Tree` by value, and the C struct is infinite (codegen cyclic value-type error).
+# With the member-walking detector the absence union boxes into an 8-byte arena handle, finitizing the
+# struct. This is the exact shape of the compiler's own `checker::Ptr.inner: checker::Type | null`.
+#
+#   teko build examples/regressions/nullfield_variant_recursive_via_variant && \
+#     ./examples/regressions/nullfield_variant_recursive_via_variant/bin/nullfield_variant_recursive_via_variant   # -> exit 42
+name = "nullfield_variant_recursive_via_variant"
+source = "src"
+
+[artifact]
+kind = "binary"
