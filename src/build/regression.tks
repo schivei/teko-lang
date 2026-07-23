@@ -69,9 +69,10 @@ fn sh_squote(arg: str) -> str {
 }
 
 /**
- * windows_path_to_sh — rewrite every backslash in a Windows-style path to a forward slash — the core
- * conversion `to_sh_path` applies on a Windows host. Extracted from `to_sh_path` so the conversion
- * itself (not just the OS gate) is unit-testable on every CI host, independent of `teko::os()`.
+ * windows_path_to_sh — rewrite every backslash in a Windows-style path to a forward slash — the FIRST
+ * of the two rewrites `to_sh_path` applies on a Windows host (`windows_drive_to_mount` is the
+ * second). Extracted so the conversion itself (not just the OS gate) is unit-testable on every CI
+ * host, independent of `teko::os()`.
  *
  * @param path  a Windows-style filesystem path (drive-letter + backslash separators)
  * @return      `path` with every `\` rewritten to `/`
@@ -89,22 +90,43 @@ fn windows_path_to_sh(path: str) -> str {
 }
 
 /**
+ * windows_drive_to_mount — rewrite a forward-slashed, drive-letter-prefixed path (`D:/a/b`) to its
+ * git-bash/MSYS POSIX MOUNT form (`/d/a/b`) — the canonical, unambiguous form `cygpath -u` produces
+ * and the one every MSYS tool's own PATH/HOME already uses natively. A bare `D:/...` string, while
+ * often accepted for opening a FILE, is not guaranteed to resolve the same way when a shell decides
+ * HOW TO LAUNCH a command (its "is this a path?" check looks for a leading `/`); the mount form
+ * removes that ambiguity entirely. The drive letter is lowercased (matching `cygpath -u` — MSYS's
+ * fixed mount table is keyed on the lowercase letter). `path` unchanged when it carries no
+ * `<letter>:` prefix (already POSIX, or not a path at all).
+ *
+ * @param path  a forward-slashed path, possibly `<letter>:`-prefixed
+ * @return      the MSYS mount-style POSIX form, or `path` unchanged when it carries no drive letter
+ * @since 0.3.0.30
+ */
+fn windows_drive_to_mount(path: str) -> str {
+    if path.len < 2 || !is_ascii_alpha(path[0]) || path[1] != b':' { return path }
+    let d = path[0]
+    let lower_idx = if d >= b'A' && d <= b'Z' { (d to u64) - (b'A' to u64) } else { (d to u64) - (b'a' to u64) }
+    let drive = teko::str::slice("abcdefghijklmnopqrstuvwxyz", lower_idx, lower_idx + 1)
+    "/" ~ drive ~ teko::str::slice(path, 2, path.len)
+}
+
+/**
  * to_sh_path — normalize a FILESYSTEM PATH for the `/bin/sh -c` this runner spawns children through:
- * on a Windows host that `sh` is git-bash/MSYS, which resolves a drive-letter path only when it uses
- * forward slashes (`D:/a/.../teko.exe`) — its native backslash form (`D:\a\...\teko.exe`, the shape
- * a Windows CI runner hands the compiler as `argv[0]`/CWD-joined paths) does not survive that shell
- * unmangled, so the spawned command reads as "command not found" instead of the compiler.
- * `windows_path_to_sh` does the rewrite (every `\` to `/`; the drive letter, e.g. `D:`, needs no
- * change — git-bash accepts it as-is). A no-op on every other host, where a path never carries a `\`
- * to begin with.
+ * on a Windows host that `sh` is git-bash/MSYS, whose child-launch path resolution wants a POSIX
+ * mount-style absolute path (`/d/a/.../teko.exe`), not the native backslash form (`D:\a\...\teko.exe`,
+ * the shape a Windows CI runner hands the compiler as `argv[0]`/CWD-joined paths) — unconverted, the
+ * spawned command reads as "command not found" instead of the compiler. `windows_path_to_sh` handles
+ * the backslash-to-slash rewrite, then `windows_drive_to_mount` folds the drive letter into the mount
+ * form. A no-op on every other host, where a path never carries a `\` or a drive letter to begin with.
  *
  * @param path  a filesystem path as this host's `teko::env`/argv APIs return it
- * @return      `path` with every `\` rewritten to `/` on a Windows host, else `path` unchanged
+ * @return      the git-bash mount-style form of `path` on a Windows host, else `path` unchanged
  * @since 0.3.0.30
  */
 fn to_sh_path(path: str) -> str {
     if teko::os() != "windows" { return path }
-    windows_path_to_sh(path)
+    windows_drive_to_mount(windows_path_to_sh(path))
 }
 
 /**
