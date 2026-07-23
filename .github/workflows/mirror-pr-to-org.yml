@@ -1,81 +1,93 @@
 # .github/workflows/mirror-pr-to-org.yml
-# Auto-mirror a fork PR to the org (owner request). The fork PR is `branch -> seed/linux-x86_64`.
-# The mirror opens, on the org, a CROSS-FORK PR `fork:branch -> org:branch` — same branch name on
-# both sides. That org branch already exists on the org (here it is the umbrella
-# `remodel/emit-throughput`); the fork's copy carries the newer commits, and GitHub compares across
-# the fork network.
-#
-# WHY cross-fork (no push, no alias): `schivei/teko-lang` is a fork of `teko-org/teko-lang`, so a PR
-# can be opened straight from the fork branch into the org's same-named branch — nothing is pushed to
-# the org. This is exactly what the org's ruleset wants (GH013: "changes must be made through a pull
-# request"): the PR IS the change. Earlier attempts pushed the branch to the org (rejected by the
-# ruleset) and invented `promote/*` aliases — all unnecessary. The org NEVER has `seed/*`; the org PR
-# base is the branch name itself (the org's umbrella), not the fork PR's seed base.
-#
-# REQUIRES a repo secret `ORG_PR_TOKEN` — a PAT (or GitHub App token) with `pull-requests:write` on
-# `teko-org/teko-lang` (contents write is NOT needed — nothing is pushed). Without it this fails loud.
-#
-# Scope: fork repo only; fires on fork PRs whose base is seed/linux-x86_64; head ≠ seed and ≠ main.
+# MANUAL mirror (workflow_dispatch): the OWNER runs this from the Actions screen, passing the fork
+# PR number as input. It opens/updates the cross-fork org PR `fork:branch -> org:branch` carrying
+# the fork PR's title/body (drafts included). Manual because event-based triggers cannot cover the
+# promotion PR:
+#   - `pull_request` runs on the MERGE REF, which a conflicted cross-lineage promotion PR
+#     (umbrella -> seed) never has — so it stays silent exactly when mirroring matters;
+#   - `pull_request_target` registers its trigger from the DEFAULT branch (main), and this file
+#     lives ONLY on the seed (owner invariant) — verified empirically: active workflow + file on
+#     the base ref + edited events produced no run.
+# REQUIRES the repo secret `ORG_PR_TOKEN` (pull-requests:write on teko-org/teko-lang). Reading the
+# fork PR's metadata uses the default GITHUB_TOKEN (pull-requests: read).
 name: Mirror PR to org
 
 on:
-  # pull_request_target (NOT pull_request): resolves this workflow from the BASE branch (the seed),
-  # so the file needs to exist ONLY on the seed (owner invariant), and it FIRES EVEN WHEN THE PR IS
-  # CONFLICTED — a cross-lineage promotion PR (umbrella -> seed) has no merge ref, which silenced the
-  # old pull_request trigger entirely. Safe here: the job never checks out PR code; it only reads PR
-  # METADATA (title/body/number) and talks to the org via ORG_PR_TOKEN.
-  pull_request_target:
-    # opened/reopened create the org PR; synchronize/edited keep it in sync (the step is idempotent:
-    # it edits the existing org PR, and a cross-fork PR auto-tracks new commits on the fork branch —
-    # no push needed, so synchronize needs no branch update, just a title/body refresh).
-    types: [opened, reopened, synchronize, edited]
-    branches: [seed/linux-x86_64]   # only PRs whose BASE is the seed branch
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Número do PR do fork (base = seed) a espelhar na org"
+        required: true
+        type: string
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: mirror-pr-${{ github.event.pull_request.number }}
+  group: mirror-pr-${{ inputs.pr }}
   cancel-in-progress: false
 
 jobs:
   mirror:
-    # fork only; head is any branch EXCEPT the seed itself or main
-    if: >-
-      github.repository == 'schivei/teko-lang' &&
-      github.event.pull_request.head.ref != 'seed/linux-x86_64' &&
-      github.event.pull_request.head.ref != 'main'
+    if: github.repository == 'schivei/teko-lang'
     runs-on: ubuntu-latest
     env:
       ORG: teko-org/teko-lang
-      HEAD_REF: ${{ github.event.pull_request.head.ref }}
-      TITLE: ${{ github.event.pull_request.title }}
-      BODY: ${{ github.event.pull_request.body }}
-      NUM: ${{ github.event.pull_request.number }}
-      GH_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
+      PR: ${{ inputs.pr }}
+      SEED: seed/linux-x86_64
     steps:
-      - name: Guard — secret present
+      - name: Guard — org secret present
+        env:
+          ORG_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
         run: |
           set -eu
-          if [ -z "${GH_TOKEN:-}" ]; then
+          if [ -z "${ORG_TOKEN:-}" ]; then
             echo "::error::ORG_PR_TOKEN secret is required (pull-requests:write on $ORG). No org PR created."
             exit 1
           fi
 
-      - name: Open (or update) the cross-fork org PR (fork:branch -> org:branch)
+      - name: Read the fork PR metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          FORK_OWNER="${GITHUB_REPOSITORY%%/*}"   # e.g. schivei
-          # Build the mirrored body in a FILE via printf %s — the fork PR body ($BODY) is arbitrary
-          # Markdown (backticks, quotes, $, newlines); inlining it into a double-quoted assignment
-          # broke the shell parse. printf %s takes each value literally; --body-file avoids re-quoting.
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json state,baseRefName,headRefName,title,body > "$RUNNER_TEMP/pr.json"
+          STATE=$(jq -r .state "$RUNNER_TEMP/pr.json")
+          BASE_REF=$(jq -r .baseRefName "$RUNNER_TEMP/pr.json")
+          HEAD_REF=$(jq -r .headRefName "$RUNNER_TEMP/pr.json")
+          if [ "$STATE" != "OPEN" ]; then
+            echo "::error::PR #$PR is $STATE — only open PRs are mirrored."
+            exit 1
+          fi
+          if [ "$BASE_REF" != "$SEED" ]; then
+            echo "::error::PR #$PR base is '$BASE_REF' — this mirror is for PRs whose base is the seed ($SEED)."
+            exit 1
+          fi
+          if [ "$HEAD_REF" = "$SEED" ] || [ "$HEAD_REF" = "main" ]; then
+            echo "::error::PR #$PR head '$HEAD_REF' is excluded (seed/main are never mirrored as heads)."
+            exit 1
+          fi
+          # Title/body go through FILES (never inline shell) — arbitrary Markdown is not shell-safe.
+          jq -r .title "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/title.txt"
+          jq -r .body  "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/body-src.md"
+          echo "HEAD_REF=$HEAD_REF" >> "$GITHUB_ENV"
+
+      - name: Open (or update) the cross-fork org PR (fork:branch -> org:branch)
+        env:
+          GH_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
+        run: |
+          set -eu
+          FORK_OWNER="${GITHUB_REPOSITORY%%/*}"
           BODY_FILE="$RUNNER_TEMP/org-pr-body.md"
           {
-            printf '%s\n\n---\n' "$BODY"
-            printf 'Mirrored from %s#%s (%s:%s -> %s). Titles/bodies kept in sync for the org-side merge.\n' \
-              "$GITHUB_REPOSITORY" "$NUM" "$FORK_OWNER" "$HEAD_REF" "$HEAD_REF"
+            cat "$RUNNER_TEMP/body-src.md"
+            printf '\n\n---\n'
+            printf 'Mirrored from %s#%s (%s:%s -> %s). Manual dispatch; title/body synced on each run.\n' \
+              "$GITHUB_REPOSITORY" "$PR" "$FORK_OWNER" "$HEAD_REF" "$HEAD_REF"
           } > "$BODY_FILE"
-          # Find an already-open cross-fork PR (same fork head branch, same org base branch).
+          TITLE="$(cat "$RUNNER_TEMP/title.txt")"
           EXIST="$(gh pr list --repo "$ORG" --state open --base "$HEAD_REF" \
                      --json number,headRefName,headRepositoryOwner \
                      --jq "[.[] | select(.headRefName==\"$HEAD_REF\" and .headRepositoryOwner.login==\"$FORK_OWNER\")][0].number" \
