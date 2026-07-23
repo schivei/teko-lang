@@ -36,7 +36,7 @@ fn collect_types(items: []parser::Item) -> TypeTable {
  * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
  * @return error?  an error iff `t` carries unsafe data into a non-`unsafe` fn's signature
  */
-fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, table: TypeTable) -> error? {
+fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, table: TypeTable) -> error | null {
     if fn_unsafe { return null }
     if !unsafe_carrying(t, table) { return null }
     error { message = $"safe fn '{fn_name}' names unsafe type in its signature — mark it `unsafe fn` or take/return only safe types (§2: only safe types cross the boundary)" }
@@ -182,7 +182,7 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
     mut param_names: []str = teko::list::empty()
     mut defaults: []parser::Expr = teko::list::empty()
     mut n_required: u64 = f.params.len
-    let disc_gov: parser::Function? = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
+    let disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
     mut i = 0
     loop {
         if i >= f.params.len { break }
@@ -450,7 +450,7 @@ pub fn find_class_body(name: str, table: TypeTable) -> parser::ClassBody | error
 // an honest error. Uses only the NON-recursive find_class_body lookup, so it terminates even on a
 // cycle. A base that is unknown / not-a-class STOPS the walk (validate_class_decl surfaces that
 // specific error). Mirrors the interface-cycle guard in effective_interface_methods.
-fn class_inheritance_acyclic(name: str, table: TypeTable) -> error? {
+fn class_inheritance_acyclic(name: str, table: TypeTable) -> error | null {
     mut seen: []str = teko::list::push(teko::list::empty(), name)
     mut cur = name
     loop {
@@ -680,7 +680,7 @@ fn default_restated_param(contract_params: []parser::Param, impl_params: []parse
 //  - an `override` method must match an existing method in the base's EFFECTIVE methods, and
 //    that base method must itself be overridable (`abstract`/`virtual`/already `override`).
 //  - (DEFARGS rule E) an `override` method must NOT restate a default the base method owns.
-fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error? {
+fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error | null {
     if cb.has_base {
         let base_decl = match type_table_find(table, cb.base_name, "") {   // (#109 W1) base-class lookup on a resolved name — no referencing ns
             parser::TypeDecl as td => td
@@ -708,7 +708,7 @@ fn validate_class_decl(cb: parser::ClassBody, table: TypeTable) -> error? {
         if i >= cb.methods.len { break }
         let m = cb.methods[i]
         if m.is_override {
-            mut found: parser::Function? = null
+            mut found: parser::Function | null = null
             mut j = 0
             loop {
                 if j >= base_methods.len { break }
@@ -908,7 +908,7 @@ fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: Ty
  * @return null on full conformance
  * @throws when an interface method is missing, mismatched, or not `pub` on a class
  */
-fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Function, implements: []str, table: TypeTable, members_all_public: bool) -> error? {
+fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Function, implements: []str, table: TypeTable, members_all_public: bool) -> error | null {
     mut ii = 0
     loop {
         if ii >= implements.len { break }
@@ -936,7 +936,7 @@ fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Functi
  * @return null when the type conforms to `iname`
  * @throws when a required method is missing, mismatched, restates a default, or is not `pub`
  */
-fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, table: TypeTable, members_all_public: bool) -> error? {
+fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, table: TypeTable, members_all_public: bool) -> error | null {
     let ihit = match find_interface_decl(iname, table, type_ns) { IfaceHit as h => h; error as e => return e }
     let ib = match ihit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{iname} is not an interface" } }
     let req_methods = match effective_interface_methods(ib, ihit.ns, table, teko::list::push(teko::list::empty(), qualify(ihit.ns, name_last_segment(ihit.decl.name)))) { []parser::Function as f => f; error as e => return e }
@@ -963,7 +963,7 @@ fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Func
  * @return null when `req` is satisfied
  * @throws when `req` is missing, its signature mismatches, it restates a default, or is not `pub`
  */
-fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool) -> error? {
+fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool) -> error | null {
     mut mi = 0
     loop {
         if mi >= own_methods.len { break }
@@ -1218,7 +1218,7 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
 // bodied method from a sibling trait counts: it IS a deriver method now) or, for a class, an
 // inherited one. A requirement SHARED by several derived traits is naturally satisfied once
 // (each pair checks independently against the same method).
-fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> error? {
+fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> error | null {
     mut i: u64 = 0
     loop {
         if i >= derives.len { break }
@@ -1553,7 +1553,7 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
 // `Base__g__<mangle>` instances that share the "" namespace bucket with every other stamped
 // instance; that's not a user-facing collision, and stamping already dedups by exact mangled
 // name (resolve.tks::instantiate_types's "already stamped" check).
-fn check_no_duplicate_types(table: TypeTable) -> error? {
+fn check_no_duplicate_types(table: TypeTable) -> error | null {
     mut i: u64 = 0
     loop {
         if i >= table.len { break }
@@ -1591,13 +1591,13 @@ fn check_no_duplicate_types(table: TypeTable) -> error? {
  * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
  * @return error?  an error iff `ft` carries unsafe data into a non-`unsafe` decl
  */
-fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: str, ft: Type, table: TypeTable) -> error? {
+fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: str, ft: Type, table: TypeTable) -> error | null {
     if decl_unsafe { return null }
     if !unsafe_carrying(ft, table) { return null }
     error { message = $"struct/class '{decl_name}' has an unsafe-typed field '{field_name}' — it must be declared `unsafe` (unsafe data cannot be held by a safe type; §2 contagion-by-composition)" }
 }
 
-fn validate_type_decls(table: TypeTable) -> error? {
+fn validate_type_decls(table: TypeTable) -> error | null {
     match check_no_duplicate_types(table) { error as e => return e; null => { } }   // (#109 W0)
     mut i = 0
     loop {

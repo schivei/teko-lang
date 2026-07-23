@@ -721,7 +721,7 @@ fn cg_expr_refs_name(e: checker::TExpr, name: str) -> bool {
 // `class_name` finds it either way)? Returns that method's mangled NAMESPACE (for cb_fn_name) or
 // null if the class isn't destructible. Scoped assumption: one class of a given bare name per
 // program (a name collision across namespaces both with a `destruct` is not disambiguated here).
-fn cg_find_destruct_ns(prog: checker::TProgram, class_name: str) -> str? {
+fn cg_find_destruct_ns(prog: checker::TProgram, class_name: str) -> str | null {
     cg_find_method_ns(prog, class_name, "destruct")
 }
 
@@ -731,7 +731,7 @@ fn cg_find_destruct_ns(prog: checker::TProgram, class_name: str) -> str? {
 // last segment is `class_name` finds it either way)? Returns that method's mangled NAMESPACE (for
 // cb_fn_name) or null. Scoped assumption: one class of a given bare name per program (a name
 // collision across namespaces is not disambiguated here). Mirror of codegen.c::cg_find_method_ns.
-fn cg_find_method_ns(prog: checker::TProgram, class_name: str, method: str) -> str? {
+fn cg_find_method_ns(prog: checker::TProgram, class_name: str, method: str) -> str | null {
     mut i = 0
     loop {
         if i >= prog.items.len { break }
@@ -1375,10 +1375,10 @@ fn cg_type_is_niche_able(prog: checker::TProgram, x: checker::Type) -> bool {
  * @see         cg_union_tag_ctype (the inline `uint8`-tag path this gates)
  * @since 0.3.0.30 (null-union C3)
  */
-fn cg_union_niche_member(prog: checker::TProgram, v: checker::Variant) -> checker::Type? {
+fn cg_union_niche_member(prog: checker::TProgram, v: checker::Variant) -> checker::Type | null {
     if v.members.len != 2 { return null }
     mut null_count = 0
-    mut other: checker::Type? = null
+    mut other: checker::Type | null = null
     mut i = 0
     loop {
         if i >= v.members.len { break }
@@ -1618,10 +1618,10 @@ fn cg_named_min_bytes(prog: checker::TProgram, name: str, depth: u64) -> u64 {
  * @return      the boxed member `X`, or `null` when the union is not a box-in-arena union
  * @since 0.3.0.30 (null-union C4)
  */
-fn cg_union_box_member(prog: checker::TProgram, v: checker::Variant) -> checker::Type? {
+fn cg_union_box_member(prog: checker::TProgram, v: checker::Variant) -> checker::Type | null {
     if v.members.len != 2 { return null }
     mut null_count = 0
-    mut other: checker::Type? = null
+    mut other: checker::Type | null = null
     mut i = 0
     loop {
         if i >= v.members.len { break }
@@ -1786,7 +1786,7 @@ fn cg_union_recur_in_members(prog: checker::TProgram, union_t: checker::Type, ns
  * @throws      error on any of the four ineligible classes (non-sum / niche-able / recursive / small)
  * @since 0.3.0.30 (null-union C4)
  */
-fn inline_attr_eligible(prog: checker::TProgram, t: checker::Type) -> error? {
+fn inline_attr_eligible(prog: checker::TProgram, t: checker::Type) -> error | null {
     let v = match t {
         checker::Variant as va => va
         _ => return error { message = "`#inline` applies only to a boxed union (sum) type — this is not a sum" }
@@ -3768,7 +3768,7 @@ fn emit_interp(buf: []byte, prog: checker::TProgram, in: checker::TInterp, escap
 // use the EFFECTIVE (base-inherited) field set so an optional field declared on an ancestor is
 // found from a derived class's construction — matching emit_type_decl's class body.
 // (C: cg_find_struct_field_type.)
-fn cg_find_struct_field_type(prog: checker::TProgram, sname: str, fname: str) -> parser::TypeExpr? {
+fn cg_find_struct_field_type(prog: checker::TProgram, sname: str, fname: str) -> parser::TypeExpr | null {
     mut i = 0
     loop {
         if i >= prog.items.len { break }
@@ -5463,7 +5463,7 @@ fn emit_pat_test(buf: []byte, prog: checker::TProgram, pat: parser::Pattern, sub
 // (C: `cg_kind_descend`.)
 type CgKindDescend = struct { var_type: checker::Type; boxed: bool }
 
-fn cg_kind_descend(prog: checker::TProgram, subjT: checker::Type, pat: parser::Pattern) -> CgKindDescend? {
+fn cg_kind_descend(prog: checker::TProgram, subjT: checker::Type, pat: parser::Pattern) -> CgKindDescend | null {
     let sname = match subjT { checker::Named as nm => nm.name; _ => return null }
     match pat {
         parser::BindPattern => { }
@@ -5473,7 +5473,7 @@ fn cg_kind_descend(prog: checker::TProgram, subjT: checker::Type, pat: parser::P
     let d = match cg_find_decl(prog, sname) { parser::TypeDecl as dd => dd; error => return null }
     let sb = match d.body { parser::StructBody as s => s; _ => return null }
     // find a field named `kind` whose type-ann is a NAMED type.
-    mut kfte: parser::TypeExpr? = null
+    mut kfte: parser::TypeExpr | null = null
     mut i = 0
     loop {
         if i >= sb.fields.len { break }
@@ -7769,7 +7769,7 @@ fn cg_add_di_providers(providers: []checker::DiProvider, td: parser::TypeDecl) -
 
 /** (W10c/MEM-3) The name of a class's zero-argument static factory (its first no-arg static), or
  *  null when it has none. */
-fn cg_di_factory(cb0: parser::ClassBody) -> str? {
+fn cg_di_factory(cb0: parser::ClassBody) -> str | null {
     mut i: u64 = 0
     loop {
         if i >= cb0.methods.len { break }
@@ -7843,7 +7843,7 @@ fn emit_di_materializer(buf: []byte, prog: checker::TProgram, p: checker::DiProv
 /** (issue #284) Resolve a DI factory's mangled namespace by an EXACT canonical class-namespace match
  *  (`class_canon` is the impl's full canonical name, and every effective method is stamped under the
  *  owning class's canonical namespace), so two same-bare classes never share a factory. */
-fn cg_find_di_factory_ns(prog: checker::TProgram, class_canon: str, method: str) -> str? {
+fn cg_find_di_factory_ns(prog: checker::TProgram, class_canon: str, method: str) -> str | null {
     mut i = 0
     loop {
         if i >= prog.items.len { break }
