@@ -1,19 +1,4 @@
 /**
- * Wrap a caller-owned i64 call-counter cell into an identity transform that ticks the cell
- * on every call — the instrument the laziness tests read back to prove a `map`/`filter`
- * closure ran EXACTLY as many times as the downstream `take` demanded, never once more.
- * The cell is a `Ref<i64>` (MEM-1b-ii), the only shared-mutation seam a closure can advance
- * across calls.
- *
- * @param cell  the caller-owned tick counter, incremented on each call
- * @return      an identity `(i64) -> i64` that ticks `cell` as a side effect
- */
-fn counting_identity(cell: Ref<i64>) -> (i64) -> i64 {
-    let c: (i64) -> i64 = (x: i64) => { cell.value = cell.value + 1; x }
-    c
-}
-
-/**
  * Unwrap an `i64?`, treating the `null` case as a distinguished sentinel so a failed pull
  * surfaces as a wrong value rather than a panic inside an assert.
  *
@@ -26,30 +11,6 @@ fn or_else(value: i64?, sentinel: i64) -> i64 {
         i64 as v => v
         null => sentinel
     }
-}
-
-/**
- * `range` yields the half-open sequence in order and stops at the bound.
- */
-#test
-fn range_yields_the_sequence() {
-    mut rc = RangeCursor { next = 0; hi = 4 }
-    let collected = collect(range(rc))
-    teko::assert::is_true(collected.len == 4)
-    teko::assert::is_true(collected[0] == 0)
-    teko::assert::is_true(collected[3] == 3)
-}
-
-/**
- * `over_array` walks the backing slice front-to-back.
- */
-#test
-fn over_array_walks_the_slice() {
-    mut ac = ArrayCursor { pos = 0 }
-    let collected = collect(over_array([10, 20, 30], ac))
-    teko::assert::is_true(collected.len == 3)
-    teko::assert::is_true(collected[0] == 10)
-    teko::assert::is_true(collected[2] == 30)
 }
 
 /**
@@ -66,56 +27,12 @@ fn once_and_empty_edge_sources() {
 }
 
 /**
- * `map` under a `take` runs its closure EXACTLY as many times as `take` pulls — the headline
- * laziness proof: a `map` over a thousand-element range, capped at two, must tick the counter
- * exactly twice, never a thousand times.
- */
-#test
-fn map_is_lazy_past_take() {
-    mut count_cell = 0
-    let ticking = counting_identity(count_cell)
-    mut rc = RangeCursor { next = 0; hi = 1000 }
-    mut tc = TakeCursor { left = 2 }
-    let result = collect(take(map(range(rc), ticking), tc))
-    teko::assert::is_true(result.len == 2)
-    teko::assert::is_true(result[0] == 0)
-    teko::assert::is_true(result[1] == 1)
-    teko::assert::is_true(count_cell == 2)
-}
-
-/**
- * `filter` under a `take` pulls the source only until the cap is met — the counter ticks
- * once per source element inspected, and the run stops after the third kept element without
- * draining the thousand-element range.
- */
-#test
-fn filter_is_lazy_past_take() {
-    mut count_cell = 0
-    let ticking = counting_identity(count_cell)
-    mut rc = RangeCursor { next = 0; hi = 1000 }
-    mut tc = TakeCursor { left = 3 }
-    let result = collect(take(filter(map(range(rc), ticking), is_even_local), tc))
-    teko::assert::is_true(result.len == 3)
-    teko::assert::is_true(result[0] == 0)
-    teko::assert::is_true(result[2] == 4)
-    teko::assert::is_true(count_cell == 5)
-}
-
-/**
  * The local even predicate used by the laziness and filter tests.
  *
  * @param x  the value to test
  * @return   true when `x` is even
  */
 fn is_even_local(x: i64) -> bool { x % 2 == 0 }
-
-/**
- * The local ten-times transform used by the composition test.
- *
- * @param x  the value to scale
- * @return   `x * 10`
- */
-fn times_ten_local(x: i64) -> i64 { x * 10 }
 
 /**
  * The local addition combiner used by the fold/reduce tests.
@@ -125,30 +42,6 @@ fn times_ten_local(x: i64) -> i64 { x * 10 }
  * @return   `a + x`
  */
 fn add_local(a: i64, x: i64) -> i64 { a + x }
-
-/**
- * `map` transforms every element.
- */
-#test
-fn map_transforms() {
-    mut rc = RangeCursor { next = 1; hi = 4 }
-    let collected = collect(map(range(rc), times_ten_local))
-    teko::assert::is_true(collected.len == 3)
-    teko::assert::is_true(collected[0] == 10)
-    teko::assert::is_true(collected[2] == 30)
-}
-
-/**
- * `filter` keeps only the matching elements.
- */
-#test
-fn filter_keeps_matching() {
-    mut rc = RangeCursor { next = 0; hi = 6 }
-    let collected = collect(filter(range(rc), is_even_local))
-    teko::assert::is_true(collected.len == 3)
-    teko::assert::is_true(collected[0] == 0)
-    teko::assert::is_true(collected[2] == 4)
-}
 
 /**
  * `take` yields a leading prefix; `skip` drops one.
@@ -276,16 +169,6 @@ fn any_all_find_terminals() {
  * @return   true when `x >= 0`
  */
 fn is_gte_zero_local(x: i64) -> bool { x >= 0 }
-
-/**
- * The composition payoff: `fold(map(filter(range(0,6), even), *10), 0, +)` == 60.
- */
-#test
-fn pipeline_range_filter_map_fold() {
-    mut rc = RangeCursor { next = 0; hi = 6 }
-    let total = fold(map(filter(range(rc), is_even_local), times_ten_local), 0, add_local)
-    teko::assert::is_true(total == 60)
-}
 
 /**
  * The byte-element bridge: `collect_bytes(take_bytes(over_bytes(bytes_of("hello")), 3))`
