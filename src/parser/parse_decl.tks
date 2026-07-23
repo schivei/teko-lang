@@ -58,13 +58,16 @@ fn parse_params(tokens: []lexer::Token, pos: u64, allow_untyped_first: bool) -> 
         let has_params_kw = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "params" &&
         is_name_at(tokens, p + 1) && is_kind_at(tokens, p + 2, lexer::TokenKind::Colon)
         if has_params_kw { p = p + 1 }
+        let has_ref_kw = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "ref" &&
+        is_name_at(tokens, p + 1) && is_kind_at(tokens, p + 2, lexer::TokenKind::Colon)
+        if has_ref_kw { p = p + 1 }
         if !is_name_at(tokens, p) {
             return err_at(tokens, p, "expected a parameter name")
         }
         let name = tokens[p].text
         // (OOP A1) the RECEIVER: only the very first param, only when the caller allows it, only
         // when NOT immediately followed by `:` (a typed 1st param means the method is STATIC).
-        let is_receiver = first && allow_untyped_first && !has_params_kw && !is_kind_at(tokens, p + 1, lexer::TokenKind::Colon)
+        let is_receiver = first && allow_untyped_first && !has_params_kw && !has_ref_kw && !is_kind_at(tokens, p + 1, lexer::TokenKind::Colon)
         first = false
         if is_receiver {
             params = teko::list::push(params, Param { name = name; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
@@ -77,6 +80,7 @@ fn parse_params(tokens: []lexer::Token, pos: u64, allow_untyped_first: bool) -> 
             if has_params_kw {
                 match ty.node { SliceType => { }; _ => return err_at(tokens, p + 2, "'params' parameter must have a slice type ([]T)") }
             }
+            let param_ty = if has_ref_kw { wrap_ref_type(ty.node) } else { ty.node }
             // DEFARGS (2026-07-01) — `= <expr>` right after the type: a default value, evaluated at
             // the call site when the argument is omitted. TRAILING-ONLY (rule A): once ANY param
             // defaults, every param after it must ALSO default — `=` uses Assign, consistent with
@@ -93,7 +97,7 @@ fn parse_params(tokens: []lexer::Token, pos: u64, allow_untyped_first: bool) -> 
                 return err_at(tokens, ppos, "a default-valued parameter must be followed only by other defaulted parameters (defaults are trailing-only)")
             }
             if has_default { seen_default = true }
-            params = teko::list::push(params, Param { name = name; has_type = true; type_ann = ty.node; is_params = has_params_kw; has_default = has_default; default_expr = default_expr })
+            params = teko::list::push(params, Param { name = name; has_type = true; type_ann = param_ty; is_params = has_params_kw; has_default = has_default; default_expr = default_expr })
             p = ppos
         }
         if has_params_kw && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
