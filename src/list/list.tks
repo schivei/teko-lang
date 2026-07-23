@@ -1,18 +1,19 @@
 /**
- * Grow `x` by appending `v`, mutating `x` IN-PLACE through the exclusive mutable borrow `&x`
- * (the F1 borrow bridge). This is the coexistence signature for the ref-push migration (AL3): it
- * lives ALONGSIDE the untouched value-thread `teko::list::push(xs, v) -> []T` so no unmigrated
- * site changes. F1's body writes through the reference (`x.value = teko::list::push(x.value, v)`)
- * — behavior-identical to the value form; the cap-in-object win that removes the global push cache
- * lands with F3+AL3, not here. Migration is gradual, fixpoint-green per sub-lote; a final rename to
- * `push` is optional once every site moves. The surface annotation is `Ref<[]T>` (the reference
- * type surface), reached at the call site through the `&x` borrow expression.
+ * Grows `x` by appending `v`, mutating `x` IN-PLACE through the `ref` parameter (0.3.1 adoption —
+ * the pre-adoption signature spelled the surface `Ref<[]T>`, borrowed at the call site with `&x`;
+ * both are replaced by the `ref` keyword end to end). It lives ALONGSIDE the untouched value-thread
+ * `teko::list::push(xs, v) -> []T` so no unmigrated site changes: the body write-throughs
+ * (`x.value = teko::list::push(x.value, v)`) — behavior-identical to the value form; `push` is a
+ * checker builtin (`type_list_builtin`) whose argument typing does not yet auto-deref a bare `ref`
+ * argument, so the read stays explicit `.value` (still legal — only the `Ref<T>` type name is
+ * hidden from the surface, not the accessor). The cap-in-object win that removes the global push
+ * cache lands with F3+AL3, not here. A final rename to `push` is optional once every site moves.
  *
- * @param x  the target slice, borrowed mutably and exclusively (`&x`) — spine `is_unique_at` proven
+ * @param x  the target slice, referenced mutably and exclusively — spine `is_unique_at` proven
  * @param v  the element to append, of the slice's concrete `T`
  * @throws   panic if the backing capacity overflows `u64` (M.1 fail-loud) — reached only once F3's
  *           cap-doubling lands
  */
-pub fn grow<T>(x: Ref<[]T>, v: T) -> void {
+pub fn grow<T>(ref x: []T, v: T) -> void {
     x.value = teko::list::push(x.value, v)
 }
