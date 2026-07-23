@@ -98,7 +98,7 @@ pub type MemWriter = struct {
 pub type ReadFn = (u64) -> Region | error
 pub type WriteFn = (Region) -> u64 | error
 
-pub fn mem_read_fn(source: Ref<MemReader>) -> ReadFn {
+pub fn mem_read_fn(ref source: MemReader) -> ReadFn {
     let lifted: ReadFn = (max: u64) => {
         let step = source.value.read_step(max)
         source.value = step.reader
@@ -107,7 +107,7 @@ pub fn mem_read_fn(source: Ref<MemReader>) -> ReadFn {
     lifted
 }
 
-pub fn mem_write_fn(sink: Ref<MemWriter>) -> WriteFn {
+pub fn mem_write_fn(ref sink: MemWriter) -> WriteFn {
     let lifted: WriteFn = (from: Region) => {
         let step = sink.value.write_step(from)
         sink.value = step.writer
@@ -151,7 +151,7 @@ pub type LimitState = struct {
     fn of(limit: u64) -> LimitState { LimitState { remaining = limit } }
 }
 
-pub fn limit_read_fn(src: ReadFn, state: Ref<LimitState>) -> ReadFn {
+pub fn limit_read_fn(src: ReadFn, ref state: LimitState) -> ReadFn {
     let limited: ReadFn = (max: u64) => {
         mut want = state.value.remaining
         if want > max { want = max }
@@ -173,7 +173,7 @@ pub type BufReaderState = struct {
     fn fresh() -> BufReaderState { BufReaderState { pending = Region::empty(); pos = 0 } }
 }
 
-pub fn buffered_read_fn(src: ReadFn, state: Ref<BufReaderState>, chunk_size: u64) -> ReadFn {
+pub fn buffered_read_fn(src: ReadFn, ref state: BufReaderState, chunk_size: u64) -> ReadFn {
     let buffered: ReadFn = (max: u64) => {
         if max == 0 { return Region::empty() }
         mut current = state.value
@@ -207,7 +207,7 @@ pub type BufWriterState = struct {
     fn fresh() -> BufWriterState { BufWriterState { pending = Region::empty() } }
 }
 
-pub fn buffered_write_fn(dst: WriteFn, state: Ref<BufWriterState>, capacity: u64) -> WriteFn {
+pub fn buffered_write_fn(dst: WriteFn, ref state: BufWriterState, capacity: u64) -> WriteFn {
     let buffered: WriteFn = (from: Region) => {
         let combined = state.value.pending.concat(from)
         if combined.len() < capacity {
@@ -225,7 +225,7 @@ pub fn buffered_write_fn(dst: WriteFn, state: Ref<BufWriterState>, capacity: u64
     buffered
 }
 
-pub fn flush_write(dst: WriteFn, state: Ref<BufWriterState>) -> u64 | error {
+pub fn flush_write(dst: WriteFn, ref state: BufWriterState) -> u64 | error {
     let pending = state.value.pending
     if pending.len() == 0 { return 0 to u64 }
     let flushed = match write_all(dst, pending) { u64 as n => n; error as e => return e }
