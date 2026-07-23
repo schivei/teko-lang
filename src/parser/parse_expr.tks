@@ -433,13 +433,22 @@ fn parse_expr_no_struct(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | erro
     parse_coalesce(tokens, pos, false)
 }
 
-// level 9 (the loosest) — `??` Elvis / null-coalescing (REBOOT_PLAN §203). Below `||`.
-// Right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`.
+/**
+ * parse_coalesce — the loosest rung of the expression ladder (below `||`). The `??` null-coalescing
+ * sugar has been REMOVED: an expression now parses straight through `parse_or`, and a trailing `??`
+ * token is rejected with a diagnostic naming the explicit replacement. `T | null` values narrow with
+ * an explicit `match`, not the Elvis operator.
+ *
+ * @param tokens        the token stream
+ * @param pos           the position at which the expression begins
+ * @param allow_struct  whether a bare `Name { … }` struct literal is admissible here (W4a)
+ * @return              the parsed expression, or an error when a `??` operator is encountered
+ * @throws              error naming `match` on the `T | null` value when the removed `??` appears
+ */
 fn parse_coalesce(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Expr> | error {
     let first = match parse_or(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
     if is_kind_at(tokens, first.next, lexer::TokenKind::QQ) {
-        let rhs = match parse_coalesce(tokens, skip_seps(tokens, first.next + 1), allow_struct) { Parsed<Expr> as x => x; error as e => return e }   // skip newlines after a trailing infix operator (line continuation)   // right-assoc → recurse
-        return Parsed<Expr> { node = Expr { kind = Coalesce { left = first.node; right = rhs.node }; line = tokens[pos].line; col = tokens[pos].col }; next = rhs.next }
+        return err_at(tokens, first.next, "the `??` null-coalescing operator has been removed — use an explicit `match` on the `T | null` value instead")
     }
     Parsed<Expr> { node = first.node; next = first.next }
 }
@@ -464,23 +473,8 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
             p = idx.next + 1
             continue
         }
-        // `?.` safe navigation (null-propagating — REBOOT_PLAN §203): `?.field` reads a
-        // field; `?.method(args)` is a null-propagating METHOD call (NP-OOP, issue #116) —
-        // positional-only, like MethodCall (arg_names discarded, see the `.method()` note).
         if is_kind_at(tokens, p, lexer::TokenKind::QDot) {
-            if !is_name_at(tokens, p + 1) {
-                return err_at(tokens, p + 1, "expected a field or method name after '?.'")
-            }
-            let name = tokens[p + 1].text
-            if is_kind_at(tokens, p + 2, lexer::TokenKind::LParen) {
-                let ca = match parse_call_args(tokens, p + 2) { ParsedCallArgs as x => x; error as e => return e }
-                node = Expr { kind = SafeMethodCall { receiver = node; method = name; args = ca.args }; line = tokens[pos].line; col = tokens[pos].col }
-                p = ca.next
-                continue
-            }
-            node = Expr { kind = SafeFieldAccess { receiver = node; field = name }; line = tokens[pos].line; col = tokens[pos].col }
-            p = p + 2
-            continue
+            return err_at(tokens, p, "the `?.` safe-navigation operator has been removed — use an explicit `match` on the `T | null` receiver instead")
         }
         if !is_kind_at(tokens, p, lexer::TokenKind::Dot) { break }
         if !is_name_at(tokens, p + 1) {
