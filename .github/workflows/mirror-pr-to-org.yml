@@ -1,22 +1,17 @@
 # .github/workflows/mirror-pr-to-org.yml
-# MANUAL org-PR creator (workflow_dispatch): the OWNER dispatches it with the UMBRELLA
-# branch name + title + body, and it opens (or updates) the cross-fork PR on the org —
-# `schivei:<branch> -> teko-org:<branch>`. This replaces the old event-driven PR mirror:
-# with the seed/* branch model retired (owner 2026-07-23) there is no promotion-PR event
-# to piggyback on, and event triggers proved unreliable for this flow (pull_request needs
-# a merge ref; pull_request_target registers from the default branch).
-# LOCKS: never runs on the org (repository guard) and only executes on main (ref guard) —
-# after equalization the file EXISTS on org main, but must never run there.
+# MANUAL org-PR creator (workflow_dispatch): the OWNER dispatches it with a title + body and
+# it opens (or updates) the cross-fork promotion PR on the org — `schivei:main -> teko-org:main`.
+# Main-first era (owner ruling 0.3.1, 2026-07-23): work happens directly on the fork's main —
+# there is no umbrella branch anymore, so the promotion target is ALWAYS main and the old
+# `branch` input is gone.
+# LOCK: never runs on the org (repository guard) — after equalization this file EXISTS on the
+# org's main, but must never run there. Ref of dispatch is irrelevant (nothing is checked out).
 # REQUIRES the repo secret `ORG_PR_TOKEN` (pull-requests:write on teko-org/teko-lang).
 name: Mirror PR to org
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Nome da branch umbrella (existe no fork E na org; vira head e base do PR cross-fork)"
-        required: true
-        type: string
       title:
         description: "Título do PR na org"
         required: true
@@ -31,19 +26,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: mirror-org-${{ inputs.branch }}
+  group: mirror-org-main
   cancel-in-progress: false
 
 jobs:
   mirror:
-    # Owner ruling 2026-07-23: o mirror NÃO tem trava de ref — a branch-alvo é um INPUT,
-    # então o ref de dispatch é irrelevante (a trava main-only pertence ao CUT). Só o
-    # org-lock é absoluto: nunca executa em teko-org.
+    # Org-lock absoluto: nunca executa em teko-org. Sem trava de ref — o alvo é fixo (main)
+    # e o job não faz checkout de código.
     if: github.repository == 'schivei/teko-lang'
     runs-on: ubuntu-latest
     env:
       ORG: teko-org/teko-lang
-      BR: ${{ inputs.branch }}
+      BR: main
       TITLE: ${{ inputs.title }}
       BODY: ${{ inputs.body }}
     steps:
@@ -56,11 +50,8 @@ jobs:
             echo "::error::ORG_PR_TOKEN secret is required (pull-requests:write on $ORG)."
             exit 1
           fi
-          case "$BR" in
-            main|seed/*) echo "::error::branch '$BR' is not mirrorable (main/seed são excluídas)."; exit 1 ;;
-          esac
 
-      - name: Open (or update) the cross-fork org PR (fork:branch -> org:branch)
+      - name: Open (or update) the cross-fork org PR (fork:main -> org:main)
         env:
           GH_TOKEN: ${{ secrets.ORG_PR_TOKEN }}
         run: |
