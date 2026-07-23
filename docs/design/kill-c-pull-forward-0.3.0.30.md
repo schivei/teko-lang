@@ -30,7 +30,7 @@
 > `abi_{sysv64,aapcs64,win64,riscv64}.tks`, `regalloc*`, `lir_interp.tks`/`minst_interp.tks`,
 > `src/codegen/codegen.tks` (`cb_fn_name` the `__` mangle; `f.c_symbol` extern no-mangle at :7515),
 > the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + `vm-retirement.md:327`
-> (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkb-regression-format.md`,
+> (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkr-regression-format.md`,
 > `teko.tkp` `[tests]`/`[platforms]`.
 
 ---
@@ -170,13 +170,13 @@ pass own-native** (a fixture passing only via the C emitter is a regression).
 ### 5.1 Where it wires
 
 - **Surface:** each FFI fixture is a standalone project under **`examples/regressions/ffi/<name>/`**, a
-  first-class **`.tkb`** regressive, picked up by **`[tests] regression = ["examples/regressions"]`**.
+  first-class **`.tkr`** regressive, picked up by **`[tests] regression = ["examples/regressions"]`**.
   The runner (`build/regression.tks`) builds once + runs, asserting **exit/stdout/stderr**;
   `EXPECT_COMPILE_FAIL` for negatives; `trap` for panics.
 - **Own-native build:** FFI fixtures build through the **own backend** (`Given backend = "own"`), NOT the
   C emitter. Own-backend-coupled cases are `Given pending = "<crumb>"` and **skipped-green** until landed.
 - **Cross-OS/arch matrix:** the lane runs on **each CI host** (`[platforms]` × arch runners);
-  `targets = ["host"]`. Platform-specific results use the `.tkb` **`on "<os-arch>"`** override.
+  `targets = ["host"]`. Platform-specific results use the `.tkr` **`on "<os-arch>"`** override.
 - **Link is the system `ld`; `cc` only compiles the reverse-FFI C consumer** (`consumer.c`): the runner
   builds the `abi="c"` artifact own-native (`.o`/`.a` + `.h`), compiles `consumer.c` with host `cc`, and
   **links Teko `.o`/`.a` + the consumer object with the SYSTEM `ld`**, then runs + asserts.
@@ -414,7 +414,7 @@ calls through the fn-pointer table) · `revffi_export_variant_tagged`.
   IMPORT — `extern type = struct/union/enum/flags [= "c_tag"] [from header "h.h"]` (opaque `extern type`
   → `void*` unchanged; `from header` lets the Tier-0 resolver fill enum/flag values). The §5.2.1 naming
   rule (flatten canonical `_` or explicit `= "SYM"`/`= "c_tag"`) governs **every** exported symbol/tag.
-- **FFI validation:** a cross-OS/arch `.tkb` suite under `examples/regressions/ffi/` (both directions +
+- **FFI validation:** a cross-OS/arch `.tkr` suite under `examples/regressions/ffi/` (both directions +
   pointers + all decl kinds + explicit-symbol/flatten/collision cases), own-native, gen1-executable,
   system-`ld`-linked (host `cc` only for the reverse-FFI C consumer).
 

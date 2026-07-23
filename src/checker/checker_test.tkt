@@ -1333,3 +1333,88 @@ fn region_handle_predicate_recognizes_arena() {
     teko::assert::is_false(is_region_handle_name("Color", color_enum_table()))
     teko::assert::is_true(region_handle_field_name("Color", color_enum_table()) == "")
 }
+
+/** bigint_named — the `bigint` surface type (the runtime `BigInt` struct's canonical name). */
+fn bigint_named() -> Type { Named { name = "teko::numeric::bigint::BigInt" } }
+/** dec_named — the `dec` surface type (the runtime `Decimal` struct's canonical name). */
+fn dec_named() -> Type { Named { name = "teko::numeric::dec::Decimal" } }
+/** call_lowers_to — does a lowered operator `TExpr` call `<ns>::<fn>`? */
+fn call_lowers_to(te: TExpr, ns: str, fn_name: str) -> bool {
+    match te.kind {
+        TCall as call => call.call_ns == ns && call.callee.segments[call.callee.segments.len - 1].name == fn_name
+        _ => false
+    }
+}
+
+/** bignum_plus_lowers_to_add — `bigint + bigint` becomes a `teko::numeric::bigint::add` call. */
+#test
+fn bignum_plus_lowers_to_add() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("b") }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "add"))
+}
+
+/** bignum_percent_lowers_to_rem — `bigint % bigint` becomes a `teko::numeric::bigint::rem` call. */
+#test
+fn bignum_percent_lowers_to_rem() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Percent; left = e_var("a"); right = e_var("b") }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "rem"))
+}
+
+/** bignum_literal_adopts — `bigint + <int literal>` adopts the literal via `bigint::of`. */
+#test
+fn bignum_literal_adopts() {
+    let env = define(empty_env(), "a", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_num(7) }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let adopted = match te.kind { TCall as call => call.args[1]; _ => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(adopted, "teko::numeric::bigint", "of"))
+}
+
+/** dec_percent_is_rejected — `dec % dec` is a checker error (decimals have no remainder operator). */
+#test
+fn dec_percent_is_rejected() {
+    let env = define(define(empty_env(), "a", dec_named(), false), "b", dec_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Percent; left = e_var("a"); right = e_var("b") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "not defined on `dec`")
+    }
+}
+
+/** bignum_no_implicit_promotion — `bigint + <i64 variable>` is refused, asking for an explicit `of`. */
+#test
+fn bignum_no_implicit_promotion() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "n", i64t(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("n") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no implicit")
+    }
+}
+
+/** bignum_mixing_is_rejected — mixing `bigint` and `dec` in one operation is refused. */
+#test
+fn bignum_mixing_is_rejected() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", dec_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("b") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "mix")
+    }
+}
+
+/** bignum_compare_lowers_to_cmp — `bigint < bigint` lowers to a `cmp(...) < 0` bool comparison. */
+#test
+fn bignum_compare_lowers_to_cmp() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let crest = teko::list::push(teko::list::empty(), parser::CmpTerm { op = lexer::TokenKind::Lt; operand = e_var("b") })
+    let cmp = parser::Compare { first = e_var("a"); rest = crest }
+    let te = match type_compare(cmp, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
+    let inner = match te.kind { TCompare as tc => tc.first; _ => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(inner, "teko::numeric::bigint", "cmp"))
+}
