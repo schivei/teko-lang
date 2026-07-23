@@ -82,16 +82,25 @@ fn expr_is_bare_var(e: TExpr) -> bool {
     }
 }
 
-// mark_expr — walk `e`, adding every variable read in an ESCAPING position to `acc` IN PLACE.
-// `acc` is a `Ref<[]str>`: a name is recorded via `acc.value = str_set_add(acc.value, name)`
-// (whole-`.value` replace — the only mutation a non-scalar ref admits), so the grown set is
-// visible to every caller through the one shared cell — no thread-and-return. `escaping` is the
-// context: true ⇒ a read here lets the variable outlive the frame. The ref param is FORWARDED
-// straight through to every recursive call (it is already a `Ref<[]str>`, no re-ref).
-fn mark_expr(e: TExpr, escaping: bool, acc: Ref<[]str>) -> void {
+/**
+ * Walks `e`, adding every variable read in an ESCAPING position to `acc` IN PLACE — write-through
+ * (0.3.1 adoption; the pre-adoption spelling threaded a `Ref<[]str>` cell), so the grown set is
+ * visible to every caller through the one shared reference — no thread-and-return. `escaping` is
+ * the context: true means a read here lets the variable outlive the frame. The `ref` param is
+ * FORWARDED straight through to every recursive call (it is already a reference, no re-borrow).
+ * The `str_set_add` call reads `acc.value` explicitly — passing a `ref`-bound argument bare where a
+ * plain-value parameter is expected is not yet auto-deref'd by the checker's call-argument typing
+ * (only operator/field-access/assignment contexts are); the explicit read stays legal (`.value` is
+ * not hidden, only the `Ref<T>` type name is) and keeps this generation seed-buildable.
+ *
+ * @param e         the expression to walk
+ * @param escaping  true when a read here outlives the enclosing frame
+ * @param acc       the escaping-name accumulator (by-reference, write-through, grown in place)
+ */
+fn mark_expr(e: TExpr, escaping: bool, ref acc: []str) -> void {
     match e.kind {
         // a bare variable read: it escapes only if read in an escaping context.
-        TVar as v => if escaping { acc.value = str_set_add(acc.value, v.name) } else { }
+        TVar as v => if escaping { acc = str_set_add(acc.value, v.name) } else { }
 
         // leaves with no variable reads.
         TNumber => { }
@@ -251,7 +260,7 @@ fn mark_expr(e: TExpr, escaping: bool, acc: Ref<[]str>) -> void {
             mut i = 0
             loop {
                 if i >= lam.captures.len { break }
-                if escaping { acc.value = str_set_add(acc.value, lam.captures[i].name) }
+                if escaping { acc = str_set_add(acc.value, lam.captures[i].name) }
                 i++
             }
         }
@@ -260,13 +269,19 @@ fn mark_expr(e: TExpr, escaping: bool, acc: Ref<[]str>) -> void {
     }
 }
 
-// mark_block — walk a statement block, threading the escaping-var accumulator. `tail` is TRUE
-// when this block's TRAILING value is RETURNED (the function/branch tail) — codegen drops the
-// frame region BEFORE that value and `return`s it (emit_block_tail/emit_exprstmt_tail), so the
-// last statement, when it is a value-bearing expr-statement, must be analysed in an ESCAPING
-// context (MEM Step 1 UAF fix). All NON-last statements are interior (tail=false). A `tail=false`
-// block (a loop/defer body, or a discarded if/match branch) discards its trailing value.
-fn mark_block(body: []TStatement, tail: bool, acc: Ref<[]str>) -> void {
+/**
+ * Walks a statement block, threading the escaping-var accumulator. `tail` is TRUE when this
+ * block's TRAILING value is RETURNED (the function/branch tail) — codegen drops the frame region
+ * BEFORE that value and `return`s it (`emit_block_tail`/`emit_exprstmt_tail`), so the last
+ * statement, when it is a value-bearing expr-statement, must be analysed in an ESCAPING context
+ * (MEM Step 1 UAF fix). All NON-last statements are interior (`tail = false`). A `tail = false`
+ * block (a loop/defer body, or a discarded if/match branch) discards its trailing value.
+ *
+ * @param body  the statement block to walk
+ * @param tail  true iff the block's trailing value is returned
+ * @param acc   the escaping-name accumulator (by-reference, write-through, grown in place)
+ */
+fn mark_block(body: []TStatement, tail: bool, ref acc: []str) -> void {
     mut i = 0
     loop {
         if i >= body.len { break }
@@ -276,11 +291,17 @@ fn mark_block(body: []TStatement, tail: bool, acc: Ref<[]str>) -> void {
     }
 }
 
-// mark_stmt — walk one statement. Establishes the escaping context per position. `tail` is TRUE
-// only for the block's LAST statement when that block's trailing value is returned: an
-// expr-statement there is an IMPLICIT RETURN (B.20/W5a) whose value codegen produces AFTER
-// dropping the frame region, so it must be ESCAPING (not discarded).
-fn mark_stmt(s: TStatement, tail: bool, acc: Ref<[]str>) -> void {
+/**
+ * Walks one statement, establishing the escaping context per position. `tail` is TRUE only for
+ * the block's LAST statement when that block's trailing value is returned: an expr-statement
+ * there is an IMPLICIT RETURN (B.20/W5a) whose value codegen produces AFTER dropping the frame
+ * region, so it must be ESCAPING (not discarded).
+ *
+ * @param s     the statement to walk
+ * @param tail  true iff `s` is the block's last statement and its trailing value is returned
+ * @param acc   the escaping-name accumulator (by-reference, write-through, grown in place)
+ */
+fn mark_stmt(s: TStatement, tail: bool, ref acc: []str) -> void {
     match s {
         // a binding RHS escapes (the value lives on through the bound name; conservatively the
         // name may itself later escape — we do not run a second fixpoint pass).
@@ -325,7 +346,7 @@ fn mark_stmt(s: TStatement, tail: bool, acc: Ref<[]str>) -> void {
 // TAIL position: its trailing value-bearing expr-statement is an IMPLICIT RETURN (escaping).
 pub fn fn_escaping_vars(f: TFunction) -> []str {
     mut acc: []str = teko::list::empty()
-    mark_block(f.body, true, acc)   // auto-ref the `mut acc` into the `Ref<[]str>` param (in-place)
+    mark_block(f.body, true, acc)
     acc
 }
 

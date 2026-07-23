@@ -102,18 +102,44 @@ fn parse_type_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     ParsedType { node = node; next = p; pending_gt = 0 }
 }
 
-// A named type is a path: `u64`, `lexer::Token` (nominal — B.13). It may carry generic type
-// ARGUMENTS `<T1, T2, …>` (S4 type-generics — `Box<i64>`, `Result<i64, str>`, nested `Box<Box<i64>>`).
-// Inference-only: type-args appear ONLY in a type position, never as a call turbofish.
-//
-// The `<…>` is parsed SPECULATIVELY and backtracks if it is not a closed argument list: the cast
-// target is a type-PRIMARY (`x to i64 < y`), so a bare `<` after a type name must stay available as
-// the comparison operator. The close handles the `>>` (Shr) compound: it closes THIS list with one
-// `>` and leaves the other for the enclosing generic (threaded via ParsedType.pending_gt), so
-// `Box<Box<i64>>` parses at any nesting depth. (A `>=`/`>>=` close — `>` immediately before `=`,
-// no space — still backtracks; write a space before `=`.)
+/**
+ * hide_ref_surface_at — the 0.3.1 adoption gate: the compiler-internal reference name `Ref` is no
+ * longer user-spellable as an ordinary named type (the `ref` keyword grafia, `wrap_ref_type` above,
+ * is the ONLY surface). This fires only for the literal capitalized identifier `Ref` reached through
+ * the ORDINARY named-type path (`parse_named`, below) — the `ref`-keyword grafia branch in
+ * `parse_type_primary` returns before ever calling `parse_named`, so it never re-enters this gate,
+ * and a `ref T | null` union member (the null-union R2-relaxed shape) still resolves normally.
+ *
+ * @param tokens  the token stream
+ * @param path    the just-parsed type path
+ * @return        true iff the path is the single, bare, reserved segment `Ref`
+ */
+fn hide_ref_surface_at(path: Path) -> bool {
+    path.segments.len == 1 && path.segments[0].name == "Ref"
+}
+
+/**
+ * A named type is a path: `u64`, `lexer::Token` (nominal — B.13). It may carry generic type
+ * ARGUMENTS `<T1, T2, …>` (S4 type-generics — `Box<i64>`, `Result<i64, str>`, nested `Box<Box<i64>>`).
+ * Inference-only: type-args appear ONLY in a type position, never as a call turbofish.
+ *
+ * The `<…>` is parsed SPECULATIVELY and backtracks if it is not a closed argument list: the cast
+ * target is a type-PRIMARY (`x to i64 < y`), so a bare `<` after a type name must stay available as
+ * the comparison operator. The close handles the `>>` (Shr) compound: it closes THIS list with one
+ * `>` and leaves the other for the enclosing generic (threaded via `ParsedType.pending_gt`), so
+ * `Box<Box<i64>>` parses at any nesting depth. (A `>=`/`>>=` close — `>` immediately before `=`,
+ * no space — still backtracks; write a space before `=`.)
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the type name's first token
+ * @return        the parsed named type (with any `<…>` type-argument list)
+ * @throws        when the reserved compiler-internal name `Ref` is spelled directly (0.3.1 — use `ref T`)
+ */
 fn parse_named(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
     let pp = match parse_path(tokens, pos) { Parsed<Path> as x => x; error as e => return e }
+    if hide_ref_surface_at(pp.node) {
+        return err_at(tokens, pos, "`Ref<T>` is compiler-internal — write the `ref` keyword instead (`ref T` in a type position, `ref x: T` to bind)")
+    }
     let plain = ParsedType { node = NamedType { path = pp.node; args = teko::list::empty() }; next = pp.next; pending_gt = 0 }
     if !is_kind_at(tokens, pp.next, lexer::TokenKind::Lt) { return plain }
     mut args: []TypeExpr = teko::list::empty()

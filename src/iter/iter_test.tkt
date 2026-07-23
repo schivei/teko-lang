@@ -2,13 +2,16 @@
  * Wrap a caller-owned i64 call-counter cell into an identity transform that ticks the cell
  * on every call — the instrument the laziness tests read back to prove a `map`/`filter`
  * closure ran EXACTLY as many times as the downstream `take` demanded, never once more.
- * The cell is a `Ref<i64>` (MEM-1b-ii), the only shared-mutation seam a closure can advance
- * across calls.
+ * The cell is a `ref i64` (MEM-1b-ii), the only shared-mutation seam a closure can advance
+ * across calls. The tick stays explicit `.value` (0.3.1 — a bare `ref`-bound write-through
+ * assign inside a CLOSURE needs a `lam_collect_stmt` capture fix this generation's seed
+ * predates; `.value =` keeps the FieldAccess-target shape the seed's capture walk already
+ * handles, avoiding an incomplete env-struct capture list this generation).
  *
  * @param cell  the caller-owned tick counter, incremented on each call
  * @return      an identity `(i64) -> i64` that ticks `cell` as a side effect
  */
-fn counting_identity(cell: Ref<i64>) -> (i64) -> i64 {
+fn counting_identity(ref cell: i64) -> (i64) -> i64 {
     let c: (i64) -> i64 = (x: i64) => { cell.value = cell.value + 1; x }
     c
 }

@@ -11,7 +11,7 @@ pub type IntIter = () -> i64 | null
 
 /**
  * The half-open range cursor: the next value to yield and the exclusive upper bound. Cursors
- * live in caller-owned `mut` state and are threaded through a `Ref` (the one shared-mutation
+ * live in caller-owned `mut` state and are threaded through a `ref` (the one shared-mutation
  * cell) — a `mut` captured directly by a closure is by-copy and would never advance.
  *
  * @param next  the next integer to yield
@@ -27,11 +27,11 @@ pub type RangeCursor = struct { next: i64; hi: i64 }
  * @return     an IntIter over the range
  * @since ITER0
  */
-pub fn range(cur: Ref<RangeCursor>) -> IntIter {
+pub fn range(ref cur: RangeCursor) -> IntIter {
     let it: IntIter = () => {
-        if cur.value.next >= cur.value.hi { return null }
-        let v = cur.value.next
-        cur.value = RangeCursor { next = v + 1; hi = cur.value.hi }
+        if cur.next >= cur.hi { return null }
+        let v = cur.next
+        cur = RangeCursor { next = v + 1; hi = cur.hi }
         v
     }
     it
@@ -98,12 +98,12 @@ pub type TakeCursor = struct { left: i64 }
  * @return     a lazy IntIter of at most `n` leading elements
  * @since ITER0
  */
-pub fn take(src: IntIter, cur: Ref<TakeCursor>) -> IntIter {
+pub fn take(src: IntIter, ref cur: TakeCursor) -> IntIter {
     let taken: IntIter = () => {
-        if cur.value.left <= 0 { return null }
+        if cur.left <= 0 { return null }
         let nx = src()
         match nx {
-            i64 as v => { cur.value = TakeCursor { left = cur.value.left - 1 }; v }
+            i64 as v => { cur = TakeCursor { left = cur.left - 1 }; v }
             null => null
         }
     }
@@ -126,14 +126,14 @@ pub type SkipCursor = struct { left: i64 }
  * @return     a lazy IntIter with its first `n` elements dropped
  * @since ITER0
  */
-pub fn skip(src: IntIter, cur: Ref<SkipCursor>) -> IntIter {
+pub fn skip(src: IntIter, ref cur: SkipCursor) -> IntIter {
     let skipped: IntIter = () => {
         loop {
-            if cur.value.left <= 0 { break }
+            if cur.left <= 0 { break }
             let dropped = src()
             match dropped {
-                i64 => cur.value = SkipCursor { left = cur.value.left - 1 }
-                null => { cur.value = SkipCursor { left = 0 }; return null }
+                i64 => cur = SkipCursor { left = cur.left - 1 }
+                null => { cur = SkipCursor { left = 0 }; return null }
             }
         }
         src()
@@ -158,13 +158,13 @@ pub type ChainCursor = struct { first_done: bool }
  * @return     a lazy IntIter over `a` followed by `b`
  * @since ITER0
  */
-pub fn chain(a: IntIter, b: IntIter, cur: Ref<ChainCursor>) -> IntIter {
+pub fn chain(a: IntIter, b: IntIter, ref cur: ChainCursor) -> IntIter {
     let ch: IntIter = () => {
-        if cur.value.first_done == false {
+        if cur.first_done == false {
             let na = a()
             match na {
                 i64 as x => return x
-                null => cur.value = ChainCursor { first_done = true }
+                null => cur = ChainCursor { first_done = true }
             }
         }
         b()
@@ -240,8 +240,8 @@ pub fn collect(src: IntIter) -> []i64 {
  * @return      an identity transform that ticks `cell`
  * @since ITER0
  */
-pub fn counting_identity(cell: Ref<i64>) -> (i64) -> i64 {
-    let c: (i64) -> i64 = (x: i64) => { cell.value = cell.value + 1; x }
+pub fn counting_identity(ref cell: i64) -> (i64) -> i64 {
+    let c: (i64) -> i64 = (x: i64) => { cell = cell + 1; x }
     c
 }
 
