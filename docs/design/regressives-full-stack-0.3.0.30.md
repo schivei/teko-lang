@@ -1,565 +1,395 @@
-# 0.3.0.30 HEADLINE — REGRESSIVES FULL-STACK (integrated plan)
+# 0.3.0.30 HEADLINE — REGRESSORS BY ARTIFACT-KIND × TARGET × FFI (integrated plan)
 
-Umbrella: `remodel/emit-throughput` (post-0.3.0.29). Owner ruling: the regressive
-SUPPORT, the `.tkr`/`.tkb` FORMATS, and the REAL regressives are developed TOGETHER.
-DESIGN ONLY; this doc is the ordered crumb sequence.
+Umbrella: `remodel/emit-throughput`. Owner reframe (2026-07-23). DESIGN ONLY; this doc is the
+ordered crumb sequence. Companion: `docs/design/tkr-regression-format.md` (the `.tkr` Gherkin
+format; taxonomy corrected). Sibling: `docs/design/kill-c-pull-forward-0.3.0.30.md` (the
+own-native `.o`/`.a` + system-`ld` + FFI crumbs KP1–KP17 this doc gates the regressors behind).
 
-**Owner revision (2026-07-22):** do NOT migrate the ~66 shell-harness fixtures 1:1.
-Consolidate the whole regressive surface to **(B) the COMPILER ITSELF as the primary
-full-stack regressor** PLUS **(A) 2-3 curated `.tkb` projects** that cover ONLY what the
-compiler-regressor does not assert. The old fixtures are re-mapped: most are SUBSUMED by
-the compiler-regressor, a handful fold into the curated projects, the rest are DROPPED.
+## 0. The reframe (owner 2026-07-23) — WHY this replaces the oracle-type partition
 
-Companion: `docs/design/tkb-regression-format.md` (the `.tkb` format, reconstructed).
+The prior plan partitioned the curated regressors by ORACLE TYPE
+(`rt_behavior` / `host_cli_io` / `compile_fail_diag`). That is **DISCARDED**. The compiler is a
+native EXECUTABLE, so R0 already IS the regressor of the "exe native" artifact kind AND of the
+whole LANGUAGE. The curated regressors must therefore cover only what R0 STRUCTURALLY cannot
+exercise — the matrix of **artifact kinds, targets, and FFI** — never language features
+(those live in R0 + checker `#test`s). Concretely:
 
----
+- runtime-operand law and host/CLI/IO are exercised NATURALLY by the consumer exes (the
+  `binary` / `interop` regressors) — no dedicated project.
+- compile-fail DIAGNOSTICS become CHECKER `#test`s (stronger than a diagnostic-less regressor)
+  — REPORTED UP (the architect does not open issues).
 
-## 0. Ground truth (verified in-tree)
+"3 é teórico; de fato não vejo mais do que 10 (incluindo o próprio compilador)." — owner.
 
-- The runner + `.tkr` model shipped inert in 0.3.0.29: `src/build/regression.tks`
-  (`run_regression_phase`, `run_regression_sources`, `run_one_regressive`, `check_run`,
-  `check_compile_fail`, `match_stream`, `dir_first_tkr`, `discover_source`,
-  `compile_regressive`, `run_captured`) and `src/build/tkr.tks` (`parse_tkr` → `Tkr` +
-  `TkrKind`/`TkrMatch`/`TkrExpect`/`TkrGolden`).
-- `project.tks::test_project` already calls `run_regression_phase(exe, m)` when
-  `m.test_regression_dirs.len > 0` (~:3288). Zero-cost no-op today (no manifest declares it).
-- Manifest support complete: `[tests] regression` / `gate` / `targets`.
-- **CRUX (bootstrap-safe, verified):** the BUILD gate does NOT run regressives.
-  `teko . -o bin` → `compile_project_g → run_gate → run_native_gate` (no
-  `run_regression_phase`); `--no-verify` → `build_ungated` (gate skipped). ONLY
-  `test_project` (the `teko test` path) runs the regression phase. So declaring
-  `[tests] regression` in `teko.tkp` activates regressives EXCLUSIVELY in the `teko test .`
-  self-test lane (`tests.yml`) — never in the seed→gen1 build, never in `release.yml`
-  (`--no-verify --release`). This is exactly the owner boundary: TEST lane, gen1 self-test,
-  no gen2-in-testing.
-- Anti-recursion: `TEKO_IN_REGRESSION` sentinel + the structural belt (each regressive is
-  `teko build`-ed → `build_ungated`, no nested test phase).
+## 1. Taxonomy (corrected — see companion doc §0)
 
-Existing shell harnesses (analysis + revised fate in §4):
+`.tkb` = Teko Binary codec (`src/emit/tkb_*`, FROZEN/UNTOUCHED). `.tkr` = Gherkin regressor
+(single parser in `src/build/tkr.tks`). `.tkp` = manifest. `.tkl` = portable package.
 
-| harness | what it does | revised fate |
-|---|---|---|
-| `scripts/compile_fail_regressions.sh` | 31 `EXPECT_COMPILE_FAIL` dirs | RETIRE (6 diagnostic pins → `compile_fail_diag`; 25 failure-only DROPPED) |
-| `scripts/positive_regressions.sh` | 35 `EXPECT_EXIT` dirs | RETIRE (SUBSUMED by compiler-regressor; dirs kept as sanitizer corpus) |
-| `scripts/native_regressions.sh` | `cd <proj> && teko build .` #64 CWD-runtime guard | KEEP (distinct invocation shape) |
-| `scripts/crossmodule_regressions.sh` | 1 dep/consumer `.tkl` fixture | KEEP (needs `packages/` provisioning; §4.4) |
-| `scripts/diff_c_own.sh` | C-vs-own BACKEND differential + `.o` checks | KEEP (backend differential) |
-| `scripts/validate_wasm_own.sh` | own-wasm == C-native BACKEND differential | KEEP (backend differential) |
-| sanitizers.yml build-all loops | build every fixture under ASan/paranoid | KEEP (sanitizer corpus) |
+Consolidation (retained by the owner):
+- MIGRATE the Gherkin logic from `src/build/tkb.tks` INTO `src/build/tkr.tks` (the single
+  `.tkr` parser). DELETE `src/build/tkb.tks` + `src/build/tkb_test.tkt`. The test becomes
+  `src/build/tkr_test.tkt`.
+- DELETE the old on-disk TOML `.tkr` file format: the `parse_tkr` TOML reader + its
+  `TkrBuild`/`TkrExpectAccum`/`tkr_split_kv`/`tkr_open_header`/`tkr_apply_*` helpers go. The
+  `Tkr` struct + the check layer (`check_run`/`check_compile_fail`/`match_stream`/
+  `resolve_stream`/`tkr_expect_for`/`TkrExpect`/`TkrGolden`) STAY as the frozen lowering target.
+- RENAME `examples/regressions/rt_behavior/rt_behavior.tkb` → `rt_behavior.tkr` (same Gherkin).
 
----
+## 2. THE GATING MODEL — regressors run under GEN1, not the seed (owner 2026-07-23)
 
-## 1. The model: (B) compiler-as-regressor + (A) 2-3 curated projects
+**The gate for a regressor is NOT "can the seed do it?" — it is "does GEN1 (the compiler built
+from the umbrella/PR sources) have the capability at the point the regressor is authored?"**
 
-### 1.B — The compiler IS the primary full-stack regressor (R0)
+The regression phase fires in `./bin/teko test .`, where `./bin/teko` = gen1 (the seed compiled
+the umbrella sources into gen1). The seed 0.3.0.29 only needs to build gen1; it does NOT need the
+capability the regressor exercises. Therefore:
 
-The self-host chain — the previous released seed compiling the PR's compiler sources into
-gen1, gen1 running its OWN `#test` suite (`teko test .`), and gen1 re-compiling the whole
-project to a byte-identical fixpoint — is ALREADY the largest real full-stack regressive in
-the tree. It exercises the ENTIRE language (every construct the compiler source uses:
-generics, traits, classes, interfaces, const folding, closures, match, defer, ownership,
-arenas, the whole host surface) on a huge real program, and asserts, per PR, on three OSes:
+- Since **.30 pulls own-native `.o`/`.a` emission + link via the system `ld` INTO .30**
+  (`kill-c-pull-forward-0.3.0.30.md` §2/§3, crumbs KP16/KP17), the **static / shared / pack /
+  interop** regressors are authorable **WITHIN .30**, LIVE right after the crumb that adds the
+  emission to gen1 — NOT `.31`-gated. They run under gen1 (which HAS the emission), even though
+  the 0.3.0.29 seed cannot emit `.a`/`.o`.
+- Likewise **FFI export/import** land in .30 behind their KP crumbs (KP10/KP11 reverse-FFI;
+  KP7/KP12/KP13 import), so the `ffi_export`/`ffi_import` regressors are **.30-LIVE**, aligned to
+  the kill-C FFI lane (`kill-c-pull-forward-0.3.0.30.md` §5).
+- The **only** ordering constraint is WITHIN .30: a regressor exercising a capability goes LIVE
+  **after** the KP crumb that adds it to gen1 (else gen1, built from pre-emission sources, fails
+  the regressor). Sequenced inside .30 behind the enabling crumb — never pushed to .31.
+- Only what genuinely does NOT land in .30 defers to .31 (today: `wasm_browser`, pending the
+  browser JS-runtime slice — stated explicitly below).
 
-1. **The compiler still compiles the whole language** — the seed builds gen1 from the PR
-   sources (`teko . -o bin`, native.yml `build-test` + tests.yml + sanitizers.yml). A
-   language regression that broke ANY construct the compiler uses breaks this build.
-2. **The compiler still passes its own gate** — `./bin/teko test .` (tests.yml, one runner
-   per OS) runs the full `#test` suite (600+ tests) + the D4 coverage floors. This is the
-   functional oracle for every checker/lowering/codegen unit.
-3. **The compiler reaches a byte-identical fixpoint** — gen1 builds gen2
-   (sanitizers.yml mem-paranoid `./bin/teko . -o gen2-mp`; the release fixpoint), and the
-   own==C / own==wasm backend differentials (diff_c_own.sh, validate_wasm_own.sh) confirm
-   the emitted machine code agrees across backends. A codegen regression that changed the
-   emitted bytes breaks the fixpoint / the differential.
+**Verified emission status TODAY (pre-KP, under the current C-backed gen1), from
+`src/build/project.tks`:**
+  - `binary` (exe) — YES (default path).
+  - `package` → `.tkl` — YES (C7.12, `project.tks:907`; a CODEC path, backend-independent).
+  - `static` → `.a` — HONEST STOP today (`project.tks:902`); becomes YES in gen1 at **KP16**.
+  - `shared` → `.so`/`.dylib`/`.dll` — HONEST STOP today (`project.tks:905`); YES at **KP16/KP17**.
+  - `wasm32-wasi` — build emits `.wasm` today (`validate_wasm_own.sh`); the RUN oracle needs a
+    wasmtime harness added to the runner (crumb C7 below, own to this workstream).
+  - `wasm32-browser` — module emits; JS-runtime wiring is "a later slice" → `.31` unless it lands.
+  - FFI (`extern`, `abi="c"`) — no front-end today; lands in gen1 at KP7–KP15 (all .30).
 
-**Concrete mechanism (decided): R0 is the EXISTING self-host + `teko test .` + fixpoint
-lanes, NAMED and COUNTED as the compiler-regressor — NO new fixture, NO `[tests] regression`
-self-entry.** A self-entry would be circular (a `teko test .` regressive whose project is
-`teko` itself would re-enter the whole gate; the `TEKO_IN_REGRESSION` sentinel would just
-no-op it). The design's job here is purely to NAME this existing capability as R0 and to
-document what it SUBSUMES, so the curated fixtures (A) do not duplicate it.
+## 3. Ground truth (verified in-tree, 2026-07-23)
 
-**What R0 subsumes:** any fixture whose sole purpose is "language feature X still
-compiles / still runs / is still rejected" — because the compiler's own source USES X (so a
-break fails the gen1 build) and/or its `#test` suite already covers X (so a break fails
-`teko test .`). This is the bulk of the old 66 (see §3).
+- Runner + `Tkr` model + check layer in `src/build/regression.tks` + `src/build/tkr.tks`.
+  `project.tks::test_project` calls `run_regression_phase(exe, m)`; the BUILD gate does NOT
+  (`--no-verify` → `build_ungated`). `[tests] regression` fires EXCLUSIVELY in `teko test .`.
+- `teko.tkp` already declares `[tests] regression = ["examples/regressions"]` + `gate = true`.
+- Anti-recursion: `TEKO_IN_REGRESSION` sentinel (`regression.tks:459`) + the structural belt
+  (each regressor is `teko build`-ed → `build_ungated`, no nested test phase).
+- 217 dirs under `examples/regressions/`; `const_crossmodule_inline` is the dep/consumer pair.
+- The kill-C FFI lane (`kill-c-pull-forward-0.3.0.30.md` §5) already scopes FFI fixtures under
+  `examples/regressions/ffi/<name>/` — but names them `.tkb` and cites the DELETED
+  `tkb-regression-format.md`. That is the OLD taxonomy; it must be updated to `.tkr` + the new
+  grammar (incl. the `backend`/`pending` Given nouns, §7). REPORTED UP (that doc is another
+  agent's territory; the taxonomy fix propagates there).
 
-**What R0 does NOT assert** (and therefore the curated projects (A) must):
-- The **runtime-operand law**: R0's tests may run over CONSTANT operands the folder
-  collapses; R0 does not guarantee an op is EXECUTED on fold-opaque (argv/stdin) operands.
-- **Observable process behavior of an arbitrary built binary**: exit code, stdout/stderr
-  TEXT and BYTE/HEX goldens, from a program compiled by gen1 and RUN as a child — R0 asserts
-  the COMPILER's own exit/tests, not a fixture program's observable streams.
-- **Host surface end-to-end from a built binary**: env/io/fs/process as OBSERVED by a
-  separately-built program (R0 uses the host surface internally, but does not pin a built
-  program's observable host effects).
-- **The runner's own features**: CLI args passthrough into a regressive.
-- **The exact compile-fail DIAGNOSTIC wording** (the 6 unique pins) — a contract on the
-  MESSAGE text a rejection emits, which R0's rejection unit-tests do not all pin.
+## 4. The regressor set (≤10 incl. the compiler) — FINAL, gated per KP crumb
 
-### 1.A — The 2-3 curated `.tkb` projects (the residual surface)
+Partition axis: **artifact kind × target × FFI × interop.** "Live at" = the crumb after which
+gen1 has the capability and the regressor is authored. All except `wasm_browser` are **.30**.
 
-Exactly what R0 does not cover, in as few entry points as possible. **THREE projects**
-(justified in §2), each a single `.tkb` using `Scenario Outline`s for breadth:
+| # | regressor | artifact / target | uniquely asserts (R0 cannot) | live at (gen1 capability) |
+|---|---|---|---|---|
+| R0 | **the compiler** | `binary` (exe native) | whole language + exe kind; fixpoint gen1==gen2; own==C/own==wasm differentials | existing lanes (§5); declared by `regressor.tkr` |
+| 1 | **`rt_behavior`** (renamed) | `binary` (exe) | an ARBITRARY built program's observable exit/stdout over fold-opaque argv operands; runner first-light self-proof | **.30 C2** (builds under gen1 today) |
+| 2 | **`pack`** | `package` → `.tkl` | the package artifact kind emits a well-formed `.tkl` | **.30 C3** (`.tkl` codec exists today) |
+| 3 | **`interop`** | `binary` consuming #2 (+ later #4/#5) | binary↔package interoperability end-to-end (build dep → provision → consume → run) | **.30 C4** (package-interop today); static/shared deps join at KP16/KP17 |
+| 4 | **`static`** | `static` → `.a` | the static-library artifact kind + a consumer linking it | **.30, after KP16** (own-native `.a` archive writer) → crumb C-S1 |
+| 5 | **`shared`** | `shared` → `.so`/`.dylib`/`.dll` | the shared-library artifact kind + a consumer linking it | **.30, after KP16+KP17** (`.o` + system-`ld -shared`) → crumb C-S2 |
+| 6 | **`wasm_wasi`** | `wasm32-wasi` | a wasm module RUN under wasmtime (exit/stdout) via `teko test` | **.30 C7** (build exists today; this crumb adds the runner wasmtime harness) |
+| 7 | **`wasm_browser`** | `wasm32-browser` | a browser-target module under a headless JS runtime | **.31** unless the browser JS-runtime slice lands in .30; then .30 behind it |
+| 8 | **`ffi_export`** | `binary`/`shared` `abi="c"` | reverse-FFI: teko exposes a C ABI (`.h`, `ns_name`/`= "SYM"`) a C driver links | **.30, after KP10+KP11 (+ KP16/KP17 link)** → crumb C-F1 |
+| 9 | **`ffi_import`** | `binary` + `extern fn/type` | teko calls a C library through `extern` | **.30, after KP7+KP12+KP13 (+ system-`ld`)** → crumb C-F2 |
 
-- **P1 `rt_behavior`** — the runtime-operand law. ONE `.tkp` compiled ONCE; Outlines drive N
-  executed runs over fold-opaque argv operands across the op families (arith / bitwise /
-  shift-masked / compare / concat / foreach / `ids[i]=v`). Oracles: exit code + stdout.
-- **P2 `host_cli_io`** — observable host + CLI + IO. ONE `.tkp` compiled once; Outlines vary
-  env / stdin / argv (including the `--` passthrough) and a file-IO roundtrip. Oracles:
-  exit + stdout/stderr TEXT + one byte/HEX golden.
-- **P3 `compile_fail_diag`** — the negative path. ONE project whose `.tkb` Outline names a
-  distinct failing source per row (`Given source "cases/<f>.tks"`) and pins the required
-  `diagnostic`. The 6 unique diagnostic pins. No run phase (compile-per-scenario).
+**Nine regressors + R0 = ten entry points, all .30 except `wasm_browser`.** Four are LIVE
+immediately under today's gen1 (R0, `rt_behavior`, `pack`, `interop`-package); the rest go LIVE
+inside .30 the moment their KP crumb lands in gen1 — each DESIGNED now (companion §9) so the
+implementer wires them in minutes.
 
-Everything else from the old 66 is SUBSUMED by R0 or DROPPED (§3).
+### 4.1 Why not fewer / more
+- Not fewer: each asserts a DISTINCT artifact-kind capability R0 alone does not. `rt_behavior`
+  doubles as the runner's live self-proof.
+- Not more: `interop` (#3) is the "quarto que compõe a disposição" — it is where #2/#4/#5 prove
+  interoperation and grows as the library kinds land, rather than spawning new entry points.
 
----
+### 4.2 The FFI regressors ARE the kill-C §5 lane
+`ffi_export`/`ffi_import` (#8/#9) are the SAME fixtures the kill-C doc §5 scopes under
+`examples/regressions/ffi/<name>/`, RE-EXPRESSED in the corrected `.tkr` grammar (with
+`Given backend = "own"` and `Given pending = "<KP-crumb>"` skipped-green until the crumb lands).
+This design does not duplicate that suite; it OWNS the taxonomy correction (`.tkb`→`.tkr`) and
+the grammar the suite authors against.
 
-## 2. Why THREE curated projects (count justification)
+## 5. R0 — the compiler as the root regressor (the .29 debt)
 
-The three projects partition by **oracle TYPE**, not by feature — that is what keeps the
-surface minimal and non-overlapping with R0:
+R0 is the EXISTING self-host + `teko test .` + fixpoint + backend-differential lanes, NAMED and
+COUNTED as the compiler-regressor via a **root `.tkr`**.
 
-- P1's oracle is a value COMPUTED from opaque operands (exit/stdout of pure computation).
-- P2's oracle is an observable HOST EFFECT + stream bytes (env/io/cli/process).
-- P3's oracle is a BUILD-TIME diagnostic with NO run phase at all.
+- **File: `regressor.tkr` at the repository root.** Distinct from `teko.tkp`; a `.tkr` at the
+  root is unambiguous and greppable. NOT under `examples/regressions/`, so discovery does not
+  pick it up as an ordinary regressor.
+- **Declarative + NON-RECURSIVE.** `regressor.tkr` DECLARES the contract; the runner does NOT
+  execute it. The runner treats the repo-root self-project as a no-op: `TEKO_IN_REGRESSION`
+  already prevents a `teko test .` re-entry, and discovery is scoped to the
+  `[tests] regression` sources (`examples/regressions`), which excludes the root. A self-entry
+  would be circular. The EXISTING lanes VERIFY the contract; `regressor.tkr` is its DECLARATION.
+- **Contract (documentation Scenarios, each with a `# verified-by:` lane comment):**
+  1. `Feature: R0 — the compiler is its own full-stack regressor (exe native).`
+  2. `Scenario: the compiler compiles the whole language` — seed builds gen1 (`teko . -o bin`).
+  3. `Scenario: the compiler passes its own gate` — `teko test .` exit 0 (600+ `#test`s + D4).
+  4. `Scenario: the compiler reaches a byte-identical fixpoint` — **gen1 == gen2, NEVER gen3.**
+  5. `Scenario: the emitted code agrees across backends` — own==C (`diff_c_own.sh`) and
+     own==wasm (`validate_wasm_own.sh`).
 
-P3 cannot merge into P1/P2: a compile-fail has no built artifact to run, and needs distinct
-FAILING sources — a fundamentally different runner shape. P1 and P2 COULD merge into one
-"behavior" project, but they are kept separate because (a) P2 needs environmental provisioning
-(env vars, a scratch file, the `--` tail) that P1 does not, and (b) one focused Outline per
-concern reads far better than a 30-row grab-bag. If the owner prefers TWO, merge P1+P2 into a
-single `rt_and_host` project — acceptable, at the cost of a busier `.tkb`. Recommend three.
+## 6. Re-mapping the 217 dirs
 
-Net regressive surface: **3 `.tkb` projects (~3 entry points, ~2-3 dozen scenario rows) +
-R0 (existing, zero new lane).** Down from 66 shell-harness fixtures.
+- **SUBSUMED by R0 (drop as regressors; dirs may stay as corpus):** every language-feature
+  fixture — the compiler source USES the feature and/or its `#test` suite covers it. The bulk.
+- **FOLD into `interop`:** `const_crossmodule_inline` (dep/consumer) — its build-dep→`.tkl`
+  →consume→run shape IS the package-interop regressor. Retire `crossmodule_regressions.sh` once
+  `interop` is green (§8).
+- **FOLD into `rt_behavior`:** fixed-literal arithmetic fixtures (`own_arith_exit`,
+  `own_sub_exit`, `char_ops`) become Outline ROWS over argv operands (already the shape of
+  `rt_behavior.tkr`); then dropped as standalone regressors. Their DIRS stay where referenced by
+  `diff_c_own.sh` / `validate_wasm_own.sh` (backend corpora) — do NOT delete.
+- **→ CHECKER `#test` (REPORTED UP):** compile-fail rejection fixtures with a unique diagnostic.
+  A diagnostic-less regressor passes on ANY build failure (weak); the rejection is a checker
+  concern. Where not yet a checker `#test`, it should become one — stronger than a regressor.
+- **KEEP as corpus (NOT regressors, NOT deleted):** dirs referenced by `diff_c_own.sh`,
+  `validate_wasm_own.sh`, and the sanitizers.yml build-all loops.
+- **DROP (delete with the harness):** failure-only compile-fail dirs with no diagnostic pin and
+  no corpus role (their only consumer was the retired shell harness).
 
----
+## 7. `examples/regression-fixture/` (the runner's failure-reporting self-test)
 
-## 3. Re-mapping the old 66 fixtures under this model
+The two TOML `test.tkr` demos (`exit_ok` pass / `exit_bad` FAIL) proved the runner REPORTS a
+mismatch. Since the on-disk TOML `.tkr` format is DELETED and a genuinely-failing regressor
+cannot live under a green `teko test .` gate, this coverage MOVES to an in-memory checker `#test`
+in `src/build/tkr_test.tkt` (`check_run` over a mismatching `CapResult` → failing `RegrOutcome`;
+over a matching one → passing). Deterministic, gate-safe, stronger. DELETE
+`examples/regression-fixture/`.
 
-### 3.1 — 31 `EXPECT_COMPILE_FAIL`
+## 8. CI-shrink SPEC (owner applies `.github`/`scripts`)
 
-- **FOLD into P3 `compile_fail_diag`** (the 6 with a UNIQUE diagnostic pin — 5 unique
-  messages): `const_ns_qualified_visibility_rejected` ("is private to"),
-  `iface_value_struct_rejected` ("a `struct` value cannot be used as the interface"),
-  `lit_neg_unsigned` ("a negative literal cannot be annotated as an unsigned type (M.1)"),
-  `lit_slice_overflow` / `lit_u8_overflow` (share "literal out of range for the annotated
-  type (M.1 — fail early)" — keep BOTH constructs as two rows, one shared message),
-  `lit_trunc_cast` ("constant out of range for the cast target (M.1 — fail early)"). Each
-  becomes a `cases/<name>.tks` + an Outline row pinning the message.
-- **DROP** the 25 failure-only fixtures (no diagnostic pin): `adopt_break_outside_loop`,
-  `adopt_break_unknown_label`, `adopt_return_type_mismatch`, `arena_manual_leak`,
-  `discard_*` (6), `free_*` (3), `loop_label_lowercase`, `loop_range_counter_leak`,
-  `loop_three_part_nonbool_cond`, `member_const_interface_rejected`,
-  `member_const_override_rejected`, `member_const_visibility_leak_rejected`, `must_free_leak`,
-  `ref_in_collection_rejected`, `ref_local_unnamed_source_rejected`, `ref_returned_rejected`,
-  `underscore_as_x_rejected`, `unsafe_field_in_safe_struct`. Rationale: a failure-only oracle
-  passes on ANY build failure (a weak guard), and the REJECTION of each of these constructs
-  is a CHECKER concern already exercised by the compiler's `#test` suite (R0). REPORTED UP
-  (not turned into new issues by the architect): where a specific rejection is NOT yet a
-  checker `#test`, it should become one — that is stronger than a diagnostic-less regressive.
-  The fixture DIRS may be deleted with the harness (owner, §4).
+The architect does NOT edit `.github`/`scripts`; this is the exact delta, applied at C6 AFTER the
+live regressors (R0 + `rt_behavior` + `pack` + `interop`) are green under `teko test .`.
 
-### 3.2 — 35 `EXPECT_EXIT`
+### 8.1 DELETE (scripts that run regressors INDIVIDUALLY instead of via `teko test`)
+- `scripts/compile_fail_regressions.sh` — its diagnostic pins → checker `#test`s (§6, REPORTED
+  UP) BEFORE deletion; the rest were failure-only.
+- `scripts/positive_regressions.sh` — SUBSUMED by R0 (`EXPECT_EXIT` positives).
+- `scripts/native_regressions.sh` — the `#64` CWD-build guard folds into a regressor (§8.3).
+- `scripts/crossmodule_regressions.sh` — folds into the `interop` regressor (§6).
 
-- **SUBSUMED by R0** (DROP as regressives; the DIRS stay as sanitizer positive corpus): all
-  the const-folding / member-const / interface-value / literal-context fixtures assert
-  language features the compiler source USES and its `#tests` cover —
-  `comptime_fold_*` (5), `const_agg_*` (3), `const_pub_export_survives`, `const_scalar_inline`,
-  `const_variant_match_subject`, `member_const_*` (5), `iface_*` (7), `lit_*` (5),
-  `null_union_basic`, `list_grow_bridge`, `stored_borrow_sound`, `cf4_field_len_fold`,
-  `cf4_index_fold`.
-- **FOLD into P1 `rt_behavior`** (as opaque-operand SCENARIOS, not 1:1 dirs): the
-  fixed-literal arithmetic fixtures `own_arith_exit` / `own_sub_exit` become Outline rows
-  whose operands come from argv (the runtime-operand upgrade). The fixed-literal versions are
-  then DROPPED as regressives (they remain in the diff_c_own / validate_wasm BACKEND corpora,
-  which reference them by dir name — do NOT delete those dirs).
+### 8.2 REMOVE these steps from `.github/workflows/native.yml` (`gen1-checks` job)
+- `native.yml:282-286` — "CWD build regression check (issue #64, on gen1)" → `native_regressions.sh`
+- `native.yml:294-298` — "EXPECT_COMPILE_FAIL regression check (issue #610, on gen1)" → `compile_fail_regressions.sh`
+- `native.yml:308-312` — "EXPECT_EXIT positive const regression check (issue #594 8f, on gen1)" → `positive_regressions.sh`
+- `native.yml:321-325` — "E2E cross-module const regression check (issue #594 8d, on gen1)" → `crossmodule_regressions.sh`
 
-### 3.3 — char_ops (no marker)
+### 8.3 The `#64` CWD-build guard — FOLD, don't drop
+`native_regressions.sh` checks `cd <project> && teko build .` (CWD-relative resolution, #64/#66)
+— a distinct INVOCATION shape the by-PATH runner does not reproduce. FOLD it into a `rt_behavior`
+(or `interop`) `Scenario` whose runner mode chdir's into the regressor dir before `teko build .`.
+If that mode is not added this wave, KEEP `native_regressions.sh` + its step and note the debt —
+do NOT silently drop the #64 coverage.
 
-- **FOLD into P1** as a str-ops Outline row (UTF-8 codepoint ops over an argv-supplied
-  string), OR DROP as subsumed (str_slice_chars/char_at are used in the compiler and
-  unit-tested). Recommend a single P1 row so the runtime-operand STR path is covered.
+### 8.4 KEEP (backend differentials — NOT "individual regressor" runners)
+`scripts/diff_c_own.sh`, `scripts/validate_wasm_own.sh` stay (own==C, own==wasm differentials);
+their corpus dirs stay too (§6).
 
-### 3.4 — 1 cross-module (`const_crossmodule_inline`)
+### 8.5 R0 needs NO new lane
+R0 is the existing self-host + `teko test .` + fixpoint + differentials; only NAMED here (via
+`regressor.tkr`). No workflow edit required for R0.
 
-- **KEEP** under `crossmodule_regressions.sh` this wave (dep/consumer, no top-level `.tkp`;
-  §4.4). Not folded into A.
+## 9. Crumb sequence (ordered; `[RITUAL]` = fixpoint gen1==gen2 byte-identical + `teko test .` green on all 3 OSes)
 
-**Result:** old 66 → **P3 (~6 rows) + P1 (~2 folded rows among its op-family rows) + 0 from
-the 35 EXPECT_EXIT as standalone regressives.** The rest is R0-subsumed or dropped.
+Every crumb builds under the previous seed and uses only str/list/match/struct/enum/loop (all in
+the 0.3.0.29 seed). C0–C7 are this workstream's crumbs; the C-S*/C-F* regressor crumbs are
+ordered INSIDE .30 immediately AFTER their enabling kill-C KP crumb lands in gen1.
 
----
+### C0 — Docs + R0 declaration (this wave's design deliverable)
+Files: `docs/design/tkr-regression-format.md` (done), this doc (done), NEW `regressor.tkr` at the
+repo root (§5). Gate: light. NOT `[RITUAL]`.
 
-## 4. Revised CI-shrink SPEC (owner applies `.github`/`scripts`)
+### C1 — Consolidate the Gherkin parser into `.tkr` (the rename/merge)
+Files: `src/build/tkr.tks` (RECEIVES the migrated Gherkin parser + lowering + Outline expand;
+LOSES the TOML `parse_tkr` + helpers), DELETE `src/build/tkb.tks`, DELETE
+`src/build/tkb_test.tkt`, NEW/renamed `src/build/tkr_test.tkt`, `src/build/regression.tks`
+(discovery + dispatch + the root self-project guard).
 
-The architect does NOT edit `.github`/`scripts`; this is the exact delta for the owner,
-applied at C6 AFTER the curated projects are green under `teko test .`.
+Renames (Gherkin `Tkb*`/`tkb_*` → `Tkr*`/`tkr_*`, avoiding collision with the frozen
+`Tkr`/`TkrKind`/… which STAY): `TkbPhase`→`TkrPhase`, `TkbStep`→`TkrStep`, `TkbRow`→`TkrRow`,
+`TkbExamples`→`TkrExamples`, `TkbScenario`→`TkrScenario`, `TkbFeature`→`TkrFeature`;
+`parse_feature`→`parse_tkr` (REPLACES the deleted TOML `parse_tkr`); `run_one_tkb`→`run_one_tkr`;
+every `tkb_*` helper → `tkr_*`. Discovery collapses to `.tkr`-only (drop the dual-format
+`SpecRef.is_tkb`); `dir_first_tkr` returns the single `.tkr`.
 
-### 4.1 — `native.yml` `gen1-checks` job
-
-REMOVE (now subsumed by R0 + the curated projects):
-- "EXPECT_COMPILE_FAIL regression check (issue #610)" — `scripts/compile_fail_regressions.sh`
-- "EXPECT_EXIT positive const regression check (issue #594 8f)" — `scripts/positive_regressions.sh`
-
-KEEP: "CWD build regression check (#64)" (native_regressions.sh — §4.3), "E2E cross-module
-(#594 8d)" (crossmodule_regressions.sh — §4.4), "C-vs-own differential" + the wasm
-differential (backend differentials).
-
-### 4.2 — scripts + markers
-
-- DELETE after C6 green: `scripts/compile_fail_regressions.sh`, `scripts/positive_regressions.sh`.
-- `EXPECT_EXIT` markers: removable (harness gone); the DIRS stay (sanitizer positive corpus,
-  built by sanitizers.yml's build-all loops — no coverage lost).
-- `EXPECT_COMPILE_FAIL` markers: sanitizers.yml's build-all loops SKIP on them
-  (`if [ -f EXPECT_COMPILE_FAIL ]`). Two owner options: (a) delete the 25 dropped failure-only
-  dirs + their markers (they are used by NOTHING once the harness retires — recommended
-  cleanup), keeping only the 6 pinned constructs as P3 `cases/`; or (b) leave the dirs as
-  negative sanitizer corpus and keep the markers. Recommend (a) — the harness was their only
-  consumer; the 6 pinned constructs move to P3.
-- KEEP: `native_regressions.sh`, `crossmodule_regressions.sh`, `diff_c_own.sh`,
-  `validate_wasm_own.sh`.
-
-### 4.3 — #64 CWD guard NOT subsumed — KEEP
-
-`native_regressions.sh` checks `cd <project> && teko build .` (the CWD-relative runtime
-resolution shape, #64/#66). The regression runner builds by PATH (`teko <dir> -o bin`,
-compiler-relative resolution) and does NOT reproduce the cd-into shape. Orthogonal — stays.
-
-### 4.4 — Cross-module NOT subsumed this wave — KEEP
-
-`const_crossmodule_inline` is a `dep/`+`consumer/` pair with no top-level `.tkp`; the runner
-lacks the build-dep-to-`.tkl` + provision-`packages/` capability. DESIGN-AHEAD (not this
-wave): a `.tkb` `Background` step `Given dependency "<dep-subdir>"` the runner builds to a
-`.tkl` and provisions into a scratch `packages/` before the consumer compile (mirroring
-`crossmodule_regressions.sh`). Until then KEEP the harness + its `native.yml` step.
-
-### 4.5 — R0 needs NO new lane
-
-The compiler-regressor is the EXISTING self-host (native.yml build-test, tests.yml
-`teko test .`, sanitizers fixpoint, diff_c_own, validate_wasm). This design only NAMES it;
-no workflow edit is required for R0.
-
----
-
-## 5. Revised crumb sequence (shorter under the smaller surface)
-
-Each crumb builds under the previous seed (0.3.0.29 released binary is the C0 seed; the
-whole workstream uses only str/list/match/struct/enum/loop — all present in 0.3.0.29).
-`[RITUAL]` = full gate (seed→gen1 + `teko test .` green on all three OSes AND the tests.yml
-duration delta measured, §7 R1).
-
-- **C0** — Docs + `tkb.tks` scaffold + FORMALIZE R0 (doc only). Compiles, dormant.
-- **C1** — Real `.tkb` parser + lowering + Outline expand + discovery(`.tkb`/`.tkr`) +
-  `tkb_test.tkt` unit tests. Not yet wired to a live project. `[RITUAL]`
-- **C2** — Author **P1 `rt_behavior`** + turn `teko.tkp` non-inert. First light. `[RITUAL]`
-- **C3** — Args passthrough (`--` tail + `[tests] args`, §6). `[RITUAL]`
-- **C4** — Author **P2 `host_cli_io`** (host surface + `--` passthrough + a HEX golden). `[RITUAL]`
-- **C5** — Author **P3 `compile_fail_diag`** + the compile-fail-per-scenario-source runner
-  extension (`Given source "<file>"`). `[RITUAL]`
-- **C6** — CI-shrink + harness-retirement SPEC (owner applies §4). `[RITUAL final]`
-
-Seven crumbs (C0-C6), simpler than the pre-revision 8: the three heavy 1:1-migration crumbs
-collapse into the authoring crumbs C2/C4/C5 (one per curated project).
-
-### C0 — Docs + scaffold + R0 formalization
-
-Files: `docs/design/tkb-regression-format.md` (done), this doc, NEW `src/build/tkb.tks`
-skeleton (types + honest-stop `parse_feature`; dormant — not called by discovery). R0 is
-DOC-ONLY: name the self-host + `teko test .` + fixpoint lanes as the compiler-regressor in
-this doc; no code, no fixture. Gate: light (must compile). NOT `[RITUAL]`.
-
-Type signatures for `tkb.tks` (copy-paste ready, full Javadoc):
+Signature shapes (full Javadoc; bodies migrate from the current `tkb.tks`):
 
 ```teko
 /**
- * TkbPhase — the Gherkin step PHASE: `Given` (opaque runtime inputs), `When` (the entry verb
- * that classifies the kind), or `Then` (the expected observable output). `And`/`But` inherit
- * the preceding step's phase and never appear as a distinct value here.
+ * TkrPhase — the Gherkin step PHASE: `Given` (inputs), `When` (the entry verb classifying the
+ * exercise mode), or `Then` (the expected observable output). `And`/`But` inherit the preceding
+ * step's phase and never appear as a distinct value here.
  *
  * @since 0.3.0.30
  */
-pub type TkbPhase = enum { Given; When; Then }
+pub type TkrPhase = enum { Given; When; Then }
 
 /**
- * TkbStep — one lowered Gherkin step: the resolved `phase`, the `noun` phrase selecting a
- * `Tkr` field (e.g. "args", "exit", "stdout sha256", "source"), the entry `verb` for a When,
- * the `osarch` route from an `on "<os-arch>"` prefix, and the raw TOML `value` text (already
- * placeholder-substituted, still in surface form so the reused `mf_read_*` lexers decode it).
+ * TkrFeature — one parsed `.tkr` file: the `name` free text and the `scenarios` (Background
+ * already folded into each scenario's steps). One feature = one regressor project.
  *
  * @since 0.3.0.30
  */
-pub type TkbStep = struct {
-    /** the resolved phase (And/But inherit the previous step's). */
-    phase: TkbPhase
-    /** the noun-phrase selecting the target `Tkr` field ("" for an entry-verb When). */
-    noun: str
-    /** the entry verb ("built and run" | "compiled" | "compilation fails" | ""). */
-    verb: str
-    /** the os-arch route from an `on "<os-arch>"` prefix ("" = top-level expectation). */
-    osarch: str
-    /** the raw TOML value text right of `=` ("" for a valueless entry verb). */
-    value: str
-}
-
-/**
- * TkbExamples — a Scenario Outline's parameter table: `headers` (placeholder names) and
- * `rows` (one `[]str` of column values per case). Empty `headers` ⇒ a plain scenario (one
- * implicit row).
- *
- * @since 0.3.0.30
- */
-pub type TkbExamples = struct {
-    /** the placeholder column names from the header row. */
-    headers: []str
-    /** one row of column values per parametrised case. */
-    rows: [][]str
-}
-
-/**
- * TkbScenario — one scenario: `name`, whether it is an `outline`, its ordered `steps`
- * (Background Given steps prepended), and its `examples` table (empty for a plain scenario).
- *
- * @since 0.3.0.30
- */
-pub type TkbScenario = struct {
-    /** the scenario's free-text label (report line). */
-    name: str
-    /** true for a `Scenario Outline` (expanded per Examples row). */
-    outline: bool
-    /** the ordered steps (Background Given steps prepended). */
-    steps: []TkbStep
-    /** the parameter table (empty headers ⇒ a single implicit row). */
-    examples: TkbExamples
-}
-
-/**
- * TkbFeature — one parsed `.tkb` file: the `name` free text and the `scenarios` (Background
- * already folded into each scenario's steps). One feature = one regressive project.
- *
- * @since 0.3.0.30
- */
-pub type TkbFeature = struct {
+pub type TkrFeature = struct {
     /** the Feature free-text label. */
     name: str
     /** the scenarios, each carrying the Background Given steps. */
-    scenarios: []TkbScenario
+    scenarios: []TkrScenario
 }
 
 /**
- * parse_feature — read a `.tkb` source into a `TkbFeature`, or fail honestly (M.3). Reuses
- * the manifest value lexers (`mf_read_quoted`/`mf_read_array`/`mf_read_int`) verbatim for
- * every right-hand side; introduces only keyword-line + Examples-table + HEX-docstring
- * parsing. Background Given steps are prepended to every scenario.
+ * parse_tkr — read a `.tkr` (Gherkin) source into a `TkrFeature`, or fail honestly (M.3). Reuses
+ * the manifest value lexers (`mf_read_quoted`/`mf_read_array`/`mf_read_int`) verbatim for every
+ * right-hand side; introduces only keyword-line + Examples-table + HEX-docstring parsing.
+ * REPLACES the deleted TOML `parse_tkr`.
  *
- * @param src  the `.tkb` file contents
+ * @param src  the `.tkr` file contents
  * @return     the parsed feature, or an `error` on any malformed line / unknown noun-phrase
  * @throws     on a malformed keyword line, an unknown noun-phrase, or a malformed value
  * @since 0.3.0.30
  */
-fn parse_feature(src: str) -> TkbFeature | error {
-    // C0: honest-stop scaffold — the real body lands in C1.
-    error { message = "tkb: parse_feature not yet implemented (0.3.0.30 C1)" }
-}
-```
-
-### C1 — Real `.tkb` parser + run loop + discovery
-
-Files: `src/build/tkb.tks` (implement `parse_feature` + the lowering + the run loop),
-`src/build/regression.tks` (generalise discovery to `.tkb`/`.tkr`), `src/build/tkb_test.tkt`
-(NEW unit tests: parse, lower, outline expand, HEX docstring, verdict PARITY vs the
-equivalent `.tkr`).
-
-New signatures (copy-paste ready):
-
-```teko
-/**
- * tkb_lower_scenario — lower one PLAIN scenario to a `Tkr`, folding Given/When/Then steps
- * into the reused `Tkr` model (`Given`→opaque inputs, `When`→kind, `Then`→expectations,
- * routing `on "<os-arch>"` into `TkrExpect`/`TkrGolden`). M.3 honest error on a bad value.
- *
- * @param sc  the scenario (steps already Background-prepended)
- * @return    the lowered spec, or an `error` on a malformed step value / unknown phrase
- * @throws    on a malformed value or an unknown noun-phrase
- * @since 0.3.0.30
- */
-fn tkb_lower_scenario(sc: TkbScenario) -> Tkr | error { /* C1 */ }
+fn parse_tkr(src: str) -> TkrFeature | error { /* migrate the tkb.tks body */ }
 
 /**
- * tkb_expand_outline — expand a `Scenario Outline` into one `Tkr` per Examples row by
- * textually substituting each `<name>` placeholder with the row's matching column value
- * BEFORE the reused `mf_read_*` lexers see it, then lowering. A plain scenario yields a
- * single-element list.
+ * run_one_tkr — parse, then exercise a `.tkr` regressor, dispatching on `(m.artifact, When-verb)`
+ * (companion §4): `built and run` (exe), `packaged` (`.tkl` + `artifact exists`), `linked and
+ * run` (interop), `built as static/shared library`, `run on "<target>"` (wasm), `exports/imports
+ * c abi` (FFI), `compilation fails` (per-source). A verb whose capability is not in THIS gen1 is
+ * an HONEST STOP (or `Given pending`-skipped-green). The verdict is the FIRST failure, else pass.
  *
- * @param sc  the (outline) scenario
- * @return    one lowered spec per row, or an `error` on a width mismatch / bad value
- * @throws    on a row width mismatch, an unknown placeholder, or a malformed value
- * @since 0.3.0.30
- */
-fn tkb_expand_outline(sc: TkbScenario) -> []Tkr | error { /* C1 */ }
-
-/**
- * tkb_read_hex_docstring — decode a `"""<hex>"""` docstring to raw bytes, ignoring ALL ASCII
- * whitespace between the fences. Carries CONTROL bytes (`\n`, `\0`, opcodes) LITERALLY into a
- * `Literal` `TkrMatch`, closing the `.tkr` newline-in-quoted-literal gap. M.3 on bad hex.
- *
- * @param s  the source starting at the opening `"""`
- * @param p  the cursor at the first `"`
- * @return   the decoded bytes, or an `error` on malformed hex / an unterminated docstring
- * @throws   on a non-hex nibble, an odd nibble count, or a missing closing `"""`
- * @since 0.3.0.30
- */
-fn tkb_read_hex_docstring(s: str, p: u64) -> str | error { /* C1 */ }
-
-/**
- * SpecRef — a discovered spec file: its `name` (basename in the regressive dir) and `is_tkb`
- * (true for a `.tkb`, false for a legacy `.tkr`). Lets `run_one_regressive` dispatch on
- * format without re-scanning.
- *
- * @since 0.3.0.30
- */
-type SpecRef = struct {
-    /** the spec file basename inside the regressive directory. */
-    name: str
-    /** true for a `.tkb` (canonical), false for a `.tkr` (legacy). */
-    is_tkb: bool
-}
-
-/**
- * dir_first_spec — the first spec in `dir`, PREFERRING a `.tkb` over a `.tkr`, or `null` when
- * `dir` is unreadable or holds no spec. Supersedes `dir_first_tkr` in discovery
- * (`dir_first_tkr` retained for the legacy `.tkr`-only meta-tests).
- *
- * @param dir  the directory to inspect
- * @return     the preferred spec ref, or `null`
- * @since 0.3.0.30
- */
-fn dir_first_spec(dir: str) -> SpecRef? { /* C1 */ }
-
-/**
- * run_one_tkb — parse, then run a `.tkb` regressive. For RUN scenarios: compile the dir's
- * `.tkp` ONCE, expand each scenario (outline ⇒ N `Tkr`s), and run the built binary per
- * lowered `Tkr` through the UNCHANGED `check_run`. For COMPILE-FAIL scenarios: compile each
- * scenario's `Given source "<file>"` standalone and check via `check_compile_fail` (no run,
- * so no shared artifact — per-scenario compile is inherent to the negative path). The verdict
- * is the FIRST failure, else pass.
- *
- * @param exe       the absolute path to this compiler binary
- * @param regr_dir  the regressive project directory
- * @param tkb_name  the `.tkb` basename inside `regr_dir`
- * @param prefix    the scratch-file prefix for this regressive
+ * @param exe       the absolute path to this compiler binary (gen1)
+ * @param regr_dir  the regressor project directory
+ * @param tkr_name  the `.tkr` basename inside `regr_dir`
+ * @param prefix    the scratch-file prefix for this regressor
  * @return          the aggregate verdict
  * @since 0.3.0.30
  */
-fn run_one_tkb(exe: str, regr_dir: str, tkb_name: str, prefix: str) -> RegrOutcome { /* C1 */ }
+fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str) -> RegrOutcome { /* migrate */ }
 ```
 
-Discovery/dispatch: replace `dir_first_tkr` with `dir_first_spec` in
-`run_regression_sources`; when `is_tkb`, call `run_one_tkb`, else `run_one_regressive`.
+Root self-project guard in `run_regression_sources`: a discovered dir resolving to the repo root
+(the self-project holding `regressor.tkr`) is SKIPPED (honest skip: `regression skip <root>
+(self-project — verified by the self-host lanes)`). `[RITUAL]`.
 
-### C2 — P1 `rt_behavior` + `teko.tkp` non-inert (first light)
+### C2 — `rt_behavior` renamed + first light (LIVE .30, today's gen1)
+`git mv examples/regressions/rt_behavior/rt_behavior.tkb rt_behavior.tkr`. Confirm discovery runs
+it via `teko test .`. Inert→live transition + runner self-proof. Resolve tree-cleanliness (R2).
+`[RITUAL]` — 3 OSes green + duration delta measured.
 
-Files: NEW `examples/regressions/rt_behavior/` (`.tkp` + `src/main.tks` reading argv +
-`rt_behavior.tkb`), and `teko.tkp`:
-```
-[tests]
-regression = ["examples/regressions"]
-gate = true
-targets = ["host"]
-```
-`discover_source` scans all subdirs and runs only those carrying a spec — with only
-`rt_behavior` holding a `.tkb`, only P1 runs; P2/P3 join automatically when authored (no
-further `teko.tkp` edit). Resolve tree-cleanliness (R2) here. `[RITUAL]` — the inert→live
-transition; confirm three OSes green + measure the (tiny) duration delta.
+### C3 — `pack` regressor (LIVE .30, `.tkl` codec exists today)
+NEW `examples/regressions/pack/` (`pack.tkp` `[artifact] kind = "package"` + a small `src` of
+`exp` items + `pack.tkr` `When packaged` / `Then artifact exists`). Add the `packaged` verb + the
+`artifact exists` oracle to `run_one_tkr` (locate `<out>/<name>-<version>.tkl`). `[RITUAL]`.
 
-### C3 — Args passthrough
+### C4 — `interop` regressor (LIVE .30, package-interop today; folds `const_crossmodule_inline`)
+NEW `examples/regressions/interop/` (a `dep/` package + a `consumer/` exe + `interop.tkr` with
+`Background: Given dependency "dep"` + `When linked and run` + `Then exit`/`stdout`). Add the
+`dependency` Background noun + `linked and run` mode to `run_one_tkr`: build each dep to its
+artifact (`.tkl` today), provision a scratch `packages/`, build the consumer, run it. `[RITUAL]`.
 
-See §6. Files: `manifest.tks` (`Manifest.test_regression_args`), `project.tks` (`--` tail in
-the `test` subcommand → thread to `run_regression_phase`), `regression.tks` (append after the
-spec `args`). `[RITUAL]`.
+### C5 — args passthrough (runner ergonomics)
+`manifest.tks` (`Manifest.test_regression_args` — `[tests] args`), `project.tks` (`--` tail in
+the `test` subcommand), `regression.tks` (append after each spec's `args`). Precedence:
+`spec.args ++ m.test_regression_args ++ passthrough` (fold-opaque operands ALWAYS first).
+Recommend BOTH; if one, the `--` tail (no manifest surface). `[RITUAL]`.
 
-### C4 — P2 `host_cli_io`
+### C6 — CI-shrink + harness-retirement SPEC (owner applies §8)
+BEFORE deletion: the compile-fail diagnostic pins are raised as checker `#test`s (REPORTED UP)
+and the `#64` CWD guard is folded (§8.3) or explicitly kept. `[RITUAL final for the spine]`.
 
-Files: NEW `examples/regressions/host_cli_io/` (`.tkp` + `src` exercising env/stdin/args/file
-IO + a `host_cli_io.tkb` whose Outline varies env/stdin/argv incl. the `--` passthrough, with
-a HEX-docstring byte golden on one stream). `[RITUAL]`.
+### C7 — `wasm_wasi` regressor (LIVE .30 — this crumb OWNS the enabling capability)
+Add `run_wasm_captured(module, args, stdin, prefix)` to `regression.tks` (invoke `wasmtime run`,
+mirroring `validate_wasm_own.sh`; same `CapResult` shape as `run_captured`). NEW
+`examples/regressions/wasm_wasi/` (`Given targets = ["wasm32-wasi"]` + `When run on
+"wasm32-wasi"` + `Then exit`/`stdout`). The wasm BUILD exists today; this adds the RUN oracle.
+`[RITUAL]`.
 
-### C5 — P3 `compile_fail_diag`
+### C-S1 — `static` regressor (LIVE .30, ordered AFTER kill-C KP16)
+Once gen1 emits `.a` (KP16, own-native archive writer): NEW `examples/regressions/static/`
+(`kind = "static"` + `static.tkr` `When built as static library` / `Then artifact exists`) and
+extend `interop` with `Given dependency "static-dep"` linking the `.a` via system `ld`.
+`[RITUAL]`.
 
-Files: NEW `examples/regressions/compile_fail_diag/` (`compile_fail_diag.tkb` + a `cases/`
-dir of the ~6 failing snippets) + the `run_one_tkb` compile-fail-per-source path (already in
-the C1 signature; implement here with the fixtures that exercise it). Add the `source` noun
-to `tkb_lower_scenario`. `[RITUAL]`.
+### C-S2 — `shared` regressor (LIVE .30, ordered AFTER kill-C KP16+KP17)
+Once gen1 emits `.o` + links `-shared` via system `ld` (KP16/KP17): NEW
+`examples/regressions/shared/` and extend `interop` to consume the shared lib. `[RITUAL]`.
 
-### C6 — CI-shrink SPEC (owner applies)
+### C-F1 — `ffi_export` regressor (LIVE .30, ordered AFTER kill-C KP10+KP11, link via KP16/KP17)
+Once gen1 does `exp fn` C-ABI export (KP10) + `.h` emission (KP11): the reverse-FFI fixtures of
+kill-C §5.2.B under `examples/regressions/ffi/` in `.tkr` form (`When exports c abi`; a
+`consumer.c` compiled by host `cc`, linked with the Teko `.o`/`.a` by the system `ld`, run +
+asserted). `[RITUAL]`.
 
-Deliver §4 as the owner's exact edit list. `[RITUAL final]` — full gate after the owner
-applies the CI deltas; confirm R0 + the three curated projects cover the retired harnesses'
-verdicts with no coverage loss.
+### C-F2 — `ffi_import` regressor (LIVE .30, ordered AFTER kill-C KP7+KP12+KP13, system-`ld` link)
+Once gen1 lowers `extern fn` calls (KP7) + macro resolver (KP12) + vararg ABI (KP13): the
+using-C fixtures of kill-C §5.2.A (`When imports c abi`, `Given backend = "own"`,
+`Given pending = "<KP>"` skipped-green until each lands). `[RITUAL]`.
 
----
+### (deferred) `wasm_browser` — `.31` unless the browser JS-runtime slice lands in .30
+If the browser runtime + a headless driver land in .30, author `examples/regressions/wasm_browser/`
+behind that crumb (same shape as C7 with a headless harness). Otherwise it is the sole `.31`
+regressor.
 
-## 6. Args passthrough (task 5) — both designs + recommendation (unchanged)
+## 10. Risks / tensions / what to report up
 
-Option A — `[tests] args = [...]` → `Manifest.test_regression_args`, appended to every spec's
-`args`. Declarative, in-repo; static, and it must not be confused with a spec's own opaque
-`args`.
+- **R1 (perf).** Live set is tiny: `rt_behavior` (~1 compile + ~15 runs), `pack` (1 build),
+  `interop` (2 builds + 1 run), later `wasm_wasi`/`static`/`shared`/FFI a handful each. R0 is the
+  existing gate (zero new cost). MEASURE at each `[RITUAL]`. No HALT.
+- **R2 (tree cleanliness).** `compile_regressive` writes `examples/regressions/<name>/bin/` (and
+  the interop scratch `packages/`) into the tree, perturbing the fixpoint byte-identity check.
+  RESOLUTION (C2): gitignore `examples/regressions/**/bin/` + `**/packages/` (a repo edit the
+  implementer applies, NOT `.github`/`scripts`). Preferred alt: redirect output to
+  `bin/.regr-work/<sanitized>/`.
+- **R3 (compile-fail diagnostics → checker `#test`).** REPORTED UP: the diagnostic pins must
+  become checker `#test`s BEFORE `compile_fail_regressions.sh` is deleted (C6), else the wording
+  coverage is lost.
+- **R4 (#64 CWD guard).** Decision (§8.3): fold into a regressor CWD-compile mode, or KEEP
+  `native_regressions.sh`. Recommend fold; if not this wave, KEEP + note the debt.
+- **R5 (kill-C taxonomy drift — REPORTED UP).** `kill-c-pull-forward-0.3.0.30.md` §5 and its
+  crumb table still say `.tkb` and cite the DELETED `tkb-regression-format.md`. The FFI lane must
+  author against `.tkr` + this grammar (incl. the `backend`/`pending` Given nouns). That doc is
+  another agent's territory; the taxonomy correction propagates there — routed to the owner.
+- **R6 (root `.tkr` recursion).** `regressor.tkr` is DECLARATIVE and runner-SKIPPED; the
+  `TEKO_IN_REGRESSION` sentinel is the backstop. Non-circular.
+- **R7 (ordering-within-.30, the owner's one caveat).** Each of static/shared/ffi goes LIVE only
+  AFTER its KP crumb lands in gen1 (C-S1 after KP16, C-S2 after KP16/KP17, C-F1 after KP10/KP11,
+  C-F2 after KP7/KP12/KP13). Landing a regressor before its KP crumb would fail gen1 (built from
+  pre-capability sources). Sequenced inside .30 behind the enabler — never pushed to .31.
 
-Option B — `teko test . -- <args>` → the tail after `--` threaded through
-`test_project → run_regression_phase → argv_with_args`. Ad-hoc, Cargo/go-test convention,
-zero manifest surface; ephemeral, needs the `test` subcommand to stop flag-parsing at `--`.
+## 11. Decisions taken (ratify with the owner)
 
-RECOMMENDATION: BOTH, with documented precedence `spec.args ++ m.test_regression_args ++
-passthrough` — the spec's opaque operands ALWAYS first (the fold-opaque contract holds:
-passthrough args are ADDITIONAL argv, never a replacement). If only one: prefer B (no manifest
-field, no authority ambiguity). Contract:
-```teko
-/**
- * Manifest.test_regression_args — `[tests] args` — extra argv appended (after each spec's own
- * opaque `args`, before the `--` CLI tail) to EVERY regressive run. `[]` when absent. The
- * fold-opaque contract holds: additional runtime operands, never a replacement.
- * @since 0.3.0.30
- */
-test_regression_args: []str
-```
-`run_regression_phase(exe, m, passthrough: []str)` gains the tail parameter.
+1. **Final set = 10 (R0 + 9), all .30 except `wasm_browser`.** LIVE-today: R0, `rt_behavior`,
+   `pack`, `interop` (package). LIVE-later-in-.30 behind a KP crumb: `wasm_wasi` (C7), `static`
+   (KP16), `shared` (KP16/KP17), `ffi_export` (KP10/KP11), `ffi_import` (KP7/KP12/KP13).
+   `wasm_browser` → .31 unless the browser slice lands.
+2. **Gating model = gen1 capability, not seed capability** (owner 2026-07-23): regressors run
+   under `./bin/teko` = gen1; the gate is "does gen1 have the capability at authoring," so
+   static/shared/pack/interop/FFI are .30, ordered after their kill-C KP crumb.
+3. **Root file name = `regressor.tkr`** (repo root, declarative, runner-skipped).
+4. **`rt_behavior` RETAINED** (renamed to `.tkr`) as the exe/runner self-proof + R0's
+   observable-program complement.
+5. **`interop` is package-first** (folds `const_crossmodule_inline`), extended to static/shared
+   as they land — one entry point, not three.
+6. **`examples/regression-fixture/` DELETED**, its failure-reporting coverage → an in-memory
+   `tkr_test.tkt` `#test`.
+7. **compile-fail diagnostics → checker `#test`s** (REPORTED UP), not a curated regressor.
+8. **FFI regressors ARE the kill-C §5 lane** re-expressed in `.tkr`; that doc's `.tkb` naming +
+   its citation of the deleted format doc must be corrected (REPORTED UP).
 
----
-
-## 7. Risks / open questions / law tensions
-
-- **R1 (perf — now DRAMATICALLY smaller).** Under the 3-project model the added
-  `teko test .` cost is: P1 = 1 compile + ~10-12 runs; P2 = 1 compile + ~6 runs; P3 = ~6
-  tiny FAILING compiles (no run). ≈ **2 full compiles + ~18 fast runs + 6 failing compiles ≈
-  well under one minute** added on each OS — versus the ~70 full build+run cycles the 1:1
-  migration would have added. R0 itself is the EXISTING gate (zero new cost). Windows's
-  ~90-min cap is no longer a concern from this workstream. Still MEASURE at each `[RITUAL]`,
-  but the pressure is gone. No HALT.
-- **R2 (tree cleanliness).** `compile_regressive` builds with `-o bin` relative to the
-  (chdir'd) regressive dir, writing `examples/regressions/<name>/bin/` into the working tree —
-  can perturb the fixpoint/byte-identity checks. RESOLUTION (C2): add
-  `examples/regressions/**/bin/` (and `examples/regression-fixture/**/bin/`) to `.gitignore`
-  (a repo edit the implementer applies; NOT a `.github`/`scripts` edit). Deferred alternative:
-  redirect `compile_regressive` output to `bin/.regr-work/<sanitized>/`.
-- **R3 (dropped failure-only rejections).** The 25 dropped negative fixtures had weak
-  (diagnostic-less) oracles. Their rejection is a checker concern; where a construct's
-  rejection is NOT already a checker `#test`, it should BECOME one (stronger than a
-  diagnostic-less regressive). REPORTED UP — the architect does not open issues; this is a
-  finding for the owner to route. Not a HALT.
-- **R4 (discovery breadth).** `regression = ["examples/regressions"]` scans all subdirs each
-  `teko test .` (a cheap `list_dir` probe per subdir). Intended ergonomics (add a spec → get
-  a regressive), documented so it is a choice not a surprise. With only 3 spec-bearing dirs
-  the run set stays tiny.
-- **R5 (compile-fail model bend).** P3 compiles per scenario (each `Given source "<file>"`),
-  which relaxes the "one `.tkp` compiled once" rule for the negative path ONLY — justified
-  because a compile-fail has no shared built artifact and needs distinct failing sources.
-  Documented in the format doc §5/§10.
-- **Open (owner, non-blocking): two vs three curated projects** (§2 — recommend three;
-  P1+P2 merge is acceptable) and the **args-passthrough shape** (§6 — recommend both). Proceed
-  with the recommendations unless overridden. Not a HALT.
-
-No genuine LAW TENSION surfaced: Teko-only (all new code in `.tks`/`.tkt`/`.tkb`/`.tkr`),
-W15 full-Javadoc (all signatures above), M.3 honest-stops (parser errors), and the owner's
-TEST-lane / no-gen2 / no-1:1-migration boundaries are all satisfied. No HALT required.
+No genuine LAW TENSION surfaced: Teko-only (`.tks`/`.tkt`/`.tkr`), W15 full-Javadoc (all new
+signatures), M.3 honest-stops (parser errors + gated verbs + `Given pending` skips), fixpoint
+gen1==gen2 (never gen3), TEST-lane / no-gen2 / anti-recursion boundaries all hold. No HALT.
