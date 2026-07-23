@@ -471,43 +471,138 @@ fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: T
     match acc { TExpr as te => te; null => error { message = "a comparison needs at least one operator" } }
 }
 
+/**
+ * A pair of typed binary operands after literal-adoption normalization.
+ */
+type BinOperands = struct {
+    /** The left operand. */
+    l: TExpr
+    /** The right operand. */
+    r: TExpr
+}
+
+/**
+ * adopt_binop_operands — when a binary's operands differ only because one is an untyped numeric
+ * LITERAL, retype that literal to the other (non-literal) operand's type so `line + 1` / `n % 10`
+ * type-check (C6): the non-literal operand's type wins, and the literal node is rebuilt with it. The
+ * left operand takes priority when both would adopt. Already-equal or non-adoptable operands pass
+ * through unchanged.
+ *
+ * @param l  the typed left operand
+ * @param r  the typed right operand
+ * @return   the operands with a fitting literal retyped to its partner's type
+ */
+fn adopt_binop_operands(l: TExpr, r: TExpr) -> BinOperands {
+    if type_eq(l.type, r.type) { return BinOperands { l = l; r = r } }
+    if literal_adopts(l, r.type) { return BinOperands { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col }; r = r } }
+    if literal_adopts(r, l.type) { return BinOperands { l = l; r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
+    BinOperands { l = l; r = r }
+}
+
+/**
+ * err_binop_type_mismatch — wrap a binary-operand type-mismatch with rendered expected/actual types
+ * so the driver prints "expected X, found Y" (mirrors expr.c type_binary's tk_error_types wrap;
+ * C1.8/E2).
+ *
+ * @param msg  the diagnostic message
+ * @param l    the left operand (renders as "expected")
+ * @param r    the right operand (renders as "actual")
+ * @return     the type-annotated error
+ */
+fn err_binop_type_mismatch(msg: str, l: TExpr, r: TExpr) -> error {
+    teko::error::err_typed(error { message = msg }, type_render(l.type), type_render(r.type))
+}
+
+/**
+ * type_shift_binop — type a shift (`<< >>`): integer operands only (no float bit-shifts — B.38); the
+ * result takes the left operand's type.
+ *
+ * @param op  the shift operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed shift expression, or a type error
+ * @throws    when either operand is not an integer
+ */
+fn type_shift_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands (no float bit-shifts — B.38)" } }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+}
+
+/**
+ * type_arith_binop — type an arithmetic operator (`+ - * /`) over the native numeric set (ints AND
+ * floats). Same-type only (no promotion, no mixed int/float — B.22; a cross-family operand needs an
+ * explicit `to`).
+ *
+ * @param op  the arithmetic operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed arithmetic expression, or a type error
+ * @throws    when the left operand is not numeric, or the operands differ in type
+ */
+fn type_arith_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
+    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r) }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+}
+
+/**
+ * type_bitwise_binop — type a bitwise/remainder operator (`% & | ^`): integer operands only (not a
+ * float — B.38), same-type (no promotion — B.22).
+ *
+ * @param op  the bitwise/remainder operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed expression, or a type error
+ * @throws    when the left operand is not an integer, or the operands differ in type
+ */
+fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
+    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+}
+
+/**
+ * type_logical_binop — type a logical operator (`&& ||`): bool operands, bool result, short-circuit
+ * (matches C + the VM).
+ *
+ * @param op  the logical operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed bool expression, or a type error
+ * @throws    when either operand is not a bool
+ */
+fn type_logical_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_bool(l.type) || !is_bool(r.type) { return error { message = "logical `&&`/`||` need bool operands" } }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * type_binary — type a binary expression. Dispatches, in order: the `~` concat chain; the `bigint`/
+ * `dec` operator sugar (lowered to library calls); then the native operator classes — shift, arith
+ * (`+ - * /`), bitwise/remainder (`% & | ^`), and logical (`&& ||`). Operands are normalized so a
+ * fitting untyped numeric literal adopts its partner's type first (C6).
+ *
+ * @param b      the binary expression node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed binary (or lowered bignum call) expression, or a type error
+ * @throws       on a void operand, an incompatible operand type, or a non-binary operator
+ */
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     if b.op == lexer::TokenKind::Tilde { return type_tilde_chain(b, env, table) }
-    mut l = deref_ref_value(match type_expr(b.left, env, table) { TExpr as te => te; error as e => return e })
-    mut r = deref_ref_value(match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e })
-    if type_is_void(l.type) || type_is_void(r.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
-    let lk = bignum_kind(l.type)
-    let rk = bignum_kind(r.type)
-    if lk != "" || rk != "" { return type_bignum_binop(b.op, l, r, lk, rk) }
-    // C6 — a fitting numeric LITERAL operand adopts the OTHER operand's type (e.g. `line + 1`,
-    // `n % 10`): the non-literal operand's type wins; rebuild the literal node with that type.
-    if !type_eq(l.type, r.type) {
-        if literal_adopts(l, r.type) { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col } }
-        else { if literal_adopts(r, l.type) { r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
-    }
-    if op_is_shift(b.op) {
-        if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands (no float bit-shifts — B.38)" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
-    }
-    if op_is_arith(b.op) {
-        // + - * / over the native numeric set (B.38): ints AND floats. Same-type only
-        // (B.22 — no promotion, no mixed int/float; cross-family needs an explicit `to`).
-        if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
-        // (C1.8/E2) attach expected=type_render(l.type), actual=type_render(r.type) so the driver
-        // prints "expected X, found Y" — mirrors expr.c type_binary's tk_error_types wrap.
-        if !type_eq(l.type, r.type) { return teko::error::err_typed(error { message = "operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)" }, type_render(l.type), type_render(r.type)) }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
-    }
-    if op_is_arith_bitwise(b.op) {   // %, & | ^ — integer-only
-        if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
-        // (C1.8/E2) attach expected/actual (type_render of l/r) — mirrors expr.c type_binary.
-        if !type_eq(l.type, r.type) { return teko::error::err_typed(error { message = "operands must be the same type (no promotion — B.22)" }, type_render(l.type), type_render(r.type)) }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = l.type; line = 0; col = 0 }
-    }
-    if b.op == lexer::TokenKind::AndAnd || b.op == lexer::TokenKind::OrOr {   // logical && / || — bool operands, bool result, short-circuit (matches C + the VM)
-        if !is_bool(l.type) || !is_bool(r.type) { return error { message = "logical `&&`/`||` need bool operands" } }
-        return TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
-    }
+    let l0 = deref_ref_value(match type_expr(b.left, env, table) { TExpr as te => te; error as e => return e })
+    let r0 = deref_ref_value(match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e })
+    if type_is_void(l0.type) || type_is_void(r0.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    let lk = bignum_kind(l0.type)
+    let rk = bignum_kind(r0.type)
+    if lk != "" || rk != "" { return type_bignum_binop(b.op, l0, r0, lk, rk) }
+    let ops = adopt_binop_operands(l0, r0)
+    let l = ops.l
+    let r = ops.r
+    if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
+    if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
+    if op_is_arith_bitwise(b.op) { return type_bitwise_binop(b.op, l, r) }
+    if b.op == lexer::TokenKind::AndAnd || b.op == lexer::TokenKind::OrOr { return type_logical_binop(b.op, l, r) }
     error { message = "not a binary operator" }
 }
 
