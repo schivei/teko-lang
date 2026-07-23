@@ -287,11 +287,198 @@ fn deref_ref_value(te: TExpr) -> TExpr {
     }
 }
 
+/**
+ * bignum_kind — classify a type as one of the compiler-known arbitrary-precision surfaces. Returns
+ * `"bigint"` for `teko::numeric::bigint::BigInt`, `"dec"` for `teko::numeric::dec::Decimal`, or the
+ * empty string for anything else. The single discriminator behind the operator/comparison sugar.
+ *
+ * @param t  the resolved type
+ * @return   `"bigint"`, `"dec"`, or `""`
+ */
+fn bignum_kind(t: Type) -> str {
+    match t {
+        Named as n => {
+            if n.name == "teko::numeric::bigint::BigInt" { return "bigint" }
+            if n.name == "teko::numeric::dec::Decimal" { return "dec" }
+            ""
+        }
+        _ => ""
+    }
+}
+
+/**
+ * bignum_named — the `Named` type of a bignum kind (`"bigint"` → the `BigInt` struct, otherwise the
+ * `Decimal` struct).
+ *
+ * @param kind  `"bigint"` or `"dec"`
+ * @return      the corresponding `Named` type
+ */
+fn bignum_named(kind: str) -> Type {
+    if kind == "bigint" { return Named { name = "teko::numeric::bigint::BigInt" } }
+    Named { name = "teko::numeric::dec::Decimal" }
+}
+
+/**
+ * bignum_ns — the runtime module namespace backing a bignum kind (drives the mangled C symbol of the
+ * lowered call).
+ *
+ * @param kind  `"bigint"` or `"dec"`
+ * @return      `"teko::numeric::bigint"` or `"teko::numeric::dec"`
+ */
+fn bignum_ns(kind: str) -> str {
+    if kind == "bigint" { return "teko::numeric::bigint" }
+    "teko::numeric::dec"
+}
+
+/**
+ * bignum_call — build a typed call `teko::numeric::<kind>::<fn_name>(args)` — the ONE runtime
+ * implementation both the library and the operator sugar target (no doubling). A namespaced,
+ * non-closure `TCall` codegen resolves to the mangled library symbol under both backends.
+ *
+ * @param kind     `"bigint"` or `"dec"`
+ * @param fn_name  the library function's bare name (`add`/`sub`/`mul`/`div`/`rem`/`cmp`/`neg`/`of`)
+ * @param args     the typed argument expressions
+ * @param ret      the call's result type
+ * @return         the typed call expression
+ */
+fn bignum_call(kind: str, fn_name: str, args: []TExpr, ret: Type) -> TExpr {
+    mut segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = "teko" })
+    segs = teko::list::push(segs, parser::Segment { name = "numeric" })
+    segs = teko::list::push(segs, parser::Segment { name = kind })
+    segs = teko::list::push(segs, parser::Segment { name = fn_name })
+    let callee = parser::Path { segments = segs }
+    TExpr { kind = TCall { callee = callee; args = args; call_ns = bignum_ns(kind); is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = ret; line = 0; col = 0 }
+}
+
+/**
+ * bignum_adopt_operand — coerce one operand of a bignum operation to the target kind. A value already
+ * of that kind passes through; a fitting non-negative integer LITERAL adopts it via the library's
+ * `of` constructor (literal-adopt: `big + 1` works). Every other operand — a value of the OTHER
+ * bignum kind, a machine-typed variable, or a float literal — is rejected with a diagnostic that
+ * names the explicit conversion (no implicit promotion, B.22).
+ *
+ * @param e     the typed operand
+ * @param kind  the target bignum kind (`"bigint"` or `"dec"`)
+ * @return      the operand as a value of `kind`, or an error explaining the required explicit step
+ * @throws      when the operand mixes bignum kinds, is a non-literal of a different type, is a float
+ *              literal, or is an integer literal too large to adopt without a suffix
+ */
+fn bignum_adopt_operand(e: TExpr, kind: str) -> TExpr | error {
+    if bignum_kind(e.type) == kind { return e }
+    if bignum_kind(e.type) != "" { return error { message = "cannot mix `bigint` and `dec` in one operation — convert explicitly" } }
+    match e.kind {
+        TNumber as n => {
+            if n.is_float { return error { message = $"a floating-point literal cannot adopt `{kind}` — write it with a `bi`/`d` suffix or convert explicitly with `{kind}::of(...)`" } }
+            if !value_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
+            let lit = TExpr { kind = e.kind; type = Prim { kind = PrimKind::I64 }; line = e.line; col = e.col }
+            bignum_call(kind, "of", teko::list::push(teko::list::empty(), lit), bignum_named(kind))
+        }
+        _ => error { message = $"no implicit conversion to `{kind}` — wrap the operand with `{kind}::of(x)` (no implicit promotion — B.22)" }
+    }
+}
+
+/**
+ * bignum_op_fn — map a binary operator token to the bignum library function it lowers to. Rejects
+ * `%` on `dec` (decimals define no remainder) and any non-arithmetic operator on either kind.
+ *
+ * @param op    the operator token
+ * @param kind  the bignum kind (`"bigint"` or `"dec"`)
+ * @return      the library function name, or an error for an unsupported operator
+ * @throws      when the operator is `%` on `dec`, or is not one of `+ - * /` (`%` on `bigint`)
+ */
+fn bignum_op_fn(op: lexer::TokenKind, kind: str) -> str | error {
+    if op == lexer::TokenKind::Plus { return "add" }
+    if op == lexer::TokenKind::Minus { return "sub" }
+    if op == lexer::TokenKind::Star { return "mul" }
+    if op == lexer::TokenKind::Slash { return "div" }
+    if op == lexer::TokenKind::Percent {
+        if kind == "dec" { return error { message = "`%` (modulo) is not defined on `dec` — a decimal has no remainder operator" } }
+        return "rem"
+    }
+    error { message = $"this operator is not defined on `{kind}` — `bigint` supports `+ - * / %`, `dec` supports `+ - * /`, and comparisons (`< > <= >= == !=`)" }
+}
+
+/**
+ * type_bignum_binop — lower a binary operator over a bignum operand to its library call (operator
+ * sugar). Determines the target kind (rejecting a `bigint`/`dec` mix), maps the operator to its
+ * function, adopts each operand, and returns the typed call.
+ *
+ * @param op     the operator token
+ * @param l      the typed left operand
+ * @param r      the typed right operand
+ * @param lk     the left operand's bignum kind (`""` if not a bignum)
+ * @param rk     the right operand's bignum kind (`""` if not a bignum)
+ * @return       the typed library call implementing the operator, or a type error
+ * @throws       when the operands mix kinds, an operator is unsupported, or an operand cannot adopt
+ */
+fn type_bignum_binop(op: lexer::TokenKind, l: TExpr, r: TExpr, lk: str, rk: str) -> TExpr | error {
+    if lk != "" && rk != "" && lk != rk { return error { message = "cannot mix `bigint` and `dec` in one operation — convert explicitly" } }
+    let kind = if lk != "" { lk } else { rk }
+    let fn_name = match bignum_op_fn(op, kind) { str as s => s; error as e => return e }
+    let la = match bignum_adopt_operand(l, kind) { TExpr as te => te; error as e => return e }
+    let ra = match bignum_adopt_operand(r, kind) { TExpr as te => te; error as e => return e }
+    mut cargs: []TExpr = teko::list::push(teko::list::empty(), la)
+    cargs = teko::list::push(cargs, ra)
+    bignum_call(kind, fn_name, cargs, bignum_named(kind))
+}
+
+/**
+ * combine_and — fold two bool `TExpr`s into a short-circuiting `&&`, or seed the fold with the first
+ * term. Used to chain a bignum comparison (`a < b < c` → `cmp(a,b)<0 && cmp(b,c)<0`).
+ *
+ * @param acc   the accumulated bool expression, or `null` for the first term
+ * @param next  the next bool comparison term
+ * @return      `acc && next`, or `next` when `acc` is `null`
+ */
+fn combine_and(acc: TExpr?, next: TExpr) -> TExpr {
+    match acc {
+        TExpr as a => TExpr { kind = TBinary { op = lexer::TokenKind::AndAnd; left = a; right = next }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        null => next
+    }
+}
+
+/**
+ * type_bignum_compare — lower a comparison whose first operand is a bignum to a chain of `cmp(...)
+ * <op> 0` terms (comparison sugar). Each adjacent pair becomes a `cmp` call compared to zero; a
+ * chained comparison folds the terms with `&&`. Operands adopt the first operand's kind.
+ *
+ * @param first  the typed (bignum) first operand
+ * @param rest   the raw comparison terms (operator + untyped operand)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @param kind   the bignum kind of the comparison
+ * @return       the typed bool expression, or a type error
+ * @throws       when an operand cannot adopt the kind or the chain is empty
+ */
+fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: TypeTable, kind: str) -> TExpr | error {
+    mut prev = match bignum_adopt_operand(first, kind) { TExpr as te => te; error as e => return e }
+    mut acc: TExpr? = null
+    mut i = 0
+    loop {
+        if i >= rest.len { break }
+        let cur_raw = deref_ref_value(match type_expr(rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        let cur = match bignum_adopt_operand(cur_raw, kind) { TExpr as te => te; error as e => return e }
+        mut cmp_args: []TExpr = teko::list::push(teko::list::empty(), prev)
+        cmp_args = teko::list::push(cmp_args, cur)
+        let cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
+        let zero = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+        let term = TCmpTerm { op = rest[i].op; operand = zero }
+        let one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        acc = combine_and(acc, one_cmp)
+        prev = cur
+        i = i + 1
+    }
+    match acc { TExpr as te => te; null => error { message = "a comparison needs at least one operator" } }
+}
+
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     if b.op == lexer::TokenKind::Tilde { return type_tilde_chain(b, env, table) }
     mut l = deref_ref_value(match type_expr(b.left, env, table) { TExpr as te => te; error as e => return e })
     mut r = deref_ref_value(match type_expr(b.right, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(l.type) || type_is_void(r.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    let lk = bignum_kind(l.type)
+    let rk = bignum_kind(r.type)
+    if lk != "" || rk != "" { return type_bignum_binop(b.op, l, r, lk, rk) }
     // C6 — a fitting numeric LITERAL operand adopts the OTHER operand's type (e.g. `line + 1`,
     // `n % 10`): the non-literal operand's type wins; rebuild the literal node with that type.
     if !type_eq(l.type, r.type) {
@@ -327,6 +514,11 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
 fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
     let o = deref_ref_value(match type_expr(u.operand, env, table) { TExpr as te => te; error as e => return e })
     if type_is_void(o.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    let uk = bignum_kind(o.type)
+    if uk != "" {
+        if u.op == lexer::TokenKind::Minus { return bignum_call(uk, "neg", teko::list::push(teko::list::empty(), o), bignum_named(uk)) }
+        return error { message = $"unary `!`/`~` is not defined on `{uk}`" }
+    }
     if u.op == lexer::TokenKind::Minus {   // negation: any numeric (int or float — B.38)
         if !is_numeric(o.type) { return error { message = "unary `-` needs a numeric operand (int or float)" } }
         return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
@@ -346,6 +538,8 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
     mut first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
     mut prev = first.type
     if type_is_void(prev) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    let fk = bignum_kind(first.type)
+    if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
     mut terms: []TCmpTerm = teko::list::empty()
     mut i = 0
     loop {
