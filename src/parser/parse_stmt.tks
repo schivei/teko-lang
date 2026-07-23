@@ -49,6 +49,9 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
     if is_adopt_head(tokens, pos) {
         return parse_adopt(tokens, pos)
     }
+    if is_ref_binding_head(tokens, pos) {
+        return parse_ref_binding(tokens, pos)
+    }
     if is_kind_at(tokens, pos, lexer::TokenKind::Let) || is_kind_at(tokens, pos, lexer::TokenKind::Mut) || is_kind_at(tokens, pos, lexer::TokenKind::Const) {
         return parse_binding(tokens, pos)
     }
@@ -198,6 +201,9 @@ fn parse_inline_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> |
 // `{ x; y }` (parse_bind_target).
 fn parse_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error {
     let kw = kind_at(tokens, pos)
+    if is_ref_binding_head(tokens, pos + 1) {
+        return err_at(tokens, pos + 1, "a reference binding is written `ref x: T` — the `ref` is itself the binding modifier; there is no `let ref`/`mut ref`/`const ref` (tripartite law: `let` protects a value, `mut` unlocks a value, `ref` aliases — a reference is inherently mutable, so no immutable reference exists)")
+    }
     mut kind = BindKind::Let
     if kw == lexer::TokenKind::Mut { kind = BindKind::Mut }
     if kw == lexer::TokenKind::Const { kind = BindKind::Const }
@@ -208,6 +214,45 @@ fn parse_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error 
     }
     let v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; value = v.node }; next = v.next }
+}
+
+/**
+ * is_ref_binding_head — does `pos` open a `ref`-modifier binding (0.3.0.30 Part A)? A reference
+ * binding is spelled `ref NAME : T = e` (or `ref NAME = e`): the contextual `ref` identifier (never
+ * a reserved word) immediately followed by a binding NAME and then a `:` (annotation) or `=` (init).
+ * The name+`:`/`=` lookahead keeps a bare identifier `ref` used as a value/expression unaffected.
+ *
+ * @param tokens  the token stream
+ * @param pos     the candidate `ref` position
+ * @return        true iff `pos` opens a `ref`-modifier binding
+ */
+fn is_ref_binding_head(tokens: []lexer::Token, pos: u64) -> bool {
+    if !(is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "ref") { return false }
+    if !is_name_at(tokens, pos + 1) { return false }
+    is_kind_at(tokens, pos + 2, lexer::TokenKind::Colon) || is_kind_at(tokens, pos + 2, lexer::TokenKind::Assign)
+}
+
+/**
+ * parse_ref_binding — parse a `ref NAME : T = e` reference binding (0.3.0.30 Part A). `ref` is the
+ * third binding modifier (after `let`/`mut`): the bound name aliases its target with write-through
+ * semantics (R4). It desugars to a `mut` `Binding` whose annotation is wrapped in the internal
+ * `Ref<>` (checker `Reference{T}`), so an annotated `ref x: T` binds a `Reference{T}`; an
+ * un-annotated `ref x = &y` lets the checker infer the reference type from the RHS borrow.
+ *
+ * @param tokens  the token stream
+ * @param pos     the index of the leading `ref` token
+ * @return        the parsed reference `Binding` and the index past the value, or a parse error
+ * @throws        when the target, annotation, `=`, or value fails to parse
+ */
+fn parse_ref_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error {
+    let tgt = match parse_bind_target(tokens, pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
+    let ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
+    if !is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
+        return err_at(tokens, ann.next, "a `ref` binding requires an initializer (`ref x: T = e`) — a reference is write-through and can never be left unbound (definite-assignment)")
+    }
+    let v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
+    let ann_ty = if ann.has_type { wrap_ref_type(ann.type_ann) } else { ann.type_ann }
+    Parsed<Statement> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; value = v.node }; next = v.next }
 }
 
 // a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
