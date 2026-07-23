@@ -1605,12 +1605,15 @@ fn cg_named_min_bytes(prog: checker::TProgram, name: str, depth: u64) -> u64 {
 /**
  * cg_union_box_member — for a two-member absence union `{ null, X }`, return `X` when it is the
  * BOX-IN-ARENA class: `X` carries NO spare NULL niche (so `cg_union_niche_member` declined it) AND
- * its saturating payload is ≥ 16 bytes (`u128`/`i128`, a large by-value struct). Such an `X` is
- * stored as an 8-byte handle into the arena (`NULL` = `null` = zero heap; a `tk_region_alloc` cell on
- * a non-null construct); return `null` for any smaller/niche-able member (those stay niche or
- * inline-tag). Mirrors `cg_union_niche_member`'s two-member/one-null shape gate.
+ * EITHER it is SELF-RECURSIVE (`X` embeds this very union by value, so an inline layout has no finite
+ * size and MUST box — the finitizing indirection a recursive value type demands) OR its saturating
+ * payload is ≥ 16 bytes (`u128`/`i128`, a large by-value struct). Such an `X` is stored as an 8-byte
+ * handle into the arena (`NULL` = `null` = zero heap; a `tk_region_alloc` cell on a non-null
+ * construct); return `null` for any smaller, non-recursive, niche-able member (those stay niche or
+ * inline-tag). Mirrors `cg_union_niche_member`'s two-member/one-null shape gate, and closes the
+ * struct-FIELD recursion gap the local/param/return null-union C5 rails already box (`.30` nullfield).
  *
- * @param prog  the typed program (niche + size classification)
+ * @param prog  the typed program (niche + size + recursion classification)
  * @param v     the resolved union type (its members already null-first normalized)
  * @return      the boxed member `X`, or `null` when the union is not a box-in-arena union
  * @since 0.3.0.30 (null-union C4)
@@ -1631,6 +1634,7 @@ fn cg_union_box_member(prog: checker::TProgram, v: checker::Variant) -> checker:
     if null_count != 1 { return null }
     let x = match other { checker::Type as t => t; null => return null }
     if cg_type_is_niche_able(prog, x) { return null }
+    if cg_union_inline_recursive(prog, checker::Variant { members = v.members }, x, 0 to u64) { return x }
     if cg_type_min_bytes(prog, x) >= (16 to u64) { return x }
     null
 }
@@ -3923,6 +3927,10 @@ fn emit_struct_init_literal(buf: []byte, prog: checker::TProgram, e: checker::TE
                         parser::NamedType as inner_nt => { exp_t = checker::Optional { inner = checker::Named { name = cg_canon_name_ns(prog, inner_nt.path, checker::name_qualifier(name)) } } }
                         _ => { }
                     }
+                    parser::UnionType as ut => match cg_te_to_type_ns(prog, checker::name_qualifier(name), parser::UnionType { members = ut.members }) {
+                        checker::Variant as va => { exp_t = checker::Variant { members = va.members } }
+                        _ => { }
+                    }
                     _ => { }
                 }
                 null => { }
@@ -4879,6 +4887,25 @@ fn cg_slice_param_type(prog: checker::TProgram, slt: parser::SliceType, arg_type
  * @throws          error when the inner type or the payload value cannot be emitted
  * @since 0.3.0.30 (null-union C4)
  */
+/**
+ * cg_emit_inline_null — emit the INLINE-TAG `null` value of a null-bearing union that is neither
+ * niche nor box: `(tk_u_<keys>){ .tag = …_NULL, .as.null = 0 }`. The niche/box null (a zero word or
+ * handle) is emitted by its own `emit_as_r` arm; a bare-null LITERAL reaching the inline-tag rail
+ * carries the sentinel `null`-optional type (not the union), so the value-key reachability wrap
+ * cannot key it — this is the seam that lets an inline-tag `T | null` local be reassigned `= null`,
+ * a `-> T | null` return one, and a `null` be written into an inline-tag struct field.
+ *
+ * @param buf       the emit buffer
+ * @param expected  the null-bearing inline-tag union slot type
+ * @return          `buf` with the inline-tag null compound literal appended
+ * @throws          when the union typename cannot be emitted
+ * @since 0.3.0.30 (nullfield)
+ */
+fn cg_emit_inline_null(buf: []byte, expected: checker::Type) -> []byte | error {
+    let o = match cg_wrap_open(buf, expected, "null") { []byte as r => r; error as e => return e }
+    cb(o, "0 }")
+}
+
 fn cg_emit_box_construct(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let bxN = fresh_named("_ubx", buf.len to i64)
     mut out = cb(buf, "({ ")
@@ -4921,6 +4948,13 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
                 }
             }
             null => { }
+        }
+        _ => { }
+    }
+    match expected {
+        checker::Variant as iva => match value.kind {
+            checker::TNullLit => if cg_variant_has_null(iva) { return cg_emit_inline_null(buf, expected) }
+            _ => { }
         }
         _ => { }
     }
@@ -8612,6 +8646,35 @@ fn cg_is_builtin_scalar(last: str) -> bool {
     last == "str" || last == "error" || last == "ptr" || last == "uptr" ||   // (C7.1a) opaque FFI transport types
     last == "Ref"   // (MEM-1b) Ref<T> lowers to a pointer → no by-value aggregate edge
 }
+/**
+ * cg_texpr_union_ready — by-value readiness of a struct-field / variant-member INLINE UNION type-expr.
+ *
+ * A null-BEARING union (`X | null`) routes through its RESOLVED representation so the readiness key
+ * matches the one the type-set collected and the field emitter (`emit_type_expr`) spells — the C5
+ * resolve null-first normalizes the member order, so the SOURCE-ORDER syntactic key would mismatch
+ * and falsely report "no edge" (emitting the enclosing struct BEFORE the union body → cc "incomplete
+ * type"). A niche or box-in-arena union stores an 8-byte handle (a pointer whose forward typedef is
+ * always present) and is READY like a slice; an inline-tag union embeds its `tk_u_<keys>` struct by
+ * value and gates on that struct's emission. A null-FREE union keeps the legacy source-order key.
+ *
+ * @param prog      the typed program (union representation classification)
+ * @param em        the emitted-so-far record
+ * @param set       the collected type registry
+ * @param ut        the syntactic inline-union type-expr
+ * @param owner_ns  the owner decl's namespace (resolves the union's member paths)
+ * @return          true when the union carries no by-value edge (pointer / uncollected) or is emitted
+ * @since 0.3.0.30 (nullfield)
+ */
+fn cg_texpr_union_ready(prog: checker::TProgram, em: CgEmitted, set: CgTypeSet, ut: parser::UnionType, owner_ns: str) -> bool {
+    if !cg_texpr_union_has_null(ut) {
+        return cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(teko::list::empty(), ut) { []byte as o => str(o); error => "" })
+    }
+    let resolved = cg_te_to_type_ns(prog, owner_ns, parser::UnionType { members = ut.members })
+    let va = match resolved { checker::Variant as v => v; _ => return cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(teko::list::empty(), ut) { []byte as o => str(o); error => "" }) }
+    match cg_union_niche_member(prog, va) { checker::Type => return true; null => { } }
+    match cg_union_box_member(prog, va) { checker::Type => return true; null => { } }
+    cg_uvar_emitted_key(em, set, cg_variant_key(va))
+}
 // By-value readiness of a field/member SYNTACTIC type-expr (struct field / variant member).
 fn cg_texpr_ready(prog: checker::TProgram, em: CgEmitted, set: CgTypeSet, te: parser::TypeExpr, owner_ns: str) -> bool {
     match te {
@@ -8633,7 +8696,7 @@ fn cg_texpr_ready(prog: checker::TProgram, em: CgEmitted, set: CgTypeSet, te: pa
         }
         parser::OptionalType as ot => cg_opt_emitted_key(em, set, match cg_opt_mangle_texpr_str(ot.inner) { str as s => s; error => "" })
         parser::SliceType => true   // pointer (slice typedef pre-emitted)
-        parser::UnionType as ut => cg_uvar_emitted_key(em, set, match cg_variant_typename_texpr(teko::list::empty(), ut) { []byte as o => str(o); error => "" })
+        parser::UnionType as ut => cg_texpr_union_ready(prog, em, set, ut, owner_ns)
         parser::FunctionType => true   // (W10a) tk_closure is a runtime type — always ready
     }
 }
