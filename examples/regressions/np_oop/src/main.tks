@@ -1,55 +1,59 @@
-// distinct exit codes per failure surface (0 = all pass; the harness diffs VM vs native).
+let c: Counter | null = Counter::make(7)
+let v1 = match c { null => 0; Counter as cc => cc.get() }
+if v1 != 7 { exit(1) }
+let none: Counter | null = null
+let v2 = match none { null => 42; Counter as cc => cc.get() }
+if v2 != 42 { exit(2) }
 
-// 1) C? ?.method() — present and null
-let c: Counter? = Counter::make(7)
-if (c?.get() ?? 0) != 7 { exit(1) }
-let none: Counter? = null
-if (none?.get() ?? 42) != 42 { exit(2) }
+let v3 = match c { null => 0; Counter as cc => cc.plus(3) }
+if v3 != 10 { exit(3) }
 
-// 2) non-receiver args flow through the safe call
-if (c?.plus(3) ?? 0) != 10 { exit(3) }
+let v4 = match c { null => 0; Counter as cc => cc.n }
+if v4 != 7 { exit(4) }
+let v5 = match none { null => 5; Counter as cc => cc.n }
+if v5 != 5 { exit(5) }
 
-// 3) C? ?.field (pub) — the class route desugars through the checker
-if (c?.n ?? 0) != 7 { exit(4) }
-if (none?.n ?? 5) != 5 { exit(5) }
+let step6: Counter | null = match c { null => null; Counter as cc => cc.next() }
+let v6 = match step6 { null => 0; Counter as cc => cc.get() }
+if v6 != 8 { exit(6) }
+let step7: Counter | null = match c { null => null; Counter as cc => cc.maybe_next() }
+let v7 = match step7 { null => 0; Counter as cc => cc.n }
+if v7 != 8 { exit(7) }
+let step8: Counter | null = match none { null => null; Counter as cc => cc.next() }
+let v8 = match step8 { null => 9; Counter as cc => cc.get() }
+if v8 != 9 { exit(8) }
 
-// 4) chaining: a C-returning method re-wraps (C?) and chains; a C?-returning method
-//    stays C? (no double wrap) and chains identically
-if (c?.next()?.get() ?? 0) != 8 { exit(6) }
-if (c?.maybe_next()?.n ?? 0) != 8 { exit(7) }
-if (none?.next()?.get() ?? 9) != 9 { exit(8) }
+match c { null => { }; Counter as cc => cc.poke() }
+match none { null => { }; Counter as cc => cc.poke() }
 
-// 5) a void method through ?. (statement position) — runs when present, skips when null
-c?.poke()
-none?.poke()
-
-// 6) I? ?.method() — dispatch through the vtable when non-null
 let circ = Circle::make(2)
-let s: Shape? = circ
-if (s?.area() ?? 0) != 12 { exit(9) }
-let noshape: Shape? = null
-if (noshape?.area() ?? 5) != 5 { exit(10) }
+let s: Shape | null = circ
+let v9 = match s { null => 0; Shape as sh => sh.area() }
+if v9 != 12 { exit(9) }
+let noshape: Shape | null = null
+let v10 = match noshape { null => 5; Shape as sh => sh.area() }
+if v10 != 5 { exit(10) }
 
-// 7) ?? with class operands — the fallback rides the object REFERENCE (class values are
-//    reference-semantic: the picked value is the same object, not a copy)
 let a = Counter::make(1)
 let b = Counter::make(2)
-if (none ?? b).get() != 2 { exit(11) }
-let some: Counter? = a
-if (some ?? b).get() != 1 { exit(12) }
+let p11 = match none { null => b; Counter as cc => cc }
+if p11.get() != 2 { exit(11) }
+let some: Counter | null = a
+let p12 = match some { null => b; Counter as cc => cc }
+if p12.get() != 1 { exit(12) }
 
-// 8) ?? with a CONFORMING class fallback — widens into the interface inner (Shape? ?? Circle → Shape)
-let picked = noshape ?? circ
+let picked = match noshape { null => circ; Shape as sh => sh }
 if picked.area() != 12 { exit(13) }
-let picked2 = s ?? Circle::make(9)
+let picked2 = match s { null => Circle::make(9); Shape as sh => sh }
 if picked2.area() != 12 { exit(14) }
 
-// 9) struct-optional safe calls — the same desugar over a struct method + the struct
-//    ?.field lowering that predates NP-OOP (locked together)
-let bx: Box? = Box { v = 6 }
-if (bx?.doubled() ?? 0) != 12 { exit(15) }
-if (bx?.v ?? 0) != 6 { exit(16) }
-let nobox: Box? = null
-if (nobox?.doubled() ?? 3) != 3 { exit(17) }
+let bx: Box | null = Box { v = 6 }
+let v15 = match bx { null => 0; Box as bb => bb.doubled() }
+if v15 != 12 { exit(15) }
+let v16 = match bx { null => 0; Box as bb => bb.v }
+if v16 != 6 { exit(16) }
+let nobox: Box | null = null
+let v17 = match nobox { null => 3; Box as bb => bb.doubled() }
+if v17 != 3 { exit(17) }
 
 exit(0)

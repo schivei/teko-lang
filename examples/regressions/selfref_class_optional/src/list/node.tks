@@ -1,48 +1,65 @@
-// (#122) a self-referencing class: `next: Node?` is a class-optional field. `next = null` at
-// construction, `set_next` writes a present link, and `sum` walks the chain through safe field
-// access (`n?.value`) + `??` coalescing — all paths the VM already handles, differentially
-// pinned against native.
-
+/**
+ * Node — a self-referencing class whose `next: Node | null` link is null-initialised, written
+ * present by `set_next`, and walked by `sum` through `match` narrowing on the class-optional.
+ */
 pub type Node = class {
+    /** value — this node's payload, summed by `sum`. */
     pub value: i64
-    pub next: Node?
+    /** next — the optional forward link; null at the tail. */
+    pub next: Node | null
 
-    // construct a tail node (next = null — the class-optional null-init that reached the
-    // raw-`null` native codegen error before #122).
+    /**
+     * make — construct a tail node whose link is null.
+     *
+     * @param v the node's value
+     * @return  a fresh tail Node
+     */
     pub fn make(v: i64) -> Node {
         Node { value = v; next = null }
     }
 
-    // link `n` after `self`: `self.next = n` writes a PRESENT class-optional (the pointer/value
-    // path that hit the tk_opt_Node* vs tk_opt_Node mismatch before #122).
+    /**
+     * set_next — link `n` after `self`, writing a present class-optional.
+     *
+     * @param n the node to link after self
+     */
     pub fn set_next(self, n: Node) {
         self.next = n
     }
 }
 
-// walk the chain summing values. `cur?.value ?? 0` reads through the class-optional; the next
-// pointer is followed by re-binding to `cur.next` (also a class-optional). A fixed 8-iteration
-// cap keeps it a plain `loop` (Teko has no while/for) with a definite bound.
+/**
+ * sum — walk the chain summing values, reading each link through `match` narrowing. A fixed
+ * 8-iteration cap keeps it a plain bounded `loop`.
+ *
+ * @param head the chain head (its value is always added)
+ * @return     the sum of head's value plus each reachable link's value
+ */
 pub fn sum(head: Node) -> i64 {
     mut total = 0
-    mut cur = head.next   // Node? — start after head so we exercise the optional both present+absent
+    mut cur = head.next
     total = total + head.value
     mut steps = 0
     loop {
         if steps >= 8 { break }
-        total = total + (cur?.value ?? 0)
-        cur = cur?.next ?? null
+        let add = match cur { null => 0; Node as n => n.value }
+        total = total + add
+        cur = match cur { null => null; Node as n => n.next }
         steps = steps + 1
     }
     total
 }
 
+/**
+ * run — build the chain 1 -> 2 -> 3 (tail link null) and sum it.
+ *
+ * @return 6
+ */
 pub fn run() -> i64 {
     let a = Node::make(1)
     let b = Node::make(2)
     let c = Node::make(3)
     a.set_next(b)
     b.set_next(c)
-    // chain 1 -> 2 -> 3, tail next = null. sum = 1 + 2 + 3 = 6.
     sum(a)
 }
