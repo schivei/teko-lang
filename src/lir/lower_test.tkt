@@ -187,21 +187,45 @@ fn lwt_lbinop_of_picks_signedness_and_family() {
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Plus, checker::PrimKind::F64, LBinOp::FAdd))
 }
 
+/**
+ * lwt_lbinop_of_maps_bitwise_and_shift — the KP2 bitwise/shift lowering: `& | ^` map to
+ * IAnd/IOr/IXor, `<<` to the signedness-agnostic IShl, and `>>` to IShrS on a signed result
+ * type or IShrU on an unsigned one (the shift's signedness is the LEFT operand's, carried in
+ * the result PrimKind lbinop_of receives).
+ */
 #test
-fn lwt_lbinop_of_rejects_non_arithmetic() {
-    teko::assert::is_true(match lbinop_of(lexer::TokenKind::Amp, checker::PrimKind::I64) { LBinOp => false; error => true })
+fn lwt_lbinop_of_maps_bitwise_and_shift() {
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Amp, checker::PrimKind::I64, LBinOp::IAnd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Pipe, checker::PrimKind::U32, LBinOp::IOr))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Caret, checker::PrimKind::I16, LBinOp::IXor))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shl, checker::PrimKind::I64, LBinOp::IShl))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shr, checker::PrimKind::I64, LBinOp::IShrS))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shr, checker::PrimKind::U64, LBinOp::IShrU))
 }
 
 /**
- * lwt_lunop_of_picks_negation_family — lunop_of maps `-` to INeg/FNeg by family.
- * `!` (Bang) is deliberately NOT mapped here: it is intercepted in lower_unary and
- * lowered to a logical `operand == 0` (F1c fix, #389), so lunop_of returns an error for
- * it rather than the old bitwise LUnOp::INot (which miscompiled `!` on the own backend).
+ * lwt_lbinop_of_rejects_out_of_subset — a token with no arithmetic/bitwise/shift LBinOp (a
+ * logical `&&`, which lowers via its own short-circuit path, never lbinop_of) still
+ * honest-stops, so the defensive `_` arm stays reachable-safe.
+ */
+#test
+fn lwt_lbinop_of_rejects_out_of_subset() {
+    teko::assert::is_true(match lbinop_of(lexer::TokenKind::AndAnd, checker::PrimKind::I64) { LBinOp => false; error => true })
+}
+
+/**
+ * lwt_lunop_of_picks_negation_family — lunop_of maps `-` to INeg/FNeg by family and `~`
+ * (bitwise one's-complement, integer-only) to INot. `!` (Bang) is deliberately NOT mapped
+ * here: it is intercepted in lower_unary and lowered to a logical `operand == 0` (F1c fix,
+ * #389), so lunop_of returns an error for it rather than the old bitwise LUnOp::INot (which
+ * miscompiled `!` on the own backend); `~`, a genuine one's-complement, DOES map to INot.
  */
 #test
 fn lwt_lunop_of_picks_negation_family() {
     teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Minus, checker::PrimKind::I64, LUnOp::INeg))
     teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Minus, checker::PrimKind::F64, LUnOp::FNeg))
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Tilde, checker::PrimKind::I64, LUnOp::INot))
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Tilde, checker::PrimKind::U8, LUnOp::INot))
     teko::assert::is_true(match lunop_of(lexer::TokenKind::Bang, checker::PrimKind::Bool) { LUnOp => false; error => true })
 }
 
@@ -224,6 +248,47 @@ fn lwt_lowers_logical_not_to_icmpeq_zero() {
 fn lwt_lowers_unary_neg() {
     let e = lwt_unary(lexer::TokenKind::Minus, lwt_num_i64(42 to i128), checker::PrimKind::I64)
     teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = ineg %0")
+}
+
+/**
+ * lwt_lowers_unary_bitnot — `~x` lowers to a bitwise `inot` over the operand VReg (NOT the
+ * logical `== 0` chain that `!` lowers to): the operand is `%0`, then `%1 = inot %0`.
+ */
+#test
+fn lwt_lowers_unary_bitnot() {
+    let e = lwt_unary(lexer::TokenKind::Tilde, lwt_num_i64(5 to i128), checker::PrimKind::I64)
+    let text = lwt_lower_expr_text(e)
+    teko::assert::str_contains(text, "%1 = inot %0")
+    teko::assert::is_true(!teko::str::contains(text, "icmpeq"))
+}
+
+/**
+ * lwt_lowers_bitwise_ops — `a & b`, `a | b`, `a ^ b` lower to iand/ior/ixor over the two
+ * operand VRegs (`%2 = <op> %0, %1`).
+ */
+#test
+fn lwt_lowers_bitwise_ops() {
+    let a = lwt_num_i64(6 to i128)
+    let b = lwt_num_i64(3 to i128)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Amp, a, b, checker::PrimKind::I64)), "%2 = iand %0, %1")
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Pipe, a, b, checker::PrimKind::I64)), "%2 = ior %0, %1")
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Caret, a, b, checker::PrimKind::I64)), "%2 = ixor %0, %1")
+}
+
+/**
+ * lwt_lowers_shift_ops_pick_signedness — `<<` lowers to ishl; `>>` lowers to ishrs on a
+ * signed result type and ishru on an unsigned one (the shift's signedness is the LEFT
+ * operand's, which the checker makes the result type).
+ */
+#test
+fn lwt_lowers_shift_ops_pick_signedness() {
+    let a = lwt_num_i64(8 to i128)
+    let amt = lwt_num_i64(2 to i128)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shl, a, amt, checker::PrimKind::I64)), "%2 = ishl %0, %1")
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shr, a, amt, checker::PrimKind::I64)), "%2 = ishrs %0, %1")
+    let ua = lwt_num(8 to i128, checker::PrimKind::U64)
+    let uamt = lwt_num(2 to i128, checker::PrimKind::U64)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shr, ua, uamt, checker::PrimKind::U64)), "%2 = ishru %0, %1")
 }
 
 #test

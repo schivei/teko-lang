@@ -162,6 +162,94 @@ fn iwt_f5_unary_neg_round_trip() {
     teko::assert::is_true(interp_lmodule(iwt_neg_exit(), "main", iwt_no_args()) == iwt_i128(42))
 }
 
+/**
+ * iwt_binop_exit — `exit(a <op> b)`: two int consts feed a binary op whose result feeds
+ * tk_exit, exactly the iwt_let_mul_exit shape parameterized over an arbitrary LBinOp — the
+ * run-oracle probe for the KP2 bitwise/shift arms.
+ *
+ * @param op  the binary LBinOp to place between the two operands
+ * @param a   the left operand's constant value
+ * @param b   the right operand's constant value
+ * @return    the built `main`-and-exit module
+ */
+fn iwt_binop_exit(op: LBinOp, a: i64, b: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i128(a), 0, 0))
+    let vb = alloc_vreg(f)
+    f = vb.func
+    f = append_inst(f, 0, const_int_inst(vb.vreg, iwt_i128(b), 0, 0))
+    let vr = alloc_vreg(f)
+    f = vr.func
+    f = append_inst(f, 0, bin_inst(vr.vreg, op, va.vreg, vb.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vr.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i128(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+/**
+ * iwt_unop_exit — `exit(<op> a)`: one int const feeds a unary op whose result feeds tk_exit
+ * — the run-oracle probe for the KP2 INot arm.
+ *
+ * @param op  the unary LUnOp to apply to the operand
+ * @param a   the operand's constant value
+ * @return    the built `main`-and-exit module
+ */
+fn iwt_unop_exit(op: LUnOp, a: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i128(a), 0, 0))
+    let vr = alloc_vreg(f)
+    f = vr.func
+    f = append_inst(f, 0, un_inst(vr.vreg, op, va.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vr.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i128(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+/**
+ * iwt_runs_bitwise_ops — the oracle RUNS `& | ^`: `6 & 3 == 2`, `6 | 3 == 7`, `6 ^ 3 == 5`
+ * (exact two's-complement bit ops on the carrier). Before KP2 eval_bin honest-stopped these.
+ */
+#test
+fn iwt_runs_bitwise_ops() {
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IAnd, 6, 3), "main", iwt_no_args()) == iwt_i128(2))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IOr, 6, 3), "main", iwt_no_args()) == iwt_i128(7))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IXor, 6, 3), "main", iwt_no_args()) == iwt_i128(5))
+}
+
+/**
+ * iwt_runs_shift_ops — the oracle RUNS `<< >>`: `5 << 3 == 40`, and both the arithmetic
+ * (IShrS) and logical (IShrU) right shift of a non-negative value agree — `40 >> 3 == 5`.
+ */
+#test
+fn iwt_runs_shift_ops() {
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShl, 5, 3), "main", iwt_no_args()) == iwt_i128(40))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShrS, 40, 3), "main", iwt_no_args()) == iwt_i128(5))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShrU, 40, 3), "main", iwt_no_args()) == iwt_i128(5))
+}
+
+/**
+ * iwt_runs_bitwise_not — the oracle RUNS INot (`~`): `~0 == -1`, `~(-1) == 0`, `~5 == -6`
+ * (one's-complement on the signed carrier). Before KP2 eval_un honest-stopped INot.
+ */
+#test
+fn iwt_runs_bitwise_not() {
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, 0), "main", iwt_no_args()) == iwt_i128(-1))
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, -1), "main", iwt_no_args()) == iwt_i128(0))
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, 5), "main", iwt_no_args()) == iwt_i128(-6))
+}
+
 /** iwt_alloc_field — reserve a slot at `base`, store `val` at `offset`, then load it back
     into a fresh VReg — the shared alloca/field_addr/store/load shape every A1-3 memory
     fixture below builds on. */
