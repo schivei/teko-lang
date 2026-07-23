@@ -11,7 +11,7 @@ now fixed (see §0).
 |---|---|---|---|
 | `.tkp` | project manifest (TOML) | every project root | unchanged |
 | `.tkb` | **Teko Binary** — portable serialized-module codec; part of the `.tkl` package (ZIP of `.tkh`+`.tkb`+`.tsym`, `docs/BUILDING.md:92`) | `src/emit/tkb_{buf,frame,read,write}.tks` + `src/emit/tkb_test.tkt` | **FROZEN / UNTOUCHED** — it is the binary format, NOT a test format |
-| `.tkr` | **Gherkin regressor** — the BDD spec (Feature / Scenario / Scenario Outline / Examples) declaring what to expect of a regressor project. ONE `.tkr` per regressor project. | `src/build/tkr.tks` (the single parser) + `src/build/tkr_test.tkt` | canonical authoring format |
+| `.tkr` | **Gherkin regressor** — the BDD spec (Feature / Scenario / Scenario Outline / Examples) declaring what to expect of a regressor project. A project may hold N `.tkr` files, and each file may hold N features (§1.1). | `src/build/tkr.tks` (the single parser) + `src/build/tkr_test.tkt` | canonical authoring format |
 | `.tkl` | portable package (ZIP of `.tkh`+`.tkb`+`.tsym`) — the artifact a `kind = "package"` project emits | build output | unchanged |
 | `.tkh` | exported interface (type signatures + docs) | inside a `.tkl` | unchanged |
 | `.tsym` | symbol map | build output / inside a `.tkl` | unchanged |
@@ -28,12 +28,30 @@ KEYWORDS (`Feature`, `Background`, `Scenario`, `Scenario Outline`, `Examples`, `
 manifest value lexers (`mf_read_quoted` / `mf_read_array` / `mf_read_int`,
 `src/build/manifest.tks`) verbatim. There is ZERO new value-lexing.
 
-One `.tkr` file describes ONE regressor project: the directory's single `.tkp` entry point.
-The `When` verb classifies HOW the project is exercised (§4) — which, under the artifact-kind
-reframe (`regressives-full-stack-0.3.0.30.md`), is the axis that matters: the regressor
-surface partitions by ARTIFACT KIND × TARGET × FFI, not by language feature.
+A regressor project is a directory with a single `.tkp` entry point plus one OR MORE `.tkr`
+files (§1.1). The `When` verb classifies HOW the project is exercised (§4) — which, under the
+artifact-kind reframe (`regressives-full-stack-0.3.0.30.md`), is the axis that matters: the
+regressor surface partitions by ARTIFACT KIND × TARGET × FFI, not by language feature.
 
-### 1.1 The frozen in-memory target (`Tkr` + the check layer)
+### 1.1 File granularity — free (owner 2026-07-23, #40)
+
+The `.tkr`↔project relation is NOT 1:1; granularity is the developer's choice:
+
+- **N files per project.** A project directory may hold ANY number of `.tkr` files (e.g.
+  `arith.tkr`, `bitwise.tkr`, `io.tkr` side by side). Discovery scans and runs ALL of them
+  (§10), not just the first — the project's verdict is the aggregate over every scenario of
+  every `.tkr` it holds.
+- **N features per file.** A single `.tkr` may hold MULTIPLE `Feature:` blocks (each opening a
+  fresh feature) and, within each, any number of `Scenario` / `Scenario Outline`. `parse_tkr`
+  returns a `[]TkrFeature` (a file is a LIST of features), not a single feature.
+- **Both valid, no coercion.** A fat `.tkr` with everything, or many small `.tkr`s per concern
+  — both are accepted; nothing forces one shape. The two axes compose freely: N files × N
+  features/file × N scenarios/feature.
+
+This changes only the FILE granularity inside a regressor project; it does NOT change the
+taxonomy or the curated set of 10 regressors (`regressives-full-stack-0.3.0.30.md` §4).
+
+### 1.2 The frozen in-memory target (`Tkr` + the check layer)
 
 Parsing lowers Gherkin to the **frozen** in-memory model — reused verbatim, never a
 serialized file:
@@ -52,7 +70,10 @@ of the in-memory `Tkr`.
 A `.tkr` file is a sequence of lines. Leading whitespace is insignificant. A line is one of:
 
 - blank / `#`-comment — skipped (M.2).
-- `Feature: <free text>` — opens the file; the free text is documentation only.
+- `Feature: <free text>` — opens a feature; the free text is documentation only. A file MAY
+  contain multiple `Feature:` blocks (each closes the previous and opens a new one), so
+  `parse_tkr` yields a `[]TkrFeature` (§1.1). A file with no explicit `Feature:` is one implicit
+  feature carrying its scenarios.
 - `Background:` — opens a step block whose `Given` steps are PREPENDED to every scenario
   (shared inputs: common `args`, `stdin`, `targets`, and interop `dependency` declarations).
 - `Scenario: <free text>` — opens a single-run scenario.
@@ -199,11 +220,32 @@ because .30 pulls the enabling capabilities into gen1:
   still uses the OLD `.tkb` name + cites the deleted format doc — corrected to `.tkr` here;
   REPORTED UP). Live in .30 after KP10/KP11 (export) and KP7/KP12/KP13 (import).
 
-## 10. Meta-tests (`src/build/tkr_test.tkt`)
+## 10. Discovery — all `.tkr` in a project (owner 2026-07-23, #40)
 
-The consolidated parser's `#test`s assert: parse round-trips; a Scenario lowers to the expected
-`Tkr`; an Outline expands to the expected `[]Tkr`; a HEX docstring decodes control bytes; the
-verdict PARITY between a lowered scenario and a hand-built `Tkr` (identical `RegrOutcome`); and
-the runner-reports-FAIL self-test (an in-memory `check_run` over a mismatching `CapResult`
-returns a failing `RegrOutcome`) — the coverage the deleted `examples/regression-fixture/`
-demo used to carry, now a deterministic, gate-safe checker test.
+Discovery scans a regressor directory for EVERY `.tkr` file (not the first) and runs each; a
+project's verdict is the aggregate over all of them. The signature shift from the single-spec
+model:
+
+- `dir_tkr_files(dir) -> []str` — the basenames of ALL `*.tkr` in `dir` (replaces the
+  first-only `dir_first_tkr`/`dir_first_spec`; a dir IS a regressor iff this is non-empty).
+- `discover_source(source) -> []str` — unchanged in shape (regressor directories), but a dir
+  qualifies when `dir_tkr_files(dir).len > 0`.
+- `run_one_regressor(exe, dir, prefix) -> RegrOutcome` — iterates `dir_tkr_files(dir)`, parses
+  each with `parse_tkr` (→ `[]TkrFeature`), runs every feature's every scenario, and folds the
+  verdicts (FIRST failure wins, else pass). The per-file scratch prefix includes the `.tkr`
+  basename so captures never collide across files.
+
+`parse_tkr` returns `[]TkrFeature` (a file is a list of features, §1.1); a single-feature file
+is the one-element case. Ordering is deterministic (sorted basenames, then source order within a
+file) so a failure's report line is stable.
+
+## 11. Meta-tests (`src/build/tkr_test.tkt`)
+
+The consolidated parser's `#test`s assert: parse round-trips; a file with MULTIPLE `Feature:`
+blocks yields a `[]TkrFeature` of the right length; a directory with MULTIPLE `.tkr` files is
+discovered and run in full; a Scenario lowers to the expected `Tkr`; an Outline expands to the
+expected `[]Tkr`; a HEX docstring decodes control bytes; the verdict PARITY between a lowered
+scenario and a hand-built `Tkr` (identical `RegrOutcome`); and the runner-reports-FAIL self-test
+(an in-memory `check_run` over a mismatching `CapResult` returns a failing `RegrOutcome`) — the
+coverage the deleted `examples/regression-fixture/` demo used to carry, now a deterministic,
+gate-safe checker test.
