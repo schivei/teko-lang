@@ -224,7 +224,9 @@ Renames (Gherkin `Tkb*`/`tkb_*` → `Tkr*`/`tkr_*`, avoiding collision with the 
 `TkbExamples`→`TkrExamples`, `TkbScenario`→`TkrScenario`, `TkbFeature`→`TkrFeature`;
 `parse_feature`→`parse_tkr` (REPLACES the deleted TOML `parse_tkr`); `run_one_tkb`→`run_one_tkr`;
 every `tkb_*` helper → `tkr_*`. Discovery collapses to `.tkr`-only (drop the dual-format
-`SpecRef.is_tkb`); `dir_first_tkr` returns the single `.tkr`.
+`SpecRef.is_tkb`) AND scans ALL `.tkr` in a dir, not the first (owner 2026-07-23, #40 — free
+file granularity; companion §10): `dir_first_tkr` → `dir_tkr_files(dir) -> []str`, and
+`parse_tkr` returns a `[]TkrFeature` (a file may hold multiple `Feature:` blocks).
 
 Signature shapes (full Javadoc; bodies migrate from the current `tkb.tks`):
 
@@ -239,8 +241,10 @@ Signature shapes (full Javadoc; bodies migrate from the current `tkb.tks`):
 pub type TkrPhase = enum { Given; When; Then }
 
 /**
- * TkrFeature — one parsed `.tkr` file: the `name` free text and the `scenarios` (Background
- * already folded into each scenario's steps). One feature = one regressor project.
+ * TkrFeature — one parsed `Feature:` block of a `.tkr` file: the `name` free text and the
+ * `scenarios` (Background already folded into each scenario's steps). A file may hold MULTIPLE
+ * features (`parse_tkr` returns `[]TkrFeature`); a project may hold multiple `.tkr` files — the
+ * file↔project relation is free (companion §1.1, #40).
  *
  * @since 0.3.0.30
  */
@@ -252,33 +256,48 @@ pub type TkrFeature = struct {
 }
 
 /**
- * parse_tkr — read a `.tkr` (Gherkin) source into a `TkrFeature`, or fail honestly (M.3). Reuses
- * the manifest value lexers (`mf_read_quoted`/`mf_read_array`/`mf_read_int`) verbatim for every
+ * parse_tkr — read a `.tkr` (Gherkin) source into its `[]TkrFeature` (one per `Feature:` block;
+ * a file with no explicit `Feature:` is one implicit feature), or fail honestly (M.3). Reuses the
+ * manifest value lexers (`mf_read_quoted`/`mf_read_array`/`mf_read_int`) verbatim for every
  * right-hand side; introduces only keyword-line + Examples-table + HEX-docstring parsing.
  * REPLACES the deleted TOML `parse_tkr`.
  *
  * @param src  the `.tkr` file contents
- * @return     the parsed feature, or an `error` on any malformed line / unknown noun-phrase
+ * @return     the parsed features, or an `error` on any malformed line / unknown noun-phrase
  * @throws     on a malformed keyword line, an unknown noun-phrase, or a malformed value
  * @since 0.3.0.30
  */
-fn parse_tkr(src: str) -> TkrFeature | error { /* migrate the tkb.tks body */ }
+fn parse_tkr(src: str) -> []TkrFeature | error { /* migrate the tkb.tks body; loop features */ }
 
 /**
- * run_one_tkr — parse, then exercise a `.tkr` regressor, dispatching on `(m.artifact, When-verb)`
- * (companion §4): `built and run` (exe), `packaged` (`.tkl` + `artifact exists`), `linked and
- * run` (interop), `built as static/shared library`, `run on "<target>"` (wasm), `exports/imports
- * c abi` (FFI), `compilation fails` (per-source). A verb whose capability is not in THIS gen1 is
- * an HONEST STOP (or `Given pending`-skipped-green). The verdict is the FIRST failure, else pass.
+ * dir_tkr_files — the basenames of ALL `*.tkr` files in `dir` (sorted for a stable report),
+ * empty when `dir` is unreadable or holds none. A directory IS a regressor iff this is non-empty.
+ * REPLACES the first-only `dir_first_tkr`/`dir_first_spec` (owner #40 — a project may hold N
+ * `.tkr` files, all run).
+ *
+ * @param dir  the directory to inspect
+ * @return     every `.tkr` basename in `dir` (sorted), or an empty list
+ * @since 0.3.0.30
+ */
+fn dir_tkr_files(dir: str) -> []str { /* list_dir, filter .tkr, sort */ }
+
+/**
+ * run_one_regressor — exercise a regressor DIRECTORY: for EVERY `.tkr` in `dir_tkr_files(dir)`,
+ * parse (→ `[]TkrFeature`) and run every feature's every scenario, dispatching on
+ * `(m.artifact, When-verb)` (companion §4): `built and run` (exe), `packaged` (`.tkl` +
+ * `artifact exists`), `linked and run` (interop), `built as static/shared library`, `run on
+ * "<target>"` (wasm), `exports/imports c abi` (FFI), `compilation fails` (per-source). A verb
+ * whose capability is not in THIS gen1 is an HONEST STOP (or `Given pending`-skipped-green). The
+ * verdict folds the FIRST failure across all files/features/scenarios, else pass. Each file's
+ * scratch prefix embeds its basename so captures never collide.
  *
  * @param exe       the absolute path to this compiler binary (gen1)
  * @param regr_dir  the regressor project directory
- * @param tkr_name  the `.tkr` basename inside `regr_dir`
  * @param prefix    the scratch-file prefix for this regressor
- * @return          the aggregate verdict
+ * @return          the aggregate verdict over every `.tkr` in the directory
  * @since 0.3.0.30
  */
-fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str) -> RegrOutcome { /* migrate */ }
+fn run_one_regressor(exe: str, regr_dir: str, prefix: str) -> RegrOutcome { /* iterate + fold */ }
 ```
 
 Root self-project guard in `run_regression_sources`: a discovered dir resolving to the repo root
@@ -389,6 +408,10 @@ regressor.
 7. **compile-fail diagnostics → checker `#test`s** (REPORTED UP), not a curated regressor.
 8. **FFI regressors ARE the kill-C §5 lane** re-expressed in `.tkr`; that doc's `.tkb` naming +
    its citation of the deleted format doc must be corrected (REPORTED UP).
+9. **Free file granularity** (owner 2026-07-23, #40): a project may hold N `.tkr` files and a
+   `.tkr` may hold N features — discovery scans/runs ALL (`dir_first_tkr` → `dir_tkr_files`,
+   `parse_tkr` → `[]TkrFeature`). Fat-or-many is the developer's choice; the taxonomy and the
+   set of 10 are unchanged (only the file granularity INSIDE a project).
 
 No genuine LAW TENSION surfaced: Teko-only (`.tks`/`.tkt`/`.tkr`), W15 full-Javadoc (all new
 signatures), M.3 honest-stops (parser errors + gated verbs + `Given pending` skips), fixpoint
