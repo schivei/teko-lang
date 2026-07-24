@@ -1,0 +1,86 @@
+/**
+ * Leaf — a terminal tree cell carrying the folded payload.
+ *
+ * @field v  the payload value returned when the fold reaches this leaf
+ */
+type Leaf = struct {
+    /** the payload value returned when the fold reaches this leaf. */
+    v: i64
+}
+
+/**
+ * Node — an interior tree cell. Its `child` field is the absence union `Tree | null`, the recursive
+ * back-edge whose payload `Tree` is a VARIANT; the union representation dial boxes it into an 8-byte
+ * arena handle (`Tree *`) so the C struct stays finite.
+ *
+ * @field child  the next tree down, or `null` at the bottom — the recursive `Tree | null` back-edge
+ */
+type Node = struct {
+    /** the next tree down, or `null` at the bottom — the recursive `Tree | null` back-edge. */
+    child: Tree | null
+}
+
+/**
+ * Tree — a leaf or an interior node. The variant is the payload of the `Node.child` absence union, so
+ * the value-type cycle runs through this variant's `Node` member.
+ */
+type Tree = variant Leaf | Node
+
+/**
+ * leaf — a terminal tree carrying `v`.
+ *
+ * @param v  the payload
+ * @return   a leaf tree
+ * @since 0.3.1
+ */
+pub fn leaf(v: i64) -> Tree {
+    return Leaf { v = v }
+}
+
+/**
+ * wrap — an interior node whose child is `t` (boxed straight through the `Tree | null` handle).
+ *
+ * @param t  the tree the node points at
+ * @return   the wrapping interior tree
+ * @since 0.3.1
+ */
+pub fn wrap(t: Tree) -> Tree {
+    return Node { child = t }
+}
+
+/**
+ * bottom — an interior node with no child (writes the NULL handle into the `Tree | null` field).
+ *
+ * @return an interior tree whose `child` is `null`
+ * @since 0.3.1
+ */
+pub fn bottom() -> Tree {
+    return Node { child = null }
+}
+
+/**
+ * fold — walk to the deepest leaf, returning its payload; a `null` child yields zero.
+ *
+ * @param t  the tree to fold
+ * @return   the deepest leaf's payload, or 0 when a node bottoms out at `null`
+ * @since 0.3.1
+ */
+pub fn fold(t: Tree) -> i64 {
+    match t {
+        Leaf as l => return l.v
+        Node as n => match n.child {
+            Tree as c => return fold(c)
+            null => return 0
+        }
+    }
+}
+
+/**
+ * scene — a three-level tree `Node -> Node -> Leaf(42)` folded to its leaf payload.
+ *
+ * @return 42
+ * @since 0.3.1
+ */
+pub fn scene() -> i64 {
+    return fold(wrap(wrap(leaf(42))))
+}
