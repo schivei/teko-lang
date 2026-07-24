@@ -561,36 +561,76 @@ fn type_shift_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
 }
 
 /**
+ * widen_int_binop — join two INTEGER operand types under the W-RULE (`int_arith_join`,
+ * `expr.tks`, §2.1/§2.2) and widen whichever side is narrower to the common result, or
+ * surface the honest "no lossless common type" stop when none exists. Shared by
+ * `type_arith_binop` and `type_bitwise_binop` (both integer-eligible operator classes) so
+ * `+ - * / % & | ^` complete the B.22 sign-check's arithmetic sibling identically.
+ *
+ * @param op  the binary operator token, carried through to the built `TBinary`
+ * @param l   the typed left operand (an integer `Prim`)
+ * @param r   the typed right operand (an integer `Prim`)
+ * @return    the typed binary expression at the W-RULE-joined width
+ * @throws    when `l.type` and `r.type` share no lossless common integer type (W-RULE §2.2 —
+ *            equal-width mixed sign, or the unsigned side equal-or-wider than the signed side)
+ */
+fn widen_int_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    let joined = match int_arith_join(prim_kind_of(l.type), prim_kind_of(r.type)) {
+        PrimKind as k => k
+        error as e => return err_binop_type_mismatch(e.message, l, r)
+    }
+    let lw = widen_operand(l, joined)
+    let rw = widen_operand(r, joined)
+    TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+}
+
+/**
  * type_arith_binop — type an arithmetic operator (`+ - * /`) over the native numeric set (ints AND
- * floats). Same-type only (no promotion, no mixed int/float — B.22; a cross-family operand needs an
- * explicit `to`).
+ * floats). Same-type operands take the fast identity path; different-width same-family operands
+ * (both integer, or both float) WIDEN under the W-RULE (`widen_int_binop` / `float_arith_join`,
+ * completing B.22 into arithmetic — `cast-width-hygiene-0.3.1.md` §2); a mixed-sign integer pair
+ * with no lossless common type, or a cross-family (int×float) pair, is an honest compile error
+ * demanding an explicit `to` (B.38 — int×float stays unchanged).
  *
  * @param op  the arithmetic operator token
  * @param l   the typed left operand
  * @param r   the typed right operand
  * @return    the typed arithmetic expression, or a type error
- * @throws    when the left operand is not numeric, or the operands differ in type
+ * @throws    when the left operand is not numeric, the operands are int×float, or a mixed-sign
+ *            integer pair has no lossless common type (W-RULE §2.2)
  */
 fn type_arith_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
     if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
-    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r) }
-    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if is_integer(l.type) && is_integer(r.type) { return widen_int_binop(op, l, r) }
+    if is_float(l.type) && is_float(r.type) {
+        let joined = float_arith_join(prim_kind_of(l.type), prim_kind_of(r.type))
+        let lw = widen_operand(l, joined)
+        let rw = widen_operand(r, joined)
+        return TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+    }
+    err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r)
 }
 
 /**
  * type_bitwise_binop — type a bitwise/remainder operator (`% & | ^`): integer operands only (not a
- * float — B.38), same-type (no promotion — B.22).
+ * float — B.38). Same-type operands take the fast identity path; different-width operands WIDEN
+ * under the W-RULE (`widen_int_binop`, completing B.22 into arithmetic — `cast-width-hygiene-
+ * 0.3.1.md` §2); a mixed-sign pair with no lossless common type is an honest compile error
+ * demanding an explicit `to`.
  *
  * @param op  the bitwise/remainder operator token
  * @param l   the typed left operand
  * @param r   the typed right operand
  * @return    the typed expression, or a type error
- * @throws    when the left operand is not an integer, or the operands differ in type
+ * @throws    when the left operand is not an integer, the right operand is not an integer, or a
+ *            mixed-sign integer pair has no lossless common type (W-RULE §2.2)
  */
 fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
     if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
-    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
-    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if !is_integer(r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
+    widen_int_binop(op, l, r)
 }
 
 /**
