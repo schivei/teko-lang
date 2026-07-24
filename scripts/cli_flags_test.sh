@@ -72,4 +72,21 @@ done
 run_flag
 [ "$RC" -eq 2 ] || fail "bare teko exit $RC (want 2)"
 
+# --- --backend : REMOVED (owner ruling 2026-07-24) — every spelling, in every dispatch shape,
+#     is rejected honestly (exit 2) with a message pointing at TEKO_BACKEND, never silently
+#     ignored or mistaken for the project positional -------------------------------------------
+BACKEND_FIXTURE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)/examples/regressions/own_exit_code"
+
+run_flag build --backend=native "$BACKEND_FIXTURE_DIR"
+[ "$RC" -eq 2 ] || fail "'build --backend=native' exit $RC (want 2)"
+printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'build --backend=native' stderr missing 'TEKO_BACKEND': $ERR"
+
+run_flag run --backend native "$BACKEND_FIXTURE_DIR"
+[ "$RC" -eq 2 ] || fail "'run --backend native' exit $RC (want 2)"
+printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'run --backend native' stderr missing 'TEKO_BACKEND': $ERR"
+
+run_flag "$BACKEND_FIXTURE_DIR" --backend=c
+[ "$RC" -eq 2 ] || fail "'<bare-project> --backend=c' exit $RC (want 2)"
+printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'<bare-project> --backend=c' stderr missing 'TEKO_BACKEND': $ERR"
+
 echo "cli_flags_test: PASS ($BIN)"
