@@ -144,9 +144,13 @@ PROBES=0
 MAX_PROBES=64
 BASE_LOG="$(mktemp)"
 while :; do
+  rm -rf "$GEN1_BASE_DIR"
+  mkdir -p "$GEN1_BASE_DIR"
+  git -C "$WORKTREE_DIR" clean -fdxq
   if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
     break
   fi
+  log "probe error head: $(tail -2 "$BASE_LOG" | tr '\n' ' ' | cut -c1-200)"
   PROBES=$((PROBES + 1))
   if [ "$PROBES" -ge "$MAX_PROBES" ]; then
     log "FATAL: no seed-buildable ancestor found within $MAX_PROBES first-parent steps of merge-base $MERGE_BASE_SHA"
