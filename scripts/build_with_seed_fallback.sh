@@ -128,24 +128,51 @@ if [ "$MERGE_BASE_SHA" = "$HEAD_FOR_MERGE_BASE" ]; then
   exit 1
 fi
 
-log "seed fallback engaged (seed cannot build tip; bootstrapping via gen1 of merge-base $MERGE_BASE_SHA)"
+log "seed fallback engaged (seed cannot build tip; probing back from merge-base $MERGE_BASE_SHA)"
 
+# In a stacked train, the merge-base with the PR's base branch may ITSELF sit past the
+# capability jump (wagon N+2's base is wagon N+1, already unbuildable by the seed). The
+# bootstrap point is the NEWEST first-parent ancestor the seed CAN build — failed probes
+# are cheap (the compiler rejects in seconds), only the final successful build is paid.
 WORKTREE_DIR="$(mktemp -d)"
 rmdir "$WORKTREE_DIR"
 git worktree add --detach "$WORKTREE_DIR" "$MERGE_BASE_SHA" >/dev/null
 
 GEN1_BASE_DIR="$(mktemp -d)"
+BOOT_SHA="$MERGE_BASE_SHA"
+PROBES=0
+MAX_PROBES=64
 BASE_LOG="$(mktemp)"
-if ! build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
-  log "FATAL: seed failed to build merge-base $MERGE_BASE_SHA — the fallback's own bootstrap step failed"
-  log "----- seed build of the tip (failure) -----"
-  cat "$FAST_LOG"
-  log "----- seed build of merge-base $MERGE_BASE_SHA (failure) -----"
-  cat "$BASE_LOG"
-  rm -f "$BASE_LOG"
-  exit 1
-fi
+while :; do
+  if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
+    break
+  fi
+  PROBES=$((PROBES + 1))
+  if [ "$PROBES" -ge "$MAX_PROBES" ]; then
+    log "FATAL: no seed-buildable ancestor found within $MAX_PROBES first-parent steps of merge-base $MERGE_BASE_SHA"
+    log "----- seed build of the tip (failure) -----"
+    cat "$FAST_LOG"
+    log "----- seed build of last probe $BOOT_SHA (failure) -----"
+    cat "$BASE_LOG"
+    rm -f "$BASE_LOG"
+    exit 1
+  fi
+  if ! PARENT_SHA="$(git -C "$WORKTREE_DIR" rev-parse -q --verify "$BOOT_SHA^" 2>/dev/null)"; then
+    log "FATAL: ran out of history walking back from merge-base $MERGE_BASE_SHA — no seed-buildable ancestor"
+    log "----- seed build of the tip (failure) -----"
+    cat "$FAST_LOG"
+    log "----- seed build of last probe $BOOT_SHA (failure) -----"
+    cat "$BASE_LOG"
+    rm -f "$BASE_LOG"
+    exit 1
+  fi
+  log "probe: seed cannot build $BOOT_SHA — stepping back to $PARENT_SHA"
+  BOOT_SHA="$PARENT_SHA"
+  git -C "$WORKTREE_DIR" checkout -q --detach "$BOOT_SHA"
+done
 rm -f "$BASE_LOG"
+log "bootstrap point: $BOOT_SHA (newest seed-buildable ancestor, $PROBES probe(s) back from the merge-base)"
+MERGE_BASE_SHA="$BOOT_SHA"
 
 if ! GEN1_BASE_BIN="$(resolve_bin "$GEN1_BASE_DIR")"; then
   log "FATAL: merge-base build reported success but no teko/teko.exe binary was found in $GEN1_BASE_DIR"
