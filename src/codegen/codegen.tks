@@ -5029,7 +5029,38 @@ fn cg_emit_box_construct(buf: []byte, prog: checker::TProgram, ret_type: checker
     cb(out, "; })")
 }
 
+/**
+ * Wraps `value` into its `expected` type's C representation — variant (niche/box/inline), optional
+ * present-wrap, or (0.3.1 — owner ruling 2026-07-24) a `ref` BINDING'S `Reference` target: a bare
+ * (non-`Reference`) `value` is the mutable-source alias path `type_ref_binding_value` (checker)
+ * already validated, so it is address-taken here (`&value`); an already-`Reference` `value` is the
+ * forwarding path (another reference) and emits plainly. Falls through to a plain expression emit
+ * when `expected` needs no wrapping at all.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program (representation classification)
+ * @param ret_type  the enclosing function's return type (threaded for a diverging sub-value)
+ * @param expected  the target type `value` is wrapped into
+ * @param value     the typed value to wrap
+ * @param escaping  the enclosing function's escaping-name set (frame routing)
+ * @param regions   the active block/frame region stack
+ * @param fn_body   the enclosing function's body (frame-locality queries)
+ * @param dctx      the enclosing `defer` context
+ * @return          the buffer with the representation-correct wrapped value appended
+ */
 fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    match expected {
+        checker::Reference => {
+            match value.type {
+                checker::Reference => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)
+                _ => {
+                    let o = cb(buf, "&")
+                    return emit_expr_ctx(o, prog, ret_type, value, escaping, regions, fn_body, dctx)
+                }
+            }
+        }
+        _ => { }
+    }
     match expected {
         checker::Variant as nva => match cg_union_niche_member(prog, nva) {
             checker::Type as nx => {

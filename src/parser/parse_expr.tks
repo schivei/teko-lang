@@ -501,17 +501,28 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
     Parsed<Expr> { node = node; next = p }
 }
 
-// prefix unary `- ~ !` (right-assoc: `!!a` is `!(!a)`), plus the prefix `&x` safe borrow
-// (AL wave F1). `&` in PREFIX position is a Borrow; `&` BETWEEN operands is the binary
-// bitwise-and, consumed at the binary level — so a leading `&` here is unambiguous. Below `to`.
+/**
+ * The prefix-unary level: `- ~ !` (right-assoc: `!!a` is `!(!a)`), plus the prefix `&x` safe
+ * borrow (AL wave F1). `&` in PREFIX position is a Borrow; `&` BETWEEN operands is the binary
+ * bitwise-and, consumed at the binary level — so a leading `&` here is unambiguous. A bare `ref`
+ * immediately before a name (owner ruling 2026-07-24) is named HONESTLY as a misuse: `ref` is a
+ * BINDING keyword (`ref r: T = e`, `fn f(ref r: T)`), never an expression-position operator — the
+ * pre-adoption `a(ref x)` call-site spelling is gone; a plain `a(x)` auto-refs into a `ref`
+ * parameter. Below `to`.
+ *
+ * @param tokens        the token stream
+ * @param pos           the index of the (possibly unary) expression's first token
+ * @param allow_struct  whether a bare `{` here opens a struct literal (context-dependent)
+ * @return              the parsed unary (or lower-precedence) expression
+ * @throws              when `pos` opens a bare `ref` immediately before a name
+ */
 fn parse_unary(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Expr> | error {
     if is_kind_at(tokens, pos, lexer::TokenKind::Amp) {
         let operand = match parse_unary(tokens, pos + 1, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
         return Parsed<Expr> { node = Expr { kind = Borrow { operand = operand.node }; line = tokens[pos].line; col = tokens[pos].col }; next = operand.next }
     }
     if is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "ref" && is_name_at(tokens, pos + 1) {
-        let operand = match parse_unary(tokens, pos + 1, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
-        return Parsed<Expr> { node = Expr { kind = Borrow { operand = operand.node }; line = tokens[pos].line; col = tokens[pos].col }; next = operand.next }
+        return err_at(tokens, pos, "`ref` is a binding keyword, not an expression operator — pass the bare value (`f(x)`); the compiler auto-refs it into a `ref` parameter (a reference binding is spelled `ref r: T = x`)")
     }
     if is_unary(tokens, pos) {
         let op = kind_at(tokens, pos)
