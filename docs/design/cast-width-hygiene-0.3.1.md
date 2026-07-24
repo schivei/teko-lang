@@ -3,12 +3,30 @@
 > **Status:** DECISIONS CLOSED — ruling-level, owner 2026-07-24 (counter-round cumprido).
 > **Implementation progress (branch `feat/0.3.1-cast-width-a`, base `327d50d4`):** **C1
 > (W-RULE in the checker) — DONE.** **C2 (backend no-op confirmation) — DONE.** **C6
-> (`teko::casting` stdlib module) — DONE.** C3/C4/C5 (the `.len`/signature sweep, the corpus
-> cast sweep + the `redundant cast` error, and the metric gate) remain open for a follow-on
-> wagon — the W-RULE landed here is strictly ADDITIVE (widens acceptance only; the existing
-> manual `to` equalizations in the corpus are now redundant but still legal, unswept). §9
-> records the closed rulings; the plan below is aligned to them (D1 direct-error, D2 rejected
-> → no new cast syntax, D3 peer-type, D4 ≤2% gate, D5 = swap declarant types to u64).
+> (`teko::casting` stdlib module) — DONE.**
+> **C3 (signature sweep, branch `feat/0.3.1-cast-width-c3c5`) — DONE.** Widened ~30
+> frame-slot/count declarations (`MFrameAddr`/`Riscv`/`X86.slot`, `Spilled`/`AssignLookup.slot`,
+> `next_slot`, `frame_base`, `count_spills`/`append_spill_slots`,
+> `emit_gpr_reload`/`emit_gpr_store` + `rewrite_inst`/`block`/`func` × 3 archs,
+> `slot_offset`/`_riscv`, `frame_slot_addr`, `block_pos`→`block_rpo_pos`) `u32`→`u64`,
+> deleting the `.len to u32`/`.len to u64` casts they existed only to satisfy.
+> **C4 (corpus cast sweep + the D1 `redundant cast` error, "varre → liga") — DONE.** `type_cast`
+> rejects a same-type cast (class 1); `type_binary`/`type_compare` reject a redundant
+> lossless-widen (class 3) — guarded against a literal partner (adoption depends on the
+> partner's PRE-cast type) and against a partner that is ITSELF an equally-removable `to`
+> (two mutually-"redundant" casts can jointly establish the real computed width — found and
+> fixed during the sweep itself, `encode_riscv.tks::resolve_word_riscv`). Swept ~200+
+> corpus-wide redundant casts (the bulk "bare literal to i64/f64" pattern + individually
+> verified class-3 sites); D1 flips on in the SAME commit, corpus never red between wagons.
+> **C5 (ARITH-CAST-RATE probe + CI flag) — DONE**, `--arith-cast-gate` wired and unit-tested;
+> current corpus reads CAST-DENSITY 23.3/KLOC (was 25.7/KLOC pre-C3/C4) and ARITH-CAST-RATE
+> 3.40% — ABOVE the D4 ≤2% ceiling, so the flag is NOT yet wired as a blocking CI step (would
+> red every future PR against the current corpus). Closing that gap needs either a follow-on
+> signature-sweep wagon over the remaining cast-dense `*_consts.tks`/`objfile_*.tks` wire-format
+> files (C3's own explicitly out-of-scope "highest blast radius" tier) or an owner
+> re-ratification of the threshold/scope — an open item for the integrator, not silently
+> deferred. §9 records the closed rulings; the plan below is aligned to them (D1 direct-error,
+> D2 rejected → no new cast syntax, D3 peer-type, D4 ≤2% gate, D5 = swap declarant types to u64).
 >
 > **Owner rulings recorded verbatim (dated 2026-07-24):**
 > 1. *"Casting deve ser feito com muita cautela e em casos excepcionais (raríssimos); o
