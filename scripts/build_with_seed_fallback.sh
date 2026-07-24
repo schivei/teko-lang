@@ -143,7 +143,12 @@ rm -rf "$WORKTREE_DIR"
 git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
 git worktree add --detach "$WORKTREE_DIR" "$MERGE_BASE_SHA" >/dev/null
 
-GEN1_BASE_DIR="${GITHUB_WORKSPACE:-$PWD}/.teko-seed-fallback-out"
+# The probe OUTPUT lives INSIDE the probe worktree: with an out dir under the tip's
+# checkout, the C compile of an ANCESTOR mixed the TIP's runtime header into the
+# ancestor's generated C (proven: probes died on exactly the tk_rt_datetime_* symbols
+# the time-redesign wagon removed). Self-contained probe = ancestor code + ancestor
+# runtime, the same shape as the fast path's in-project `-o bin`.
+GEN1_BASE_DIR="$WORKTREE_DIR/.probe-out"
 rm -rf "$GEN1_BASE_DIR"
 mkdir -p "$GEN1_BASE_DIR"
 BOOT_SHA="$MERGE_BASE_SHA"
@@ -151,9 +156,9 @@ PROBES=0
 MAX_PROBES=64
 BASE_LOG="$(mktemp)"
 while :; do
+  git -C "$WORKTREE_DIR" clean -fdxq
   rm -rf "$GEN1_BASE_DIR"
   mkdir -p "$GEN1_BASE_DIR"
-  git -C "$WORKTREE_DIR" clean -fdxq
   if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
     break
   fi
