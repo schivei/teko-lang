@@ -48,6 +48,28 @@ if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
     skip_or_fail "no archive provided (arg1='${ARCHIVE:-<empty>}')"
 fi
 
+# Absolutize BEFORE any step below could run from a different CWD (run 30074280021's
+# macos-arm64 fix, ported here too for consistency across every check_ar_*.sh — this
+# script's own steps never `cd` today, but a relative $ARCHIVE staying valid must not
+# depend on that staying true).
+ARCHIVE="$(cd "$(dirname "$ARCHIVE")" && pwd)/$(basename "$ARCHIVE")"
+
+# ARCHIVE_WIN is the SAME file, in the form the NATIVE Windows tools below (llvm-lib,
+# dumpbin) need (run 30074603155, windows-x86_64: the absolutize step above produces an
+# MSYS POSIX path, e.g. `/d/a/teko-lang/...` — a real path in git-bash's own shell, but
+# not one any native Windows .exe can open; passing it to llvm-lib gave "no such file or
+# directory" where the ORIGINAL relative-path invocation worked, since a bare relative
+# path's forward slashes resolve fine for these tools' own CWD-relative lookup, unlike an
+# MSYS-rooted absolute one). `cygpath -w` converts to `D:\a\teko-lang\...` (the same
+# translation the workflow's own lld-link step already applies) — a no-op passthrough
+# when `cygpath` is absent (every other host: linux/macOS, or this sandbox). Every POSIX
+# tool below (`head`/`od`, the `-f` test above) keeps using the untranslated $ARCHIVE;
+# only the native-tool invocations switch to $ARCHIVE_WIN.
+ARCHIVE_WIN="$ARCHIVE"
+if command -v cygpath >/dev/null 2>&1; then
+    ARCHIVE_WIN="$(cygpath -w "$ARCHIVE")"
+fi
+
 SYMBOL="${2:-}"
 trace "checking archive=$ARCHIVE symbol=${SYMBOL:-<none>}"
 
@@ -74,7 +96,7 @@ magic_hex="$(head -c 8 "$ARCHIVE" | od -An -tx1 | tr -d ' \n')"
 # invocation (the same MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL idiom check_coff.sh already
 # uses for lld-link).
 trace "step: $LIB_TOOL /list"
-list_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$LIB_TOOL" "/list" "$ARCHIVE" 2>&1)"
+list_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$LIB_TOOL" "/list" "$ARCHIVE_WIN" 2>&1)"
 list_rc=$?
 if [[ "$list_rc" -ne 0 ]]; then
     trace "$LIB_TOOL /list output:"; printf '%s\n' "$list_out" | sed 's/^/      | /' >&2
@@ -88,7 +110,7 @@ trace "$LIB_TOOL /list: enumerated an .o member"
 
 if command -v dumpbin >/dev/null 2>&1; then
     trace "step: dumpbin /LINKERMEMBER (present on PATH)"
-    linkermember_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' dumpbin "/linkermember" "$ARCHIVE" 2>&1)"
+    linkermember_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' dumpbin "/linkermember" "$ARCHIVE_WIN" 2>&1)"
     linkermember_rc=$?
     if [[ "$linkermember_rc" -ne 0 ]]; then
         trace "dumpbin /LINKERMEMBER output:"; printf '%s\n' "$linkermember_out" | sed 's/^/      | /' >&2
