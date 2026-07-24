@@ -1340,7 +1340,15 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
  * `x86_64-windows` via the MS two-linker-member `.lib` writer
  * (`emit_static_archive_coff`); every wasm target is a NAMED honest stop — a
  * wasm module has no static-archive convention to wrap into (M.3 — no fake
- * artifact).
+ * artifact). `lower_program` unconditionally synthesizes a virtual `int
+ * main()` from the project's loose top-level statements (`emit_native`'s
+ * entry point for a `binary` artifact) — a library has none of its own, but
+ * `lower_program` is shared with the binary path and always appends the
+ * (trivial, `return 0`) synthesized one regardless, so it is stripped here
+ * (`strip_virtual_main`) BEFORE any target tail runs: a `static` artifact must
+ * never export a bare `main` symbol for a real consumer's own `main` to
+ * collide with (found by the THEORY branch's real link+run validation, a gap
+ * `ar`/`nm`/`ld -r`-only checking never caught).
  *
  * @param dir      the project directory (for diagnostics)
  * @param stem     the output artifact name (the manifest `name`)
@@ -1355,7 +1363,8 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
     }
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let raw_lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let lmod = strip_virtual_main(raw_lmod)
     match native_target() {
         NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod)
         NativeTarget::Riscv64Linux => emit_static_lib_riscv(dir, od, stem, lmod)
@@ -1363,6 +1372,29 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
         NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod)
         _ => fail(dir, "static library output has no wasm convention to wrap into (M.3)")
     }
+}
+
+/**
+ * strip_virtual_main — `lmod` with the synthesized virtual `main` `LFunc`
+ * removed (identified by its exact, un-namespaced `"main"` symbol —
+ * `lower_virtual_main` builds it via `new_func("main", ...)` directly,
+ * bypassing `mangle_fn_symbol`, so a real user function can never collide
+ * with this exact bare name: any root-level `pub`/`exp fn main` mangles to
+ * `<project>__main` instead). Every OTHER field (`rodata`/`globals`/
+ * `layouts`) passes through unchanged; only `funcs` is filtered.
+ *
+ * @param lmod  the freshly lowered module (still carrying the virtual main)
+ * @return      the same module with the virtual main's `LFunc` dropped
+ */
+fn strip_virtual_main(lmod: teko::lir::LModule) -> teko::lir::LModule {
+    mut kept: []teko::lir::LFunc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= lmod.funcs.len { break }
+        if lmod.funcs[i].symbol != "main" { kept = teko::list::push(kept, lmod.funcs[i]) }
+        i++
+    }
+    teko::lir::LModule { funcs = kept; rodata = lmod.rodata; globals = lmod.globals; layouts = lmod.layouts }
 }
 
 /**
