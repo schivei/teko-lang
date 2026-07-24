@@ -18,7 +18,7 @@
  * `exp("add")` override for an exact name) — that mechanism is wired ONLY into
  * the C-backend `abi="c"` binary path today (`src/build/project.tks::backend`
  * dispatches `Backend::Native` straight to `emit_native`/`emit_static_lib`
- * BEFORE the `m.abi == "c"` gate), so it has no effect on a `--backend=native`
+ * BEFORE the `m.abi == "c"` gate), so it has no effect on a `TEKO_BACKEND=native`
  * static-lib build. Verified locally (own-native COFF/Mach-O objects built on
  * this sandbox, `objdump -t`/`strings -a`): the real symbol is
  * `theory_ar_lib__add` on Windows/COFF, `_theory_ar_lib__add` on macOS/Mach-O
