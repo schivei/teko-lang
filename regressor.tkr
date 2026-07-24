@@ -694,3 +694,226 @@ Feature: F3 null-union — KNOWN-STOP (promote to a positive scenario the day it
     """
     When compilation fails
     Then diagnostic = "interface cannot be a variant member"
+Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dobrado, dir removido)
+
+  Scenario: loop_label_lowercase
+    Given source inline = """
+    outer: loop {
+        break outer
+    }
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "loop label must be UPPER_SNAKE"
+
+  Scenario: loop_range_counter_leak
+    Given source inline = """
+    loop mut i in 0..3 {
+        i = i
+    }
+    exit(i)
+    """
+    When compilation fails
+    Then diagnostic = "undefined name: i"
+
+  Scenario: loop_three_part_nonbool_cond
+    Given source inline = """
+    loop mut i = 0; i; i++ {
+        exit(i)
+    }
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "needs a bool"
+
+  Scenario: member_const_interface_rejected
+    Given source inline = """
+    /**
+     * Contract — an interface that ILLEGALLY declares a `const` member. The parser rejects this: an
+     * interface carries no statics, so a member const is only allowed in a struct/class/trait body.
+     */
+    type Contract = interface {
+        /**
+         * run — an ordinary interface method signature (legal).
+         *
+         * @return an i64
+         */
+        fn run(self) -> i64
+        /** BAD — a `const` member in an interface body: a located parse error (#594 crumb 7). */
+        const BAD: i64 = 1
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "a `const` member is only allowed in a struct, class, or trait body"
+
+  Scenario: member_const_override_rejected
+    Given source inline = """
+    /**
+     * Widget — a struct that ILLEGALLY marks a member `const` with `override`. The parser rejects this:
+     * `override` is method-only; a member const is statically hidden, never overridden (#594 crumb 7).
+     *
+     * @field id  the widget's identifier
+     */
+    type Widget = struct {
+        /** the widget's identifier */
+        id: i64
+        /** BAD — a member const bearing `override`: a located parse error. */
+        override const BAD: i64 = 1
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "may not carry `override`"
+
+  Scenario: reject_f16
+    Given source inline = """
+    let x: f16 = 1.0
+    exit(x to i32)
+    """
+    When compilation fails
+    Then diagnostic = "type 'f16' was removed"
+
+  Scenario: reject_i128
+    Given source inline = """
+    let x: i128 = 1
+    exit(x to i32)
+    """
+    When compilation fails
+    Then diagnostic = "type 'i128' was removed"
+
+  Scenario: reject_lit_over_u64
+    Given source inline = """
+    let x = 18446744073709551616
+    exit(x to i32)
+    """
+    When compilation fails
+    Then diagnostic = "integer literal exceeds u64::MAX"
+
+  Scenario: reject_u128
+    Given source inline = """
+    let x: u128 = 1
+    exit(x to i32)
+    """
+    When compilation fails
+    Then diagnostic = "type 'u128' was removed"
+
+  Scenario: sugar_coalesce_rejected
+    Given source inline = """
+    let y = 0 ?? 1
+    exit(y to i32)
+    """
+    When compilation fails
+    Then diagnostic = "null-coalescing operator has been removed"
+
+  Scenario: sugar_qmark_field_rejected
+    Given source inline = """
+    let x = 5
+    let y = x?.n
+    exit(0 to i32)
+    """
+    When compilation fails
+    Then diagnostic = "safe-navigation operator has been removed"
+
+  Scenario: sugar_qmark_type_rejected
+    Given source inline = """
+    let y: i64? = null
+    exit(0 to i32)
+    """
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+  Scenario: sugar_slice_opt_rejected
+    Given source inline = """
+    let xs: []i64? = teko::list::empty()
+    exit(0 to i32)
+    """
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
+
+  Scenario: comptime_fold_interp_hex
+    Given source inline = """
+    let a: u64 = 0xFF
+    if $"{a:X}" != "FF" { exit(1) }
+    if $"{a:x}" != "ff" { exit(2) }
+    if $"{a:b}" != "11111111" { exit(3) }
+    if $"{a}" != "255" { exit(4) }
+    if $"0x{a:X} = {a}" != "0xFF = 255" { exit(5) }
+    let n: i64 = -1234567
+    if $"{n:n}" != "-1,234,567" { exit(6) }
+    if $"{n}" != "-1234567" { exit(7) }
+    let w: i64 = 42
+    if $"{w:d5}" != "00042" { exit(8) }
+    exit(0)
+    """
+    When built and run
+    Then exit = 0
+
+  Scenario: comptime_fold_local
+    Given source inline = """
+    let a: u64 = 0xFF
+    let hi = a >> 4
+    let masked = a & 0x0F
+    exit(hi + masked + 12)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: len_is_u64_nocast
+    Given source inline = """
+    let s = "abc"
+    let n: u64 = s.len
+    exit(n to i32)
+    """
+    When built and run
+    Then exit = 3
+
+  Scenario: own_arith_exit
+    Given source inline = """
+    mut n = 3
+    exit(n * 10 + 12)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: own_sub_exit
+    Given source inline = """
+    mut n = 3
+    exit(n * 20 - 18)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: width_float_widen
+    Given source inline = """
+    let a: f32 = 1.5
+    let b: f64 = 2.0
+    let widened = a + b
+
+    exit(widened to i32)
+    """
+    When built and run
+    Then exit = 3
+
+  Scenario: width_literal_adopt
+    Given source inline = """
+    let n: u32 = 10
+    exit(n % 3)
+    """
+    When built and run
+    Then exit = 1
+
+  Scenario: width_rule_mixed_sign_peer_ok
+    Given source inline = """
+    let a: u8 = 5 to u8
+    let b: i32 = -2
+
+    exit(a + b)
+    """
+    When built and run
+    Then exit = 3
+
