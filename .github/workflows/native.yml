@@ -123,10 +123,12 @@ jobs:
       # step), and enforces ALL THREE coverage floors (function/line/branch, #265 Track A) from
       # the native run's merged marks. Because tests run out-of-process, the compiler's peak stays
       # codegen-only (~940 MB). This is ONE gate per platform; native is the sole engine (VM
-      # retired, issue #524).
+      # retired, issue #524). Uses scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24):
+      # the seed only has to build `main`, not this PR — a staged bootstrap through gen1(main)
+      # kicks in only when the raw seed cannot compile the tip directly.
       - name: Test gate (native on the primary; compile-only elsewhere — perf)
         shell: bash
-        run: teko . -o bin --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh bin
 
       # fmt gate REMOVED (owner ruling 2026-07-08): `teko fmt` is a DEV tool for canonical
       # formatting, NOT a gate to bar code. The current fmt collapses hand-alignment, so it
@@ -171,8 +173,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci_provision_teko.sh linux-x86_64
 
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): bootstraps through
+      # gen1(main) when the raw seed cannot compile the tip directly (the seed only has to
+      # build `main`, never a capability jump this PR itself introduces).
       - name: Build gen1 (the PR compiler under test — carries emit_native_riscv)
-        run: teko . -o bin --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh bin
 
       # The fast riscv own==C differential: TEKO_DIFF_TARGET=riscv64-linux selects the riscv
       # lane in diff_c_own.sh (NOT uname — this host is x86_64). Per exit(n) fixture it builds
@@ -253,9 +258,12 @@ jobs:
       # The seed builds the PR's compiler sources → bin/teko (= gen1, the compiler
       # UNDER TEST). Everything below validates gen1, NOT the raw seed — so a codegen
       # fix in this PR is actually exercised (a raw-seed diff would test the old release).
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): the seed only has to
+      # build `main`; a staged bootstrap through gen1(main) kicks in only when the raw seed
+      # cannot compile the tip directly, so a genuine capability jump never blocks the wave.
       - name: Build gen1 (released seed compiles the PR corpus → bin/teko)
         shell: bash
-        run: teko . -o bin --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh bin
 
       # NOTE (owner design 2026-07-15): the "gen1 self-test" step (`./bin/teko test .`) was
       # MOVED OUT of this job into the isolated .github/workflows/tests.yml, which runs the
@@ -423,8 +431,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci_provision_teko.sh linux-x86_64-glibc
 
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): the seed only has to
+      # build `main`; falls back to a staged bootstrap through gen1(main) only when the raw
+      # seed cannot emit the tip's teko.c directly.
       - name: Emit teko.c (one gen, no gate)
-        run: teko . -o out --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh out
 
       # NOTE: a `zig cc -fsyntax-only -Werror=sometimes-uninitialized` guard was tried here but
       # zig's clang is stricter than Apple clang and still flags residual value-match temps the
