@@ -10,9 +10,10 @@
  * The code-generation backend a build lowers through. `C` emits C and links it with the
  * host `cc` (the trusted default, byte-identical across generations — FIXPOINT-preserving);
  * `Native` opts into Teko's own AOT backend + M-linker (`lir::lower` → isel → regalloc →
- * encode → objfile → link). Selected by the `--backend={c,native}` CLI flag, with the
- * `TEKO_BACKEND` env as a lower-precedence fallback (D1/#390, own-backend-architecture §3.7).
- * The default is `C`, so a flagless build stays on the trusted path.
+ * encode → objfile → link). Selected by the `TEKO_BACKEND=native` environment variable — the
+ * earlier `--backend={c,native}` CLI flag was REMOVED as unused surface (owner ruling
+ * 2026-07-24; D1/#390, own-backend-architecture §3.7 supersede this transitional env seam with
+ * the real manifest surface). The default is `C`, so an env-free build stays on the trusted path.
  */
 type Backend = enum { C; Native }
 
@@ -75,8 +76,9 @@ pub type Manifest = struct {
     test_default_targets: []str
     /**
      * The resolved code-generation backend (`C` default, `Native` for the own AOT path).
-     * NOT a `.tkp` key: it is stamped from the `--backend` CLI flag / `TEKO_BACKEND` env by
-     * `backend_of` + `with_backend` after the front-end parses the manifest (D1/#390).
+     * NOT a `.tkp` key: it is stamped from the `TEKO_BACKEND` env (the sole selection seam —
+     * the earlier `--backend` CLI flag was removed, owner ruling 2026-07-24) by `backend_of` +
+     * `with_backend` after the front-end parses the manifest (D1/#390).
      */
     backend: Backend
 }
@@ -453,7 +455,7 @@ fn parse_manifest(src: str) -> Manifest | error {
 
 /**
  * with_backend — a copy of `m` with its code-generation `backend` set to `b`, every other
- * field carried through unchanged. The CLI `--backend` resolver (`backend_of`, project.tks)
+ * field carried through unchanged. The `TEKO_BACKEND` resolver (`backend_of`, project.tks)
  * stamps the resolved selection onto the front-end's manifest with this before the artifact
  * dispatch reads `m.backend`; `parse_manifest` itself never sets a non-default backend, so the
  * manifest reader stays a pure `.tkp` → `Manifest` function (D1/#390).

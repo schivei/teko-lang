@@ -12,33 +12,24 @@ fn pt_dirname_posix_is_byte_identical() {
 }
 
 /**
- * target_matches — is `target_from_name(name)`'s own result `want`? The
- * shared assertion body every `target_from_name` golden below reduces to
- * (`NativeTarget` has no `Eq`-by-value assert helper, so this compares by
- * hand via `match`).
+ * target_matches — does `target_from_name(name)` resolve to `want`? `false` when
+ * `name` is unrecognized (the R2 honest error, owner ruling 2026-07-24) — the
+ * shared assertion body every `target_from_name` golden below reduces to.
  *
  * @param str name  the raw `TEKO_TARGET` value to map
  * @param NativeTarget want  the expected mapped target
- * @return bool  `true` iff `target_from_name(name) == want`
+ * @return bool  `true` iff `target_from_name(name)` resolves to `want`
  */
 fn target_matches(name: str, want: NativeTarget) -> bool {
-    match target_from_name(name) {
-        NativeTarget::Arm64Macho => want == NativeTarget::Arm64Macho
-        NativeTarget::X8664Linux => want == NativeTarget::X8664Linux
-        NativeTarget::Riscv64Linux => want == NativeTarget::Riscv64Linux
-        NativeTarget::X8664Windows => want == NativeTarget::X8664Windows
-        NativeTarget::Wasm32Wasi => want == NativeTarget::Wasm32Wasi
-        NativeTarget::Wasm64Wasi => want == NativeTarget::Wasm64Wasi
-        NativeTarget::Wasm32Browser => want == NativeTarget::Wasm32Browser
-    }
+    match target_from_name(name) { NativeTarget as t => t == want; error => false }
 }
 
 #test
 /**
  * target_from_name_still_maps_the_pre_existing_targets — a non-regression
  * check on the ENUM extension (#389 C1-5 adds two arms to `NativeTarget`):
- * the pre-existing `x86_64-linux`/`x86_64-elf` mappings, an unrecognized
- * string, and the empty string all still resolve exactly as before.
+ * the pre-existing `x86_64-linux`/`x86_64-elf` mappings, and the canonical
+ * `arm64-macos` name, still resolve exactly as before.
  *
  * @return void
  */
@@ -46,8 +37,61 @@ fn target_from_name_still_maps_the_pre_existing_targets() {
     teko::assert::is_true(target_matches("x86_64-linux", NativeTarget::X8664Linux))
     teko::assert::is_true(target_matches("x86_64-elf", NativeTarget::X8664Linux))
     teko::assert::is_true(target_matches("arm64-macos", NativeTarget::Arm64Macho))
-    teko::assert::is_true(target_matches("", NativeTarget::Arm64Macho))
-    teko::assert::is_true(target_matches("bogus-target", NativeTarget::Arm64Macho))
+}
+
+#test
+/**
+ * target_from_name_rejects_unsupported_values — R2 (owner ruling 2026-07-24): an
+ * unrecognized `TEKO_TARGET` value (a typo, or the empty string) is now an honest
+ * COMPILE error naming the offending value and listing the supported set, never a
+ * silent mis-lower to `Arm64Macho` (the pre-0.3.1 behavior `target_from_name_still_
+ * maps_the_pre_existing_targets` used to also cover).
+ *
+ * @return void
+ */
+fn target_from_name_rejects_unsupported_values() {
+    match target_from_name("bogus-target") {
+        NativeTarget => teko::assert::is_true(false)
+        error as e => {
+            teko::assert::is_true(teko::str::contains(e.message, "bogus-target"))
+            teko::assert::is_true(teko::str::contains(e.message, "x86_64-linux"))
+        }
+    }
+    match target_from_name("") {
+        NativeTarget => teko::assert::is_true(false)
+        error as e => teko::assert::is_true(teko::str::contains(e.message, "supported targets"))
+    }
+}
+
+#test
+/**
+ * host_target_for_os_maps_every_known_os — the R1 host default
+ * (owner ruling 2026-07-24, teko-target-crosslink-0.3.1.md §2.1): `linux` and
+ * `windows` pick their own-backend x86-64 pipeline, while `macos` and any other
+ * (`unknown`) value keep the pre-existing `Arm64Macho` default — simulating all
+ * three supported host OSes without depending on which one this test actually
+ * runs on.
+ *
+ * @return void
+ */
+fn host_target_for_os_maps_every_known_os() {
+    teko::assert::is_true(host_target_for_os("linux") == NativeTarget::X8664Linux)
+    teko::assert::is_true(host_target_for_os("windows") == NativeTarget::X8664Windows)
+    teko::assert::is_true(host_target_for_os("macos") == NativeTarget::Arm64Macho)
+    teko::assert::is_true(host_target_for_os("unknown") == NativeTarget::Arm64Macho)
+}
+
+#test
+/**
+ * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()`
+ * (real `teko::os()`) resolves to exactly what `host_target_for_os` maps that same
+ * OS string to — i.e. the two functions never disagree on the actual build host,
+ * whichever of the three supported OSes it is.
+ *
+ * @return void
+ */
+fn host_default_target_matches_the_real_host() {
+    teko::assert::is_true(host_default_target() == host_target_for_os(teko::os()))
 }
 
 #test
@@ -137,14 +181,48 @@ fn project_arg_of_skips_optimization_flags() {
 
 #test
 /**
- * project_arg_of_skips_backend_flag — `project_arg_of` skips `--backend` and its value in BOTH
- * spellings, so the project positional is still found, not the flag or its argument. D1/#390.
+ * is_backend_flag_detects_both_retired_spellings — the retired `--backend` flag
+ * (owner ruling 2026-07-24) is recognized in both its two-token (`--backend native`)
+ * and single-token (`--backend=native`/`--backend=c`) spellings, so `has_backend_flag`
+ * can reject the whole line honestly; an ordinary positional or an unrelated flag is
+ * NOT mistaken for it.
  *
  * @return void
  */
-fn project_arg_of_skips_backend_flag() {
-    teko::assert::is_true(project_arg_of(args_of("--backend=native", "proj", ""), 0) == "proj")
-    teko::assert::is_true(project_arg_of(args_of("--backend", "native", "proj"), 0) == "proj")
+fn is_backend_flag_detects_both_retired_spellings() {
+    teko::assert::is_true(is_backend_flag("--backend"))
+    teko::assert::is_true(is_backend_flag("--backend=native"))
+    teko::assert::is_true(is_backend_flag("--backend=c"))
+    teko::assert::is_true(!is_backend_flag("proj"))
+    teko::assert::is_true(!is_backend_flag("--release"))
+}
+
+#test
+/**
+ * has_backend_flag_scans_from_start — `has_backend_flag` finds a `--backend`
+ * occurrence anywhere from `start` onward (both spellings), and reports absent when
+ * the line carries none.
+ *
+ * @return void
+ */
+fn has_backend_flag_scans_from_start() {
+    teko::assert::is_true(has_backend_flag(args_of("--backend=native", "proj", ""), 0))
+    teko::assert::is_true(has_backend_flag(args_of("--backend", "native", "proj"), 0))
+    teko::assert::is_true(!has_backend_flag(args_of(".", "--release", ""), 0))
+}
+
+#test
+/**
+ * project_arg_of_no_longer_recognizes_backend — since `--backend` was removed as CLI
+ * surface (owner ruling 2026-07-24, rejected upstream by `has_backend_flag` before
+ * `project_arg_of` ever runs), `project_arg_of` itself no longer special-cases it: a
+ * stray `--backend=native` now falls through as an (unknown) positional, exactly the
+ * honest "not a project" signal `--vm-gate` already gets (#524, M3).
+ *
+ * @return void
+ */
+fn project_arg_of_no_longer_recognizes_backend() {
+    teko::assert::is_true(project_arg_of(args_of("--backend=native", "proj", ""), 0) == "--backend=native")
 }
 
 /** pt_push_u64le — append `v` as 8 little-endian bytes (the `.tkcov` wire form) to `b`. */
