@@ -76,8 +76,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci_provision_teko.sh linux-x86_64
 
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): this lane only ever
+      # runs on a push to main, so the fast path is the only path that should ever fire here —
+      # the fallback exists for uniformity with the other lanes and as a fail-loud backstop,
+      # never as an expected route (a seed that cannot build main is a real regression).
       - name: Build gen1 (seed compiles the PR sources)
-        run: teko . -o bin --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh bin
 
       # Run the gate on gen1 with the arena oracle armed. Any poison-touch / reuse aborts loud.
       - name: Run the gate on gen1 (TEKO_MEM_PARANOID)
@@ -133,11 +137,13 @@ jobs:
 
       # The compiler is the downloaded release; sanitize its C by building gen1 (generated
       # C + runtime seam) under -fsanitize via a cc wrapper, then RUN gen1 — that is what
-      # exercises the compiler's C under ASan/UBSan.
+      # exercises the compiler's C under ASan/UBSan. scripts/build_with_seed_fallback.sh
+      # (owner ruling 2026-07-24) is a fail-loud backstop here — this lane only runs on a
+      # push to main, so the fallback should never actually engage.
       - name: Build gen1 under ASan + UBSan (cc wrapper)
         run: |
           sh scripts/ci_cc_wrap.sh "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-          teko . -o bin --no-verify --release
+          sh scripts/build_with_seed_fallback.sh bin
 
       # This lane runs the NATIVE gate (`./bin/teko . -o gen2-asan`): the sanitized gen1 compiles the
       # whole project through the PRODUCTION native pipeline (front-end -> emitted C -> host cc ->
@@ -247,10 +253,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci_provision_teko.sh linux-x86_64
 
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): bootstraps through
+      # gen1(main) when the raw seed cannot compile the tip directly.
       - name: Build gen1 under TSan (cc wrapper)
         run: |
           sh scripts/ci_cc_wrap.sh "-fsanitize=thread -fno-omit-frame-pointer -g"
-          teko . -o bin --no-verify --release
+          sh scripts/build_with_seed_fallback.sh bin
 
       # SMOKE (not the full suite — see the BUILD + SMOKE rationale above; RESTORE the
       # full `teko test .` gate under TSan as the concurrency surface lands). Build ONE
@@ -306,7 +314,7 @@ jobs:
     # once the compiler-speed work (-O2 seed + churn/arena) brings the build time down. With just the
     # build + smoke, 20 min is ample. Kept on the lane light tier (not main-only) BECAUSE it guards the
     # Windows-specific codegen (emit_native_win / PE-COFF) this wave develops.
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
 
@@ -320,9 +328,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci_provision_teko.sh windows-x86_64
 
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): bootstraps through
+      # gen1(main) when the raw seed cannot compile the tip directly. Runs under Git Bash on
+      # this Windows runner, same as every other step on this lane.
       - name: Build gen1 (seed compiles the PR sources)
         shell: bash
-        run: teko . -o bin --no-verify --release
+        run: sh scripts/build_with_seed_fallback.sh bin
 
       # Tests are NOT run on Windows for now (owner ruling 2026-07-14): the full `teko test .`
       # self-host on top of the ~11-min gen1 build blew the cap. Until the compiler-speed work
