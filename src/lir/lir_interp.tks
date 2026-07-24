@@ -28,13 +28,13 @@
 pub type IResult = struct { tag: u32; value: i64; message: str }
 
 /** ires_continue — a non-terminator step's placeholder (the block loop advances). */
-fn ires_continue() -> IResult { IResult { tag = 0; value = 0 to i64; message = "" } }
+fn ires_continue() -> IResult { IResult { tag = 0; value = 0; message = "" } }
 /** ires_return — an `ret` terminator carrying the function's result value. */
 fn ires_return(v: i64) -> IResult { IResult { tag = 3; value = v; message = "" } }
 /** ires_exit — a `tk_exit` unwind carrying the exit code. */
 fn ires_exit(code: i64) -> IResult { IResult { tag = 1; value = code; message = "" } }
 /** ires_error — an out-of-subset op reached at runtime. */
-fn ires_error(msg: str) -> IResult { IResult { tag = 2; value = 0 to i64; message = msg } }
+fn ires_error(msg: str) -> IResult { IResult { tag = 2; value = 0; message = msg } }
 /** ires_goto — a jump/branch's chosen target block id: a block-TRANSITION outcome, never
     surfaced past interp_blocks (the multi-block executor that follows it). */
 fn ires_goto(target: u32) -> IResult { IResult { tag = 4; value = target to i64; message = "" } }
@@ -61,7 +61,7 @@ fn new_regfile(n: u32) -> RegFile {
     mut i: u32 = 0
     loop {
         if i >= n { break }
-        vals = teko::list::push(vals, 0 to i64)
+        vals = teko::list::push(vals, 0)
         set = teko::list::push(set, false)
         i++
     }
@@ -117,7 +117,7 @@ fn mem_alloc(m: MemStore, bytes: u32) -> MemAlloc {
     mut i: u32 = 0
     loop {
         if i >= bytes { break }
-        cells = teko::list::push(cells, 0 to i64)
+        cells = teko::list::push(cells, 0)
         i++
     }
     MemAlloc { mem = MemStore { cells = cells; next = m.next + bytes }; addr = base to i64 }
@@ -129,9 +129,9 @@ pub type MemRead = struct { ok: bool; value: i64 }
 
 /** mem_load — read the cell at `addr`; ok=false for a negative or out-of-bounds address. */
 fn mem_load(m: MemStore, addr: i64) -> MemRead {
-    if addr < (0 to i64) { return MemRead { ok = false; value = 0 to i64 } }
+    if addr < (0) { return MemRead { ok = false; value = 0 } }
     let idx = addr to u64
-    if idx >= m.cells.len { return MemRead { ok = false; value = 0 to i64 } }
+    if idx >= m.cells.len { return MemRead { ok = false; value = 0 } }
     MemRead { ok = true; value = m.cells[idx] }
 }
 
@@ -140,7 +140,7 @@ fn mem_load(m: MemStore, addr: i64) -> MemRead {
     negative or out-of-bounds address is an internal error (the lowering never emits one
     that outruns its own alloca). */
 fn mem_store(m: MemStore, addr: i64, value: i64) -> MemStore | error {
-    if addr < (0 to i64) { return error { message = "lir interp: store to a negative address (internal)" } }
+    if addr < (0) { return error { message = "lir interp: store to a negative address (internal)" } }
     let idx = addr to u64
     if idx >= m.cells.len { return error { message = "lir interp: store to an out-of-bounds address (internal)" } }
     mut cells: []i64 = teko::list::empty()
@@ -161,12 +161,12 @@ fn mem_store(m: MemStore, addr: i64, value: i64) -> MemStore | error {
     (A1-4, #382), so a `load` off a `global_addr` finds real content from instruction 0. */
 pub fn interp_lmodule(m: LModule, entry: str, args: []i64) -> i64 {
     let f = find_lfunc(m, entry)
-    if !f.found { return -1 to i64 }
-    let mem = match seed_rodata(m) { MemStore as x => x; error => return -1 to i64 }
+    if !f.found { return -1 }
+    let mem = match seed_rodata(m) { MemStore as x => x; error => return -1 }
     let r = interp_call(m, f.func, args, 0, mem)
     if is_exit(r.result) { return r.result.value }
     if is_return(r.result) { return r.result.value }
-    -1 to i64
+    -1
 }
 
 /** seed_rodata — a fresh memory with every entry of `m.rodata` pre-loaded, ONE CELL PER
@@ -215,7 +215,7 @@ fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: 
         let r = entry.relocs[j]
         let hit = rodata_base_of(rodata, r.target)
         if !hit.ok { return error { message = teko::str::concat("lir interp: rodata-internal pointer targets unknown rodata symbol @", r.target) } }
-        cur = match mem_store(cur, base + (r.offset to i64), hit.addr) { MemStore as m2 => m2; error as e => return e }
+        cur = match mem_store(cur, base + r.offset, hit.addr) { MemStore as m2 => m2; error as e => return e }
         j++
     }
     cur
@@ -240,7 +240,7 @@ fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: 
  */
 fn resolve_rodata_relocs(mem: MemStore, rodata: []LRodata) -> MemStore | error {
     mut cur = mem
-    mut base: i64 = 0 to i64
+    mut base: i64 = 0
     mut i: u64 = 0
     loop {
         if i >= rodata.len { break }
@@ -275,7 +275,7 @@ pub type RodataHit = struct { ok: bool; addr: i64 }
     by walking `rodata` and summing byte lengths up to the match — the SAME cumulative-offset
     walk `seed_rodata` performs, so the two always agree (A1-4, #382). */
 fn rodata_base_of(rodata: []LRodata, symbol: str) -> RodataHit {
-    mut offset: i64 = 0 to i64
+    mut offset: i64 = 0
     mut i: u64 = 0
     loop {
         if i >= rodata.len { break }
@@ -283,7 +283,7 @@ fn rodata_base_of(rodata: []LRodata, symbol: str) -> RodataHit {
         offset = offset + (rodata[i].bytes.len to i64)
         i++
     }
-    RodataHit { ok = false; addr = 0 to i64 }
+    RodataHit { ok = false; addr = 0 }
 }
 
 /** LFuncHit — a module function lookup result. */
@@ -325,7 +325,7 @@ pub fn func_slot_addr(m: LModule, symbol: str) -> i64 | error {
     mut i: u64 = 0
     loop {
         if i >= m.funcs.len { break }
-        if m.funcs[i].symbol == symbol { return -((i to i64) + (1 to i64)) }
+        if m.funcs[i].symbol == symbol { return -((i to i64) + (1)) }
         i++
     }
     error { message = teko::str::concat("lir interp: no function registered for vtable symbol `", symbol, "`") }
@@ -349,8 +349,8 @@ pub type FuncAddrHit = struct { found: bool; func: LFunc }
  * @return FuncAddrHit  the resolved function, or found=false
  */
 fn resolve_func_addr(m: LModule, addr: i64) -> FuncAddrHit {
-    if addr >= (0 to i64) { return FuncAddrHit { found = false; func = empty_lfunc() } }
-    let idx = (-addr - (1 to i64)) to u64
+    if addr >= (0) { return FuncAddrHit { found = false; func = empty_lfunc() } }
+    let idx = (-addr - (1)) to u64
     if idx >= m.funcs.len { return FuncAddrHit { found = false; func = empty_lfunc() } }
     FuncAddrHit { found = true; func = m.funcs[idx] }
 }
@@ -370,8 +370,8 @@ fn interp_call(m: LModule, f: LFunc, args: []i64, depth: u32, mem: MemStore) -> 
     mut rf = new_regfile(f.next_vreg)
     mut i: u64 = 0
     loop {
-        if i >= f.n_params to u64 { break }
-        let a = if i < args.len { args[i] } else { 0 to i64 }
+        if i >= f.n_params { break }
+        let a = if i < args.len { args[i] } else { 0 }
         rf = rf_set(rf, i to u32, a)
         i++
     }
@@ -493,7 +493,7 @@ fn interp_jump(f: LFunc, j: LJump, rf: RegFile, mem: MemStore) -> IStep {
 fn interp_branch(f: LFunc, br: LBranch, rf: RegFile, mem: MemStore) -> IStep {
     let c = rf_get(rf, br.cond)
     if !c.ok { return istep_stop(ires_error("lir interp: branch on an undefined VReg"), rf, mem) }
-    let taken = c.value != (0 to i64)
+    let taken = c.value != (0)
     let target = if taken { br.t_target } else { br.f_target }
     let args = if taken { br.t_args } else { br.f_args }
     match bind_block_args(f, target, rf, args) {
@@ -550,7 +550,7 @@ fn interp_def(rf: RegFile, inst: LInst, v: i64, mem: MemStore) -> IStep {
 
 /** interp_ret — a `ret %v` (or `ret`): unwind with the returned value (0 for a void ret). */
 fn interp_ret(rf: RegFile, r: LRet, mem: MemStore) -> IStep {
-    if !r.has_value { return istep_stop(ires_return(0 to i64), rf, mem) }
+    if !r.has_value { return istep_stop(ires_return(0), rf, mem) }
     let v = rf_get(rf, r.value)
     if !v.ok { return istep_stop(ires_error("lir interp: ret of an undefined VReg"), rf, mem) }
     istep_stop(ires_return(v.value), rf, mem)
@@ -568,7 +568,7 @@ fn interp_alloca(rf: RegFile, inst: LInst, a: LAlloca, mem: MemStore) -> IStep {
 fn interp_field_addr(rf: RegFile, inst: LInst, fa: LFieldAddr, mem: MemStore) -> IStep {
     let b = rf_get(rf, fa.base)
     if !b.ok { return istep_stop(ires_error("lir interp: field_addr on an undefined VReg"), rf, mem) }
-    istep_cont(rf_set(rf, inst.result, b.value + (fa.offset to i64)), mem)
+    istep_cont(rf_set(rf, inst.result, b.value + fa.offset), mem)
 }
 
 /** interp_load — read the cell at the address held in `ld.addr`, storing it into the
@@ -634,7 +634,7 @@ pub type EvalOut = struct { ok: bool; value: i64; message: str }
 /** eval_ok — a successful arithmetic value. */
 fn eval_ok(v: i64) -> EvalOut { EvalOut { ok = true; value = v; message = "" } }
 /** eval_err — a failed arithmetic (out-of-subset opcode or bad input). */
-fn eval_err(msg: str) -> EvalOut { EvalOut { ok = false; value = 0 to i64; message = msg } }
+fn eval_err(msg: str) -> EvalOut { EvalOut { ok = false; value = 0; message = msg } }
 
 /** interp_bin — an integer binary op: read both operands, compute, store the result. A
     float op or a divide-by-zero honest-stops (the N1 fixtures never divide by zero). */
@@ -696,17 +696,17 @@ fn eval_bin(op: LBinOp, a: i64, b: i64) -> EvalOut {
     seed does not yet implement a `bool to <numeric>` cast (checker::cast_kind honest-stops
     on Bool), so this picks the constant explicitly; the same representation lower_bool_and's
     zero constant and a lowered `TBoolLit` will use. */
-fn bool_to_i64(b: bool) -> i64 { if b { 1 to i64 } else { 0 to i64 } }
+fn bool_to_i64(b: bool) -> i64 { if b { 1 } else { 0 } }
 
 /** eval_div — integer division with a zero-divisor guard. */
 fn eval_div(a: i64, b: i64) -> EvalOut {
-    if b == 0 to i64 { return eval_err("lir interp: divide by zero") }
+    if b == 0 { return eval_err("lir interp: divide by zero") }
     eval_ok(a / b)
 }
 
 /** eval_rem — integer remainder with a zero-divisor guard. */
 fn eval_rem(a: i64, b: i64) -> EvalOut {
-    if b == 0 to i64 { return eval_err("lir interp: remainder by zero") }
+    if b == 0 { return eval_err("lir interp: remainder by zero") }
     eval_ok(a % b)
 }
 
@@ -789,7 +789,7 @@ fn interp_call_indirect_inst(m: LModule, inst: LInst, ci: LCallIndirect, rf: Reg
 
 /** interp_exit — `tk_exit(n)`: unwind with exit code n (0 when called with no argument). */
 fn interp_exit(args: []i64, rf: RegFile, mem: MemStore) -> IStep {
-    let code = if args.len == 0 { 0 to i64 } else { args[0] }
+    let code = if args.len == 0 { 0 } else { args[0] }
     istep_stop(ires_exit(code), rf, mem)
 }
 

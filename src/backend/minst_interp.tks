@@ -123,8 +123,8 @@ fn iv_new() -> IReg64Vec {
  */
 fn iv_get(v: IReg64Vec, id: u32) -> IVRead {
     let i = id to u64
-    if i >= v.values.len { return IVRead { ok = false; value = 0 to i64 } }
-    if !v.set[i] { return IVRead { ok = false; value = 0 to i64 } }
+    if i >= v.values.len { return IVRead { ok = false; value = 0 } }
+    if !v.set[i] { return IVRead { ok = false; value = 0 } }
     IVRead { ok = true; value = v.values[i] }
 }
 
@@ -143,7 +143,7 @@ fn iv_set(v0: IReg64Vec, id: u32, val: i64) -> IReg64Vec {
     mut set = v0.set
     loop {
         if values.len >= need { break }
-        values = teko::list::push(values, 0 to i64)
+        values = teko::list::push(values, 0)
         set = teko::list::push(set, false)
     }
     mut out_values: []i64 = teko::list::empty()
@@ -214,7 +214,7 @@ fn mem_get(m: MMemStore, addr: i64) -> i64 {
         if m.cells[i].addr == addr { return m.cells[i].val }
         i++
     }
-    0 to i64
+    0
 }
 
 /**
@@ -301,7 +301,7 @@ type MRegFile = struct {
 fn mrf_new() -> MRegFile {
     MRegFile {
         gpr_v = iv_new(); fpr_v = iv_new(); gpr_p = iv_new(); fpr_p = iv_new()
-        flag_a = 0 to i64; flag_b = 0 to i64; has_flags = false
+        flag_a = 0; flag_b = 0; has_flags = false
         mem = memstore_new()
     }
 }
@@ -432,7 +432,7 @@ type MIResult = struct {
  *
  * @return MIResult  the CONTINUE outcome
  */
-fn mires_continue() -> MIResult { MIResult { tag = 0; value = 0 to i64; message = "" } }
+fn mires_continue() -> MIResult { MIResult { tag = 0; value = 0; message = "" } }
 
 /**
  * mires_return — an `MRet` terminator carrying the function's result.
@@ -448,7 +448,7 @@ fn mires_return(v: i64) -> MIResult { MIResult { tag = 1; value = v; message = "
  * @param str msg  the honest-stop message
  * @return MIResult  the ERROR outcome
  */
-fn mires_error(msg: str) -> MIResult { MIResult { tag = 2; value = 0 to i64; message = msg } }
+fn mires_error(msg: str) -> MIResult { MIResult { tag = 2; value = 0; message = msg } }
 
 /**
  * is_micontinue — true iff `r` is a CONTINUE placeholder.
@@ -555,7 +555,7 @@ fn alu_ok(v: i64) -> AluEval { AluEval { ok = true; value = v; message = "" } }
  * @param str msg  the honest-stop message
  * @return AluEval  the failed outcome
  */
-fn alu_err(msg: str) -> AluEval { AluEval { ok = false; value = 0 to i64; message = msg } }
+fn alu_err(msg: str) -> AluEval { AluEval { ok = false; value = 0; message = msg } }
 
 /**
  * alu_div — integer division with a zero-divisor guard, mirroring
@@ -566,7 +566,7 @@ fn alu_err(msg: str) -> AluEval { AluEval { ok = false; value = 0 to i64; messag
  * @return AluEval  the quotient, or a divide-by-zero honest-stop
  */
 fn alu_div(a: i64, b: i64) -> AluEval {
-    if b == (0 to i64) { return alu_err("minst interp: divide by zero") }
+    if b == (0) { return alu_err("minst interp: divide by zero") }
     alu_ok(a / b)
 }
 
@@ -655,7 +655,7 @@ fn interp_alu(mrf: MRegFile, x: MAlu) -> MIStep {
 fn interp_alu_imm(mrf: MRegFile, x: MAluImm) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: alu_imm operand register is undefined"), mrf) }
-    let r = eval_alu(x.op, a.value, x.imm to i64)
+    let r = eval_alu(x.op, a.value, x.imm)
     if !r.ok { return mistep_stop(mires_error(r.message), mrf) }
     mistep_cont(mrf_set(mrf, x.dst, r.value))
 }
@@ -731,7 +731,7 @@ fn interp_cmp(mrf: MRegFile, x: MCmp) -> MIStep {
 fn interp_cmp_imm(mrf: MRegFile, x: MCmpImm) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: cmp_imm operand register is undefined"), mrf) }
-    mistep_cont(mrf_with_flags(mrf, a.value, x.imm to i64))
+    mistep_cont(mrf_with_flags(mrf, a.value, x.imm))
 }
 
 /**
@@ -745,7 +745,7 @@ fn interp_cmp_imm(mrf: MRegFile, x: MCmpImm) -> MIStep {
 fn interp_cset(mrf: MRegFile, x: MCSet) -> MIStep {
     if !mrf.has_flags { return mistep_stop(mires_error("minst interp: cset with no preceding compare (internal)"), mrf) }
     let truth = cond_holds(x.cond, mrf.flag_a, mrf.flag_b)
-    mistep_cont(mrf_set(mrf, x.dst, if truth { 1 to i64 } else { 0 to i64 }))
+    mistep_cont(mrf_set(mrf, x.dst, if truth { 1 } else { 0 }))
 }
 
 /**
@@ -819,7 +819,7 @@ fn interp_mov(mrf: MRegFile, x: MMov) -> MIStep {
 fn interp_ret(mrf: MRegFile) -> MIStep {
     let px0 = mrf_get(mrf, preg(0, MRegClass::GPR))
     if px0.ok { return mistep_stop(mires_return(px0.value), mrf) }
-    mistep_stop(mires_return(0 to i64), mrf)
+    mistep_stop(mires_return(0), mrf)
 }
 
 /**
@@ -858,7 +858,7 @@ fn mrf_with_mem(mrf: MRegFile, mem: MMemStore) -> MRegFile {
  * @return i64  the slot's base address
  */
 fn frame_slot_addr(slot: u64) -> i64 {
-    ((slot to i64) + (1 to i64)) * (65536 to i64)
+    ((slot to i64) + (1)) * (65536)
 }
 
 /**
@@ -884,7 +884,7 @@ fn interp_frame_addr(mrf: MRegFile, x: MFrameAddr) -> MIStep {
 fn interp_load(mrf: MRegFile, x: MLoad) -> MIStep {
     let base = mrf_get(mrf, x.mem.base)
     if !base.ok { return mistep_stop(mires_error("minst interp: load base register is undefined"), mrf) }
-    let addr = base.value + (x.mem.offset to i64)
+    let addr = base.value + x.mem.offset
     mistep_cont(mrf_set(mrf, x.dst, mem_get(mrf.mem, addr)))
 }
 
@@ -900,7 +900,7 @@ fn interp_store(mrf: MRegFile, x: MStore) -> MIStep {
     let base = mrf_get(mrf, x.mem.base)
     let src = mrf_get(mrf, x.src)
     if !base.ok || !src.ok { return mistep_stop(mires_error("minst interp: store base/src register is undefined"), mrf) }
-    let addr = base.value + (x.mem.offset to i64)
+    let addr = base.value + x.mem.offset
     mistep_cont(mrf_with_mem(mrf, mem_set(mrf.mem, addr, src.value)))
 }
 
@@ -1011,7 +1011,7 @@ fn interp_branch_cond(mrf: MRegFile, x: MBranchCond) -> MIStep {
 fn interp_cbz(mrf: MRegFile, x: MCbz) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: cbz operand register is undefined"), mrf) }
-    let is_zero = a.value == (0 to i64)
+    let is_zero = a.value == (0)
     if is_zero == x.zero { mistep_stop(mires_jump(x.target), mrf) } else { mistep_cont(mrf) }
 }
 
@@ -1133,8 +1133,8 @@ fn find_mblock(f: MFunc, block_id: u32) -> MBlockHit {
  */
 pub fn minst_interp(m: MModule, entry: str, args: []i64) -> i64 {
     let f = find_mfunc(m, entry)
-    if !f.found { return -1 to i64 }
-    if f.func.blocks.len == 0 { return -1 to i64 }
+    if !f.found { return -1 }
+    if f.func.blocks.len == 0 { return -1 }
     mut mrf = seed_params(mrf_new(), args)
     mut cur: u32 = f.func.blocks[0].id
     mut budget: u64 = 0
@@ -1142,11 +1142,11 @@ pub fn minst_interp(m: MModule, entry: str, args: []i64) -> i64 {
         if budget >= 1000000 { break }
         budget++
         let hit = find_mblock(f.func, cur)
-        if !hit.found { return -1 to i64 }
+        if !hit.found { return -1 }
         let step = run_mblock(hit.block, mrf)
         mrf = step.mrf
         if is_mireturn(step.result) { return step.result.value }
-        if is_mijump(step.result) { cur = step.result.value to u32 } else { return -1 to i64 }
+        if is_mijump(step.result) { cur = step.result.value to u32 } else { return -1 }
     }
-    -1 to i64
+    -1
 }

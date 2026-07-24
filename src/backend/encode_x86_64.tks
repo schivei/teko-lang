@@ -157,7 +157,7 @@ fn push_imm32_x86(buf: []byte, x: i64) -> []byte {
  */
 fn push_imm64_x86(buf: []byte, x: i64) -> []byte {
     let lo = (x & X86_LOW32_MASK) to u32
-    let hi = ((x >> (32 to i64)) & X86_LOW32_MASK) to u32
+    let hi = ((x >> (32)) & X86_LOW32_MASK) to u32
     emit_u32_le(emit_u32_le(buf, lo), hi)
 }
 
@@ -296,7 +296,7 @@ fn cond_cc_x86(c: MCond) -> u32 {
  */
 fn fits_i32_x86(x: i64) -> bool {
     let hi = X86_IMM32_MAX
-    let lo = (0 to i64) - X86_IMM32_MIN_MAGNITUDE
+    let lo = (0) - X86_IMM32_MIN_MAGNITUDE
     x >= lo && x <= hi
 }
 
@@ -442,13 +442,13 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem) -> []byte {
     let disp = mem.offset to i64
     let need_sib = base3 == X86_REG_RSP_ID
     let is_rbp = base3 == X86_REG_RBP_ID
-    let zero_disp = disp == (0 to i64) && !is_rbp
-    let disp8 = disp >= ((0 to i64) - X86_DISP8_MAGNITUDE) && disp <= X86_DISP8_MAX
+    let zero_disp = disp == (0) && !is_rbp
+    let disp8 = disp >= ((0) - X86_DISP8_MAGNITUDE) && disp <= X86_DISP8_MAX
     let md = if zero_disp { MODRM_MOD_INDIRECT } else { if disp8 { MODRM_MOD_DISP8 } else { MODRM_MOD_DISP32 } }
     let rm = if need_sib { X86_REG_RSP_ID } else { base3 }
     mut b = push_byte_x86(buf, modrm_x86(md, reg3, rm))
     if need_sib { b = push_byte_x86(b, (X86_REG_RSP_ID << X86_FIELD3_SHIFT) | base3) }
-    if md == MODRM_MOD_DISP8 { b = push_byte_x86(b, (disp & (X86_BYTE_MASK to i64)) to u32) }
+    if md == MODRM_MOD_DISP8 { b = push_byte_x86(b, (disp & X86_BYTE_MASK) to u32) }
     if md == MODRM_MOD_DISP32 { b = push_imm32_x86(b, disp) }
     b
 }
@@ -1517,9 +1517,9 @@ fn honest_globals_x86() -> error {
  */
 fn reloc_addend_x86(kind: RelocKindX86) -> i64 {
     match kind {
-        Plt32 => (0 to i64) - X86_REL32_FIELD_BYTES
-        Pc32 => (0 to i64) - X86_REL32_FIELD_BYTES
-        Abs64 => 0 to i64
+        Plt32 => (0) - X86_REL32_FIELD_BYTES
+        Pc32 => (0) - X86_REL32_FIELD_BYTES
+        Abs64 => 0
     }
 }
 
@@ -1688,7 +1688,7 @@ fn patch_branches_x86(raw: []byte, fixups: []BranchFixupX86, offsets: []BlockOff
         if i >= fixups.len { break }
         let fx = fixups[i]
         let target_off = match lookup_block_offset_x86(offsets, fx.target) { u32 as v => v; error as e => return e }
-        let disp = (target_off to i64) - ((fx.field_off to i64) + X86_REL32_FIELD_BYTES)
+        let disp = target_off - (fx.field_off + X86_REL32_FIELD_BYTES)
         if !fits_i32_x86(disp) { return honest_farbranch_x86() }
         let field = (disp & X86_LOW32_MASK) to u32
         buf = write_u32_le_at(buf, fx.field_off, field)
@@ -1890,7 +1890,7 @@ fn rodata_relocs_x86(rs: []lir::LDataReloc) -> []RelocX86 {
     mut i: u64 = 0
     loop {
         if i >= rs.len { break }
-        out = teko::list::push(out, RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0 to i64; sect = RelocSect::Rodata })
+        out = teko::list::push(out, RelocX86 { offset = rs[i].offset; sym = rs[i].target; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata })
         i++
     }
     out

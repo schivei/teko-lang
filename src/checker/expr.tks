@@ -135,6 +135,39 @@ fn widen_operand(operand: TExpr, target: PrimKind) -> TExpr {
     TExpr { kind = TCast { expr = operand }; type = target_type; line = operand.line; col = operand.col }
 }
 
+/**
+ * cast_widen_is_redundant — class-3 of the D1 `redundant cast` diagnostic
+ * (`cast-width-hygiene-0.3.1.md` §4/§9): true iff `term` is an explicit `x to T`
+ * wrapping an INTEGER operand that `int_arith_join` already widens LOSSLESSLY
+ * to `T` — i.e. the W-RULE (arithmetic) or the B.22 sign-check (comparison)
+ * already accepts the PRE-cast operand directly against `other`, so the
+ * hand-written cast changed nothing. Deliberately conservative: a NARROWING
+ * cast is never flagged (stripping it could change the compared/computed
+ * value — the risk the design doc's §8 Risk 2 names), so only a provable,
+ * lossless widen-to-exactly-`T` trips this. `other` must also be an integer
+ * (a cast into a float/int-mismatched comparison is never redundant).
+ *
+ * @param term   a typed operand of a binary arithmetic/bitwise/comparison op
+ * @param other  the type `term` is combined/compared against
+ * @return       whether `term`'s cast is a provable no-op under the W-RULE
+ * @see          int_arith_join — the join this mirrors
+ * @since        0.3.1
+ */
+fn cast_widen_is_redundant(term: TExpr, other: Type) -> bool {
+    if !is_integer(other) { return false }
+    if !is_integer(term.type) { return false }
+    match term.kind {
+        TCast as tc => {
+            if !is_integer(tc.expr.type) { return false }
+            match int_arith_join(prim_kind_of(tc.expr.type), prim_kind_of(term.type)) {
+                PrimKind as k => k == prim_kind_of(term.type)
+                error => false
+            }
+        }
+        _ => false
+    }
+}
+
 // --- binary-op regimes (on the op token) ---
 fn op_is_shift(op: lexer::TokenKind) -> bool {
     op == lexer::TokenKind::Shl || op == lexer::TokenKind::Shr

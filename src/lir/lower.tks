@@ -770,7 +770,7 @@ fn is_logical_not(op: lexer::TokenKind) -> bool {
  */
 fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
     let z = ctx_alloc(ao.ctx)
-    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0 to i64, line, col))
+    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
     let r = ctx_alloc(with_zero)
     let inst = bin_inst(r.vreg, LBinOp::ICmpEq, ao.vreg, z.vreg, line, col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
@@ -885,7 +885,7 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32) 
     let then_args = teko::list::push(teko::list::empty(), b_vreg)
     let after_then = append_inst(after_br, thenb.block_id, jump_inst(mergeb.block_id, then_args, line, col))
     let zc = alloc_vreg(after_then)
-    let with_zero = append_inst(zc.func, elseb.block_id, const_int_inst(zc.vreg, 0 to i64, line, col))
+    let with_zero = append_inst(zc.func, elseb.block_id, const_int_inst(zc.vreg, 0, line, col))
     let else_args = teko::list::push(teko::list::empty(), zc.vreg)
     let after_else = append_inst(with_zero, elseb.block_id, jump_inst(mergeb.block_id, else_args, line, col))
     Lowered { ctx = ctx_with(ctx, after_else, mergeb.block_id, ctx.env); vreg = mp.vreg }
@@ -1321,7 +1321,7 @@ fn materialize_thunk_params(f0: LFunc, line: u32, col: u32) -> LFunc {
     mut f = f0
     mut i: u64 = 0
     loop {
-        if i >= f.n_params to u64 { break }
+        if i >= f.n_params { break }
         f = append_inst(f, 0, param_inst(i to u32, i to u32, line, col))
         i++
     }
@@ -1435,7 +1435,7 @@ fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered
     let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, e.line, e.col)
     let ctx2 = ctx_with_lifted(ctx, teko::list::push(ctx.lifted, thunk))
     let nullo = ctx_alloc(ctx2)
-    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0 to i64, e.line, e.col))
+    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0, e.line, e.col))
     build_closure_literal(with_null, thunk_sym, nullo.vreg, e.line, e.col)
 }
 
@@ -1616,7 +1616,7 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
 fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::TCapture, line: u32, col: u32) -> Lowered | error {
     if captures.len == 0 {
         let r = ctx_alloc(ctx)
-        return Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, line, col)); vreg = r.vreg }
+        return Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, line, col)); vreg = r.vreg }
     }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, line, col))
@@ -2971,7 +2971,7 @@ fn lower_safe_field_access(ctx: LowerCtx, e: checker::TExpr, sfa: checker::TSafe
     let then_func = append_inst(with_load.func, thenb.block_id, jump_inst(mergeb.block_id, then_args, e.line, e.col))
     let nullr_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
     let nullr = ctx_alloc(nullr_ctx)
-    let with_null = ctx_append(nullr.ctx, const_int_inst(nullr.vreg, 0 to i64, e.line, e.col))
+    let with_null = ctx_append(nullr.ctx, const_int_inst(nullr.vreg, 0, e.line, e.col))
     let else_args = teko::list::push(teko::list::empty(), nullr.vreg)
     let else_func = append_inst(with_null.func, elseb.block_id, jump_inst(mergeb.block_id, else_args, e.line, e.col))
     Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
@@ -3148,7 +3148,7 @@ fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Typ
 fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) -> PatternTest | error {
     match subj.ty {
         checker::Variant as v => match null_union_payload(v) {
-            checker::Type => lower_variant_tag_eq_test(ctx, subj, 0 to i64, line, col)
+            checker::Type => lower_variant_tag_eq_test(ctx, subj, 0, line, col)
             null => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
         }
         _ => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
@@ -3178,7 +3178,7 @@ fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker:
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, e.line, e.col))
     match e.kind {
-        checker::TNullLit => store_null_union_tag(with_alloca, base.vreg, 0 to i64, e.line, e.col)
+        checker::TNullLit => store_null_union_tag(with_alloca, base.vreg, 0, e.line, e.col)
         _ => store_null_union_payload(with_alloca, base.vreg, pty, e)
     }
 }
@@ -3228,7 +3228,7 @@ fn store_null_union_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u3
  * @throws  propagated from lowering `e`
  */
 fn store_null_union_payload(ctx: LowerCtx, base: u32, pty: LType, e: checker::TExpr) -> Lowered | error {
-    let tagged = store_null_union_tag(ctx, base, 1 to i64, e.line, e.col)
+    let tagged = store_null_union_tag(ctx, base, 1, e.line, e.col)
     let vo = match lower_expr(tagged.ctx, e) { Lowered as x => x; error as err => return err }
     let paddr = ctx_alloc(vo.ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
@@ -3528,7 +3528,7 @@ fn lower_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, bp: parser::BindPatte
  */
 fn lower_variant_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, v: checker::Variant, bp: parser::BindPattern, line: u32, col: u32) -> PatternTest | error {
     match null_union_payload(v) {
-        checker::Type => lower_variant_tag_eq_test(ctx, subj, 1 to i64, line, col)
+        checker::Type => lower_variant_tag_eq_test(ctx, subj, 1, line, col)
         null => lower_variant_case_test(ctx, subj, v.members, bind_pattern_case_name(bp), line, col)
     }
 }
@@ -3979,8 +3979,8 @@ fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, s
  */
 fn lfallback_const(rt: LType) -> i64 {
     match rt {
-        I64 => 2147483648 to i64
-        _ => 0 to i64
+        I64 => 2147483648
+        _ => 0
     }
 }
 
@@ -4541,7 +4541,7 @@ fn slice_element_type(t: checker::Type) -> checker::Type | error {
 /** const_index_addr — a CONSTANT index folds directly into a static byte offset
     (`index * stride`), a single `field_addr` (no runtime multiply). */
 fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line: u32, col: u32) -> Lowered {
-    let offset = (idx_value * (stride to i64)) to u32
+    let offset = (idx_value * stride) to u32
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, field_addr_inst(r.vreg, base, offset, line, col)); vreg = r.vreg }
 }
@@ -4650,7 +4650,7 @@ fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit)
 /** bool_lit_value — a bool literal's i64 register carrier (1 = true, 0 = false — the released
     seed does not implement a `bool to <numeric>` cast, so this picks the constant explicitly,
     mirroring the interp's own bool_to_i64 and lower_bool_and's zero constant). */
-fn bool_lit_value(v: bool) -> i64 { if v { 1 to i64 } else { 0 to i64 } }
+fn bool_lit_value(v: bool) -> i64 { if v { 1 } else { 0 } }
 
 /** lower_byte_lit — a byte literal -> its value widened to the i64 carrier. */
 fn lower_byte_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TByteLit) -> Lowered {
@@ -4667,7 +4667,7 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
 /** lower_null_lit — `null` -> a zero (null) Ptr constant. */
 fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered {
     let r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, e.line, e.col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
 }
 
 /** lower_path_expr — `Enum::Member` -> its already-RESOLVED member value (the checker's
@@ -5628,6 +5628,6 @@ fn close_virtual_main(tail: LowerMainTail) -> LowerCtx | error {
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     if tail.has_value { return ctx_append(replayed, ret_inst(tail.vreg, 0, 0)) }
     let r = ctx_alloc(replayed)
-    let c0 = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, 0, 0))
+    let c0 = ctx_append(r.ctx, const_int_inst(r.vreg, 0, 0, 0))
     ctx_append(c0, ret_inst(r.vreg, 0, 0))
 }

@@ -676,6 +676,9 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     let ops = adopt_binop_operands(l0, r0)
     let l = ops.l
     let r = ops.r
+    if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
+        match arith_redundant_widen_cast(l, r) { Type as t => return err_redundant_cast(t); null => { } }
+    }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
     if op_is_arith_bitwise(b.op) { return type_bitwise_binop(b.op, l, r) }
@@ -728,6 +731,8 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
             first = TExpr { kind = first.kind; type = cur.type; line = first.line; col = first.col }
             prev = cur.type
         }
+        if cast_widen_is_redundant(cur, prev) { return err_redundant_cast(cur.type) }
+        if i == 0 && cast_widen_is_redundant(first, cur.type) { return err_redundant_cast(first.type) }
         if !is_comparable(prev, cur.type) { return error { message = "operands are not comparable" } }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = cur })
         prev = cur.type
@@ -1874,10 +1879,64 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
     (is_int_cast_end(from) && is_flags_named(to, table))
 }
 
+/**
+ * err_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9,
+ * owner ruling 2026-07-24): a direct compile ERROR, no warn phase — *"prefiro
+ * que falhe para evitarmos de cair no mesmo erro."* Fires on a provable no-op
+ * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
+ * sign-check already performs), never on a genuine narrow/widen the source
+ * still needs.
+ *
+ * @param t  the redundant cast's own (unchanged) type
+ * @return   the diagnostic error
+ * @since    0.3.1
+ */
+fn err_redundant_cast(t: Type) -> error {
+    error { message = $"redundant cast: this `to {type_render(t)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it" }
+}
+
+/**
+ * arith_redundant_widen_cast — D1 class 3 for an arithmetic/bitwise binary op:
+ * the type of WHICHEVER side carries a redundant lossless-widen `to`
+ * (`cast_widen_is_redundant`, `expr.tks`), or `null` when neither side does.
+ * The W-RULE already joins mixed-width integers implicitly (`widen_int_binop`),
+ * so a hand-written widen immediately before the op changed nothing — UNLESS
+ * flagging it could cascade into changing the op's actual result type/value:
+ *
+ * - the OTHER side is a bare numeric literal: a literal adopts its partner's
+ *   ACTUAL (pre-cast) type (`adopt_binop_operands`, ahead of this check), so
+ *   stripping the cast would change what the literal adopts to (e.g.
+ *   `(id to u64) + 1` with `id: u32` — remove the cast and the literal `1`
+ *   adopts `u32`, not `u64`, a real semantic change, not a no-op);
+ * - the OTHER side is ITSELF an explicit `to` cast to the same target: two
+ *   casts can each look individually redundant against the OTHER's post-cast
+ *   type, but removing BOTH collapses the pair to the type_eq FAST PATH at
+ *   their narrower shared pre-cast width (e.g. `(a to i64) - (b to i64)`
+ *   with `a`/`b`: `u32` — each cast alone looks redundant against the
+ *   other's `i64`, but deleting both turns a signed `i64` subtraction into a
+ *   wrapping `u32` one, changing the result for `a < b`). Only a cast whose
+ *   partner is a NATURALLY-typed (non-cast, non-literal) expression is safe.
+ *
+ * @param l  the typed left operand
+ * @param r  the typed right operand
+ * @return   the redundant cast's own type, or `null`
+ * @since    0.3.1
+ */
+fn arith_redundant_widen_cast(l: TExpr, r: TExpr) -> Type | null {
+    let l_is_literal = match l.kind { TNumber => true; _ => false }
+    let r_is_literal = match r.kind { TNumber => true; _ => false }
+    let l_is_cast = match l.kind { TCast => true; _ => false }
+    let r_is_cast = match r.kind { TCast => true; _ => false }
+    if !r_is_literal && !r_is_cast && cast_widen_is_redundant(l, r.type) { return l.type }
+    if !l_is_literal && !l_is_cast && cast_widen_is_redundant(r, l.type) { return r.type }
+    null
+}
+
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
     let target = match resolve_type(c.target, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the cast's enclosing namespace
+    if type_eq(inner.type, target) { return err_redundant_cast(target) }
     // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
     // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
     // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors expr.c type_cast.)
@@ -2986,7 +3045,7 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env) -> TExpr | e
             mut j: u64 = 0
             loop {
                 if j >= eb.members.len { break }
-                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j to u64 }; type = et; line = 0; col = 0 } }
+                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j }; type = et; line = 0; col = 0 } }
                 j++
             }
             error { message = $"no member `{member}` in enum `{tname}`" }

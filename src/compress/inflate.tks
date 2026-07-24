@@ -350,12 +350,12 @@ type InflateState = struct {
  * @throws          when `distance > output.len` (a malformed or truncated stream)
  */
 fn copy_back_reference(output: []byte, distance: u32, length: u32) -> []byte | error {
-    if (distance to u64) > output.len { return error { message = "inflate: back-reference distance exceeds output so far" } }
+    if distance > output.len { return error { message = "inflate: back-reference distance exceeds output so far" } }
     mut out = output
     mut i: u32 = 0
     loop {
         if i >= length { break }
-        let src_index = out.len - (distance to u64)
+        let src_index = out.len - distance
         out = teko::list::push(out, out[src_index])
         i++
     }
@@ -422,7 +422,7 @@ fn inflate_stored_block(state: InflateState) -> InflateState | error {
     if aligned.byte_pos + 4 > aligned.data.len { return error { message = "inflate: truncated stored-block header" } }
     let len = (aligned.data[aligned.byte_pos] to u64) | ((aligned.data[aligned.byte_pos + 1] to u64) << 8)
     let nlen = (aligned.data[aligned.byte_pos + 2] to u64) | ((aligned.data[aligned.byte_pos + 3] to u64) << 8)
-    if (nlen & (DEFLATE_STORED_LEN_MASK to u64)) != ((~len) & (DEFLATE_STORED_LEN_MASK to u64)) { return error { message = "inflate: stored-block NLEN check failed" } }
+    if (nlen & DEFLATE_STORED_LEN_MASK) != ((~len) & DEFLATE_STORED_LEN_MASK) { return error { message = "inflate: stored-block NLEN check failed" } }
 
     let data_start = aligned.byte_pos + 4
     if data_start + len > aligned.data.len { return error { message = "inflate: truncated stored-block data" } }
@@ -493,7 +493,7 @@ fn decode_code_lengths(r: BitReader, cl_table: HuffTable, total: u32) -> CodeLen
     mut cur = r
     mut lengths: []u32 = teko::list::empty()
     loop {
-        if lengths.len >= (total to u64) { break }
+        if lengths.len >= total { break }
         let sym_step = match decode_symbol(cur, cl_table) { SymbolResult as s => s; error as e => return e }
         cur = sym_step.next
         let symbol = sym_step.symbol
