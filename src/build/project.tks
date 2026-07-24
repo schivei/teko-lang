@@ -872,8 +872,11 @@ fn plist_xml(m: Manifest) -> str {
  * backend — the artifact dispatch: lower the checked program to the native
  * `binary` and report. `stem` is the output name (the manifest `name`); artifacts
  * land under `out_dir` (default "bin", or `-o <dir>`), created at the project root
- * (the cwd after the front-end chdir'd). Mirrors `driver.c`. The library kinds
- * (static/shared) are honest stops (M.3); `package` emits a `.tkl`; the default
+ * (the cwd after the front-end chdir'd). Mirrors `driver.c`. `Static` wraps the
+ * own-native whole-program object into a GNU-format `.a` (`emit_static_lib`, KP16
+ * — own-backend ELF targets only; every other target/backend combination is a
+ * NAMED honest stop, M.3 — no fake artifact); `Shared` is still a plain honest
+ * stop (its increment has not landed); `package` emits a `.tkl`; the default
  * `binary` kind emits C and links via `cc` — UNLESS `m.backend == Backend::Native`
  * (the resolved `--backend` selection, D1/#390) selects the own AOT backend
  * (`emit_native`). The default is `Backend::C`, so a flagless build stays
@@ -894,12 +897,8 @@ fn plist_xml(m: Manifest) -> str {
  * @return         0 on a successful build, else the failing status
  */
 fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool) -> i32 {
-    // (C7.1m) artifact-kind dispatch. Binary → the native executable backend below. The library kinds
-    // are HONEST STOPS until their increments land (M.3 — no fake artifact): static/shared = native
-    // lib output (ar / -shared); package = a `.tkl` ZIP of .tkh+.tkb+.tsym, which needs the PROGRAM-
-    // level `.tkb` typed-tree codec (today the `.tkb` is expression-only) — the keystone next step.
     if m.artifact == Artifact::Static {
-        return fail(dir, "static library output (.a) is not yet implemented — planned (C7.1m)")
+        return emit_static_lib(dir, stem, out_dir, prog, m)
     }
     if m.artifact == Artifact::Shared {
         return fail(dir, "shared library output (.dylib/.so/.dll) is not yet implemented — planned (C7.1m)")
@@ -1324,6 +1323,107 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
     }
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
+    0
+}
+
+/**
+ * emit_static_lib — the `Artifact::Static` (`kind = "static"`) tail (KP16, the
+ * kill-C static-archive substrate, `docs/design/kill-c-pull-forward-0.3.0.30.md`
+ * §2(b)): own-native ONLY — requires `Backend::Native` (`--backend=native`),
+ * since a `.a` wraps an own-emitted `.o`, and the C emitter never produces one.
+ * Lowers the checked program to LIR exactly as `emit_native` does, then
+ * dispatches on the selected target: the two ELF targets (`x86_64-linux`,
+ * `riscv64-linux`) archive their whole-program object via the KP16 GNU-format
+ * writer (`teko::backend::emit_static_archive`); every other target (arm64
+ * Mach-O, x86-64/PE-COFF Windows) is a NAMED honest stop — their archive
+ * conventions (BSD `__.SYMDEF`, the MS two-linker-member COFF `.lib`) are
+ * undelivered, since this runner carries no host toolchain to cross-validate
+ * them (KP16 scope note, M.3 — no fake artifact).
+ *
+ * @param dir      the project directory (for diagnostics)
+ * @param stem     the output artifact name (the manifest `name`)
+ * @param out_dir  the build output directory (`-o`, default "bin")
+ * @param prog     the checked, typed program
+ * @param m        the resolved manifest
+ * @return         0 on a successful build+archive, else the failing status
+ */
+fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+    if m.backend != Backend::Native {
+        return fail(dir, "static library output (.a) needs the own-native backend (--backend=native) — the C emitter never produces a `.o` to archive")
+    }
+    let od = strip_trailing_slash(out_dir)
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    match native_target() {
+        NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod)
+        NativeTarget::Riscv64Linux => emit_static_lib_riscv(dir, od, stem, lmod)
+        _ => fail(dir, "static library output (.a) is implemented only for the ELF own-backend targets today (x86_64-linux/riscv64-linux) — the Mach-O `__.SYMDEF` / COFF two-linker-member archive conventions are a follow-on (KP16 scope note)")
+    }
+}
+
+/**
+ * emit_static_lib_x86 — the x86-64/ELF static-archive tail: select, allocate,
+ * and encode exactly as `emit_native_x86` does, then hand the encoded module's
+ * object bytes AND its neutral symbol list (for the archive's exported-symbol
+ * index) to `finish_static_archive` in place of `finish_native_object`'s cc-link.
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param lmod  the target-independent lowered module
+ * @return      0 on a successful write+archive, else the failing status
+ */
+fn emit_static_lib_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule) -> i32 {
+    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    finish_static_archive(dir, od, stem, teko::backend::emit_elf(enc), enc.symbols)
+}
+
+/**
+ * emit_static_lib_riscv — the riscv64/ELF static-archive tail: select,
+ * allocate, and encode exactly as `emit_native_riscv` does, then hand the
+ * encoded module's object bytes AND its neutral symbol list to
+ * `finish_static_archive` in place of `finish_native_object`'s cc-link.
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param lmod  the target-independent lowered module
+ * @return      0 on a successful write+archive, else the failing status
+ */
+fn emit_static_lib_riscv(dir: str, od: str, stem: str, lmod: teko::lir::LModule) -> i32 {
+    let sel = match teko::backend::select_module_riscv(lmod) { teko::backend::MModuleRiscv as x => x; error as e => return fail(dir, e.message) }
+    let col = match teko::backend::regalloc_module_riscv(teko::backend::RISCV64_LP64D, sel) { teko::backend::MModuleRiscv as x => x; error as e => return fail(dir, e.message) }
+    let enc = match teko::backend::encode_module_riscv(teko::backend::RISCV64_LP64D, col) { teko::backend::EncodedModuleRiscv as x => x; error as e => return fail(dir, e.message) }
+    finish_static_archive(dir, od, stem, teko::backend::emit_elf_riscv(enc), enc.symbols)
+}
+
+/**
+ * finish_static_archive — the object-format-agnostic tail shared by every
+ * ELF static-archive target: write the encoded `.o` bytes to `<od>/<stem>.o`
+ * (the same on-disk object a binary build would produce), wrap it into a
+ * single-member GNU-format `.a` (`teko::backend::emit_static_archive`, KP16)
+ * indexed by `symbols`' exported entries, write it to `<od>/lib<stem>.a` (the
+ * `ar`/`ld` convention every `-l<stem>` search expects), and print the
+ * EXCLUSIVE `"(own backend, static archive)"` success marker.
+ *
+ * @param dir      the project directory (for diagnostics)
+ * @param od       the slash-stripped output directory (already created)
+ * @param stem     the output artifact name (the manifest `name`)
+ * @param obj      the encoded object-file bytes (ELF, own-native emitted)
+ * @param symbols  the encoded module's neutral symbol list (the archive's
+ *                 exported-symbol index)
+ * @return         0 on a successful write+archive, else the failing status
+ */
+fn finish_static_archive(dir: str, od: str, stem: str, obj: []byte, symbols: []teko::backend::Symbol) -> i32 {
+    let objp = teko::str::concat(od, "/", teko::str::concat(stem, ".o"))
+    let member_name = teko::str::concat(stem, ".o")
+    let libp = teko::str::concat(od, "/", teko::str::concat("lib", teko::str::concat(stem, ".a")))
+    match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
+    let archive = teko::backend::emit_static_archive(member_name, obj, symbols)
+    match teko::io::write_file_bytes(libp, archive) { error as e => return fail(dir, e.message); null => { } }
+    teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", libp, " (own backend, static archive)")))
     0
 }
 
