@@ -62,22 +62,67 @@ jobs:
           ../../../bin/teko build . -o bin --no-verify --backend=native
           ls -la bin
 
-      # AR_CHECK_REQUIRE_TOOLS=1 turns an honest-skip into a hard failure (this runner IS
-      # macOS, so a skip here would mean a real provisioning gap, never a legitimate pass —
-      # M.3, owner ruling on run 30061110006). The script itself is invoked DIRECTLY (no
-      # `out="$(...)"` capture) so every trace/fail line streams live to the job log — a
-      # captured-then-swallowed failure (the exact "exit 1, no output" bug the ruling
-      # named) can never happen again.
-      - name: Host-toolchain well-formedness gate (ar/nm/ld — MUST NOT honest-skip here)
+      # DIAGNOSTIC (owner ruling on run 30064037840 — "ground truth da própria plataforma,
+      # sem adivinhar spec"): Apple's `ar` is legacy cctools, notoriously byte-different
+      # from LLVM's BSD writer in the fine details this THEORY writer was cross-checked
+      # against (`ar t` lists `__.SYMDEF_64` but rejects the archive — "Inappropriate file
+      # type or format"). Build TWO reference archives from the SAME .o with Apple's OWN
+      # tools (`libtool -static`, and `ar rcs` + `ranlib`) and dump every byte of all three
+      # archives (ours + both references) side by side in the job log — this is the diff
+      # source for the NEXT iteration's convergence, not a hand-guessed spec. Never fails
+      # the job (`|| true` on every risky command) — purely diagnostic.
+      - name: Diagnostic — reference archives from Apple's own ar/libtool + byte dumps
+        shell: bash
+        run: |
+          set -u
+          cd examples/theory/ar_static_lib_demo/bin
+          echo "::group::libtool -static reference (ref_libtool.a)"
+          libtool -static -o ref_libtool.a theory_ar_lib.o 2>&1 || echo "libtool rc=$?"
+          echo "::endgroup::"
+          echo "::group::ar rcs + ranlib reference (ref_arranlib.a)"
+          ar rcs ref_arranlib.a theory_ar_lib.o 2>&1 || echo "ar rcs rc=$?"
+          ranlib ref_arranlib.a 2>&1 || echo "ranlib rc=$?"
+          echo "::endgroup::"
+          echo "::group::od -A d -t x1z libtheory_ar_lib.a (OURS)"
+          od -A d -t x1z libtheory_ar_lib.a 2>&1 | head -200 || true
+          echo "::endgroup::"
+          echo "::group::od -A d -t x1z ref_libtool.a"
+          [ -f ref_libtool.a ] && { od -A d -t x1z ref_libtool.a | head -200 || true; }
+          echo "::endgroup::"
+          echo "::group::od -A d -t x1z ref_arranlib.a"
+          [ -f ref_arranlib.a ] && { od -A d -t x1z ref_arranlib.a | head -200 || true; }
+          echo "::endgroup::"
+          echo "::group::ar t / nm --print-armap / nm -a on the references"
+          for f in ref_libtool.a ref_arranlib.a; do
+            if [ -f "$f" ]; then
+              echo "-- ar t $f --"; ar t "$f" 2>&1 || echo "ar t $f rc=$?"
+              echo "-- nm --print-armap $f --"; nm --print-armap "$f" 2>&1 || echo "nm --print-armap $f rc=$?"
+              echo "-- nm -a $f --"; nm -a "$f" 2>&1 || echo "nm -a $f rc=$?"
+            fi
+          done
+          echo "::endgroup::"
+
+      # SECONDARY check (owner ruling on run 30064037840): `continue-on-error` — a red
+      # `ar t` here is a REPORTED, known-in-convergence issue, not a job-failing one. The
+      # PRIMARY consumibility criterion is the link+run step below (real ld64 + a running
+      # binary); this step's own outcome is captured (`id: armacho`) and echoed in the
+      # final summary so it never silently masks anything either way.
+      - name: Host-toolchain well-formedness gate (ar/nm/ld — reported, non-blocking)
+        id: armacho
+        continue-on-error: true
         shell: bash
         env:
           AR_CHECK_REQUIRE_TOOLS: "1"
         run: ./scripts/check_ar_macho.sh examples/theory/ar_static_lib_demo/bin/libtheory_ar_lib.a theory_ar_lib__add
 
-      # Link + RUN a real consumer against the archive: proves the archive is not just
-      # byte-well-formed but LINKER- and LOADER-consumable end to end (M.3 — no fake
-      # validation). add(40, 2) = 42.
-      - name: Link + run theory_ar_consumer.c against the archive (expect exit 42)
+      # PRIMARY consumibility criterion (owner ruling on run 30064037840): link + RUN a
+      # real consumer against the archive via `clang`/`ld64` — this is what a real build
+      # actually needs, and it runs UNCONDITIONALLY (the well-formedness step above may
+      # have failed `ar t` and this still executes — M.3, no result gets masked). Proves
+      # the archive is not just byte-well-formed but LINKER- and LOADER-consumable end to
+      # end. add(40, 2) = 42.
+      - name: Link + run theory_ar_consumer.c against the archive (PRIMARY gate — expect exit 42)
+        id: linkrun
         shell: bash
         run: |
           set -eu
@@ -89,6 +134,20 @@ jobs:
           set -e
           echo "consumer exit code: $rc"
           [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+      # Explicit, un-maskable summary of BOTH results (owner ruling on run 30064037840):
+      # the job's real pass/fail already rode on `linkrun` (a step failure fails the job
+      # regardless of what this prints), but this makes the `ar t` status legible at a
+      # glance without scrolling into the gated step's own log.
+      - name: Summarize theory validation (link+run is PRIMARY; ar/nm/ld is reported)
+        if: always()
+        shell: bash
+        run: |
+          echo "PRIMARY  link+run (clang/ld64, real consumer, exit 42 expected): ${{ steps.linkrun.outcome }}"
+          echo "REPORTED ar/nm/ld well-formedness gate (check_ar_macho.sh):      ${{ steps.armacho.outcome }}"
+          if [ "${{ steps.linkrun.outcome }}" = "success" ] && [ "${{ steps.armacho.outcome }}" != "success" ]; then
+            echo "NOTE: the archive links and RUNS correctly via clang/ld64, but Apple's own ar/nm rejects it — a known, in-convergence byte-format gap (see the diagnostic step's reference-archive dumps above). Port-back may proceed with this gap tracked."
+          fi
 
   # ── Windows: MS two-linker-member COFF .lib, gen1 build + real-toolchain link+run ──
   windows-ar-validation:
