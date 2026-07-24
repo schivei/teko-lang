@@ -591,7 +591,7 @@ fn et_get(t: ElideTable, id: u32) -> ElideKind {
 
 /**
  * u32_stack_top — the last element of `xs` (§5's own live `ctx.pending`
- * mirror, LIFO top), or `u32_unset()` when `xs` is empty (mirrors `u32_pos`'
+ * mirror, LIFO top), or `u32_unset()` when `xs` is empty (mirrors `block_rpo_pos`'
  * own defensive sentinel default — no real VReg id collides with it in any
  * function small enough to compile).
  *
@@ -2215,22 +2215,22 @@ fn u32_list_reverse(xs: []u32) -> []u32 {
 }
 
 /**
- * u32_pos — the 0-based position of `id` in `order`, or `order.len` if
+ * block_rpo_pos — the 0-based position of `id` in `order`, or `order.len` if
  * absent (a defensive default: an absent target sorts last, never a
  * spurious back-edge).
  *
  * @param []u32 order  the RPO block-id order
  * @param u32 id  the block id to rank
- * @return u32  its position, or `order.len`
+ * @return u64  its position, or `order.len`
  */
-fn u32_pos(order: []u32, id: u32) -> u32 {
+fn block_rpo_pos(order: []u32, id: u32) -> u64 {
     mut i: u64 = 0
     loop {
         if i >= order.len { break }
-        if order[i] == id { return i to u32 }
+        if order[i] == id { return i }
         i++
     }
-    order.len to u32
+    order.len
 }
 
 /**
@@ -3278,7 +3278,7 @@ fn preds_of(t: []PredEntry, id: u32) -> []u32 {
  * rpo_pos_table — a positional `[]u32` giving each block id's own RPO
  * position (`u32_unset()` for a block absent from `order`, i.e.
  * unreachable) — the fast O(1) lookup `compute_idom`'s intersect loop reads
- * instead of repeatedly re-scanning `order` (`u32_pos`).
+ * instead of repeatedly re-scanning `order` (`block_rpo_pos`).
  *
  * @param u64 n  the block count to size for
  * @param []u32 order  the RPO block-id order
@@ -3553,7 +3553,7 @@ fn is_cfg_irreducible(cfg: CfgInfo) -> bool {
         loop {
             if j >= ss.len { break }
             let s = ss[j]
-            if u32_pos(cfg.order, s) <= u32_pos(cfg.order, b) && !dominates(cfg, s, b) {
+            if block_rpo_pos(cfg.order, s) <= block_rpo_pos(cfg.order, b) && !dominates(cfg, s, b) {
                 return true
             }
             j++
@@ -3582,7 +3582,7 @@ fn is_loop_header(cfg: CfgInfo, h: u32) -> bool {
         mut j: u64 = 0
         loop {
             if j >= ss.len { break }
-            if ss[j] == h && u32_pos(cfg.order, h) <= u32_pos(cfg.order, x) && dominates(cfg, h, x) { return true }
+            if ss[j] == h && block_rpo_pos(cfg.order, h) <= block_rpo_pos(cfg.order, x) && dominates(cfg, h, x) { return true }
             j++
         }
         i++
@@ -3644,7 +3644,7 @@ fn loop_body_of(cfg: CfgInfo, h: u32) -> []u32 {
         mut j: u64 = 0
         loop {
             if j >= ss.len { break }
-            if ss[j] == h && u32_pos(cfg.order, h) <= u32_pos(cfg.order, x) && dominates(cfg, h, x) {
+            if ss[j] == h && block_rpo_pos(cfg.order, h) <= block_rpo_pos(cfg.order, x) && dominates(cfg, h, x) {
                 let contrib = natural_loop_body_from(cfg, h, x)
                 mut k: u64 = 0
                 loop {
