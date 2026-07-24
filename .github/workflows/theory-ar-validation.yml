@@ -1,0 +1,250 @@
+name: "[THEORY] AR Mach-O/COFF validation — DO NOT MERGE"
+
+# THEORY WORKFLOW (owner mechanism, 2026-07-24): branches under theory/** are
+# EXPERIMENTAL — they exist ONLY to give a design/spike a REAL CI runner (here: the
+# macOS/Windows toolchains this repo's own linux dev sandbox does not have), and are
+# NEVER merged to main. This workflow is TEMPORARY: once it proves (or disproves) the
+# BSD `__.SYMDEF` Mach-O writer (`src/backend/objfile_ar_macho.tks`) and the MS
+# two-linker-member COFF `.lib` writer (`src/backend/objfile_ar_coff.tks`) against the
+# REAL host toolchains, the validated hunks port back to the real KP16 vagão
+# (feat/0.3.1-objfile-whole-program / its successor PR) and this workflow + branch are
+# discarded. Do not add theory/** to any required-status-check list; do not build on
+# top of this branch.
+#
+# Push-triggered (a theory/* branch has no long-lived PR to gate) plus manual dispatch.
+on:
+  push:
+    branches: ['theory/**']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── macOS: BSD __.SYMDEF Mach-O archive, full self-test + real-toolchain link+run ──
+  macos-ar-validation:
+    name: theory / macos-latest (BSD __.SYMDEF)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision teko from the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci_provision_teko.sh macos-arm64
+
+      - name: Build gen1 (released seed compiles the theory branch corpus)
+        shell: bash
+        run: teko . -o bin --no-verify --release
+
+      # Full self-test — this exercises src/backend/objfile_ar_test.tkt (KP16's GNU/ELF
+      # goldens, must stay green) AND the new objfile_ar_macho_test.tkt/objfile_ar_coff_test.tkt
+      # byte goldens for BOTH new writers (the COFF one is cross-format, so its goldens run
+      # here too, on macOS).
+      - name: gen1 self-test (objfile_ar / objfile_ar_macho / objfile_ar_coff goldens included)
+        shell: bash
+        run: ./bin/teko test .
+
+      # REAL static-archive build: own-native backend, default target on macos-latest is
+      # arm64-macos (native_target()'s TEKO_TARGET-unset default), so this exercises
+      # emit_static_lib_macho -> emit_static_archive_macho end to end, writing a REAL
+      # BSD __.SYMDEF .a this runner's own `ar`/`nm`/`ld` can inspect.
+      - name: Build the theory static-lib demo (own-native, BSD __.SYMDEF .a)
+        shell: bash
+        env:
+          TEKO_BACKEND: native
+        run: |
+          set -eu
+          cd examples/theory/ar_static_lib_demo
+          ../../../bin/teko build . -o bin --no-verify
+          ls -la bin
+
+      # DIAGNOSTIC (owner ruling on run 30064037840 — "ground truth da própria plataforma,
+      # sem adivinhar spec"): Apple's `ar` is legacy cctools, notoriously byte-different
+      # from LLVM's BSD writer in the fine details this THEORY writer was cross-checked
+      # against (`ar t` lists `__.SYMDEF_64` but rejects the archive — "Inappropriate file
+      # type or format"). Build TWO reference archives from the SAME .o with Apple's OWN
+      # tools (`libtool -static`, and `ar rcs` + `ranlib`) and dump every byte of all three
+      # archives (ours + both references) side by side in the job log — this is the diff
+      # source for the NEXT iteration's convergence, not a hand-guessed spec. Never fails
+      # the job (`|| true` on every risky command) — purely diagnostic.
+      - name: Diagnostic — reference archives from Apple's own ar/libtool + byte dumps
+        shell: bash
+        run: |
+          set -u
+          cd examples/theory/ar_static_lib_demo/bin
+          echo "::group::libtool -static reference (ref_libtool.a)"
+          libtool -static -o ref_libtool.a theory_ar_lib.o 2>&1 || echo "libtool rc=$?"
+          echo "::endgroup::"
+          echo "::group::ar rcs + ranlib reference (ref_arranlib.a)"
+          ar rcs ref_arranlib.a theory_ar_lib.o 2>&1 || echo "ar rcs rc=$?"
+          ranlib ref_arranlib.a 2>&1 || echo "ranlib rc=$?"
+          echo "::endgroup::"
+          # NOTE (run 30064264749): `-t x1z` is a GNU coreutils extension (the trailing `z`
+          # appends printable ASCII per line) — BSD `od` (what macOS ships) rejects it
+          # outright ("od: z: unrecognised format character"), so EVERY dump below was
+          # silently empty last iteration. `-t x1` (hex only, no `z`) is POSIX/BSD-portable
+          # and is what this run actually needed.
+          echo "::group::od -A d -t x1 libtheory_ar_lib.a (OURS)"
+          od -A d -t x1 libtheory_ar_lib.a 2>&1 | head -200 || true
+          echo "::endgroup::"
+          echo "::group::od -A d -t x1 ref_libtool.a"
+          [ -f ref_libtool.a ] && { od -A d -t x1 ref_libtool.a | head -200 || true; }
+          echo "::endgroup::"
+          echo "::group::od -A d -t x1 ref_arranlib.a"
+          [ -f ref_arranlib.a ] && { od -A d -t x1 ref_arranlib.a | head -200 || true; }
+          echo "::endgroup::"
+          echo "::group::ar t / nm --print-armap / nm -a on the references"
+          for f in ref_libtool.a ref_arranlib.a; do
+            if [ -f "$f" ]; then
+              echo "-- ar t $f --"; ar t "$f" 2>&1 || echo "ar t $f rc=$?"
+              echo "-- nm --print-armap $f --"; nm --print-armap "$f" 2>&1 || echo "nm --print-armap $f rc=$?"
+              echo "-- nm -a $f --"; nm -a "$f" 2>&1 || echo "nm -a $f rc=$?"
+            fi
+          done
+          echo "::endgroup::"
+
+      # SECONDARY check (owner ruling on run 30064037840): `continue-on-error` — a red
+      # `ar t` here is a REPORTED, known-in-convergence issue, not a job-failing one. The
+      # PRIMARY consumibility criterion is the link+run step below (real ld64 + a running
+      # binary); this step's own outcome is captured (`id: armacho`) and echoed in the
+      # final summary so it never silently masks anything either way.
+      - name: Host-toolchain well-formedness gate (ar/nm/ld — reported, non-blocking)
+        id: armacho
+        continue-on-error: true
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_macho.sh examples/theory/ar_static_lib_demo/bin/libtheory_ar_lib.a theory_ar_lib__add
+
+      # PRIMARY consumibility criterion (owner ruling on run 30064037840): link + RUN a
+      # real consumer against the archive via `clang`/`ld64` — this is what a real build
+      # actually needs, and it runs UNCONDITIONALLY (the well-formedness step above may
+      # have failed `ar t` and this still executes — M.3, no result gets masked). Proves
+      # the archive is not just byte-well-formed but LINKER- and LOADER-consumable end to
+      # end. add(40, 2) = 42.
+      - name: Link + run theory_ar_consumer.c against the archive (PRIMARY gate — expect exit 42)
+        id: linkrun
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/theory_ar_consumer.c -o /tmp/theory_ar_consumer.o
+          clang /tmp/theory_ar_consumer.o examples/theory/ar_static_lib_demo/bin/libtheory_ar_lib.a -o /tmp/theory_ar_consumer_bin
+          set +e
+          /tmp/theory_ar_consumer_bin
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+      # Explicit, un-maskable summary of BOTH results (owner ruling on run 30064037840):
+      # the job's real pass/fail already rode on `linkrun` (a step failure fails the job
+      # regardless of what this prints), but this makes the `ar t` status legible at a
+      # glance without scrolling into the gated step's own log.
+      - name: Summarize theory validation (link+run is PRIMARY; ar/nm/ld is reported)
+        if: always()
+        shell: bash
+        run: |
+          echo "PRIMARY  link+run (clang/ld64, real consumer, exit 42 expected): ${{ steps.linkrun.outcome }}"
+          echo "REPORTED ar/nm/ld well-formedness gate (check_ar_macho.sh):      ${{ steps.armacho.outcome }}"
+          if [ "${{ steps.linkrun.outcome }}" = "success" ] && [ "${{ steps.armacho.outcome }}" != "success" ]; then
+            echo "NOTE: the archive links and RUNS correctly via clang/ld64, but Apple's own ar/nm rejects it — a known, in-convergence byte-format gap (see the diagnostic step's reference-archive dumps above). Port-back may proceed with this gap tracked."
+          fi
+
+  # ── Windows: MS two-linker-member COFF .lib, gen1 build + real-toolchain link+run ──
+  windows-ar-validation:
+    name: theory / windows-latest (COFF two-linker-member .lib)
+    runs-on: windows-latest
+    # Mirrors sanitizers.yml's windows-selfhost owner ruling (2026-07-14): the gen1 BUILD
+    # alone is ~11 min on this runner, and the full `teko test .` self-host blows the
+    # cap on top of that — so this job builds gen1 and proves the REAL static-lib
+    # link+run end to end (the THEORY point), without also running the whole self-test
+    # suite (already proven on the macOS job above and by the linux ritual locally).
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision teko from the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci_provision_teko.sh windows-x86_64
+
+      - name: Build gen1 (seed compiles the theory branch corpus)
+        shell: bash
+        run: teko . -o bin --no-verify --release
+
+      # REAL static-archive build: TEKO_TARGET=x86_64-windows selects the own-native
+      # Win64/PE-COFF pipeline, exercising emit_static_lib_coff -> emit_static_archive_coff
+      # end to end, writing a REAL MS two-linker-member .lib this runner's own
+      # llvm-lib/lib.exe/dumpbin can inspect.
+      - name: Build the theory static-lib demo (own-native, COFF two-linker-member .lib)
+        shell: bash
+        env:
+          TEKO_TARGET: x86_64-windows
+          TEKO_BACKEND: native
+        run: |
+          set -eu
+          cd examples/theory/ar_static_lib_demo
+          ../../../bin/teko build . -o bin --no-verify
+          ls -la bin
+
+      # AR_CHECK_REQUIRE_TOOLS=1 turns an honest-skip into a hard failure (windows-latest
+      # ships llvm-lib, so a skip here would be a real provisioning gap — M.3, owner ruling
+      # on run 30061110006). The script itself is invoked DIRECTLY (no `out="$(...)"`
+      # capture) so every trace/fail line streams live to the job log.
+      - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — MUST NOT honest-skip here)
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_coff.sh examples/theory/ar_static_lib_demo/bin/theory_ar_lib.lib theory_ar_lib__add
+
+      # Link + RUN a real consumer against the archive with lld-link (the same tool +
+      # MSYS path-conversion guard scripts/check_coff.sh already uses for the raw .o
+      # link-consumability check). add(40, 2) = 42.
+      - name: Link + run theory_ar_consumer.c against the archive (expect exit 42)
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/theory_ar_consumer.c -o theory_ar_consumer.o
+          obj_arg=theory_ar_consumer.o; lib_arg="examples/theory/ar_static_lib_demo/bin/theory_ar_lib.lib"; out_arg="theory_ar_consumer.exe"
+          if command -v cygpath >/dev/null 2>&1; then
+            obj_arg="$(cygpath -w theory_ar_consumer.o)"
+            lib_arg="$(cygpath -w examples/theory/ar_static_lib_demo/bin/theory_ar_lib.lib)"
+            out_arg="$(cygpath -w theory_ar_consumer.exe)"
+          fi
+          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' lld-link /nologo "/out:$out_arg" /entry:main /subsystem:console "$obj_arg" "$lib_arg"
+          set +e
+          ./theory_ar_consumer.exe
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+  # ── gate: aggregates both theory jobs (informational — theory/* is never a required check) ──
+  theory-gate:
+    name: "[THEORY] gate — DO NOT MERGE"
+    runs-on: ubuntu-latest
+    needs: [macos-ar-validation, windows-ar-validation]
+    if: always()
+    permissions: {}
+    steps:
+      - name: Evaluate results
+        run: |
+          MACOS_RESULT="${{ needs.macos-ar-validation.result }}"
+          WINDOWS_RESULT="${{ needs.windows-ar-validation.result }}"
+          echo "macos-ar-validation   = $MACOS_RESULT"
+          echo "windows-ar-validation = $WINDOWS_RESULT"
+          if [ "$MACOS_RESULT" != "success" ] || [ "$WINDOWS_RESULT" != "success" ]; then
+            echo "ERROR: theory validation failed — the Mach-O/COFF writers are NOT yet proven; do not port to the real vagão"
+            exit 1
+          fi
+          echo "Theory gate passed — both writers are real-toolchain-validated; ready to port back to KP16."

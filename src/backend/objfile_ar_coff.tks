@@ -1,0 +1,313 @@
+/**
+ * objfile_ar_coff.tks — THEORY validation slice (branch `theory/kp16-ar-macho-coff`,
+ * NEVER merged — see `.github/workflows/theory-ar-validation.yml`): the Microsoft
+ * COFF `.lib` static-archive writer, the `lib.exe` sibling of `objfile_ar.tks`
+ * (KP16's GNU-format ELF writer) and `objfile_ar_macho.tks` (the BSD-format
+ * writer). Named an honest stop at KP16's `src/build/project.tks::
+ * emit_static_lib` call site ("the MS two-linker-member `.lib` convention...
+ * undelivered"); this file is the port candidate once the theory CI's
+ * windows-latest runner (real `lib.exe`/`llvm-lib`/`dumpbin`) proves it.
+ *
+ * A COFF `.lib` shares the GNU `!<arch>\n` global header, the generic 60-byte
+ * `ar_hdr`, and the GNU short-inline-name / `"//"`-longnames-member convention
+ * for its REAL object members (all reused from `objfile_ar.tks`: `AR_GLOBAL_
+ * HEADER`, `ar_header`, `ar_member_name_field`, `emit_ar_member`,
+ * `ar_member_offsets`), but PREPENDS two synthetic "linker member"s ahead of
+ * any real member (PE/COFF spec, "Archive (Import) Library Format"):
+ *
+ *   1. the FIRST linker member (`Name = "/"`): byte-identical in WIRE SHAPE to
+ *      GNU's own `"/"` symbol table (`ar_symtab_data_size`/`build_ar_symtab_
+ *      data`, reused as-is) — a big-endian symbol count, one big-endian
+ *      per-symbol member-header-offset, then the NUL-terminated names, in
+ *      caller (member-declaration) order.
+ *   2. the SECOND linker member (`Name = "/"`, a second `/`-named member —
+ *      resolved by ARCHIVE POSITION, not by a distinct name): a little-endian
+ *      member count + one little-endian member-header-offset per member (the
+ *      "member table"), a little-endian symbol count + one little-endian
+ *      1-BASED member-table INDEX per symbol (SORTED ALPHABETICALLY — the
+ *      point of this member: `lib.exe`/`link.exe` binary-search it), then the
+ *      NUL-terminated names in that same sorted order.
+ *
+ * Then, optionally, the GNU-compatible `"//"` longnames member (any real
+ * member name over 15 bytes — unreached by KP16's sole producer, whose member
+ * name is always `"<stem>.o"`, covered by a direct unit test), then the real
+ * members themselves.
+ */
+
+/**
+ * emit_u16_le_lib — append `v`'s low 16 bits to `buf` as two little-endian
+ * bytes (the second linker member's per-symbol 1-based member-table index —
+ * the COFF `.lib` sibling of `objfile_coff.tks::emit_u16_le_coff`, kept
+ * distinct so this file stays independently readable).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 v  the field value (only the low 16 bits are emitted)
+ * @return []byte  `buf` followed by v's two little-endian low bytes
+ */
+fn emit_u16_le_lib(buf: []byte, v: u32) -> []byte {
+    mut b = teko::list::push(buf, (v & AR_BYTE_MASK) to byte)
+    teko::list::push(b, ((v >> (8 to u32)) & AR_BYTE_MASK) to byte)
+}
+
+/**
+ * COFF_LIB_LONGNAME_TERMINATOR — the 1-byte NUL terminator COFF longnames-
+ * member tools (`lib.exe`, `llvm-lib`, `link.exe`) append after each stored
+ * long name — the `"//"` member's per-name delimiter. NOT GNU ar's own `"/\n"`
+ * convention (cross-checked against LLVM's `ArchiveWriter.cpp` COFF writer,
+ * which NUL-terminates every longnames entry — `StringTable << '\0'` — unlike
+ * its BSD/GNU siblings).
+ */
+const COFF_LIB_LONGNAME_TERMINATOR: byte = 0 to byte
+
+/**
+ * CoffLibLongnames — the resolved `"//"` longnames-member payload plus the
+ * per-member `Name` field text: an INLINE `<=15`-byte name reuses
+ * `objfile_ar.tks::ar_member_name_field` (`"<name>/"`, space-padded); a
+ * LONGER name is stored in `bytes` (NUL-terminated) and its field becomes the
+ * GNU-compatible `"/<offset>"` reference.
+ */
+type CoffLibLongnames = struct {
+    /**
+     * bytes — the `"//"` member's payload (only long names; empty when every
+     * member name is inline-sized).
+     */
+    bytes: []byte
+    /**
+     * name_fields — each member's resolved 16-byte `Name` field text, member
+     * order.
+     */
+    name_fields: []str
+}
+
+/**
+ * coff_lib_longnames — resolve every member's bare name into its `Name` field
+ * text, spilling any name over 15 bytes into the shared `"//"` longnames
+ * payload (GNU-compatible `"/<offset>"` reference + NUL-terminated storage) —
+ * unreached by KP16's sole producer (`emit_static_archive_coff`'s member name
+ * is always `"<stem>.o"`, always short), covered by a direct unit test on a
+ * hand-built input.
+ *
+ * @param []str names  each member's bare on-disk name, in emission order
+ * @return CoffLibLongnames  the resolved `Name` fields + the shared `"//"` payload
+ */
+fn coff_lib_longnames(names: []str) -> CoffLibLongnames {
+    mut bytes: []byte = teko::list::empty()
+    mut fields: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        let nm = names[i]
+        if nm.len <= (15 to u64) {
+            fields = teko::list::push(fields, ar_member_name_field(nm))
+        } else {
+            let off = bytes.len
+            fields = teko::list::push(fields, ar_pad_right(teko::str::concat("/", $"{off}"), AR_NAME_WIDTH))
+            bytes = emit_str_bytes(bytes, nm)
+            bytes = teko::list::push(bytes, COFF_LIB_LONGNAME_TERMINATOR)
+        }
+        i++
+    }
+    CoffLibLongnames { bytes = bytes; name_fields = fields }
+}
+
+/**
+ * coff_lib_symbol_before — the alphabetical-order comparator the second
+ * linker member's symbol table sorts by: true iff `a.name` sorts strictly
+ * before `b.name` (byte-lexicographic, via the shared `str_compare` runtime
+ * primitive).
+ *
+ * @param ArSymbol a  the first symbol
+ * @param ArSymbol b  the second symbol
+ * @return bool  true iff `a` precedes `b`
+ */
+fn coff_lib_symbol_before(a: ArSymbol, b: ArSymbol) -> bool {
+    teko::runtime::str_compare(a.name, b.name) < (0 to i64)
+}
+
+/**
+ * coff_lib_sorted_symbols — `symbols` in alphabetical `name` order (an
+ * insertion sort, mirroring `regalloc.tks::sort_by_start`'s shape) — the
+ * second linker member's REQUIRED order (PE/COFF spec: `lib.exe`/`link.exe`
+ * binary-search this table by name).
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index, any order
+ * @return []ArSymbol  the same symbols, alphabetically sorted by name
+ */
+fn coff_lib_sorted_symbols(symbols: []ArSymbol) -> []ArSymbol {
+    mut out: []ArSymbol = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let v = symbols[i]
+        mut ins: []ArSymbol = teko::list::empty()
+        mut placed: bool = false
+        mut j: u64 = 0
+        loop {
+            if j >= out.len { break }
+            let o = out[j]
+            if !placed && coff_lib_symbol_before(v, o) {
+                ins = teko::list::push(ins, v)
+                placed = true
+            }
+            ins = teko::list::push(ins, o)
+            j++
+        }
+        if !placed { ins = teko::list::push(ins, v) }
+        out = ins
+        i++
+    }
+    out
+}
+
+/**
+ * coff_lib_second_payload_size — the byte length of the second linker
+ * member's DATA (excluding its own 60-byte header): the member count + one
+ * 4-byte offset per member, the symbol count + one 2-byte index per symbol,
+ * then every sorted symbol's NUL-terminated name — computable from the member
+ * count and the (already sorted) symbol names alone, mirroring
+ * `objfile_ar.tks::ar_symtab_data_size`'s two-pass layout seam.
+ *
+ * @param u64 num_members  the archive's real-member count
+ * @param []ArSymbol sorted  the alphabetically sorted exported-symbol index
+ * @return u32  the second linker member's unpadded data byte length
+ */
+fn coff_lib_second_payload_size(num_members: u64, sorted: []ArSymbol) -> u32 {
+    mut total: u32 = (4 to u32) + (num_members to u32) * (4 to u32) + (4 to u32) + (sorted.len to u32) * (2 to u32)
+    mut i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        total = total + (sorted[i].name.len to u32) + (1 to u32)
+        i++
+    }
+    total
+}
+
+/**
+ * coff_lib_second_payload — the complete second linker member DATA: the
+ * little-endian member count, the member table (each real member's own
+ * header file offset, member-declaration order), the little-endian symbol
+ * count, the 1-based member-table index per (alphabetically sorted) symbol,
+ * then every sorted symbol's NUL-terminated name.
+ *
+ * @param []u32 member_offsets  each member's own header file offset, member order
+ * @param []ArSymbol sorted  the alphabetically sorted exported-symbol index
+ * @return []byte  the second linker member's unpadded data bytes
+ */
+fn coff_lib_second_payload(member_offsets: []u32, sorted: []ArSymbol) -> []byte {
+    mut b: []byte = emit_u32_le(teko::list::empty(), member_offsets.len to u32)
+    mut i: u64 = 0
+    loop {
+        if i >= member_offsets.len { break }
+        b = emit_u32_le(b, member_offsets[i])
+        i++
+    }
+    b = emit_u32_le(b, sorted.len to u32)
+    i = 0
+    loop {
+        if i >= sorted.len { break }
+        b = emit_u16_le_lib(b, (sorted[i].member + (1 to u64)) to u32)
+        i++
+    }
+    i = 0
+    loop {
+        if i >= sorted.len { break }
+        b = emit_str_bytes(b, sorted[i].name)
+        b = teko::list::push(b, 0 to byte)
+        i++
+    }
+    b
+}
+
+/**
+ * coff_lib_member_total_len — a synthetic member's total on-disk span (its
+ * 60-byte header + its data + its optional even-alignment pad byte).
+ *
+ * @param u32 payload_size  the member's unpadded data byte length
+ * @return u32  the member's total header+data(+pad) byte span
+ */
+fn coff_lib_member_total_len(payload_size: u32) -> u32 {
+    AR_HEADER_SIZE + payload_size + ar_even_pad_len(payload_size)
+}
+
+/**
+ * emit_coff_lib_archive — assemble a complete Microsoft COFF `.lib` static
+ * archive: the 8-byte global header, the first linker member (GNU-shaped,
+ * reused), the second linker member (the sorted binary-search table), the
+ * optional `"//"` longnames member, then every real `ArMember` in list order
+ * — GNU-inline-named when its bare name is <=15 bytes, `"/<offset>"`-
+ * referenced into the longnames payload otherwise. The three synthetic
+ * members' sizes are each knowable from names/counts alone (no member offset
+ * needed), so — exactly like `objfile_ar.tks::emit_ar_archive`'s two-pass
+ * layout — the real members' file offsets (`ar_member_offsets`, reused as-is)
+ * are resolved in one forward pass, no backpatching. Consumable by
+ * `lib.exe /LIST` / `llvm-lib /list` / `dumpbin /LINKERMEMBER`, and by
+ * `link.exe`/`lld-link` linking a consumer against an exported symbol.
+ *
+ * @param []ArMember members  the archive's real members, in emission order
+ * @param []ArSymbol symbols  the exported-symbol index (each naming its
+ *        defining member by 0-based list index)
+ * @return []byte  the finished COFF `.lib` archive bytes
+ */
+pub fn emit_coff_lib_archive(members: []ArMember, symbols: []ArSymbol) -> []byte {
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        names = teko::list::push(names, members[i].name)
+        i++
+    }
+    let longnames = coff_lib_longnames(names)
+    let has_longnames = longnames.bytes.len > (0 to u64)
+    let sorted = coff_lib_sorted_symbols(symbols)
+    let payload1_size = ar_symtab_data_size(symbols)
+    let payload1_total = coff_lib_member_total_len(payload1_size)
+    let payload2_size = coff_lib_second_payload_size(members.len, sorted)
+    let payload2_total = coff_lib_member_total_len(payload2_size)
+    let longnames_size = longnames.bytes.len to u32
+    let longnames_total = if has_longnames { coff_lib_member_total_len(longnames_size) } else { 0 to u32 }
+    let first_real_offset = (AR_GLOBAL_HEADER.len to u32) + payload1_total + payload2_total + longnames_total
+    let member_offsets = ar_member_offsets(first_real_offset, members)
+    let payload1 = build_ar_symtab_data(symbols, member_offsets)
+    let payload2 = coff_lib_second_payload(member_offsets, sorted)
+    mut b: []byte = teko::list::empty()
+    b = append_bytes(b, AR_GLOBAL_HEADER)
+    b = emit_ar_member(b, ar_pad_right(AR_SYMTAB_NAME, AR_NAME_WIDTH), payload1, AR_MODE_SPECIAL)
+    b = emit_ar_member(b, ar_pad_right(AR_SYMTAB_NAME, AR_NAME_WIDTH), payload2, AR_MODE_SPECIAL)
+    if has_longnames { b = emit_ar_member(b, ar_pad_right("//", AR_NAME_WIDTH), longnames.bytes, AR_MODE_SPECIAL) }
+    i = 0
+    loop {
+        if i >= members.len { break }
+        b = emit_ar_member(b, longnames.name_fields[i], members[i].data, AR_MODE_REGULAR)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_static_archive_coff — wrap ONE whole-program PE/COFF relocatable
+ * object (`obj_name`/`obj_bytes`) into a single-member Microsoft `.lib`
+ * static archive with the two-linker-member symbol index, indexing every one
+ * of `symbols`' defined, non-local entries against that lone member — the
+ * theory port candidate for KP16's COFF honest-stop
+ * (`src/build/project.tks::emit_static_lib`'s `X8664Windows` arm). Unlike
+ * `objfile_ar_macho.tks::emit_static_archive_macho`, Windows x64 symbol names
+ * carry NO leading-underscore decoration (`objfile_coff.tks::CoffSymbol`'s own
+ * convention), so `symbols`' names pass through bare.
+ *
+ * @param str obj_name  the member's bare on-disk name (`"<stem>.o"`)
+ * @param []byte obj_bytes  the PE/COFF object file's bytes (own-native emitted)
+ * @param []Symbol symbols  the module's neutral symbol list (for the exported-symbol index)
+ * @return []byte  the finished COFF `.lib` archive bytes
+ */
+pub fn emit_static_archive_coff(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte {
+    let member = ArMember { name = obj_name; data = obj_bytes }
+    let names = global_symbol_names(symbols)
+    mut ar_symbols: []ArSymbol = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        ar_symbols = teko::list::push(ar_symbols, ArSymbol { name = names[i]; member = 0 to u64 })
+        i++
+    }
+    emit_coff_lib_archive([member], ar_symbols)
+}
