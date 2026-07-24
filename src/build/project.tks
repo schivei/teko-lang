@@ -2295,6 +2295,25 @@ fn analyzer_of(args: []str) -> bool {
     false
 }
 
+/**
+ * arith_cast_gate_of — does `--arith-cast-gate` appear in the args? (`teko test .
+ * --arith-cast-gate`, D4/C5 — `cast-width-hygiene-0.3.1.md` §5): after the gate + floors,
+ * compute the ARITH-CAST-RATE (D4) over the already-typed program and FAIL the build when
+ * it exceeds the ratified ≤2% ceiling. CI-facing (unlike `--analyzer`, this one gates).
+ *
+ * @param args  the process argv
+ * @return      whether `--arith-cast-gate` is present
+ */
+fn arith_cast_gate_of(args: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == "--arith-cast-gate" { return true }
+        i = i + 1
+    }
+    false
+}
+
 /** (Issue #249 lever A) does `--no-verify` appear in the args? A `build` normally ALWAYS runs the
  *  D4 `.tkt` gate first (unchanged default); this flag skips it entirely, emitting straight to
  *  codegen. Intended for a self-host release chain that has already proven the gate on an earlier
@@ -2416,6 +2435,9 @@ fn has_backend_flag(args: []str, start: u64) -> bool {
  *  occurrence of either now falls through as an unknown positional, the honest "not a project"
  *  signal that the flag is gone.
  *
+ *  Also skips `--arith-cast-gate` (D4/C5, `cast-width-hygiene-0.3.1.md` §5) — the ARITH-CAST-
+ *  RATE CI gate flag.
+ *
  *  @param args   the full CLI argument vector
  *  @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
  *  @return       the first positional argument, or "" when only flags remain
@@ -2434,6 +2456,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
         else if args[i] == "--release" { i = i + 1 }
         else if args[i] == "--no-tty" { i = i + 1 }
         else if args[i] == "--analyzer" { i = i + 1 }
+        else if args[i] == "--arith-cast-gate" { i = i + 1 }
         else if opt_arg_has_prefix(args[i]) { i = i + 1 }
         else { return args[i] }
     }
@@ -2978,6 +3001,38 @@ fn run_analyzer(dir: str, fe: Frontend) -> i32 {
     if arc != 0 { return arc }
     teko::io::print(analyzer_report(analyze_records_of(fe.prog, adir)))
     0
+}
+
+/**
+ * arith_cast_rate_line — the printed report line: `arith-cast-rate: <with>/<total> (<pct>%),
+ * ceiling <=2.00%`.
+ *
+ * @param r  the accumulated report
+ * @return   the formatted report line (no trailing newline)
+ */
+fn arith_cast_rate_line(r: checker::ArithCastRateReport) -> str {
+    let pct = checker::arith_cast_rate_pct(r)
+    $"teko: arith-cast-rate: {r.with_conversion}/{r.total} ({pct:F2}%), ceiling <=2.00%"
+}
+
+/**
+ * run_arith_cast_gate — the `teko test . --arith-cast-gate` body (D4/C5,
+ * `cast-width-hygiene-0.3.1.md` §5): compute the ARITH-CAST-RATE over the ALREADY-TYPED
+ * program (`fe.prog` — no recompile, no run needed, unlike `--analyzer`) and fail the build
+ * when it exceeds the ratified ≤2% ceiling. A passing `.tkt` gate already ran before this is
+ * reached, so a program with zero arithmetic/assignment expressions gates vacuously green.
+ *
+ * @param dir  the project directory (diagnostics)
+ * @param fe   the already-assembled front-end product (checked program + manifest)
+ * @return     0 when the rate is at or under 2%, else 1 (the CI-facing failure)
+ * @since 0.3.1 (C5)
+ */
+fn run_arith_cast_gate(dir: str, fe: Frontend) -> i32 {
+    let r = checker::arith_cast_rate_report(fe.prog)
+    teko::io::println(arith_cast_rate_line(r))
+    if checker::arith_cast_rate_gate_ok(r) { return 0 }
+    teko::io::eprintln("teko: arith-cast-rate gate FAILED — the D4 ceiling (<=2%) was exceeded")
+    1
 }
 
 /**
@@ -3662,9 +3717,12 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
  * @param per_test_cov     `--per-test-cov` — also print the dev-time per-test attribution report
  * @param per_commit_base  `--per-commit-test <base>` — the git base for the delta gate ("" = no-op)
  * @param analyzer         `--analyzer` — after the gate + floors, run the dev-time stale/redundant analyzer
- * @return                 0 when every test passes and the floor + delta policies hold, else the failing status
+ * @param arith_cast_gate  `--arith-cast-gate` — after the gate + floors, enforce the D4
+ *                         ARITH-CAST-RATE ceiling (≤2%, `cast-width-hygiene-0.3.1.md` §5, C5)
+ * @return                 0 when every test passes and the floor + delta + arith-cast-rate
+ *                         policies hold, else the failing status
  */
-fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool) -> i32 {
+fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
     ensure_rt_dir_abs()
     let exe = self_exe_path()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
@@ -3684,6 +3742,10 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     if fe.manifest.test_regression_files.len > 0 {
         let rrc = run_regression_phase(exe, fe.manifest)
         if rrc != 0 { return rrc }
+    }
+    if arith_cast_gate {
+        let acrc = run_arith_cast_gate(dir, fe)
+        if acrc != 0 { return acrc }
     }
     if per_test_cov { return run_per_test_cov(dir, fe) }
     if analyzer { return run_analyzer(dir, fe) }
