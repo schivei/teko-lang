@@ -89,7 +89,7 @@ float/i128 isel** (own-native, no external dep). Objfile emission must complete 
 | item | verdict | detail |
 |---|---|---|
 | complete whole-program `.o` emission | **PODE .30** | extend `objfile_{elf,macho,coff}` to the whole program |
-| `.a` static-archive emission | **PODE .30** | add the archive writer |
+| `.a` static-archive emission | **DONE (.30)** | GNU-format ELF writer (KP16) + the BSD `__.SYMDEF SORTED` Mach-O and MS two-linker-member COFF `.lib` writers, ported from the `theory/kp16-ar-macho-coff` real-toolchain validation branch (run d44f63c9: SUCCESS on a real macOS runner — `ar`/`nm`/`ld64` accepted and linked the archive — and a real Windows runner — `lld-link` accepted and linked it). KP16's own Mach-O/COFF honest-stop ("no host toolchain to cross-validate here") is CLOSED; `src/build/project.tks::emit_static_lib` dispatches all three formats (`ArchiveFormat::Gnu`/`Bsd`/`Coff`) |
 | build-step swap ("emit `.o`/`.a` + system `ld`", behind a flag) | **PODE .30 (prep)** | default flips when lowering=100% |
 | runnable native binary / full self-host | **ACHIEVABLE with system `ld`** (NOT E1) | gated only on lowering=100% (float+i128) + `.o`/`.a` emission |
 
