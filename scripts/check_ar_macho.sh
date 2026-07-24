@@ -3,11 +3,11 @@
 # NEVER merged): host-tool well-formedness gate for the BSD-format `.a` static archive
 # (`src/backend/objfile_ar_macho.tks::emit_static_archive_macho`) — the Mach-O sibling of
 # `scripts/check_ar_elf.sh`. Asserts the REAL macOS toolchain accepts the archive: `ar t`
-# lists the member, `nm -a` sees the `__.SYMDEF_64`-indexed symbols, and `ld -r` links the
+# lists the member, `nm -a` sees the `__.SYMDEF SORTED`-indexed symbols, and `ld -r` links the
 # extracted member. The engine-agnostic byte layout is pinned by the golden tests in
 # `src/backend/objfile_ar_macho_test.tkt`; this script is the external cross-check, run
 # ONLY on the theory CI's macos-latest runner (real Apple `ar`/`nm`/`ld` — the ONE
-# toolchain that can validate a BSD `__.SYMDEF_64` table).
+# toolchain that can validate a BSD `__.SYMDEF SORTED` table).
 #
 # FAIL LOUD (M.3, owner ruling on run 30061110006): every check TRACES to stderr before it
 # runs and prints the underlying tool's OWN stdout+stderr on failure — a silent "exit 1,
