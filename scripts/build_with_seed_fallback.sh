@@ -157,6 +157,14 @@ while :; do
   if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
     break
   fi
+  if grep -q "cc failed to build the generated C" "$BASE_LOG"; then
+    log "FATAL: probe $BOOT_SHA compiles at the Teko level but its C compile FAILED — this is an"
+    log "ENVIRONMENTAL toolchain problem, not a seed-capability gap; walking further back cannot fix it."
+    log "----- full probe build log ($BOOT_SHA) -----"
+    sed 's/^/teko-ci:   | /' "$BASE_LOG" >&2
+    rm -f "$BASE_LOG"
+    exit 1
+  fi
   log "probe error tail:"
   tail -15 "$BASE_LOG" | sed 's/^/teko-ci:   | /' >&2
   PROBES=$((PROBES + 1))
