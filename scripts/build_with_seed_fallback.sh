@@ -156,9 +156,9 @@ PROBES=0
 MAX_PROBES=64
 BASE_LOG="$(mktemp)"
 while :; do
+  git -C "$WORKTREE_DIR" clean -fdxq
   rm -rf "$GEN1_BASE_DIR"
   mkdir -p "$GEN1_BASE_DIR"
-  git -C "$WORKTREE_DIR" clean -fdxq
   if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
     break
   fi
