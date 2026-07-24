@@ -3,7 +3,9 @@
 # static archive (`src/backend/objfile_ar_macho.tks::emit_static_archive_macho`) — the
 # Mach-O sibling of `scripts/check_ar_elf.sh`. Asserts the REAL macOS toolchain accepts
 # the archive: `ar t` lists the member, `nm -a` sees the `__.SYMDEF SORTED`-indexed
-# symbols, and `ld -r` links the extracted member. The engine-agnostic byte layout is
+# symbols, and `ld -r -arch <host-arch>` (ld64 needs the explicit `-arch` GNU `ld`
+# infers on its own) relinks the extracted REAL object member — not the `__.SYMDEF
+# SORTED` index member `ar t` lists first. The engine-agnostic byte layout is
 # pinned by the golden tests in `src/backend/objfile_ar_macho_test.tkt`; this script is
 # the external cross-check, run on native.yml's `ar-macho-coff-validation` macos-latest
 # leg (real Apple `ar`/`nm`/`ld` — the ONE toolchain that can validate a BSD
@@ -69,9 +71,15 @@ if [[ "$ar_t_rc" -ne 0 ]]; then
     trace "ar t output:"; printf '%s\n' "$ar_t_out" | sed 's/^/      | /' >&2
     fail "ar t rejected $ARCHIVE (rc=$ar_t_rc)"
 fi
-member="$(printf '%s\n' "$ar_t_out" | head -1)"
-[[ -n "$member" ]] || fail "ar t listed no member in $ARCHIVE"
-trace "ar t: first member = '$member'"
+# The REAL object member, not `ar t`'s first listed entry (run 30074603155: on a BSD
+# archive `__.SYMDEF SORTED` — the synthetic symbol-table member `emit_bsd_ar_archive`
+# always writes FIRST — is that first entry, not the real relocatable object; `ld -r`
+# needs the actual `.o` member. Every real member this writer ever produces is named
+# `"<stem>.o"` (`emit_static_archive_macho`'s sole caller), so the first `*.o`-suffixed
+# entry IS the real member, in every member order the writer could ever emit.
+member="$(printf '%s\n' "$ar_t_out" | grep '\.o$' | head -1)"
+[[ -n "$member" ]] || fail "ar t listed no *.o object member in $ARCHIVE (only: $(printf '%s' "$ar_t_out" | tr '\n' ' '))"
+trace "ar t: object member = '$member'"
 
 trace "step: nm -a (symbol index)"
 nm_out="$(nm -a "$ARCHIVE" 2>&1)"
@@ -89,7 +97,15 @@ if [[ -n "$SYMBOL" ]]; then
     fi
 fi
 
-trace "step: ar x (extract '$member') + ld -r (relocatable relink)"
+# ld64's `-r` relocatable-link mode cannot infer the target architecture from the
+# object alone (run 30074603155: "Missing -arch option") the way GNU `ld -r` does on
+# linux — Apple's `ld` always needs an explicit `-arch`. `uname -m` on Darwin already
+# returns ld64's own arch name verbatim (`arm64` on Apple Silicon, `x86_64` on Intel),
+# so no translation table is needed; this is Darwin-only (the script has already
+# skip_or_fail'd on any non-Darwin host above) — GNU `ld -r` (check_ar_elf.sh's own
+# relink step) takes no such flag and must stay untouched.
+arch="$(uname -m)"
+trace "step: ar x (extract '$member') + ld -r -arch $arch (relocatable relink)"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/check-ar-macho.XXXXXX")"
 ar_x_out="$(cd "$tmp_dir" && ar x "$ARCHIVE" "$member" 2>&1)"
 ar_x_rc=$?
@@ -98,12 +114,12 @@ if [[ "$ar_x_rc" -ne 0 || ! -f "$extracted" ]]; then
     trace "ar x output:"; printf '%s\n' "$ar_x_out" | sed 's/^/      | /' >&2
     fail "ar x could not extract member $member from $ARCHIVE (rc=$ar_x_rc)"
 fi
-ld_out="$(ld -r "$extracted" -o /dev/null 2>&1)"
+ld_out="$(ld -r -arch "$arch" "$extracted" -o /dev/null 2>&1)"
 ld_rc=$?
 rm -rf "$tmp_dir"
 if [[ "$ld_rc" -ne 0 ]]; then
     trace "ld -r output:"; printf '%s\n' "$ld_out" | sed 's/^/      | /' >&2
-    fail "ld -r rejected the extracted member $member (rc=$ld_rc)"
+    fail "ld -r -arch $arch rejected the extracted member $member (rc=$ld_rc)"
 fi
 
 echo "check_ar_macho: OK — $ARCHIVE is a well-formed, ar/nm/ld-consumable BSD static archive"
