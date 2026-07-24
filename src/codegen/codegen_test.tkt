@@ -28,16 +28,16 @@ fn cgt_named_te(s: str) -> parser::TypeExpr {
     parser::NamedType { path = cgt_path1(s); args = teko::list::empty() }
 }
 
-fn cgt_num(v: i128, k: checker::PrimKind) -> checker::TExpr {
+fn cgt_num(v: i64, k: checker::PrimKind) -> checker::TExpr {
     checker::TExpr {
-        kind = checker::TNumber { is_float = false; value = v; fval = 0.0 }
+        kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }
         type = checker::Prim { kind = k }
         line = 0; col = 0
     }
 }
-fn cgt_num_i64(v: i128) -> checker::TExpr { cgt_num(v, checker::PrimKind::I64) }
-fn cgt_num_i8(v: i64) -> checker::TExpr { cgt_num(v to i128, checker::PrimKind::I8) }
-fn cgt_num_i32(v: i128) -> checker::TExpr { cgt_num(v, checker::PrimKind::I32) }
+fn cgt_num_i64(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I64) }
+fn cgt_num_i8(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I8) }
+fn cgt_num_i32(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I32) }
 
 fn cgt_e_bool_t() -> checker::TExpr {
     checker::TExpr {
@@ -107,53 +107,47 @@ fn cgt_buffer_basics() {
     teko::assert::is_true(s7 == "foobar")
 }
 
-// ---------------------------------------------------------------------------
-// Group B: Large integers and C-string escaping
-//   cb_u128_digits, cb_u128_c_expr, cb_i128, cb_f64_literal, cb_cstr_escaped
-// ---------------------------------------------------------------------------
+/**
+ * cgt_large_int_and_escape — Group B: large-integer printing and C-string escaping
+ * (`cb_u64_digits`, `cb_u64_c_expr`, `cb_numint`, `cb_f64_literal`, `cb_cstr_escaped`).
+ *
+ * `cb_numint`'s negative case (drop-128, 2026-07-24) used to PANIC in the VM (the old `v to
+ * u128` reinterpretation of a negative source); `NumInt`'s explicit sign flag needs no such
+ * reinterpretation, so both a `-(` prefix and the correct magnitude are now directly coverable
+ * on both engines (#299).
+ */
 #test
 fn cgt_large_int_and_escape() {
-    // cb_u128_digits
-    let d0 = str(cb_u128_digits(cgt_empty(), 0 to u128))
+    let d0 = str(cb_u64_digits(cgt_empty(), 0 to u64))
     teko::assert::is_true(d0 == "0")
-    let d255 = str(cb_u128_digits(cgt_empty(), 255 to u128))
+    let d255 = str(cb_u64_digits(cgt_empty(), 255 to u64))
     teko::assert::is_true(d255 == "255")
 
-    // cb_u128_c_expr — small value (hi == 0 path); also exercises cb_u128_digits internally
-    let uc = str(cb_u128_c_expr(cgt_empty(), 0 to u128))
+    let uc = str(cb_u64_c_expr(cgt_empty(), 0 to u64))
     teko::assert::is_true(teko::str::contains(uc, "0"))
-    let uc1 = str(cb_u128_c_expr(cgt_empty(), 1 to u128))
+    let uc1 = str(cb_u64_c_expr(cgt_empty(), 1 to u64))
     teko::assert::is_true(uc1.len > 0)
 
-    // cb_i128 — zero, positive, AND negative. The negative branch used to PANIC in the VM
-    // (the old `v to u128` on a negative source); #299 reinterprets the bits non-trapping, so
-    // it is now coverable directly from tests on both engines.
-    let i0 = str(cb_i128(cgt_empty(), 0 to i128))
+    let i0 = str(cb_numint(cgt_empty(), parser::numint_of_u64(0)))
     teko::assert::is_true(teko::str::contains(i0, "0"))
-    let ipos = str(cb_i128(cgt_empty(), 42 to i128))
+    let ipos = str(cb_numint(cgt_empty(), parser::numint_of_u64(42)))
     teko::assert::is_true(teko::str::contains(ipos, "42"))
-    // negative (#299): sign `-(` is emitted and the magnitude is correct — no panic
-    let ineg = str(cb_i128(cgt_empty(), (0 to i128) - (1 to i128)))
+    let ineg = str(cb_numint(cgt_empty(), parser::numint_negate(parser::numint_of_u64(1))))
     teko::assert::is_true(teko::str::contains(ineg, "-("))
     teko::assert::is_true(teko::str::contains(ineg, "1"))
-    let ineg42 = str(cb_i128(cgt_empty(), (0 to i128) - (42 to i128)))
+    let ineg42 = str(cb_numint(cgt_empty(), parser::numint_negate(parser::numint_of_u64(42))))
     teko::assert::is_true(teko::str::contains(ineg42, "-("))
     teko::assert::is_true(teko::str::contains(ineg42, "42"))
 
-    // cb_f64_literal — just verify non-empty (delegates to teko::ftoa)
     let flit = str(cb_f64_literal(cgt_empty(), 1.5))
     teko::assert::is_true(flit.len > 0)
 
-    // cb_cstr_escaped — plain ASCII unchanged
     let e1 = str(cb_cstr_escaped(cgt_empty(), "hi"))
     teko::assert::is_true(e1 == "hi")
-    // backslash (one char → two chars \\)
     let e2 = cb_cstr_escaped(cgt_empty(), "\\")
     teko::assert::is_true(e2.len == 2)
-    // tab → \t  (two chars)
     let e3 = cb_cstr_escaped(cgt_empty(), "\t")
     teko::assert::is_true(e3.len == 2)
-    // newline → \n (two chars)
     let e4 = cb_cstr_escaped(cgt_empty(), "\n")
     teko::assert::is_true(e4.len == 2)
 }
@@ -714,7 +708,7 @@ fn cgt_emit_value_match_arm_commits_tail() {
         value = cgt_num_i64(7)
     }
     let arm_lit: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { is_float = false; value = 1 to i128; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(1); fval = 0.0 }; line = 0; col = 0 }
     }
     mut arm_body: []checker::TStatement = teko::list::push(teko::list::empty(), bind_tmp)
     arm_body = teko::list::push(arm_body, cgt_stmt(cgt_e_var("tmp")))
@@ -882,16 +876,16 @@ fn cgt_emit_function_comprehensive() {
 //   makes EXACTLY ONE arm run, matching the VM and the value-form match. This test asserts the
 //   emitted C carries the commit `goto …_done` chain (the structural guarantee).
 // ---------------------------------------------------------------------------
-fn cgt_lit_arm(v: i128, body_name: str) -> checker::TArm {
+fn cgt_lit_arm(v: u64, body_name: str) -> checker::TArm {
     // arm: `v => { let <body_name> = <v> }` — a NON-diverging effect body (the bug trigger).
     let lit: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { is_float = false; value = v; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; line = 0; col = 0 }
     }
     let eff: checker::TStatement = checker::TBinding {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = body_name }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(v)
+        value = cgt_num_i64(v to i64)
     }
     checker::TArm { pattern = lit; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
 }
@@ -1302,7 +1296,7 @@ fn cgt_emit_index_in_array_interp() {
 fn cgt_emit_lit_pattern_str_vs_int() {
     // int literal pattern: (_s == 42)
     let int_pat: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { value = 42; is_float = false; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { value = parser::numint_of_u64(42); is_float = false; fval = 0.0 }; line = 0; col = 0 }
     }
     let int_out = match emit_pat_test(cgt_empty(), cgt_prog(), int_pat, "_s", checker::Prim { kind = checker::PrimKind::I64 }) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(int_out, "(_s == "))   // bare C `==` (cb_i128 spells the constant)
@@ -1438,7 +1432,7 @@ fn cgt_region_ops() {
         type = checker::Uptr { }
         line = 0; col = 0
     }
-    let alloc_args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), region_var), cgt_num(42 to i128, checker::PrimKind::U64))
+    let alloc_args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), region_var), cgt_num(42, checker::PrimKind::U64))
     let alloc_e = checker::TExpr {
         kind = checker::TCall { callee = cgt_path3("teko", "mem", "region_alloc"); args = alloc_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
         type = checker::Ptr { inner = checker::Prim { kind = checker::PrimKind::U64 } }

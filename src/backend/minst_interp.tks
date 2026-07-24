@@ -1,7 +1,9 @@
 /**
  * teko::backend (isel-over-interp harness) — re-interpret a SELECTED
  * `MModule` over the SAME abstract model `teko::lir`'s `lir_interp` uses
- * (an unmasked i128-carrier register value, no byte-accurate layout), so
+ * (a raw i64 two's-complement register value that WRAPS mod 2^64 at every op —
+ * drop-128, 2026-07-24; both interpreters changed in lockstep, so this
+ * equivalence oracle is preserved — no byte-accurate layout), so
  * `minst_interp(select_module(m), entry, args) == interp_lmodule(m, entry,
  * args)` is a like-for-like equivalence check (§4/§6.2 of the isel plan).
  * This is A2's permanent equivalence oracle; it retires once A4's real
@@ -20,53 +22,50 @@
  */
 
 /**
- * two_pow_32 — the constant 2^32 as an i128 (a literal that fits the
- * parser's working range directly, unlike 2^64 in `isel_arm64.tks`).
- *
- * @return i128  2^32
- */
-fn two_pow_32() -> i128 {
-    4294967296 to i128
-}
-
-/**
- * decode_signed64 — the signed i128 value a 64-bit two's-complement bit
- * pattern represents: non-negative when the sign bit (bit 63) is clear,
- * otherwise `bits - 2^64`.
+ * decode_signed64 — the signed i64 value a 64-bit two's-complement bit pattern represents:
+ * a straight bit-reinterpret. `bits: u64 -> i64` is a CHECKED same-width cross-signedness
+ * cast (M.1) that panics past `i64::MAX`, so this never casts the full pattern directly — it
+ * splits `bits` into two 32-bit halves (each provably `<= u32::MAX`, always a safe widening
+ * cast) and reconstructs with ordinary WRAPPING `i64` arithmetic (drop-128, 2026-07-24 —
+ * replaces the old widen-to-i64-then-subtract-2^64 technique, which needed a wider carrier
+ * this crumb removes).
  *
  * @param u64 bits  the 64-bit bit pattern to decode
- * @return i128  its signed value
+ * @return i64  its signed value
  */
-fn decode_signed64(bits: u64) -> i128 {
-    let sign_boundary = 9223372036854775807 to u64
-    if bits > sign_boundary { (bits to i128) - two_pow_64() } else { bits to i128 }
+fn decode_signed64(bits: u64) -> i64 {
+    let hi = (bits >> 32) to i64
+    let lo = (bits & mask32_u64()) to i64
+    (hi * 4294967296) + lo
 }
 
 /**
- * decode_signed32 — the signed i128 value a 32-bit two's-complement bit
+ * decode_signed32 — the signed i64 value a 32-bit two's-complement bit
  * pattern (the low 32 bits of `bits`) represents, mirroring
- * `decode_signed64` at the narrower width.
+ * `decode_signed64` at the narrower width. Unlike the 64-bit case, `masked`
+ * is always `<= u32::MAX` — far inside `i64`'s range — so both arms cast
+ * directly with no split needed.
  *
  * @param u64 bits  the bit pattern to decode (only its low 32 bits are read)
- * @return i128  its signed value
+ * @return i64  its signed value
  */
-fn decode_signed32(bits: u64) -> i128 {
+fn decode_signed32(bits: u64) -> i64 {
     let masked = bits & mask32_u64()
     let sign_boundary = 2147483647 to u64
-    if masked > sign_boundary { (masked to i128) - two_pow_32() } else { masked to i128 }
+    if masked > sign_boundary { (masked to i64) - 4294967296 } else { masked to i64 }
 }
 
 /**
- * decode_signed — the signed i128 value a register-width bit pattern
+ * decode_signed — the signed i64 value a register-width bit pattern
  * represents, at width `wide` (true for 64-bit, false for 32-bit) — the
  * inverse of `isel_arm64.tks`'s `u64_bits_of`, used to re-derive the
  * logical value a `MOVZ`/`MOVK`/`MOVN` sequence assembles.
  *
  * @param u64 bits  the bit pattern to decode
  * @param bool wide  true for the 64-bit X form, false for 32-bit W
- * @return i128  its signed value
+ * @return i64  its signed value
  */
-fn decode_signed(bits: u64, wide: bool) -> i128 {
+fn decode_signed(bits: u64, wide: bool) -> i64 {
     if wide { decode_signed64(bits) } else { decode_signed32(bits) }
 }
 
@@ -84,21 +83,21 @@ type IVRead = struct {
     /**
      * value — the stored value (meaningful only when `ok`).
      */
-    value: i128
+    value: i64
 }
 
 /**
- * IReg128Vec — a growable, positionally-indexed i128 register vector (one
+ * IReg64Vec — a growable, positionally-indexed i64 register vector (one
  * of the four register files `MRegFile` holds — GPR/FPR, virtual/
  * physical), mirroring `teko::lir`'s `RegFile`.
  *
  * @since #383 A2-2
  */
-type IReg128Vec = struct {
+type IReg64Vec = struct {
     /**
      * values — each recorded position's value, parallel to `set`.
      */
-    values: []i128
+    values: []i64
     /**
      * set — whether each position has actually been written.
      */
@@ -108,24 +107,24 @@ type IReg128Vec = struct {
 /**
  * iv_new — an empty register vector.
  *
- * @return IReg128Vec  the empty vector
+ * @return IReg64Vec  the empty vector
  */
-fn iv_new() -> IReg128Vec {
-    IReg128Vec { values = teko::list::empty(); set = teko::list::empty() }
+fn iv_new() -> IReg64Vec {
+    IReg64Vec { values = teko::list::empty(); set = teko::list::empty() }
 }
 
 /**
  * iv_get — read position `id`; `ok=false` when it is out of range or was
  * never written.
  *
- * @param IReg128Vec v  the vector to read
+ * @param IReg64Vec v  the vector to read
  * @param u32 id  the position to read
  * @return IVRead  the read outcome
  */
-fn iv_get(v: IReg128Vec, id: u32) -> IVRead {
+fn iv_get(v: IReg64Vec, id: u32) -> IVRead {
     let i = id to u64
-    if i >= v.values.len { return IVRead { ok = false; value = 0 to i128 } }
-    if !v.set[i] { return IVRead { ok = false; value = 0 to i128 } }
+    if i >= v.values.len { return IVRead { ok = false; value = 0 to i64 } }
+    if !v.set[i] { return IVRead { ok = false; value = 0 to i64 } }
     IVRead { ok = true; value = v.values[i] }
 }
 
@@ -133,21 +132,21 @@ fn iv_get(v: IReg128Vec, id: u32) -> IVRead {
  * iv_set — write `val` into position `id`, growing the vector first when
  * `id` is past its current length.
  *
- * @param IReg128Vec v0  the vector to update
+ * @param IReg64Vec v0  the vector to update
  * @param u32 id  the position to write
- * @param i128 val  the value to store
- * @return IReg128Vec  the updated vector
+ * @param i64 val  the value to store
+ * @return IReg64Vec  the updated vector
  */
-fn iv_set(v0: IReg128Vec, id: u32, val: i128) -> IReg128Vec {
+fn iv_set(v0: IReg64Vec, id: u32, val: i64) -> IReg64Vec {
     let need = (id to u64) + 1
     mut values = v0.values
     mut set = v0.set
     loop {
         if values.len >= need { break }
-        values = teko::list::push(values, 0 to i128)
+        values = teko::list::push(values, 0 to i64)
         set = teko::list::push(set, false)
     }
-    mut out_values: []i128 = teko::list::empty()
+    mut out_values: []i64 = teko::list::empty()
     mut out_set: []bool = teko::list::empty()
     mut i: u64 = 0
     loop {
@@ -157,7 +156,7 @@ fn iv_set(v0: IReg128Vec, id: u32, val: i128) -> IReg128Vec {
         out_set = teko::list::push(out_set, if is_target { true } else { set[i] })
         i++
     }
-    IReg128Vec { values = out_values; set = out_set }
+    IReg64Vec { values = out_values; set = out_set }
 }
 
 /**
@@ -171,12 +170,12 @@ type MemCell = struct {
     /**
      * addr — the byte address (an `MFrameAddr` base plus `MMem` displacement).
      */
-    addr: i128
+    addr: i64
     /**
      * val — the whole value stored at `addr` (size-agnostic, mirroring
      * `lir_interp`'s one-cell-per-address approximation).
      */
-    val: i128
+    val: i64
 }
 
 /**
@@ -205,17 +204,17 @@ fn memstore_new() -> MMemStore { MMemStore { cells = teko::list::empty() } }
  * mem_get — read the value at `addr`; an address never stored to reads 0.
  *
  * @param MMemStore m  the memory to read
- * @param i128 addr  the address to read
- * @return i128  the stored value, or 0 if the address was never written
+ * @param i64 addr  the address to read
+ * @return i64  the stored value, or 0 if the address was never written
  */
-fn mem_get(m: MMemStore, addr: i128) -> i128 {
+fn mem_get(m: MMemStore, addr: i64) -> i64 {
     mut i: u64 = 0
     loop {
         if i >= m.cells.len { break }
         if m.cells[i].addr == addr { return m.cells[i].val }
         i++
     }
-    0 to i128
+    0 to i64
 }
 
 /**
@@ -224,11 +223,11 @@ fn mem_get(m: MMemStore, addr: i128) -> i128 {
  * `mrf_set`).
  *
  * @param MMemStore m  the memory to update
- * @param i128 addr  the address to write
- * @param i128 val  the value to store
+ * @param i64 addr  the address to write
+ * @param i64 val  the value to store
  * @return MMemStore  the updated memory
  */
-fn mem_set(m: MMemStore, addr: i128, val: i128) -> MMemStore {
+fn mem_set(m: MMemStore, addr: i64, val: i64) -> MMemStore {
     mut found = false
     mut cells: []MemCell = teko::list::empty()
     mut i: u64 = 0
@@ -260,27 +259,27 @@ type MRegFile = struct {
     /**
      * gpr_v — the virtual GPR register vector.
      */
-    gpr_v: IReg128Vec
+    gpr_v: IReg64Vec
     /**
      * fpr_v — the virtual FPR register vector.
      */
-    fpr_v: IReg128Vec
+    fpr_v: IReg64Vec
     /**
      * gpr_p — the physical GPR register vector (x0..x30).
      */
-    gpr_p: IReg128Vec
+    gpr_p: IReg64Vec
     /**
      * fpr_p — the physical FPR register vector (v0..v31).
      */
-    fpr_p: IReg128Vec
+    fpr_p: IReg64Vec
     /**
      * flag_a — the left operand of the most recent `MCmp`/`MCmpImm`.
      */
-    flag_a: i128
+    flag_a: i64
     /**
      * flag_b — the right operand of the most recent `MCmp`/`MCmpImm`.
      */
-    flag_b: i128
+    flag_b: i64
     /**
      * has_flags — true once a compare has run (an `MCSet` before the
      * first compare is an internal error).
@@ -302,7 +301,7 @@ type MRegFile = struct {
 fn mrf_new() -> MRegFile {
     MRegFile {
         gpr_v = iv_new(); fpr_v = iv_new(); gpr_p = iv_new(); fpr_p = iv_new()
-        flag_a = 0 to i128; flag_b = 0 to i128; has_flags = false
+        flag_a = 0 to i64; flag_b = 0 to i64; has_flags = false
         mem = memstore_new()
     }
 }
@@ -313,9 +312,9 @@ fn mrf_new() -> MRegFile {
  *
  * @param MRegFile mrf  the register file to read
  * @param MReg r  the register operand naming the vector
- * @return IReg128Vec  the selected vector
+ * @return IReg64Vec  the selected vector
  */
-fn mrf_vec_of(mrf: MRegFile, r: MReg) -> IReg128Vec {
+fn mrf_vec_of(mrf: MRegFile, r: MReg) -> IReg64Vec {
     if r.is_phys {
         match r.reg_class { MRegClass::GPR => mrf.gpr_p; MRegClass::FPR => mrf.fpr_p }
     } else {
@@ -329,10 +328,10 @@ fn mrf_vec_of(mrf: MRegFile, r: MReg) -> IReg128Vec {
  *
  * @param MRegFile mrf  the register file to update
  * @param MReg r  the register operand naming the vector to replace
- * @param IReg128Vec v  the replacement vector
+ * @param IReg64Vec v  the replacement vector
  * @return MRegFile  the updated register file
  */
-fn mrf_with_vec(mrf: MRegFile, r: MReg, v: IReg128Vec) -> MRegFile {
+fn mrf_with_vec(mrf: MRegFile, r: MReg, v: IReg64Vec) -> MRegFile {
     if r.is_phys {
         match r.reg_class {
             MRegClass::GPR => MRegFile { gpr_v = mrf.gpr_v; fpr_v = mrf.fpr_v; gpr_p = v; fpr_p = mrf.fpr_p; flag_a = mrf.flag_a; flag_b = mrf.flag_b; has_flags = mrf.has_flags; mem = mrf.mem }
@@ -363,10 +362,10 @@ fn mrf_get(mrf: MRegFile, r: MReg) -> IVRead {
  *
  * @param MRegFile mrf  the register file to update
  * @param MReg r  the register operand to write
- * @param i128 val  the value to store
+ * @param i64 val  the value to store
  * @return MRegFile  the updated register file
  */
-fn mrf_set(mrf: MRegFile, r: MReg, val: i128) -> MRegFile {
+fn mrf_set(mrf: MRegFile, r: MReg, val: i64) -> MRegFile {
     mrf_with_vec(mrf, r, iv_set(mrf_vec_of(mrf, r), r.id, val))
 }
 
@@ -375,11 +374,11 @@ fn mrf_set(mrf: MRegFile, r: MReg, val: i128) -> MRegFile {
  * `MCmp`/`MCmpImm` step), returning the updated register file.
  *
  * @param MRegFile mrf  the register file to update
- * @param i128 a  the left compared value
- * @param i128 b  the right compared value
+ * @param i64 a  the left compared value
+ * @param i64 b  the right compared value
  * @return MRegFile  the updated register file
  */
-fn mrf_with_flags(mrf: MRegFile, a: i128, b: i128) -> MRegFile {
+fn mrf_with_flags(mrf: MRegFile, a: i64, b: i64) -> MRegFile {
     MRegFile { gpr_v = mrf.gpr_v; fpr_v = mrf.fpr_v; gpr_p = mrf.gpr_p; fpr_p = mrf.fpr_p; flag_a = a; flag_b = b; has_flags = true; mem = mrf.mem }
 }
 
@@ -389,10 +388,10 @@ fn mrf_with_flags(mrf: MRegFile, a: i128, b: i128) -> MRegFile {
  * FPR argument seeding follows once float parameters are selected.
  *
  * @param MRegFile mrf0  the register file to seed
- * @param []i128 args  the entry function's argument values
+ * @param []i64 args  the entry function's argument values
  * @return MRegFile  the seeded register file
  */
-fn seed_params(mrf0: MRegFile, args: []i128) -> MRegFile {
+fn seed_params(mrf0: MRegFile, args: []i64) -> MRegFile {
     mut mrf = mrf0
     mut i: u64 = 0
     loop {
@@ -421,7 +420,7 @@ type MIResult = struct {
      * value — the RETURN outcome's carried value, or the JUMP outcome's
      * target block id (0 otherwise).
      */
-    value: i128
+    value: i64
     /**
      * message — the ERROR outcome's message ("" otherwise).
      */
@@ -433,15 +432,15 @@ type MIResult = struct {
  *
  * @return MIResult  the CONTINUE outcome
  */
-fn mires_continue() -> MIResult { MIResult { tag = 0; value = 0 to i128; message = "" } }
+fn mires_continue() -> MIResult { MIResult { tag = 0; value = 0 to i64; message = "" } }
 
 /**
  * mires_return — an `MRet` terminator carrying the function's result.
  *
- * @param i128 v  the returned value
+ * @param i64 v  the returned value
  * @return MIResult  the RETURN outcome
  */
-fn mires_return(v: i128) -> MIResult { MIResult { tag = 1; value = v; message = "" } }
+fn mires_return(v: i64) -> MIResult { MIResult { tag = 1; value = v; message = "" } }
 
 /**
  * mires_error — an out-of-subset instruction reached at "runtime".
@@ -449,7 +448,7 @@ fn mires_return(v: i128) -> MIResult { MIResult { tag = 1; value = v; message = 
  * @param str msg  the honest-stop message
  * @return MIResult  the ERROR outcome
  */
-fn mires_error(msg: str) -> MIResult { MIResult { tag = 2; value = 0 to i128; message = msg } }
+fn mires_error(msg: str) -> MIResult { MIResult { tag = 2; value = 0 to i64; message = msg } }
 
 /**
  * is_micontinue — true iff `r` is a CONTINUE placeholder.
@@ -474,7 +473,7 @@ fn is_mireturn(r: MIResult) -> bool { r.tag == 1 }
  * @param u32 target  the destination block id
  * @return MIResult  the JUMP outcome
  */
-fn mires_jump(target: u32) -> MIResult { MIResult { tag = 3; value = target to i128; message = "" } }
+fn mires_jump(target: u32) -> MIResult { MIResult { tag = 3; value = target to i64; message = "" } }
 
 /**
  * is_mijump — true iff `r` is a JUMP outcome (control transfers to another
@@ -534,7 +533,7 @@ type AluEval = struct {
     /**
      * value — the computed result (meaningful only when `ok`).
      */
-    value: i128
+    value: i64
     /**
      * message — the honest-stop message (meaningful only when `!ok`).
      */
@@ -544,10 +543,10 @@ type AluEval = struct {
 /**
  * alu_ok — a successful ALU evaluation.
  *
- * @param i128 v  the computed value
+ * @param i64 v  the computed value
  * @return AluEval  the successful outcome
  */
-fn alu_ok(v: i128) -> AluEval { AluEval { ok = true; value = v; message = "" } }
+fn alu_ok(v: i64) -> AluEval { AluEval { ok = true; value = v; message = "" } }
 
 /**
  * alu_err — a failed ALU evaluation (an out-of-subset op or a zero
@@ -556,23 +555,23 @@ fn alu_ok(v: i128) -> AluEval { AluEval { ok = true; value = v; message = "" } }
  * @param str msg  the honest-stop message
  * @return AluEval  the failed outcome
  */
-fn alu_err(msg: str) -> AluEval { AluEval { ok = false; value = 0 to i128; message = msg } }
+fn alu_err(msg: str) -> AluEval { AluEval { ok = false; value = 0 to i64; message = msg } }
 
 /**
  * alu_div — integer division with a zero-divisor guard, mirroring
  * `lir_interp`'s `eval_div`.
  *
- * @param i128 a  the dividend
- * @param i128 b  the divisor
+ * @param i64 a  the dividend
+ * @param i64 b  the divisor
  * @return AluEval  the quotient, or a divide-by-zero honest-stop
  */
-fn alu_div(a: i128, b: i128) -> AluEval {
-    if b == (0 to i128) { return alu_err("minst interp: divide by zero") }
+fn alu_div(a: i64, b: i64) -> AluEval {
+    if b == (0 to i64) { return alu_err("minst interp: divide by zero") }
     alu_ok(a / b)
 }
 
 /**
- * eval_alu — the arithmetic of an `MAluOp` over the unmasked i128 carrier
+ * eval_alu — the arithmetic of an `MAluOp` over the unmasked i64 carrier
  * (matching `lir_interp`'s own unmasked model, so the equivalence check holds
  * for any in-range value): `Add`/`Sub`/`Mul`/`Sdiv`/`Udiv` arithmetic, the
  * bitwise lane (`And`/`Orr`/`Eor`, pure two's-complement bit ops), and the
@@ -581,11 +580,11 @@ fn alu_div(a: i128, b: i128) -> AluEval {
  * and mirroring `lir_interp`'s own `eval_bin` shift arms.
  *
  * @param MAluOp op  the operation to evaluate
- * @param i128 a  the first operand
- * @param i128 b  the second operand
+ * @param i64 a  the first operand
+ * @param i64 b  the second operand
  * @return AluEval  the computed value, or a honest-stop
  */
-fn eval_alu(op: MAluOp, a: i128, b: i128) -> AluEval {
+fn eval_alu(op: MAluOp, a: i64, b: i64) -> AluEval {
     match op {
         MAluOp::Add => alu_ok(a + b)
         MAluOp::Sub => alu_ok(a - b)
@@ -603,17 +602,17 @@ fn eval_alu(op: MAluOp, a: i128, b: i128) -> AluEval {
 
 /**
  * cond_holds — whether `MCond` `c` holds for the pending compare operands
- * `a`/`b`, using the carrier's plain (signed) i128 operators for BOTH the
+ * `a`/`b`, using the carrier's plain (signed) i64 operators for BOTH the
  * signed and unsigned lanes — A2-2's own fixtures are non-negative, so the
  * two agree, exactly mirroring `lir_interp`'s own `eval_bin` reasoning for
  * `ICmpLtS` vs `ICmpLtU`.
  *
  * @param MCond c  the condition code to test
- * @param i128 a  the left compared value
- * @param i128 b  the right compared value
+ * @param i64 a  the left compared value
+ * @param i64 b  the right compared value
  * @return bool  whether the condition holds
  */
-fn cond_holds(c: MCond, a: i128, b: i128) -> bool {
+fn cond_holds(c: MCond, a: i64, b: i64) -> bool {
     match c {
         MCond::EQ => a == b
         MCond::NE => a != b
@@ -656,7 +655,7 @@ fn interp_alu(mrf: MRegFile, x: MAlu) -> MIStep {
 fn interp_alu_imm(mrf: MRegFile, x: MAluImm) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: alu_imm operand register is undefined"), mrf) }
-    let r = eval_alu(x.op, a.value, x.imm to i128)
+    let r = eval_alu(x.op, a.value, x.imm to i64)
     if !r.ok { return mistep_stop(mires_error(r.message), mrf) }
     mistep_cont(mrf_set(mrf, x.dst, r.value))
 }
@@ -692,7 +691,7 @@ fn interp_neg(mrf: MRegFile, x: MNeg) -> MIStep {
 
 /**
  * interp_mvn — an `MMvn` step: `dst = ~a`, the bitwise one's-complement over the unmasked
- * i128 carrier (matching `lir_interp`'s own `eval_un` INot arm, so the equivalence check
+ * i64 carrier (matching `lir_interp`'s own `eval_un` INot arm, so the equivalence check
  * holds for any in-range value; narrow-width masking is deferred exactly as `interp_neg`
  * defers it).
  *
@@ -732,7 +731,7 @@ fn interp_cmp(mrf: MRegFile, x: MCmp) -> MIStep {
 fn interp_cmp_imm(mrf: MRegFile, x: MCmpImm) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: cmp_imm operand register is undefined"), mrf) }
-    mistep_cont(mrf_with_flags(mrf, a.value, x.imm to i128))
+    mistep_cont(mrf_with_flags(mrf, a.value, x.imm to i64))
 }
 
 /**
@@ -746,7 +745,7 @@ fn interp_cmp_imm(mrf: MRegFile, x: MCmpImm) -> MIStep {
 fn interp_cset(mrf: MRegFile, x: MCSet) -> MIStep {
     if !mrf.has_flags { return mistep_stop(mires_error("minst interp: cset with no preceding compare (internal)"), mrf) }
     let truth = cond_holds(x.cond, mrf.flag_a, mrf.flag_b)
-    mistep_cont(mrf_set(mrf, x.dst, if truth { 1 to i128 } else { 0 to i128 }))
+    mistep_cont(mrf_set(mrf, x.dst, if truth { 1 to i64 } else { 0 to i64 }))
 }
 
 /**
@@ -820,7 +819,7 @@ fn interp_mov(mrf: MRegFile, x: MMov) -> MIStep {
 fn interp_ret(mrf: MRegFile) -> MIStep {
     let px0 = mrf_get(mrf, preg(0, MRegClass::GPR))
     if px0.ok { return mistep_stop(mires_return(px0.value), mrf) }
-    mistep_stop(mires_return(0 to i128), mrf)
+    mistep_stop(mires_return(0 to i64), mrf)
 }
 
 /**
@@ -856,10 +855,10 @@ fn mrf_with_mem(mrf: MRegFile, mem: MMemStore) -> MRegFile {
  * given slot always resolves to the same base here.
  *
  * @param u32 slot  the frame-slot index
- * @return i128  the slot's base address
+ * @return i64  the slot's base address
  */
-fn frame_slot_addr(slot: u32) -> i128 {
-    ((slot to i128) + (1 to i128)) * (65536 to i128)
+fn frame_slot_addr(slot: u32) -> i64 {
+    ((slot to i64) + (1 to i64)) * (65536 to i64)
 }
 
 /**
@@ -885,7 +884,7 @@ fn interp_frame_addr(mrf: MRegFile, x: MFrameAddr) -> MIStep {
 fn interp_load(mrf: MRegFile, x: MLoad) -> MIStep {
     let base = mrf_get(mrf, x.mem.base)
     if !base.ok { return mistep_stop(mires_error("minst interp: load base register is undefined"), mrf) }
-    let addr = base.value + (x.mem.offset to i128)
+    let addr = base.value + (x.mem.offset to i64)
     mistep_cont(mrf_set(mrf, x.dst, mem_get(mrf.mem, addr)))
 }
 
@@ -901,7 +900,7 @@ fn interp_store(mrf: MRegFile, x: MStore) -> MIStep {
     let base = mrf_get(mrf, x.mem.base)
     let src = mrf_get(mrf, x.src)
     if !base.ok || !src.ok { return mistep_stop(mires_error("minst interp: store base/src register is undefined"), mrf) }
-    let addr = base.value + (x.mem.offset to i128)
+    let addr = base.value + (x.mem.offset to i64)
     mistep_cont(mrf_with_mem(mrf, mem_set(mrf.mem, addr, src.value)))
 }
 
@@ -1012,7 +1011,7 @@ fn interp_branch_cond(mrf: MRegFile, x: MBranchCond) -> MIStep {
 fn interp_cbz(mrf: MRegFile, x: MCbz) -> MIStep {
     let a = mrf_get(mrf, x.a)
     if !a.ok { return mistep_stop(mires_error("minst interp: cbz operand register is undefined"), mrf) }
-    let is_zero = a.value == (0 to i128)
+    let is_zero = a.value == (0 to i64)
     if is_zero == x.zero { mistep_stop(mires_jump(x.target), mrf) } else { mistep_cont(mrf) }
 }
 
@@ -1129,13 +1128,13 @@ fn find_mblock(f: MFunc, block_id: u32) -> MBlockHit {
  *
  * @param MModule m  the selected module to execute
  * @param str entry  the entry function's symbol
- * @param []i128 args  the entry function's argument values
- * @return i128  the produced exit code, or -1 on any honest-stop
+ * @param []i64 args  the entry function's argument values
+ * @return i64  the produced exit code, or -1 on any honest-stop
  */
-pub fn minst_interp(m: MModule, entry: str, args: []i128) -> i128 {
+pub fn minst_interp(m: MModule, entry: str, args: []i64) -> i64 {
     let f = find_mfunc(m, entry)
-    if !f.found { return -1 to i128 }
-    if f.func.blocks.len == 0 { return -1 to i128 }
+    if !f.found { return -1 to i64 }
+    if f.func.blocks.len == 0 { return -1 to i64 }
     mut mrf = seed_params(mrf_new(), args)
     mut cur: u32 = f.func.blocks[0].id
     mut budget: u64 = 0
@@ -1143,11 +1142,11 @@ pub fn minst_interp(m: MModule, entry: str, args: []i128) -> i128 {
         if budget >= 1000000 { break }
         budget++
         let hit = find_mblock(f.func, cur)
-        if !hit.found { return -1 to i128 }
+        if !hit.found { return -1 to i64 }
         let step = run_mblock(hit.block, mrf)
         mrf = step.mrf
         if is_mireturn(step.result) { return step.result.value }
-        if is_mijump(step.result) { cur = step.result.value to u32 } else { return -1 to i128 }
+        if is_mijump(step.result) { cur = step.result.value to u32 } else { return -1 to i64 }
     }
-    -1 to i128
+    -1 to i64
 }

@@ -8,6 +8,21 @@ use teko::lexer
 // `(tk_byte)k`. The .tkb reader's prim_of / kind_of are the inverses (byte → enum ordinal).
 fn prim_byte(k: checker::PrimKind) -> byte { k to byte }
 fn kind_byte(k: lexer::TokenKind) -> byte { k to byte }
+
+/**
+ * numint_hi / numint_lo — the frozen `hi:lo` u64-pair wire encoding of a `parser::NumInt`
+ * (drop-128, 2026-07-24; replaces the old `(value >> 64)`/`(value & 0xFFFF…FFFF)` i128
+ * split — §7's wire-compat proof): `lo` is the value's own 64-bit two's-complement bits
+ * (the magnitude when non-negative, else its two's-complement negation, `0 - mag`); `hi` is
+ * the sign-extension of that pattern — all-ones when negative, else 0. Byte-identical to
+ * what the old i128 carrier produced for every value in `[i64::MIN, u64::MAX]` (the only
+ * range a `NumInt` can hold).
+ *
+ * @param v  the literal value to encode
+ * @return   the wire `hi`/`lo` half
+ */
+fn numint_hi(v: parser::NumInt) -> u64 { if v.neg { 0xFFFFFFFFFFFFFFFF } else { 0 } }
+fn numint_lo(v: parser::NumInt) -> u64 { if v.neg { 0 - v.mag } else { v.mag } }
 fn bindkind_byte(k: parser::BindKind) -> byte { k to byte }   // (C7.16) Let/Mut/Const → ordinal byte
 fn assign_kind_byte(k: parser::AssignKind) -> byte { k to byte }   // (#88) Simple/RefDeref/Field → ordinal byte
 fn vis_byte(v: parser::Visibility) -> byte { v to byte }   // (C7.16) Private/Pub/Exp → ordinal byte
@@ -90,16 +105,13 @@ fn write_call_tail(buf: []byte, t: StrTable, cl: checker::TCall) -> []byte {
 fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
     let b = write_type(buf, t, te.type)   // every node carries its type
     match te.kind {
-        // N1/N2: the number node carries { is_float, value: i128, fval: f64 }. Serialize:
-        // tag, is_float (u8), the 128-bit value as two u64 (hi then lo), then the f64's
-        // IEEE-754 bits as a u64. read_texpr reads the exact inverse.
         checker::TNumber as n => write_u64(
             write_u64(
                 write_u64(
                     write_u8(write_u8(b, 0), (if n.is_float { 1 } else { 0 }) to byte),
-                    (n.value >> 64) to u64),   // hi
-                (n.value & 0xFFFFFFFFFFFFFFFF) to u64),   // lo
-            teko::f64_bits(n.fval))   // f64 -> u64 bit pattern
+                    numint_hi(n.value)),
+                numint_lo(n.value)),
+            teko::f64_bits(n.fval))
         checker::TVar as v => write_u32(write_u8(write_u32(write_u8(b, 1), st_find(t, v.name)), (if v.is_func { 1 } else { 0 }) to byte), st_find(t, v.func_ns))   // (W10a) name, is_func, func_ns
         checker::TStrLit as s => write_u32(write_u8(b, 2), st_find(t, s.text))
         checker::TByteLit as bl => write_u8(write_u8(b, 3), bl.value)
@@ -175,7 +187,7 @@ fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
             sb
         }
         // Enum::Member — PathExpr: tag 19, enum name (interned u32), member (interned u32), ordinal (u64), (#50) value (u128 as hi then lo u64).
-        checker::TPathExpr as pe => write_u64(write_u64(write_u64(write_u32(write_u32(write_u8(b, 19), st_find(t, pe.enum_name)), st_find(t, pe.member)), pe.ordinal), (pe.value >> 64) to u64), (pe.value & 0xFFFFFFFFFFFFFFFF) to u64)
+        checker::TPathExpr as pe => write_u64(write_u64(write_u64(write_u32(write_u32(write_u8(b, 19), st_find(t, pe.enum_name)), st_find(t, pe.member)), pe.ordinal), 0), pe.value)
         // Phase 2 — InExpr (<expr> in [ … ]): tag 20, lhs texpr, nelems (u64), then each elem texpr (write order = read order).
         checker::TInExpr as ie => {
             mut sb = write_texpr(write_u8(b, 20), t, ie.lhs)
@@ -415,7 +427,8 @@ fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody) -> []byte {
 
 /** a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4)/
     FlagsBody(5)/ClassBody(6)/InterfaceBody(7)/TraitBody(8). (#165 C5) Interface/Trait ride their
-    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u128 value. */
+    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u64 value
+    (drop-128, 2026-07-24), still wire-shaped as a hi:lo pair (`hi` always 0) for byte compat. */
 fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
     match tb {
         parser::StructBody as s => write_struct_body(buf, t, s)
@@ -430,16 +443,19 @@ fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
     }
 }
 
-/** (C8.6) a FlagsBody: n(u64), then for each member name_idx(u32) + value hi(u64) + lo(u64). */
+/**
+ * (C8.6) a FlagsBody: n(u64), then for each member name_idx(u32) + value hi(u64) + lo(u64). A
+ * flags member's value is a non-negative u64 magnitude (drop-128, 2026-07-24 — `hi` is always 0,
+ * keeping the wire pair shape byte-compat with the pre-drop codec, §7's wire-compat proof).
+ */
 fn write_flags_body(buf: []byte, t: StrTable, f: parser::FlagsBody) -> []byte {
     mut sb = write_u64(write_u8(buf, 5), f.members.len to u64)
     mut i = 0
     loop {
         if i >= f.members.len { break }
         sb = write_u32(sb, st_find(t, f.members[i]))
-        let v = f.values[i]
-        sb = write_u64(sb, (v >> 64) to u64)
-        sb = write_u64(sb, (v & 0xFFFFFFFFFFFFFFFF) to u64)
+        sb = write_u64(sb, 0)
+        sb = write_u64(sb, f.values[i])
         i++
     }
     sb
@@ -598,7 +614,7 @@ fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram) -> []byte {
 // a parser::Expr in a pattern (Number/StrLit/ByteLit only): u8 tag + payload.
 fn write_pexpr(buf: []byte, t: StrTable, e: parser::Expr) -> []byte {
     match e.kind {
-        parser::Number as n => write_u64(write_u64(write_u64(write_u8(write_u8(buf, 0), (if n.is_float { 1 } else { 0 }) to byte), (n.value >> 64) to u64), (n.value & 0xFFFFFFFFFFFFFFFF) to u64), teko::f64_bits(n.fval))
+        parser::Number as n => write_u64(write_u64(write_u64(write_u8(write_u8(buf, 0), (if n.is_float { 1 } else { 0 }) to byte), numint_hi(n.value)), numint_lo(n.value)), teko::f64_bits(n.fval))
         parser::StrLit as s => write_u32(write_u8(buf, 1), st_find(t, s.text))
         parser::ByteLit as bl => write_u8(write_u8(buf, 2), bl.value)
         _ => write_u8(buf, 255)   // a non-literal pattern expr (does not occur — patterns hold only Number/Str/Byte); read rejects 255

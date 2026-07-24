@@ -28,17 +28,18 @@ fn u64_hex(v: u64) -> str {
     str(xs)
 }
 
-/** i128_dec — the i128 as decimal text. i64_to_str only covers 64-bit carriers, so
-    the LIR printer renders 128-bit literals itself (digit-by-digit over the
-    magnitude, with a leading '-' for negatives). */
-fn i128_dec(v: i128) -> str {
+/** i64_dec — the i64 as decimal text (drop-128, 2026-07-24 — replaces `i128_dec`;
+    `LConstInt.val` is now the i64 carrier itself). Renders digit-by-digit over the
+    magnitude, with a leading '-' for negatives, rather than delegating to
+    `teko::u64_to_str`/`i64_to_str` so the printer stays self-contained. */
+fn i64_dec(v: i64) -> str {
     if v == 0 { return "0" }
     let neg = v < 0
-    mut mag: u128 = if neg { u128_of_neg_i128(v) } else { v to u128 }
+    mut mag: u64 = if neg { u64_of_neg_i64(v) } else { v to u64 }
     mut digits: []byte = teko::list::empty()
     loop {
         if mag == 0 { break }
-        digits = teko::list::push(digits, (b'0' to u128 + mag % 10) to byte)
+        digits = teko::list::push(digits, (b'0' to u64 + mag % 10) to byte)
         mag = mag / 10
     }
     mut xs: []byte = teko::list::empty()
@@ -48,10 +49,13 @@ fn i128_dec(v: i128) -> str {
     str(xs)
 }
 
-/** u128_of_neg_i128 — the magnitude of a negative i128 as a u128, computed without
-    overflowing on i128::MIN (|MIN| exceeds i128::MAX). */
-fn u128_of_neg_i128(v: i128) -> u128 {
-    ((-(v + 1)) to u128) + 1
+/** u64_of_neg_i64 — the magnitude of a negative i64 as a u64, computed without
+    overflowing on i64::MIN (|MIN| exceeds i64::MAX): `-(v+1)` never overflows (v+1
+    stays in range even at MIN), then `+1` recovers the true magnitude. Also sidesteps
+    the CHECKED `i64 -> u64` cast (M.1) a direct `v to u64` on a negative source would
+    panic on — `-(v+1)` is always non-negative, so its cast is safe. */
+fn u64_of_neg_i64(v: i64) -> u64 {
+    ((-(v + 1)) to u64) + 1
 }
 
 /** ltype_name — the printer spelling of an LType (the machine class as a lowercase
@@ -126,7 +130,7 @@ fn result_prefix(inst: LInst) -> str {
     the enclosing block so N1 keeps it terse: the literal is untyped in the printer
     (its width is fixed by the consumer). N1 prints a bare `const <dec>`. */
 fn print_const_int(c: LConstInt) -> str {
-    teko::str::concat("const ", i128_dec(c.val))
+    teko::str::concat("const ", i64_dec(c.val))
 }
 
 /** print_const_float — `const.f64 0x<bits>` (bit-exact IEEE). */

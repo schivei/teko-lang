@@ -66,32 +66,37 @@ fn ltype_is_float(t: LType) -> bool {
 
 /**
  * lo_byte — the little-endian byte of `v` at bit offset `shift` (a multiple of 8): shift right, take
- * the low 8 bits (#594 crumb 6). Truncating through `u64` yields the correct two's-complement byte
- * for a negative `v` (e.g. `~0` serializes to `0xFF`), matching how the backend stores a scalar.
+ * the low 8 bits (#594 crumb 6). `v` is the value's raw i64 two's-complement register bits (drop-128,
+ * 2026-07-24 — the fold carrier is i64, not i128); truncating through `u64` yields the correct two's-
+ * complement byte for a negative `v` (e.g. `~0` serializes to `0xFF`), matching how the backend stores
+ * a scalar. A `shift >= 64` is reached only when serializing into a field WIDER than the i64 carrier
+ * (a still-accepted `u128`/`i128` const field) — its byte is the sign-extension fill (all-ones for a
+ * negative `v`, all-zeros otherwise), exactly what storing a narrower register into a wider slot does.
  *
- * @param v      the i128 value being serialized
+ * @param v      the i64 value being serialized
  * @param shift  the bit offset of the wanted byte (0, 8, 16, …)
  * @return       the extracted byte
  */
-fn lo_byte(v: i128, shift: i128) -> byte {
+fn lo_byte(v: i64, shift: u32) -> byte {
+    if shift >= 64 { return if v < 0 { 0xFF to byte } else { 0 to byte } }
     (((v >> shift) to u64) & (0xFF to u64)) to byte
 }
 
 /**
- * serialize_le — the little-endian byte image of the i128 value `v` in `nbytes` bytes (#594 crumb
+ * serialize_le — the little-endian byte image of the i64 value `v` in `nbytes` bytes (#594 crumb
  * 6). A field/element wider than its value truncates to its declared width, exactly as a machine
- * store of that width would.
+ * store of that width would; a field WIDER than i64 sign-extends (`lo_byte`'s `shift >= 64` case).
  *
  * @param v       the folded scalar value
  * @param nbytes  the target width in bytes (the machine class's size)
  * @return        the little-endian byte image
  */
-fn serialize_le(v: i128, nbytes: u32) -> []byte {
+fn serialize_le(v: i64, nbytes: u32) -> []byte {
     mut out: []byte = teko::list::empty()
     mut k: u32 = 0
     loop {
         if k >= nbytes { break }
-        out = teko::list::push(out, lo_byte(v, (k * 8) to i128))
+        out = teko::list::push(out, lo_byte(v, k * 8))
         k++
     }
     out
@@ -100,31 +105,31 @@ fn serialize_le(v: i128, nbytes: u32) -> []byte {
 /**
  * const_fold_unary — fold a const unary operator over an already-folded operand (#594 crumb 6): unary
  * `-` (negation) or `~` (bitwise complement, computed as the two's-complement identity `-v - 1` so the
- * fold uses ONLY i128 `+`/`-`, the sole i128 arithmetic the native backend lowers today — `*`/`/` are
- * deferred to an i128 helper, see `isel_arm64.tks` §6.3). The result is the widest integer carrier and
- * truncates to the field's width at serialization.
+ * fold uses ONLY i64 `+`/`-`, the sole arithmetic the native backend lowers today — `*`/`/` are
+ * deferred to a helper, see `isel_arm64.tks` §6.3). The result is the fold's i64 register carrier
+ * (drop-128, 2026-07-24) and truncates/sign-extends to the field's width at serialization.
  *
  * @param op  the unary operator token kind
  * @param v   the folded operand value
  * @return    the folded result
  * @throws    when `op` is not a const-admissible unary operator
  */
-fn const_fold_unary(op: lexer::TokenKind, v: i128) -> i128 | error {
+fn const_fold_unary(op: lexer::TokenKind, v: i64) -> i64 | error {
     match op {
-        lexer::TokenKind::Tilde => ((0 to i128) - v) - (1 to i128)
-        lexer::TokenKind::Minus => (0 to i128) - v
+        lexer::TokenKind::Tilde => ((0 to i64) - v) - (1 to i64)
+        lexer::TokenKind::Minus => (0 to i64) - v
         _ => error { message = "const aggregate: non-const unary operator in initializer (#594)" }
     }
 }
 
 /**
  * const_fold_binary — fold a const binary operator over two already-folded operands (#594 crumb 6).
- * Only `+` and `-` fold here: they are the i128 arithmetic the native self-build definitely lowers
- * (`lir_print.tks` performs `*`/`/`/`%` on a u128 magnitude precisely because signed i128
- * multiply/divide/shift are deferred to a helper-call, `isel_arm64.tks` §6.3). The remaining
- * const-grammar operators (`* / % & | ^ << >>`) are a documented Tier-A follow-up — they honest-stop
- * rather than emit an i128 op the backend cannot yet materialize (the required Tier-A shapes use
- * literal/cast fields, no arithmetic).
+ * Only `+` and `-` fold here: they are the i64 arithmetic the native self-build definitely lowers
+ * (`lir_print.tks` performs `*`/`/`/`%` on a u64 magnitude precisely because signed multiply/divide/
+ * shift are deferred to a helper-call, `isel_arm64.tks` §6.3). The remaining const-grammar operators
+ * (`* / % & | ^ << >>`) are a documented Tier-A follow-up — they honest-stop rather than emit an op
+ * the backend cannot yet materialize (the required Tier-A shapes use literal/cast fields, no
+ * arithmetic).
  *
  * @param op  the binary operator token kind
  * @param a   the folded left operand
@@ -132,7 +137,7 @@ fn const_fold_unary(op: lexer::TokenKind, v: i128) -> i128 | error {
  * @return    the folded result
  * @throws    for any operator beyond `+`/`-` (a Tier-A const-fold follow-up)
  */
-fn const_fold_binary(op: lexer::TokenKind, a: i128, b: i128) -> i128 | error {
+fn const_fold_binary(op: lexer::TokenKind, a: i64, b: i64) -> i64 | error {
     match op {
         lexer::TokenKind::Plus => a + b
         lexer::TokenKind::Minus => a - b
@@ -141,22 +146,22 @@ fn const_fold_binary(op: lexer::TokenKind, a: i128, b: i128) -> i128 | error {
 }
 
 /**
- * const_fold_int — fold a scalar (integer/bool/byte) const initializer expression to its i128 value
- * (#594 crumb 6): a numeric/byte/bool literal, a cast (representation-preserving here — the target
- * width truncates only at serialization), or a unary/binary arithmetic tree over such leaves. A
- * FLOAT value, a `char` (fat runtime image), an enum-member path, or a nested const reference is a
- * documented Tier-A follow-up and honest-stops (the required Tier-A shapes use integer/bool/byte
- * literal fields directly).
+ * const_fold_int — fold a scalar (integer/bool/byte) const initializer expression to its raw i64
+ * register value (#594 crumb 6; drop-128, 2026-07-24): a numeric/byte/bool literal, a cast
+ * (representation-preserving here — the target width truncates/sign-extends only at serialization),
+ * or a unary/binary arithmetic tree over such leaves. A FLOAT value, a `char` (fat runtime image), an
+ * enum-member path, or a nested const reference is a documented Tier-A follow-up and honest-stops (the
+ * required Tier-A shapes use integer/bool/byte literal fields directly).
  *
  * @param e  the field/element initializer expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when `e` is a float, a char, or a form beyond the integer const-fold subset
  */
-fn const_fold_int(e: checker::TExpr) -> i128 | error {
+fn const_fold_int(e: checker::TExpr) -> i64 | error {
     match e.kind {
-        checker::TNumber as n => if n.is_float { error { message = "const aggregate: float value materialization is a Tier-A follow-up (#594)" } } else { n.value }
-        checker::TByteLit as b => b.value to i128
-        checker::TBoolLit as bo => if bo.value { 1 to i128 } else { 0 to i128 }
+        checker::TNumber as n => if n.is_float { error { message = "const aggregate: float value materialization is a Tier-A follow-up (#594)" } } else { parser::numint_to_i64(n.value) }
+        checker::TByteLit as b => b.value to i64
+        checker::TBoolLit as bo => if bo.value { 1 to i64 } else { 0 to i64 }
         checker::TCharLit => error { message = "const aggregate: char value is fat (Tier-B, T-B) (#594)" }
         checker::TCast as c => const_fold_int(c.expr)
         checker::TUnary as u => const_fold_unary_expr(u)
@@ -170,11 +175,11 @@ fn const_fold_int(e: checker::TExpr) -> i128 | error {
  * operator (#594 crumb 6).
  *
  * @param u  the typed unary expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when the operand or the operator is outside the integer const-fold subset
  */
-fn const_fold_unary_expr(u: checker::TUnary) -> i128 | error {
-    let v = match const_fold_int(u.operand) { i128 as x => x; error as e => return e }
+fn const_fold_unary_expr(u: checker::TUnary) -> i64 | error {
+    let v = match const_fold_int(u.operand) { i64 as x => x; error as e => return e }
     const_fold_unary(u.op, v)
 }
 
@@ -183,12 +188,12 @@ fn const_fold_unary_expr(u: checker::TUnary) -> i128 | error {
  * the operator (#594 crumb 6).
  *
  * @param b  the typed binary expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when an operand or the operator is outside the integer const-fold subset
  */
-fn const_fold_binary_expr(b: checker::TBinary) -> i128 | error {
-    let a = match const_fold_int(b.left) { i128 as x => x; error as e => return e }
-    let c = match const_fold_int(b.right) { i128 as x => x; error as e => return e }
+fn const_fold_binary_expr(b: checker::TBinary) -> i64 | error {
+    let a = match const_fold_int(b.left) { i64 as x => x; error as e => return e }
+    let c = match const_fold_int(b.right) { i64 as x => x; error as e => return e }
     const_fold_binary(b.op, a, c)
 }
 
@@ -286,7 +291,7 @@ fn const_str_bytes(init: checker::TExpr) -> []byte | error {
 
 /**
  * const_array_bytes — the rodata image of a `[]T` flat-scalar array literal: each element folded to
- * its i128 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
+ * its i64 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
  * a later `[i]`/`.len` read agrees byte-for-byte on both engines (#594 crumb 6). A spread element is
  * not statically materializable and honest-stops.
  *
@@ -302,7 +307,7 @@ fn const_array_bytes(element: checker::Type, a: checker::TArrayLit) -> []byte | 
     loop {
         if i >= a.elements.len { break }
         if a.elements[i].is_spread { return error { message = "const slice: spread element not statically materializable (#594)" } }
-        let v = match const_fold_int(a.elements[i].expr) { i128 as x => x; error as e => return e }
+        let v = match const_fold_int(a.elements[i].expr) { i64 as x => x; error as e => return e }
         out = append_bytes(out, serialize_le(v, stride))
         i++
     }
@@ -362,7 +367,7 @@ fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: 
     if ltype_is_ptr(lt) { return error { message = teko::str::concat("const aggregate: field `", layout.field_names[j], "` is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)") } }
     if ltype_is_float(lt) { return error { message = teko::str::concat("const aggregate: float field `", layout.field_names[j], "` materialization is a Tier-A follow-up (#594)") } }
     let vexpr = match struct_init_value(si, layout.field_names[j]) { checker::TExpr as x => x; error as e => return e }
-    let v = match const_fold_int(vexpr) { i128 as x => x; error as e => return e }
+    let v = match const_fold_int(vexpr) { i64 as x => x; error as e => return e }
     serialize_le(v, ltype_size(lt))
 }
 
@@ -409,7 +414,7 @@ fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: ch
     let count = match const_fat_len(field_ty, array_bytes.len to u32) { u32 as c => c; error as e => return e }
     let leaf_sym = const_leaf_symbol(const_name, field_name)
     let ptr_size = ltype_size(LType::Ptr)
-    let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i128, ptr_size))
+    let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i64, ptr_size))
     FatFieldImage {
         slot_bytes = slot
         reloc = data_reloc(fieldoff, leaf_sym)
@@ -494,7 +499,7 @@ fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts:
  */
 fn const_variant_tag_bytes(si: checker::TStructInit, index: u32) -> []byte | error {
     if si.field_names.len > 0 { return error { message = "const variant: non-empty payload case materialization is a Tier-A follow-up (#594)" } }
-    serialize_le(index to i128, ltype_size(LType::I32))
+    serialize_le(index to i64, ltype_size(LType::I32))
 }
 
 /**
