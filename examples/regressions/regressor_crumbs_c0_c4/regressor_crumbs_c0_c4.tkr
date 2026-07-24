@@ -1,0 +1,65 @@
+# regressor_crumbs_c0_c4.tkr — a self-test bank proving the 0.3.1 C0-C4 regression-runner
+# crumbs (docs/design/regressor-principal-0.3.1.md) actually work end-to-end under `teko test .`:
+# inline source (C1), env/backend injection (C2), and a target run-wrapper with an honest skip
+# path (C3). Crumb C4 (dependency provisioning) is proven separately by
+# examples/regressions/crumb_dependency_smoke/ (a project-regressor — provisioning a scratch
+# `packages/` needs a real dep + consumer project, not an inline snippet).
+#
+# This file is a THROWAWAY crumb smoke test, not the final `regressor.tkr` bank — populating the
+# real bank (F0-F7, the complete null-union matrix, etc.) is crumb C5, out of this wave's scope.
+
+Feature: C1 — inline source builds and runs
+
+  Scenario: an inline snippet builds and runs
+    Given source inline = """
+    exit(41 + 1)
+    """
+    When built and run
+    Then exit = 42
+
+# A `compilation fails` scenario MUST live in its OWN Feature: a Feature is dispatched uniformly
+# by its FIRST scenario's kind (`tkr_feature_is_compile_fail`), so mixing a compile-fail scenario
+# alongside a `built and run` one under the same Feature would route it through the run path
+# instead (a pre-existing 0.3.0.30 grammar constraint, not a 0.3.1 change).
+Feature: C1b — inline source rejects with a pinned diagnostic
+
+  Scenario: an inline snippet's compilation fails with a pinned diagnostic
+    Given source inline = """
+    exit(totally_undefined_name)
+    """
+    When compilation fails
+    Then diagnostic = "undefined name"
+
+Feature: C2 — env and backend injection
+
+  Scenario Outline: own and C backends agree on the same snippet (own == C, transitively)
+    Given source inline = """
+    exit(10 * 3 + 2)
+    """
+    Given backend = "<backend>"
+    When built and run
+    Then exit = 32
+
+    Examples:
+      | backend |
+      | c       |
+      | own     |
+
+  Scenario: an explicit env token reaches the compiled program
+    Given source inline = """
+    exit(match teko::env::var("CRUMB_C2_PROBE") { str as v => if v == "hello" { 0 } else { 1 }; error => 2 })
+    """
+    Given env = ["CRUMB_C2_PROBE=hello"]
+    When built and run
+    Then exit = 0
+
+Feature: C3 — target run-wrapper (honest skip when the toolchain is absent)
+
+  Scenario: an own-backend wasm32-wasi build runs under wasmtime (or honest-skips without it)
+    Given source inline = """
+    exit(7)
+    """
+    Given backend = "own"
+    Given target = "wasm32-wasi"
+    When built and run
+    Then exit = 7

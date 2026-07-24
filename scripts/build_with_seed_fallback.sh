@@ -53,11 +53,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# build_project BIN DIR OUT LOGFILE — runs "BIN . -o OUT --no-verify --release" with cwd
-# DIR, tees combined output to LOGFILE, and returns the build's own exit status.
+# build_project BIN DIR OUT LOGFILE [RT_DIR] — runs "BIN . -o OUT --no-verify --release"
+# with cwd DIR, tees combined output to LOGFILE, and returns the build's own exit status.
+# RT_DIR, when non-empty, pins TK_RT_DIR for the build: the compiler otherwise locates
+# teko_rt.{h,c} relative to ITS OWN binary (argv[0]), and both fallback stages break under
+# that rule — CI provisions the seed into <tip>/.seed, so an ancestor probe would compile
+# ancestor-generated C against the TIP's runtime header (proven: probes died on the exact
+# tk_rt_datetime_* symbols the time-redesign wagon removed), and gen1 lives inside the probe
+# worktree, so the tip build would symmetrically pick the ANCESTOR's runtime. Each stage
+# passes the runtime dir of the tree it is actually compiling.
 build_project() {
-  bin="$1"; proj_dir="$2"; out="$3"; logfile="$4"
-  ( cd "$proj_dir" && "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
+  bin="$1"; proj_dir="$2"; out="$3"; logfile="$4"; rt_dir="${5:-}"
+  if [ -n "$rt_dir" ]; then
+    ( cd "$proj_dir" && TK_RT_DIR="$rt_dir" "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
+  else
+    ( cd "$proj_dir" && "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
+  fi
+}
+
+# rt_dir_of BASE — echoes BASE's in-tree runtime dir (src/runtime, then the bundled-install
+# runtime layout), or empty when neither exists (the caller then leaves the compiler's own
+# argv[0]-relative resolution in charge).
+rt_dir_of() {
+  base="$1"
+  if [ -f "$base/src/runtime/teko_rt.h" ]; then
+    printf '%s\n' "$base/src/runtime"
+  elif [ -f "$base/runtime/teko_rt.h" ]; then
+    printf '%s\n' "$base/runtime"
+  else
+    printf '%s\n' ""
+  fi
 }
 
 # resolve_bin DIR — echoes the built teko binary under DIR (teko or teko.exe), failing if
@@ -134,19 +159,44 @@ log "seed fallback engaged (seed cannot build tip; probing back from merge-base 
 # capability jump (wagon N+2's base is wagon N+1, already unbuildable by the seed). The
 # bootstrap point is the NEWEST first-parent ancestor the seed CAN build — failed probes
 # are cheap (the compiler rejects in seconds), only the final successful build is paid.
-WORKTREE_DIR="$(mktemp -d)"
-rmdir "$WORKTREE_DIR"
+# The probe worktree and its output live INSIDE the workspace, not the system temp dir:
+# on the Windows runners the C toolchain demonstrably works in the workspace drive but
+# fails opaquely when teko builds from %TEMP% (proven by probe logs — Teko compiles, cc
+# dies). Same-workspace scratch also keeps everything on one filesystem.
+WORKTREE_DIR="${GITHUB_WORKSPACE:-$PWD}/.teko-seed-fallback-wt"
+rm -rf "$WORKTREE_DIR"
+git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
 git worktree add --detach "$WORKTREE_DIR" "$MERGE_BASE_SHA" >/dev/null
 
-GEN1_BASE_DIR="$(mktemp -d)"
+# The probe OUTPUT lives INSIDE the probe worktree: with an out dir under the tip's
+# checkout, the C compile of an ANCESTOR mixed the TIP's runtime header into the
+# ancestor's generated C (proven: probes died on exactly the tk_rt_datetime_* symbols
+# the time-redesign wagon removed). Self-contained probe = ancestor code + ancestor
+# runtime, the same shape as the fast path's in-project `-o bin`.
+GEN1_BASE_DIR="$WORKTREE_DIR/.probe-out"
+rm -rf "$GEN1_BASE_DIR"
+mkdir -p "$GEN1_BASE_DIR"
 BOOT_SHA="$MERGE_BASE_SHA"
 PROBES=0
 MAX_PROBES=64
 BASE_LOG="$(mktemp)"
 while :; do
-  if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
+  git -C "$WORKTREE_DIR" clean -fdxq
+  rm -rf "$GEN1_BASE_DIR"
+  mkdir -p "$GEN1_BASE_DIR"
+  if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG" "$(rt_dir_of "$WORKTREE_DIR")"; then
     break
   fi
+  if grep -q "cc failed to build the generated C" "$BASE_LOG"; then
+    log "FATAL: probe $BOOT_SHA compiles at the Teko level but its C compile FAILED — this is an"
+    log "ENVIRONMENTAL toolchain problem, not a seed-capability gap; walking further back cannot fix it."
+    log "----- full probe build log ($BOOT_SHA) -----"
+    sed 's/^/teko-ci:   | /' "$BASE_LOG" >&2
+    rm -f "$BASE_LOG"
+    exit 1
+  fi
+  log "probe error tail:"
+  tail -15 "$BASE_LOG" | sed 's/^/teko-ci:   | /' >&2
   PROBES=$((PROBES + 1))
   if [ "$PROBES" -ge "$MAX_PROBES" ]; then
     log "FATAL: no seed-buildable ancestor found within $MAX_PROBES first-parent steps of merge-base $MERGE_BASE_SHA"
@@ -180,7 +230,7 @@ if ! GEN1_BASE_BIN="$(resolve_bin "$GEN1_BASE_DIR")"; then
 fi
 
 TIP_LOG="$(mktemp)"
-if ! build_project "$GEN1_BASE_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG"; then
+if ! build_project "$GEN1_BASE_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$PWD")"; then
   log "FATAL: gen1 of merge-base $MERGE_BASE_SHA still failed to build the tip"
   log "----- seed build of the tip (failure) -----"
   cat "$FAST_LOG"

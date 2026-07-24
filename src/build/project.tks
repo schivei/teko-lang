@@ -1699,6 +1699,28 @@ fn dirname_of(path: str) -> str {
 }
 
 /**
+ * The last path segment of `path` — everything after the rightmost path separator — or the
+ * whole `path` when it carries no separator. The mirror of `dirname_of` (same reverse
+ * POSIX-or-Windows-separator scan, so together `dirname_of(p) ~ "/" ~ basename_of(p)`
+ * reconstructs a separator-normalized `p`), used by the regression runner (0.3.1 C0) to split a
+ * manifest-listed `.tkr` FILE path into its regressor directory and basename without a
+ * `teko::str::last_index_of` call (native-only — the VM does not implement it).
+ *
+ * @param path  an argv[0]-style invocation path, POSIX- or Windows-separated
+ * @return      the segment after the rightmost separator, or `path` unchanged when it carries none
+ */
+fn basename_of(path: str) -> str {
+    mut i = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        let b = path[i]
+        if b == b'/' || b == b'\\' { return teko::str::slice_from(path, i + 1) }
+    }
+    path
+}
+
+/**
  * Whether `b` is an ASCII letter (A-Z or a-z) — the drive-letter test for a Windows absolute
  * path such as `C:\...`. Named with an `_ascii_` segment to stay distinct from the `is_alpha`
  * char builtin, which classifies a full Unicode `char` rather than a raw path byte.
@@ -1861,7 +1883,7 @@ fn strip_tests(prog: checker::TProgram) -> checker::TProgram {
  * @param binp   the built artifact path
  * @param start  when the build began, before the front-end ran
  */
-fn report_build_done(binp: str, start: i128) {
+fn report_build_done(binp: str, start: i64) {
     teko::io::eprintln(teko::str::concat("built ", binp, teko::str::concat("   ", teko::str::concat(elapsed_str(start), "s"))))
 }
 
@@ -1904,7 +1926,7 @@ fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram) -> error | nu
  *  (#148). The shared tail of every build path once its program is final: no tests present,
  *  the `--no-verify` escape hatch, and the gate's own release rebuild. `tty` selects the
  *  backend's in-place `\r` phase updates (BUILD-OUTPUT OBSERVABILITY). */
-fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i128) -> i32 {
+fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64) -> i32 {
     let rc = backend(dir, m.name, out_dir, prog, m, opt, tty)
     if rc == 0 {
         report_build_done(teko::str::concat(strip_trailing_slash(out_dir), "/", m.name), start)
@@ -1919,7 +1941,7 @@ fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manife
  *  where the `.tkt` gate outcome is already known deterministic from gen-1. This is the path
  *  `release.yml` drives with `--no-verify --release`, so the published seed links at `-O2`.
  *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i128, backend: Backend) -> i32 {
+fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend) -> i32 {
     let fe = match frontend_body(false, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start)
 }
@@ -2106,7 +2128,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool) -> str {
  *  `frontend_parse`, is not repeated), strip any surviving `#test` functions by provenance,
  *  and hand the clean program to the backend at optimization level `opt`. `backend` is the
  *  resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i128, backend: Backend, pf: ParsedFront) -> i32 {
+fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront) -> i32 {
     let pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest }
     let rel = match frontend_check(pf_prod, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start)
@@ -2134,7 +2156,7 @@ fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i128, ba
  *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
  *  @return         0 when every test passes, the floor policy is satisfied, and the release build succeeds
  *  @since #265 */
-fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend, cov_validation: bool) -> i32 {
+fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool) -> i32 {
     let trc = run_native_gate(dir, out_dir, fe.prog, fe.manifest, tty)
     if trc != 0 { return trc }
     report_native_coverage(fe.prog)
@@ -2165,14 +2187,14 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
  * @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
  * @return         0 when the gate passes and the release build succeeds, else the failing status
  */
-fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i128, backend: Backend, cov_validation: bool) -> i32 {
+fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool) -> i32 {
     run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation)
 }
 
 /** No `#test` functions at all: ignore the gate, build the production program straight from the
  *  already-assembled `fe` (no test code present to strip or verify) at optimization level `opt`.
  *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i128, backend: Backend) -> i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start) }
+fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend) -> i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start) }
 
 /** compile_project_g — the build with the D4 TEST GATE (ON BY DEFAULT; `--no-test` is IGNORED for a
  *  build — a release MUST run its tests). Assemble WITH the `.tkt` tests, run them on the NATIVE gate
@@ -3627,9 +3649,10 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
  * `--per-commit-test <base>` runs the delta-coverage enforcer (`run_per_commit_test`) AFTER the floor
  * policy — measuring coverage attributed to the lines changed since `<base>` and (under
  * `--cov-validation`) failing when that delta is below floor; absent, it is a zero-cost no-op.
- * When the manifest declares `[tests] regression` directories (`test_regression_dirs`), the
- * regression phase (`run_regression_phase`) runs after the floor + delta policies and before any
- * dev-time report; with no regression directories it is a zero-cost no-op (the 0.3.0.29 inert base).
+ * When the manifest declares `[tests] regression` files (`test_regression_files` — an explicit,
+ * ordered list of `.tkr` paths, 0.3.1 C0), the regression phase (`run_regression_phase`) runs
+ * after the floor + delta policies and before any dev-time report; with no regression files it
+ * is a zero-cost no-op (the 0.3.0.29 inert base).
  *
  * @param dir              the project directory (already the cwd; the front-end chdir'd in)
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
@@ -3656,7 +3679,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
         let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation)
         if pc != 0 { return pc }
     }
-    if fe.manifest.test_regression_dirs.len > 0 {
+    if fe.manifest.test_regression_files.len > 0 {
         let rrc = run_regression_phase(exe, fe.manifest)
         if rrc != 0 { return rrc }
     }
