@@ -13,21 +13,43 @@
 #
 # TOOL-PRESENCE GATED, not host-OS gated (mirrors check_coff.sh's own cross-format
 # reasoning): `llvm-lib`/`lib.exe` may be reachable from a non-Windows host with the LLVM
-# toolchain installed, so this script tries whichever is on PATH and HONEST-SKIPS (exit 0)
-# only when neither is found. With no argument, or no archive at the path, it also
-# honest-skips.
+# toolchain installed, so this script tries whichever is on PATH.
+#
+# FAIL LOUD (M.3, owner ruling on run 30061110006): every check TRACES to stderr before it
+# runs and prints the underlying tool's OWN stdout+stderr on failure — a silent "exit 1, no
+# output" gate is never acceptable. `AR_CHECK_REQUIRE_TOOLS=1` turns an honest-skip (no
+# archive given, or neither `llvm-lib` nor `lib.exe` found) into a HARD FAILURE instead of
+# exit 0 — set this on a runner where the toolchain is guaranteed present (the theory CI's
+# windows-latest job), mirroring `validate_wasm_own.sh`'s `REQUIRE_WASM_ENGINE` seam.
 #
 # usage: scripts/check_ar_coff.sh <archive.lib> [symbol_that_must_resolve]
+#   AR_CHECK_REQUIRE_TOOLS=1   (default: unset) — an honest-skip becomes a hard failure.
 
 set -u
 
+trace() { echo "check_ar_coff: $*" >&2; }
+fail() { echo "check_ar_coff: FAIL — $1" >&2; exit 1; }
+
+require="${AR_CHECK_REQUIRE_TOOLS:-0}"
+
+skip_or_fail() {
+    local reason="$1"
+    if [[ "$require" == "1" ]]; then
+        fail "AR_CHECK_REQUIRE_TOOLS=1 but $reason — failing closed (this mode never honest-skips)"
+    fi
+    trace "skipped — $reason"
+    exit 0
+}
+
+trace "starting on $(uname -s)-$(uname -m), AR_CHECK_REQUIRE_TOOLS=$require"
+
 ARCHIVE="${1:-}"
 if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
-    echo "check_ar_coff: skipped — no archive provided"
-    exit 0
+    skip_or_fail "no archive provided (arg1='${ARCHIVE:-<empty>}')"
 fi
 
 SYMBOL="${2:-}"
+trace "checking archive=$ARCHIVE symbol=${SYMBOL:-<none>}"
 
 LIB_TOOL=""
 if command -v llvm-lib >/dev/null 2>&1; then
@@ -39,36 +61,51 @@ elif command -v lib >/dev/null 2>&1; then
 fi
 
 if [[ -z "$LIB_TOOL" ]]; then
-    echo "check_ar_coff: skipped — needs llvm-lib or lib.exe; neither found on $(uname -s)"
-    exit 0
+    skip_or_fail "needs llvm-lib or lib.exe; neither found on $(uname -s) (PATH=$PATH)"
 fi
+trace "using LIB_TOOL=$LIB_TOOL ($(command -v "$LIB_TOOL"))"
 
-fail() { echo "check_ar_coff: FAIL — $1"; exit 1; }
-
+trace "step: global header magic"
 magic_hex="$(head -c 8 "$ARCHIVE" | od -An -tx1 | tr -d ' \n')"
-[[ "$magic_hex" == "213c617263683e0a" ]] || fail "$ARCHIVE has no '!<arch>\\n' global header"
+[[ "$magic_hex" == "213c617263683e0a" ]] || fail "$ARCHIVE has no '!<arch>\\n' global header (got 0x$magic_hex)"
 
 # lib.exe/llvm-lib use a single leading slash (`/list`); under a MSYS/Git-Bash shell that
 # looks like a POSIX path and gets silently mangled — disable path conversion for this one
 # invocation (the same MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL idiom check_coff.sh already
 # uses for lld-link).
+trace "step: $LIB_TOOL /list"
 list_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$LIB_TOOL" "/list" "$ARCHIVE" 2>&1)"
 list_rc=$?
 if [[ "$list_rc" -ne 0 ]]; then
-    echo "check_ar_coff: $LIB_TOOL /list rejected $ARCHIVE (rc=$list_rc) — full output below:"
-    echo "$list_out" | sed 's/^/      | /'
-    fail "$LIB_TOOL /list rejected $ARCHIVE"
+    trace "$LIB_TOOL /list output:"; printf '%s\n' "$list_out" | sed 's/^/      | /' >&2
+    fail "$LIB_TOOL /list rejected $ARCHIVE (rc=$list_rc)"
 fi
-echo "$list_out" | grep -qi '\.o' || fail "$LIB_TOOL /list did not enumerate an .o member in $ARCHIVE"
+if ! printf '%s\n' "$list_out" | grep -qi '\.o'; then
+    trace "$LIB_TOOL /list output:"; printf '%s\n' "$list_out" | sed 's/^/      | /' >&2
+    fail "$LIB_TOOL /list did not enumerate an .o member in $ARCHIVE"
+fi
+trace "$LIB_TOOL /list: enumerated an .o member"
 
 if command -v dumpbin >/dev/null 2>&1; then
+    trace "step: dumpbin /LINKERMEMBER (present on PATH)"
     linkermember_out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' dumpbin "/linkermember" "$ARCHIVE" 2>&1)"
     linkermember_rc=$?
-    [[ "$linkermember_rc" -eq 0 ]] || fail "dumpbin /LINKERMEMBER rejected $ARCHIVE"
-    echo "$linkermember_out" | grep -qi 'linker member' || fail "dumpbin /LINKERMEMBER found no linker member in $ARCHIVE"
-    if [[ -n "$SYMBOL" ]]; then
-        echo "$linkermember_out" | grep -qi "$SYMBOL" || fail "dumpbin /LINKERMEMBER does not list '$SYMBOL'"
+    if [[ "$linkermember_rc" -ne 0 ]]; then
+        trace "dumpbin /LINKERMEMBER output:"; printf '%s\n' "$linkermember_out" | sed 's/^/      | /' >&2
+        fail "dumpbin /LINKERMEMBER rejected $ARCHIVE (rc=$linkermember_rc)"
     fi
+    if ! printf '%s\n' "$linkermember_out" | grep -qi 'linker member'; then
+        trace "dumpbin /LINKERMEMBER output:"; printf '%s\n' "$linkermember_out" | sed 's/^/      | /' >&2
+        fail "dumpbin /LINKERMEMBER found no linker member in $ARCHIVE"
+    fi
+    if [[ -n "$SYMBOL" ]]; then
+        if ! printf '%s\n' "$linkermember_out" | grep -qi "$SYMBOL"; then
+            trace "dumpbin /LINKERMEMBER output:"; printf '%s\n' "$linkermember_out" | sed 's/^/      | /' >&2
+            fail "dumpbin /LINKERMEMBER does not list '$SYMBOL'"
+        fi
+    fi
+else
+    trace "step: dumpbin /LINKERMEMBER — skipped, dumpbin not on PATH (llvm-lib/lib.exe toolchains commonly lack it; not required)"
 fi
 
 echo "check_ar_coff: OK — $ARCHIVE is a well-formed, $LIB_TOOL-consumable COFF static archive"

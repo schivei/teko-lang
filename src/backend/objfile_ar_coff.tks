@@ -50,18 +50,21 @@ fn emit_u16_le_lib(buf: []byte, v: u32) -> []byte {
 }
 
 /**
- * COFF_LIB_LONGNAME_TERMINATOR — the 2-byte `"/\n"` terminator GNU-compatible
- * longnames-member tools (`lib.exe`, `llvm-lib`, `ar`) append after each stored
- * long name — the `"//"` member's per-name delimiter.
+ * COFF_LIB_LONGNAME_TERMINATOR — the 1-byte NUL terminator COFF longnames-
+ * member tools (`lib.exe`, `llvm-lib`, `link.exe`) append after each stored
+ * long name — the `"//"` member's per-name delimiter. NOT GNU ar's own `"/\n"`
+ * convention (cross-checked against LLVM's `ArchiveWriter.cpp` COFF writer,
+ * which NUL-terminates every longnames entry — `StringTable << '\0'` — unlike
+ * its BSD/GNU siblings).
  */
-const COFF_LIB_LONGNAME_TERMINATOR: str = "/\n"
+const COFF_LIB_LONGNAME_TERMINATOR: byte = 0 to byte
 
 /**
  * CoffLibLongnames — the resolved `"//"` longnames-member payload plus the
  * per-member `Name` field text: an INLINE `<=15`-byte name reuses
  * `objfile_ar.tks::ar_member_name_field` (`"<name>/"`, space-padded); a
- * LONGER name is stored in `bytes` (terminated by `"/\n"`) and its field
- * becomes the GNU-compatible `"/<offset>"` reference.
+ * LONGER name is stored in `bytes` (NUL-terminated) and its field becomes the
+ * GNU-compatible `"/<offset>"` reference.
  */
 type CoffLibLongnames = struct {
     /**
@@ -79,10 +82,10 @@ type CoffLibLongnames = struct {
 /**
  * coff_lib_longnames — resolve every member's bare name into its `Name` field
  * text, spilling any name over 15 bytes into the shared `"//"` longnames
- * payload (GNU-compatible `"/<offset>"` reference + `"/\n"`-terminated
- * storage) — unreached by KP16's sole producer (`emit_static_archive_coff`'s
- * member name is always `"<stem>.o"`, always short), covered by a direct unit
- * test on a hand-built input.
+ * payload (GNU-compatible `"/<offset>"` reference + NUL-terminated storage) —
+ * unreached by KP16's sole producer (`emit_static_archive_coff`'s member name
+ * is always `"<stem>.o"`, always short), covered by a direct unit test on a
+ * hand-built input.
  *
  * @param []str names  each member's bare on-disk name, in emission order
  * @return CoffLibLongnames  the resolved `Name` fields + the shared `"//"` payload
@@ -100,7 +103,7 @@ fn coff_lib_longnames(names: []str) -> CoffLibLongnames {
             let off = bytes.len
             fields = teko::list::push(fields, ar_pad_right(teko::str::concat("/", $"{off}"), AR_NAME_WIDTH))
             bytes = emit_str_bytes(bytes, nm)
-            bytes = emit_str_bytes(bytes, COFF_LIB_LONGNAME_TERMINATOR)
+            bytes = teko::list::push(bytes, COFF_LIB_LONGNAME_TERMINATOR)
         }
         i++
     }

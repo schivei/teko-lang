@@ -62,15 +62,17 @@ jobs:
           ../../../bin/teko build . -o bin --no-verify --backend=native
           ls -la bin
 
+      # AR_CHECK_REQUIRE_TOOLS=1 turns an honest-skip into a hard failure (this runner IS
+      # macOS, so a skip here would mean a real provisioning gap, never a legitimate pass —
+      # M.3, owner ruling on run 30061110006). The script itself is invoked DIRECTLY (no
+      # `out="$(...)"` capture) so every trace/fail line streams live to the job log — a
+      # captured-then-swallowed failure (the exact "exit 1, no output" bug the ruling
+      # named) can never happen again.
       - name: Host-toolchain well-formedness gate (ar/nm/ld — MUST NOT honest-skip here)
         shell: bash
-        run: |
-          set -eu
-          ARCHIVE=examples/theory/ar_static_lib_demo/bin/libtheory_ar_lib.a
-          out="$(./scripts/check_ar_macho.sh "$ARCHIVE" theory_ar_lib__add)"
-          echo "$out"
-          echo "$out" | grep -q "check_ar_macho: skipped" && { echo "FAIL — the macOS check honest-skipped on its own native runner"; exit 1; }
-          echo "$out" | grep -q "check_ar_macho: OK" || { echo "FAIL — check_ar_macho.sh did not report OK"; exit 1; }
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_macho.sh examples/theory/ar_static_lib_demo/bin/libtheory_ar_lib.a theory_ar_lib__add
 
       # Link + RUN a real consumer against the archive: proves the archive is not just
       # byte-well-formed but LINKER- and LOADER-consumable end to end (M.3 — no fake
@@ -128,15 +130,15 @@ jobs:
           ../../../bin/teko build . -o bin --no-verify --backend=native
           ls -la bin
 
+      # AR_CHECK_REQUIRE_TOOLS=1 turns an honest-skip into a hard failure (windows-latest
+      # ships llvm-lib, so a skip here would be a real provisioning gap — M.3, owner ruling
+      # on run 30061110006). The script itself is invoked DIRECTLY (no `out="$(...)"`
+      # capture) so every trace/fail line streams live to the job log.
       - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — MUST NOT honest-skip here)
         shell: bash
-        run: |
-          set -eu
-          ARCHIVE=examples/theory/ar_static_lib_demo/bin/theory_ar_lib.lib
-          out="$(./scripts/check_ar_coff.sh "$ARCHIVE" theory_ar_lib__add)"
-          echo "$out"
-          echo "$out" | grep -q "check_ar_coff: skipped" && { echo "FAIL — the COFF check honest-skipped on a Windows runner (no llvm-lib/lib.exe on PATH?)"; exit 1; }
-          echo "$out" | grep -q "check_ar_coff: OK" || { echo "FAIL — check_ar_coff.sh did not report OK"; exit 1; }
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_coff.sh examples/theory/ar_static_lib_demo/bin/theory_ar_lib.lib theory_ar_lib__add
 
       # Link + RUN a real consumer against the archive with lld-link (the same tool +
       # MSYS path-conversion guard scripts/check_coff.sh already uses for the raw .o
