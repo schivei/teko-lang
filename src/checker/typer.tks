@@ -401,7 +401,7 @@ fn bignum_adopt_operand(e: TExpr, kind: str) -> TExpr | error {
     match e.kind {
         TNumber as n => {
             if n.is_float { return error { message = $"a floating-point literal cannot adopt `{kind}` — write it with a `bi`/`d` suffix or convert explicitly with `{kind}::of(...)`" } }
-            if !value_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
+            if !numint_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
             let lit = TExpr { kind = e.kind; type = Prim { kind = PrimKind::I64 }; line = e.line; col = e.col }
             bignum_call(kind, "of", teko::list::push(teko::list::empty(), lit), bignum_named(kind))
         }
@@ -493,7 +493,7 @@ fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: T
         mut cmp_args: []TExpr = teko::list::push(teko::list::empty(), prev)
         cmp_args = teko::list::push(cmp_args, cur)
         let cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
-        let zero = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+        let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
         let term = TCmpTerm { op = rest[i].op; operand = zero }
         let one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
         acc = combine_and(acc, one_cmp)
@@ -1014,7 +1014,7 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExp
     }
     // any/none: compare (recv & mask) against a zero-valued flags literal (the same pattern as
     // an enum ordinal cast — codegen/VM read the NAMED flags type off the node, not the literal).
-    let zero = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = rt; line = 0; col = 0 }
+    let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
     let cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
     let term = TCmpTerm { op = cmp_op; operand = zero }
     TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
@@ -1609,23 +1609,34 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
 // (M.4). *(Redefines the early compile-forbid rule — see the Redefinitions Index; the prior rule
 // over-applied M.1, forbidding what a guard makes non-silent.)*
 
-// does a constant INTEGER value (i128 carrier) fit the target integer prim's range? (B.38 —
-// extended to the full int set, incl 128-bit.) Floats are handled separately (float_fits);
-// Bool is never a literal target. The carrier is signed i128, so an unsigned target gates on
-// v >= 0 first; u128's upper bound is the carrier max, so non-negativity is its only gate.
-fn value_fits(v: i128, k: PrimKind) -> bool {
+/**
+ * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38
+ * — the full int set, incl the still-accepted 128-bit surface types.) Replaces the old i128-
+ * carrier `value_fits` (drop-128, 2026-07-24; carrier-detoxed off i128, §2.1). Floats are
+ * handled separately (`float_fits`); Bool is never a literal target. An unsigned target
+ * rejects a negative `v` first, then gates the magnitude against its max; a signed target
+ * gates the magnitude against its positive max (non-negative `v`) or against `2^(w-1)`
+ * (negative `v` — the extra headroom that admits e.g. `i8::MIN = -128`, magnitude 128).
+ * `u128`/`i128` always fit — the widest value this carrier can hold (`[i64::MIN, u64::MAX]`)
+ * sits far inside either range.
+ *
+ * @param v  the resolved literal carrier
+ * @param k  the target integer prim kind
+ * @return   true iff `v` is representable in `k`
+ */
+fn numint_fits(v: parser::NumInt, k: PrimKind) -> bool {
     if prim_is_float(k) { return false }   // an int literal does not fit a float type (N1/N2)
-    if k == PrimKind::U8 { return v >= 0 && v <= 255 }
-    if k == PrimKind::U16 { return v >= 0 && v <= 65535 }
-    if k == PrimKind::U32 { return v >= 0 && v <= 4294967295 }
-    if k == PrimKind::U64 { return v >= 0 && v <= 18446744073709551615 }
-    if k == PrimKind::U128 { return v >= 0 }   // i128 max < u128 max → any v>=0 fits
-    if k == PrimKind::I8 { return v >= -128 && v <= 127 }
-    if k == PrimKind::I16 { return v >= -32768 && v <= 32767 }
-    if k == PrimKind::I32 { return v >= -2147483648 && v <= 2147483647 }
-    if k == PrimKind::I64 { return v >= (-9223372036854775807 - 1) && v <= 9223372036854775807 }
-    if k == PrimKind::I128 { return true }   // v is already an i128
-    false   // Bool — not a numeric range (guarded by the caller)
+    if k == PrimKind::U8 { return !v.neg && v.mag <= 255 }
+    if k == PrimKind::U16 { return !v.neg && v.mag <= 65535 }
+    if k == PrimKind::U32 { return !v.neg && v.mag <= 4294967295 }
+    if k == PrimKind::U64 { return !v.neg && v.mag <= 18446744073709551615 }
+    if k == PrimKind::U128 { return !v.neg }
+    if k == PrimKind::I8 { return if v.neg { v.mag <= 128 } else { v.mag <= 127 } }
+    if k == PrimKind::I16 { return if v.neg { v.mag <= 32768 } else { v.mag <= 32767 } }
+    if k == PrimKind::I32 { return if v.neg { v.mag <= 2147483648 } else { v.mag <= 2147483647 } }
+    if k == PrimKind::I64 { return if v.neg { v.mag <= 9223372036854775808 } else { v.mag <= 9223372036854775807 } }
+    if k == PrimKind::I128 { return true }
+    false
 }
 
 // does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a float constant
@@ -1672,7 +1683,7 @@ fn const_range_check(e: parser::Expr, target: Type) -> error | null {
                 // float→int / int→float / float→float constant conversions are runtime-guarded (trunc
                 // toward zero, overflow/NaN/∞ → panic — §5); the checker permits them, the fit is codegen/VM.
                 if n.is_float || !prim_is_int(k) { null }
-                else if value_fits(n.value, k) { null }
+                else if numint_fits(n.value, k) { null }
                 else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
             }
             error => null   // non-numeric target: cast_check already rejected it
@@ -1728,7 +1739,7 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error | null {
                             } else {
                                 if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
                                 else if !prim_is_signed(p.kind) { error { message = "a negative literal cannot be annotated as an unsigned type (M.1)" } }
-                                else if value_fits(n.value, p.kind) { null }
+                                else if numint_fits(n.value, p.kind) { null }
                                 else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
                             }
                         }
@@ -1750,7 +1761,7 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error | null {
                 } else {
                     // an integer literal adopts an integer annotation only; never a float type (N1).
                     if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
-                    else if value_fits(n.value, p.kind) { null }
+                    else if numint_fits(n.value, p.kind) { null }
                     else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
                 }
             }
@@ -1955,6 +1966,17 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
 // counter — both twin checkers produce the same name for the same node).
 fn safe_binder_name(line: u32, col: u32) -> str { $"__tkq{line}_{col}" }
 
+/**
+ * unread_guard_placeholder — a syntactically-valid but never-evaluated `TArm.guard` for an arm
+ * built with `has_when = false`; every consumer skips the guard field entirely in that case, so
+ * its content is inert (the concrete zero literal is arbitrary — any well-typed `TExpr` would do).
+ *
+ * @return a placeholder integer-literal expression
+ */
+fn unread_guard_placeholder() -> TExpr {
+    TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Void { }; line = 0; col = 0 }
+}
+
 // build the typed `match recv { null => <null:R?>; <Inner> as binder => <armv> }`.
 // `armv` is the already-typed present-arm value (the member call/read on the binder).
 fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TExpr {
@@ -1968,7 +1990,7 @@ fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TEx
         null_body = teko::list::push(null_body, TExprStmt { expr = TExpr { kind = TNullLit { }; type = result; line = 0; col = 0 } })
     }
     mut arms: []TArm = teko::list::empty()
-    let guard_ph = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }   // placeholder, gated by has_when (never read)
+    let guard_ph = unread_guard_placeholder()
     arms = teko::list::push(arms, TArm { pattern = parser::NullPattern { }; has_when = false; guard = guard_ph; body = null_body })
     // present arm: `<Inner> as binder => <armv>` — the pattern re-resolves nominally in the
     // VM/codegen exactly like a user-written `match` over a `T?`.
@@ -2108,7 +2130,7 @@ fn type_foreach_elem_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTab
     let tn = match elem_type_name(inner) { str as s => s; error as e => return e }
     let e2 = define(env, bp.binding, inner, false)
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }
+    mut guard = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Void { }; line = 0; col = 0 }
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -2390,7 +2412,7 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
                 Prim as p => {
                     if !type_eq(val.type, ft) {
                         let fits = if num.is_float { prim_is_float(p.kind) }
-                        else { prim_is_int(p.kind) && value_fits(num.value, p.kind) }
+                        else { prim_is_int(p.kind) && numint_fits(num.value, p.kind) }
                         if fits { val = TExpr { kind = val.kind; type = ft; line = val.line; col = val.col } }
                     }
                 }
@@ -2908,17 +2930,17 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env) -> TExpr | e
             mut j: u64 = 0
             loop {
                 if j >= eb.members.len { break }
-                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j to u128 }; type = et; line = 0; col = 0 } }   // (#50) enum member VALUE = its ordinal
+                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j to u64 }; type = et; line = 0; col = 0 } }
                 j++
             }
             error { message = $"no member `{member}` in enum `{tname}`" }
         }
         parser::FlagsBody as fb => {
-            if fb.members.len > 128 { return error { message = "flags type has more than 128 members (u128 overflow)" } }
+            if fb.members.len > 64 { return error { message = "a flags type may declare at most 64 members (bit 63 is the last) — write this as two flags types instead" } }
             mut j: u64 = 0
             loop {
                 if j >= fb.members.len { break }
-                if fb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = (1 to u128) << j }; type = et; line = 0; col = 0 } }   // (#50) flags member VALUE = 1 << ordinal (power-of-2)
+                if fb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = (1 to u64) << j }; type = et; line = 0; col = 0 } }
                 j++
             }
             error { message = $"no member `{member}` in the flags type `{tname}`" }
@@ -3525,7 +3547,7 @@ fn type_if_stmt(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error 
 fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
     let e2 = match check_pattern(a.pattern, subject, env, table) { Env as e => e; error as err => return err }
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }   // placeholder, gated by has_when (never read when absent)
+    mut guard = unread_guard_placeholder()
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -4172,7 +4194,7 @@ fn number_fits_member(n: TNumber, m: Type) -> bool {
     match cast_kind(m) {
         PrimKind as k => {
             if n.is_float { prim_is_float(k) && float_fits(n.fval, k) }
-            else { prim_is_int(k) && value_fits(n.value, k) }
+            else { prim_is_int(k) && numint_fits(n.value, k) }
         }
         error => false
     }

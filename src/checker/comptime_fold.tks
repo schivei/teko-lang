@@ -4,11 +4,13 @@ use teko::parser
 /**
  * ConstValue — the comptime value domain: the result of evaluating a provably-const
  * expression subtree. An integer is stored as its raw two's-complement bit pattern in
- * a `u128` PLUS its declared type, so every integer family (i8..i128 / u8..u128 /
- * byte / char) re-emits and re-wraps exactly as the metal would; a float keeps its raw
- * bits so formatting is byte-exact; a string/bytes keeps its bytes; an aggregate holds
- * child ConstValues in order. This domain exists ONLY inside the fold — it never
- * escapes to lowering (the fold reconstructs a literal TExpr from it via `literal_of`).
+ * a `u64` PLUS its declared type (drop-128, 2026-07-24 — the fold's internal carrier is
+ * detoxed off i128/u128; every width it EVALUATES is u8..u64/i8..i64, since that is now
+ * the whole of the language's non-bignum integer surface), so every integer family
+ * re-emits and re-wraps exactly as the metal would; a float keeps its raw bits so
+ * formatting is byte-exact; a string/bytes keeps its bytes; an aggregate holds child
+ * ConstValues in order. This domain exists ONLY inside the fold — it never escapes to
+ * lowering (the fold reconstructs a literal TExpr from it via `literal_of`).
  *
  * @field kind  the value's case (int / float / bool / bytes / aggregate)
  * @since #comptime-fold
@@ -27,11 +29,11 @@ pub type ConstValueKind = variant CVInt | CVFloat | CVBool | CVBytes | CVAgg
  * would sit in a register of `ty`, plus the declared integer type (so a fold knows the
  * width for wrapping/overflow checks and re-emission).
  *
- * @field bits  the value's raw two's-complement bits, zero-extended into u128
+ * @field bits  the value's raw two's-complement bits, zero-extended into u64
  * @field ty    the declared integer type (drives width, signedness, wrap/overflow)
  * @since #comptime-fold
  */
-pub type CVInt = struct { bits: u128; ty: Type }
+pub type CVInt = struct { bits: u64; ty: Type }
 
 /**
  * CVFloat — a float comptime value: the raw IEEE-754 bits (so re-emission and
@@ -75,9 +77,11 @@ pub type CVAgg = struct { elems: []ConstValue }
  * IntInfo — the width/signedness a comptime integer op runs at: the number of value
  * bits and whether the top bit is a sign bit. Derived from a `CVInt.ty` (a `Prim`
  * integer or `byte`) by `int_info`; every wrap/overflow/re-emission decision reads it.
+ * `width` never exceeds 64 — `int_info` errors on a wider type (the fold does not
+ * evaluate the still-accepted-but-uncarried `u128`/`i128` surface, drop-128, 2026-07-24).
  *
- * @field width   the integer's bit width (8 / 16 / 32 / 64 / 128)
- * @field is_signed  true iff the type is a signed integer (i8..i128), false for unsigned/byte
+ * @field width   the integer's bit width (8 / 16 / 32 / 64)
+ * @field is_signed  true iff the type is a signed integer (i8..i64), false for unsigned/byte
  * @since #comptime-fold
  */
 type IntInfo = struct { width: u32; is_signed: bool }
@@ -85,12 +89,12 @@ type IntInfo = struct { width: u32; is_signed: bool }
 /**
  * cv_int — wrap a two's-complement bit pattern and its declared type into a ConstValue.
  *
- * @param bits  the value's raw two's-complement bits, zero-extended into u128
+ * @param bits  the value's raw two's-complement bits, zero-extended into u64
  * @param ty    the declared integer type
  * @return      the integer ConstValue
  * @since #comptime-fold
  */
-fn cv_int(bits: u128, ty: Type) -> ConstValue { ConstValue { kind = CVInt { bits = bits; ty = ty } } }
+fn cv_int(bits: u64, ty: Type) -> ConstValue { ConstValue { kind = CVInt { bits = bits; ty = ty } } }
 
 /**
  * cv_float — wrap raw IEEE-754 bits into a float ConstValue.
@@ -145,22 +149,23 @@ pub type AggConstMap = ScalarConstMap
 fn cv_agg(elems: []ConstValue) -> ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
 
 /**
- * width_mask — the low-`w`-bits mask (2^w - 1) as a u128, the ceiling of an unsigned
- * value of width `w` and the modulus a width-`w` operation reduces modulo. Width 128 is
- * the all-ones u128 (its `1 << 128` cannot be spelled), every other width builds the
- * mask from a single in-range shift.
+ * width_mask — the low-`w`-bits mask (2^w - 1) as a u64, the ceiling of an unsigned
+ * value of width `w` and the modulus a width-`w` operation reduces modulo. Width 64 is
+ * the all-ones u64 (its `1 << 64` cannot be spelled — the fold's top-width special case,
+ * moved here from 128, drop-128, 2026-07-24), every other width builds the mask from a
+ * single in-range shift.
  *
- * @param w  the bit width (8 / 16 / 32 / 64 / 128)
- * @return   the mask 2^w - 1 as a u128
+ * @param w  the bit width (8 / 16 / 32 / 64)
+ * @return   the mask 2^w - 1 as a u64
  * @since #comptime-fold
  */
-fn width_mask(w: u32) -> u128 {
-    if w >= 128 { return ~(0 to u128) }
-    (1 to u128 << w) - 1
+fn width_mask(w: u32) -> u64 {
+    if w >= 64 { return ~(0 to u64) }
+    (1 to u64 << w) - 1
 }
 
 /**
- * mask_to_width — reduce a u128 bit pattern to its low `w` bits, the two's-complement
+ * mask_to_width — reduce a u64 bit pattern to its low `w` bits, the two's-complement
  * normalization every width-`w` result passes through before it becomes a `CVInt.bits`.
  *
  * @param bits  the unreduced bit pattern
@@ -168,7 +173,7 @@ fn width_mask(w: u32) -> u128 {
  * @return      `bits` with every bit at or above position `w` cleared
  * @since #comptime-fold
  */
-fn mask_to_width(bits: u128, w: u32) -> u128 { bits & width_mask(w) }
+fn mask_to_width(bits: u64, w: u32) -> u64 { bits & width_mask(w) }
 
 /**
  * bit_set — is the bit at position `pos` set in `bits`? Used to read a value's sign bit
@@ -179,17 +184,19 @@ fn mask_to_width(bits: u128, w: u32) -> u128 { bits & width_mask(w) }
  * @return      true iff bit `pos` is 1
  * @since #comptime-fold
  */
-fn bit_set(bits: u128, pos: u32) -> bool { ((bits >> pos) & (1 to u128)) == (1 to u128) }
+fn bit_set(bits: u64, pos: u32) -> bool { ((bits >> pos) & (1 to u64)) == (1 to u64) }
 
 /**
  * msb_value — 2^(w-1), the magnitude of the most-negative signed value of width `w` and
- * the exclusive ceiling of a signed magnitude at that width.
+ * the exclusive ceiling of a signed magnitude at that width. `w` is always <= 64 (`int_info`
+ * gates it), so the shift is always in-range — no top-width special case needed here (unlike
+ * `width_mask`, whose shift amount is `w` itself, which CAN legally reach 64).
  *
  * @param w  the bit width
- * @return   2^(w-1) as a u128
+ * @return   2^(w-1) as a u64
  * @since #comptime-fold
  */
-fn msb_value(w: u32) -> u128 { 1 to u128 << (w - 1) }
+fn msb_value(w: u32) -> u64 { 1 to u64 << (w - 1) }
 
 /**
  * is_negative — does `bits` denote a negative value under `info`? False for every
@@ -200,19 +207,19 @@ fn msb_value(w: u32) -> u128 { 1 to u128 << (w - 1) }
  * @return      true iff the value is a negative signed value
  * @since #comptime-fold
  */
-fn is_negative(bits: u128, info: IntInfo) -> bool { info.is_signed && bit_set(mask_to_width(bits, info.width), info.width - 1) }
+fn is_negative(bits: u64, info: IntInfo) -> bool { info.is_signed && bit_set(mask_to_width(bits, info.width), info.width - 1) }
 
 /**
  * twos_neg — the width-`w` two's-complement negation of `x` (2^w - x mod 2^w), computed
  * with in-range subtraction only (never an underflowing `0 - x`), so it is safe on every
- * engine and for every width including 128.
+ * engine and for every width including the carrier's own top width (64).
  *
  * @param x  the value to negate (its low `w` bits are used)
  * @param w  the bit width
  * @return   the two's-complement negation, reduced to width `w`
  * @since #comptime-fold
  */
-fn twos_neg(x: u128, w: u32) -> u128 { mask_to_width((width_mask(w) - mask_to_width(x, w)) + (1 to u128), w) }
+fn twos_neg(x: u64, w: u32) -> u64 { mask_to_width((width_mask(w) - mask_to_width(x, w)) + (1 to u64), w) }
 
 /**
  * magnitude — the unsigned magnitude of the value `bits` denotes under `info`: the value
@@ -221,10 +228,10 @@ fn twos_neg(x: u128, w: u32) -> u128 { mask_to_width((width_mask(w) - mask_to_wi
  *
  * @param bits  the value's bit pattern
  * @param info  the value's width/signedness
- * @return      the absolute value as a u128
+ * @return      the absolute value as a u64
  * @since #comptime-fold
  */
-fn magnitude(bits: u128, info: IntInfo) -> u128 {
+fn magnitude(bits: u64, info: IntInfo) -> u64 {
     if is_negative(bits, info) { return twos_neg(bits, info.width) }
     mask_to_width(bits, info.width)
 }
@@ -239,7 +246,7 @@ fn magnitude(bits: u128, info: IntInfo) -> u128 {
  * @return      true iff the value is the signed minimum
  * @since #comptime-fold
  */
-fn is_min_bits(bits: u128, info: IntInfo) -> bool { info.is_signed && mask_to_width(bits, info.width) == msb_value(info.width) }
+fn is_min_bits(bits: u64, info: IntInfo) -> bool { info.is_signed && mask_to_width(bits, info.width) == msb_value(info.width) }
 
 /**
  * is_all_ones — is every low bit of `bits` set at width `w` (the bit pattern of a signed
@@ -250,53 +257,32 @@ fn is_min_bits(bits: u128, info: IntInfo) -> bool { info.is_signed && mask_to_wi
  * @return      true iff the low `w` bits are all 1
  * @since #comptime-fold
  */
-fn is_all_ones(bits: u128, w: u32) -> bool { mask_to_width(bits, w) == width_mask(w) }
+fn is_all_ones(bits: u64, w: u32) -> bool { mask_to_width(bits, w) == width_mask(w) }
 
 /**
  * int_info — classify a type as an integer width/signedness, or error when it is not an
- * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned).
+ * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned), or when
+ * it is WIDER than the fold's u64 carrier — the still-accepted `u128`/`i128` surface types
+ * (drop-128, 2026-07-24: the fold does not evaluate them; such a subtree is left unfolded,
+ * exactly like any other form the fold does not support yet). This is the ONE gate every
+ * `IntInfo` passes through, so it protects every width/shift computation downstream from
+ * ever seeing a width the u64 carrier cannot represent.
  *
  * @param t  the type to classify
- * @return   the width/signedness, or an error when `t` is not an integer type
+ * @return   the width/signedness, or an error when `t` is not an integer type the fold carries
  * @since #comptime-fold
  */
 fn int_info(t: Type) -> IntInfo | error {
     match t {
         Prim as p => {
             if !prim_is_int(p.kind) { return error { message = "comptime fold: type is not an integer" } }
-            IntInfo { width = prim_width(p.kind); is_signed = prim_is_signed(p.kind) }
+            let w = prim_width(p.kind)
+            if w > 64 { return error { message = "comptime fold: integer width wider than 64 bits is not evaluated (u128/i128 — drop-128, 2026-07-24)" } }
+            IntInfo { width = w; is_signed = prim_is_signed(p.kind) }
         }
         Byte => IntInfo { width = 8; is_signed = false }
         _ => error { message = "comptime fold: type is not an integer" }
     }
-}
-
-/**
- * signed_min_i128 — the minimum value of a signed type of width `w` as an i128 carrier
- * (-2^(w-1)), the lower bound the literal range check compares against.
- *
- * @param w  the bit width
- * @return   -2^(w-1) as an i128
- * @since #comptime-fold
- */
-fn signed_min_i128(w: u32) -> i128 {
-    let mx = (msb_value(w) - (1 to u128)) to i128
-    -(mx) - (1 to i128)
-}
-
-/**
- * neg_literal_bits — the width-`w` two's-complement bit pattern of a NEGATIVE i128
- * literal value, computed without ever negating i128-MIN directly (which would overflow):
- * it forms the magnitude from `-(value + 1)` (always in range) and subtracts.
- *
- * @param value  the negative literal value (< 0, already range-checked)
- * @param w      the target bit width
- * @return       the value's two's-complement bits at width `w`
- * @since #comptime-fold
- */
-fn neg_literal_bits(value: i128, w: u32) -> u128 {
-    let k = (-(value + (1 to i128))) to u128
-    width_mask(w) - k
 }
 
 /**
@@ -321,7 +307,7 @@ pub fn eval_const(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> Con
     match e.kind {
         TNumber as n => eval_number(n, e)
         TBoolLit as b => cv_bool(b.value)
-        TByteLit as by => cv_int(by.value to u128, Byte { })
+        TByteLit as by => cv_int(by.value to u64, Byte { })
         TCharLit as ch => cv_bytes(bytes_of_str(ch.bytes))
         TStrLit as s => cv_bytes(bytes_of_str(s.text))
         TCast as c => eval_cast_expr(c, e, table, env, agg)
@@ -441,16 +427,16 @@ fn eval_number(n: TNumber, e: TExpr) -> ConstValue | error {
 }
 
 /**
- * eval_int_literal — encode an integer literal `value` as its declared type `t`,
- * erroring when `t` is not an integer or the value is out of range for it.
+ * eval_int_literal — encode a sign-magnitude integer literal `value` as its declared type
+ * `t`, erroring when `t` is not an integer or the value is out of range for it.
  *
- * @param value  the literal's integer value (i128 carrier)
+ * @param value  the literal's value (sign + 64-bit magnitude — `parser::NumInt`)
  * @param t      the literal's declared type
  * @param e      the enclosing expression (positions any error)
  * @return       the integer comptime value, or a located error
  * @since #comptime-fold
  */
-fn eval_int_literal(value: i128, t: Type, e: TExpr) -> ConstValue | error {
+fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr) -> ConstValue | error {
     match int_info(t) {
         error => return const_form_error("comptime fold: a non-integer type on an integer literal (#comptime-fold)", e)
         IntInfo as info => encode_int_literal(value, info, t, e)
@@ -460,25 +446,27 @@ fn eval_int_literal(value: i128, t: Type, e: TExpr) -> ConstValue | error {
 /**
  * encode_int_literal — range-check `value` against the type `t` of width/signedness
  * `info` and produce its two's-complement bits, erroring (M.1; LEGISLATION:148) when the
- * literal is out of range for its type.
+ * literal is out of range for its type. Sign-magnitude (drop-128, 2026-07-24) makes the
+ * negative path direct — no `i128`-MIN-avoidance trick needed (the magnitude is already at
+ * hand): a negative value fits iff its magnitude is at most `2^(w-1)` (`i8::MIN`'s magnitude
+ * 128 fits `i8`); the two's-complement bits are `width_mask(w) - mag + 1`.
  *
- * @param value  the literal's integer value (i128 carrier)
+ * @param value  the literal's value (sign + 64-bit magnitude)
  * @param info   the type's width/signedness
  * @param t      the literal's declared type
  * @param e      the enclosing expression (positions any error)
  * @return       the integer comptime value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn encode_int_literal(value: i128, info: IntInfo, t: Type, e: TExpr) -> ConstValue | error {
-    if value < (0 to i128) {
+fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: Type, e: TExpr) -> ConstValue | error {
+    if value.neg {
         if !info.is_signed { return const_form_error("negative literal is out of range for an unsigned type (#comptime-fold)", e) }
-        if value < signed_min_i128(info.width) { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
-        return cv_int(neg_literal_bits(value, info.width), t)
+        if value.mag > msb_value(info.width) { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+        return cv_int(mask_to_width((width_mask(info.width) - value.mag) + (1 to u64), info.width), t)
     }
-    let uv = value to u128
-    let max = if info.is_signed { msb_value(info.width) - (1 to u128) } else { width_mask(info.width) }
-    if uv > max { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
-    cv_int(mask_to_width(uv, info.width), t)
+    let max = if info.is_signed { msb_value(info.width) - (1 to u64) } else { width_mask(info.width) }
+    if value.mag > max { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+    cv_int(mask_to_width(value.mag, info.width), t)
 }
 
 /**
@@ -575,7 +563,7 @@ fn bytes_to_cv_elems(data: []byte) -> []ConstValue {
     mut i: u64 = 0
     loop {
         if i >= data.len { break }
-        out = teko::list::push(out, cv_int(data[i] to u128, Byte { }))
+        out = teko::list::push(out, cv_int(data[i] to u64, Byte { }))
         i++
     }
     out
@@ -625,7 +613,7 @@ fn is_byte_type(t: Type) -> bool {
 fn cast_to_int(v: ConstValue, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
     match v.kind {
         CVInt as ci => cast_int_to_int(ci, target, dst, e)
-        CVBool as cb => cv_int(if cb.v { 1 to u128 } else { 0 to u128 }, target)
+        CVBool as cb => cv_int(if cb.v { 1 to u64 } else { 0 to u64 }, target)
         _ => const_form_error("comptime fold: cannot cast this constant kind to an integer (#comptime-fold)", e)
     }
 }
@@ -662,7 +650,7 @@ fn cast_int_to_int(ci: CVInt, target: Type, dst: IntInfo, e: TExpr) -> ConstValu
  * @return        the re-encoded integer value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn cast_int_widths(bits: u128, src: IntInfo, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
+fn cast_int_widths(bits: u64, src: IntInfo, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
     if is_negative(bits, src) {
         if !dst.is_signed { return const_form_error("constant is out of range for the cast target (a negative value to an unsigned type) (#comptime-fold)", e) }
         let m = twos_neg(bits, src.width)
@@ -679,11 +667,11 @@ fn cast_int_widths(bits: u128, src: IntInfo, target: Type, dst: IntInfo, e: TExp
  * admits: its signed maximum 2^(w-1)-1, or its unsigned ceiling 2^w-1.
  *
  * @param dst  the target's width/signedness
- * @return     the inclusive maximum as a u128
+ * @return     the inclusive maximum as a u64
  * @since #comptime-fold
  */
-fn cast_max(dst: IntInfo) -> u128 {
-    if dst.is_signed { return msb_value(dst.width) - (1 to u128) }
+fn cast_max(dst: IntInfo) -> u64 {
+    if dst.is_signed { return msb_value(dst.width) - (1 to u64) }
     width_mask(dst.width)
 }
 
@@ -707,7 +695,7 @@ fn cast_max(dst: IntInfo) -> u128 {
 fn eval_unary_expr(u: TUnary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
     if u.op == lexer::TokenKind::Minus {
         match u.operand.kind {
-            TNumber as n => if !n.is_float { return eval_int_literal((0 to i128) - n.value, e.type, e) }
+            TNumber as n => if !n.is_float { return eval_int_literal(parser::numint_negate(n.value), e.type, e) }
             _ => { }
         }
     }
@@ -784,9 +772,9 @@ fn int_unary_at(op: lexer::TokenKind, ci: CVInt, info: IntInfo, e: TExpr) -> Con
  * @return      the negated integer value, or a located out-of-range error
  * @since #comptime-fold
  */
-fn int_negate(a: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+fn int_negate(a: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
     if !info.is_signed {
-        if mask_to_width(a, info.width) == (0 to u128) { return cv_int(0 to u128, ty) }
+        if mask_to_width(a, info.width) == (0 to u64) { return cv_int(0 to u64, ty) }
         return const_form_error("negation of a non-zero unsigned constant is out of range (#comptime-fold)", e)
     }
     if is_min_bits(a, info) { return const_form_error("integer overflow negating a constant (a signed MIN has no positive) (#comptime-fold)", e) }
@@ -990,25 +978,25 @@ fn eval_index_at(ag: CVAgg, idx: ConstValue, e: TExpr) -> ConstValue | error {
  * @since #comptime-fold
  */
 fn eval_index_pick(ag: CVAgg, ci: CVInt, e: TExpr) -> ConstValue | error {
-    let iv = match index_carrier(ci) { null => return const_form_error("comptime fold: index is out of range (#comptime-fold)", e); i128 as v => v }
-    if iv < (0 to i128) { return const_form_error("comptime fold: a negative index is out of range (#comptime-fold)", e) }
-    if (iv to u128) >= (ag.elems.len to u128) { return const_form_error("comptime fold: index is out of range for the aggregate length (#comptime-fold)", e) }
-    ag.elems[iv to u64]
+    let iv = match index_carrier(ci) { null => return const_form_error("comptime fold: index is out of range (#comptime-fold)", e); parser::NumInt as v => v }
+    if iv.neg { return const_form_error("comptime fold: a negative index is out of range (#comptime-fold)", e) }
+    if iv.mag >= ag.elems.len { return const_form_error("comptime fold: index is out of range for the aggregate length (#comptime-fold)", e) }
+    ag.elems[iv.mag]
 }
 
 /**
- * index_carrier — the signed i128 value a const index `CVInt` denotes, or null when the value has no
- * i128 form (a u128 whose magnitude exceeds i128-max — necessarily an out-of-range index). Reuses
- * `int_info`/`cv_int_to_i128`, the same reconstruction `literal_of` uses.
+ * index_carrier — the sign-magnitude value a const index `CVInt` denotes, or null when its type is
+ * not an integer the fold carries. Reuses `int_info`/`cv_int_to_numint`, the same reconstruction
+ * `literal_of` uses.
  *
  * @param ci  the folded index integer
- * @return    the index's i128 value, or null when unrepresentable
+ * @return    the index's value, or null when unrepresentable
  * @since #comptime-fold
  */
-fn index_carrier(ci: CVInt) -> i128 | null {
+fn index_carrier(ci: CVInt) -> parser::NumInt | null {
     match int_info(ci.ty) {
         error => null
-        IntInfo as info => cv_int_to_i128(ci.bits, info)
+        IntInfo as info => cv_int_to_numint(ci.bits, info)
     }
 }
 
@@ -1068,7 +1056,7 @@ fn eval_len_field(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: A
     let recv = match eval_const(fa.receiver, table, env, agg) { error as x => return x; ConstValue as v => v }
     match value_length(recv) {
         null => const_form_error("comptime fold: `.len` receiver is not a const string or aggregate (#comptime-fold)", e)
-        u64 as n => cv_int(n to u128, e.type)
+        u64 as n => cv_int(n, e.type)
     }
 }
 
@@ -1308,7 +1296,7 @@ fn int_binop_dispatch(op: lexer::TokenKind, la: CVInt, ra: CVInt, info: IntInfo,
  * @return      the folded sum, or a located overflow error
  * @since #comptime-fold
  */
-fn int_add(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+fn int_add(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
     let raw = a + b
     let res = mask_to_width(raw, info.width)
     if int_add_overflows(a, b, res, raw, info) { return const_form_error("integer overflow in a constant `+` (out of range for its type) (#comptime-fold)", e) }
@@ -1317,25 +1305,27 @@ fn int_add(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | 
 
 /**
  * int_add_overflows — does the addition leave the type's range? Signed: both operands
- * share a sign the result does not. Unsigned: a carry beyond the width (at width 128 a
- * u128 carry-out, else a sum exceeding the width mask).
+ * share a sign the result does not. Unsigned: a carry beyond the width (at width 64, the
+ * carrier's own top width, a u64 carry-out — `raw` already wrapped, detected via `raw < a`
+ * — else a sum exceeding the width mask, safe because `raw` had headroom to compute
+ * unwrapped at any width below the carrier's own).
  *
  * @param a     the left operand's bit pattern
  * @param b     the right operand's bit pattern
  * @param res   the width-reduced sum
- * @param raw   the un-reduced u128 sum
+ * @param raw   the un-reduced u64 sum
  * @param info  the operation's width/signedness
  * @return      true iff the addition overflows
  * @since #comptime-fold
  */
-fn int_add_overflows(a: u128, b: u128, res: u128, raw: u128, info: IntInfo) -> bool {
+fn int_add_overflows(a: u64, b: u64, res: u64, raw: u64, info: IntInfo) -> bool {
     if info.is_signed {
         let sa = bit_set(a, info.width - 1)
         let sb = bit_set(b, info.width - 1)
         let sr = bit_set(res, info.width - 1)
         return (sa == sb) && (sr != sa)
     }
-    if info.width >= 128 { return raw < a }
+    if info.width >= 64 { return raw < a }
     raw > width_mask(info.width)
 }
 
@@ -1351,7 +1341,7 @@ fn int_add_overflows(a: u128, b: u128, res: u128, raw: u128, info: IntInfo) -> b
  * @return      the folded difference, or a located overflow error
  * @since #comptime-fold
  */
-fn int_sub(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+fn int_sub(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
     let res = mask_to_width(a + twos_neg(b, info.width), info.width)
     if int_sub_overflows(a, b, res, info) { return const_form_error("integer overflow in a constant `-` (out of range for its type) (#comptime-fold)", e) }
     cv_int(res, ty)
@@ -1368,7 +1358,7 @@ fn int_sub(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | 
  * @return      true iff the subtraction overflows
  * @since #comptime-fold
  */
-fn int_sub_overflows(a: u128, b: u128, res: u128, info: IntInfo) -> bool {
+fn int_sub_overflows(a: u64, b: u64, res: u64, info: IntInfo) -> bool {
     if info.is_signed {
         let sa = bit_set(a, info.width - 1)
         let sb = bit_set(b, info.width - 1)
@@ -1391,7 +1381,7 @@ fn int_sub_overflows(a: u128, b: u128, res: u128, info: IntInfo) -> bool {
  * @return      the folded product, or a located overflow error
  * @since #comptime-fold
  */
-fn int_mul(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+fn int_mul(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
     let res = mask_to_width(a * b, info.width)
     if int_mul_overflows(a, b, info) { return const_form_error("integer overflow in a constant `*` (out of range for its type) (#comptime-fold)", e) }
     cv_int(res, ty)
@@ -1399,7 +1389,7 @@ fn int_mul(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | 
 
 /**
  * int_mul_overflows — does the multiplication leave the type's range? It compares
- * magnitudes: the product of the unsigned magnitudes must not carry out of u128 and must
+ * magnitudes: the product of the unsigned magnitudes must not carry out of u64 and must
  * fit the type's magnitude ceiling (a signed result may reach 2^(w-1) only when the signs
  * differ, i.e. the minimum).
  *
@@ -1409,14 +1399,16 @@ fn int_mul(a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | 
  * @return      true iff the multiplication overflows
  * @since #comptime-fold
  */
-fn int_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
+fn int_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
     if !info.is_signed { return unsigned_mul_overflows(a, b, info) }
     signed_mul_overflows(a, b, info)
 }
 
 /**
- * unsigned_mul_overflows — does an unsigned product leave the width? A u128 carry-out, or
- * (below width 128) a product exceeding the width mask.
+ * unsigned_mul_overflows — does an unsigned product leave the width? A u64 carry-out
+ * (`mul_mag_overflows`, width-agnostic), or — below the carrier's own top width (64), where
+ * a non-overflowing u64 product still has headroom to compare against the mask directly —
+ * a product exceeding the width mask.
  *
  * @param a     the left operand's bit pattern
  * @param b     the right operand's bit pattern
@@ -1424,15 +1416,15 @@ fn int_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
  * @return      true iff the unsigned product overflows
  * @since #comptime-fold
  */
-fn unsigned_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
+fn unsigned_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
     if mul_mag_overflows(a, b) { return true }
-    if info.width >= 128 { return false }
+    if info.width >= 64 { return false }
     (a * b) > width_mask(info.width)
 }
 
 /**
  * signed_mul_overflows — does a signed product leave the width? The magnitude product must
- * not carry out of u128 nor exceed 2^(w-1); a magnitude of exactly 2^(w-1) is in range
+ * not carry out of u64 nor exceed 2^(w-1); a magnitude of exactly 2^(w-1) is in range
  * only when the signs differ (the type minimum).
  *
  * @param a     the left operand's bit pattern
@@ -1441,7 +1433,7 @@ fn unsigned_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
  * @return      true iff the signed product overflows
  * @since #comptime-fold
  */
-fn signed_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
+fn signed_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
     let ua = magnitude(a, info)
     let ub = magnitude(b, info)
     if mul_mag_overflows(ua, ub) { return true }
@@ -1453,16 +1445,17 @@ fn signed_mul_overflows(a: u128, b: u128, info: IntInfo) -> bool {
 }
 
 /**
- * mul_mag_overflows — does the unsigned product `x * y` carry out of the u128 carrier?
+ * mul_mag_overflows — does the unsigned product `x * y` carry out of the u64 carrier?
  * Detected without a wider type: a non-zero `x` whose product divided back does not
- * recover `y` overflowed.
+ * recover `y` overflowed. Width-agnostic — sound at every width, including the carrier's
+ * own top width (64), where `x * y` may itself wrap (Teko native `*` wraps, never traps).
  *
  * @param x  the first magnitude
  * @param y  the second magnitude
- * @return   true iff `x * y` exceeds u128
+ * @return   true iff `x * y` exceeds u64
  * @since #comptime-fold
  */
-fn mul_mag_overflows(x: u128, y: u128) -> bool { x != (0 to u128) && ((x * y) / x != y) }
+fn mul_mag_overflows(x: u64, y: u64) -> bool { x != (0 to u64) && ((x * y) / x != y) }
 
 /**
  * int_divrem — integer division (`is_div`) or remainder. A zero divisor and the signed
@@ -1479,8 +1472,8 @@ fn mul_mag_overflows(x: u128, y: u128) -> bool { x != (0 to u128) && ((x * y) / 
  * @throws        a located error when the divisor is zero or a signed `MIN / -1` overflows
  * @since #comptime-fold
  */
-fn int_divrem(is_div: bool, a: u128, b: u128, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
-    if mask_to_width(b, info.width) == (0 to u128) { return divrem_zero_error(is_div, e) }
+fn int_divrem(is_div: bool, a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    if mask_to_width(b, info.width) == (0 to u64) { return divrem_zero_error(is_div, e) }
     if info.is_signed && is_min_bits(a, info) && is_all_ones(b, info.width) { return const_form_error("integer overflow in a constant signed division (MIN / -1) (#comptime-fold)", e) }
     if !info.is_signed { return cv_int(mask_to_width(if is_div { a / b } else { a % b }, info.width), ty) }
     let ua = magnitude(a, info)
@@ -1515,7 +1508,7 @@ fn divrem_zero_error(is_div: bool, e: TExpr) -> error {
  * @return      the folded signed quotient
  * @since #comptime-fold
  */
-fn int_div_signed(ua: u128, ub: u128, a: u128, b: u128, info: IntInfo, ty: Type) -> ConstValue | error {
+fn int_div_signed(ua: u64, ub: u64, a: u64, b: u64, info: IntInfo, ty: Type) -> ConstValue | error {
     let uq = ua / ub
     let neg = bit_set(a, info.width - 1) != bit_set(b, info.width - 1)
     let res = if neg { twos_neg(uq, info.width) } else { uq }
@@ -1534,7 +1527,7 @@ fn int_div_signed(ua: u128, ub: u128, a: u128, b: u128, info: IntInfo, ty: Type)
  * @return      the folded signed remainder
  * @since #comptime-fold
  */
-fn int_rem_signed(ua: u128, ub: u128, a: u128, info: IntInfo, ty: Type) -> ConstValue | error {
+fn int_rem_signed(ua: u64, ub: u64, a: u64, info: IntInfo, ty: Type) -> ConstValue | error {
     let ur = ua % ub
     let neg = bit_set(a, info.width - 1)
     let res = if neg { twos_neg(ur, info.width) } else { ur }
@@ -1573,7 +1566,7 @@ fn int_shift(is_left: bool, la: CVInt, ra: CVInt, info: IntInfo, e: TExpr) -> Co
  * @return      the masked shift amount as a u32
  * @since #comptime-fold
  */
-fn shift_count(bits: u128, w: u32) -> u32 { (bits & ((w - 1) to u128)) to u32 }
+fn shift_count(bits: u64, w: u32) -> u32 { (bits & ((w - 1) to u64)) to u32 }
 
 /**
  * is_arith_shift — is this right-shift an arithmetic (sign-filling) one? Only when the
@@ -1585,7 +1578,7 @@ fn shift_count(bits: u128, w: u32) -> u32 { (bits & ((w - 1) to u128)) to u32 }
  * @return      true iff the shift must fill the vacated high bits with ones
  * @since #comptime-fold
  */
-fn is_arith_shift(a: u128, cnt: u32, info: IntInfo) -> bool { info.is_signed && cnt > 0 && bit_set(a, info.width - 1) }
+fn is_arith_shift(a: u64, cnt: u32, info: IntInfo) -> bool { info.is_signed && cnt > 0 && bit_set(a, info.width - 1) }
 
 /**
  * arith_shr — the arithmetic right-shift of a negative signed value: the logical shift
@@ -1597,7 +1590,7 @@ fn is_arith_shift(a: u128, cnt: u32, info: IntInfo) -> bool { info.is_signed && 
  * @return      the sign-preserving shifted bits, reduced to width
  * @since #comptime-fold
  */
-fn arith_shr(a: u128, cnt: u32, info: IntInfo) -> u128 {
+fn arith_shr(a: u64, cnt: u32, info: IntInfo) -> u64 {
     let logical = a >> cnt
     let fill = mask_to_width(width_mask(info.width) << (info.width - cnt), info.width)
     mask_to_width(logical | fill, info.width)
@@ -1647,12 +1640,13 @@ fn float_div(x: f64, y: f64, e: TExpr) -> ConstValue | error {
 
 /**
  * cf_is_int_type — true iff `t` is an integer type the fold re-emits as a `TNumber` literal (a
- * `Prim` integer i8..i128 / u8..u128, or `byte`). The evaluability predicate and `literal_of` both
- * gate on this so the CF2 fold stays within the integer scalar subset (floats, chars, strings and
- * aggregates are left unfolded for a later crumb).
+ * `Prim` integer i8..i64 / u8..u64, or `byte` — `int_info`'s width gate means a still-accepted
+ * `u128`/`i128` type is NOT included here; such a value is left unfolded, drop-128 2026-07-24).
+ * The evaluability predicate and `literal_of` both gate on this so the CF2 fold stays within the
+ * integer scalar subset (floats, chars, strings and aggregates are left unfolded for a later crumb).
  *
  * @param t  the type to classify
- * @return   whether `t` is an integer/byte type
+ * @return   whether `t` is an integer/byte type the fold carries
  * @since #comptime-fold
  */
 fn cf_is_int_type(t: Type) -> bool {
@@ -1923,49 +1917,39 @@ fn cf_fold_cast_operand(e: TExpr, agg: AggConstMap) -> bool {
 }
 
 /**
- * i128_max_as_u128 — the largest signed-i128 value (2^127 - 1) as a u128, the ceiling above which an
- * unsigned comptime integer has NO `TNumber` literal form (the parser's `Number.value` carrier is an
- * i128, and `value_fits` admits an unsigned literal only when it is non-negative — a u128 whose top
- * bit is set cannot be spelled and is left unfolded).
- *
- * @return  2^127 - 1 as a u128
- * @since #comptime-fold
- */
-fn i128_max_as_u128() -> u128 { msb_value(128) - (1 to u128) }
-
-/**
- * cv_int_to_i128 — reconstruct the i128 literal carrier a `CVInt` of width/signedness `info` re-emits
- * as, in the SAME representation the parser/typer use (an unsigned value as its non-negative
- * magnitude, a signed value as its signed integer), or null when the value has no literal form (a
- * u128 whose magnitude exceeds i128-max — e.g. `~(0 to u128)`; such a value is left as its op-tree so
- * behavior is preserved). Every returned carrier round-trips: fed back to the pipeline as a `TNumber`
- * of the same type, it lowers to exactly the folded bits on both engines, because it is
- * indistinguishable from a hand-written literal the existing lowering already emits correctly.
+ * cv_int_to_numint — reconstruct the sign-magnitude literal carrier a `CVInt` of
+ * width/signedness `info` re-emits as, in the SAME representation the parser/typer use (an
+ * unsigned value as its non-negative magnitude, a signed value as its signed magnitude).
+ * Replaces `cv_int_to_i128` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
+ * (`int_info`'s gate), every value this returns is provably `<= u64::MAX` in magnitude, so —
+ * unlike the old i128 carrier, which had no literal form for a u128 whose top bit was set —
+ * this NEVER returns null; the return type stays `| null` for the caller's shape (a future
+ * fold form may reintroduce an unrepresentable case). Every returned carrier round-trips:
+ * fed back to the pipeline as a `TNumber` of the same type, it lowers to exactly the folded
+ * bits on both engines, because it is indistinguishable from a hand-written literal the
+ * existing lowering already emits correctly.
  *
  * @param bits  the value's two's-complement bits
  * @param info  the value's width/signedness
- * @return      the i128 literal carrier, or null when the value is unrepresentable as a literal
+ * @return      the literal carrier (never null; see above)
  * @since #comptime-fold
  */
-fn cv_int_to_i128(bits: u128, info: IntInfo) -> i128 | null {
+fn cv_int_to_numint(bits: u64, info: IntInfo) -> parser::NumInt | null {
     let v = mask_to_width(bits, info.width)
-    if !info.is_signed {
-        if v > i128_max_as_u128() { return null }
-        return v to i128
-    }
-    if !bit_set(v, info.width - 1) { return v to i128 }
-    if is_min_bits(v, info) { return signed_min_i128(info.width) }
-    -(twos_neg(v, info.width) to i128)
+    if !info.is_signed { return parser::numint_of_u64(v) }
+    if !bit_set(v, info.width - 1) { return parser::numint_of_u64(v) }
+    if is_min_bits(v, info) { return parser::NumInt { neg = true; mag = msb_value(info.width) } }
+    parser::NumInt { neg = true; mag = twos_neg(v, info.width) }
 }
 
 /**
  * literal_of — reconstruct a literal `TExpr` from a computed `ConstValue`, typed as `ty` and
  * positioned at (`line`, `col`) — the inverse of `eval_const` used by the fold to splice a folded
  * literal back into the typed AST. CF2 reconstructs the INTEGER case (a `CVInt` becomes a `TNumber`
- * whose carrier is re-derived from the bits under `ty`); a value with no literal form (the u128
- * top-bit case, `cv_int_to_i128 == null`) and every non-integer kind (folded only from a later crumb)
- * return null, signalling the caller to leave the original op-tree unfolded (behavior preserved). The
- * produced node is indistinguishable to lowering from a hand-written literal — zero runtime.
+ * whose carrier is re-derived from the bits under `ty`); every non-integer kind (folded only from a
+ * later crumb) returns null, signalling the caller to leave the original op-tree unfolded (behavior
+ * preserved). The produced node is indistinguishable to lowering from a hand-written literal — zero
+ * runtime.
  *
  * @param v     the computed comptime value
  * @param ty    the type the fold site resolved (the reconstructed literal's `.type`)
@@ -1983,8 +1967,7 @@ fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr | null {
 
 /**
  * int_literal_of — reconstruct a `TNumber` literal from an integer comptime value `ci`, typed `ty`
- * and positioned at (`line`, `col`), or null when `ty` is not an integer or the value has no literal
- * carrier (`cv_int_to_i128 == null`).
+ * and positioned at (`line`, `col`), or null when `ty` is not an integer type the fold carries.
  *
  * @param ci    the integer comptime value
  * @param ty    the reconstructed literal's type
@@ -1996,9 +1979,9 @@ fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr | null {
 fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32) -> TExpr | null {
     match int_info(ty) {
         error => null
-        IntInfo as info => match cv_int_to_i128(ci.bits, info) {
+        IntInfo as info => match cv_int_to_numint(ci.bits, info) {
             null => null
-            i128 as val => TExpr { kind = TNumber { is_float = false; value = val; fval = 0.0 }; type = ty; line = line; col = col }
+            parser::NumInt as val => TExpr { kind = TNumber { is_float = false; value = val; fval = 0.0 }; type = ty; line = line; col = col }
         }
     }
 }
@@ -3408,16 +3391,15 @@ fn cf_reverse_bytes(a: []byte) -> []byte {
  * cf_project_u64 — the low 64 bits of `bits` after the width/signedness `info` projection the C backend
  * performs when it casts an interpolation hole to `uint64_t` (the argument every `tk_fmt_x_*`/`tk_fmt_b`
  * / `tk_u64_to_str` receives). A signed value narrower than 64 bits is SIGN-EXTENDED to 64 (so `-1 to
- * i8` renders as `FFFFFFFFFFFFFFFF` under `:X`, exactly as `(uint64_t)((int8_t)-1)` does); every other
- * value is its low 64 bits (an unsigned value zero-extends, a 64-bit-or-wider value truncates — the
- * SAME truncation `(uint64_t)` applies to an i128/u128 hole).
+ * i8` renders as `FFFFFFFFFFFFFFFF` under `:X`, exactly as `(uint64_t)((int8_t)-1)` does); a width-64
+ * value passes through as-is (the carrier's own top width — `mask_to_width(masked, 64)` is a no-op).
  *
  * @param bits  the value's two's-complement bits
  * @param info  the value's width/signedness
- * @return      the 64-bit pattern the runtime formatter receives, as a u128 in `[0, 2^64)`
+ * @return      the 64-bit pattern the runtime formatter receives
  * @since #comptime-fold
  */
-fn cf_project_u64(bits: u128, info: IntInfo) -> u128 {
+fn cf_project_u64(bits: u64, info: IntInfo) -> u64 {
     let masked = mask_to_width(bits, info.width)
     if info.width >= 64 { return mask_to_width(masked, 64) }
     if info.is_signed && bit_set(masked, info.width - 1) { return masked | (width_mask(64) ^ width_mask(info.width)) }
@@ -3431,33 +3413,33 @@ fn cf_project_u64(bits: u128, info: IntInfo) -> u128 {
  * zero defensively and is unreachable.
  *
  * @param ci  the integer comptime value
- * @return    the 64-bit pattern as a u128 in `[0, 2^64)`
+ * @return    the 64-bit pattern
  * @since #comptime-fold
  */
-fn cf_as_u64(ci: CVInt) -> u128 {
+fn cf_as_u64(ci: CVInt) -> u64 {
     match int_info(ci.ty) {
-        error => 0 to u128
+        error => 0 to u64
         IntInfo as info => cf_project_u64(ci.bits, info)
     }
 }
 
 /**
- * cf_u64_decimal — the unsigned decimal render of `v` (a value in `[0, 2^64)`): the digits with no
- * leading zeros, `"0"` for zero — byte-identical to `tk_u64_to_str`.
+ * cf_u64_decimal — the unsigned decimal render of `v`: the digits with no leading zeros, `"0"` for
+ * zero — byte-identical to `tk_u64_to_str`.
  *
- * @param v  the value to render (must be `< 2^64`)
+ * @param v  the value to render
  * @return   the decimal digit bytes
  * @since #comptime-fold
  */
-fn cf_u64_decimal(v: u128) -> []byte {
-    if v == (0 to u128) { return cf_single_byte(48 to byte) }
+fn cf_u64_decimal(v: u64) -> []byte {
+    if v == (0 to u64) { return cf_single_byte(48 to byte) }
     mut rev: []byte = teko::list::empty()
     mut x = v
     loop {
-        if x == (0 to u128) { break }
-        let d = (x % (10 to u128)) to u64
+        if x == (0 to u64) { break }
+        let d = x % (10 to u64)
         rev = teko::list::push(rev, (48 + d) to byte)
-        x = x / (10 to u128)
+        x = x / (10 to u64)
     }
     cf_reverse_bytes(rev)
 }
@@ -3468,11 +3450,11 @@ fn cf_u64_decimal(v: u128) -> []byte {
  * `tk_i64_to_str` (which forms the magnitude as `-(v + 1) + 1`, matched here by the two's-complement
  * negation at width 64).
  *
- * @param u  the 64-bit pattern (a u128 in `[0, 2^64)`) interpreted as a signed int64
+ * @param u  the 64-bit pattern interpreted as a signed int64
  * @return   the signed decimal bytes
  * @since #comptime-fold
  */
-fn cf_i64_decimal(u: u128) -> []byte {
+fn cf_i64_decimal(u: u64) -> []byte {
     if bit_set(u, 63) { return cf_append_bytes(cf_single_byte(45 to byte), cf_u64_decimal(twos_neg(u, 64))) }
     cf_u64_decimal(u)
 }
@@ -3501,13 +3483,13 @@ fn cf_hex_digit(d: u64, upper: bool) -> byte {
  * @return       the hex digit bytes
  * @since #comptime-fold
  */
-fn cf_hex(v: u128, upper: bool) -> []byte {
-    if v == (0 to u128) { return cf_single_byte(48 to byte) }
+fn cf_hex(v: u64, upper: bool) -> []byte {
+    if v == (0 to u64) { return cf_single_byte(48 to byte) }
     mut rev: []byte = teko::list::empty()
     mut x = v
     loop {
-        if x == (0 to u128) { break }
-        let nib = (x & (15 to u128)) to u64
+        if x == (0 to u64) { break }
+        let nib = x & (15 to u64)
         rev = teko::list::push(rev, cf_hex_digit(nib, upper))
         x = x >> (4 to u32)
     }
@@ -3522,13 +3504,13 @@ fn cf_hex(v: u128, upper: bool) -> []byte {
  * @return   the binary digit bytes
  * @since #comptime-fold
  */
-fn cf_binary(v: u128) -> []byte {
-    if v == (0 to u128) { return cf_single_byte(48 to byte) }
+fn cf_binary(v: u64) -> []byte {
+    if v == (0 to u64) { return cf_single_byte(48 to byte) }
     mut rev: []byte = teko::list::empty()
     mut x = v
     loop {
-        if x == (0 to u128) { break }
-        rev = teko::list::push(rev, (48 + ((x & (1 to u128)) to u64)) to byte)
+        if x == (0 to u64) { break }
+        rev = teko::list::push(rev, (48 + (x & (1 to u64))) to byte)
         x = x >> (1 to u32)
     }
     cf_reverse_bytes(rev)
@@ -3540,12 +3522,12 @@ fn cf_binary(v: u128) -> []byte {
  * fill to reach `width` (the field width COUNTS the sign), then the magnitude digits. A width no larger
  * than the rendered body adds no padding.
  *
- * @param u      the 64-bit pattern (a u128 in `[0, 2^64)`) interpreted as a signed int64
+ * @param u      the 64-bit pattern interpreted as a signed int64
  * @param width  the minimum field width (the parsed spec digits, default 1)
  * @return       the zero-padded signed decimal bytes
  * @since #comptime-fold
  */
-fn cf_fmt_d(u: u128, width: u64) -> []byte {
+fn cf_fmt_d(u: u64, width: u64) -> []byte {
     let neg = bit_set(u, 63)
     let mag = if neg { twos_neg(u, 64) } else { u }
     let digits = cf_u64_decimal(mag)
@@ -3568,11 +3550,11 @@ fn cf_fmt_d(u: u128, width: u64) -> []byte {
  * with a `','` thousands separator inserted every three digits from the right of the integer part —
  * byte-identical to `tk_fmt_n_i`.
  *
- * @param u  the 64-bit pattern (a u128 in `[0, 2^64)`) interpreted as a signed int64
+ * @param u  the 64-bit pattern interpreted as a signed int64
  * @return   the comma-grouped signed decimal bytes
  * @since #comptime-fold
  */
-fn cf_fmt_n(u: u128) -> []byte {
+fn cf_fmt_n(u: u64) -> []byte {
     let neg = bit_set(u, 63)
     let mag = if neg { twos_neg(u, 64) } else { u }
     let digits = cf_u64_decimal(mag)

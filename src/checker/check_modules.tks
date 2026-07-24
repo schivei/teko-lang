@@ -157,6 +157,25 @@ fn check_texpr(te: parser::TypeExpr, ref_ns: str, table: TypeTable, al: []AliasB
     }
 }
 
+/**
+ * check_flags_member_cap — a `flags` type declares no type-exprs to validate (C8.3), but its
+ * bit-value carrier is a u64 (drop-128, 2026-07-24): bit 63 is the last representable power of
+ * two, so a flags type is capped at 64 members regardless of whether any member is ever
+ * referenced via `Type::Member` (codegen emits every member's `1 << i` unconditionally, so this
+ * declaration-time cap is required, not just the access-time one in
+ * `typer.tks::type_ns_qualified_value`).
+ *
+ * @param fb  the flags type's body (its declared member names)
+ * @return    an error when the cap is exceeded, else `null`
+ * @throws    when `fb.members.len` exceeds 64
+ */
+fn check_flags_member_cap(fb: parser::FlagsBody) -> error | null {
+    if fb.members.len > 64 {
+        return error { message = "a flags type may declare at most 64 members (bit 63 is the last) — write this as two flags types instead" }
+    }
+    null
+}
+
 // the pass: check every decl's type-references (params/return for fns; fields/variant member
 // for type decls). Returns null on success or the first error.
 fn check_modules(prog: parser::Program, table: TypeTable) -> error | null {
@@ -209,7 +228,7 @@ fn check_modules(prog: parser::Program, table: TypeTable) -> error | null {
                         e = check_texpr(ab.alias, it.namespace, table, al)   // an alias's RHS type-expr
                     }
                     parser::EnumBody => { }
-                    parser::FlagsBody => { }   // (C8.3) member names only; no type-exprs to validate
+                    parser::FlagsBody as fb => { e = check_flags_member_cap(fb) }
                     parser::ExternBody => { }   // (C7.1a) opaque handle — no type-exprs to validate
                     parser::ClassBody as cb => {   // (W10b.CLASS) mirrors StructBody's field-only scope (methods unchecked here, same as struct methods today)
                         mut k = 0

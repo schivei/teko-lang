@@ -19,6 +19,22 @@ type RType = struct { r: Reader; value: checker::Type }
 type RTypes = struct { r: Reader; value: []checker::Type }
 type RTable = struct { r: Reader; value: []str }
 
+/**
+ * numint_of_hilo — reconstruct a `parser::NumInt` from the frozen `hi:lo` u64-pair wire
+ * encoding (drop-128, 2026-07-24; see `tkb_write.tks::write_numint`) — the exact inverse of
+ * the writer's derivation: `hi` all-ones marks a negative value (sign-extension), any other
+ * `hi` (always 0 for a value this codec ever writes) marks non-negative; the magnitude is
+ * `lo` directly when non-negative, else `lo`'s own two's-complement negation (`0 - lo`).
+ *
+ * @param hi  the high wire half
+ * @param lo  the low wire half
+ * @return    the reconstructed literal carrier
+ */
+fn numint_of_hilo(hi: u64, lo: u64) -> parser::NumInt {
+    if hi == 0xFFFFFFFFFFFFFFFF { return parser::NumInt { neg = true; mag = 0 - lo } }
+    parser::numint_of_u64(lo)
+}
+
 fn read_u8(r: Reader) -> RByte | error {
     if r.pos >= r.data.len { return error { message = "truncated .tkb" } }
     RByte { r = Reader { data = r.data; pos = r.pos + 1 }; value = r.data[r.pos] }
@@ -242,15 +258,12 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
     let ty = match read_type(r, table) { RType as x => x; error as e => return e }
     let tag = match read_u8(ty.r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
-        // N1/N2 inverse of write_texpr's TNumber: is_float (u8), the 128-bit value as two
-        // u64 (hi then lo), then the f64's IEEE-754 bits as a u64.
         let isf = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         let hi = match read_u64(isf.r) { RU64 as x => x; error as e => return e }
         let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
         let fb = match read_u64(lo.r) { RU64 as x => x; error as e => return e }
-        let v128 = (((hi.value to u128) << 64) | (lo.value to u128)) to i128
         return RTExpr { r = fb.r; value = checker::TExpr {
-                kind = checker::TNumber { is_float = isf.value != 0; value = v128; fval = teko::f64_from_bits(fb.value) }
+                kind = checker::TNumber { is_float = isf.value != 0; value = numint_of_hilo(hi.value, lo.value); fval = teko::f64_from_bits(fb.value) }
                 type = ty.value
                 line = 0
                 col = 0
@@ -392,15 +405,12 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TInterp { pieces = pieces; holes = holes; specs = empty_specs }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 19 {
-        // Enum::Member — PathExpr: inverse of write tag 19 — enum name, member, ordinal (u64),
-        // (#50) the resolved member value (u128 as hi then lo u64).
         let en = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
         let mb = match tkb_read_str(en.r, table) { RStr as x => x; error as e => return e }
         let od = match read_u64(mb.r) { RU64 as x => x; error as e => return e }
         let vh = match read_u64(od.r) { RU64 as x => x; error as e => return e }
         let vl = match read_u64(vh.r) { RU64 as x => x; error as e => return e }
-        let v = ((vh.value to u128) << 64) | (vl.value to u128)
-        return RTExpr { r = vl.r; value = checker::TExpr { kind = checker::TPathExpr { enum_name = en.value; member = mb.value; ordinal = od.value; value = v }; type = ty.value; line = 0; col = 0 } }
+        return RTExpr { r = vl.r; value = checker::TExpr { kind = checker::TPathExpr { enum_name = en.value; member = mb.value; ordinal = od.value; value = vl.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 20 {
         // Phase 2 — InExpr (<expr> in [ … ]): inverse of write tag 20 — lhs texpr, nelems (u64), then each elem texpr.
@@ -736,20 +746,18 @@ fn read_typebody(r: Reader, table: []str) -> RTypeBody | error {
     if tag.value == 3 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::AliasBody { alias = te.value } } }
     if tag.value == 4 { return RTypeBody { r = tag.r; value = parser::ExternBody { } } }
     if tag.value == 5 {
-        // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
         let n = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
         mut rr = n.r
         mut names: []str = teko::list::empty()
-        mut vals: []u128 = teko::list::empty()
+        mut vals: []u64 = teko::list::empty()
         mut i = 0
         loop {
             if i >= n.value { break }
             let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
             let hi = match read_u64(nm.r) { RU64 as x => x; error as e => return e }
             let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
-            let v = ((hi.value to u128) << 64) | (lo.value to u128)
             names = teko::list::push(names, nm.value)
-            vals = teko::list::push(vals, v)
+            vals = teko::list::push(vals, lo.value)
             rr = lo.r
             i++
         }
@@ -894,8 +902,7 @@ fn read_pexpr(r: Reader, table: []str) -> RPExpr | error {
         let hi = match read_u64(isf.r) { RU64 as x => x; error as e => return e }
         let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
         let fb = match read_u64(lo.r) { RU64 as x => x; error as e => return e }
-        let v128 = (((hi.value to u128) << 64) | (lo.value to u128)) to i128
-        return RPExpr { r = fb.r; value = parser::Expr { kind = parser::Number { is_float = isf.value != 0; value = v128; fval = teko::f64_from_bits(fb.value) }; line = 0; col = 0 } }
+        return RPExpr { r = fb.r; value = parser::Expr { kind = parser::Number { is_float = isf.value != 0; value = numint_of_hilo(hi.value, lo.value); fval = teko::f64_from_bits(fb.value) }; line = 0; col = 0 } }
     }
     if tag.value == 1 {
         let s = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }

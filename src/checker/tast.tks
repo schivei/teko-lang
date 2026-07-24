@@ -14,10 +14,17 @@ pub type TExpr = struct {
     col: u32
 }
 
-// leaves + operators (mirror Expr; children are TExpr — the whole tree is typed).
-// same contract as ast Number (N1): raw value; `.type` decides width/float-kind.
-// (`value` is the integer carrier — canonical Teko uses i128; C bootstrap uses __int128.)
-pub type TNumber = struct { is_float: bool; value: i128; fval: f64 }
+/**
+ * A typed numeric literal leaf (mirrors `parser::Number`, N1): raw value; `.type` decides
+ * width/float-kind.
+ *
+ * @field is_float  false for an integer literal (`value` holds it), true for a float literal
+ *                   (`fval` holds it, default f64)
+ * @field value      the raw integer literal value — see `parser::NumInt` (meaningful only when
+ *                    `!is_float`)
+ * @field fval       the raw float literal value (meaningful only when `is_float`)
+ */
+pub type TNumber = struct { is_float: bool; value: parser::NumInt; fval: f64 }
 pub type TVar = struct { name: str; is_func: bool; func_ns: str }   // (W10a) is_func = a bare reference to a top-level fn used as a VALUE → lowers to a `tk_closure` literal; func_ns = the fn's declaring namespace (for the C symbol mangle). A local of closure type has is_func=false (emits the bare name).
 pub type TStrLit = struct { text: str }
 pub type TByteLit = struct { value: byte }
@@ -69,7 +76,18 @@ pub type TInExpr = struct { lhs: TExpr; elems: []TExpr }
 // flattens it at runtime (concatenates the sub-slice into the result slice).
 pub type TArrayElem = struct { is_spread: bool; expr: TExpr }
 pub type TArrayLit = struct { elements: []TArrayElem }
-pub type TPathExpr = struct { enum_name: str; member: str; ordinal: u64; value: u128 }   // Enum::Member as a VALUE — `.type` is the NAMED enum; carries the resolved member ordinal + (#50) the RESOLVED member value (enum: the ordinal; flags: 1 << ordinal, u128 cap) so the VM reads it instead of recomputing
+/**
+ * `Enum::Member` as a VALUE — `.type` is the NAMED enum; carries the resolved member ordinal +
+ * (#50) the RESOLVED member value (enum: the ordinal; flags: `1 << ordinal`) so codegen reads
+ * it instead of recomputing.
+ *
+ * @field enum_name  the named enum/flags type this member belongs to
+ * @field member     the member's name
+ * @field ordinal    the member's 0-based declaration position
+ * @field value      the resolved value: the ordinal for an `enum`, `1 << ordinal` for a `flags`
+ *                    (u64 cap — drop-128, 2026-07-24 — so a flags type declares at most 64 members)
+ */
+pub type TPathExpr = struct { enum_name: str; member: str; ordinal: u64; value: u64 }
 // (W10) a typed closure LITERAL. `.type` (on the TExpr) is the closure's `Func` type. `params` are
 // the typed parameters; `body` is the typed statement block (its trailing value is the result, of
 // type `ret`). `captures` lists the FREE variables the body reads from the enclosing scope — each

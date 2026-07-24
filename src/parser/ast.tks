@@ -1,13 +1,108 @@
 // --- expressions ---
-// a literal number leaf (N1 — TEKO_CORRECTION_PLAN §5). Carries the RAW value; the
-// resolved type (set by the typer) decides width/signedness/float-kind.
-//  - integer literal (any width, incl u128/i128): is_float=false, `value` holds it.
-//  - float literal (f16/f32/f64): is_float=true, `fval` holds it (default f64).
-// (`value` is the integer carrier — canonical Teko uses i128; C bootstrap uses __int128.)
 
 use teko::lexer
 
-pub type Number = struct { is_float: bool; value: i128; fval: f64 }   // a literal number leaf
+/**
+ * NumInt — the resolved integer-literal carrier, sign + 64-bit magnitude (drop-128,
+ * 2026-07-24). Holds any value in the language's integer range `[i64::MIN, u64::MAX]`:
+ * `neg=false` covers `0..=u64::MAX`, `neg=true` covers `i64::MIN..=-1`. Replaces the old
+ * `i128` carrier, whose only reason to exist was to hold a high-bit u64 losslessly — a
+ * u64 with its high bit set needs 65 signed bits, not 128.
+ *
+ * @field neg  true iff the value is strictly negative (only ever set for a signed target)
+ * @field mag  the magnitude: the value itself when `neg=false`, else its absolute value.
+ *             `i64::MIN` is representable as `{ neg = true; mag = 0x8000000000000000 }`
+ *             (`|i64::MIN|` = 2^63 fits u64)
+ * @since 0.3.1 (drop-128-family)
+ */
+pub type NumInt = struct { neg: bool; mag: u64 }
+
+/**
+ * numint_of_u64 — a non-negative `NumInt` carrying the magnitude `m` (`neg=false`). The
+ * constructor every non-negated integer literal / synthesized constant value uses.
+ *
+ * @param m  the non-negative magnitude
+ * @return   `{ neg = false; mag = m }`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_of_u64(m: u64) -> NumInt { NumInt { neg = false; mag = m } }
+
+/**
+ * numint_of_i64 — the `NumInt` a plain signed `i64` value denotes (sign-splits it). Safe at
+ * the `i64::MIN` boundary: `-(v+1)` never overflows (`v+1` stays in range even at `i64::MIN`,
+ * and negating it lands at worst on `i64::MAX`), and `+1` recovers the true magnitude — the
+ * classic MIN-safe negation, avoiding the CHECKED `i64 -> u64` cast (M.1) a direct negation
+ * would need.
+ *
+ * @param v  the signed value to convert
+ * @return   `v` as a sign-magnitude `NumInt`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_of_i64(v: i64) -> NumInt {
+    if v >= 0 { return numint_of_u64(v to u64) }
+    NumInt { neg = true; mag = ((0 - (v + 1)) to u64) + 1 }
+}
+
+/**
+ * numint_negate — the arithmetic negation of `v` (unary `-`). Zero stays zero (canonical
+ * non-negative); every other magnitude flips its sign flag, magnitude unchanged (sign +
+ * magnitude negation never touches the magnitude bits, unlike two's-complement negation).
+ *
+ * @param v  the value to negate
+ * @return   `-v`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_negate(v: NumInt) -> NumInt {
+    if v.mag == 0 { v } else { NumInt { neg = !v.neg; mag = v.mag } }
+}
+
+/**
+ * numint_is_zero — is `v` the value zero? (`neg` is ignored — a canonical `NumInt` never
+ * carries `neg=true` at magnitude 0, but a caller-built one might; this checks the value,
+ * not the representation.)
+ *
+ * @param v  the value to test
+ * @return   true iff `v` denotes zero
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_is_zero(v: NumInt) -> bool { v.mag == 0 }
+
+/**
+ * numint_to_i64 — `v`'s raw 64-bit two's-complement bit pattern, reinterpreted as `i64` (the
+ * SAME register value the native backend would hold). Teko's `u64 -> i64` `to` cast is
+ * CHECKED (a same-width cross-signedness cast, M.1) and panics on a magnitude past
+ * `i64::MAX` — exactly the high-magnitude values this function must reinterpret, never
+ * reject — so it never casts the full magnitude directly. Instead it splits `mag` into two
+ * 32-bit halves (each provably `<= u32::MAX`, so `to i64` on either half is a plain widening
+ * cast, always safe) and reconstructs the 64-bit pattern with ordinary WRAPPING `i64`
+ * arithmetic (`+`/`*`, never checked — the native backend emits them as bare machine ops),
+ * then negates in `i64` when `v.neg` (wrapping negation is its own correct two's-complement
+ * inverse even at the `i64::MIN` boundary — no corner case needed). Every carrier that needs
+ * a plain machine-register view of a literal (LIR constants, the interpreters, const-
+ * aggregate serialization) goes through this one conversion.
+ *
+ * @param v  the value to reinterpret
+ * @return   `v`'s value as a raw i64 register bit pattern
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_to_i64(v: NumInt) -> i64 {
+    let hi = (v.mag >> 32) to i64
+    let lo = (v.mag & 0xFFFFFFFF) to i64
+    let bits = (hi * 4294967296) + lo
+    if v.neg { 0 - bits } else { bits }
+}
+
+/**
+ * A literal number leaf (N1 — TEKO_CORRECTION_PLAN §5). Carries the RAW value; the resolved
+ * type (set by the typer) decides width/signedness/float-kind.
+ *
+ * @field is_float  false for an integer literal (`value` holds it, any width u8..u64/i8..i64),
+ *                   true for a float literal (f32/f64; `fval` holds it, default f64)
+ * @field value      the raw integer literal value as a sign+64-bit-magnitude pair (meaningful
+ *                    only when `!is_float`) — see `NumInt`
+ * @field fval       the raw float literal value (meaningful only when `is_float`)
+ */
+pub type Number = struct { is_float: bool; value: NumInt; fval: f64 }
 pub type Var = struct { name: str }   // a variable reference (reading)
 pub type StrLit = struct { text: str }   // "…"  (B.36)
 pub type ByteLit = struct { value: byte }   // b'x' (B.36)
@@ -287,7 +382,16 @@ pub type StructBody = struct { fields: []Field; methods: []Function; implements:
  */
 pub type Field = struct { name: str; type_ann: TypeExpr; vis: Visibility; is_intern: bool; has_doc: bool; doc: str }
 pub type EnumBody = struct { members: []str }   // member names, in order
-pub type FlagsBody = struct { members: []str; values: []u128 }   // member names + power-of-2 values (C8.3 assigns member i → 1<<i; C8.6 serializes)
+/**
+ * A `flags` type body: member names + their power-of-2 bit-values (C8.3 assigns member `i`
+ * → `1 << i`; C8.6 serializes). The bit-value carrier is `u64` (drop-128, 2026-07-24), so a
+ * flags type is capped at 64 members — bit 63 is the last representable; a 65th member is a
+ * checker error naming the cap.
+ *
+ * @field members  the member names, in declaration order
+ * @field values    the resolved bit-value of each member, PARALLEL to `members` (≤ 64 entries)
+ */
+pub type FlagsBody = struct { members: []str; values: []u64 }
 pub type VariantBody = struct { type_expr: TypeExpr }   // a union (A.8)
 pub type AliasBody = struct { alias: TypeExpr }   // `type Name = <type-expr>` — a TRANSPARENT alias (self-host parity)
 pub type ExternBody = struct { }   // `extern type Name` — an OPAQUE foreign handle (C7.1a; lowers to `void *`)

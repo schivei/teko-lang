@@ -167,22 +167,22 @@ fn mv_riscv(dst: MReg, src: MReg) -> MInstRiscv {
 }
 
 /**
- * min_i32_riscv — `i32::MIN` as an i128, computed as `-(2^31)` so no literal
+ * min_i32_riscv — `i32::MIN` as an i64, computed as `-(2^31)` so no literal
  * names the boundary value directly.
  *
- * @return i128  i32::MIN
+ * @return i64  i32::MIN
  */
-fn min_i32_riscv() -> i128 {
-    -(2147483648 to i128)
+fn min_i32_riscv() -> i64 {
+    -(2147483648 to i64)
 }
 
 /**
- * max_i32_riscv — `i32::MAX` as an i128.
+ * max_i32_riscv — `i32::MAX` as an i64.
  *
- * @return i128  i32::MAX
+ * @return i64  i32::MAX
  */
-fn max_i32_riscv() -> i128 {
-    2147483647 to i128
+fn max_i32_riscv() -> i64 {
+    2147483647 to i64
 }
 
 /**
@@ -191,11 +191,11 @@ fn max_i32_riscv() -> i128 {
  * directly. A value outside it needs a `lui`+`addi` pair (a 32-bit constant) or
  * the `B2-bigimm` honest-stop (a 64-bit one).
  *
- * @param i128 v  the value to check
+ * @param i64 v  the value to check
  * @return bool  whether `v` fits a signed 12-bit immediate
  */
-fn fits_imm12_riscv(v: i128) -> bool {
-    v >= -(2048 to i128) && v <= (2047 to i128)
+fn fits_imm12_riscv(v: i64) -> bool {
+    v >= -(2048 to i64) && v <= (2047 to i64)
 }
 
 /**
@@ -203,10 +203,10 @@ fn fits_imm12_riscv(v: i128) -> bool {
  * a `lui`+`addi` constant materialization requires: a wider literal needs the
  * multi-instruction `li` behind the `B2-bigimm` honest-stop.
  *
- * @param i128 v  the value to check
+ * @param i64 v  the value to check
  * @return bool  whether `v` fits an i32
  */
-fn fits_i32_riscv(v: i128) -> bool {
+fn fits_i32_riscv(v: i64) -> bool {
     v >= min_i32_riscv() && v <= max_i32_riscv()
 }
 
@@ -237,10 +237,10 @@ fn lo12_of_bits_riscv(bits: u64) -> i32 {
  *
  * @param SelCtxRiscv ctx  the context to extend
  * @param MReg dst  the destination register
- * @param i128 val  the 32-bit-range literal to materialize
+ * @param i64 val  the 32-bit-range literal to materialize
  * @return SelCtxRiscv  the advanced context (two instructions emitted)
  */
-fn emit_lui_addi_riscv(ctx: SelCtxRiscv, dst: MReg, val: i128) -> SelCtxRiscv {
+fn emit_lui_addi_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv {
     let bits = u64_bits_of(val) & mask32_u64()
     let hi20 = (((bits + (2048 to u64)) >> (12 to u64)) & (1048575 to u64)) to u32
     let lo12 = lo12_of_bits_riscv(bits)
@@ -253,16 +253,15 @@ fn emit_lui_addi_riscv(ctx: SelCtxRiscv, dst: MReg, val: i128) -> SelCtxRiscv {
  * a single `li` (`addi rd, x0, imm12`) when it fits the signed 12-bit window,
  * a `lui`+`addi` pair when it fits 32 bits, otherwise the named `B2-bigimm`
  * honest-stop (a 64-bit immediate needs the multi-instruction `li` sequence —
- * a REAL RISC-V limit, unlike x86's near-N/A `movabs`; deferred to 0.3.1). The
- * i128-beyond-64-bit case is subsumed by the same stop.
+ * a REAL RISC-V limit, unlike x86's near-N/A `movabs`; deferred to 0.3.1).
  *
  * @param SelCtxRiscv ctx  the context to extend
  * @param MReg dst  the destination register
- * @param i128 val  the literal value to materialize
+ * @param i64 val  the literal value to materialize
  * @return SelCtxRiscv | error  the advanced context, or the `B2-bigimm` stop
  * @throws  when `val` exceeds the 32-bit `lui`+`addi` reach (`B2-bigimm`)
  */
-fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i128) -> SelCtxRiscv | error {
+fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv | error {
     if fits_imm12_riscv(val) {
         return selctx_riscv_emit(ctx, li_riscv(dst, val to i32))
     }
@@ -275,8 +274,8 @@ fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i128) -> SelCtxRisc
 /**
  * select_const_int_riscv — the `LConstInt` selection: materialize its value into
  * a 64-bit GPR (B2-3 defaults every untyped constant to the widest, no-loss form
- * — matching `LConstInt.val`'s own i128 carrier — since the LIR carries no
- * per-value width for a bare constant).
+ * — matching `LConstInt.val`'s own i64 carrier, drop-128 2026-07-24 — since the
+ * LIR carries no per-value width for a bare constant).
  *
  * @param SelCtxRiscv ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -895,7 +894,7 @@ fn select_alloca_riscv(ctx0: SelCtxRiscv, inst: lir::LInst, a: lir::LAlloca) -> 
  * @throws  the `B2-bigimm` honest-stop for a field offset beyond imm12
  */
 fn select_field_addr_riscv(ctx0: SelCtxRiscv, inst: lir::LInst, fa: lir::LFieldAddr) -> SelCtxRiscv | error {
-    if !fits_imm12_riscv(fa.offset to i128) {
+    if !fits_imm12_riscv(fa.offset to i64) {
         return error { message = "isel riscv64: B2-bigimm — a struct field offset beyond the addi imm12 window needs a materialized offset add, the imm12 honest-stop (0.3.1)" }
     }
     let dst = vreg(inst.result, MRegClass::GPR)

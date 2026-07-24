@@ -650,7 +650,7 @@ fn lower_number(ctx: LowerCtx, e: checker::TExpr, n: checker::TNumber) -> Lowere
         let finst = const_float_inst(r.vreg, teko::f64_bits(n.fval), e.line, e.col)
         return Lowered { ctx = ctx_append(r.ctx, finst); vreg = r.vreg }
     }
-    let inst = const_int_inst(r.vreg, n.value, e.line, e.col)
+    let inst = const_int_inst(r.vreg, parser::numint_to_i64(n.value), e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
@@ -777,7 +777,7 @@ fn is_logical_not(op: lexer::TokenKind) -> bool {
  */
 fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
     let z = ctx_alloc(ao.ctx)
-    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0 to i128, line, col))
+    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0 to i64, line, col))
     let r = ctx_alloc(with_zero)
     let inst = bin_inst(r.vreg, LBinOp::ICmpEq, ao.vreg, z.vreg, line, col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
@@ -892,7 +892,7 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32) 
     let then_args = teko::list::push(teko::list::empty(), b_vreg)
     let after_then = append_inst(after_br, thenb.block_id, jump_inst(mergeb.block_id, then_args, line, col))
     let zc = alloc_vreg(after_then)
-    let with_zero = append_inst(zc.func, elseb.block_id, const_int_inst(zc.vreg, 0 to i128, line, col))
+    let with_zero = append_inst(zc.func, elseb.block_id, const_int_inst(zc.vreg, 0 to i64, line, col))
     let else_args = teko::list::push(teko::list::empty(), zc.vreg)
     let after_else = append_inst(with_zero, elseb.block_id, jump_inst(mergeb.block_id, else_args, line, col))
     Lowered { ctx = ctx_with(ctx, after_else, mergeb.block_id, ctx.env); vreg = mp.vreg }
@@ -1442,7 +1442,7 @@ fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered
     let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, e.line, e.col)
     let ctx2 = ctx_with_lifted(ctx, teko::list::push(ctx.lifted, thunk))
     let nullo = ctx_alloc(ctx2)
-    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0 to i128, e.line, e.col))
+    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0 to i64, e.line, e.col))
     build_closure_literal(with_null, thunk_sym, nullo.vreg, e.line, e.col)
 }
 
@@ -1623,7 +1623,7 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
 fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::TCapture, line: u32, col: u32) -> Lowered | error {
     if captures.len == 0 {
         let r = ctx_alloc(ctx)
-        return Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i128, line, col)); vreg = r.vreg }
+        return Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, line, col)); vreg = r.vreg }
     }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, line, col))
@@ -2882,7 +2882,7 @@ fn lower_safe_field_access(ctx: LowerCtx, e: checker::TExpr, sfa: checker::TSafe
     let then_func = append_inst(with_load.func, thenb.block_id, jump_inst(mergeb.block_id, then_args, e.line, e.col))
     let nullr_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
     let nullr = ctx_alloc(nullr_ctx)
-    let with_null = ctx_append(nullr.ctx, const_int_inst(nullr.vreg, 0 to i128, e.line, e.col))
+    let with_null = ctx_append(nullr.ctx, const_int_inst(nullr.vreg, 0 to i64, e.line, e.col))
     let else_args = teko::list::push(teko::list::empty(), nullr.vreg)
     let else_func = append_inst(with_null.func, elseb.block_id, jump_inst(mergeb.block_id, else_args, e.line, e.col))
     Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
@@ -3083,7 +3083,7 @@ fn lower_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, lp: parser::Litera
     match lp.value.kind {
         parser::StrLit as sl => lower_str_literal_pattern_test(ctx, subj, sl.text, line, col)
         parser::Number as n => lower_number_literal_pattern_test(ctx, subj, n, line, col)
-        parser::ByteLit as b => lower_scalar_literal_pattern_test(ctx, subj, b.value to i128, line, col)
+        parser::ByteLit as b => lower_scalar_literal_pattern_test(ctx, subj, b.value to i64, line, col)
         _ => error { message = "native backend N1: unsupported literal match pattern (internal)" }
     }
 }
@@ -3103,7 +3103,7 @@ fn lower_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, lp: parser::Litera
  */
 fn lower_number_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, n: parser::Number, line: u32, col: u32) -> PatternTest | error {
     if n.is_float { return error { message = "native backend N1: float match pattern not yet lowered (N2)" } }
-    lower_scalar_literal_pattern_test(ctx, subj, n.value, line, col)
+    lower_scalar_literal_pattern_test(ctx, subj, parser::numint_to_i64(n.value), line, col)
 }
 
 /**
@@ -3113,12 +3113,12 @@ fn lower_number_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, n: parser::
  * @param LowerCtx ctx  the lowering context to append the test's instructions
  *                      into
  * @param MatchSubj subj  the match's already-lowered subject
- * @param i128 value  the constant to compare the subject against
+ * @param i64 value  the constant to compare the subject against
  * @param u32 line  the source line to stamp the emitted instructions with
  * @param u32 col  the source column to stamp the emitted instructions with
  * @return PatternTest  the computed equality test
  */
-fn lower_scalar_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, value: i128, line: u32, col: u32) -> PatternTest {
+fn lower_scalar_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, value: i64, line: u32, col: u32) -> PatternTest {
     let r = ctx_alloc(ctx)
     let with_const = ctx_append(r.ctx, const_int_inst(r.vreg, value, line, col))
     let cr = ctx_alloc(with_const)
@@ -3147,7 +3147,7 @@ fn lower_scalar_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, value: i128
 fn lower_str_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, text: str, line: u32, col: u32) -> PatternTest | error {
     if !subj.is_fat { return error { message = "native backend N1: string match pattern over a non-string subject (internal)" } }
     let lenr = ctx_alloc(ctx)
-    let with_lenconst = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, text.len to i128, line, col))
+    let with_lenconst = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, text.len to i64, line, col))
     let lcmp = ctx_alloc(with_lenconst)
     let with_lcmp = ctx_append(lcmp.ctx, bin_inst(lcmp.vreg, LBinOp::ICmpEq, subj.len, lenr.vreg, line, col))
     let bytes_test = str_pattern_bytes_test(with_lcmp, subj, text, lcmp.vreg, line, col)
@@ -3204,7 +3204,7 @@ fn str_pattern_byte_eq(ctx: LowerCtx, subj: MatchSubj, want: byte, index: u32, l
     let bl = ctx_alloc(with_addr)
     let with_load = ctx_append(bl.ctx, load_inst(bl.vreg, addr.vreg, LType::I8, line, col))
     let bc = ctx_alloc(with_load)
-    let with_bconst = ctx_append(bc.ctx, const_int_inst(bc.vreg, want to i128, line, col))
+    let with_bconst = ctx_append(bc.ctx, const_int_inst(bc.vreg, want to i64, line, col))
     let eqr = ctx_alloc(with_bconst)
     Lowered { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, bl.vreg, bc.vreg, line, col)); vreg = eqr.vreg }
 }
@@ -3254,7 +3254,7 @@ fn lower_named_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, n: checker::Nam
     match find_enum_info(ctx.enums, n.name) {
         LEnumInfo as ei => {
             let ord = match enum_member_ordinal(ei, bind_pattern_case_name(bp)) { u32 as o => o; error as err => return err }
-            lower_scalar_literal_pattern_test(ctx, subj, ord to i128, line, col)
+            lower_scalar_literal_pattern_test(ctx, subj, ord to i64, line, col)
         }
         null => PatternTest { ctx = ctx; always = true; vreg = 0 }
     }
@@ -3284,7 +3284,7 @@ fn lower_variant_case_test(ctx: LowerCtx, subj: MatchSubj, members: []checker::T
     let tagr = ctx_alloc(with_addr)
     let with_tag = ctx_append(tagr.ctx, load_inst(tagr.vreg, addr.vreg, LType::I32, line, col))
     let cr = ctx_alloc(with_tag)
-    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, vm.index to i128, line, col))
+    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, vm.index to i64, line, col))
     let eqr = ctx_alloc(with_const)
     PatternTest { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, tagr.vreg, cr.vreg, line, col)); always = false; vreg = eqr.vreg }
 }
@@ -3647,7 +3647,7 @@ fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, s
     let base_ctx = ctx_with(ctx, merged.func, ctx.block_id, ctx.env)
     let chain = match lower_match_arms_value(base_ctx, e, m.arms, subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
     let fb = ctx_alloc(chain)
-    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, 0 to i128, e.line, e.col))
+    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, 0 to i64, e.line, e.col))
     let fallback_args = merge_value_args(fb.vreg, arm_scalar_args(with_zero.env, indices))
     let closed = append_inst(with_zero.func, with_zero.block_id, jump_inst(mergeb.block_id, fallback_args, e.line, e.col))
     Lowered { ctx = ctx_with(with_zero, closed, mergeb.block_id, merged.env); vreg = mp.vreg }
@@ -3871,7 +3871,7 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata) -> LoweredFat |
     let ptr = ctx_alloc(ctx)
     let with_ptr = ctx_append(ptr.ctx, global_addr_inst(ptr.vreg, r.symbol, e.line, e.col))
     let lenr = ctx_alloc(with_ptr)
-    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, n to i128, e.line, e.col))
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, n to i64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = ptr.vreg; len = lenr.vreg }
 }
 
@@ -3954,7 +3954,7 @@ fn lower_str_bytes_fat(ctx: LowerCtx, text: str, line: u32, col: u32) -> Lowered
     let ptr = ctx_alloc(interned.ctx)
     let with_ptr = ctx_append(ptr.ctx, global_addr_inst(ptr.vreg, interned.symbol, line, col))
     let lenr = ctx_alloc(with_ptr)
-    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, text.len to i128, line, col))
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, text.len to i64, line, col))
     LoweredFat { ctx = with_len; ptr = ptr.vreg; len = lenr.vreg }
 }
 
@@ -4209,8 +4209,8 @@ fn slice_element_type(t: checker::Type) -> checker::Type | error {
 
 /** const_index_addr — a CONSTANT index folds directly into a static byte offset
     (`index * stride`), a single `field_addr` (no runtime multiply). */
-fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i128, stride: u32, line: u32, col: u32) -> Lowered {
-    let offset = (idx_value * (stride to i128)) to u32
+fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line: u32, col: u32) -> Lowered {
+    let offset = (idx_value * (stride to i64)) to u32
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, field_addr_inst(r.vreg, base, offset, line, col)); vreg = r.vreg }
 }
@@ -4222,7 +4222,7 @@ fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i128, stride: u32, line
 fn dynamic_index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u32, line: u32, col: u32) -> Lowered | error {
     let io = match lower_expr(ctx, index) { Lowered as x => x; error as err => return err }
     let sc = ctx_alloc(io.ctx)
-    let with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, stride to i128, line, col))
+    let with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, stride to i64, line, col))
     let mr = ctx_alloc(with_stride)
     let with_mul = ctx_append(mr.ctx, bin_inst(mr.vreg, LBinOp::IMul, io.vreg, sc.vreg, line, col))
     let ar = ctx_alloc(with_mul)
@@ -4233,7 +4233,7 @@ fn dynamic_index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u
     a literal integer (folds to a single instruction), else `dynamic_index_addr`. */
 fn index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u32, line: u32, col: u32) -> Lowered | error {
     match index.kind {
-        checker::TNumber as n => if n.is_float { dynamic_index_addr(ctx, base, index, stride, line, col) } else { const_index_addr(ctx, base, n.value, stride, line, col) }
+        checker::TNumber as n => if n.is_float { dynamic_index_addr(ctx, base, index, stride, line, col) } else { const_index_addr(ctx, base, parser::numint_to_i64(n.value), stride, line, col) }
         _ => dynamic_index_addr(ctx, base, index, stride, line, col)
     }
 }
@@ -4312,22 +4312,22 @@ fn store_array_elements(ctx: LowerCtx, base: u32, elements: []checker::TArrayEle
 fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> LoweredFat | error {
     let base = match lower_array_lit(ctx, e, al) { Lowered as x => x; error as err => return err }
     let lenr = ctx_alloc(base.ctx)
-    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i128, e.line, e.col))
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = base.vreg; len = lenr.vreg }
 }
 
-/** bool_lit_value — a bool literal's i128 carrier (1 = true, 0 = false — the released seed
-    does not implement a `bool to <numeric>` cast, so this picks the constant explicitly,
-    mirroring the interp's own bool_to_i128 and lower_bool_and's zero constant). */
-fn bool_lit_value(v: bool) -> i128 { if v { 1 to i128 } else { 0 to i128 } }
+/** bool_lit_value — a bool literal's i64 register carrier (1 = true, 0 = false — the released
+    seed does not implement a `bool to <numeric>` cast, so this picks the constant explicitly,
+    mirroring the interp's own bool_to_i64 and lower_bool_and's zero constant). */
+fn bool_lit_value(v: bool) -> i64 { if v { 1 to i64 } else { 0 to i64 } }
 
-/** lower_byte_lit — a byte literal -> its value widened to the i128 carrier. */
+/** lower_byte_lit — a byte literal -> its value widened to the i64 carrier. */
 fn lower_byte_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TByteLit) -> Lowered {
     let r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, b.value to i128, e.line, e.col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, b.value to i64, e.line, e.col)); vreg = r.vreg }
 }
 
-/** lower_bool_lit — a bool literal -> its i128 carrier (bool_lit_value). */
+/** lower_bool_lit — a bool literal -> its i64 carrier (bool_lit_value). */
 fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Lowered {
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, bool_lit_value(b.value), e.line, e.col)); vreg = r.vreg }
@@ -4336,14 +4336,14 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
 /** lower_null_lit — `null` -> a zero (null) Ptr constant. */
 fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered {
     let r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i128, e.line, e.col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, e.line, e.col)); vreg = r.vreg }
 }
 
 /** lower_path_expr — `Enum::Member` -> its already-RESOLVED member value (the checker's
     `.value`: the ordinal for a plain enum, `1 << ordinal` for a FLAGS enum). */
 fn lower_path_expr(ctx: LowerCtx, e: checker::TExpr, p: checker::TPathExpr) -> Lowered {
     let r = ctx_alloc(ctx)
-    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, p.value to i128, e.line, e.col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, p.value to i64, e.line, e.col)); vreg = r.vreg }
 }
 
 /** utf8_codepoint2 — the codepoint of a validated 2-byte UTF-8 sequence. */
@@ -4372,11 +4372,11 @@ fn utf8_codepoint4(s: str) -> u32 {
 
 /** utf8_codepoint — the single codepoint a TCharLit's raw UTF-8 bytes decode to (the lexer
     already validated `s` is EXACTLY one codepoint, 1-4 bytes). */
-fn utf8_codepoint(s: str) -> i128 {
-    if s.len == 1 { return (s[0] to u32) to i128 }
-    if s.len == 2 { return utf8_codepoint2(s) to i128 }
-    if s.len == 3 { return utf8_codepoint3(s) to i128 }
-    utf8_codepoint4(s) to i128
+fn utf8_codepoint(s: str) -> i64 {
+    if s.len == 1 { return (s[0] to u32) to i64 }
+    if s.len == 2 { return utf8_codepoint2(s) to i64 }
+    if s.len == 3 { return utf8_codepoint3(s) to i64 }
+    utf8_codepoint4(s) to i64
 }
 
 /** lower_char_lit — a char literal -> its decoded codepoint (the LIR's scalar
@@ -5297,6 +5297,6 @@ fn close_virtual_main(tail: LowerMainTail) -> LowerCtx | error {
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     if tail.has_value { return ctx_append(replayed, ret_inst(tail.vreg, 0, 0)) }
     let r = ctx_alloc(replayed)
-    let c0 = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i128, 0, 0))
+    let c0 = ctx_append(r.ctx, const_int_inst(r.vreg, 0 to i64, 0, 0))
     ctx_append(c0, ret_inst(r.vreg, 0, 0))
 }

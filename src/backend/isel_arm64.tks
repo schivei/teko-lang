@@ -263,58 +263,37 @@ fn selctx_scratch(ctx: SelCtx, reg_class: MRegClass) -> FreshScratch {
 }
 
 /**
- * two_pow_64 — the constant 2^64 as an i128, computed via multiplication
- * (`2^32 * 2^32`) rather than a decimal literal: the released seed's
- * integer-literal parser caps at `u64::MAX` and 2^64 overflows it, so every
- * bit-pattern helper below shares this arithmetic workaround instead of
- * writing the literal directly.
+ * fits_i64 — true iff `v` lies within the i64 range: since `LConstInt.val` is now the raw
+ * i64 register carrier itself (drop-128, 2026-07-24 — was an i128 carrier a materialized
+ * constant could exceed), this is ALWAYS true — a `v: i64` trivially fits `i64`. The
+ * honest-stop it guards (full register-pair materialization for a value beyond 64 bits) is
+ * therefore unreachable; kept in place (not deleted) because the register-pair topology
+ * itself is a Wave-B/.32 dead-code sweep, not this crumb's — deleting this guard now would
+ * leave `select_const_int`'s error arm structurally orphaned ahead of that sweep.
  *
- * @return i128  2^64
+ * @param i64 v  the value to check
+ * @return bool  always true
  */
-fn two_pow_64() -> i128 {
-    let half = 4294967296 to i128
-    half * half
+fn fits_i64(v: i64) -> bool {
+    true
 }
 
 /**
- * `MAX_I64_I128` — `i64::MAX` as an i128 (a literal that fits the parser's
- * working range directly, unlike `u64::MAX`/2^64 above).
- */
-const MAX_I64_I128: i128 = 9223372036854775807 to i128
-
-/**
- * `MIN_I64_I128` — `i64::MIN` as an i128, computed as `-(MAX_I64_I128) - 1` so
- * no literal ever names the boundary value directly (a literal for
- * `-9223372036854775808` risks the same parser-range issue `two_pow_64`
- * works around).
- */
-const MIN_I64_I128: i128 = -(MAX_I64_I128) - (1 to i128)
-
-/**
- * fits_i64 — true iff `v` lies within the i64 range, the precondition every
- * A2-2 constant materialization requires: full i128 register-pair
- * materialization is deferred (the plan's §6.3 i128-helper decision,
- * generalized to constants beyond a single 64-bit register).
+ * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (drop-128, 2026-07-24 —
+ * `val` is now the i64 carrier itself, not a wider i128): a non-negative value casts
+ * directly (`i64 -> u64` is a CHECKED cast, M.1, but always passes for a non-negative
+ * source); a negative value's magnitude is formed via `-(val + 1)` (never overflowing —
+ * the classic `i64::MIN`-safe negation, avoided even at the boundary since `val + 1` and its
+ * negation both stay in range), cast to `u64` (safe — the magnitude is non-negative and `<=
+ * 2^63`), then the two's-complement pattern is `u64::MAX - magnitude + 1`.
  *
- * @param i128 v  the value to check
- * @return bool  whether `v` fits an i64
- */
-fn fits_i64(v: i128) -> bool {
-    v >= MIN_I64_I128 && v <= MAX_I64_I128
-}
-
-/**
- * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (already
- * known, by the caller's precondition, to fit an i64): a non-negative value
- * casts directly; a negative one is shifted into the non-negative range by
- * adding 2^64 BEFORE casting, since a checked numeric cast never
- * reinterprets a negative source as unsigned.
- *
- * @param i128 val  the value to convert, fitting an i64
+ * @param i64 val  the value to convert
  * @return u64  its 64-bit two's-complement bit pattern
  */
-fn u64_bits_of(val: i128) -> u64 {
-    if val < (0 to i128) { (val + two_pow_64()) to u64 } else { val to u64 }
+fn u64_bits_of(val: i64) -> u64 {
+    if val >= (0 to i64) { return val to u64 }
+    let mag = ((0 to i64) - (val + (1 to i64))) to u64 + (1 to u64)
+    (MASK_ALL_U64 - mag) + (1 to u64)
 }
 
 /**
@@ -509,14 +488,12 @@ fn materialize_bits(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool) -> SelCtx {
  *
  * @param SelCtx ctx0  the context to extend
  * @param MReg dst  the destination register
- * @param i128 val  the literal value to materialize
+ * @param i64 val  the literal value to materialize
  * @param bool wide  true for the 64-bit X form, false for 32-bit W
- * @return SelCtx | error  the advanced context, or a NAMED error when
- *                         `val` needs more than 64 bits (i128 register-pair
- *                         materialization, deferred alongside §6.3's
- *                         i128-helper decision)
+ * @return SelCtx | error  the advanced context, or `fits_i64`'s (now
+ *                         unreachable) NAMED error
  */
-fn materialize_int(ctx0: SelCtx, dst: MReg, val: i128, wide: bool) -> SelCtx | error {
+fn materialize_int(ctx0: SelCtx, dst: MReg, val: i64, wide: bool) -> SelCtx | error {
     if !fits_i64(val) {
         return error { message = "isel arm64: an i128 constant beyond 64 bits needs register-pair materialization, deferred alongside the i128 mul/div helper-call decision (§6.3)" }
     }
@@ -527,8 +504,9 @@ fn materialize_int(ctx0: SelCtx, dst: MReg, val: i128, wide: bool) -> SelCtx | e
 /**
  * select_const_int — the `LConstInt` selection: materialize its value into
  * a fresh 64-bit GPR (A2-2 defaults every untyped constant to the widest,
- * no-information-loss form — matching `LConstInt.val`'s own i128 carrier
- * choice — since the LIR carries no per-value width for a bare constant).
+ * no-information-loss form — matching `LConstInt.val`'s own i64 carrier
+ * choice, drop-128 2026-07-24 — since the LIR carries no per-value width
+ * for a bare constant).
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)

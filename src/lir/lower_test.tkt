@@ -11,14 +11,14 @@ use teko::parser
     resolves tests by last path segment). */
 fn lwt_prim(k: checker::PrimKind) -> checker::Type { checker::Prim { kind = k } }
 
-fn lwt_num(v: i128, k: checker::PrimKind) -> checker::TExpr {
-    checker::TExpr { kind = checker::TNumber { is_float = false; value = v; fval = 0.0 }; type = lwt_prim(k); line = 0; col = 0 }
+fn lwt_num(v: i64, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = lwt_prim(k); line = 0; col = 0 }
 }
 
-fn lwt_num_i64(v: i128) -> checker::TExpr { lwt_num(v, checker::PrimKind::I64) }
+fn lwt_num_i64(v: i64) -> checker::TExpr { lwt_num(v, checker::PrimKind::I64) }
 
 fn lwt_fnum(v: f64) -> checker::TExpr {
-    checker::TExpr { kind = checker::TNumber { is_float = true; value = 0 to i128; fval = v }; type = lwt_prim(checker::PrimKind::F64); line = 0; col = 0 }
+    checker::TExpr { kind = checker::TNumber { is_float = true; value = parser::numint_of_u64(0); fval = v }; type = lwt_prim(checker::PrimKind::F64); line = 0; col = 0 }
 }
 
 fn lwt_var(name: str, k: checker::PrimKind) -> checker::TExpr {
@@ -236,7 +236,7 @@ fn lwt_lunop_of_picks_negation_family() {
  */
 #test
 fn lwt_lowers_logical_not_to_icmpeq_zero() {
-    let cond = lwt_cmp(lwt_num_i64(1 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2 to i128))))
+    let cond = lwt_cmp(lwt_num_i64(1 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2 to i64))))
     let e = lwt_unary(lexer::TokenKind::Bang, cond, checker::PrimKind::Bool)
     let text = lwt_lower_expr_text(e)
     teko::assert::str_contains(text, "%3 = const 0")
@@ -246,7 +246,7 @@ fn lwt_lowers_logical_not_to_icmpeq_zero() {
 
 #test
 fn lwt_lowers_unary_neg() {
-    let e = lwt_unary(lexer::TokenKind::Minus, lwt_num_i64(42 to i128), checker::PrimKind::I64)
+    let e = lwt_unary(lexer::TokenKind::Minus, lwt_num_i64(42 to i64), checker::PrimKind::I64)
     teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = ineg %0")
 }
 
@@ -256,7 +256,7 @@ fn lwt_lowers_unary_neg() {
  */
 #test
 fn lwt_lowers_unary_bitnot() {
-    let e = lwt_unary(lexer::TokenKind::Tilde, lwt_num_i64(5 to i128), checker::PrimKind::I64)
+    let e = lwt_unary(lexer::TokenKind::Tilde, lwt_num_i64(5 to i64), checker::PrimKind::I64)
     let text = lwt_lower_expr_text(e)
     teko::assert::str_contains(text, "%1 = inot %0")
     teko::assert::is_true(!teko::str::contains(text, "icmpeq"))
@@ -268,8 +268,8 @@ fn lwt_lowers_unary_bitnot() {
  */
 #test
 fn lwt_lowers_bitwise_ops() {
-    let a = lwt_num_i64(6 to i128)
-    let b = lwt_num_i64(3 to i128)
+    let a = lwt_num_i64(6 to i64)
+    let b = lwt_num_i64(3 to i64)
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Amp, a, b, checker::PrimKind::I64)), "%2 = iand %0, %1")
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Pipe, a, b, checker::PrimKind::I64)), "%2 = ior %0, %1")
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Caret, a, b, checker::PrimKind::I64)), "%2 = ixor %0, %1")
@@ -282,39 +282,39 @@ fn lwt_lowers_bitwise_ops() {
  */
 #test
 fn lwt_lowers_shift_ops_pick_signedness() {
-    let a = lwt_num_i64(8 to i128)
-    let amt = lwt_num_i64(2 to i128)
+    let a = lwt_num_i64(8 to i64)
+    let amt = lwt_num_i64(2 to i64)
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shl, a, amt, checker::PrimKind::I64)), "%2 = ishl %0, %1")
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shr, a, amt, checker::PrimKind::I64)), "%2 = ishrs %0, %1")
-    let ua = lwt_num(8 to i128, checker::PrimKind::U64)
-    let uamt = lwt_num(2 to i128, checker::PrimKind::U64)
+    let ua = lwt_num(8 to i64, checker::PrimKind::U64)
+    let uamt = lwt_num(2 to i64, checker::PrimKind::U64)
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shr, ua, uamt, checker::PrimKind::U64)), "%2 = ishru %0, %1")
 }
 
 #test
 fn lwt_lowers_cast_i64_to_i32_truncates() {
-    let e = lwt_cast(lwt_num_i64(42 to i128), checker::PrimKind::I32)
+    let e = lwt_cast(lwt_num_i64(42 to i64), checker::PrimKind::I32)
     teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = trunc %0")
 }
 
 #test
 fn lwt_lowers_cast_i32_to_i64_sign_extends() {
-    let inner = lwt_num(5 to i128, checker::PrimKind::I32)
+    let inner = lwt_num(5 to i64, checker::PrimKind::I32)
     let e = lwt_cast(inner, checker::PrimKind::I64)
     teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = sext %0")
 }
 
 #test
 fn lwt_lowers_unsigned_ge_comparison() {
-    let e = lwt_cmp(lwt_num(3 to i128, checker::PrimKind::U32), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Ge, lwt_num(5 to i128, checker::PrimKind::U32))))
+    let e = lwt_cmp(lwt_num(3 to i64, checker::PrimKind::U32), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Ge, lwt_num(5 to i64, checker::PrimKind::U32))))
     teko::assert::str_contains(lwt_lower_expr_text(e), "%2 = icmpgeu %0, %1")
 }
 
 #test
 fn lwt_lowers_eq_and_ne_comparisons() {
-    let eq = lwt_cmp(lwt_num_i64(3 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(3 to i128))))
+    let eq = lwt_cmp(lwt_num_i64(3 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(3 to i64))))
     teko::assert::str_contains(lwt_lower_expr_text(eq), "icmpeq %0, %1")
-    let ne = lwt_cmp(lwt_num_i64(3 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Ne, lwt_num_i64(3 to i128))))
+    let ne = lwt_cmp(lwt_num_i64(3 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Ne, lwt_num_i64(3 to i64))))
     teko::assert::str_contains(lwt_lower_expr_text(ne), "icmpne %0, %1")
 }
 
@@ -326,9 +326,9 @@ fn lwt_lowers_float_eq_comparison() {
 
 #test
 fn lwt_lowers_chain_comparison_ands_adjacent_terms() {
-    let a = lwt_num_i64(1 to i128)
-    let b = lwt_num_i64(2 to i128)
-    let c = lwt_num_i64(3 to i128)
+    let a = lwt_num_i64(1 to i64)
+    let b = lwt_num_i64(2 to i64)
+    let c = lwt_num_i64(3 to i64)
     let terms = teko::list::push(teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, b)), lwt_cmp_term(lexer::TokenKind::Lt, c))
     let text = lwt_lower_expr_text(lwt_cmp(a, terms))
     teko::assert::str_contains(text, "icmplts %0, %1")
@@ -361,14 +361,14 @@ fn lwt_lowers_chain_comparison_ands_adjacent_terms() {
  * @return void
  */
 fn lwt_if_stmt_value_if_rhs_reassign_threads_the_outer_merge() {
-    let inner_cond = lwt_cmp(lwt_num_i64(1 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1 to i128))))
-    let inner_then = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(5 to i128), checker::PrimKind::I64)), lwt_exprstmt(lwt_var("x", checker::PrimKind::I64)))
-    let inner_else = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i128)))
+    let inner_cond = lwt_cmp(lwt_num_i64(1 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1 to i64))))
+    let inner_then = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(5 to i64), checker::PrimKind::I64)), lwt_exprstmt(lwt_var("x", checker::PrimKind::I64)))
+    let inner_else = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i64)))
     let inner_if = lwt_if_value(inner_cond, inner_then, inner_else, checker::PrimKind::I64)
     let outer_then = teko::list::push(teko::list::empty(), lwt_bind("y", inner_if, checker::PrimKind::I64))
-    let outer_cond = lwt_cmp(lwt_num_i64(1 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1 to i128))))
+    let outer_cond = lwt_cmp(lwt_num_i64(1 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1 to i64))))
     let ifstmt = lwt_if_stmt(outer_cond, outer_then, false, teko::list::empty())
-    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1 to i128), checker::PrimKind::I64)), lwt_exprstmt(ifstmt)), lwt_ret(lwt_var("x", checker::PrimKind::I64)))
+    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1 to i64), checker::PrimKind::I64)), lwt_exprstmt(ifstmt)), lwt_ret(lwt_var("x", checker::PrimKind::I64)))
     let f = lwt_fn("nested_value_if_rhs", "teko::demo", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
@@ -402,12 +402,12 @@ fn lwt_if_stmt_value_if_rhs_reassign_threads_the_outer_merge() {
 fn lwt_match_stmt_threads_both_the_reassigned_and_the_pattern_shadowed_name() {
     let subject = lwt_var("k", checker::PrimKind::I64)
     let arm0 = lwt_arm(lwt_bind_pattern("A", "x"), teko::list::empty())
-    let arm1_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(99 to i128), checker::PrimKind::I64)), lwt_simple_assign("y", lexer::TokenKind::Assign, lwt_num_i64(20 to i128), checker::PrimKind::I64))
+    let arm1_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(99 to i64), checker::PrimKind::I64)), lwt_simple_assign("y", lexer::TokenKind::Assign, lwt_num_i64(20 to i64), checker::PrimKind::I64))
     let arm1 = lwt_arm(lwt_wildcard_pattern(), arm1_body)
     let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
     let match_stmt = checker::TExpr { kind = checker::TMatchExpr { subject = subject; arms = arms }; type = checker::Void { }; line = 0; col = 0 }
     let tail = lwt_ret(lwt_bin(lexer::TokenKind::Plus, lwt_var("x", checker::PrimKind::I64), lwt_var("y", checker::PrimKind::I64), checker::PrimKind::I64))
-    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1 to i128), checker::PrimKind::I64)), lwt_bind("y", lwt_num_i64(10 to i128), checker::PrimKind::I64)), lwt_exprstmt(match_stmt)), tail)
+    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1 to i64), checker::PrimKind::I64)), lwt_bind("y", lwt_num_i64(10 to i64), checker::PrimKind::I64)), lwt_exprstmt(match_stmt)), tail)
     let params = teko::list::push(teko::list::empty(), lwt_param("k", "i64"))
     let f = lwt_fn("shadow_and_clean_reassign", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
@@ -420,8 +420,8 @@ fn lwt_match_stmt_threads_both_the_reassigned_and_the_pattern_shadowed_name() {
 
 #test
 fn lwt_honest_stop_on_if_without_else_as_a_value() {
-    let cond = lwt_cmp(lwt_num_i64(1 to i128), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2 to i128))))
-    let then_blk = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1 to i128)))
+    let cond = lwt_cmp(lwt_num_i64(1 to i64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2 to i64))))
+    let then_blk = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1 to i64)))
     let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = then_blk }; type = lwt_prim(checker::PrimKind::I64); line = 0; col = 0 }
     teko::assert::str_contains(lwt_lower_expr_text(ifexpr), "if-without-else used as a value not yet lowered")
 }
@@ -442,7 +442,7 @@ fn lwt_println_of_a_non_fat_producer_honest_stops() {
 
 #test
 fn lwt_lowers_direct_teko_call_with_mangle() {
-    let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(40 to i128)), lwt_num_i64(2 to i128))
+    let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(40 to i64)), lwt_num_i64(2 to i64))
     let call = lwt_call(lwt_path1("add"), "teko::demo", args, checker::Prim { kind = checker::PrimKind::I64 })
     teko::assert::str_contains(lwt_lower_expr_text(call), "%2 = call @teko__demo__add(%0, %1)")
 }
@@ -464,9 +464,9 @@ fn lwt_const(name: str, init: checker::TExpr) -> checker::TItem {
  */
 #test
 fn lwt_scalar_const_inlines_and_leaves_no_global() {
-    let use_expr = lwt_bin(lexer::TokenKind::Plus, lwt_var("K", checker::PrimKind::I64), lwt_num_i64(1 to i128), checker::PrimKind::I64)
+    let use_expr = lwt_bin(lexer::TokenKind::Plus, lwt_var("K", checker::PrimKind::I64), lwt_num_i64(1 to i64), checker::PrimKind::I64)
     mut items: []checker::TItem = teko::list::empty()
-    items = teko::list::push(items, lwt_const("K", lwt_num_i64(41 to i128)))
+    items = teko::list::push(items, lwt_const("K", lwt_num_i64(41 to i64)))
     items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { }))))
     let inlined = match checker::inline_consts(checker::TProgram { items = items }) { checker::TProgram as p => p; error as err => { teko::assert::is_true(false); return } }
     let m = match lower_program(inlined) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
@@ -491,11 +491,11 @@ fn lwt_scalar_const_inlines_and_leaves_no_global() {
  */
 #test
 fn lwt_agg_slice_const_materializes_one_rodata_entry() {
-    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i128)), lwt_num_i64(20 to i128))
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i64)), lwt_num_i64(20 to i64))
     let slice_ty = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }
     let cd: checker::TItem = checker::TConstDecl { name = "NUMS"; namespace = ""; ty = slice_ty; init = lwt_array_lit(elems, checker::PrimKind::I64); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
     let i64_ty = lwt_prim(checker::PrimKind::I64)
-    let idx_bind: checker::TStatement = checker::TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "idx" }; bound = i64_ty; value = lwt_num_i64(0 to i128) }
+    let idx_bind: checker::TStatement = checker::TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "idx" }; bound = i64_ty; value = lwt_num_i64(0 to i64) }
     let use0 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
     let use1 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
     let sum = lwt_bin(lexer::TokenKind::Plus, use0, use1, checker::PrimKind::I64)
@@ -591,8 +591,8 @@ fn lwt_slice_field(name: str, elem_tname: str) -> parser::Field {
  */
 #test
 fn lwt_tb6_deref_reads_second_element_and_len() {
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_index(lwt_tb6_k2_xs(), lwt_num_i64(1 to i128), lwt_prim(checker::PrimKind::I64))) == (20 to i128))
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_field_access(lwt_tb6_k2_xs(), "len", lwt_prim(checker::PrimKind::I64))) == (2 to i128))
+    teko::assert::is_true(lwt_tb6_deref_exit(lwt_index(lwt_tb6_k2_xs(), lwt_num_i64(1 to i64), lwt_prim(checker::PrimKind::I64))) == (20 to i64))
+    teko::assert::is_true(lwt_tb6_deref_exit(lwt_field_access(lwt_tb6_k2_xs(), "len", lwt_prim(checker::PrimKind::I64))) == (2 to i64))
 }
 
 /**
@@ -614,20 +614,20 @@ fn lwt_tb6_k2_xs() -> checker::TExpr {
  * @param use_expr  the i64-typed expression the virtual main exits with (a `K2.xs[i]` or `K2.xs.len`)
  * @return          the VM exit code of the lowered program
  */
-fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i128 {
+fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i64 {
     let decl = lwt_struct_decl("S2", lwt_two_fields(lwt_slice_field("xs", "i64"), lwt_field("n", "i64")))
-    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i128)), lwt_num_i64(20 to i128))
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i64)), lwt_num_i64(20 to i64))
     let xs_lit = lwt_array_lit(elems, checker::PrimKind::I64)
     let fnames = teko::list::push(teko::list::push(teko::list::empty(), "xs"), "n")
-    let fvals = teko::list::push(teko::list::push(teko::list::empty(), xs_lit), lwt_num_i64(2 to i128))
+    let fvals = teko::list::push(teko::list::push(teko::list::empty(), xs_lit), lwt_num_i64(2 to i64))
     let si = lwt_struct_init("S2", fnames, fvals)
     let cd: checker::TItem = checker::TConstDecl { name = "K2"; namespace = ""; ty = checker::Named { name = "S2" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
     let exit_call = lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { })
     mut items: []checker::TItem = teko::list::push(teko::list::empty(), decl)
     items = teko::list::push(items, cd)
     items = teko::list::push(items, lwt_item(lwt_exprstmt(exit_call)))
-    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return (-99 to i128) } }
-    let no_args: []i128 = teko::list::empty()
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return (-99 to i64) } }
+    let no_args: []i64 = teko::list::empty()
     interp_lmodule(m, "main", no_args)
 }
 
@@ -654,11 +654,11 @@ fn lwt_wildcard_pattern() -> parser::Pattern { parser::WildcardPattern { } }
 /**
  * lwt_int_pattern — an integer-literal pattern `v` (A1-5, #382).
  *
- * @param i128 v  the literal's integer value
+ * @param i64 v  the literal's integer value
  * @return parser::Pattern  the literal pattern node
  */
-fn lwt_int_pattern(v: i128) -> parser::Pattern {
-    parser::LiteralPattern { value = parser::Expr { kind = parser::Number { is_float = false; value = v; fval = 0.0 }; line = 0; col = 0 } }
+fn lwt_int_pattern(v: i64) -> parser::Pattern {
+    parser::LiteralPattern { value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; line = 0; col = 0 } }
 }
 
 /**
@@ -692,7 +692,7 @@ fn lwt_bind_pattern(case_name: str, binding: str) -> parser::Pattern {
  * @return checker::TArm  the typed arm node
  */
 fn lwt_arm(pat: parser::Pattern, body: []checker::TStatement) -> checker::TArm {
-    checker::TArm { pattern = pat; has_when = false; guard = lwt_num_i64(0 to i128); body = body }
+    checker::TArm { pattern = pat; has_when = false; guard = lwt_num_i64(0 to i64); body = body }
 }
 
 /**
@@ -746,8 +746,8 @@ fn lwt_circle_layout() -> LStructLayout {
 #test
 fn lwt_lowers_match_enum_member_pattern_via_registered_ordinal() {
     let subject = lwt_typed_var("c", checker::Named { name = "Color" })
-    let arm0 = lwt_arm(lwt_bind_pattern("Red", ""), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(10 to i128))))
-    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i128))))
+    let arm0 = lwt_arm(lwt_bind_pattern("Red", ""), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(10 to i64))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i64))))
     let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
     let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
     let params = teko::list::push(teko::list::empty(), lwt_param("c", "Color"))
@@ -765,9 +765,9 @@ fn lwt_lowers_match_enum_member_pattern_via_registered_ordinal() {
 #test
 fn lwt_lowers_match_when_guard_falls_through_to_next_arm() {
     let subject = lwt_var("x", checker::PrimKind::I64)
-    let guard = lwt_cmp(subject, teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Gt, lwt_num_i64(0 to i128))))
-    let arm0 = lwt_guarded_arm(lwt_int_pattern(1 to i128), guard, teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(100 to i128))))
-    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i128))))
+    let guard = lwt_cmp(subject, teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Gt, lwt_num_i64(0 to i64))))
+    let arm0 = lwt_guarded_arm(lwt_int_pattern(1 to i64), guard, teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(100 to i64))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i64))))
     let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
     let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
     let params = teko::list::push(teko::list::empty(), lwt_param("x", "i64"))
@@ -807,8 +807,8 @@ fn lwt_lowers_match_variant_case_binds_the_payload() {
 #test
 fn lwt_lowers_match_string_arm_via_byte_compare() {
     let subject = lwt_strlit("hi")
-    let arm0 = lwt_arm(lwt_str_pattern("hi"), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1 to i128))))
-    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i128))))
+    let arm0 = lwt_arm(lwt_str_pattern("hi"), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1 to i64))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0 to i64))))
     let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
     let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
     let text = lwt_lower_expr_text(match_expr)
@@ -850,15 +850,15 @@ fn lwt_lowers_match_string_arm_via_byte_compare() {
  */
 #test
 fn lwt_defer_inside_match_value_arm_fires_only_on_that_arms_own_branch() {
-    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i128), checker::PrimKind::I64)
+    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i64), checker::PrimKind::I64)
     let defer_body = teko::list::push(teko::list::empty(), lwt_simple_assign("s", lexer::TokenKind::Assign, s_plus_100, checker::PrimKind::I64))
     let subject = lwt_var("x", checker::PrimKind::I64)
     let arm0_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_defer(defer_body)), lwt_exprstmt(lwt_var("s", checker::PrimKind::I64)))
-    let arm0 = lwt_arm(lwt_int_pattern(1 to i128), arm0_body)
+    let arm0 = lwt_arm(lwt_int_pattern(1 to i64), arm0_body)
     let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_var("s", checker::PrimKind::I64))))
     let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
     let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
-    let body = teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i128), checker::PrimKind::I64)), lwt_ret(match_expr))
+    let body = teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i64), checker::PrimKind::I64)), lwt_ret(match_expr))
     let params = teko::list::push(teko::list::empty(), lwt_param("x", "i64"))
     let f = lwt_fn("match_value_arm_scoped", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
@@ -899,7 +899,7 @@ fn lwt_field_access(recv: checker::TExpr, field: str, ft: checker::Type) -> chec
 #test
 fn lwt_lowers_struct_init_via_registered_layout() {
     let names = teko::list::push(teko::list::push(teko::list::empty(), "x"), "y")
-    let vals = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(3 to i128)), lwt_num_i64(4 to i128))
+    let vals = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(3 to i64)), lwt_num_i64(4 to i64))
     let si = lwt_struct_init("Point", names, vals)
     let text = lwt_lower_expr_text_with(si, lwt_one_layout(lwt_point_layout()))
     teko::assert::str_contains(text, "%0 = alloca 16, align 8")
@@ -931,9 +931,9 @@ fn lwt_index(recv: checker::TExpr, index: checker::TExpr, et: checker::Type) -> 
 
 #test
 fn lwt_lowers_array_literal_and_constant_index() {
-    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i128)), lwt_num_i64(20 to i128)), lwt_num_i64(30 to i128))
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10 to i64)), lwt_num_i64(20 to i64)), lwt_num_i64(30 to i64))
     let arr = lwt_array_lit(elems, checker::PrimKind::I64)
-    let ix = lwt_index(arr, lwt_num_i64(1 to i128), lwt_prim(checker::PrimKind::I64))
+    let ix = lwt_index(arr, lwt_num_i64(1 to i64), lwt_prim(checker::PrimKind::I64))
     let text = lwt_lower_expr_text(ix)
     teko::assert::str_contains(text, "%0 = alloca 24, align 8")
     teko::assert::str_contains(text, "%4 = field_addr %0, 8")
@@ -952,9 +952,9 @@ fn lwt_field_assign(recv: checker::TExpr, field: str, op: lexer::TokenKind, valu
 #test
 fn lwt_lowers_plain_field_assignment_via_registered_layout() {
     let p = lwt_named_var("p", "Point")
-    let assign = lwt_field_assign(p, "x", lexer::TokenKind::Assign, lwt_num_i64(9 to i128), lwt_prim(checker::PrimKind::I64))
+    let assign = lwt_field_assign(p, "x", lexer::TokenKind::Assign, lwt_num_i64(9 to i64), lwt_prim(checker::PrimKind::I64))
     let params = teko::list::push(teko::list::empty(), lwt_param("p", "Point"))
-    let body = teko::list::push(teko::list::push(teko::list::empty(), assign), lwt_ret(lwt_num_i64(0 to i128)))
+    let body = teko::list::push(teko::list::push(teko::list::empty(), assign), lwt_ret(lwt_num_i64(0 to i64)))
     let f = lwt_fn("write_x", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f, lwt_one_layout(lwt_point_layout())) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
@@ -966,9 +966,9 @@ fn lwt_lowers_plain_field_assignment_via_registered_layout() {
 #test
 fn lwt_lowers_compound_field_assignment_reads_then_writes() {
     let p = lwt_named_var("p", "Point")
-    let assign = lwt_field_assign(p, "x", lexer::TokenKind::PlusEq, lwt_num_i64(5 to i128), lwt_prim(checker::PrimKind::I64))
+    let assign = lwt_field_assign(p, "x", lexer::TokenKind::PlusEq, lwt_num_i64(5 to i64), lwt_prim(checker::PrimKind::I64))
     let params = teko::list::push(teko::list::empty(), lwt_param("p", "Point"))
-    let body = teko::list::push(teko::list::push(teko::list::empty(), assign), lwt_ret(lwt_num_i64(0 to i128)))
+    let body = teko::list::push(teko::list::push(teko::list::empty(), assign), lwt_ret(lwt_num_i64(0 to i64)))
     let f = lwt_fn("bump_x", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f, lwt_one_layout(lwt_point_layout())) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
@@ -980,8 +980,8 @@ fn lwt_lowers_compound_field_assignment_reads_then_writes() {
 #test
 fn lwt_lowers_compound_simple_assignment_reads_then_rebinds() {
     mut items: []checker::TItem = teko::list::empty()
-    items = teko::list::push(items, lwt_item(lwt_bind("x", lwt_num_i64(4 to i128), checker::PrimKind::I64)))
-    let assign = checker::TAssign { kind = parser::AssignKind::Simple; name = "x"; op = lexer::TokenKind::StarEq; bound = lwt_prim(checker::PrimKind::I64); value = lwt_num_i64(3 to i128); deref = false; target = checker::no_texpr() }
+    items = teko::list::push(items, lwt_item(lwt_bind("x", lwt_num_i64(4 to i64), checker::PrimKind::I64)))
+    let assign = checker::TAssign { kind = parser::AssignKind::Simple; name = "x"; op = lexer::TokenKind::StarEq; bound = lwt_prim(checker::PrimKind::I64); value = lwt_num_i64(3 to i64); deref = false; target = checker::no_texpr() }
     items = teko::list::push(items, lwt_item(assign))
     items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), lwt_var("x", checker::PrimKind::I64)), checker::Void { }))))
     let prog = checker::TProgram { items = items }
@@ -1013,7 +1013,7 @@ fn lwt_lowers_null_literal_as_a_zero_ptr_const() {
 
 #test
 fn lwt_lowers_path_expr_to_its_resolved_value() {
-    let pe = checker::TExpr { kind = checker::TPathExpr { enum_name = "Color"; member = "Green"; ordinal = 1; value = 1 to u128 }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
+    let pe = checker::TExpr { kind = checker::TPathExpr { enum_name = "Color"; member = "Green"; ordinal = 1; value = 1 to u64 }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
     teko::assert::str_contains(lwt_lower_expr_text(pe), "%0 = const 1")
 }
 
@@ -1047,7 +1047,7 @@ fn lwt_index_of(recv: checker::TExpr, index: checker::TExpr, et: checker::Type) 
 
 #test
 fn lwt_lowers_str_index_loads_the_byte_off_rodata() {
-    let ix = lwt_index_of(lwt_strlit("abc"), lwt_num_i64(0 to i128), checker::Byte { })
+    let ix = lwt_index_of(lwt_strlit("abc"), lwt_num_i64(0 to i64), checker::Byte { })
     let text = lwt_lower_expr_text(lwt_cast(ix, checker::PrimKind::I32))
     teko::assert::str_contains(text, "rodata .Lstr0: [97, 98, 99]")
     teko::assert::str_contains(text, "field_addr %0, 0")
@@ -1070,7 +1070,7 @@ fn lwt_interp(pieces: []str, holes: []checker::TExpr) -> checker::TExpr {
 #test
 fn lwt_lowers_interpolation_as_nested_str_concat_calls() {
     let pieces = teko::list::push(teko::list::push(teko::list::empty(), "n="), "")
-    let holes = teko::list::push(teko::list::empty(), lwt_num_i64(7 to i128))
+    let holes = teko::list::push(teko::list::empty(), lwt_num_i64(7 to i64))
     let text = lwt_lower_expr_text(lwt_interp(pieces, holes))
     teko::assert::str_contains(text, "rodata .Lstr0: [110, 61]")
     teko::assert::str_contains(text, "global_addr @.Lstr0")
@@ -1085,8 +1085,8 @@ fn lwt_in_expr(lhs: checker::TExpr, elems: []checker::TExpr) -> checker::TExpr {
 
 #test
 fn lwt_lowers_in_expr_as_an_eq_chain_ored_together() {
-    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(1 to i128)), lwt_num_i64(2 to i128))
-    let text = lwt_lower_expr_text(lwt_in_expr(lwt_num_i64(1 to i128), elems))
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(1 to i64)), lwt_num_i64(2 to i64))
+    let text = lwt_lower_expr_text(lwt_in_expr(lwt_num_i64(1 to i64), elems))
     teko::assert::str_contains(text, "icmpeq")
     teko::assert::str_contains(text, "ior")
 }
@@ -1147,8 +1147,8 @@ fn lwt_iface_call(iface: str, method: str, slot: u32, args: []checker::TExpr, re
 
 #test
 fn lwt_lowers_iface_dispatch_call_via_vtable_load_and_indirect_call() {
-    let recv = lwt_num_i64(1000 to i128)
-    let extra = lwt_num_i64(7 to i128)
+    let recv = lwt_num_i64(1000 to i64)
+    let extra = lwt_num_i64(7 to i64)
     let args = teko::list::push(teko::list::push(teko::list::empty(), recv), extra)
     let call = lwt_iface_call("Speaker", "speak", 2, args, lwt_prim(checker::PrimKind::I64))
     let text = lwt_lower_expr_text(call)
@@ -1165,7 +1165,7 @@ fn lwt_lowers_iface_dispatch_call_via_vtable_load_and_indirect_call() {
 
 #test
 fn lwt_lowers_void_iface_dispatch_call_as_a_valueless_indirect_call() {
-    let recv = lwt_num_i64(2000 to i128)
+    let recv = lwt_num_i64(2000 to i64)
     let args = teko::list::push(teko::list::empty(), recv)
     let call = lwt_iface_call("Speaker", "speak", 0, args, checker::Void { })
     let text = lwt_lower_expr_text(call)
@@ -1237,7 +1237,7 @@ fn lwt_lowers_fn_value_and_closure_call_via_a_thunk() {
     let fty = lwt_func_type(teko::list::push(teko::list::push(teko::list::empty(), lwt_prim(checker::PrimKind::I64)), lwt_prim(checker::PrimKind::I64)), lwt_prim(checker::PrimKind::I64))
     mut items: []checker::TItem = teko::list::empty()
     items = teko::list::push(items, lwt_item(lwt_bind_typed("f", lwt_fn_value("add", "teko::demo", fty), fty)))
-    let cargs = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(2 to i128)), lwt_num_i64(3 to i128))
+    let cargs = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(2 to i64)), lwt_num_i64(3 to i64))
     let call = lwt_closure_call("f", cargs, fty, lwt_prim(checker::PrimKind::I64))
     items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), call), checker::Void { }))))
     let prog = checker::TProgram { items = items }
@@ -1316,9 +1316,9 @@ fn lwt_lowers_capturing_lambda_literal_and_closure_call() {
     let captures = teko::list::push(teko::list::empty(), lwt_capture("captured", i64ty))
     let lam = lwt_lambda(params, lam_body, captures, i64ty)
     mut items: []checker::TItem = teko::list::empty()
-    items = teko::list::push(items, lwt_item(lwt_bind("captured", lwt_num_i64(41 to i128), checker::PrimKind::I64)))
+    items = teko::list::push(items, lwt_item(lwt_bind("captured", lwt_num_i64(41 to i64), checker::PrimKind::I64)))
     items = teko::list::push(items, lwt_item(lwt_bind_typed("f", lam, lam.type)))
-    let call = lwt_closure_call("f", teko::list::push(teko::list::empty(), lwt_num_i64(1 to i128)), lam.type, i64ty)
+    let call = lwt_closure_call("f", teko::list::push(teko::list::empty(), lwt_num_i64(1 to i64)), lam.type, i64ty)
     items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), call), checker::Void { }))))
     let prog = checker::TProgram { items = items }
     let m = match lower_program(prog) { LModule as x => x; error as err => return }
@@ -1339,9 +1339,9 @@ fn lwt_lowers_capturing_lambda_literal_and_closure_call() {
  */
 #test
 fn lwt_lowers_defer_fires_before_a_void_lambdas_fall_through_return() {
-    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i128), checker::PrimKind::I64)
+    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i64), checker::PrimKind::I64)
     let defer_body = teko::list::push(teko::list::empty(), lwt_simple_assign("s", lexer::TokenKind::Assign, s_plus_100, checker::PrimKind::I64))
-    let lam_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i128), checker::PrimKind::I64)), lwt_defer(defer_body))
+    let lam_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i64), checker::PrimKind::I64)), lwt_defer(defer_body))
     let lam = lwt_lambda(teko::list::empty(), lam_body, teko::list::empty(), checker::Void { })
     mut items: []checker::TItem = teko::list::empty()
     items = teko::list::push(items, lwt_item(lwt_bind_typed("f", lam, lam.type)))
@@ -1361,11 +1361,11 @@ fn lwt_lowers_defer_fires_before_a_void_lambdas_fall_through_return() {
  */
 #test
 fn lwt_interp_runs_function_trailing_expression_as_return_value() {
-    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num(42 to i128, checker::PrimKind::I32)))
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num(42 to i64, checker::PrimKind::I32)))
     let f = lwt_fn("f", "", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
     let m = add_func(empty_module(), lf)
-    teko::assert::is_true(interp_lmodule(m, "f", teko::list::empty()) == (42 to i128))
+    teko::assert::is_true(interp_lmodule(m, "f", teko::list::empty()) == (42 to i64))
 }
 
 /**
@@ -1406,13 +1406,13 @@ fn lwt_lowers_continue_jumps_back_to_the_loop_head() {
  */
 #test
 fn lwt_defer_inside_else_arm_fires_only_on_that_arms_own_branch() {
-    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i128), checker::PrimKind::I64)
+    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100 to i64), checker::PrimKind::I64)
     let defer_body = teko::list::push(teko::list::empty(), lwt_simple_assign("s", lexer::TokenKind::Assign, s_plus_100, checker::PrimKind::I64))
-    let cond = lwt_cmp(lwt_var("x", checker::PrimKind::I64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Gt, lwt_num_i64(0 to i128))))
+    let cond = lwt_cmp(lwt_var("x", checker::PrimKind::I64), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Gt, lwt_num_i64(0 to i64))))
     let else_blk = teko::list::push(teko::list::empty(), lwt_defer(defer_body))
     let ifstmt = lwt_if_stmt(cond, teko::list::empty(), true, else_blk)
     let tail_ret = lwt_ret(lwt_var("s", checker::PrimKind::I64))
-    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i128), checker::PrimKind::I64)), lwt_exprstmt(ifstmt)), tail_ret)
+    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1 to i64), checker::PrimKind::I64)), lwt_exprstmt(ifstmt)), tail_ret)
     let params = teko::list::push(teko::list::empty(), lwt_param("x", "i64"))
     let f = lwt_fn("else_arm_scoped", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
@@ -1582,8 +1582,8 @@ fn nested_struct_by_value_field_layout_accounts_for_the_inner_structs_real_width
 #test
 fn lwt_virtual_main_returns_the_trailing_top_level_expressions_value() {
     mut items: []checker::TItem = teko::list::empty()
-    items = teko::list::push(items, lwt_item(lwt_bind("x", lwt_num_i64(40 to i128), checker::PrimKind::I64)))
-    let tail = lwt_bin(lexer::TokenKind::Plus, lwt_var("x", checker::PrimKind::I64), lwt_num_i64(2 to i128), checker::PrimKind::I64)
+    items = teko::list::push(items, lwt_item(lwt_bind("x", lwt_num_i64(40 to i64), checker::PrimKind::I64)))
+    let tail = lwt_bin(lexer::TokenKind::Plus, lwt_var("x", checker::PrimKind::I64), lwt_num_i64(2 to i64), checker::PrimKind::I64)
     items = teko::list::push(items, lwt_item(lwt_exprstmt(tail)))
     let prog = checker::TProgram { items = items }
     let m = match lower_program(prog) { LModule as x => x; error as err => return }

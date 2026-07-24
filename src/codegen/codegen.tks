@@ -110,8 +110,8 @@ fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str) -> []byte {
     if !ctx.on { return buf }
     if line == 0 { return buf }
     mut b = cb(cb(buf, indent), "tk_cov_line_at(")
-    b = cb(cb_u128_digits(b, ctx.fn_idx to u128), "ULL, ")
-    cb(cb_u128_digits(b, line to u128), ");\n")
+    b = cb(cb_u64_digits(b, ctx.fn_idx), "ULL, ")
+    cb(cb_u64_digits(b, line to u64), ");\n")
 }
 
 /**
@@ -131,10 +131,10 @@ fn emit_cov_line(buf: []byte, ctx: CovCtx, line: u32, indent: str) -> []byte {
 fn emit_cov_branch(buf: []byte, ctx: CovCtx, line: u32, col: u32, outcome: u64, indent: str) -> []byte {
     if !ctx.on { return buf }
     mut b = cb(cb(buf, indent), "tk_cov_branch_at(")
-    b = cb(cb_u128_digits(b, ctx.fn_idx to u128), "ULL, ")
-    b = cb(cb_u128_digits(b, line to u128), ", ")
-    b = cb(cb_u128_digits(b, col to u128), ", ")
-    cb(cb_u128_digits(b, outcome to u128), ");\n")
+    b = cb(cb_u64_digits(b, ctx.fn_idx), "ULL, ")
+    b = cb(cb_u64_digits(b, line to u64), ", ")
+    b = cb(cb_u64_digits(b, col to u64), ", ")
+    cb(cb_u64_digits(b, outcome), ");\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +188,17 @@ fn cb_i64(buf: []byte, v: i64) -> []byte {
     b
 }
 
-// cb_u128_digits — append the decimal MAGNITUDE of an unsigned 128-bit value (no sign).
-// __int128 has no printf specifier in the C backend, so the digits are spelled out
-// high-to-low (collect low-to-high, emit reversed) — the C twin is `cb_u128_digits`.
-fn cb_u128_digits(buf: []byte, v: u128) -> []byte {
+/**
+ * cb_u64_digits — append the decimal MAGNITUDE of an unsigned 64-bit value (no sign) (drop-128,
+ * 2026-07-24 — replaces `cb_u128_digits`; the widest integer carrier is now u64, so this covers
+ * every literal, not just a below-128-bit subset). The digits are spelled out high-to-low
+ * (collect low-to-high, emit reversed).
+ *
+ * @param buf  the emission buffer
+ * @param v    the magnitude to append
+ * @return     the buffer with the decimal digits appended
+ */
+fn cb_u64_digits(buf: []byte, v: u64) -> []byte {
     if v == 0 { return cb_byte(buf, b'0') }
     mut b = buf
     mut n = v
@@ -211,52 +218,37 @@ fn cb_u128_digits(buf: []byte, v: u128) -> []byte {
     b
 }
 
-// cb_u128_c_expr — a u128 MAGNITUDE as a C constant EXPRESSION of type `unsigned __int128`. A
-// 128-bit value has NO C literal: a decimal token wider than `unsigned long long` is rejected
-// BEFORE any cast applies, so when it exceeds 64 bits we BUILD it from two 64-bit halves via
-// shifts: `(((unsigned __int128)<hi>ULL << 64) | (unsigned __int128)<lo>ULL)`. ≤64-bit values
-// stay a plain `(unsigned __int128)<dec>ULL`. (C: `cb_u128_c_expr`.)
-fn cb_u128_c_expr(buf: []byte, v: u128) -> []byte {
-    let lo = v & 0xFFFFFFFFFFFFFFFF   // low 64 bits (fits a C decimal)
-    let hi = v >> 64   // high 64 bits
-    if hi == 0 {
-        mut b = cb(buf, "(unsigned __int128)")
-        b = cb_u128_digits(b, lo)
-        return cb(b, "ULL")
-    }
-    mut b = cb(buf, "(((unsigned __int128)")
-    b = cb_u128_digits(b, hi)
-    b = cb(b, "ULL << 64) | (unsigned __int128)")
-    b = cb_u128_digits(b, lo)
-    cb(b, "ULL)")
+/**
+ * cb_u64_c_expr — a u64 MAGNITUDE as a C constant EXPRESSION, `<dec>ULL` (drop-128, 2026-07-24 —
+ * replaces `cb_u128_c_expr`'s two-halves shift form: the widest carrier is now u64, which —
+ * unlike u128 — DOES have a native C decimal-literal form, so no shift composition is needed).
+ *
+ * @param buf  the emission buffer
+ * @param v    the magnitude to append
+ * @return     the buffer with the `<dec>ULL` expression appended
+ */
+fn cb_u64_c_expr(buf: []byte, v: u64) -> []byte {
+    cb(cb_u64_digits(buf, v), "ULL")
 }
 
-// reinterpret_i128_bits_u128 — the raw 128 bits of a signed value AS a u128, two's-complement,
-// NEVER trapping. Local to codegen's cb_* family (codegen must not depend on vm.tks): each 64-bit
-// half is masked out (non-negative after the mask, so the `to u128` is total), then recomposed in
-// u128 space where every sub-op is total. The codegen-side twin of the VM's
-// reinterpret_i128_to_u128. (C: `cb_reinterpret_i128_bits_u128`; #299.)
-fn reinterpret_i128_bits_u128(v: i128) -> u128 {
-    let lo = (v & 0xFFFFFFFFFFFFFFFF) to u128
-    let hi = ((v >> 64) & 0xFFFFFFFFFFFFFFFF) to u128
-    (hi << 64) | lo
-}
-
-// cb_i128 — append a signed 128-bit value as a C constant expression (sign + magnitude via the
-// shift form). A negative i128 must NOT compute its magnitude via `v to u128`: the checked cast
-// PANICS ("impossible conversion") on a negative source. Historically this never fired (a source
-// negative parses as `Unary(Minus, Number)`), but a DIRECT negative `Number` (a synthesizer or a
-// checked-math fold) reaches here. Instead reinterpret the bits into u128 (never trapping) and take
-// the two's-complement magnitude `~bits + 1`, total even for the most-negative value (whose i128
-// negation overflows). (C: `cb_i128`; #299.)
-fn cb_i128(buf: []byte, v: i128) -> []byte {
-    if v < 0 {
-        let mag = (~reinterpret_i128_bits_u128(v)) + (1 to u128)
+/**
+ * cb_numint — append a `parser::NumInt` literal value as a C constant expression: the sign is
+ * already explicit on the carrier (drop-128, 2026-07-24 — replaces `cb_i128`, whose negative
+ * case had to reinterpret a signed i128's raw bits into u128 first since the OLD carrier could
+ * hold a directly-negative value with no separate sign flag; `NumInt` never needs that
+ * reinterpretation; #299).
+ *
+ * @param buf  the emission buffer
+ * @param v    the sign-magnitude literal value to append
+ * @return     the buffer with the constant expression appended (`-(...)` when negative)
+ */
+fn cb_numint(buf: []byte, v: parser::NumInt) -> []byte {
+    if v.neg {
         mut b = cb(buf, "-(")
-        b = cb_u128_c_expr(b, mag)
+        b = cb_u64_c_expr(b, v.mag)
         return cb(b, ")")
     }
-    cb_u128_c_expr(buf, reinterpret_i128_bits_u128(v))
+    cb_u64_c_expr(buf, v.mag)
 }
 
 // cb_f64_literal — append a f64 as a round-trippable decimal literal. The C twin used
@@ -3506,14 +3498,14 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
         mut out = cb(buf, "({ ")
         out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
         out = cb(out, " *"); out = cb(out, pN); out = cb(out, " = malloc(")
-        out = cb_u128_digits(out, a.elements.len to u128)
+        out = cb_u64_digits(out, a.elements.len to u64)
         out = cb(out, " * sizeof(")
         out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
         out = cb(out, ")); if (!"); out = cb(out, pN); out = cb(out, ") abort(); ")
         mut i: u64 = 0
         loop {
             if i >= a.elements.len { break }
-            out = cb(out, pN); out = cb(out, "["); out = cb_u128_digits(out, i to u128); out = cb(out, "] = ")
+            out = cb(out, pN); out = cb(out, "["); out = cb_u64_digits(out, i to u64); out = cb(out, "] = ")
             out = match emit_as(out, prog, elem, a.elements[i].expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
             out = cb(out, "; ")
             i++
@@ -3521,7 +3513,7 @@ fn emit_array_lit(buf: []byte, prog: checker::TProgram, e: checker::TExpr, a: ch
         out = cb(out, "(")
         out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
         out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = ")
-        out = cb_u128_digits(out, a.elements.len to u128)
+        out = cb_u64_digits(out, a.elements.len to u64)
         return cb(out, " }; })")
     }
     // slow path: has spread — build incrementally via tk_slice_push
@@ -5283,7 +5275,7 @@ fn cg_emit_lit_pattern(buf: []byte, lit: parser::Expr) -> []byte | error {
     match lit.kind {
         parser::Number as n => {
             if n.is_float { return cb_f64_literal(buf, n.fval) }
-            cb_i128(buf, n.value)
+            cb_numint(buf, n.value)
         }
         parser::ByteLit as b => cb_i64(buf, b.value to i64)
         parser::StrLit as sl => {
@@ -6185,7 +6177,7 @@ fn emit_number(buf: []byte, prog: checker::TProgram, e: checker::TExpr, n: check
     match e.type {
         checker::Byte => {
             mut o = cb(buf, "((uint8_t)")
-            o = cb_i128(o, n.value)
+            o = cb_numint(o, n.value)
             return cb(o, ")")
         }
         _ => { }
@@ -6202,7 +6194,7 @@ fn emit_number(buf: []byte, prog: checker::TProgram, e: checker::TExpr, n: check
                 mut o = cb(buf, "((")
                 o = mangle_type_name(o, "", nm.name)
                 o = cb(o, ")")
-                o = cb_i128(o, n.value)
+                o = cb_numint(o, n.value)
                 return cb(o, ")")
             }
         }
@@ -6232,7 +6224,7 @@ fn emit_number(buf: []byte, prog: checker::TProgram, e: checker::TExpr, n: check
     mut out = cb(buf, "((")
     out = match emit_prim(out, k) { []byte as o => o; error as err => return err }
     out = cb(out, ")")
-    out = cb_i128(out, n.value)
+    out = cb_numint(out, n.value)
     cb(out, ")")
 }
 
@@ -7914,7 +7906,7 @@ fn emit_function(buf: []byte, prog: checker::TProgram, f: checker::TFunction) ->
 fn emit_function_cov(buf: []byte, prog: checker::TProgram, f: checker::TFunction, cov_idx: i64) -> []byte | error {
     mut out = match emit_function_sig(buf, prog, f) { []byte as o => o; error as err => return err }
     out = cb(out, " {\n")
-    if cov_idx >= 0 { out = cb(cb_u128_digits(cb(out, "    tk_cov_mark("), cov_idx to u128), ");\n") }
+    if cov_idx >= 0 { out = cb(cb_u64_digits(cb(out, "    tk_cov_mark("), cov_idx to u64), ");\n") }
     // (W9.3) PER-SCOPE defer. The TAST body is emitted UNCHANGED; defers are tracked via the threaded
     // DeferCtx (the functional twin of the C's g_cg_defers/g_cg_ndefers statics, reset per function).
     // A TDeferStmt appends to dctx.defers (emits nothing inline); every scope-block fires `[base, len)`
@@ -10268,9 +10260,9 @@ fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []
     b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
     b = cb_cstr_escaped(b, head)
     b = cb(b, "\", ")
-    b = cb_u128_digits(b, head.len to u128)
+    b = cb_u64_digits(b, head.len to u64)
     b = cb(b, " });\n")
-    if cov { b = cb(cb_u128_digits(cb(b, "    tk_cov_enter("), idx to u128), ");\n") }
+    if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx to u64), ");\n") }
     b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
     b = cb(b, "();\n")
     if cov { b = cb(b, "    tk_cov_leave();\n") }
@@ -10302,15 +10294,15 @@ fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64) -> []byt
     b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
     b = cb_cstr_escaped(b, head)
     b = cb(b, "\", ")
-    b = cb_u128_digits(b, head.len to u128)
+    b = cb_u64_digits(b, head.len to u64)
     b = cb(b, " });\n")
     b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
-    b = cb(cb_u128_digits(cb(b, "    tk_cov_enter("), idx to u128), ");\n")
+    b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx to u64), ");\n")
     b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
     b = cb(b, "();\n")
     b = cb(b, "    tk_cov_leave();\n")
     b = cb(b, "    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
-    b = cb_u128_digits(b, idx to u128)
+    b = cb_u64_digits(b, idx to u64)
     b = cb(b, ".tkcov\", d); tk_cov_dump(p); } }\n")
     b = cb(b, "    tk_println((tk_str){ (const tk_byte *)\"ok\", 2 });\n")
     b = cb(b, "    tk_arena_pop();\n")
@@ -10383,7 +10375,7 @@ fn tk_emit_tsym(prog: checker::TProgram) -> str {
                 b = cb(b, "\t")
                 b = cb(b, f.file)
                 b = cb(b, ":")
-                b = cb_u128_digits(b, f.line to u128)
+                b = cb_u64_digits(b, f.line to u64)
                 b = cb(b, "\n")
             }
             _ => { }
