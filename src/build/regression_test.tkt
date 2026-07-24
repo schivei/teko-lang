@@ -50,3 +50,144 @@ fn to_sh_path_gates_on_host_os() {
     if teko::os() == "windows" { teko::assert::is_true(converted == "/d/a/teko-lang/bin/teko.exe"); return }
     teko::assert::is_true(converted == raw)
 }
+
+/**
+ * manifest_with_regression_files — a minimal valid manifest declaring `test_regression_files` as
+ * exactly `[path]` and `gate = true` — the shared fixture builder for the run_regression_sources
+ * M.3 tests below (0.3.1 C0).
+ *
+ * @param path  the single `.tkr` path to list
+ * @return      the parsed manifest
+ */
+fn manifest_with_regression_files(path: str) -> Manifest {
+    let src = teko::str::concat(teko::str::concat("name = \"h\"\nsource = \"src\"\n[tests]\nregression = [\"", path), "\"]\ngate = true\n")
+    match parse_manifest(src) { Manifest as m => m; error => parse_manifest_or_die() }
+}
+
+#test
+/**
+ * run_regression_sources_missing_path_is_a_manifest_error — a listed `.tkr` path that does not
+ * resolve to a readable file gates the run non-zero (M.3 — never a silent skip), 0.3.1 C0.
+ *
+ * @return void
+ */
+fn run_regression_sources_missing_path_is_a_manifest_error() {
+    let m = manifest_with_regression_files("examples/regressions/__definitely_missing__.tkr")
+    teko::assert::is_true(run_regression_sources("teko", m) == 1)
+}
+
+#test
+/**
+ * env_prefix_cmd_shapes_the_env_prefix — an empty env yields "" (byte-identical to the pre-C2
+ * `run_captured`); a non-empty env yields an `env K=V … ` fragment with each token single-quoted.
+ *
+ * @return void
+ */
+fn env_prefix_cmd_shapes_the_env_prefix() {
+    teko::assert::is_true(env_prefix_cmd(teko::list::empty()) == "")
+    let one = teko::list::push(teko::list::empty(), "FOO=bar")
+    teko::assert::is_true(env_prefix_cmd(one) == "env 'FOO=bar' ")
+}
+
+#test
+/**
+ * cd_prefix_cmd_is_a_noop_for_dot_and_empty — `cd_prefix_cmd` is "" for "" and "." (the runner's
+ * own cwd already), and a real `cd … && ` fragment otherwise (0.3.1 C3 `built in place`).
+ *
+ * @return void
+ */
+fn cd_prefix_cmd_is_a_noop_for_dot_and_empty() {
+    teko::assert::is_true(cd_prefix_cmd("") == "")
+    teko::assert::is_true(cd_prefix_cmd(".") == "")
+    teko::assert::is_true(cd_prefix_cmd("examples/regressions/rt_behavior") == "cd 'examples/regressions/rt_behavior' && ")
+}
+
+#test
+/**
+ * resolve_run_wrapper_is_a_noop_on_host — "" / "host" resolve to no run-wrapper, and an
+ * unrecognised target name is likewise a no-op (never a fabricated wrapper), 0.3.1 C3.
+ *
+ * @return void
+ */
+fn resolve_run_wrapper_is_a_noop_on_host() {
+    match resolve_run_wrapper("") { []str as w => teko::assert::is_true(w.len == 0); error => teko::assert::is_true(false) }
+    match resolve_run_wrapper(HOST_TARGET) { []str as w => teko::assert::is_true(w.len == 0); error => teko::assert::is_true(false) }
+    match resolve_run_wrapper("some-unknown-target") { []str as w => teko::assert::is_true(w.len == 0); error => teko::assert::is_true(false) }
+}
+
+#test
+/**
+ * wrap_argv_with_wrapper_prepends_the_wrapper — a non-empty wrapper is prepended ahead of `argv`;
+ * an empty wrapper leaves `argv` untouched (0.3.1 C3).
+ *
+ * @return void
+ */
+fn wrap_argv_with_wrapper_prepends_the_wrapper() {
+    let argv = teko::list::push(teko::list::push(teko::list::empty(), "bin/x"), "1")
+    let wrapper = teko::list::push(teko::list::push(teko::list::empty(), "wasmtime"), "run")
+    let wrapped = wrap_argv_with_wrapper(wrapper, argv)
+    teko::assert::is_true(wrapped.len == 4)
+    teko::assert::is_true(wrapped[0] == "wasmtime")
+    teko::assert::is_true(wrapped[1] == "run")
+    teko::assert::is_true(wrapped[2] == "bin/x")
+    teko::assert::is_true(wrapped[3] == "1")
+    let bare = wrap_argv_with_wrapper(teko::list::empty(), argv)
+    teko::assert::is_true(bare.len == 2)
+}
+
+#test
+/**
+ * guard_no_project_build_at_root_refuses_a_bare_root_scenario — a root-scoped (`regr_dir` "."/"")
+ * scenario with NO inline/explicit source is refused (it would rebuild the compiler); one WITH an
+ * inline source, or any non-root directory, is allowed through (0.3.1 C1 §1.1).
+ *
+ * @return void
+ */
+fn guard_no_project_build_at_root_refuses_a_bare_root_scenario() {
+    let bare = tkr_lower_new_for_test()
+    match guard_no_project_build_at_root(".", bare) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("", bare) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("examples/regressions/rt_behavior", bare) { error => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+/**
+ * tkr_lower_new_for_test — a lowered `Tkr` with no inline/explicit source, for the guard test
+ * above (a plain project-based scenario shape).
+ *
+ * @return a bare lowered spec
+ */
+fn tkr_lower_new_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n") { Tkr as t => t; error => tkr_lower_new_for_test() }
+}
+
+/**
+ * tkr_first_lowered_or_die — parse `src` and lower its first scenario, for a fixture that is
+ * known-valid (an internal helper, not a test itself).
+ *
+ * @param src  the `.tkr` text
+ * @return     the lowered spec, or an error on a malformed fixture
+ */
+fn tkr_first_lowered_or_die(src: str) -> Tkr | error {
+    let feats = match parse_tkr(src) { []TkrFeature as f => f; error as e => return e }
+    tkr_lower_scenario(feats[0].scenarios[0])
+}
+
+#test
+/**
+ * declarative_scenario_has_no_when_verb — `tkb_scenario_is_declarative` is true for a verb-less
+ * (documentation-only) scenario and false once a `When` step is present (0.3.1 C1 §2c).
+ *
+ * @return void
+ */
+fn declarative_scenario_has_no_when_verb() {
+    let decl_src = "Feature: f\n  Scenario: doc only\n    # verified-by: something external\n"
+    match parse_tkr(decl_src) {
+        []TkrFeature as fs => teko::assert::is_true(tkb_scenario_is_declarative(fs[0].scenarios[0]))
+        error => teko::assert::is_true(false)
+    }
+    let live_src = "Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"
+    match parse_tkr(live_src) {
+        []TkrFeature as fs => teko::assert::is_false(tkb_scenario_is_declarative(fs[0].scenarios[0]))
+        error => teko::assert::is_true(false)
+    }
+}

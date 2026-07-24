@@ -190,20 +190,18 @@ fn tkr_osarch_routing() {
 
 #test
 /**
- * tkr_compile_fail_lowers — a `compilation fails` scenario lowers to the CompileFail kind pinning the
- * `diagnostic` substring, and `tkr_scenario_source` reports its `Given source = "<file>"`.
+ * tkr_compile_fail_lowers — a `compilation fails` scenario lowers to the CompileFail kind pinning
+ * the `diagnostic` substring, and its `Given source = "<file>"` lowers into `Tkr.source_file`.
  *
  * @return void
  */
 fn tkr_compile_fail_lowers() {
     let src = "Feature: f\n  Scenario: neg\n    Given source = \"cases/x.tks\"\n    When compilation fails\n    Then diagnostic = \"out of range\"\n"
-    match parse_tkr(src) {
-        []TkrFeature as fs => {
-            teko::assert::is_true(tkr_scenario_source(fs[0].scenarios[0]) == "cases/x.tks")
-            match tkr_lower_scenario(fs[0].scenarios[0]) {
-                Tkr as t => { teko::assert::is_true(t.kind == TkrKind::CompileFail); teko::assert::is_true(t.diagnostic == "out of range") }
-                error => teko::assert::is_true(false)
-            }
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.source_file == "cases/x.tks")
+            teko::assert::is_true(t.kind == TkrKind::CompileFail)
+            teko::assert::is_true(t.diagnostic == "out of range")
         }
         error => teko::assert::is_true(false)
     }
@@ -226,6 +224,8 @@ fn tkr_verdict_parity() {
                 args = teko::list::push(teko::list::empty(), "7"); stdin = ""; kind = TkrKind::Print; exit = 42
                 stdout = TkrMatch { mode = TkrMatchMode::Literal; text = "ok" }; stderr = tkr_match_ignore()
                 targets = teko::list::empty(); expect = teko::list::empty(); golden = teko::list::empty(); diagnostic = ""
+                source_inline = ""; source_file = ""; env = teko::list::empty(); target = ""
+                in_place = false; dep_dir = ""; check_wellformed = false; check_module_valid = false
             }
             let good = CapResult { exit = 42; stdout = "ok"; stderr = "" }
             let bad = CapResult { exit = 1; stdout = "no"; stderr = "" }
@@ -236,43 +236,6 @@ fn tkr_verdict_parity() {
         }
         error => teko::assert::is_true(false)
     }
-}
-
-#test
-/**
- * tkr_discovery_lists_tkr — `dir_tkr_files` returns the empty list for an unreadable directory and
- * the renamed `rt_behavior.tkr` for its regressor dir; that dir is NOT the self-project (no
- * `regressor.tkr`), so the runner executes it.
- *
- * @return void
- */
-fn tkr_discovery_lists_tkr() {
-    teko::assert::is_true(dir_tkr_files("examples/regressions/__nope__").len == 0)
-    let files = dir_tkr_files("examples/regressions/rt_behavior")
-    teko::assert::is_true(files.len == 1)
-    teko::assert::is_true(files[0] == "rt_behavior.tkr")
-    teko::assert::is_false(dir_is_self_project("examples/regressions/rt_behavior"))
-}
-
-#test
-/**
- * tkr_files_sort_deterministically — `dir_tkr_files`'s insertion sort orders basenames byte-wise, so
- * a project holding multiple `.tkr` files runs them in a stable order regardless of `list_dir`'s
- * order (companion §10).
- *
- * @return void
- */
-fn tkr_files_sort_deterministically() {
-    let a = tkr_insert_sorted(teko::list::empty(), "io.tkr")
-    let b = tkr_insert_sorted(a, "arith.tkr")
-    let c = tkr_insert_sorted(b, "bitwise.tkr")
-    teko::assert::is_true(c.len == 3)
-    teko::assert::is_true(c[0] == "arith.tkr")
-    teko::assert::is_true(c[1] == "bitwise.tkr")
-    teko::assert::is_true(c[2] == "io.tkr")
-    teko::assert::is_true(tkr_basename_lt("a.tkr", "b.tkr"))
-    teko::assert::is_false(tkr_basename_lt("b.tkr", "a.tkr"))
-    teko::assert::is_false(tkr_basename_lt("a.tkr", "a.tkr"))
 }
 
 #test
