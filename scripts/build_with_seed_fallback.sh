@@ -30,12 +30,14 @@
 #
 # Env:
 #   TEKO_SEED_FALLBACK_SEED_BIN     the seed command to invoke (default: teko, resolved on PATH)
-#   TEKO_SEED_FALLBACK_BASE_BRANCH  the branch the fallback bootstraps from (default: main)
+#   TEKO_SEED_FALLBACK_BASE_BRANCH  the branch the fallback bootstraps from (default: GITHUB_BASE_REF
+#                                   when Actions sets it — a STACKED PR bootstraps from its BASE
+#                                   branch, the predecessor wagon — else main)
 set -eu
 
 OUT_DIR="${1:-bin}"
 SEED_BIN="${TEKO_SEED_FALLBACK_SEED_BIN:-teko}"
-BASE_BRANCH="${TEKO_SEED_FALLBACK_BASE_BRANCH:-main}"
+BASE_BRANCH="${TEKO_SEED_FALLBACK_BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
 
 WORKTREE_DIR=""
 GEN1_BASE_DIR=""
