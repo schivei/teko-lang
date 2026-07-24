@@ -251,7 +251,10 @@ if ! build_project "$GEN1_BASE_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$
   fi
   log "ladder engaged: gen1($BOOT_SHA) cannot build the tip — building merge-base $LADDER_SHA as the intermediate rung"
   git -C "$WORKTREE_DIR" checkout -q --detach "$LADDER_SHA"
-  git -C "$WORKTREE_DIR" clean -fdxq
+  # -e .probe-out: gen1's own binary lives there — cleaning it would delete the very
+  # compiler about to build this rung (it is stale-era ARTIFACTS we must not reuse, but
+  # the BINARY is the ladder's tool; the rung build reads only src/ + its own rt dir).
+  git -C "$WORKTREE_DIR" clean -fdxq -e .probe-out
   GEN2_DIR="$WORKTREE_DIR/.ladder-out"
   rm -rf "$GEN2_DIR"
   mkdir -p "$GEN2_DIR"
