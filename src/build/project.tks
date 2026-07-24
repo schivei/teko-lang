@@ -237,14 +237,20 @@ fn load_deps_program(m: Manifest) -> checker::TProgram | error {
  * on each tick, record the latest `(done, total)` into `last`/`total_cell` (read
  * back once `type_program_with_deps_pre_mono` returns, for the settle line — the
  * actual total can differ slightly from the pre-check item count once trait
- * derivations fold) and render the live "N/M items" counter.
+ * derivations fold) and render the live "N/M items" counter. The closure write-throughs stay
+ * explicit `.value =` (0.3.1 — a bare `ref`-bound write-through assign captures correctly with
+ * the `lam_collect_stmt` fix this PR ships, but that fix cannot yet cover its OWN introduction —
+ * the compiler that BUILDS this generation's `src/` is the PREVIOUS seed, whose closure-capture
+ * pass predates the fix; a bare `last = n` inside this exact closure would build a corrupt
+ * env struct THIS generation. `.value =` keeps the FieldAccess-target shape the previous seed's
+ * capture walk already handles).
  *
  * @param phase       the checker phase handle from `phase_begin`
  * @param last        the caller's tick counter, updated to the latest `done`
  * @param total_cell  the caller's total-item counter, updated to the latest `total`
  * @return            the `ProgressFn` closure to pass to `type_program_with_deps_pre_mono`
  */
-fn checker_tick_fn(phase: Phase, last: Ref<u64>, total_cell: Ref<u64>) -> checker::ProgressFn {
+fn checker_tick_fn(phase: Phase, ref last: u64, ref total_cell: u64) -> checker::ProgressFn {
     (n: u64, m: u64) => {
         last.value = n
         total_cell.value = m

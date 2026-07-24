@@ -1,6 +1,6 @@
 /**
  * The 0-based cursor over an `over_array` source. Caller-owned (MEM-1b-ii): a `mut` local
- * threaded into the source through a `Ref`, so the position survives across pulls.
+ * threaded into the source through a `ref`, so the position survives across pulls.
  *
  * @param pos  the index of the next element to yield
  * @since ITER0
@@ -17,11 +17,11 @@ pub type ArrayCursor = struct { pos: u64 }
  * @example    mut c = ArrayCursor { pos = 0 }; over_array([1, 2, 3], c)
  * @since ITER0
  */
-pub fn over_array(xs: []i64, cur: Ref<ArrayCursor>) -> IntIter {
+pub fn over_array(xs: []i64, ref cur: ArrayCursor) -> IntIter {
     let it: IntIter = () => {
-        if cur.value.pos >= xs.len { return null }
-        let v = xs[cur.value.pos]
-        cur.value = ArrayCursor { pos = cur.value.pos + 1 }
+        if cur.pos >= xs.len { return null }
+        let v = xs[cur.pos]
+        cur.value = ArrayCursor { pos = cur.pos + 1 }
         v
     }
     it
@@ -46,11 +46,11 @@ pub type RangeCursor = struct { next: i64; hi: i64 }
  * @example    mut c = RangeCursor { next = 0; hi = 3 }; range(c) yields 0, 1, 2
  * @since ITER0
  */
-pub fn range(cur: Ref<RangeCursor>) -> IntIter {
+pub fn range(ref cur: RangeCursor) -> IntIter {
     let it: IntIter = () => {
-        if cur.value.next >= cur.value.hi { return null }
-        let v = cur.value.next
-        cur.value = RangeCursor { next = v + 1; hi = cur.value.hi }
+        if cur.next >= cur.hi { return null }
+        let v = cur.next
+        cur.value = RangeCursor { next = v + 1; hi = cur.hi }
         v
     }
     it
@@ -65,9 +65,9 @@ pub fn range(cur: Ref<RangeCursor>) -> IntIter {
  * @return      an IntIter yielding `v` exactly once
  * @since ITER0
  */
-pub fn once(v: i64, cur: Ref<OnceCursor>) -> IntIter {
+pub fn once(v: i64, ref cur: OnceCursor) -> IntIter {
     let it: IntIter = () => {
-        if cur.value.emitted { return null }
+        if cur.emitted { return null }
         cur.value = OnceCursor { emitted = true }
         v
     }
@@ -162,12 +162,12 @@ pub type TakeCursor = struct { left: i64 }
  * @example    take(range(rc), tc) with tc = TakeCursor { left = 3 }
  * @since ITER0
  */
-pub fn take(src: IntIter, cur: Ref<TakeCursor>) -> IntIter {
+pub fn take(src: IntIter, ref cur: TakeCursor) -> IntIter {
     let taken: IntIter = () => {
-        if cur.value.left <= 0 { return null }
+        if cur.left <= 0 { return null }
         let nx = src()
         match nx {
-            i64 as v => { cur.value = TakeCursor { left = cur.value.left - 1 }; v }
+            i64 as v => { cur.value = TakeCursor { left = cur.left - 1 }; v }
             null => null
         }
     }
@@ -193,13 +193,13 @@ pub type SkipCursor = struct { left: i64 }
  * @example    skip(range(rc), sc) with sc = SkipCursor { left = 2 }
  * @since ITER0
  */
-pub fn skip(src: IntIter, cur: Ref<SkipCursor>) -> IntIter {
+pub fn skip(src: IntIter, ref cur: SkipCursor) -> IntIter {
     let skipped: IntIter = () => {
         loop {
-            if cur.value.left <= 0 { break }
+            if cur.left <= 0 { break }
             let dropped = src()
             match dropped {
-                i64 => cur.value = SkipCursor { left = cur.value.left - 1 }
+                i64 => cur.value = SkipCursor { left = cur.left - 1 }
                 null => { cur.value = SkipCursor { left = 0 }; return null }
             }
         }
@@ -226,13 +226,13 @@ pub type EnumCursor = struct { index: i64 }
  * @example    enumerate(over_array(xs, ac), ec) yields (0, xs[0]), (1, xs[1]), …
  * @since ITER0
  */
-pub fn enumerate(src: IntIter, cur: Ref<EnumCursor>) -> IntIndexedIter {
+pub fn enumerate(src: IntIter, ref cur: EnumCursor) -> IntIndexedIter {
     let en: IntIndexedIter = () => {
         let nx = src()
         match nx {
             i64 as v => {
-                let out = IntIndexed { index = cur.value.index; value = v }
-                cur.value = EnumCursor { index = cur.value.index + 1 }
+                let out = IntIndexed { index = cur.index; value = v }
+                cur.value = EnumCursor { index = cur.index + 1 }
                 out
             }
             null => null
@@ -287,9 +287,9 @@ pub type ChainCursor = struct { first_done: bool }
  * @example    chain(range(ra), range(rb), cc)
  * @since ITER0
  */
-pub fn chain(a: IntIter, b: IntIter, cur: Ref<ChainCursor>) -> IntIter {
+pub fn chain(a: IntIter, b: IntIter, ref cur: ChainCursor) -> IntIter {
     let ch: IntIter = () => {
-        if cur.value.first_done == false {
+        if cur.first_done == false {
             let na = a()
             match na {
                 i64 as x => return x

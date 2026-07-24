@@ -55,22 +55,46 @@ fn type_var(v: parser::Var, env: Env) -> TExpr | error {
 // (W10) CLOSURE LITERALS — type a `(params) => body` lambda, analyse its captures.
 // ============================================================================
 
-// collect the NAMES a lambda body READS (`refs`) and the names it BINDS internally (`bound` —
-// inner `let`s + nested-lambda params), so the free variables are `refs − bound − <params>`.
-fn lam_collect_block(stmts: []parser::Statement, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the names a lambda body's statements READ (`refs`) and the names they BIND internally
+ * (`bound` — inner `let`s + nested-lambda params) transitively over every statement in `stmts`, so
+ * the free variables are `refs − bound − <params>` (0.3.1 — `ref` params, write-through, replacing
+ * the pre-adoption `Ref<[]str>` spelling; `str_set_add`'s explicit `.value` read stays — passing a
+ * `ref` argument bare into a plain-value parameter is not yet checker-auto-deref'd at a call site).
+ *
+ * @param stmts  the statement block to scan
+ * @param refs   accumulates every read name (by-reference, write-through)
+ * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ */
+fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []str) -> void {
     mut i = 0
     loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound); i++ }
 }
-fn lam_collect_stmt(s: parser::Statement, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the read/bound names of a single lambda-body statement `s` into `refs`/`bound` — the
+ * per-statement-kind dispatch `lam_collect_block` folds over a whole block. A bare-name `Assign`
+ * (`AssignKind::Simple`, no walkable `.target` expr) registers its `name` directly (0.3.1 fix — a
+ * `ref`-bound write-through assignment, `r = v`, has no `FieldAccess` target to recurse into the
+ * way the pre-adoption `r.value = v` spelling did, so it was never captured without this; a
+ * `Field`/`Index` target is still walked via `.target` as before).
+ *
+ * @param s      the statement to scan
+ * @param refs   accumulates every read name (by-reference, write-through)
+ * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ */
+fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str) -> void {
     match s {
         parser::Binding as b => {
             lam_collect_expr(b.value, refs, bound)
             match b.target {
-                parser::SimpleName as sn => bound.value = str_set_add(bound.value, sn.name)
-                parser::DestructurePattern as dp => { mut j = 0; loop { if j >= dp.names.len { break }; bound.value = str_set_add(bound.value, dp.names[j]); j++ } }
+                parser::SimpleName as sn => bound = str_set_add(bound.value, sn.name)
+                parser::DestructurePattern as dp => { mut j = 0; loop { if j >= dp.names.len { break }; bound = str_set_add(bound.value, dp.names[j]); j++ } }
             }
         }
-        parser::Assign as a => { lam_collect_expr(a.value, refs, bound); if parser::assign_has_target(a.kind) { lam_collect_expr(a.target, refs, bound) } }
+        parser::Assign as a => {
+            lam_collect_expr(a.value, refs, bound)
+            if parser::assign_has_target(a.kind) { lam_collect_expr(a.target, refs, bound) } else { refs = str_set_add(refs.value, a.name) }
+        }
         parser::Return as r => if r.has_value { lam_collect_expr(r.value, refs, bound) } else { }
         parser::LoopStmt as l => { lam_collect_block(l.init, refs, bound); lam_collect_block(l.body, refs, bound) }
         parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound)
@@ -80,13 +104,21 @@ fn lam_collect_stmt(s: parser::Statement, refs: Ref<[]str>, bound: Ref<[]str>) -
         parser::ContinueStmt => { }
     }
 }
-fn lam_collect_expr(e: parser::Expr, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the read/bound names of a single lambda-body expression `e` into `refs`/`bound` — the
+ * per-expression-kind dispatch `lam_collect_stmt`/`lam_collect_block` recurse through.
+ *
+ * @param e      the expression to scan
+ * @param refs   accumulates every read name (by-reference, write-through)
+ * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ */
+fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str) -> void {
     match e.kind {
-        parser::Var as v => refs.value = str_set_add(refs.value, v.name)
+        parser::Var as v => refs = str_set_add(refs.value, v.name)
         parser::Binary as b => { lam_collect_expr(b.left, refs, bound); lam_collect_expr(b.right, refs, bound) }
         parser::Unary as u => lam_collect_expr(u.operand, refs, bound)
         parser::Compare as c => { lam_collect_expr(c.first, refs, bound); mut i = 0; loop { if i >= c.rest.len { break }; lam_collect_expr(c.rest[i].operand, refs, bound); i++ } }
-        parser::Call as cl => { if cl.callee.segments.len == 1 { refs.value = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound); i++ } }
+        parser::Call as cl => { if cl.callee.segments.len == 1 { refs = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound); i++ } }
         parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound); lam_collect_block(f.then_blk, refs, bound); if f.has_else { lam_collect_block(f.else_blk, refs, bound) } }
         parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound); i++ } }
         parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound)
@@ -101,7 +133,7 @@ fn lam_collect_expr(e: parser::Expr, refs: Ref<[]str>, bound: Ref<[]str>) -> voi
         parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound); i++ } }
         parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound); mut i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound); i++ } }
         parser::ArrayLit as a => { mut i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound); i++ } }
-        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound.value = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound) }   // a NESTED lambda's params are bound; its free reads transit to the outer
+        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound) }
         parser::Number => { }
         parser::StrLit => { }
         parser::ByteLit => { }
@@ -1367,6 +1399,23 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
     rewrite_segment_at(c.callee, owner_idx, inst)
 }
 
+/**
+ * Types a call expression: resolves the callee (a builtin, a same/qualified-namespace function, or
+ * a local closure value), types every argument against the resolved signature — widening (B.14),
+ * literal-adoption (C6), generic type-param inference (S4), AUTO-REF (a `mut` lvalue passed where a
+ * `ref<T>` param is expected), and transparent auto-deref (0.3.1 — a `ref`-typed argument that does
+ * NOT already satisfy the parameter directly peels one `Reference` layer via `deref_ref_value`, so a
+ * `ref` binding is usable bare as a call argument, no `.value`; a `ref`-typed argument that already
+ * widens as-is — forwarding into a `ref T` param, or into a `ref T | null` union, the null-union R2
+ * relaxation — is left alone, never derefed away from a shape that already fits) — and produces the
+ * typed `TCall`.
+ *
+ * @param c0     the untyped call node (post generic-static-callee retargeting if type-args are given)
+ * @param env    the typing environment (bindings + current namespace)
+ * @param table  the resolved type table (signatures, decls, generics)
+ * @return       the typed call expression, its type the callee's resolved return type
+ * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
+ */
 fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
     let c = if c0.type_args.len == 0 { c0 } else {
         let rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
@@ -1498,6 +1547,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             loop {
                 if i >= targs.len { break }
                 mut a = targs[i]
+                if !assignable_to(a.type, f.params[i], table) { a = deref_ref_value(a) }
                 // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T —
                 // the compiler takes the reference (codegen emits `&`). Requires a `mut` variable (you
                 // can't reference an immutable binding — there'd be nothing to mutate). A value ALREADY
@@ -3664,11 +3714,57 @@ fn type_array_lit_expected(a: parser::ArrayLit, expected: Type, env: Env, table:
     TExpr { kind = TArrayLit { elements = elems }; type = expected; line = 0; col = 0 }
 }
 
-// Type a binding's value with the annotation as its expected type (so a generic constructor targets
-// the concrete instance from `: Box<i64>`).
+/**
+ * Types a `ref` binding's initializer against the annotated Reference target (owner ruling
+ * 2026-07-24): `ref r: T = x` REQUIRES `x` to be a mutable variable (aliased, write-through — R7)
+ * or another already-Reference-typed expression (forwarded plainly). There is no third case — a
+ * fresh value/expression cannot become a `ref` binding's source (no expression-position `ref x`
+ * exists to spell it, and no silent copy-fallback: an honest error names the real fix). The typed
+ * value keeps its BARE (unwrapped) type on the mutable-var path — codegen's `emit_as_r` detects the
+ * `Reference`-expected / non-`Reference`-value mismatch and emits the `&` itself, mirroring
+ * `type_call`'s call-argument auto-ref.
+ *
+ * @param bv     the binding's value expression
+ * @param rf     the annotated `Reference` target
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed initializer (bare-typed on the alias path, `Reference`-typed on the
+ *               forwarding path)
+ * @throws       when the source is neither a mutable variable nor an already-`Reference` value
+ */
+fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: TypeTable) -> TExpr | error {
+    let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
+    match v.type { Reference => return v; _ => { } }
+    if !type_eq(v.type, rf.inner) {
+        return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
+    }
+    match bv.kind {
+        parser::Var as var => match lookup_binding(env, var.name) {
+            ValBinding as vb => {
+                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" } }
+                v
+            }
+            error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" }
+        }
+        _ => error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" }
+    }
+}
+
+/**
+ * Types a binding's value with the annotation as its expected type (so a generic constructor
+ * targets the concrete instance from `: Box<i64>`) — or, when the annotation is a `Reference`
+ * (a `ref` binding), routes through `type_ref_binding_value`'s mutable-source/forwarding rule
+ * instead of the ordinary widening/literal-adoption path (0.3.1 — owner ruling 2026-07-24).
+ *
+ * @param b      the binding whose value is typed
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed initializer
+ */
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr | error {
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
+        match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
         return type_value_expected(b.value, at, env, table)
     }
     type_expr(b.value, env, table)
@@ -3677,7 +3773,15 @@ fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr |
 /**
  * Type-checks a `let`/`mut`/`const` binding statement, producing its typed `TBinding` node and
  * the environment extended with the newly bound name (a `SimpleName` target; a
- * `DestructurePattern` target is left as a refinement — the environment is returned unchanged).
+ * `DestructurePattern` target is left as a refinement — the environment is returned unchanged). A
+ * `ref` binding (`at` resolves to `Reference`, owner ruling 2026-07-24) skips the ordinary
+ * widening/literal-adopt check entirely — `type_binding_value` (via `type_ref_binding_value`)
+ * already validated the mutable-source/forwarding rule and typed `v` accordingly (bare on the
+ * alias path, since a bare-typed alias value is never "assignable to" its own `Reference`
+ * wrapper); `bound` is always set to the annotation `at` when one is given, unconditionally. A
+ * top-level `Reference` bound type is legal ONLY on a genuine `ref` binding (`BindKind::Mut`,
+ * `parse_ref_binding`'s desugar) — a `let`/`const` binding can never carry one (deep immutability
+ * is the whole point of `let`; the tripartite law: `let` protects, `mut` unlocks, `ref` aliases).
  *
  * @param parser::Binding b  the parsed binding (target, optional annotation, initializer)
  * @param Env env  the typing environment (read for `env.fn_unsafe`, U2's local-containment gate)
@@ -3694,7 +3798,8 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
-        if !assignable_to(v.type, at, table) {   // B.14 widening (case → variant) OR C6: a fitting literal adopts T (leaf stays i64)
+        let is_ref_binding = match at { Reference => true; _ => false }
+        if !is_ref_binding && !assignable_to(v.type, at, table) {
             // (C1.8/E2) wrap with expected=type_render(at), actual=type_render(v.type) — mirrors
             // typer.c type_binding's tk_error_types wrap of annotated_literal_reason's message.
             match struct_iface_named_stop(v.type, at, table) { error as se => return se; null => { } }
@@ -3733,7 +3838,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
         return error { message = "an empty list needs a known element type; annotate the binding (e.g. `mut xs: []i32 = teko::list::empty()`)" }
     }
     match bound {
-        Reference => { }
+        Reference => if b.kind != parser::BindKind::Mut { return error { message = "`let`/`const` cannot bind a reference — a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
         _ => if type_contains_ref(bound) && !is_ref_null_variant(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
     if !env.fn_unsafe && unsafe_carrying(bound, table) {

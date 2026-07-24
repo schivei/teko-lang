@@ -5037,7 +5037,38 @@ fn cg_emit_box_construct(buf: []byte, prog: checker::TProgram, ret_type: checker
     cb(out, "; })")
 }
 
+/**
+ * Wraps `value` into its `expected` type's C representation — variant (niche/box/inline), optional
+ * present-wrap, or (0.3.1 — owner ruling 2026-07-24) a `ref` BINDING'S `Reference` target: a bare
+ * (non-`Reference`) `value` is the mutable-source alias path `type_ref_binding_value` (checker)
+ * already validated, so it is address-taken here (`&value`); an already-`Reference` `value` is the
+ * forwarding path (another reference) and emits plainly. Falls through to a plain expression emit
+ * when `expected` needs no wrapping at all.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program (representation classification)
+ * @param ret_type  the enclosing function's return type (threaded for a diverging sub-value)
+ * @param expected  the target type `value` is wrapped into
+ * @param value     the typed value to wrap
+ * @param escaping  the enclosing function's escaping-name set (frame routing)
+ * @param regions   the active block/frame region stack
+ * @param fn_body   the enclosing function's body (frame-locality queries)
+ * @param dctx      the enclosing `defer` context
+ * @return          the buffer with the representation-correct wrapped value appended
+ */
 fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    match expected {
+        checker::Reference => {
+            match value.type {
+                checker::Reference => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)
+                _ => {
+                    let o = cb(buf, "&")
+                    return emit_expr_ctx(o, prog, ret_type, value, escaping, regions, fn_body, dctx)
+                }
+            }
+        }
+        _ => { }
+    }
     match expected {
         checker::Variant as nva => match cg_union_niche_member(prog, nva) {
             checker::Type as nx => {
@@ -9260,15 +9291,33 @@ fn cg_lift_lambdas(prog: checker::TProgram) -> LiftResult {
     loop { if j >= acc.fns.len { break }; items = teko::list::push(items, acc.fns[j]); j++ }
     LiftResult { prog = checker::TProgram { items = items }; lams = acc.lams }
 }
-fn cg_lift_block(stmts: []checker::TStatement, acc: Ref<StampAcc>) -> []checker::TStatement {
-    // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
-    // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+/**
+ * Rebuilds a statement block with every nested closure literal stamped (`cg_lift_stmt` per
+ * statement), threading the lift accumulator `acc` (0.3.1 — a `ref` param; forwarded bare to
+ * every recursive call, it is already a reference, no re-borrow). `out` is a linear chain: born
+ * empty, self-append-only, read only after the loop — so every copy-grow frees the superseded
+ * buffer (#148 R3 DECREE; `mem::push_fo`, paranoid-gated).
+ *
+ * @param stmts  the statement block to rebuild
+ * @param acc    the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
+ * @return       the block with every lambda literal stamped
+ */
+fn cg_lift_block(stmts: []checker::TStatement, ref acc: StampAcc) -> []checker::TStatement {
     mut out: []checker::TStatement = teko::list::empty()
     mut i = 0
     loop { if i >= stmts.len { break }; out = teko::mem::push_fo(out, cg_lift_stmt(stmts[i], acc)); i++ }
     out
 }
-fn cg_lift_stmt(s: checker::TStatement, acc: Ref<StampAcc>) -> checker::TStatement {
+/**
+ * Rebuilds one statement, recursing into every sub-expression via `cg_lift_expr` so a nested
+ * closure literal is stamped wherever it appears (a binding/assign RHS, a return value, a loop
+ * body, …).
+ *
+ * @param s    the statement to rebuild
+ * @param acc  the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
+ * @return     the statement with every lambda literal stamped
+ */
+fn cg_lift_stmt(s: checker::TStatement, ref acc: StampAcc) -> checker::TStatement {
     match s {
         checker::TBinding as b => checker::TBinding { kind = b.kind; target = b.target; bound = b.bound; value = cg_lift_expr(b.value, acc) }
         checker::TAssign as a => checker::TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = cg_lift_expr(a.value, acc); deref = a.deref; target = if parser::assign_has_target(a.kind) { cg_lift_expr(a.target, acc) } else { a.target } }
@@ -9281,25 +9330,33 @@ fn cg_lift_stmt(s: checker::TStatement, acc: Ref<StampAcc>) -> checker::TStateme
         checker::TContinueStmt => s
     }
 }
-fn cg_lift_expr(e: checker::TExpr, acc: Ref<StampAcc>) -> checker::TExpr {
+/**
+ * Rebuilds one expression, recursing into every sub-expression, and STAMPS every closure literal
+ * it finds with a unique `lift_id` (issue #107 fix — a real lift_id counter bug this exposed):
+ * a `TLambda` reserves ITS OWN id BEFORE recursing into its body, so a nested lambda literal
+ * inside it stamps with HIGHER ids (outer-first numbering, stable regardless of nesting). The
+ * recursive `cg_lift_block` call may advance `acc.next` further (once per nested lambda it
+ * finds) — the counter used AFTER the recursion is read FRESH from `acc.next` (whatever the
+ * nested walk left it at), never reset to `id + 1`: that would REUSE ids already handed out to
+ * nested lambdas, producing two lifted C functions both named `__tkclo_<id>` (a
+ * duplicate-definition compile error) the moment a lambda literal contains another lambda
+ * literal. A non-capturing lambda is synthesized as a plain top-level fn; a capturing one is
+ * recorded in `acc.lams` for the env-struct + env-first lifted-fn emission path.
+ *
+ * @param e    the expression to rebuild
+ * @param acc  the lift-id counter + synthesized-fn/capturing-lambda accumulator (by-reference)
+ * @return     the expression with every lambda literal stamped
+ */
+fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc) -> checker::TExpr {
     match e.kind {
         checker::TLambda as lam => {
-            // (issue #107 fix — a real lift_id counter bug this exposed) reserve THIS lambda's id
-            // BEFORE recursing into its body, so a nested lambda literal inside it stamps with
-            // HIGHER ids (outer-first numbering, stable regardless of nesting). The recursive
-            // cg_lift_block call below may advance `acc.value.next` further (once per nested
-            // lambda it finds) — the counter used AFTER the recursion must be read FRESH from
-            // `acc.value.next` (whatever the nested walk left it at), never reset to `id + 1`:
-            // that would REUSE ids already handed out to nested lambdas, producing two lifted C
-            // functions both named `__tkclo_<id>` (a duplicate-definition compile error) the
-            // moment a lambda literal contains another lambda literal.
-            let id = acc.value.next
-            acc.value = StampAcc { next = id + 1; fns = acc.value.fns; lams = acc.value.lams }
+            let id = acc.next
+            acc = StampAcc { next = id + 1; fns = acc.fns; lams = acc.lams }
             let nbody = cg_lift_block(lam.body, acc)   // stamp nested lambdas first (ids > id)
             // synthesize a plain top-level fn for a NON-capturing lambda; capturing → emitted by the
             // capture path (recorded in `lams`).
-            mut newfns = acc.value.fns
-            mut newlams = acc.value.lams
+            mut newfns = acc.fns
+            mut newlams = acc.lams
             let stamped = checker::TLambda { params = lam.params; body = nbody; captures = lam.captures; ret = lam.ret; lift_id = id }
             if lam.captures.len == 0 {
                 mut ps: []parser::Param = teko::list::empty()
@@ -9310,7 +9367,7 @@ fn cg_lift_expr(e: checker::TExpr, acc: Ref<StampAcc>) -> checker::TExpr {
                 newlams = teko::list::push(newlams, stamped)
             }
             // preserve whatever `next` the nested recursion advanced to (never regress it).
-            acc.value = StampAcc { next = acc.value.next; fns = newfns; lams = newlams }
+            acc = StampAcc { next = acc.next; fns = newfns; lams = newlams }
             checker::TExpr { kind = stamped; type = e.type; line = e.line; col = e.col }
         }
         checker::TBinary as b => checker::TExpr { kind = checker::TBinary { op = b.op; left = cg_lift_expr(b.left, acc); right = cg_lift_expr(b.right, acc) }; type = e.type; line = e.line; col = e.col }
