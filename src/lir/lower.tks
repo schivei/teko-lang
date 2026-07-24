@@ -706,7 +706,7 @@ fn lower_const_addr(ctx: LowerCtx, symbol: str, line: u32, col: u32) -> Lowered 
  * @param name    the referenced const's name
  * @return        the matching LRodata entry, or null
  */
-fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata? {
+fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata | null {
     let sym = const_rodata_symbol(name)
     mut i: u64 = 0
     loop {
@@ -1825,17 +1825,64 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
 }
 
 /** lower_binding — `let x = e`: a str/slice-typed binding (A1-4, #382) lowers `e` through
-    the FAT path and binds (ptr, len); every other binding lowers `e` to a single VReg and
-    binds it plainly. The binding target must be a simple name (a destructuring pattern is
-    out of the N1 subset). */
+    the FAT path and binds (ptr, len); every other binding lowers `e` through
+    `lower_binding_value` (coercion-aware, C6/C7 null-union) and binds the single result VReg
+    plainly. The binding target must be a simple name (a destructuring pattern is out of the
+    N1 subset). */
 fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
     if is_fat_type(b.bound) {
         let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
         return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
     }
-    let lo = match lower_expr(ctx, b.value) { Lowered as x => x; error as err => return err }
+    let lo = match lower_binding_value(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
     LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
+}
+
+/**
+ * lower_binding_value — a `let`/`mut` binding's value, coerced into its DECLARED type `bound`
+ * when that is a null-bearing two-member union (`T | null`) and the value's own natural type
+ * is not already that union (a bare `null` literal, or the payload type `T` directly): builds
+ * the own backend's uniform tag+payload wrapper via `lower_null_union_construct`. Every other
+ * declared type lowers the value plainly — the checker types an assignable value at its OWN
+ * narrow type and leaves the wrap to codegen (the C backend's `emit_as`; this is its
+ * own-backend analog, scoped to the null-union shape `lower_variant_case_test`/
+ * `lower_variant_case_bind` already read).
+ *
+ * @param LowerCtx ctx  the lowering context to append the binding's instructions into
+ * @param checker::Type bound  the binding's declared type
+ * @param checker::TExpr value  the binding's typed value expression
+ * @return Lowered  the lowered (and, when needed, coerced) value
+ * @throws  propagated from lowering the value or the wrapper's payload
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_binding_value(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match bound {
+        checker::Variant as v => match null_union_payload(v) {
+            checker::Type as payload => lower_binding_value_into_null_union(ctx, payload, value)
+            null => lower_expr(ctx, value)
+        }
+        _ => lower_expr(ctx, value)
+    }
+}
+
+/**
+ * lower_binding_value_into_null_union — the `checker::Variant` arm of `lower_binding_value`:
+ * a value ALREADY typed as the union itself (re-binding an existing `T | null` value) passes
+ * through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
+ * `lower_null_union_construct`.
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Type payload  the union's non-null member type
+ * @param checker::TExpr value  the binding's typed value expression
+ * @return Lowered  the value's own VReg (already wrapped), or a freshly built wrapper
+ * @throws  propagated from lowering the value or the wrapper's payload
+ */
+fn lower_binding_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match value.type {
+        checker::Variant => lower_expr(ctx, value)
+        _ => lower_null_union_construct(ctx, payload, value)
+    }
 }
 
 /** bind_target_name — the bound simple name; a destructuring pattern honest-stops. */
@@ -2701,9 +2748,11 @@ pub type LowerBlockValue = struct { ctx: LowerCtx; terminated: bool; vreg: u32 }
 
 /** lower_block_value — lower an if-expression arm's statement block: every statement but
     the last lowers as an ordinary effect-only statement; the last is the arm's TAIL VALUE
-    (an expression-statement) unless it already terminated the block on its own. Mirrors
-    emit_branch_value's "last statement is the value" shape (codegen.tks). */
-fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement) -> LowerBlockValue | error {
+    (an expression-statement) unless it already terminated the block on its own. `result_ty`
+    is the enclosing if/match/function's own result machine class — threaded through to
+    `lower_tail_expr_stmt`'s diverging-tail fallback (C7). Mirrors emit_branch_value's "last
+    statement is the value" shape (codegen.tks). */
+fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
     mut cur = ctx
     mut i: u64 = 0
@@ -2714,20 +2763,66 @@ fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement) -> LowerBlockVa
         if out.terminated { return LowerBlockValue { ctx = cur; terminated = true; vreg = 0 } }
         i++
     }
-    lower_tail_stmt(cur, body[body.len - 1])
+    lower_tail_stmt(cur, body[body.len - 1], result_ty)
 }
 
 /** lower_tail_stmt — an if-expression arm's final statement: an expression-statement's
     value IS the arm's tail value; any other statement kind is delegated to
     lower_tail_non_expr. */
-fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValue | error {
+fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
     match s {
-        checker::TExprStmt as es => {
-            let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
-            LowerBlockValue { ctx = lo.ctx; terminated = false; vreg = lo.vreg }
-        }
+        checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty)
         _ => lower_tail_non_expr(ctx, s)
     }
+}
+
+/**
+ * lower_tail_expr_stmt — a VALUE arm's tail expression-statement: a `Void`-typed tail is, by
+ * the checker's own invariant (`texpr_diverges`/`tblock_diverges`, `src/checker/typer.tks` —
+ * "a panic/exit call DIVERGES ... its result may stand in for ANY type at a value position"),
+ * ALWAYS a diverging call (`panic`/`exit`, or a nested match/if whose every branch diverges).
+ * Its own placeholder (unused-by-contract) VReg is never a REAL value, so a `diverging_tail_
+ * value` fallback of the arm's own `result_ty` stands in instead — the exact own-backend gap
+ * C7's `T | null` panic-hook arm exposed (the placeholder VReg colliding, by pure VReg-number
+ * coincidence, with an unrelated live value elsewhere in the function). Any other (non-Void)
+ * tail yields its own value normally.
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the tail statement
+ * @param checker::TExprStmt es  the tail expression-statement
+ * @param LType result_ty  the enclosing arm's own expected result machine class
+ * @return LowerBlockValue  the value outcome (never terminated here — a diverging tail still
+ *                          falls through with a placeholder, keeping the arm's own control-flow
+ *                          shape identical to every sibling's, C7)
+ * @throws  propagated from lowering the tail expression
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType) -> LowerBlockValue | error {
+    let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+    if !type_is_void(es.expr.type) { return LowerBlockValue { ctx = lo.ctx; terminated = false; vreg = lo.vreg } }
+    diverging_tail_value(lo.ctx, result_ty)
+}
+
+/**
+ * diverging_tail_value — a value arm's tail already diverged at runtime
+ * (`lower_tail_expr_stmt`'s doc): materialize a defensive, WIDTH-CORRECT constant of `result_ty`
+ * instead of forwarding the diverging call's placeholder VReg. Never observed at runtime (the
+ * tail's own call already trapped/exited), but matching `result_ty`'s machine class keeps this
+ * arm's merge edge consistent with every sibling's real value (`lfallback_const`'s own
+ * width-selection doc) — and, just as importantly, lets the arm still FALL THROUGH to the
+ * shared merge rather than an early `return`, so the enclosing `if`/`match`'s own wasm block
+ * never becomes function-terminal (which would force ITS declared type to match the function's
+ * own return type instead of staying the ordinary merge-via-block-arg shape every other
+ * construct here already uses).
+ *
+ * @param LowerCtx ctx  the lowering context positioned right after the diverging tail
+ * @param LType result_ty  the arm's expected result machine class
+ * @return LowerBlockValue  the (never-observed) placeholder value, NOT terminated
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn diverging_tail_value(ctx: LowerCtx, result_ty: LType) -> LowerBlockValue {
+    let r = ctx_alloc(ctx)
+    let with_const = ctx_append(r.ctx, const_int_inst(r.vreg, lfallback_const(result_ty), 0, 0))
+    LowerBlockValue { ctx = with_const; terminated = false; vreg = r.vreg }
 }
 
 /** lower_tail_non_expr — a non-expression-statement tail: valid only if it terminates the
@@ -2810,10 +2905,11 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     let merged = add_merge_scalar_params(mp.func, mergeblk.block_id, ctx.env, names)
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
-    let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk) { LowerBlockValue as x => x; error as err => return err }
+    let result_ty = ltype_of(e.type)
+    let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk, result_ty) { LowerBlockValue as x => x; error as err => return err }
     let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    let else_val = match lower_block_value(else_ctx, f.else_blk) { LowerBlockValue as x => x; error as err => return err }
+    let else_val = match lower_block_value(else_ctx, f.else_blk, result_ty) { LowerBlockValue as x => x; error as err => return err }
     let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
@@ -2960,6 +3056,194 @@ fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMembe
 }
 
 /**
+ * null_union_payload — for a two-member absence union `{ null, X }` (the resolver's
+ * null-first canonical order, `checker::resolve.union_normalize_null`), the payload type `X`;
+ * `null` for any other member-list shape (more/fewer members, or no leading `Null`). The own
+ * backend has no niche/box optimization dial (unlike the C backend's `cg_union_niche_member`/
+ * `cg_union_box_member`, #382 predates the null-union pivot) — EVERY null-bearing two-member
+ * union uses ONE uniform tag(I32)@0 + payload@8 wrapper, the shape `lower_variant_case_test`/
+ * `lower_variant_case_bind` already read. Because the union has exactly one non-null member,
+ * a null-union arm never needs a BY-NAME case lookup: `null` is always tag 0, `X` is always
+ * tag 1.
+ *
+ * @param checker::Variant v  the resolved union type to classify
+ * @return checker::Type?  the sole non-null member, or `null` when `v` is not a null-first
+ *                         two-member union
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn null_union_payload(v: checker::Variant) -> checker::Type | null {
+    if v.members.len != 2 { return null }
+    match v.members[0] { checker::Null => v.members[1]; _ => null }
+}
+
+/**
+ * lower_variant_tag_eq_test — `subj.tag == index`: load the tag (field 0, `I32`) off the
+ * subject's base address, then compare against `index` — the shared test both a NAMED-case
+ * lookup (`lower_variant_case_test`) and a fixed-index null-union arm (`lower_null_pattern_test`,
+ * `lower_bind_pattern_test`'s null-union branch) reduce to (the variant runtime image is
+ * tag@0 + payload@8, per the plan's §5.3).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param i128 index  the tag value to compare the subject against
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ */
+fn lower_variant_tag_eq_test(ctx: LowerCtx, subj: MatchSubj, index: i128, line: u32, col: u32) -> PatternTest {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, subj.vreg, 0, line, col))
+    let tagr = ctx_alloc(with_addr)
+    let with_tag = ctx_append(tagr.ctx, load_inst(tagr.vreg, addr.vreg, LType::I32, line, col))
+    let cr = ctx_alloc(with_tag)
+    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, index, line, col))
+    let eqr = ctx_alloc(with_const)
+    PatternTest { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, tagr.vreg, cr.vreg, line, col)); always = false; vreg = eqr.vreg }
+}
+
+/**
+ * bind_payload_at8 — load the case payload at the variant's fixed offset 8, of machine class
+ * `ty`, and bind it to `binding` — the shared load both a NAMED-case bind
+ * (`lower_variant_case_bind`) and a fixed-index null-union payload bind
+ * (`bind_null_union_payload`) reduce to.
+ *
+ * @param LowerCtx ctx  the lowering context to append the load's instructions into
+ * @param u32 base  the subject's base-address VReg
+ * @param LType ty  the payload's machine class
+ * @param str binding  the name to bind the loaded payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload
+ */
+fn bind_payload_at8(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerCtx {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, 8, 0, 0))
+    let r = ctx_alloc(with_addr)
+    let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ty, 0, 0))
+    ctx_bind(with_load, binding, r.vreg)
+}
+
+/**
+ * bind_null_union_payload — `X as x` over a null-bearing two-member union subject: `x` binds
+ * the payload loaded at the fixed offset 8, of the payload type's own machine class. Needs no
+ * NAME lookup (`null_union_payload`'s doc): a two-member null union has exactly one non-null
+ * case.
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param checker::Type payload  the union's non-null member type
+ * @param str binding  the name to bind the payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str) -> LowerCtx {
+    bind_payload_at8(ctx, subj.vreg, ltype_of(payload), binding)
+}
+
+/**
+ * lower_null_pattern_test — a `null` pattern's test over a null-bearing two-member union
+ * subject: `subj.tag == 0` (the resolver's null-first canonical order puts `null` at index 0).
+ * Any other subject shape stays out of the A1-5 subset (`null` never matches a non-union
+ * subject).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ * @throws  when the subject is not a null-bearing `Variant`
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) -> PatternTest | error {
+    match subj.ty {
+        checker::Variant as v => match null_union_payload(v) {
+            checker::Type => lower_variant_tag_eq_test(ctx, subj, 0 to i128, line, col)
+            null => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
+        }
+        _ => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_null_union_construct — build the own backend's uniform tag+payload wrapper for a value
+ * coerced into a null-bearing two-member union (`null_union_payload`'s doc): allocate
+ * `{ i32 tag; <payload> }` (tag@0, payload@8 — the fixed layout `lower_variant_tag_eq_test`/
+ * `bind_payload_at8` already read), then store tag `0` for a `null` value, or tag `1` plus the
+ * lowered payload for any other value.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param checker::Type payload  the union's non-null member type (drives the payload's
+ *                               machine class)
+ * @param checker::TExpr e  the value being coerced (a `TNullLit`, or an expression of the
+ *                          payload type)
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering a non-null payload expression
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
+    let pty = ltype_of(payload)
+    let align = null_union_wrapper_align(pty)
+    let size = (8 to u32) + ltype_size(pty)
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, e.line, e.col))
+    match e.kind {
+        checker::TNullLit => store_null_union_tag(with_alloca, base.vreg, 0 to i128, e.line, e.col)
+        _ => store_null_union_payload(with_alloca, base.vreg, pty, e)
+    }
+}
+
+/**
+ * null_union_wrapper_align — the tag+payload wrapper's alignment: the payload's own alignment
+ * when it is wider than the `i32` tag word, else the tag word's own 4-byte alignment.
+ *
+ * @param LType pty  the payload's machine class
+ * @return u32  the wrapper's alignment in bytes
+ */
+fn null_union_wrapper_align(pty: LType) -> u32 {
+    let pa = ltype_align(pty)
+    if pa > (4 to u32) { pa } else { 4 to u32 }
+}
+
+/**
+ * store_null_union_tag — store `index` as the wrapper's `i32` tag word (offset 0), leaving the
+ * payload slot's bytes unspecified (a `null` construction never reads them back — the `tag == 0`
+ * test never binds a payload).
+ *
+ * @param LowerCtx ctx  the lowering context to append the store's instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param i128 index  the tag value to store
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the wrapper's base address, unchanged
+ */
+fn store_null_union_tag(ctx: LowerCtx, base: u32, index: i128, line: u32, col: u32) -> Lowered {
+    let tagr = ctx_alloc(ctx)
+    let with_tag = ctx_append(tagr.ctx, const_int_inst(tagr.vreg, index, line, col))
+    let addr = ctx_alloc(with_tag)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, 0, line, col))
+    let with_store = ctx_append(with_addr, store_inst(addr.vreg, tagr.vreg, LType::I32, line, col))
+    Lowered { ctx = with_store; vreg = base }
+}
+
+/**
+ * store_null_union_payload — store tag `1` (the null-union's sole present case) then the
+ * lowered payload `e` at the wrapper's fixed offset 8.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param LType pty  the payload's machine class
+ * @param checker::TExpr e  the payload value to lower and store
+ * @return Lowered  the wrapper's base address
+ * @throws  propagated from lowering `e`
+ */
+fn store_null_union_payload(ctx: LowerCtx, base: u32, pty: LType, e: checker::TExpr) -> Lowered | error {
+    let tagged = store_null_union_tag(ctx, base, 1 to i128, e.line, e.col)
+    let vo = match lower_expr(tagged.ctx, e) { Lowered as x => x; error as err => return err }
+    let paddr = ctx_alloc(vo.ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, vo.vreg, pty, e.line, e.col))
+    Lowered { ctx = with_pstore; vreg = base }
+}
+
+/**
  * find_enum_info — the LEnumInfo in `enums` named `name`, or `null` (a match
  * subject bound to a plain Named type that is NOT a registered enum — a bare
  * bind pattern over it always matches, A1-5, #382).
@@ -2969,7 +3253,7 @@ fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMembe
  * @return LEnumInfo?  the matching entry, or `null` when `name` is not a
  *                     registered enum
  */
-fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo? {
+fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo | null {
     mut i: u64 = 0
     loop {
         if i >= enums.len { break }
@@ -3037,8 +3321,8 @@ type PatternTest = struct { ctx: LowerCtx; always: bool; vreg: u32 }
  * lower_pattern_test — the boolean test `pat` applies to `subj`: a wildcard
  * always matches; a scalar/string literal tests equality; a bind/field pattern
  * tests a variant's tag OR an enum's ordinal (falling back to an unconditional
- * whole-value bind); a range/ alternation/`null` pattern is out of the A1-5
- * subset (A1-5, #382).
+ * whole-value bind); a `null` pattern tests a null-bearing union's tag (C7);
+ * a range/alternation pattern is out of the A1-5 subset (A1-5, #382).
  *
  * @param LowerCtx ctx  the lowering context to append the test's instructions
  *                      into
@@ -3048,8 +3332,8 @@ type PatternTest = struct { ctx: LowerCtx; always: bool; vreg: u32 }
  *                  none)
  * @param u32 col  the enclosing match expression's source column
  * @return PatternTest  the test outcome (always-true, or a computed bool VReg)
- * @throws  for a range/alternation/`null`/slice pattern, or an unresolvable
- *          case/enum name
+ * @throws  for a range/alternation/slice pattern, a `null` pattern over a
+ *          non-null-union subject, or an unresolvable case/enum name
  */
 fn lower_pattern_test(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern, line: u32, col: u32) -> PatternTest | error {
     match pat {
@@ -3059,7 +3343,7 @@ fn lower_pattern_test(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern, line
         parser::FieldPattern as fp => lower_field_pattern_test(ctx, subj, fp, line, col)
         parser::RangePattern => error { message = "native backend N1: range match pattern not yet lowered (N2)" }
         parser::AltPattern => error { message = "native backend N1: alternation (`|`) match pattern not yet lowered (N2)" }
-        parser::NullPattern => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
+        parser::NullPattern => lower_null_pattern_test(ctx, subj, line, col)
     }
 }
 
@@ -3210,11 +3494,12 @@ fn str_pattern_byte_eq(ctx: LowerCtx, subj: MatchSubj, want: byte, index: u32, l
 }
 
 /**
- * lower_bind_pattern_test — a BindPattern's test: over a `Variant` subject it
- * selects a CASE (by tag); over a plain `Named` subject registered as an enum
- * it selects a MEMBER (by ordinal); a slice pattern (`[]T as x`) is out of the
- * A1-5 subset; anything else always matches (binds the whole subject) (A1-5,
- * #382).
+ * lower_bind_pattern_test — a BindPattern's test: over a null-bearing two-member `Variant`
+ * subject (C7) it tests the FIXED payload tag (index 1, `null_union_payload`'s doc — no name
+ * lookup needed); over any other `Variant` subject it selects a CASE by NAME (tag); over a
+ * plain `Named` subject registered as an enum it selects a MEMBER (by ordinal); a slice
+ * pattern (`[]T as x`) is out of the A1-5 subset; anything else always matches (binds the
+ * whole subject) (A1-5, #382).
  *
  * @param LowerCtx ctx  the lowering context to append the test's instructions
  *                      into
@@ -3228,9 +3513,30 @@ fn str_pattern_byte_eq(ctx: LowerCtx, subj: MatchSubj, want: byte, index: u32, l
 fn lower_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, bp: parser::BindPattern, line: u32, col: u32) -> PatternTest | error {
     if bp.is_slice { return error { message = "native backend N1: slice match pattern not yet lowered (N2)" } }
     match subj.ty {
-        checker::Variant as v => lower_variant_case_test(ctx, subj, v.members, bind_pattern_case_name(bp), line, col)
+        checker::Variant as v => lower_variant_bind_pattern_test(ctx, subj, v, bp, line, col)
         checker::Named as n => lower_named_bind_pattern_test(ctx, subj, n, bp, line, col)
         _ => PatternTest { ctx = ctx; always = true; vreg = 0 }
+    }
+}
+
+/**
+ * lower_variant_bind_pattern_test — the `checker::Variant` arm of `lower_bind_pattern_test`:
+ * a null-bearing two-member union tests the fixed payload tag (index 1); any other variant
+ * selects its case by NAME (tag).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param checker::Variant v  the subject's resolved variant type
+ * @param parser::BindPattern bp  the bind pattern to test
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the test outcome
+ * @throws  when `bp`'s case name is not a member of `v` (non-null-union variant only)
+ */
+fn lower_variant_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, v: checker::Variant, bp: parser::BindPattern, line: u32, col: u32) -> PatternTest | error {
+    match null_union_payload(v) {
+        checker::Type => lower_variant_tag_eq_test(ctx, subj, 1 to i128, line, col)
+        null => lower_variant_case_test(ctx, subj, v.members, bind_pattern_case_name(bp), line, col)
     }
 }
 
@@ -3279,14 +3585,7 @@ fn lower_named_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, n: checker::Nam
  */
 fn lower_variant_case_test(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, line: u32, col: u32) -> PatternTest | error {
     let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
-    let addr = ctx_alloc(ctx)
-    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, subj.vreg, 0, line, col))
-    let tagr = ctx_alloc(with_addr)
-    let with_tag = ctx_append(tagr.ctx, load_inst(tagr.vreg, addr.vreg, LType::I32, line, col))
-    let cr = ctx_alloc(with_tag)
-    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, vm.index to i128, line, col))
-    let eqr = ctx_alloc(with_const)
-    PatternTest { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, tagr.vreg, cr.vreg, line, col)); always = false; vreg = eqr.vreg }
+    lower_variant_tag_eq_test(ctx, subj, vm.index to i128, line, col)
 }
 
 /**
@@ -3331,10 +3630,11 @@ fn lower_pattern_binds(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern) -> 
 }
 
 /**
- * lower_bind_pattern_binds — `Foo as x`: over a `Variant` subject, `x` binds
- * the CASE's payload (loaded at offset 8, per its own machine class); otherwise
- * `x` binds the WHOLE subject VReg (or fat pair). A bindingless bind
- * (`Foo`/`Foo as _`) binds nothing (A1-5, #382).
+ * lower_bind_pattern_binds — `Foo as x`: over a null-bearing two-member `Variant` subject
+ * (C7), `x` binds the FIXED payload (no name lookup, `null_union_payload`'s doc); over any
+ * other `Variant` subject, `x` binds the case's payload found BY NAME; otherwise `x` binds
+ * the WHOLE subject VReg (or fat pair). A bindingless bind (`Foo`/`Foo as _`) binds nothing
+ * (A1-5, #382).
  *
  * @param LowerCtx ctx  the lowering context to extend with the pattern's
  *                      binding
@@ -3347,8 +3647,27 @@ fn lower_pattern_binds(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern) -> 
 fn lower_bind_pattern_binds(ctx: LowerCtx, subj: MatchSubj, bp: parser::BindPattern) -> LowerCtx | error {
     if !bp.has_binding { return ctx }
     match subj.ty {
-        checker::Variant as v => lower_variant_case_bind(ctx, subj, v.members, bind_pattern_case_name(bp), bp.binding)
+        checker::Variant as v => lower_variant_bind_pattern_binds(ctx, subj, v, bp)
         _ => bind_whole_subject(ctx, subj, bp.binding)
+    }
+}
+
+/**
+ * lower_variant_bind_pattern_binds — the `checker::Variant` arm of `lower_bind_pattern_binds`:
+ * a null-bearing two-member union binds the FIXED payload (`bind_null_union_payload`); any
+ * other variant binds its case's payload found BY NAME (`lower_variant_case_bind`).
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param checker::Variant v  the subject's resolved variant type
+ * @param parser::BindPattern bp  the bind pattern to apply (already known bindingful)
+ * @return LowerCtx  the context with `bp`'s binding applied
+ * @throws  when `bp`'s case name is not a member of `v` (non-null-union variant only)
+ */
+fn lower_variant_bind_pattern_binds(ctx: LowerCtx, subj: MatchSubj, v: checker::Variant, bp: parser::BindPattern) -> LowerCtx | error {
+    match null_union_payload(v) {
+        checker::Type as payload => bind_null_union_payload(ctx, subj, payload, bp.binding)
+        null => lower_variant_case_bind(ctx, subj, v.members, bind_pattern_case_name(bp), bp.binding)
     }
 }
 
@@ -3387,12 +3706,7 @@ fn bind_whole_subject(ctx: LowerCtx, subj: MatchSubj, name: str) -> LowerCtx {
  */
 fn lower_variant_case_bind(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, binding: str) -> LowerCtx | error {
     let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
-    let ty = ltype_of(vm.ty)
-    let addr = ctx_alloc(ctx)
-    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, subj.vreg, 8, 0, 0))
-    let r = ctx_alloc(with_addr)
-    let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ty, 0, 0))
-    ctx_bind(with_load, binding, r.vreg)
+    bind_payload_at8(ctx, subj.vreg, ltype_of(vm.ty), binding)
 }
 
 /**
@@ -3577,7 +3891,7 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> Matc
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let bv = match lower_block_value(step.ctx, arm.body) { LowerBlockValue as x => x; error as err => return err }
+    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type)) { LowerBlockValue as x => x; error as err => return err }
     let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
@@ -3647,10 +3961,34 @@ fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, s
     let base_ctx = ctx_with(ctx, merged.func, ctx.block_id, ctx.env)
     let chain = match lower_match_arms_value(base_ctx, e, m.arms, subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
     let fb = ctx_alloc(chain)
-    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, 0 to i128, e.line, e.col))
+    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, lfallback_const(ltype_of(e.type)), e.line, e.col))
     let fallback_args = merge_value_args(fb.vreg, arm_scalar_args(with_zero.env, indices))
     let closed = append_inst(with_zero.func, with_zero.block_id, jump_inst(mergeb.block_id, fallback_args, e.line, e.col))
     Lowered { ctx = ctx_with(with_zero, closed, mergeb.block_id, merged.env); vreg = mp.vreg }
+}
+
+/**
+ * lfallback_const — a dead-code fallback VALUE at machine class `rt`, for a merge edge that is
+ * PROVABLY never taken (`lower_match_value`'s exhaustiveness-guaranteed dead arm-test fallback;
+ * `diverging_tail_value`'s diverging-tail placeholder, C7): plain `0` for a machine class the
+ * wasm backend already encodes narrow (`I8`/`I16`/`I32`/`Ptr` all wire to `i32` —
+ * `stackify_fits_i32`'s own doc: "a constant with no other type information defaults to...
+ * i32"), or the smallest magnitude that FORCES the wider `i64` wasm encoding when `rt` is
+ * `I64` — the exact class a REAL sibling edge into the same merge already produces, so this
+ * never-taken edge does not collide with it at the wasm validator's per-local type check
+ * (`LConstInt` carries no separate width field; a bare `0` always looks i32-narrow by
+ * magnitude alone). The value itself is NEVER observed at runtime — only its ENCODED WIDTH
+ * matters here.
+ *
+ * @param LType rt  the merge edge's expected result machine class
+ * @return i128  a value that wasm-encodes at `rt`'s own machine class
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lfallback_const(rt: LType) -> i128 {
+    match rt {
+        I64 => 2147483648 to i128
+        _ => 0 to i128
+    }
 }
 
 /**
@@ -4563,7 +4901,7 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  */
 fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32) -> LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
-    let tail = match lower_block_value(ctx, body) { LowerBlockValue as x => x; error as err => return err }
+    let tail = match lower_block_value(ctx, body, ret_ty) { LowerBlockValue as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     ctx_append(replayed, ret_inst(tail.vreg, line, col))
@@ -4850,7 +5188,7 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout) 
  * @param []LStructLayout known  every struct layout resolved so far
  * @return LStructLayout?  the matching nested layout, or `null`
  */
-fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout? {
+fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
     match named_type_name_of(te) {
         str as name => find_known_struct_layout(known, name)
         null => null
@@ -4865,7 +5203,7 @@ fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStru
  * @param parser::TypeExpr te  the syntactic type annotation
  * @return str?  the single segment's name, or `null`
  */
-fn named_type_name_of(te: parser::TypeExpr) -> str? {
+fn named_type_name_of(te: parser::TypeExpr) -> str | null {
     match te {
         parser::NamedType as nt => single_segment_name(nt.path)
         _ => null
@@ -4879,7 +5217,7 @@ fn named_type_name_of(te: parser::TypeExpr) -> str? {
  * @param parser::Path p  the path to inspect
  * @return str?  `p`'s single segment's name, or `null`
  */
-fn single_segment_name(p: parser::Path) -> str? {
+fn single_segment_name(p: parser::Path) -> str | null {
     if p.segments.len != 1 { return null }
     p.segments[0].name
 }
@@ -4894,7 +5232,7 @@ fn single_segment_name(p: parser::Path) -> str? {
  * @param str name  the struct name to look up
  * @return LStructLayout?  the matching entry, or `null`
  */
-fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayout? {
+fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayout | null {
     mut i: u64 = 0
     loop {
         if i >= layouts.len { break }
@@ -4913,7 +5251,7 @@ fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayou
  * @param LStructLayout? nested  the field's nested struct layout, when known
  * @return u32  the field's byte size
  */
-fn field_size_of(ft: LType, nested: LStructLayout?) -> u32 {
+fn field_size_of(ft: LType, nested: LStructLayout | null) -> u32 {
     match nested {
         LStructLayout as l => l.size
         null => ltype_size(ft)
@@ -4929,7 +5267,7 @@ fn field_size_of(ft: LType, nested: LStructLayout?) -> u32 {
  * @param LStructLayout? nested  the field's nested struct layout, when known
  * @return u32  the field's byte alignment
  */
-fn field_align_of(ft: LType, nested: LStructLayout?) -> u32 {
+fn field_align_of(ft: LType, nested: LStructLayout | null) -> u32 {
     match nested {
         LStructLayout as l => l.align
         null => ltype_align(ft)
@@ -4981,7 +5319,7 @@ fn named_single_segment_is(p: parser::Path, want: str) -> bool {
  * @return        the field's byte size
  * @since #594 T-B6
  */
-fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout?) -> u32 {
+fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
     if typeexpr_is_fat(te) { return ltype_size(LType::Ptr) * (2 to u32) }
     field_size_of(ft, nested)
 }
@@ -4996,7 +5334,7 @@ fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout?) ->
  * @return        the field's byte alignment
  * @since #594 T-B6
  */
-fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout?) -> u32 {
+fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
     if typeexpr_is_fat(te) { return ltype_align(LType::Ptr) }
     field_align_of(ft, nested)
 }
