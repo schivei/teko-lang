@@ -409,6 +409,119 @@ jobs:
           REQUIRE_WASM_ENGINE: "1"
         run: ./scripts/validate_wasm_own.sh
 
+  # ── AR Mach-O/COFF real-toolchain validation (port from theory/kp16-ar-macho-coff) ──
+  # KP16's own-native static-archive writer already ships the GNU-format ELF lane
+  # (`src/backend/objfile_ar.tks`), gated by the exit(n) corpus above. This job proves +
+  # gates the two remaining lanes — the BSD `__.SYMDEF SORTED` Mach-O writer
+  # (`src/backend/objfile_ar_macho.tks`) and the MS two-linker-member COFF `.lib` writer
+  # (`src/backend/objfile_ar_coff.tks`) — against a REAL host toolchain, mirroring the
+  # validation the `theory/kp16-ar-macho-coff` branch ran (run d44f63c9, SUCCESS on both
+  # macOS and Windows) before its hunks ported back here. Builds
+  # examples/regressions/ar_link_run via `TEKO_BACKEND=native` — `native_target()`'s
+  # host default (R1, owner ruling 2026-07-24) selects the right container with no
+  # `TEKO_TARGET` override — runs the host-tool well-formedness gate
+  # (`scripts/check_ar_macho.sh` / `scripts/check_ar_coff.sh`, `AR_CHECK_REQUIRE_TOOLS=1` so
+  # an honest-skip here is a hard failure — the toolchain is guaranteed present on these
+  # runners), then links + RUNS `scripts/ar_link_run_consumer.c` against the
+  # archive — the PRIMARY consumibility criterion (`add(40, 2)` must exit 42).
+  ar-macho-coff-validation:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macos-arm64
+            format: macho
+          - os: windows-latest
+            label: windows-x86_64
+            format: coff
+    name: ar validation / ${{ matrix.label }} (${{ matrix.format }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision teko from the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL: ${{ matrix.label }}
+        run: ./scripts/ci_provision_teko.sh "$LABEL"
+
+      - name: Build gen1 (seed compiles the PR corpus, staged fallback if needed → bin/teko)
+        shell: bash
+        run: sh scripts/build_with_seed_fallback.sh bin
+
+      - name: Build the static-lib fixture (own-native, host-default target)
+        shell: bash
+        env:
+          TEKO_BACKEND: native
+        run: |
+          set -eu
+          cd examples/regressions/ar_link_run
+          ../../../bin/teko build . -o bin --no-verify
+          ls -la bin
+
+      - name: Host-toolchain well-formedness gate (ar/nm/ld64 — Mach-O)
+        if: matrix.format == 'macho'
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_macho.sh examples/regressions/ar_link_run/bin/libar_link_run.a ar_link_run__add
+
+      - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — COFF)
+        if: matrix.format == 'coff'
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_coff.sh examples/regressions/ar_link_run/bin/ar_link_run.lib ar_link_run__add
+
+      # PRIMARY consumibility criterion — a real host cc (clang/ld64) links + RUNS the
+      # consumer against the archive. add(40, 2) = 42.
+      - name: Link + run the consumer against the Mach-O archive (expect exit 42)
+        if: matrix.format == 'macho'
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/ar_link_run_consumer.c -o /tmp/ar_link_run_consumer.o
+          clang /tmp/ar_link_run_consumer.o examples/regressions/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
+          set +e
+          /tmp/ar_link_run_consumer_bin
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+      # PRIMARY consumibility criterion — lld-link (the same tool + MSYS path-conversion
+      # guard scripts/check_coff.sh already uses) links + RUNS the consumer natively.
+      # add(40, 2) = 42.
+      - name: Link + run the consumer against the COFF archive (expect exit 42)
+        if: matrix.format == 'coff'
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/ar_link_run_consumer.c -o ar_link_run_consumer.o
+          obj_arg=ar_link_run_consumer.o
+          lib_arg="examples/regressions/ar_link_run/bin/ar_link_run.lib"
+          out_arg=ar_link_run_consumer.exe
+          if command -v cygpath >/dev/null 2>&1; then
+            obj_arg="$(cygpath -w ar_link_run_consumer.o)"
+            lib_arg="$(cygpath -w examples/regressions/ar_link_run/bin/ar_link_run.lib)"
+            out_arg="$(cygpath -w ar_link_run_consumer.exe)"
+          fi
+          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' lld-link /nologo "/out:$out_arg" /entry:main /subsystem:console "$obj_arg" "$lib_arg"
+          set +e
+          ./ar_link_run_consumer.exe
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
   # ── release cross-compile smoke: the EXACT zig-cross the release runs, compile-only ──
   # release.yml is tag-triggered, so its Linux cross-compile went unvalidated in PR CI — a
   # zig-version/target break (e.g. 0.13.0's incomplete riscv64 glibc, missing stubs-lp64d.h)
@@ -471,7 +584,7 @@ jobs:
   gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [changes, build-test, riscv64-qemu, gen1-checks, release-cross-smoke]
+    needs: [changes, build-test, riscv64-qemu, gen1-checks, ar-macho-coff-validation, release-cross-smoke]
     if: always()
     permissions: {}
 
@@ -481,6 +594,7 @@ jobs:
           BUILD_RESULT="${{ needs.build-test.result }}"
           RISCV_RESULT="${{ needs.riscv64-qemu.result }}"
           GEN1_RESULT="${{ needs.gen1-checks.result }}"
+          AR_RESULT="${{ needs.ar-macho-coff-validation.result }}"
           SMOKE_RESULT="${{ needs.release-cross-smoke.result }}"
           CHANGES="${{ needs.changes.outputs.run }}"
 
@@ -488,6 +602,7 @@ jobs:
           echo "build-test    = $BUILD_RESULT"
           echo "riscv64-qemu  = $RISCV_RESULT"
           echo "gen1-checks   = $GEN1_RESULT"
+          echo "ar-macho-coff-validation = $AR_RESULT"
           echo "release-cross-smoke = $SMOKE_RESULT"
 
           # If the paths filter said nothing relevant changed, everything skipped → OK
@@ -517,6 +632,14 @@ jobs:
           # infra noise — a red riscv gates the merge and, downstream, the release.
           if [ "$RISCV_RESULT" = "failure" ] || [ "$RISCV_RESULT" = "cancelled" ]; then
             echo "ERROR: riscv64-qemu $RISCV_RESULT"
+            exit 1
+          fi
+
+          # ar-macho-coff-validation must be success — a red Mach-O/COFF real-toolchain gate
+          # (host ar/nm/ld64 well-formedness + a real link+run) is a genuine static-archive
+          # regression, not infra noise.
+          if [ "$AR_RESULT" = "failure" ] || [ "$AR_RESULT" = "cancelled" ]; then
+            echo "ERROR: ar-macho-coff-validation $AR_RESULT"
             exit 1
           fi
 
