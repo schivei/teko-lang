@@ -1,21 +1,18 @@
-# regressor.tkr — R0, the compiler as its own full-stack regressor (0.3.0.30 C2, companion §5).
-#
-# DECLARATIVE + NON-RECURSIVE. This file DECLARES the contract R0 already satisfies; the runner
-# does NOT execute it. The existing self-host lanes VERIFY the contract (each Scenario names its
-# `# verified-by:` lane). A `.tkr` at the repo root is unambiguous and greppable, and it sits
-# OUTSIDE `[tests] regression = ["examples/regressions"]`, so discovery never picks it up.
-#
-# Two belts make the non-recursion structural: (1) the regression runner recognises the repo-root
-# self-project — a discovered dir holding a `regressor.tkr` (`dir_is_self_project`) is honest-SKIPPED,
-# never built or run; (2) the `TEKO_IN_REGRESSION` sentinel refuses a nested `teko test .` re-entry.
-# A self-entry would be circular (the compiler testing itself testing itself), so it is a no-op.
+# regressor.tkr — the compiler as its own full-stack regressor (0.3.1, regressor-principal
+# design doc, C5). `[tests] regression` (teko.tkp) lists this file FIRST — every non-declarative
+# scenario below EXECUTES under `teko test .`: the compiler-as-SUT compiling and running tiny
+# `.tks` snippets (`Given source inline`), never itself (the root-project guard,
+# `guard_no_project_build_at_root`, refuses a scenario with no inline/explicit source at the
+# repo root). The four `# verified-by:` R0 scenarios below stay DECLARATIVE (living documentation
+# — a self-host/fixpoint/own-backend contract that genuinely cannot execute without recursion);
+# every other Feature is an executable language/capability matrix.
 
-Feature: R0 — the compiler is its own full-stack regressor (exe native).
+Feature: R0 — the compiler is its own full-stack regressor (exe native, declarative).
 
   # The compiler is a native `binary` artifact, so R0 already IS the regressor of the "exe native"
   # artifact kind AND of the whole LANGUAGE. The curated regressors under examples/regressions cover
   # only what R0 structurally CANNOT exercise (other artifact kinds, targets, FFI) — never language
-  # features (those live in R0 + the checker `#test` suite).
+  # features (those live in the Features below + the checker `#test` suite).
 
   Scenario: the compiler compiles the whole language
     # verified-by: the seed builds gen1 from the umbrella sources (teko . -o bin) — the self-host build.
@@ -28,5 +25,672 @@ Feature: R0 — the compiler is its own full-stack regressor (exe native).
     # NEVER gen3 — the two-generation fixpoint is the release invariant.
 
   Scenario: the emitted code agrees across backends
-    # verified-by: own==C (scripts/diff_c_own.sh) and own==wasm (scripts/validate_wasm_own.sh) —
+    # verified-by: own==C (F5 backend Examples below) and own==wasm (F5 target-routed scenarios) —
     # the native backend's output matches the C emitter and the wasm target on the shared corpus.
+
+# F3 — the NULL-UNION matrix (regressor-principal-0.3.1.md §3.1). Every shape × operation ×
+# recursion cell the owner's mandate calls for, EACH a real, runnable regressive — no partial
+# pass. Two cells are HONEST GAPS, not silently dropped: a slice whose ELEMENT is itself a
+# null-union (`[]T` where `T = X | null`) is REJECTED by codegen today ("optional/slice inner
+# type not yet supported" — a genuine, verified capability gap, not a scenario bug); an
+# `Iface | null` (interface-in-union) construction is a checker-level KNOWN-STOP, pinned below as
+# a compile-fail scenario (F3 known-stop) rather than dropped — the day support lands this
+# scenario fails LOUDLY (an XSTOP, mirroring `diff_c_own.sh`'s KNOWN_STOP convention), forcing a
+# conscious promotion to a positive scenario. FFI `ptr<T> | null`/`uptr | null` (§3.1 "FFI") is
+# NOT authored — no existing in-tree `ptr<T>`/`uptr` USAGE pattern to model a snippet against
+# safely within this wave; flagged for the architect/owner, not guessed.
+
+Feature: F3 null-union — scalar, struct, class shapes
+
+  Scenario: scalar u64 | null, present and absent
+    Given source inline = """
+    let present: u64 | null = 40
+    let absent: u64 | null = null
+    let rp = match present { u64 as v => v; null => 0 to u64 }
+    let ra = match absent { u64 as v => v; null => 2 to u64 }
+    exit(rp + ra)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: struct Point | null, present and absent
+    Given source inline = """
+    type Point = struct { x: i64; y: i64 }
+    fn sum_or(p: Point | null, fallback: i64) -> i64 {
+        match p { Point as v => v.x + v.y; null => fallback }
+    }
+    let present: Point | null = Point { x = 10; y = 20 }
+    let absent: Point | null = null
+    exit(sum_or(present, 0) + sum_or(absent, 12))
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: class Counter | null, present and absent
+    Given source inline = """
+    type Counter = class {
+        pub n: i64
+        pub fn make(v: i64) -> Counter { Counter { n = v } }
+        pub fn bump(self) -> i64 { self.n + 1 }
+    }
+    fn bump_or(c: Counter | null, fallback: i64) -> i64 {
+        match c { Counter as v => v.bump(); null => fallback }
+    }
+    let present: Counter | null = Counter::make(9)
+    let absent: Counter | null = null
+    exit(bump_or(present, 0) + bump_or(absent, 32))
+    """
+    When built and run
+    Then exit = 42
+
+Feature: F3 null-union — nesting, base/widen, writeback, forward, recursion
+
+  Scenario: nested null-union field-of-a-field
+    Given source inline = """
+    type Inner = struct { v: i64 | null }
+    type Outer = struct { inner: Inner | null }
+    fn read_outer(o: Outer, fallback: i64) -> i64 {
+        match o.inner {
+            Inner as inn => match inn.v { i64 as v => v; null => fallback }
+            null => fallback
+        }
+    }
+    let present = Outer { inner = Inner { v = 30 } }
+    let inner_null = Outer { inner = Inner { v = null } }
+    let outer_null = Outer { inner = null }
+    exit(read_outer(present, 0) + read_outer(inner_null, 5) + read_outer(outer_null, 7))
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: base widened from a derived class, null-union
+    Given source inline = """
+    type Animal = virtual class {
+        pub name: str
+        pub virtual fn speak(self) -> str { "..." }
+    }
+    type Dog = class Animal {
+        pub fn make(n: str) -> Dog { Dog { name = n } }
+        pub override fn speak(self) -> str { "Woof" }
+    }
+    fn speak_or(a: Animal | null, fallback: str) -> str {
+        match a { Animal as v => v.speak(); null => fallback }
+    }
+    let present: Animal | null = Dog::make("Rex")
+    let absent: Animal | null = null
+    let r1 = speak_or(present, "?")
+    let r2 = speak_or(absent, "?")
+    exit(if r1 == "Woof" && r2 == "?" { 42 } else { 1 })
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: writeback mutates a null-union field, value -> null -> value
+    Given source inline = """
+    type Box = struct { v: i64 | null }
+    mut b = Box { v = null }
+    b.v = 10
+    let r1 = match b.v { i64 as x => x; null => 0 }
+    b.v = null
+    let r2 = match b.v { i64 as x => x; null => 32 }
+    exit(r1 + r2)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: forward an un-narrowed null-union return
+    Given source inline = """
+    type Point = struct { x: i64; y: i64 }
+    fn maybe_point(present: bool) -> Point | null {
+        if present { return Point { x = 21; y = 21 } }
+        null
+    }
+    fn read_or(p: Point | null, fallback: i64) -> i64 {
+        match p { Point as v => v.x + v.y; null => fallback }
+    }
+    exit(read_or(maybe_point(true), 0) + read_or(maybe_point(false), 0))
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: self-referential linked-list walk over a null-union next
+    Given source inline = """
+    type Node = struct { v: i64; next: Node | null }
+    fn sum_list(head: Node | null) -> i64 {
+        mut cur = head
+        mut total: i64 = 0
+        loop {
+            match cur {
+                Node as n => { total = total + n.v; cur = n.next }
+                null => break
+            }
+        }
+        total
+    }
+    let list = Node { v = 10; next = Node { v = 20; next = Node { v = 12; next = null } } }
+    exit(sum_list(list))
+    """
+    When built and run
+    Then exit = 42
+
+Feature: F3 null-union — folded from the retired nullfield_variant_* dirs (dobrado, dir removido)
+
+  Scenario: small inline-tag null-union field (folds nullfield_variant_plain)
+    Given source inline = """
+    /**
+     * A — one payload-bearing case of `Op`, carrying an `i64` in `x`.
+     *
+     * @field x  the case's payload, returned by `read` on the `A` arm
+     */
+    type A = struct {
+        /** the case's payload, returned by `read` on the `A` arm. */
+        x: i64
+    }
+
+    /**
+     * B — the other payload-bearing case of `Op`, carrying an `i64` in `y`.
+     *
+     * @field y  the case's payload, returned by `read` on the `B` arm
+     */
+    type B = struct {
+        /** the case's payload, returned by `read` on the `B` arm. */
+        y: i64
+    }
+
+    /**
+     * Op — a two-case variant whose largest payload is 8 bytes, so `Op | null` takes the INLINE-TAG
+     * representation (`{ uint8 tag; union { A; B } }`) embedded BY VALUE in a struct field.
+     */
+    type Op = variant A | B
+
+    /**
+     * Slot — the struct under test: its `f` field is the inline-tag absence union `Op | null`, the shape
+     * whose topological emission ordering the nullfield fix corrected. A second scalar field neighbours it
+     * so the field is not the whole struct.
+     *
+     * @field f    the `Op | null` field — a present `Op` case or `null`
+     * @field tag  a neighbouring scalar (proves the field carries a real offset, not the whole struct)
+     */
+    type Slot = struct {
+        /** the `Op | null` field — a present `Op` case or `null`. */
+        f: Op | null
+        /** a neighbouring scalar, so the union field carries a real offset. */
+        tag: i64
+    }
+
+    /**
+     * with_a — a `Slot` whose union field holds an `A` case carrying `v` (a value written into the field).
+     *
+     * @param v  the `A` payload
+     * @return   a `Slot` with `f = A { x = v }`
+     * @since 0.3.0.30
+     */
+    pub fn with_a(v: i64) -> Slot { return Slot { f = A { x = v }; tag = 1 } }
+
+    /**
+     * with_b — a `Slot` whose union field holds a `B` case carrying `v`.
+     *
+     * @param v  the `B` payload
+     * @return   a `Slot` with `f = B { y = v }`
+     * @since 0.3.0.30
+     */
+    pub fn with_b(v: i64) -> Slot { return Slot { f = B { y = v }; tag = 2 } }
+
+    /**
+     * empty_slot — a `Slot` whose union field holds `null` (a bare `null` written into an inline-tag field).
+     *
+     * @return a `Slot` with `f = null`
+     * @since 0.3.0.30
+     */
+    pub fn empty_slot() -> Slot { return Slot { f = null; tag = 0 } }
+
+    /**
+     * read — the field's payload: match the outer `Op` case then its inner `A`/`B` case for the payload,
+     * or 0 when the field is `null`.
+     *
+     * @param s  the slot whose `Op | null` field is read
+     * @return   the present case's payload, or 0 for `null`
+     * @since 0.3.0.30
+     */
+    pub fn read(s: Slot) -> i64 {
+        match s.f {
+            Op as v => match v { A as a => return a.x; B as b => return b.y }
+            null => return 0
+        }
+    }
+
+    exit((read(with_a(30)) + read(with_b(12)) + read(empty_slot())) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: large box-in-arena null-union field (folds nullfield_variant_boxed)
+    Given source inline = """
+    /**
+     * Big — the LARGE case of `Op`: three `i64` fields (24 bytes), which pushes `Op | null` past the
+     * 16-byte threshold onto the box-in-arena representation rail.
+     *
+     * @field a  the first payload word
+     * @field b  the second payload word
+     * @field c  the third payload word
+     */
+    type Big = struct {
+        /** the first payload word. */
+        a: i64
+        /** the second payload word. */
+        b: i64
+        /** the third payload word. */
+        c: i64
+    }
+
+    /**
+     * Small — the small case of `Op`, a single `i64`, so the variant genuinely has two cases of unequal
+     * size (the saturating max — `Big` — decides the ≥ 16-byte boxing).
+     *
+     * @field s  the sole payload word
+     */
+    type Small = struct {
+        /** the sole payload word. */
+        s: i64
+    }
+
+    /**
+     * Op — a two-case variant whose saturating payload (`Big`, 24 bytes) is ≥ 16 bytes, so `Op | null`
+     * boxes into an arena handle.
+     */
+    type Op = variant Big | Small
+
+    /**
+     * Holder — the struct under test: its `f` field is the box-in-arena union `Op | null`, stored as an
+     * 8-byte handle, alongside a neighbouring scalar.
+     *
+     * @field f      the boxed `Op | null` field (an arena handle, or the NULL handle)
+     * @field label  a neighbouring scalar added into the result
+     */
+    type Holder = struct {
+        /** the boxed `Op | null` field (an arena handle, or the NULL handle). */
+        f: Op | null
+        /** a neighbouring scalar added into the result. */
+        label: i64
+    }
+
+    /**
+     * make_big — a `Holder` whose boxed field holds a `Big` case derived from `v` (`{ v, v+1, v+2 }`),
+     * boxed into the arena by the struct literal.
+     *
+     * @param v  the seed for the three `Big` words
+     * @return   a `Holder` with `f = Big { a = v; b = v + 1; c = v + 2 }` and `label = 1`
+     * @since 0.3.0.30
+     */
+    pub fn make_big(v: i64) -> Holder { return Holder { f = Big { a = v; b = v + 1; c = v + 2 }; label = 1 } }
+
+    /**
+     * make_null — a `Holder` whose boxed field holds `null` (the NULL arena handle).
+     *
+     * @return a `Holder` with `f = null` and `label = 8`
+     * @since 0.3.0.30
+     */
+    pub fn make_null() -> Holder { return Holder { f = null; label = 8 } }
+
+    /**
+     * read — dereference the boxed field and match it: a `Big` case sums its three words plus `label`, a
+     * `Small` case yields its word, and `null` yields `label` alone.
+     *
+     * @param h  the holder read through
+     * @return   the boxed case's contribution plus/at `label`
+     * @since 0.3.0.30
+     */
+    pub fn read(h: Holder) -> i64 {
+        match h.f {
+            Op as v => match v { Big as bg => return bg.a + bg.b + bg.c + h.label; Small as sm => return sm.s }
+            null => return h.label
+        }
+    }
+
+    exit((read(make_big(10)) + read(make_null())) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: null-union field nested one struct deep (folds nullfield_variant_nested)
+    Given source inline = """
+    /**
+     * A — a payload-bearing case of `Op`, carrying an `i64` in `x`.
+     *
+     * @field x  the case payload
+     */
+    type A = struct {
+        /** the case payload. */
+        x: i64
+    }
+
+    /**
+     * B — the other case of `Op`, carrying an `i64` in `y`.
+     *
+     * @field y  the case payload
+     */
+    type B = struct {
+        /** the case payload. */
+        y: i64
+    }
+
+    /**
+     * Op — a two-case inline-tag variant; used as the payload of the INNER struct's `Op | null` field.
+     */
+    type Op = variant A | B
+
+    /**
+     * Inner — the inner struct carrying the `Op | null` field, embedded BY VALUE inside `Outer`.
+     *
+     * @field f  the `Op | null` field at the inner nesting level
+     */
+    type Inner = struct {
+        /** the `Op | null` field at the inner nesting level. */
+        f: Op | null
+    }
+
+    /**
+     * Outer — the outer struct embedding `Inner` by value alongside a scalar, so the union field sits two
+     * levels deep in the value graph.
+     *
+     * @field inner  the by-value inner struct bearing the `Op | null` field
+     * @field tag    a neighbouring scalar added into the result
+     */
+    type Outer = struct {
+        /** the by-value inner struct bearing the `Op | null` field. */
+        inner: Inner
+        /** a neighbouring scalar added into the result. */
+        tag: i64
+    }
+
+    /**
+     * make — an `Outer` whose inner `Op | null` field holds a `B` case carrying `v`.
+     *
+     * @param v  the `B` payload written at the inner level
+     * @return   an `Outer` with `inner.f = B { y = v }` and `tag = 10`
+     * @since 0.3.0.30
+     */
+    pub fn make(v: i64) -> Outer { return Outer { inner = Inner { f = B { y = v } }; tag = 10 } }
+
+    /**
+     * read — match the inner `outer.inner.f` field (a two-level path into the union), returning the
+     * present case's payload plus the outer `tag`, or just `tag` when the field is `null`.
+     *
+     * @param o  the outer struct read through
+     * @return   the inner field's payload plus `tag`, or `tag` alone for `null`
+     * @since 0.3.0.30
+     */
+    pub fn read(o: Outer) -> i64 {
+        match o.inner.f {
+            Op as v => match v { A as a => return a.x + o.tag; B as b => return b.y + o.tag }
+            null => return o.tag
+        }
+    }
+
+    exit(read(make(32)) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: self-referential list through a boxed null-union field (folds nullfield_variant_recursive)
+    Given source inline = """
+    /**
+     * Node — one cell of a singly linked list. Its `next` field is the absence union `Node | null`, the
+     * SELF-RECURSIVE edge that closes the value-type cycle; the union representation dial boxes it into an
+     * 8-byte arena handle (`Node *`) so the C struct stays finite.
+     *
+     * @field val   the cell's payload value, folded by `sum`
+     * @field next  the following cell, or `null` at the tail
+     */
+    type Node = struct {
+        /** the cell's payload value, folded by `sum`. */
+        val: i64
+        /** the following cell, or `null` at the tail — the recursive `Node | null` back-edge. */
+        next: Node | null
+    }
+
+    /**
+     * cons — prepend a fresh `val` cell in front of `rest`. A struct-literal `next = rest` boxes the
+     * existing `Node | null` handle straight through (no re-box), the linked-list constructor.
+     *
+     * @param val   the new head cell's payload
+     * @param rest  the tail the new cell points at (a `Node | null`)
+     * @return      the new head cell
+     * @since 0.3.0.30
+     */
+    pub fn cons(val: i64, rest: Node | null) -> Node {
+        return Node { val = val; next = rest }
+    }
+
+    /**
+     * build3 — a three-cell list `10 -> 20 -> 12 -> null`, constructed tail-first so each `cons` boxes
+     * the previously built suffix into the next cell's `Node | null` field (the innermost `next = null`
+     * writes the tail's NULL handle).
+     *
+     * @return the head of the three-cell list
+     * @since 0.3.0.30
+     */
+    pub fn build3() -> Node {
+        return cons(10, cons(20, cons(12, null)))
+    }
+
+    /**
+     * sum — fold every cell's `val`, walking the `Node | null` chain by matching each `next` handle: the
+     * `Node` arm dereferences the boxed cell and recurses, the `null` arm terminates.
+     *
+     * @param n  the chain to fold (a `Node | null`)
+     * @return   the sum of every reachable cell's `val`
+     * @since 0.3.0.30
+     */
+    pub fn sum(n: Node | null) -> i64 {
+        match n {
+            Node as cell => return cell.val + sum(cell.next)
+            null => return 0
+        }
+    }
+
+    exit(sum(build3()) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: recursion through a variant payload's null-union field (folds nullfield_variant_recursive_via_variant)
+    Given source inline = """
+    /**
+     * Leaf — a terminal tree cell carrying the folded payload.
+     *
+     * @field v  the payload value returned when the fold reaches this leaf
+     */
+    type Leaf = struct {
+        /** the payload value returned when the fold reaches this leaf. */
+        v: i64
+    }
+
+    /**
+     * Node — an interior tree cell. Its `child` field is the absence union `Tree | null`, the recursive
+     * back-edge whose payload `Tree` is a VARIANT; the union representation dial boxes it into an 8-byte
+     * arena handle (`Tree *`) so the C struct stays finite.
+     *
+     * @field child  the next tree down, or `null` at the bottom — the recursive `Tree | null` back-edge
+     */
+    type Node = struct {
+        /** the next tree down, or `null` at the bottom — the recursive `Tree | null` back-edge. */
+        child: Tree | null
+    }
+
+    /**
+     * Tree — a leaf or an interior node. The variant is the payload of the `Node.child` absence union, so
+     * the value-type cycle runs through this variant's `Node` member.
+     */
+    type Tree = variant Leaf | Node
+
+    /**
+     * leaf — a terminal tree carrying `v`.
+     *
+     * @param v  the payload
+     * @return   a leaf tree
+     * @since 0.3.1
+     */
+    pub fn leaf(v: i64) -> Tree {
+        return Leaf { v = v }
+    }
+
+    /**
+     * wrap — an interior node whose child is `t` (boxed straight through the `Tree | null` handle).
+     *
+     * @param t  the tree the node points at
+     * @return   the wrapping interior tree
+     * @since 0.3.1
+     */
+    pub fn wrap(t: Tree) -> Tree {
+        return Node { child = t }
+    }
+
+    /**
+     * bottom — an interior node with no child (writes the NULL handle into the `Tree | null` field).
+     *
+     * @return an interior tree whose `child` is `null`
+     * @since 0.3.1
+     */
+    pub fn bottom() -> Tree {
+        return Node { child = null }
+    }
+
+    /**
+     * fold — walk to the deepest leaf, returning its payload; a `null` child yields zero.
+     *
+     * @param t  the tree to fold
+     * @return   the deepest leaf's payload, or 0 when a node bottoms out at `null`
+     * @since 0.3.1
+     */
+    pub fn fold(t: Tree) -> i64 {
+        match t {
+            Leaf as l => return l.v
+            Node as n => match n.child {
+                Tree as c => return fold(c)
+                null => return 0
+            }
+        }
+    }
+
+    /**
+     * scene — a three-level tree `Node -> Node -> Leaf(42)` folded to its leaf payload.
+     *
+     * @return 42
+     * @since 0.3.1
+     */
+    pub fn scene() -> i64 {
+        return fold(wrap(wrap(leaf(42))))
+    }
+
+    exit(scene() to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  Scenario: full mutation cycle of a null-union field (folds nullfield_variant_writeback)
+    Given source inline = """
+    /**
+     * A — a payload-bearing case of `Op`, carrying an `i64` in `x`.
+     *
+     * @field x  the case payload
+     */
+    type A = struct {
+        /** the case payload. */
+        x: i64
+    }
+
+    /**
+     * B — the other case of `Op`, carrying an `i64` in `y`.
+     *
+     * @field y  the case payload
+     */
+    type B = struct {
+        /** the case payload. */
+        y: i64
+    }
+
+    /**
+     * Op — a two-case inline-tag variant; the payload of the mutated `Op | null` field.
+     */
+    type Op = variant A | B
+
+    /**
+     * Box — a one-field struct whose `f: Op | null` field is mutated in place through the write-back
+     * cycle (value → null → value), re-matched at each stage.
+     *
+     * @field f  the mutated `Op | null` field
+     */
+    type Box = struct {
+        /** the mutated `Op | null` field. */
+        f: Op | null
+    }
+
+    /**
+     * cycle — exercise the FULL mutation cycle of a null-union field. Start with a present `A`, match it
+     * (accumulate its payload), write `null` back and re-match (the `null` arm), write a `B` back and
+     * re-match (the `B` arm), accumulating a distinct amount at each stage so the exit code witnesses
+     * every write:
+     *   A { x = 30 } -> +30 ; b.f = null -> +2 ; b.f = B { y = 10 } -> +10  ==>  42
+     *
+     * @return the staged accumulator (42)
+     * @since 0.3.0.30
+     */
+    pub fn cycle() -> i64 {
+        mut b: Box = Box { f = A { x = 30 } }
+        mut acc = 0
+        match b.f {
+            Op as v => match v { A as a => acc = acc + a.x; B as bb => acc = acc + bb.y }
+            null => acc = acc + 1000
+        }
+        b.f = null
+        match b.f {
+            Op as v => acc = acc + 5000
+            null => acc = acc + 2
+        }
+        b.f = B { y = 10 }
+        match b.f {
+            Op as v => match v { A as a => acc = acc + 7000; B as bb => acc = acc + bb.y }
+            null => acc = acc + 9000
+        }
+        return acc
+    }
+
+    exit(cycle() to i32)
+    """
+    When built and run
+    Then exit = 42
+
+Feature: F3 null-union — the strict compile-fail boundary
+
+  Scenario: bare null into a non-nullable slot is rejected
+    Given source inline = """
+    let x: i64 = null
+    exit(1)
+    """
+    When compilation fails
+    Then diagnostic = "value type does not match annotation"
+
+  Scenario: the retired T? optional-postfix sugar is rejected
+    Given source inline = """
+    let p: ptr<i64>? = null
+    exit(1)
+    """
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+Feature: F3 null-union — KNOWN-STOP (promote to a positive scenario the day it closes)
+
+  Scenario: an interface cannot yet be a null-union member
+    Given source inline = """
+    type Shape = interface { fn area(self) -> i64 }
+    type Square = class & Shape {
+        pub side: i64
+        pub fn make(s: i64) -> Square { Square { side = s } }
+        pub fn area(self) -> i64 { self.side * self.side }
+    }
+    let present: Shape | null = Square::make(6)
+    exit(1)
+    """
+    When compilation fails
+    Then diagnostic = "interface cannot be a variant member"

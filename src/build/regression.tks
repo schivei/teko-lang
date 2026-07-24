@@ -627,13 +627,46 @@ fn snippet_brace_delta(line: str) -> i64 {
 }
 
 /**
+ * snippet_skip_doc_comment — the cursor just past the closing fence of a doc-comment block
+ * opening at `from` (a folded fixture's own W15 Javadoc is DISCARDED here, never reclassified —
+ * a Doc token with no declaration immediately after it is a parse error, C7.9's "a comment with
+ * no declaration after it is deleted, not converted" rule, and `split_snippet_decls_and_stmts`
+ * cannot always keep a doc-comment attached to the declaration that follows once decls and
+ * statements are separated into different files). EOF with no closing fence returns `src.len`
+ * (the caller's outer loop then simply stops).
+ *
+ * @param src   the inline snippet's whole source text
+ * @param from  the cursor at the start of the doc-comment's opening line
+ * @return      the cursor just past the line carrying the closing fence
+ * @since 0.3.1
+ */
+fn snippet_skip_doc_comment(src: str, from: u64) -> u64 {
+    mut cur = from
+    loop {
+        if cur >= src.len { return cur }
+        mut eol = cur
+        loop {
+            if eol >= src.len { break }
+            if src[eol] == b'\n' { break }
+            eol = eol + 1
+        }
+        let line = teko::str::slice(src, cur, eol)
+        let next = if eol < src.len { eol + 1 } else { eol }
+        if teko::str::contains(line, "*/") { return next }
+        cur = next
+    }
+    src.len
+}
+
+/**
  * split_snippet_decls_and_stmts — split an inline snippet's source into its top-level
  * declarations and statements (0.3.1): `main.tks` may declare neither `type` nor `fn` (the C7.9
  * virtual-main rule), so a snippet needing a custom type or helper function cannot be a single
- * `main.tks`. Walks `src` line by line tracking BRACE DEPTH (a `type`/`fn` body may span many
- * lines); a new top-level chunk starts at depth 0 on a non-blank line and ends when depth RETURNS
- * to 0. Each whole chunk is classified (`snippet_chunk_is_decl`) and appended, in order, to the
- * matching half.
+ * `main.tks`. A leading doc-comment before a top-level construct is discarded
+ * (`snippet_skip_doc_comment`) — never carried into either half. Walks the remaining `src` line by
+ * line tracking BRACE DEPTH (a `type`/`fn` body may span many lines); a new top-level chunk starts
+ * at depth 0 on a non-blank, non-doc-comment line and ends when depth RETURNS to 0. Each whole
+ * chunk is classified (`snippet_chunk_is_decl`) and appended, in order, to the matching half.
  *
  * @param src  the inline snippet's whole source text
  * @return     the source split into its declaration and statement halves
@@ -656,7 +689,9 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
         }
         let line = teko::str::slice(src, cur, eol)
         let next = if eol < src.len { eol + 1 } else { eol }
-        if !in_chunk && tkr_trim(line).len == 0 { cur = next; continue }
+        let trimmed = tkr_trim(line)
+        if !in_chunk && trimmed.len == 0 { cur = next; continue }
+        if !in_chunk && mf_starts_with(trimmed, "/**") { cur = snippet_skip_doc_comment(src, cur); continue }
         in_chunk = true
         if chunk.len > 0 { chunk = chunk ~ "\n" }
         chunk = chunk ~ line
