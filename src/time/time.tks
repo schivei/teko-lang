@@ -1,103 +1,365 @@
-// src/time/time.tks  (namespace teko::time)
-// Date/Time placeholder types — ROUND 0. Arithmetic + format specs are later rounds.
-//
-// Five value types backed by ticks/day counts:
-//   DateTime        — nanoseconds since Unix epoch (u128)
-//   TimeSpan        — signed nanosecond duration (i128)
-//   Time            — nanoseconds since midnight (u64)
-//   Date            — days since Unix epoch (i32)  1970-01-01 = day 0
-//   DateTimeOffset  — DateTime with a UTC offset (u128 ticks + i16 offset_minutes)
-//
-// The runtime implementations live in src/runtime/teko_rt.{c,h}.
-// The VM rejects extern fn calls with vm_unsupported; callers that need real time
-// values must compile with `teko build` (native binary) rather than `teko run`.
+/**
+ * src/time/time.tks   (namespace `teko::time`)
+ *
+ * DATE/TIME — the drop-128 A6 redesign (owner-ratified type table, 2026-07-24). Five value
+ * types, EVERY carrier field <= 64 bits (no `i128`/`u128` anywhere in this module):
+ *
+ *   `date`      — `i32` days since 1970-01-01 (Gregorian proleptic), +-5.88M years.
+ *   `time`      — `u64` ns since midnight, domain `0..86_399_999_999_999` (23:59:59.999999999).
+ *   `span`      — `i64` ns signed duration/delta, +-292 years; also the monotonic-clock reading.
+ *   `datetime`  — `{days: i32; ticks: u64}`, a civil date+time-of-day with NO timezone.
+ *   `dto`       — a `datetime` plus a fixed `offset_minutes: i16`. A geographic zone id
+ *                 (tzdata-backed) is Tier 2, deferred to .32+ — `dto` carries only the fixed
+ *                 numeric offset, never a zone name.
+ *
+ * `timestamp` (i64 UNIX seconds) is a REPRESENTATION, not a carrier type — see
+ * `timestamp_from_datetime`/`timestamp_to_datetime` below. Its domain (+-292 BILLION years)
+ * vastly exceeds `datetime`'s (+-5.88M years, bounded by `date`'s `i32`), so
+ * `timestamp_to_datetime` HONESTLY PANICS (via the `to i32` cast) on a timestamp whose day
+ * count does not fit `date` — never a silent wrap.
+ *
+ * EXTERN-STRUCT CALLING CONVENTION (read before adding a new extern here). An `extern fn`'s
+ * struct param/return is declared, in the generated C, using `teko_rt.h`'s OWN typedef — never
+ * the mangled typedef codegen generates for the SAME-shaped Teko type. The two are
+ * layout-identical but NOMINALLY DISTINCT C types, so a value fresh off an extern call can
+ * NEVER be stored in a `let`/field or passed to a non-extern fn (a C COMPILE ERROR, not a
+ * runtime bug — verified empirically against this compiler). So every host-dependent clock read
+ * below is a PRIVATE extern returning a bare SCALAR (`wall_days`/`wall_ns_of_day`/
+ * `wall_offset_minutes`/`monotonic_ns`), never a carrier struct; the PUBLIC `*_now`/`*_today`
+ * constructors are ordinary (non-extern) Teko functions that compose the scalar into the
+ * carrier struct entirely on the Teko side — fully storable/composable from that point on, and
+ * VM-runnable except for the four private scalar reads themselves (still native-only, same as
+ * the ROUND 0 design). Every other operation (accessors, arithmetic, `timestamp` conversions) is
+ * pure Teko end-to-end, so both engines produce byte-identical results wherever they run at all.
+ */
 
-pub type DateTime = struct { ticks: i128 }
-pub type TimeSpan = struct { ticks: i128 }
-pub type Time = struct { ticks: u64 }
-pub type Date = struct { days: i32 }
-pub type DateTimeOffset = struct { ticks: i128; offset_minutes: i16 }
+/** A calendar date: `i32` days since 1970-01-01 (Gregorian proleptic). No time-of-day, no zone. */
+pub type date = struct {
+    /** the number of days since 1970-01-01 (may be negative for a pre-epoch date) */
+    days: i32
+}
 
-// --- constructors ---
+/** A time-of-day: `u64` nanoseconds since midnight. Domain `0..86_399_999_999_999`. */
+pub type time = struct {
+    /** the number of nanoseconds since 00:00:00.000000000 (< 86_400_000_000_000) */
+    ticks: u64
+}
 
-// datetime_now() — current UTC time as nanoseconds since Unix epoch.
-pub extern fn datetime_now() -> DateTime = "tk_rt_datetime_now" from "teko_rt"
+/** A signed duration/delta: `i64` nanoseconds, +-292 years. Also a monotonic-clock reading. */
+pub type span = struct {
+    /** the signed nanosecond count (negative = a duration into the past) */
+    ticks: i64
+}
 
-// datetime_local_now() — current local time with UTC offset in offset_minutes.
-pub extern fn datetime_local_now() -> DateTimeOffset = "tk_rt_datetime_local_now" from "teko_rt"
+/** A civil date+time-of-day with NO timezone: a `date` and a `time` flattened into one value. */
+pub type datetime = struct {
+    /** the date component — days since 1970-01-01 (see `date.days`) */
+    days: i32
+    /** the time-of-day component — ns since midnight (see `time.ticks`) */
+    ticks: u64
+}
 
-// date_today() — today's date (local wall clock) as days since 1970-01-01.
-pub extern fn date_today() -> Date = "tk_rt_date_today" from "teko_rt"
+/**
+ * A `datetime` with a FIXED UTC offset. A geographic zone id (tzdata-backed) is Tier 2
+ * (deferred to .32+); this carries only the numeric offset, never a zone name.
+ */
+pub type dto = struct {
+    /** the date component — days since 1970-01-01 (see `date.days`) */
+    days: i32
+    /** the time-of-day component — ns since midnight (see `time.ticks`) */
+    ticks: u64
+    /** the fixed UTC offset, in minutes (positive = east of UTC) */
+    offset_minutes: i16
+}
 
-// time_now_utc() — current UTC time-of-day as nanoseconds since midnight.
-pub extern fn time_now_utc() -> Time = "tk_rt_time_now_utc" from "teko_rt"
+/** How many nanoseconds make up one full day — the `time`/`datetime` ticks-field modulus. */
+const NS_PER_DAY: i64 = 86400000000000
 
-// timespan_from_ns(ns) — construct a TimeSpan from a signed nanosecond count.
-pub extern fn timespan_from_ns(ns: i64) -> TimeSpan = "tk_rt_timespan_from_ns" from "teko_rt"
+/**
+ * Days since 1970-01-01, UTC, from the host wall clock. NATIVE-ONLY (the VM rejects every
+ * `extern fn`); a bare scalar so a caller can compose it into a `date` without tripping the
+ * extern-struct calling convention documented in the module doc.
+ *
+ * @return the current UTC day count
+ */
+extern fn wall_days() -> i32 = "tk_rt_wall_days" from "teko_rt"
 
-// date_from_days(d) — construct a Date from an explicit days-since-epoch value.
-// Use this in tests instead of date_today() for deterministic results.
-pub extern fn date_from_days(d: i32) -> Date = "tk_rt_date_from_days" from "teko_rt"
+/**
+ * Nanoseconds since midnight, UTC, from the host wall clock. NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current UTC ns-of-day, always `< 86_400_000_000_000`
+ */
+extern fn wall_ns_of_day() -> u64 = "tk_rt_wall_ns_of_day" from "teko_rt"
 
-// --- accessors ---
+/**
+ * The host's local UTC offset, in minutes (positive = east of UTC). NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current local UTC offset, in minutes
+ */
+extern fn wall_offset_minutes() -> i16 = "tk_rt_wall_offset_minutes" from "teko_rt"
 
-// datetime_to_unix_ns(dt) — extract the raw nanosecond count from a DateTime.
-pub extern fn datetime_to_unix_ns(dt: DateTime) -> i128 = "tk_rt_datetime_to_unix_ns" from "teko_rt"
+/**
+ * Nanoseconds from an UNSPECIFIED monotonic origin (never compare across process runs; never
+ * subtract against a wall-clock reading). NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current monotonic-clock ns reading
+ */
+extern fn monotonic_ns() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
 
-// date_year(d) — Gregorian year of a Date (e.g. 1970 for day 0).
-pub extern fn date_year(d: Date) -> i32 = "tk_rt_date_year" from "teko_rt"
+/**
+ * Construct a `date` from an explicit days-since-epoch value — the deterministic alternative to
+ * `date_today()` (tests should prefer this).
+ *
+ * @param days  days since 1970-01-01 (may be negative)
+ * @return      the `date` for `days`
+ */
+pub fn date_from_days(days: i32) -> date {
+    date { days = days }
+}
 
-// date_month(d) — Gregorian month 1–12 of a Date.
-pub extern fn date_month(d: Date) -> i32 = "tk_rt_date_month" from "teko_rt"
+/**
+ * Construct a `time` from an explicit ns-since-midnight value, validating its domain.
+ *
+ * @param ns  nanoseconds since midnight; must be `< 86_400_000_000_000` (< 24h)
+ * @return    the `time` for `ns`
+ * @throws    panics when `ns` names a moment at or past the next midnight
+ */
+pub fn time_from_ns(ns: u64) -> time {
+    if ns >= 86400000000000 { panic("teko::time: time-of-day ns out of range (must be < 86_400_000_000_000, i.e. < 24h)") }
+    time { ticks = ns }
+}
 
-// date_day_of_month(d) — day-of-month 1–31 of a Date.
-pub extern fn date_day_of_month(d: Date) -> i32 = "tk_rt_date_day_of_month" from "teko_rt"
+/**
+ * Construct a `span` from an explicit signed nanosecond count. Every `i64` is a valid `span` —
+ * the carrier IS the domain, no validation needed.
+ *
+ * @param ns  the signed nanosecond duration
+ * @return    the `span` for `ns`
+ */
+pub fn span_from_ns(ns: i64) -> span {
+    span { ticks = ns }
+}
 
-// time_hour(t) — UTC hour 0–23 of a Time value.
-pub extern fn time_hour(t: Time) -> i32 = "tk_rt_time_hour" from "teko_rt"
+/**
+ * Combine a `date` and a `time` into a `datetime` (civil, no timezone).
+ *
+ * @param d  the date component
+ * @param t  the time-of-day component
+ * @return   the combined `datetime`
+ */
+pub fn datetime_of(d: date, t: time) -> datetime {
+    datetime { days = d.days; ticks = t.ticks }
+}
 
-// time_minute(t) — minute 0–59 of a Time value.
-pub extern fn time_minute(t: Time) -> i32 = "tk_rt_time_minute" from "teko_rt"
+/**
+ * Attach a fixed UTC offset to a `datetime`, producing a `dto`.
+ *
+ * @param dt               the civil datetime
+ * @param offset_minutes   the fixed UTC offset, in minutes (positive = east of UTC)
+ * @return                 the combined `dto`
+ */
+pub fn dto_of(dt: datetime, offset_minutes: i16) -> dto {
+    dto { days = dt.days; ticks = dt.ticks; offset_minutes = offset_minutes }
+}
 
-// time_second(t) — second 0–59 of a Time value.
-pub extern fn time_second(t: Time) -> i32 = "tk_rt_time_second" from "teko_rt"
+/**
+ * Today's date (UTC, host wall clock). NATIVE-ONLY (see the module doc); use `date_from_days`
+ * in tests for deterministic results.
+ *
+ * @return today's `date`, UTC
+ */
+pub fn date_today() -> date {
+    date_from_days(wall_days())
+}
 
-// dto_offset_minutes(dto) — UTC offset in minutes of a DateTimeOffset value.
-pub extern fn dto_offset_minutes(dto: DateTimeOffset) -> i16 = "tk_rt_dto_offset_minutes" from "teko_rt"
+/**
+ * The current time-of-day (UTC, host wall clock). NATIVE-ONLY; see `date_today`.
+ *
+ * @return the current UTC `time`
+ */
+pub fn time_now_utc() -> time {
+    time_from_ns(wall_ns_of_day())
+}
 
-// --- arithmetic ---
+/**
+ * The current UTC `datetime` (host wall clock). NATIVE-ONLY; see `date_today`.
+ *
+ * Reads `date_today()` and `time_now_utc()` independently (two separate host clock reads, like
+ * the ROUND 0 design before it) — a moment-of-execution skew across a midnight boundary is
+ * possible but immaterial for this library's use (build-progress reporting, log timestamps).
+ *
+ * @return the current UTC `datetime`
+ */
+pub fn datetime_now() -> datetime {
+    datetime_of(date_today(), time_now_utc())
+}
 
-// datetime_add(dt, span) — DateTime advanced by a TimeSpan (may be negative).
-pub extern fn datetime_add(dt: DateTime, span: TimeSpan) -> DateTime = "tk_rt_datetime_add" from "teko_rt"
+/**
+ * The current local `dto` (host wall clock + host local UTC offset). NATIVE-ONLY; see
+ * `date_today`.
+ *
+ * @return the current local `dto`
+ */
+pub fn dto_local_now() -> dto {
+    dto_of(datetime_now(), wall_offset_minutes())
+}
 
-// datetime_sub(dt, span) — DateTime moved back by a TimeSpan.
-pub extern fn datetime_sub(dt: DateTime, span: TimeSpan) -> DateTime = "tk_rt_datetime_sub" from "teko_rt"
+/**
+ * A fresh monotonic-clock reading, as a `span`. NATIVE-ONLY; see `date_today`. Meaningful only
+ * as the operand of `span_sub` against ANOTHER `span_monotonic_now()` reading from the SAME
+ * process run (an elapsed-time measurement) — never compare its raw value across runs or
+ * against a wall-clock `span`.
+ *
+ * @return an opaque monotonic instant, as a `span`
+ */
+pub fn span_monotonic_now() -> span {
+    span_from_ns(monotonic_ns())
+}
 
-// datetime_diff(a, b) — signed duration a - b as a TimeSpan (always fits: both i128).
-pub extern fn datetime_diff(a: DateTime, b: DateTime) -> TimeSpan = "tk_rt_datetime_diff" from "teko_rt"
+/**
+ * Floor division (rounds towards -infinity, unlike Teko's native truncating `/`) — the shared
+ * normalization primitive `datetime_add`/`timestamp_to_datetime` use to keep a ticks-of-day
+ * value inside `[0, modulus)` even when the dividend is negative.
+ *
+ * @param a  the dividend
+ * @param b  the positive divisor
+ * @return   `a` divided by `b`, rounded towards -infinity
+ */
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b
+    let r = a % b
+    if r != 0 && (r < 0) != (b < 0) { q - 1 } else { q }
+}
 
-// timespan_add(a, b) — sum of two TimeSpans.
-pub extern fn timespan_add(a: TimeSpan, b: TimeSpan) -> TimeSpan = "tk_rt_timespan_add" from "teko_rt"
+/**
+ * `dt` advanced by `sp` (may be negative — a `datetime` moved backward). Normalizes the
+ * resulting ticks-of-day back into `[0, 86_400_000_000_000)`, carrying the overflow/underflow
+ * into the date component.
+ *
+ * @param dt  the starting datetime
+ * @param sp  the signed nanosecond offset to apply
+ * @return    `dt` shifted by `sp`
+ * @throws    panics if the resulting date does not fit `i32` (the checked `+`/`to i32` below)
+ */
+pub fn datetime_add(dt: datetime, sp: span) -> datetime {
+    let combined = (dt.ticks to i64) + sp.ticks
+    let day_delta = floor_div(combined, NS_PER_DAY)
+    let new_ticks = combined - day_delta * NS_PER_DAY
+    datetime { days = dt.days + (day_delta to i32); ticks = new_ticks to u64 }
+}
 
-// timespan_sub(a, b) — difference of two TimeSpans (a - b).
-pub extern fn timespan_sub(a: TimeSpan, b: TimeSpan) -> TimeSpan = "tk_rt_timespan_sub" from "teko_rt"
+/**
+ * `dt` moved back by `sp` — `datetime_add(dt, -sp)`.
+ *
+ * @param dt  the starting datetime
+ * @param sp  the signed nanosecond offset to subtract
+ * @return    `dt` shifted by `-sp`
+ * @throws    panics if `sp` is `i64::MIN` (unrepresentable negated) or the resulting date
+ *            overflows `i32`
+ */
+pub fn datetime_sub(dt: datetime, sp: span) -> datetime {
+    datetime_add(dt, span { ticks = 0 - sp.ticks })
+}
 
-// timespan_to_ns(span) — extract the raw signed nanosecond count from a TimeSpan.
-pub extern fn timespan_to_ns(span: TimeSpan) -> i128 = "tk_rt_timespan_to_ns" from "teko_rt"
+/**
+ * The signed duration `a - b`, as a `span`. Computes the SMALL day delta first, then widens —
+ * so two datetimes a short interval apart (even if both are centuries from the epoch) diff
+ * correctly; only a truly-out-of-`span`-domain difference (`> ~292 years`) panics.
+ *
+ * @param a  the later (minuend) datetime
+ * @param b  the earlier (subtrahend) datetime
+ * @return   `a - b`, as a `span`
+ * @throws   panics when the true difference exceeds `span`'s +-292-year domain (`date`'s own
+ *           domain is +-5.88M years — wider than `span` by owner-ratified design)
+ */
+pub fn datetime_diff(a: datetime, b: datetime) -> span {
+    let day_diff = (a.days - b.days) to i64
+    let tick_diff = (a.ticks to i64) - (b.ticks to i64)
+    span { ticks = day_diff * NS_PER_DAY + tick_diff }
+}
 
-// date_add_days(d, days) — Date shifted by a signed day count (may be negative).
-pub extern fn date_add_days(d: Date, days: i32) -> Date = "tk_rt_date_add_days" from "teko_rt"
+/**
+ * The sum of two `span`s.
+ *
+ * @param a  the first span
+ * @param b  the second span
+ * @return   `a + b`
+ * @throws   panics on signed 64-bit overflow
+ */
+pub fn span_add(a: span, b: span) -> span {
+    span { ticks = a.ticks + b.ticks }
+}
 
-// date_diff_days(a, b) — signed day difference a - b.
-pub extern fn date_diff_days(a: Date, b: Date) -> i32 = "tk_rt_date_diff_days" from "teko_rt"
+/**
+ * The difference of two `span`s (`a - b`).
+ *
+ * @param a  the minuend span
+ * @param b  the subtrahend span
+ * @return   `a - b`
+ * @throws   panics on signed 64-bit overflow
+ */
+pub fn span_sub(a: span, b: span) -> span {
+    span { ticks = a.ticks - b.ticks }
+}
+
+/**
+ * `d` shifted by a signed day count (may be negative).
+ *
+ * @param d     the starting date
+ * @param days  the signed day offset to apply
+ * @return      `d` shifted by `days`
+ * @throws      panics on signed 32-bit overflow
+ */
+pub fn date_add_days(d: date, days: i32) -> date {
+    date { days = d.days + days }
+}
+
+/**
+ * The signed day difference `a - b`.
+ *
+ * @param a  the later (minuend) date
+ * @param b  the earlier (subtrahend) date
+ * @return   `a - b`, in days
+ * @throws   panics on signed 32-bit overflow
+ */
+pub fn date_diff_days(a: date, b: date) -> i32 {
+    a.days - b.days
+}
+
+/**
+ * `dt` as a UNIX timestamp (whole seconds since 1970-01-01T00:00:00Z). LOSSY: any sub-second
+ * remainder in `dt.ticks` is truncated (floored towards -infinity is not needed here — `dt`'s
+ * ns-of-day is always non-negative, so plain truncating division is exact-or-floor already).
+ * Never panics — `timestamp`'s `i64`-second domain (+-292 BILLION years) is vastly wider than
+ * `datetime`'s (+-5.88M years, `date`'s own `i32` bound).
+ *
+ * @param dt  the civil datetime to convert
+ * @return    the UNIX timestamp, in whole seconds
+ */
+pub fn timestamp_from_datetime(dt: datetime) -> i64 {
+    (dt.days to i64) * 86400 + ((dt.ticks / 1000000000) to i64)
+}
+
+/**
+ * A UNIX timestamp (whole seconds since 1970-01-01T00:00:00Z) as a civil `datetime`.
+ *
+ * @param ts  the UNIX timestamp, in whole seconds (may be negative, pre-1970)
+ * @return    the civil `datetime` for `ts`
+ * @throws    panics when `ts` names a day count outside `date`'s `i32` domain (+-5.88M years) —
+ *            `timestamp`'s own domain is far wider (+-292 BILLION years), so this is a genuine,
+ *            expected domain mismatch (owner-ratified table), not a bug
+ */
+pub fn timestamp_to_datetime(ts: i64) -> datetime {
+    let days = floor_div(ts, 86400)
+    let secs_of_day = ts - days * 86400
+    datetime { days = days to i32; ticks = (secs_of_day to u64) * 1000000000 }
+}
 
 /**
  * A Gregorian calendar date broken into its year, month, and day-of-month components.
  *
  * `$"{d:yyyy-MM-dd}"` and `date_to_string`/`time_to_string` compute their fields in pure Teko
- * (via `civil_from_days`), unlike the extern host-clock accessors above (`date_year`/… bottom
- * out at the host and cannot run on `teko run`), so both engines produce byte-identical output.
- * The field math mirrors src/runtime/teko_rt.c's tk_jdn_to_ymd / tk_rt_time_hour helpers.
+ * (via `civil_from_days`), so both engines (VM and native) produce byte-identical output.
  */
 pub type CivilDate = struct {
     /** the Gregorian year (e.g. 1970 for epoch day 0; may be negative for far-past dates) */
@@ -109,10 +371,11 @@ pub type CivilDate = struct {
 }
 
 /**
- * Convert a days-since-epoch count (Date.days) into its Gregorian year/month/day.
+ * Convert a days-since-epoch count (`date.days`) into its Gregorian year/month/day.
  *
- * Uses the Richards (2013) Julian-Day-Number algorithm, identical to teko_rt.c::tk_jdn_to_ymd,
- * so it handles negative day counts (pre-1970 dates) the same way the native accessors do.
+ * Uses the Richards (2013) Julian-Day-Number algorithm, identical to teko_rt.c's
+ * `tk_jdn_to_ymd` (mirrored by design, not shared — see teko_rt.h), so it handles negative day
+ * counts (pre-1970 dates) the same way.
  *
  * @param days  the number of days since 1970-01-01 (may be negative)
  * @return      the year, month (1..12), and day-of-month (1..31) for `days`
@@ -187,7 +450,7 @@ fn run_length(pattern: str, i: u64) -> u64 {
 }
 
 /**
- * Format a Date value against a calendar pattern (`$"{d:yyyy-MM-dd}"` / `to_string`).
+ * Format a `date` value against a calendar pattern (`$"{d:yyyy-MM-dd}"` / `to_string`).
  *
  * Recognized tokens: `yyyy` (4-digit year), `yy` (2-digit year), `MM`/`M` (month), `dd`/`d`
  * (day). Any other byte — separators like `-`, `/`, `.`, spaces — passes through literally.
@@ -196,7 +459,7 @@ fn run_length(pattern: str, i: u64) -> u64 {
  * @param pattern  the calendar pattern
  * @return         `d` rendered per `pattern`
  */
-pub fn date_to_string(d: Date, pattern: str) -> str {
+pub fn date_to_string(d: date, pattern: str) -> str {
     let civ = civil_from_days(d.days to i64)
     mut out = ""
     mut i = 0 to u64
@@ -227,16 +490,16 @@ pub fn date_to_string(d: Date, pattern: str) -> str {
 }
 
 /**
- * Format a Time value against a clock pattern (`$"{t:HH:mm:ss}"` / `to_string`).
+ * Format a `time` value against a clock pattern (`$"{t:HH:mm:ss}"` / `to_string`).
  *
  * Recognized tokens: `HH`/`H` (hour 0..23), `mm`/`m` (minute), `ss`/`s` (second). Any other byte
- * passes through literally. The field math mirrors teko_rt.c::tk_rt_time_hour/minute/second.
+ * passes through literally.
  *
  * @param t        the time-of-day to format
  * @param pattern  the clock pattern
  * @return         `t` rendered per `pattern`
  */
-pub fn time_to_string(t: Time, pattern: str) -> str {
+pub fn time_to_string(t: time, pattern: str) -> str {
     let secs = (t.ticks / 1000000000) to i64
     let hour = secs / 3600
     let minute = (secs % 3600) / 60

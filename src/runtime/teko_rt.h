@@ -431,45 +431,41 @@ uint64_t tk_peak_rss(void);
 // output is a security defect, never a soft error here).
 tk_slice_byte tk_rt_secure_bytes(uint64_t n);
 
-// ---- Date/Time placeholder types (ROUND 0) ----
-// Five value types: DateTime (signed ns since Unix epoch), TimeSpan (signed ns duration),
-// Time (ns since midnight), Date (days since 1970-01-01 = 0), DateTimeOffset (DateTime + offset).
-// DateTime.ticks is i128 (signed) so DateTime - DateTime always fits in TimeSpan (i128).
-typedef struct { __int128  ticks;                         } tk_datetime;
-typedef struct { __int128  ticks;                         } tk_timespan;
-typedef struct { uint64_t  ticks;                         } tk_time;
-typedef struct { int32_t   days;                          } tk_date;
-typedef struct { __int128  ticks; int16_t offset_minutes; } tk_datetimeoffset;
+// ---- teko::time (drop-128 A6 redesign, owner-ratified table 2026-07-24) ----
+// Carrier structs, EVERY field <= 64 bits (no __int128 anywhere in this surface):
+//   date      — i32 days since 1970-01-01 (Gregorian proleptic, +-5.88M years)
+//   time      — u64 ns since midnight, domain 0..86_399_999_999_999 (23:59:59.999999999)
+//   span      — i64 ns signed duration/delta (+-292 years); also the monotonic-clock reading
+//   datetime  — {days: i32; ticks: u64} — civil date+time-of-day, no timezone
+//   dto       — datetime + offset_minutes: i16 — civil with a FIXED UTC offset (a geographic
+//               zone id is Tier 2, deferred to .32+)
+// timestamp (i64 UNIX seconds) is a REPRESENTATION, not a carrier struct.
+//
+// An extern fn's struct param/return uses THIS header's typedef, never the mangled typedef
+// codegen generates for the SAME-shaped Teko type — the two are layout-identical but nominally
+// distinct C types, so a Teko `let`/field can never hold a value fresh off an extern call (a
+// compile error, not a runtime corruption). So EVERY host-dependent read below returns a bare
+// SCALAR (never one of the carrier structs) — teko::time's pure Teko constructors then compose
+// the scalar into the ergonomic struct, entirely on the Teko side, fully storable/composable
+// from that point on (src/time/time.tks). `tk_rt_date_from_days`/`tk_rt_date_year`/
+// `tk_rt_date_month`/`tk_rt_date_day_of_month` are the ONE exception, kept ONLY for the
+// pre-existing `examples/regressions/time_types` fixture's own direct extern re-declaration
+// (its ORIGINAL extern-chained calling shape, unchanged) — teko::time's own module no longer
+// calls them (civil_from_days, already pure Teko, does the same calendar math).
+typedef struct { int32_t  days;                          } tk_date;
+typedef struct { uint64_t ticks;                         } tk_time;
+typedef struct { int64_t  ticks;                         } tk_span;
 
-tk_datetime       tk_rt_datetime_now(void);
-tk_datetimeoffset tk_rt_datetime_local_now(void);
-tk_date           tk_rt_date_today(void);
-tk_time           tk_rt_time_now_utc(void);
-tk_timespan       tk_rt_timespan_from_ns(int64_t ns);
-tk_date           tk_rt_date_from_days(int32_t days);
-
-__int128 tk_rt_datetime_to_unix_ns(tk_datetime dt);
+tk_date  tk_rt_date_from_days(int32_t days);
 int32_t  tk_rt_date_year(tk_date d);
 int32_t  tk_rt_date_month(tk_date d);
 int32_t  tk_rt_date_day_of_month(tk_date d);
-int32_t  tk_rt_time_hour(tk_time t);
-int32_t  tk_rt_time_minute(tk_time t);
-int32_t  tk_rt_time_second(tk_time t);
-int16_t  tk_rt_dto_offset_minutes(tk_datetimeoffset dto);
 
-// --- arithmetic (ROUND 0) ---
-// DateTime +/- TimeSpan = DateTime; DateTime - DateTime = TimeSpan (always fits, both i128).
-// TimeSpan +/- TimeSpan = TimeSpan. Date +/- (days: i32) = Date. Comparisons via raw ticks/days
-// (exposed already through the accessors above) — no dedicated compare fn needed (Teko can
-// compare the extracted i128/i32 with native `<`/`==`).
-tk_datetime tk_rt_datetime_add(tk_datetime dt, tk_timespan span);
-tk_datetime tk_rt_datetime_sub(tk_datetime dt, tk_timespan span);
-tk_timespan tk_rt_datetime_diff(tk_datetime a, tk_datetime b);      // a - b
-tk_timespan tk_rt_timespan_add(tk_timespan a, tk_timespan b);
-tk_timespan tk_rt_timespan_sub(tk_timespan a, tk_timespan b);
-__int128    tk_rt_timespan_to_ns(tk_timespan span);
-tk_date     tk_rt_date_add_days(tk_date d, int32_t days);
-int32_t     tk_rt_date_diff_days(tk_date a, tk_date b);             // a - b, in days
+// --- host clock reads (SCALAR-only, see above) ---
+int32_t  tk_rt_wall_days(void);            // days since 1970-01-01, UTC, host wall clock
+uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall clock
+int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
+int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
 // D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
 // record which production functions executed during a `teko test` run WITHOUT a Teko

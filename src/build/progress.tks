@@ -75,28 +75,33 @@ pub fn report_mode(quiet: bool, tty: bool) -> Report {
  * One in-flight build phase: its label, start time, and how it renders (`mode`).
  *
  * @field label  the fixed-width-padded phase name ("lexer", "checker", "cc", ...)
- * @field start  when the phase began, as nanoseconds since the Unix epoch (see
- *               `now_ns` — plain `i128` rather than `teko::time::DateTime`, whose
- *               struct wrapper cannot round-trip through a stored local/field)
+ * @field start  when the phase began, as a monotonic-clock ns reading (see `now_ns` —
+ *               plain `i64` rather than `teko::time::span`; a build phase's duration is a
+ *               MONOTONIC measurement per the drop-128 A6 type table, and threading the raw
+ *               scalar `now_ns()` already returns keeps every call site downstream a plain
+ *               numeric parameter, never a stored `teko::time` carrier struct)
  * @field mode   how this phase renders its progress (`Tty`/`Plain`/`Quiet`)
  */
 pub type Phase = struct {
     label: str
-    start: i128
+    start: i64
     mode: Report
 }
 
 /**
- * The current wall-clock time as nanoseconds since the Unix epoch. Chains
- * `teko::time::datetime_now()` straight into `datetime_to_unix_ns` in ONE expression
- * (never binding the intermediate `DateTime` to a local) because storing that
- * struct in a Teko-level local or field does not round-trip through codegen's
- * extern-struct marshalling — the plain `i128` it unwraps to has no such gap.
+ * A fresh monotonic-clock reading, in nanoseconds — the baseline `Phase.start` records and
+ * `elapsed_str` measures against. Reads the `.ticks` field straight off
+ * `teko::time::span_monotonic_now()`'s return: that function is PURE (non-extern) — it composes
+ * `teko::time`'s private extern clock read into an ordinary `span` on the Teko side — so its
+ * result is a normal, freely-composable value; only a value fresh off an EXTERN call itself
+ * would trip the storage restriction `teko::time`'s module doc describes. This module keeps
+ * every downstream call site (`Phase.start` and every fn threading it) a plain `i64`, matching
+ * the ROUND 0 precedent of never storing a `teko::time` carrier struct here.
  *
- * @return nanoseconds since the Unix epoch
+ * @return a monotonic-clock ns reading
  */
-fn now_ns() -> i128 {
-    teko::time::datetime_to_unix_ns(teko::time::datetime_now())
+fn now_ns() -> i64 {
+    teko::time::span_monotonic_now().ticks
 }
 
 /**
@@ -134,15 +139,15 @@ fn pad_left(s: str, width: u64) -> str {
 }
 
 /**
- * The wall time elapsed since `start` (nanoseconds since the epoch, see `now_ns`),
- * rendered to one decimal place of seconds ("42.1", no unit suffix — the caller
- * appends "s"). A negative span (a clock that moved backward) floors to zero
- * rather than rendering a negative time.
+ * The monotonic time elapsed since `start` (ns, see `now_ns`), rendered to one decimal place of
+ * seconds ("42.1", no unit suffix — the caller appends "s"). A negative delta (should never
+ * happen on a monotonic clock, but the checked `-` above would panic on genuine overflow before
+ * this ran) floors to zero rather than rendering a negative time.
  *
- * @param start  the phase's recorded start time, in nanoseconds since the epoch
+ * @param start  the phase's recorded start time, a monotonic-clock ns reading (see `now_ns`)
  * @return       the elapsed seconds, one decimal place, as decimal text
  */
-fn elapsed_str(start: i128) -> str {
+fn elapsed_str(start: i64) -> str {
     let ns = now_ns() - start
     let ns_u = if ns < 0 { 0 to u64 } else { ns to u64 }
     let tenths = ns_u / 100000000
@@ -204,12 +209,12 @@ fn mid_line(label: str, text: str) -> str {
  *
  * @param label    the phase name
  * @param text     the final counter/detail text
- * @param start    the phase's start time, in nanoseconds since the epoch (for the elapsed column)
+ * @param start    the phase's start time, a monotonic-clock ns reading (for the elapsed column)
  * @param mark     "✓" (success) or "✗" (failure)
  * @param message  the failure diagnostic, or "" on success
  * @return         the rendered settle line, un-terminated (no trailing newline)
  */
-fn settle_line(label: str, text: str, start: i128, mark: str, message: str) -> str {
+fn settle_line(label: str, text: str, start: i64, mark: str, message: str) -> str {
     let elapsed = teko::str::concat(pad_left(elapsed_str(start), 6), "s")
     let head = teko::str::concat("  ", teko::str::concat(pad_right(label, 11), teko::str::concat(pad_right(text, 24), teko::str::concat(elapsed, teko::str::concat("  ", mark)))))
     if message == "" { head } else { teko::str::concat(head, teko::str::concat("  ", message)) }
