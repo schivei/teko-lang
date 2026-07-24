@@ -96,6 +96,15 @@ fn i8t() -> Type { Prim { kind = PrimKind::I8 } }
 fn i16t() -> Type { Prim { kind = PrimKind::I16 } }
 fn i32t() -> Type { Prim { kind = PrimKind::I32 } }
 fn strt() -> Type { Str { } }
+/**
+ * f32t — the `f32` primitive type, for the W-RULE tests below (`cast-width-hygiene-0.3.1.md`
+ * C1). `u16t`/`u64t` (`comptime_fold_test.tkt`) and `f64t` (`consteval_test.tkt`) already
+ * exist in this namespace (`teko::checker`) and are reused bare — every `.tkt` in a directory
+ * shares its namespace, so only `f32t` is new here.
+ *
+ * @return the `f32` primitive type
+ */
+fn f32t() -> Type { Prim { kind = PrimKind::F32 } }
 fn cast_of(varname: str, target_name: str) -> parser::Cast {
     parser::Cast { expr = e_var(varname); target = named_t(target_name) }
 }
@@ -1417,4 +1426,90 @@ fn bignum_compare_lowers_to_cmp() {
     teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
     let inner = match te.kind { TCompare as tc => tc.first; _ => { teko::assert::is_true(false); return } }
     teko::assert::is_true(call_lowers_to(inner, "teko::numeric::bigint", "cmp"))
+}
+
+/** arith_binop — build `a <op> b` from two already-bound variable names, for the W-RULE tests below. */
+fn arith_binop(op: lexer::TokenKind) -> parser::Binary {
+    parser::Binary { op = op; left = e_var("a"); right = e_var("b") }
+}
+
+/** widen_same_sign_u8_u32_to_u32 — `u8 + u32` (same signedness) widens to the LARGER width `u32`,
+    no explicit `to` needed (W-RULE §2.1). */
+#test
+fn widen_same_sign_u8_u32_to_u32() {
+    let env = define(define(empty_env(), "a", u8t(), false), "b", u32t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::U32))
+}
+
+/** widen_same_sign_i16_i64_to_i64 — `i16 + i64` (same signedness) widens to the LARGER width
+    `i64`, no explicit `to` needed (W-RULE §2.1). */
+#test
+fn widen_same_sign_i16_i64_to_i64() {
+    let env = define(define(empty_env(), "a", i16t(), false), "b", i64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I64))
+}
+
+/** widen_mixed_sign_peer_u8_i32_to_i32 — `u8 + i32`: the signed side (`i32`, 32 bits) is
+    STRICTLY WIDER than the unsigned side (`u8`, 8 bits), so every `u8` value fits `i32` — the
+    peer-type widen accepts it, result `i32` (D3, W-RULE §2.2 lossless branch). */
+#test
+fn widen_mixed_sign_peer_u8_i32_to_i32() {
+    let env = define(define(empty_env(), "a", u8t(), false), "b", i32t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I32))
+}
+
+/** mixed_sign_equal_width_rejected_u64_i64 — `u64 + i64`: EQUAL width mixed sign has NO
+    lossless common fixed-width type (Teko has no wider backstop after i64/u64) — an honest
+    compile error demanding an explicit `to` (W-RULE §2.2 fallthrough, D3). */
+#test
+fn mixed_sign_equal_width_rejected_u64_i64() {
+    let env = define(define(empty_env(), "a", u64t(), false), "b", i64t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no lossless common type")
+    }
+}
+
+/** int_float_still_rejected — `i32 + f64` stays a compile error: int×float is unchanged by the
+    W-RULE (B.38 — no implicit int↔float promotion, ever). */
+#test
+fn int_float_still_rejected() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", f64t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no mixed int/float")
+    }
+}
+
+/** float_widens_f32_f64_to_f64 — `f32 + f64` widens to the wider float (W-RULE §2.3), always
+    lossless — the float join is total, unlike the int join. */
+#test
+fn float_widens_f32_f64_to_f64() {
+    let env = define(define(empty_env(), "a", f32t(), false), "b", f64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::F64))
+}
+
+/** bitwise_widens_same_sign_u16_u64_to_u64 — `u16 & u64` (bitwise, integer-only — B.38) widens
+    under the SAME W-RULE join `type_arith_binop` uses (`widen_int_binop`), completing B.22 for
+    the bitwise/remainder operator class too. */
+#test
+fn bitwise_widens_same_sign_u16_u64_to_u64() {
+    let env = define(define(empty_env(), "a", u16t(), false), "b", u64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Amp), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::U64))
+}
+
+/** bitwise_mixed_sign_equal_width_rejected_u32_i32 — `u32 | i32` (equal width, mixed sign) has
+    no lossless common type — the same honest-stop the arithmetic class gives, now for bitwise. */
+#test
+fn bitwise_mixed_sign_equal_width_rejected_u32_i32() {
+    let env = define(define(empty_env(), "a", u32t(), false), "b", i32t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Pipe), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no lossless common type")
+    }
 }
