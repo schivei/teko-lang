@@ -134,11 +134,18 @@ log "seed fallback engaged (seed cannot build tip; probing back from merge-base 
 # capability jump (wagon N+2's base is wagon N+1, already unbuildable by the seed). The
 # bootstrap point is the NEWEST first-parent ancestor the seed CAN build — failed probes
 # are cheap (the compiler rejects in seconds), only the final successful build is paid.
-WORKTREE_DIR="$(mktemp -d)"
-rmdir "$WORKTREE_DIR"
+# The probe worktree and its output live INSIDE the workspace, not the system temp dir:
+# on the Windows runners the C toolchain demonstrably works in the workspace drive but
+# fails opaquely when teko builds from %TEMP% (proven by probe logs — Teko compiles, cc
+# dies). Same-workspace scratch also keeps everything on one filesystem.
+WORKTREE_DIR="${GITHUB_WORKSPACE:-$PWD}/.teko-seed-fallback-wt"
+rm -rf "$WORKTREE_DIR"
+git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
 git worktree add --detach "$WORKTREE_DIR" "$MERGE_BASE_SHA" >/dev/null
 
-GEN1_BASE_DIR="$(mktemp -d)"
+GEN1_BASE_DIR="${GITHUB_WORKSPACE:-$PWD}/.teko-seed-fallback-out"
+rm -rf "$GEN1_BASE_DIR"
+mkdir -p "$GEN1_BASE_DIR"
 BOOT_SHA="$MERGE_BASE_SHA"
 PROBES=0
 MAX_PROBES=64
@@ -150,7 +157,8 @@ while :; do
   if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG"; then
     break
   fi
-  log "probe error head: $(tail -2 "$BASE_LOG" | tr '\n' ' ' | cut -c1-200)"
+  log "probe error tail:"
+  tail -15 "$BASE_LOG" | sed 's/^/teko-ci:   | /' >&2
   PROBES=$((PROBES + 1))
   if [ "$PROBES" -ge "$MAX_PROBES" ]; then
     log "FATAL: no seed-buildable ancestor found within $MAX_PROBES first-parent steps of merge-base $MERGE_BASE_SHA"
