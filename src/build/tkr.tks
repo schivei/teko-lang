@@ -97,6 +97,22 @@ pub type Tkr = struct {
     golden: []TkrGolden
     /** for `CompileFail`: the required diagnostic substring ("" → assert failure only). */
     diagnostic: str
+    /** an inline Teko source program (from `Given source inline`); "" when the scenario builds a dir `.tkp` or an explicit `source` file. @since 0.3.1 */
+    source_inline: str
+    /** an explicit standalone source file, relative to `regr_dir` (from `Given source`); "" when none. @since 0.3.1 */
+    source_file: str
+    /** per-scenario child env (`K=V` tokens) applied to compile AND run; from `Given env`/`Given backend`/`Given target`. [] when none. @since 0.3.1 */
+    env: []str
+    /** the effective os-arch target (from `Given target`); "" → the build host's native target. @since 0.3.1 */
+    target: str
+    /** true for the `When built in place` entry verb (the #64 CWD-relative shape: `teko build .` with CWD == `regr_dir`). @since 0.3.1 */
+    in_place: bool
+    /** the `Background: Given dependency` sub-project directory (relative to `regr_dir`); "" when the scenario needs no provisioned dependency. @since 0.3.1 */
+    dep_dir: str
+    /** true for a `Then object well-formed` step (post-build host-toolchain cross-check of the emitted `.o`). @since 0.3.1 */
+    check_wellformed: bool
+    /** true for a `Then module valid` step (post-build `wasm-validate` cross-check of the emitted `.wasm`). @since 0.3.1 */
+    check_module_valid: bool
 }
 
 /**
@@ -675,16 +691,114 @@ fn tkr_apply_line(p: TkrParse, line: str) -> TkrParse | error {
 }
 
 /**
+ * tkr_count_triple_quotes — the number of non-overlapping `"""` occurrences in `line`. A line
+ * opening a raw multi-line docstring (`Given source inline = """`) carries exactly ONE; a
+ * self-contained single-line value (e.g. a HEX docstring `= """0a 00"""`) carries an EVEN count.
+ * Used by `parse_tkr` to tell the two shapes apart before deciding whether to slurp continuation
+ * lines.
+ *
+ * @param line  the trimmed source line
+ * @return      how many `"""` occurrences it carries
+ * @since 0.3.1
+ */
+fn tkr_count_triple_quotes(line: str) -> u64 {
+    mut n: u64 = 0
+    mut k: u64 = 0
+    loop {
+        if k + 3 > line.len { break }
+        if mf_at(line, k) == b'"' && mf_at(line, k + 1) == b'"' && mf_at(line, k + 2) == b'"' { n = n + 1; k = k + 3 } else { k = k + 1 }
+    }
+    n
+}
+
+/**
+ * tkr_needs_docstring_continuation — does `line` open a RAW multi-line `"""` docstring whose close
+ * has not yet been seen (an odd `"""` count)? True for `Given source inline = """`; false for an
+ * already-closed single-line value and for any ordinary line.
+ *
+ * @param line  the trimmed source line
+ * @return      true when `line` opens an unterminated `"""` docstring
+ * @since 0.3.1
+ */
+fn tkr_needs_docstring_continuation(line: str) -> bool { tkr_count_triple_quotes(line) % 2 == 1 }
+
+/**
+ * TkrSlurp — the result of consuming a RAW multi-line docstring body: its decoded `text` (every
+ * line between the opener and the closing `"""`-only line, newline-joined, verbatim — no escape
+ * processing) and `next` (the source cursor just past the consumed closing-fence line).
+ *
+ * @since 0.3.1
+ */
+type TkrSlurp = struct {
+    /** the docstring body, newline-joined, byte-for-byte as authored. */
+    text: str
+    /** the cursor just past the closing `"""` line. */
+    next: u64
+}
+
+/**
+ * tkr_slurp_docstring_body — consume RAW physical lines of `src` starting at `from` verbatim
+ * (untrimmed — a Teko snippet's indentation is preserved byte-for-byte, though it is
+ * parse-irrelevant) until a line whose TRIMMED form is exactly `"""` (the Gherkin closing-fence
+ * convention) closes the docstring. M.3 when EOF is reached first (an unterminated docstring).
+ *
+ * @param src   the whole `.tkr` source
+ * @param from  the cursor just past the opener line's newline
+ * @return      the joined body text and the cursor past the closing line, or an `error` on EOF
+ * @throws      when `src` ends before a closing `"""`-only line is found
+ * @since 0.3.1
+ */
+fn tkr_slurp_docstring_body(src: str, from: u64) -> TkrSlurp | error {
+    mut cur = from
+    mut out = ""
+    mut first = true
+    loop {
+        if cur >= src.len { return error { message = "tkr: unterminated \"\"\" docstring (missing a closing \"\"\" line)" } }
+        mut eol = cur
+        loop {
+            if eol >= src.len { break }
+            if src[eol] == b'\n' { break }
+            eol = eol + 1
+        }
+        let raw = teko::str::slice(src, cur, eol)
+        let next = if eol < src.len { eol + 1 } else { eol }
+        if tkr_trim(raw) == "\"\"\"" { return TkrSlurp { text = out; next = next } }
+        if !first { out = out ~ "\n" }
+        out = out ~ raw
+        first = false
+        cur = next
+    }
+    error { message = "tkr: unreachable docstring slurp" }
+}
+
+/**
+ * tkr_strip_trailing_fence — `line` with its trailing `"""` opener fence removed (the caller has
+ * already established `line` ends with it, via `tkr_needs_docstring_continuation`), so the
+ * reconstructed one-line-equivalent step reads `<keyword> <noun> = <body>` with the multi-line
+ * `<body>` appended in place of the bare fence.
+ *
+ * @param line  the trimmed opener line (ends with `"""`)
+ * @return      `line` minus its trailing `"""`
+ * @since 0.3.1
+ */
+fn tkr_strip_trailing_fence(line: str) -> str {
+    if line.len < 3 { return line }
+    teko::str::slice_to(line, line.len - 3)
+}
+
+/**
  * parse_tkr — read a `.tkr` (Gherkin) source into its `[]TkrFeature` (one per `Feature:` block; a
  * file with no explicit `Feature:` is one implicit feature carrying its scenarios; an empty file is
  * the empty list), or fail honestly (M.3). Reuses the manifest value lexers (`mf_read_quoted`/
- * `mf_read_array`/`mf_read_int`) verbatim for every right-hand side; introduces only keyword-line +
- * Examples-table + HEX-docstring parsing. Background Given steps are prepended to every scenario
- * (at flush).
+ * `mf_read_array`/`mf_read_int`) verbatim for every right-hand side; introduces keyword-line +
+ * Examples-table + HEX-docstring parsing, plus a RAW multi-line `"""` docstring continuation (for
+ * `Given source inline`, 0.3.1 C1) that slurps subsequent physical lines verbatim until a
+ * `"""`-only closing line. Background Given steps are prepended to every scenario (at flush).
  *
  * @param src  the `.tkr` file contents
  * @return     the parsed features, or an `error` on any malformed line / unknown noun-phrase
- * @throws     on a malformed keyword line, an unknown noun-phrase, or a malformed value
+ * @throws     on a malformed keyword line, an unknown noun-phrase, a malformed value, or an
+ *             unterminated `"""` docstring
  * @since 0.3.0.30
  */
 fn parse_tkr(src: str) -> []TkrFeature | error {
@@ -699,9 +813,16 @@ fn parse_tkr(src: str) -> []TkrFeature | error {
             eol = eol + 1
         }
         let raw = teko::str::slice(src, cur, eol)
-        if eol < src.len { cur = eol + 1 } else { cur = eol }
+        cur = if eol < src.len { eol + 1 } else { eol }
         let line = tkr_trim(raw)
         if line.len == 0 || line[0] == b'#' { continue }
+        if tkr_needs_docstring_continuation(line) {
+            let body = match tkr_slurp_docstring_body(src, cur) { TkrSlurp as s => s; error as e => return e }
+            let full_line = tkr_strip_trailing_fence(line) ~ body.text
+            p = match tkr_apply_line(p, full_line) { TkrParse as np => np; error as e => return e }
+            cur = body.next
+            continue
+        }
         p = match tkr_apply_line(p, line) { TkrParse as np => np; error as e => return e }
     }
     let done = tkr_flush_feature(p)
@@ -959,6 +1080,22 @@ type TkrLower = struct {
     expect: []TkrExpect
     /** the per-os-arch byte goldens. */
     golden: []TkrGolden
+    /** an inline Teko source program; "" when none declared. @since 0.3.1 */
+    source_inline: str
+    /** an explicit standalone source file (relative to `regr_dir`); "" when none declared. @since 0.3.1 */
+    source_file: str
+    /** accumulated per-scenario child env (`K=V` tokens). @since 0.3.1 */
+    env: []str
+    /** the declared effective os-arch target; "" when none declared. @since 0.3.1 */
+    target: str
+    /** true once a `When built in place` entry verb is seen. @since 0.3.1 */
+    in_place: bool
+    /** the declared `Background: Given dependency` sub-project directory; "" when none declared. @since 0.3.1 */
+    dep_dir: str
+    /** true once a `Then object well-formed` step is seen. @since 0.3.1 */
+    check_wellformed: bool
+    /** true once a `Then module valid` step is seen. @since 0.3.1 */
+    check_module_valid: bool
 }
 
 /**
@@ -973,12 +1110,54 @@ fn tkr_lower_new() -> TkrLower {
         args = teko::list::empty(); stdin = ""; kind = TkrKind::Exit; exit = 0
         stdout = tkr_match_ignore(); stderr = tkr_match_ignore(); targets = teko::list::empty()
         diagnostic = ""; expect = teko::list::empty(); golden = teko::list::empty()
+        source_inline = ""; source_file = ""; env = teko::list::empty(); target = ""
+        in_place = false; dep_dir = ""; check_wellformed = false; check_module_valid = false
     }
 }
 
 /**
- * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`; `source` is handled
- * by the runner, not the `Tkr`) into `b`. M.3 on a malformed value or an unknown Given noun.
+ * tkr_env_extend — `base` with every token of `extra` appended, in order. The accumulator step
+ * `Given env`/`Given backend`/`Given target` use to grow the per-scenario child env without a
+ * general list-concat builtin (none exists in `teko::list`).
+ *
+ * @param base   the env tokens accumulated so far
+ * @param extra  the tokens to append
+ * @return       `base` followed by `extra`
+ * @since 0.3.1
+ */
+fn tkr_env_extend(base: []str, extra: []str) -> []str {
+    mut out = base
+    mut k: u64 = 0
+    loop {
+        if k >= extra.len { break }
+        out = teko::list::push(out, extra[k])
+        k = k + 1
+    }
+    out
+}
+
+/**
+ * tkr_backend_env — the env token(s) `Given backend` sugars to: `"own"` → `TEKO_BACKEND=native`
+ * (the own AOT backend), `"c"` → `TEKO_BACKEND=c` (explicit, for a paired differential
+ * `Examples` row — `backend_of` only tests for the exact string `"native"`, so this is
+ * functionally the default but documents intent), anything else → `[]` (an unrecognised backend
+ * name sets no env — M.3 is the caller's concern were this ever load-bearing; today it is purely
+ * additive sugar).
+ *
+ * @param value  the declared backend name (`"own"` | `"c"` | other)
+ * @return       the env token(s) the name sugars to, or `[]` for an unrecognised name
+ * @since 0.3.1
+ */
+fn tkr_backend_env(value: str) -> []str {
+    if value == "own" { return teko::list::push(teko::list::empty(), "TEKO_BACKEND=native") }
+    if value == "c" { return teko::list::push(teko::list::empty(), "TEKO_BACKEND=c") }
+    teko::list::empty()
+}
+
+/**
+ * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`/`source`/
+ * `source inline`/`env`/`backend`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
+ * unknown Given noun.
  *
  * @param b      the lowering accumulator
  * @param noun   the Given noun-phrase
@@ -988,22 +1167,45 @@ fn tkr_lower_new() -> TkrLower {
  * @since 0.3.0.30
  */
 fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
-    if noun == "source" { return b }
+    if noun == "source" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = q.text; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if noun == "source inline" {
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = value; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if noun == "env" {
+        let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, xs); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if noun == "backend" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, tkr_backend_env(q.text)); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if noun == "target" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        let env2 = tkr_env_extend(b.env, teko::list::push(teko::list::empty(), teko::str::concat("TEKO_TARGET=", q.text)))
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = q.text; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if noun == "dependency" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = q.text; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
     if noun == "args" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
-        return TkrLower { args = xs; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = xs; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "targets" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = xs; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = xs; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "stdin" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = q.text; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = q.text; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "stdin bytes" {
         let d = match tkr_read_hex_docstring(value, 0) { str as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = d; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = d; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     error { message = teko::str::concat("tkr: unknown Given noun-phrase: ", noun) }
 }
@@ -1021,19 +1223,19 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
  */
 fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     if noun == "exit" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = tkr_read_i32(value, 0); stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = tkr_read_i32(value, 0); stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "diagnostic" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = q.text; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = q.text; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if mf_starts_with(noun, "stdout") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = m; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = m; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if mf_starts_with(noun, "stderr") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = m; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = m; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     error { message = teko::str::concat("tkr: unknown Then noun-phrase: ", noun) }
 }
@@ -1053,29 +1255,31 @@ fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
 fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> TkrLower | error {
     if noun == "artifact sha256" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = tkr_put_golden(b.golden, osarch, q.text) }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = tkr_put_golden(b.golden, osarch, q.text); source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     let e = tkr_get_expect(b.expect, osarch)
     if noun == "exit" {
         let ne = TkrExpect { osarch = osarch; has_exit = true; exit = tkr_read_i32(value, 0); stdout = e.stdout; stderr = e.stderr }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if mf_starts_with(noun, "stdout") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as er => return er }
         let ne = TkrExpect { osarch = osarch; has_exit = e.has_exit; exit = e.exit; stdout = m; stderr = e.stderr }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if mf_starts_with(noun, "stderr") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as er => return er }
         let ne = TkrExpect { osarch = osarch; has_exit = e.has_exit; exit = e.exit; stdout = e.stdout; stderr = m }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     error { message = teko::str::concat("tkr: unknown routed Then noun-phrase: ", noun) }
 }
 
 /**
- * tkr_apply_step_lower — fold one step into the lowering: a When sets the kind, a Given sets an
- * opaque input, a Then sets a top-level or `on`-routed expectation. M.3 on any malformed value.
+ * tkr_apply_step_lower — fold one step into the lowering: a When sets the kind (`built in place`
+ * additionally marks `in_place`), a Given sets an opaque input, a Then sets a top-level or
+ * `on`-routed expectation (or a verb-only leaf-tool flag: `object well-formed`/`module valid`).
+ * M.3 on any malformed value.
  *
  * @param b     the lowering accumulator
  * @param step  the (already placeholder-substituted) step
@@ -1085,12 +1289,21 @@ fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> Tkr
  */
 fn tkr_apply_step_lower(b: TkrLower, step: TkrStep) -> TkrLower | error {
     if step.phase == TkrPhase::When {
+        if step.verb == "built in place" {
+            return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Print; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = true; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        }
         let k = match tkr_kind_for_verb(step.verb) { TkrKind as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = k; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = k; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if step.phase == TkrPhase::Given { return tkr_apply_given(b, step.noun, step.value) }
     if step.verb == "it traps" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Trap; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Trap; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+    }
+    if step.verb == "object well-formed" {
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = true; check_module_valid = b.check_module_valid }
+    }
+    if step.verb == "module valid" {
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = true }
     }
     if step.osarch.len > 0 { return tkr_apply_then_osarch(b, step.osarch, step.noun, step.value) }
     tkr_apply_then_top(b, step.noun, step.value)
@@ -1113,7 +1326,10 @@ fn tkr_lower_to_tkr(steps: []TkrStep) -> Tkr | error {
         b = match tkr_apply_step_lower(b, steps[k]) { TkrLower as nb => nb; error as e => return e }
         k = k + 1
     }
-    Tkr { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; expect = b.expect; golden = b.golden; diagnostic = b.diagnostic }
+    Tkr {
+        args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; expect = b.expect; golden = b.golden; diagnostic = b.diagnostic
+        source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid
+    }
 }
 
 /**
@@ -1164,21 +1380,21 @@ fn tkr_expand_outline(sc: TkrScenario) -> []Tkr | error {
 }
 
 /**
- * tkr_scenario_source — the `Given source = "<file>"` path of a compile-fail scenario (the standalone
- * source it compiles), or "" when the scenario declares none.
+ * tkb_scenario_is_declarative — true when a scenario has NO `When` entry verb: it is a
+ * documentation-only meta-scenario (an R0 `# verified-by:` contract) and is honest-SKIPPED,
+ * never executed. Lets `regressor.tkr` carry the self-host/fixpoint contract as living
+ * documentation beside the executable language matrix.
  *
- * @param sc  the scenario
- * @return    the source file path (relative to the regressor dir), or ""
- * @since 0.3.0.30
+ * @param sc  the parsed scenario
+ * @return    true when the scenario declares no `When` verb
+ * @since 0.3.1
  */
-fn tkr_scenario_source(sc: TkrScenario) -> str {
+fn tkb_scenario_is_declarative(sc: TkrScenario) -> bool {
     mut k: u64 = 0
     loop {
         if k >= sc.steps.len { break }
-        if sc.steps[k].phase == TkrPhase::Given && sc.steps[k].noun == "source" {
-            match mf_read_quoted(sc.steps[k].value, 0) { MfQuoted as q => return q.text; error => return "" }
-        }
+        if sc.steps[k].phase == TkrPhase::When { return false }
         k = k + 1
     }
-    ""
+    true
 }

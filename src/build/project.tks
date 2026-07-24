@@ -1699,6 +1699,28 @@ fn dirname_of(path: str) -> str {
 }
 
 /**
+ * The last path segment of `path` — everything after the rightmost path separator — or the
+ * whole `path` when it carries no separator. The mirror of `dirname_of` (same reverse
+ * POSIX-or-Windows-separator scan, so together `dirname_of(p) ~ "/" ~ basename_of(p)`
+ * reconstructs a separator-normalized `p`), used by the regression runner (0.3.1 C0) to split a
+ * manifest-listed `.tkr` FILE path into its regressor directory and basename without a
+ * `teko::str::last_index_of` call (native-only — the VM does not implement it).
+ *
+ * @param path  an argv[0]-style invocation path, POSIX- or Windows-separated
+ * @return      the segment after the rightmost separator, or `path` unchanged when it carries none
+ */
+fn basename_of(path: str) -> str {
+    mut i = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        let b = path[i]
+        if b == b'/' || b == b'\\' { return teko::str::slice_from(path, i + 1) }
+    }
+    path
+}
+
+/**
  * Whether `b` is an ASCII letter (A-Z or a-z) — the drive-letter test for a Windows absolute
  * path such as `C:\...`. Named with an `_ascii_` segment to stay distinct from the `is_alpha`
  * char builtin, which classifies a full Unicode `char` rather than a raw path byte.
@@ -3627,9 +3649,10 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
  * `--per-commit-test <base>` runs the delta-coverage enforcer (`run_per_commit_test`) AFTER the floor
  * policy — measuring coverage attributed to the lines changed since `<base>` and (under
  * `--cov-validation`) failing when that delta is below floor; absent, it is a zero-cost no-op.
- * When the manifest declares `[tests] regression` directories (`test_regression_dirs`), the
- * regression phase (`run_regression_phase`) runs after the floor + delta policies and before any
- * dev-time report; with no regression directories it is a zero-cost no-op (the 0.3.0.29 inert base).
+ * When the manifest declares `[tests] regression` files (`test_regression_files` — an explicit,
+ * ordered list of `.tkr` paths, 0.3.1 C0), the regression phase (`run_regression_phase`) runs
+ * after the floor + delta policies and before any dev-time report; with no regression files it
+ * is a zero-cost no-op (the 0.3.0.29 inert base).
  *
  * @param dir              the project directory (already the cwd; the front-end chdir'd in)
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
@@ -3656,7 +3679,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
         let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation)
         if pc != 0 { return pc }
     }
-    if fe.manifest.test_regression_dirs.len > 0 {
+    if fe.manifest.test_regression_files.len > 0 {
         let rrc = run_regression_phase(exe, fe.manifest)
         if rrc != 0 { return rrc }
     }
