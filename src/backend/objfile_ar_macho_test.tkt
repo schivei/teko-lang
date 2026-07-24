@@ -1,0 +1,172 @@
+/**
+ * macho_ar_u32_le_at — the little-endian u32 read from `bytes` at byte index
+ * `i` (every `__.SYMDEF` field is little-endian — the exact opposite of GNU
+ * `objfile_ar.tks`'s big-endian `"/"` member).
+ *
+ * @param []byte bytes  the archive bytes
+ * @param u64 i  the field's byte offset
+ * @return u32  the little-endian u32 at `i`
+ */
+fn macho_ar_u32_le_at(bytes: []byte, i: u64) -> u32 {
+    (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32)) | ((bytes[i + (2 to u64)] to u32) << (16 to u32)) | ((bytes[i + (3 to u64)] to u32) << (24 to u32))
+}
+
+#test
+/**
+ * bsd_ar_global_header_and_symdef_name — the archive opens with the shared
+ * 8-byte `"!<arch>\n"` magic, and the very next 9 bytes spell `__.SYMDEF`
+ * (space-padded, NO `/` terminator — the BSD `Name` field convention, unlike
+ * GNU's slash-terminated form).
+ *
+ * @return void
+ */
+fn bsd_ar_global_header_and_symdef_name() {
+    let member = bsd_build_member("main.o", [0xDE to byte, 0xAD to byte, 0xBE to byte, 0xEF to byte])
+    let obj = emit_bsd_ar_archive([member], [ArSymbol { name = "_main"; member = 0 to u64 }])
+    teko::assert::is_true(obj[0] == (0x21 to byte))
+    teko::assert::is_true(obj[7] == (0x0A to byte))
+    teko::assert::is_true(obj[8] == (0x5F to byte))
+    teko::assert::is_true(obj[9] == (0x5F to byte))
+    teko::assert::is_true(obj[10] == (0x2E to byte))
+    teko::assert::is_true(obj[16] == (0x46 to byte))
+    teko::assert::is_true(obj[17] == (0x20 to byte))
+    teko::assert::is_true(obj[24] == (0x30 to byte))
+}
+
+#test
+/**
+ * bsd_ar_single_member_symdef_and_member_layout — a one-member, one-symbol
+ * BSD archive (`main.o` / symbol `_main`) lays out EXACTLY: 8-byte global
+ * header + 60-byte `__.SYMDEF` header (`Size` = "22") + 22-byte `__.SYMDEF`
+ * payload (ranlib-array size=8, one LE `{strx=0, off=90}` entry, strtab
+ * size=6, `"_main\0"`) + the 60-byte member header (`Name` = `"main.o"`
+ * space-padded, no slash; `Size` = "4") + the 4-byte member data — 154 bytes
+ * total, hand-verified against the BSD `ranlib`/`ar_hdr` layout.
+ *
+ * @return void
+ */
+fn bsd_ar_single_member_symdef_and_member_layout() {
+    let member = bsd_build_member("main.o", [0xDE to byte, 0xAD to byte, 0xBE to byte, 0xEF to byte])
+    let obj = emit_bsd_ar_archive([member], [ArSymbol { name = "_main"; member = 0 to u64 }])
+    teko::assert::is_true(obj.len == (154 to u64))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 68 to u64) == (8 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 72 to u64) == (0 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 76 to u64) == (90 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 80 to u64) == (6 to u32))
+    teko::assert::is_true(obj[84] == (0x5F to byte))
+    teko::assert::is_true(obj[89] == (0 to byte))
+    teko::assert::is_true(obj[90] == (0x6D to byte))
+    teko::assert::is_true(obj[96] == (0x20 to byte))
+    teko::assert::is_true(obj[150] == (0xDE to byte))
+    teko::assert::is_true(obj[153] == (0xEF to byte))
+}
+
+#test
+/**
+ * bsd_ar_two_members_offsets_survive_odd_pad — a two-member BSD archive whose
+ * FIRST member's data is an ODD 1 byte (forcing a single `\n` pad byte before
+ * the second member's header): the `ranlib` entries' `ran_off` fields point at
+ * each member's own header start (104 and 166 — the pad byte correctly shifts
+ * the second member's header past the first member's data+pad), and no `/` is
+ * ever written into a `Name` field (the BSD/GNU divergence).
+ *
+ * @return void
+ */
+fn bsd_ar_two_members_offsets_survive_odd_pad() {
+    let a = bsd_build_member("a.o", [0x01 to byte])
+    let b = bsd_build_member("b.o", [0x02 to byte, 0x03 to byte])
+    let obj = emit_bsd_ar_archive([a, b], [ArSymbol { name = "sym_a"; member = 0 to u64 }, ArSymbol { name = "sym_b"; member = 1 to u64 }])
+    teko::assert::is_true(obj.len == (228 to u64))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 68 to u64) == (16 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 72 to u64) == (0 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 76 to u64) == (104 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 80 to u64) == (6 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 84 to u64) == (166 to u32))
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 88 to u64) == (12 to u32))
+    teko::assert::is_true(obj[104] == (0x61 to byte))
+    teko::assert::is_true(obj[107] == (0x20 to byte))
+    teko::assert::is_true(obj[164] == (0x01 to byte))
+    teko::assert::is_true(obj[165] == (0x0A to byte))
+    teko::assert::is_true(obj[166] == (0x62 to byte))
+    teko::assert::is_true(obj[226] == (0x02 to byte))
+    teko::assert::is_true(obj[227] == (0x03 to byte))
+}
+
+#test
+/**
+ * bsd_member_layout_inline_for_short_name — a member name at or under the
+ * 16-byte `Name` field width lays out INLINE: the field is the bare name,
+ * space-padded, and there is no name-prefix to prepend to the member's data.
+ *
+ * @return void
+ */
+fn bsd_member_layout_inline_for_short_name() {
+    let layout = bsd_member_layout("main.o")
+    teko::assert::is_true(layout.name_field == ar_pad_right("main.o", AR_NAME_WIDTH))
+    teko::assert::is_true(layout.prefix.len == (0 to u64))
+}
+
+#test
+/**
+ * bsd_member_layout_extended_name_over_16_bytes — a member name OVER the
+ * 16-byte `Name` field width (unreached by KP16's sole real producer, whose
+ * member name is always `"<stem>.o"`) uses the BSD `#1/<N>` extended form:
+ * the `Name` field carries the literal `#1/20` tag (space-padded), and
+ * `bsd_build_member` prepends the real 20-byte name to the member's data —
+ * `Size` then covers name-prefix + real bytes together.
+ *
+ * @return void
+ */
+fn bsd_member_layout_extended_name_over_16_bytes() {
+    let name = "abcdefghijklmnopqrst"
+    let layout = bsd_member_layout(name)
+    teko::assert::is_true(layout.name_field == ar_pad_right("#1/20", AR_NAME_WIDTH))
+    teko::assert::is_true(layout.prefix.len == (20 to u64))
+    let member = bsd_build_member(name, [0x01 to byte, 0x02 to byte])
+    teko::assert::is_true(member.data.len == (22 to u64))
+    teko::assert::is_true(member.data[0] == (0x61 to byte))
+    teko::assert::is_true(member.data[19] == (0x74 to byte))
+    teko::assert::is_true(member.data[20] == (0x01 to byte))
+    teko::assert::is_true(member.data[21] == (0x02 to byte))
+}
+
+#test
+/**
+ * macho_ar_symbols_prefixes_underscore_and_excludes_non_globals — the archive
+ * symbol index built from a neutral `Symbol` list carries ONLY the defined,
+ * non-local entry (`main` → `_main`), matching `objfile_macho.tks::build_strtab`'s
+ * `_`-prefix convention and excluding the file-local rodata datum and the
+ * undefined extern (mirrors `objfile_ar.tks::global_symbol_names`'s filter).
+ *
+ * @return void
+ */
+fn macho_ar_symbols_prefixes_underscore_and_excludes_non_globals() {
+    let syms = macho_ar_symbols([
+        Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true },
+        Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false },
+        Symbol { name = "printf"; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+    ])
+    teko::assert::is_true(syms.len == (1 to u64))
+    teko::assert::is_true(syms[0].name == "_main")
+    teko::assert::is_true(syms[0].member == (0 to u64))
+}
+
+#test
+/**
+ * emit_static_archive_macho_wraps_one_member — the whole-program entry point
+ * wraps exactly one member and its symbol index carries only the `_`-prefixed
+ * defined global (`_main`), matching the GNU `emit_static_archive`'s
+ * `ar_static_archive_indexes_only_defined_globals` counterpart.
+ *
+ * @return void
+ */
+fn emit_static_archive_macho_wraps_one_member() {
+    let obj = emit_static_archive_macho("prog.o", [0xAA to byte, 0xBB to byte], [
+        Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true },
+        Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false },
+        Symbol { name = "printf"; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+    ])
+    teko::assert::is_true(macho_ar_u32_le_at(obj, 68 to u64) == (8 to u32))
+    teko::assert::is_true(obj[obj.len - (2 to u64)] == (0xAA to byte))
+    teko::assert::is_true(obj[obj.len - (1 to u64)] == (0xBB to byte))
+}

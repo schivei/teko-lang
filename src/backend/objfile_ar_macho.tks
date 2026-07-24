@@ -1,0 +1,332 @@
+/**
+ * objfile_ar_macho.tks — THEORY validation slice (branch `theory/kp16-ar-macho-coff`,
+ * NEVER merged — see `.github/workflows/theory-ar-validation.yml`): the BSD-format
+ * `.a` static-archive writer for a Mach-O member, the `ranlib` sibling of
+ * `objfile_ar.tks` (KP16's GNU-format ELF writer). Named an honest stop at KP16's
+ * `src/build/project.tks::emit_static_lib` call site ("no host toolchain to
+ * cross-validate here"); this file is the port candidate once the theory CI's
+ * macOS-latest runner (real `ar`/`nm`/`ld`) proves it.
+ *
+ * A BSD archive shares the GNU `!<arch>\n` global header and the generic 60-byte
+ * `ar_hdr` (both reused from `objfile_ar.tks`: `AR_GLOBAL_HEADER`, `ar_header`,
+ * `ar_pad_right`, `ar_even_pad_len`, `emit_ar_member`), but its symbol-table member
+ * is named `__.SYMDEF` (not GNU's bare `/`), its `ar_hdr` `Name` field carries NO
+ * `/` terminator (a BSD name is either the raw text, space-padded, or the extended
+ * `#1/<N>` form below), and its symbol-table payload is a distinct, ALL-LITTLE-
+ * ENDIAN `struct ranlib[]` layout (unlike GNU's all-big-endian one):
+ *
+ *   [u32 LE: byte size of the `ranlib` array that follows]
+ *   [ranlib entries, 8 bytes each: u32 LE `ran_strx` (name offset in the string
+ *    table below) + u32 LE `ran_off` (the file offset of the DEFINING member's
+ *    OWN 60-byte header)]
+ *   [u32 LE: byte size of the string table that follows]
+ *   [string table: each indexed symbol's Mach-O name (`_`-prefixed, matching
+ *    `objfile_macho.tks::build_strtab`'s convention), NUL-terminated,
+ *    concatenated in ranlib order]
+ *
+ * Member names over 16 bytes use the BSD `#1/<N>` extended-name convention: the
+ * `Name` field carries the literal text `#1/<N>` (space-padded to 16), and the
+ * real name's raw `N` bytes are PREPENDED to the member's data (the header
+ * `Size` field covers name-prefix + real data together) — unreached by KP16's
+ * sole producer (`emit_static_archive_macho`'s member name is always
+ * `"<stem>.o"`, always short), covered by a direct unit test on a hand-built
+ * input, mirroring `objfile_ar.tks`'s own long-name honest-stop note.
+ */
+
+/**
+ * BSD_SYMDEF_NAME — the BSD archive symbol-table member's bare `Name`
+ * (`"__.SYMDEF"`, no `SORTED` suffix — an unsorted table is a valid, linkable
+ * symbol index; only a `ranlib`-driven binary-search tool cares about the
+ * suffix, and every consumer this writer targets — `ar`/`nm`/`ld` — scans
+ * linearly).
+ */
+const BSD_SYMDEF_NAME: str = "__.SYMDEF"
+
+/**
+ * BSD_RANLIB_ENTRY_SIZE — the on-disk size of one `struct ranlib` entry: a
+ * 4-byte LE `ran_strx` + a 4-byte LE `ran_off`.
+ */
+const BSD_RANLIB_ENTRY_SIZE: u32 = 8 to u32
+
+/**
+ * BsdMemberLayout — the resolved `ar_hdr` `Name` field text and (for a
+ * long name) the raw name-prefix bytes to prepend to a BSD archive member's
+ * data, computed once per member (`bsd_member_layout`).
+ */
+type BsdMemberLayout = struct {
+    /**
+     * name_field — the 16-byte, space-padded `Name` field text: the bare name
+     * (name.len <= 16) or the `#1/<N>` extended-name tag (name.len > 16).
+     */
+    name_field: str
+    /**
+     * prefix — the raw name bytes to prepend to the member's data (empty for
+     * an inline name; `name`'s bytes, unterminated, for the extended form).
+     */
+    prefix: []byte
+}
+
+/**
+ * bsd_member_layout — decide a BSD archive member's `Name` field encoding: a
+ * name that fits the fixed 16-byte field is written inline, space-padded (no
+ * GNU-style `/` terminator — BSD has none); a longer name uses the `#1/<N>`
+ * extended form, whose real bytes are returned as `prefix` (the caller
+ * prepends them to the member's data, per the BSD long-name convention).
+ *
+ * @param str name  the member's bare on-disk name
+ * @return BsdMemberLayout  the formatted `Name` field and any name-prefix bytes
+ */
+fn bsd_member_layout(name: str) -> BsdMemberLayout {
+    if name.len <= AR_NAME_WIDTH {
+        return BsdMemberLayout { name_field = ar_pad_right(name, AR_NAME_WIDTH); prefix = teko::list::empty() }
+    }
+    let tag = teko::str::concat("#1/", $"{name.len}")
+    BsdMemberLayout { name_field = ar_pad_right(tag, AR_NAME_WIDTH); prefix = emit_str_bytes(teko::list::empty(), name) }
+}
+
+/**
+ * BsdArMember — one resolved BSD archive member: its pre-formatted 16-byte
+ * `Name` field and its FULL on-disk data (the long-name prefix, when present,
+ * already folded into `data` — so `data.len` is exactly the `ar_hdr` `Size`).
+ */
+type BsdArMember = struct {
+    /**
+     * name_field — the pre-formatted 16-byte `Name` field text.
+     */
+    name_field: str
+    /**
+     * data — the member's full on-disk payload (name-prefix + real bytes).
+     */
+    data: []byte
+}
+
+/**
+ * bsd_build_member — resolve a bare member name + its real object bytes into a
+ * `BsdArMember`: the formatted `Name` field, and `data` = the long-name prefix
+ * (empty when the name is inline) followed by the real bytes.
+ *
+ * @param str name  the member's bare on-disk name
+ * @param []byte data  the member's real object-file bytes
+ * @return BsdArMember  the resolved member, ready for `emit_ar_member`
+ */
+fn bsd_build_member(name: str, data: []byte) -> BsdArMember {
+    let layout = bsd_member_layout(name)
+    BsdArMember { name_field = layout.name_field; data = append_bytes(layout.prefix, data) }
+}
+
+/**
+ * bsd_member_total_len — the total on-disk span of one BSD member (its 60-byte
+ * header, its (name-prefixed) data, and its optional even-alignment pad byte)
+ * — the increment `bsd_member_offsets` walks by to find the next member's
+ * header start.
+ *
+ * @param BsdArMember m  the member
+ * @return u32  the member's total header+data(+pad) byte span
+ */
+fn bsd_member_total_len(m: BsdArMember) -> u32 {
+    let sz = m.data.len to u32
+    AR_HEADER_SIZE + sz + ar_even_pad_len(sz)
+}
+
+/**
+ * bsd_member_offsets — the file offset of each BSD member's OWN 60-byte
+ * header, in member-list order, starting at `first_offset` (the byte just
+ * past the `__.SYMDEF` member) — the archive-wide addresses each `ranlib`
+ * entry's `ran_off` points at.
+ *
+ * @param u32 first_offset  the first real member's header file offset
+ * @param []BsdArMember members  the archive's members, in emission order
+ * @return []u32  each member's header file offset, in member order
+ */
+fn bsd_member_offsets(first_offset: u32, members: []BsdArMember) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut off = first_offset
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        out = teko::list::push(out, off)
+        off = off + bsd_member_total_len(members[i])
+        i++
+    }
+    out
+}
+
+/**
+ * BsdSymStrTab — the assembled `__.SYMDEF` string-table part: its raw bytes
+ * (each `ArSymbol` name, NUL-terminated, concatenated) and the parallel
+ * per-symbol byte offset each `ranlib` entry's `ran_strx` carries.
+ */
+type BsdSymStrTab = struct {
+    /**
+     * bytes — the string-table bytes (NUL-terminated names, concatenated).
+     */
+    bytes: []byte
+    /**
+     * strx — each symbol's start offset within `bytes`, in symbol order.
+     */
+    strx: []u32
+}
+
+/**
+ * build_bsd_symstrtab — assemble the `__.SYMDEF` string-table part from the
+ * archive's symbol index: each `ArSymbol.name` (already Mach-O `_`-prefixed by
+ * the caller), NUL-terminated, concatenated in order, recording each name's
+ * start offset as its `ran_strx`.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @return BsdSymStrTab  the string-table bytes + the per-symbol name offsets
+ */
+fn build_bsd_symstrtab(symbols: []ArSymbol) -> BsdSymStrTab {
+    mut bytes: []byte = teko::list::empty()
+    mut strx: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        strx = teko::list::push(strx, bytes.len to u32)
+        bytes = emit_str_bytes(bytes, symbols[i].name)
+        bytes = teko::list::push(bytes, 0 to byte)
+        i++
+    }
+    BsdSymStrTab { bytes = bytes; strx = strx }
+}
+
+/**
+ * bsd_symdef_payload_size — the byte length of the `__.SYMDEF` member's DATA
+ * (excluding its own 60-byte header): the two 4-byte length prefixes, the
+ * `ranlib` array (`symbols.len * 8`), and the NUL-terminated string table —
+ * computable BEFORE any member's file offset is known, since it depends only
+ * on the symbol names/count, mirroring `objfile_ar.tks::ar_symtab_data_size`'s
+ * two-pass layout seam.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @return u32  the `__.SYMDEF` member's unpadded data byte length
+ */
+fn bsd_symdef_payload_size(symbols: []ArSymbol) -> u32 {
+    mut total: u32 = (4 to u32) + (symbols.len to u32) * BSD_RANLIB_ENTRY_SIZE + (4 to u32)
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        total = total + (symbols[i].name.len to u32) + (1 to u32)
+        i++
+    }
+    total
+}
+
+/**
+ * bsd_ranlib_array — the `struct ranlib[]` bytes: one 8-byte LE entry per
+ * symbol (`ran_strx` from the pre-built string table, `ran_off` the defining
+ * member's real header offset), in symbol-index order.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @param []u32 member_offsets  each member's own header file offset, member order
+ * @param []u32 strx  each symbol's string-table offset, symbol order
+ * @return []byte  the `ranlib` array bytes
+ */
+fn bsd_ranlib_array(symbols: []ArSymbol, member_offsets: []u32, strx: []u32) -> []byte {
+    mut b: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        b = emit_u32_le(b, strx[i])
+        b = emit_u32_le(b, member_offsets[symbols[i].member])
+        i++
+    }
+    b
+}
+
+/**
+ * bsd_symdef_payload — the complete `__.SYMDEF` member DATA: the LE byte
+ * size of the `ranlib` array, the array itself, the LE byte size of the
+ * string table, then the string table — in that fixed four-block order.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @param []u32 member_offsets  each member's own header file offset, member order
+ * @return []byte  the `__.SYMDEF` member's unpadded data bytes
+ */
+fn bsd_symdef_payload(symbols: []ArSymbol, member_offsets: []u32) -> []byte {
+    let strtab = build_bsd_symstrtab(symbols)
+    let ranlib = bsd_ranlib_array(symbols, member_offsets, strtab.strx)
+    mut b: []byte = emit_u32_le(teko::list::empty(), ranlib.len to u32)
+    b = append_bytes(b, ranlib)
+    b = emit_u32_le(b, strtab.bytes.len to u32)
+    append_bytes(b, strtab.bytes)
+}
+
+/**
+ * emit_bsd_ar_archive — assemble a complete BSD-format `.a` static archive:
+ * the 8-byte global header, the `__.SYMDEF` member (indexing every `ArSymbol`
+ * against its defining member's real file offset), then every real
+ * `BsdArMember` in list order. The same two-pass layout as
+ * `objfile_ar.tks::emit_ar_archive` (the `__.SYMDEF` payload size is knowable
+ * before any member offset, from names/count alone), so the single forward
+ * pass below needs no backpatching. Consumable by `ar t`/`ar x` (lists/
+ * extracts members), `nm`/`nm -a` and `ld` (the `__.SYMDEF` index resolves
+ * archive-member selection without a full per-member symtab scan).
+ *
+ * @param []BsdArMember members  the archive's members, in emission order
+ * @param []ArSymbol symbols  the exported-symbol index (each naming its
+ *        defining member by 0-based list index)
+ * @return []byte  the finished BSD-format `.a` archive bytes
+ */
+pub fn emit_bsd_ar_archive(members: []BsdArMember, symbols: []ArSymbol) -> []byte {
+    let payload_size = bsd_symdef_payload_size(symbols)
+    let symdef_total = AR_HEADER_SIZE + payload_size + ar_even_pad_len(payload_size)
+    let first_member_offset = (AR_GLOBAL_HEADER.len to u32) + symdef_total
+    let offsets = bsd_member_offsets(first_member_offset, members)
+    let symdef_data = bsd_symdef_payload(symbols, offsets)
+    mut b: []byte = teko::list::empty()
+    b = append_bytes(b, AR_GLOBAL_HEADER)
+    b = emit_ar_member(b, ar_pad_right(BSD_SYMDEF_NAME, AR_NAME_WIDTH), symdef_data, AR_MODE_SPECIAL)
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        b = emit_ar_member(b, members[i].name_field, members[i].data, AR_MODE_REGULAR)
+        i++
+    }
+    b
+}
+
+/**
+ * macho_ar_symbols — the archive's exported-symbol index from a module's
+ * neutral `Symbol` list: every defined, non-local (globally-visible) entry,
+ * `_`-prefixed to match the Mach-O nlist string-table convention
+ * (`objfile_macho.tks::build_strtab`), each naming member 0 — the sole
+ * whole-program member (#385 A4-5).
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ArSymbol  the `_`-prefixed exported-symbol index
+ */
+fn macho_ar_symbols(symbols: []Symbol) -> []ArSymbol {
+    let names = global_symbol_names(symbols)
+    mut out: []ArSymbol = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, ArSymbol { name = teko::str::concat("_", names[i]); member = 0 to u64 })
+        i++
+    }
+    out
+}
+
+/**
+ * emit_static_archive_macho — wrap ONE whole-program Mach-O relocatable object
+ * (`obj_name`/`obj_bytes`) into a single-member BSD-format `.a` static archive
+ * with a `__.SYMDEF` symbol table, indexing every one of `symbols`' defined,
+ * non-local entries against that lone member — the theory port candidate for
+ * KP16's Mach-O honest-stop (`src/build/project.tks::emit_static_lib`'s
+ * `Arm64Macho` arm). Format-specific in BOTH directions (unlike
+ * `objfile_ar.tks::emit_static_archive`'s format-agnostic input): `symbols`'
+ * names are `_`-prefixed to match `objfile_macho.tks::emit_macho`'s own
+ * string-table convention, and the container is BSD ar — the format
+ * `scripts/check_ar_macho.sh`'s `ar`/`nm`/`ld` cross-check (and every
+ * Mach-O-hosting `ld`) expects.
+ *
+ * @param str obj_name  the member's bare on-disk name (`"<stem>.o"`)
+ * @param []byte obj_bytes  the Mach-O object file's bytes (own-native emitted)
+ * @param []Symbol symbols  the module's neutral symbol list (for the exported-symbol index)
+ * @return []byte  the finished BSD-format `.a` archive bytes
+ */
+pub fn emit_static_archive_macho(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte {
+    let member = bsd_build_member(obj_name, obj_bytes)
+    emit_bsd_ar_archive([member], macho_ar_symbols(symbols))
+}
