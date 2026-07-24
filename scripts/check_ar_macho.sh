@@ -48,6 +48,13 @@ if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
     skip_or_fail "no archive provided (arg1='${ARCHIVE:-<empty>}')"
 fi
 
+# Absolutize BEFORE any cd (run 30074280021, macos-arm64: the ar-x-into-a-tempdir step
+# below `cd`s into a scratch dir, so a RELATIVE $ARCHIVE — the common case, a caller
+# passing a repo-relative path — would silently resolve against the wrong directory
+# there and "ar: ...: No such file or directory". A relative $1 is otherwise valid input
+# (the well-formedness checks above run BEFORE any cd, so they never hit this).
+ARCHIVE="$(cd "$(dirname "$ARCHIVE")" && pwd)/$(basename "$ARCHIVE")"
+
 SYMBOL="${2:-}"
 trace "checking archive=$ARCHIVE symbol=${SYMBOL:-<none>}"
 

@@ -48,6 +48,12 @@ if [[ -z "$ARCHIVE" || ! -f "$ARCHIVE" ]]; then
     skip_or_fail "no archive provided (arg1='${ARCHIVE:-<empty>}')"
 fi
 
+# Absolutize BEFORE any step below could run from a different CWD (run 30074280021's
+# macos-arm64 fix, ported here too for consistency across every check_ar_*.sh — this
+# script's own steps never `cd` today, but a relative $ARCHIVE staying valid must not
+# depend on that staying true).
+ARCHIVE="$(cd "$(dirname "$ARCHIVE")" && pwd)/$(basename "$ARCHIVE")"
+
 SYMBOL="${2:-}"
 trace "checking archive=$ARCHIVE symbol=${SYMBOL:-<none>}"
 
