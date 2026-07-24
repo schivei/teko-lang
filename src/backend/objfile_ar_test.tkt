@@ -11,6 +11,18 @@ fn ar_u32_be_at(bytes: []byte, i: u64) -> u32 {
     ((bytes[i] to u32) << (24 to u32)) | ((bytes[i + (1 to u64)] to u32) << (16 to u32)) | ((bytes[i + (2 to u64)] to u32) << (8 to u32)) | (bytes[i + (3 to u64)] to u32)
 }
 
+/**
+ * art_ok — unwrap an `emit_ar_archive`/`emit_static_archive` result, defaulting to an
+ * empty archive on the (unexpected, in every fixture below) error arm so a real honest-stop
+ * fails the caller's length/byte assertions instead of the test silently passing.
+ *
+ * @param []byte | error r  the result to unwrap
+ * @return []byte  the wrapped archive bytes, or an empty slice on error
+ */
+fn art_ok(r: []byte | error) -> []byte {
+    match r { []byte as b => b; error => teko::list::empty() }
+}
+
 #test
 /**
  * ar_archive_global_header_and_symtab_name — the archive opens with the 8-byte
@@ -21,7 +33,7 @@ fn ar_u32_be_at(bytes: []byte, i: u64) -> u32 {
  */
 fn ar_archive_global_header_and_symtab_name() {
     let member = ArMember { name = "main.o"; data = [0xDE to byte, 0xAD to byte, 0xBE to byte, 0xEF to byte] }
-    let obj = emit_ar_archive([member], [ArSymbol { name = "main"; member = 0 to u64 }])
+    let obj = art_ok(emit_ar_archive([member], [ArSymbol { name = "main"; member = 0 to u64 }]))
     teko::assert::is_true(obj[0] == (0x21 to byte))
     teko::assert::is_true(obj[1] == (0x3C to byte))
     teko::assert::is_true(obj[6] == (0x3E to byte))
@@ -44,7 +56,7 @@ fn ar_archive_global_header_and_symtab_name() {
  */
 fn ar_single_member_symtab_and_member_layout() {
     let member = ArMember { name = "main.o"; data = [0xDE to byte, 0xAD to byte, 0xBE to byte, 0xEF to byte] }
-    let obj = emit_ar_archive([member], [ArSymbol { name = "main"; member = 0 to u64 }])
+    let obj = art_ok(emit_ar_archive([member], [ArSymbol { name = "main"; member = 0 to u64 }]))
     teko::assert::is_true(obj.len == (146 to u64))
     teko::assert::is_true(ar_u32_be_at(obj, 68 to u64) == (1 to u32))
     teko::assert::is_true(ar_u32_be_at(obj, 72 to u64) == (82 to u32))
@@ -76,7 +88,7 @@ fn ar_single_member_symtab_and_member_layout() {
 fn ar_two_members_offsets_survive_odd_pad() {
     let a = ArMember { name = "a.o"; data = [0x01 to byte] }
     let b = ArMember { name = "b.o"; data = [0x02 to byte, 0x03 to byte] }
-    let obj = emit_ar_archive([a, b], [ArSymbol { name = "sym_a"; member = 0 to u64 }, ArSymbol { name = "sym_b"; member = 1 to u64 }])
+    let obj = art_ok(emit_ar_archive([a, b], [ArSymbol { name = "sym_a"; member = 0 to u64 }, ArSymbol { name = "sym_b"; member = 1 to u64 }]))
     teko::assert::is_true(obj.len == (216 to u64))
     teko::assert::is_true(ar_u32_be_at(obj, 68 to u64) == (2 to u32))
     teko::assert::is_true(ar_u32_be_at(obj, 72 to u64) == (92 to u32))
@@ -108,6 +120,20 @@ fn ar_mixed_symbol_module() -> []Symbol {
 
 #test
 /**
+ * ar_member_name_over_budget_honest_stops — a member name over the GNU short-name form's
+ * 15-byte budget (here 16 bytes) honest-stops rather than silently overflowing the fixed
+ * 16-byte `Name` field and corrupting every subsequent `ar_hdr` byte offset.
+ *
+ * @return void
+ */
+fn ar_member_name_over_budget_honest_stops() {
+    let member = ArMember { name = "sixteen_byte_nam"; data = [0x01 to byte] }
+    teko::assert::is_true(match emit_ar_archive([member], []) { []byte => false; error => true })
+    teko::assert::is_true(match emit_static_archive("sixteen_byte_nam", [0x01 to byte], []) { []byte => false; error => true })
+}
+
+#test
+/**
  * ar_static_archive_indexes_only_defined_globals — `emit_static_archive` indexes
  * ONLY the defined, non-local symbol (`main`) — the file-local rodata datum and
  * the undefined extern are both excluded from the GNU symbol table, since
@@ -117,7 +143,7 @@ fn ar_mixed_symbol_module() -> []Symbol {
  * @return void
  */
 fn ar_static_archive_indexes_only_defined_globals() {
-    let obj = emit_static_archive("prog.o", [0xAA to byte, 0xBB to byte], ar_mixed_symbol_module())
+    let obj = art_ok(emit_static_archive("prog.o", [0xAA to byte, 0xBB to byte], ar_mixed_symbol_module()))
     teko::assert::is_true(obj.len == (144 to u64))
     teko::assert::is_true(ar_u32_be_at(obj, 68 to u64) == (1 to u32))
     teko::assert::is_true(ar_u32_be_at(obj, 72 to u64) == (82 to u32))

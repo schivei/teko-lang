@@ -1584,9 +1584,10 @@ fn archive_output_path(od: str, stem: str, format: ArchiveFormat) -> str {
  * @param obj          the encoded object-file bytes
  * @param symbols      the encoded module's neutral symbol list
  * @param format       the target archive container
- * @return             the finished archive bytes
+ * @return             the finished archive bytes, or an honest-stop
+ * @throws             when the GNU writer's `member_name` exceeds its 15-byte short-name budget
  */
-fn wrap_archive_bytes(member_name: str, obj: []byte, symbols: []teko::backend::Symbol, format: ArchiveFormat) -> []byte {
+fn wrap_archive_bytes(member_name: str, obj: []byte, symbols: []teko::backend::Symbol, format: ArchiveFormat) -> []byte | error {
     match format {
         Gnu => teko::backend::emit_static_archive(member_name, obj, symbols)
         Bsd => teko::backend::emit_static_archive_macho(member_name, obj, symbols)
@@ -1611,13 +1612,14 @@ fn wrap_archive_bytes(member_name: str, obj: []byte, symbols: []teko::backend::S
  *                 exported-symbol index)
  * @param format   the target archive container
  * @return         0 on a successful write+archive, else the failing status
+ *                 (including the GNU writer's over-length member-name honest-stop)
  */
 fn finish_static_archive(dir: str, od: str, stem: str, obj: []byte, symbols: []teko::backend::Symbol, format: ArchiveFormat) -> i32 {
     let objp = teko::str::concat(od, "/", teko::str::concat(stem, ".o"))
     let member_name = teko::str::concat(stem, ".o")
     let libp = archive_output_path(od, stem, format)
     match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
-    let archive = wrap_archive_bytes(member_name, obj, symbols, format)
+    let archive = match wrap_archive_bytes(member_name, obj, symbols, format) { []byte as b => b; error as e => return fail(dir, e.message) }
     match teko::io::write_file_bytes(libp, archive) { error as e => return fail(dir, e.message); null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", libp, " (own backend, static archive)")))
     0

@@ -15,8 +15,11 @@
  *
  * GNU ar member names are capped at 15 bytes here (the trailing `/` terminator
  * fills the 16th byte of the fixed `Name` field); the extended `"//"` long-name
- * table is NOT implemented (KP16 scope note) — unreached today, since every
- * caller's member name is `"<stem>.o"`, always short. The Mach-O/COFF archive
+ * table is NOT implemented (KP16 scope note). A name over budget is an honest
+ * compile-time error (`ar_member_name_field`) rather than a silently corrupted
+ * archive — every caller's member name is `"<stem>.o"` today, always short, but
+ * a project whose manifest `name` is long enough now fails loudly instead of
+ * emitting a misaligned `.a`. The Mach-O/COFF archive
  * conventions (BSD `__.SYMDEF`, the two-linker-member MS `.lib` format) each get
  * their OWN writer (`objfile_ar_macho.tks`, `objfile_ar_coff.tks`) — this file
  * stays the GNU-ar-only ELF writer, unmodified.
@@ -152,12 +155,22 @@ fn ar_pad_right(s: str, width: u64) -> str {
 
 /**
  * ar_member_name_field — the 16-byte `Name` field for a real object member: `name`
- * followed by the GNU `/` terminator, space-padded to `AR_NAME_WIDTH`.
+ * followed by the GNU `/` terminator, space-padded to `AR_NAME_WIDTH`. HONEST-STOPS
+ * when `name` does not fit the short-name form (>15 bytes, so `name` + the `/`
+ * terminator would overflow the fixed 16-byte `Name` field): the GNU `"//"`
+ * extended long-name table is NOT implemented here (KP16 scope note, `objfile_ar.tks`'s
+ * own header) — silently emitting an over-length field would corrupt every
+ * following `ar_hdr` byte offset in the archive, a header-shape bug rather than a
+ * mere naming inconvenience, so this is refused loudly instead (M.1/M.3).
  *
  * @param str name  the member's bare name (<=15 bytes)
- * @return str  the 16-byte, space-padded `Name` field text
+ * @return str | error  the 16-byte, space-padded `Name` field text, or an honest-stop
+ * @throws  when `name.len > 15` (the GNU short-name form's own byte budget)
  */
-fn ar_member_name_field(name: str) -> str {
+fn ar_member_name_field(name: str) -> str | error {
+    if name.len > (15 to u64) {
+        return error { message = "objfile_ar: member name exceeds the GNU short-name form's 15-byte budget (the '//' long-name table is not implemented)" }
+    }
     ar_pad_right(teko::str::concat(name, "/"), AR_NAME_WIDTH)
 }
 
@@ -336,9 +349,10 @@ fn build_ar_symtab_data(symbols: []ArSymbol, member_offsets: []u32) -> []byte {
  * @param []ArMember members  the archive's members, in emission order
  * @param []ArSymbol symbols  the exported-symbol index (each naming its
  *        defining member by 0-based list index)
- * @return []byte  the finished `.a` archive bytes
+ * @return []byte | error  the finished `.a` archive bytes, or an honest-stop
+ * @throws  when a member's name does not fit `ar_member_name_field`'s short-name budget
  */
-pub fn emit_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte {
+pub fn emit_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte | error {
     let symtab_size = ar_symtab_data_size(symbols)
     let symtab_total = AR_HEADER_SIZE + symtab_size + ar_even_pad_len(symtab_size)
     let first_member_offset = (AR_GLOBAL_HEADER.len to u32) + symtab_total
@@ -350,7 +364,8 @@ pub fn emit_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte {
     mut i: u64 = 0
     loop {
         if i >= members.len { break }
-        b = emit_ar_member(b, ar_member_name_field(members[i].name), members[i].data, AR_MODE_REGULAR)
+        let name_field = match ar_member_name_field(members[i].name) { str as s => s; error as e => return e }
+        b = emit_ar_member(b, name_field, members[i].data, AR_MODE_REGULAR)
         i++
     }
     b
@@ -394,9 +409,10 @@ fn global_symbol_names(symbols: []Symbol) -> []str {
  * @param str obj_name  the member's bare on-disk name (<=15 bytes, `"<stem>.o"`)
  * @param []byte obj_bytes  the object file's bytes (own-native emitted)
  * @param []Symbol symbols  the module's neutral symbol list (for the exported-symbol index)
- * @return []byte  the finished `.a` archive bytes
+ * @return []byte | error  the finished `.a` archive bytes, or an honest-stop
+ * @throws  when `obj_name` does not fit the GNU short-name form's 15-byte budget
  */
-pub fn emit_static_archive(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte {
+pub fn emit_static_archive(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte | error {
     let member = ArMember { name = obj_name; data = obj_bytes }
     let names = global_symbol_names(symbols)
     mut ar_symbols: []ArSymbol = teko::list::empty()
