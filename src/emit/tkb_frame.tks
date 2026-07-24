@@ -404,6 +404,23 @@ fn collect_tarm(t: StrTable, a: checker::TArm) -> StrTable {
 
 // --- the frame: header (magic + version + hash) + the body ---
 
+/**
+ * Wire format version of a single-TExpr `.tkb`. Bumped 1 → 2 in 0.3.1: the drop-128 family
+ * removal (R2) deleted `PrimKind::{U128,I128,F16}` and RENUMBERED the surviving `PrimKind`
+ * ordinals on the wire, so a pre-0.3.1 artifact would deserialize into the WRONG types if the
+ * reader accepted it. Owner ruling 2026-07-24: an old `.tkb` must FAIL LOUD against the new
+ * compiler (M.3) — rebuild the artifact; no retroactive support for pre-STS/LTS formats.
+ * @since 0.3.1 (drop-128 R2)
+ */
+pub const TKB_EXPR_VERSION: u32 = 2
+
+/**
+ * Wire format version of a whole-program `.tkb` (C7.16). Bumped 3 → 4 in 0.3.1 for the same
+ * `PrimKind` ordinal renumbering as `TKB_EXPR_VERSION` — see its rationale.
+ * @since 0.3.1 (drop-128 R2)
+ */
+pub const TKB_PROGRAM_VERSION: u32 = 4
+
 fn serialize(te: checker::TExpr) -> []byte {
     let table = collect_strings(st_empty(), te)
     let body = write_texpr(write_strtable(teko::list::empty(), table), table, te)
@@ -413,7 +430,7 @@ fn serialize(te: checker::TExpr) -> []byte {
     out = write_u8(out, b'K')
     out = write_u8(out, b'B')
     out = write_u8(out, 0)
-    out = write_u32(out, 1)   // version 1 = a single TExpr
+    out = write_u32(out, TKB_EXPR_VERSION)
     out = write_u64(out, h)   // FNV-1a of the body
     append_bytes(out, body)
 }
@@ -430,7 +447,7 @@ fn serialize_program(prog: checker::TProgram) -> []byte {
     out = write_u8(out, b'K')
     out = write_u8(out, b'B')
     out = write_u8(out, 0)
-    out = write_u32(out, 3)
+    out = write_u32(out, TKB_PROGRAM_VERSION)
     out = write_u64(out, h)
     append_bytes(out, body)
 }
