@@ -20,41 +20,43 @@
  * convention (that `_64` suffix is an LLVM-writer-only distinction; Apple's
  * `ar`/`ranlib`/`ld64` apparently never renamed the member for 64-bit content
  * — the bit width is resolved some other way on the reader side, and the
- * literal member name stays the traditional one). This explains BOTH observed
- * failures in one shot: Apple's `ar t` didn't recognize `"__.SYMDEF_64"` as
- * the reserved table-of-contents name, so it fell through to validating the
- * member as an ordinary object file and rejected it ("Inappropriate file type
- * or format" — our raw `ranlib_64` bytes are not a Mach-O header); `ld64`
- * likely hit the same non-recognition and, while treating our synthetic
- * member as if it were a real linkable object, flagged its `Mode` field
- * (deterministic `"0"`, matching LLVm's OWN convention for this member) as
- * implausible for a real file — "archive member invalid control bits". Fixed
- * by using the exact, empirically-confirmed name AND sorting the ranlib
- * table by symbol name (what the `SORTED` in that name actually promises):
+ * literal member name stays the traditional one). The `#1/<N>` extended-name
+ * mechanism itself was ALREADY correct at this point (Apple's `ar t` resolved
+ * our wrong-named member through it just fine); only the LITERAL NAME TEXT
+ * was fixed here, plus sorting the ranlib table by symbol name (what
+ * `SORTED` in that name promises).
  *
- *   - The symbol-table member is named `__.SYMDEF SORTED` (Apple's real,
- *     empirically-confirmed name — `ar t`/`libtool -static` ground truth,
- *     not a guess from the LLVM writer or from `ar.h`/`ranlib.h` alone).
- *   - Its `ranlib_64` array is sorted alphabetically by exported symbol name
- *     (`bsd_sorted_symbols`) — matching the `SORTED` promise in the name.
- *   - EVERY member's `Name` field — including `__.SYMDEF SORTED` itself —
- *     uses the BSD `#1/<N>` extended-name form UNCONDITIONALLY (never the
- *     GNU inline-plus-`/`-terminator form): the `Name` field holds the
- *     literal text `#1/<N>`, and the real `N` name bytes are written
- *     immediately after the fixed 60-byte header, zero-padded so the CONTENT
- *     that follows starts at an 8-byte-aligned file offset (`bsd_name_layout`).
- *     `Size` covers name+pad+content together. (Apple's `ar t` DID correctly
- *     resolve our WRONG name through this exact `#1/<N>` mechanism in run
- *     30064264749's log — proof the encoding itself, only the LITERAL NAME
- *     TEXT, was ever the mismatch.)
- *   - Every field inside the symtab payload is 8 bytes (u64), little-endian:
- *     the `ranlib` array's byte-size prefix, each `struct ranlib_64` entry's
- *     `ran_strx`/`ran_off` (u64 each, `strx` first), and the string table's
- *     byte-size prefix.
- *   - Every member's CONTENT is padded to a multiple of 8 bytes after the
- *     data (`0x0A` fill, matching LLVM's own choice) so the NEXT member's
- *     header also lands 8-byte aligned — the BSD alignment unit, replacing
- *     GNU's 2-byte/`ar_even_pad_len` convention entirely for this writer.
+ * ITERATION NOTE 3 (run 30065167036, GROUND TRUTH — byte-for-byte `od -A d
+ * -t x1` diff of `ref_libtool.a`/`ref_arranlib.a`, built by Apple's OWN
+ * `libtool -static`/`ar rcs`+`ranlib` from the IDENTICAL `.o`, against our
+ * own archive from the SAME diagnostic step): the name fix alone did not
+ * satisfy `ar t`/`ld64` — the payload's INTERNAL layout also diverged from
+ * cctools' real `struct ranlib`/`struct symdef` shape, which turns out to be
+ * the CLASSIC 32-bit BSD layout, not LLVM's `ranlib_64`:
+ *
+ *   - Every field inside the symtab payload is 4 bytes (u32), little-endian —
+ *     NOT 8 (u64): the `ranlib` array's byte-size prefix, each entry's
+ *     `ran_strx`/`ran_off` (u32 each, `strx` first), and the string table's
+ *     byte-size prefix. (`BSD_RANLIB_ENTRY_SIZE` = 8, `bsd_ranlib_array`
+ *     emits `emit_u32_le`.)
+ *   - The string table's declared size prefix is its PADDED length —
+ *     `align_up(raw_len, BSD_ALIGN)` — with the padding bytes (`0x00`
+ *     fill) actually appended and included in that count
+ *     (`build_bsd_symstrtab`); the reference has ZERO trailing/outer padding
+ *     after the whole symdef payload specifically BECAUSE this construction
+ *     (`4 + 8*n + 4 + align_up(raw, 8)`) is already always a multiple of 8.
+ *   - The `Mode` field differs PER MEMBER KIND: `"100644"` for the
+ *     `__.SYMDEF SORTED` member, but `"644"` (no leading `"100"`) for a real
+ *     object member — two distinct BSD-specific constants
+ *     (`BSD_MODE_SYMDEF`/`BSD_MODE_MEMBER`), replacing the GNU writer's
+ *     reused `AR_MODE_SPECIAL`/`AR_MODE_REGULAR` (whose values don't match
+ *     either BSD case).
+ *   - A member's CONTENT is padded to a multiple of 8 bytes with `0x00` fill
+ *     (not `0x0A`) so the NEXT member's header also lands 8-byte aligned.
+ *   - The `#1/<N>` name-field mechanism (name text, inner padding formula
+ *     relative to the member's absolute header offset) was independently
+ *     re-confirmed byte-identical to the reference for both the symdef and
+ *     the real-object member names — no change there.
  */
 
 /**
@@ -70,10 +72,12 @@
 const BSD_SYMDEF_NAME: str = "__.SYMDEF SORTED"
 
 /**
- * BSD_RANLIB_ENTRY_SIZE — the on-disk size of one `struct ranlib_64` entry: an
- * 8-byte LE `ran_strx` + an 8-byte LE `ran_off`.
+ * BSD_RANLIB_ENTRY_SIZE — the on-disk size of one `struct ranlib` entry: a
+ * 4-byte LE `ran_strx` + a 4-byte LE `ran_off` (the classic 32-bit BSD shape
+ * Apple's real `ar`/`ranlib`/`ld64` actually consume — run 30065167036 ground
+ * truth, NOT LLVM's 64-bit-widened `ranlib_64`).
  */
-const BSD_RANLIB_ENTRY_SIZE: u32 = 16 to u32
+const BSD_RANLIB_ENTRY_SIZE: u32 = 8 to u32
 
 /**
  * BSD_ALIGN — the BSD/Darwin archive alignment unit (8 bytes): every member's
@@ -82,6 +86,22 @@ const BSD_RANLIB_ENTRY_SIZE: u32 = 16 to u32
  * before the next member's header starts.
  */
 const BSD_ALIGN: u32 = 8 to u32
+
+/**
+ * BSD_MODE_SYMDEF — the `ar_hdr` `Mode` field for the `__.SYMDEF SORTED`
+ * member, byte-for-byte the value Apple's own `libtool -static`/`ranlib`
+ * write (run 30065167036 ground truth) — distinct from a real object
+ * member's `BSD_MODE_MEMBER` and from the GNU writer's `AR_MODE_SPECIAL`.
+ */
+const BSD_MODE_SYMDEF: str = "100644"
+
+/**
+ * BSD_MODE_MEMBER — the `ar_hdr` `Mode` field for a real object-file member
+ * in a BSD/Darwin archive: octal `644`, WITHOUT the GNU writer's leading
+ * `"100"` regular-file-type digits (run 30065167036 ground truth — Apple's
+ * `ar t`/`ld64` reject the GNU-shaped `AR_MODE_REGULAR` value here).
+ */
+const BSD_MODE_MEMBER: str = "644"
 
 /**
  * bsd_align_pad — the zero-or-more byte count needed to advance `pos` up to
@@ -165,8 +185,9 @@ fn bsd_member_span(name_with_padding: u32, content_size: u32) -> u32 {
 /**
  * bsd_write_member — emit one complete BSD archive member: the 60-byte
  * header (`Size` = name-with-padding + content length), the raw name bytes,
- * `inner_pad` zero bytes, the content bytes, then `0x0A`-byte padding up to
- * the content's own `BSD_ALIGN` boundary.
+ * `inner_pad` zero bytes, the content bytes, then `0x00`-byte padding up to
+ * the content's own `BSD_ALIGN` boundary (run 30065167036 ground truth — NOT
+ * `0x0A`, LLVM's own writer's fill choice).
  *
  * @param []byte buf  the buffer to extend
  * @param BsdNameLayout layout  the member's resolved name encoding
@@ -188,7 +209,7 @@ fn bsd_write_member(buf: []byte, layout: BsdNameLayout, content: []byte, mode: s
     i = 0
     loop {
         if i >= outer { break }
-        b = teko::list::push(b, 0x0A to byte)
+        b = teko::list::push(b, 0 to byte)
         i++
     }
     b
@@ -243,12 +264,16 @@ fn bsd_layout_members(first_offset: u32, members: []ArMember) -> BsdLayoutResult
 
 /**
  * BsdSymStrTab — the assembled `__.SYMDEF SORTED` string-table part: its raw
- * bytes (each `ArSymbol` name, NUL-terminated, concatenated) and the
- * parallel per-symbol byte offset each `ranlib_64` entry's `ran_strx` carries.
+ * bytes (each `ArSymbol` name, NUL-terminated, concatenated, then `0x00`-
+ * padded up to `BSD_ALIGN` — the DECLARED string-table size the reference
+ * archive's own size prefix carries is this PADDED length, run 30065167036
+ * ground truth) and the parallel per-symbol byte offset each `ranlib`
+ * entry's `ran_strx` carries.
  */
 type BsdSymStrTab = struct {
     /**
-     * bytes — the string-table bytes (NUL-terminated names, concatenated).
+     * bytes — the string-table bytes: NUL-terminated names, concatenated,
+     * then zero-padded up to the next `BSD_ALIGN` boundary.
      */
     bytes: []byte
     /**
@@ -261,10 +286,12 @@ type BsdSymStrTab = struct {
  * build_bsd_symstrtab — assemble the `__.SYMDEF SORTED` string-table part from
  * the archive's symbol index: each `ArSymbol.name` (already Mach-O
  * `_`-prefixed by the caller), NUL-terminated, concatenated in order,
- * recording each name's start offset as its `ran_strx`.
+ * recording each name's start offset as its `ran_strx`, then zero-padded up
+ * to the next `BSD_ALIGN` boundary (the reference's OWN string-table size
+ * prefix always counts this padding — run 30065167036 ground truth).
  *
  * @param []ArSymbol symbols  the archive's exported-symbol index
- * @return BsdSymStrTab  the string-table bytes + the per-symbol name offsets
+ * @return BsdSymStrTab  the padded string-table bytes + the per-symbol name offsets
  */
 fn build_bsd_symstrtab(symbols: []ArSymbol) -> BsdSymStrTab {
     mut bytes: []byte = teko::list::empty()
@@ -277,59 +304,70 @@ fn build_bsd_symstrtab(symbols: []ArSymbol) -> BsdSymStrTab {
         bytes = teko::list::push(bytes, 0 to byte)
         i++
     }
+    let pad = bsd_align_pad(bytes.len to u32)
+    mut j: u32 = 0
+    loop {
+        if j >= pad { break }
+        bytes = teko::list::push(bytes, 0 to byte)
+        j++
+    }
     BsdSymStrTab { bytes = bytes; strx = strx }
 }
 
 /**
  * bsd_symdef_payload_size — the byte length of the `__.SYMDEF SORTED` member's
- * DATA (excluding its own header+name prefix): the two 8-byte LE length
- * prefixes, the `ranlib_64` array (`symbols.len * 16`), and the
- * NUL-terminated string table — computable BEFORE any member's file offset
- * is known, since it depends only on the symbol names/count, mirroring
- * `objfile_ar.tks::ar_symtab_data_size`'s two-pass layout seam.
+ * DATA (excluding its own header+name prefix): the two 4-byte LE length
+ * prefixes, the `ranlib` array (`symbols.len * BSD_RANLIB_ENTRY_SIZE`), and
+ * the NUL-terminated, `BSD_ALIGN`-padded string table — computable BEFORE any
+ * member's file offset is known, since it depends only on the symbol names/
+ * count, mirroring `objfile_ar.tks::ar_symtab_data_size`'s two-pass layout
+ * seam.
  *
  * @param []ArSymbol symbols  the archive's exported-symbol index
  * @return u32  the `__.SYMDEF SORTED` member's unpadded data byte length
  */
 fn bsd_symdef_payload_size(symbols: []ArSymbol) -> u32 {
-    mut total: u32 = (8 to u32) + (symbols.len to u32) * BSD_RANLIB_ENTRY_SIZE + (8 to u32)
+    mut raw_strtab: u32 = 0
     mut i: u64 = 0
     loop {
         if i >= symbols.len { break }
-        total = total + (symbols[i].name.len to u32) + (1 to u32)
+        raw_strtab = raw_strtab + (symbols[i].name.len to u32) + (1 to u32)
         i++
     }
-    total
+    let padded_strtab = raw_strtab + bsd_align_pad(raw_strtab)
+    (4 to u32) + (symbols.len to u32) * BSD_RANLIB_ENTRY_SIZE + (4 to u32) + padded_strtab
 }
 
 /**
- * bsd_ranlib_array — the `struct ranlib_64[]` bytes: one 16-byte LE entry per
- * symbol (`ran_strx` from the pre-built string table, `ran_off` the defining
- * member's real header offset — both widened to u64 on the wire), in
- * symbol-index order.
+ * bsd_ranlib_array — the `struct ranlib[]` bytes: one `BSD_RANLIB_ENTRY_SIZE`
+ * LE entry per symbol (`ran_strx` from the pre-built string table, `ran_off`
+ * the defining member's real header offset — both 4-byte LE on the wire, the
+ * classic 32-bit BSD shape, run 30065167036 ground truth), in symbol-index
+ * order.
  *
  * @param []ArSymbol symbols  the archive's exported-symbol index
  * @param []u32 member_offsets  each member's own header file offset, member order
  * @param []u32 strx  each symbol's string-table offset, symbol order
- * @return []byte  the `ranlib_64` array bytes
+ * @return []byte  the `ranlib` array bytes
  */
 fn bsd_ranlib_array(symbols: []ArSymbol, member_offsets: []u32, strx: []u32) -> []byte {
     mut b: []byte = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= symbols.len { break }
-        b = emit_u64_le(b, strx[i] to u64)
-        b = emit_u64_le(b, member_offsets[symbols[i].member] to u64)
+        b = emit_u32_le(b, strx[i])
+        b = emit_u32_le(b, member_offsets[symbols[i].member])
         i++
     }
     b
 }
 
 /**
- * bsd_symdef_payload — the complete `__.SYMDEF SORTED` member DATA: the LE u64
- * byte size of the `ranlib_64` array, the array itself, the LE u64 byte size
- * of the string table, then the string table — in that fixed four-block
- * order.
+ * bsd_symdef_payload — the complete `__.SYMDEF SORTED` member DATA: the LE u32
+ * byte size of the `ranlib` array, the array itself, the LE u32 byte size of
+ * the (already `BSD_ALIGN`-padded) string table, then the string table — in
+ * that fixed four-block order (run 30065167036 ground truth: the classic
+ * 32-bit BSD `struct symdef` shape, not LLVM's 64-bit-widened one).
  *
  * @param []ArSymbol symbols  the archive's exported-symbol index
  * @param []u32 member_offsets  each member's own header file offset, member order
@@ -338,9 +376,9 @@ fn bsd_ranlib_array(symbols: []ArSymbol, member_offsets: []u32, strx: []u32) -> 
 fn bsd_symdef_payload(symbols: []ArSymbol, member_offsets: []u32) -> []byte {
     let strtab = build_bsd_symstrtab(symbols)
     let ranlib = bsd_ranlib_array(symbols, member_offsets, strtab.strx)
-    mut b: []byte = emit_u64_le(teko::list::empty(), ranlib.len to u64)
+    mut b: []byte = emit_u32_le(teko::list::empty(), ranlib.len to u32)
     b = append_bytes(b, ranlib)
-    b = emit_u64_le(b, strtab.bytes.len to u64)
+    b = emit_u32_le(b, strtab.bytes.len to u32)
     append_bytes(b, strtab.bytes)
 }
 
@@ -428,11 +466,11 @@ pub fn emit_bsd_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte {
     let symdef_data = bsd_symdef_payload(sorted, laid_out.offsets)
     mut b: []byte = teko::list::empty()
     b = append_bytes(b, AR_GLOBAL_HEADER)
-    b = bsd_write_member(b, symdef_layout, symdef_data, AR_MODE_SPECIAL)
+    b = bsd_write_member(b, symdef_layout, symdef_data, BSD_MODE_SYMDEF)
     mut i: u64 = 0
     loop {
         if i >= members.len { break }
-        b = bsd_write_member(b, laid_out.layouts[i], members[i].data, AR_MODE_REGULAR)
+        b = bsd_write_member(b, laid_out.layouts[i], members[i].data, BSD_MODE_MEMBER)
         i++
     }
     b
