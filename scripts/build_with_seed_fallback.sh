@@ -222,6 +222,7 @@ while :; do
 done
 rm -f "$BASE_LOG"
 log "bootstrap point: $BOOT_SHA (newest seed-buildable ancestor, $PROBES probe(s) back from the merge-base)"
+LADDER_SHA="$MERGE_BASE_SHA"
 MERGE_BASE_SHA="$BOOT_SHA"
 
 if ! GEN1_BASE_BIN="$(resolve_bin "$GEN1_BASE_DIR")"; then
@@ -231,13 +232,56 @@ fi
 
 TIP_LOG="$(mktemp)"
 if ! build_project "$GEN1_BASE_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$PWD")"; then
-  log "FATAL: gen1 of merge-base $MERGE_BASE_SHA still failed to build the tip"
-  log "----- seed build of the tip (failure) -----"
-  cat "$FAST_LOG"
-  log "----- gen1(merge-base $MERGE_BASE_SHA) build of the tip (failure) -----"
+  # LADDER (second rung). In a stacked train TWO capability jumps can separate the bootstrap
+  # point from the tip (e.g. the 2a codegen fixes AND the W-RULE checker): gen1(bootstrap) can
+  # build the seed-era corpus but not a tip whose corpus already RELIES on a capability a HIGHER
+  # wagon introduced. The PR's own merge-base with its base branch carries every capability
+  # except the tip's delta, so it is the natural intermediate rung: gen1(bootstrap) builds the
+  # merge-base -> gen2 (now capability-complete) builds the tip. Only engaged when the walk
+  # actually stepped back (otherwise the merge-base IS the bootstrap point and retrying it
+  # would loop).
+  if [ "$LADDER_SHA" = "$BOOT_SHA" ]; then
+    log "FATAL: gen1 of bootstrap point $BOOT_SHA failed to build the tip (no higher rung exists)"
+    log "----- seed build of the tip (failure) -----"
+    cat "$FAST_LOG"
+    log "----- gen1($BOOT_SHA) build of the tip (failure) -----"
+    cat "$TIP_LOG"
+    rm -f "$TIP_LOG"
+    exit 1
+  fi
+  log "ladder engaged: gen1($BOOT_SHA) cannot build the tip — building merge-base $LADDER_SHA as the intermediate rung"
+  git -C "$WORKTREE_DIR" checkout -q --detach "$LADDER_SHA"
+  git -C "$WORKTREE_DIR" clean -fdxq
+  GEN2_DIR="$WORKTREE_DIR/.ladder-out"
+  rm -rf "$GEN2_DIR"
+  mkdir -p "$GEN2_DIR"
+  RUNG_LOG="$(mktemp)"
+  if ! build_project "$GEN1_BASE_BIN" "$WORKTREE_DIR" "$GEN2_DIR" "$RUNG_LOG" "$(rt_dir_of "$WORKTREE_DIR")"; then
+    log "FATAL: gen1($BOOT_SHA) failed to build the intermediate rung $LADDER_SHA"
+    log "----- gen1($BOOT_SHA) build of rung $LADDER_SHA (failure) -----"
+    cat "$RUNG_LOG"
+    rm -f "$TIP_LOG" "$RUNG_LOG"
+    exit 1
+  fi
+  rm -f "$RUNG_LOG"
+  if ! GEN2_BIN="$(resolve_bin "$GEN2_DIR")"; then
+    log "FATAL: rung build reported success but no teko/teko.exe binary was found in $GEN2_DIR"
+    rm -f "$TIP_LOG"
+    exit 1
+  fi
+  if ! build_project "$GEN2_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$PWD")"; then
+    log "FATAL: gen2 of rung $LADDER_SHA still failed to build the tip"
+    log "----- seed build of the tip (failure) -----"
+    cat "$FAST_LOG"
+    log "----- gen2(rung $LADDER_SHA) build of the tip (failure) -----"
+    cat "$TIP_LOG"
+    rm -f "$TIP_LOG"
+    exit 1
+  fi
   cat "$TIP_LOG"
-  rm -f "$TIP_LOG"
-  exit 1
+  rm -f "$FAST_LOG" "$TIP_LOG"
+  log "seed fallback complete — tip built via gen1($BOOT_SHA) -> gen2(rung $LADDER_SHA)"
+  exit 0
 fi
 cat "$TIP_LOG"
 rm -f "$FAST_LOG" "$TIP_LOG"
