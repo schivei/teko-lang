@@ -608,26 +608,22 @@ fn select_un_riscv(ctx0: SelCtxRiscv, inst: lir::LInst, u: lir::LUn) -> SelCtxRi
  * register for the parameter's GPR-class index (`a0..a7`, read through
  * `arg_reg(RISCV64_LP64D, ...)` — the arg ids are `x10..x17`, NOT the encoding
  * order) into the parameter's VReg via `mv`. A float-class parameter needs an
- * `fa*` register (the `B2-fp` stop), an i128 parameter a register-pair slot (the
- * i128-inherited stop), and a parameter past the 8-register window the LP64D
- * stack-arg slot (the `B2-args` stop).
+ * `fa*` register (the `B2-fp` stop), and a parameter past the 8-register window
+ * the LP64D stack-arg slot (the `B2-args` stop).
  *
  * @param SelCtxRiscv ctx0  the context to extend
  * @param lir::LFunc f  the enclosing function (its `param_types`)
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LParam p  the parameter op
  * @return SelCtxRiscv | error  the advanced context, or a NAMED honest-stop
- * @throws  an out-of-range index (internal), an `i128` param, a float param
- *          (`B2-fp`), or a past-`a7` param (`B2-args`)
+ * @throws  an out-of-range index (internal), a float param (`B2-fp`), or a
+ *          past-`a7` param (`B2-args`)
  */
 fn select_param_riscv(ctx0: SelCtxRiscv, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtxRiscv | error {
     if (p.index to u64) >= f.param_types.len {
         return error { message = "isel riscv64: param index out of range (internal)" }
     }
     let ty = f.param_types[p.index to u64]
-    if ltype_is_i128(ty) {
-        return error { message = "isel riscv64: an i128 parameter needs a register-pair ABI slot (the i128-inherited stop)" }
-    }
     if mregclass_of_ltype(ty) == MRegClass::FPR {
         return error { message = "isel riscv64: B2-fp — a float parameter arrives in an fa* register via an F/D move, the float honest-stop (0.3.1)" }
     }
@@ -837,13 +833,11 @@ fn select_branch_riscv(ctx0: SelCtxRiscv, f: lir::LFunc, br: lir::LBranch) -> Se
 /**
  * mem_size_riscv — the load/store transfer width for a machine class: B/H/W/D
  * for the integer widths (and Ptr = D). A float access (F32/F64) needs an F/D
- * move (the `B2-fp` stop), an i128 access a register-pair transfer (the
- * i128-inherited stop), an f16 access has no single-register width, and a
- * void-typed access is malformed.
+ * move (the `B2-fp` stop), and a void-typed access is malformed.
  *
  * @param lir::LType t  the accessed value's machine class
  * @return MMemSizeRiscv | error  the transfer width, or a NAMED honest-stop
- * @throws  a float/f16 access (`B2-fp`/no-width), an i128 access, or a void access
+ * @throws  a float access (`B2-fp`), or a void access
  */
 fn mem_size_riscv(t: lir::LType) -> MMemSizeRiscv | error {
     match t {
@@ -854,8 +848,6 @@ fn mem_size_riscv(t: lir::LType) -> MMemSizeRiscv | error {
         lir::LType::Ptr => MMemSizeRiscv::D
         lir::LType::F32 => error { message = "isel riscv64: B2-fp — an f32 memory access uses an F/D move, the float honest-stop (0.3.1)" }
         lir::LType::F64 => error { message = "isel riscv64: B2-fp — an f64 memory access uses an F/D move, the float honest-stop (0.3.1)" }
-        lir::LType::I128 => error { message = "isel riscv64: an i128 memory access needs a register-pair transfer (the i128-inherited stop)" }
-        lir::LType::F16 => error { message = "isel riscv64: an f16 memory access has no single-register transfer width (0.3.1)" }
         lir::LType::Void => error { message = "isel riscv64: a void-typed memory access is malformed (internal)" }
     }
 }

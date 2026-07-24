@@ -77,8 +77,9 @@ pub type CVAgg = struct { elems: []ConstValue }
  * IntInfo — the width/signedness a comptime integer op runs at: the number of value
  * bits and whether the top bit is a sign bit. Derived from a `CVInt.ty` (a `Prim`
  * integer or `byte`) by `int_info`; every wrap/overflow/re-emission decision reads it.
- * `width` never exceeds 64 — `int_info` errors on a wider type (the fold does not
- * evaluate the still-accepted-but-uncarried `u128`/`i128` surface, drop-128, 2026-07-24).
+ * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u128`/`i128` were
+ * removed from the surface, drop-128, 2026-07-24), so `int_info`'s width gate is now a
+ * defensive invariant rather than a live not-evaluated-width path.
  *
  * @field width   the integer's bit width (8 / 16 / 32 / 64)
  * @field is_signed  true iff the type is a signed integer (i8..i64), false for unsigned/byte
@@ -262,11 +263,10 @@ fn is_all_ones(bits: u64, w: u32) -> bool { mask_to_width(bits, w) == width_mask
 /**
  * int_info — classify a type as an integer width/signedness, or error when it is not an
  * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned), or when
- * it is WIDER than the fold's u64 carrier — the still-accepted `u128`/`i128` surface types
- * (drop-128, 2026-07-24: the fold does not evaluate them; such a subtree is left unfolded,
- * exactly like any other form the fold does not support yet). This is the ONE gate every
- * `IntInfo` passes through, so it protects every width/shift computation downstream from
- * ever seeing a width the u64 carrier cannot represent.
+ * it is WIDER than the fold's u64 carrier. The surface no longer HAS a type wider than 64 bits
+ * (`u128`/`i128` were removed, drop-128, 2026-07-24) so this width gate is a defensive
+ * invariant, not a live path — but it is the ONE gate every `IntInfo` passes through, so it
+ * protects every width/shift computation downstream from ever seeing an out-of-range width.
  *
  * @param t  the type to classify
  * @return   the width/signedness, or an error when `t` is not an integer type the fold carries
@@ -277,7 +277,7 @@ fn int_info(t: Type) -> IntInfo | error {
         Prim as p => {
             if !prim_is_int(p.kind) { return error { message = "comptime fold: type is not an integer" } }
             let w = prim_width(p.kind)
-            if w > 64 { return error { message = "comptime fold: integer width wider than 64 bits is not evaluated (u128/i128 — drop-128, 2026-07-24)" } }
+            if w > 64 { return error { message = "comptime fold: integer width wider than 64 bits is not evaluated" } }
             IntInfo { width = w; is_signed = prim_is_signed(p.kind) }
         }
         Byte => IntInfo { width = 8; is_signed = false }
@@ -1640,10 +1640,10 @@ fn float_div(x: f64, y: f64, e: TExpr) -> ConstValue | error {
 
 /**
  * cf_is_int_type — true iff `t` is an integer type the fold re-emits as a `TNumber` literal (a
- * `Prim` integer i8..i64 / u8..u64, or `byte` — `int_info`'s width gate means a still-accepted
- * `u128`/`i128` type is NOT included here; such a value is left unfolded, drop-128 2026-07-24).
- * The evaluability predicate and `literal_of` both gate on this so the CF2 fold stays within the
- * integer scalar subset (floats, chars, strings and aggregates are left unfolded for a later crumb).
+ * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u128`/`i128` family has no surface
+ * type to classify, drop-128 2026-07-24). The evaluability predicate and `literal_of` both gate
+ * on this so the CF2 fold stays within the integer scalar subset (floats, chars, strings and
+ * aggregates are left unfolded for a later crumb).
  *
  * @param t  the type to classify
  * @return   whether `t` is an integer/byte type the fold carries

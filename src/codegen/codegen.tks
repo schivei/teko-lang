@@ -306,20 +306,23 @@ pub fn tk_emit_meta(name: str, version: str, suffix: str, description: str) -> s
 // Types -> C type text.
 // ---------------------------------------------------------------------------
 
-// emit_prim — a PrimKind -> its C fixed-width type name. (C: `emit_prim`.)
+/**
+ * emit_prim — a `PrimKind` -> its C fixed-width type name. (C: `emit_prim`.)
+ *
+ * @param buf  the growable output buffer
+ * @param k    the prim kind to emit
+ * @return     the grown buffer
+ */
 fn emit_prim(buf: []byte, k: checker::PrimKind) -> []byte | error {
     match k {
         checker::PrimKind::U8 => cb(buf, "uint8_t")
         checker::PrimKind::U16 => cb(buf, "uint16_t")
         checker::PrimKind::U32 => cb(buf, "uint32_t")
         checker::PrimKind::U64 => cb(buf, "uint64_t")
-        checker::PrimKind::U128 => cb(buf, "unsigned __int128")
         checker::PrimKind::I8 => cb(buf, "int8_t")
         checker::PrimKind::I16 => cb(buf, "int16_t")
         checker::PrimKind::I32 => cb(buf, "int32_t")
         checker::PrimKind::I64 => cb(buf, "int64_t")
-        checker::PrimKind::I128 => cb(buf, "__int128")
-        checker::PrimKind::F16 => cb(buf, "_Float16")
         checker::PrimKind::F32 => cb(buf, "float")
         checker::PrimKind::F64 => cb(buf, "double")
         checker::PrimKind::Bool => cb(buf, "bool")
@@ -1108,11 +1111,10 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
         checker::Prim as p => match p.kind {
             checker::PrimKind::U8 => cb(buf, "u8"); checker::PrimKind::U16 => cb(buf, "u16")
             checker::PrimKind::U32 => cb(buf, "u32"); checker::PrimKind::U64 => cb(buf, "u64")
-            checker::PrimKind::U128 => cb(buf, "u128"); checker::PrimKind::I8 => cb(buf, "i8")
-            checker::PrimKind::I16 => cb(buf, "i16"); checker::PrimKind::I32 => cb(buf, "i32")
-            checker::PrimKind::I64 => cb(buf, "i64"); checker::PrimKind::I128 => cb(buf, "i128")
-            checker::PrimKind::F16 => cb(buf, "f16"); checker::PrimKind::F32 => cb(buf, "f32")
-            checker::PrimKind::F64 => cb(buf, "f64"); checker::PrimKind::Bool => cb(buf, "bool")
+            checker::PrimKind::I8 => cb(buf, "i8"); checker::PrimKind::I16 => cb(buf, "i16")
+            checker::PrimKind::I32 => cb(buf, "i32"); checker::PrimKind::I64 => cb(buf, "i64")
+            checker::PrimKind::F32 => cb(buf, "f32"); checker::PrimKind::F64 => cb(buf, "f64")
+            checker::PrimKind::Bool => cb(buf, "bool")
         }
         checker::Byte => cb(buf, "byte")
         checker::Char => cb(buf, "char")
@@ -1146,11 +1148,10 @@ fn cg_opt_mangle_str(inner: checker::Type) -> str | error {
         checker::Prim as p => match p.kind {
             checker::PrimKind::U8 => "u8"; checker::PrimKind::U16 => "u16"
             checker::PrimKind::U32 => "u32"; checker::PrimKind::U64 => "u64"
-            checker::PrimKind::U128 => "u128"; checker::PrimKind::I8 => "i8"
-            checker::PrimKind::I16 => "i16"; checker::PrimKind::I32 => "i32"
-            checker::PrimKind::I64 => "i64"; checker::PrimKind::I128 => "i128"
-            checker::PrimKind::F16 => "f16"; checker::PrimKind::F32 => "f32"
-            checker::PrimKind::F64 => "f64"; checker::PrimKind::Bool => "bool"
+            checker::PrimKind::I8 => "i8"; checker::PrimKind::I16 => "i16"
+            checker::PrimKind::I32 => "i32"; checker::PrimKind::I64 => "i64"
+            checker::PrimKind::F32 => "f32"; checker::PrimKind::F64 => "f64"
+            checker::PrimKind::Bool => "bool"
         }
         checker::Byte => "byte"
         checker::Char => "char"
@@ -1905,13 +1906,10 @@ fn emit_type_expr(buf: []byte, prog: checker::TProgram, te: parser::TypeExpr, re
             else if last == "u16" { return cb(buf, "uint16_t") }
             else if last == "u32" { return cb(buf, "uint32_t") }
             else if last == "u64" { return cb(buf, "uint64_t") }
-            else if last == "u128" { return cb(buf, "unsigned __int128") }
             else if last == "i8" { return cb(buf, "int8_t") }
             else if last == "i16" { return cb(buf, "int16_t") }
             else if last == "i32" { return cb(buf, "int32_t") }
             else if last == "i64" { return cb(buf, "int64_t") }
-            else if last == "i128" { return cb(buf, "__int128") }
-            else if last == "f16" { return cb(buf, "_Float16") }
             else if last == "f32" { return cb(buf, "float") }
             else if last == "f64" { return cb(buf, "double") }
             else if last == "bool" { return cb(buf, "bool") }
@@ -2058,24 +2056,24 @@ fn assignop_c(op: lexer::TokenKind) -> str | error {
 // Integer prims only; bool is never a guard target.
 // ---------------------------------------------------------------------------
 
-// These mirror the type.tks predicates (prim_is_float/prim_is_int/…) but stay local so
-// the F3 logic is self-contained; they are now exhaustive over the Tier-1 prim set
-// (incl. U128/I128 + the floats F16/F32/F64). (C twins: cg_prim_is_*.)
-
-// cg_prim_is_float — the IEEE float prims (F16/F32/F64). (type.tks: prim_is_float.)
+/**
+ * cg_prim_is_float — the IEEE float prims (F32/F64). (type.tks: `prim_is_float`.) Mirrors the
+ * `type.tks` predicate but stays local so the F3 logic is self-contained; exhaustive over the
+ * native prim set (u8..u64/i8..i64 + the floats f32/f64, drop-128 2026-07-24). (C twin:
+ * `cg_prim_is_float`.)
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a float
+ */
 fn cg_prim_is_float(k: checker::PrimKind) -> bool { checker::prim_is_float(k) }
 
-// cg_prim_is_int — the integer prims (U8..U128, I8..I128). NOT bool, NOT float.
+/**
+ * cg_prim_is_int — the integer prims (U8..U64, I8..I64). NOT bool, NOT float.
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is an integer
+ */
 fn cg_prim_is_int(k: checker::PrimKind) -> bool { checker::prim_is_int(k) }
-
-/** cg_is_arith_builtin_call — is a `div`/`rem`-named call the BARE reserved arithmetic FFI (`teko::div`
-    /`teko::rem`, the VM's checked ÷/% lowering) rather than a namespaced USER fn of the same name? The
-    reserved builtins carry NO user namespace (empty call_ns); a `teko::runtime::div` (i64→i64) carries
-    its own namespace and must keep its own C symbol. The native gate compiles such a user call for the
-    first time (#265), so this guard stops it from being hijacked into the `tk_div`/`tk_rem` builtin. */
-fn cg_is_arith_builtin_call(last: str, call_ns: str) -> bool {
-    (last == "div" || last == "rem") && call_ns.len == 0
-}
 
 /** cg_assert_c_symbol — the C symbol for an INJECTED `teko::assert::<name>` call, or "" when the
  *  call is not a `teko::assert::*` builtin. The injected assertions (is_true/is_false/str_contains)
@@ -2104,10 +2102,20 @@ fn cg_assert_c_symbol(callee: parser::Path) -> str {
     ""
 }
 
-// cg_prim_is_signed_int — the SIGNED integer prims (I8..I128). (type.tks: prim_is_signed.)
+/**
+ * cg_prim_is_signed_int — the SIGNED integer prims (I8..I64). (type.tks: `prim_is_signed`.)
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a signed integer
+ */
 fn cg_prim_is_signed_int(k: checker::PrimKind) -> bool { checker::prim_is_signed(k) }
 
-// cg_int_width — bit-width ordinal (8/16/32/64/128) for narrowing analysis; ints only.
+/**
+ * cg_int_width — bit-width ordinal (8/16/32/64) for narrowing analysis; ints only.
+ *
+ * @param k  the prim kind to measure
+ * @return   its bit width, or 0 for a non-integer prim
+ */
 fn cg_int_width(k: checker::PrimKind) -> i64 {
     match k {
         checker::PrimKind::U8 => 8
@@ -2118,46 +2126,58 @@ fn cg_int_width(k: checker::PrimKind) -> i64 {
         checker::PrimKind::I32 => 32
         checker::PrimKind::U64 => 64
         checker::PrimKind::I64 => 64
-        checker::PrimKind::U128 => 128
-        checker::PrimKind::I128 => 128
         _ => 0
     }
 }
 
-// prim_div_tag — the tag ("u8".."i128", "f16".."f64") naming a div/mod (or cast) helper,
-// e.g. tk_div_u32 / tk_div_f64 / tk_to_i16. Bool has no tag (never a guard target); the
-// C returned NULL for Bool, here that is an honest `str | error`. (C: `prim_div_tag`.)
+/**
+ * prim_div_tag — the tag ("u8".."i64", "f32"/"f64") naming a div/mod (or cast) helper, e.g.
+ * `tk_div_u32` / `tk_div_f64` / `tk_to_i16`. Bool has no tag (never a guard target); the C
+ * returned NULL for Bool, here that is an honest `str | error`. (C: `prim_div_tag`.)
+ *
+ * @param k  the prim kind to tag
+ * @return   the runtime-helper suffix
+ * @throws   when `k` is `Bool` (no div/cast helper exists)
+ */
 fn prim_div_tag(k: checker::PrimKind) -> str | error {
     match k {
         checker::PrimKind::U8 => "u8"
         checker::PrimKind::U16 => "u16"
         checker::PrimKind::U32 => "u32"
         checker::PrimKind::U64 => "u64"
-        checker::PrimKind::U128 => "u128"
         checker::PrimKind::I8 => "i8"
         checker::PrimKind::I16 => "i16"
         checker::PrimKind::I32 => "i32"
         checker::PrimKind::I64 => "i64"
-        checker::PrimKind::I128 => "i128"
-        checker::PrimKind::F16 => "f16"
         checker::PrimKind::F32 => "f32"
         checker::PrimKind::F64 => "f64"
         checker::PrimKind::Bool => error { message = "codegen: bool has no div/cast helper tag" }
     }
 }
 
-// prim_int_tag — the integer-target tag ("u8".."i128") naming a cast helper; error for
-// non-ints (float/bool). Reuses prim_div_tag once integer-ness is established.
+/**
+ * prim_int_tag — the integer-target tag ("u8".."i64") naming a cast helper; error for
+ * non-ints (float/bool). Reuses `prim_div_tag` once integer-ness is established.
+ *
+ * @param k  the prim kind to tag
+ * @return   the runtime-helper suffix
+ * @throws   when `k` is not an integer
+ */
 fn prim_int_tag(k: checker::PrimKind) -> str | error {
     if cg_prim_is_int(k) { return prim_div_tag(k) }
     error { message = "codegen: cast to a non-integer type not yet supported" }
 }
 
-// prim_float_tag — the float-source suffix ("f16"/"f32"/"f64") for a float->int cast
-// helper (tk_to_<dst>_from_<fsrc>); error for non-floats.
+/**
+ * prim_float_tag — the float-source suffix ("f32"/"f64") for a float->int cast helper
+ * (`tk_to_<dst>_from_<fsrc>`); error for non-floats.
+ *
+ * @param k  the prim kind to tag
+ * @return   the float-source suffix
+ * @throws   when `k` is not a float
+ */
 fn prim_float_tag(k: checker::PrimKind) -> str | error {
     match k {
-        checker::PrimKind::F16 => "f16"
         checker::PrimKind::F32 => "f32"
         checker::PrimKind::F64 => "f64"
         _ => error { message = "codegen: not a float source type" }
@@ -2203,11 +2223,9 @@ fn emit_div_mod(buf: []byte, prog: checker::TProgram, e: checker::TExpr, b: chec
         return error { message = "codegen: modulo on a float type is not allowed" }
     }
     let tag = match prim_div_tag(prim.kind) {
-        str as t => t   // covers u8..i128 AND f16..f64
+        str as t => t
         error => return error { message = "codegen: division/modulo on a non-numeric type not yet supported" }
     }
-    // Float `/` -> tk_div_f64/f32/f16 (ruling §5: float ÷0 PANICS, parity with int).
-    // Int `/`,`%` -> tk_div_*/tk_mod_* as before. Single-eval (each operand emitted once).
     mut out = buf
     if b.op == lexer::TokenKind::Slash { out = cb(out, "tk_div_") } else { out = cb(out, "tk_mod_") }
     out = cb(out, tag)
@@ -2997,12 +3015,7 @@ fn emit_call(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, e: c
             else if last == "stdin_eof" { builtin = "tk_rt_stdin_eof"; has_builtin = true }
             else if last == "read_stdin" { builtin = "tk_rt_read_stdin"; has_builtin = true }
             else if last == "parse" { builtin = "tk_float_parse"; has_builtin = true }   // teko::float::parse(str) -> f64
-            // arithmetic FFI over the i128 carrier (sign-aware) + float bit-patterns. (`div`/`rem`
-            // mangle to tk_* so they never clash with libc's div/rem.)
-            else if cg_is_arith_builtin_call(last, c.call_ns) && last == "div" { builtin = "tk_div"; has_builtin = true }
-            else if cg_is_arith_builtin_call(last, c.call_ns) && last == "rem" { builtin = "tk_rem"; has_builtin = true }
             else if last == "fdiv" { builtin = "tk_fdiv"; has_builtin = true }   // (f64,f64) -> f64
-            else if last == "int_to_float" { builtin = "tk_int_to_float"; has_builtin = true }   // (i128,bool) -> f64
             else if last == "f64_bits" { builtin = "tk_f64_bits"; has_builtin = true }   // (f64) -> u64
             else if last == "f64_from_bits" { builtin = "tk_f64_from_bits"; has_builtin = true }   // (u64) -> f64
             // D3 — test-coverage sink (host side-channel): the VM marks executed production fns.
@@ -6197,12 +6210,18 @@ fn emit_match_stmt(buf: []byte, prog: checker::TProgram, e: checker::TExpr, m: c
 
 // emit_expr — the expression dispatch (the C's emit_expr switch). Unsupported value
 // nodes fail with an honest message (M.3). (C: `emit_expr`.)
-// emit_number — a TNumber literal. The node's resolved prim (e.type) decides width and
-// float-kind (N1/N2). Float literals emit a round-trippable double, cast to the right C
-// float type (f64 plain; f32 `(float)`; f16 `(_Float16)`). Integer literals emit the
-// decimal value cast to the prim's C type, so the literal carries the right width — a
-// u128/i128 literal is wider than any C integer literal can spell on its own.
-// (C: the TK_TEXPR_NUMBER branch of emit_expr.)
+/**
+ * emit_number — a `TNumber` literal. The node's resolved prim (`e.type`) decides width and
+ * float-kind (N1/N2). Float literals emit a round-trippable double, cast to the right C float
+ * type (f64 plain; f32 `(float)`). Integer literals emit the decimal value cast to the prim's C
+ * type, so the literal carries the right width. (C: the `TK_TEXPR_NUMBER` branch of `emit_expr`.)
+ *
+ * @param buf   the growable output buffer
+ * @param prog  the checked program (context for a flags-typed literal)
+ * @param e     the enclosing typed expression (its resolved `.type`)
+ * @param n     the number literal node
+ * @return      the grown buffer
+ */
 fn emit_number(buf: []byte, prog: checker::TProgram, e: checker::TExpr, n: checker::TNumber) -> []byte | error {
     // A numeric literal adopted to `byte` via literal-adoption (e.g. `c < 0x20` where c: byte).
     match e.type {
@@ -6240,11 +6259,6 @@ fn emit_number(buf: []byte, prog: checker::TProgram, e: checker::TExpr, n: check
             checker::PrimKind::F64 => return cb_f64_literal(buf, n.fval)
             checker::PrimKind::F32 => {
                 mut o = cb(buf, "(float)(")
-                o = cb_f64_literal(o, n.fval)
-                return cb(o, ")")
-            }
-            checker::PrimKind::F16 => {
-                mut o = cb(buf, "(_Float16)(")
                 o = cb_f64_literal(o, n.fval)
                 return cb(o, ")")
             }
@@ -8485,13 +8499,10 @@ fn cg_te_to_type_ns(prog: checker::TProgram, ref_ns: str, te: parser::TypeExpr) 
             else if last == "u16" { checker::Prim { kind = checker::PrimKind::U16 } }
             else if last == "u32" { checker::Prim { kind = checker::PrimKind::U32 } }
             else if last == "u64" { checker::Prim { kind = checker::PrimKind::U64 } }
-            else if last == "u128" { checker::Prim { kind = checker::PrimKind::U128 } }
             else if last == "i8" { checker::Prim { kind = checker::PrimKind::I8 } }
             else if last == "i16" { checker::Prim { kind = checker::PrimKind::I16 } }
             else if last == "i32" { checker::Prim { kind = checker::PrimKind::I32 } }
             else if last == "i64" { checker::Prim { kind = checker::PrimKind::I64 } }
-            else if last == "i128" { checker::Prim { kind = checker::PrimKind::I128 } }
-            else if last == "f16" { checker::Prim { kind = checker::PrimKind::F16 } }
             else if last == "f32" { checker::Prim { kind = checker::PrimKind::F32 } }
             else if last == "f64" { checker::Prim { kind = checker::PrimKind::F64 } }
             else if last == "bool" { checker::Prim { kind = checker::PrimKind::Bool } }
@@ -8775,11 +8786,16 @@ fn cg_type_ready(prog: checker::TProgram, em: CgEmitted, set: CgTypeSet, t: chec
         _ => true   // prim/byte/str/error/void/func — no aggregate edge
     }
 }
-// is `last` a builtin scalar name (no aggregate edge → ready)?
+/**
+ * cg_is_builtin_scalar — is `last` a builtin scalar name (no aggregate edge → ready)?
+ *
+ * @param last  the surface type name to classify
+ * @return      whether `last` names a builtin scalar
+ */
 fn cg_is_builtin_scalar(last: str) -> bool {
-    last == "u8" || last == "u16" || last == "u32" || last == "u64" || last == "u128" ||
-    last == "i8" || last == "i16" || last == "i32" || last == "i64" || last == "i128" ||
-    last == "f16" || last == "f32" || last == "f64" || last == "bool" || last == "byte" ||
+    last == "u8" || last == "u16" || last == "u32" || last == "u64" ||
+    last == "i8" || last == "i16" || last == "i32" || last == "i64" ||
+    last == "f32" || last == "f64" || last == "bool" || last == "byte" ||
     last == "str" || last == "error" || last == "ptr" || last == "uptr" ||   // (C7.1a) opaque FFI transport types
     last == "Ref"   // (MEM-1b) Ref<T> lowers to a pointer → no by-value aggregate edge
 }

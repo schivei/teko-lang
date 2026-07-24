@@ -166,20 +166,14 @@ const RCX_X86: MReg = preg(1, MRegClass::GPR)
  * encoder later narrows to `mov r32, imm32` / `movabs r64, imm64` from the
  * value). Defaults to the widest, no-information-loss 64-bit form, matching
  * `LConstInt.val`'s own i64 two's-complement carrier (drop-128, 2026-07-24),
- * since the LIR carries no per-value width for a bare constant. `fits_i64`
- * always holds today (the carrier itself is i64); its honest-stop is kept
- * for the still-accepted i128/u128 surface widths' eventual register-pair
- * materialization (inherited from A2's i128 route).
+ * since the LIR carries no per-value width for a bare constant.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LConstInt c  the constant op
- * @return SelCtxX86 | error  the advanced context, or the i128 honest-stop
+ * @return SelCtxX86  the advanced context
  */
-fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) -> SelCtxX86 | error {
-    if !fits_i64(c.val) {
-        return error { message = "isel x86-64: an i128 constant beyond 64 bits needs register-pair materialization (the i128-inherited stop, A2's i128 route)" }
-    }
+fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) -> SelCtxX86 {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
     selctx_x86_emit(ctx1, movimm_x86(dst, c.val to i64, true))
@@ -472,9 +466,9 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 | 
  * the SAME isel code receives arguments in SysV registers on x86-linux and in
  * the Win64 registers on x86_64-windows (the byte-identical SysV path passes
  * `SYSV64`, exactly the descriptor the old hardcode named). A float-class
- * parameter needs an XMM move (the `B1-fp` stop), an i128 parameter a
- * register-pair slot (the i128-inherited stop), and a parameter past the ABI's
- * integer-argument register window the stack-arg slot (the `B1-args` stop).
+ * parameter needs an XMM move (the `B1-fp` stop), and a parameter past the
+ * ABI's integer-argument register window the stack-arg slot (the `B1-args`
+ * stop).
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
@@ -488,9 +482,6 @@ fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: li
         return error { message = "isel x86-64: param index out of range (internal)" }
     }
     let ty = f.param_types[p.index to u64]
-    if ltype_is_i128(ty) {
-        return error { message = "isel x86-64: an i128 parameter needs a register-pair ABI slot (the i128-inherited stop)" }
-    }
     if mregclass_of_ltype(ty) == MRegClass::FPR {
         return error { message = "isel x86-64: B1-fp — a float parameter arrives in an XMM register via an SSE move, the float honest-stop (0.3.1)" }
     }
@@ -715,9 +706,7 @@ fn select_branch_x86(ctx0: SelCtxX86, f: lir::LFunc, br: lir::LBranch) -> SelCtx
 /**
  * mem_size_of_x86 — the load/store transfer size for a machine class: B/W/D/Q
  * for the integer widths (and Ptr = Q). A float access (F32/F64) needs an SSE
- * move (the `B1-fp` stop), an i128 access a register-pair transfer (the
- * i128-inherited stop), an f16 access has no single-register size, and a
- * void-typed access is malformed.
+ * move (the `B1-fp` stop), and a void-typed access is malformed.
  *
  * @param lir::LType t  the accessed value's machine class
  * @return MMemSizeX86 | error  the transfer size, or a NAMED honest-stop
@@ -731,8 +720,6 @@ fn mem_size_of_x86(t: lir::LType) -> MMemSizeX86 | error {
         lir::LType::Ptr => MMemSizeX86::Q
         lir::LType::F32 => error { message = "isel x86-64: B1-fp — an f32 memory access uses an SSE move, the float honest-stop (0.3.1)" }
         lir::LType::F64 => error { message = "isel x86-64: B1-fp — an f64 memory access uses an SSE move, the float honest-stop (0.3.1)" }
-        lir::LType::I128 => error { message = "isel x86-64: an i128 memory access needs a register-pair transfer (the i128-inherited stop)" }
-        lir::LType::F16 => error { message = "isel x86-64: an f16 memory access has no single-register transfer size (0.3.1)" }
         lir::LType::Void => error { message = "isel x86-64: a void-typed memory access is malformed (internal)" }
     }
 }

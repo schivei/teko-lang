@@ -53,7 +53,7 @@ fn ltype_is_ptr(t: LType) -> bool {
 }
 
 /**
- * ltype_is_float — true iff a machine class is an IEEE float class (`F16`/`F32`/`F64`) (#594 crumb
+ * ltype_is_float — true iff a machine class is an IEEE float class (`F32`/`F64`) (#594 crumb
  * 6). The Tier-A serializer materializes integer/bool/byte fields only; a float field is a documented
  * Tier-A follow-up and honest-stops.
  *
@@ -61,17 +61,19 @@ fn ltype_is_ptr(t: LType) -> bool {
  * @return   whether it is a float class
  */
 fn ltype_is_float(t: LType) -> bool {
-    match t { F16 => true; F32 => true; F64 => true; _ => false }
+    match t { F32 => true; F64 => true; _ => false }
 }
 
 /**
  * lo_byte — the little-endian byte of `v` at bit offset `shift` (a multiple of 8): shift right, take
  * the low 8 bits (#594 crumb 6). `v` is the value's raw i64 two's-complement register bits (drop-128,
- * 2026-07-24 — the fold carrier is i64, not i128); truncating through `u64` yields the correct two's-
+ * 2026-07-24 — the fold carrier is i64; no machine class is ever wider than i64/8 bytes now that
+ * `u128`/`i128` are removed from the surface); truncating through `u64` yields the correct two's-
  * complement byte for a negative `v` (e.g. `~0` serializes to `0xFF`), matching how the backend stores
- * a scalar. A `shift >= 64` is reached only when serializing into a field WIDER than the i64 carrier
- * (a still-accepted `u128`/`i128` const field) — its byte is the sign-extension fill (all-ones for a
- * negative `v`, all-zeros otherwise), exactly what storing a narrower register into a wider slot does.
+ * a scalar. The `shift >= 64` arm is a defensive invariant (unreachable today, since no field's
+ * `ltype_size` exceeds 8 bytes) rather than a live path — kept in case a wider machine class is ever
+ * reintroduced, in which case its byte would be the sign-extension fill (all-ones for a negative `v`,
+ * all-zeros otherwise), exactly what storing a narrower register into a wider slot does.
  *
  * @param v      the i64 value being serialized
  * @param shift  the bit offset of the wanted byte (0, 8, 16, …)

@@ -9,12 +9,17 @@
 use teko::lexer
 use teko::parser
 
-// ---- leaves ----
+/**
+ * type_number — the leaf typing of a number literal (N1/N2, B.38): adopts a DEFAULT type — `i64`
+ * for an integer literal, `f64` for a float. An annotation/expected type re-adopts a fitting
+ * literal at the binding/cast site (`annotated_literal_ok`/`const_range_check`), where the full
+ * int set (`u8..u64`/`i8..i64`) and the float set (`f32`/`f64`) come into play (literal typing in
+ * annotated context: C6).
+ *
+ * @param n  the parsed number literal
+ * @return   the typed leaf, defaulted to `i64`/`f64`
+ */
 fn type_number(n: parser::Number) -> TExpr {
-    // N1/N2 (B.38): the leaf adopts a DEFAULT — i64 for an integer literal, f64 for a float.
-    // An annotation/expected type re-adopts a fitting literal at the binding/cast site
-    // (annotated_literal_ok / const_range_check), where the full int set (incl u128/i128)
-    // and the float set (f16/f32) come into play. [literal typing in annotated context: C6]
     let k = if n.is_float { PrimKind::F64 } else { PrimKind::I64 }
     TExpr { kind = TNumber { is_float = n.is_float; value = n.value; fval = n.fval }; type = Prim { kind = k }; line = 0; col = 0 }
 }
@@ -1650,15 +1655,13 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
 // over-applied M.1, forbidding what a guard makes non-silent.)*
 
 /**
- * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38
- * — the full int set, incl the still-accepted 128-bit surface types.) Replaces the old i128-
- * carrier `value_fits` (drop-128, 2026-07-24; carrier-detoxed off i128, §2.1). Floats are
- * handled separately (`float_fits`); Bool is never a literal target. An unsigned target
- * rejects a negative `v` first, then gates the magnitude against its max; a signed target
- * gates the magnitude against its positive max (non-negative `v`) or against `2^(w-1)`
- * (negative `v` — the extra headroom that admits e.g. `i8::MIN = -128`, magnitude 128).
- * `u128`/`i128` always fit — the widest value this carrier can hold (`[i64::MIN, u64::MAX]`)
- * sits far inside either range.
+ * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38 —
+ * the full int set is now u8..u64/i8..i64, the 128-bit surface types having been removed,
+ * drop-128 2026-07-24.) Replaces the old i128-carrier `value_fits` (carrier-detoxed off i128,
+ * §2.1). Floats are handled separately (`float_fits`); Bool is never a literal target. An
+ * unsigned target rejects a negative `v` first, then gates the magnitude against its max; a
+ * signed target gates the magnitude against its positive max (non-negative `v`) or against
+ * `2^(w-1)` (negative `v` — the extra headroom that admits e.g. `i8::MIN = -128`, magnitude 128).
  *
  * @param v  the resolved literal carrier
  * @param k  the target integer prim kind
@@ -1670,19 +1673,23 @@ fn numint_fits(v: parser::NumInt, k: PrimKind) -> bool {
     if k == PrimKind::U16 { return !v.neg && v.mag <= 65535 }
     if k == PrimKind::U32 { return !v.neg && v.mag <= 4294967295 }
     if k == PrimKind::U64 { return !v.neg && v.mag <= 18446744073709551615 }
-    if k == PrimKind::U128 { return !v.neg }
     if k == PrimKind::I8 { return if v.neg { v.mag <= 128 } else { v.mag <= 127 } }
     if k == PrimKind::I16 { return if v.neg { v.mag <= 32768 } else { v.mag <= 32767 } }
     if k == PrimKind::I32 { return if v.neg { v.mag <= 2147483648 } else { v.mag <= 2147483647 } }
     if k == PrimKind::I64 { return if v.neg { v.mag <= 9223372036854775808 } else { v.mag <= 9223372036854775807 } }
-    if k == PrimKind::I128 { return true }
     false
 }
 
-// does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a float constant
-// is accepted into ANY float width — precision/range loss of float CONSTANTS is permissive for
-// now (the runtime/codegen rounding-loss note in §5 still applies). Tightening f16/f32 over-range
-// to a compile error is deferred (no fail-early for float consts yet).
+/**
+ * float_fits — does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a
+ * float constant is accepted into ANY float width — precision/range loss of float CONSTANTS is
+ * permissive for now (the runtime/codegen rounding-loss note in §5 still applies). Tightening
+ * `f32` over-range to a compile error is deferred (no fail-early for float consts yet).
+ *
+ * @param v  the constant float value (unused — every width currently accepts any value)
+ * @param k  the target float prim kind
+ * @return   whether `k` is a float prim
+ */
 fn float_fits(v: f64, k: PrimKind) -> bool { prim_is_float(k) }
 
 // is `from -> to` a DEFINED conversion? Any integer↔integer is (the loss is runtime/codegen's,
@@ -1713,15 +1720,22 @@ fn cast_check(from: Type, to: Type) -> error | null {
     null   // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
 }
 
-// a CONSTANT literal already out of the target's range is a compile error (M.1 — fail early);
-// non-constant operands are guarded at runtime by codegen. Direct literals only (comptime folding deferred).
+/**
+ * const_range_check — a CONSTANT literal already out of the target's range is a compile error
+ * (M.1 — fail early); non-constant operands are guarded at runtime by codegen. Direct literals
+ * only (comptime folding deferred). Only the int-literal → int-target case is statically
+ * range-checkable (B.38, u8..u64/i8..i64); float→int / int→float / float→float constant
+ * conversions are runtime-guarded (trunc toward zero, overflow/NaN/∞ → panic — §5) — the checker
+ * permits them, the fit is codegen/VM's.
+ *
+ * @param e       the candidate literal expression
+ * @param target  the cast/annotation target type
+ * @return        an error naming the out-of-range constant, or null when the fit is fine
+ */
 fn const_range_check(e: parser::Expr, target: Type) -> error | null {
     match e.kind {
         parser::Number as n => match cast_kind(target) {   // byte target → U8 range (0..255)
             PrimKind as k => {
-                // only the int-literal → int-target case is statically range-checkable (B.38, incl 128).
-                // float→int / int→float / float→float constant conversions are runtime-guarded (trunc
-                // toward zero, overflow/NaN/∞ → panic — §5); the checker permits them, the fit is codegen/VM.
                 if n.is_float || !prim_is_int(k) { null }
                 else if numint_fits(n.value, k) { null }
                 else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
@@ -1765,8 +1779,6 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error | null {
             }
             _ => error { message = "value type does not match annotation" }
         }
-        // a NEGATIVE numeric literal `-N` (unary minus over a NUMBER) — adopts a SIGNED int
-        // annotation that N fits, or a float annotation for `-3.14` (parse_lit's `mut d: i128 = -1`).
         parser::Unary as u => {
             if u.op == lexer::TokenKind::Minus {
                 match u.operand.kind {

@@ -307,20 +307,32 @@ fn call_ns(env: Env, callee: parser::Path) -> str {
     ""
 }
 
-// resolve an INJECTED built-in type name to its Type (B.19). User types
-// (struct/enum/variant) resolve against the collected registry (Etapa 3).
+/**
+ * builtin_type — resolve an INJECTED built-in type name to its `Type` (B.19). User types
+ * (struct/enum/variant) resolve against the collected registry (Etapa 3), not here.
+ *
+ * `i128`/`u128`/`f16` are explicit HONEST-STOP arms (drop-128, 2026-07-24): the language's widest
+ * integer is 64-bit and its floats are f32/f64, so these three names never resolve to a `Prim` —
+ * they name the removed 128-bit family / half-precision float and point the caller at the
+ * surviving escape hatch (`teko::numeric::bigint::BigInt` / `Decimal` / `f32`) instead of falling
+ * through to the generic "not a built-in type" message.
+ *
+ * @param name  the surface type name to resolve
+ * @return      the resolved `Type`, or an error naming why `name` is not a built-in type
+ * @throws      when `name` is `i128`/`u128`/`f16` (removed, honest-stop) or is not a built-in name
+ */
 fn builtin_type(name: str) -> Type | error {
     if name == "u8" { return Prim { kind = PrimKind::U8 } }
     if name == "u16" { return Prim { kind = PrimKind::U16 } }
     if name == "u32" { return Prim { kind = PrimKind::U32 } }
     if name == "u64" { return Prim { kind = PrimKind::U64 } }
-    if name == "u128" { return Prim { kind = PrimKind::U128 } }   // native set (B.38)
+    if name == "u128" { return error { message = "type 'u128' was removed (0.3.1): the language's widest integer is 64-bit (i64/u64). For larger integers use teko::numeric::bigint::BigInt (write '123bi') or Decimal." } }
     if name == "i8" { return Prim { kind = PrimKind::I8 } }
     if name == "i16" { return Prim { kind = PrimKind::I16 } }
     if name == "i32" { return Prim { kind = PrimKind::I32 } }
     if name == "i64" { return Prim { kind = PrimKind::I64 } }
-    if name == "i128" { return Prim { kind = PrimKind::I128 } }   // native set (B.38)
-    if name == "f16" { return Prim { kind = PrimKind::F16 } }   // native floats (B.38)
+    if name == "i128" { return error { message = "type 'i128' was removed (0.3.1): the language's widest integer is 64-bit (i64/u64). For larger integers use teko::numeric::bigint::BigInt (write '123bi') or Decimal." } }
+    if name == "f16" { return error { message = "type 'f16' was removed (0.3.1): the language's floats are f32/f64. Use f32." } }
     if name == "f32" { return Prim { kind = PrimKind::F32 } }   // native floats (B.38)
     if name == "f64" { return Prim { kind = PrimKind::F64 } }   // native floats (B.38)
     if name == "bool" { return Prim { kind = PrimKind::Bool } }
@@ -437,7 +449,12 @@ fn host_surface_fn(name: str) -> Type | error {
  * string interner, and (via `host_surface_fn`) the C-native `teko::env`/`io`/`fs`/`process` host
  * surface. Resolved by LAST path segment only (like `builtin_type`) — every name here is
  * assumed unique across the whole corpus, so a bare or `teko::`-rooted call resolves identically.
- * NON-generic, fixed signatures (M.5).
+ * NON-generic, fixed signatures (M.5). The `div`/`rem`/`int_to_float` reserved arithmetic
+ * builtins over the wide i128 carrier (the retired VM's own `/`/`%` lowering, `teko_rt.c`:
+ * `tk_div`/`tk_rem`/`tk_int_to_float`) are REMOVED (drop-128, 2026-07-24): native codegen never
+ * routed through them (it uses the per-width `tk_div_<tag>`/`tk_mod_<tag>` helpers via
+ * `prim_div_tag`), and no corpus call site was bare and unqualified, so they were dead weight
+ * once i128 left the type system.
  *
  * @param name  the last path segment of the call being resolved
  * @return      the built-in's `Func` type, or `error` if `name` names no built-in (the caller
@@ -503,17 +520,9 @@ fn builtin_fn(name: str) -> Type | error {
         mut lp: []Type = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 }), Prim { kind = PrimKind::U32 })
         return Func { params = lp; ret = Prim { kind = PrimKind::Bool }; variadic = false; param_names = []; n_required = (lp).len; defaults = [] }
     }
-    // VM-internal arithmetic FFI (sign-aware over the i128 carrier) + F3 panic helpers (reserved teko:: root).
-    if name == "div" || name == "rem" {
-        mut dp: []Type = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I128 }), Prim { kind = PrimKind::I128 })
-        dp = teko::list::push(dp, Prim { kind = PrimKind::Bool })
-        return Func { params = dp; ret = Prim { kind = PrimKind::I128 }; variadic = false; param_names = []; n_required = (dp).len; defaults = [] }
-    }
     if name == "fdiv" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }), Prim { kind = PrimKind::F64 })).len; defaults = [] } }
     if name == "panic_div0" || name == "panic_oob" || name == "panic_cast" || name == "panic_overflow" { return Func { params = teko::list::empty(); ret = void_t; variadic = false; param_names = []; n_required = 0; defaults = [] } }
-    // math / bit-pattern FFI: floor(f64)->f64 ; int_to_float(i128,bool)->f64 ; f64<->bits.
     if name == "floor" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })).len; defaults = [] } }
-    if name == "int_to_float" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I128 }), Prim { kind = PrimKind::Bool }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(teko::list::empty(), Prim { kind = PrimKind::I128 }), Prim { kind = PrimKind::Bool })).len; defaults = [] } }
     if name == "f64_from_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })).len; defaults = [] } }
     if name == "f64_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })).len; defaults = [] } }
     if name == "is_true" || name == "is_false" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::Bool })).len; defaults = [] } }

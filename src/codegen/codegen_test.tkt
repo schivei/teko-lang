@@ -282,7 +282,6 @@ fn cgt_prim_predicates() {
     // cg_prim_is_int — integer prims; not float, not bool
     teko::assert::is_true(cg_prim_is_int(checker::PrimKind::U8))
     teko::assert::is_true(cg_prim_is_int(checker::PrimKind::I64))
-    teko::assert::is_true(cg_prim_is_int(checker::PrimKind::U128))
     teko::assert::is_false(cg_prim_is_int(checker::PrimKind::F64))
     teko::assert::is_false(cg_prim_is_int(checker::PrimKind::Bool))
 
@@ -297,7 +296,6 @@ fn cgt_prim_predicates() {
     teko::assert::is_true(cg_int_width(checker::PrimKind::I16) == 16)
     teko::assert::is_true(cg_int_width(checker::PrimKind::U32) == 32)
     teko::assert::is_true(cg_int_width(checker::PrimKind::I64) == 64)
-    teko::assert::is_true(cg_int_width(checker::PrimKind::U128) == 128)
 
     // prim_div_tag — integer and float tags
     let t1 = match prim_div_tag(checker::PrimKind::U8) { str as s => s; error => "" }
@@ -348,8 +346,6 @@ fn cgt_type_emission() {
     teko::assert::is_true(p3 == "double")
     let p4 = match emit_prim(cgt_empty(), checker::PrimKind::Bool) { []byte as o => str(o); error => "" }
     teko::assert::is_true(p4 == "bool")
-    let p5 = match emit_prim(cgt_empty(), checker::PrimKind::U128) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(p5 == "unsigned __int128")
 
     // emit_type — wrapping emit_prim plus non-prim cases
     let t1 = match emit_type(cgt_empty(), cgt_prog(), checker::Prim { kind = checker::PrimKind::I32 }) { []byte as o => str(o); error => "" }
@@ -439,11 +435,12 @@ fn cgt_prog_queries() {
     teko::assert::is_false(cg_is_prim_name("MyType"))
 
     // cg_is_builtin_scalar
-    teko::assert::is_true(cg_is_builtin_scalar("i128"))
+    teko::assert::is_true(cg_is_builtin_scalar("i64"))
     teko::assert::is_true(cg_is_builtin_scalar("bool"))
     teko::assert::is_true(cg_is_builtin_scalar("byte"))
     teko::assert::is_true(cg_is_builtin_scalar("error"))
     teko::assert::is_false(cg_is_builtin_scalar("Foo"))
+    teko::assert::is_false(cg_is_builtin_scalar("i128"))
 
     // cg_find_decl — empty program → error (but function is covered)
     let fd = match cg_find_decl(prog, "Foo") { parser::TypeDecl => "found"; error => "not-found" }
@@ -1653,12 +1650,41 @@ fn cgt_var2(a: checker::Type, b: checker::Type) -> checker::Variant {
 }
 
 /**
- * The `u128 | null` union — no niche, a saturating 16-byte payload (the box-in-arena class).
+ * cgt_pair16_decl — a two-`i64`-field struct TypeDecl (`Pair16`), a real by-value 16-byte
+ * aggregate — the ≥16-byte no-niche test vehicle standing in for the removed scalar `u128`
+ * (drop-128, 2026-07-24). Unlike `Func` (unsupported by `cg_opt_mangle`, so `cg_mangle_eq`
+ * would spuriously treat it as "equal" to the enclosing union in `cg_union_inline_recursive`'s
+ * both-error fallback), a real struct mangles cleanly, matching the `repr_box` regression
+ * fixture's own `Vec2` vehicle for the identical box-in-arena scenario.
  *
- * @return  the resolved `u128 | null` variant
+ * @return  the `Pair16` struct TypeDecl (two `i64` fields, `x`/`y`)
  */
-fn cgt_u128_null() -> checker::Variant {
-    cgt_var2(checker::Null { }, checker::Prim { kind = checker::PrimKind::U128 })
+fn cgt_pair16_decl() -> parser::TypeDecl {
+    let fx = parser::Field { name = "x"; type_ann = cgt_named_te("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fy = parser::Field { name = "y"; type_ann = cgt_named_te("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields: []parser::Field = teko::list::push(teko::list::push(teko::list::empty(), fx), fy)
+    let body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }
+    parser::TypeDecl { name = "Pair16"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+}
+
+/**
+ * cgt_prog_with_pair16 — a `TProgram` whose sole item is the `Pair16` struct TypeDecl, so
+ * `cg_find_decl`/`cg_named_min_bytes` resolve it when the union classifiers probe its size.
+ *
+ * @return  a program carrying exactly the `Pair16` TypeDecl
+ */
+fn cgt_prog_with_pair16() -> checker::TProgram {
+    let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_pair16_decl())
+    checker::TProgram { items = items }
+}
+
+/**
+ * The `Pair16 | null` union — no niche, a saturating 16-byte payload (the box-in-arena class).
+ *
+ * @return  the resolved `Pair16 | null` variant
+ */
+fn cgt_pair16_null() -> checker::Variant {
+    cgt_var2(checker::Null { }, checker::Named { name = "Pair16" })
 }
 
 /**
@@ -1681,28 +1707,29 @@ fn cgt_ptr_null() -> checker::Variant {
 
 /**
  * Assert `union_repr_class` picks the right physical representation per member class and the
- * `#inline` force flag: `u128|null` boxes by default and forces to inline-tag; `i32|null` is
+ * `#inline` force flag: `Pair16|null` boxes by default and forces to inline-tag; `i32|null` is
  * inline-tag; a niche-able `ptr|null` is niche regardless of the force flag.
  */
 #test
 fn cgt_union_repr_class_dial() {
-    let p = cgt_prog()
-    teko::assert::is_true(match union_repr_class(p, cgt_u128_null(), false) { UnionRepr::BoxInArena => true; _ => false })
-    teko::assert::is_true(match union_repr_class(p, cgt_u128_null(), true) { UnionRepr::InlineTag => true; _ => false })
+    let p = cgt_prog_with_pair16()
+    teko::assert::is_true(match union_repr_class(p, cgt_pair16_null(), false) { UnionRepr::BoxInArena => true; _ => false })
+    teko::assert::is_true(match union_repr_class(p, cgt_pair16_null(), true) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_i32_null(), false) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), false) { UnionRepr::Niche => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), true) { UnionRepr::Niche => true; _ => false })
 }
 
 /**
- * Assert `inline_attr_eligible` accepts a boxed `u128|null` and rejects each ineligible class with an
- * error: a non-sum (`i32`), an already-inline sum (`i32|null`), and a niche-able sum (`ptr|null`).
+ * Assert `inline_attr_eligible` accepts a boxed `Pair16|null` and rejects each ineligible class
+ * with an error: a non-sum (`i32`), an already-inline sum (`i32|null`), and a niche-able sum
+ * (`ptr|null`).
  */
 #test
 fn cgt_inline_attr_eligible_classes() {
-    let p = cgt_prog()
-    let u128box: checker::Type = cgt_u128_null()
-    teko::assert::is_true(match inline_attr_eligible(p, u128box) { error => false; null => true })
+    let p = cgt_prog_with_pair16()
+    let pairbox: checker::Type = cgt_pair16_null()
+    teko::assert::is_true(match inline_attr_eligible(p, pairbox) { error => false; null => true })
     teko::assert::is_true(match inline_attr_eligible(p, checker::Prim { kind = checker::PrimKind::I32 }) { error => true; null => false })
     let i32inline: checker::Type = cgt_i32_null()
     teko::assert::is_true(match inline_attr_eligible(p, i32inline) { error => true; null => false })

@@ -1,11 +1,23 @@
 /**
+ * Pair — a large by-value struct (two `i64` words = 16 bytes) with NO spare NULL niche, standing in
+ * for the removed scalar `u128` (drop-128, 2026-07-24) as the `#inline` attribute's test vehicle: any
+ * ≥16-byte no-niche type exercises the same boxed-by-default union slot the parse sites attach to.
+ */
+type Pair = struct {
+    /** The first word of the pair. */
+    x: i64
+    /** The second word of the pair. */
+    y: i64
+}
+
+/**
  * A holder whose union field carries the `#inline` layout attribute at the struct-FIELD parse site
  * (C4's new field parse position). The attribute parses and the field builds; its boxed-vs-inline
  * layout flip is a flagged C4 remainder, so the slot still round-trips as the boxed default here.
  */
 type Holder = struct {
     /** A `#inline`-annotated large-union field — exercises the field parse site. */
-    #inline slot: u128 | null
+    #inline slot: Pair | null
 }
 
 /**
@@ -16,17 +28,17 @@ type Holder = struct {
  * @return  present local payload (42) + absent field sentinel (5) = 47
  */
 pub fn probe_inline_parse() -> i32 {
-    #inline mut hot: u128 | null = 42 to u128
+    #inline mut hot: Pair | null = Pair { x = 42; y = 0 }
     mut a: i32 = 0
     match hot {
         null => a = 100
-        u128 as v => a = v to i32
+        Pair as v => a = v.x to i32
     }
     let h: Holder = Holder { slot = null }
     mut b: i32 = 0
     match h.slot {
         null => b = 5
-        u128 as v => b = (v to i32) + 100
+        Pair as v => b = (v.x to i32) + 100
     }
     a + b
 }

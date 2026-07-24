@@ -9,13 +9,9 @@ use teko::lir
  * access takes a native i32 address, §6's checked narrow applies at every
  * `Ptr`-typed memory op) or `i64` on wasm64 (`ptr64 = true` — the uniform
  * 64-bit `ptr<>` model needs no narrowing at all, `ltype_size(Ptr) = 8`
- * already matches). `I128` and `F16` have no wasm value type at all — the
- * two NAMED honest-stops `C1-i128` (shared with A2's own i128 route) and
- * `C1-f16` (matching the register targets' own f16 gap). `Void` is a
- * valueless machine class (never a real operand), so it also has no valtype
- * byte — an internal-error arm, distinct from the two design-named stops,
- * exercised directly by a unit test rather than reachable through valid
- * lowering.
+ * already matches). `Void` is a valueless machine class (never a real
+ * operand), so it has no valtype byte — an internal-error arm, exercised
+ * directly by a unit test rather than reachable through valid lowering.
  *
  * @param LType t  the machine class to map
  * @param bool ptr64  the target pointer width (`false` = wasm32, the
@@ -29,8 +25,6 @@ pub fn wasm_valtype(t: lir::LType, ptr64: bool) -> u8 | error {
         lir::LType::I16 => wasm_vtype_wire(WasmVType::I32)
         lir::LType::I32 => wasm_vtype_wire(WasmVType::I32)
         lir::LType::I64 => wasm_vtype_wire(WasmVType::I64)
-        lir::LType::I128 => error { message = "stackify: C1-i128 — wasm has no native i128 valtype, deferred (shared with A2's i128 route, backend-a4-encoder.md §6.3)" }
-        lir::LType::F16 => error { message = "stackify: C1-f16 — wasm has no native f16 valtype, deferred (matches the register targets' f16 gap)" }
         lir::LType::F32 => wasm_vtype_wire(WasmVType::F32)
         lir::LType::F64 => wasm_vtype_wire(WasmVType::F64)
         lir::LType::Ptr => if ptr64 { wasm_vtype_wire(WasmVType::I64) } else { wasm_vtype_wire(WasmVType::I32) }
@@ -1367,8 +1361,7 @@ type WasmMemOp = struct {
  * value at the REGISTER boundary (the checked narrow / plain widen
  * `stackify_load`/`stackify_store` apply on wasm32, vs the identity on
  * wasm64) — a target-independent decision this table does not need to make.
- * `I128`/`F16` are the same two named honest-stops `wasm_valtype` names;
- * `Void` is the same internal-error arm.
+ * `Void` is the same internal-error arm `wasm_valtype` names.
  *
  * @param LType t  the accessed machine class
  * @return WasmMemOp | error  the resolved memory-access shape, or a named
@@ -1383,8 +1376,6 @@ fn wasm_mem_op(t: lir::LType) -> WasmMemOp | error {
         lir::LType::Ptr => WasmMemOp { load_op = WASM_OP_I64_LOAD; store_op = WASM_OP_I64_STORE; align = 3 to u32; valtype = wasm_vtype_wire(WasmVType::I64) }
         lir::LType::F32 => WasmMemOp { load_op = WASM_OP_F32_LOAD; store_op = WASM_OP_F32_STORE; align = 2 to u32; valtype = wasm_vtype_wire(WasmVType::F32) }
         lir::LType::F64 => WasmMemOp { load_op = WASM_OP_F64_LOAD; store_op = WASM_OP_F64_STORE; align = 3 to u32; valtype = wasm_vtype_wire(WasmVType::F64) }
-        lir::LType::I128 => error { message = "stackify: C1-i128 — an i128 memory access has no wasm valtype, deferred (shared with A2's i128 route)" }
-        lir::LType::F16 => error { message = "stackify: C1-f16 — an f16 memory access has no wasm valtype, deferred (matches the register targets' f16 gap)" }
         lir::LType::Void => error { message = "stackify: a void-typed memory access is malformed (internal)" }
     }
 }
@@ -1443,19 +1434,15 @@ fn stackify_narrow_ptr_load(ctx0: StackifyCtx, panic_ix: u32) -> StackifyCtx {
 /**
  * stackify_const_int — the `LConstInt` lowering: `i32.const`/`i64.const`
  * (`stackify_fits_i32` picks the narrowest lossless wasm width, §4.1),
- * `local.set` into the result's own VReg-numbered local. `c.val` is now the
- * i64 carrier itself (drop-128, 2026-07-24), so `fits_i64`'s `C1-i128` guard
- * is unreachable (kept for structural parity — see `isel_arm64.tks::fits_i64`).
+ * `local.set` into the result's own VReg-numbered local. `c.val` is the i64
+ * carrier itself (drop-128, 2026-07-24), so no width guard is ever needed.
  *
  * @param StackifyCtx ctx0  the context to extend
  * @param LInst inst  the enclosing instruction (its result VReg)
  * @param LConstInt c  the constant op
- * @return StackifyCtx | error  the advanced context, or the `C1-i128` stop
+ * @return StackifyCtx  the advanced context
  */
-fn stackify_const_int(ctx0: StackifyCtx, inst: lir::LInst, c: lir::LConstInt) -> StackifyCtx | error {
-    if !fits_i64(c.val) {
-        return error { message = "stackify: C1-i128 — an integer constant beyond 64 bits needs register-pair materialization, deferred (shared with A2's i128 route, backend-a4-encoder.md §6.3)" }
-    }
+fn stackify_const_int(ctx0: StackifyCtx, inst: lir::LInst, c: lir::LConstInt) -> StackifyCtx {
     let narrow = stackify_fits_i32(c.val)
     let op = if narrow { WASM_OP_I32_CONST } else { WASM_OP_I64_CONST }
     let vt = if narrow { wasm_vtype_wire(WasmVType::I32) } else { wasm_vtype_wire(WasmVType::I64) }
@@ -2068,8 +2055,7 @@ fn wasm_resolve_data(t: WasmSymbolTable, symbol: str) -> u32 | error {
  * @param bool ptr64  the target pointer width (`wasm_valtype`'s own switch,
  *                    #389 C1-7)
  * @return StackifyCtx | error  the advanced context, or a propagated
- *                              honest-stop (an unresolved symbol, or the
- *                              callee's own `C1-i128`/`C1-f16` return type)
+ *                              honest-stop (an unresolved symbol)
  */
 fn stackify_call(ctx0: StackifyCtx, symbols: WasmSymbolTable, inst: lir::LInst, c: lir::LCall, ptr64: bool) -> StackifyCtx | error {
     let target = match wasm_resolve_call(symbols, c.symbol) { WasmCallTarget as t => t; error as e => return e }
@@ -4652,7 +4638,7 @@ fn wasm_register_program_symbols(wasi: WasmWasiImportSet, funcs: []lir::LFunc) -
  * `LFunc`'s own signature maps to: every `param_types` entry through
  * `wasm_valtype` (in order), and a single result whenever `ret_type` is not
  * `Void` (the MVP's no-multi-value shape, §4.3). Propagates `wasm_valtype`'s
- * own honest-stops (`C1-i128`/`C1-f16`) on either side.
+ * own internal-error arm on either side (a malformed `Void`-typed param).
  *
  * @param LFunc f  the function whose signature to translate
  * @return WasmFuncType | error  the translated signature, or a propagated
@@ -5406,8 +5392,8 @@ fn wasm_scope_stop_wasm64() -> error {
  * (`wasm_program_memory_plan`). Returns the NAMED `C1-globals` honest-stop
  * when `lmod.globals` is non-empty (mirrors A4-4's own guard,
  * `wasm_honest_globals`) before touching anything else, and propagates
- * any per-function honest-stop unchanged (`C1-i128`/`C1-f16`/
- * `C1-irreducible`/an unresolved call/data symbol).
+ * any per-function honest-stop unchanged (`C1-irreducible`/an unresolved
+ * call/data symbol).
  *
  * **The checked-narrow panic message (#389 C1-7 review finding #1,
  * `backend-wasm.md` §6/§8).** The module's own data section is the
