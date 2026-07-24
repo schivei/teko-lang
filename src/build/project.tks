@@ -3696,20 +3696,101 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
 }
 
 /**
+ * regression_coverage_exe — the compiler binary the regression tier uses to compile its scenarios
+ * (0.3.1 C-cov, `regressor-principal-0.3.1.md` §5.1 Cov-A): for the compiler's OWN project
+ * (`fe.manifest.name == "teko"` — the reserved root name no other project may claim), build a
+ * COVERAGE-INSTRUMENTED copy of `fe.prog` (`codegen::tk_emit_c_cov`) and return ITS path, so every
+ * scenario compile marks the exact compiler-source lines it exercises — folded back via
+ * `merge_regression_coverage` BEFORE the floor read. For any OTHER project `exe` (this running
+ * binary) is returned UNCHANGED: its regressions compile UNRELATED snippets with a plain compiler,
+ * and there is nothing of THAT project's own source to attribute coverage to. A failed
+ * instrumented build honest-warns and falls back to `exe` un-instrumented — the regression tier's
+ * pass/fail verdict never depends on the coverage feed succeeding.
+ *
+ * @param dir  the project directory (the instrumented binary's build directory anchor)
+ * @param exe  this compiler binary's own path (the fallback, and every other project's exe)
+ * @param fe   the resolved front-end product (its `prog`/`manifest` build the instrumented copy)
+ * @return     the exe the regression tier should compile scenarios with
+ * @since 0.3.1
+ */
+fn regression_coverage_exe(dir: str, exe: str, fe: Frontend) -> str {
+    if fe.manifest.name != "teko" { return exe }
+    match build_regression_cov_exe(fe.manifest, fe.prog) {
+        str as p => p
+        error as e => {
+            teko::io::println(teko::str::concat("teko: regression coverage-feed build failed (", teko::str::concat(e.message, ") — running regressions without coverage attribution")))
+            exe
+        }
+    }
+}
+
+/**
+ * build_regression_cov_exe — build a COVERAGE-INSTRUMENTED copy of the compiler `prog` (0.3.1
+ * C-cov): emit it under `CgMode::ProgramCov` (`codegen::tk_emit_c_cov` — the SAME production-fn
+ * line/branch prologues `TestCov` carries, but the ORDINARY virtual-main body, so the binary is a
+ * fully functional `teko` CLI that ALSO dumps its coverage sinks to `$TEKO_TKCOV` at exit), then
+ * compile it with `run_cc` at opt 0 (a throwaway gate-shaped binary, built fast). Distinct from the
+ * `<name>-tktest` gate binary (`run_native_gate`) — that one's `main()` calls `#test`s; this one's
+ * `main()` is the real CLI, so IT (not the release binary) can compile regression SNIPPETS while
+ * marking the compiler-source lines those compiles exercise.
+ *
+ * @param m     the resolved manifest (names the output stem)
+ * @param prog  the checked program to emit (the SAME `fe.prog` this `teko test` run already checked)
+ * @return      the built instrumented binary's path, or an error
+ * @since 0.3.1
+ */
+fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram) -> str | error {
+    let od = "bin"
+    match teko::fs::mkdir(od) { error => { }; null => { } }
+    let stem = teko::str::concat(m.name, "-regrcov")
+    let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
+    let binp = teko::str::concat(od, "/", stem)
+    let emitted = match codegen::tk_emit_c_cov(prog) { str as s => s; error as e => return e }
+    let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
+    match teko::io::write_file(cfile, csrc) { error as e => return e; null => { } }
+    if run_cc(cfile, binp, m, prog, 0) != 0 { return error { message = "cc failed to build the coverage-instrumented regression compiler" } }
+    binp
+}
+
+/**
+ * run_regression_tier — run the `[tests] regression` phase, feeding its coverage back into this
+ * process's sinks BEFORE any floor read (0.3.1 C-cov, D9): resolve the coverage-feeding exe
+ * (`regression_coverage_exe`), run every listed `.tkr` (`run_regression_phase`), then merge every
+ * covfile the compiles produced (`merge_regression_coverage`) — a no-op merge when the exe was not
+ * instrumented (every project except the compiler's own). Coverage is merged REGARDLESS of the
+ * phase's verdict — a rejected (compile-fail) scenario exercises real compiler code too.
+ *
+ * @param dir  the project directory
+ * @param exe  this compiler binary's own path
+ * @param fe   the resolved front-end product
+ * @return     0 when every regressor passed (or the tier is advisory), 1 on a gated failure
+ * @since 0.3.1
+ */
+fn run_regression_tier(dir: str, exe: str, fe: Frontend) -> i32 {
+    let regr_exe = regression_coverage_exe(dir, exe, fe)
+    let rc = run_regression_phase(regr_exe, fe.manifest)
+    merge_regression_coverage()
+    rc
+}
+
+/**
  * The `teko test <dir>` entry (D2, post-VM): assemble WITH the `.tkt` tests, then run every
  * `#test` NATIVELY via the #265 native gate (emit a test-profile C TU, compile with `run_cc`,
- * run the child fail-fast — a failed assert panics with a non-zero exit, M.1), then apply the
- * D4 coverage-floor policy (`--cov-validation` enforces; otherwise warns — owner ruling 0.3.0.29).
- * Unlike `teko build`, it emits NO release binary. `--coverage` writes a Cobertura report to
+ * run the child fail-fast — a failed assert panics with a non-zero exit, M.1). When the manifest
+ * declares `[tests] regression` files (`test_regression_files` — an explicit, ordered list of
+ * `.tkr` paths, 0.3.1 C0), the regression tier (`run_regression_tier`) runs NEXT, folding its
+ * coverage feed into `fe.prog` (C-cov, D9) — BEFORE `--coverage`/the floor policy read it, so
+ * neither ever undercounts what the regressives exercised. Then the D4 coverage-floor policy
+ * applies (`--cov-validation` enforces; otherwise warns — owner ruling 0.3.0.29). Unlike
+ * `teko build`, it emits NO release binary. `--coverage` writes a Cobertura report to
  * `<cwd>/cobertura.xml` (the project root — `teko test` has no `-o`). `--per-test-cov` additionally
  * emits the dev-time per-test attribution report (`run_per_test_cov`) AFTER the floor policy.
  * `--per-commit-test <base>` runs the delta-coverage enforcer (`run_per_commit_test`) AFTER the floor
  * policy — measuring coverage attributed to the lines changed since `<base>` and (under
- * `--cov-validation`) failing when that delta is below floor; absent, it is a zero-cost no-op.
- * When the manifest declares `[tests] regression` files (`test_regression_files` — an explicit,
- * ordered list of `.tkr` paths, 0.3.1 C0), the regression phase (`run_regression_phase`) runs
- * after the floor + delta policies and before any dev-time report; with no regression files it
- * is a zero-cost no-op (the 0.3.0.29 inert base).
+ * `--cov-validation`) failing when that delta is below floor; absent, it is a zero-cost no-op. The
+ * regression tier's OWN verdict gates last (after the floor + delta policies), matching the
+ * pre-C-cov ordering; with no regression files the whole tier is a zero-cost no-op (the 0.3.0.29
+ * inert base).
  *
  * @param dir              the project directory (already the cwd; the front-end chdir'd in)
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
@@ -3719,7 +3800,7 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
  * @param analyzer         `--analyzer` — after the gate + floors, run the dev-time stale/redundant analyzer
  * @param arith_cast_gate  `--arith-cast-gate` — after the gate + floors, enforce the D4
  *                         ARITH-CAST-RATE ceiling (≤2%, `cast-width-hygiene-0.3.1.md` §5, C5)
- * @return                 0 when every test passes and the floor + delta + arith-cast-rate
+ * @return                 0 when every test passes and the floor + delta + regression + arith-cast-rate
  *                         policies hold, else the failing status
  */
 fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
@@ -3728,6 +3809,8 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
     if trc != 0 { return trc }
+    let has_regr = fe.manifest.test_regression_files.len > 0
+    let regr_rc = if has_regr { run_regression_tier(dir, exe, fe) } else { 0 }
     if gen_cov {
         let xml = coverage::cov_cobertura(fe.prog)
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
@@ -3739,10 +3822,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
         let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation)
         if pc != 0 { return pc }
     }
-    if fe.manifest.test_regression_files.len > 0 {
-        let rrc = run_regression_phase(exe, fe.manifest)
-        if rrc != 0 { return rrc }
-    }
+    if has_regr && regr_rc != 0 { return regr_rc }
     if arith_cast_gate {
         let acrc = run_arith_cast_gate(dir, fe)
         if acrc != 0 { return acrc }

@@ -717,7 +717,7 @@ fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: s
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, to_sh_path(dep_out))
     argv = teko::list::push(argv, "--no-verify")
-    let comp = run_captured(argv, "", prefix ~ ".dep_compile")
+    let comp = run_captured_env(argv, "", with_regr_cov_env(teko::list::empty(), prefix ~ ".dep_compile"), prefix ~ ".dep_compile")
     if comp.exit != 0 { return error { message = teko::str::concat("dependency build failed: ", last_line(comp.stderr)) } }
     let entries = match teko::fs::list_dir(dep_out) { []str as e => e; error as e => return e }
     mut tkl = ""
@@ -851,6 +851,90 @@ fn check_run(t: Tkr, target: str, run: CapResult) -> RegrOutcome {
 }
 
 /**
+ * REGR_WORK_DIR — the regression scratch work tree every scenario's capture files land under
+ * (`run_regression_sources`), and the root `merge_regression_coverage` walks after the phase runs.
+ * Pinned here so both never drift apart.
+ *
+ * @since 0.3.1
+ */
+pub const REGR_WORK_DIR: str = "bin/.regr-work"
+
+/**
+ * with_regr_cov_env — append a `TEKO_TKCOV=<abs prefix>.tkcov` token onto `env` (0.3.1 C-cov):
+ * every regressive COMPILE carries a per-row covfile target, resolved to an ABSOLUTE path first —
+ * a project compile (`teko <dir> -o bin …`) chdir's INTO `<dir>` before resolving a relative `-o`
+ * (`provision_dependency`'s own note), so a RELATIVE `TEKO_TKCOV` would resolve against that
+ * new cwd instead of the runner's own by the time the dump fires, landing nowhere
+ * `merge_regression_coverage` looks. Harmless when the compiler under test is NOT
+ * coverage-instrumented — a plain (`CgMode::Program`) build never reads `TEKO_TKCOV`, so no file
+ * is produced; when it IS (`regression_coverage_exe`'s `CgMode::ProgramCov` build, the compiler's
+ * own project), the file this compile's child process dumps is exactly what gets merged back into
+ * `fe.prog`.
+ *
+ * @param env     the scenario's own child env (`K=V` tokens; `Given env`/`Given backend`)
+ * @param prefix  the scratch-file prefix for this compile row (its covfile is `<abs prefix>.tkcov`)
+ * @return        `env` with the covfile token appended
+ * @since 0.3.1
+ */
+fn with_regr_cov_env(env: []str, prefix: str) -> []str {
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    teko::list::push(env, $"TEKO_TKCOV={abs_path_of(prefix, cwd)}.tkcov")
+}
+
+/**
+ * collect_tkcov_files — recursively list every `*.tkcov` file under `dir` (the regression scratch
+ * work tree), depth-first. `teko::fs::list_dir` doubles as the is-directory probe here: an entry
+ * `list_dir` can open is a subdirectory (recurse into it), one it cannot is a plain file (keep it
+ * when its name ends `.tkcov`). A plain (non-instrumented) regression run creates none, so this
+ * walk then returns `[]`.
+ *
+ * @param dir  the directory to walk (the regression scratch work tree, or one of its subdirectories)
+ * @return     every `.tkcov` file path found, in directory-listing order
+ * @since 0.3.1
+ */
+fn collect_tkcov_files(dir: str) -> []str {
+    mut out: []str = teko::list::empty()
+    let entries = match teko::fs::list_dir(dir) { []str as e => e; error => return out }
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let full = dir ~ "/" ~ entries[i]
+        match teko::fs::list_dir(full) {
+            []str => {
+                let sub = collect_tkcov_files(full)
+                mut si: u64 = 0
+                loop { if si >= sub.len { break }; out = teko::list::push(out, sub[si]); si = si + 1 }
+            }
+            error => { if teko::str::ends_with(full, ".tkcov") { out = teko::list::push(out, full) } }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * merge_regression_coverage — fold every `.tkcov` file the regression phase's compiles produced
+ * (under `REGR_WORK_DIR`, 0.3.1 C-cov) into this process's coverage sinks via
+ * `teko::coverage::cov_merge`, so a subsequent `coverage_floor_misses` read of `fe.prog` counts the
+ * compiler-source lines those compiles exercised. A no-op (0 merged) when the regression tier's exe
+ * was not coverage-instrumented — every project except the compiler's own
+ * (`regression_coverage_exe`, `src/build/project.tks`).
+ *
+ * @return how many `.tkcov` files were merged
+ * @since 0.3.1
+ */
+pub fn merge_regression_coverage() -> u64 {
+    let files = collect_tkcov_files(REGR_WORK_DIR)
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        teko::coverage::cov_merge(files[i])
+        i = i + 1
+    }
+    files.len
+}
+
+/**
  * RegrBuilt — the lazily-built artifact of a project-based regressor: whether the project's `.tkp`
  * has been compiled yet (`done`), the captured build outcome (`comp`), and the built binary path
  * (`binp`). Threaded so several RUN scenarios (across features, across an entire `.tkr` file) share
@@ -963,11 +1047,11 @@ fn tkr_artifact_fail(msg: str, built: RegrBuilt) -> TkrArtifact {
 fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrArtifact {
     match guard_no_project_build_at_root(regr_dir, t) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
     if t.source_inline.len > 0 {
-        let comp = compile_inline_source(exe, t.source_inline, t.env, prefix)
+        let comp = compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix)
         return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built }
     }
     if t.source_file.len > 0 {
-        let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, t.env, prefix)
+        let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix)
         return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built }
     }
     if t.dep_dir.len > 0 {
@@ -978,19 +1062,19 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
             error as e => return tkr_artifact_fail(e.message, built)
             str => { }
         }
-        let comp = compile_regressive(exe, scratch_consumer, t.env, prefix ~ ".compile")
+        let comp = compile_regressive(exe, scratch_consumer, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(scratch_consumer) { str as s => s; error => "" }
         let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target) }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb }
     }
     if t.in_place {
         if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built } }
-        let comp = compile_in_place(exe, regr_dir, t.env, prefix ~ ".compile")
+        let comp = compile_in_place(exe, regr_dir, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(regr_dir) { str as s => s; error => "" }
         let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target) }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb }
     }
-    let nb = tkr_ensure_built(exe, regr_dir, t.env, prefix, built)
+    let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
     TkrArtifact { comp = nb.comp; binp = artifact_path_for_target(nb.binp, t.target); built = nb }
 }
 
@@ -1111,9 +1195,9 @@ fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) 
             }
             let row_prefix = $"{prefix}.{si}.{ri}"
             let comp = if t.source_inline.len > 0 {
-                compile_inline_source(exe, t.source_inline, t.env, row_prefix)
+                compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, row_prefix), row_prefix)
             } else {
-                compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, t.env, row_prefix)
+                compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, row_prefix), row_prefix)
             }
             let oc = check_compile_fail(t, comp)
             if !oc.ok { return regr_fail($"{sc.name}[{ri}]: {oc.message}") }
@@ -1230,7 +1314,7 @@ fn regr_sanitize(s: str) -> str {
  * @since 0.3.1
  */
 fn run_regression_sources(exe: str, m: Manifest) -> i32 {
-    let work = "bin/.regr-work"
+    let work = REGR_WORK_DIR
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     mut fails: u64 = 0
     mut si: u64 = 0

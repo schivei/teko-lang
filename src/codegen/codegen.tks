@@ -50,8 +50,13 @@ use teko::parser
     `TestAnalyze` (0.3.0.29) emits the SAME production-fn instrumentation as `TestCov`, but a
     per-test ISOLATION harness: between every `#test` it resets all three sinks, runs the test,
     and dumps THAT test's id-set to `$TEKO_ANALYZE_DIR/<idx>.tkcov` — one compile answers the
-    whole-suite stale/redundant question (`teko test . --analyzer`). */
-type CgMode = enum { Program; TestPlain; TestCov; TestAnalyze }
+    whole-suite stale/redundant question (`teko test . --analyzer`). `ProgramCov` (0.3.1 C-cov)
+    emits the SAME production-fn instrumentation as `TestCov`, but `Program`'s ORDINARY
+    virtual-main (byte-identical to `Program`'s statement body, only wrapped with the sink
+    reset/enable calls and an `atexit`-registered dump) — a fully functional `teko` CLI that also
+    feeds the regression tier's coverage back into `fe.prog` (`build_regression_cov_exe`,
+    `src/build/project.tks`). Never used for the release build, so the fixpoint is untouched. */
+type CgMode = enum { Program; TestPlain; TestCov; TestAnalyze; ProgramCov }
 
 /**
  * CovCtx — the coverage-instrumentation context threaded through TestCov body emission (#265).
@@ -9991,6 +9996,25 @@ pub fn tk_emit_c_test(prog0: checker::TProgram, cov: bool) -> str | error {
     tk_emit_c_mode(prog0, if cov { CgMode::TestCov } else { CgMode::TestPlain })
 }
 
+/**
+ * tk_emit_c_cov — the COVERAGE-INSTRUMENTED PROGRAM emission entry (0.3.1 C-cov): the ordinary
+ * virtual-main (byte-for-byte the SAME statements `tk_emit_c` emits), wrapped with the SAME
+ * production-fn/line/branch `tk_cov_*` prologues `TestCov` carries, plus an `atexit`-registered
+ * dump to `$TEKO_TKCOV`. Used ONLY to build the regression tier's own coverage-feeding compiler
+ * (`build_regression_cov_exe`, `src/build/project.tks`) — never the release build, so
+ * `CgMode::Program`'s fixpoint-compared output is untouched. Exposed so the build driver can
+ * request the coverage-instrumented program profile without naming `CgMode` across the namespace
+ * boundary.
+ *
+ * @param prog0  the checked program to emit (a compiler-as-SUT's OWN checked program — C-cov only
+ *               makes sense when it is)
+ * @return       the emitted C translation unit text, or an error
+ * @since 0.3.1
+ */
+pub fn tk_emit_c_cov(prog0: checker::TProgram) -> str | error {
+    tk_emit_c_mode(prog0, CgMode::ProgramCov)
+}
+
 /** tk_emit_c_test_analyze — the ANALYZE-MODE test-gate emission entry (`teko test . --analyzer`,
     0.3.0.29). Emits the same production-fn/line/branch instrumentation as `TestCov`, but a per-test
     isolation harness (`emit_test_main_analyze`) that resets the sinks around each `#test` and dumps
@@ -10150,20 +10174,65 @@ fn tk_emit_c_mode(prog0: checker::TProgram, mode: CgMode) -> str | error {
 
 /** emit_mode_main — the trailing `main()`, the ONLY mode-dependent emission (#265): `Program` emits
     the historical virtual-main over the loose top-level statements (byte-identical — the fixpoint
-    compares THIS), `TestPlain`/`TestCov` emit the native test gate that calls each `#test`. */
+    compares THIS), `ProgramCov` (0.3.1 C-cov) emits the SAME virtual-main wrapped with the coverage
+    sinks, `TestPlain`/`TestCov`/`TestAnalyze` emit the native test gate that calls each `#test`. */
 fn emit_mode_main(buf: []byte, prog: checker::TProgram, mode: CgMode) -> []byte | error {
     match mode {
         CgMode::Program => emit_program_main(buf, prog)
+        CgMode::ProgramCov => emit_program_main_cov(buf, prog)
         _ => emit_test_main(buf, prog, mode)
     }
 }
 
-/** emit_program_main — the VIRTUAL-MAIN: the loose top-level statements, in order, become the body
-    of C `main()`; falling off the end -> `return 0;` (default exit 0). W5a — the LAST loose
-    statement, if it is a value-carrying expr-statement, becomes the process exit code via
-    `return (int)(…)`. This is the historical emission verbatim (extracted, #265) — the fixpoint
-    compares THIS output, so it stays byte-for-byte identical. */
+/**
+ * emit_program_main — the VIRTUAL-MAIN: the loose top-level statements, in order, become the body
+ * of C `main()`; falling off the end -> `return 0;` (default exit 0). W5a — the LAST loose
+ * statement, if it is a value-carrying expr-statement, becomes the process exit code via
+ * `return (int)(…)`. Delegates to `emit_program_main_body(buf, prog, false)` — BYTE-IDENTICAL to
+ * the historical emission (extracted, #265); the fixpoint compares THIS output.
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose loose top-level statements form the virtual-main body
+ * @return      the buffer with the virtual-main appended
+ * @since #265
+ */
 fn emit_program_main(buf: []byte, prog: checker::TProgram) -> []byte | error {
+    emit_program_main_body(buf, prog, false)
+}
+
+/**
+ * emit_program_main_cov — `emit_program_main`'s virtual-main, PLUS a coverage-instrumentation
+ * bracket (0.3.1 C-cov): a static `atexit`-registered dump helper, and the sink reset/enable calls
+ * right after `tk_set_args`. `atexit` (rather than an explicit trailing call) is what makes this
+ * correct regardless of HOW the virtual-main exits — a fall-through `return 0`, the W5a tail-expr
+ * `return (int)(…)`, or an `exit(n)`/`tk_exit(n)` call — every one of those already runs the libc
+ * `atexit` queue (only `abort`/`tk_panic*` skip it, mirroring the region-cleanup hook's own note in
+ * `teko_rt.c`). Used ONLY to build the regression tier's coverage-feeding compiler
+ * (`build_regression_cov_exe`, `src/build/project.tks`) — never the release binary, so the
+ * `CgMode::Program` fixpoint is untouched.
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose loose top-level statements form the virtual-main body
+ * @return      the buffer with the coverage-instrumented virtual-main appended
+ * @since 0.3.1
+ */
+fn emit_program_main_cov(buf: []byte, prog: checker::TProgram) -> []byte | error {
+    emit_program_main_body(buf, prog, true)
+}
+
+/**
+ * emit_program_main_body — the shared body of `emit_program_main`/`emit_program_main_cov` (0.3.1
+ * C-cov extraction): `cov == false` emits BYTE-IDENTICAL output to the historical virtual-main
+ * (the fixpoint compares this shape); `cov == true` additionally wraps the coverage sinks around it
+ * (see `emit_program_main_cov`).
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose loose top-level statements form the virtual-main body
+ * @param cov   emit the coverage-sink reset/enable/atexit-dump bracket
+ * @return      the buffer with the virtual-main appended
+ * @since #265
+ */
+fn emit_program_main_body(buf: []byte, prog: checker::TProgram, cov: bool) -> []byte | error {
     mut b = buf
     mut last_stmt = prog.items.len
     mut li: u64 = 0   // u64 index (so `last_stmt = li` matches last_stmt's u64 type)
@@ -10175,9 +10244,15 @@ fn emit_program_main(buf: []byte, prog: checker::TProgram) -> []byte | error {
         }
         li++
     }
+    if cov { b = cb(b, "static void __tk_cov_atexit_dump(void) { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n") }
     // main captures argv so teko::env::args() (tk_rt_args) can return it; tk_set_args first.
     b = cb(b, "int main(int argc, char **argv) {\n")
     b = cb(b, "    tk_set_args(argc, argv);\n")
+    if cov {
+        b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_branches_on(true);\n")
+        b = cb(b, "    tk_cov_line_reset(); tk_cov_lines_on(true);\n")
+        b = cb(b, "    atexit(__tk_cov_atexit_dump);\n")
+    }
     mut j = 0
     loop {
         if j >= prog.items.len { break }
@@ -10358,18 +10433,20 @@ fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64) -> []byt
 
 /**
  * mode_instruments_cov — whether `mode` populates the `tk_cov_*` sinks (`TestCov` aggregates the
- * whole run into one dump, `TestAnalyze` isolates each test into its own dump). Both emit the SAME
- * production-fn/line/branch instrumentation; only the harness in `emit_test_main` differs. Program
- * and TestPlain emit ZERO cov calls → byte-identical output → the gen1==gen2 fixpoint is intact.
+ * whole run into one dump, `TestAnalyze` isolates each test into its own dump, `ProgramCov`
+ * aggregates the whole virtual-main run into one dump — 0.3.1 C-cov). All three emit the SAME
+ * production-fn/line/branch instrumentation; only the trailing `main()` harness differs (`Program`
+ * and `TestPlain` emit ZERO cov calls → byte-identical output → the gen1==gen2 fixpoint is intact).
  *
  * @param mode  the codegen mode being emitted
- * @return      true for `TestCov`/`TestAnalyze`, false for `Program`/`TestPlain`
+ * @return      true for `TestCov`/`TestAnalyze`/`ProgramCov`, false for `Program`/`TestPlain`
  * @since 0.3.0.29
  */
 fn mode_instruments_cov(mode: CgMode) -> bool {
     match mode {
         CgMode::TestCov => true
         CgMode::TestAnalyze => true
+        CgMode::ProgramCov => true
         _ => false
     }
 }
