@@ -579,11 +579,114 @@ fn snippet_manifest_text() -> str {
 }
 
 /**
+ * SnippetSplit — an inline snippet's source, split into its top-level DECLARATIONS (`type`/`fn`/
+ * `use`/`const`, brace-depth-scoped) and its top-level STATEMENTS, each half in original source
+ * order (`split_snippet_decls_and_stmts`).
+ *
+ * @since 0.3.1
+ */
+type SnippetSplit = struct {
+    /** the concatenated declaration chunks, in source order ("" when the snippet declares none). */
+    decls: str
+    /** the concatenated statement chunks, in source order. */
+    stmts: str
+}
+
+/**
+ * snippet_chunk_is_decl — does the top-level chunk `chunk` open with a declaration keyword
+ * (`type`/`fn`/`class`/`use`/`const`, or its `pub` form)? Everything else (an expression,
+ * `let`/`mut`, `if`/`loop`, …) is a virtual-main STATEMENT.
+ *
+ * @param chunk  one top-level source chunk (brace-depth-balanced)
+ * @return       true when `chunk` is a declaration
+ * @since 0.3.1
+ */
+fn snippet_chunk_is_decl(chunk: str) -> bool {
+    let t = tkr_trim(chunk)
+    mf_starts_with(t, "type ") || mf_starts_with(t, "fn ") || mf_starts_with(t, "use ") || mf_starts_with(t, "const ") || mf_starts_with(t, "pub fn ") || mf_starts_with(t, "pub type ") || mf_starts_with(t, "pub const ")
+}
+
+/**
+ * snippet_brace_delta — the net `{`/`}` count of `line` (each `{` is +1, each `}` is -1) — the
+ * brace-depth increment `split_snippet_decls_and_stmts` accumulates per line.
+ *
+ * @param line  one source line
+ * @return      its net brace delta
+ * @since 0.3.1
+ */
+fn snippet_brace_delta(line: str) -> i64 {
+    mut d: i64 = 0
+    mut k: u64 = 0
+    loop {
+        if k >= line.len { break }
+        if line[k] == b'{' { d = d + 1 }
+        if line[k] == b'}' { d = d - 1 }
+        k = k + 1
+    }
+    d
+}
+
+/**
+ * split_snippet_decls_and_stmts — split an inline snippet's source into its top-level
+ * declarations and statements (0.3.1): `main.tks` may declare neither `type` nor `fn` (the C7.9
+ * virtual-main rule), so a snippet needing a custom type or helper function cannot be a single
+ * `main.tks`. Walks `src` line by line tracking BRACE DEPTH (a `type`/`fn` body may span many
+ * lines); a new top-level chunk starts at depth 0 on a non-blank line and ends when depth RETURNS
+ * to 0. Each whole chunk is classified (`snippet_chunk_is_decl`) and appended, in order, to the
+ * matching half.
+ *
+ * @param src  the inline snippet's whole source text
+ * @return     the source split into its declaration and statement halves
+ * @since 0.3.1
+ */
+fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
+    mut decls = ""
+    mut stmts = ""
+    mut chunk = ""
+    mut depth: i64 = 0
+    mut in_chunk = false
+    mut cur: u64 = 0
+    loop {
+        if cur >= src.len { break }
+        mut eol = cur
+        loop {
+            if eol >= src.len { break }
+            if src[eol] == b'\n' { break }
+            eol = eol + 1
+        }
+        let line = teko::str::slice(src, cur, eol)
+        let next = if eol < src.len { eol + 1 } else { eol }
+        if !in_chunk && tkr_trim(line).len == 0 { cur = next; continue }
+        in_chunk = true
+        if chunk.len > 0 { chunk = chunk ~ "\n" }
+        chunk = chunk ~ line
+        depth = depth + snippet_brace_delta(line)
+        if depth <= 0 {
+            if snippet_chunk_is_decl(chunk) { decls = decls ~ chunk ~ "\n\n" } else { stmts = stmts ~ chunk ~ "\n\n" }
+            chunk = ""
+            depth = 0
+            in_chunk = false
+        }
+        cur = next
+    }
+    if chunk.len > 0 {
+        if snippet_chunk_is_decl(chunk) { decls = decls ~ chunk ~ "\n" } else { stmts = stmts ~ chunk ~ "\n" }
+    }
+    SnippetSplit { decls = decls; stmts = stmts }
+}
+
+/**
  * compile_snippet_text — build a SINGLE Teko program `src_text` as a SCRATCH project under
- * `<prefix>.proj/` (a synthesized minimal `.tkp` + the program at the project-root `main.tks`,
- * required by the C7.9 main-file rule) with the current compiler `exe`, under `env`. No on-disk
- * project is touched — this is the compiler-as-SUT over a snippet, with zero committed fixture
- * tree. The shared tail of `compile_inline_source`/`compile_standalone_source`.
+ * `<prefix>.proj/` (a synthesized minimal `.tkp` + the program's STATEMENTS at the project-root
+ * `main.tks`, required by the C7.9 main-file rule) with the current compiler `exe`, under `env`.
+ * When `src_text` declares a top-level `type`/`fn` (a struct/class/variant/helper the statements
+ * need — `main.tks` alone cannot carry one), its declarations are split out
+ * (`split_snippet_decls_and_stmts`) into a sibling `src/regr_decls.tks` module, sharing the
+ * project's flat namespace with `main.tks` unqualified — mirroring the existing on-disk fixture
+ * shape (`main.tks` + `src/lib.tks`). A pure-statement snippet (no declarations) writes `src_text`
+ * UNCHANGED to `main.tks`, byte-identical to the pre-split behavior. No on-disk project is
+ * touched — this is the compiler-as-SUT over a snippet, with zero committed fixture tree. The
+ * shared tail of `compile_inline_source`/`compile_standalone_source`.
  *
  * @param exe       the absolute path to this compiler binary (gen1)
  * @param src_text  the whole `.tks` program to compile
@@ -597,7 +700,13 @@ fn compile_snippet_text(exe: str, src_text: str, env: []str, prefix: str) -> Cap
     let proj = prefix ~ ".proj"
     match mkdir_p(teko::str::concat(proj, "/src/")) { error => { }; null => { } }
     match teko::io::write_file(proj ~ "/teko.tkp", snippet_manifest_text()) { error => { }; null => { } }
-    match teko::io::write_file(proj ~ "/main.tks", src_text) { error => { }; null => { } }
+    let split = split_snippet_decls_and_stmts(src_text)
+    if split.decls.len == 0 {
+        match teko::io::write_file(proj ~ "/main.tks", src_text) { error => { }; null => { } }
+    } else {
+        match teko::io::write_file(proj ~ "/src/regr_decls.tks", split.decls) { error => { }; null => { } }
+        match teko::io::write_file(proj ~ "/main.tks", split.stmts) { error => { }; null => { } }
+    }
     compile_regressive(exe, proj, env, prefix ~ ".compile")
 }
 
@@ -1166,11 +1275,36 @@ fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, bui
 }
 
 /**
+ * tkr_compile_fail_artifact — resolve ONE compile-fail scenario's build: an inline snippet
+ * (`compile_inline_source`) or an explicit standalone file (`compile_standalone_source`), each
+ * relative to `regr_dir`; with NEITHER declared, falls back to compiling `regr_dir`'s OWN project
+ * (`compile_regressive`) — the multi-file-fixture case, where the rejected construct needs its
+ * full source tree (e.g. a construct spanning two files) and cannot be a single snippet. Guarded
+ * against the project-root recursion (`guard_no_project_build_at_root`) exactly like the RUN path.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param t         the lowered scenario
+ * @param prefix    the scratch-file prefix for this row
+ * @return          the captured build outcome
+ * @since 0.3.1
+ */
+fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> CapResult {
+    if t.source_inline.len > 0 { return compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix) }
+    if t.source_file.len > 0 { return compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix) }
+    match guard_no_project_build_at_root(regr_dir, t) {
+        error as e => return CapResult { exit = 1; stdout = ""; stderr = e.message }
+        null => { }
+    }
+    compile_regressive(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix)
+}
+
+/**
  * tkr_run_compile_fail — run the compile-fail scenarios of a parsed feature: a declarative
- * scenario is honest-SKIPPED; every other scenario compiles its declared inline snippet
- * (`compile_inline_source`) or explicit standalone file (`compile_standalone_source`, relative to
- * `regr_dir`) and checks it via `check_compile_fail` — a compile-fail scenario with NEITHER is an
- * honest error (it never touches a project `.tkp`). The verdict is the FIRST failure, else pass.
+ * scenario is honest-SKIPPED; every other scenario resolves its build artifact
+ * (`tkr_compile_fail_artifact` — an inline/explicit-file snippet, or `regr_dir`'s OWN project when
+ * neither is declared) and checks it via `check_compile_fail`. The verdict is the FIRST failure,
+ * else pass.
  *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressor project directory
@@ -1190,15 +1324,8 @@ fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) 
         loop {
             if ri >= specs.len { break }
             let t = specs[ri]
-            if t.source_inline.len == 0 && t.source_file.len == 0 {
-                return regr_fail($"{sc.name}: a compile-fail scenario needs `Given source`/`Given source inline`")
-            }
             let row_prefix = $"{prefix}.{si}.{ri}"
-            let comp = if t.source_inline.len > 0 {
-                compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, row_prefix), row_prefix)
-            } else {
-                compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, row_prefix), row_prefix)
-            }
+            let comp = tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix)
             let oc = check_compile_fail(t, comp)
             if !oc.ok { return regr_fail($"{sc.name}[{ri}]: {oc.message}") }
             ri = ri + 1

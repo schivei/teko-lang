@@ -4273,8 +4273,39 @@ fn cg_is_variant_type(prog: checker::TProgram, mt: checker::Type) -> bool {
     }
 }
 
-// cg_var_reaches — does variant `v` (TRANSITIVELY, depth bound 16) contain a member whose key
-// == vkey? (C: `cg_var_reaches`.)
+/**
+ * cg_member_reached_via_subclass — does a variant member of type `mt` reach `vkey` through
+ * SUB→BASE polymorphism: `mt` is a polymorphic base class and `vkey` names a STRICT subclass of
+ * it? (0.3.1, null-union F3 "base/widen": a `Base | null` slot constructed directly from a
+ * DERIVED-class expression, e.g. `let a: Animal | null = Dog::make(…)`, needs this so the member's
+ * key search recognizes the upcast the value actually needs — mirrors the plain `expected: Named`
+ * SUB→BASE branch of `emit_as_r`, extended to a variant MEMBER instead of the whole slot.)
+ *
+ * @param prog  the typed program
+ * @param mt    a variant member's type
+ * @param vkey  the value's own member key (its class name)
+ * @return      true when `mt` is a polymorphic base `vkey` strictly subclasses
+ * @since 0.3.1
+ */
+fn cg_member_reached_via_subclass(prog: checker::TProgram, mt: checker::Type, vkey: str) -> bool {
+    match mt {
+        checker::Named as mn => cg_is_polymorphic_base(prog, mn.name) && vkey != mn.name && cg_is_class_named(prog, vkey) && cg_subclass_reaches(prog, vkey, mn.name, SUBCLASS_CHAIN_DEPTH_LIMIT)
+        _ => false
+    }
+}
+
+/**
+ * cg_var_reaches — does variant `v` (TRANSITIVELY, depth bound 16) contain a member whose key ==
+ * `vkey`, OR whose type is a polymorphic base `vkey` strictly subclasses
+ * (`cg_member_reached_via_subclass`, 0.3.1 "base/widen")? (C: `cg_var_reaches`.)
+ *
+ * @param prog   the typed program
+ * @param v      the variant type being searched
+ * @param vkey   the member key being searched for (a case/class name)
+ * @param depth  the remaining transitive-recursion budget (bounded, never unbounded)
+ * @return       true when `v` reaches `vkey`, directly or through a nested/subclassed member
+ * @since 0.3.0.29
+ */
 fn cg_var_reaches(prog: checker::TProgram, v: checker::Type, vkey: str, depth: i64) -> bool {
     if depth <= 0 { return false }
     let n = cg_var_nmem(prog, v)
@@ -4287,6 +4318,7 @@ fn cg_var_reaches(prog: checker::TProgram, v: checker::Type, vkey: str, depth: i
         if cg_is_variant_type(prog, mt) {
             if cg_var_reaches(prog, mt, vkey, depth - 1) { return true }
         }
+        if cg_member_reached_via_subclass(prog, mt, vkey) { return true }
         i++
     }
     false
@@ -4351,12 +4383,31 @@ fn cg_wrap_open(buf: []byte, v: checker::Type, mkey: str) -> []byte | error {
     }
 }
 
-// emit_variant_wrap — wrap `value` (a bare case) into the variant `expected`, DIRECTLY or
-// TRANSITIVELY. A value that is a case of a NESTED variant member is routed through that member
-// (Named → (Type){…} → (Type|error){…}), recursing. PRECONDITION: value's key is reachable in
-// `expected` (the caller guards with cg_var_reaches and otherwise emits plainly); `T? | error`
-// is an illegal type here, so reachability is a separate predicate rather than a `null` result.
-// (C: `emit_variant_wrap`.)
+/**
+ * emit_variant_wrap — wrap `value` (a bare case) into the variant `expected`, DIRECTLY or
+ * TRANSITIVELY. A value that is a case of a NESTED variant member is routed through that member
+ * (Named → (Type){…} → (Type|error){…}), recursing. The DIRECT pass also matches a member that is
+ * a polymorphic BASE class `value`'s own class strictly subclasses
+ * (`cg_member_reached_via_subclass`, 0.3.1 "base/widen" — e.g. `Animal | null` constructed from a
+ * `Dog` value): that arm wraps `value` via `emit_as_r` (not a bare `emit_expr_ret`) so the
+ * SUB→BASE upcast fires INSIDE the `.as.<member>` slot, matching the member's actual C
+ * representation (`tk_base_<Base>`, not the raw subclass struct). PRECONDITION: value's key is
+ * reachable in `expected` (the caller guards with `cg_var_reaches` and otherwise emits plainly);
+ * `T? | error` is an illegal type here, so reachability is a separate predicate rather than a
+ * `null` result. (C: `emit_variant_wrap`.)
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type (threaded for a diverging value inside `value`)
+ * @param expected  the target variant type `value` wraps into
+ * @param value     the case value being wrapped
+ * @param escaping  the escaping-binding set (region model)
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body
+ * @param dctx      the enclosing defer context
+ * @return          `buf` with the wrapped compound literal appended, or an error
+ * @throws          when `value`'s key is unreachable in `expected` (an internal caller-guard bug)
+ */
 fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     match expected {
         checker::Variant as bva => match cg_union_box_member(prog, bva) {
@@ -4375,15 +4426,20 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Ty
     }
     let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
     let n = cg_var_nmem(prog, expected)
-    // pass 1 — DIRECT: value's key matches a member of `expected`.
     mut i = 0
     loop {
         if i >= n { break }
         let mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
+        let mt = cg_var_mtype(prog, expected, i)
         if mk == vkey {
             mut out = match cg_wrap_open(buf, expected, vkey) { []byte as o => o; error as err => return err }
             out = match emit_expr_ret(out, prog, ret_type, value) { []byte as o => o; error as err => return err }
             return cb(out, " }")
+        }
+        if cg_member_reached_via_subclass(prog, mt, vkey) {
+            mut sout = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
+            sout = match emit_as_r(sout, prog, ret_type, mt, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            return cb(sout, " }")
         }
         i++
     }
@@ -5084,7 +5140,7 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
             checker::Type as nx => {
                 match value.kind {
                     checker::TNullLit => return cg_emit_niche_null(buf, prog, nx)
-                    _ => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)
+                    _ => return emit_as_r(buf, prog, ret_type, nx, value, escaping, regions, fn_body, dctx)
                 }
             }
             null => { }
