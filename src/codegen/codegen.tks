@@ -1634,7 +1634,7 @@ fn cg_union_box_member(prog: checker::TProgram, v: checker::Variant) -> checker:
     if null_count != 1 { return null }
     let x = match other { checker::Type as t => t; null => return null }
     if cg_type_is_niche_able(prog, x) { return null }
-    if cg_union_inline_recursive(prog, checker::Variant { members = v.members }, x, 0 to u64) { return x }
+    if cg_union_inline_recursive(prog, checker::Variant { members = v.members }, x) { return x }
     if cg_type_min_bytes(prog, x) >= (16 to u64) { return x }
     null
 }
@@ -1671,36 +1671,97 @@ fn union_repr_class(prog: checker::TProgram, v: checker::Variant, forced_inline:
 
 /**
  * cg_union_inline_recursive — would inline-forcing the union `union_t` be SELF-RECURSIVE (hence of no
- * finite size)? True when the candidate payload `x` transitively EMBEDS `union_t` BY VALUE — through
- * struct fields only; a slice/pointer/class handle is an indirection that finitizes the type and
- * stops the walk. Depth-bounded so a genuinely finite value graph always terminates.
+ * finite size)? True when the candidate payload `x` transitively EMBEDS `union_t` BY VALUE, through
+ * either a struct FIELD or a VARIANT MEMBER; a slice/pointer/class handle is an indirection that
+ * finitizes the type and stops the walk. Walking variant members (not only struct fields) catches the
+ * recursion when the payload is itself a variant whose member is a struct that carries the union back
+ * (e.g. `Ptr.inner: Type | null` where `Type` is a variant with a `Ptr` member) — a size-16 fall-back
+ * would MISS such a case for a small-min-byte variant, Inline it, and produce an infinite C value type.
+ * The visited-name set guarantees termination over a finite type graph without a fixed depth cap.
  *
- * @param prog     the typed program (struct-field resolution)
+ * @param prog     the typed program (struct-field + variant-member resolution)
  * @param union_t  the resolved union whose inline-forcing is being validated
  * @param x        the resolved type currently being walked (initially the boxed payload member)
- * @param depth    the current struct-nesting depth (bounded)
  * @return         true iff `x` embeds `union_t` by value (inline-forcing would not terminate)
  * @since 0.3.0.30 (null-union C4)
  */
-fn cg_union_inline_recursive(prog: checker::TProgram, union_t: checker::Type, x: checker::Type, depth: u64) -> bool {
-    if depth >= (8 to u64) { return false }
+fn cg_union_inline_recursive(prog: checker::TProgram, union_t: checker::Type, x: checker::Type) -> bool {
+    cg_union_inline_recursive_seen(prog, union_t, x, teko::list::empty())
+}
+
+/**
+ * cg_union_inline_recursive_seen — the visited-guarded worker behind `cg_union_inline_recursive`. A
+ * NAMED type already on the `seen` path yields false (that node was explored and carried no back-edge
+ * to `union_t`); a class handle is a pointer indirection that finitizes the walk; a struct descends
+ * its fields, a variant its members.
+ *
+ * @param prog     the typed program (decl + field/member resolution)
+ * @param union_t  the resolved union being validated
+ * @param x        the resolved type currently being walked
+ * @param seen     the canonical names already on this walk (cycle guard)
+ * @return         true iff `x` embeds `union_t` by value
+ * @since 0.3.1 (null-union C6 variant-payload recursion)
+ */
+fn cg_union_inline_recursive_seen(prog: checker::TProgram, union_t: checker::Type, x: checker::Type, seen: []str) -> bool {
     if cg_mangle_eq(union_t, x) { return true }
-    match x {
-        checker::Named as nm => {
-            if cg_is_class_named(prog, nm.name) { return false }
-            let d = match cg_find_decl(prog, nm.name) { parser::TypeDecl as dd => dd; error => return false }
-            let sb = match d.body { parser::StructBody as s => s; _ => return false }
-            mut i = 0
-            loop {
-                if i >= sb.fields.len { break }
-                let ft = cg_te_to_type_ns(prog, checker::name_qualifier(nm.name), sb.fields[i].type_ann)
-                if cg_union_inline_recursive(prog, union_t, ft, depth + (1 to u64)) { return true }
-                i++
-            }
-            false
-        }
+    let nm = match x { checker::Named as n => n; _ => return false }
+    if cg_is_class_named(prog, nm.name) { return false }
+    if cg_nameset_seen(seen, nm.name) { return false }
+    let seen2 = teko::list::push(seen, nm.name)
+    let d = match cg_find_decl(prog, nm.name) { parser::TypeDecl as dd => dd; error => return false }
+    let ns = checker::name_qualifier(nm.name)
+    match d.body {
+        parser::StructBody as sb => cg_union_recur_in_fields(prog, union_t, ns, sb.fields, seen2)
+        parser::VariantBody as vb => cg_union_recur_in_members(prog, union_t, ns, vb, seen2)
         _ => false
     }
+}
+
+/**
+ * cg_union_recur_in_fields — does any struct FIELD of the walked type embed `union_t` by value?
+ *
+ * @param prog     the typed program (field-type resolution)
+ * @param union_t  the resolved union being validated
+ * @param ns       the owning struct's namespace (resolves bare field type names)
+ * @param fields   the struct's fields
+ * @param seen     the canonical names already on this walk (cycle guard)
+ * @return         true iff a field's by-value content reaches `union_t`
+ * @since 0.3.1 (null-union C6 variant-payload recursion)
+ */
+fn cg_union_recur_in_fields(prog: checker::TProgram, union_t: checker::Type, ns: str, fields: []parser::Field, seen: []str) -> bool {
+    mut i = 0
+    loop {
+        if i >= fields.len { break }
+        let ft = cg_te_to_type_ns(prog, ns, fields[i].type_ann)
+        if cg_union_inline_recursive_seen(prog, union_t, ft, seen) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * cg_union_recur_in_members — does any VARIANT MEMBER of the walked type embed `union_t` by value? A
+ * variant's C layout embeds its largest member by value, so a member that carries the union back
+ * closes a value-type cycle exactly as a struct field does.
+ *
+ * @param prog     the typed program (member-type resolution)
+ * @param union_t  the resolved union being validated
+ * @param ns       the owning variant's namespace (resolves bare member type names)
+ * @param vb       the variant body
+ * @param seen     the canonical names already on this walk (cycle guard)
+ * @return         true iff a member's by-value content reaches `union_t`
+ * @since 0.3.1 (null-union C6 variant-payload recursion)
+ */
+fn cg_union_recur_in_members(prog: checker::TProgram, union_t: checker::Type, ns: str, vb: parser::VariantBody, seen: []str) -> bool {
+    let u = match vb.type_expr { parser::UnionType as ut => ut; _ => return false }
+    mut i = 0
+    loop {
+        if i >= u.members.len { break }
+        let mt = cg_te_to_type_ns(prog, ns, u.members[i])
+        if cg_union_inline_recursive_seen(prog, union_t, mt, seen) { return true }
+        i++
+    }
+    false
 }
 
 /**
@@ -1736,7 +1797,7 @@ fn inline_attr_eligible(prog: checker::TProgram, t: checker::Type) -> error? {
     }
     match cg_union_box_member(prog, v) {
         checker::Type as bx => {
-            if cg_union_inline_recursive(prog, t, bx, 0 to u64) {
+            if cg_union_inline_recursive(prog, t, bx) {
                 return error { message = "`#inline` cannot apply to a self-recursive union — it MUST box (an inline self-recursive sum has no finite size)" }
             }
             null
@@ -4375,6 +4436,74 @@ fn emit_variant_wrap_str(buf: []byte, prog: checker::TProgram, expected: checker
     error { message = "codegen: emit_variant_wrap_str on an unreachable case (internal — caller must guard with cg_var_reaches)" }
 }
 
+/**
+ * cg_emit_union_present_str — wrap a present member C-EXPRESSION STRING `cexpr` (of static type
+ * `mem`) into the absence/sum slot `uni`, using the slot's PHYSICAL representation. A niche union
+ * stores the present member BARE (the member itself carries the representation, e.g. `error | null`
+ * ≡ `tk_error`); any other sum embeds the member behind its inline-tag through `emit_variant_wrap_str`.
+ * The legacy `Optional` former (`T?`, still buildable while an intermediate bootstrap seed carries a
+ * pre-pivot corpus) present-wraps into its `tk_opt_<inner>` struct. This is the string-position dual
+ * of `emit_as_r`'s present-value wrapping, for FFI result arms whose value is a runtime C expression
+ * rather than a typed `TExpr`.
+ *
+ * @param buf    the output byte buffer
+ * @param prog   the typed program (union representation classification)
+ * @param uni    the target absence slot (a null-union `Variant` or a legacy `Optional`)
+ * @param mem    the static type of the present member being wrapped
+ * @param cexpr  the C expression string producing the present member value
+ * @return       the buffer with the representation-correct wrapped value appended
+ * @throws       error when the inline-tag wrap is asked for an unreachable member (via emit_variant_wrap_str)
+ * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
+ */
+fn cg_emit_union_present_str(buf: []byte, prog: checker::TProgram, uni: checker::Type, mem: checker::Type, cexpr: str) -> []byte | error {
+    match uni {
+        checker::Optional as opt => {
+            mut o = cb(buf, "(")
+            o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
+            o = cb(o, "){ .present = true, .value = ")
+            o = cb(o, cexpr)
+            return cb(o, " }")
+        }
+        _ => { }
+    }
+    let va = match uni { checker::Variant as v => v; _ => return cb(buf, cexpr) }
+    match cg_union_niche_member(prog, va) {
+        checker::Type => return cb(buf, cexpr)
+        null => { }
+    }
+    emit_variant_wrap_str(buf, prog, uni, mem, cexpr)
+}
+
+/**
+ * cg_emit_ffi_ures — emit a fixed-ABI unit-result (`tk_ffi_ures`) bound to `ures_tmp` as the Teko
+ * `error | null` return value, in the return type's physical representation: the `.ok` branch is the
+ * union's `null` (routed through `emit_as_r` so a niche stores its sentinel, a box stores 0, an
+ * inline-tag stores its null wrap), the failure branch wraps the `tk_str` `.err` message via
+ * `tk_error_make` into the union's present `error` member. Replaces the hardcoded `.present`/`.value`
+ * optional shape that only fit the pre-pivot `error?` former.
+ *
+ * @param buf        the output byte buffer
+ * @param prog       the typed program (representation classification + expression lowering)
+ * @param result_ty  the Teko result type (`error | null`)
+ * @param ures_tmp   the C temp name holding the bound `tk_ffi_ures`
+ * @param escaping   the escaping-locals set threaded from the enclosing emit
+ * @param regions    the active region frames
+ * @param fn_body    the enclosing function body (defer/region resolution)
+ * @param dctx       the defer context
+ * @return           the buffer with the `.ok ? <null> : <error>` ternary appended
+ * @throws           error propagated from the null/error arm emission
+ * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
+ */
+fn cg_emit_ffi_ures(buf: []byte, prog: checker::TProgram, result_ty: checker::Type, ures_tmp: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let nulllit = checker::TExpr { kind = checker::TNullLit { }; type = result_ty; line = 0; col = 0 }
+    mut o = cb(buf, ures_tmp)
+    o = cb(o, ".ok ? ")
+    o = match emit_as_r(o, prog, result_ty, result_ty, nulllit, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+    o = cb(o, " : ")
+    let errcexpr = teko::str::concat("tk_error_make(", ures_tmp, ".err)")
+    cg_emit_union_present_str(o, prog, result_ty, checker::Error { }, errcexpr)
+}
+
 // cg_wrap_elem_str — wrap a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
 // into the slice element target `T` (= `expected`), for the emit_as slice-covariance rebuild. Uniform
 // with emit_as's value-position wrapping:
@@ -4528,15 +4657,8 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
         o = cb(o, "s.ptr, (uint64_t)")
         o = cb(o, t)
         o = cb(o, "s.len); ")
-        o = cb(o, t)
-        o = cb(o, "r.ok ? (")
-        o = match emit_type(o, prog, e.type) { []byte as r => r; error as err => return err }
-        o = cb(o, "){ .present = false } : (")
-        o = match emit_type(o, prog, e.type) { []byte as r => r; error as err => return err }
-        // E2-NATIVE: .value is now tk_error; wrap the tk_str .err message via tk_error_make.
-        o = cb(o, "){ .present = true, .value = tk_error_make(")
-        o = cb(o, t)
-        return cb(o, "r.err) }; })")
+        o = match cg_emit_ffi_ures(o, prog, e.type, teko::str::concat(t, "r"), escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+        return cb(o, "; })")
     }
 
     // ROUND 0 — sres_byteslice: str_from_utf8(bytes: []byte) -> str | error. The C function
@@ -4586,17 +4708,9 @@ fn emit_host_ffi(buf: []byte, prog: checker::TProgram, e: checker::TExpr, c: che
     }
     o = cb(o, "); ")
 
-    // error? : ok → present=false (success) ; !ok → present=true, value=<tk_error>.
-    // E2-NATIVE: .value is now tk_error; wrap the tk_str .err message via tk_error_make.
     if kind == "ures" {
-        o = cb(o, t)
-        o = cb(o, ".ok ? (")
-        o = match emit_type(o, prog, e.type) { []byte as r => r; error as err => return err }
-        o = cb(o, "){ .present = false } : (")
-        o = match emit_type(o, prog, e.type) { []byte as r => r; error as err => return err }
-        o = cb(o, "){ .present = true, .value = tk_error_make(")
-        o = cb(o, t)
-        return cb(o, ".err) }; })")
+        o = match cg_emit_ffi_ures(o, prog, e.type, t, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+        return cb(o, "; })")
     }
 
     // VARIANT results: ok → wrap the value arm ; !ok → wrap the error arm (a tk_error).
