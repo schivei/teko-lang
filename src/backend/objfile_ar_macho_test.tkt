@@ -44,18 +44,22 @@ fn bsd_ar_global_header_and_symdef_name() {
 /**
  * bsd_ar_single_member_symdef_and_member_layout — a one-member, one-symbol
  * BSD/Darwin archive (`main.o` / symbol `_main`) lays out EXACTLY per the
- * run-30065167036 byte-for-byte ground truth against Apple's own
+ * run-30067176730 byte-for-byte ground truth against Apple's own
  * `libtool -static` reference archive: 8-byte global header + 60-byte
  * `__.SYMDEF SORTED` header (`Name`=`"#1/20"`, `Mode`=`"100644"`,
- * `Size`=`"44"` = 20 name bytes + 24 payload bytes) + 16 raw name bytes
- * (`"__.SYMDEF SORTED"`) + 4-byte zero inner pad (84 -> 88) + 24-byte payload
- * (u32 LE ranlib-array-size=8, one `{strx=0, off=112}` `struct ranlib` entry,
- * u32 LE strtab-size=8 — the PADDED length, `align_up(6, 8)` — `"_main\0"`
- * plus 2 zero pad bytes) + zero outer pad (24 is already 8-aligned) + the
- * 60-byte `main.o` member header (`Name`=`"#1/12"`, `Mode`=`"644"`,
- * `Size`=`"16"` = 12 name-with-padding + 4 content) + 6 raw name bytes
- * (`"main.o"`) + 6-byte zero inner pad (172 -> 184) + 4-byte content +
- * 4-byte zero outer pad (184 -> 192) — 192 bytes total.
+ * `Size`=`"44"` = 20 name bytes + 24 payload bytes, ALREADY 8-aligned so
+ * raw==padded here) + 16 raw name bytes (`"__.SYMDEF SORTED"`) + 4-byte zero
+ * inner pad (84 -> 88) + 24-byte payload (u32 LE ranlib-array-size=8, one
+ * `{strx=0, off=112}` `struct ranlib` entry, u32 LE strtab-size=8 — the
+ * PADDED length, `align_up(6, 8)` — `"_main\0"` plus 2 zero pad bytes) +
+ * zero outer pad (24 is already 8-aligned) + the 60-byte `main.o` member
+ * header (`Name`=`"#1/12"`, `Mode`=`"644"`, `Size`=`"20"` = 12
+ * name-with-padding + `align_up(4, 8)`=8 PADDED content — run 30067176730:
+ * `Size` counts the member's own trailing pad bytes too, NOT the raw
+ * 4-byte content length `"16"` an earlier iteration declared, which made
+ * `ar`/`ld64` read a bogus header 4 bytes short of this member's true end)
+ * + 6 raw name bytes (`"main.o"`) + 6-byte zero inner pad (172 -> 184) +
+ * 4-byte content + 4-byte zero outer pad (184 -> 192) — 192 bytes total.
  *
  * @return void
  */
@@ -72,6 +76,9 @@ fn bsd_ar_single_member_symdef_and_member_layout() {
     teko::assert::is_true(obj[109] == (0 to byte))
     teko::assert::is_true(obj[110] == (0 to byte))
     teko::assert::is_true(obj[112] == (0x23 to byte))
+    teko::assert::is_true(obj[160] == (0x32 to byte))
+    teko::assert::is_true(obj[161] == (0x30 to byte))
+    teko::assert::is_true(obj[162] == (0x20 to byte))
     teko::assert::is_true(obj[184] == (0xDE to byte))
     teko::assert::is_true(obj[187] == (0xEF to byte))
     teko::assert::is_true(obj[188] == (0 to byte))
@@ -88,7 +95,11 @@ fn bsd_ar_single_member_symdef_and_member_layout() {
  * zero-padded after its content back up to a multiple of 8 — proving the
  * sequential `bsd_layout_members` offset-threading survives non-trivial
  * per-member padding on both sides even at the new 4-byte field width
- * (run 30065167036 ground truth).
+ * (run 30065167036 ground truth). Each member's own `Size` field
+ * (`"12"` for both `a.o` and `b.o`) counts its PADDED content length
+ * (`nwp(4) + align_up(1, 8)=8` and `nwp(4) + align_up(2, 8)=8`, both 12 —
+ * run 30067176730: `Size` must include the member's own trailing pad, not
+ * just its raw content length, or `ar`/`ld64` misplace the next header).
  *
  * @return void
  */
@@ -108,12 +119,18 @@ fn bsd_ar_two_members_offsets_thread_through_padding() {
     teko::assert::is_true(obj[124] == (0 to byte))
     teko::assert::is_true(obj[127] == (0 to byte))
     teko::assert::is_true(obj[128] == (0x23 to byte))
+    teko::assert::is_true(obj[176] == (0x31 to byte))
+    teko::assert::is_true(obj[177] == (0x32 to byte))
+    teko::assert::is_true(obj[178] == (0x20 to byte))
     teko::assert::is_true(obj[188] == (0x61 to byte))
     teko::assert::is_true(obj[191] == (0 to byte))
     teko::assert::is_true(obj[192] == (0x01 to byte))
     teko::assert::is_true(obj[193] == (0 to byte))
     teko::assert::is_true(obj[199] == (0 to byte))
     teko::assert::is_true(obj[200] == (0x23 to byte))
+    teko::assert::is_true(obj[248] == (0x31 to byte))
+    teko::assert::is_true(obj[249] == (0x32 to byte))
+    teko::assert::is_true(obj[250] == (0x20 to byte))
     teko::assert::is_true(obj[260] == (0x62 to byte))
     teko::assert::is_true(obj[263] == (0 to byte))
     teko::assert::is_true(obj[264] == (0x02 to byte))
@@ -216,7 +233,10 @@ fn macho_ar_symbols_prefixes_underscore_and_excludes_non_globals() {
  * symdef span and the member's header start (112) match the single-member
  * test exactly; the CONTENT IS NOT the archive's last bytes — its 2-byte
  * length needs 6 zero-byte outer-padding bytes to reach the next 8-byte
- * boundary, so `obj[184..186)` (not `obj[obj.len-2..]`) is the content.
+ * boundary, so `obj[184..186)` (not `obj[obj.len-2..]`) is the content, and
+ * the member's `Size` field (`"20"` = `nwp(12) + align_up(2, 8)=8`) counts
+ * those 6 pad bytes too (run 30067176730 ground truth), not the raw 2-byte
+ * content length alone.
  *
  * @return void
  */
@@ -229,6 +249,8 @@ fn emit_static_archive_macho_wraps_one_member() {
     teko::assert::is_true(obj.len == (192 to u64))
     teko::assert::is_true(macho_ar_u32_le_at(obj, 88 to u64) == (8 to u32))
     teko::assert::is_true(macho_ar_u32_le_at(obj, 96 to u64) == (112 to u32))
+    teko::assert::is_true(obj[160] == (0x32 to byte))
+    teko::assert::is_true(obj[161] == (0x30 to byte))
     teko::assert::is_true(obj[184] == (0xAA to byte))
     teko::assert::is_true(obj[185] == (0xBB to byte))
     teko::assert::is_true(obj[186] == (0 to byte))
