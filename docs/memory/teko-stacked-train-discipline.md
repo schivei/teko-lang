@@ -120,3 +120,49 @@ não-progresso. Invariantes aprendidos na marra:
 - **A saída da sondagem mora DENTRO do worktree sondado** (mesma razão: era do runtime).
 - **O clean preserva os diretórios que guardam os compiladores da escada.**
 - Build intermediário é seco (`--no-verify`): medida **transitória da .31**, a desfazer na .32.
+
+## Lane que estreia na aterrissagem → vagão próprio de correção (owner 2026-07-25)
+
+O split light/full do CI (`base_ref == main` ⇒ full) tem um efeito de segunda ordem: as lanes
+full-only rodam **pela primeira vez** no vagão que aterrissa. Na .31 isso concentrou OITO estreias
+num único momento — lane riscv64 restaurada, ASan/UBSan/LSan, `TEKO_MEM_PARANOID`, Windows
+self-host, `test / macos`, três `ar validation`, cross-smoke — e duas delas (ASan e mem-paranoid)
+**nunca haviam rodado na história do projeto**, porque gateavam em `github.ref == 'refs/heads/main'`,
+condição que nunca casa num evento `pull_request`.
+
+Duas saídas foram propostas ao owner e **as duas foram rejeitadas**: aceitar o risco e resolver na
+contra-máquina; ou gastar um PR descartável apontado para `main` só para forçar um run completo.
+
+**Ruling: vagão NOVO de correção, antes do W15.** Ordem de fechamento passa a ser:
+
+> features → métrica/limpeza transversal (D4) → **vagão de correção de estreia** → W15 → contra-máquina
+
+O run completo sai de graça, sem PR de mentira: o vagão de correção recebe **retarget da base para
+`main`** — a mesma mecânica já ratificada para o dreno ("o CI roda contra a main de verdade") — o
+full roda contra a árvore quase-final, as correções entram **nesse mesmo vagão**, e depois a base
+volta para o vagão anterior para o W15 empilhar em cima.
+
+Por que é melhor que as alternativas: um PR descartável mede uma árvore que ainda vai mudar e o
+trabalho de correção não tem onde morar; aceitar o risco trava o owner no último passo. O vagão
+resolve os dois — é lugar de trabalho **e** é o gatilho do run.
+
+**Corolário: pré-carregue o vagão em vez de reagir ao vermelho.** As classes de falha de cada lane
+são estaticamente caçáveis. Prova empírica da .31: a lane do Windows, ao ser ligada, entregou dois
+defeitos reais em duas horas — um seed de assert morto em PE/COFF (weak cruzando unidade de tradução
+não existe nesse formato) e um `"/tmp/..."` hardcoded num fixture. O segundo era achável com um
+`grep`. Uma varredura por classe antes do run faz o vagão nascer com lista.
+
+## Armadilhas do worktree compartilhado
+
+- **NUNCA `git stash` em worktree de vagão.** O `.git` é compartilhado entre todos os worktrees e a
+  **pilha de stash é global**. Um `git stash -q` numa árvore já limpa não cria entrada (sai 0 em
+  silêncio), e o `git stash pop -q` emparelhado vai então buscar o topo da pilha **de outro agente** —
+  em 2026-07-25 isso deletou um design doc alheio ao vagão. Para comparar antes/depois use
+  `git archive` ou copie para `/tmp`.
+- **Um achado de auditoria vale no snapshot em que foi feito, não no topo.** Dois achados de revisores
+  na .31 eram verdadeiros no worktree auditado e **já corrigidos num vagão acima** (a guarda de nome
+  de membro do `ar`, que chegou no commit `d1aab7ba`). Reverificar no TOPO antes de virar trabalho não
+  é desconfiança do revisor — é o passo que evita um vagão de correção inútil.
+- **Ramo de erro inalcançável não é bug.** Um `error => ""` cuja condição de entrada é a negação exata
+  da condição de erro do chamado não pode disparar. Vira higiene (ramo morto que finge ser possível),
+  não MEDIUM de corrupção.

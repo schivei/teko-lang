@@ -31,3 +31,43 @@ source: TEKO_CONSTITUTION.md, TEKO_LEGISLATION.md, TEKO_MASTER_PLAN.md (wave con
 **Metaprogramming-out-of-LTS:** comptime/macros deferred to post-`1.0.0.0`; traits (structural derive) stay.
 
 **STS-before-LTS (2026-07-13):** sequential-task-structure ruling stabilizes before LTS lockdown; waves solve independently.
+
+- **Gate que não gateia é pior que gate ausente (2026-07-25).** Quatro instâncias na .31: dois jobs de
+  sanitizer com condição que nunca casa (`github.ref` em `pull_request` é `refs/pull/N/merge`); o
+  runner de regressivo contando pulo como sucesso e escondendo no agregado (`N run, 0 failed` com
+  tudo pulado); o `REGRESSION_REQUIRE_TOOLS`, o toggle fail-closed que o projeto construiu e nunca
+  ligou em lugar nenhum; e o gate de tag esperando 60 min por workflows que **não rodam em push**
+  (`on: pull_request:` apenas), o que travou release E seed novo. Regra: **todo gate afirma o modo em
+  que está e falha quando o que devia rodar pulou.** `skipped` no caminho obrigatório é ERRO, não
+  aprovação — e um gate que **não pode** passar bloqueia mais do que protege.
+- **Prova removida tem que ser substituída por prova, não por prosa (2026-07-25).** O drop-128 tirou
+  carriers de 128 bits que eram provas carregando peso, e em três lugares distintos a substituição foi
+  uma frase de doc-comment que deixou de ser verdadeira: os `@throws panics on overflow` do
+  `teko::time` (a flag nunca é definida), o "wrapping, never checked" do `numint_to_i64` (é UB de
+  signed), e o "as fixtures são não-negativas" do `lir_interp` (com i64, u64 de bit alto é negativo —
+  o oráculo divergiu do backend que ele valida). O contra-exemplo correto está no mesmo trem:
+  `numint_hi`/`numint_lo`, com prova escrita e verificável no doc-comment. **Frase sobrevive a
+  refactor; significado não.**
+- **Um build por cenário é erro de design; a separação de fases é o habilitador, não a economia
+  (owner 2026-07-25).** O runner de regressivo sintetiza um projeto descartável por cenário **e por
+  linha de `Examples`** (`<prefix>.proj/` com `.tkp` mínimo + os statements), e paga **quatro
+  processos** por build: `sh -c` (captura por redireção) → `teko` (start + init de runtime +
+  front-end sobre 3 linhas) → `cc` (clang sobre o C gerado + runtime) → o binário. Medido na .31:
+  318 builds em 8m33s = **1,61 s por build**, com fontes de no máximo 9 linhas — ou seja, custo
+  **fixo**, não proporcional à fixture.
+
+  Duas coisas que o ruling do owner NÃO precisou corrigir, porque já eram verdade: todo build de
+  cenário já passa `--no-verify`, e a regressão que É o próprio binário (Feature R0) é
+  **declarativa** — quatro cenários sem fonte e sem build, apontando por `# verified-by:` para fatos
+  que o pipeline já estabelece (self-host, `teko test .` == 0, fixpoint gen1==gen2, own==C).
+
+  O que a separação de fases destrava, e é onde o ganho mora: **paralelizar** os builds (mutuamente
+  independentes), **um scratch só** em vez de N árvores, e **amortizar o `cc`** (um processo clang por
+  cenário é o dominante). Reordenar sem essas três não economiza nada.
+
+  Ressalva de premissa, registrada para não se perder: os cenários **não** cabem num único projeto —
+  cada um é um programa com seus próprios statements de topo, e projeto Teko compila para **um**
+  binário. O que se compartilha é a fase, o scratch e a passada de compilação; nunca o artefato.
+
+  Ordem decidida: **medir na .31, reestruturar na .32** — paralelizar o runner mexe em determinismo de
+  saída (ordem de linhas, interleaving de captura) e esse risco não entra no trem que está fechando.

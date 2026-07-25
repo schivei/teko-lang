@@ -20,6 +20,7 @@ this skill is the operating procedure.
 | wagon below is red | **do nothing** — it goes green in the drain |
 | wagon is closed/green | **never touch it, never push to it** |
 | a merge errors during the drain | only then a wagon reopens |
+| lane full-only vai estrear na aterrissagem | **vagão próprio de correção antes do W15**, com retarget da base para `main` para forçar o run |
 
 **Never cascade a fix downward.** `update_pull_request_branch` across the chain is the wrong
 reflex: it burns runners and hours for what the drain does for free. The only gate that matters
@@ -91,6 +92,10 @@ The top branch already contains every wagon below it, so the drain is a single m
 4. delete the wagon branches — under squash that is what actually closes them (the original SHAs
    never become reachable from `main`, so GitHub cannot auto-detect; it closes a PR when its base
    or head branch disappears). `Closes #N` keywords close ISSUES, never PRs.
+
+O mesmo retarget-para-`main` serve como **ensaio**: o vagão de correção de estreia usa-o para forçar
+um run completo contra a árvore quase-final, e depois devolve a base ao vagão anterior. É o único
+lugar onde a base de um vagão muda duas vezes, e é deliberado.
 
 Never merge, never un-draft anything else, never squash on the owner's behalf.
 
