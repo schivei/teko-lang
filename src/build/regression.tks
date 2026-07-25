@@ -542,10 +542,16 @@ fn compile_regressive(exe: str, regr_dir: str, env: []str, prefix: str) -> CapRe
  * which builds `<regr_dir>` from the runner's OWN cwd without `cd`-ing into it. The binary lands at
  * `<regr_dir>/bin/<name>`, same as `compile_regressive`.
  *
+ * `prefix` is resolved to an ABSOLUTE path before the capture runs: the shell command
+ * `run_captured_in_dir` builds is `cd <regr_dir> && … < prefix.in > prefix.out 2> prefix.err`,
+ * so the redirection targets are evaluated AFTER the `cd` — a relative `prefix` (e.g. the
+ * runner's own `bin/.regr-work/…`) would resolve against `regr_dir`, not the directory it was
+ * actually written under, and the shell would fail to open it (never a silent skip; caught here).
+ *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressive project directory (the directory the CWD-relative build runs in)
  * @param env       per-scenario child env (`K=V` tokens; 0.3.1 C2)
- * @param prefix    the scratch-file prefix for this compile
+ * @param prefix    the scratch-file prefix for this compile (relative or absolute)
  * @return          the captured build outcome
  * @since 0.3.1
  */
@@ -555,7 +561,8 @@ fn compile_in_place(exe: str, regr_dir: str, env: []str, prefix: str) -> CapResu
     argv = teko::list::push(argv, "-o")
     argv = teko::list::push(argv, "bin")
     argv = teko::list::push(argv, "--no-verify")
-    run_captured_in_dir(argv, "", env, regr_dir, prefix)
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    run_captured_in_dir(argv, "", env, regr_dir, abs_path_of(prefix, cwd))
 }
 
 /**
