@@ -92,10 +92,14 @@ jobs:
   # own isolated runner (no other diagnostic work competing on this box). If it still exceeds the
   # cap it may need the same build-time relief the perf phase is bringing to the other lanes — do
   # NOT silently drop it; the owner wants one test runner per OS.
-  # FULL-ONLY: base_ref == main.
+  # LIGHT PATH — deliberately NOT full-only (integrator ruling 2026-07-25). Windows is the only
+  # non-ubuntu lane that rides the light tier, because it is the only one that has caught a
+  # wagon-unique failure on this train: wagon 15 red on `Windows self-host smoke`, wagon 16 red
+  # here (`assert_native` — a weak-symbol seam PE/COFF never resolved). Omitting it from the light
+  # tier would defer every Windows break to the landing wagon, which is exactly how `assert_native`
+  # stayed invisible for as long as it did. Rationale in full: native.yml's matrix note.
   test-windows:
     name: test / windows
-    if: github.base_ref == 'main'
     runs-on: windows-latest
     timeout-minutes: 125
     permissions:
@@ -147,13 +151,16 @@ jobs:
           echo "mode=$MODE (base_ref='$BASE_REF')"
           echo "test / linux   = $LINUX   (light path)"
           echo "test / macos   = $MACOS   (full only)"
-          echo "test / windows = $WINDOWS   (full only)"
+          echo "test / windows = $WINDOWS   (light path — see native.yml's matrix note)"
 
           FAILED=0
-          if [ "$LINUX" != "success" ]; then
-            echo "ERROR: test / linux = $LINUX (the light path requires success; a skip means a broken condition)"
+          require_light_path() {
+            [ "$2" = "success" ] && return 0
+            echo "ERROR: $1 = $2 (the light path requires success; a skip means a broken condition)"
             FAILED=1
-          fi
+          }
+          require_light_path "test / linux"   "$LINUX"
+          require_light_path "test / windows" "$WINDOWS"
 
           require_full_only() {
             if [ "$MODE" = "full" ]; then
@@ -166,7 +173,6 @@ jobs:
             echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
           }
           require_full_only "test / macos"   "$MACOS"
-          require_full_only "test / windows" "$WINDOWS"
 
           if [ "$FAILED" = "1" ]; then
             echo "Test suite gate FAILED (mode=$MODE)."
