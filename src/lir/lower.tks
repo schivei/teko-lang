@@ -1817,42 +1817,54 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
     }
 }
 
-/** lower_binding — `let x = e`: a str/slice-typed binding (A1-4, #382) lowers `e` through
-    the FAT path and binds (ptr, len); every other binding lowers `e` through
-    `lower_binding_value` (coercion-aware, C6/C7 null-union) and binds the single result VReg
-    plainly. The binding target must be a simple name (a destructuring pattern is out of the
-    N1 subset). */
+/**
+ * lower_binding — `let x = e`: a str/slice-typed binding (A1-4, #382) lowers `e` through the FAT
+ * path and binds (ptr, len); every other binding lowers `e` through `lower_value_into_type`
+ * (coercion-aware, C6/C7 null-union) and binds the single result VReg plainly.
+ *
+ * @param LowerCtx ctx  the lowering context to append the binding's instructions into
+ * @param checker::TBinding b  the typed binding statement
+ * @return LowerStmtOut | error  the context with the name bound, or an honest stop
+ * @throws  when the target is a destructuring pattern (out of the N1 subset), or propagated
+ *          from lowering the value
+ */
 fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
     if is_fat_type(b.bound) {
         let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
         return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
     }
-    let lo = match lower_binding_value(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
+    let lo = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
     LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
 }
 
 /**
- * lower_binding_value — a `let`/`mut` binding's value, coerced into its DECLARED type `bound`
- * when that is a null-bearing two-member union (`T | null`) and the value's own natural type
- * is not already that union (a bare `null` literal, or the payload type `T` directly): builds
- * the own backend's uniform tag+payload wrapper via `lower_null_union_construct`. Every other
- * declared type lowers the value plainly — the checker types an assignable value at its OWN
- * narrow type and leaves the wrap to codegen (the C backend's `emit_as`; this is its
- * own-backend analog, scoped to the null-union shape `lower_variant_case_test`/
- * `lower_variant_case_bind` already read).
+ * lower_value_into_type — lower `value` COERCED into the declared type `bound`: when `bound` is a
+ * null-bearing two-member union (`T | null`) and the value's own natural type is not already that
+ * union (a bare `null` literal, or the payload type `T` directly), build the own backend's uniform
+ * tag+payload wrapper via `lower_null_union_construct`; every other declared type lowers the value
+ * plainly. The checker types an assignable value at its OWN narrow type and leaves the wrap to the
+ * backend — the C backend does it in `emit_as`, on EVERY placement (binding, assign, return,
+ * argument, field), and this is the own-backend analog.
  *
- * @param LowerCtx ctx  the lowering context to append the binding's instructions into
- * @param checker::Type bound  the binding's declared type
- * @param checker::TExpr value  the binding's typed value expression
+ * Every own-backend placement that KNOWS its declared type routes through here: `lower_binding`
+ * (`b.bound`), `lower_assign_simple` and `store_assign_value` (`a.bound`). The placements that do
+ * NOT carry one — a call argument (a direct call's `TCall` has no callee signature) and a struct
+ * literal field (the layout keeps machine classes, not checker types) — are closed at the other
+ * end instead, by `lower_null_lit`'s honest-stop, so no placement can write a raw `const 0` into a
+ * VReg that a later `match` reads as the wrapper's base address (that was a deref of address 0).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Type bound  the DECLARED type of the slot the value is placed into
+ * @param checker::TExpr value  the typed value expression
  * @return Lowered  the lowered (and, when needed, coerced) value
  * @throws  propagated from lowering the value or the wrapper's payload
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
-fn lower_binding_value(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
+fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
     match bound {
         checker::Variant as v => match null_union_payload(v) {
-            checker::Type as payload => lower_binding_value_into_null_union(ctx, payload, value)
+            checker::Type as payload => lower_value_into_null_union(ctx, payload, value)
             null => lower_expr(ctx, value)
         }
         _ => lower_expr(ctx, value)
@@ -1860,18 +1872,18 @@ fn lower_binding_value(ctx: LowerCtx, bound: checker::Type, value: checker::TExp
 }
 
 /**
- * lower_binding_value_into_null_union — the `checker::Variant` arm of `lower_binding_value`:
- * a value ALREADY typed as the union itself (re-binding an existing `T | null` value) passes
- * through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
+ * lower_value_into_null_union — the `checker::Variant` arm of `lower_value_into_type`: a value
+ * ALREADY typed as the union itself (re-binding or re-assigning an existing `T | null` value)
+ * passes through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
  * `lower_null_union_construct`.
  *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Type payload  the union's non-null member type
- * @param checker::TExpr value  the binding's typed value expression
+ * @param checker::TExpr value  the typed value expression being placed into the union slot
  * @return Lowered  the value's own VReg (already wrapped), or a freshly built wrapper
  * @throws  propagated from lowering the value or the wrapper's payload
  */
-fn lower_binding_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: checker::TExpr) -> Lowered | error {
+fn lower_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: checker::TExpr) -> Lowered | error {
     match value.type {
         checker::Variant => lower_expr(ctx, value)
         _ => lower_null_union_construct(ctx, payload, value)
@@ -3059,14 +3071,24 @@ fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMembe
  * a null-union arm never needs a BY-NAME case lookup: `null` is always tag 0, `X` is always
  * tag 1.
  *
+ * ORDER-INSENSITIVE by construction: the resolver canonicalizes null-first at every union
+ * construction site (`resolve.union_normalize_null`, called from `resolve_type` AND from
+ * `type_join`), so `members[0]` IS the `Null` in every union this backend can be handed today.
+ * This function nevertheless accepts either order — a classifier that answers "not a null union"
+ * for a union that IS one degrades into a false honest-stop (the exact defect the `type_join`
+ * normalization fixed), and the two-member check above already bounds the search.
+ *
  * @param checker::Variant v  the resolved union type to classify
- * @return checker::Type?  the sole non-null member, or `null` when `v` is not a null-first
- *                         two-member union
+ * @return checker::Type?  the sole non-null member, or `null` when `v` is not a two-member
+ *                         union with exactly one `Null` member
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn null_union_payload(v: checker::Variant) -> checker::Type | null {
     if v.members.len != 2 { return null }
-    match v.members[0] { checker::Null => v.members[1]; _ => null }
+    match v.members[0] {
+        checker::Null => match v.members[1] { checker::Null => null; _ => v.members[1] }
+        _ => match v.members[1] { checker::Null => v.members[0]; _ => null }
+    }
 }
 
 /**
@@ -4664,8 +4686,29 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, bool_lit_value(b.value), e.line, e.col)); vreg = r.vreg }
 }
 
-/** lower_null_lit — `null` -> a zero (null) Ptr constant. */
-fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered {
+/**
+ * lower_null_lit — a `null` literal in a position that lowers it as a VALUE: a zero (null) Ptr
+ * constant, which is the whole representation for an `Optional`-typed null.
+ *
+ * A null typed `checker::Null` is a different thing and HONEST-STOPS here. The checker gives a bare
+ * `null` the `Null` type exactly when its context is a null-bearing union (`typer.type_expr`'s
+ * `null_widens_into` arm), and in the own backend such a value must become the union's tag+payload
+ * wrapper (`lower_value_into_type`). The placements that know their declared type intercept it
+ * before this function is ever reached; anything else — a call argument, a struct-literal field —
+ * would otherwise write a raw `const 0` into a VReg that a later `match` reads as the wrapper's
+ * BASE ADDRESS, i.e. a load from address 0. Refusing to lower it names the gap instead (M.3).
+ *
+ * @param LowerCtx ctx  the lowering context to append the constant into
+ * @param checker::TExpr e  the null-literal expression (its `.type` decides value vs union)
+ * @param checker::TNullLit n  the null-literal node
+ * @return Lowered | error  the zero constant, or the honest stop for a union-typed null
+ * @throws  when the literal's type is `Null` (a union placement with no coercion site)
+ */
+fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered | error {
+    match e.type {
+        checker::Null => return error { message = "native backend N1: a `null` in this position needs the null-union wrapper the placement does not declare a type for (N2)" }
+        _ => { }
+    }
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
 }
@@ -4745,12 +4788,24 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     }
 }
 
-/** lower_assign_simple — `name = e` rebinds the env to the newly-lowered value (an
-    SSA-lite shadow, exactly like a `let`); `name op= e` reads the CURRENT vreg, applies the
-    arithmetic op, and rebinds to the result. */
+/**
+ * lower_assign_simple — `name = e` rebinds the env to the newly-lowered value (an SSA-lite shadow,
+ * exactly like a `let`); `name op= e` reads the CURRENT vreg, applies the arithmetic op, and
+ * rebinds to the result. The plain `=` path lowers through `lower_value_into_type` against the
+ * target's DECLARED type (`a.bound`), so re-assigning into a `T | null` local rebuilds the
+ * tag+payload wrapper the binding established — assigning the raw value would leave a later
+ * `match` reading a payload as a base address. A compound `op=` needs a `PrimKind` and so can
+ * never target a union.
+ *
+ * @param LowerCtx ctx  the lowering context to append the assignment's instructions into
+ * @param checker::TAssign a  the typed assignment (kind `Simple`)
+ * @return LowerStmtOut | error  the context with the name re-bound, or an honest stop
+ * @throws  when the name is unbound, the compound operator/type has no LIR op, or propagated
+ *          from lowering the value
+ */
 fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     if a.op == lexer::TokenKind::Assign {
-        let vo = match lower_expr(ctx, a.value) { Lowered as x => x; error as err => return err }
+        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
         return LowerStmtOut { ctx = ctx_reassign(vo.ctx, a.name, vo.vreg); terminated = false }
     }
     let cur = lenv_lookup(ctx.env, a.name)
@@ -4778,12 +4833,22 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound), a)
 }
 
-/** store_assign_value — the shared tail of a field assignment: a plain `=` stores the
-    lowered RHS directly; a compound op loads the CURRENT field value first, applies the
-    arithmetic, then stores the result. */
+/**
+ * store_assign_value — the shared tail of a field assignment: a plain `=` stores the lowered RHS
+ * directly (coerced into the field's DECLARED type first, `lower_value_into_type` — a `T | null`
+ * field stores the wrapper's address, never a bare payload); a compound op loads the CURRENT field
+ * value first, applies the arithmetic, then stores the result.
+ *
+ * @param LowerCtx ctx  the lowering context to append the store's instructions into
+ * @param u32 addr  the already-computed field address VReg
+ * @param LType field_ty  the field's machine class (the store's width)
+ * @param checker::TAssign a  the typed assignment (kind `Field`)
+ * @return LowerStmtOut | error  the context with the store appended, or an honest stop
+ * @throws  when the compound operator/type has no LIR op, or propagated from lowering the value
+ */
 fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAssign) -> LowerStmtOut | error {
     if a.op == lexer::TokenKind::Assign {
-        let vo = match lower_expr(ctx, a.value) { Lowered as x => x; error as err => return err }
+        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
         return LowerStmtOut { ctx = ctx_append(vo.ctx, store_inst(addr, vo.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
     }
     let cr = ctx_alloc(ctx)

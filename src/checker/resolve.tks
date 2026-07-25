@@ -182,8 +182,21 @@ fn resolve_bare_g_instance(last: str, table: TypeTable) -> parser::TypeDecl | nu
     null
 }
 
-fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser::TypeDecl | error {
-    if path.segments.len == 0 { return error { message = "not a user type" } }
+/**
+ * NotUserType — the marker `resolve_type_ref` returns when a path names no registered user type: a
+ * STRUCTURED "keep looking / report it unknown" answer, distinct from the `error` arm, which is
+ * reserved for a path that DID match something and was rejected (a cross-namespace visibility
+ * violation, an ambiguous qualifier). Its two readers (`resolve_named`, the generic-instance
+ * resolver) each turn it into their own caller-facing message.
+ *
+ * It replaces a sentinel `error { message = "not a user type" }` that those readers discriminated
+ * by comparing the MESSAGE TEXT — identity by string, which any rewording silently breaks, and the
+ * breakage would surface as an internal sentinel leaking into a user-facing diagnostic.
+ */
+type NotUserType = struct { }
+
+fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser::TypeDecl | NotUserType | error {
+    if path.segments.len == 0 { return NotUserType { } }
     let last = path.segments[path.segments.len - 1].name
     if path.segments.len == 1 {
         // R3 — BARE: strict own-namespace resolution.
@@ -218,7 +231,7 @@ fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser
             }
             j++
         }
-        return error { message = "not a user type" }
+        return NotUserType { }
     }
     // R4 / R0 — QUALIFIED: match last segment + qualifier; unique winner, else ambiguity/unknown.
     let qual = path_qualifier(path, path.segments.len - 1)
@@ -243,7 +256,7 @@ fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser
         return error { message = $"ambiguous type reference '{qual}::{last}' — the qualifier matches more than one namespace ({nss}). Use the absolute path (`teko::…::{last}`)." }
     }
     if winner_idx >= 0 { return table[winner_idx to u64].decl }
-    error { message = "not a user type" }
+    NotUserType { }
 }
 
 // (#109 order fix) split a SOURCE-WRITTEN type name string on "::" into a Path — so an
@@ -273,7 +286,11 @@ fn name_to_path(name: str) -> parser::Path {
 // (companion, like type_ref_ns). Used by collect's `implements`/`extends`/trait-derive walks, so
 // a bare name never resolves by table-scan order. (Mirrors resolve.c.)
 pub fn resolve_name_ref(name: str, table: TypeTable, ref_ns: str) -> parser::TypeDecl | error {
-    resolve_type_ref(name_to_path(name), table, ref_ns)
+    match resolve_type_ref(name_to_path(name), table, ref_ns) {
+        parser::TypeDecl as td => td
+        NotUserType => error { message = "not a user type" }
+        error as e => e
+    }
 }
 pub fn resolved_name_ns(name: str, table: TypeTable, ref_ns: str) -> str {
     type_ref_ns(name_to_path(name), table, ref_ns)
@@ -675,7 +692,8 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str) -> Type | er
     if path.segments.len == 1 {
         match builtin_type(name) {
             Type as t => return t
-            error as e => { if e.message != "not a built-in type" { return e } }
+            NotBuiltinType => { }
+            error as e => return e
         }
     }
     match resolve_type_ref(path, table, ref_ns) {   // R0/R3/R4 — a user struct/enum/variant/alias
@@ -688,9 +706,8 @@ fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str) -> Type | er
                 _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
             }
         }
-        // R3/R4 fail-loud diagnostics (cross-namespace collision, ambiguity) propagate verbatim;
-        // the plain "not a user type" sentinel becomes the caller-facing "unknown type" message.
-        error as e => { if e.message == "not a user type" { return error { message = $"unknown type: {name}" } }; return e }
+        NotUserType => return error { message = $"unknown type: {name}" }
+        error as e => return e
     }
     error { message = $"unknown type: {name}" }
 }
@@ -1306,19 +1323,34 @@ fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
     }
 }
 
-// (#41-followon) The JOIN (least-upper-bound) of two arm/branch types for match/`if` value
-// unification (B.20). If either widens into the other, the WIDER one; otherwise the UNION variant
-// `a | b` (members flattened + deduped) — the branch values are bare cases that each widen into
-// this union, which in turn widens into any wider declared return variant. (Mirror of resolve.c.)
-//
-// (#83) "Equal" per type_eq ALSO holds sentinel-vs-concrete (`[]Void == []i64`, permissive by
-// design — see type_eq's Slice/Optional cases). Blindly returning `a` in that branch discards a
-// concrete element type when the SENTINEL happens to be the first operand: an array literal like
-// `[[], [1]]` unifies its element type by folding type_join left-to-right over `[]`'s `[]Void`
-// then `[1]`'s `[]i64`, and `a` (the accumulator) was the sentinel — the join silently kept
-// `[]Void`, so codegen later saw an untyped empty slice with no contextual element (issue #83;
-// the VM, which ignores element types, ran fine). Prefer the CONCRETE side when the two are
-// sentinel-equal but not type_has_sentinel-equal.
+/**
+ * type_join — the JOIN (least-upper-bound) of two arm/branch types, for match/`if` value
+ * unification (B.20, #41-followon). If either widens into the other, the WIDER one; otherwise the
+ * UNION variant `a | b` (members flattened, deduped, and null-normalized) — the branch values are
+ * bare cases that each widen into this union, which in turn widens into any wider declared return
+ * variant. Mirror of resolve.c.
+ *
+ * Two invariants this function must not break:
+ *
+ * - (#83) "Equal" per `type_eq` ALSO holds sentinel-vs-concrete (`[]Void == []i64`, permissive by
+ *   design — see `type_eq`'s Slice/Optional cases). Blindly returning `a` there discards a concrete
+ *   element type when the SENTINEL is the first operand: `[[], [1]]` folds `type_join` left to
+ *   right over `[]`'s `[]Void` then `[1]`'s `[]i64`, and the accumulator was the sentinel, so the
+ *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the VM, which ignores
+ *   element types, ran fine). Prefer the CONCRETE side when the two are sentinel-equal but not
+ *   `type_has_sentinel`-equal.
+ * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
+ *   out in source (`resolve_type`'s `UnionType` arm). Null-first is not cosmetic: the own backend
+ *   classifies a two-member absence union by `members[0]` being `Null` (`lower.null_union_payload`),
+ *   so an inferred `mut x = if c { 5 } else { null }` used to produce `Variant{i64, Null}` and be
+ *   REJECTED with "null match pattern not yet lowered", while the identical annotated
+ *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39).
+ *
+ * @param a      the first branch/arm type
+ * @param b      the second branch/arm type
+ * @param table  the resolved type table (drives `widens_into`)
+ * @return       the least-upper-bound type of `a` and `b`
+ */
 fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
     if type_eq(a, b) {
         let a_sentinel = type_has_sentinel(a)
@@ -1329,7 +1361,7 @@ fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
     if widens_into(b, a, table) { return a }
     let m1 = union_collect(teko::list::empty(), a, table)
     let m2 = union_collect(m1, b, table)
-    Variant { members = m2 }
+    Variant { members = union_normalize_null(m2) }
 }
 
 // ── (S4) generics inference: subst + unify ───────────────────────────────────────────────────
@@ -1362,7 +1394,7 @@ pub fn subst_type(t: Type, s: Subst) -> Type {
             mut ms: []Type = teko::list::empty()
             mut i = 0
             loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
-            Variant { members = ms }
+            Variant { members = union_normalize_null(ms) }
         }
         Func as f => {
             mut ps: []Type = teko::list::empty()
@@ -1806,9 +1838,8 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) ->
             }
             Named { name = generic_inst_name(name, argtypes) }
         }
-        // R3/R4 fail-loud diagnostics propagate verbatim; the plain "not a user type" sentinel
-        // becomes the generic-specific "unknown generic type" message.
-        error as e => { if e.message == "not a user type" { return error { message = $"unknown generic type: {name}" } }; return e }
+        NotUserType => return error { message = $"unknown generic type: {name}" }
+        error as e => return e
     }
 }
 
