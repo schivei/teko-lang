@@ -7,19 +7,24 @@ name: Sanitizers & Stress
 #   no ASan shadow memory, ~one native self-host of wall-clock. This is what a lane PR
 #   must pass so the seed it feeds the next crumb is memory-clean.
 #
-#   HEAVY gate (audits MAIN, runs ONLY on merge to main): the full ASan+UBSan(+LSan-by-name)
-#   default-dispatch lane. It is the ~24-min lane that surfaced the historical root UBs; it is
-#   NOT worth paying on every lane PR now that the C mirror is gone and the light gate guards
-#   the seed. Its SINGLE trigger is the MERGE to main: it runs ONLY on push to main
-#   (github.ref == refs/heads/main) as a post-merge audit. It does NOT run on PRs — not even
-#   on the umbrella -> main PR (base_ref == main); there the aggregator passes green-by-skip.
-#   the seed. Its single trigger is main: it runs as a REQUIRED check on PRs INTO main (the
-#   umbrella -> main integration merge) and re-runs on push to main as a post-merge audit.
-#   No nightly, no schedule, no auto-issue (owner ruling: "Único gatilho passa a ser merge na main").
+#   HEAVY gate (audits MAIN): the full ASan+UBSan(+LSan-by-name) default-dispatch lane. It is the
+#   ~24-min lane that surfaced the historical root UBs; it is NOT worth paying on every wagon PR
+#   now that the C mirror is gone. It runs on the PR whose BASE is main — the wagon that LANDS a
+#   stacked train, or a hotfix. No nightly, no schedule, no auto-issue.
 #
-# CI runs on PULL REQUESTS + the two integration pushes (remodel seed-cut, main merge). Branch
-# protection gates merges on the aggregators below; the release trusts main and does not re-validate.
-# chore/reboot stays listed for PRs into it (#54).
+# BUG FIXED HERE (2026-07-25): `mem-paranoid` and `asan-default` gated on
+# `github.ref == 'refs/heads/main'`, describing a `push:` trigger this workflow does NOT have. On a
+# `pull_request` event `github.ref` is `refs/pull/N/merge`, so the condition was ALWAYS false: both
+# lanes had never run once, and the `Heavy sanitizer gate` that aggregates them was vacuously green
+# (confirmed live on PR #91: both `skipped`, gate `success`). The axis is `github.base_ref`.
+#
+# LIGHT vs FULL (owner proposal 2026-07-24): every job in this workflow is heavy enough to belong to
+# the full path — `tsan` carries a 90-min budget and `windows-selfhost` a 100-min one — so the whole
+# workflow is full-only. What guards a wagon PR instead is `test / linux` + the native self-build
+# gate; the memory/UB audit lands once, at the landing.
+#
+# CI runs on PULL REQUESTS. Branch protection gates merges on the aggregators below; the release
+# trusts main and does not re-validate.
 on:
   pull_request:
     branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
@@ -35,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.filter.outputs.run }}
+      # `full` is true only for a PR whose BASE is main (see the header). Exported here so every
+      # job and both aggregators read ONE definition of the mode.
+      full: ${{ steps.mode.outputs.full }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +56,15 @@ jobs:
               - 'scripts/ci_provision_teko.sh'
               - '.github/workflows/sanitizers.yml'
               - '.github/lsan-suppressions.txt'
+      - name: Decide the mode (full <=> base_ref == main)
+        id: mode
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$BASE_REF" = "main" ]; then full=true; else full=false; fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF')"
 
   # ── HEAVY gate: TEKO_MEM_PARANOID native self-host — MAIN ONLY ────────────────
   # TEKO_MEM_PARANOID is teko's OWN arena oracle (teko_rt.c #148 Level-2): a runtime getenv that
@@ -61,7 +78,7 @@ jobs:
   mem-paranoid:
     name: Memory paranoid (native self-host)
     needs: changes
-    if: needs.changes.outputs.run == 'true' && github.ref == 'refs/heads/main'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
@@ -115,7 +132,7 @@ jobs:
   asan-default:
     name: ASan+UBSan+LSan / default dispatch
     needs: changes
-    if: needs.changes.outputs.run == 'true' && github.ref == 'refs/heads/main'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
@@ -237,7 +254,7 @@ jobs:
   tsan:
     name: TSan
     needs: changes
-    if: needs.changes.outputs.run == 'true'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -309,7 +326,7 @@ jobs:
   windows-selfhost:
     name: Windows self-host smoke (gen-1)
     needs: changes
-    if: needs.changes.outputs.run == 'true'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     # The gen1 BUILD alone is ~11 min on the Windows runner (the slow-compiler perf problem the perf
     # phase is fixing). The full `teko test .` self-host on top of that blew both the 20- and (mid-
@@ -350,12 +367,12 @@ jobs:
           .\bin\teko.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # ── gate: LIGHT aggregator — the SEED protector (required on lanes + remodel + main) ─
-  # Aggregates the lane-PR suite: tsan + windows-selfhost. This is the required check for
-  # lane/remodel PRs (and it also runs on PRs into main). It NEVER depends on the heavy
-  # asan-default / mem-paranoid lanes, so lane PRs never wait on them (owner ruling 2026-07-14:
-  # TEKO_MEM_PARANOID's never-reuse self-host is ~18-20 min — too heavy for every lane PR, so it
-  # moved to the main-only heavy gate below).
+  # ── gate: aggregates tsan + windows-selfhost, and ASSERTS THE MODE ─────────────
+  # Stable required-check name for the branch ruleset. BOTH lanes it aggregates are full-only (90-
+  # and 100-min budgets), so on the light path this gate's contract is "both SKIPPED" — and it says
+  # so out loud instead of passing by default. J3: a gate that reads `skipped` as approval turns one
+  # broken `if:` into a silent hole; here a full-mode skip is an ERROR, and a light-mode success is
+  # a warning (a wrong condition, but nothing hidden).
   gate:
     name: Sanitizer gate
     runs-on: ubuntu-latest
@@ -365,14 +382,18 @@ jobs:
 
     steps:
       - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.changes.outputs.run }}
+          FULL: ${{ needs.changes.outputs.full }}
+          TSAN: ${{ needs.tsan.result }}
+          WINDOWS_SELFHOST: ${{ needs.windows-selfhost.result }}
         run: |
-          TSAN="${{ needs.tsan.result }}"
-          WINDOWS_SELFHOST="${{ needs.windows-selfhost.result }}"
-          CHANGES="${{ needs.changes.outputs.run }}"
-
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
           echo "changes.run      = $CHANGES"
-          echo "tsan             = $TSAN"
-          echo "windows-selfhost = $WINDOWS_SELFHOST"
+          echo "tsan             = $TSAN   (full only)"
+          echo "windows-selfhost = $WINDOWS_SELFHOST   (full only)"
 
           if [ "$CHANGES" != "true" ]; then
             echo "No relevant files changed — gate passes."
@@ -380,26 +401,34 @@ jobs:
           fi
 
           FAILED=0
-          for RESULT in "$TSAN" "$WINDOWS_SELFHOST"; do
-            if [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ]; then
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success)"
               FAILED=1
+              return 0
             fi
-          done
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only tsan             "$TSAN"
+          require_full_only windows-selfhost "$WINDOWS_SELFHOST"
 
           if [ "$FAILED" = "1" ]; then
-            echo "ERROR: one or more light-gate jobs failed or were cancelled."
+            echo "Sanitizer gate FAILED (mode=$MODE)."
             exit 1
           fi
-
-          echo "Sanitizer gate (light) passed."
+          echo "Sanitizer gate passed (mode=$MODE)."
           exit 0
 
-  # ── gate: HEAVY aggregator — the MAIN audit (required on main ONLY) ────────────
-  # Aggregates the main-only heavy lanes: asan-default (ASan+UBSan) AND mem-paranoid
-  # (TEKO_MEM_PARANOID never-reuse self-host). On lane/remodel PRs both are SKIPPED, so this
-  # aggregator passes (a skipped dependency is neither failure nor cancelled) and is harmless if
-  # left un-required there. On PRs into main it enforces both heavy lanes — THIS is the required
-  # check on the main ruleset (see docs/design/ci-gates.md).
+  # ── gate: HEAVY aggregator — the memory/UB audit at the landing ────────────────
+  # Aggregates asan-default (ASan+UBSan+LSan) AND mem-paranoid (TEKO_MEM_PARANOID never-reuse
+  # self-host). Both were DEAD until 2026-07-25 — they gated on `github.ref == 'refs/heads/main'`
+  # in a workflow with only a `pull_request` trigger, so the condition never matched and this
+  # aggregator was vacuously green. They now run on the PR whose BASE is main, and this gate
+  # DEMANDS the result the mode implies: `success` from both in full mode, `skipped` from both on
+  # the light path. A skip in full mode is an ERROR — that is exactly the failure that hid here
+  # for months.
   heavy-gate:
     name: Heavy sanitizer gate (main)
     runs-on: ubuntu-latest
@@ -409,33 +438,41 @@ jobs:
 
     steps:
       - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.changes.outputs.run }}
+          FULL: ${{ needs.changes.outputs.full }}
+          ASAN_DEFAULT: ${{ needs.asan-default.result }}
+          MEM_PARANOID: ${{ needs.mem-paranoid.result }}
         run: |
-          ASAN_DEFAULT="${{ needs.asan-default.result }}"
-          MEM_PARANOID="${{ needs.mem-paranoid.result }}"
-          CHANGES="${{ needs.changes.outputs.run }}"
-
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
           echo "changes.run  = $CHANGES"
-          echo "asan-default = $ASAN_DEFAULT   (skipped on non-main contexts by design)"
-          echo "mem-paranoid = $MEM_PARANOID   (skipped on non-main contexts by design)"
+          echo "asan-default = $ASAN_DEFAULT   (full only)"
+          echo "mem-paranoid = $MEM_PARANOID   (full only)"
 
           if [ "$CHANGES" != "true" ]; then
             echo "No relevant files changed — heavy gate passes."
             exit 0
           fi
 
-          # A skipped lane (lane/remodel context) is NOT a failure — the heavy lanes only run on
-          # main. Only a real failure/cancellation of a lane fails this gate.
           FAILED=0
-          for RESULT in "$ASAN_DEFAULT" "$MEM_PARANOID"; do
-            if [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ]; then
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success — a skip here is the bug this gate used to hide)"
               FAILED=1
+              return 0
             fi
-          done
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only asan-default "$ASAN_DEFAULT"
+          require_full_only mem-paranoid "$MEM_PARANOID"
 
           if [ "$FAILED" = "1" ]; then
-            echo "ERROR: a heavy sanitizer lane (ASan / mem-paranoid) failed or was cancelled."
+            echo "Heavy sanitizer gate FAILED (mode=$MODE)."
             exit 1
           fi
-
-          echo "Heavy sanitizer gate passed."
+          echo "Heavy sanitizer gate passed (mode=$MODE)."
           exit 0

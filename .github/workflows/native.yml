@@ -25,6 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      # LIGHT vs FULL (owner proposal 2026-07-24): `full` is true only for a PR whose BASE is main
+      # — the wagon that LANDS a stacked train, or a hotfix. Every intermediate wagon PR (base = the
+      # previous wagon's branch) runs the light path. See docs/design/ci-gates.md.
+      full: ${{ steps.decide.outputs.full }}
+      matrix_build: ${{ steps.decide.outputs.matrix_build }}
+      matrix_gen1: ${{ steps.decide.outputs.matrix_gen1 }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -47,13 +53,34 @@ jobs:
       # over-skip). A trigger-level `paths-ignore` is deliberately NOT used here: the `gate` job is
       # a REQUIRED status check, and skipping the whole workflow would leave it never reported →
       # the PR would hang "waiting for CI gate". The always-running gate + this filter is the fix.
-      - name: Decide (skip when the change is Markdown-only)
+      #
+      # The MODE + the two dynamic matrices are emitted FIRST, unconditionally: the docs-only
+      # branch below exits early, and a consumer job's `strategy.matrix: ${{ fromJSON(...) }}`
+      # must never be handed an empty string. `github.base_ref` is the axis (NOT `github.ref`,
+      # which on a pull_request is `refs/pull/N/merge` and never matches a branch name — that
+      # exact mistake is the J2 bug this same change fixes in sanitizers.yml).
+      - name: Decide (mode + matrices, then skip when the change is Markdown-only)
         id: decide
         shell: bash
         env:
           MATCHED: ${{ steps.filter.outputs.run }}
           FILES: ${{ steps.filter.outputs.run_files }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
+          if [ "$BASE_REF" = "main" ]; then full=true; else full=false; fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF')"
+
+          LINUX='{"os":"ubuntu-latest","label":"linux-x86_64","full_gate":true}'
+          GEN1_LINUX='{"os":"ubuntu-latest","label":"linux-x86_64"}'
+          if [ "$full" = "true" ]; then
+            echo "matrix_build={\"include\":[$LINUX,{\"os\":\"ubuntu-24.04-arm\",\"label\":\"linux-arm64\"},{\"os\":\"macos-latest\",\"label\":\"macos-arm64\"},{\"os\":\"windows-latest\",\"label\":\"windows-x86_64\"}]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_gen1={\"include\":[$GEN1_LINUX,{\"os\":\"macos-latest\",\"label\":\"macos-arm64\"}]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix_build={\"include\":[$LINUX]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_gen1={\"include\":[$GEN1_LINUX]}" >> "$GITHUB_OUTPUT"
+          fi
+
           if [ "$MATCHED" != "true" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "No allowlisted path changed — nothing to gate."
@@ -68,14 +95,21 @@ jobs:
           done
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [ "$run" = "true" ]; then
-            echo "Non-Markdown changes present — running the full gate."
+            echo "Non-Markdown changes present — running the gate."
           else
             echo "Markdown-only change under the allowlisted paths — skipping the heavy gate."
           fi
 
-  # ── matrix: Linux x86_64 + arm64, macOS arm64, Windows x86_64 + arm64 ──────
+  # ── matrix: Linux x86_64 (light) + arm64, macOS arm64, Windows x86_64 (full) ──────
   # NOTE: Windows uses Clang (not MSVC) because the project requires __int128 and
   # other GCC/Clang extensions that MSVC does not support.
+  #
+  # The matrix is DYNAMIC (`needs.changes.outputs.matrix_build`): the light path builds
+  # linux-x86_64 only — the signal that actually catches a compiler break — and the full path
+  # (base_ref == main) adds linux-arm64 + macos-arm64 + windows-x86_64. windows-arm64 stays
+  # DISABLED (owner ruling 2026-07-06, compile-time): it was the CI critical path. It is a
+  # FUTURE-SUPPORT pendency — restore it to the full-path include list once the native gate is
+  # fast (#168/#265) and a faster arm64 Windows runner is available. Tracking: #304.
   build-test:
     needs: changes
     if: needs.changes.outputs.run == 'true'
@@ -83,23 +117,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            full_gate: true
-          - os: ubuntu-24.04-arm
-            label: linux-arm64
-          - os: macos-latest
-            label: macos-arm64
-          - os: windows-latest
-            label: windows-x86_64
-          # DISABLED (owner ruling 2026-07-06, compile-time): windows-arm64 was the CI
-          # critical path. Commented out as a FUTURE-SUPPORT pendency — re-enable once the
-          # native gate is fast (#168/#265) and a faster arm64 Windows runner is available.
-          # Tracking: #304.
-          # - os: windows-11-arm
-          #   label: windows-arm64
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix_build) }}
 
     name: build-test / ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -144,21 +162,18 @@ jobs:
   # lives in `regressor.tkr` + the project-regressors under `examples/regressions/`, run
   # NATIVELY by `teko test .` in tests.yml (the sole regression executor, D6) — this job
   # no longer duplicates them.
+  #
+  # The matrix is DYNAMIC (`needs.changes.outputs.matrix_gen1`): ubuntu-latest on the light path,
+  # plus macos-latest on the full path. The former per-entry `install_deps` shell string is GONE —
+  # a multi-line shell script cannot travel inside JSON inside YAML without escaping that is a
+  # standing invitation to error, and a dependency install belongs to the OS, not to a matrix cell.
+  # It is now one step keyed on `runner.os`.
   gen1-checks:
     needs: changes
     if: needs.changes.outputs.run == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            install_deps: |
-              sudo apt-get update -y
-              sudo apt-get install -y clang
-          - os: macos-latest
-            label: macos-arm64
-            install_deps: ""
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix_gen1) }}
 
     # Budget kept at 45 min (issue #524 crumb 2). With the heavy `teko test .` self-test now
     # moved OUT to tests.yml (owner design 2026-07-15), this job only builds gen1 once and runs
@@ -177,10 +192,13 @@ jobs:
 
       # The own==C differential compiles the GENERATED C (+ the runtime seam
       # teko_rt.c) with the host cc — so cc is still needed; the COMPILER itself is
-      # the downloaded release, not a from-source build.
-      - name: Install cc
-        if: matrix.install_deps != ''
-        run: ${{ matrix.install_deps }}
+      # the downloaded release, not a from-source build. macOS ships clang with the
+      # Xcode CLT already, so only the Linux runner needs an install.
+      - name: Install cc (Linux only — macOS ships clang)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
 
       - name: Provision teko from the latest release
         shell: bash
@@ -235,6 +253,88 @@ jobs:
           TEKO: ./bin/teko
         run: ./scripts/target_host_default_test.sh
 
+  # ── RISC-V own==C differential under QEMU (BLOCKING — gated in the CI gate job) ─
+  # RESTORED (this lane went to zero when the 234 regression directories were folded into 10
+  # `.tkr` files and the side-car scripts — including `scripts/diff_c_own.sh`, the ONLY thing the
+  # old job drove — were culled). riscv64 EXECUTION is back, now through the single regression
+  # executor instead of a side-car script: `regressor.tkr`'s F5 differential corpus is a
+  # backend x target `Examples` cross, so every one of its 15 scenarios runs `c` AND `own` on the
+  # host AND cross-compiled to `riscv64-linux`, both cross-linked by `riscv64-linux-gnu-gcc`
+  # (`resolve_cc`'s TEKO_TARGET arm) and both RUN under `qemu-riscv64-static`
+  # (`resolve_run_wrapper`), asserting own == C exit + stdout. `own_riscv_object_well_formed`
+  # restores the old lane's other half: `scripts/check_elf.sh` over the own-emitted riscv `.o`
+  # with the riscv binutils.
+  #
+  # FULL-ONLY: a cross+emulated lane is exactly the cost the light path exists to defer to the
+  # wagon that lands.
+  #
+  # REGRESSION_REQUIRE_TOOLS=1 IS THE POINT: without it a lane whose provisioning broke would
+  # honest-SKIP the riscv rows and report green — worse than having no lane at all, because it
+  # LOOKS like coverage. With it, an absent cross-gcc / qemu is a hard failure.
+  #
+  # …and BECAUSE the flag is fail-closed for EVERY capability the corpus declares, this is also the
+  # one lane that must provision ALL of them. `regressor.tkr` F7 carries a `Given target =
+  # "wasm32-wasi"` scenario needing `wasmtime`, which NO lane had ever provisioned — so that
+  # scenario has never actually run anywhere. It runs here, gated. That is why this lane installs
+  # wasmtime as well as the riscv toolchain, and why the fail-closed flag lives HERE and not on
+  # tests.yml: a lane that cannot run part of the corpus cannot honestly demand that none of it be
+  # skipped.
+  riscv64-qemu:
+    needs: changes
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
+    name: build-test / linux-riscv64 (qemu own==C differential)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: false
+    permissions:
+      contents: read
+    env:
+      WASMTIME_VERSION: "v39.0.1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # gcc-riscv64-linux-gnu pulls binutils-riscv64-linux-gnu, which is what
+      # scripts/check_elf.sh needs under ELF_TOOLCHAIN=riscv64-linux-gnu- for the own object's
+      # well-formedness cross-check.
+      - name: Install cross-compiler + QEMU + host clang
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user-static clang
+
+      # The official release tarball — the same shape release-cross-smoke already uses for zig.
+      - name: Install wasmtime (the F7 wasm32-wasi scenario's executor)
+        run: |
+          set -eu
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" | tar -xJ
+          echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
+
+      - name: Verify wasmtime is on PATH (fail loud before the fail-closed run)
+        run: wasmtime --version
+
+      # riscv has no release binary asset, so it cannot download a seed like the other
+      # platforms. Seed the x86_64 released binary; it builds gen1 (the PR compiler under
+      # test) from THIS branch's src/, so gen1 carries the own riscv64 AOT backend
+      # (emit_native_riscv) — the C bootstrap / a cmake build from the frozen twins would
+      # NOT. The differential runs gen1, never the raw seed.
+      - name: Provision teko (x86_64 released seed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci_provision_teko.sh linux-x86_64
+
+      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): bootstraps through
+      # gen1(main) when the raw seed cannot compile the tip directly (the seed only has to
+      # build `main`, never a capability jump this PR itself introduces).
+      - name: Build gen1 (the PR compiler under test — carries emit_native_riscv)
+        run: sh scripts/build_with_seed_fallback.sh bin
+
+      - name: RISC-V own==C differential under QEMU (the single regression executor, on gen1)
+        shell: bash
+        env:
+          REGRESSION_REQUIRE_TOOLS: "1"
+        run: ./bin/teko test .
+
   # ── AR ELF/Mach-O/COFF real-toolchain validation (port from theory/kp16-ar-macho-coff) ──
   # KP16's own-native static-archive writer ships three container lanes: the GNU-format
   # ELF writer (`src/backend/objfile_ar.tks`), the BSD `__.SYMDEF SORTED` Mach-O writer
@@ -252,9 +352,10 @@ jobs:
   # `AR_CHECK_REQUIRE_TOOLS=1` so an honest-skip here is a hard failure — the toolchain is
   # guaranteed present on these runners), then links + RUNS `scripts/ar_link_run_consumer.c`
   # against the archive — the PRIMARY consumibility criterion (`add(40, 2)` must exit 42).
+  # FULL-ONLY: three OS runners for the archive-container lanes is full-path cost.
   ar-elf-macho-coff-validation:
     needs: changes
-    if: needs.changes.outputs.run == 'true'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -386,9 +487,10 @@ jobs:
   # at an optimizing level once turned latent UB in teko.c into a checker miscompile that a
   # compile-only smoke could never see (fix/readdir-order-determinism). A break here gates the
   # merge, so a broken release can never reach main.
+  # FULL-ONLY: the release path is only about to be taken from the wagon that lands.
   release-cross-smoke:
     needs: changes
-    if: needs.changes.outputs.run == 'true'
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     name: release cross-compile smoke (zig)
     runs-on: ubuntu-latest
     permissions:
@@ -434,28 +536,42 @@ jobs:
       - name: Run the x86_64-glibc cross artifact over the corpus (miscompile guard)
         run: ./gd-linux-x86_64-glibc/teko . -o /tmp/xrun --no-verify --release
 
-  # ── gate: aggregates all build-test + gen1-checks + cross-smoke results ──
+  # ── gate: aggregates every native job, and ASSERTS THE MODE ───────────────────
+  # J3 (the guard against an empty green): a gate that treats `skipped` as approved turns the
+  # light/full split into a blind spot — one broken `if:` would skip everything and still report
+  # green. So this gate asserts, per job, WHICH result the mode demands:
+  #   * light-path jobs (build-test, gen1-checks) must be `success`. `skipped` is an ERROR: it
+  #     means a condition broke, never "nothing to do" (the docs-only case exits earlier, above).
+  #   * full-only jobs must be `success` when full, and `skipped` when light. An unexpected
+  #     `success` on the light path is reported (a condition is wrong) but does not block.
+  # The mode itself is printed on every run, so a reader never has to infer it.
   gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [changes, build-test, gen1-checks, ar-elf-macho-coff-validation, release-cross-smoke]
+    needs: [changes, build-test, gen1-checks, riscv64-qemu, ar-elf-macho-coff-validation, release-cross-smoke]
     if: always()
     permissions: {}
 
     steps:
       - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.changes.outputs.run }}
+          FULL: ${{ needs.changes.outputs.full }}
+          BUILD_RESULT: ${{ needs.build-test.result }}
+          GEN1_RESULT: ${{ needs.gen1-checks.result }}
+          RISCV_RESULT: ${{ needs.riscv64-qemu.result }}
+          AR_RESULT: ${{ needs.ar-elf-macho-coff-validation.result }}
+          SMOKE_RESULT: ${{ needs.release-cross-smoke.result }}
         run: |
-          BUILD_RESULT="${{ needs.build-test.result }}"
-          GEN1_RESULT="${{ needs.gen1-checks.result }}"
-          AR_RESULT="${{ needs.ar-elf-macho-coff-validation.result }}"
-          SMOKE_RESULT="${{ needs.release-cross-smoke.result }}"
-          CHANGES="${{ needs.changes.outputs.run }}"
-
-          echo "changes.run   = $CHANGES"
-          echo "build-test    = $BUILD_RESULT"
-          echo "gen1-checks   = $GEN1_RESULT"
-          echo "ar-elf-macho-coff-validation = $AR_RESULT"
-          echo "release-cross-smoke = $SMOKE_RESULT"
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
+          echo "changes.run                  = $CHANGES"
+          echo "build-test                   = $BUILD_RESULT   (light path)"
+          echo "gen1-checks                  = $GEN1_RESULT   (light path)"
+          echo "riscv64-qemu                 = $RISCV_RESULT   (full only)"
+          echo "ar-elf-macho-coff-validation = $AR_RESULT   (full only)"
+          echo "release-cross-smoke          = $SMOKE_RESULT   (full only)"
 
           # If the paths filter said nothing relevant changed, everything skipped → OK
           if [ "$CHANGES" != "true" ]; then
@@ -463,34 +579,38 @@ jobs:
             exit 0
           fi
 
-          # build-test must be success (not failure, not cancelled)
-          if [ "$BUILD_RESULT" = "failure" ] || [ "$BUILD_RESULT" = "cancelled" ]; then
-            echo "ERROR: build-test $BUILD_RESULT"
+          FAILED=0
+
+          # A light-path job must SUCCEED. `skipped` here is a broken condition, not an absence
+          # of work: build-test is the self-build gate and gen1-checks is the CLI/R1 surface, and
+          # both are unconditional on the light path.
+          require_success() {
+            [ "$2" = "success" ] && return 0
+            echo "ERROR: $1 = $2 (the light path requires success; a skip means a broken condition)"
+            FAILED=1
+          }
+          require_success build-test  "$BUILD_RESULT"
+          require_success gen1-checks "$GEN1_RESULT"
+
+          # A full-only job must SUCCEED in full mode and be SKIPPED in light mode. An unexpected
+          # success on the light path costs runner time but hides nothing, so it warns.
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success)"
+              FAILED=1
+              return 0
+            fi
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only riscv64-qemu                 "$RISCV_RESULT"
+          require_full_only ar-elf-macho-coff-validation "$AR_RESULT"
+          require_full_only release-cross-smoke          "$SMOKE_RESULT"
+
+          if [ "$FAILED" = "1" ]; then
+            echo "CI gate FAILED (mode=$MODE)."
             exit 1
           fi
-
-          # gen1-checks must be success — gen1's own gate, CLI surface, the CWD-build
-          # regression check (#64), and the own==C differential are all folded into this
-          # job; any failure there gates the merge.
-          if [ "$GEN1_RESULT" = "failure" ] || [ "$GEN1_RESULT" = "cancelled" ]; then
-            echo "ERROR: gen1-checks $GEN1_RESULT"
-            exit 1
-          fi
-
-          # ar-elf-macho-coff-validation must be success — a red ELF/Mach-O/COFF real-toolchain
-          # gate (host ar/nm/ld well-formedness + a real link+run) is a genuine static-archive
-          # regression, not infra noise.
-          if [ "$AR_RESULT" = "failure" ] || [ "$AR_RESULT" = "cancelled" ]; then
-            echo "ERROR: ar-elf-macho-coff-validation $AR_RESULT"
-            exit 1
-          fi
-
-          # release-cross-smoke must be success — a broken release cross-compile (zig version /
-          # target / runtime portability) gates the merge so it never reaches a real tag.
-          if [ "$SMOKE_RESULT" = "failure" ] || [ "$SMOKE_RESULT" = "cancelled" ]; then
-            echo "ERROR: release-cross-smoke $SMOKE_RESULT"
-            exit 1
-          fi
-
-          echo "Gate passed."
+          echo "CI gate passed (mode=$MODE)."
           exit 0

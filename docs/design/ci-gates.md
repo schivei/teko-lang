@@ -1,7 +1,67 @@
-# CI memory/UB gating — two tiers (light seed-gate on lanes, heavy audit on main)
+# CI gating — the light/full split, and the memory/UB tiers
 
-**Status:** ratified (owner ruling 2026-07-14). Supersedes the prior arrangement where the
-full ASan+UBSan(+LSan-by-name) default-dispatch lane ran on *every* lane PR.
+**Status:** ratified (owner ruling 2026-07-14 for the memory/UB tiers; owner proposal 2026-07-24
+for the light/full split, implemented 2026-07-25).
+
+## The axis: `light` vs `full`
+
+```
+full  <=> github.base_ref == 'main'      (the wagon that LANDS a stacked train, or a hotfix)
+light <=> any other base                 (an intermediate wagon PR)
+```
+
+Delivery is a **stacked train**: each wagon is a PR based on the previous wagon's branch, and the
+whole train lands in ONE integration at the top wagon, retargeted to `main`. So the only complete
+CI run that matters is the landing's; running the whole matrix on every intermediate wagon burns
+runners to re-prove what the landing proves again.
+
+`github.base_ref` is the axis, **never** `github.ref`: on a `pull_request` event `github.ref` is
+`refs/pull/N/merge` and matches no branch name. That exact mistake was a live bug here — see
+"The J2 bug" below.
+
+| track | light | full |
+|---|---|---|
+| `tests.yml` | `test / linux` | + `test / macos`, `test / windows` |
+| `native.yml` `build-test` | linux-x86_64 | + linux-arm64, macos-arm64, windows-x86_64 |
+| `native.yml` `gen1-checks` | ubuntu-latest | + macos-latest |
+| `native.yml` `riscv64-qemu` | — | yes |
+| `native.yml` `ar-elf-macho-coff-validation` | — | yes |
+| `native.yml` `release-cross-smoke` | — | yes |
+| `sanitizers.yml` (all four jobs) | — | yes |
+| `codeql.yml` / `sast.yml` | unchanged (see below) | unchanged |
+
+What survives on the light path is precisely what catches a compiler break: gen1 builds, `teko
+test .` passes (which since D6 includes the ten `.tkr` regressors), and the own==C differential on
+linux.
+
+`codeql.yml` is deliberately NOT gated: it feeds the `code_scanning` ruleset rule, which requires a
+completed analysis for the PR head, so skipping it leaves the PR blocked "waiting for CodeQL".
+`sast.yml` is already narrowly path-filtered to `src/runtime/**` + `src/assert/**` (clang-tidy over
+two C files) and is left as-is.
+
+### Gates assert the MODE, not merely the absence of failure
+
+Every aggregator (`CI gate`, `Sanitizer gate`, `Heavy sanitizer gate (main)`, `Test suite gate`)
+demands a specific result per job:
+
+1. `changes.run != 'true'` (a docs-only change) — passes, as before.
+2. A **light-path** job must be `success`. `skipped` is an **ERROR**: it means a broken condition,
+   not "nothing to do".
+3. A **full-only** job must be `success` in full mode and `skipped` in light mode. An unexpected
+   `success` on the light path is reported as a warning (a wrong condition, but nothing hidden).
+4. The gate prints `mode=light|full` on every run.
+
+Without (2) and (3) the split would trade cost for blindness: one bad `if:` would skip everything
+and every gate would still report green.
+
+### The J2 bug the split exposed and fixed
+
+`mem-paranoid` and `asan-default` gated on `github.ref == 'refs/heads/main'` in a workflow whose
+only trigger is `pull_request`. The condition could therefore never match: **both lanes had never
+run once**, and `Heavy sanitizer gate (main)` — which treated a skip as approval — was vacuously
+green (confirmed live on PR #91: both `skipped`, gate `success`). They now gate on
+`github.base_ref == 'main'` and the aggregator DEMANDS their success in full mode. The split did
+not reduce coverage here; it **restored** two lanes.
 
 ## Problem
 
@@ -22,7 +82,7 @@ is no second implementation to differentially catch these UBs.
 Split memory/UB gating into two tiers with **distinct, stable required-check names** so the
 branch rulesets can require the right tier on the right branch.
 
-### LIGHT gate — the SEED protector — runs on EVERY lane PR
+### LIGHT tier — the SEED protector (the arena oracle)
 
 Job `mem-paranoid` (check name **`Memory paranoid (native self-host)`**), aggregated by the
 **`Sanitizer gate`** check.
@@ -32,37 +92,33 @@ Job `mem-paranoid` (check name **`Memory paranoid (native self-host)`**), aggreg
 - `TEKO_MEM_PARANOID` is teko's **own** arena oracle (`src/runtime/teko_rt.c`, #148 Level-2): a
   runtime `getenv` that **poisons every freed arena block and never reuses it**, so any
   use-after-free / arena-reuse-after-free in the compiler's own C aborts loud.
-- Cost ≈ one native self-host. This is what a lane PR must pass so the **seed** it feeds the next
-  crumb is memory-clean. `tsan` (build + smoke) and `windows-selfhost` (one gate run) stay in this
-  tier — already right-sized, unchanged.
+- Cost ≈ one native self-host.
+- **As of 2026-07-25 this job, like every other job in `sanitizers.yml`, is FULL-only** (see the
+  light/full split above): `tsan` carries a 90-min budget and `windows-selfhost` a 100-min one, so
+  the whole workflow belongs to the landing. What guards an intermediate wagon PR instead is
+  `test / linux` plus the native self-build gate in `native.yml`. The `TEKO_MEM_PARANOID` self-host
+  is also part of every wagon's LOCAL closing ritual, so the oracle still runs per wagon — off the
+  shared runners.
 
-### HEAVY gate — the MAIN audit — runs ONLY on merge to main
+### HEAVY tier — the MAIN audit (ASan + UBSan + LSan)
 
 Job `asan-default` (check name **`ASan+UBSan+LSan / default dispatch`**), aggregated by the
 **`Heavy sanitizer gate (main)`** check.
 
 - Body unchanged (the proven ASan+UBSan native-path audit; LSan off-by-construction, as its long
   in-file comment explains).
-- **Trigger changed** to the **merge to main, and only that** — a pure post-merge audit:
-  `if: needs.changes.outputs.run == 'true' && github.ref == 'refs/heads/main'`.
-  It runs **ONLY on push to `main`** (the push that lands the umbrella → main integration merge —
-  the seed/release boundary). It does **NOT** run on any PR — not on lane/remodel PRs, and
-  **not on the umbrella → `main` PR** either (owner clarification 2026-07-14: *"rodar somente em
-  merge na main, não em PR para main"*).
-- On **every** PR (lane, remodel, and the umbrella → `main` PR) and on remodel pushes it is
-  **skipped** — a skipped dependency is neither `failure` nor `cancelled`, so the
-  `Heavy sanitizer gate (main)` aggregator passes harmlessly (green-by-skip) there and blocks
-  nothing. The aggregator can therefore stay a required check on the rulesets without ever gating
-  a PR; its real work happens on the post-merge `main` push.
+- Body unchanged.
+- **Trigger, as of 2026-07-25:** `if: needs.changes.outputs.run == 'true' &&
+  needs.changes.outputs.full == 'true'` — the PR whose BASE is `main`, i.e. the landing (or a
+  hotfix). The earlier spelling (`github.ref == 'refs/heads/main'`) described a `push:` trigger
+  this workflow does not have and so never fired at all; see "The J2 bug" above.
+- On a light-path PR it is **skipped**, and `Heavy sanitizer gate (main)` now REQUIRES that skip
+  rather than tolerating it — so a broken condition cannot pass as "nothing to do".
 
-**Single trigger = merge to main (the push).** No nightly, no cron schedule, no auto-issue, and
-**no PR-into-main gate** — the owner explicitly rejected the daily-00h variant AND the PR-into-main
-trigger in favor of *"Único gatilho passa a ser merge na main"*.
+No nightly, no cron schedule, no auto-issue.
 
-> **Trade-off (accepted).** Because the heavy audit is now strictly post-merge, a UB it would catch
-> lands on `main` first and is flagged only by the `main` push run, not blocked before merge. The
-> owner accepts this: the light `TEKO_MEM_PARANOID` seed-gate already guards every lane PR, and the
-> heavy ASan/UBSan sweep is a release-boundary audit, not a per-PR gate.
+> **Trade-off (accepted).** The heavy audit runs once per train, at the landing, rather than on
+> every wagon PR. The light native self-build gate plus `test / linux` guard each wagon.
 
 ## Why this is safe
 

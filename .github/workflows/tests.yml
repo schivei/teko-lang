@@ -9,6 +9,12 @@ name: Tests
 # (native.yml's gen1-checks self-test step was removed when this workflow was added).
 #
 # CI runs on PULL REQUESTS (the per-PR gate) plus PUSHES to main + remodel/** integration branches.
+#
+# LIGHT vs FULL (owner proposal 2026-07-24): `test / linux` runs on EVERY PR; `test / macos` and
+# `test / windows` run only when the PR's BASE is main — the wagon that LANDS a stacked train, or a
+# hotfix. The axis is `github.base_ref`, never `github.ref` (on a pull_request that is
+# `refs/pull/N/merge` and matches no branch name). An intermediate wagon PR therefore pays one test
+# runner instead of three, and the whole matrix is paid exactly once, at the landing.
 on:
   pull_request:
     branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
@@ -51,8 +57,10 @@ jobs:
         run: ./bin/teko test .
 
   # ── test / macos ─────────────────────────────────────────────────────────────
+  # FULL-ONLY: base_ref == main.
   test-macos:
     name: test / macos
+    if: github.base_ref == 'main'
     runs-on: macos-latest
     timeout-minutes: 95
     permissions:
@@ -84,8 +92,10 @@ jobs:
   # own isolated runner (no other diagnostic work competing on this box). If it still exceeds the
   # cap it may need the same build-time relief the perf phase is bringing to the other lanes — do
   # NOT silently drop it; the owner wants one test runner per OS.
+  # FULL-ONLY: base_ref == main.
   test-windows:
     name: test / windows
+    if: github.base_ref == 'main'
     runs-on: windows-latest
     timeout-minutes: 125
     permissions:
@@ -110,10 +120,14 @@ jobs:
           .\bin\teko.exe test .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # ── test suite gate: aggregates the three per-OS test runners ──────────────────
-  # Stable required-check name for the branch ruleset. Passes when every test job succeeded or
-  # was skipped (docs-only PR); fails if any failed or was cancelled. Mirrors the aggregator
-  # pattern in native.yml (`CI gate`) and sanitizers.yml (`Sanitizer gate`).
+  # ── test suite gate: aggregates the per-OS test runners, and ASSERTS THE MODE ──
+  # Stable required-check name for the branch ruleset. J3 (the guard against an empty green): a
+  # gate that counts `skipped` as approval would let one broken `if:` skip every runner and still
+  # report green. So the demanded result is asserted per job and per mode:
+  #   * `test / linux` is the light path — it must be `success`; `skipped` is an ERROR.
+  #   * `test / macos` and `test / windows` are full-only — `success` when full, `skipped` when
+  #     light (an unexpected success on light warns: the condition is wrong, but nothing is hidden).
+  # Mirrors the aggregator pattern in native.yml (`CI gate`) and sanitizers.yml (`Sanitizer gate`).
   test-suite-gate:
     name: Test suite gate
     runs-on: ubuntu-latest
@@ -122,26 +136,41 @@ jobs:
     permissions: {}
     steps:
       - name: Evaluate results
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          LINUX: ${{ needs.test-linux.result }}
+          MACOS: ${{ needs.test-macos.result }}
+          WINDOWS: ${{ needs.test-windows.result }}
         run: |
-          LINUX="${{ needs.test-linux.result }}"
-          MACOS="${{ needs.test-macos.result }}"
-          WINDOWS="${{ needs.test-windows.result }}"
-
-          echo "test / linux  = $LINUX"
-          echo "test / macos  = $MACOS"
-          echo "test / windows = $WINDOWS"
+          set -u
+          if [ "$BASE_REF" = "main" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE (base_ref='$BASE_REF')"
+          echo "test / linux   = $LINUX   (light path)"
+          echo "test / macos   = $MACOS   (full only)"
+          echo "test / windows = $WINDOWS   (full only)"
 
           FAILED=0
-          for RESULT in "$LINUX" "$MACOS" "$WINDOWS"; do
-            if [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ]; then
-              FAILED=1
-            fi
-          done
-
-          if [ "$FAILED" = "1" ]; then
-            echo "ERROR: one or more per-OS test runners failed or were cancelled."
-            exit 1
+          if [ "$LINUX" != "success" ]; then
+            echo "ERROR: test / linux = $LINUX (the light path requires success; a skip means a broken condition)"
+            FAILED=1
           fi
 
-          echo "Test suite gate passed."
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success)"
+              FAILED=1
+              return 0
+            fi
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only "test / macos"   "$MACOS"
+          require_full_only "test / windows" "$WINDOWS"
+
+          if [ "$FAILED" = "1" ]; then
+            echo "Test suite gate FAILED (mode=$MODE)."
+            exit 1
+          fi
+          echo "Test suite gate passed (mode=$MODE)."
           exit 0
