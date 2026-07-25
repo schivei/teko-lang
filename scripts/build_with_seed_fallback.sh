@@ -1,27 +1,43 @@
 #!/usr/bin/env sh
 # scripts/build_with_seed_fallback.sh — build gen1 (the tip's compiler) from the released
-# seed, with a staged bootstrap fallback for when the seed cannot compile the tip directly.
+# seed, with a STAGED BOOTSTRAP fallback for when the seed cannot compile the tip directly.
 #
 # INVARIANT (owner ruling 2026-07-24, replacing the older "seed builds the tip" rule): the
-# released seed only has to build `main` (the merge-base). gen1(main) is itself a valid seed
-# for the tip, so when the RAW released seed cannot compile the tip (a genuine language/
-# codegen capability jump landed on this branch since the seed was cut), this script bridges
-# the gap in one extra generation: seed -> gen1(merge-base) -> gen1(tip). "We run the tests
-# under gen1, not under the seed" (the .30 ruling) extends naturally: gen1 just may come from
-# one extra hop when the seed alone cannot reach it.
+# released seed only has to build the PR's BASE lineage. A compiler built from an ancestor is
+# itself a valid seed for a newer commit, so when the RAW released seed cannot compile the tip
+# (a genuine language/codegen capability jump landed since the seed was cut), this script walks
+# a chain of intermediate generations until one of them reaches the tip. "We run the tests
+# under gen1, not under the seed" (the .30 ruling) extends naturally: gen1 may come from a few
+# extra hops when the seed alone cannot reach it.
 #
 # FAST PATH (unchanged, zero extra cost): the seed builds the tip directly. This is the
 # common case and costs exactly what it always did — one build, no git history probing.
 #
-# FALLBACK (only entered when the fast path fails): fetches enough history to compute the
-# merge-base between the tip and $TEKO_SEED_FALLBACK_BASE_BRANCH (default `main`), builds
-# THAT commit with the seed (a dry build — `--no-verify`, no test gate — because CI already
-# gated it on the PR that landed it on main; owner ruling 2026-07-24: the dry intermediate
-# build is a TRANSITIONAL .31 measure, to be undone in .32 and not repeated), then builds
-# the tip with the resulting binary. A push directly to
-# main never needs this: main's own merge-base with itself is itself, so the "no bootstrap
-# gap" guard below fails loud instead of pretending a fallback exists — a released seed that
-# cannot build main is a real regression, not a capability gap this script can paper over.
+# FALLBACK (only entered when the fast path fails) — the LADDER, an iterative staged bootstrap:
+#
+#   current := the released seed
+#   repeat:
+#     if `current` builds the tip -> done
+#     rung := the NEWEST first-parent ancestor of the tip that `current` CAN build
+#             (found by cheap probing: a compiler rejects an out-of-reach corpus in seconds)
+#     current := the compiler produced by building `rung`
+#
+# Why the rung must be DISCOVERED and not assumed: a fixed rung (the merge-base with the base
+# branch) is not necessarily buildable by the previous generation. Proven on the .31 train —
+# the cast-width wagon ADDED the W-RULE to the checker and then DELETED the now-redundant manual
+# casts from the corpus, so its own head requires a W-RULE-capable compiler while an older
+# generation dies on it with B.22 ("operands must be the same type"). The buildable rung is the
+# older wagon that has the new CAPABILITY but not yet the corpus that DEPENDS on it. Only a
+# probe can find that commit; a fixed guess lands on the wrong side of the jump.
+#
+# Each stage costs one successful build plus a few cheap rejections, and MAX_STAGES bounds the
+# whole thing. A push directly to main never enters any of this: main's own merge-base with
+# itself is itself, so the "no bootstrap gap" guard fails loud instead of pretending a fallback
+# exists — a released seed that cannot build main is a real regression, not a capability gap.
+#
+# The intermediate builds are DRY (`--no-verify`, no test gate) because CI already gated each of
+# those commits on the PR that landed it; owner ruling 2026-07-24: the dry intermediate build is
+# a TRANSITIONAL .31 measure, to be undone in .32 and not repeated.
 #
 # Usage:   sh scripts/build_with_seed_fallback.sh [OUT_DIR]
 #          OUT_DIR defaults to "bin" and receives the SAME gen1 binary the direct call to
@@ -40,15 +56,14 @@ SEED_BIN="${TEKO_SEED_FALLBACK_SEED_BIN:-teko}"
 BASE_BRANCH="${TEKO_SEED_FALLBACK_BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
 
 WORKTREE_DIR=""
-GEN1_BASE_DIR=""
 
 log() { printf '%s\n' "teko-ci: $*" >&2; }
 
-# cleanup — removes the scratch worktree/output directory this script creates while
-# bootstrapping the fallback, on any exit path (success or failure).
+# cleanup — removes the scratch worktree this script creates while bootstrapping the fallback,
+# on any exit path (success or failure). Every stage's output lives INSIDE that worktree, so
+# removing it reclaims all of them.
 cleanup() {
   [ -n "$WORKTREE_DIR" ] && [ -d "$WORKTREE_DIR" ] && git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
-  [ -n "$GEN1_BASE_DIR" ] && rm -rf "$GEN1_BASE_DIR"
   return 0
 }
 trap cleanup EXIT
@@ -56,12 +71,12 @@ trap cleanup EXIT
 # build_project BIN DIR OUT LOGFILE [RT_DIR] — runs "BIN . -o OUT --no-verify --release"
 # with cwd DIR, tees combined output to LOGFILE, and returns the build's own exit status.
 # RT_DIR, when non-empty, pins TK_RT_DIR for the build: the compiler otherwise locates
-# teko_rt.{h,c} relative to ITS OWN binary (argv[0]), and both fallback stages break under
+# teko_rt.{h,c} relative to ITS OWN binary (argv[0]), and every fallback stage breaks under
 # that rule — CI provisions the seed into <tip>/.seed, so an ancestor probe would compile
 # ancestor-generated C against the TIP's runtime header (proven: probes died on the exact
-# tk_rt_datetime_* symbols the time-redesign wagon removed), and gen1 lives inside the probe
-# worktree, so the tip build would symmetrically pick the ANCESTOR's runtime. Each stage
-# passes the runtime dir of the tree it is actually compiling.
+# tk_rt_datetime_* symbols the time-redesign wagon removed), and an intermediate compiler
+# lives inside the probe worktree, so the tip build would symmetrically pick the ANCESTOR's
+# runtime. Each stage passes the runtime dir of the tree it is actually compiling.
 build_project() {
   bin="$1"; proj_dir="$2"; out="$3"; logfile="$4"; rt_dir="${5:-}"
   if [ -n "$rt_dir" ]; then
@@ -128,7 +143,7 @@ if build_project "$SEED_BIN" "$PWD" "$OUT_DIR" "$FAST_LOG"; then
   rm -f "$FAST_LOG"
   exit 0
 fi
-log "seed FAILED to build the tip directly — probing the staged fallback"
+log "seed FAILED to build the tip directly — engaging the staged bootstrap ladder"
 
 if ! ensure_full_history; then
   log "FATAL: could not fetch '$BASE_BRANCH' history from origin — no fallback path exists"
@@ -153,139 +168,130 @@ if [ "$MERGE_BASE_SHA" = "$HEAD_FOR_MERGE_BASE" ]; then
   exit 1
 fi
 
-log "seed fallback engaged (seed cannot build tip; probing back from merge-base $MERGE_BASE_SHA)"
-
-# In a stacked train, the merge-base with the PR's base branch may ITSELF sit past the
-# capability jump (wagon N+2's base is wagon N+1, already unbuildable by the seed). The
-# bootstrap point is the NEWEST first-parent ancestor the seed CAN build — failed probes
-# are cheap (the compiler rejects in seconds), only the final successful build is paid.
-# The probe worktree and its output live INSIDE the workspace, not the system temp dir:
-# on the Windows runners the C toolchain demonstrably works in the workspace drive but
-# fails opaquely when teko builds from %TEMP% (proven by probe logs — Teko compiles, cc
-# dies). Same-workspace scratch also keeps everything on one filesystem.
+# The ladder worktree and every stage's output live INSIDE the workspace, not the system temp
+# dir: on the Windows runners the C toolchain demonstrably works on the workspace drive but
+# fails opaquely when teko builds from %TEMP% (proven by probe logs — Teko compiles, cc dies).
+# Same-workspace scratch also keeps everything on one filesystem.
 WORKTREE_DIR="${GITHUB_WORKSPACE:-$PWD}/.teko-seed-fallback-wt"
 rm -rf "$WORKTREE_DIR"
 git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
 git worktree add --detach "$WORKTREE_DIR" "$MERGE_BASE_SHA" >/dev/null
 
-# The probe OUTPUT lives INSIDE the probe worktree: with an out dir under the tip's
-# checkout, the C compile of an ANCESTOR mixed the TIP's runtime header into the
-# ancestor's generated C (proven: probes died on exactly the tk_rt_datetime_* symbols
-# the time-redesign wagon removed). Self-contained probe = ancestor code + ancestor
-# runtime, the same shape as the fast path's in-project `-o bin`.
-GEN1_BASE_DIR="$WORKTREE_DIR/.probe-out"
-rm -rf "$GEN1_BASE_DIR"
-mkdir -p "$GEN1_BASE_DIR"
-BOOT_SHA="$MERGE_BASE_SHA"
-PROBES=0
+MAX_STAGES=4
 MAX_PROBES=64
-BASE_LOG="$(mktemp)"
-while :; do
-  git -C "$WORKTREE_DIR" clean -fdxq
-  rm -rf "$GEN1_BASE_DIR"
-  mkdir -p "$GEN1_BASE_DIR"
-  if build_project "$SEED_BIN" "$WORKTREE_DIR" "$GEN1_BASE_DIR" "$BASE_LOG" "$(rt_dir_of "$WORKTREE_DIR")"; then
-    break
-  fi
-  if grep -q "cc failed to build the generated C" "$BASE_LOG"; then
-    log "FATAL: probe $BOOT_SHA compiles at the Teko level but its C compile FAILED — this is an"
-    log "ENVIRONMENTAL toolchain problem, not a seed-capability gap; walking further back cannot fix it."
-    log "----- full probe build log ($BOOT_SHA) -----"
-    sed 's/^/teko-ci:   | /' "$BASE_LOG" >&2
-    rm -f "$BASE_LOG"
-    exit 1
-  fi
-  log "probe error tail:"
-  tail -15 "$BASE_LOG" | sed 's/^/teko-ci:   | /' >&2
-  PROBES=$((PROBES + 1))
-  if [ "$PROBES" -ge "$MAX_PROBES" ]; then
-    log "FATAL: no seed-buildable ancestor found within $MAX_PROBES first-parent steps of merge-base $MERGE_BASE_SHA"
-    log "----- seed build of the tip (failure) -----"
-    cat "$FAST_LOG"
-    log "----- seed build of last probe $BOOT_SHA (failure) -----"
-    cat "$BASE_LOG"
-    rm -f "$BASE_LOG"
-    exit 1
-  fi
-  if ! PARENT_SHA="$(git -C "$WORKTREE_DIR" rev-parse -q --verify "$BOOT_SHA^" 2>/dev/null)"; then
-    log "FATAL: ran out of history walking back from merge-base $MERGE_BASE_SHA — no seed-buildable ancestor"
-    log "----- seed build of the tip (failure) -----"
-    cat "$FAST_LOG"
-    log "----- seed build of last probe $BOOT_SHA (failure) -----"
-    cat "$BASE_LOG"
-    rm -f "$BASE_LOG"
-    exit 1
-  fi
-  log "probe: seed cannot build $BOOT_SHA — stepping back to $PARENT_SHA"
-  BOOT_SHA="$PARENT_SHA"
-  git -C "$WORKTREE_DIR" checkout -q --detach "$BOOT_SHA"
-done
-rm -f "$BASE_LOG"
-log "bootstrap point: $BOOT_SHA (newest seed-buildable ancestor, $PROBES probe(s) back from the merge-base)"
-LADDER_SHA="$MERGE_BASE_SHA"
-MERGE_BASE_SHA="$BOOT_SHA"
-
-if ! GEN1_BASE_BIN="$(resolve_bin "$GEN1_BASE_DIR")"; then
-  log "FATAL: merge-base build reported success but no teko/teko.exe binary was found in $GEN1_BASE_DIR"
-  exit 1
-fi
-
+CURRENT_BIN="$SEED_BIN"
+CURRENT_DESC="the released seed"
+STAGE=0
+PROBE_FROM="$MERGE_BASE_SHA"
+LAST_RUNG=""
+TIP_RT_DIR="$(rt_dir_of "$PWD")"
 TIP_LOG="$(mktemp)"
-if ! build_project "$GEN1_BASE_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$PWD")"; then
-  # LADDER (second rung). In a stacked train TWO capability jumps can separate the bootstrap
-  # point from the tip (e.g. the 2a codegen fixes AND the W-RULE checker): gen1(bootstrap) can
-  # build the seed-era corpus but not a tip whose corpus already RELIES on a capability a HIGHER
-  # wagon introduced. The PR's own merge-base with its base branch carries every capability
-  # except the tip's delta, so it is the natural intermediate rung: gen1(bootstrap) builds the
-  # merge-base -> gen2 (now capability-complete) builds the tip. Only engaged when the walk
-  # actually stepped back (otherwise the merge-base IS the bootstrap point and retrying it
-  # would loop).
-  if [ "$LADDER_SHA" = "$BOOT_SHA" ]; then
-    log "FATAL: gen1 of bootstrap point $BOOT_SHA failed to build the tip (no higher rung exists)"
+
+while :; do
+  # Does the compiler we currently hold reach the tip?
+  if build_project "$CURRENT_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$TIP_RT_DIR"; then
+    cat "$TIP_LOG"
+    rm -f "$FAST_LOG" "$TIP_LOG"
+    log "staged bootstrap complete — tip built by $CURRENT_DESC after $STAGE ladder stage(s)"
+    exit 0
+  fi
+  if [ "$STAGE" -eq 0 ]; then
+    log "confirmed: the released seed cannot build the tip — probing back from merge-base $MERGE_BASE_SHA"
+  else
+    log "stage $STAGE compiler ($CURRENT_DESC) still cannot build the tip — probing for a newer rung"
+    log "tip build error tail:"
+    tail -8 "$TIP_LOG" | sed 's/^/teko-ci:   | /' >&2
+  fi
+
+  STAGE=$((STAGE + 1))
+  if [ "$STAGE" -gt "$MAX_STAGES" ]; then
+    log "FATAL: the tip is still unreachable after $MAX_STAGES ladder stages — the capability gap"
+    log "between the released seed and this tip is deeper than the ladder is allowed to climb."
     log "----- seed build of the tip (failure) -----"
     cat "$FAST_LOG"
-    log "----- gen1($BOOT_SHA) build of the tip (failure) -----"
+    log "----- last stage's build of the tip (failure) -----"
     cat "$TIP_LOG"
     rm -f "$TIP_LOG"
     exit 1
   fi
-  log "ladder engaged: gen1($BOOT_SHA) cannot build the tip — building merge-base $LADDER_SHA as the intermediate rung"
-  git -C "$WORKTREE_DIR" checkout -q --detach "$LADDER_SHA"
-  # -e .probe-out: gen1's own binary lives there — cleaning it would delete the very
-  # compiler about to build this rung (it is stale-era ARTIFACTS we must not reuse, but
-  # the BINARY is the ladder's tool; the rung build reads only src/ + its own rt dir).
-  git -C "$WORKTREE_DIR" clean -fdxq -e .probe-out
-  GEN2_DIR="$WORKTREE_DIR/.ladder-out"
-  rm -rf "$GEN2_DIR"
-  mkdir -p "$GEN2_DIR"
+
+  # Find the NEWEST first-parent ancestor at-or-before $PROBE_FROM that $CURRENT_BIN can build.
+  RUNG_SHA="$PROBE_FROM"
+  RUNG_OUT="$WORKTREE_DIR/.rung-out-$STAGE"
   RUNG_LOG="$(mktemp)"
-  if ! build_project "$GEN1_BASE_BIN" "$WORKTREE_DIR" "$GEN2_DIR" "$RUNG_LOG" "$(rt_dir_of "$WORKTREE_DIR")"; then
-    log "FATAL: gen1($BOOT_SHA) failed to build the intermediate rung $LADDER_SHA"
-    log "----- gen1($BOOT_SHA) build of rung $LADDER_SHA (failure) -----"
-    cat "$RUNG_LOG"
-    rm -f "$TIP_LOG" "$RUNG_LOG"
-    exit 1
-  fi
+  PROBES=0
+  RUNG_RT_DIR=""
+  while :; do
+    git -C "$WORKTREE_DIR" checkout -q --detach "$RUNG_SHA"
+    # Clean stale artifacts of the previous probe, but PRESERVE every .rung-out-* — those hold
+    # the compilers this ladder is standing on (including the one about to run).
+    git -C "$WORKTREE_DIR" clean -fdxq -e '.rung-out-*'
+    rm -rf "$RUNG_OUT"
+    mkdir -p "$RUNG_OUT"
+    RUNG_RT_DIR="$(rt_dir_of "$WORKTREE_DIR")"
+    if build_project "$CURRENT_BIN" "$WORKTREE_DIR" "$RUNG_OUT" "$RUNG_LOG" "$RUNG_RT_DIR"; then
+      break
+    fi
+    if grep -q "cc failed to build the generated C" "$RUNG_LOG"; then
+      log "FATAL: rung candidate $RUNG_SHA compiles at the Teko level but its C compile FAILED — this"
+      log "is an ENVIRONMENTAL toolchain problem, not a capability gap; walking further back cannot fix it."
+      log "----- full rung build log ($RUNG_SHA) -----"
+      sed 's/^/teko-ci:   | /' "$RUNG_LOG" >&2
+      rm -f "$RUNG_LOG" "$TIP_LOG"
+      exit 1
+    fi
+    PROBES=$((PROBES + 1))
+    if [ "$PROBES" -ge "$MAX_PROBES" ]; then
+      log "FATAL: no buildable rung found within $MAX_PROBES first-parent steps of $PROBE_FROM (stage $STAGE)"
+      log "----- last rung candidate $RUNG_SHA (failure) -----"
+      cat "$RUNG_LOG"
+      rm -f "$RUNG_LOG" "$TIP_LOG"
+      exit 1
+    fi
+    if ! PARENT_SHA="$(git -C "$WORKTREE_DIR" rev-parse -q --verify "$RUNG_SHA^" 2>/dev/null)"; then
+      log "FATAL: ran out of history walking back from $PROBE_FROM (stage $STAGE) — no buildable rung"
+      log "----- last rung candidate $RUNG_SHA (failure) -----"
+      cat "$RUNG_LOG"
+      rm -f "$RUNG_LOG" "$TIP_LOG"
+      exit 1
+    fi
+    log "probe: $CURRENT_DESC cannot build $RUNG_SHA — stepping back to $PARENT_SHA"
+    RUNG_SHA="$PARENT_SHA"
+  done
   rm -f "$RUNG_LOG"
-  if ! GEN2_BIN="$(resolve_bin "$GEN2_DIR")"; then
-    log "FATAL: rung build reported success but no teko/teko.exe binary was found in $GEN2_DIR"
-    rm -f "$TIP_LOG"
-    exit 1
-  fi
-  if ! build_project "$GEN2_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$(rt_dir_of "$PWD")"; then
-    log "FATAL: gen2 of rung $LADDER_SHA still failed to build the tip"
+
+  # NO-PROGRESS GUARD. If this stage's probe landed on the very commit the previous stage
+  # already built, a newer compiler reached no further — every commit in the base lineage that
+  # is buildable at all is already behind us, so the tip needs a capability the tip ITSELF
+  # introduces. That is a genuine bootstrap impossibility for this commit, not something more
+  # stages can fix: say so instead of burning the remaining stages rebuilding the same rung.
+  if [ "$RUNG_SHA" = "$LAST_RUNG" ]; then
+    log "FATAL: no progress — stage $STAGE's probe landed on $RUNG_SHA again, the same rung stage"
+    log "$((STAGE - 1)) already built. The tip requires a capability that no buildable ancestor"
+    log "provides, i.e. one the tip itself introduces; a staged bootstrap cannot bridge that."
     log "----- seed build of the tip (failure) -----"
     cat "$FAST_LOG"
-    log "----- gen2(rung $LADDER_SHA) build of the tip (failure) -----"
+    log "----- last stage's build of the tip (failure) -----"
     cat "$TIP_LOG"
     rm -f "$TIP_LOG"
     exit 1
   fi
-  cat "$TIP_LOG"
-  rm -f "$FAST_LOG" "$TIP_LOG"
-  log "seed fallback complete — tip built via gen1($BOOT_SHA) -> gen2(rung $LADDER_SHA)"
-  exit 0
-fi
-cat "$TIP_LOG"
-rm -f "$FAST_LOG" "$TIP_LOG"
-log "seed fallback complete — tip built via gen1 of merge-base $MERGE_BASE_SHA"
+  LAST_RUNG="$RUNG_SHA"
+
+  if ! NEXT_BIN="$(resolve_bin "$RUNG_OUT")"; then
+    log "FATAL: rung build reported success but no teko/teko.exe binary was found in $RUNG_OUT"
+    rm -f "$TIP_LOG"
+    exit 1
+  fi
+  log "ladder stage $STAGE: built $RUNG_SHA ($PROBES probe(s) back from $PROBE_FROM) — that compiler is the new rung"
+
+  # The next stage probes the window BETWEEN this rung and the tip: a newer rung than the one
+  # we just built is the only thing that can carry us further, and re-probing from the same
+  # point would rebuild what we already hold. Walking forward is not possible with a
+  # first-parent walk, so the next probe starts again at the merge-base — but the compiler in
+  # hand is strictly newer, so it reaches strictly further before being rejected. Convergence
+  # is bounded by MAX_STAGES.
+  CURRENT_BIN="$NEXT_BIN"
+  CURRENT_DESC="gen$STAGE(rung $RUNG_SHA)"
+  PROBE_FROM="$MERGE_BASE_SHA"
+done
