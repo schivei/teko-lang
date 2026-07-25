@@ -558,3 +558,256 @@ fn pt_program_declares_assert_seed_is_false_for_an_empty_program() {
     let empty = checker::TProgram { items = teko::list::empty() }
     teko::assert::is_false(program_declares_assert_seed(empty))
 }
+
+/**
+ * pt_manifest_of — parse a `.tkp` fixture text into a Manifest for the extern-lib validator tests,
+ * degrading to the smallest parsable manifest when the fixture text itself is malformed.
+ *
+ * @param src  the `.tkp` text
+ * @return     the parsed manifest, or a minimal one with no `[extern.libs]` columns
+ */
+fn pt_manifest_of(src: str) -> Manifest {
+    match parse_manifest(src) { Manifest as m => m; error => pt_empty_manifest() }
+}
+
+/**
+ * pt_empty_manifest — the smallest manifest that parses (no `[extern.libs]` at all), the stand-in
+ * for a malformed fixture text.
+ *
+ * @return a manifest with empty extern-lib columns
+ */
+fn pt_empty_manifest() -> Manifest {
+    match parse_manifest("name = \"x\"\nsource = \"src\"\n") { Manifest as m => m; error => pt_empty_manifest() }
+}
+
+/**
+ * pt_is_error — did a validator return an error (rather than the `null` success)?
+ *
+ * @param v  the validator verdict
+ * @return   true iff `v` carries an error
+ */
+fn pt_is_error(v: null | error) -> bool {
+    match v { error => true; null => false }
+}
+
+/**
+ * pt_error_text — the message of a validator verdict, or "" when it succeeded.
+ *
+ * @param v  the validator verdict
+ * @return   the error message, or "" for success
+ */
+fn pt_error_text(v: null | error) -> str {
+    match v { error as e => e.message; null => "" }
+}
+
+/**
+ * pt_cross_target — a target that is NEVER a host default (`host_target_for_os` only ever answers
+ * x86_64-linux, x86_64-windows or arm64-macos), so `cross_note` classifies it as cross on EVERY CI
+ * host and the R4/R5 cross assertions below hold platform-independently.
+ *
+ * @return the always-cross fixture target
+ */
+fn pt_cross_target() -> NativeTarget { NativeTarget::Riscv64Linux }
+
+#test
+/**
+ * pt_target_name_and_objfmt_are_one_source — the canonical os-arch name of each target round-trips
+ * through `target_from_name` (the D39 single string space: what the reverse direction emits, the
+ * forward direction accepts), and each name carries the object format the `--allow-undef`
+ * translation and the COFF import-lib rule key on.
+ *
+ * @return void
+ */
+fn pt_target_name_and_objfmt_are_one_source() {
+    teko::assert::is_true(target_name(NativeTarget::X8664Linux) == "x86_64-linux")
+    teko::assert::is_true(target_name(NativeTarget::Arm64Macho) == "arm64-macos")
+    teko::assert::is_true(target_name(NativeTarget::X8664Windows) == "x86_64-windows")
+    teko::assert::is_true(target_name(NativeTarget::Riscv64Linux) == "riscv64-linux")
+    teko::assert::is_true(target_name(NativeTarget::Wasm32Wasi) == "wasm32-wasi")
+    match target_from_name(target_name(NativeTarget::X8664Windows)) {
+        NativeTarget as t => teko::assert::is_true(t == NativeTarget::X8664Windows)
+        error => teko::assert::is_true(false)
+    }
+    teko::assert::is_true(target_objfmt(NativeTarget::X8664Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Riscv64Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Macho) == OBJFMT_MACHO)
+    teko::assert::is_true(target_objfmt(NativeTarget::X8664Windows) == OBJFMT_COFF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Wasm64Wasi) == OBJFMT_WASM)
+    teko::assert::is_true(target_links_with_cc(NativeTarget::X8664Linux))
+    teko::assert::is_false(target_links_with_cc(NativeTarget::Wasm32Wasi))
+    teko::assert::is_true(target_os_name(NativeTarget::X8664Windows) == "windows")
+    teko::assert::is_true(target_os_name(NativeTarget::Wasm32Wasi) == "")
+}
+
+#test
+/**
+ * pt_cross_note_is_empty_for_the_host_target — the C5 classification: the host's own target is NOT
+ * cross and carries no note, while a target no host defaults to is cross and its note names BOTH
+ * targets plus the honest verdict ("not executed"). `resolved_target_name` with `TEKO_TARGET` unset
+ * IS the host default's name, so a plain build selects its own os-arch link section.
+ *
+ * @return void
+ */
+fn pt_cross_note_is_empty_for_the_host_target() {
+    let here = cross_note(host_default_target())
+    teko::assert::is_false(here.is_cross)
+    teko::assert::is_true(here.note == "")
+    let cross = cross_note(pt_cross_target())
+    teko::assert::is_true(cross.is_cross)
+    teko::assert::str_contains(cross.note, "riscv64-linux")
+    teko::assert::str_contains(cross.note, target_name(host_default_target()))
+    teko::assert::str_contains(cross.note, "not executed")
+    teko::assert::is_true(cross_note_for_name("riscv64-linux").is_cross)
+    teko::assert::is_false(cross_note_for_name("").is_cross)
+    teko::assert::is_false(cross_note_for_name("some-unknown-target").is_cross)
+    teko::assert::is_false(cross_note_for_name(target_name(host_default_target())).is_cross)
+}
+
+#test
+/**
+ * pt_os_lib_key_matches_both_shapes — the §4.2 link-time delta: a deferred section key applies when
+ * it is the build's target OS (bare-OS back-compat) OR its full os-arch name, and never otherwise.
+ *
+ * @return void
+ */
+fn pt_os_lib_key_matches_both_shapes() {
+    teko::assert::is_true(os_lib_key_matches("linux", "linux", "x86_64-linux"))
+    teko::assert::is_true(os_lib_key_matches("x86_64-linux", "linux", "x86_64-linux"))
+    teko::assert::is_false(os_lib_key_matches("arm64-macos", "linux", "x86_64-linux"))
+    teko::assert::is_false(os_lib_key_matches("windows", "linux", "x86_64-linux"))
+}
+
+#test
+/**
+ * pt_static_lib_cross_must_be_pointed_at_and_present — R4/M.3: for a CROSS target a bare
+ * `static:<name>` is a compile error naming the lib, the target and the os-arch section that fixes
+ * it (the host linker cannot search the target's library paths); the SAME declaration for the host
+ * target is fine (the host linker searches its own paths and reports its own miss). An
+ * explicitly-named path that is absent is an error for any target — the already-ratified
+ * "explicitly-named missing lib file is a hard error" rule (LEGISLATION:423), per target.
+ *
+ * @return void
+ */
+fn pt_static_lib_cross_must_be_pointed_at_and_present() {
+    let bare = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:foo\"]\n")
+    let cross = validate_static_libs_for_target(bare, pt_cross_target())
+    teko::assert::is_true(pt_is_error(cross))
+    teko::assert::str_contains(pt_error_text(cross), "foo")
+    teko::assert::str_contains(pt_error_text(cross), "riscv64-linux")
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target())))
+    let absent = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:__no_such_dir__/libfoo.a\"]\n")
+    let miss = validate_static_libs_for_target(absent, host_default_target())
+    teko::assert::is_true(pt_is_error(miss))
+    teko::assert::str_contains(pt_error_text(miss), "__no_such_dir__/libfoo.a")
+    let clean = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nm = []\n")
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(clean, pt_cross_target())))
+}
+
+#test
+/**
+ * pt_static_validation_honours_the_section_key — a `static:` declaration in a section that does NOT
+ * apply to the validated target is not the target's problem: only the applicable sections (global,
+ * the target's bare OS, the target's os-arch) are checked.
+ *
+ * @return void
+ */
+fn pt_static_validation_honours_the_section_key() {
+    let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.arm64-macos]\nfoo = [\"static:foo\"]\n")
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(m, NativeTarget::X8664Windows)))
+    let own = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.riscv64-linux]\nfoo = [\"static:foo\"]\n")
+    teko::assert::is_true(pt_is_error(validate_static_libs_for_target(own, pt_cross_target())))
+}
+
+#test
+/**
+ * pt_shared_lib_default_fails_and_allow_undef_opts_in — R5 (owner ruling 2026-07-24 §5.0): a named
+ * shared lib that is absent here FAILS by default, with a message pointing at `--allow-undef`; the
+ * same manifest under the opt-in passes (the blind link is explicit, never silent). A bare
+ * `shared:<name>` gets no compile-time verdict — the linker's own fail-loud miss is the default.
+ *
+ * @return void
+ */
+fn pt_shared_lib_default_fails_and_allow_undef_opts_in() {
+    let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:__no_such_dir__/libbar.so\"]\n")
+    let strict = validate_shared_libs_for_target(m, host_default_target(), false)
+    teko::assert::is_true(pt_is_error(strict))
+    teko::assert::str_contains(pt_error_text(strict), "__no_such_dir__/libbar.so")
+    teko::assert::str_contains(pt_error_text(strict), ALLOW_UNDEF_FLAG)
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, host_default_target(), true)))
+    let by_name = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:bar\"]\n")
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(by_name, host_default_target(), false)))
+}
+
+#test
+/**
+ * pt_shared_cross_coff_needs_an_import_lib — R5's COFF gap (§5.2): cross-linking a `shared:` lib to
+ * `x86_64-windows` without an import library is a NAMED honest stop EVEN WITH `--allow-undef`,
+ * because PE/COFF cannot reference a DLL without one and the transitional linker will not synthesize
+ * it; pointing at a `.lib` import stub lifts the stop (its own presence is then the ordinary rule).
+ *
+ * @return void
+ */
+fn pt_shared_cross_coff_needs_an_import_lib() {
+    let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.x86_64-windows]\nbar = [\"shared:bar\"]\n")
+    if cross_note(NativeTarget::X8664Windows).is_cross {
+        let stop = validate_shared_libs_for_target(m, NativeTarget::X8664Windows, true)
+        teko::assert::is_true(pt_is_error(stop))
+        teko::assert::str_contains(pt_error_text(stop), "import library")
+        let pointed = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.x86_64-windows]\nbar = [\"shared:__no_such_dir__/bar.lib\"]\n")
+        teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(pointed, NativeTarget::X8664Windows, true)))
+        return
+    }
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, NativeTarget::X8664Windows, false)))
+}
+
+#test
+/**
+ * pt_allow_undef_flag_surface — the opt-in is recognized only when spelled exactly, translates per
+ * object format (Mach-O's `dynamic_lookup`; ELF's pair, since `--allow-shlib-undefined` alone does
+ * not let an executable carry an undefined symbol), and has NO translation for PE/COFF or wasm — a
+ * flag that would do nothing is not emitted, the honest stop covers that case instead.
+ *
+ * @return void
+ */
+fn pt_allow_undef_flag_surface() {
+    teko::assert::is_true(allow_undef_of(args_of("teko", "build", ALLOW_UNDEF_FLAG)))
+    teko::assert::is_false(allow_undef_of(args_of("teko", "build", ".")))
+    teko::assert::is_false(allow_undef_of(args_of("teko", "build", "--allow-undefined")))
+    teko::assert::str_contains(allow_undef_cc_flag(OBJFMT_ELF), "--unresolved-symbols=ignore-all")
+    teko::assert::str_contains(allow_undef_cc_flag(OBJFMT_ELF), "--allow-shlib-undefined")
+    teko::assert::is_true(allow_undef_cc_flag(OBJFMT_MACHO) == "-Wl,-undefined,dynamic_lookup")
+    teko::assert::is_true(allow_undef_cc_flag(OBJFMT_COFF) == "")
+    teko::assert::is_true(allow_undef_cc_flag(OBJFMT_WASM) == "")
+    teko::assert::is_true(project_arg_of(args_of("teko", ALLOW_UNDEF_FLAG, "proj"), 1) == "proj")
+}
+
+#test
+/**
+ * pt_blind_link_withdrawal_is_opt_in_only — a flag is withdrawn from the link line ONLY for the case
+ * the opt-in exists for. This gate runs WITHOUT `--allow-undef` in its own argv, so nothing is
+ * withdrawn here — which is exactly the invariant that matters: no silent blind link.
+ *
+ * @return void
+ */
+fn pt_blind_link_withdrawal_is_opt_in_only() {
+    teko::assert::is_false(allow_undef_selected())
+    teko::assert::is_false(omit_flag_for_blind_link("__no_such_dir__/libbar.so", LINK_MODE_SHARED))
+    teko::assert::is_false(omit_flag_for_blind_link("-lbar", LINK_MODE_SHARED))
+    teko::assert::is_false(omit_flag_for_blind_link("__no_such_dir__/libfoo.a", LINK_MODE_STATIC))
+}
+
+#test
+/**
+ * pt_lib_file_present_reads_the_local_tree — the R4/R5 locality probe answers from the project root
+ * the build already chdir'd into: a file that exists is present, a fabricated path is not, and an
+ * unreadable directory is not present (never an exception).
+ *
+ * @return void
+ */
+fn pt_lib_file_present_reads_the_local_tree() {
+    teko::assert::is_true(lib_file_present("teko.tkp"))
+    teko::assert::is_false(lib_file_present("__no_such_dir__/libfoo.a"))
+    teko::assert::is_false(lib_file_present("src/__no_such_file__.a"))
+    teko::assert::is_true(lib_spec_path("-lfoo") == "")
+    teko::assert::is_true(lib_spec_path("vendor/libfoo.a") == "vendor/libfoo.a")
+}

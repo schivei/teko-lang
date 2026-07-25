@@ -417,6 +417,10 @@ void    tk_set_args(int argc, char **argv);
 tk_str *tk_rt_args(uint64_t *n);
 // (C7.1f) the host OS name: "macos"/"linux"/"windows"/"unknown" (teko::os; per-OS resolution + `#os`).
 tk_str tk_rt_os(void);
+// (0.3.1 C2) the host CPU architecture: "x86_64"/"arm64"/"riscv64"/"unknown" (teko::arch). The
+// canonical token that concatenates with tk_rt_os() into the "<arch>-<os>" target key; mirrors
+// tk_rt_os's plain-str shape so the released seed's frozen codegen can lower it.
+tk_str tk_rt_arch(void);
 // (CLI --version) the build's version string — the RAW project-manifest `version` + `-<suffix>`
 // (e.g. "0.0.1.0-bootstrap"). Compiled from the TEKO_VERSION_STRING define injected by both build
 // paths (CMake for the bootstrap, run_cc for self-host), never a runtime file read. (teko::env::version)

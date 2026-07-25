@@ -1764,6 +1764,26 @@ tk_str tk_rt_os(void) {
     return (tk_str){ (const tk_byte *)s, strlen(s) };
 }
 
+// (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64" /
+// "riscv64" (else "unknown"), selected from the compiler's own target predefines. Mirrors
+// tk_rt_os's already-working plain-str shape (no {ok,value,err} lift), so the released seed's
+// frozen codegen.c can lower it. The canonical spellings are "arm64" (not "aarch64") and
+// "x86_64" (not "amd64") so the token concatenates directly with tk_rt_os() into the
+// "<arch>-<os>" NativeTarget key (teko-target-crosslink-0.3.1.md §2.2). A compile-time
+// constant, exactly like tk_rt_os. [teko::arch]
+tk_str tk_rt_arch(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    static const char *s = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    static const char *s = "x86_64";
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    static const char *s = "riscv64";
+#else
+    static const char *s = "unknown";
+#endif
+    return (tk_str){ (const tk_byte *)s, strlen(s) };
+}
+
 // (CLI --version) the build's VERSION STRING — the RAW project-manifest `version` +
 // `-<suffix>` (e.g. "0.0.1.0-bootstrap"), the SINGLE SOURCE OF TRUTH being teko.tkp.
 // TEKO_VERSION_STRING is injected at COMPILE TIME by both build paths: CMake defines it for

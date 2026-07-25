@@ -504,3 +504,38 @@ fn split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration() {
     teko::assert::is_true(teko::str::contains(split.decls, "fn probe"))
     teko::assert::is_true(teko::str::contains(split.stmts, "exit(probe())"))
 }
+
+/**
+ * rt_alien_target_name — a target name that is CROSS on this host AND links through the host `cc`
+ * (no dedicated cross driver): `arm64-macos` everywhere but macOS, `x86_64-linux` there. The pair the
+ * `host_cc_cannot_link_cross_reason` test needs to exercise its non-empty arm on every CI host.
+ *
+ * @return the always-cross, host-cc-linked target name for this host
+ */
+fn rt_alien_target_name() -> str {
+    if teko::os() == "macos" { return "x86_64-linux" }
+    "arm64-macos"
+}
+
+#test
+/**
+ * host_cc_cannot_link_cross_reason_names_the_unlinkable_cross — the capability the vagão-17 probe was
+ * missing: a cross target with NO dedicated cross driver would reach the host `cc`, which cannot link
+ * a foreign object format, so the row is honest-skipped BEFORE the build instead of dying in `ld`
+ * with an error indistinguishable from a compiler regression. The host itself, a wasm target (no link
+ * step at all) and a target WITH a cross driver are never skipped by this rule. A pinned `TEKO_CC`
+ * lifts it, so the assertion is guarded on that seam being unset (as it is in the self-test lane).
+ *
+ * @return void
+ */
+fn host_cc_cannot_link_cross_reason_names_the_unlinkable_cross() {
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason(HOST_TARGET) == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("wasm32-wasi") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("riscv64-linux") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("some-unknown-target") == "")
+    if teko_cc_env().len > 0 { return }
+    let alien = host_cc_cannot_link_cross_reason(rt_alien_target_name())
+    teko::assert::is_true(alien.len > 0)
+    teko::assert::str_contains(alien, rt_alien_target_name())
+}

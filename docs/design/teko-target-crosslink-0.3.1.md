@@ -413,24 +413,52 @@ Each crumb is independently gate-able; ritual (full gate) points marked.
   C3 scope, gated on the `teko::arch()` seed bump (C2) as planned. **RITUAL: full gate green
   (build/test/fixpoint/diff_c_own/W15) + the new fixture proving linux-host default emits ELF x86_64
   (§7, T1).** FIXPOINT on mac unchanged (verified).
-- **C2 (M, seed-gated).** Add `tk_rt_arch()` to `src/runtime/teko_rt.{c,h}` (maintained-C exception)
-  and wire `teko::arch()` at `src/checker/scope.tks:450`-neighbor and
-  `src/codegen/codegen.tks:3036`-neighbor. Used by no one yet. RITUAL: full gate. **Then seed bump.**
-- **C3 (M, after the C2 bump).** Introduce `supported_targets()`/`TargetRow` (D39 single source),
-  `host_target()` (precise os×arch), and convert `target_from_name`/`native_target` to error-returning
-  table lookups (R2 honest error, no arm64 fallback). Thread `NativeTarget | error` through
-  `emit_native`/`default_cc`. RITUAL: full gate + R2 honest-error fixtures (§7).
-- **C4 (M-L).** The §4.2 arch-key tkp fill (ratifies §4.1, adds os-arch keys): os-arch
-  `[extern.libs.<os-arch>]` sections + preserve the `static:`/`shared:` mode (`os_lib_mode` column,
-  stop stripping at `manifest.tks:207-208`) + `validate_static_libs_for_target` (M.3, R4). Touches
-  `src/build/manifest.tks` (type + parser + builder) and the link-flag selection in
-  `src/build/project.tks`. RITUAL: full gate + M.3 fixtures (§7).
-- **C5 (M).** Cross-emit honest reporting: `cross_note`/`CrossNote`, skip the run/differential when
-  `is_cross`, print the emitted-not-run line (R3/R5). RITUAL: full gate + cross-emit fixture (§7).
-- **C6 (S).** The `--allow-undef` opt-in flag (OUR Teko-linker flag) + its transitional translation
-  per objfmt (`--allow-shlib-undefined` / `-undefined dynamic_lookup`) + the DEFAULT fail-loud on a
-  missing shared lib + the COFF import-lib named honest-stop (R5, §5). Touches the CLI flag surface
-  and the link-driver arg builder in `src/build/project.tks`. RITUAL: full gate + R5 fixtures (§7).
+- **C2 (M, seed-gated). DONE (2026-07-25, feat/0.3.1-target-crosslink).** `tk_rt_arch()` added to
+  `src/runtime/teko_rt.c` (beside `tk_rt_os`) + declared in `teko_rt.h`; `teko::arch()` wired in the
+  checker (`scope.tks::builtin_fn`, beside the `os` arm) and the codegen builtin map
+  (`codegen.tks`, `else if last == "arch" { builtin = "tk_rt_arch" }`). Called by NO ONE in the
+  corpus — deliberately, so the seed ladder stays two rungs (this vagão + the .32 seed that carries
+  it). Verified end-to-end on a scratch project built by gen1 (`teko::arch()` → `"x86_64"`).
+  **Then seed bump.**
+- **C3 (M, after the C2 bump). NOT in the C2/C4/C5/C6 vagão — deferred to .32 by integrator ruling
+  (2026-07-25).** Collapsing C2 and C3 into one vagão is forbidden by the bootstrap law (§8), and
+  landing C3 alone in .31 would add a THIRD rung to the .31 seed ladder for no gain: C4/C5/C6 do not
+  depend on it. They ride C1's os-only host default, which is already precise on linux/x86_64,
+  windows/x86_64 and macos/arm64 (the overwhelming majority); the ONE imprecision it leaves — a
+  same-OS different-arch host (arm64-linux, x86_64-macos) reading an explicit same-OS cross request as
+  NOT cross — is documented at `cross_note` and is the conservative direction (the host runs it and
+  reports the real exit, rather than fabricating a skip). In the .32 the .31 seed already carries
+  `teko::arch()`, so C3 becomes a plain refactor. C3 still owns
+  `supported_targets()`/`TargetRow`/`host_target()`; the C4/C5/C6 vagão landed only the two
+  reverse-direction columns it could not do without — `target_name` (variant → canonical os-arch) and
+  `target_objfmt` — as standalone matches for C3 to fold into `TargetRow`.
+- **C4 (M-L). DONE (2026-07-25, feat/0.3.1-target-crosslink).** Ratifies §4.1 and fills §4.2: the
+  `[extern.libs.<os-arch>]` section key was ALREADY captured verbatim by the parser (now pinned by a
+  test), so the delta is at LINK time — `os_lib_key_matches` (a bare OS, as before, OR the full
+  os-arch) consumed by `append_reachable_os_lib_flags`. The `static:`/`shared:` mode is no longer
+  stripped: `mf_extern_spec` returns `ExternLibSpec { flag; mode }` into the new
+  `link_mode`/`os_lib_mode` columns. **Bug found and fixed in-crumb:** `mf_extern_flag` tested for a
+  path BEFORE stripping the mode prefix, so the ratified `static:vendor/x86_64-linux/libfoo.a`
+  spelling leaked the literal `static:` prefix onto the `cc` line.
+  `validate_static_libs_for_target` implements R4/M.3.
+- **C5 (M). DONE (2026-07-25, feat/0.3.1-target-crosslink).** `CrossNote`/`cross_note` +
+  `cross_note_for_name` (the name-keyed door) + `resolved_cross_note`. `teko run` and the native test
+  gate print the emitted-not-run line and skip the child process when cross; the regression runner
+  consults the SAME `cross_note_for_name` (`tkr_row_run_verdict`) instead of keeping a second idea of
+  "cross", and `host_cc_cannot_link_cross_reason` closes the pre-build hole the vagão-17 probe left
+  (a cross target with no dedicated cross driver reached the host `ld` and failed on the object
+  format, indistinguishably from a compiler regression).
+- **C6 (S). DONE (2026-07-25, feat/0.3.1-target-crosslink).** `--allow-undef` (`ALLOW_UNDEF_FLAG`,
+  `allow_undef_of`/`allow_undef_selected`, skipped by `project_arg_of`, listed in `teko --help`) +
+  `allow_undef_cc_flag` per objfmt + `omit_flag_for_blind_link` (a named-but-absent `shared:` path is
+  withdrawn from the link line under the opt-in — otherwise `ld` fails on the missing file and the
+  opt-in is a no-op) + the DEFAULT fail-loud (`validate_shared_libs_for_target`) + the COFF
+  import-lib named honest-stop. **§5.2's ELF row is incomplete and was corrected in-crumb:**
+  `--allow-shlib-undefined` alone governs undefined symbols INSIDE a shared dependency, so an
+  EXECUTABLE with an undefined symbol still fails `ld` (verified with `cc` on linux/x86_64). The ELF
+  translation is therefore the PAIR `-Wl,--allow-shlib-undefined,--unresolved-symbols=ignore-all`;
+  emitting only the ratified flag would have shipped a no-op opt-in, which M.1/M.3 forbid more
+  strongly than a flag list binds. Mach-O's `-undefined dynamic_lookup` needed no correction.
 
 Blocked/forward: E1 (own-linker DT_NEEDED/import table) closes the COFF-shared-cross gap — NOT in
 scope here; named forward reference only.
@@ -469,6 +497,45 @@ New scenarios to add (inputs → expected exit, VM=interp and native where appli
 VM vs native: T1-T3 assert absolute exit on both engines where the snippet runs; T4/T6/T8 are
 compile-fail (engine-independent, diagnostic-pinned per the F1 inversion); T5/T7 assert emit + object
 well-formed with an honest RUN-skip label.
+
+### 7.1 Where each fixture actually landed (C2/C4/C5/C6 vagão, 2026-07-25)
+
+The corpus rule changed under this design: the .31 regressor is `regressor.tkr` (the 234 fixture
+directories were folded into 10 `.tkr` files, owner target ≤10 — **no new directory under
+`examples/regressions/`**), so a new case is a `Scenario`/`Scenario Outline` in `regressor.tkr` or it
+is a `#test`. The split below is forced by ONE mechanical fact: a `.tkr` scenario's project manifest
+is SYNTHESIZED (`snippet_manifest_text`) and the grammar has no `Given manifest` noun, so a case whose
+input IS a `[extern.libs…]` table cannot be a `.tkr` scenario at all. Those cases are `#test`s over
+the validators — which the format doc itself prefers ("the reframe routes MOST compile-fail
+diagnostics to CHECKER `#test`s (stronger than a diagnostic-less regressor)", §5.1).
+
+| # | landed as | where |
+|---|---|---|
+| T1 | `scripts/target_host_default_test.sh` (C1, unchanged) | the one harness that leaves `TEKO_TARGET` unset |
+| T2 | same script, macOS arm (host-conditional arm) | + FIXPOINT itself |
+| T3 | `regressor.tkr` F5 `own_explicit_host_os_arch_runs` | runs for real on x86_64-linux; honest-skips elsewhere (`host_cc_cannot_link_cross_reason`) |
+| T4 | `regressor.tkr` **new Feature F8** (3 compile-fail scenarios: the phrase, the offending value, a canonical name in the list) | diagnostic-pinned |
+| T5 | `regressor.tkr` F5 `own_cross_x86_64_windows_emits_coff_and_skips_the_run` | emit + `Then object well-formed` (COFF) + honest RUN-skip |
+| T6 | `#test` `pt_static_lib_cross_must_be_pointed_at_and_present` + `pt_static_validation_honours_the_section_key` (`project_test.tkt`) | needs a `[extern.libs]` manifest |
+| T7a | `#test` `pt_shared_lib_default_fails_and_allow_undef_opts_in` (strict arm) | idem |
+| T7b | same `#test` (opt-in arm) + `pt_blind_link_withdrawal_is_opt_in_only` | idem |
+| T8 | `#test` `pt_shared_cross_coff_needs_an_import_lib` | idem |
+
+Also pinned by `#test`: the §4.2 os-arch section key and the preserved mode
+(`extern_libs_section_key_accepts_a_full_os_arch`, `global_extern_libs_carry_their_mode_column`,
+`mf_extern_spec_*`, `manifest_test.tkt`), the link-time key match (`pt_os_lib_key_matches_both_shapes`),
+the target/objfmt tables (`pt_target_name_and_objfmt_are_one_source`), the cross classification
+(`pt_cross_note_is_empty_for_the_host_target`), the flag surface + translation
+(`pt_allow_undef_flag_surface`) and the runner's new link-capability probe
+(`host_cc_cannot_link_cross_reason_names_the_unlinkable_cross`, `regression_test.tkt`). The os-arch
+KEY SELECTION was additionally proven end-to-end by hand on gen1 (`[extern.libs.x86_64-linux] nope`
+puts `-lnope` on the link line — `cannot find -lnope`; `[extern.libs.arm64-macos] nope` does not —
+`undefined reference`; `[extern.libs.linux] nope` still does).
+
+**Reported gap (no product code missing):** the `.tkr` grammar cannot express a scenario whose input
+is a manifest section. Adding a `Given manifest = """…"""` noun would let T6/T7/T8 be end-to-end
+regressor scenarios instead of validator `#test`s. That is a REGRESSOR-FORMAT change (grammar + lower
++ `Tkr` field + the format doc), out of this design's scope — flagged for the integrator.
 
 ---
 

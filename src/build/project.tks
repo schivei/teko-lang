@@ -541,31 +541,72 @@ fn cc_family_is_clang(cc: str, binary: str) -> bool {
  * (m.link_lib_name, parallel to m.link_flags) is in `reachable` — extern-reachability: only a
  * lib whose name is actually reached by a call from the program's own entry points earns a
  * place on the link line, so a project that declares two [extern.libs] but only calls one of
- * them's extern fns links just that one.
+ * them's extern fns links just that one — and only when the blind-link opt-in has not withdrawn
+ * it (`omit_flag_for_blind_link`).
+ *
+ * @param argv       the link argument vector so far
+ * @param m          the resolved manifest (global `[extern.libs]` columns)
+ * @param reachable  the extern-lib keys actually reached from the program's entry points
+ * @return           `argv` with every reachable, non-withdrawn global flag appended in order
  */
 fn append_reachable_link_flags(argv: []str, m: Manifest, reachable: []str) -> []str {
     mut out = argv
     mut li = 0
     loop {
         if li >= m.link_flags.len { break }
-        if name_in(reachable, m.link_lib_name[li]) { out = teko::list::push(out, m.link_flags[li]) }
+        if name_in(reachable, m.link_lib_name[li]) && !omit_flag_for_blind_link(m.link_flags[li], m.link_mode[li]) {
+            out = teko::list::push(out, m.link_flags[li])
+        }
         li = li + 1
     }
     out
 }
 
 /**
- * (C7.20) append_reachable_os_lib_flags — the DEFERRED per-OS `[extern.libs.<os>]` flags
- * (C7.1f), appended to `argv` only when their OS matches `target_os` (host, or `[extern]
- * target`) AND their originating key is in `reachable`. Resolved HERE (native), so manifest
- * parse stays host-independent.
+ * omit_flag_for_blind_link — must this resolved flag be WITHDRAWN from the link line because the
+ * build asked for a blind link over it (R5)? True only for the exact case the opt-in exists for:
+ * `--allow-undef` is set, the element declared `shared:`, it NAMES a path, and that path is not
+ * present here — there is nothing to hand the linker, so passing it would fail on the missing file
+ * and make the opt-in a no-op. A bare `shared:<name>` is NEVER withdrawn: whether the linker can
+ * find `-l<name>` in its own (or the cross toolchain's) search paths is the linker's question, and
+ * its fail-loud miss IS the R5 default — a dev who means to blind-link one must point at its path.
+ *
+ * @param flag  the resolved link flag
+ * @param mode  the element's declared linkage mode (`LINK_MODE_SHARED` for a `shared:` element)
+ * @return      true iff the flag must be left off the link line for the blind link
+ * @since 0.3.1
  */
-fn append_reachable_os_lib_flags(argv: []str, m: Manifest, tos: str, reachable: []str) -> []str {
+fn omit_flag_for_blind_link(flag: str, mode: str) -> bool {
+    if mode != LINK_MODE_SHARED { return false }
+    if !allow_undef_selected() { return false }
+    let path = lib_spec_path(flag)
+    if path.len == 0 { return false }
+    !lib_file_present(path)
+}
+
+/**
+ * (C7.20) append_reachable_os_lib_flags — the DEFERRED `[extern.libs.<key>]` flags (C7.1f),
+ * appended to `argv` only when their section key applies to this build (`os_lib_key_matches`: a
+ * bare OS matching `target_os`, or a full os-arch matching `target_key` — the ratified §4.2
+ * arch-key fill) AND their originating key is in `reachable` AND the blind-link opt-in has not
+ * withdrawn it (`omit_flag_for_blind_link`). Resolved HERE, so manifest parse stays
+ * host-independent.
+ *
+ * @param argv        the link argument vector so far
+ * @param m           the resolved manifest (the deferred per-section columns)
+ * @param tos         the build's target OS (`target_os`)
+ * @param target_key  the build's canonical os-arch name (`resolved_target_name`)
+ * @param reachable   the extern-lib keys actually reached from the program's entry points
+ * @return            `argv` with every applicable, reachable deferred flag appended in order
+ */
+fn append_reachable_os_lib_flags(argv: []str, m: Manifest, tos: str, target_key: str, reachable: []str) -> []str {
     mut out = argv
     mut oi = 0
     loop {
         if oi >= m.os_lib_os.len { break }
-        if m.os_lib_os[oi] == tos && name_in(reachable, m.os_lib_name[oi]) { out = teko::list::push(out, m.os_lib_flag[oi]) }
+        if os_lib_key_matches(m.os_lib_os[oi], tos, target_key) && name_in(reachable, m.os_lib_name[oi]) && !omit_flag_for_blind_link(m.os_lib_flag[oi], m.os_lib_mode[oi]) {
+            out = teko::list::push(out, m.os_lib_flag[oi])
+        }
         oi = oi + 1
     }
     out
@@ -850,10 +891,310 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     let reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     let tos = target_os(m)
-    argv = append_reachable_os_lib_flags(argv, m, tos, reachable)
+    argv = append_reachable_os_lib_flags(argv, m, tos, resolved_target_name(), reachable)
+    argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, tos)
     argv = teko::list::push(argv, "-o")
     teko::list::push(argv, binary)
+}
+
+/**
+ * ALLOW_UNDEF_FLAG — the Teko-linker flag name that opts INTO a blind link over shared libraries
+ * the link step cannot see (R5, teko-target-crosslink-0.3.1.md §5). OURS, not the system
+ * linker's: `allow_undef_cc_flag` translates it per object format for the transitional `cc`, and
+ * the own M-linker makes it native in E1.
+ */
+const ALLOW_UNDEF_FLAG: str = "--allow-undef"
+
+/**
+ * allow_undef_of — does the `--allow-undef` opt-in appear in `args`? The SINGLE parser for the
+ * flag (owner ruling 2026-07-24, §5.0: "o default é FALHAR … ou passa --allow-undef … Nunca
+ * blind-link silencioso — opt-in, M.3"), consulted both by `project_arg_of` (so the token is never
+ * mistaken for the project positional) and — through `allow_undef_selected` — by the link-line
+ * builder.
+ *
+ * @param args  the full CLI argument vector
+ * @return      true iff `--allow-undef` appears anywhere in `args`
+ * @since 0.3.1
+ */
+fn allow_undef_of(args: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if args[i] == ALLOW_UNDEF_FLAG { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * allow_undef_selected — is the blind-link opt-in active for THIS build? `allow_undef_of` over
+ * this process's own argv, so the link-line builder and the M.3 shared-lib validator read the one
+ * flag parser without eight layers of plumbing threading a link-step modality through the
+ * front-end. The same shape `self_exe_path` uses to read argv where it is needed.
+ *
+ * @return true iff this invocation carries `--allow-undef`
+ * @since 0.3.1
+ */
+fn allow_undef_selected() -> bool { allow_undef_of(teko::env::args()) }
+
+/**
+ * allow_undef_cc_flag — the TRANSITIONAL translation of `--allow-undef` for a given object format
+ * (§5.2): Mach-O → `-Wl,-undefined,dynamic_lookup`, which is precisely "leave these undefined,
+ * resolve at load". ELF needs the PAIR `--allow-shlib-undefined,--unresolved-symbols=ignore-all`:
+ * §5.2 names the first, but `--allow-shlib-undefined` alone governs only undefined symbols INSIDE a
+ * shared dependency — an EXECUTABLE with an undefined symbol still fails `ld` (verified: `cc` with
+ * only that flag rejects a program calling an unlinked symbol). Emitting the ratified flag alone
+ * would ship a no-op opt-in — a fabricated capability, which M.1/M.3 forbid more strongly than the
+ * flag list binds — so the mechanically-required companion travels with it. `""` for
+ * PE/COFF — a DLL cannot be referenced without an import library, so there is no host-linker flag
+ * that would make the blind link work there (the honest stop is raised by
+ * `validate_shared_libs_for_target`, not silently papered over with a flag that does nothing) —
+ * and `""` for wasm, which has no link step at all. In E1 the own M-linker makes the capability
+ * native and this translation retires.
+ *
+ * @param objfmt  the resolved target's object format (`target_objfmt`)
+ * @return        the host-linker flag that enables the blind link, or "" when none exists
+ * @since 0.3.1
+ */
+fn allow_undef_cc_flag(objfmt: str) -> str {
+    if objfmt == OBJFMT_ELF { return "-Wl,--allow-shlib-undefined,--unresolved-symbols=ignore-all" }
+    if objfmt == OBJFMT_MACHO { return "-Wl,-undefined,dynamic_lookup" }
+    ""
+}
+
+/**
+ * append_allow_undef_flag — append the translated blind-link flag to the link line when this build
+ * carries `--allow-undef` and the resolved target's object format has a translation. A flagless
+ * build appends NOTHING, so the default link line — and the product FIXPOINT — stay byte-identical.
+ *
+ * @param argv  the link argument vector so far
+ * @return      `argv` with the translated flag appended, or unchanged
+ * @since 0.3.1
+ */
+fn append_allow_undef_flag(argv: []str) -> []str {
+    if !allow_undef_selected() { return argv }
+    let flag = allow_undef_cc_flag(target_objfmt(resolved_target()))
+    if flag.len == 0 { return argv }
+    teko::list::push(argv, flag)
+}
+
+/**
+ * ExternLibEntry — one `[extern.libs…]` declaration that APPLIES to the build's resolved target,
+ * flattened out of the manifest's parallel columns for the M.3 validators: the manifest key, the
+ * resolved link flag, the declared linkage mode, and the section it came from.
+ *
+ * @since 0.3.1
+ */
+type ExternLibEntry = struct {
+    /** the manifest key (the `from "<key>"` handle) this flag was declared under. */
+    key: str
+    /** the resolved cc link flag (`-l<name>`, a direct file path, or a verbatim `-flag`). */
+    flag: str
+    /** the declared linkage mode: `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or "". */
+    mode: str
+    /** the section key it came from: "" for the global `[extern.libs]`, else the bare OS / os-arch. */
+    section: str
+}
+
+/**
+ * applicable_extern_libs — every extern-lib declaration that applies to `target`: the whole global
+ * `[extern.libs]` section (it links on every target) plus the deferred `[extern.libs.<key>]`
+ * entries whose section key matches, keyed on the TARGET's own OS and canonical os-arch name
+ * (`target_os_name`/`target_name`) rather than on the build's `[extern] target` triple — the
+ * validators answer "is this lib available FOR THE REQUESTED TARGET", which is a question about the
+ * target, not about the `cc` triple seam.
+ *
+ * @param m       the parsed manifest
+ * @param target  the resolved own-backend target
+ * @return        the applicable declarations, global section first, each in declaration order
+ * @since 0.3.1
+ */
+fn applicable_extern_libs(m: Manifest, target: NativeTarget) -> []ExternLibEntry {
+    mut out: []ExternLibEntry = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.link_flags.len { break }
+        out = teko::list::push(out, ExternLibEntry { key = m.link_lib_name[i]; flag = m.link_flags[i]; mode = m.link_mode[i]; section = "" })
+        i = i + 1
+    }
+    let tos = target_os_name(target)
+    let tkey = target_name(target)
+    mut j: u64 = 0
+    loop {
+        if j >= m.os_lib_os.len { break }
+        if os_lib_key_matches(m.os_lib_os[j], tos, tkey) {
+            out = teko::list::push(out, ExternLibEntry { key = m.os_lib_name[j]; flag = m.os_lib_flag[j]; mode = m.os_lib_mode[j]; section = m.os_lib_os[j] })
+        }
+        j = j + 1
+    }
+    out
+}
+
+/**
+ * lib_spec_path — the LOCAL FILE PATH a resolved link flag names, or "" when the flag names no
+ * file (a `-l<name>` search request or a verbatim `-flag` escape). A direct-file element resolves
+ * to the path itself (`mf_extern_spec`), so a leading `-` is the whole distinction.
+ *
+ * @param flag  a resolved link flag
+ * @return      the path it names, or "" when it names none
+ * @since 0.3.1
+ */
+fn lib_spec_path(flag: str) -> str {
+    if flag.len > 0 && flag[0] == b'-' { return "" }
+    flag
+}
+
+/**
+ * lib_file_present — is `path` present on THIS machine? Resolved by listing the containing
+ * directory and looking for the basename, so the check costs one `list_dir` and never slurps a
+ * multi-megabyte archive into memory just to learn it exists.
+ *
+ * @param path  the declared library path (relative to the project root, or absolute)
+ * @return      true iff a directory entry with that basename exists
+ * @since 0.3.1
+ */
+fn lib_file_present(path: str) -> bool {
+    let entries = match teko::fs::list_dir(dirname_of(path)) { []str as e => e; error => return false }
+    name_in(entries, basename_of(path))
+}
+
+/**
+ * static_lib_locality_error — the R4 verdict for ONE static declaration. A cross target's static
+ * lib MUST name a local file: the host linker cannot search the target's library paths, so a bare
+ * `-l<name>` for a cross target is the "not pointed at for the requested os-arch" error (and the
+ * message spells the `[extern.libs.<os-arch>]` line that fixes it). A named path — cross or host —
+ * must be PRESENT, which is the already-ratified "an explicitly-named missing lib file is a hard
+ * error" rule (LEGISLATION:423) applied per target. A bare `-l<name>` for the HOST target keeps
+ * today's behaviour: the host linker searches its own paths and reports its own fail-loud miss.
+ *
+ * @param e       the applicable static declaration
+ * @param target  the resolved own-backend target
+ * @return        null when the lib is honestly available, else the positioned compile error
+ * @throws        when the lib is unpointed-at (cross) or its named path is absent (R4, M.3)
+ * @since 0.3.1
+ */
+fn static_lib_locality_error(e: ExternLibEntry, target: NativeTarget) -> null | error {
+    let tname = target_name(target)
+    let path = lib_spec_path(e.flag)
+    if path.len == 0 {
+        if !cross_note(target).is_cross { return null }
+        return error { message = $"[extern.libs] static lib {e.key} is not pointed at for target {tname}: a cross static lib must name a file present locally — declare it as [extern.libs.{tname}] {e.key} = [static:<path>] (R4, M.3)" }
+    }
+    if lib_file_present(path) { return null }
+    error { message = $"[extern.libs] static lib {e.key} for target {tname} is not present locally: {path} (R4, M.3)" }
+}
+
+/**
+ * validate_static_libs_for_target — M.3/R4: every `static:` lib that applies to the resolved
+ * target must be pointed at for that target AND present locally, surfaced HERE as a positioned
+ * COMPILE error naming the lib, the target and the missing path — never deferred to an opaque `ld`
+ * failure. `shared:` libs follow the §5 fail-or-`--allow-undef` rule
+ * (`validate_shared_libs_for_target`), not this one; a manifest with no `static:` declaration is a
+ * no-op.
+ *
+ * @param m       the parsed manifest (global + per-section `[extern.libs]` columns)
+ * @param target  the resolved own-backend target
+ * @return        null when every applicable static lib is available, else the FIRST honest error
+ * @throws        when an applicable static lib is unpointed-at or absent (R4, M.3)
+ * @since 0.3.1
+ */
+fn validate_static_libs_for_target(m: Manifest, target: NativeTarget) -> null | error {
+    let entries = applicable_extern_libs(m, target)
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        if entries[i].mode == LINK_MODE_STATIC {
+            match static_lib_locality_error(entries[i], target) { error as err => return err; null => { } }
+        }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * is_import_lib_path — does `path` name a PE import library (a `.lib` or `.a` import stub)? The one
+ * thing that lets a COFF link reference a DLL at all, so it is what the R5 COFF rule looks for.
+ *
+ * @param path  the declared library path
+ * @return      true iff the path names an import-library file
+ * @since 0.3.1
+ */
+fn is_import_lib_path(path: str) -> bool {
+    teko::str::ends_with(path, ".lib") || teko::str::ends_with(path, ".a")
+}
+
+/**
+ * shared_lib_link_error — the R5 verdict for ONE shared declaration. PE/COFF first: the
+ * transitional `link.exe`/`lld-link` cannot reference a DLL without an import library and will not
+ * invent one, so a cross `shared:` on `x86_64-windows` that names no import lib is a NAMED honest
+ * stop EVEN WITH `--allow-undef` (§5.2 — the E1 own import-table writer closes this, and the
+ * message says so; fabricating an import table in the transitional path is not on the table). Then
+ * the general rule: a NAMED path that is absent FAILS by default and is permitted only under the
+ * explicit `--allow-undef` blind link. A bare `-l<name>` gets no compile-time verdict — the linker
+ * searches its own (or the cross toolchain's) paths and its "cannot find -l<name>" IS the R5
+ * fail-loud default; `--allow-undef` never suppresses that, it only permits undefined symbols.
+ *
+ * @param e            the applicable shared declaration
+ * @param target       the resolved own-backend target
+ * @param allow_undef  whether this build carries the `--allow-undef` opt-in
+ * @return             null when the link may honestly proceed, else the compile error / named stop
+ * @throws             on a missing named shared lib without `--allow-undef`, or the COFF import-lib gap
+ * @since 0.3.1
+ */
+fn shared_lib_link_error(e: ExternLibEntry, target: NativeTarget, allow_undef: bool) -> null | error {
+    let tname = target_name(target)
+    let path = lib_spec_path(e.flag)
+    if target_objfmt(target) == OBJFMT_COFF && cross_note(target).is_cross && !is_import_lib_path(path) {
+        return error { message = $"[extern.libs] shared lib {e.key} cannot be linked for target {tname}: PE/COFF references a DLL only through an import library, which the transitional system linker will not synthesize — point at one ([extern.libs.{tname}] {e.key} = [shared:<path>.lib]); --allow-undef does not lift this (E1's own import-table writer does)" }
+    }
+    if path.len == 0 { return null }
+    if lib_file_present(path) { return null }
+    if allow_undef { return null }
+    error { message = $"[extern.libs] shared lib {e.key} for target {tname} is not present locally: {path} — supply the library, or pass {ALLOW_UNDEF_FLAG} to link blind and resolve it at load time on the target (R5, M.3)" }
+}
+
+/**
+ * validate_shared_libs_for_target — M.3/R5: the DEFAULT is to FAIL when an applicable `shared:`
+ * lib cannot be linked here; `--allow-undef` is the sole, explicit escape (owner ruling
+ * 2026-07-24, §5.0 — never a silent blind link). Delegates each applicable declaration to
+ * `shared_lib_link_error`; a manifest with no `shared:` declaration is a no-op.
+ *
+ * @param m            the parsed manifest (global + per-section `[extern.libs]` columns)
+ * @param target       the resolved own-backend target
+ * @param allow_undef  whether this build carries the `--allow-undef` opt-in
+ * @return             null when every applicable shared lib may honestly link, else the FIRST error
+ * @throws             on a missing named shared lib without the opt-in, or the COFF import-lib gap
+ * @since 0.3.1
+ */
+fn validate_shared_libs_for_target(m: Manifest, target: NativeTarget, allow_undef: bool) -> null | error {
+    let entries = applicable_extern_libs(m, target)
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        if entries[i].mode == LINK_MODE_SHARED {
+            match shared_lib_link_error(entries[i], target, allow_undef) { error as err => return err; null => { } }
+        }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * validate_extern_libs_for_target — the build's single M.3 pre-link gate: apply the R4 static rule
+ * and the R5 shared rule to the target THIS build resolved, with the `--allow-undef` opt-in read
+ * from this invocation. Called before any artifact is emitted, so an unavailable cross lib is a
+ * positioned compile error instead of an opaque linker failure half a pipeline later.
+ *
+ * @param m  the resolved manifest
+ * @return   null when the link may honestly proceed, else the first R4/R5 error
+ * @throws   per `validate_static_libs_for_target` / `validate_shared_libs_for_target`
+ * @since 0.3.1
+ */
+fn validate_extern_libs_for_target(m: Manifest) -> null | error {
+    let target = resolved_target()
+    match validate_static_libs_for_target(m, target) { error as e => return e; null => { } }
+    validate_shared_libs_for_target(m, target, allow_undef_selected())
 }
 
 /**
@@ -985,6 +1326,7 @@ fn plist_xml(m: Manifest) -> str {
  * @return         0 on a successful build, else the failing status
  */
 fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool) -> i32 {
+    match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.artifact == Artifact::Static {
         return emit_static_lib(dir, stem, out_dir, prog, m)
     }
@@ -1133,14 +1475,16 @@ type NativeTarget = enum { Arm64Macho; X8664Linux; Riscv64Linux; X8664Windows; W
  * teko-target-crosslink-0.3.1.md §0) for a `TEKO_TARGET` value `target_from_name`
  * does not recognize: names the offending value AND lists every canonical/alias
  * name it accepts, so a typo or an unsupported request is a COMPILE error, never a
- * silent mis-lower to the wrong object format.
+ * silent mis-lower to the wrong object format. The message carries NO `teko: ` prefix
+ * of its own — every path that surfaces it goes through `fail`, which prefixes
+ * `teko: <dir>: ` — so the diagnostic reads with one prefix, not two.
  *
  * @param name  the raw, unrecognized `TEKO_TARGET` value
  * @return      the honest error naming `name` and the supported set
  */
 fn unsupported_target_error(name: str) -> error {
     error { message = teko::str::concat(
-        "teko: unsupported TEKO_TARGET \"", name,
+        "unsupported TEKO_TARGET \"", name,
         "\" — supported targets: x86_64-linux (alias x86_64-elf), riscv64-linux (alias riscv64-elf), ",
         "x86_64-windows (aliases x86_64-win, x86_64-pe, x86_64-coff), arm64-macos, ",
         "wasm32-wasi (aliases wasm32, wasm, wasi), wasm64-wasi (alias wasm64), ",
@@ -1236,6 +1580,204 @@ fn host_default_target() -> NativeTarget { host_target_for_os(teko::os()) }
 fn native_target() -> NativeTarget | error {
     match teko::env::var("TEKO_TARGET") { str as v => target_from_name(v); error => host_default_target() }
 }
+
+/**
+ * resolved_target — the own-backend target this build resolves to, with the R2 error arm folded
+ * back onto the host default. The honest R2 stop for an unrecognized `TEKO_TARGET` belongs to
+ * `emit_native` (which surfaces it as a build failure before anything is emitted); every OTHER
+ * consumer of the resolved target — the cross-emit note (`cross_note`), the os-arch link-key
+ * selection (`resolved_target_name`) and the M.3 extern-lib validators — needs a TOTAL answer and
+ * must not double-report that diagnostic, so a bad value reads here as the host default (which is
+ * also exactly what the C backend, the only path that ignores `TEKO_TARGET`, links for).
+ *
+ * @return the resolved own-backend target, or the host default when the value is unrecognized
+ * @since 0.3.1
+ */
+fn resolved_target() -> NativeTarget {
+    match native_target() { NativeTarget as t => t; error => host_default_target() }
+}
+
+/**
+ * target_name — the CANONICAL `<arch>-<os>` name of an own-backend target: the exact spelling
+ * `target_from_name` accepts as canonical (its format-named aliases are deliberately NOT produced
+ * here) and the spelling the `[extern.libs.<os-arch>]` section key, the `on "<os-arch>"` regressor
+ * routing and the cross-emit note all share — ONE os-arch string space (D39). C3 folds this into
+ * `supported_targets()`'s `TargetRow.name` column; until that seed-gated crumb lands it is the
+ * single source for the reverse (variant → name) direction.
+ *
+ * @param t  the own-backend target
+ * @return   its canonical os-arch name
+ * @since 0.3.1
+ */
+fn target_name(t: NativeTarget) -> str {
+    match t {
+        NativeTarget::Arm64Macho => "arm64-macos"
+        NativeTarget::X8664Linux => "x86_64-linux"
+        NativeTarget::Riscv64Linux => "riscv64-linux"
+        NativeTarget::X8664Windows => "x86_64-windows"
+        NativeTarget::Wasm32Wasi => "wasm32-wasi"
+        NativeTarget::Wasm64Wasi => "wasm64-wasi"
+        NativeTarget::Wasm32Browser => "wasm32-browser"
+    }
+}
+
+/** OBJFMT_ELF — the object-format token of the ELF targets (linux, riscv64-linux). */
+const OBJFMT_ELF: str = "elf"
+
+/** OBJFMT_MACHO — the object-format token of the Mach-O target (arm64-macos). */
+const OBJFMT_MACHO: str = "macho"
+
+/** OBJFMT_COFF — the object-format token of the PE/COFF target (x86_64-windows). */
+const OBJFMT_COFF: str = "coff"
+
+/** OBJFMT_WASM — the object-format token of the wasm targets: a self-contained module, not a
+    relocatable object, so there is no separate link step to give a linker flag to. */
+const OBJFMT_WASM: str = "wasm"
+
+/**
+ * target_objfmt — the OBJECT FORMAT an own-backend target emits, as the token the
+ * `--allow-undef` translation table (§5.2) and the COFF import-lib rule (R5) key on. Named by
+ * format rather than by OS because that is what the transitional system linker's flag spelling
+ * actually depends on. C3 folds this into `TargetRow.objfmt`.
+ *
+ * @param t  the own-backend target
+ * @return   `OBJFMT_ELF` / `OBJFMT_MACHO` / `OBJFMT_COFF` / `OBJFMT_WASM`
+ * @since 0.3.1
+ */
+fn target_objfmt(t: NativeTarget) -> str {
+    match t {
+        NativeTarget::Arm64Macho => OBJFMT_MACHO
+        NativeTarget::X8664Linux => OBJFMT_ELF
+        NativeTarget::Riscv64Linux => OBJFMT_ELF
+        NativeTarget::X8664Windows => OBJFMT_COFF
+        NativeTarget::Wasm32Wasi => OBJFMT_WASM
+        NativeTarget::Wasm64Wasi => OBJFMT_WASM
+        NativeTarget::Wasm32Browser => OBJFMT_WASM
+    }
+}
+
+/**
+ * target_links_with_cc — does building for `t` end in a `cc`/`ld` LINK step? True for every
+ * relocatable-object target; false for the wasm targets, whose own-backend tail
+ * (`emit_native_wasm`) writes a finished, self-contained module and never invokes a linker
+ * (`backend-wasm.md` §1.2). Consulted wherever a rule is about the LINKER — the `--allow-undef`
+ * translation, and the regressor's "can this host link that target" capability probe — so a wasm
+ * target is never asked to justify a link step it does not have.
+ *
+ * @param t  the own-backend target
+ * @return   true iff building for `t` runs a link step
+ * @since 0.3.1
+ */
+fn target_links_with_cc(t: NativeTarget) -> bool { target_objfmt(t) != OBJFMT_WASM }
+
+/**
+ * target_os_name — the OS half of a target's canonical os-arch name (`"linux"` / `"macos"` /
+ * `"windows"`), in the same vocabulary `teko::os()` and the bare-OS `[extern.libs.<os>]` section
+ * key use; `""` for the wasm targets, which name no host OS. This is the OS a manifest's per-OS
+ * section is matched against when the build resolves an explicit `TEKO_TARGET`.
+ *
+ * @param t  the own-backend target
+ * @return   the target's OS name, or "" for a wasm target
+ * @since 0.3.1
+ */
+fn target_os_name(t: NativeTarget) -> str {
+    match t {
+        NativeTarget::Arm64Macho => "macos"
+        NativeTarget::X8664Linux => "linux"
+        NativeTarget::Riscv64Linux => "linux"
+        NativeTarget::X8664Windows => "windows"
+        NativeTarget::Wasm32Wasi => ""
+        NativeTarget::Wasm64Wasi => ""
+        NativeTarget::Wasm32Browser => ""
+    }
+}
+
+/**
+ * CrossNote — whether the resolved target differs from the build host, plus the human note the
+ * build report carries when it does. The run/differential step consults `is_cross` to SKIP
+ * execution HONESTLY (an emitted-not-run status), never to invent a green: the host cannot
+ * execute an artifact built for another target (R3/R5, teko-target-crosslink-0.3.1.md §3).
+ *
+ * @since 0.3.1
+ */
+type CrossNote = struct {
+    /** true when the resolved target is not this build host's own target. */
+    is_cross: bool
+    /** the emitted-not-run report line when `is_cross`, else "". */
+    note: str
+}
+
+/**
+ * cross_note — classify the resolved target against the build host (R3): equal ⇒ not cross and an
+ * empty note; different ⇒ cross, with the report line naming BOTH targets
+ * (`cross: emitted for x86_64-windows on host x86_64-linux — not executed`). The host side is
+ * `host_default_target()`, which is OS-only until the seed-gated `teko::arch()` crumb makes it
+ * precise (§2.1): on a host whose arch is not its OS's dominant one (arm64-linux, x86_64-macos)
+ * an explicit same-OS cross request therefore reads as NOT cross and is still executed — the
+ * conservative direction (the host runs it and reports the real exit) rather than a fabricated
+ * skip. It never mis-reports the reverse.
+ *
+ * @param target  the resolved own-backend target
+ * @return        the cross classification + its report line
+ * @since 0.3.1
+ */
+fn cross_note(target: NativeTarget) -> CrossNote {
+    let host = host_default_target()
+    if target == host { return CrossNote { is_cross = false; note = "" } }
+    CrossNote { is_cross = true; note = $"teko: cross: emitted for {target_name(target)} on host {target_name(host)} — not executed" }
+}
+
+/**
+ * cross_note_for_name — `cross_note` keyed by a target NAME (a `TEKO_TARGET` value or a regressor's
+ * `Given target`), so the regression runner's honest run-skip and the build's own emitted-not-run
+ * note read the SAME rule instead of each carrying its own idea of what "cross" means (D39). An
+ * unrecognized name is not cross here: its honest R2 stop belongs to `emit_native`.
+ *
+ * @param name  the target name ("" → the host default, i.e. never cross)
+ * @return      the cross classification for that name
+ * @since 0.3.1
+ */
+fn cross_note_for_name(name: str) -> CrossNote {
+    if name.len == 0 { return CrossNote { is_cross = false; note = "" } }
+    match target_from_name(name) { NativeTarget as t => cross_note(t); error => CrossNote { is_cross = false; note = "" } }
+}
+
+/**
+ * resolved_cross_note — `cross_note` for the target THIS build resolved (`resolved_target`), the
+ * form the build's run steps consult: `teko run`'s execute step and the native test gate's run
+ * both print `note` and skip the child process when `is_cross`, so a cross build reports
+ * "emitted, not executed" instead of failing on an artifact this host cannot exec.
+ *
+ * @return the cross classification for this build
+ * @since 0.3.1
+ */
+fn resolved_cross_note() -> CrossNote { cross_note(resolved_target()) }
+
+/**
+ * resolved_target_name — the canonical os-arch name of the target this build resolves to, the KEY
+ * an `[extern.libs.<os-arch>]` section is matched against at link time (§4.2). An unset
+ * `TEKO_TARGET` yields the host default's name, so a plain host build still selects its own
+ * os-arch section.
+ *
+ * @return the canonical os-arch name of the resolved target
+ * @since 0.3.1
+ */
+fn resolved_target_name() -> str { target_name(resolved_target()) }
+
+/**
+ * os_lib_key_matches — does a deferred `[extern.libs.<key>]` section apply to this build? The
+ * section key is EITHER a bare OS (matching any arch of that OS — LEGISLATION:426, unchanged
+ * back-compat) OR a full os-arch name (matching exactly one target — the ratified §4.2 arch-key
+ * fill). One comparison per shape, no new TOML surface: this is the whole link-time delta the
+ * arch dimension needed.
+ *
+ * @param key         the section key as written in the manifest
+ * @param tos         the build's target OS (`target_os` — the `[extern] target` triple, else the host)
+ * @param target_key  the build's canonical os-arch name (`resolved_target_name`)
+ * @return            true iff the section's flags belong on this build's link line
+ * @since 0.3.1
+ */
+fn os_lib_key_matches(key: str, tos: str, target_key: str) -> bool { key == tos || key == target_key }
 
 /**
  * strip_trailing_slash — `dir` without a single trailing `/`, so a joined
@@ -2144,7 +2686,12 @@ fn report_native_coverage(prog: checker::TProgram) {
  *  BUILD-OUTPUT OBSERVABILITY: the gate's emit and cc steps used to be the silent gap between the
  *  front-end and the test run; both now report as visible phases (`emit test` for the first silent step,
  *  `cc test` for the slow one). The gate always reports — `tty` only selects the rendering (Tty on a
- *  terminal, Plain on a CI/log), never silence. */
+ *  terminal, Plain on a CI/log), never silence.
+ *  CROSS (0.3.1 C5): when the resolved target is not this host's, the gate TU is still emitted and
+ *  linked (proving the cross link line works) but the RUN — and with it the coverage merge — is
+ *  honestly skipped with the emitted-not-run line. Before this, a cross `teko build` died at the gate
+ *  on an exec failure of a foreign-format binary; a fabricated pass is not the alternative, an honest
+ *  "not executed" is. */
 fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
     let mode = report_mode(false, tty)
     let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
@@ -2170,6 +2717,8 @@ fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest,
         return fail(dir, "cc failed to build the native test gate")
     }
     phase_end_ok(cc_phase, binp)
+    let cross = resolved_cross_note()
+    if cross.is_cross { teko::io::println(cross.note); return 0 }
     match teko::env::set_var("TEKO_TKCOV", covfile) { error => { }; null => { } }
     mut argv: []str = teko::list::push(teko::list::empty(), binp)
     let trc = teko::process::run(argv)
@@ -2500,7 +3049,8 @@ fn has_backend_flag(args: []str, start: u64) -> bool {
  *  signal that the flag is gone.
  *
  *  Also skips `--arith-cast-gate` (D4/C5, `cast-width-hygiene-0.3.1.md` §5) — the ARITH-CAST-
- *  RATE CI gate flag.
+ *  RATE CI gate flag, and `--allow-undef` (R5, `teko-target-crosslink-0.3.1.md` §5) — the
+ *  blind-link opt-in for a shared lib the link step cannot see.
  *
  *  @param args   the full CLI argument vector
  *  @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
@@ -2521,6 +3071,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
         else if args[i] == "--no-tty" { i = i + 1 }
         else if args[i] == "--analyzer" { i = i + 1 }
         else if args[i] == "--arith-cast-gate" { i = i + 1 }
+        else if args[i] == ALLOW_UNDEF_FLAG { i = i + 1 }
         else if opt_arg_has_prefix(args[i]) { i = i + 1 }
         else { return args[i] }
     }
@@ -2545,6 +3096,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
  * @return         0 on a successful build, else the failing status
  */
 fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+    match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.backend == Backend::Native {
         return emit_native(dir, stem, out_dir, prog, m)
     }
@@ -2591,6 +3143,9 @@ fn build_debug_and_report(dir: str, stem: str, out_dir: str, prog: checker::TPro
  * fed by the `.tsym` map), assertions ON, and no optimization (see build_cc_argv's `debug` seam).
  * The binary is built to a scratch dir, then run; the returned status is the PROGRAM's own exit code
  * (teko::exit(n) -> n, a panic -> non-zero) — the exact contract the retired VM `run` path had.
+ * When the resolved target is NOT this host's (`resolved_cross_note`), the binary is emitted and the
+ * RUN is honestly skipped with the emitted-not-run line (R3/C5): this host cannot exec a cross
+ * artifact, and reporting that is the honest answer — never a fabricated run status.
  *
  * @param dir      the project directory (already the cwd; the front-end chdir'd in)
  * @param backend  the resolved code-generation backend (`TEKO_BACKEND=native`, default `Backend::C`)
@@ -2602,6 +3157,8 @@ fn run_project(dir: str, backend: Backend) -> i32 {
     let stem = fe.manifest.name
     let bc = build_debug_and_report(dir, stem, "target/debug", fe.prog, with_backend(fe.manifest, backend))
     if bc != 0 { return bc }
+    let cross = resolved_cross_note()
+    if cross.is_cross { teko::io::println(cross.note); return 0 }
     let binp = teko::str::concat("target/debug/", stem)
     let argv = teko::list::push(teko::list::empty(), binp)
     teko::process::run(argv)

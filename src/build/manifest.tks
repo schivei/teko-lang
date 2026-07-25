@@ -23,11 +23,17 @@ type Backend = enum { C; Native }
  * records are evolution).
  *
  * link_lib_name and os_lib_name (C7.20) are PARALLEL to link_flags and os_lib_os/os_lib_flag
- * respectively: each holds the originating `[extern.libs]`/`[extern.libs.<os>]` KEY for its
+ * respectively: each holds the originating `[extern.libs]`/`[extern.libs.<key>]` KEY for its
  * same-indexed resolved flag (one key can fan out to several flags, e.g. a `-framework Name`
  * pair — every one of those flags carries that same key). That key is the same name an
  * `extern fn … from "<key>"` binds to, so a reachability pass can filter a whole key's flags
  * together by whether any of its externs is actually called.
+ *
+ * A `[extern.libs.<key>]` SECTION key is either a bare OS (`linux` — any arch of that OS,
+ * LEGISLATION:426) or a full os-arch name (`x86_64-linux` — that target only, the ratified §4.2
+ * arch-key fill of teko-target-crosslink-0.3.1.md); both land in os_lib_os and are told apart at
+ * link time by `os_lib_key_matches`. link_mode/os_lib_mode carry the declared `static:`/`shared:`
+ * linkage so the R4 and R5 rules can be applied per entry (§4.3/§5).
  */
 pub type Manifest = struct {
     name: str   // canonical root
@@ -47,11 +53,54 @@ pub type Manifest = struct {
     cov_functions: u64   // [coverage] functions — the D4 FUNCTION-coverage floor % (default 80)
     cov_lines: u64   // [coverage] lines     — the D4 LINE-coverage floor %     (default 80)
     cov_branches: u64   // [coverage] branches  — the D4 BRANCH-coverage floor %   (default 80)
-    link_flags: []str   // [extern.libs] resolved cc link flags (C7.1e; `-l<name>` / paths / raw flags)
+    /**
+     * The GLOBAL `[extern.libs]` section's resolved cc link flags (C7.1e), in declaration order:
+     * `-l<name>` for a bare name, the path itself for a direct file, a `-flag` element verbatim.
+     * These link on EVERY target.
+     */
+    link_flags: []str
+    /**
+     * The originating `[extern.libs]` KEY of each same-indexed `link_flags` entry (C7.20) — the
+     * same name an `extern fn … from "<key>"` binds to, so extern-reachability can filter a whole
+     * key's flags together even when one key fanned out to several.
+     */
     link_lib_name: []str
-    os_lib_os: []str   // [extern.libs.<os>] — the OS each DEFERRED per-OS flag belongs to (C7.1f)
-    os_lib_flag: []str   // [extern.libs.<os>] — the resolved flag (parallel to os_lib_os; selected at link time)
+    /**
+     * The declared LINKAGE MODE of each global `[extern.libs]` flag — `"static"`, `"shared"`, or
+     * `""` when the element states none. PARALLEL to `link_flags`/`link_lib_name`. Recorded (no
+     * longer stripped) because the R4 static-locality rule and the R5 shared fail-or-`--allow-undef`
+     * rule are DIFFERENT rules, and only the mode tells them apart
+     * (teko-target-crosslink-0.3.1.md §4.3).
+     *
+     * @since 0.3.1
+     */
+    link_mode: []str
+    /**
+     * The SECTION KEY each deferred `[extern.libs.<key>]` flag belongs to: either a bare OS
+     * (`"linux"` — any arch of that OS, LEGISLATION:426) or a full os-arch name
+     * (`"x86_64-linux"` — that target only, the §4.2 arch-key fill). Selected at LINK time by
+     * `os_lib_key_matches`, so parsing stays host-independent.
+     */
+    os_lib_os: []str
+    /**
+     * The resolved cc link flag of each deferred entry, PARALLEL to `os_lib_os` — same vocabulary
+     * as `link_flags`, appended to the link line only when its section key matches the build's
+     * target.
+     */
+    os_lib_flag: []str
+    /**
+     * The originating `[extern.libs.<key>]` KEY of each same-indexed `os_lib_flag` entry (C7.20),
+     * the per-section sibling of `link_lib_name`.
+     */
     os_lib_name: []str
+    /**
+     * The declared LINKAGE MODE of each deferred `[extern.libs.<os>]`/`[extern.libs.<os-arch>]`
+     * flag — `"static"`, `"shared"`, or `""`. PARALLEL to `os_lib_os`/`os_lib_flag`/`os_lib_name`,
+     * the per-section sibling of `link_mode`.
+     *
+     * @since 0.3.1
+     */
+    os_lib_mode: []str
     cc: str   // [extern] cc — the C driver to invoke ("" = the default `cc`) (C7.1f)
     target: str   // [extern] target — a cross target triple for `-target` ("" = host)
     sysroot: str   // [extern] sysroot — `--sysroot` for cross builds ("" = none)
@@ -200,74 +249,174 @@ fn mf_has_path(s: str) -> bool {
     teko::str::ends_with(s, ".dll") || teko::str::ends_with(s, ".o") || teko::str::ends_with(s, ".lib")
 }
 
-// resolve one [extern.libs] element (or, for an empty array, the lib key) to a cc link flag (C7.1e):
-//   `-flag`          → verbatim (e.g. `-framework`, `Security` on macOS)
-//   path / *.a/.so/… → verbatim direct file
-//   `static:`/`shared:` prefix → stripped (the linkage MODE is deferred — the Linux increment)
-//   bare name        → `-l<name>` (a leading `lib` stripped)
-fn mf_extern_flag(s: str) -> str {
-    if s.len > 0 && s[0] == b'-' { return s }
-    if mf_has_path(s) { return s }
-    mut name = s
-    if mf_starts_with(name, "static:") { name = teko::str::slice_from(name, 7) }
-    else if mf_starts_with(name, "shared:") { name = teko::str::slice_from(name, 7) }
-    teko::str::concat("-l", mf_strip_lib(name))
+/**
+ * LINK_MODE_STATIC — the `os_lib_mode`/`link_mode` token for a FORCED-STATIC element
+ * (`static:<name>`, or a `.a`/`.lib`/`.o` direct file whose extension decides it —
+ * LEGISLATION:423). Named once so the parser, the R4 validator and their tests cannot drift.
+ *
+ * @since 0.3.1
+ */
+const LINK_MODE_STATIC: str = "static"
+
+/**
+ * LINK_MODE_SHARED — the `os_lib_mode`/`link_mode` token for a FORCED-DYNAMIC element
+ * (`shared:<name>`, or a `.so`/`.dylib`/`.dll` direct file). The R5 fail-or-`--allow-undef` rule
+ * keys on exactly this token.
+ *
+ * @since 0.3.1
+ */
+const LINK_MODE_SHARED: str = "shared"
+
+/**
+ * MODE_PREFIX_LEN — the byte length of both `static:` and `shared:`, the two mode prefixes
+ * `mf_extern_spec` strips (they are deliberately the same width — D39: one constant, one strip).
+ *
+ * @since 0.3.1
+ */
+const MODE_PREFIX_LEN: u64 = 7
+
+/**
+ * ExternLibSpec — one resolved `[extern.libs…]` array element: the cc link flag it contributes and
+ * the LINKAGE MODE it declared. The mode used to be stripped and thrown away; it is now carried so
+ * the R4 static-locality rule (a cross static lib must be a local file) and the R5 shared rule (a
+ * missing shared lib fails unless `--allow-undef`) can be told apart at all
+ * (teko-target-crosslink-0.3.1.md §4.3/§5).
+ *
+ * @since 0.3.1
+ */
+type ExternLibSpec = struct {
+    /** the cc link flag this element resolves to (`-l<name>`, a direct file path, or a verbatim `-flag`). */
+    flag: str
+    /** the declared linkage mode: `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or `""` when unstated. */
+    mode: str
 }
 
 /**
- * (C7.20) The five parallel accumulators `parse_manifest` grows while it reads
- * `[extern.libs]` / `[extern.libs.<os>]` lines: link_flags/link_lib_name for the global
- * section, os_lib_os/os_lib_flag/os_lib_name for a deferred per-OS one. Bundled into one
- * struct so `parse_extern_libs_entry` can take and return them as a single value.
+ * mf_mode_from_ext — the linkage mode a DIRECT FILE's extension decides, per LEGISLATION:423 ("a
+ * path … → linked as a direct file (the extension decides static vs shared)"): `.a`/`.lib`/`.o` →
+ * static, `.so`/`.dylib`/`.dll` → shared, anything else → `""` (unstated). Consulted only when the
+ * element carried no explicit `static:`/`shared:` prefix, which always wins.
+ *
+ * @param s  the path form of the element (mode prefix already stripped)
+ * @return   `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or `""` when the extension decides neither
+ * @since 0.3.1
+ */
+fn mf_mode_from_ext(s: str) -> str {
+    if teko::str::ends_with(s, ".a") || teko::str::ends_with(s, ".lib") || teko::str::ends_with(s, ".o") { return LINK_MODE_STATIC }
+    if teko::str::ends_with(s, ".so") || teko::str::ends_with(s, ".dylib") || teko::str::ends_with(s, ".dll") { return LINK_MODE_SHARED }
+    ""
+}
+
+/**
+ * mf_extern_spec — resolve ONE `[extern.libs]` array element (or, for an empty array, the lib key
+ * itself) to its cc link flag PLUS its declared linkage mode (C7.1e + the §4.3 mode column):
+ * a `-flag` element passes through verbatim with no mode (the M.5 escape); otherwise an explicit
+ * `static:`/`shared:` prefix is stripped and REMEMBERED, and what remains is either a direct file
+ * (a `/` or a known library extension — linked verbatim, the extension supplying the mode when the
+ * prefix did not) or a bare name (`-l<name>`, a leading `lib` stripped). Stripping the prefix
+ * BEFORE the path test is what makes the ratified `static:vendor/x86_64-linux/libfoo.a` spelling
+ * (§4.2) resolve to the file `vendor/x86_64-linux/libfoo.a` instead of leaking the literal
+ * `static:` prefix onto the link line.
+ *
+ * @param s  the raw array element (or the lib key, for an empty array)
+ * @return   the resolved flag + declared mode
+ * @since 0.3.1
+ */
+fn mf_extern_spec(s: str) -> ExternLibSpec {
+    if s.len > 0 && s[0] == b'-' { return ExternLibSpec { flag = s; mode = "" } }
+    mut mode = ""
+    mut rest = s
+    if mf_starts_with(rest, "static:") { mode = LINK_MODE_STATIC; rest = teko::str::slice_from(rest, MODE_PREFIX_LEN) }
+    else if mf_starts_with(rest, "shared:") { mode = LINK_MODE_SHARED; rest = teko::str::slice_from(rest, MODE_PREFIX_LEN) }
+    if mf_has_path(rest) {
+        let by_ext = if mode.len > 0 { mode } else { mf_mode_from_ext(rest) }
+        return ExternLibSpec { flag = rest; mode = by_ext }
+    }
+    ExternLibSpec { flag = teko::str::concat("-l", mf_strip_lib(rest)); mode = mode }
+}
+
+/**
+ * (C7.20 + the §4.3 mode column) The parallel accumulators `parse_manifest` grows while it reads
+ * `[extern.libs]` / `[extern.libs.<key>]` lines: `link_flags`/`link_lib_name`/`link_mode` for the
+ * global section, `os_lib_os`/`os_lib_flag`/`os_lib_name`/`os_lib_mode` for a deferred per-section
+ * one. Bundled into one struct so `parse_extern_libs_entry` can take and return them as a single
+ * value.
  */
 type ExternLibsAccum = struct {
+    /** the global `[extern.libs]` flags so far. */
     link_flags: []str
+    /** the originating key of each global flag, parallel to `link_flags`. */
     link_lib_name: []str
+    /** the declared linkage mode of each global flag, parallel to `link_flags` (0.3.1). */
+    link_mode: []str
+    /** the section key (bare OS or os-arch) of each deferred flag. */
     os_lib_os: []str
+    /** the deferred flags so far, parallel to `os_lib_os`. */
     os_lib_flag: []str
+    /** the originating key of each deferred flag, parallel to `os_lib_os`. */
     os_lib_name: []str
+    /** the declared linkage mode of each deferred flag, parallel to `os_lib_os` (0.3.1). */
+    os_lib_mode: []str
 }
 
 /**
- * parse_extern_libs_entry — fold one `[extern.libs]`/`[extern.libs.<os>]` `key = [ <spec…> ]`
+ * parse_extern_libs_entry — fold one `[extern.libs]`/`[extern.libs.<key>]` `key = [ <spec…> ]`
  * line into `accum`. An empty array resolves the KEY itself to one flag (`-l<key>`); a
- * non-empty array resolves every element via mf_extern_flag (bare → `-l`, path/`*.a` → file,
- * `-flag` → verbatim). Every resolved flag is pushed alongside `key` (C7.20 — the same name an
- * `extern fn … from "<key>"` binds to, so a later reachability pass can filter a whole key's
- * flags together even when one key fanned out to several, e.g. a `-framework Name` pair). A
- * global `[extern.libs]` entry (`is_os = false`) links on every OS; a `[extern.libs.<os>]`
- * entry is DEFERRED with its `os` and selected at link time by target_os (C7.1f) — so parsing
- * stays host-independent (the VM never calls the host `os()`).
+ * non-empty array resolves every element via `mf_extern_spec` (bare → `-l`, path/`*.a` → file,
+ * `-flag` → verbatim), each carrying its declared linkage mode. Every resolved flag is pushed
+ * alongside `key` (C7.20 — the same name an `extern fn … from "<key>"` binds to, so a later
+ * reachability pass can filter a whole key's flags together even when one key fanned out to
+ * several, e.g. a `-framework Name` pair). A global `[extern.libs]` entry (`is_os = false`) links
+ * on every target; a `[extern.libs.<key>]` entry is DEFERRED with its section key and selected at
+ * link time by `os_lib_key_matches` (C7.1f + the §4.2 os-arch fill) — so parsing stays
+ * host-independent.
+ *
+ * @param accum  the accumulators so far
+ * @param key    the manifest key being folded (the `from "<key>"` handle)
+ * @param elems  the declared array elements ([] → the key resolves itself)
+ * @param is_os  true for a `[extern.libs.<key>]` section (deferred), false for the global one
+ * @param os     the section key of a deferred entry (a bare OS or a full os-arch name)
+ * @return       the updated accumulators
  */
 fn parse_extern_libs_entry(accum: ExternLibsAccum, key: str, elems: []str, is_os: bool, os: str) -> ExternLibsAccum {
-    if elems.len == 0 { return push_extern_lib_flag(accum, key, mf_extern_flag(key), is_os, os) }
+    if elems.len == 0 { return push_extern_lib_spec(accum, key, mf_extern_spec(key), is_os, os) }
     mut acc = accum
     mut ai = 0
     loop {
         if ai >= elems.len { break }
-        acc = push_extern_lib_flag(acc, key, mf_extern_flag(elems[ai]), is_os, os)
+        acc = push_extern_lib_spec(acc, key, mf_extern_spec(elems[ai]), is_os, os)
         ai = ai + 1
     }
     acc
 }
 
 /**
- * push_extern_lib_flag — append one resolved link flag (+ its originating key) to `accum`,
- * routing to the global lists or the deferred per-OS ones per `is_os`.
+ * push_extern_lib_spec — append one resolved spec (flag + mode, with its originating key) to
+ * `accum`, routing to the global columns or the deferred per-section ones per `is_os`.
+ *
+ * @param accum  the accumulators so far
+ * @param key    the originating manifest key
+ * @param spec   the resolved flag + declared linkage mode
+ * @param is_os  true to route into the deferred per-section columns
+ * @param os     the section key of a deferred entry (ignored when `is_os` is false)
+ * @return       the updated accumulators
  */
-fn push_extern_lib_flag(accum: ExternLibsAccum, key: str, flag: str, is_os: bool, os: str) -> ExternLibsAccum {
+fn push_extern_lib_spec(accum: ExternLibsAccum, key: str, spec: ExternLibSpec, is_os: bool, os: str) -> ExternLibsAccum {
     if is_os {
         return ExternLibsAccum {
-            link_flags = accum.link_flags; link_lib_name = accum.link_lib_name
+            link_flags = accum.link_flags; link_lib_name = accum.link_lib_name; link_mode = accum.link_mode
             os_lib_os = teko::list::push(accum.os_lib_os, os)
-            os_lib_flag = teko::list::push(accum.os_lib_flag, flag)
+            os_lib_flag = teko::list::push(accum.os_lib_flag, spec.flag)
             os_lib_name = teko::list::push(accum.os_lib_name, key)
+            os_lib_mode = teko::list::push(accum.os_lib_mode, spec.mode)
         }
     }
     ExternLibsAccum {
-        link_flags = teko::list::push(accum.link_flags, flag)
+        link_flags = teko::list::push(accum.link_flags, spec.flag)
         link_lib_name = teko::list::push(accum.link_lib_name, key)
+        link_mode = teko::list::push(accum.link_mode, spec.mode)
         os_lib_os = accum.os_lib_os; os_lib_flag = accum.os_lib_flag; os_lib_name = accum.os_lib_name
+        os_lib_mode = accum.os_lib_mode
     }
 }
 
@@ -324,9 +473,11 @@ fn parse_manifest(src: str) -> Manifest | error {
     mut cov_branches: u64 = 80
     mut link_flags: []str = teko::list::empty()   // [extern.libs] resolved cc link flags (C7.1e)
     mut link_lib_name: []str = teko::list::empty()
+    mut link_mode: []str = teko::list::empty()
     mut os_lib_os: []str = teko::list::empty()   // [extern.libs.<os>] — deferred per-OS flags, keyed by OS (C7.1f)
     mut os_lib_flag: []str = teko::list::empty()   // [extern.libs.<os>] — the resolved flag (parallel to os_lib_os)
     mut os_lib_name: []str = teko::list::empty()
+    mut os_lib_mode: []str = teko::list::empty()
     mut cc = ""   // [extern] scalars (C7.1f) — cross/driver knobs
     mut target = ""
     mut sysroot = ""
@@ -438,13 +589,15 @@ fn parse_manifest(src: str) -> Manifest | error {
                 // `prefer` and other [extern] keys are ignored for now (static/shared mode deferred).
             } else if sec == "extern.libs" || sec == "extern.libs.os" {
                 let arr = match mf_read_array(line, v) { MfArray as a => a; error as e => return e }
-                let accum = ExternLibsAccum { link_flags = link_flags; link_lib_name = link_lib_name; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name }
+                let accum = ExternLibsAccum { link_flags = link_flags; link_lib_name = link_lib_name; link_mode = link_mode; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name; os_lib_mode = os_lib_mode }
                 let updated = parse_extern_libs_entry(accum, key, arr.items, sec == "extern.libs.os", sec_os)
                 link_flags = updated.link_flags
                 link_lib_name = updated.link_lib_name
+                link_mode = updated.link_mode
                 os_lib_os = updated.os_lib_os
                 os_lib_flag = updated.os_lib_flag
                 os_lib_name = updated.os_lib_name
+                os_lib_mode = updated.os_lib_mode
             }
             // "other" → keys ignored (M.5)
         }
@@ -453,7 +606,7 @@ fn parse_manifest(src: str) -> Manifest | error {
     if !have_name { return error { message = "manifest missing required field 'name'" } }
     if !have_source { return error { message = "manifest missing required field 'source'" } }
 
-    Manifest { name = name; artifact = artifact; abi = abi; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = link_flags; link_lib_name = link_lib_name; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding; test_regression_files = test_regression_files; test_gate = test_gate; test_default_targets = test_default_targets; backend = Backend::C }
+    Manifest { name = name; artifact = artifact; abi = abi; source = source; deps = deps; aliases = aliases; version = version; suffix = suffix; description = description; platforms = platforms; cov_functions = cov_functions; cov_lines = cov_lines; cov_branches = cov_branches; link_flags = link_flags; link_lib_name = link_lib_name; link_mode = link_mode; os_lib_os = os_lib_os; os_lib_flag = os_lib_flag; os_lib_name = os_lib_name; os_lib_mode = os_lib_mode; cc = cc; target = target; sysroot = sysroot; freestanding = freestanding; test_regression_files = test_regression_files; test_gate = test_gate; test_default_targets = test_default_targets; backend = Backend::C }
 }
 
 /**
@@ -468,5 +621,5 @@ fn parse_manifest(src: str) -> Manifest | error {
  * @return   a new `Manifest` identical to `m` except for `backend = b`
  */
 fn with_backend(m: Manifest, b: Backend) -> Manifest {
-    Manifest { name = m.name; artifact = m.artifact; abi = m.abi; source = m.source; deps = m.deps; aliases = m.aliases; version = m.version; suffix = m.suffix; description = m.description; platforms = m.platforms; cov_functions = m.cov_functions; cov_lines = m.cov_lines; cov_branches = m.cov_branches; link_flags = m.link_flags; link_lib_name = m.link_lib_name; os_lib_os = m.os_lib_os; os_lib_flag = m.os_lib_flag; os_lib_name = m.os_lib_name; cc = m.cc; target = m.target; sysroot = m.sysroot; freestanding = m.freestanding; test_regression_files = m.test_regression_files; test_gate = m.test_gate; test_default_targets = m.test_default_targets; backend = b }
+    Manifest { name = m.name; artifact = m.artifact; abi = m.abi; source = m.source; deps = m.deps; aliases = m.aliases; version = m.version; suffix = m.suffix; description = m.description; platforms = m.platforms; cov_functions = m.cov_functions; cov_lines = m.cov_lines; cov_branches = m.cov_branches; link_flags = m.link_flags; link_lib_name = m.link_lib_name; link_mode = m.link_mode; os_lib_os = m.os_lib_os; os_lib_flag = m.os_lib_flag; os_lib_name = m.os_lib_name; os_lib_mode = m.os_lib_mode; cc = m.cc; target = m.target; sysroot = m.sysroot; freestanding = m.freestanding; test_regression_files = m.test_regression_files; test_gate = m.test_gate; test_default_targets = m.test_default_targets; backend = b }
 }

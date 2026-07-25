@@ -13424,6 +13424,37 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
     Then exit = 42
     Then object well-formed
 
+  # (0.3.1 C5) The CROSS-EMIT rows: TEKO_TARGET names a target this host may be able to BUILD but
+  # cannot EXECUTE. R3 says emit normally; C5 says report "emitted, not executed" and skip the run
+  # instead of failing on an exec of a foreign-format binary. The RUN is honest-skipped by
+  # cross_note_for_name (the same classification the build's own report uses) while `Then object
+  # well-formed` still asserts the emitted object IS the requested format — which is the whole point
+  # of a cross build. On a host with no cross toolchain the row skips earlier, at
+  # target_toolchain_skip_reason.
+  Scenario: own_cross_x86_64_windows_emits_coff_and_skips_the_run (0.3.1 C5 — emitted, not executed)
+    Given backend = "own"
+    Given target = "x86_64-windows"
+    Given source inline = """
+    exit(42)
+    """
+    When built and run
+    Then exit = 42
+    Then object well-formed
+
+  # (0.3.1 C5) The host os-arch spelled EXPLICITLY: the reproduced-good path of the motivating bug
+  # (TEKO_TARGET=x86_64-linux made the whole vertical work, exit 42). On an x86_64 linux host this
+  # RUNS for real; on any other host it is a cross target whose link step would reach the host `cc`,
+  # so host_cc_cannot_link_cross_reason skips the row honestly instead of dying in `ld`.
+  Scenario: own_explicit_host_os_arch_runs (0.3.1 C5 — the reproduced-good path)
+    Given backend = "own"
+    Given target = "x86_64-linux"
+    Given source inline = """
+    exit(42)
+    """
+    When built and run
+    Then exit = 42
+    Then object well-formed
+
 Feature: F6 rt_behavior — the runtime-operand law over fold-opaque argv operands (folded from the retired rt_behavior.tkr, dir removido)
 
   # One program, compiled ONCE; every row RUNS the built binary with argv operands that
@@ -13635,3 +13666,35 @@ Feature: F7 host_cli_io — observable host surface (folded from the retired reg
     Given target = "wasm32-wasi"
     When built and run
     Then exit = 7
+
+Feature: F8 target — the TEKO_TARGET boundary (compile-fail; R2 honest error, teko-target-crosslink-0.3.1.md §0)
+
+  # An unrecognised TEKO_TARGET must be a COMPILE error naming the value AND listing the supported
+  # set — never a silent mis-lower to some other object format (the pre-0.3.1 arm64/Mach-O fallback,
+  # which is how a linux x86_64 host came to emit a Mach-O arm64 object).
+  Scenario: an unsupported TEKO_TARGET is an honest compile error listing the supported set
+    Given backend = "own"
+    Given target = "bogus-arch"
+    Given source inline = """
+    exit(42)
+    """
+    When compilation fails
+    Then diagnostic = "unsupported TEKO_TARGET"
+
+  Scenario: the unsupported-target diagnostic names the offending value
+    Given backend = "own"
+    Given target = "x86_64-solaris"
+    Given source inline = """
+    exit(42)
+    """
+    When compilation fails
+    Then diagnostic = "x86_64-solaris"
+
+  Scenario: the unsupported-target diagnostic lists a canonical supported name
+    Given backend = "own"
+    Given target = "not-a-target"
+    Given source inline = """
+    exit(42)
+    """
+    When compilation fails
+    Then diagnostic = "supported targets: x86_64-linux"

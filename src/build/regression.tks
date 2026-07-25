@@ -498,12 +498,38 @@ fn cross_cc_for_target(target: str) -> str {
 }
 
 /**
+ * host_cc_cannot_link_cross_reason — "" unless `target` is a CROSS target whose link step would run
+ * through the build host's own `cc` with no cross toolchain pinned, in which case it names why the
+ * row cannot be built here. `default_cc_for_target` returns the host `cc` for every target that has
+ * no dedicated cross driver (`x86_64-linux`, `arm64-macos`), and the host `cc` cannot link an object
+ * of a foreign format — so on an arm64-macos host a `Given target = "x86_64-linux"` row would die in
+ * `ld` with a cross-format error indistinguishable from a real regression. Reuses the build's OWN
+ * cross classification (`cross_note_for_name`) and its `TEKO_CC` seam (`teko_cc_env` — a pinned
+ * cross driver lifts the skip), so the runner never invents a second idea of what "cross" means.
+ * Wasm targets are exempt: they have no link step at all (`target_links_with_cc`).
+ *
+ * @param target  the scenario's declared target ("" / "host" → never cross)
+ * @return        "" when this host can link `target`, else the honest reason it cannot
+ * @since 0.3.1
+ */
+fn host_cc_cannot_link_cross_reason(target: str) -> str {
+    if !cross_note_for_name(target).is_cross { return "" }
+    let t = match target_from_name(target) { NativeTarget as x => x; error => return "" }
+    if !target_links_with_cc(t) { return "" }
+    if default_cc_for_target(t) != HOST_CC_NAME { return "" }
+    if teko_cc_env().len > 0 { return "" }
+    $"the host cc cannot link a {target_name(t)} object and no cross toolchain is pinned (TEKO_CC)"
+}
+
+/**
  * target_toolchain_skip_reason — "" when every tool a `Given target` scenario needs is on this
  * host's PATH, else the human-readable reason the scenario cannot honestly run here. Probed BEFORE
  * the artifact is built, because a missing CROSS-LINKER surfaces as a `cc` failure the runner cannot
  * distinguish from a real compiler regression — the run-wrapper check alone (`resolve_run_wrapper`,
  * consulted only after a successful build) would therefore turn "this host has no riscv toolchain"
- * into a red gate on every host that legitimately has none.
+ * into a red gate on every host that legitimately has none. The same argument covers a cross target
+ * with NO dedicated cross driver (`host_cc_cannot_link_cross_reason`), which would otherwise reach
+ * the host `ld` and fail on the object format.
  *
  * @param target  the scenario's declared target ("" / "host" → always runnable)
  * @return        "" when the target is runnable here, else the missing-tool reason
@@ -514,6 +540,8 @@ fn target_toolchain_skip_reason(target: str) -> str {
     if cc.len > 0 && !tool_on_path(cc) {
         return $"{cc} (the cross-linker for target {target}) not found on PATH"
     }
+    let host_cc = host_cc_cannot_link_cross_reason(target)
+    if host_cc.len > 0 { return host_cc }
     match resolve_run_wrapper(target) { []str => ""; error as e => e.message }
 }
 
@@ -1472,10 +1500,38 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
 }
 
 /**
+ * tkr_row_run_verdict — the RUN half of one row's verdict: execute the built binary under the
+ * scenario's `env`/`stdin`/`args` (behind `wrap`, the run-wrapper prefix) and check it via
+ * `check_run` — UNLESS the row's target is a CROSS target this host cannot exec, in which case the
+ * run is honestly SKIPPED carrying the build's own emitted-not-run note (`cross_note_for_name`,
+ * project.tks — the single source of truth C5 gave the build; the runner does not keep a second
+ * one). A wrapper-bearing target (wasm under `wasmtime`, riscv under `qemu`) is NOT skipped: the
+ * emulator IS how this host executes it.
+ *
+ * @param t       the lowered scenario
+ * @param binp    the built binary path
+ * @param wrap    the resolved run-wrapper prefix ([] for a directly-executable target)
+ * @param prefix  the scratch-file prefix for this run
+ * @return        the run verdict, or the honest emitted-not-run skip
+ * @since 0.3.1
+ */
+fn tkr_row_run_verdict(t: Tkr, binp: str, wrap: []str, prefix: str) -> RegrOutcome {
+    if wrap.len == 0 {
+        let cross = cross_note_for_name(t.target)
+        if cross.is_cross { return regr_skip(cross.note) }
+    }
+    let argv = wrap_argv_with_wrapper(wrap, argv_with_args(binp, t.args))
+    check_run(t, HOST_TARGET, run_captured_env(argv, t.stdin, t.env, prefix))
+}
+
+/**
  * tkr_run_one_row — run and check ONE lowered scenario against its already-resolved binary `binp`:
- * resolve the `Given target` run-wrapper (honest-skip/fail-closed when its tool is absent), run
- * under the scenario's `env`/`stdin`/`args`, check via `check_run`, then apply any declared
- * leaf-tool checks (`Then object well-formed` / `Then module valid`) on top.
+ * resolve the `Given target` run-wrapper (honest-skip/fail-closed when its tool is absent), take the
+ * run verdict (`tkr_row_run_verdict` — which honest-skips the run itself for a cross target), then
+ * apply any declared leaf-tool checks (`Then object well-formed` / `Then module valid`) on top. The
+ * leaf checks run even when the RUN was skipped: a cross row's whole point is that its EMITTED
+ * object is well-formed for the target, which is checkable on this host even though the binary is not
+ * runnable here.
  *
  * @param t       the lowered scenario
  * @param binp    the built binary path
@@ -1486,9 +1542,7 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
  */
 fn tkr_run_one_row(t: Tkr, binp: str, prefix: str) -> RegrOutcome {
     let wrap = match resolve_run_wrapper(t.target) { []str as w => w; error as e => return tool_skip_or_fail(e.message) }
-    let argv = wrap_argv_with_wrapper(wrap, argv_with_args(binp, t.args))
-    let run = run_captured_env(argv, t.stdin, t.env, prefix)
-    let oc = check_run(t, HOST_TARGET, run)
+    let oc = tkr_row_run_verdict(t, binp, wrap, prefix)
     if !oc.ok { return oc }
     mut skips: u64 = 0
     if t.check_wellformed {
