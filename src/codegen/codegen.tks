@@ -4324,6 +4324,37 @@ fn cg_var_reaches(prog: checker::TProgram, v: checker::Type, vkey: str, depth: i
     false
 }
 
+/**
+ * cg_var_reaches_exact — like `cg_var_reaches`, but WITHOUT the SUB→BASE widen case
+ * (`cg_member_reached_via_subclass`): does variant `v` (transitively, depth bound 16) contain a
+ * member whose key equals `vkey` EXACTLY? Used by callers whose wrap implementation has no widen
+ * pass of its own (e.g. `emit_variant_wrap_str`, called from `cg_wrap_elem_str`), so the
+ * reachability guard never promises an upcast the callee cannot actually emit.
+ *
+ * @param prog   the typed program
+ * @param v      the variant type being searched
+ * @param vkey   the member key being searched for (a case/class name)
+ * @param depth  the remaining transitive-recursion budget (bounded, never unbounded)
+ * @return       true when `v` reaches `vkey` through an exact key match, directly or nested
+ * @since 0.3.1
+ */
+fn cg_var_reaches_exact(prog: checker::TProgram, v: checker::Type, vkey: str, depth: i64) -> bool {
+    if depth <= 0 { return false }
+    let n = cg_var_nmem(prog, v)
+    mut i = 0
+    loop {
+        if i >= n { break }
+        let k = match cg_var_mkey(prog, v, i) { str as s => s; error => "" }
+        if k == vkey { return true }
+        let mt = cg_var_mtype(prog, v, i)
+        if cg_is_variant_type(prog, mt) {
+            if cg_var_reaches_exact(prog, mt, vkey, depth - 1) { return true }
+        }
+        i++
+    }
+    false
+}
+
 // cg_narrow_variant_widens_into — is `from` a VARIANT (inline `tk_u_…` OR a named variant decl)
 // EVERY member of which is reachable in the WIDER variant slot `to`? This is the codegen-side
 // widening test for an if/match arm JOIN whose inferred type is a NARROW member-pair union while
@@ -4426,24 +4457,115 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Ty
     }
     let vkey = match cg_member_key_str(value.type) { str as s => s; error => "" }
     let n = cg_var_nmem(prog, expected)
+    match emit_variant_wrap_exact_pass(buf, prog, ret_type, expected, value, vkey, n) {
+        []byte as o => return o
+        error as e => return e
+        null => { }
+    }
+    match emit_variant_wrap_widen_pass(buf, prog, ret_type, expected, value, vkey, n, escaping, regions, fn_body, dctx) {
+        []byte as o => return o
+        error as e => return e
+        null => { }
+    }
+    match emit_variant_wrap_transitive_pass(buf, prog, ret_type, expected, value, vkey, n, escaping, regions, fn_body, dctx) {
+        []byte as o => return o
+        error as e => return e
+        null => { }
+    }
+    error { message = "codegen: emit_variant_wrap on an unreachable case (internal — caller must guard with cg_var_reaches)" }
+}
+
+/**
+ * emit_variant_wrap_exact_pass — the DIRECT-EXACT pass of `emit_variant_wrap` (0.3.1 C3): scans
+ * every member of `expected` for one whose key equals `vkey` exactly, and wraps `value` into it
+ * via `emit_expr_ret`. This pass runs to completion BEFORE the SUB→BASE widen pass ever looks at
+ * a member, so an exact key always wins over a widenable base member, whichever the union
+ * declares first — the ordering bug this pass's isolation fixes.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type (threaded for a diverging value inside `value`)
+ * @param expected  the target variant type `value` wraps into
+ * @param value     the case value being wrapped
+ * @param vkey      `value`'s own member key
+ * @param n         `expected`'s member count
+ * @return          the wrapped buffer, or `null` when no member's key equals `vkey` exactly
+ * @since 0.3.1
+ */
+fn emit_variant_wrap_exact_pass(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64) -> []byte | null | error {
     mut i = 0
     loop {
         if i >= n { break }
         let mk = match cg_var_mkey(prog, expected, i) { str as s => s; error => "" }
-        let mt = cg_var_mtype(prog, expected, i)
         if mk == vkey {
             mut out = match cg_wrap_open(buf, expected, vkey) { []byte as o => o; error as err => return err }
             out = match emit_expr_ret(out, prog, ret_type, value) { []byte as o => o; error as err => return err }
             return cb(out, " }")
         }
-        if cg_member_reached_via_subclass(prog, mt, vkey) {
-            mut sout = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
-            sout = match emit_as_r(sout, prog, ret_type, mt, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            return cb(sout, " }")
-        }
         i++
     }
-    // pass 2 — TRANSITIVE: route through a member variant that reaches vkey.
+    null
+}
+
+/**
+ * emit_variant_wrap_widen_pass — the SUB→BASE widen pass of `emit_variant_wrap` (0.3.1
+ * "base/widen"): runs only AFTER `emit_variant_wrap_exact_pass` finds nothing, scanning for a
+ * member that is a polymorphic BASE class `vkey` strictly subclasses
+ * (`cg_member_reached_via_subclass`), and wrapping `value` into it via `emit_as_r` (not a bare
+ * `emit_expr_ret`) so the SUB→BASE upcast fires INSIDE the `.as.<member>` slot, matching the
+ * member's actual C representation (`tk_base_<Base>`, not the raw subclass struct).
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type (threaded for a diverging value inside `value`)
+ * @param expected  the target variant type `value` wraps into
+ * @param value     the case value being wrapped
+ * @param vkey      `value`'s own member key
+ * @param n         `expected`'s member count
+ * @param escaping  the escaping-binding set (region model)
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body
+ * @param dctx      the enclosing defer context
+ * @return          the wrapped buffer, or `null` when no member is a base `vkey` subclasses
+ * @since 0.3.1
+ */
+fn emit_variant_wrap_widen_pass(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | null | error {
+    mut w = 0
+    loop {
+        if w >= n { break }
+        let wmt = cg_var_mtype(prog, expected, w)
+        if cg_member_reached_via_subclass(prog, wmt, vkey) {
+            let wmk = match cg_var_mkey(prog, expected, w) { str as s => s; error => "" }
+            mut sout = match cg_wrap_open(buf, expected, wmk) { []byte as o => o; error as err => return err }
+            sout = match emit_as_r(sout, prog, ret_type, wmt, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            return cb(sout, " }")
+        }
+        w++
+    }
+    null
+}
+
+/**
+ * emit_variant_wrap_transitive_pass — the TRANSITIVE pass of `emit_variant_wrap`: scans for a
+ * member that is itself a variant transitively reaching `vkey` (`cg_var_reaches`), and recurses
+ * `emit_variant_wrap` into that member (Named → `(Type){…}` → `(Type|error){…}`). Runs only
+ * after the exact and widen passes both find nothing.
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param ret_type  the enclosing return type (threaded for a diverging value inside `value`)
+ * @param expected  the target variant type `value` wraps into
+ * @param value     the case value being wrapped
+ * @param vkey      `value`'s own member key
+ * @param n         `expected`'s member count
+ * @param escaping  the escaping-binding set (region model)
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function body
+ * @param dctx      the enclosing defer context
+ * @return          the wrapped buffer, or `null` when no member transitively reaches `vkey`
+ * @since 0.3.1
+ */
+fn emit_variant_wrap_transitive_pass(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, vkey: str, n: i64, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | null | error {
     mut j = 0
     loop {
         if j >= n { break }
@@ -4452,14 +4574,13 @@ fn emit_variant_wrap(buf: []byte, prog: checker::TProgram, ret_type: checker::Ty
             if cg_var_reaches(prog, mt, vkey, 16) {
                 let mk = match cg_var_mkey(prog, expected, j) { str as s => s; error => "" }
                 mut out = match cg_wrap_open(buf, expected, mk) { []byte as o => o; error as err => return err }
-                out = match emit_variant_wrap(out, prog, ret_type, mt, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }   // recurse into the member variant
+                out = match emit_variant_wrap(out, prog, ret_type, mt, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
                 return cb(out, " }")
             }
         }
         j++
     }
-    // unreachable given the caller's cg_var_reaches guard.
-    error { message = "codegen: emit_variant_wrap on an unreachable case (internal — caller must guard with cg_var_reaches)" }
+    null
 }
 
 // emit_variant_wrap_str — like emit_variant_wrap but wraps a C-EXPRESSION STRING `cexpr` of
@@ -4570,67 +4691,104 @@ fn cg_emit_ffi_ures(buf: []byte, prog: checker::TProgram, result_ty: checker::Ty
     cg_emit_union_present_str(o, prog, result_ty, checker::Error { }, errcexpr)
 }
 
-// cg_wrap_elem_str — wrap a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
-// into the slice element target `T` (= `expected`), for the emit_as slice-covariance rebuild. Uniform
-// with emit_as's value-position wrapping:
-//   * T is OPTIONAL  → present-wrap: (tk_opt_<inner>){ .present = true, .value = <recurse into inner> }
-//   * T is a VARIANT the element's key reaches → variant-wrap (emit_variant_wrap_str)
-//   * otherwise (same type) → emit `cexpr` bare.
-// (C: `cg_wrap_elem_str`.)
+/**
+ * cg_wrap_elem_str — wraps a C-EXPRESSION STRING `cexpr` (a `[]U` element of static type `vtype`)
+ * into the slice element target `T` (= `expected`), for the `emit_as` slice-covariance rebuild.
+ * Uniform with `emit_as`'s value-position wrapping: `T` OPTIONAL present-wraps
+ * (`(tk_opt_<inner>){ .present = true, .value = <recurse into inner> }`); `T` a CONTRACT
+ * (interface/trait) the element conforms to (W10b.D3) upcasts into the fat pointer
+ * (`.data`/`.vtable`), exactly like `emit_as`'s value-position upcast; `T` a VARIANT the
+ * element's key reaches EXACTLY variant-wraps via `emit_variant_wrap_str` (guarded with
+ * `cg_var_reaches_exact`, not the widened `cg_var_reaches`, since `emit_variant_wrap_str` has no
+ * SUB→BASE widen pass of its own); otherwise `cexpr` is emitted bare. (C: `cg_wrap_elem_str`.)
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program
+ * @param expected  the slice element target type `T`
+ * @param vtype     the source element's static type `U`
+ * @param cexpr     the C-expression string for the element value
+ * @return          `buf` with the wrapped element appended
+ */
 fn cg_wrap_elem_str(buf: []byte, prog: checker::TProgram, expected: checker::Type, vtype: checker::Type, cexpr: str) -> []byte | error {
     match expected {
-        checker::Optional as opt => {
-            match opt.inner {
-                checker::Void => return cb(buf, cexpr)   // sentinel inner — bare (should not occur)
-                _ => {
-                    mut o = cb(buf, "(")
-                    o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
-                    o = cb(o, "){ .present = true, .value = ")
-                    o = match cg_wrap_elem_str(o, prog, opt.inner, vtype, cexpr) { []byte as r => r; error as err => return err }   // the inner may need its own wrap
-                    return cb(o, " }")
-                }
-            }
-        }
+        checker::Optional as opt => return cg_wrap_elem_str_optional(buf, prog, opt, vtype, cexpr)
         _ => { }
     }
-    // (W10b.D3) T is a CONTRACT (interface) and the element a conforming CLASS: wrap the element
-    // lvalue into the fat pointer, exactly like emit_as's value-position upcast — this is how a
-    // homogeneous `[]Circle` value covariant-rebuilds into a `[]Shape` slot.
     match expected {
-        checker::Named as en => {
-            if cg_is_interface_named(prog, en.name) || cg_is_trait_named(prog, en.name) {
-                match vtype {
-                    checker::Named as vn => {
-                        if cg_is_class_named(prog, vn.name) {
-                            mut o = cb(buf, "(")
-                            o = mangle_type_name(o, "", en.name)
-                            o = cb(o, "){ .data = (void *)(")
-                            o = cb(o, cexpr)
-                            o = cb(o, "), .vtable = tk_vt_")
-                            o = cb_tysym(o, vn.name)
-                            o = cb(o, "_")
-                            o = cb_tysym(o, en.name)
-                            return cb(o, " }")
-                        }
-                    }
-                    _ => { }
-                }
-            }
+        checker::Named as en => match cg_wrap_elem_str_contract(buf, prog, en, vtype, cexpr) {
+            []byte as o => return o
+            null => { }
+            error as e => return e
         }
         _ => { }
     }
-    // not optional → variant-wrap when the element's key reaches T, else emit it bare (the same
-    // reachability guard the C caller applies before emit_variant_wrap_str).
     let ukey = match cg_member_key_str(vtype) { str as s => s; error => "" }
     let wrappable = match expected {
-        checker::Variant => ukey != "" && cg_var_reaches(prog, expected, ukey, 16)
-        checker::Named => ukey != "" && cg_var_reaches(prog, expected, ukey, 16)
+        checker::Variant => ukey != "" && cg_var_reaches_exact(prog, expected, ukey, 16)
+        checker::Named => ukey != "" && cg_var_reaches_exact(prog, expected, ukey, 16)
         _ => false
     }
     if wrappable {
-        emit_variant_wrap_str(buf, prog, expected, vtype, cexpr)
-    } else {
-        cb(buf, cexpr)   // not wrapped — bare element
+        return emit_variant_wrap_str(buf, prog, expected, vtype, cexpr)
+    }
+    cb(buf, cexpr)
+}
+
+/**
+ * cg_wrap_elem_str_optional — the OPTIONAL branch of `cg_wrap_elem_str`: present-wraps `cexpr`
+ * into `opt`'s `tk_opt_<inner>` struct, recursing into `opt.inner` for the inner element (which
+ * may itself need its own wrap). A `Void` inner is a sentinel that should not occur, so it is
+ * emitted bare.
+ *
+ * @param buf    the output byte buffer
+ * @param prog   the typed program
+ * @param opt    the target optional type
+ * @param vtype  the source element's static type
+ * @param cexpr  the C-expression string for the element value
+ * @return       `buf` with the present-wrapped element appended
+ */
+fn cg_wrap_elem_str_optional(buf: []byte, prog: checker::TProgram, opt: checker::Optional, vtype: checker::Type, cexpr: str) -> []byte | error {
+    match opt.inner {
+        checker::Void => return cb(buf, cexpr)
+        _ => { }
+    }
+    mut o = cb(buf, "(")
+    o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
+    o = cb(o, "){ .present = true, .value = ")
+    o = match cg_wrap_elem_str(o, prog, opt.inner, vtype, cexpr) { []byte as r => r; error as err => return err }
+    cb(o, " }")
+}
+
+/**
+ * cg_wrap_elem_str_contract — the CONTRACT branch of `cg_wrap_elem_str` (W10b.D3): when `en` is
+ * an interface/trait and `vtype` is a conforming class, upcasts `cexpr` into `en`'s fat pointer
+ * (`.data`/`.vtable`) — how a homogeneous `[]Circle` value covariant-rebuilds into a `[]Shape`
+ * slot. Returns `null` when `en`/`vtype` do not form a contract-upcast pair, so the caller falls
+ * through to the variant/bare cases.
+ *
+ * @param buf    the output byte buffer
+ * @param prog   the typed program
+ * @param en     the target named type (tested for interface/trait)
+ * @param vtype  the source element's static type
+ * @param cexpr  the C-expression string for the element value
+ * @return       `buf` with the upcast fat pointer appended, or `null` when not a contract upcast
+ */
+fn cg_wrap_elem_str_contract(buf: []byte, prog: checker::TProgram, en: checker::Named, vtype: checker::Type, cexpr: str) -> []byte | null | error {
+    if !(cg_is_interface_named(prog, en.name) || cg_is_trait_named(prog, en.name)) { return null }
+    match vtype {
+        checker::Named as vn => {
+            if !cg_is_class_named(prog, vn.name) { return null }
+            mut o = cb(buf, "(")
+            o = mangle_type_name(o, "", en.name)
+            o = cb(o, "){ .data = (void *)(")
+            o = cb(o, cexpr)
+            o = cb(o, "), .vtable = tk_vt_")
+            o = cb_tysym(o, vn.name)
+            o = cb(o, "_")
+            o = cb_tysym(o, en.name)
+            cb(o, " }")
+        }
+        _ => null
     }
 }
 
@@ -5140,7 +5298,7 @@ fn emit_as_r(buf: []byte, prog: checker::TProgram, ret_type: checker::Type, expe
             checker::Type as nx => {
                 match value.kind {
                     checker::TNullLit => return cg_emit_niche_null(buf, prog, nx)
-                    _ => return emit_as_r(buf, prog, ret_type, nx, value, escaping, regions, fn_body, dctx)
+                    _ => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)
                 }
             }
             null => { }
