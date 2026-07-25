@@ -150,6 +150,71 @@ fn guard_no_project_build_at_root_refuses_a_bare_root_scenario() {
     match guard_no_project_build_at_root("examples/regressions/rt_behavior", bare) { error => teko::assert::is_true(false); null => teko::assert::is_true(true) }
 }
 
+#test
+/**
+ * guard_no_project_build_at_root_also_refuses_a_bare_root_compile_fail_scenario — the guard MUST
+ * refuse a root-scoped `CompileFail`-kind scenario with no inline/explicit source exactly like
+ * any other kind (0.3.1 C5): a bare `When compilation fails` at `regr_dir == "."` would otherwise
+ * fall through to `compile_regressive(".")`, rebuilding the compiler itself. Before 0.3.1 C5 the
+ * guard special-cased `t.kind != TkrKind::CompileFail`, so this scenario shape was NEVER refused —
+ * this test pins the fix.
+ *
+ * @return void
+ */
+fn guard_no_project_build_at_root_also_refuses_a_bare_root_compile_fail_scenario() {
+    let bare_compile_fail = tkr_lower_compile_fail_new_for_test()
+    match guard_no_project_build_at_root(".", bare_compile_fail) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("examples/regressions/rt_behavior", bare_compile_fail) { error => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+/**
+ * regr_dir_has_single_tkp_requires_exactly_one_manifest — false for a real (non-project) source
+ * directory with no `.tkp` at all, true for a genuine single-project directory (0.3.1 C4).
+ *
+ * @return void
+ */
+fn regr_dir_has_single_tkp_requires_exactly_one_manifest() {
+    teko::assert::is_true(!regr_dir_has_single_tkp("src/build"))
+    teko::assert::is_true(regr_dir_has_single_tkp("examples/regressions/rt_behavior"))
+}
+
+#test
+/**
+ * tkr_compile_fail_artifact_refuses_a_non_project_dir_with_no_source — REPRO 1 of 0.3.1 C4: a
+ * compile-fail scenario with no `Given source`/`Given source inline`, whose `regr_dir` is NOT a
+ * single-project directory (no `.tkp`), must fail-closed with an HONEST error — never fall
+ * through to `compile_regressive` and let the runner's OWN "no single .tkp manifest" infra
+ * failure be consumed by `check_compile_fail` as if it were the compiler rejecting the construct
+ * (the false-green this test pins shut).
+ *
+ * @return void
+ */
+fn tkr_compile_fail_artifact_refuses_a_non_project_dir_with_no_source() {
+    let t = tkr_lower_compile_fail_new_for_test()
+    match tkr_compile_fail_artifact("", "src/build", t, "bin/.regr-work/c4_test_probe") {
+        CapResult => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+#test
+/**
+ * tkr_compile_fail_artifact_refuses_a_compile_fail_scenario_with_no_diagnostic — the multi-file
+ * fallback also fail-closes when the scenario declares no `Then diagnostic`, even over a genuine
+ * single-project directory: with no diagnostic to assert against a real compiler message, a
+ * bare non-zero exit proves nothing (0.3.1 C4 fix (2)).
+ *
+ * @return void
+ */
+fn tkr_compile_fail_artifact_refuses_a_compile_fail_scenario_with_no_diagnostic() {
+    let t = tkr_lower_compile_fail_no_diagnostic_for_test()
+    match tkr_compile_fail_artifact("", "examples/regressions/rt_behavior", t, "bin/.regr-work/c4_test_probe2") {
+        CapResult => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
 /**
  * tkr_lower_new_for_test — a lowered `Tkr` with no inline/explicit source, for the guard test
  * above (a plain project-based scenario shape).
@@ -158,6 +223,26 @@ fn guard_no_project_build_at_root_refuses_a_bare_root_scenario() {
  */
 fn tkr_lower_new_for_test() -> Tkr {
     match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n") { Tkr as t => t; error => tkr_lower_new_for_test() }
+}
+
+/**
+ * tkr_lower_compile_fail_no_diagnostic_for_test — a lowered `Tkr` of `CompileFail` kind with no
+ * inline/explicit source AND no declared `diagnostic`, for the fail-closed test above.
+ *
+ * @return a bare `CompileFail`-kind lowered spec with an empty diagnostic
+ */
+fn tkr_lower_compile_fail_no_diagnostic_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When compilation fails\n") { Tkr as t => t; error => tkr_lower_compile_fail_no_diagnostic_for_test() }
+}
+
+/**
+ * tkr_lower_compile_fail_new_for_test — a lowered `Tkr` of `CompileFail` kind with no
+ * inline/explicit source, for the root-guard test above (the multi-file-fixture scenario shape).
+ *
+ * @return a bare `CompileFail`-kind lowered spec
+ */
+fn tkr_lower_compile_fail_new_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When compilation fails\n    Then diagnostic = \"x\"\n") { Tkr as t => t; error => tkr_lower_compile_fail_new_for_test() }
 }
 
 /**
@@ -190,4 +275,75 @@ fn declarative_scenario_has_no_when_verb() {
         []TkrFeature as fs => teko::assert::is_false(tkb_scenario_is_declarative(fs[0].scenarios[0]))
         error => teko::assert::is_true(false)
     }
+}
+
+#test
+/**
+ * snippet_brace_delta_ignores_a_brace_inside_a_string_literal — sub-finding (1) of the 0.3.1
+ * splitter fix: a literal `{` inside a string (`let brace = "{"`) must NOT open a brace-depth
+ * chunk that never closes, and a `fn helper() -> i64 { 7 }` declaration on the FOLLOWING line
+ * must classify as a decl, cleanly split from the surrounding statements — the false RED the
+ * unfixed splitter produced (the whole snippet fused into one non-decl chunk, `main.tks`
+ * rejected for declaring a function).
+ *
+ * @return void
+ */
+fn snippet_brace_delta_ignores_a_brace_inside_a_string_literal() {
+    let src = "let brace = \"{\"\nfn helper() -> i64 { 7 }\nexit(helper() + brace.len)\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "fn helper"))
+    teko::assert::is_true(!teko::str::contains(split.decls, "let brace"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "let brace"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(helper"))
+}
+
+#test
+/**
+ * snippet_brace_delta_ignores_a_closing_brace_inside_a_string_literal — sub-finding (1)'s worse
+ * half: a literal `}` inside a string (`"}"`) inside a `fn` body must NOT close the chunk early
+ * and truncate the declaration mid-body — the unfixed splitter dropped the real closing `}`
+ * entirely, corrupting `src/regr_decls.tks` into a parse error.
+ *
+ * @return void
+ */
+fn snippet_brace_delta_ignores_a_closing_brace_inside_a_string_literal() {
+    let src = "fn f() -> str {\n    \"}\"\n}\nexit(f().len)\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "fn f() -> str {"))
+    teko::assert::is_true(teko::str::contains(split.decls, "\"}\""))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(f().len)"))
+}
+
+#test
+/**
+ * snippet_chunk_is_decl_recognizes_flags_class_exp_unsafe — sub-finding (2) of the 0.3.1 splitter
+ * fix: `snippet_chunk_is_decl` used to only recognize a flat 7-way keyword chain that missed
+ * `flags`/`class`/`exp const`/`unsafe fn` entirely — each is a legal top-level declaration and
+ * must never land in `main.tks` as a (rejected) statement.
+ *
+ * @return void
+ */
+fn snippet_chunk_is_decl_recognizes_flags_class_exp_unsafe() {
+    teko::assert::is_true(snippet_chunk_is_decl("flags Cor {\n    A\n    B\n}"))
+    teko::assert::is_true(snippet_chunk_is_decl("class Box {\n    v: i64\n}"))
+    teko::assert::is_true(snippet_chunk_is_decl("exp const Q: i64 = 3"))
+    teko::assert::is_true(snippet_chunk_is_decl("unsafe fn u() -> i64 { 5 }"))
+    teko::assert::is_true(snippet_chunk_is_decl("pub unsafe fn u() -> i64 { 5 }"))
+}
+
+#test
+/**
+ * split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration — sub-finding (3) of the
+ * 0.3.1 splitter fix: a bare attribute line (`#test`) preceding a declaration must accumulate
+ * onto the SAME chunk as the declaration it decorates, not close as its own (misclassified,
+ * non-decl) one-line chunk.
+ *
+ * @return void
+ */
+fn split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration() {
+    let src = "#test\nfn probe() -> i64 { 1 }\nexit(probe())\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "#test"))
+    teko::assert::is_true(teko::str::contains(split.decls, "fn probe"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(probe())"))
 }

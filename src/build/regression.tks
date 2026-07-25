@@ -593,37 +593,136 @@ type SnippetSplit = struct {
 }
 
 /**
- * snippet_chunk_is_decl — does the top-level chunk `chunk` open with a declaration keyword
- * (`type`/`fn`/`class`/`use`/`const`, or its `pub` form)? Everything else (an expression,
- * `let`/`mut`, `if`/`loop`, …) is a virtual-main STATEMENT.
+ * snippet_chunk_head_keyword_start — the byte offset where `t` (a trimmed chunk) begins its
+ * declaration head keyword, after stripping any leading modifier tokens (`pub `, `exp `,
+ * `unsafe `, `extern `, in any combination/order — e.g. `pub unsafe fn`).
+ *
+ * @param t  the trimmed chunk text
+ * @return   the offset of the first byte past every leading modifier token
+ * @since 0.3.1
+ */
+fn snippet_chunk_head_keyword_start(t: str) -> u64 {
+    mut rest = t
+    mut off: u64 = 0
+    loop {
+        let before = rest
+        if mf_starts_with(rest, "pub ") { rest = teko::str::slice(rest, 4, rest.len); off = off + 4 }
+        if mf_starts_with(rest, "exp ") { rest = teko::str::slice(rest, 4, rest.len); off = off + 4 }
+        if mf_starts_with(rest, "unsafe ") { rest = teko::str::slice(rest, 7, rest.len); off = off + 7 }
+        if mf_starts_with(rest, "extern ") { rest = teko::str::slice(rest, 7, rest.len); off = off + 7 }
+        if rest == before { break }
+    }
+    off
+}
+
+/**
+ * snippet_chunk_skip_attr_lines — the remainder of `text` after every leading bare attribute line
+ * (`#…`, one per line — e.g. `#test`) is dropped. `split_snippet_decls_and_stmts` accumulates a
+ * leading attribute onto the declaration it decorates into ONE chunk, so the head-keyword read
+ * must skip past it to find the actual declaration line.
+ *
+ * @param text  the chunk text (one or more full lines, `\n`-joined)
+ * @return      `text` with every leading attribute line removed
+ * @since 0.3.1
+ */
+fn snippet_chunk_skip_attr_lines(text: str) -> str {
+    mut rest = text
+    loop {
+        if !mf_starts_with(tkr_trim(rest), "#") { return rest }
+        mut k: u64 = 0
+        loop {
+            if k >= rest.len { break }
+            if rest[k] == b'\n' { break }
+            k = k + 1
+        }
+        if k >= rest.len { return "" }
+        rest = teko::str::slice(rest, k + 1, rest.len)
+    }
+}
+
+/**
+ * snippet_chunk_is_decl — does the top-level chunk `chunk` (past any leading attribute lines,
+ * `snippet_chunk_skip_attr_lines`) open with a declaration keyword (`type`/`fn`/`class`/`flags`/
+ * `interface`/`use`/`const`), after any leading modifier tokens (`pub`/`exp`/`unsafe`/`extern`,
+ * `snippet_chunk_head_keyword_start`)? Everything else (an expression, `let`/`mut`, `if`/`loop`,
+ * …) is a virtual-main STATEMENT.
  *
  * @param chunk  one top-level source chunk (brace-depth-balanced)
  * @return       true when `chunk` is a declaration
  * @since 0.3.1
  */
 fn snippet_chunk_is_decl(chunk: str) -> bool {
-    let t = tkr_trim(chunk)
-    mf_starts_with(t, "type ") || mf_starts_with(t, "fn ") || mf_starts_with(t, "use ") || mf_starts_with(t, "const ") || mf_starts_with(t, "pub fn ") || mf_starts_with(t, "pub type ") || mf_starts_with(t, "pub const ")
+    let t = tkr_trim(snippet_chunk_skip_attr_lines(chunk))
+    let head = teko::str::slice(t, snippet_chunk_head_keyword_start(t), t.len)
+    mf_starts_with(head, "type ") || mf_starts_with(head, "fn ") || mf_starts_with(head, "class ") || mf_starts_with(head, "flags ") || mf_starts_with(head, "interface ") || mf_starts_with(head, "use ") || mf_starts_with(head, "const ")
 }
 
 /**
- * snippet_brace_delta — the net `{`/`}` count of `line` (each `{` is +1, each `}` is -1) — the
- * brace-depth increment `split_snippet_decls_and_stmts` accumulates per line.
+ * BraceScan — the result of scanning one line for its net brace delta OUTSIDE string/char
+ * literals and slash-star block comments (`snippet_brace_delta`): the delta itself, plus whether
+ * the line ends INSIDE an unterminated string/char literal or an unterminated block comment,
+ * each threaded into the next line's scan.
  *
- * @param line  one source line
- * @return      its net brace delta
  * @since 0.3.1
  */
-fn snippet_brace_delta(line: str) -> i64 {
+type BraceScan = struct {
+    /** the net `{`/`}` count outside any string/char literal, block comment, or `//` comment. */
+    delta: i64
+    /** true when the line ends inside an open (unterminated) string/char literal. */
+    in_str: bool
+    /** true when the line ends inside an open (unterminated) slash-star block comment. */
+    in_comment: bool
+}
+
+/**
+ * snippet_brace_delta — the net `{`/`}` count of `line` OUTSIDE any string/char literal, a
+ * slash-star block comment (including a nested Javadoc field doc), or an unquoted `//` line
+ * comment (each `{` is +1, each `}` is -1) — the brace-depth increment
+ * `split_snippet_decls_and_stmts` accumulates per line. Walks bytes tracking whether a `"`/`'`
+ * literal or a block comment is open (`\` escapes the next byte inside a literal, never itself a
+ * close), so a literal brace (e.g. `let brace = "{"`) and a brace inside PROSE (e.g. a field's
+ * nested Javadoc doc-comment, whose apostrophe would otherwise desync the literal-open state) are
+ * never miscounted as real ones; a triple-quoted (`"""`) literal is tracked by the same
+ * open/close toggle — its odd-length open/close runs carry the right parity across lines even
+ * though this scanner is not delimiter-width-aware. `in_str`/`in_comment` carry an already-open
+ * span in from a PRIOR line and report whether it is still open at end-of-line, so the caller
+ * threads both into the next call.
+ *
+ * @param line        one source line
+ * @param in_str      true when `line` begins inside an already-open string/char literal
+ * @param in_comment  true when `line` begins inside an already-open block comment
+ * @return            the net brace delta outside literals/comments, and whether a literal or a
+ *                     block comment is still open at end-of-line
+ * @since 0.3.1
+ */
+fn snippet_brace_delta(line: str, in_str: bool, in_comment: bool) -> BraceScan {
     mut d: i64 = 0
+    mut open = in_str
+    mut quote: byte = b'"'
+    mut comment = in_comment
     mut k: u64 = 0
     loop {
         if k >= line.len { break }
-        if line[k] == b'{' { d = d + 1 }
-        if line[k] == b'}' { d = d - 1 }
+        let c = line[k]
+        if comment {
+            if c == b'*' && k + 1 < line.len && line[k + 1] == b'/' { comment = false; k = k + 2; continue }
+            k = k + 1
+            continue
+        }
+        if open {
+            if c == b'\\' { k = k + 2; continue }
+            if c == quote { open = false }
+            k = k + 1
+            continue
+        }
+        if c == b'/' && k + 1 < line.len && line[k + 1] == b'*' { comment = true; k = k + 2; continue }
+        if c == b'"' || c == b'\'' { open = true; quote = c; k = k + 1; continue }
+        if c == b'/' && k + 1 < line.len && line[k + 1] == b'/' { break }
+        if c == b'{' { d = d + 1 }
+        if c == b'}' { d = d - 1 }
         k = k + 1
     }
-    d
+    BraceScan { delta = d; in_str = open; in_comment = comment }
 }
 
 /**
@@ -664,9 +763,16 @@ fn snippet_skip_doc_comment(src: str, from: u64) -> u64 {
  * virtual-main rule), so a snippet needing a custom type or helper function cannot be a single
  * `main.tks`. A leading doc-comment before a top-level construct is discarded
  * (`snippet_skip_doc_comment`) — never carried into either half. Walks the remaining `src` line by
- * line tracking BRACE DEPTH (a `type`/`fn` body may span many lines); a new top-level chunk starts
- * at depth 0 on a non-blank, non-doc-comment line and ends when depth RETURNS to 0. Each whole
- * chunk is classified (`snippet_chunk_is_decl`) and appended, in order, to the matching half.
+ * line tracking BRACE DEPTH OUTSIDE string/char literals AND block comments (`snippet_brace_delta`,
+ * threading its `in_str`/`in_comment` across lines — a `type`/`fn` body may span many lines, a
+ * literal brace such as `let brace = "{"` must never look like a real one, and a NESTED Javadoc
+ * field doc-comment inside the body must never leak its prose apostrophes into the literal-open
+ * state); a new top-level chunk starts at depth 0 on a non-blank,
+ * non-doc-comment line. A chunk consisting SO FAR of only bare attribute lines (`#…`) never closes
+ * on its own — the attribute accumulates onto the declaration it decorates, so both are classified
+ * together (`snippet_chunk_is_decl` skips the leading attribute lines when reading the head
+ * keyword). Every other chunk ends when depth RETURNS to 0 and is classified
+ * (`snippet_chunk_is_decl`), appended in order to the matching half.
  *
  * @param src  the inline snippet's whole source text
  * @return     the source split into its declaration and statement halves
@@ -678,6 +784,9 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
     mut chunk = ""
     mut depth: i64 = 0
     mut in_chunk = false
+    mut in_str = false
+    mut in_comment = false
+    mut attr_only = true
     mut cur: u64 = 0
     loop {
         if cur >= src.len { break }
@@ -692,11 +801,16 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
         let trimmed = tkr_trim(line)
         if !in_chunk && trimmed.len == 0 { cur = next; continue }
         if !in_chunk && mf_starts_with(trimmed, "/**") { cur = snippet_skip_doc_comment(src, cur); continue }
+        if !in_chunk { attr_only = true }
         in_chunk = true
         if chunk.len > 0 { chunk = chunk ~ "\n" }
         chunk = chunk ~ line
-        depth = depth + snippet_brace_delta(line)
-        if depth <= 0 {
+        if trimmed.len > 0 && !mf_starts_with(trimmed, "#") { attr_only = false }
+        let scan = snippet_brace_delta(line, in_str, in_comment)
+        depth = depth + scan.delta
+        in_str = scan.in_str
+        in_comment = scan.in_comment
+        if depth <= 0 && !attr_only {
             if snippet_chunk_is_decl(chunk) { decls = decls ~ chunk ~ "\n\n" } else { stmts = stmts ~ chunk ~ "\n\n" }
             chunk = ""
             depth = 0
@@ -711,6 +825,24 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
 }
 
 /**
+ * sh_rm_rf — recursively delete `path` via `rm -rf` (best-effort — `path` may not already exist).
+ * The shared shell idiom `copy_dir` (0.3.1 C4) and `compile_snippet_text` (0.3.1 splitter fix)
+ * both need to make a scratch tree hermetic before writing into it.
+ *
+ * @param path  the path to delete
+ * @return      `null` on success, or an `error` when the shell delete fails
+ * @throws      when `rm -rf` exits non-zero
+ * @since 0.3.1
+ */
+fn sh_rm_rf(path: str) -> null | error {
+    mut shv: []str = teko::list::push(teko::list::empty(), "sh")
+    shv = teko::list::push(shv, "-c")
+    shv = teko::list::push(shv, teko::str::concat("rm -rf ", sh_squote(to_sh_path(path))))
+    if teko::process::run(shv) != 0 { return error { message = teko::str::concat("failed to remove ", path) } }
+    null
+}
+
+/**
  * compile_snippet_text — build a SINGLE Teko program `src_text` as a SCRATCH project under
  * `<prefix>.proj/` (a synthesized minimal `.tkp` + the program's STATEMENTS at the project-root
  * `main.tks`, required by the C7.9 main-file rule) with the current compiler `exe`, under `env`.
@@ -719,9 +851,11 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
  * (`split_snippet_decls_and_stmts`) into a sibling `src/regr_decls.tks` module, sharing the
  * project's flat namespace with `main.tks` unqualified — mirroring the existing on-disk fixture
  * shape (`main.tks` + `src/lib.tks`). A pure-statement snippet (no declarations) writes `src_text`
- * UNCHANGED to `main.tks`, byte-identical to the pre-split behavior. No on-disk project is
- * touched — this is the compiler-as-SUT over a snippet, with zero committed fixture tree. The
- * shared tail of `compile_inline_source`/`compile_standalone_source`.
+ * UNCHANGED to `main.tks`, byte-identical to the pre-split behavior. The scratch tree is wiped
+ * (`sh_rm_rf`) before being repopulated, so no `main.tks`/`src/regr_decls.tks`/`bin/` from a PRIOR
+ * row sharing this `prefix` can ever survive into this one (0.3.1 splitter fix (4)). No on-disk
+ * project is touched — this is the compiler-as-SUT over a snippet, with zero committed fixture
+ * tree. The shared tail of `compile_inline_source`/`compile_standalone_source`.
  *
  * @param exe       the absolute path to this compiler binary (gen1)
  * @param src_text  the whole `.tks` program to compile
@@ -733,6 +867,7 @@ fn split_snippet_decls_and_stmts(src: str) -> SnippetSplit {
  */
 fn compile_snippet_text(exe: str, src_text: str, env: []str, prefix: str) -> CapResult {
     let proj = prefix ~ ".proj"
+    match sh_rm_rf(proj) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(proj, "/src/")) { error => { }; null => { } }
     match teko::io::write_file(proj ~ "/teko.tkp", snippet_manifest_text()) { error => { }; null => { } }
     let split = split_snippet_decls_and_stmts(src_text)
@@ -1133,8 +1268,8 @@ fn tkr_ensure_built(exe: str, regr_dir: str, env: []str, prefix: str, built: Reg
 fn guard_no_project_build_at_root(regr_dir: str, t: Tkr) -> null | error {
     let at_root = regr_dir == "." || regr_dir.len == 0
     let has_src = t.source_inline.len > 0 || t.source_file.len > 0
-    if at_root && t.kind != TkrKind::CompileFail && !has_src {
-        return error { message = "regressor.tkr scenario would rebuild the compiler root — use an inline `source` snippet" }
+    if at_root && !has_src {
+        return error { message = "regressor.tkr scenario at the project root has no inline/explicit `source` — it would rebuild the compiler root" }
     }
     null
 }
@@ -1310,26 +1445,60 @@ fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, bui
 }
 
 /**
+ * regr_dir_has_single_tkp — does `regr_dir` contain EXACTLY one `.tkp` manifest? The fail-closed
+ * precondition for `tkr_compile_fail_artifact`'s multi-file fallback: a bare source directory
+ * (not a real project) must never be silently accepted as one just because the runner's own
+ * "no single .tkp manifest" infrastructure error also happens to surface as a non-zero exit,
+ * which `check_compile_fail` cannot distinguish from a genuine compiler rejection.
+ *
+ * @param regr_dir  the directory to probe
+ * @return          true when exactly one `*.tkp` entry is present, false otherwise (including an
+ *                   unreadable directory)
+ * @since 0.3.1
+ */
+fn regr_dir_has_single_tkp(regr_dir: str) -> bool {
+    let entries = match teko::fs::list_dir(regr_dir) { []str as e => e; error => return false }
+    mut count: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        if teko::str::ends_with(entries[i], ".tkp") { count = count + 1 }
+        i++
+    }
+    count == 1
+}
+
+/**
  * tkr_compile_fail_artifact — resolve ONE compile-fail scenario's build: an inline snippet
  * (`compile_inline_source`) or an explicit standalone file (`compile_standalone_source`), each
  * relative to `regr_dir`; with NEITHER declared, falls back to compiling `regr_dir`'s OWN project
  * (`compile_regressive`) — the multi-file-fixture case, where the rejected construct needs its
  * full source tree (e.g. a construct spanning two files) and cannot be a single snippet. Guarded
- * against the project-root recursion (`guard_no_project_build_at_root`) exactly like the RUN path.
+ * against the project-root recursion (`guard_no_project_build_at_root`) exactly like the RUN
+ * path, and — for the multi-file fallback specifically — fail-closed against `regr_dir` not
+ * actually being a project (`regr_dir_has_single_tkp`) or the scenario omitting the `diagnostic`
+ * it would need to assert against a real compiler-emitted message (0.3.1 M.3: an infrastructure
+ * failure must never be consumed as "the compiler rejected the construct").
  *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressor project directory
  * @param t         the lowered scenario
  * @param prefix    the scratch-file prefix for this row
- * @return          the captured build outcome
+ * @return          the captured build outcome, or an error when the scenario cannot honestly
+ *                   resolve an artifact (a guard rejection, a missing project, or no diagnostic)
+ * @throws          when `regr_dir` is the project root with no inline/explicit source, or the
+ *                   multi-file fallback has no single `.tkp` project or no declared `diagnostic`
  * @since 0.3.1
  */
-fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> CapResult {
+fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> CapResult | error {
     if t.source_inline.len > 0 { return compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix) }
     if t.source_file.len > 0 { return compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix) }
     match guard_no_project_build_at_root(regr_dir, t) {
-        error as e => return CapResult { exit = 1; stdout = ""; stderr = e.message }
+        error as e => return e
         null => { }
+    }
+    if !regr_dir_has_single_tkp(regr_dir) || t.diagnostic.len == 0 {
+        return error { message = "a compile-fail scenario with no `Given source`/`Given source inline` needs a `.tkp` project in " ~ regr_dir ~ " and a `Then diagnostic`" }
     }
     compile_regressive(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix)
 }
@@ -1360,7 +1529,7 @@ fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) 
             if ri >= specs.len { break }
             let t = specs[ri]
             let row_prefix = $"{prefix}.{si}.{ri}"
-            let comp = tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix)
+            let comp = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix) { CapResult as c => c; error as e => return regr_fail($"{sc.name}[{ri}]: {e.message}") }
             let oc = check_compile_fail(t, comp)
             if !oc.ok { return regr_fail($"{sc.name}[{ri}]: {oc.message}") }
             ri = ri + 1
@@ -1477,6 +1646,7 @@ fn regr_sanitize(s: str) -> str {
  */
 fn run_regression_sources(exe: str, m: Manifest) -> i32 {
     let work = REGR_WORK_DIR
+    match sh_rm_rf(work) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     mut fails: u64 = 0
     mut si: u64 = 0
