@@ -1672,7 +1672,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
 #ifdef _WIN32
     // _spawnvp(_P_WAIT) is synchronous: blocks until the child exits, returns its exit code.
     int w = tk_win32_spawnvp(cargv[0], cargv);
-    return (w == -1) ? 127 : (int32_t)(int8_t)w;
+    return (w == -1) ? 127 : (int32_t)w;
 #else
     pid_t pid = fork();
     if (pid < 0) return 127;
@@ -1682,7 +1682,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)(int8_t)WEXITSTATUS(status);
+    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
     return 127;
 #endif
 }
@@ -1712,7 +1712,7 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
     _dup2(saved_err, _fileno(stderr));
     _close(saved_out);
     _close(saved_err);
-    return (w == -1) ? 127 : (int32_t)(int8_t)w;
+    return (w == -1) ? 127 : (int32_t)w;
 #else
     pid_t pid = fork();
     if (pid < 0) return 127;
@@ -1728,7 +1728,7 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)(int8_t)WEXITSTATUS(status);
+    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
     return 127;
 #endif
 }
