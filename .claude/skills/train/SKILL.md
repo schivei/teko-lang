@@ -78,12 +78,19 @@ No `Co-Authored-By:`, no "Generated with Claude Code" line — clean Conventiona
 **Force-push is disabled**: never rewrite pushed history to fix a trailer; forward-only. A PR
 body may keep a generation note.
 
-## Drain (owner-only)
+## Drain (owner-only) — ONE merge, not N
 
 Everything stays **draft**. The **bump is the contra-máquina**: its own wagon at the very top,
-after the W15 support car. When it closes green, **only it leaves draft** — that is the owner's
-cue. The owner then merges top→base, each wagon into the one below, and the base wagon lands on
-`main` once, carrying the whole train (and the bump, which fires the org mirror).
+after the W15 support car. When it closes green, **only it leaves draft** — that is the owner's cue.
+
+The top branch already contains every wagon below it, so the drain is a single merge:
+
+1. retarget the contra-máquina's base to `main` (its diff becomes the whole train);
+2. squash-merge → `main` gets one commit with everything, bump included;
+3. the other PRs are **closed**, not merged;
+4. delete the wagon branches — under squash that is what actually closes them (the original SHAs
+   never become reachable from `main`, so GitHub cannot auto-detect; it closes a PR when its base
+   or head branch disappears). `Closes #N` keywords close ISSUES, never PRs.
 
 Never merge, never un-draft anything else, never squash on the owner's behalf.
 

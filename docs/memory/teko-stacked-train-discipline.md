@@ -37,6 +37,32 @@ verde quando o de cima desagua nele**. Consequências, todas obrigatórias:
 **vagão novo** de correções, não edições retroativas. Assim o vagão auditado permanece
 exatamente como foi validado e cada achado tem diff próprio.
 
+## O dreno é UM merge, não N (owner 2026-07-25)
+
+A branch do topo **contém**, por construção, todo o histórico de cada vagão abaixo (cada um é
+baseado no anterior). Logo, mergear o topo na main produz **a mesma árvore** que N merges
+encadeados — o dreno vagão-a-vagão é trabalho redundante. A receita:
+
+1. contra-máquina verde no topo;
+2. **retarget da base dela para `main`** (o diff do PR passa a ser o trem inteiro, e o CI roda
+   contra a main de verdade — o "run completo" no vagão que aterrissa);
+3. squash-merge: a main recebe **um** commit com tudo, incluindo o bump;
+4. os demais PRs **se fecham**, não se mergeiam;
+5. apagar as branches dos vagões.
+
+**Como os demais PRs realmente fecham — depende da estratégia:**
+
+- **squash** (o nosso): os commits dos vagões NUNCA ficam alcançáveis a partir da main (o squash
+  cria um commit novo), então o GitHub **não** marca os outros como mergeados por alcançabilidade.
+  O que os fecha é **apagar as branches** — o GitHub fecha o PR quando a base ou a head some.
+- **merge-commit / rebase**: os SHAs originais entram na main e o auto-close por alcançabilidade
+  funciona sozinho.
+- **Palavras-chave (`Closes #N`) fecham ISSUES, não PRs.** Um comentário listando os vagões vale
+  como rastreabilidade (romaneio de embarque), nunca como mecanismo de fechamento.
+
+Essa é também a razão de a limpeza automatizada guardar-se por **SHA gravado no manifesto** e não
+por ancestralidade: sob squash, "esta branch foi mergeada?" não é respondível pelo grafo.
+
 ## Protocolo de draft e a deixa do owner
 
 Todos os PRs do trem ficam **draft**. O **bump é a contra-máquina** (owner 2026-07-25): vagão
