@@ -151,3 +151,50 @@ fn dto_offset_field() {
     let minus_five_thirty = teko::time::dto_of(dt, -330 to i16)
     teko::assert::is_true(minus_five_thirty.offset_minutes == -330)
 }
+
+/**
+ * `datetime_diff` is exact at the LAST in-domain day distance and no further: `SPAN_MAX_WHOLE_DAYS`
+ * (106_750 days, ~292 years) times a day of nanoseconds still fits a `span`, and the value it
+ * returns is that exact product.
+ *
+ * The romaneio's motivating value — a 200_000-day difference — is deliberately NOT exercised here:
+ * it is now a documented, guarded PANIC (a domain the `span` carrier cannot hold), and before the
+ * guard it was a signed-overflow wrap, i.e. C undefined behavior that the ASan/UBSan lane traps.
+ * The honest boundary test is the largest value the domain DOES contain.
+ */
+#test
+fn datetime_diff_at_the_last_in_domain_day() {
+    let later = teko::time::datetime_of(teko::time::date_from_days(106750), teko::time::time_from_ns(0))
+    let earlier = teko::time::datetime_of(teko::time::date_from_days(0), teko::time::time_from_ns(0))
+    let d = teko::time::datetime_diff(later, earlier)
+    teko::assert::is_true(d.ticks == 9223200000000000000)
+    teko::assert::is_true(d.ticks > 0)
+    let back = teko::time::datetime_diff(earlier, later)
+    teko::assert::is_true(back.ticks == 0 - 9223200000000000000)
+}
+
+/**
+ * `date_diff_days` widens BOTH carriers before subtracting, so a difference that does not fit the
+ * `i32` operands' own width is still computed exactly when it fits the result — and a difference
+ * that does not fit the result at all is refused rather than wrapped (that refusal is a panic, so
+ * it is documented, not asserted here).
+ */
+#test
+fn date_diff_days_widens_before_subtracting() {
+    let far_future = teko::time::date_from_days(2000000000 to i32)
+    let far_past = teko::time::date_from_days(-100000000 to i32)
+    teko::assert::is_true(teko::time::date_diff_days(far_future, far_past) == 2100000000)
+}
+
+/**
+ * A pre-year-1 date renders its NEGATIVE year as ISO-8601 extended text (`-0221-…`), never the
+ * byte garbage the pre-0.3.1 `digits_of` produced: with a negative operand `n % 10` is negative, so
+ * `(48 + n % 10) to byte` fell BELOW `'0'` and emitted `'/'`/`'.'`-class bytes.
+ */
+#test
+fn date_to_string_renders_a_negative_year() {
+    let before_year_one = teko::time::date_from_days(-800000 to i32)
+    let text = teko::time::date_to_string(before_year_one, "yyyy-MM-dd")
+    teko::assert::is_true(teko::time::civil_from_days(-800000).year < 0)
+    teko::assert::is_true(text == "-0221-09-04")
+}

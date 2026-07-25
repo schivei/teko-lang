@@ -647,41 +647,55 @@ fn interp_bin(rf: RegFile, inst: LInst, b: LBin, mem: MemStore) -> IStep {
     istep_cont(rf_set(rf, inst.result, r.value), mem)
 }
 
-/** eval_bin — the arithmetic of an integer LBinOp over the i64 carrier. Signed and
-    unsigned divide/remainder/comparison/shift all use the carrier's plain (signed) i64
-    operators — the N1/A1-1 fixtures are non-negative, so signed and unsigned agree, exactly
-    like eval_div/eval_rem's existing reasoning; a zero divisor honest-stops. The bitwise ops
-    (IAnd/IOr/IXor) are pure two's-complement bit operations, exact on the carrier for any
-    in-range operand; the shifts (IShl/IShrS/IShrU) shift on the carrier — width masking of a
-    narrow-type result is deferred to the phase that runs narrow types (mirroring eval_un's
-    ZExt/SExt/Trunc identity). Float comparisons are declared (so the match documents every
-    LBinOp) but honest-stop: the interp carries no float VALUE yet (LConstFloat itself errors
-    — see interp_inst). */
+/**
+ * eval_bin — the arithmetic of an integer LBinOp over the i64 carrier.
+ *
+ * The SIGNED family uses the carrier's own operators; the UNSIGNED family (`IDivU`/`IRemU`/
+ * `IShrU`/`ICmp*U`) REINTERPRETS both operands as `u64` first and computes there. That distinction
+ * is the whole reason the LIR carries two opcode families, and it used to be thrown away: every U
+ * variant was spelled identically to its S twin. With the pre-0.3.1 i128 carrier the written
+ * justification ("the fixtures are non-negative") held; at i64 a `u64` with bit 63 set READS
+ * NEGATIVE, so `ICmpGtU(u64::MAX, 5)` answered 0 where the correct unsigned answer is 1, and
+ * `IShrU` sign-extended. This interpreter is the ORACLE the native backend is differentially
+ * validated against — a wrong oracle either masks a real backend bug or invents a false one.
+ *
+ * The bitwise ops (IAnd/IOr/IXor) are pure two's-complement bit operations, exact on the carrier
+ * for any operand and identical in both domains; `IShl` likewise (the bit pattern is the same
+ * either way). Width masking of a narrow-type result stays deferred to the phase that runs narrow
+ * types (mirroring eval_un's ZExt/SExt/Trunc identity). A zero divisor honest-stops. Float
+ * comparisons are declared (so the match documents every LBinOp) but honest-stop: the interp
+ * carries no float VALUE yet (LConstFloat itself errors — see interp_inst).
+ *
+ * @param op  the LIR binary opcode
+ * @param a   the left operand's carrier value
+ * @param b   the right operand's carrier value
+ * @return    the computed value, or the honest stop for an out-of-subset opcode / zero divisor
+ */
 fn eval_bin(op: LBinOp, a: i64, b: i64) -> EvalOut {
     match op {
         IAdd => eval_ok(a + b)
         ISub => eval_ok(a - b)
         IMul => eval_ok(a * b)
         IDivS => eval_div(a, b)
-        IDivU => eval_div(a, b)
+        IDivU => eval_div_u(a, b)
         IRemS => eval_rem(a, b)
-        IRemU => eval_rem(a, b)
+        IRemU => eval_rem_u(a, b)
         IAnd => eval_ok(a & b)
         IOr => eval_ok(a | b)
         IXor => eval_ok(a ^ b)
         IShl => eval_ok(a << b)
         IShrS => eval_ok(a >> b)
-        IShrU => eval_ok(a >> b)
+        IShrU => eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) >> u64_bits_of_i64(b)))
         ICmpEq => eval_ok(bool_to_i64(a == b))
         ICmpNe => eval_ok(bool_to_i64(a != b))
         ICmpLtS => eval_ok(bool_to_i64(a < b))
-        ICmpLtU => eval_ok(bool_to_i64(a < b))
+        ICmpLtU => eval_ok(bool_to_i64(u64_bits_of_i64(a) < u64_bits_of_i64(b)))
         ICmpLeS => eval_ok(bool_to_i64(a <= b))
-        ICmpLeU => eval_ok(bool_to_i64(a <= b))
+        ICmpLeU => eval_ok(bool_to_i64(u64_bits_of_i64(a) <= u64_bits_of_i64(b)))
         ICmpGtS => eval_ok(bool_to_i64(a > b))
-        ICmpGtU => eval_ok(bool_to_i64(a > b))
+        ICmpGtU => eval_ok(bool_to_i64(u64_bits_of_i64(a) > u64_bits_of_i64(b)))
         ICmpGeS => eval_ok(bool_to_i64(a >= b))
-        ICmpGeU => eval_ok(bool_to_i64(a >= b))
+        ICmpGeU => eval_ok(bool_to_i64(u64_bits_of_i64(a) >= u64_bits_of_i64(b)))
         FCmpEq => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
         FCmpNe => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
         FCmpLt => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
@@ -698,16 +712,107 @@ fn eval_bin(op: LBinOp, a: i64, b: i64) -> EvalOut {
     zero constant and a lowered `TBoolLit` will use. */
 fn bool_to_i64(b: bool) -> i64 { if b { 1 } else { 0 } }
 
-/** eval_div — integer division with a zero-divisor guard. */
+/**
+ * LIR_I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest pattern whose SIGNED reading is negative,
+ * and exactly the distance between the unsigned and the signed reading of any pattern at or above
+ * it. The pivot both carrier reinterpretations turn on.
+ */
+const LIR_I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * LIR_U64_ALL_ONES — every bit of a `u64` set (`2^64 - 1`), the value a negative carrier's
+ * magnitude is subtracted from to reach its unsigned reading.
+ */
+const LIR_U64_ALL_ONES: u64 = 0xFFFFFFFFFFFFFFFF
+
+/**
+ * LIR_I64_MIN — the most negative `i64` (`-2^63`), spelled as a subtraction because `2^63` has no
+ * `i64` literal form.
+ */
+const LIR_I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * u64_bits_of_i64 — the `u64` reading of a carrier value's 64-bit two's-complement pattern, the
+ * conversion the unsigned opcode family applies to both operands.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW: a non-negative value casts straight across (inside
+ * `u64`'s range, so the CHECKED `i64 -> u64` cast passes). For a negative `v`, `v + 1` lies in
+ * `[i64::MIN + 1, 0]` and `0 - (v + 1)` therefore in `[0, i64::MAX]` — both in range, no overflow
+ * even at `i64::MIN` — and subtracting that magnitude from `LIR_U64_ALL_ONES` (`2^64 - 1 - (-v - 1)`
+ * = `2^64 + v`) is an in-range unsigned subtraction. At `v == -1` the result is `u64::MAX`; at
+ * `v == i64::MIN` it is `2^63`.
+ *
+ * @param v  the carrier value
+ * @return   its unsigned reading
+ */
+fn u64_bits_of_i64(v: i64) -> u64 {
+    if v >= 0 { return v to u64 }
+    let magnitude = 0 - (v + 1)
+    LIR_U64_ALL_ONES - (magnitude to u64)
+}
+
+/**
+ * i64_of_u64_bits — the carrier value a 64-bit pattern denotes, the inverse of
+ * `u64_bits_of_i64`. A pattern below `2^63` casts straight across (inside `i64`'s positive range,
+ * so the CHECKED `u64 -> i64` cast passes); one at or above it casts `bits - 2^63` (in
+ * `[0, 2^63)`, again in range) and adds `i64::MIN`, a sum in `[i64::MIN, -1]` that cannot overflow.
+ *
+ * @param bits  the 64-bit two's-complement pattern
+ * @return      its signed carrier reading
+ */
+fn i64_of_u64_bits(bits: u64) -> i64 {
+    if bits < LIR_I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - LIR_I64_SIGN_BIT_U) to i64) + LIR_I64_MIN
+}
+
+/**
+ * eval_div — SIGNED integer division with a zero-divisor guard.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the quotient, or the honest stop for a zero divisor
+ */
 fn eval_div(a: i64, b: i64) -> EvalOut {
     if b == 0 { return eval_err("lir interp: divide by zero") }
     eval_ok(a / b)
 }
 
-/** eval_rem — integer remainder with a zero-divisor guard. */
+/**
+ * eval_rem — SIGNED integer remainder with a zero-divisor guard.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the remainder, or the honest stop for a zero divisor
+ */
 fn eval_rem(a: i64, b: i64) -> EvalOut {
     if b == 0 { return eval_err("lir interp: remainder by zero") }
     eval_ok(a % b)
+}
+
+/**
+ * eval_div_u — UNSIGNED integer division: both carrier values are reinterpreted as `u64`, divided
+ * there, and the quotient reinterpreted back. Distinct from `eval_div` for every operand with bit
+ * 63 set.
+ *
+ * @param a  the dividend's carrier value
+ * @param b  the divisor's carrier value
+ * @return   the unsigned quotient as a carrier value, or the honest stop for a zero divisor
+ */
+fn eval_div_u(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: divide by zero") }
+    eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) / u64_bits_of_i64(b)))
+}
+
+/**
+ * eval_rem_u — UNSIGNED integer remainder, the `eval_div_u` companion.
+ *
+ * @param a  the dividend's carrier value
+ * @param b  the divisor's carrier value
+ * @return   the unsigned remainder as a carrier value, or the honest stop for a zero divisor
+ */
+fn eval_rem_u(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: remainder by zero") }
+    eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) % u64_bits_of_i64(b)))
 }
 
 /** interp_un — an integer unary op: negate (INeg) or the numeric conversions, which the N1

@@ -76,6 +76,44 @@ pub type dto = struct {
 const NS_PER_DAY: i64 = 86400000000000
 
 /**
+ * SPAN_MAX — the largest `span`, i.e. `i64::MAX` nanoseconds (~292 years). The ceiling every
+ * arithmetic guard in this module checks against BEFORE computing, so no operation here can reach
+ * a signed overflow.
+ */
+const SPAN_MAX: i64 = 9223372036854775807
+
+/**
+ * SPAN_MIN — the most negative `span` (`-2^63` ns), spelled as a subtraction because `2^63` has no
+ * `i64` literal form.
+ */
+const SPAN_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * SPAN_MAX_WHOLE_DAYS — the largest whole-day count whose nanosecond value, PLUS a full day of
+ * sub-day remainder, still fits a `span`.
+ *
+ * PROOF: `106_750 * 86_400_000_000_000 = 9_223_200_000_000_000_000`, which is
+ * `172_036_854_775_807` below `i64::MAX` — more than one whole day of nanoseconds
+ * (`86_400_000_000_000`) of headroom. So for any `|days| <= SPAN_MAX_WHOLE_DAYS` and any
+ * `|remainder| < NS_PER_DAY`, `days * NS_PER_DAY + remainder` is exactly representable, in both
+ * signs (`i64::MIN` is one further from zero than `i64::MAX`, so the negative side has strictly
+ * more room). One more day (`106_751`) would overflow: `106_751 * NS_PER_DAY` exceeds `i64::MAX`.
+ * This is `datetime_diff`'s exact domain — ~292 years, the `span` domain the module header states.
+ */
+const SPAN_MAX_WHOLE_DAYS: i64 = 106750
+
+/**
+ * DATE_DAYS_MAX — the largest `date.days`, i.e. `i32::MAX` (~5.88M years past the epoch). Every
+ * `date` arithmetic guard checks against it before narrowing back to the `i32` carrier.
+ */
+const DATE_DAYS_MAX: i64 = 2147483647
+
+/**
+ * DATE_DAYS_MIN — the most negative `date.days`, i.e. `i32::MIN`.
+ */
+const DATE_DAYS_MIN: i64 = -2147483648
+
+/**
  * Days since 1970-01-01, UTC, from the host wall clock. NATIVE-ONLY (the VM rejects every
  * `extern fn`); a bare scalar so a caller can compose it into a `date` without tripping the
  * extern-struct calling convention documented in the module doc.
@@ -232,20 +270,49 @@ fn floor_div(a: i64, b: i64) -> i64 {
 }
 
 /**
+ * date_days_checked — narrow a day count computed in `i64` back onto the `date` carrier, refusing
+ * a value outside `i32`. Every `date`-producing operation funnels through here, so the carrier is
+ * never reached by a wrapped or truncated value: the domain is checked BEFORE the narrowing, and
+ * the message names the barrier (M.3) instead of leaving a `to i32` cast panic to speak for it.
+ *
+ * @param days  the day count to place on the carrier
+ * @return      `days` as the `i32` the `date` carrier holds
+ * @throws      panics when `days` is outside `[i32::MIN, i32::MAX]`, i.e. past `date`'s ratified
+ *              +-5.88M-year domain
+ */
+fn date_days_checked(days: i64) -> i32 {
+    if days > DATE_DAYS_MAX || days < DATE_DAYS_MIN {
+        panic("teko::time: date out of range (a `date` holds +-5.88M years, the i32 day carrier)")
+    }
+    days to i32
+}
+
+/**
  * `dt` advanced by `sp` (may be negative — a `datetime` moved backward). Normalizes the
  * resulting ticks-of-day back into `[0, 86_400_000_000_000)`, carrying the overflow/underflow
  * into the date component.
  *
+ * PROOF THAT THE INTERNAL ARITHMETIC CANNOT OVERFLOW, given the guard below: `dt.ticks` is a
+ * ticks-of-day, so `0 <= dt.ticks < NS_PER_DAY` and `(dt.ticks to i64)` is non-negative. The sum
+ * `(dt.ticks to i64) + sp.ticks` can therefore only overflow ABOVE (adding a non-negative to any
+ * `i64` never underflows), which the guard rejects; `floor_div` and the `day_delta * NS_PER_DAY`
+ * that follows stay inside the sum's own magnitude. The final day count is computed in `i64` and
+ * narrowed through `date_days_checked`.
+ *
  * @param dt  the starting datetime
  * @param sp  the signed nanosecond offset to apply
  * @return    `dt` shifted by `sp`
- * @throws    panics if the resulting date does not fit `i32` (the checked `+`/`to i32` below)
+ * @throws    panics when `sp` would carry the ns sum past `i64`, or when the resulting date leaves
+ *            `date`'s `i32` domain
  */
 pub fn datetime_add(dt: datetime, sp: span) -> datetime {
+    if sp.ticks > SPAN_MAX - (dt.ticks to i64) {
+        panic("teko::time: datetime_add overflows the ns span domain (+-292 years)")
+    }
     let combined = (dt.ticks to i64) + sp.ticks
     let day_delta = floor_div(combined, NS_PER_DAY)
     let new_ticks = combined - day_delta * NS_PER_DAY
-    datetime { days = dt.days + (day_delta to i32); ticks = new_ticks to u64 }
+    datetime { days = date_days_checked(dt.days + day_delta); ticks = new_ticks to u64 }
 }
 
 /**
@@ -254,26 +321,38 @@ pub fn datetime_add(dt: datetime, sp: span) -> datetime {
  * @param dt  the starting datetime
  * @param sp  the signed nanosecond offset to subtract
  * @return    `dt` shifted by `-sp`
- * @throws    panics if `sp` is `i64::MIN` (unrepresentable negated) or the resulting date
- *            overflows `i32`
+ * @throws    panics when `sp` is `i64::MIN` (its negation is not a `span`), or from
+ *            `datetime_add` on the shifted value
  */
 pub fn datetime_sub(dt: datetime, sp: span) -> datetime {
+    if sp.ticks == SPAN_MIN {
+        panic("teko::time: datetime_sub cannot negate the most negative span (i64::MIN)")
+    }
     datetime_add(dt, span { ticks = 0 - sp.ticks })
 }
 
 /**
- * The signed duration `a - b`, as a `span`. Computes the SMALL day delta first, then widens —
- * so two datetimes a short interval apart (even if both are centuries from the epoch) diff
- * correctly; only a truly-out-of-`span`-domain difference (`> ~292 years`) panics.
+ * The signed duration `a - b`, as a `span`. Computes the day delta in `i64` first (the `i32`
+ * carriers are widened BEFORE subtracting, so two dates at opposite ends of `date`'s +-5.88M-year
+ * domain do not wrap the subtraction itself), checks it against `span`'s own, much narrower domain,
+ * and only then scales to nanoseconds.
+ *
+ * PROOF: with `|day_diff| <= SPAN_MAX_WHOLE_DAYS` (see that constant's own proof) the product
+ * `day_diff * NS_PER_DAY` leaves more than one full day of nanoseconds of headroom, and
+ * `|tick_diff| < NS_PER_DAY` because both operands are ticks-of-day — so the final sum is exactly
+ * representable. `date`'s domain is +-5.88M years and `span`'s is +-292 years by owner-ratified
+ * design, so a difference this rejects is a genuine domain mismatch, not a bug.
  *
  * @param a  the later (minuend) datetime
  * @param b  the earlier (subtrahend) datetime
  * @return   `a - b`, as a `span`
- * @throws   panics when the true difference exceeds `span`'s +-292-year domain (`date`'s own
- *           domain is +-5.88M years — wider than `span` by owner-ratified design)
+ * @throws   panics when the true difference exceeds `span`'s +-292-year domain
  */
 pub fn datetime_diff(a: datetime, b: datetime) -> span {
-    let day_diff = (a.days - b.days) to i64
+    let day_diff = (a.days to i64) - (b.days to i64)
+    if day_diff > SPAN_MAX_WHOLE_DAYS || day_diff < 0 - SPAN_MAX_WHOLE_DAYS {
+        panic("teko::time: datetime_diff exceeds the span domain (+-292 years)")
+    }
     let tick_diff = (a.ticks to i64) - (b.ticks to i64)
     span { ticks = day_diff * NS_PER_DAY + tick_diff }
 }
@@ -281,49 +360,74 @@ pub fn datetime_diff(a: datetime, b: datetime) -> span {
 /**
  * The sum of two `span`s.
  *
+ * PROOF THAT THE GUARD IS EXACT AND CANNOT ITSELF OVERFLOW: for `b >= 0` the sum exceeds `i64` iff
+ * `a > SPAN_MAX - b`, and `SPAN_MAX - b` is in range because `b >= 0`; for `b < 0` the sum
+ * underflows iff `a < SPAN_MIN - b`, and `SPAN_MIN - b` is in range because `-b > 0`. Both
+ * subtractions are therefore representable, and no other pair can leave the domain.
+ *
  * @param a  the first span
  * @param b  the second span
  * @return   `a + b`
- * @throws   panics on signed 64-bit overflow
+ * @throws   panics when the sum leaves the `i64` nanosecond domain
  */
 pub fn span_add(a: span, b: span) -> span {
+    if b.ticks >= 0 && a.ticks > SPAN_MAX - b.ticks {
+        panic("teko::time: span_add overflows the ns span domain (+-292 years)")
+    }
+    if b.ticks < 0 && a.ticks < SPAN_MIN - b.ticks {
+        panic("teko::time: span_add underflows the ns span domain (+-292 years)")
+    }
     span { ticks = a.ticks + b.ticks }
 }
 
 /**
  * The difference of two `span`s (`a - b`).
  *
+ * PROOF THAT THE GUARD IS EXACT AND CANNOT ITSELF OVERFLOW: for `b <= 0` the difference exceeds
+ * `i64` iff `a > SPAN_MAX + b`, and `SPAN_MAX + b` is in range because `b <= 0`; for `b > 0` it
+ * underflows iff `a < SPAN_MIN + b`, and `SPAN_MIN + b` is in range because `b > 0`. Written as
+ * additions precisely so the guard never has to negate `b` (`i64::MIN` has no negation).
+ *
  * @param a  the minuend span
  * @param b  the subtrahend span
  * @return   `a - b`
- * @throws   panics on signed 64-bit overflow
+ * @throws   panics when the difference leaves the `i64` nanosecond domain
  */
 pub fn span_sub(a: span, b: span) -> span {
+    if b.ticks <= 0 && a.ticks > SPAN_MAX + b.ticks {
+        panic("teko::time: span_sub overflows the ns span domain (+-292 years)")
+    }
+    if b.ticks > 0 && a.ticks < SPAN_MIN + b.ticks {
+        panic("teko::time: span_sub underflows the ns span domain (+-292 years)")
+    }
     span { ticks = a.ticks - b.ticks }
 }
 
 /**
- * `d` shifted by a signed day count (may be negative).
+ * `d` shifted by a signed day count (may be negative). The shift is computed in `i64` and narrowed
+ * through `date_days_checked`, so a shift past the carrier is refused instead of wrapping.
  *
  * @param d     the starting date
  * @param days  the signed day offset to apply
  * @return      `d` shifted by `days`
- * @throws      panics on signed 32-bit overflow
+ * @throws      panics when the shifted date leaves `date`'s `i32` domain
  */
 pub fn date_add_days(d: date, days: i32) -> date {
-    date { days = d.days + days }
+    date { days = date_days_checked((d.days to i64) + (days to i64)) }
 }
 
 /**
- * The signed day difference `a - b`.
+ * The signed day difference `a - b`. Both carriers are widened to `i64` BEFORE subtracting (two
+ * dates at opposite ends of the `i32` domain differ by more than `i32` can hold), and the result is
+ * narrowed back through `date_days_checked`.
  *
  * @param a  the later (minuend) date
  * @param b  the earlier (subtrahend) date
  * @return   `a - b`, in days
- * @throws   panics on signed 32-bit overflow
+ * @throws   panics when the difference does not fit `i32`
  */
 pub fn date_diff_days(a: date, b: date) -> i32 {
-    a.days - b.days
+    date_days_checked((a.days to i64) - (b.days to i64))
 }
 
 /**
@@ -393,17 +497,30 @@ pub fn civil_from_days(days: i64) -> CivilDate {
 }
 
 /**
- * Render `v` in decimal, left-padded with leading zeros to at least `width` digits.
+ * Render `v` in decimal, left-padded with leading zeros to at least `width` DIGITS. A negative `v`
+ * keeps its `-` in front of the padded digits (`pad_zeros(-221, 4)` is `"-0221"`, the ISO-8601
+ * extended spelling of a pre-year-1 year), so the sign is never counted as a digit nor buried
+ * inside the zeros.
  *
- * Assumes a non-negative `v` (the calendar fields it formats are all non-negative). Used for the
- * zero-padded pattern tokens (`yyyy`/`MM`/`dd`/`HH`/`mm`/`ss`).
- *
- * @param v      the non-negative value to render
- * @param width  the minimum digit width
+ * @param v      the value to render (any sign — `civ.year` is documented negative-capable)
+ * @param width  the minimum digit width, excluding any sign
  * @return       `v` in decimal, zero-padded on the left to `width` digits
  */
 fn pad_zeros(v: i64, width: i64) -> str {
-    mut s = digits_of(v)
+    if v < 0 { return teko::str::concat("-", pad_zeros_magnitude(magnitude_of(v), width)) }
+    pad_zeros_magnitude(v to u64, width)
+}
+
+/**
+ * Render an unsigned magnitude in decimal, left-padded with leading zeros to at least `width`
+ * digits — the sign-free core `pad_zeros` wraps.
+ *
+ * @param mag    the magnitude to render
+ * @param width  the minimum digit width
+ * @return       `mag` in decimal, zero-padded on the left to `width` digits
+ */
+fn pad_zeros_magnitude(mag: u64, width: i64) -> str {
+    mut s = digits_of_magnitude(mag)
     loop {
         if s.len to i64 >= width { break }
         s = teko::str::concat("0", s)
@@ -412,18 +529,52 @@ fn pad_zeros(v: i64, width: i64) -> str {
 }
 
 /**
- * Render a non-negative integer as its plain decimal text.
+ * Render an integer as its plain decimal text, sign included.
  *
- * @param v  the non-negative value to render
- * @return   the decimal digits of `v` ("0" for zero)
+ * The pre-0.3.1 form took an `i64`, documented "non-negative", and computed each digit as
+ * `(48 + n % 10) to byte`. Teko's `%` truncates towards zero, so for a NEGATIVE `n` the remainder
+ * is negative and the digit byte came out BELOW `'0'` — the year -221 rendered as `"/."`-style
+ * garbage. `CivilDate.year` is documented negative-capable and `civil_from_days` genuinely produces
+ * it for any pre-0001-01-01 date, so that path was reachable from the public API
+ * (`date_to_string`). Splitting the sign off and rendering the MAGNITUDE makes the function total.
+ *
+ * @param v  the value to render (any sign)
+ * @return   the decimal text of `v` ("0" for zero, `-` prefixed when negative)
  */
 fn digits_of(v: i64) -> str {
-    if v == 0 { return "0" }
+    if v < 0 { return teko::str::concat("-", digits_of_magnitude(magnitude_of(v))) }
+    digits_of_magnitude(v to u64)
+}
+
+/**
+ * magnitude_of — the absolute value of `v` as a `u64`.
+ *
+ * PROOF THAT IT IS EXACT AT `i64::MIN`: negating `v` directly would overflow there (`2^63` is not
+ * an `i64`), so the negation is done on `v + 1` — which lies in `[i64::MIN + 1, 0]`, making
+ * `0 - (v + 1)` land in `[0, i64::MAX]`, both in range — and the missing unit is added back in the
+ * `u64` domain, where `i64::MAX + 1` is representable.
+ *
+ * @param v  the (possibly negative) value whose magnitude is wanted
+ * @return   `|v|`, exactly, for every `i64`
+ */
+fn magnitude_of(v: i64) -> u64 {
+    if v >= 0 { return v to u64 }
+    ((0 - (v + 1)) to u64) + 1
+}
+
+/**
+ * Render an unsigned magnitude as its plain decimal text — the sign-free core `digits_of` wraps.
+ *
+ * @param mag  the magnitude to render
+ * @return     the decimal digits of `mag` ("0" for zero)
+ */
+fn digits_of_magnitude(mag: u64) -> str {
+    if mag == 0 { return "0" }
     mut digits: []byte = teko::list::empty()
-    mut n = v
+    mut n = mag
     loop {
         if n == 0 { break }
-        digits = teko::list::push(digits, (48 + n % 10) to byte)
+        digits = teko::list::push(digits, (48 + (n % 10)) to byte)
         n = n / 10
     }
     mut xs: []byte = teko::list::empty()
