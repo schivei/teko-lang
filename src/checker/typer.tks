@@ -61,84 +61,100 @@ fn type_var(v: parser::Var, env: Env) -> TExpr | error {
 // ============================================================================
 
 /**
- * Collects the names a lambda body's statements READ (`refs`) and the names they BIND internally
- * (`bound` — inner `let`s + nested-lambda params) transitively over every statement in `stmts`, so
- * the free variables are `refs − bound − <params>` (0.3.1 — `ref` params, write-through, replacing
- * the pre-adoption `Ref<[]str>` spelling; `str_set_add`'s explicit `.value` read stays — passing a
- * `ref` argument bare into a plain-value parameter is not yet checker-auto-deref'd at a call site).
+ * Collects the names a lambda body's statements READ (`refs`), the names they BIND internally
+ * (`bound` — inner `let`s + nested-lambda params) and the names they ASSIGN TO by bare name
+ * (`writes`), transitively over every statement in `stmts`, so the free variables are
+ * `refs − bound − <params>` and the assigned free variables are `writes − bound − <params>`
+ * (0.3.1 — `ref` params, write-through, replacing the pre-adoption `Ref<[]str>` spelling;
+ * `str_set_add`'s explicit `.value` read stays — passing a `ref` argument bare into a plain-value
+ * parameter is not yet checker-auto-deref'd at a call site).
  *
- * @param stmts  the statement block to scan
- * @param refs   accumulates every read name (by-reference, write-through)
- * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ * @param stmts   the statement block to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
  */
-fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []str) -> void {
+fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     mut i = 0
-    loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound); i++ }
+    loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound, writes); i++ }
 }
 /**
- * Collects the read/bound names of a single lambda-body statement `s` into `refs`/`bound` — the
+ * Collects the read/bound/written names of a single lambda-body statement `s` — the
  * per-statement-kind dispatch `lam_collect_block` folds over a whole block. A bare-name `Assign`
- * (`AssignKind::Simple`, no walkable `.target` expr) registers its `name` directly (0.3.1 fix — a
- * `ref`-bound write-through assignment, `r = v`, has no `FieldAccess` target to recurse into the
- * way the pre-adoption `r.value = v` spelling did, so it was never captured without this; a
- * `Field`/`Index` target is still walked via `.target` as before).
+ * (`AssignKind::Simple`, no walkable `.target` expr) registers its `name` in BOTH `refs` and
+ * `writes`: in `refs` because a `ref`-bound write-through assignment (`r = v`) has no
+ * `FieldAccess` target to recurse into the way the pre-adoption `r.value = v` spelling did, so it
+ * would otherwise never be captured; in `writes` because the capture is by COPY unless the name is
+ * `ref`-bound, and only the caller (`type_lambda`, which has the enclosing scope) can tell the two
+ * apart and reject the copy case honestly. A `Field`/`Index` target is still walked via `.target`.
  *
- * @param s      the statement to scan
- * @param refs   accumulates every read name (by-reference, write-through)
- * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ * @param s       the statement to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
  */
-fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str) -> void {
+fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     match s {
         parser::Binding as b => {
-            lam_collect_expr(b.value, refs, bound)
+            lam_collect_expr(b.value, refs, bound, writes)
             match b.target {
                 parser::SimpleName as sn => bound = str_set_add(bound.value, sn.name)
                 parser::DestructurePattern as dp => { mut j = 0; loop { if j >= dp.names.len { break }; bound = str_set_add(bound.value, dp.names[j]); j++ } }
             }
         }
         parser::Assign as a => {
-            lam_collect_expr(a.value, refs, bound)
-            if parser::assign_has_target(a.kind) { lam_collect_expr(a.target, refs, bound) } else { refs = str_set_add(refs.value, a.name) }
+            lam_collect_expr(a.value, refs, bound, writes)
+            if parser::assign_has_target(a.kind) {
+                lam_collect_expr(a.target, refs, bound, writes)
+            } else {
+                refs = str_set_add(refs.value, a.name)
+                writes = str_set_add(writes.value, a.name)
+            }
         }
-        parser::Return as r => if r.has_value { lam_collect_expr(r.value, refs, bound) } else { }
-        parser::LoopStmt as l => { lam_collect_block(l.init, refs, bound); lam_collect_block(l.body, refs, bound) }
-        parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound)
-        parser::DeferStmt as d => lam_collect_block(d.body, refs, bound)
-        parser::AdoptStmt as a => lam_collect_block(a.body, refs, bound)
+        parser::Return as r => if r.has_value { lam_collect_expr(r.value, refs, bound, writes) } else { }
+        parser::LoopStmt as l => { lam_collect_block(l.init, refs, bound, writes); lam_collect_block(l.body, refs, bound, writes) }
+        parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound, writes)
+        parser::DeferStmt as d => lam_collect_block(d.body, refs, bound, writes)
+        parser::AdoptStmt as a => lam_collect_block(a.body, refs, bound, writes)
         parser::BreakStmt => { }
         parser::ContinueStmt => { }
     }
 }
 /**
- * Collects the read/bound names of a single lambda-body expression `e` into `refs`/`bound` — the
- * per-expression-kind dispatch `lam_collect_stmt`/`lam_collect_block` recurse through.
+ * Collects the read/bound/written names of a single lambda-body expression `e` — the
+ * per-expression-kind dispatch `lam_collect_stmt`/`lam_collect_block` recurse through. An
+ * expression carries no assignment of its own, but the BLOCKS inside one (an `if`/`match` arm, a
+ * nested lambda body) do, so `writes` is threaded through unchanged. Two arms carry history worth
+ * keeping: `Borrow` (`&x`) recurses because a free read transits through the borrowed operand (AL
+ * wave F1), and `SafeMethodCall` is the NP-OOP receiver/args walk (issue #116).
  *
- * @param e      the expression to scan
- * @param refs   accumulates every read name (by-reference, write-through)
- * @param bound  accumulates every internally-bound name (by-reference, write-through)
+ * @param e       the expression to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
  */
-fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str) -> void {
+fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     match e.kind {
         parser::Var as v => refs = str_set_add(refs.value, v.name)
-        parser::Binary as b => { lam_collect_expr(b.left, refs, bound); lam_collect_expr(b.right, refs, bound) }
-        parser::Unary as u => lam_collect_expr(u.operand, refs, bound)
-        parser::Compare as c => { lam_collect_expr(c.first, refs, bound); mut i = 0; loop { if i >= c.rest.len { break }; lam_collect_expr(c.rest[i].operand, refs, bound); i++ } }
-        parser::Call as cl => { if cl.callee.segments.len == 1 { refs = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound); i++ } }
-        parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound); lam_collect_block(f.then_blk, refs, bound); if f.has_else { lam_collect_block(f.else_blk, refs, bound) } }
-        parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound); i++ } }
-        parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound)
-        parser::SafeFieldAccess as sfa => lam_collect_expr(sfa.receiver, refs, bound)
-        parser::Coalesce as co => { lam_collect_expr(co.left, refs, bound); lam_collect_expr(co.right, refs, bound) }
-        parser::Cast as ct => lam_collect_expr(ct.expr, refs, bound)
-        parser::Borrow as b => lam_collect_expr(b.operand, refs, bound)   // &x — free reads transit through the borrowed operand (AL wave F1)
-        parser::MethodCall as mc => { lam_collect_expr(mc.receiver, refs, bound); mut i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound); i++ } }
-        parser::SafeMethodCall as smc => { lam_collect_expr(smc.receiver, refs, bound); mut i = 0; loop { if i >= smc.args.len { break }; lam_collect_expr(smc.args[i], refs, bound); i++ } }   // (NP-OOP, issue #116)
-        parser::StructLit as sl => { mut i = 0; loop { if i >= sl.field_vals.len { break }; lam_collect_expr(sl.field_vals[i], refs, bound); i++ } }
-        parser::Index as ix => { lam_collect_expr(ix.receiver, refs, bound); lam_collect_expr(ix.index, refs, bound) }
-        parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound); i++ } }
-        parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound); mut i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound); i++ } }
-        parser::ArrayLit as a => { mut i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound); i++ } }
-        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound) }
+        parser::Binary as b => { lam_collect_expr(b.left, refs, bound, writes); lam_collect_expr(b.right, refs, bound, writes) }
+        parser::Unary as u => lam_collect_expr(u.operand, refs, bound, writes)
+        parser::Compare as c => { lam_collect_expr(c.first, refs, bound, writes); mut i = 0; loop { if i >= c.rest.len { break }; lam_collect_expr(c.rest[i].operand, refs, bound, writes); i++ } }
+        parser::Call as cl => { if cl.callee.segments.len == 1 { refs = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound, writes); i++ } }
+        parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound, writes); lam_collect_block(f.then_blk, refs, bound, writes); if f.has_else { lam_collect_block(f.else_blk, refs, bound, writes) } }
+        parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound, writes); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound, writes); i++ } }
+        parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound, writes)
+        parser::SafeFieldAccess as sfa => lam_collect_expr(sfa.receiver, refs, bound, writes)
+        parser::Coalesce as co => { lam_collect_expr(co.left, refs, bound, writes); lam_collect_expr(co.right, refs, bound, writes) }
+        parser::Cast as ct => lam_collect_expr(ct.expr, refs, bound, writes)
+        parser::Borrow as b => lam_collect_expr(b.operand, refs, bound, writes)
+        parser::MethodCall as mc => { lam_collect_expr(mc.receiver, refs, bound, writes); mut i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound, writes); i++ } }
+        parser::SafeMethodCall as smc => { lam_collect_expr(smc.receiver, refs, bound, writes); mut i = 0; loop { if i >= smc.args.len { break }; lam_collect_expr(smc.args[i], refs, bound, writes); i++ } }
+        parser::StructLit as sl => { mut i = 0; loop { if i >= sl.field_vals.len { break }; lam_collect_expr(sl.field_vals[i], refs, bound, writes); i++ } }
+        parser::Index as ix => { lam_collect_expr(ix.receiver, refs, bound, writes); lam_collect_expr(ix.index, refs, bound, writes) }
+        parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound, writes); i++ } }
+        parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound, writes); mut i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound, writes); i++ } }
+        parser::ArrayLit as a => { mut i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound, writes); i++ } }
+        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound, writes) }
         parser::Number => { }
         parser::StrLit => { }
         parser::ByteLit => { }
@@ -161,6 +177,47 @@ fn lam_param_type(p: parser::LambdaParam, idx: u64, exp_params: []Type, table: T
     if idx < exp_params.len { return exp_params[idx] }
     error { message = $"cannot infer the type of closure parameter `{p.name}` — annotate it (`{p.name}: T`) or give the closure a target type" }
 }
+/**
+ * lam_reject_copy_capture_write — reject a lambda body that ASSIGNS to a captured variable whose
+ * capture is by COPY. A capture is by reference only when the enclosing binding is itself
+ * `Reference`-typed (`type_lambda`'s `by_ref`); for every other type the closure gets a copy, so
+ * `mut n = 0; let g = () => { n = 5; 0 }` used to type-check, run, and DISCARD the write with no
+ * diagnostic at all — the worst M.3 category, a miscompilation of a program that looks legal.
+ *
+ * Names bound INSIDE the body (inner `let`s, the lambda's own params — the `bound` set) are the
+ * lambda's own locals and are never captures. A name that resolves to a global/function (`ns != ""`)
+ * or does not resolve at all is left alone: the body's own typing already reported the latter.
+ *
+ * True mutable capture is a language design decision, not a bug fix — this names the barrier
+ * instead of silently losing the write.
+ *
+ * @param writes  the bare-name assignment targets the body collected
+ * @param bound   the names the body binds internally (its own locals + params)
+ * @param env     the ENCLOSING typing environment (decides ref-bound vs copy)
+ * @return        `null` when every assigned name is `ref`-bound or body-local
+ * @throws        when the body assigns to a by-copy captured variable
+ */
+fn lam_reject_copy_capture_write(writes: []str, bound: []str, env: Env) -> null | error {
+    mut i: u64 = 0
+    loop {
+        if i >= writes.len { break }
+        let nm = writes[i]
+        if !str_set_has(bound, nm) {
+            match lookup_binding(env, nm) {
+                ValBinding as b => {
+                    let by_ref = match b.type { Reference => true; _ => false }
+                    if b.ns.len == 0 && !by_ref {
+                        return error { message = $"a lambda cannot assign to the captured variable `{nm}` — the capture is by COPY, so the write would be lost; take it as a `ref` parameter instead" }
+                    }
+                }
+                error => { }
+            }
+        }
+        i++
+    }
+    null
+}
+
 fn type_lambda(lam: parser::Lambda, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
     mut exp_params: []Type = teko::list::empty()
     match expected { Func as ef => exp_params = ef.params; _ => { } }
@@ -184,9 +241,11 @@ fn type_lambda(lam: parser::Lambda, expected: Type, env: Env, table: TypeTable) 
     // 3. capture analysis — free vars (refs − bound − params) that resolve to an ENCLOSING LOCAL.
     mut refs: []str = teko::list::empty()
     mut bnd: []str = teko::list::empty()
+    mut writes: []str = teko::list::empty()
     mut j = 0
     loop { if j >= lam.params.len { break }; bnd = str_set_add(bnd, lam.params[j].name); j++ }
-    lam_collect_block(lam.body, refs, bnd)
+    lam_collect_block(lam.body, refs, bnd, writes)
+    match lam_reject_copy_capture_write(writes, bnd, env) { error as e => return e; null => { } }
     mut captures: []TCapture = teko::list::empty()
     mut k = 0
     loop {
@@ -677,7 +736,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     let l = ops.l
     let r = ops.r
     if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
-        match arith_redundant_widen_cast(l, r) { Type as t => return err_redundant_cast(t); null => { } }
+        match redundant_widen_cast_of(l, r) { Type as t => return err_redundant_cast(t); null => { } }
     }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
@@ -709,37 +768,43 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
     error { message = "not a unary operator" }
 }
 
+/**
+ * type_compare — type a comparison chain (`a < b <= c`), operand by operand. Each step adopts a
+ * bare numeric literal to its partner's type through the very function the binary ops use
+ * (`adopt_binop_operands`, so `c < 0x20` compares a `byte` against a `u8`-adopted literal), applies
+ * the SHARED D1 class-3 diagnostic
+ * (`redundant_widen_cast_of` — the same guarded decision `type_binary` uses, so an arithmetic and a
+ * comparison spelling of the same operand pair always agree), and checks comparability.
+ *
+ * @param c      the comparison chain node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed comparison (always `bool`), or a type error
+ * @throws       on a `void` operand, a redundant widen cast, or an incomparable operand pair
+ */
 fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error {
     mut first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
-    mut prev = first.type
-    if type_is_void(prev) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    if type_is_void(first.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
     let fk = bignum_kind(first.type)
     if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
+    mut prev = first
     mut terms: []TCmpTerm = teko::list::empty()
     mut i = 0
     loop {
         if i >= c.rest.len { break }
-        mut cur = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
-        if type_is_void(cur.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
-        // numeric-literal adoption (parity with binary ops): a literal operand adopts the OTHER's
-        // numeric type so `c < 0x20` (byte vs int-literal) and `0x20 < c` compare (byte = u8).
-        let cur_is_num = match cur.kind { TNumber => true; _ => false }
-        let first_is_num = match first.kind { TNumber => true; _ => false }
-        if cur_is_num && literal_adopts(cur, prev) {
-            cur = TExpr { kind = cur.kind; type = prev; line = cur.line; col = cur.col }
-        } else if i == 0 && first_is_num && literal_adopts(first, cur.type) {
-            first = TExpr { kind = first.kind; type = cur.type; line = first.line; col = first.col }
-            prev = cur.type
-        }
-        if cast_widen_is_redundant(cur, prev) { return err_redundant_cast(cur.type) }
-        if i == 0 && cast_widen_is_redundant(first, cur.type) { return err_redundant_cast(first.type) }
-        if !is_comparable(prev, cur.type) { return error { message = "operands are not comparable" } }
-        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = cur })
-        prev = cur.type
+        let raw = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        let adopted = adopt_binop_operands(prev, raw)
+        if i == 0 { first = adopted.l }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { Type as t => return err_redundant_cast(t); null => { } }
+        if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
+        prev = adopted.r
         i++
     }
     TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
+
 
 /**
  * Marker: the call is not a `teko::list::*` builtin — `type_list_builtin` falls back so its
@@ -1893,43 +1958,6 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
  */
 fn err_redundant_cast(t: Type) -> error {
     error { message = $"redundant cast: this `to {type_render(t)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it" }
-}
-
-/**
- * arith_redundant_widen_cast — D1 class 3 for an arithmetic/bitwise binary op:
- * the type of WHICHEVER side carries a redundant lossless-widen `to`
- * (`cast_widen_is_redundant`, `expr.tks`), or `null` when neither side does.
- * The W-RULE already joins mixed-width integers implicitly (`widen_int_binop`),
- * so a hand-written widen immediately before the op changed nothing — UNLESS
- * flagging it could cascade into changing the op's actual result type/value:
- *
- * - the OTHER side is a bare numeric literal: a literal adopts its partner's
- *   ACTUAL (pre-cast) type (`adopt_binop_operands`, ahead of this check), so
- *   stripping the cast would change what the literal adopts to (e.g.
- *   `(id to u64) + 1` with `id: u32` — remove the cast and the literal `1`
- *   adopts `u32`, not `u64`, a real semantic change, not a no-op);
- * - the OTHER side is ITSELF an explicit `to` cast to the same target: two
- *   casts can each look individually redundant against the OTHER's post-cast
- *   type, but removing BOTH collapses the pair to the type_eq FAST PATH at
- *   their narrower shared pre-cast width (e.g. `(a to i64) - (b to i64)`
- *   with `a`/`b`: `u32` — each cast alone looks redundant against the
- *   other's `i64`, but deleting both turns a signed `i64` subtraction into a
- *   wrapping `u32` one, changing the result for `a < b`). Only a cast whose
- *   partner is a NATURALLY-typed (non-cast, non-literal) expression is safe.
- *
- * @param l  the typed left operand
- * @param r  the typed right operand
- * @return   the redundant cast's own type, or `null`
- * @since    0.3.1
- */
-fn arith_redundant_widen_cast(l: TExpr, r: TExpr) -> Type | null {
-    let l_is_literal = match l.kind { TNumber => true; _ => false }
-    let r_is_literal = match r.kind { TNumber => true; _ => false }
-    let l_is_cast = match l.kind { TCast => true; _ => false }
-    let r_is_cast = match r.kind { TCast => true; _ => false }
-    if !r_is_literal && !r_is_cast && cast_widen_is_redundant(l, r.type) { return l.type }
-    if !l_is_literal && !l_is_cast && cast_widen_is_redundant(r, l.type) { return r.type }
-    null
 }
 
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
@@ -3861,17 +3889,32 @@ fn type_array_lit_expected(a: parser::ArrayLit, expected: Type, env: Env, table:
  * `Reference`-expected / non-`Reference`-value mismatch and emits the `&` itself, mirroring
  * `type_call`'s call-argument auto-ref.
  *
+ * BOTH paths check the referent. The forwarding path used to return the source reference the moment
+ * its type was a `Reference`, BEFORE the `type_eq` below, so `ref q: Big = p` with `p: ref i64`
+ * type-checked and then wrote through a `Big`-shaped view of an `i64` cell — a memory-safety hole
+ * from a re-annotation the checker never compared. A forward now requires `type_eq(src.inner,
+ * rf.inner)`: the alias may be re-spelled, never re-typed.
+ *
  * @param bv     the binding's value expression
  * @param rf     the annotated `Reference` target
  * @param env    the typing environment
  * @param table  the resolved type table
  * @return       the typed initializer (bare-typed on the alias path, `Reference`-typed on the
  *               forwarding path)
- * @throws       when the source is neither a mutable variable nor an already-`Reference` value
+ * @throws       when the source is neither a mutable variable nor an already-`Reference` value, or
+ *               when a forwarded reference names a DIFFERENT referent type than the annotation
  */
 fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: TypeTable) -> TExpr | error {
     let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
-    match v.type { Reference => return v; _ => { } }
+    match v.type {
+        Reference as src => {
+            if !type_eq(src.inner, rf.inner) {
+                return teko::error::err_typed(error { message = "a forwarded `ref` binding must name the SAME referent type as the reference it aliases" }, type_render(rf.inner), type_render(src.inner))
+            }
+            return v
+        }
+        _ => { }
+    }
     if !type_eq(v.type, rf.inner) {
         return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
     }

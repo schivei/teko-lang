@@ -137,20 +137,33 @@ fn widen_operand(operand: TExpr, target: PrimKind) -> TExpr {
 
 /**
  * cast_widen_is_redundant — class-3 of the D1 `redundant cast` diagnostic
- * (`cast-width-hygiene-0.3.1.md` §4/§9): true iff `term` is an explicit `x to T`
- * wrapping an INTEGER operand that `int_arith_join` already widens LOSSLESSLY
- * to `T` — i.e. the W-RULE (arithmetic) or the B.22 sign-check (comparison)
- * already accepts the PRE-cast operand directly against `other`, so the
- * hand-written cast changed nothing. Deliberately conservative: a NARROWING
- * cast is never flagged (stripping it could change the compared/computed
- * value — the risk the design doc's §8 Risk 2 names), so only a provable,
- * lossless widen-to-exactly-`T` trips this. `other` must also be an integer
- * (a cast into a float/int-mismatched comparison is never redundant).
+ * (`cast-width-hygiene-0.3.1.md` §4/§9): true iff DELETING the explicit `x to T`
+ * that `term` is would leave the enclosing binary op with the SAME result type.
+ * That is the design doc's own class-3 recipe — *strip the cast, re-type, keep it
+ * iff the result type is unchanged* — so the predicate compares two joins:
+ * `int_arith_join(inner, other)` (what the op would produce WITHOUT the cast)
+ * against `int_arith_join(term.type, other)` (what it produces WITH it). Equal
+ * ⇒ the hand-written cast changed nothing.
+ *
+ * The `other` operand is therefore LOAD-BEARING, not a gatekeeper: `(a to u64) * b`
+ * with `a`/`b`: `u32` joins to `u32` without the cast and to `u64` with it — a real
+ * width change, so the cast STAYS. The pre-0.3.1 form compared
+ * `int_arith_join(inner, term.type)` against `term.type`, which is trivially true for
+ * EVERY lossless widen (the join of a narrower operand with the cast's own target IS
+ * that target), so it rejected every boundary cast in the language.
+ *
+ * Deliberately conservative in two further ways: a NARROWING cast is never flagged
+ * (stripping it could change the computed value — the design doc's §8 Risk 2), and a
+ * pairing the W-RULE REJECTS on either side (mixed-sign with no lossless common type)
+ * is never flagged either, since then the cast is what makes the program legal at all.
+ * `other` must also be an integer (a cast into a float/int-mismatched comparison is
+ * never redundant).
  *
  * @param term   a typed operand of a binary arithmetic/bitwise/comparison op
  * @param other  the type `term` is combined/compared against
  * @return       whether `term`'s cast is a provable no-op under the W-RULE
  * @see          int_arith_join — the join this mirrors
+ * @see          redundant_widen_cast_of — the guarded entry both diagnostic sites use
  * @since        0.3.1
  */
 fn cast_widen_is_redundant(term: TExpr, other: Type) -> bool {
@@ -159,25 +172,138 @@ fn cast_widen_is_redundant(term: TExpr, other: Type) -> bool {
     match term.kind {
         TCast as tc => {
             if !is_integer(tc.expr.type) { return false }
-            match int_arith_join(prim_kind_of(tc.expr.type), prim_kind_of(term.type)) {
-                PrimKind as k => k == prim_kind_of(term.type)
-                error => false
-            }
+            if !cast_is_lossless_widen(prim_kind_of(tc.expr.type), prim_kind_of(term.type)) { return false }
+            join_unchanged_without_cast(prim_kind_of(tc.expr.type), prim_kind_of(term.type), prim_kind_of(other))
         }
         _ => false
     }
 }
 
-// --- binary-op regimes (on the op token) ---
+/**
+ * cast_is_lossless_widen — does `x to <outer>` on an `inner`-typed operand WIDEN losslessly? True
+ * iff the W-RULE's own join of the two kinds is the cast's target, i.e. `outer` can hold every
+ * `inner` value. This is class-3's standing precondition (`cast-width-hygiene-0.3.1.md` §8 Risk 2):
+ * a NARROWING cast is never redundant even when the enclosing op's result type is unchanged by it,
+ * because the narrow is a CHECKED conversion that can trap and can drop bits — `n == ((len - 1) to
+ * u32)` with a `u64` `len` compares at `u64` either way, yet deleting the cast deletes a range
+ * check the author asked for.
+ *
+ * @param inner  the cast operand's own `PrimKind`
+ * @param outer  the cast's target `PrimKind`
+ * @return       true iff the cast is a lossless widen (or the identity)
+ * @since        0.3.1
+ */
+fn cast_is_lossless_widen(inner: PrimKind, outer: PrimKind) -> bool {
+    match int_arith_join(inner, outer) {
+        PrimKind as k => k == outer
+        error => false
+    }
+}
+
+/**
+ * join_unchanged_without_cast — does stripping a cast leave the binary op's result type
+ * unchanged? Joins the partner kind `other` with the PRE-cast kind `inner` and with the
+ * POST-cast kind `outer`, and reports whether both joins succeed and agree. A rejected
+ * pre-cast join (the W-RULE's mixed-sign refusal) answers false: the cast is then the
+ * reason the program type-checks, which is the opposite of redundant.
+ *
+ * @param inner  the cast operand's own `PrimKind` (before the `to`)
+ * @param outer  the cast's target `PrimKind` (after the `to`)
+ * @param other  the partner operand's `PrimKind`
+ * @return       true iff both joins resolve and resolve to the SAME kind
+ * @since        0.3.1
+ */
+fn join_unchanged_without_cast(inner: PrimKind, outer: PrimKind, other: PrimKind) -> bool {
+    match int_arith_join(inner, other) {
+        PrimKind as without => match int_arith_join(outer, other) {
+            PrimKind as with_cast => without == with_cast
+            error => false
+        }
+        error => false
+    }
+}
+
+/**
+ * redundant_widen_cast_of — the D1 class-3 decision for ONE binary op, shared by the
+ * arithmetic/bitwise site (`type_binary`) and the comparison site (`type_compare`) so the
+ * two can never drift: the type of WHICHEVER side carries a redundant lossless-widen `to`,
+ * or `null` when neither does. The W-RULE already joins mixed-width integers implicitly
+ * (`widen_int_binop`), so a hand-written widen immediately before the op changed nothing —
+ * UNLESS flagging it could cascade into changing the op's actual result type/value:
+ *
+ * - the OTHER side is a bare numeric literal: a literal adopts its partner's ACTUAL
+ *   (pre-cast) type (`adopt_binop_operands`, ahead of this check), so stripping the cast
+ *   would change what the literal adopts to (e.g. `(id to u64) + 1` with `id: u32` — remove
+ *   the cast and the literal `1` adopts `u32`, not `u64`, a real semantic change);
+ * - the OTHER side is ITSELF an explicit `to` cast: two casts can each look individually
+ *   redundant against the OTHER's post-cast type, but removing BOTH collapses the pair to
+ *   their narrower shared pre-cast width (e.g. `(a to i64) - (b to i64)` with `a`/`b`: `u32`
+ *   — deleting both turns a signed `i64` subtraction into a wrapping `u32` one, changing the
+ *   result for `a < b`). Only a cast whose partner is a NATURALLY-typed (non-cast,
+ *   non-literal) expression is safe to flag.
+ *
+ * Keeping this ONE function is the fix for the defect it replaces: the same two guards used
+ * to live only at the arithmetic site, so `(a to i64) - (b to i64)` compiled while
+ * `(a to i64) < (b to i64)` was a hard error.
+ *
+ * @param l  the typed left operand
+ * @param r  the typed right operand
+ * @return   the redundant cast's own type, or `null` when neither side carries one
+ * @since    0.3.1
+ */
+fn redundant_widen_cast_of(l: TExpr, r: TExpr) -> Type | null {
+    if !operand_may_flag_partner(r) && cast_widen_is_redundant(l, r.type) { return l.type }
+    if !operand_may_flag_partner(l) && cast_widen_is_redundant(r, l.type) { return r.type }
+    null
+}
+
+/**
+ * operand_may_flag_partner — is this operand one whose OWN shape blocks flagging its partner's
+ * cast? True for a bare numeric literal (it adopts its partner's pre-cast type) and for an
+ * explicit cast (deleting both casts of a pair changes the op's width), the two cascade cases
+ * `redundant_widen_cast_of` documents.
+ *
+ * @param e  the partner operand to classify
+ * @return   true when the partner is a literal or is itself a cast
+ * @since    0.3.1
+ */
+fn operand_may_flag_partner(e: TExpr) -> bool {
+    match e.kind {
+        TNumber => true
+        TCast => true
+        _ => false
+    }
+}
+
+/**
+ * op_is_shift — is `op` one of the two shift operators (`<<`, `>>`)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `<<`/`>>`
+ */
 fn op_is_shift(op: lexer::TokenKind) -> bool {
     op == lexer::TokenKind::Shl || op == lexer::TokenKind::Shr
 }
-// + - * / — the strictly-arithmetic ops, legal on floats AND ints (B.38).
+
+/**
+ * op_is_arith — is `op` one of the strictly-arithmetic operators (`+ - * /`), legal on floats
+ * AND integers (B.38)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `+`/`-`/`*`/`/`
+ */
 fn op_is_arith(op: lexer::TokenKind) -> bool {
     op == lexer::TokenKind::Plus || op == lexer::TokenKind::Minus ||
     op == lexer::TokenKind::Star || op == lexer::TokenKind::Slash
 }
-// %, & | ^ — the remainder/bitwise ops, integer-only (no float bit-twiddling — B.38).
+
+/**
+ * op_is_arith_bitwise — is `op` one of the remainder/bitwise operators (`% & | ^`), which are
+ * integer-only (no float bit-twiddling — B.38)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `%`/`&`/`|`/`^`
+ */
 fn op_is_arith_bitwise(op: lexer::TokenKind) -> bool {
     op == lexer::TokenKind::Percent ||
     op == lexer::TokenKind::Amp || op == lexer::TokenKind::Pipe || op == lexer::TokenKind::Caret
