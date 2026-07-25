@@ -80,6 +80,35 @@ type CoffLibLongnames = struct {
 }
 
 /**
+ * AR_INLINE_NAME_MAX — the longest member name the `ar` short-name form can hold INLINE: 15 bytes,
+ * because the 16-byte `Name` field must also carry the terminating `"/"`. The exact complement of
+ * `ar_member_name_field`'s own rejection bound, which is what makes `coff_inline_name_field`'s
+ * error arm unreachable.
+ */
+const AR_INLINE_NAME_MAX: u64 = 15
+
+/**
+ * coff_inline_name_field — the 16-byte `Name` field of a member whose name is known to be INLINE-
+ * sized (`<= AR_INLINE_NAME_MAX`).
+ *
+ * `ar_member_name_field` returns `str | error`, and its error condition is `name.len > 15` — the
+ * exact negation of this function's precondition, which the ONE caller
+ * (`coff_lib_longnames`) tests immediately before calling. The error arm is therefore
+ * demonstrably unreachable, and the previous spelling swallowed it into `""` inline, which reads
+ * like a silently-truncated name the writer would then emit. Naming the impossibility here keeps
+ * the caller flat and stops the next reader (and the audit that raised this) from re-deriving it.
+ *
+ * @param str nm  the member's bare name, already known to be `<= AR_INLINE_NAME_MAX` bytes
+ * @return str  the padded 16-byte `Name` field
+ */
+fn coff_inline_name_field(nm: str) -> str {
+    match ar_member_name_field(nm) {
+        str as s => s
+        error => ""
+    }
+}
+
+/**
  * coff_lib_longnames — resolve every member's bare name into its `Name` field
  * text, spilling any name over 15 bytes into the shared `"//"` longnames
  * payload (GNU-compatible `"/<offset>"` reference + NUL-terminated storage) —
@@ -97,9 +126,8 @@ fn coff_lib_longnames(names: []str) -> CoffLibLongnames {
     loop {
         if i >= names.len { break }
         let nm = names[i]
-        if nm.len <= (15 to u64) {
-            let inline_field = match ar_member_name_field(nm) { str as s => s; error => "" }
-            fields = teko::list::push(fields, inline_field)
+        if nm.len <= AR_INLINE_NAME_MAX {
+            fields = teko::list::push(fields, coff_inline_name_field(nm))
         } else {
             let off = bytes.len
             fields = teko::list::push(fields, ar_pad_right(teko::str::concat("/", $"{off}"), AR_NAME_WIDTH))

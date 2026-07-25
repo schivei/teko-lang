@@ -116,12 +116,47 @@ fn parse_type_primary(tokens: []lexer::Token, pos: u64) -> ParsedType | error {
  * `parse_type_primary` returns before ever calling `parse_named`, so it never re-enters this gate,
  * and a `ref T | null` union member (the null-union R2-relaxed shape) still resolves normally.
  *
- * @param tokens  the token stream
+ * The name is reserved at BOTH ends: `parse_type_decl` refuses to DECLARE a type called `Ref`
+ * (`is_reserved_type_name`). Without that, a user's own `pub type Ref` parsed fine and then every
+ * USE of it failed here with a message about a compiler-internal name the author never wrote — a
+ * diagnostic that names the wrong thing at the wrong place.
+ *
  * @param path    the just-parsed type path
  * @return        true iff the path is the single, bare, reserved segment `Ref`
  */
 fn hide_ref_surface_at(path: Path) -> bool {
     path.segments.len == 1 && path.segments[0].name == "Ref"
+}
+
+/**
+ * is_reserved_type_name — may a user DECLARE a type with this name? `Ref` is reserved: it is the
+ * compiler-internal safe reference `wrap_ref_type` builds, so a declaration of that name would be
+ * unusable (every reference to it is rejected by `hide_ref_surface_at`) and its rejection message
+ * would describe a construct the author never spelled.
+ *
+ * @param name  the declared type name
+ * @return      true iff the name is reserved for the compiler
+ */
+pub fn is_reserved_type_name(name: str) -> bool {
+    name == "Ref"
+}
+
+/**
+ * is_ref_grafia_annotation — is `te` a BARE `ref T` annotation (the `Ref<T>` node `wrap_ref_type`
+ * builds)? A `let`/`mut`/`const` binding may not carry one: the `ref` IS the binding modifier, so
+ * `mut r: ref i64 = x` used to be silently accepted as a full-blown reference binding —
+ * indistinguishable, after the parse, from the `ref r: i64 = x` the tripartite law prescribes, and
+ * flatly contradicting this unit's own documented rule. A union that CONTAINS a reference
+ * (`ref i32 | null`, the R2-relaxed absence shape) is not a bare `ref T` and stays legal.
+ *
+ * @param te  the parsed annotation type-expression
+ * @return    true iff the annotation is a top-level `ref T`
+ */
+pub fn is_ref_grafia_annotation(te: TypeExpr) -> bool {
+    match te {
+        NamedType as nt => nt.args.len == 1 && hide_ref_surface_at(nt.path)
+        _ => false
+    }
 }
 
 /**

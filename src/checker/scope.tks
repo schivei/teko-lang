@@ -308,20 +308,34 @@ fn call_ns(env: Env, callee: parser::Path) -> str {
 }
 
 /**
+ * NotBuiltinType — the marker `builtin_type` returns for a name that is simply not a built-in: a
+ * STRUCTURED "keep looking" answer, distinct from the `error` arm, which is reserved for a name
+ * that IS reserved and rejected (the removed `i128`/`u128`/`f16`).
+ *
+ * It replaces a sentinel `error { message = "not a built-in type" }` whose only reader compared the
+ * MESSAGE TEXT, from another file (`resolve.resolve_named`). Message equality as identity breaks
+ * the moment anyone rewords a diagnostic — a refactor that is supposed to be safe — and the failure
+ * is silent: the resolver would start propagating "not a built-in type" as a user-facing error
+ * instead of falling through to the user-type rules.
+ */
+type NotBuiltinType = struct { }
+
+/**
  * builtin_type — resolve an INJECTED built-in type name to its `Type` (B.19). User types
  * (struct/enum/variant) resolve against the collected registry (Etapa 3), not here.
  *
  * `i128`/`u128`/`f16` are explicit HONEST-STOP arms (drop-128, 2026-07-24): the language's widest
  * integer is 64-bit and its floats are f32/f64, so these three names never resolve to a `Prim` —
  * they name the removed 128-bit family / half-precision float and point the caller at the
- * surviving escape hatch (`teko::numeric::bigint::BigInt` / `Decimal` / `f32`) instead of falling
- * through to the generic "not a built-in type" message.
+ * surviving escape hatch (`teko::numeric::bigint::BigInt` / `Decimal` / `f32`) instead of being
+ * reported as merely unknown.
  *
  * @param name  the surface type name to resolve
- * @return      the resolved `Type`, or an error naming why `name` is not a built-in type
- * @throws      when `name` is `i128`/`u128`/`f16` (removed, honest-stop) or is not a built-in name
+ * @return      the resolved `Type`, or `NotBuiltinType` when the name is not a built-in at all
+ * @throws      when `name` is `i128`/`u128`/`f16` — removed, and rejected by NAME so the message
+ *              can point at the replacement
  */
-fn builtin_type(name: str) -> Type | error {
+fn builtin_type(name: str) -> Type | NotBuiltinType | error {
     if name == "u8" { return Prim { kind = PrimKind::U8 } }
     if name == "u16" { return Prim { kind = PrimKind::U16 } }
     if name == "u32" { return Prim { kind = PrimKind::U32 } }
@@ -345,7 +359,7 @@ fn builtin_type(name: str) -> Type | error {
     if name == "void" { return Void { } }   // (C7.2) explicit void return annotation in extern fn declarations
     if name == "ptr" { return Ptr { inner = null } }   // (C7.1a) opaque FFI pointer (transport-only)
     if name == "uptr" { return Uptr { } }   // (C7.1a) opaque word-size unsigned (transport-only)
-    error { message = "not a built-in type" }
+    NotBuiltinType { }
 }
 
 /**
