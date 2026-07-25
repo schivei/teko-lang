@@ -587,24 +587,23 @@ fn omit_flag_for_blind_link(flag: str, mode: str) -> bool {
 /**
  * (C7.20) append_reachable_os_lib_flags — the DEFERRED `[extern.libs.<key>]` flags (C7.1f),
  * appended to `argv` only when their section key applies to this build (`os_lib_key_matches`: a
- * bare OS matching `target_os`, or a full os-arch matching `target_key` — the ratified §4.2
- * arch-key fill) AND their originating key is in `reachable` AND the blind-link opt-in has not
- * withdrawn it (`omit_flag_for_blind_link`). Resolved HERE, so manifest parse stays
+ * bare OS matching the build's or the target's OS, or a full os-arch matching the resolved target —
+ * the ratified §4.2 arch-key fill) AND their originating key is in `reachable` AND the blind-link
+ * opt-in has not withdrawn it (`omit_flag_for_blind_link`). Resolved HERE, so manifest parse stays
  * host-independent.
  *
- * @param argv        the link argument vector so far
- * @param m           the resolved manifest (the deferred per-section columns)
- * @param tos         the build's target OS (`target_os`)
- * @param target_key  the build's canonical os-arch name (`resolved_target_name`)
- * @param reachable   the extern-lib keys actually reached from the program's entry points
- * @return            `argv` with every applicable, reachable deferred flag appended in order
+ * @param argv       the link argument vector so far
+ * @param m          the resolved manifest (the deferred per-section columns)
+ * @param keys       the build's applicability keys (`link_target_keys`)
+ * @param reachable  the extern-lib keys actually reached from the program's entry points
+ * @return           `argv` with every applicable, reachable deferred flag appended in order
  */
-fn append_reachable_os_lib_flags(argv: []str, m: Manifest, tos: str, target_key: str, reachable: []str) -> []str {
+fn append_reachable_os_lib_flags(argv: []str, m: Manifest, keys: LinkTargetKeys, reachable: []str) -> []str {
     mut out = argv
     mut oi = 0
     loop {
         if oi >= m.os_lib_os.len { break }
-        if os_lib_key_matches(m.os_lib_os[oi], tos, target_key) && name_in(reachable, m.os_lib_name[oi]) && !omit_flag_for_blind_link(m.os_lib_flag[oi], m.os_lib_mode[oi]) {
+        if os_lib_key_matches(m.os_lib_os[oi], keys) && name_in(reachable, m.os_lib_name[oi]) && !omit_flag_for_blind_link(m.os_lib_flag[oi], m.os_lib_mode[oi]) {
             out = teko::list::push(out, m.os_lib_flag[oi])
         }
         oi = oi + 1
@@ -891,7 +890,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     let reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
     let tos = target_os(m)
-    argv = append_reachable_os_lib_flags(argv, m, tos, resolved_target_name(), reachable)
+    argv = append_reachable_os_lib_flags(argv, m, link_target_keys(m), reachable)
     argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, tos)
     argv = teko::list::push(argv, "-o")
@@ -1018,12 +1017,11 @@ fn applicable_extern_libs(m: Manifest, target: NativeTarget) -> []ExternLibEntry
         out = teko::list::push(out, ExternLibEntry { key = m.link_lib_name[i]; flag = m.link_flags[i]; mode = m.link_mode[i]; section = "" })
         i = i + 1
     }
-    let tos = target_os_name(target)
-    let tkey = target_name(target)
+    let keys = target_link_keys(target)
     mut j: u64 = 0
     loop {
         if j >= m.os_lib_os.len { break }
-        if os_lib_key_matches(m.os_lib_os[j], tos, tkey) {
+        if os_lib_key_matches(m.os_lib_os[j], keys) {
             out = teko::list::push(out, ExternLibEntry { key = m.os_lib_name[j]; flag = m.os_lib_flag[j]; mode = m.os_lib_mode[j]; section = m.os_lib_os[j] })
         }
         j = j + 1
@@ -1586,7 +1584,7 @@ fn native_target() -> NativeTarget | error {
  * back onto the host default. The honest R2 stop for an unrecognized `TEKO_TARGET` belongs to
  * `emit_native` (which surfaces it as a build failure before anything is emitted); every OTHER
  * consumer of the resolved target — the cross-emit note (`cross_note`), the os-arch link-key
- * selection (`resolved_target_name`) and the M.3 extern-lib validators — needs a TOTAL answer and
+ * selection (`link_target_keys`) and the M.3 extern-lib validators — needs a TOTAL answer and
  * must not double-report that diagnostic, so a bad value reads here as the host default (which is
  * also exactly what the C backend, the only path that ignores `TEKO_TARGET`, links for).
  *
@@ -1754,30 +1752,70 @@ fn cross_note_for_name(name: str) -> CrossNote {
 fn resolved_cross_note() -> CrossNote { cross_note(resolved_target()) }
 
 /**
- * resolved_target_name — the canonical os-arch name of the target this build resolves to, the KEY
- * an `[extern.libs.<os-arch>]` section is matched against at link time (§4.2). An unset
- * `TEKO_TARGET` yields the host default's name, so a plain host build still selects its own
- * os-arch section.
+ * LinkTargetKeys — the keys a deferred `[extern.libs.<key>]` section is matched against, so the
+ * LINK line and the M.3 validators apply ONE applicability rule instead of two (D39).
  *
- * @return the canonical os-arch name of the resolved target
  * @since 0.3.1
  */
-fn resolved_target_name() -> str { target_name(resolved_target()) }
+type LinkTargetKeys = struct {
+    /**
+     * The BUILD's OS as `target_os` resolves it (the `[extern] target` triple, else the host) — the
+     * pre-0.3.1 match, kept verbatim so no existing manifest changes meaning.
+     */
+    build_os: str
+    /**
+     * The RESOLVED TARGET's own OS — what "any arch of that OS" (LEGISLATION:426) means for a CROSS
+     * build, where the build host's OS is not the OS being linked for. "" for a wasm target, which
+     * names no host OS (and has no link step).
+     */
+    emit_os: str
+    /** The resolved target's canonical os-arch name — the ratified §4.2 arch key. */
+    os_arch: str
+}
 
 /**
- * os_lib_key_matches — does a deferred `[extern.libs.<key>]` section apply to this build? The
- * section key is EITHER a bare OS (matching any arch of that OS — LEGISLATION:426, unchanged
- * back-compat) OR a full os-arch name (matching exactly one target — the ratified §4.2 arch-key
- * fill). One comparison per shape, no new TOML surface: this is the whole link-time delta the
- * arch dimension needed.
+ * link_target_keys — the applicability keys for THIS build's link line: `target_os`'s answer (the
+ * historic key, unchanged), the resolved target's own OS, and the resolved target's os-arch name.
  *
- * @param key         the section key as written in the manifest
- * @param tos         the build's target OS (`target_os` — the `[extern] target` triple, else the host)
- * @param target_key  the build's canonical os-arch name (`resolved_target_name`)
- * @return            true iff the section's flags belong on this build's link line
+ * @param m  the resolved manifest (its `[extern] target` triple feeds `target_os`)
+ * @return   the three keys a deferred section may match
  * @since 0.3.1
  */
-fn os_lib_key_matches(key: str, tos: str, target_key: str) -> bool { key == tos || key == target_key }
+fn link_target_keys(m: Manifest) -> LinkTargetKeys {
+    let t = resolved_target()
+    LinkTargetKeys { build_os = target_os(m); emit_os = target_os_name(t); os_arch = target_name(t) }
+}
+
+/**
+ * target_link_keys — the applicability keys for a target judged ON ITS OWN, with no build around
+ * it: the M.3 validators ask "is this lib available FOR THIS TARGET", which is a question about the
+ * target, not about the host or the `cc` triple seam, so both OS slots are the target's own OS.
+ *
+ * @param t  the resolved own-backend target
+ * @return   the three keys a deferred section may match for `t`
+ * @since 0.3.1
+ */
+fn target_link_keys(t: NativeTarget) -> LinkTargetKeys {
+    LinkTargetKeys { build_os = target_os_name(t); emit_os = target_os_name(t); os_arch = target_name(t) }
+}
+
+/**
+ * os_lib_key_matches — does a deferred `[extern.libs.<key>]` section apply? The section key is
+ * EITHER a bare OS — matching any arch of that OS (LEGISLATION:426), which for a CROSS build means
+ * the OS being linked FOR as well as the historic `target_os` answer — OR a full os-arch name,
+ * matching exactly one target (the ratified §4.2 arch-key fill). Additive by construction: every
+ * key that matched before still matches, so no existing manifest changes meaning. An empty key
+ * (a malformed `[extern.libs.]` header) matches nothing.
+ *
+ * @param key   the section key as written in the manifest
+ * @param keys  the build's (or the target's) applicability keys
+ * @return      true iff the section's flags belong on this link line
+ * @since 0.3.1
+ */
+fn os_lib_key_matches(key: str, keys: LinkTargetKeys) -> bool {
+    if key.len == 0 { return false }
+    key == keys.build_os || key == keys.emit_os || key == keys.os_arch
+}
 
 /**
  * strip_trailing_slash — `dir` without a single trailing `/`, so a joined
