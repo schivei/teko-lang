@@ -104,6 +104,163 @@ fn cd_prefix_cmd_is_a_noop_for_dot_and_empty() {
 
 #test
 /**
+ * regr_summary_line_reports_skips_in_their_own_column — the M.3 fix this vagão exists for: the
+ * regression summary has THREE columns, so a run whose every regressor was skipped can no longer
+ * print "N run, 0 failed" (indistinguishable from a run that checked everything). Pins the exact
+ * line shape the CI log is read for.
+ *
+ * @return void
+ */
+fn regr_summary_line_reports_skips_in_their_own_column() {
+    teko::assert::is_true(regr_summary_line(10, 0, 0) == "teko: regressions 10 run, 0 skipped, 0 failed")
+    teko::assert::is_true(regr_summary_line(10, 40, 0) == "teko: regressions 10 run, 40 skipped, 0 failed")
+    teko::assert::is_true(regr_summary_line(10, 4, 1) == "teko: regressions 10 run, 4 skipped, 1 failed")
+}
+
+#test
+/**
+ * regr_outcome_constructors_tally_only_skips — the accounting invariant the summary rests on: a
+ * skip leaf carries one skip, a pass and a fail leaf carry none, and `regr_add_skips` accumulates
+ * onto any of them without disturbing the verdict itself.
+ *
+ * @return void
+ */
+fn regr_outcome_constructors_tally_only_skips() {
+    teko::assert::is_true(regr_skip("no qemu").skips == 1)
+    teko::assert::is_true(regr_pass().skips == 0)
+    teko::assert::is_true(regr_fail("boom").skips == 0)
+    let agg = regr_add_skips(regr_add_skips(regr_pass(), 3), 4)
+    teko::assert::is_true(agg.skips == 7)
+    teko::assert::is_true(agg.ok)
+    teko::assert::is_false(agg.skipped)
+    let kept = regr_add_skips(regr_fail("boom"), 2)
+    teko::assert::is_false(kept.ok)
+    teko::assert::is_true(kept.message == "boom")
+}
+
+#test
+/**
+ * tail_lines_keeps_the_trailing_lines — `compile_failure_message`'s excerpt primitive: the last `n`
+ * lines, trailing newline tolerant, the whole text when it is shorter than `n`, and "" for `n == 0`.
+ *
+ * @return void
+ */
+fn tail_lines_keeps_the_trailing_lines() {
+    let s = "one\ntwo\nthree\nfour\n"
+    teko::assert::is_true(tail_lines(s, 2) == "three\nfour")
+    teko::assert::is_true(tail_lines(s, 1) == "four")
+    teko::assert::is_true(tail_lines(s, 9) == "one\ntwo\nthree\nfour")
+    teko::assert::is_true(tail_lines(s, 0) == "")
+    teko::assert::is_true(tail_lines("", 3) == "")
+}
+
+#test
+/**
+ * compile_failure_message_carries_the_cc_output — the M.3 fix behind item 5a: a scenario whose BUILD
+ * failed must report WHY. The host `cc`'s diagnostics are captured (the compiler child's streams are
+ * redirected and `cc` inherits them) but used to be discarded in favour of the compiler's own last
+ * line, which only says the `cc` failed. The message now reproduces the captured tail.
+ *
+ * @return void
+ */
+fn compile_failure_message_carries_the_cc_output() {
+    let comp = CapResult {
+        exit = 1
+        stdout = ""
+        stderr = "teko 0.3.1\nassert.c:16: undefined reference to `tk_panic'\nteko: bin/x: cc failed to build the generated C\n"
+    }
+    let msg = compile_failure_message(comp)
+    teko::assert::str_contains(msg, "undefined reference")
+    teko::assert::str_contains(msg, "cc failed to build the generated C")
+    teko::assert::str_contains(msg, "exit 1")
+}
+
+#test
+/**
+ * compile_failure_message_falls_back_to_stdout — a toolchain that reports on stdout only still gets
+ * a message with a cause in it; a build that wrote nothing at all says so instead of pretending.
+ *
+ * @return void
+ */
+fn compile_failure_message_falls_back_to_stdout() {
+    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = "" }
+    teko::assert::str_contains(compile_failure_message(out_only), "no input files")
+    let silent = CapResult { exit = 3; stdout = ""; stderr = "" }
+    teko::assert::str_contains(compile_failure_message(silent), "wrote nothing")
+}
+
+#test
+/**
+ * cross_cc_for_target_reuses_the_build_s_own_resolution — the pre-build capability probe must name
+ * the SAME cross-linker the build then invokes (`resolve_cc`'s `TEKO_TARGET` arm), so the two can
+ * never drift: riscv64 resolves to the riscv cross-gcc, a windows target to the MinGW cross-gcc, and
+ * every host-linked target (host sentinel, "", a wasm target, an unrecognised name) to "".
+ *
+ * @return void
+ */
+fn cross_cc_for_target_reuses_the_build_s_own_resolution() {
+    teko::assert::is_true(cross_cc_for_target("riscv64-linux") == "riscv64-linux-gnu-gcc")
+    teko::assert::is_true(cross_cc_for_target("x86_64-windows") == "x86_64-w64-mingw32-gcc")
+    teko::assert::is_true(cross_cc_for_target("") == "")
+    teko::assert::is_true(cross_cc_for_target(HOST_TARGET) == "")
+    teko::assert::is_true(cross_cc_for_target("wasm32-wasi") == "")
+    teko::assert::is_true(cross_cc_for_target("some-unknown-target") == "")
+}
+
+#test
+/**
+ * target_toolchain_skip_reason_is_empty_for_the_host — the host row of a backend x target `Examples`
+ * table must never be pre-skipped, however it spells the host ("" or the `HOST_TARGET` sentinel),
+ * and a cross target names its missing tool rather than being silently built with the wrong linker.
+ * The riscv assertion is host-conditional BY DESIGN: on the provisioned riscv CI lane both tools are
+ * present and the reason is empty; anywhere else the reason must be non-empty and name a tool.
+ *
+ * @return void
+ */
+fn target_toolchain_skip_reason_is_empty_for_the_host() {
+    teko::assert::is_true(target_toolchain_skip_reason("") == "")
+    teko::assert::is_true(target_toolchain_skip_reason(HOST_TARGET) == "")
+    let riscv = target_toolchain_skip_reason("riscv64-linux")
+    if tool_on_path("riscv64-linux-gnu-gcc") && tool_on_path("qemu-riscv64-static") {
+        teko::assert::is_true(riscv == "")
+        return
+    }
+    teko::assert::is_true(riscv.len > 0)
+}
+
+#test
+/**
+ * tkr_target_env_omits_the_host_sentinel — `Given target = "host"` (and an empty value) must export
+ * NO `TEKO_TARGET`, because the own backend's R1 host-derived default IS what an unset variable
+ * means; exporting `TEKO_TARGET=host` would earn the honest R2 unrecognised-target stop on every
+ * host. A real cross target still exports its token.
+ *
+ * @return void
+ */
+fn tkr_target_env_omits_the_host_sentinel() {
+    teko::assert::is_true(tkr_target_env(HOST_TARGET).len == 0)
+    teko::assert::is_true(tkr_target_env("").len == 0)
+    let cross = tkr_target_env("riscv64-linux")
+    teko::assert::is_true(cross.len == 1)
+    teko::assert::is_true(cross[0] == "TEKO_TARGET=riscv64-linux")
+}
+
+#test
+/**
+ * tkr_effective_target_folds_the_host_sentinel — a leaf-tool selector must receive a real os-arch:
+ * both "" and the `HOST_TARGET` sentinel resolve to this build host's own `teko::os()`, while a
+ * declared cross target passes through verbatim.
+ *
+ * @return void
+ */
+fn tkr_effective_target_folds_the_host_sentinel() {
+    teko::assert::is_true(tkr_effective_target("") == teko::os())
+    teko::assert::is_true(tkr_effective_target(HOST_TARGET) == teko::os())
+    teko::assert::is_true(tkr_effective_target("riscv64-linux") == "riscv64-linux")
+}
+
+#test
+/**
  * resolve_run_wrapper_is_a_noop_on_host — "" / "host" resolve to no run-wrapper, and an
  * unrecognised target name is likewise a no-op (never a fabricated wrapper), 0.3.1 C3.
  *

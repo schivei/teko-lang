@@ -135,6 +135,65 @@ fn tkr_outline_expands() {
     }
 }
 
+/**
+ * backend_target_outline_src — the two-column backend x target `Scenario Outline` shape the F5
+ * differential corpus uses: one Given per dimension, four rows crossing the two backends with the
+ * host sentinel and the riscv cross target.
+ *
+ * @return the `.tkr` source text
+ */
+fn backend_target_outline_src() -> str {
+    "Feature: f\n  Scenario Outline: diff\n    Given backend = \"<backend>\"\n    Given target = \"<target>\"\n    When built and run\n    Then exit = 0\n    Examples:\n      | backend | target        |\n      | c       | host          |\n      | own     | host          |\n      | c       | riscv64-linux |\n      | own     | riscv64-linux |\n"
+}
+
+/**
+ * env_has_token — does the lowered row's child env carry `token` verbatim?
+ *
+ * @param env    the row's env tokens
+ * @param token  the `K=V` token to look for
+ * @return       true iff `token` is present
+ */
+fn env_has_token(env: []str, token: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= env.len { break }
+        if env[i] == token { return true }
+        i = i + 1
+    }
+    false
+}
+
+#test
+/**
+ * tkr_backend_target_outline_crosses_both_dimensions — the grammar already supports an N-column
+ * `Examples` table (`tkr_table_cells` + `tkr_subst_row` are column-count agnostic), so the
+ * differential corpus gains its riscv dimension as two extra ROWS, not a duplicated feature. Pins
+ * the cross: four rows, each carrying its backend token, and `TEKO_TARGET` exported ONLY for the
+ * real cross target (the host sentinel means "unset", the own backend's R1 default).
+ *
+ * @return void
+ */
+fn tkr_backend_target_outline_crosses_both_dimensions() {
+    match parse_tkr(backend_target_outline_src()) {
+        []TkrFeature as fs => match tkr_expand_outline(fs[0].scenarios[0]) {
+            []Tkr as xs => {
+                teko::assert::is_true(xs.len == 4)
+                teko::assert::is_true(xs[0].target == HOST_TARGET)
+                teko::assert::is_true(env_has_token(xs[0].env, "TEKO_BACKEND=c"))
+                teko::assert::is_false(env_has_token(xs[0].env, "TEKO_TARGET=host"))
+                teko::assert::is_true(env_has_token(xs[1].env, "TEKO_BACKEND=native"))
+                teko::assert::is_true(xs[2].target == "riscv64-linux")
+                teko::assert::is_true(env_has_token(xs[2].env, "TEKO_BACKEND=c"))
+                teko::assert::is_true(env_has_token(xs[2].env, "TEKO_TARGET=riscv64-linux"))
+                teko::assert::is_true(env_has_token(xs[3].env, "TEKO_BACKEND=native"))
+                teko::assert::is_true(env_has_token(xs[3].env, "TEKO_TARGET=riscv64-linux"))
+            }
+            error => teko::assert::is_true(false)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
 #test
 /**
  * tkr_hex_docstring_control_bytes — a `"""<hex>"""` docstring decodes to raw bytes, ignoring the

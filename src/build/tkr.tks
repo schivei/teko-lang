@@ -103,7 +103,7 @@ pub type Tkr = struct {
     source_file: str
     /** per-scenario child env (`K=V` tokens) applied to compile AND run; from `Given env`/`Given backend`/`Given target`. [] when none. @since 0.3.1 */
     env: []str
-    /** the effective os-arch target (from `Given target`); "" → the build host's native target. @since 0.3.1 */
+    /** the effective os-arch target (from `Given target`); "" or the `HOST_TARGET` sentinel (`"host"`) → the build host's native target. @since 0.3.1 */
     target: str
     /** true for the `When built in place` entry verb (the #64 CWD-relative shape: `teko build .` with CWD == `regr_dir`). @since 0.3.1 */
     in_place: bool
@@ -1086,7 +1086,7 @@ type TkrLower = struct {
     source_file: str
     /** accumulated per-scenario child env (`K=V` tokens). @since 0.3.1 */
     env: []str
-    /** the declared effective os-arch target; "" when none declared. @since 0.3.1 */
+    /** the declared effective os-arch target; "" when none declared, `HOST_TARGET` when declared AS the host. @since 0.3.1 */
     target: str
     /** true once a `When built in place` entry verb is seen. @since 0.3.1 */
     in_place: bool
@@ -1155,6 +1155,24 @@ fn tkr_backend_env(value: str) -> []str {
 }
 
 /**
+ * tkr_target_env — the env token(s) `Given target` sugars to: a real cross target `t` →
+ * `TEKO_TARGET=<t>`; the `HOST_TARGET` sentinel (`"host"`) and the empty value → NO token at all.
+ * The sentinel exists so a backend×target `Examples` table can spell its HOST row explicitly, and
+ * for that row "the build host's own target" must mean exactly what an UNSET `TEKO_TARGET` means
+ * (`native_target()`'s R1 host-derived default). Exporting `TEKO_TARGET=host` instead would hand
+ * the own backend an unrecognised target name and earn its honest R2 stop on every host — turning
+ * the table's host row red for spelling out the default it already had.
+ *
+ * @param value  the declared target name (a cross target, `"host"`, or "")
+ * @return       the env token(s) the name sugars to, or `[]` for the host
+ * @since 0.3.1
+ */
+fn tkr_target_env(value: str) -> []str {
+    if value.len == 0 || value == HOST_TARGET { return teko::list::empty() }
+    teko::list::push(teko::list::empty(), teko::str::concat("TEKO_TARGET=", value))
+}
+
+/**
  * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`/`source`/
  * `source inline`/`env`/`backend`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
  * unknown Given noun.
@@ -1184,7 +1202,7 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     }
     if noun == "target" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        let env2 = tkr_env_extend(b.env, teko::list::push(teko::list::empty(), teko::str::concat("TEKO_TARGET=", q.text)))
+        let env2 = tkr_env_extend(b.env, tkr_target_env(q.text))
         return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = q.text; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "dependency" {
