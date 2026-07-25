@@ -58,6 +58,10 @@ on:
 permissions:
   contents: write
   actions: write
+  # The release gate resolves the PR this push came from (`commits/<sha>/pulls`) and reads its
+  # check runs; both need read access beyond `contents`.
+  pull-requests: read
+  checks: read
 
 # Never run two taggers concurrently for the same ref — avoids a race where two
 # pushes both see the tag missing and both try to create it.
@@ -75,6 +79,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+      pull-requests: read
+      checks: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,17 +97,24 @@ jobs:
           echo "teko.tkp-derived tag = $DERIVED"
 
       # ── RELEASE GATE ────────────────────────────────────────────────────────────
-      # The manifest-bump push and the CI workflows fire on the SAME commit IN PARALLEL.
-      # The tag minted below triggers release.yml (build + publish), so it must NEVER be
-      # created from a red commit. Block here until the push-triggered CI concludes GREEN
-      # on this exact SHA. Only the two workflows that actually run on this push are
-      # awaited — "Native Build & Test" (the CI gate) and "Sanitizers & Stress" (the
-      # Sanitizer gate). SAST/CodeQL is pull_request-only: it already gated the sub-PR
-      # merge and does not run on this push, so awaiting it would hang (and force-adding
-      # it to the push would re-run CodeQL on every seed bump — pure cost). Idempotent: a
-      # manifest touch that did not bump the version leaves the tag present, so we skip
-      # WITHOUT waiting. A red or timed-out gate exits non-zero → no tag, no release.
-      - name: Gate the release — require CI green on this commit before tagging
+      # The tag minted below triggers release.yml (build + publish), so it must NEVER be created
+      # from a red commit. This step VERIFIES the gates instead of waiting for them.
+      #
+      # BUG FIXED HERE (2026-07-25, romaneio .31): the previous version waited, in a 60-minute
+      # loop, for "Native Build & Test" and "Sanitizers & Stress" to complete AT $GITHUB_SHA,
+      # commenting that "only the two workflows that actually run on this push are awaited". Those
+      # two workflows — like tests.yml — are `on: pull_request:` ONLY. Nothing runs on this push,
+      # so the loop awaited runs that cannot exist, burned the full deadline and exited 1: NO TAG
+      # was ever minted, and release.yml (which triggers on the tag) was therefore never reached.
+      # A gate that cannot pass is worse than no gate: it blocks the release AND costs an hour of
+      # runner per attempt.
+      #
+      # Waiting "at the right SHA" is not the fix either: under squash-merge the commit that lands
+      # on main is a NEW commit, and the checks ran on the PR's head, a different SHA. So the gate
+      # resolves the PR this commit came from and verifies the checks of ITS head — the runs that
+      # actually gated the merge. If the PR cannot be resolved (a direct push, a non-squash merge),
+      # this fails LOUD rather than tagging in the dark.
+      - name: Gate the release — verify the originating PR's checks were green
         env:
           DERIVED: ${{ steps.derive.outputs.derived }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,39 +125,43 @@ jobs:
             exit 0
           fi
           SHA="$GITHUB_SHA"
-          DEADLINE=$(( $(date +%s) + 60 * 60 ))   # 60 min ceiling for the ASan long-pole
-          echo "Gating '$DERIVED' on the push CI for $SHA (CI gate + Sanitizer gate)…"
-          while :; do
-            all_done=1
-            failed=""
-            for wf in "Native Build & Test" "Sanitizers & Stress"; do
-              info="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}" \
-                        --jq "[.workflow_runs[] | select(.name==\"$wf\")] | sort_by(.run_number) | last | \"\(.status)|\(.conclusion)\"" || true)"
-              st="${info%%|*}"
-              cc="${info##*|}"
-              if [ -z "$info" ] || [ "$st" != "completed" ]; then
-                echo "  · $wf — ${st:-pending}"
-                all_done=0
-              elif [ "$cc" != "success" ]; then
-                echo "  ✗ $wf — completed=$cc"
-                failed="$failed [$wf=$cc]"
-              else
-                echo "  ✓ $wf — success"
-              fi
-            done
-            if [ -n "$failed" ]; then
-              echo "ABORT: required CI not green on $SHA:$failed"
-              echo "NOT tagging '$DERIVED'. Fix the failure and re-push (which re-bumps/re-tags)."
-              exit 1
+          PR_NUM="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" \
+                      --jq '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number' 2>/dev/null || true)"
+          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
+            echo "ABORT: $SHA does not resolve to a merged pull request."
+            echo "This gate verifies the CHECKS OF THE PR HEAD (the workflows here are pull_request-only,"
+            echo "so a push commit carries no checks of its own). A direct push to a tagging branch has"
+            echo "nothing to verify — land the bump through a PR, or tag by hand deliberately."
+            exit 1
+          fi
+          HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha')"
+          echo "Gating '$DERIVED': $SHA came from PR #$PR_NUM, head $HEAD_SHA — verifying its runs."
+          failed=""
+          missing=""
+          for wf in "Native Build & Test" "Sanitizers & Stress"; do
+            info="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${HEAD_SHA}" \
+                      --jq "[.workflow_runs[] | select(.name==\"$wf\")] | sort_by(.run_number) | last | \"\(.status)|\(.conclusion)\"" || true)"
+            st="${info%%|*}"
+            cc="${info##*|}"
+            if [ -z "$info" ] || [ "$info" = "null" ]; then
+              echo "  ? $wf — no run found on the PR head"
+              missing="$missing [$wf]"
+            elif [ "$st" != "completed" ]; then
+              echo "  ? $wf — $st (not completed)"
+              missing="$missing [$wf=$st]"
+            elif [ "$cc" != "success" ]; then
+              echo "  x $wf — completed=$cc"
+              failed="$failed [$wf=$cc]"
+            else
+              echo "  ok $wf — success"
             fi
-            [ "$all_done" = "1" ] && { echo "All required gates GREEN on $SHA — proceeding to tag + release."; break; }
-            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-              echo "TIMEOUT waiting for CI on $SHA — NOT tagging (safe default)."
-              exit 1
-            fi
-            echo "…waiting 30s"
-            sleep 30
           done
+          if [ -n "$failed" ] || [ -n "$missing" ]; then
+            echo "ABORT: the required gates are not verifiably green on PR #$PR_NUM head $HEAD_SHA:$failed$missing"
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          echo "All required gates GREEN on PR #$PR_NUM head $HEAD_SHA — proceeding to tag + release."
 
       - name: Create + push tag if it does not already exist
         env:

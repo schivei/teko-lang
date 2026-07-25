@@ -80,7 +80,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # 75 -> 120 (romaneio .31): the fixture-loop step became the whole regression executor (~322
+    # scratch builds), and every one of them runs with the arena oracle armed, which disables the
+    # free-list. The budget is a ceiling for a stall, not a target; the phase's own timing report
+    # (`teko: regressions … harness/compile/run`) is what says where the time actually goes.
+    timeout-minutes: 120
     permissions:
       contents: read
 
@@ -106,19 +110,19 @@ jobs:
           TEKO_MEM_PARANOID: '1'
         run: ./bin/teko . -o gen2-mp --no-verify --release
 
-      # Widen the corpus of language constructs exercised under the oracle: native-build every
-      # regressions fixture with gen1 while paranoid poisoning is armed.
-      - name: Native-build regressions fixtures (TEKO_MEM_PARANOID)
+      # Widen the corpus of language constructs exercised under the oracle: run the SINGLE regression
+      # EXECUTOR with gen1 while paranoid poisoning is armed.
+      #
+      # FIXED HERE (romaneio .31): this step used to iterate `examples/regressions/*/`, which the
+      # regressor fold left at NINE directories — the corpus moved into `regressor.tkr` (263 scenarios
+      # / ~322 builds), so the step covered a fraction of what its own comment claimed. Because both
+      # sanitizer lanes gated on a condition that never matched (fixed in the previous wagon), they
+      # had never run, and nobody saw the shrinkage. `teko test .` is the one executor: unit tests
+      # plus every `.tkr` the manifest lists, the nine directories included.
+      - name: Run the single regression executor on gen1 (TEKO_MEM_PARANOID)
         env:
           TEKO_MEM_PARANOID: '1'
-        run: |
-          out="$(mktemp -d)"
-          for proj in examples/regressions/*/; do
-            ls "$proj"*.tkp >/dev/null 2>&1 || continue
-            if [ -f "${proj}EXPECT_COMPILE_FAIL" ]; then echo "== skip ${proj} (EXPECT_COMPILE_FAIL — negative fixture, nothing to build)"; continue; fi
-            echo "== teko build $proj"
-            ./bin/teko build "$proj" -o "$out/$(basename "$proj")" --no-verify --release
-          done
+        run: ./bin/teko test .
 
   # ── HEAVY gate: ASan + UBSan + LSan (default computed-goto dispatch) — MAIN ONLY ─
   # Trigger is the MERGE to main, and only that: this job runs ONLY on push to main
@@ -134,7 +138,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # 75 -> 150 (romaneio .31): same reason as mem-paranoid, and heavier — under ASan the compiler
+    # child of every scratch build carries shadow memory, and the `cc` wrapper sanitizes the programs
+    # it compiles too.
+    timeout-minutes: 150
     permissions:
       contents: read
 
@@ -201,18 +208,16 @@ jobs:
       # (freed items list read for the .tsym map; crashed glibc builds of any project with a
       # non-capturing lambda) is caught. Leak detection off: the front-end deliberately holds
       # compiler-lifetime allocations it never frees (core.h S0).
-      - name: Native-build regressions fixtures (ASan + UBSan)
+      #
+      # FIXED HERE (romaneio .31): like the mem-paranoid lane, this step iterated
+      # `examples/regressions/*/` — nine directories after the regressor fold, not the corpus. It now
+      # runs the SINGLE executor (`teko test .`), which is the unit suite plus every `.tkr` the
+      # manifest lists, all of it compiled by the SANITIZED gen1.
+      - name: Run the single regression executor on gen1 (ASan + UBSan)
         env:
           ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          out="$(mktemp -d)"
-          for proj in examples/regressions/*/; do
-            ls "$proj"*.tkp >/dev/null 2>&1 || continue
-            if [ -f "${proj}EXPECT_COMPILE_FAIL" ]; then echo "== skip ${proj} (EXPECT_COMPILE_FAIL — negative fixture, nothing to sanitize)"; continue; fi
-            echo "== teko build $proj"
-            ./bin/teko build "$proj" -o "$out/$(basename "$proj")" --no-verify --release
-          done
+        run: ./bin/teko test .
 
   # ── TSan (Thread Sanitizer): BUILD + SMOKE ────────────────────────────────────
   # TSan runs build + smoke while the codebase is single-threaded (TSan finds no races

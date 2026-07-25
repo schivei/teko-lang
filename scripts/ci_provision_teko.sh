@@ -148,15 +148,29 @@ seed_from_tag() {
   esac
   chmod +x .seed/teko .seed/teko.exe 2>/dev/null || true
   bin=".seed/teko"; [ -f .seed/teko.exe ] && bin=".seed/teko.exe"
-  # VERSION SANITY: the seed must report its own tag's version. A miscompiled/misbuilt
-  # binary (e.g. a cross build that dropped -DTEKO_VERSION_STRING and reports
-  # 0.0.0.0-dev — such a build is also miscompiled) is rejected — skip to the next.
+  # VERSION SANITY: the seed must report EXACTLY its own tag's version number.
+  #
+  # The comparison is ANCHORED (string equality of the number), not a substring test. The old
+  # `case "$ver" in *"$expectnum"*)` accepted any report CONTAINING the tag's number, so tag
+  # v0.3.1.4 accepted a binary reporting 0.3.1.40 — and with the fourth field now a build counter,
+  # prefix collision is routine, not hypothetical.
+  #
+  # The rejection message states only what was OBSERVED. The previous one asserted "broken build",
+  # a cause nothing here verified: a version mismatch is equally consistent with a perfectly good
+  # binary published under a mislabelled tag, or with a binary that did not run at all. Naming an
+  # unverified cause in a log is the same M.3 failure as naming one in a diagnostic.
   expectnum="${tag#v}"; expectnum="${expectnum%%-*}"
   ver="$("$bin" --version 2>/dev/null || echo '')"
-  case "$ver" in
-    *"$expectnum"*) : ;;
-    *) log "$tag seed reports '$ver' (expected version $expectnum) — broken build, trying older"; return 1 ;;
-  esac
+  vernum="${ver##* }"          # "teko 0.3.1.4-beta" -> "0.3.1.4-beta"
+  vernum="${vernum%%-*}"       # -> "0.3.1.4"
+  if [ -z "$ver" ]; then
+    log "$tag seed did not report a version (the downloaded binary did not run here) — trying older"
+    return 1
+  fi
+  if [ "$vernum" != "$expectnum" ]; then
+    log "$tag version mismatch: the tag names $expectnum, the downloaded binary reports '$ver' — trying older"
+    return 1
+  fi
   seed_dir="$(CDPATH='' cd -- .seed && pwd)"
   [ -n "${GITHUB_PATH:-}" ] && printf '%s\n' "$seed_dir" >> "$GITHUB_PATH"
   log "teko $tag ready at $seed_dir (version $ver)"

@@ -13,27 +13,41 @@
 # FAST PATH (unchanged, zero extra cost): the seed builds the tip directly. This is the
 # common case and costs exactly what it always did — one build, no git history probing.
 #
-# FALLBACK (only entered when the fast path fails) — the LADDER, an iterative staged bootstrap:
+# FALLBACK (only entered when the fast path fails) — the LADDER, and it is PINNED, not probed
+# (owner ruling 2026-07-25: "se sabe quais compilam, seja determinístico e os utilize"):
 #
-#   current := the released seed
-#   repeat:
-#     if `current` builds the tip -> done
-#     rung := the NEWEST first-parent ancestor of the tip that `current` CAN build
-#             (found by cheap probing: a compiler rejects an out-of-reach corpus in seconds)
-#     current := the compiler produced by building `rung`
+#   for each rung in $LADDER_RUNGS, in order:  build it with the compiler in hand
+#   then:                                      build the tip with the last rung's compiler
 #
-# Why the rung must be DISCOVERED and not assumed: a fixed rung (the merge-base with the base
-# branch) is not necessarily buildable by the previous generation. Proven on the .31 train —
-# the cast-width wagon ADDED the W-RULE to the checker and then DELETED the now-redundant manual
-# casts from the corpus, so its own head requires a W-RULE-capable compiler while an older
-# generation dies on it with B.22 ("operands must be the same type"). The buildable rung is the
-# older wagon that has the new CAPABILITY but not yet the corpus that DEPENDS on it. Only a
-# probe can find that commit; a fixed guess lands on the wrong side of the jump.
+# The pair in LADDER_RUNGS was DISCOVERED by the probing algorithm (still here, behind
+# TEKO_LADDER_DISCOVER=1) and CONFIRMED by a green run (PR #92, run 30158725410): rung 1 is the
+# last commit the released 0.3.0.30 seed can build, and rung 2 is the last commit that rung 1's
+# compiler can build. Both are required — the log of that run shows the seed probing and REJECTING
+# rung 2, so the pair is irreducible and nobody should "optimize" the first one away.
 #
-# Each stage costs one successful build plus a few cheap rejections, and MAX_STAGES bounds the
-# whole thing. A push directly to main never enters any of this: main's own merge-base with
-# itself is itself, so the "no bootstrap gap" guard fails loud instead of pretending a fallback
-# exists — a released seed that cannot build main is a real regression, not a capability gap.
+# WHY PINNING: the probe is a linear walk that builds one project per candidate commit and reads
+# the failure. In that same run it cost ~75 failed builds and ~2.5 minutes per lane BEFORE any
+# useful work — on every lane, every platform, every PR, multiplied again under qemu. The rungs are
+# a property of the train's own history, not of the runner, so they belong in the file.
+#
+# WHY IT NEVER SILENTLY FALLS BACK TO PROBING: if a pinned rung fails to build, the pin is stale
+# and this script FAILS LOUD, naming the commit and how to rediscover the pair. Quietly reverting
+# to a probe is exactly how the determinism would be lost again (M.3 — a fallback that hides the
+# obsolete pin is worse than no pin).
+#
+# Why the pair had to be discovered in the first place: a fixed rung (the merge-base with the base
+# branch) is not necessarily buildable by the previous generation. Proven on the .31 train — the
+# cast-width wagon ADDED the W-RULE to the checker and then DELETED the now-redundant manual casts
+# from the corpus, so its own head requires a W-RULE-capable compiler while an older generation dies
+# on it with B.22 ("operands must be the same type"). The buildable rung is the older wagon that has
+# the new CAPABILITY but not yet the corpus that DEPENDS on it.
+#
+# A push directly to main never enters any of this: main's own merge-base with itself is itself, so
+# the "no bootstrap gap" guard fails loud instead of pretending a fallback exists — a released seed
+# that cannot build main is a real regression, not a capability gap.
+#
+# TRANSITIONAL: the whole ladder is a .31 measure. Owner ruling — the first wagon of .32 cuts the
+# .31 release as the seed and REMOVES this file's reason to exist.
 #
 # The intermediate builds are DRY (`--no-verify`, no test gate) because CI already gated each of
 # those commits on the PR that landed it; owner ruling 2026-07-24: the dry intermediate build is
@@ -49,6 +63,10 @@
 #   TEKO_SEED_FALLBACK_BASE_BRANCH  the branch the fallback bootstraps from (default: GITHUB_BASE_REF
 #                                   when Actions sets it — a STACKED PR bootstraps from its BASE
 #                                   branch, the predecessor wagon — else main)
+#   TEKO_LADDER_DISCOVER            set to 1 to REDISCOVER the rungs by probing instead of using the
+#                                   pins. A HUMAN tool, for refreshing LADDER_RUNGS when a pin goes
+#                                   stale; never set in CI (that would restore the cost the pins
+#                                   removed, and hide the staleness the pinned path reports).
 set -eu
 
 OUT_DIR="${1:-bin}"
@@ -186,6 +204,73 @@ PROBE_FROM="$MERGE_BASE_SHA"
 LAST_RUNG=""
 TIP_RT_DIR="$(rt_dir_of "$PWD")"
 TIP_LOG="$(mktemp)"
+
+# THE PINNED PAIR. Discovered by the probe below, confirmed green in PR #92 (run 30158725410):
+# rung 1 is the last commit the released 0.3.0.30 seed can build; rung 2 is the last commit rung 1's
+# compiler can build. BOTH are needed — that run shows the seed probing and rejecting rung 2 — so
+# do not "optimize" the first one away. Refresh with TEKO_LADDER_DISCOVER=1 (by hand, never in CI)
+# when a pin goes stale, and paste the rungs the discovery log names back into this line.
+LADDER_RUNGS="71c763d0ccec64df9fcd6c285a6782c642254e38 071c9c172f70c4fec5ff495e285cfc9cdef97fcb"
+
+# build_rung SHA STAGE — check the ladder worktree out at SHA and build it with $CURRENT_BIN into a
+# stage-private output dir, echoing that dir. Returns the build's own status.
+build_rung() {
+  rung_sha="$1"; rung_stage="$2"
+  RUNG_OUT="$WORKTREE_DIR/.rung-out-$rung_stage"
+  git -C "$WORKTREE_DIR" checkout -q --detach "$rung_sha"
+  # Clean stale artifacts of the previous stage, but PRESERVE every .rung-out-* — those hold the
+  # compilers this ladder is standing on (including the one about to run).
+  git -C "$WORKTREE_DIR" clean -fdxq -e '.rung-out-*'
+  rm -rf "$RUNG_OUT"
+  mkdir -p "$RUNG_OUT"
+  build_project "$CURRENT_BIN" "$WORKTREE_DIR" "$RUNG_OUT" "$RUNG_LOG" "$(rt_dir_of "$WORKTREE_DIR")"
+}
+
+# stale_pin_fatal SHA — the M.3 heart of the pinned ladder: a pinned rung that will not build means
+# the pin is OBSOLETE, and this says so and stops. It deliberately does NOT fall back to probing:
+# a silent fallback restores the ~75 wasted builds per lane AND hides the staleness, which is how
+# the determinism the owner asked for would quietly evaporate.
+stale_pin_fatal() {
+  log "FATAL: pinned ladder rung $1 FAILED to build — the pin in LADDER_RUNGS is obsolete."
+  log "This script does NOT fall back to probing (that is what the pins removed). To refresh:"
+  log "  TEKO_LADDER_DISCOVER=1 sh scripts/build_with_seed_fallback.sh   # run by hand, not in CI"
+  log "then paste the rung SHAs it reports into LADDER_RUNGS in this file."
+  log "----- pinned rung build log ($1) -----"
+  sed 's/^/teko-ci:   | /' "$RUNG_LOG" >&2
+  exit 1
+}
+
+if [ "${TEKO_LADDER_DISCOVER:-0}" != "1" ] && [ -n "$LADDER_RUNGS" ]; then
+  log "using the PINNED ladder (set TEKO_LADDER_DISCOVER=1 to rediscover the rungs instead)"
+  RUNG_LOG="$(mktemp)"
+  for RUNG_SHA in $LADDER_RUNGS; do
+    STAGE=$((STAGE + 1))
+    if ! build_rung "$RUNG_SHA" "$STAGE"; then stale_pin_fatal "$RUNG_SHA"; fi
+    if ! NEXT_BIN="$(resolve_bin "$RUNG_OUT")"; then
+      log "FATAL: pinned rung $RUNG_SHA built but no teko/teko.exe was found in $RUNG_OUT"
+      exit 1
+    fi
+    CURRENT_BIN="$NEXT_BIN"
+    CURRENT_DESC="gen$STAGE(pinned rung $RUNG_SHA)"
+    log "ladder stage $STAGE: built pinned rung $RUNG_SHA — that compiler is the new rung"
+  done
+  rm -f "$RUNG_LOG"
+  if ! build_project "$CURRENT_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$TIP_RT_DIR"; then
+    log "FATAL: the tip does not build with $CURRENT_DESC — the last pinned rung no longer reaches"
+    log "this tip, i.e. the pins are stale for the capability this branch adds. Refresh them with"
+    log "TEKO_LADDER_DISCOVER=1 (by hand) and update LADDER_RUNGS."
+    log "----- tip build with the last pinned rung (failure) -----"
+    cat "$TIP_LOG"
+    exit 1
+  fi
+  cat "$TIP_LOG"
+  rm -f "$FAST_LOG" "$TIP_LOG"
+  log "staged bootstrap complete — tip built by $CURRENT_DESC after $STAGE PINNED ladder stage(s)"
+  exit 0
+fi
+
+log "DISCOVERY MODE: probing for the ladder rungs (TEKO_LADDER_DISCOVER=1) — report the rungs this"
+log "run names back into LADDER_RUNGS; CI must never take this path."
 
 while :; do
   # Does the compiler we currently hold reach the tip?
