@@ -3736,11 +3736,14 @@ fn regression_coverage_exe(dir: str, exe: str, fe: Frontend) -> str {
  * compile it with `run_cc` at opt 0 (a throwaway gate-shaped binary, built fast). Distinct from the
  * `<name>-tktest` gate binary (`run_native_gate`) — that one's `main()` calls `#test`s; this one's
  * `main()` is the real CLI, so IT (not the release binary) can compile regression SNIPPETS while
- * marking the compiler-source lines those compiles exercise.
+ * marking the compiler-source lines those compiles exercise. The returned path is resolved
+ * ABSOLUTE (never `bin/…`-relative): a `When built in place` scenario `cd`s into its own project
+ * directory before invoking this exe (`compile_in_place`), so a relative path would resolve
+ * against the WRONG directory once the regression phase reaches that scenario.
  *
  * @param m     the resolved manifest (names the output stem)
  * @param prog  the checked program to emit (the SAME `fe.prog` this `teko test` run already checked)
- * @return      the built instrumented binary's path, or an error
+ * @return      the built instrumented binary's ABSOLUTE path, or an error
  * @since 0.3.1
  */
 fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram) -> str | error {
@@ -3753,9 +3756,6 @@ fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram) -> str | error
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
     match teko::io::write_file(cfile, csrc) { error as e => return e; null => { } }
     if run_cc(cfile, binp, m, prog, 0) != 0 { return error { message = "cc failed to build the coverage-instrumented regression compiler" } }
-    // ABSOLUTE, never relative: a `When built in place` scenario `cd`s into its own project
-    // directory before invoking `exe` (`compile_in_place`), so a `bin/...`-relative path would
-    // resolve against the WRONG directory once the phase reaches that scenario.
     let cwd = match teko::env::cwd() { str as c => c; error => "" }
     abs_path_of(binp, cwd)
 }
