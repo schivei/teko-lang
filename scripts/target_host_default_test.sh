@@ -7,22 +7,26 @@
 # regardless of the real host — a linux x86_64 host silently emitted an arm64
 # Mach-O object that `cc`/`ld` then rejected with an opaque cross-format error.
 #
-# scripts/diff_c_own.sh ALWAYS pins TEKO_TARGET explicitly for its differential
-# lanes (so a host-arch mismatch can never mask a regression there); this script
+# regressor.tkr's F5 backend Examples ALWAYS pin TEKO_TARGET explicitly for their
+# differential rows (so a host-arch mismatch can never mask a regression there); this script
 # deliberately LEAVES TEKO_TARGET unset, so it is the one harness that actually
 # exercises native_target()'s R1 default path end-to-end: build, well-formedness
 # check via the host-appropriate scripts/check_{elf,macho,coff}.sh, and run.
 #
+# The fixture is a trivial `exit(42)` scratch project WRITTEN BY THIS SCRIPT (0.3.1
+# regressor-principal wave — a fixed directory name under examples/regressions/ is exactly
+# the fragile-orphan-reference shape that wave closed; the own AOT backend also needs the
+# SIMPLEST possible body here, since it honest-stops on builtins like is_alpha/str_slice_chars
+# that a richer examples/regressions/ fixture would pull in).
+#
 # usage: scripts/target_host_default_test.sh
 #   TEKO=<self-hosted-teko>   (default: ./bin/teko — MUST carry emit_native)
-#   FIXTURE=<project-dir>     (default: examples/regressions/own_exit_code, exit 42)
 
 set -u
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEKO="${TEKO:-$script_dir/bin/teko}"
-FIXTURE="${FIXTURE:-$script_dir/examples/regressions/own_exit_code}"
-name="$(basename "$FIXTURE")"
+name="target_host_default"
 
 if [[ ! -x "$TEKO" ]]; then
     echo "target_host_default_test: no self-hosted teko at '$TEKO' (build it: teko . -o bin) — cannot run" >&2
@@ -35,8 +39,19 @@ host_arch="$(uname -m)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/teko-target-default.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+fixture="$work/$name"
+mkdir -p "$fixture/src"
+cat >"$fixture/$name.tkp" <<EOF
+name = "$name"
+source = "src"
+
+[artifact]
+kind = "binary"
+EOF
+printf 'exit(42)\n' >"$fixture/src/main.tks"
+
 out="$work/out"
-( unset TEKO_TARGET; env TEKO_BACKEND=native "$TEKO" build "$FIXTURE" -o "$out" --no-verify --release ) >"$work/build.log" 2>&1
+( unset TEKO_TARGET; env TEKO_BACKEND=native "$TEKO" build "$fixture" -o "$out" --no-verify --release ) >"$work/build.log" 2>&1
 build_rc=$?
 
 if [[ "$build_rc" -ne 0 ]]; then

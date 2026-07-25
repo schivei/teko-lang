@@ -74,8 +74,10 @@ run_flag
 
 # --- --backend : REMOVED (owner ruling 2026-07-24) — every spelling, in every dispatch shape,
 #     is rejected honestly (exit 2) with a message pointing at TEKO_BACKEND, never silently
-#     ignored or mistaken for the project positional -------------------------------------------
-BACKEND_FIXTURE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)/examples/regressions/own_exit_code"
+#     ignored or mistaken for the project positional. The rejection fires at CLI dispatch,
+#     BEFORE any project directory is resolved, so the positional here need not be a real
+#     buildable project — the repo root itself (always present) is enough. -------------------
+BACKEND_FIXTURE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
 run_flag build --backend=native "$BACKEND_FIXTURE_DIR"
 [ "$RC" -eq 2 ] || fail "'build --backend=native' exit $RC (want 2)"

@@ -116,11 +116,19 @@ SHARE_DIR="$FAKE_HOME/.local/share/teko"
 info "share dir staged correctly: $SHARE_DIR"
 
 # ── the acceptance test: build a REAL fixture from an isolated cwd, TK_RT_DIR unset ──
-FIXTURE_SRC="$REPO_ROOT/examples/regressions/exit_success_path"
-[ -d "$FIXTURE_SRC" ] || fail "missing fixture: $FIXTURE_SRC"
+# The fixture is a trivial `exit(5)` project WRITTEN BY THIS SCRIPT (0.3.1
+# regressor-principal wave — a fixed examples/regressions/ directory name is exactly the
+# fragile-orphan-reference shape that wave closed).
 FIXTURE="$WORK/fixture"
-cp -R "$FIXTURE_SRC" "$FIXTURE"
-rm -rf "${FIXTURE:?}/out" "${FIXTURE:?}/bin"
+mkdir -p "$FIXTURE/src"
+cat >"$FIXTURE/install_share_runtime_fixture.tkp" <<EOF
+name = "install_share_runtime_fixture"
+source = "src"
+
+[artifact]
+kind = "binary"
+EOF
+printf 'exit(5)\n' >"$FIXTURE/src/main.tks"
 
 BUILD_LOG="$WORK/build.log"
 if ! ( cd "$FIXTURE" && env -i HOME="$FAKE_HOME" PATH="/usr/bin:/bin" "$INSTALLED_BIN" . -o out --no-verify --release >"$BUILD_LOG" 2>&1 ); then
@@ -128,7 +136,7 @@ if ! ( cd "$FIXTURE" && env -i HOME="$FAKE_HOME" PATH="/usr/bin:/bin" "$INSTALLE
     fail "the installed binary could not build a project outside a checkout (issue #157 regressed)"
 fi
 
-BIN_OUT="$FIXTURE/out/exit_success_path"
+BIN_OUT="$FIXTURE/out/install_share_runtime_fixture"
 [ -x "$BIN_OUT" ] || fail "build reported success but produced no executable: $BIN_OUT"
 
 set +e
