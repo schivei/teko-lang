@@ -136,76 +136,14 @@ jobs:
       # pure formatting. Formatting stays covered by running `teko fmt` + the per-wave W15
       # retrofit. Re-add a `fmt --check` gate only once #372 makes fmt align properly.
 
-  # ── RISC-V own==C differential under QEMU (BLOCKING — gated in the CI gate job) ─
-  riscv64-qemu:
-    needs: changes
-    # RE-ENABLED + RE-SCOPED (issue #387 B2-8): the OLD lane ran the FULL `test . --coverage`
-    # under qemu user-mode (~8-9m, 85% emulated EXECUTION), so it was disabled (#305). B2-8
-    # replaces that with the FAST tiny exit(n) C-vs-own differential (seconds, not minutes):
-    # build gen1 (the PR compiler under test, which now carries the own riscv64 AOT backend),
-    # then run scripts/diff_c_own.sh in riscv mode — each exit(n) fixture built BOTH via the
-    # C backend cross-compiled for riscv AND via the own riscv pipeline (TEKO_TARGET=riscv64-linux),
-    # both cross-linked by riscv64-linux-gnu-gcc, both RUN under qemu-riscv64-static, asserting
-    # own_exit == C_exit. This proves own==C on riscv end-to-end without the full emulated gate.
-    if: needs.changes.outputs.run == 'true'
-    name: build-test / linux-riscv64 (qemu own==C differential)
-    runs-on: ubuntu-latest
-    continue-on-error: false
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install cross-compiler + QEMU + host clang
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user-static clang
-
-      # riscv has no release binary asset, so it can't download a seed like the other
-      # platforms. Seed the x86_64 released binary; it builds gen1 (the PR compiler under
-      # test) from THIS branch's src/, so gen1 carries the own riscv64 AOT backend
-      # (emit_native_riscv) — the C bootstrap / a cmake build from the frozen twins would
-      # NOT. The differential runs gen1, never the raw seed.
-      - name: Provision teko (x86_64 released seed)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci_provision_teko.sh linux-x86_64
-
-      # scripts/build_with_seed_fallback.sh (owner ruling 2026-07-24): bootstraps through
-      # gen1(main) when the raw seed cannot compile the tip directly (the seed only has to
-      # build `main`, never a capability jump this PR itself introduces).
-      - name: Build gen1 (the PR compiler under test — carries emit_native_riscv)
-        run: sh scripts/build_with_seed_fallback.sh bin
-
-      # The fast riscv own==C differential: TEKO_DIFF_TARGET=riscv64-linux selects the riscv
-      # lane in diff_c_own.sh (NOT uname — this host is x86_64). Per exit(n) fixture it builds
-      # the C-riscv binary (C backend + TEKO_CC=riscv64-linux-gnu-gcc) and the own-riscv binary
-      # (TEKO_BACKEND=native TEKO_TARGET=riscv64-linux + cross-gcc-as-linker), runs BOTH under
-      # qemu-riscv64-static, and asserts identical exit code + stdout, plus check_elf.sh (riscv
-      # binutils) well-formedness on the own .o. own_print_exit stays a KNOWN-STOP (the shared
-      # println LIR-builtin gap, target-independent).
-      - name: RISC-V C-vs-own differential under QEMU (own AOT backend == C backend, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-          TEKO_DIFF_TARGET: riscv64-linux
-        run: ./scripts/diff_c_own.sh
-
-  # ── gen1 checks: CLI surface and the own==C differential (issue #524) ──
+  # ── gen1 checks: CLI surface + the R1 host-target default (0.3.1 regressor-principal) ──
   # Builds gen1 (the PR's compiler under test) from the downloaded release seed, then runs
-  # CLI-surface smokes + the CWD-build-regression check (#64) + the own AOT backend == C
-  # backend differential. Test EXECUTION (`teko test .`) was moved to the isolated
-  # tests.yml (owner design 2026-07-15 — one test runner per OS, in parallel with these
-  # diagnostics), so it is NO LONGER run here. The own==C differential is the replacement
-  # cross-check for the retired VM==native harness (issue #524): the VM shared the
-  # front-end with native but not codegen, so it protected little there while its
-  # wrapper-descent bug (VM-only) cost real false-failures — see
-  # docs/design/vm-retirement.md §3. The linux-x86_64 leg additionally runs the wasm
-  # differential (issue #389 C1-8c, the keystone ritual point): own-wasm(wasmtime) ==
-  # C-native over scripts/validate_wasm_own.sh's corpus, REQUIRED (not honest-skipped —
-  # both engines are provisioned in this job, so their absence is a real failure).
+  # CLI-surface smokes + the R1 host-target-default check. Every regression assertion this
+  # job used to carry (the CWD-build check, EXPECT_COMPILE_FAIL/EXPECT_EXIT const checks,
+  # the E2E cross-module check, the own==C differential, and the wasm differential) now
+  # lives in `regressor.tkr` + the project-regressors under `examples/regressions/`, run
+  # NATIVELY by `teko test .` in tests.yml (the sole regression executor, D6) — this job
+  # no longer duplicates them.
   gen1-checks:
     needs: changes
     if: needs.changes.outputs.run == 'true'
@@ -269,7 +207,7 @@ jobs:
       # MOVED OUT of this job into the isolated .github/workflows/tests.yml, which runs the
       # suite once per OS (1 linux, 1 macOS, 1 windows) in PARALLEL with these diagnostics —
       # "assim não precisa rodar testes nestes outros diagnósticos para nenhum SO ou Arch."
-      # This job now builds gen1 and validates the CLI surface + the own==C differential ONLY;
+      # This job now builds gen1 and validates the CLI surface + the R1 host-target default ONLY;
       # test EXECUTION lives entirely in tests.yml.
 
       - name: CLI flags on gen1 (identical version string)
@@ -284,71 +222,10 @@ jobs:
         shell: bash
         run: ./scripts/region_drop_subtree_test.sh
 
-      # CWD-build-regression check (issue #64): `cd <project> && teko build .` — the exact
-      # invocation shape a real user takes — must exit 0 and produce a working binary, for
-      # both the seed compiler and the self-hosted gen1 binary it just built.
-      - name: CWD build regression check (issue #64, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-        run: ./scripts/native_regressions.sh
-
-      # EXPECT_COMPILE_FAIL assertion (issue #610, on gen1): ~30 negative regression
-      # fixtures under examples/regressions/ carry an EXPECT_COMPILE_FAIL marker but no CI
-      # leg ever built them and asserted the build actually fails — sanitizers.yml only
-      # SKIPS them, and the VM-era scripts/diff_vm_native.sh that once asserted this was
-      # retired with the VM lane (#524/#395). This step closes that gap on gen1 (the
-      # compiler under test).
-      - name: EXPECT_COMPILE_FAIL regression check (issue #610, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-        run: ./scripts/compile_fail_regressions.sh
-
-      # EXPECT_EXIT positive const regression (issue #594 crumb 8f, on gen1): the positive
-      # counterpart of the check above — ~9 const fixtures under examples/regressions/
-      # (const_scalar_inline, member_const_scalar, …) carry an EXPECT_EXIT marker but no CI
-      # leg ever built and ran them (scripts/native_regressions.sh only smokes char_ops). A
-      # fundamental const-resolution bug (collect_with_seed) was caught only by a unit test —
-      # this step builds + runs every single-project EXPECT_EXIT fixture on gen1 (the
-      # compiler under test), asserting the produced binary's exit code, before any seed
-      # bump can ship a const regression unnoticed.
-      - name: EXPECT_EXIT positive const regression check (issue #594 crumb 8f, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-        run: ./scripts/positive_regressions.sh
-
-      # E2E cross-module const regression (issue #594 crumb 8d, on gen1): the
-      # serialize -> .tkl -> deserialize -> seed_from_dep -> inline_consts -> lower -> run
-      # capability (#594 crumb 8) was previously proven only by in-memory checker unit
-      # tests. This step builds the real dep/consumer PAIR under examples/regressions/
-      # (a fixture the generic build-all loops skip by construction — no top-level .tkp),
-      # provisioning packages/ in a scratch copy for BOTH the seed and self-hosted
-      # compilers, closing the harness gap named in the #594 crumb-8 review.
-      - name: E2E cross-module const regression check (issue #594 crumb 8d, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-        run: ./scripts/crossmodule_regressions.sh
-
-      # ── C-vs-own differential (issue #385 A4-5 arm64; issue #386 B1-8 x86-64) ──
-      # The own AOT backend (TEKO_BACKEND=native) links a real native executable via cc.
-      # This gate builds each exit(n) fixture with BOTH backends on gen1 (which carries
-      # emit_native, built from the PR sources) and asserts own-native exit == C-native
-      # exit, plus a host-tool well-formedness check on the real emitted .o. TWO executing
-      # lanes, host-selected: macOS-arm64 emits arm64 Mach-O (check_macho); linux-x86_64
-      # emits x86-64 ELF via TEKO_TARGET=x86_64-elf (check_elf) and RUNS the ELF — the
-      # executing x86 differential the macOS lane cannot host. Other hosts honest-skip.
-      - name: C-vs-own differential (own AOT backend == C backend, on gen1)
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-        run: ./scripts/diff_c_own.sh
-
       # ── R1 host-target default (owner ruling 2026-07-24, teko-target-crosslink §0/§2.1) ──
-      # diff_c_own.sh above ALWAYS pins TEKO_TARGET explicitly, so it never exercises
-      # native_target()'s host-derived default. This step deliberately leaves TEKO_TARGET
+      # regressor.tkr's F5 backend Examples (tests.yml) always pin TEKO_TARGET explicitly, so
+      # they never exercise native_target()'s host-derived default. This step deliberately
+      # leaves TEKO_TARGET
       # unset and asserts the own AOT backend still emits THIS host's own object format
       # (the reproduced bug: an unset TEKO_TARGET used to hardcode arm64 Mach-O on every
       # host, so a linux/windows `cc`/`ld` then rejected the wrong-format object outright).
@@ -357,57 +234,6 @@ jobs:
         env:
           TEKO: ./bin/teko
         run: ./scripts/target_host_default_test.sh
-
-      # ── wasm differential (issue #389 C1-8c — THE KEYSTONE RITUAL POINT) ──
-      # Provisions wasmtime (pinned official release tarball, the SAME pinned-download
-      # shape as release-cross-smoke's zig step below) and WABT's `wasm-validate` (apt,
-      # pinned to the runner image's resolved package build), then runs the full
-      # own-wasm(wasmtime) == C-native differential (scripts/validate_wasm_own.sh) on
-      # gen1 (which carries emit_native_wasm, C1-5/6/7). Linux-x86_64 only: the wasmtime
-      # asset below and `apt-get install` are both linux-x86_64-shaped, and provisioning a
-      # second engine pair for macOS-arm64 is out of this crumb's scope (named blocker B-1,
-      # backend-wasm.md §14.2) — that lane's own host-specific gates already honest-skip
-      # the same way in the C-vs-own differential step above.
-      - name: Install wasmtime (official pinned tarball)
-        if: matrix.label == 'linux-x86_64'
-        env:
-          WASMTIME_VERSION: "46.0.1"
-        run: |
-          set -eu
-          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux.tar.xz" | tar -xJ
-          echo "$PWD/wasmtime-v${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
-
-      - name: Install wabt (WABT, apt, pinned)
-        if: matrix.label == 'linux-x86_64'
-        env:
-          WABT_APT_VERSION: "1.0.34+dsfg2+~cs1.0.32-1ubuntu2"
-        run: |
-          set -eu
-          sudo apt-get update -y
-          sudo apt-get install -y "wabt=${WABT_APT_VERSION}"
-
-      # Fail-closed, not skip-closed (issue #389 B-1): a broken/no-op provisioning step
-      # (PATH not exported, wrong arch asset, apt pin drift) must break THIS step, before
-      # validate_wasm_own.sh ever gets a chance to (mis)report a pass.
-      - name: Assert wasm engines are actually on PATH
-        if: matrix.label == 'linux-x86_64'
-        run: |
-          set -eu
-          command -v wasmtime
-          command -v wasm-validate
-          wasmtime --version
-          wasm-validate --version
-
-      # REQUIRE_WASM_ENGINE=1 (validate_wasm_own.sh) turns the dev-laptop honest-skip into
-      # a hard failure: CI provisioned both engines above, so an absent/broken engine here
-      # is a real regression, never a silently-green skip — the keystone's whole point.
-      - name: wasm differential (own-wasm(wasmtime) == C-native, on gen1 — issue #389 keystone)
-        if: matrix.label == 'linux-x86_64'
-        shell: bash
-        env:
-          TEKO: ./bin/teko
-          REQUIRE_WASM_ENGINE: "1"
-        run: ./scripts/validate_wasm_own.sh
 
   # ── AR ELF/Mach-O/COFF real-toolchain validation (port from theory/kp16-ar-macho-coff) ──
   # KP16's own-native static-archive writer ships three container lanes: the GNU-format
@@ -419,7 +245,7 @@ jobs:
   # before its hunks ported back here; the linux-x86_64/ELF leg was added drop-128
   # 2026-07-24, closing the gap the ELF lane's own byte-layout goldens
   # (`src/backend/objfile_ar_test.tkt`) don't reach — a real `ar`/`nm`/`ld`). Builds
-  # examples/regressions/ar_link_run via `TEKO_BACKEND=native` — `native_target()`'s
+  # examples/toolchain/ar_link_run via `TEKO_BACKEND=native` — `native_target()`'s
   # host default (R1, owner ruling 2026-07-24) selects the right container with no
   # `TEKO_TARGET` override — runs the host-tool well-formedness gate
   # (`scripts/check_ar_elf.sh` / `scripts/check_ar_macho.sh` / `scripts/check_ar_coff.sh`,
@@ -468,7 +294,7 @@ jobs:
           TEKO_BACKEND: native
         run: |
           set -eu
-          cd examples/regressions/ar_link_run
+          cd examples/toolchain/ar_link_run
           ../../../bin/teko build . -o bin --no-verify
           ls -la bin
 
@@ -477,21 +303,21 @@ jobs:
         shell: bash
         env:
           AR_CHECK_REQUIRE_TOOLS: "1"
-        run: ./scripts/check_ar_elf.sh examples/regressions/ar_link_run/bin/libar_link_run.a ar_link_run__add
+        run: ./scripts/check_ar_elf.sh examples/toolchain/ar_link_run/bin/libar_link_run.a ar_link_run__add
 
       - name: Host-toolchain well-formedness gate (ar/nm/ld64 — Mach-O)
         if: matrix.format == 'macho'
         shell: bash
         env:
           AR_CHECK_REQUIRE_TOOLS: "1"
-        run: ./scripts/check_ar_macho.sh examples/regressions/ar_link_run/bin/libar_link_run.a ar_link_run__add
+        run: ./scripts/check_ar_macho.sh examples/toolchain/ar_link_run/bin/libar_link_run.a ar_link_run__add
 
       - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — COFF)
         if: matrix.format == 'coff'
         shell: bash
         env:
           AR_CHECK_REQUIRE_TOOLS: "1"
-        run: ./scripts/check_ar_coff.sh examples/regressions/ar_link_run/bin/ar_link_run.lib ar_link_run__add
+        run: ./scripts/check_ar_coff.sh examples/toolchain/ar_link_run/bin/ar_link_run.lib ar_link_run__add
 
       # PRIMARY consumibility criterion — a real host cc/ld links + RUNS the consumer
       # against the archive. add(40, 2) = 42.
@@ -501,7 +327,7 @@ jobs:
         run: |
           set -eu
           cc -c scripts/ar_link_run_consumer.c -o /tmp/ar_link_run_consumer.o
-          cc /tmp/ar_link_run_consumer.o examples/regressions/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
+          cc /tmp/ar_link_run_consumer.o examples/toolchain/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
           set +e
           /tmp/ar_link_run_consumer_bin
           rc=$?
@@ -517,7 +343,7 @@ jobs:
         run: |
           set -eu
           clang -c scripts/ar_link_run_consumer.c -o /tmp/ar_link_run_consumer.o
-          clang /tmp/ar_link_run_consumer.o examples/regressions/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
+          clang /tmp/ar_link_run_consumer.o examples/toolchain/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
           set +e
           /tmp/ar_link_run_consumer_bin
           rc=$?
@@ -535,11 +361,11 @@ jobs:
           set -eu
           clang -c scripts/ar_link_run_consumer.c -o ar_link_run_consumer.o
           obj_arg=ar_link_run_consumer.o
-          lib_arg="examples/regressions/ar_link_run/bin/ar_link_run.lib"
+          lib_arg="examples/toolchain/ar_link_run/bin/ar_link_run.lib"
           out_arg=ar_link_run_consumer.exe
           if command -v cygpath >/dev/null 2>&1; then
             obj_arg="$(cygpath -w ar_link_run_consumer.o)"
-            lib_arg="$(cygpath -w examples/regressions/ar_link_run/bin/ar_link_run.lib)"
+            lib_arg="$(cygpath -w examples/toolchain/ar_link_run/bin/ar_link_run.lib)"
             out_arg="$(cygpath -w ar_link_run_consumer.exe)"
           fi
           MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' lld-link /nologo "/out:$out_arg" /entry:main /subsystem:console "$obj_arg" "$lib_arg"
@@ -608,11 +434,11 @@ jobs:
       - name: Run the x86_64-glibc cross artifact over the corpus (miscompile guard)
         run: ./gd-linux-x86_64-glibc/teko . -o /tmp/xrun --no-verify --release
 
-  # ── gate: aggregates all build-test + riscv + gen1-checks + cross-smoke results ──
+  # ── gate: aggregates all build-test + gen1-checks + cross-smoke results ──
   gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [changes, build-test, riscv64-qemu, gen1-checks, ar-elf-macho-coff-validation, release-cross-smoke]
+    needs: [changes, build-test, gen1-checks, ar-elf-macho-coff-validation, release-cross-smoke]
     if: always()
     permissions: {}
 
@@ -620,7 +446,6 @@ jobs:
       - name: Evaluate results
         run: |
           BUILD_RESULT="${{ needs.build-test.result }}"
-          RISCV_RESULT="${{ needs.riscv64-qemu.result }}"
           GEN1_RESULT="${{ needs.gen1-checks.result }}"
           AR_RESULT="${{ needs.ar-elf-macho-coff-validation.result }}"
           SMOKE_RESULT="${{ needs.release-cross-smoke.result }}"
@@ -628,7 +453,6 @@ jobs:
 
           echo "changes.run   = $CHANGES"
           echo "build-test    = $BUILD_RESULT"
-          echo "riscv64-qemu  = $RISCV_RESULT"
           echo "gen1-checks   = $GEN1_RESULT"
           echo "ar-elf-macho-coff-validation = $AR_RESULT"
           echo "release-cross-smoke = $SMOKE_RESULT"
@@ -650,16 +474,6 @@ jobs:
           # job; any failure there gates the merge.
           if [ "$GEN1_RESULT" = "failure" ] || [ "$GEN1_RESULT" = "cancelled" ]; then
             echo "ERROR: gen1-checks $GEN1_RESULT"
-            exit 1
-          fi
-
-          # riscv64-qemu is BLOCKING (main-integrity law: green means green everywhere).
-          # It seeds from the released x86_64 binary, builds gen1 (the PR compiler carrying
-          # the own riscv64 AOT backend), and runs the exit(n) own==C differential under
-          # qemu-riscv64-static (issue #387 B2-8), so a failure is a real regression, not
-          # infra noise — a red riscv gates the merge and, downstream, the release.
-          if [ "$RISCV_RESULT" = "failure" ] || [ "$RISCV_RESULT" = "cancelled" ]; then
-            echo "ERROR: riscv64-qemu $RISCV_RESULT"
             exit 1
           fi
 

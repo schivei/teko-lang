@@ -222,10 +222,11 @@ jobs:
   #      (instrumentation/flag incompatibilities) the moment it is introduced, so the day
   #      threading lands the TSan toolchain is already known-good.
   #   2. SMOKE: use the TSan-built `teko` to BUILD one small existing regression fixture
-  #      (examples/regressions/exit_success_path) and RUN the produced binary, asserting
-  #      its deterministic exit code (5). This proves the runtime executes race-clean
+  #      (examples/regressions/cwd_build) and RUN the produced binary, asserting
+  #      its deterministic exit code (6). This proves the runtime executes race-clean
   #      under TSan end-to-end (front-end -> C -> host cc -> execute) on a real program
-  #      that does actual work (a cross-file loop + a call-through-function-value closure).
+  #      that does actual work (cross-file UTF-8 codepoint operations, the #64 CWD-relative
+  #      invocation shape project-regressor).
   # The #128 reliability guards are kept on the smoke run: the `timeout` wrapper makes any
   # residual stall FAIL LOUD (exit 124) at a known bound instead of a silent SIGTERM (143),
   # and the bounded TSAN_OPTIONS keep TSan correct for FUTURE threading bugs while capping
@@ -278,7 +279,7 @@ jobs:
         run: |
           set -euo pipefail
           out="$(mktemp -d)"
-          proj="examples/regressions/exit_success_path"   # tiny; deterministically exits 5
+          proj="examples/regressions/cwd_build"   # tiny; deterministically exits 6
           echo "== teko build $proj (TSan)"
           timeout --kill-after=30s 600s ./bin/teko build "$proj" -o "$out" --no-verify --release | tee build.log
           bin="$(sed -n 's/.*: built //p' build.log | tail -n1)"
@@ -286,16 +287,16 @@ jobs:
             echo "ERROR: could not locate the built binary from the TSan build output." >&2
             exit 1
           fi
-          echo "== run $bin (TSan) — expecting deterministic exit code 5"
+          echo "== run $bin (TSan) — expecting deterministic exit code 6"
           set +e
           timeout --kill-after=30s 600s "$bin"
           code=$?
           set -e
-          if [ "$code" -ne 5 ]; then
-            echo "ERROR: TSan smoke run exited $code, expected 5 (race/abort/timeout/divergence)." >&2
+          if [ "$code" -ne 6 ]; then
+            echo "ERROR: TSan smoke run exited $code, expected 6 (race/abort/timeout/divergence)." >&2
             exit 1
           fi
-          echo "TSan smoke passed: build + run race-clean, exit code 5 as expected."
+          echo "TSan smoke passed: build + run race-clean, exit code 6 as expected."
 
   # ── Windows self-host smoke ───────────────────────────────────────────────────
   # The ONLY per-PR lane that self-builds gen-1 on Windows (build-test only runs the
