@@ -3669,10 +3669,14 @@ fn per_commit_diff_text(base: str) -> str | error {
  * @param fe              the assembled front-end product (checked program + manifest floors)
  * @param base            the git ref/sha to measure the delta against
  * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on a below-floor delta
+ * @param pre_regr_cob    the Cobertura XML snapshot taken right after the `#test` gate, BEFORE the
+ *                         regression tier's `merge_regression_coverage` folds in any `.tkcov` (0.3.1
+ *                         cobertura fix): the delta gate must credit only lines a `#test` actually
+ *                         exercised, never a line merely REACHED by a regressive run
  * @return                0 unless `cov_validation` is set AND the delta is below the [coverage] lines floor
  * @throws                under `cov_validation`, when the delta is below the lines floor
  */
-fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) -> i32 {
+fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool, pre_regr_cob: str) -> i32 {
     let diff = match per_commit_diff_text(base) {
         str as s => s
         error => {
@@ -3681,7 +3685,7 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool) 
         }
     }
     let cls = changed_line_set(diff)
-    let covlines = cov_lines_from_cobertura(coverage::cov_cobertura(fe.prog))
+    let covlines = cov_lines_from_cobertura(pre_regr_cob)
     let d = delta_line_coverage(covlines, cls)
     teko::io::println(per_commit_report_str(base, d))
     let pct = delta_pct(d)
@@ -3809,6 +3813,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
     if trc != 0 { return trc }
+    let pre_regr_cob = coverage::cov_cobertura(fe.prog)
     let has_regr = fe.manifest.test_regression_files.len > 0
     let regr_rc = if has_regr { run_regression_tier(dir, exe, fe) } else { 0 }
     if gen_cov {
@@ -3819,7 +3824,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     let floor_rc = enforce_coverage_floors(dir, fe, cov_validation)
     if floor_rc != 0 { return floor_rc }
     if per_commit_base.len > 0 {
-        let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation)
+        let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation, pre_regr_cob)
         if pc != 0 { return pc }
     }
     if has_regr && regr_rc != 0 { return regr_rc }
