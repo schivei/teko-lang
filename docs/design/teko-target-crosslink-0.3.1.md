@@ -434,8 +434,15 @@ Each crumb is independently gate-able; ritual (full gate) points marked.
   `target_objfmt` — as standalone matches for C3 to fold into `TargetRow`.
 - **C4 (M-L). DONE (2026-07-25, feat/0.3.1-target-crosslink).** Ratifies §4.1 and fills §4.2: the
   `[extern.libs.<os-arch>]` section key was ALREADY captured verbatim by the parser (now pinned by a
-  test), so the delta is at LINK time — `os_lib_key_matches` (a bare OS, as before, OR the full
-  os-arch) consumed by `append_reachable_os_lib_flags`. The `static:`/`shared:` mode is no longer
+  test), so the delta is at LINK time — `os_lib_key_matches` over `LinkTargetKeys`
+  (`build_os`/`emit_os`/`os_arch`), the ONE applicability rule now shared by the link line
+  (`link_target_keys`) and the M.3 validators (`target_link_keys`). **Second defect found and fixed
+  in-crumb:** a bare-OS section was matched ONLY against `target_os`, which answers the HOST OS when
+  no `[extern] target` triple is set — so cross-linking to `x86_64-windows` on linux silently dropped
+  `[extern.libs.windows]`, contradicting §4.2's own "any arch of that OS". The rule now also matches
+  the OS being linked FOR; additive by construction (every key that matched before still matches), and
+  `target_os`/`#os()` pruning are deliberately untouched (moving those changes conditional-compilation
+  semantics for cross builds — a separate decision). The `static:`/`shared:` mode is no longer
   stripped: `mf_extern_spec` returns `ExternLibSpec { flag; mode }` into the new
   `link_mode`/`os_lib_mode` columns. **Bug found and fixed in-crumb:** `mf_extern_flag` tested for a
   path BEFORE stripping the mode prefix, so the ratified `static:vendor/x86_64-linux/libfoo.a`
