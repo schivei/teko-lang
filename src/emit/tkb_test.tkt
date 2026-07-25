@@ -77,3 +77,49 @@ fn bytes_equal(a: []byte, b: []byte) -> bool {
     }
     true
 }
+
+/**
+ * tkh_of_version — an otherwise VALID `.tkh` frame whose version field is overwritten with `ver`:
+ * the `"TKH\0"` magic and the FNV-1a of the body both stay correct, which is exactly the shape a
+ * pre-0.3.1 artifact has (its own bytes are internally consistent — only the version tells the
+ * reader that its `PrimKind` ordinals are the retired ones).
+ *
+ * @param ver  the version number to stamp into the frame's version field (bytes 4..7, LE)
+ * @return     the `.tkh` bytes of a one-function header, re-versioned
+ */
+fn tkh_of_version(ver: byte) -> []byte {
+    let sig = FnSig { name = "f"; params = teko::list::empty(); ret = i64ty(); has_doc = false; doc = "" }
+    let h = Header { types = teko::list::empty(); fns = teko::list::push(teko::list::empty(), sig) }
+    let bytes = emit_tkh(h)
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= bytes.len { break }
+        if i == 4 { out = teko::list::push(out, ver) } else { out = teko::list::push(out, bytes[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * tkh_current_version_roundtrips — the `.tkh` frame this compiler WRITES is the one it reads back:
+ * the guard added below must not reject the current writer's own output.
+ */
+#test
+fn tkh_current_version_roundtrips() {
+    let h = match read_tkh(tkh_of_version(2 to byte)) { Header as x => x; error => return teko::assert::is_true(false) }
+    teko::assert::is_true(h.fns.len == 1)
+}
+
+/**
+ * tkh_version_1_is_rejected — a version-1 `.tkh` (the pre-0.3.1 shape) is REJECTED with an honest
+ * message, never read crooked: the drop-128 `PrimKind` renumbering reached the `.tkh` through the
+ * `.tkb` codec it reuses wholesale, so an old artifact would decode every primitive into the wrong
+ * type while passing both the magic and its own hash.
+ */
+#test
+fn tkh_version_1_is_rejected() {
+    let msg = match read_tkh(tkh_of_version(1 to byte)) { Header => ""; error as e => e.message }
+    teko::assert::str_contains(msg, "unsupported .tkh version")
+    teko::assert::str_contains(msg, "must be rebuilt with the current compiler")
+}
