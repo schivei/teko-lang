@@ -1224,6 +1224,12 @@ Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dob
      * binding is spelled `ref r: T = x`, never `let r: ref T = x` (or `let r: T = ref x`, or any other
      * `let`-plus-reference combination).
      *
+     * The rejection now comes from the PARSER, and says the same thing for `let`, `mut` AND `const`
+     * (romaneio .31, B-S8): the checker arm that used to answer here fired only for a NON-`mut`
+     * binding, so the identical `mut r: ref i64 = x` was silently accepted as a full reference
+     * binding. One law, one message, all three keywords. (The checker arm stays — it still answers
+     * for a binding whose reference type is INFERRED rather than annotated.)
+     *
      * @return  never — this body is a compile error
      */
     pub fn probe() -> i64 {
@@ -1235,7 +1241,7 @@ Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dob
     exit(0)
     """
     When compilation fails
-    Then diagnostic = "`let`/`const` cannot bind a reference"
+    Then diagnostic = "a reference binding is written `ref x: T = e`"
 
   Scenario: lit_neg_unsigned
     Given source inline = """
@@ -13716,3 +13722,233 @@ Feature: F8 target — the TEKO_TARGET boundary (compile-fail; R2 honest error, 
     """
     When compilation fails
     Then diagnostic = "supported targets: x86_64-linux"
+
+Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenario)
+
+  # (B-S1) The own backend coerces into a null-union at EVERY placement that declares a type, not
+  # only at the binding: `x = null` after a `T | null` binding used to write a raw `const 0` into the
+  # VReg the `match` then reads as the wrapper's base address — a load from address 0. The `c` rows
+  # are the differential control: the C backend wrapped at the assign all along.
+  Scenario Outline: null_union_reassign_to_null (backend-differential — own == C, transitively)
+    Given backend = "<backend>"
+    Given source inline = """
+    mut x: i64 | null = 5
+    x = null
+    let a = match x { i64 as v => v; null => 40 }
+    x = 2
+    let b = match x { i64 as v => v; null => 0 }
+    exit(a + b)
+    """
+    When built and run
+    Then exit = 42
+
+    Examples:
+      | backend |
+      | c       |
+      | own     |
+
+  # (A-S7, the D1 direction with ZERO coverage before this) A GENUINE boundary cast must stay
+  # SILENT: `(a to u64) * b` with u32 operands joins to u32 WITHOUT the cast and to u64 WITH it, so
+  # the cast is load-bearing — the pre-fix predicate ignored the partner operand and rejected it,
+  # which would have made every width-widening boundary in the corpus uncompilable.
+  Scenario: d1_boundary_widen_cast_compiles
+    Given source inline = """
+    /**
+     * wide_product — the product of two u32 values at u64 width. The `to u64` is the ONLY thing that
+     * makes the multiplication happen at 64 bits (the W-RULE would otherwise join u32 with u32).
+     *
+     * @param a  the left factor
+     * @param b  the right factor
+     * @return   `a * b` computed at u64 width
+     */
+    pub fn wide_product(a: u32, b: u32) -> u64 { (a to u64) * b }
+
+    exit((wide_product(7 to u32, 6 to u32) & 255) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  # (A-S3) PARITY between the arithmetic and the comparison site of the same D1 decision: a pair of
+  # casts guards against flagging in BOTH, so these two spellings of the same operands must agree.
+  # Before the shared predicate, `(a to i64) - (b to i64)` compiled and `(a to i64) < (b to i64)` was
+  # a hard error — the comparison site called the predicate raw, without the arithmetic site's guards.
+  Scenario: d1_cast_pair_parity_between_arith_and_compare
+    Given source inline = """
+    /**
+     * spread — the signed difference of two u32 values, and the same operands compared. Both
+     * spellings carry the same cast pair; the D1 diagnostic must treat them identically.
+     *
+     * @param a  the left operand
+     * @param b  the right operand
+     * @return   42 when the difference is negative and the comparison agrees, else 0
+     */
+    pub fn spread(a: u32, b: u32) -> i64 {
+        let d = (a to i64) - (b to i64)
+        if d < 0 && (a to i64) < (b to i64) { return 42 }
+        0
+    }
+
+    exit((spread(1 to u32, 2 to u32)) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  # (B-S3) The LEGITIMATE `ref` forward — same referent type — keeps compiling. It is the case the
+  # original wagon shipped without a fixture, which is why the missing `type_eq` went unnoticed.
+  Scenario: ref_forwarding_same_referent_compiles
+    Given source inline = """
+    /**
+     * bump_through — forwards an incoming reference to a second `ref` binding of the SAME referent
+     * type and writes through it. The forward is LEGITIMATE: same referent, only a new spelling.
+     *
+     * @param p  the reference to forward
+     */
+    pub fn bump_through(ref p: i64) -> void {
+        ref q: i64 = p
+        q = 42
+    }
+
+    /**
+     * probe — calls `bump_through` on a local and observes the write-through.
+     *
+     * @return  the local's value after the call
+     */
+    pub fn probe() -> i64 {
+        mut n: i64 = 1
+        bump_through(n)
+        n
+    }
+
+    exit((probe()) to i32)
+    """
+    When built and run
+    Then exit = 42
+
+  # (Block 12) The scenario binary runs with its CWD in its OWN scratch, not in the repository root.
+  # The probe writes a RELATIVE file (which must therefore land in the scratch, not the work tree)
+  # and then proves where it is by looking for a file that exists ONLY at the repo root.
+  Scenario: scenario_runs_with_cwd_in_its_own_scratch
+    Given source inline = """
+    /**
+     * probe — write a relative file, then assert the CWD is NOT the repository root.
+     *
+     * @return  0 when the relative write succeeded and `regressor.tkr` is not in this directory
+     */
+    pub fn probe() -> i32 {
+        match teko::io::write_file("regr_cwd_probe.txt", "romaneio") { error => return 2; null => { } }
+        match teko::io::read_file("regr_cwd_probe.txt") { str => { }; error => return 3 }
+        match teko::io::read_file("regressor.tkr") { str => return 4; error => { } }
+        0
+    }
+
+    exit(probe())
+    """
+    When built and run
+    Then exit = 0
+
+Feature: F9 romaneio .31 — the audit's compile-fail regressions
+
+  # (A-S7) The OTHER direction of the D1 class-3 diagnostic: a widen that genuinely changes nothing
+  # still fires. `(a to i64) + b` with `b: i64` joins to i64 either way, so the cast is a no-op.
+  Scenario: d1_class3_noop_widen_still_rejected
+    Given source inline = """
+    /**
+     * probe — a cast that the W-RULE would perform on its own: the partner is already i64.
+     *
+     * @return never — this body is a compile error
+     */
+    pub fn probe(a: i32, b: i64) -> i64 { (a to i64) + b }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "redundant cast"
+
+  # (B-S3) A `ref` FORWARD that re-annotates the referent is a memory-safety hole: the alias would
+  # view an i64 cell through a wider struct. The forwarding arm returned before the `type_eq` ran.
+  Scenario: ref_forwarding_wrong_referent_rejected
+    Given source inline = """
+    /**
+     * Big — a struct strictly wider than the i64 the forwarded reference actually points at.
+     */
+    type Big = struct {
+        /** first word */
+        a: i64
+        /** second word — past the end of an i64 referent */
+        b: i64
+    }
+
+    /**
+     * probe — attempts to re-type a forwarded reference. REJECTED: a forward may re-spell the
+     * alias, never re-type the referent.
+     *
+     * @param p  the incoming i64 reference
+     * @return   never — this body is a compile error
+     */
+    pub fn probe(ref p: i64) -> i64 {
+        ref q: Big = p
+        q.a
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "a forwarded `ref` binding must name the SAME referent type"
+
+  # (B-S6) A lambda that ASSIGNS to a captured variable: the capture is by copy, so the write used to
+  # vanish with no diagnostic at all — a miscompilation of a program that looks legal.
+  Scenario: lambda_write_to_copy_capture_rejected
+    Given source inline = """
+    /**
+     * probe — a closure that writes to a captured local. REJECTED: the capture is by copy.
+     *
+     * @return  never — this body is a compile error
+     */
+    pub fn probe() -> i64 {
+        mut n: i64 = 0
+        let g = () => { n = 5; 0 }
+        g() + n
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "a lambda cannot assign to the captured variable `n`"
+
+  # (B-S8) `mut r: ref i64 = x` was accepted and behaved exactly like `ref r: i64 = x`, while the
+  # parser's own documentation said `let` AND `mut` are rejected. The `ref` is the binding modifier.
+  Scenario: mut_ref_annotation_rejected
+    Given source inline = """
+    /**
+     * probe — a `mut` binding whose ANNOTATION is a bare `ref T`. REJECTED.
+     *
+     * @return  never — this body is a compile error
+     */
+    pub fn probe() -> i64 {
+        mut x: i64 = 1
+        mut r: ref i64 = x
+        r
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "a reference binding is written `ref x: T = e`"
+
+  # (#152 family) A user type named `Ref` used to PARSE, and then every USE of it failed with a
+  # message about a compiler-internal name the author never wrote. The name is reserved at the
+  # DECLARATION now, where the author can act on it.
+  Scenario: user_type_named_Ref_rejected_at_the_declaration
+    Given source inline = """
+    /**
+     * Ref — a user type taking the compiler's reserved name. REJECTED at the declaration.
+     */
+    pub type Ref = struct {
+        /** any field */
+        v: i64
+    }
+
+    exit(0)
+    """
+    When compilation fails
+    Then diagnostic = "`Ref` is a reserved type name"
