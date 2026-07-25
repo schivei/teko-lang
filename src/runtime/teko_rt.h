@@ -404,8 +404,19 @@ tk_ffi_ures tk_rt_setenv(tk_str name, tk_str value);
 tk_ffi_slres tk_rt_list_dir(tk_str path);
 // teko::str::last_index_of(hay, needle) — byte index of the LAST occurrence, or not-found.
 tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle);
+// TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
+// child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
+// signalled one, so <= 191), which makes a negative provably outside that space and therefore
+// unambiguous. This replaces the old sentinel 127, which collided with THREE other meanings at
+// once — the POSIX exec-failed convention, `sh`'s own "command not found", and a child that simply
+// chose to exit 127 — so a CI failure reading `exit 127` could not be attributed to any of them.
+// What is STILL ambiguous, honestly: the POSIX child arm must `_exit(127)` after a failed execvp,
+// because the exec'd-image failure has no other channel; that one case remains indistinguishable
+// from a child exiting 127. Everything the PARENT can see is now separated.
+#define TK_RT_SPAWN_FAILED (-1)
 // teko::process::run(argv) — fork/exec argv[0] with argv, wait, return its exit status
-// (127 when argv is empty / exec fails). Takes the slice as ptr+len (no generated type).
+// (TK_RT_SPAWN_FAILED when argv is empty or the child could not be started at all). Takes the
+// slice as ptr+len (no generated type).
 int32_t tk_rt_run(const tk_str *argv, uint64_t n);
 // teko::process::run_quiet(argv) — same contract as tk_rt_run, but the child's stdout/stderr
 // are redirected to the null device (issue #73: the cc flag-family probe uses this so a

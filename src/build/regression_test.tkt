@@ -170,6 +170,7 @@ fn compile_failure_message_carries_the_cc_output() {
         stderr = "teko 0.3.1\nassert.c:16: undefined reference to `tk_panic'\nteko: bin/x: cc failed to build the generated C\n"
         harness_ns = 0
         child_ns = 0
+        cmd = ""
     }
     let msg = compile_failure_message(comp)
     teko::assert::str_contains(msg, "undefined reference")
@@ -185,10 +186,53 @@ fn compile_failure_message_carries_the_cc_output() {
  * @return void
  */
 fn compile_failure_message_falls_back_to_stdout() {
-    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0 }
+    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
     teko::assert::str_contains(compile_failure_message(out_only), "no input files")
-    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0 }
+    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
     teko::assert::str_contains(compile_failure_message(silent), "wrote nothing")
+}
+
+#test
+/**
+ * exit_mismatch_message_names_the_origin_and_quotes_the_command — the run-mismatch report has to
+ * carry the evidence that tells the three readings of a "could not run" apart.
+ *
+ * This exists because PR #94's `test / windows` produced `exit 127, expected 134` with a real panic
+ * on the captured stderr: the child had plainly run, and the message still could not say whether
+ * `sh` failed to find something, whether the spawn failed, or whether Windows translates an aborting
+ * child differently. Three assertions, one per reading:
+ *   - the spawn sentinel is NAMED, not printed as a bare -1 (nothing ran; harness/host fault);
+ *   - 127 is attributed to `sh`, since the runtime no longer produces it;
+ *   - the exact shell command is quoted whenever the capture has one.
+ *
+ * The third case is the negative: an ordinary mismatch gets NO origin gloss (a note on every line
+ * is a note nobody reads), and a synthesized capture with no command must not print an empty
+ * `sh -c:` line.
+ *
+ * @return void
+ */
+fn exit_mismatch_message_names_the_origin_and_quotes_the_command() {
+    let spawned = CapResult {
+        exit = SPAWN_FAILED_EXIT; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0
+        cmd = "'/w/bin/x' < '/w/x.in' > '/w/x.out' 2> '/w/x.err'"
+    }
+    let m_spawn = exit_mismatch_message(spawned, 134)
+    teko::assert::str_contains(m_spawn, "could not start the child")
+    teko::assert::str_contains(m_spawn, "sh -c: '/w/bin/x'")
+
+    let notfound = CapResult {
+        exit = 127; stdout = ""; stderr = "sh: x: command not found\n"; harness_ns = 0; child_ns = 0
+        cmd = "'x' < '/w/x.in' > '/w/x.out' 2> '/w/x.err'"
+    }
+    let m_127 = exit_mismatch_message(notfound, 134)
+    teko::assert::str_contains(m_127, "comes from `sh`")
+    teko::assert::str_contains(m_127, "command not found")
+
+    let plain = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
+    let m_plain = exit_mismatch_message(plain, 0)
+    teko::assert::str_contains(m_plain, "exit 3, expected 0")
+    teko::assert::is_false(teko::str::contains(m_plain, "sh -c:"))
+    teko::assert::is_false(teko::str::contains(m_plain, "comes from"))
 }
 
 #test

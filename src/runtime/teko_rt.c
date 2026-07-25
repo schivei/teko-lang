@@ -1680,6 +1680,13 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle) {
 // execvp, because POSIX gives the exec'd-image failure no other channel. That is the convention's
 // own limit, not a lost distinction.
 //
+// SECOND M.3 FIX (vagão 20): every remaining PARENT-side "I could not run it" now reports
+// TK_RT_SPAWN_FAILED (teko_rt.h) instead of 127. The `test / windows` lane of PR #94 failed with
+// `exit 127, expected 134` on a scenario whose captured stderr held a real panic — i.e. the child
+// demonstrably ran — and 127 could not say whether that came from a failed `_spawnvp`, from `sh`
+// reporting command-not-found, or from a child exiting 127 itself. A sentinel that cannot be
+// confused with a child's own status is what makes the next run answerable.
+//
 // NOT YET NORMALIZED — the Windows half. `tk_win32_spawnvp` returns `_spawnvp`'s value, which for a
 // child killed by an abort/exception is a CRT/NTSTATUS-shaped code, not 128+signal; what it actually
 // is can only be OBSERVED on a Windows runner, and this file will not guess it.
@@ -1687,12 +1694,14 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle) {
 static int32_t tk_rt_wait_status_code(int status) {
     if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return (int32_t)(TK_RT_SIGNAL_EXIT_BASE + WTERMSIG(status));
-    return 127;
+    // Neither exited nor signalled: waitpid returned a status this code cannot interpret, which is
+    // a failure to OBSERVE the child, not an exit status the child produced.
+    return TK_RT_SPAWN_FAILED;
 }
 #endif
 
 int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
-    if (n == 0) return 127;
+    if (n == 0) return TK_RT_SPAWN_FAILED;
     // Build a NUL-terminated argv (each arg NUL-terminated; the vector NULL-terminated).
     char **cargv = (char **)tk_alloc((n + 1) * sizeof *cargv);
     for (uint64_t i = 0; i < n; i += 1) cargv[i] = tk_cstr(argv[i]);
@@ -1700,16 +1709,16 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
 #ifdef _WIN32
     // _spawnvp(_P_WAIT) is synchronous: blocks until the child exits, returns its exit code.
     int w = tk_win32_spawnvp(cargv[0], cargv);
-    return (w == -1) ? 127 : (int32_t)w;
+    return (w == -1) ? TK_RT_SPAWN_FAILED : (int32_t)w;
 #else
     pid_t pid = fork();
-    if (pid < 0) return 127;
-    if (pid == 0) {                      // child: exec; on failure exit 127 (POSIX convention)
-        execvp(cargv[0], cargv);
+    if (pid < 0) return TK_RT_SPAWN_FAILED;
+    if (pid == 0) {                      // child: exec; on failure exit 127 (POSIX convention —
+        execvp(cargv[0], cargv);         // the exec'd image has no other channel to report through)
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 127;
+    if (waitpid(pid, &status, 0) < 0) return TK_RT_SPAWN_FAILED;
     return tk_rt_wait_status_code(status);
 #endif
 }
@@ -1720,7 +1729,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
 // clang-only flags) so a deliberately-rejected flag doesn't leak an "unrecognized option" line
 // into the user's build output. [teko::process]
 int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
-    if (n == 0) return 127;
+    if (n == 0) return TK_RT_SPAWN_FAILED;
     char **cargv = (char **)tk_alloc((n + 1) * sizeof *cargv);
     for (uint64_t i = 0; i < n; i += 1) cargv[i] = tk_cstr(argv[i]);
     cargv[n] = NULL;
@@ -1739,10 +1748,10 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
     _dup2(saved_err, _fileno(stderr));
     _close(saved_out);
     _close(saved_err);
-    return (w == -1) ? 127 : (int32_t)w;
+    return (w == -1) ? TK_RT_SPAWN_FAILED : (int32_t)w;
 #else
     pid_t pid = fork();
-    if (pid < 0) return 127;
+    if (pid < 0) return TK_RT_SPAWN_FAILED;
     if (pid == 0) {                      // child: redirect std{out,err} to /dev/null, then exec
         int null_fd = open("/dev/null", O_WRONLY);
         if (null_fd >= 0) {
@@ -1754,7 +1763,7 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 127;
+    if (waitpid(pid, &status, 0) < 0) return TK_RT_SPAWN_FAILED;
     return tk_rt_wait_status_code(status);
 #endif
 }
