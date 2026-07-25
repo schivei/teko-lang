@@ -572,6 +572,65 @@ fn append_reachable_os_lib_flags(argv: []str, m: Manifest, tos: str, reachable: 
 }
 
 /**
+ * ASSERT_SEED_NAMESPACE — the namespace whose functions the C assert SEED
+ * (`src/assert/assert.c`) realizes as `teko__assert__*`. A program that declares
+ * this namespace ITSELF (only the compiler's own corpus does — `teko::` is a
+ * reserved, non-shadowable root) supplies those symbols from its own generated C,
+ * so the seed must not also define them there.
+ */
+const ASSERT_SEED_NAMESPACE: str = "teko::assert"
+
+/**
+ * ASSERT_SEED_STRONG_FLAG — the `cc` define that tells `src/assert/assert.c` it is the
+ * SOLE definition of `teko__assert__*` and must therefore emit STRONG symbols. Passed
+ * exactly when the program being built does not declare `teko::assert` itself. Absent,
+ * the seed defaults to `__attribute__((weak))` — the pre-2026-07-25 behaviour, kept as
+ * the default so a previously RELEASED seed (which cannot know about this flag) still
+ * links `teko.c` + `assert.c` together without a duplicate symbol.
+ */
+const ASSERT_SEED_STRONG_FLAG: str = "-DTK_ASSERT_SEED_STRONG"
+
+/**
+ * declares_assert_seed — does a top-level function with this `namespace`/`is_extern`
+ * pair DEFINE one of the assert seed's symbols? An `extern fn` only BINDS a foreign
+ * symbol (it emits a prototype, never a body), so it never competes with the seed —
+ * only a real, bodied declaration in the seed's namespace does.
+ *
+ * @param namespace  the function's declaring namespace
+ * @param is_extern  whether it is a bodiless foreign binding
+ * @return           true iff this declaration defines an assert-seed symbol
+ */
+fn declares_assert_seed(namespace: str, is_extern: bool) -> bool {
+    !is_extern && namespace == ASSERT_SEED_NAMESPACE
+}
+
+/**
+ * program_declares_assert_seed — does `prog` define the `teko::assert` symbols itself?
+ * True ONLY for the compiler's own corpus (`src/assert/assert.tks`), whose generated C
+ * defines `teko__assert__*` strongly. Its NEGATION is what `build_cc_argv` uses to pass
+ * `ASSERT_SEED_STRONG_FLAG`: when the program supplies no definition, the seed becomes
+ * the strong one and resolves everywhere — including PE/COFF, where GNU ld does not
+ * honour a weak definition across translation units, so the weak-only seed left every
+ * Windows program that CALLED `teko::assert` without defining it unlinkable (see the
+ * comment block in `src/assert/assert.c`).
+ *
+ * @param prog  the checked program about to be linked
+ * @return      true iff the program supplies the assert-seed symbols itself
+ */
+fn program_declares_assert_seed(prog: checker::TProgram) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if declares_assert_seed(f.namespace, f.is_extern) { return true } }
+            _ => { }
+        }
+        i = i + 1
+    }
+    false
+}
+
+/**
  * teko_cc_env — the raw value of the `TEKO_CC` cross-linker env seam (#387 B2-8),
  * or "" when it is unset. The seam mirrors `TEKO_BACKEND`/`TEKO_TARGET`: it lets a
  * differential lane override the compiler `build_cc_argv` invokes without a
@@ -730,9 +789,13 @@ fn opt_level_of(args: []str) -> i32 {
  * family (clang `-std=c23`/`-ferror-limit=0`, else GCC's `-std=c2x`/`-fmax-errors=0`);
  * `-w` to silence warnings on machine-generated C; the project version baked into
  * `teko_rt`'s `tk_rt_version()` as a BARE `-DTEKO_VERSION_STRING` token (embedded
- * quotes broke Windows arg re-parsing); the cross knobs (`-target`/`--sysroot`/
- * `-nostdlib`, C7.1f); the runtime + assert include dirs; the input; the two C
- * runtime seed sources (`teko_rt.c` + `assert.c`); `-lm` (unless freestanding); the
+ * quotes broke Windows arg re-parsing); `ASSERT_SEED_STRONG_FLAG` when the program
+ * does NOT declare `teko::assert` itself (making the assert seed the sole, STRONG
+ * definition — PE/COFF has no working cross-TU weak definition, so the weak-only seed
+ * left every Windows program that called `teko::assert` unlinkable); the cross knobs
+ * (`-target`/`--sysroot`/`-nostdlib`, C7.1f); the runtime + assert include dirs; the
+ * input; the two C runtime
+ * seed sources (`teko_rt.c` + `assert.c`); `-lm` (unless freestanding); the
  * reachable `[extern.libs]` link flags (C7.20); and, on macOS, the `__info_plist`
  * `-Wl,-sectcreate` section. Shared verbatim by `run_cc` (a `.c` input) and
  * `link_object` (an own-backend `.o` input) so both link the SAME way — the only
@@ -772,6 +835,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     if oflag.len > 0 { argv = teko::list::push(argv, oflag) }
     let verval = if m.suffix.len > 0 { teko::str::concat(teko::str::concat(m.version, "-"), m.suffix) } else { m.version }
     argv = teko::list::push(argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval))
+    if !program_declares_assert_seed(prog) { argv = teko::list::push(argv, ASSERT_SEED_STRONG_FLAG) }
     if m.target.len > 0 { argv = teko::list::push(teko::list::push(argv, "-target"), m.target) }
     if m.sysroot.len > 0 { argv = teko::list::push(teko::list::push(argv, "--sysroot"), m.sysroot) }
     if m.freestanding { argv = teko::list::push(argv, "-nostdlib") }

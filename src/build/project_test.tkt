@@ -530,3 +530,31 @@ fn pt_per_commit_report_str_shape() {
     let line = per_commit_report_str("origin/main", DeltaCoverage { cov = 3; val = 4 })
     teko::assert::is_true(line == "teko: per-commit delta coverage (base origin/main): 75% (3/4) of changed executable lines covered")
 }
+
+/**
+ * declares_assert_seed distinguishes a real `teko::assert` DEFINITION from every other declaration:
+ * an `extern fn` in the same namespace only BINDS a foreign symbol (prototype, no body) and never
+ * competes with the C seed, and no other namespace can supply `teko__assert__*` at all. This is the
+ * predicate that decides whether `src/assert/assert.c` joins the link line — the mechanism that
+ * replaced the seed's `__attribute__((weak))`, which GNU ld for PE/COFF does not honour across
+ * translation units (it made every Windows program calling `teko::assert` without defining it
+ * unlinkable — the `assert_native` regression scenario).
+ */
+#test
+fn pt_declares_assert_seed_only_for_a_bodied_teko_assert_decl() {
+    teko::assert::is_true(declares_assert_seed("teko::assert", false))
+    teko::assert::is_false(declares_assert_seed("teko::assert", true))
+    teko::assert::is_false(declares_assert_seed("teko::str", false))
+    teko::assert::is_false(declares_assert_seed("", false))
+    teko::assert::is_false(declares_assert_seed("assert", false))
+}
+
+/**
+ * program_declares_assert_seed is false for a program with NO items — the ordinary case, where the
+ * assert seed MUST stay on the link line so `teko__assert__*` resolves at all.
+ */
+#test
+fn pt_program_declares_assert_seed_is_false_for_an_empty_program() {
+    let empty = checker::TProgram { items = teko::list::empty() }
+    teko::assert::is_false(program_declares_assert_seed(empty))
+}
