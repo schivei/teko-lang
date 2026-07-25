@@ -121,6 +121,32 @@ não-progresso. Invariantes aprendidos na marra:
 - **O clean preserva os diretórios que guardam os compiladores da escada.**
 - Build intermediário é seco (`--no-verify`): medida **transitória da .31**, a desfazer na .32.
 
+## Seeds commitados — REMOÇÃO AGENDADA para o primeiro vagão da .32
+
+Ruling do owner (2026-07-25): *"versionar binário (nightlys do fork) será somente para o trem
+atual, no próximo devemos remover isso"*. O que fica permanente é o **nightly + promoção**; o que
+sai é o blob no repo. Sem esta lista escrita a gambiarra vira permanente, que é exatamente o modo
+como gambiarra sempre vira permanente.
+
+**O que sai, item a item:**
+
+| o quê | onde |
+|---|---|
+| os cinco blobs + o manifesto | `bootstrap/seeds/` (diretório inteiro) |
+| a regra binária | linha `bootstrap/seeds/*.xz binary` em `.gitattributes` |
+| o consumo | `seed_from_committed`, `host_seed_label`, `unxz`, o ramo `TEKO_SEED_PREFER_COMMITTED` e o fallback pós-loop em `scripts/ci_provision_teko.sh` |
+| a produção | job `seeds` + `scripts/cross_compile_seeds.sh` |
+| o consumo em CI | job `seed-debut` (`native.yml`) |
+| a escada pinada | `scripts/build_with_seed_fallback.sh` inteiro (já agendado no cabeçalho dele) |
+
+**Por que o registro está aqui e não no `<!-- train-manifest -->` do bump, como o briefing do
+vagão 20 pedia:** aquele bloco mora em `docs/bump_v<versão>.md`, e `mirror-pr-to-org.yml` dispara
+em `push` à `main` com `paths: ['teko.tkp', 'docs/bump_v*.md']`. Criar o arquivo do bump num vagão
+que **não é** o bump abriria o PR de promoção na org antes da hora — ou, com o nome de versão
+ainda não bumpado, falharia com `bump doc não encontrado` numa `main` verde. **O vagão da
+contra-máquina copia esta tabela para o `<!-- train-manifest -->` que ele cria**; é lá que ela
+termina, mas não é lá que ela pode nascer.
+
 ## Lane que estreia na aterrissagem → vagão próprio de correção (owner 2026-07-25)
 
 O split light/full do CI (`base_ref == main` ⇒ full) tem um efeito de segunda ordem: as lanes
