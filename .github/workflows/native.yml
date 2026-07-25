@@ -10,7 +10,10 @@ name: Native Build & Test
 on:
   pull_request:
     branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
-    paths: ['**.tkp', '**.tks', '**.tkt', '**.tkr', '**.sh', '**.c', '**.h', '.github/workflows/*.yml']
+    # `bootstrap/**` is listed because the committed host seeds (TRANSITIONAL — .31 only) are
+    # `.xz` blobs plus a checksum manifest: none of the extension globs above reach them, so a PR
+    # that touched ONLY a seed would have skipped the very lanes that provision from it.
+    paths: ['**.tkp', '**.tks', '**.tkt', '**.tkr', '**.sh', '**.c', '**.h', '.github/workflows/*.yml', 'bootstrap/**']
 
 # Restrict default token scope for all jobs in this workflow.
 permissions:
@@ -43,6 +46,7 @@ jobs:
               - 'tests/**'
               - 'examples/**'
               - 'scripts/**'
+              - 'bootstrap/**'
               - '.github/workflows/native.yml'
 
       # Docs-only guard (owner ruling 2026-07-11): the allowlist globs (src/**, tests/**, …)
@@ -116,10 +120,19 @@ jobs:
   #
   # The matrix is DYNAMIC (`needs.changes.outputs.matrix_build`): the light path builds
   # linux-x86_64 only — the signal that actually catches a compiler break — and the full path
-  # (base_ref == main) adds linux-arm64 + macos-arm64 + windows-x86_64. windows-arm64 stays
-  # DISABLED (owner ruling 2026-07-06, compile-time): it was the CI critical path. It is a
-  # FUTURE-SUPPORT pendency — restore it to the full-path include list once the native gate is
-  # fast (#168/#265) and a faster arm64 Windows runner is available. Tracking: #304.
+  # (base_ref == main) adds linux-arm64 + macos-arm64 + windows-x86_64.
+  #
+  # windows-arm64 is NOT in this matrix. The owner disabled it here on 2026-07-06 because THIS
+  # job — a full self-build gate — was the CI critical path on that runner, and that cost has not
+  # changed, so #304 (the pendency to restore this entry) stays about exactly that and stays
+  # deferred to the perf work (#168/#265).
+  #
+  # What DID change, 2026-07-25 with the owner's explicit authorization: the architecture is no
+  # longer untouched by CI. `seed-debut` below builds AND runs a teko compiler on windows-11-arm.
+  # That was the real gap — the fork publishes `teko-windows-arm64.zip` from release.yml's
+  # build-native, and until now no lane had ever built or executed anything on that arch. The
+  # debut lane closes it at one host build instead of the full gate's cost. Whoever revisits #304
+  # should read it as "restore the heavy gate here", not as "windows-arm64 is unexercised".
   build-test:
     needs: changes
     if: needs.changes.outputs.run == 'true'
@@ -323,11 +336,20 @@ jobs:
       - name: Verify wasmtime is on PATH (fail loud before the fail-closed run)
         run: wasmtime --version
 
-      # riscv has no release binary asset, so it cannot download a seed like the other
-      # platforms. Seed the x86_64 released binary; it builds gen1 (the PR compiler under
-      # test) from THIS branch's src/, so gen1 carries the own riscv64 AOT backend
-      # (emit_native_riscv) — the C bootstrap / a cmake build from the frozen twins would
-      # NOT. The differential runs gen1, never the raw seed.
+      # WHY AN x86_64 SEED ON A riscv64 LANE — and the reason is NOT the one this comment used
+      # to give. It claimed "riscv has no release binary asset, so it can't download a seed like
+      # the other lanes". That was FALSE: scripts/cross_compile_linux.sh:91-92 builds
+      # linux-riscv64-glibc AND linux-riscv64-musl, and the release publishes both. A false
+      # premise written into CI is what misleads the next reader (it misled one, 2026-07-25),
+      # so here is the true reason: there is no riscv64 RUNNER. This lane is x86_64 hardware
+      # emulating riscv64, and a seed is a compiler that must EXECUTE — running one under
+      # qemu-user to bootstrap would be slower than building gen1 natively on the host it is
+      # actually standing on. The decision is unchanged; only its justification is.
+      #
+      # So: seed the x86_64 released binary; it builds gen1 (the PR compiler under test) from
+      # THIS branch's src/, so gen1 carries the own riscv64 AOT backend (emit_native_riscv) —
+      # the C bootstrap / a cmake build from the frozen twins would NOT. The differential runs
+      # gen1, never the raw seed.
       - name: Provision teko (x86_64 released seed)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -487,16 +509,163 @@ jobs:
           echo "consumer exit code: $rc"
           [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
 
+  # ── seeds: cut the five committed HOST seeds, from ONE runner ───────────────────
+  # PRODUCTION side of bootstrap/seeds/ (TRANSITIONAL — .31 only, removed in the first .32
+  # wagon). scripts/cross_compile_seeds.sh turns this tip's emitted teko.c into one seed per
+  # HOST THAT RUNS THE COMPILER — the five GitHub-hosted runners — with `zig cc`, so no macOS
+  # and no Windows runner participates in producing them.
+  #
+  # WHAT THIS JOB IS FOR, given the blobs are already committed: it re-cuts them from the CURRENT
+  # tip and publishes the archives + SEEDS.sha256 as a run artifact. That is what makes the PR
+  # review criterion checkable — "the sha256 matches what the green run produced", not "I read
+  # the binary" — and it is what turns a later wagon breaking seed compilation into a RED lane
+  # rather than a discovery at release time. The consuming half is `seed-debut` below, which
+  # takes the COMMITTED blob (not this job's output) so the thing in the tree is the thing proven.
+  #
+  # FULL-ONLY, like release-cross-smoke and for the same reason: it costs one dry compiler build
+  # plus five cross-links. A wagon whose base is a previous wagon does not re-cut seeds; the
+  # wagon that lands (base = main) does.
+  seeds:
+    needs: changes
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
+    name: host seeds (zig cross-cut)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      ZIG_VERSION: "0.16.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zig (official tarball — the same pin release.yml uses)
+        run: |
+          set -eu
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | tar -xJ
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Provision x86_64 seed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci_provision_teko.sh linux-x86_64-glibc
+
+      - name: Emit teko.c (dry build — no gate, no fixpoint)
+        run: sh scripts/build_with_seed_fallback.sh out
+
+      - name: Cut the five host seeds
+        run: sh scripts/cross_compile_seeds.sh out/teko.c src seeds-out
+
+      # The REVIEWABLE artifact. A reviewer compares SEEDS.sha256 here against
+      # bootstrap/seeds/SEEDS.sha256 in the diff; the .xz files are attached so the claim can be
+      # re-derived rather than taken on faith.
+      - name: Upload the cut seeds + their checksum manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-seeds
+          path: |
+            seeds-out/teko-*.xz
+            seeds-out/SEEDS.sha256
+          if-no-files-found: error
+
+  # ── seed-debut: every host CONSUMES the committed seed ──────────────────────────
+  # The consuming half of bootstrap/seeds/ (TRANSITIONAL — .31 only). One job per HOST, each
+  # provisioning with TEKO_SEED_PREFER_COMMITTED=1 so the release probe is skipped entirely and
+  # the committed blob — sha256-verified against SEEDS.sha256 BEFORE it is decompressed — is the
+  # compiler under the build. A fallback that nothing ever takes is a fallback nobody has tested;
+  # this lane takes it on every full run.
+  #
+  # WHY IT BUILDS RATHER THAN JUST SMOKING `--version`: a seed's whole job is to compile the tip.
+  # `--version` proves the binary loads on the host, which is necessary and nowhere near
+  # sufficient — a seed that loads and then cannot build is a seed that fails at the moment it is
+  # needed, on the run that needed it.
+  #
+  # windows-11-arm DEBUTS HERE (owner authorization 2026-07-25). The fork publishes
+  # teko-windows-arm64.zip and no lane had ever built or executed anything on that arch; the seed
+  # for it is cross-cut by zig with no arm64 Windows runner involved, so this is the first and
+  # only place the result is confronted with the real hardware. If that runner's image lacks
+  # something the build needs, this lane is where it turns red — three wagons before the release,
+  # which is the entire reason the lane debuts now instead of at the bump.
+  #
+  # FULL-ONLY: five host runners is landing-wagon cost.
+  seed-debut:
+    needs: changes
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.full == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+          - os: macos-latest
+            label: macos-arm64
+          - os: windows-latest
+            label: windows-x86_64
+          - os: windows-11-arm
+            label: windows-arm64
+    name: seed debut / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Named BEFORE the build so a red run says which toolchain was actually present, instead of
+      # leaving the reader to infer it from a cc error deep inside a build log.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc xz python3 7z; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      - name: Install cc (Linux only — macOS and the Windows images ship clang)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Provision the COMMITTED seed (sha256-verified before decompression)
+        shell: bash
+        env:
+          TEKO_SEED_PREFER_COMMITTED: "1"
+          LABEL: ${{ matrix.label }}
+        run: ./scripts/ci_provision_teko.sh "$LABEL"
+
+      # The committed seed compiles THIS tip. No fallback ladder here on purpose: the ladder
+      # exists to bridge a released seed to a newer tip, and this seed was cut FROM the tip — if
+      # it cannot build it directly, the committed blob is wrong and that is exactly the finding.
+      - name: Build the tip with the committed seed
+        shell: bash
+        run: teko . -o out --no-verify
+
   # ── release cross-compile smoke: the EXACT zig-cross the release runs, compile-only ──
   # release.yml is tag-triggered, so its Linux cross-compile went unvalidated in PR CI — a
   # zig-version/target break (e.g. 0.13.0's incomplete riscv64 glibc, missing stubs-lp64d.h)
   # only surfaced AFTER merge, on a real tag. This job runs the SAME
   # scripts/cross_compile_linux.sh in SMOKE mode on every PR: emit teko.c, cross-compile all six
-  # Linux targets, assert each architecture, THEN run the x86_64-glibc artifact (native to this
-  # runner, no qemu) over the corpus. A clean cross-compile is not a clean cross-run — `zig cc`
-  # at an optimizing level once turned latent UB in teko.c into a checker miscompile that a
-  # compile-only smoke could never see (fix/readdir-order-determinism). A break here gates the
-  # merge, so a broken release can never reach main.
+  # Linux targets, assert each architecture, THEN RUN every one of them. A clean cross-compile is
+  # not a clean cross-run — `zig cc` at an optimizing level once turned latent UB in teko.c into a
+  # checker miscompile that a compile-only smoke could never see
+  # (fix/readdir-order-determinism). A break here gates the merge, so a broken release can never
+  # reach main.
+  #
+  # EXECUTION, not just compilation, for ALL SIX (2026-07-25): x86_64 natively, arm64 and riscv64
+  # under `qemu-user-static`. The two musl artifacts are `-static` and run under qemu unaided; the
+  # four glibc ones are DYNAMIC and need their target loader, so the cross libc sysroots are
+  # installed and qemu is pointed at them with `-L`. Measured, not assumed: without `-L` a
+  # dynamic aarch64/riscv64 artifact dies at `Could not open '/lib/ld-linux-*.so.*'`, which is why
+  # the invocation is uniform and explicit rather than relying on binfmt.
+  #
+  # …and the same step carries a LAW: the six artifacts must emit BYTE-IDENTICAL C for the same
+  # project. Determinism is already a law within one architecture (the gen2 == gen3 fixpoint);
+  # this extends it ACROSS architectures, where a pointer-width or endianness leak into the
+  # emitter would show up as a diverging sha256 and nowhere else.
   # FULL-ONLY: the release path is only about to be taken from the wagon that lands.
   release-cross-smoke:
     needs: changes
@@ -516,6 +685,14 @@ jobs:
           set -eu
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | tar -xJ
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      # qemu-user-static executes the non-native artifacts; the two libc6-*-cross packages carry
+      # ONLY the target loader + shared libc the four glibc artifacts need at runtime (no
+      # compiler — this lane cross-compiles with zig, not with a GNU cross-toolchain).
+      - name: Install qemu-user-static + the arm64/riscv64 loaders
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-user-static libc6-arm64-cross libc6-riscv64-cross
 
       - name: Provision x86_64 seed
         env:
@@ -537,12 +714,54 @@ jobs:
       - name: Cross-compile all six Linux targets (compile-only, no qemu)
         run: sh scripts/cross_compile_linux.sh out/teko.c src /tmp/smoke smoke
 
-      # A clean cross-COMPILE is not a clean cross-RUN: `zig cc` at an optimizing level once
-      # miscompiled latent UB in the emitted teko.c into a checker that rejected the compiler's
-      # own valid source (fix/readdir-order-determinism). The x86_64-glibc artifact is native to
-      # this x86_64 runner, so RUN it — no qemu — over the corpus. A miscompiled binary rejects
-      # the corpus (non-zero exit) and gates the merge; this is the regression that would have
-      # caught the O2 miscompile before it ever reached a release.
+      # Every published artifact RUNS, and the six agree on the C they emit. Two assertions in
+      # one step because they share the same six invocations:
+      #   1. EXECUTION — each artifact answers `--version`, then compiles a real (minimal)
+      #      project end-to-end: lexer → checker → codegen → emit C → cc. The x86_64 pair runs
+      #      natively; arm64/riscv64 run under qemu-user with `-L <sysroot>` so the dynamic glibc
+      #      artifacts find their loader.
+      #   2. CROSS-ARCH DETERMINISM — the emitted .c must be byte-identical across all six. A
+      #      pointer-width, endianness or hash-order leak into the emitter is invisible to the
+      #      within-architecture fixpoint and shows up here as a diverging sha256.
+      - name: Run all six cross artifacts + assert identical emitted C
+        run: |
+          set -eu
+          # run_art LABEL ARGS… — invoke gd-LABEL/teko, natively or under the right emulator.
+          # The `-L` sysroot is required by the four glibc (dynamic) artifacts and harmless for
+          # the two static musl ones, so the shape is uniform.
+          run_art() {
+            label="$1"; shift
+            case "$label" in
+              *-x86_64-*) "./gd-$label/teko" "$@" ;;
+              *-arm64-*)  qemu-aarch64-static -L /usr/aarch64-linux-gnu "./gd-$label/teko" "$@" ;;
+              *-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "./gd-$label/teko" "$@" ;;
+              *) echo "run_art: unknown label '$label'" >&2; return 1 ;;
+            esac
+          }
+          REF_SHA=""
+          for label in linux-x86_64-glibc linux-x86_64-musl \
+                       linux-arm64-glibc linux-arm64-musl \
+                       linux-riscv64-glibc linux-riscv64-musl; do
+            echo "=== $label ==="
+            run_art "$label" --version
+            out="/tmp/xemit-$label"
+            rm -rf "$out"
+            run_art "$label" build examples/smoke/uniontest -o "$out" --no-verify
+            sha="$(sha256sum "$out/uniontest.c" | awk '{print $1}')"
+            echo "$label emitted uniontest.c sha256 $sha"
+            if [ -z "$REF_SHA" ]; then
+              REF_SHA="$sha"
+            elif [ "$sha" != "$REF_SHA" ]; then
+              echo "FAIL — $label emitted DIFFERENT C than the first artifact ($sha != $REF_SHA)" >&2
+              echo "the emitted C must not depend on the architecture the compiler runs on" >&2
+              exit 1
+            fi
+          done
+          echo "all six artifacts ran and emitted byte-identical C ($REF_SHA)"
+
+      # The x86_64-glibc artifact additionally compiles the WHOLE compiler corpus — the heavy
+      # miscompile guard, kept native because it is the one that would have caught the `zig cc`
+      # -O2 miscompile before it reached a release, and the one it is worth paying for.
       - name: Run the x86_64-glibc cross artifact over the corpus (miscompile guard)
         run: ./gd-linux-x86_64-glibc/teko . -o /tmp/xrun --no-verify --release
 
@@ -558,7 +777,7 @@ jobs:
   gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [changes, build-test, gen1-checks, riscv64-qemu, ar-elf-macho-coff-validation, release-cross-smoke]
+    needs: [changes, build-test, gen1-checks, riscv64-qemu, ar-elf-macho-coff-validation, release-cross-smoke, seeds, seed-debut]
     if: always()
     permissions: {}
 
@@ -572,6 +791,8 @@ jobs:
           RISCV_RESULT: ${{ needs.riscv64-qemu.result }}
           AR_RESULT: ${{ needs.ar-elf-macho-coff-validation.result }}
           SMOKE_RESULT: ${{ needs.release-cross-smoke.result }}
+          SEEDS_RESULT: ${{ needs.seeds.result }}
+          DEBUT_RESULT: ${{ needs.seed-debut.result }}
         run: |
           set -u
           if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
@@ -582,6 +803,8 @@ jobs:
           echo "riscv64-qemu                 = $RISCV_RESULT   (full only)"
           echo "ar-elf-macho-coff-validation = $AR_RESULT   (full only)"
           echo "release-cross-smoke          = $SMOKE_RESULT   (full only)"
+          echo "seeds                        = $SEEDS_RESULT   (full only)"
+          echo "seed-debut                   = $DEBUT_RESULT   (full only)"
 
           # If the paths filter said nothing relevant changed, everything skipped → OK
           if [ "$CHANGES" != "true" ]; then
@@ -617,6 +840,8 @@ jobs:
           require_full_only riscv64-qemu                 "$RISCV_RESULT"
           require_full_only ar-elf-macho-coff-validation "$AR_RESULT"
           require_full_only release-cross-smoke          "$SMOKE_RESULT"
+          require_full_only seeds                        "$SEEDS_RESULT"
+          require_full_only seed-debut                   "$DEBUT_RESULT"
 
           if [ "$FAILED" = "1" ]; then
             echo "CI gate FAILED (mode=$MODE)."
