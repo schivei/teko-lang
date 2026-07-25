@@ -14,6 +14,14 @@ type CapResult = struct {
     stdout: str
     /** the bytes the child wrote to stderr ("" when none / unreadable). */
     stderr: str
+    /**
+     * monotonic ns spent OUTSIDE the child on this capture: creating the scratch directory, writing
+     * the stdin file, and reading the two capture files back (0 for a result the runner synthesized
+     * without spawning anything). Observability only — see `regr_timing.tks`.
+     */
+    harness_ns: i64
+    /** monotonic ns spent INSIDE the child process (the `sh -c` and everything under it). */
+    child_ns: i64
 }
 
 /**
@@ -199,6 +207,7 @@ fn sh_join(argv: []str) -> str {
  * @since 0.3.1
  */
 fn run_captured_cmd_prefixed(cmd_prefix: str, argv: []str, stdin_data: str, prefix: str) -> CapResult {
+    let t_start = regr_now_ns()
     match mkdir_p(teko::str::concat(dirname_of(prefix), "/")) { error => { }; null => { } }
     let si = prefix ~ ".in"
     let so = prefix ~ ".out"
@@ -209,10 +218,56 @@ fn run_captured_cmd_prefixed(cmd_prefix: str, argv: []str, stdin_data: str, pref
     mut shv: []str = teko::list::push(teko::list::empty(), "sh")
     shv = teko::list::push(shv, "-c")
     shv = teko::list::push(shv, cmd)
+    let t_spawn = regr_now_ns()
     let rc = teko::process::run(shv)
+    let t_reaped = regr_now_ns()
     let out = match teko::io::read_file(so) { str as s => s; error => "" }
     let err = match teko::io::read_file(se) { str as s => s; error => "" }
-    CapResult { exit = rc; stdout = out; stderr = err }
+    let t_end = regr_now_ns()
+    CapResult {
+        exit = rc; stdout = out; stderr = err
+        harness_ns = (t_spawn - t_start) + (t_end - t_reaped)
+        child_ns = t_reaped - t_spawn
+    }
+}
+
+/**
+ * regr_now_ns — the monotonic clock reading every measurement here subtracts. NEVER a wall clock: a
+ * wall-clock jump would produce a negative or absurd interval, and the readings are only ever used
+ * as differences.
+ *
+ * @return the monotonic nanosecond reading
+ * @since 0.3.1
+ */
+fn regr_now_ns() -> i64 {
+    teko::time::span_monotonic_now().ticks
+}
+
+/**
+ * cap_synthetic — a `CapResult` the runner produced WITHOUT spawning anything (a guard rejection, an
+ * unreadable source file, the empty initial build cache). Its phases are zero because no child ran.
+ *
+ * @param exit    the exit status to report
+ * @param stderr  the message that stands in for the child's diagnostics
+ * @return        the synthesized capture
+ * @since 0.3.1
+ */
+fn cap_synthetic(exit: i32, stderr: str) -> CapResult {
+    CapResult { exit = exit; stdout = ""; stderr = stderr; harness_ns = 0; child_ns = 0 }
+}
+
+/**
+ * cap_with_extra_harness — `c` with `ns` more nanoseconds attributed to its HARNESS phase: the
+ * scratch-tree work a caller did around the capture (wiping and repopulating a snippet project, for
+ * instance) belongs to the same row's harness cost, not to the child's.
+ *
+ * @param c   the capture to attribute onto
+ * @param ns  the extra harness nanoseconds
+ * @return    `c` with its harness phase extended
+ * @since 0.3.1
+ */
+fn cap_with_extra_harness(c: CapResult, ns: i64) -> CapResult {
+    CapResult { exit = c.exit; stdout = c.stdout; stderr = c.stderr; harness_ns = c.harness_ns + ns; child_ns = c.child_ns }
 }
 
 /**
@@ -975,6 +1030,7 @@ fn sh_rm_rf(path: str) -> null | error {
  * @since 0.3.1
  */
 fn compile_snippet_text(exe: str, src_text: str, env: []str, prefix: str) -> CapResult {
+    let t_start = regr_now_ns()
     let proj = prefix ~ ".proj"
     match sh_rm_rf(proj) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(proj, "/src/")) { error => { }; null => { } }
@@ -986,7 +1042,8 @@ fn compile_snippet_text(exe: str, src_text: str, env: []str, prefix: str) -> Cap
         match teko::io::write_file(proj ~ "/src/regr_decls.tks", split.decls) { error => { }; null => { } }
         match teko::io::write_file(proj ~ "/main.tks", split.stmts) { error => { }; null => { } }
     }
-    compile_regressive(exe, proj, env, prefix ~ ".compile")
+    let scratch_ns = regr_now_ns() - t_start
+    cap_with_extra_harness(compile_regressive(exe, proj, env, prefix ~ ".compile"), scratch_ns)
 }
 
 /**
@@ -1034,7 +1091,7 @@ fn artifact_path_for_target(base_binp: str, target: str) -> str {
 fn compile_standalone_source(exe: str, srcp: str, env: []str, prefix: str) -> CapResult {
     let text = match teko::io::read_file(srcp) {
         str as s => s
-        error as e => return CapResult { exit = 1; stdout = ""; stderr = teko::str::concat("cannot read source file: ", e.message) }
+        error as e => return cap_synthetic(1, teko::str::concat("cannot read source file: ", e.message))
     }
     compile_snippet_text(exe, text, env, prefix)
 }
@@ -1247,6 +1304,38 @@ fn check_compile_fail(t: Tkr, comp: CapResult) -> RegrOutcome {
 }
 
 /**
+ * exit_mismatch_message — the honest failure text for a run whose EXIT CODE did not match: the
+ * codes plus the TAIL of what the program actually wrote.
+ *
+ * The build-failure message already carries its captured tail (`compile_failure_message`); the RUN
+ * failure was left blind in exactly the same way, and the two readings it conflates are OPPOSITE
+ * diagnoses. `exit 127, expected 134` with an EMPTY stderr says "the binary never ran / could not be
+ * executed"; the same line with `panic: …` on stderr says "it aborted exactly as the scenario
+ * wanted, and the exit code was translated wrongly on this platform". A message that cannot tell
+ * those apart sends the reader to the wrong half of the system (M.3).
+ *
+ * @param run       the captured run outcome
+ * @param exp_exit  the exit code the scenario declared
+ * @return          the failure message, carrying the captured output tail
+ * @since 0.3.1
+ */
+fn exit_mismatch_message(run: CapResult, exp_exit: i32) -> str {
+    let err_tail = tail_lines(run.stderr, RUN_FAIL_TAIL_LINES)
+    if err_tail.len > 0 { return $"exit {run.exit}, expected {exp_exit}; captured stderr tail:\n{err_tail}" }
+    let out_tail = tail_lines(run.stdout, RUN_FAIL_TAIL_LINES)
+    if out_tail.len > 0 { return $"exit {run.exit}, expected {exp_exit}; captured stdout tail:\n{out_tail}" }
+    $"exit {run.exit}, expected {exp_exit}; the program wrote nothing to stdout or stderr"
+}
+
+/**
+ * RUN_FAIL_TAIL_LINES — how many TRAILING lines of a failed RUN's captured output the scenario's
+ * failure message reproduces. Smaller than the compile bound: a program's own output is the
+ * scenario's own tiny source, so a handful of lines is the whole story, while a failed build has a
+ * whole toolchain's diagnostics to quote.
+ */
+const RUN_FAIL_TAIL_LINES: u64 = 12
+
+/**
  * check_run — the `exit`/`print`/`trap` verdict for one host run: `trap` asserts a non-zero exit;
  * the others assert the exact (override-resolved) exit and the stdout/stderr expectations.
  *
@@ -1264,7 +1353,7 @@ fn check_run(t: Tkr, target: str, run: CapResult) -> RegrOutcome {
     if t.kind == TkrKind::Trap {
         if run.exit == 0 { return regr_fail("expected a trap (non-zero exit) but the program exited 0") }
     } else {
-        if run.exit != exp_exit { return regr_fail($"exit {run.exit}, expected {exp_exit}") }
+        if run.exit != exp_exit { return regr_fail(exit_mismatch_message(run, exp_exit)) }
     }
     if !match_stream(so, run.stdout) { return regr_fail("stdout did not match the expectation") }
     if !match_stream(se, run.stderr) { return regr_fail("stderr did not match the expectation") }
@@ -1443,7 +1532,7 @@ type TkrArtifact = struct {
  * @since 0.3.1
  */
 fn tkr_artifact_fail(msg: str, built: RegrBuilt) -> TkrArtifact {
-    TkrArtifact { comp = CapResult { exit = 1; stdout = ""; stderr = msg }; binp = ""; built = built }
+    TkrArtifact { comp = cap_synthetic(1, msg); binp = ""; built = built }
 }
 
 /**
@@ -1504,6 +1593,16 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
  * scenario's `env`/`stdin`/`args` (behind `wrap`, the run-wrapper prefix) and check it via
  * `check_run` — UNLESS the row's target is a CROSS target this host cannot exec, in which case the
  * run is honestly SKIPPED carrying the build's own emitted-not-run note (`cross_note_for_name`,
+ *
+ * THE BINARY RUNS WITH ITS CWD IN ITS OWN SCRATCH (`<prefix>.cwd/`), not in the repository root.
+ * Any fixture that writes a RELATIVE path — the natural way to write a file-IO scenario — used to
+ * land that file in the working tree, where it survived the run and dirtied `git status`; the
+ * fixture then had to know where it was and clean up after itself, which is a workaround for the
+ * runner's own choice, not a property of the scenario. Running in a per-row scratch kills the whole
+ * class. Everything the runner hands the shell across that `cd` is ABSOLUTIZED here: the binary
+ * (`argv[0]`) and the capture-file prefix, whose `.in`/`.out`/`.err` redirections are evaluated by
+ * the shell AFTER the `cd` (the same rule `compile_in_place` already documents). The leaf-tool
+ * checks keep the runner-relative `binp` — they run in the runner's own process, not the child's.
  * project.tks — the single source of truth C5 gave the build; the runner does not keep a second
  * one). A wrapper-bearing target (wasm under `wasmtime`, riscv under `qemu`) is NOT skipped: the
  * emulator IS how this host executes it. Deliberately `regr_skip` and NOT `tool_skip_or_fail`:
@@ -1518,13 +1617,33 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
  * @return        the run verdict, or the honest emitted-not-run skip
  * @since 0.3.1
  */
-fn tkr_row_run_verdict(t: Tkr, binp: str, wrap: []str, prefix: str) -> RegrOutcome {
+fn tkr_row_run_verdict(t: Tkr, binp: str, wrap: []str, prefix: str) -> RowVerdict {
     if wrap.len == 0 {
         let cross = cross_note_for_name(t.target)
-        if cross.is_cross { return regr_skip(cross.note) }
+        if cross.is_cross { return RowVerdict { outcome = regr_skip(cross.note); harness_ns = 0; run_ns = 0 } }
     }
-    let argv = wrap_argv_with_wrapper(wrap, argv_with_args(binp, t.args))
-    check_run(t, HOST_TARGET, run_captured_env(argv, t.stdin, t.env, prefix))
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    let rundir = prefix ~ ".cwd"
+    match mkdir_p(teko::str::concat(rundir, "/")) { error => { }; null => { } }
+    let argv = wrap_argv_with_wrapper(wrap, argv_with_args(abs_path_of(binp, cwd), t.args))
+    let run = run_captured_in_dir(argv, t.stdin, t.env, rundir, abs_path_of(prefix, cwd))
+    RowVerdict { outcome = check_run(t, HOST_TARGET, run); harness_ns = run.harness_ns; run_ns = run.child_ns }
+}
+
+/**
+ * RowVerdict — one row's RUN verdict plus the measurement of that run: the harness time around the
+ * child and the time inside it. Separate from `RegrOutcome` so the verdict type stays about the
+ * verdict and never carries observability into the gate logic.
+ *
+ * @since 0.3.1
+ */
+type RowVerdict = struct {
+    /** the run's verdict (pass, honest skip, or failure). */
+    outcome: RegrOutcome
+    /** ns spent on scratch/plumbing around the run. */
+    harness_ns: i64
+    /** ns spent inside the built binary. */
+    run_ns: i64
 }
 
 /**
@@ -1543,22 +1662,22 @@ fn tkr_row_run_verdict(t: Tkr, binp: str, wrap: []str, prefix: str) -> RegrOutco
  *                 checks' own skip tally
  * @since 0.3.1
  */
-fn tkr_run_one_row(t: Tkr, binp: str, prefix: str) -> RegrOutcome {
-    let wrap = match resolve_run_wrapper(t.target) { []str as w => w; error as e => return tool_skip_or_fail(e.message) }
-    let oc = tkr_row_run_verdict(t, binp, wrap, prefix)
-    if !oc.ok { return oc }
+fn tkr_run_one_row(t: Tkr, binp: str, prefix: str) -> RowVerdict {
+    let wrap = match resolve_run_wrapper(t.target) { []str as w => w; error as e => return RowVerdict { outcome = tool_skip_or_fail(e.message); harness_ns = 0; run_ns = 0 } }
+    let rv = tkr_row_run_verdict(t, binp, wrap, prefix)
+    if !rv.outcome.ok { return rv }
     mut skips: u64 = 0
     if t.check_wellformed {
         let wf = check_object_wellformed(binp ~ ".o", tkr_effective_target(t.target))
-        if !wf.ok && !wf.skipped { return wf }
+        if !wf.ok && !wf.skipped { return RowVerdict { outcome = wf; harness_ns = rv.harness_ns; run_ns = rv.run_ns } }
         skips = skips + wf.skips
     }
     if t.check_module_valid {
         let mv = check_module_valid(binp)
-        if !mv.ok && !mv.skipped { return mv }
+        if !mv.ok && !mv.skipped { return RowVerdict { outcome = mv; harness_ns = rv.harness_ns; run_ns = rv.run_ns } }
         skips = skips + mv.skips
     }
-    regr_add_skips(oc, skips)
+    RowVerdict { outcome = regr_add_skips(rv.outcome, skips); harness_ns = rv.harness_ns; run_ns = rv.run_ns }
 }
 
 /**
@@ -1573,6 +1692,8 @@ type FeatureRunResult = struct {
     outcome: RegrOutcome
     /** the shared project cache, possibly newly built by this feature's scenarios. */
     built: RegrBuilt
+    /** every row this feature measured, in run order (observability only — `regr_timing.tks`). */
+    rows: []RowTiming
 }
 
 /**
@@ -1588,6 +1709,8 @@ type TkrRowRun = struct {
     outcome: RegrOutcome
     /** the shared project cache, possibly newly built by this row. */
     built: RegrBuilt
+    /** the row's three-phase measurement (observability only — `regr_timing.tks`). */
+    times: PhaseTimes
 }
 
 /**
@@ -1607,10 +1730,15 @@ type TkrRowRun = struct {
  */
 fn tkr_run_row(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrRowRun {
     let missing = target_toolchain_skip_reason(t.target)
-    if missing.len > 0 { return TkrRowRun { outcome = tool_skip_or_fail(missing); built = built } }
+    if missing.len > 0 { return TkrRowRun { outcome = tool_skip_or_fail(missing); built = built; times = phase_zero() } }
     let art = tkr_ensure_artifact(exe, regr_dir, t, prefix, built)
-    if art.comp.exit != 0 { return TkrRowRun { outcome = regr_fail(compile_failure_message(art.comp)); built = art.built } }
-    TkrRowRun { outcome = tkr_run_one_row(t, art.binp, prefix ~ ".run"); built = art.built }
+    let build_times = PhaseTimes { harness_ns = art.comp.harness_ns; compile_ns = art.comp.child_ns; run_ns = 0; builds = 1 }
+    if art.comp.exit != 0 {
+        return TkrRowRun { outcome = regr_fail(compile_failure_message(art.comp)); built = art.built; times = build_times }
+    }
+    let rv = tkr_run_one_row(t, art.binp, prefix ~ ".run")
+    let run_times = PhaseTimes { harness_ns = rv.harness_ns; compile_ns = 0; run_ns = rv.run_ns; builds = 0 }
+    TkrRowRun { outcome = rv.outcome; built = art.built; times = phase_add(build_times, run_times) }
 }
 
 /**
@@ -1633,26 +1761,28 @@ fn tkr_run_row(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -
 fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt) -> FeatureRunResult {
     mut cur = built
     mut skips: u64 = 0
+    mut rows: []RowTiming = teko::list::empty()
     mut si: u64 = 0
     loop {
         if si >= feat.scenarios.len { break }
         let sc = feat.scenarios[si]
         if tkb_scenario_is_declarative(sc) { si = si + 1; continue }
-        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return FeatureRunResult { outcome = regr_fail(e.message); built = cur } }
+        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return FeatureRunResult { outcome = regr_fail(e.message); built = cur; rows = rows } }
         mut ri: u64 = 0
         loop {
             if ri >= specs.len { break }
             let rr = tkr_run_row(exe, regr_dir, specs[ri], $"{prefix}.{si}.{ri}", cur)
             cur = rr.built
+            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = rr.outcome.skipped; times = rr.times })
             if !rr.outcome.ok && !rr.outcome.skipped {
-                return FeatureRunResult { outcome = regr_fail($"{sc.name}[{ri}]: {rr.outcome.message}"); built = cur }
+                return FeatureRunResult { outcome = regr_fail($"{sc.name}[{ri}]: {rr.outcome.message}"); built = cur; rows = rows }
             }
             skips = skips + rr.outcome.skips
             ri = ri + 1
         }
         si = si + 1
     }
-    FeatureRunResult { outcome = regr_add_skips(regr_pass(), skips); built = cur }
+    FeatureRunResult { outcome = regr_add_skips(regr_pass(), skips); built = cur; rows = rows }
 }
 
 /**
@@ -1715,7 +1845,8 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> Ca
 }
 
 /**
- * tkr_run_compile_fail — run the compile-fail scenarios of a parsed feature: a declarative
+ * tkr_run_compile_fail — run the compile-fail scenarios of a parsed feature, returning the same
+ * shape a RUN feature does (verdict + measured rows): a declarative
  * scenario is honest-SKIPPED; every other scenario resolves its build artifact
  * (`tkr_compile_fail_artifact` — an inline/explicit-file snippet, or `regr_dir`'s OWN project when
  * neither is declared) and checks it via `check_compile_fail`. The verdict is the FIRST failure,
@@ -1728,26 +1859,43 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> Ca
  * @return          the aggregate compile-fail verdict
  * @since 0.3.0.30
  */
-fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) -> RegrOutcome {
+fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) -> FeatureRunResult {
+    mut rows: []RowTiming = teko::list::empty()
     mut si: u64 = 0
     loop {
         if si >= feat.scenarios.len { break }
         let sc = feat.scenarios[si]
         if tkb_scenario_is_declarative(sc) { si = si + 1; continue }
-        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return regr_fail(e.message) }
+        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return compile_fail_result(regr_fail(e.message), rows) }
         mut ri: u64 = 0
         loop {
             if ri >= specs.len { break }
             let t = specs[ri]
             let row_prefix = $"{prefix}.{si}.{ri}"
-            let comp = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix) { CapResult as c => c; error as e => return regr_fail($"{sc.name}[{ri}]: {e.message}") }
+            let comp = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix) { CapResult as c => c; error as e => return compile_fail_result(regr_fail($"{sc.name}[{ri}]: {e.message}"), rows) }
             let oc = check_compile_fail(t, comp)
-            if !oc.ok { return regr_fail($"{sc.name}[{ri}]: {oc.message}") }
+            let times = PhaseTimes { harness_ns = comp.harness_ns; compile_ns = comp.child_ns; run_ns = 0; builds = 1 }
+            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = false; times = times })
+            if !oc.ok { return compile_fail_result(regr_fail($"{sc.name}[{ri}]: {oc.message}"), rows) }
             ri = ri + 1
         }
         si = si + 1
     }
-    regr_pass()
+    compile_fail_result(regr_pass(), rows)
+}
+
+/**
+ * compile_fail_result — a `FeatureRunResult` for a COMPILE-FAIL feature: its verdict and its measured
+ * rows, with the shared project cache left untouched (a compile-fail feature never builds the
+ * regressor project — every row compiles its own snippet).
+ *
+ * @param oc    the feature's verdict
+ * @param rows  the rows measured before the verdict was reached
+ * @return      the feature result
+ * @since 0.3.1
+ */
+fn compile_fail_result(oc: RegrOutcome, rows: []RowTiming) -> FeatureRunResult {
+    FeatureRunResult { outcome = oc; built = RegrBuilt { done = false; comp = cap_synthetic(0, ""); binp = "" }; rows = rows }
 }
 
 /**
@@ -1772,58 +1920,124 @@ fn tkr_feature_is_compile_fail(feat: TkrFeature) -> bool {
  * across every RUN feature in the file. Nothing is compiled until a scenario actually needs it, so
  * a wholly-declarative `.tkr` (living documentation) never touches the filesystem. The verdict is
  * the FIRST failure across all features, else a pass carrying the file's whole capability-skip
- * tally (so the run summary can report skips instead of absorbing them into "run").
+ * tally (so the run summary can report skips instead of absorbing them into "run"). Every measured
+ * row travels back with it (`TkrFileRun`) for the timing report.
  *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressor project directory
  * @param tkr_name  the `.tkr` basename inside `regr_dir`
  * @param prefix    the scratch-file prefix for this `.tkr`
- * @return          the aggregate verdict for the file
+ * @return          the aggregate verdict for the file, plus its measured rows
  * @since 0.3.0.30
  */
-fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str) -> RegrOutcome {
-    let src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return regr_fail(e.message) }
-    let feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return regr_fail(e.message) }
-    mut built = RegrBuilt { done = false; comp = CapResult { exit = 0; stdout = ""; stderr = "" }; binp = "" }
+fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str) -> TkrFileRun {
+    let src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
+    let feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
+    mut built = RegrBuilt { done = false; comp = cap_synthetic(0, ""); binp = "" }
     mut skips: u64 = 0
+    mut rows: []RowTiming = teko::list::empty()
     mut fi: u64 = 0
     loop {
         if fi >= feats.len { break }
         let feat = feats[fi]
-        if tkr_feature_is_compile_fail(feat) {
-            let oc = tkr_run_compile_fail(exe, regr_dir, feat, $"{prefix}.f{fi}")
-            if !oc.ok && !oc.skipped { return oc }
-            skips = skips + oc.skips
-            fi = fi + 1
-            continue
-        }
-        let fr = tkr_run_scenarios(exe, regr_dir, feat, $"{prefix}.f{fi}", built)
+        let fr = run_one_feature(exe, regr_dir, feat, $"{prefix}.f{fi}", built)
         built = fr.built
-        if !fr.outcome.ok && !fr.outcome.skipped { return fr.outcome }
+        rows = concat_row_timings(rows, fr.rows)
+        if !fr.outcome.ok && !fr.outcome.skipped { return file_run_of(fr.outcome, rows) }
         skips = skips + fr.outcome.skips
         fi = fi + 1
     }
-    regr_add_skips(regr_pass(), skips)
+    file_run_of(regr_add_skips(regr_pass(), skips), rows)
+}
+
+/**
+ * TkrFileRun — one `.tkr` file's aggregate verdict plus every row it measured. The two travel
+ * together so the report line can carry the file's totals without a second traversal.
+ *
+ * @since 0.3.1
+ */
+type TkrFileRun = struct {
+    /** the file's aggregate verdict (the first failure, else a pass carrying its skip tally). */
+    outcome: RegrOutcome
+    /** every measured row of the file, in run order. */
+    rows: []RowTiming
+}
+
+/**
+ * file_run_of — a `TkrFileRun` of `oc` and `rows`.
+ *
+ * @param oc    the file's verdict
+ * @param rows  the file's measured rows
+ * @return      the file result
+ * @since 0.3.1
+ */
+fn file_run_of(oc: RegrOutcome, rows: []RowTiming) -> TkrFileRun {
+    TkrFileRun { outcome = oc; rows = rows }
+}
+
+/**
+ * run_one_feature — dispatch ONE feature on its kind: a compile-fail feature compiles each
+ * non-declarative scenario's source standalone; a RUN feature resolves and runs each scenario's own
+ * artifact, sharing the lazily-built project. Both return the same shape, so `run_one_tkr` folds
+ * verdict, cache and timings uniformly instead of branching over two result types.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param feat      the parsed feature
+ * @param prefix    the scratch-file prefix for this feature
+ * @param built     the shared project cache carried in
+ * @return          the feature's verdict, the (possibly updated) cache, and its measured rows
+ * @since 0.3.1
+ */
+fn run_one_feature(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt) -> FeatureRunResult {
+    if tkr_feature_is_compile_fail(feat) {
+        let cf = tkr_run_compile_fail(exe, regr_dir, feat, prefix)
+        return FeatureRunResult { outcome = cf.outcome; built = built; rows = cf.rows }
+    }
+    tkr_run_scenarios(exe, regr_dir, feat, prefix, built)
+}
+
+/**
+ * concat_row_timings — `a` followed by `b` (the per-feature measured rows folded into the file's).
+ *
+ * @param a  the rows accumulated so far
+ * @param b  the rows to append
+ * @return   the concatenation
+ * @since 0.3.1
+ */
+fn concat_row_timings(a: []RowTiming, b: []RowTiming) -> []RowTiming {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
 }
 
 /**
  * report_regressive — print one report line for a regressor's verdict (ok / FAIL / skip). A skip
  * appends its reason when it carries one (the self-project note); a bare skip prints just the label.
  * A PASS that aggregated capability skips says so on its own line — a file reported as a bare "ok"
- * while some of its rows never ran would overstate what this host actually checked (M.3).
+ * while some of its rows never ran would overstate what this host actually checked (M.3). Every
+ * non-skip line also carries the file's TOTALS (builds, wall time, phase shares — `regr_timing.tks`),
+ * because a build count and a phase split are what make the number actionable.
  *
- * @param rd  the regressor directory (the report label)
- * @param oc  the verdict
+ * @param rd    the regressor directory (the report label)
+ * @param oc    the verdict
+ * @param rows  the file's measured rows (their sum is the totals text)
  * @since 0.3.0.29
  */
-fn report_regressive(rd: str, oc: RegrOutcome) {
+fn report_regressive(rd: str, oc: RegrOutcome, rows: []RowTiming) {
     if oc.skipped {
         if oc.message.len > 0 { teko::io::println(teko::str::concat(teko::str::concat("teko: regression skip ", rd), teko::str::concat(" ", oc.message))); return }
         teko::io::println(teko::str::concat("teko: regression skip ", rd)); return
     }
-    if oc.ok && oc.skips > 0 { teko::io::println($"teko: regression ok {rd} ({oc.skips} scenario row(s) skipped — capability absent on this host)"); return }
-    if oc.ok { teko::io::println(teko::str::concat("teko: regression ok ", rd)); return }
-    teko::io::println(teko::str::concat(teko::str::concat("teko: regression FAIL ", rd), teko::str::concat(" — ", oc.message)))
+    let totals = regr_totals_text(rows_total(rows))
+    if oc.ok && oc.skips > 0 { teko::io::println($"teko: regression ok {rd} ({totals}; {oc.skips} scenario row(s) skipped — capability absent on this host)"); return }
+    if oc.ok { teko::io::println($"teko: regression ok {rd} ({totals})"); return }
+    teko::io::println($"teko: regression FAIL {rd} ({totals}) — {oc.message}")
 }
 
 /**
@@ -1890,6 +2104,7 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     mut fails: u64 = 0
     mut skips: u64 = 0
+    mut phase = phase_zero()
     mut si: u64 = 0
     loop {
         if si >= m.test_regression_files.len { break }
@@ -1901,15 +2116,17 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
                 si = si + 1
             }
             str => {
-                let oc = run_one_tkr(exe, dirname_of(path), basename_of(path), work ~ "/" ~ regr_sanitize(path))
-                report_regressive(path, oc)
-                if !oc.ok && !oc.skipped { fails = fails + 1 }
-                skips = skips + oc.skips
+                let fr = run_one_tkr(exe, dirname_of(path), basename_of(path), work ~ "/" ~ regr_sanitize(path))
+                report_regressive(path, fr.outcome, fr.rows)
+                regr_print_timings(fr.rows)
+                phase = phase_add(phase, rows_total(fr.rows))
+                if !fr.outcome.ok && !fr.outcome.skipped { fails = fails + 1 }
+                skips = skips + fr.outcome.skips
                 si = si + 1
             }
         }
     }
-    teko::io::println(regr_summary_line(m.test_regression_files.len, skips, fails))
+    teko::io::println(regr_summary_line(m.test_regression_files.len, skips, fails) ~ $" ({regr_totals_text(phase)})")
     if fails > 0 && m.test_gate { return 1 }
     0
 }

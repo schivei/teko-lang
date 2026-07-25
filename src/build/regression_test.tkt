@@ -168,6 +168,8 @@ fn compile_failure_message_carries_the_cc_output() {
         exit = 1
         stdout = ""
         stderr = "teko 0.3.1\nassert.c:16: undefined reference to `tk_panic'\nteko: bin/x: cc failed to build the generated C\n"
+        harness_ns = 0
+        child_ns = 0
     }
     let msg = compile_failure_message(comp)
     teko::assert::str_contains(msg, "undefined reference")
@@ -183,9 +185,9 @@ fn compile_failure_message_carries_the_cc_output() {
  * @return void
  */
 fn compile_failure_message_falls_back_to_stdout() {
-    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = "" }
+    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0 }
     teko::assert::str_contains(compile_failure_message(out_only), "no input files")
-    let silent = CapResult { exit = 3; stdout = ""; stderr = "" }
+    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0 }
     teko::assert::str_contains(compile_failure_message(silent), "wrote nothing")
 }
 
@@ -538,4 +540,130 @@ fn host_cc_cannot_link_cross_reason_names_the_unlinkable_cross() {
     let alien = host_cc_cannot_link_cross_reason(rt_alien_target_name())
     teko::assert::is_true(alien.len > 0)
     teko::assert::str_contains(alien, rt_alien_target_name())
+}
+
+/**
+ * rt_row — one measured row for the timing-aggregator tests.
+ *
+ * @param feature   the enclosing feature's name
+ * @param scenario  the scenario's name
+ * @param row       the row index within the scenario
+ * @param skipped   whether the row was honest-skipped
+ * @param h         the harness nanoseconds
+ * @param c         the compile nanoseconds
+ * @param r         the run nanoseconds
+ * @param builds    how many builds the row covers
+ * @return          the assembled `RowTiming`
+ */
+fn rt_row(feature: str, scenario: str, row: u64, skipped: bool, h: i64, c: i64, r: i64, builds: u64) -> RowTiming {
+    RowTiming {
+        feature = feature; scenario = scenario; row = row; skipped = skipped
+        times = PhaseTimes { harness_ns = h; compile_ns = c; run_ns = r; builds = builds }
+    }
+}
+
+/**
+ * rt_sample_rows — the shared fixture: two features, four rows — two ordinary rows, one SKIPPED row
+ * (no time, no build) and one FAILING row that DID cost a build. The expensive row that fails is
+ * exactly the one a detractor hunt cares about, so it must be counted, not discarded.
+ *
+ * @return the four measured rows, in run order
+ */
+fn rt_sample_rows() -> []RowTiming {
+    mut rows: []RowTiming = teko::list::empty()
+    rows = teko::list::push(rows, rt_row("F1", "alpha", 0, false, 1000000, 4000000, 500000, 1))
+    rows = teko::list::push(rows, rt_row("F1", "alpha", 1, true, 0, 0, 0, 0))
+    rows = teko::list::push(rows, rt_row("F2", "beta", 0, false, 2000000, 9000000, 0, 1))
+    rows = teko::list::push(rows, rt_row("F2", "gamma", 0, false, 1000000, 3000000, 0, 1))
+    rows
+}
+
+#test
+/**
+ * regr_timing_aggregates_rows_into_the_file_total — the sum over rows is the file total, phase by
+ * phase, and the build count sums with it. The skipped row contributes ~0 and no build, but it is
+ * still one of the rows the report lists (dropping it would make the aggregate overstate coverage —
+ * the same lesson as the `N run, S skipped, F failed` summary line).
+ *
+ * @return void
+ */
+fn regr_timing_aggregates_rows_into_the_file_total() {
+    let rows = rt_sample_rows()
+    let total = rows_total(rows)
+    teko::assert::is_true(total.harness_ns == 4000000)
+    teko::assert::is_true(total.compile_ns == 16000000)
+    teko::assert::is_true(total.run_ns == 500000)
+    teko::assert::is_true(total.builds == 3)
+    teko::assert::is_true(phase_total_ns(total) == 20500000)
+    teko::assert::is_true(rows.len == 4)
+    teko::assert::is_true(rows_skipped(rows) == 1)
+}
+
+#test
+/**
+ * regr_timing_phase_add_is_associative_over_partial_sums — folding row-by-row and folding two
+ * partial sums give the same total: the ONE aggregation rule (`phase_add`) is what lets a scenario, a
+ * feature, a file and the whole phase share a single arithmetic.
+ *
+ * @return void
+ */
+fn regr_timing_phase_add_is_associative_over_partial_sums() {
+    let rows = rt_sample_rows()
+    mut first_two = phase_zero()
+    first_two = phase_add(first_two, rows[0].times)
+    first_two = phase_add(first_two, rows[1].times)
+    mut last_two = phase_zero()
+    last_two = phase_add(last_two, rows[2].times)
+    last_two = phase_add(last_two, rows[3].times)
+    let joined = phase_add(first_two, last_two)
+    let direct = rows_total(rows)
+    teko::assert::is_true(joined.harness_ns == direct.harness_ns)
+    teko::assert::is_true(joined.compile_ns == direct.compile_ns)
+    teko::assert::is_true(joined.run_ns == direct.run_ns)
+    teko::assert::is_true(joined.builds == direct.builds)
+}
+
+#test
+/**
+ * regr_timing_totals_text_reports_builds_and_phase_shares — the per-file line names the build count,
+ * the wall total and the three shares. The shares are what make the number actionable: a flat list of
+ * per-scenario totals would say "everything takes ~1.6s" and point nowhere.
+ *
+ * @return void
+ */
+fn regr_timing_totals_text_reports_builds_and_phase_shares() {
+    let text = regr_totals_text(rows_total(rt_sample_rows()))
+    teko::assert::str_contains(text, "3 builds")
+    teko::assert::str_contains(text, "compile 78%")
+    teko::assert::str_contains(text, "harness 19%")
+    teko::assert::str_contains(text, "run 2%")
+}
+
+#test
+/**
+ * regr_timing_row_line_marks_a_skipped_row — a skipped row appears in the table WITH its skip mark
+ * and its ~0 time, never silently omitted.
+ *
+ * @return void
+ */
+fn regr_timing_row_line_marks_a_skipped_row() {
+    let rows = rt_sample_rows()
+    teko::assert::str_contains(regr_row_line(rows[1]), "[skipped]")
+    teko::assert::str_contains(regr_row_line(rows[1]), "alpha[1]")
+    teko::assert::is_false(teko::str::contains(regr_row_line(rows[0]), "[skipped]"))
+}
+
+#test
+/**
+ * regr_timing_renders_sub_second_and_second_scales — durations render in ms below a second and in
+ * seconds with one decimal above it, so a 1.6-second build and a 4-millisecond phase are both
+ * readable on the same line.
+ *
+ * @return void
+ */
+fn regr_timing_renders_sub_second_and_second_scales() {
+    teko::assert::is_true(regr_ms_text(4000000) == "4ms")
+    teko::assert::is_true(regr_ms_text(1610000000) == "1.6s")
+    teko::assert::is_true(regr_ms_text(0) == "0ms")
+    teko::assert::is_true(regr_share_text(1, 0) == "0%")
 }

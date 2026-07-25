@@ -1663,6 +1663,34 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle) {
     return (tk_ffi_u64res){ .ok = false };
 }
 
+// (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
+// A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
+// child, so an expected exit code is the same whether the program is run directly through
+// teko::process::run or behind a shell.
+#define TK_RT_SIGNAL_EXIT_BASE 128
+
+// (romaneio .31) tk_rt_wait_status_code — the exit code a waited-for POSIX child reports.
+//
+// M.3 FIX: this used to be `WIFEXITED ? WEXITSTATUS : 127`, so EVERY death by signal collapsed onto
+// 127 — the same value execvp-failed (`_exit(127)`) and fork-failed already return. teko::process::run
+// could not distinguish "the child aborted" from "I could not start the child", and a panicking
+// child (SIGABRT) surfaced as a spawn failure. A signalled child now reports 128 + signal.
+//
+// What stays ambiguous, honestly: a child that CHOSE to exit 127 is indistinguishable from a failed
+// execvp, because POSIX gives the exec'd-image failure no other channel. That is the convention's
+// own limit, not a lost distinction.
+//
+// NOT YET NORMALIZED — the Windows half. `tk_win32_spawnvp` returns `_spawnvp`'s value, which for a
+// child killed by an abort/exception is a CRT/NTSTATUS-shaped code, not 128+signal; what it actually
+// is can only be OBSERVED on a Windows runner, and this file will not guess it.
+#ifndef _WIN32
+static int32_t tk_rt_wait_status_code(int status) {
+    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int32_t)(TK_RT_SIGNAL_EXIT_BASE + WTERMSIG(status));
+    return 127;
+}
+#endif
+
 int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
     if (n == 0) return 127;
     // Build a NUL-terminated argv (each arg NUL-terminated; the vector NULL-terminated).
@@ -1682,8 +1710,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
-    return 127;
+    return tk_rt_wait_status_code(status);
 #endif
 }
 
@@ -1728,8 +1755,7 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
-    return 127;
+    return tk_rt_wait_status_code(status);
 #endif
 }
 
