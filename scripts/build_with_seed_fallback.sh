@@ -163,6 +163,99 @@ if build_project "$SEED_BIN" "$PWD" "$OUT_DIR" "$FAST_LOG"; then
 fi
 log "seed FAILED to build the tip directly — engaging the staged bootstrap ladder"
 
+# ── RUNG 0: THE COMMITTED SEED. Tried BEFORE the pinned SHA ladder, and the ordering is the
+# whole point (owner acceptance criterion 2026-07-26 — the counter-machine's PR on the ORG must
+# go green FIRST TRY).
+#
+# The pinned ladder below stands on two intermediate commits of this train. The merge train
+# SQUASH-merges its wagons, so those SHAs never become reachable from `main`, and
+# `ensure_full_history`'s `git fetch --unshallow origin` fetches BRANCHES — not the refs of a
+# squashed-and-deleted wagon. On the org, therefore, the ladder's first `git checkout <rung>` is
+# a guaranteed failure: the ladder depends on repository state that the merge strategy destroys.
+#
+# `bootstrap/seeds/` does not. It is IN THE TREE, sha256-verified against SEEDS.sha256 before
+# it is decompressed, and it is cut FROM the train's own tip — so it builds the tip DIRECTLY,
+# with no rungs at all. native.yml's `seed-debut` proves exactly that on all five hosts on every
+# full run, which is why this is a rung and not a hope.
+#
+# It is deliberately rung 0 and not rung -1: the newest RELEASED seed is still tried first (fast
+# path above), because the committed blob is a TRANSITIONAL .31 measure that the first .32 wagon
+# deletes. When it goes, this rung self-disables — `commit_seed_bin` finds no manifest and says so
+# — and the fast path plus the ladder are what remain, unchanged.
+#
+# host_seed_label — the committed seeds are keyed by HOST THAT RUNS THE COMPILER, not by release
+# target, so this derives the host from uname rather than taking a label from the caller: a seam
+# the caller could get wrong is a seam that silently picks the wrong blob.
+host_seed_label() {
+  hs_os="$(uname -s 2>/dev/null || echo unknown)"
+  hs_arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$hs_os" in
+    Linux)
+      case "$hs_arch" in
+        x86_64|amd64)  printf '%s' "linux-x86_64" ;;
+        aarch64|arm64) printf '%s' "linux-arm64" ;;
+        *)             printf '%s' "" ;;
+      esac ;;
+    Darwin) printf '%s' "macos-arm64" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      case "$hs_arch" in
+        x86_64|amd64)        printf '%s' "windows-x86_64" ;;
+        aarch64|arm64|ARM64) printf '%s' "windows-arm64" ;;
+        *)                   printf '%s' "" ;;
+      esac ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# commit_seed_rung — provision bootstrap/seeds/'s blob for THIS host and build the tip with it.
+# Returns 0 only when the tip actually built; every giving-up path logs WHY, because a rung that
+# fails silently is indistinguishable from a rung that was never tried.
+commit_seed_rung() {
+  cs_label="$(host_seed_label)"
+  if [ -z "$cs_label" ]; then
+    log "rung 0: no committed host seed exists for $(uname -s)/$(uname -m) — skipping"
+    return 1
+  fi
+  cs_manifest="${TEKO_SEEDS_DIR:-bootstrap/seeds}/SEEDS.sha256"
+  if [ ! -f "$cs_manifest" ]; then
+    log "rung 0: no committed seed manifest at $cs_manifest — skipping (expected once .32 drops it)"
+    return 1
+  fi
+  cs_log="$(mktemp)"
+  if ! TEKO_SEED_PREFER_COMMITTED=1 sh scripts/ci_provision_teko.sh "$cs_label" >"$cs_log" 2>&1; then
+    log "rung 0: the committed seed for '$cs_label' could not be provisioned:"
+    sed 's/^/teko-ci:   | /' "$cs_log" >&2
+    rm -f "$cs_log"
+    return 1
+  fi
+  rm -f "$cs_log"
+  cs_bin=""
+  if [ -x .seed/teko ]; then cs_bin="$PWD/.seed/teko"
+  elif [ -x .seed/teko.exe ]; then cs_bin="$PWD/.seed/teko.exe"
+  else
+    log "rung 0: provisioning reported success but no .seed/teko[.exe] is executable — skipping"
+    return 1
+  fi
+  cs_tip_log="$(mktemp)"
+  if build_project "$cs_bin" "$PWD" "$OUT_DIR" "$cs_tip_log" "$(rt_dir_of "$PWD")"; then
+    cat "$cs_tip_log"
+    rm -f "$cs_tip_log"
+    log "rung 0: the COMMITTED seed ('$cs_label') built the tip directly — no SHA ladder needed"
+    return 0
+  fi
+  log "rung 0: the committed seed ('$cs_label') could not build the tip either:"
+  tail -20 "$cs_tip_log" | sed 's/^/teko-ci:   | /' >&2
+  rm -f "$cs_tip_log"
+  return 1
+}
+
+if commit_seed_rung; then
+  rm -f "$FAST_LOG"
+  exit 0
+fi
+log "rung 0 did not reach the tip — falling through to the PINNED SHA ladder (canonical-repo only:"
+log "its rungs are unreachable wherever the wagons were squash-merged)"
+
 if ! ensure_full_history; then
   log "FATAL: could not fetch '$BASE_BRANCH' history from origin — no fallback path exists"
   log "----- seed build of the tip (failure) -----"

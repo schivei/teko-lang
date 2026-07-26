@@ -4,87 +4,83 @@ name: Tests
 # runs HERE — one runner per PUBLISHED ARTIFACT — in PARALLEL with the other tracks (native.yml,
 # sanitizers.yml). Owner's words: "criar em cada ambiente (um por SO: 1 mac, 1 linux e 1 windows)
 # testes em um yml separado, para fugir dos gargalos e que roda em paralelo com as outras
-# trilhas, assim não precisa rodar testes nestes outros diagnósticos para nenhum SO ou Arch." The
-# other workflows' diagnostic jobs therefore NO LONGER run `teko test .` for any OS/arch
-# (native.yml's gen1-checks self-test step was removed when this workflow was added).
+# trilhas, assim não precisa rodar testes nestes outros diagnósticos para nenhum SO ou Arch."
 #
 # THE AXIS WALKED: "UM POR SO" (3) → "UM POR HOST" (5) → "UM POR ARTEFATO PUBLICADO" (9).
-#
 #   • 2026-07-15 — three hand-written jobs, one per OS.
-#   • 2026-07-26 (owner) — "sobre windows-arm64 (e outros hosts), tem que fazer o build inicial e
-#     tem que colocar lane de teste se não houverem": the host set became native.yml's `build-test`
-#     set (five GitHub-hosted runners), and three hand-written jobs became ONE matrix.
-#   • 2026-07-26 (owner, same day) — "E não mandou criar a sublane de testes? Pois hoje temos
-#     apenas 3, deveriam ser 9 (6 Linux, 2 Windows e 1 MacOS)." NINE is not a host count; it is
-#     the ASSET count. `scripts/cross_compile_linux.sh` publishes glibc AND musl for x86_64,
-#     arm64 and riscv64 (six), release.yml's `build-native` publishes macos-arm64,
-#     windows-x86_64 and windows-arm64 (three). Every one of the nine is downloaded and run by
-#     real users, so every one of the nine runs the suite here.
+#   • 2026-07-26 (owner) — the host set became native.yml's `build-test` set (five runners), and
+#     three hand-written jobs became ONE matrix.
+#   • 2026-07-26 (owner, same day) — "hoje temos apenas 3, deveriam ser 9 (6 Linux, 2 Windows e
+#     1 MacOS)." NINE is not a host count; it is the ASSET count.
+#     `scripts/cross_compile_linux.sh` publishes glibc AND musl for x86_64/arm64/riscv64 (six);
+#     release.yml's `build-native` publishes macos-arm64, windows-x86_64, windows-arm64 (three).
+#     Every one of the nine is downloaded and run by real users, so every one runs the suite here.
 #
-# WHAT "ONE LANE PER ARTIFACT" HAD TO CHANGE, AND WHY IT IS NOT A RENAME. A host and an artifact
-# are different things, and four of the nine assets have NO runner that natively produces them:
-#   • the three musl assets are `-static` zig output, never the runner's gcc/glibc output;
-#   • the two riscv64 assets have no riscv64 runner AT ALL — GitHub does not offer one.
-# So a Linux lane no longer runs the host-cc gen1 binary. It builds gen1 (which emits `teko.c`),
-# then cross-builds EXACTLY the artifact it is named after through the same
-# `scripts/cross_compile_linux.sh` the release itself uses — same triples, same
-# `-O2 -fno-sanitize=undefined`, same glibc 2.28 pin — and runs `teko test .` with THAT binary.
-# A lane called `linux-x86_64-musl` that actually exercised a glibc binary built by the runner's
-# gcc would be coverage theater: six differently-named checks over one identical binary.
+# ── THE TEST LANE DOES NOT BUILD (owner ruling 2026-07-26) ────────────────────────────────────
+# "Pode aceitar [o custo do riscv], o importante é não onerar os lanes de testes, estes é que
+# devemos atacar agora." And: "todas as lanes de pull_request precisam depender dessa lane de
+# artefatos … a lane de artefatos deve executar build seco `teko build . --no-verify --release` e
+# ela deve ter a inteligência sobre o que deve gerar (a escada)."
 #
-# THE riscv64 LANES RUN UNDER `qemu-user-static`, AND THAT IS MEASURED, NOT HOPED:
-#   • native.yml's `release-cross-smoke` already RUNS all six Linux artifacts on every full run —
-#     x86_64 natively, arm64/riscv64 under `qemu-{aarch64,riscv64}-static -L <cross sysroot>` —
-#     including `build examples/smoke/uniontest`, an end-to-end compile that SPAWNS `cc`. So an
-#     emulated teko forking the host toolchain is a proven path, not a new bet.
-#   • the ex-`build-test / linux-riscv64 (qemu)` job ran the whole gate this way at 452s
-#     (docs/design/compile-time-architecture.md §1.3, run 28763999356) — emulated riscv is ~10×
-#     native.
-# The `-L /usr/riscv64-linux-gnu` sysroot is required by the DYNAMIC glibc artifact and harmless
-# for the static musl one, so the invocation is uniform. `libc6-riscv64-cross` carries only the
-# loader + shared libc — no cross compiler, because none is wanted: `resolve_cc`
-# (src/build/project.tks) deliberately links with the HOST `cc` whenever `TEKO_TARGET` is unset
-# ("the LINK step always runs ON the host"), and qemu-user passes an `execve` of a host-native
-# binary straight through to the kernel. So the COMPILER under test is fully emulated riscv64
-# while the C it emits is compiled and run natively — which is where the emulation cost belongs.
-# Overriding that with `TEKO_CC=riscv64-linux-gnu-gcc` was considered and REJECTED: it would
-# multiply the emulated surface by every test binary the suite builds, and it would diverge from
-# the link line the artifact actually uses on real riscv64 hardware (where `cc` IS native).
+# So the workflow is two layers, and the split IS the ruling:
+#   `artifact / <producer>`  — the ROOT. Owns the seed, owns THE LADDER, runs the DRY build
+#                              (`--no-verify --release`, no gate), mints the assets, uploads them.
+#   `test / <asset>`         — DOWNLOADS its asset and runs `teko test .`. Nothing else. No seed,
+#                              no `build_with_seed_fallback.sh`, no `zig cc`, no ladder.
+# The emulation cost is ACCEPTED and deliberately NOT optimised — the riscv64 lanes stay, at their
+# real cost. What was attacked instead is what the owner named: a test lane that used to pay for a
+# gen1 build and a cross-compile before it was allowed to run a single test.
 #
-# ONE MATRIX, NOT NINE HAND-WRITTEN JOBS. Three hand-written jobs was already the shape in which
-# the fourth and fifth get forgotten, and the per-job `needs:` list of the aggregator below is
-# exactly where that forgetting becomes invisible (a job outside the list runs, goes red, and
-# does not block the merge — the "gate that does not gate", which this train has hit four times).
-# A single matrix job has ONE name in `needs:`, and GitHub's aggregate result for a matrix job is
-# `success` only when EVERY leg succeeded — a failed, cancelled or absent leg is not `success`,
-# so the gate below rejects it without maintaining a list. Owner, 2026-07-26: "Só colocar todos no
-# gate de validação do teste como já é feito atualmente, a main valida se o gate está verde e não
-# um a um das lanes e sublanes." Adding four assets is therefore four matrix rows plus the gate's
-# expected label set — no new job, no new check, no aggregator renamed.
+# ── WHY BOTH LAYERS ARE MATRICES AND NOT NAMED PER-ASSET JOBS ─────────────────────────────────
+# The recommendation on the table was named artifact jobs, so each test lane could `needs:` only
+# its own artifact. That is NOT REACHABLE, and the reason is a GitHub Actions primitive: `needs:`
+# cannot reference a MATRIX LEG — it names whole jobs. So "each test lane waits only for its own
+# artifact" forces the TEST layer to be nine named jobs too, which restores verbatim the
+# hand-maintained `needs:` list behind all five occurrences of the gate-that-does-not-gate this
+# train has hit. Three further reasons it is the wrong trade:
+#   1. WAITING IS NOT THE BURDEN THE OWNER NAMED. A queued leg spends zero runner-minutes and zero
+#      of its own timeout budget. A leg that BUILDS spends both. This change removes the build; the
+#      residual is that a test leg starts when the slowest producer finishes.
+#   2. THE MEASURED GAIN IS SMALL. The only leg that starts later than strictly necessary is
+#      riscv64 — its producer (`artifact / linux`, a zig cross-compile) finishes minutes before
+#      `artifact / windows-arm64` (a native build documented at ~11 min). Single-digit minutes on a
+#      full path whose riscv cost the owner has just accepted.
+#   3. NAMED PER-ASSET JOBS WOULD PUT MODE LOGIC BACK IN THE GATE. With both layers as matrices the
+#      light/full axis lives ENTIRELY inside the matrices: `plan`, `artifact` and `test` each always
+#      run with at least one leg, so the gate asserts a flat `== success` for all three and never
+#      reasons about which jobs are legitimately `skipped` in which mode — precisely the
+#      vacuous-green hole sanitizers.yml's aggregator was caught in.
+# And the underlying risk is closed properly rather than traded for: the gate below now READS ITS
+# OWN WORKFLOW FILE and fails when any job is absent from its own `needs:`. That makes the
+# aggregator self-maintaining under ANY topology — including the nine-named-jobs one, should the
+# owner later want it.
 #
-# Per-artifact differences are shell `case` in ONE step, never a shell string in a matrix cell,
-# following the precedent native.yml set when it deleted its per-cell `install_deps` string: a
-# shell script does not travel inside JSON inside YAML without escaping that is a standing
-# invitation to error.
+# ── THE BUILD METHOD IS SWAPPABLE WITHOUT TOUCHING THE TOPOLOGY ───────────────────────────────
+# Open question (owner: stop cross-compiling with zig, produce natively; probe
+# `theory/native-runner-probe` has `ubuntu-24.04-arm` + `windows-11-arm` alive and an Alpine
+# container giving native musl on x86_64 and arm64; riscv64-in-container still unanswered). The
+# producer layer is built so the verdict changes ONE thing: which producer legs `plan` emits and
+# what steps they run. `produces` is the CONTRACT — a producer declares the asset labels it mints
+# and uploads them under `teko-assets-<producer>`; a test leg knows only that artifact name and its
+# own label. Moving riscv64 into an emulated Alpine container, or splitting the six Linux assets
+# across three native producers, is a `plan` edit plus that leg's steps. The nine test lanes, the
+# artifact contract, the gate and its coverage proof are all untouched.
 #
-# CI runs on PULL REQUESTS (the per-PR gate) plus PUSHES to main + remodel/** integration branches.
+# CI runs on PULL REQUESTS (the per-PR gate).
 #
 # LIGHT vs FULL (owner proposal 2026-07-24; artifacts revised 2026-07-26):
 #   light  = linux-x86_64-glibc + windows-x86_64
 #   full   = all nine   (base_ref == main)
-# The light set is UNCHANGED in substance from the host era — the same two checks, one of them
-# renamed to the asset it was always testing. windows-x86_64 rides the light tier for the
-# empirical reason spelled out in native.yml's matrix note (wagons 15 and 16 failed on Windows and
-# only on Windows). Every one of the other seven is full-only, and each for a reason the repo has
-# already ruled on:
-#   • linux-arm64-*, windows-arm64, macos-arm64 — an ARCH delta on a platform the light tier
-#     already covers (the standing precedent), and windows-11-arm is the slowest runner in the set.
+# The light set is UNCHANGED in substance from the host era — the same two checks, one renamed to
+# the asset it was always testing. windows-x86_64 rides the light tier for the empirical reason in
+# native.yml's matrix note (wagons 15 and 16 failed on Windows and only on Windows). The other
+# seven are full-only, each on a precedent the repo has already ruled on:
+#   • linux-arm64-*, windows-arm64, macos-arm64 — an ARCH delta on a platform light already covers.
 #   • linux-x86_64-musl, linux-arm64-musl — a LIBC/link-mode delta on a platform already covered.
-#     No wagon has ever broken on musl and not on glibc; a musl break is a link-time or
-#     static-runtime failure, and the light tier exists for the failure modes that HAVE happened.
-#   • linux-riscv64-* — arch delta AND ~10× emulated. A cross+emulated lane is exactly the cost
-#     the light path exists to defer to the wagon that lands (same ruling native.yml's
-#     `riscv64-qemu` and `release-cross-smoke` already stand on).
+#     No wagon has ever broken on musl and not on glibc; light exists for failure modes that HAVE
+#     happened.
+#   • linux-riscv64-* — arch delta AND ~10× emulated (452s measured for this exact operation,
+#     docs/design/compile-time-architecture.md §1.3, run 28763999356).
 # The axis is `github.base_ref`, never `github.ref` (on a pull_request that is
 # `refs/pull/N/merge` and matches no branch name).
 on:
@@ -97,10 +93,10 @@ permissions:
   contents: read
 
 jobs:
-  # ── plan: the mode and the artifact matrix, emitted once ──────────────────────
+  # ── plan: the mode, the asset set, and BOTH matrices, emitted once ────────────
   # Mirrors native.yml's `changes` job, minus the paths filter (this workflow is already
-  # path-filtered at the trigger). `labels` is emitted alongside `matrix` so the gate can check
-  # WHICH artifacts were planned, not merely that the matrix job went green — see the gate's note.
+  # path-filtered at the trigger). `labels` is emitted alongside the matrices so the gate can check
+  # WHICH assets were planned, not merely that the matrix jobs went green — see the gate's note.
   plan:
     name: test plan
     runs-on: ubuntu-latest
@@ -109,10 +105,11 @@ jobs:
       contents: read
     outputs:
       full: ${{ steps.decide.outputs.full }}
-      matrix: ${{ steps.decide.outputs.matrix }}
       labels: ${{ steps.decide.outputs.labels }}
+      matrix_artifact: ${{ steps.decide.outputs.matrix_artifact }}
+      matrix_test: ${{ steps.decide.outputs.matrix_test }}
     steps:
-      - name: Decide (mode + artifact matrix)
+      - name: Decide (mode + producer matrix + asset matrix)
         id: decide
         shell: bash
         env:
@@ -123,85 +120,106 @@ jobs:
           echo "full=$full" >> "$GITHUB_OUTPUT"
           echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF')"
 
-          # `label` is the RELEASE ASSET label — it feeds the job name, the seed mapping and
-          # scripts/cross_compile_linux.sh's target filter, so the check that goes red names the
-          # same string the release publishes and the user downloads.
+          # ── PRODUCER LEGS. `producer` names the leg; `produces` is its CONTRACT — the
+          # space-separated asset labels it must mint and upload as `teko-assets-<producer>`. The
+          # grouping mirrors release.yml exactly (one `build-linux` emitting teko.c once and
+          # cross-compiling from it, plus one native leg per non-Linux asset), so PR CI and the
+          # release mint their artifacts the same way. The windows-arm64 producer carries the
+          # largest cap because its gen1 BUILD alone is documented at ~11 min.
           #
-          # `os` is the runner that EXECUTES that artifact, which is not always the runner that
-          # would natively produce it: the two riscv64 rows sit on ubuntu-latest because no
-          # riscv64 runner exists and they run under qemu-user.
+          # This is the seam the pending native-production verdict moves: re-grouping `produces`
+          # (or adding legs) changes what is built where, and changes nothing below.
+          LINUX_ALL="linux-x86_64-glibc linux-x86_64-musl linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl"
+          A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"produces":"macos-arm64"}'
+          A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":75,"produces":"windows-x86_64"}'
+          A_WA='{"producer":"windows-arm64","os":"windows-11-arm","timeout":120,"produces":"windows-arm64"}'
+
+          # ── TEST LEGS. `os` is the runner that EXECUTES the asset, which is NOT the runner that
+          # minted it: the arm64 assets are cross-built on ubuntu-latest and RUN natively on
+          # ubuntu-24.04-arm, and the two riscv64 assets run on ubuntu-latest under qemu-user
+          # because no riscv64 runner exists. `producer` is how a leg finds its download.
           #
-          # `timeout` is per-artifact because the lanes are not comparable. Measured build-test
-          # wall-clock on the same corpus was 309s linux-x86_64 / 215s windows-x86_64 / 184s
-          # macos-arm64 versus 973s on windows-11-arm (docs/design/compile-time-architecture.md
-          # §1.1), and this job runs the heavier `teko test .` on top of the build. The two
-          # emulated rows get windows-arm64's 180 — the largest cap in the set — derived from the
-          # 452s the ex-riscv64 gate measured under qemu (§1.3) plus headroom for corpus growth
-          # and the regressor's per-scenario compiler spawns. A cap is here to REVEAL a duration,
-          # not to hide one: if 180 is exceeded, the honest outcome is a red lane naming the
-          # wall-clock, and the relief belongs in the perf work (#168/#265) — never in silently
-          # dropping an artifact the release publishes.
-          L_X86_GLIBC='{"os":"ubuntu-latest","label":"linux-x86_64-glibc","timeout":95}'
-          L_X86_MUSL='{"os":"ubuntu-latest","label":"linux-x86_64-musl","timeout":95}'
-          L_ARM_GLIBC='{"os":"ubuntu-24.04-arm","label":"linux-arm64-glibc","timeout":95}'
-          L_ARM_MUSL='{"os":"ubuntu-24.04-arm","label":"linux-arm64-musl","timeout":95}'
-          L_RV_GLIBC='{"os":"ubuntu-latest","label":"linux-riscv64-glibc","timeout":180}'
-          L_RV_MUSL='{"os":"ubuntu-latest","label":"linux-riscv64-musl","timeout":180}'
-          M_ARM='{"os":"macos-latest","label":"macos-arm64","timeout":95}'
-          W_X86='{"os":"windows-latest","label":"windows-x86_64","timeout":125}'
-          W_ARM='{"os":"windows-11-arm","label":"windows-arm64","timeout":180}'
+          # `timeout` is now a GATE-ONLY budget — the build left this layer. Measured native test
+          # gates on the same corpus: 181s linux-x86_64, 100s macos-arm64, 591s windows-arm64
+          # (docs/design/compile-time-architecture.md §1.2), so 45/45/90 carry 5-15x headroom. The
+          # emulated pair keeps 180 against the 452s measured under qemu (§1.3) plus room for corpus
+          # growth and the regressor's per-scenario compiler spawns. A cap exists to REVEAL a
+          # duration, not to hide one: if one is exceeded the honest outcome is a red lane naming
+          # the wall-clock, never a silently dropped asset.
+          T_XG='{"label":"linux-x86_64-glibc","producer":"linux","os":"ubuntu-latest","timeout":45}'
+          T_XM='{"label":"linux-x86_64-musl","producer":"linux","os":"ubuntu-latest","timeout":45}'
+          T_AG='{"label":"linux-arm64-glibc","producer":"linux","os":"ubuntu-24.04-arm","timeout":45}'
+          T_AM='{"label":"linux-arm64-musl","producer":"linux","os":"ubuntu-24.04-arm","timeout":45}'
+          T_RG='{"label":"linux-riscv64-glibc","producer":"linux","os":"ubuntu-latest","timeout":180}'
+          T_RM='{"label":"linux-riscv64-musl","producer":"linux","os":"ubuntu-latest","timeout":180}'
+          T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45}'
+          T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60}'
+          T_WA='{"label":"windows-arm64","producer":"windows-arm64","os":"windows-11-arm","timeout":90}'
+
           if [ "$full" = "true" ]; then
-            # SLOWEST FIRST. GitHub starts matrix legs in declaration order, so the two emulated
-            # rows and windows-11-arm — the wall-clock critical path — must not queue behind the
-            # cheap ones.
-            echo "matrix={\"include\":[$L_RV_GLIBC,$L_RV_MUSL,$W_ARM,$W_X86,$L_X86_GLIBC,$L_X86_MUSL,$L_ARM_GLIBC,$L_ARM_MUSL,$M_ARM]}" >> "$GITHUB_OUTPUT"
+            A_LINUX="{\"producer\":\"linux\",\"os\":\"ubuntu-latest\",\"timeout\":60,\"produces\":\"$LINUX_ALL\"}"
+            # SLOWEST FIRST in both matrices. GitHub starts legs in declaration order, so the
+            # ~11-min windows-arm64 producer and the emulated test legs must not queue behind cheap
+            # ones.
+            echo "matrix_artifact={\"include\":[$A_WA,$A_LINUX,$A_WX,$A_MAC]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_test={\"include\":[$T_RG,$T_RM,$T_WA,$T_WX,$T_XG,$T_XM,$T_AG,$T_AM,$T_MAC]}" >> "$GITHUB_OUTPUT"
             echo "labels=linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
           else
-            echo "matrix={\"include\":[$L_X86_GLIBC,$W_X86]}" >> "$GITHUB_OUTPUT"
+            A_LINUX='{"producer":"linux","os":"ubuntu-latest","timeout":60,"produces":"linux-x86_64-glibc"}'
+            echo "matrix_artifact={\"include\":[$A_WX,$A_LINUX]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_test={\"include\":[$T_WX,$T_XG]}" >> "$GITHUB_OUTPUT"
             echo "labels=linux-x86_64-glibc windows-x86_64" >> "$GITHUB_OUTPUT"
           fi
 
-  # ── test / <artifact> ────────────────────────────────────────────────────────
-  # Provision a host-runnable released seed, build gen1 (the PR's compiler under test — the seed
-  # compiles the PR corpus, falling back to a staged bootstrap through gen1(main) via
-  # scripts/build_with_seed_fallback.sh when the raw seed cannot reach the tip), materialise THIS
-  # lane's published artifact from gen1's emitted C, then run gen1's own full test suite
-  # (`teko test .`) with that artifact. This is the SAME heavy native pass gen1-checks used to
-  # run; it lives here so it parallels the diagnostics instead of blocking them.
+  # ── artifact / <producer>: THE ROOT LANE ──────────────────────────────────────
+  # Owner: "a lane de artefatos deve executar build seco `teko build . --no-verify --release` e ela
+  # deve ter a inteligência sobre o que deve gerar (a escada)."
   #
-  # HISTORICAL CAVEAT ON WINDOWS: the gen1 BUILD alone is ~11 min on the shared runner, and the
-  # previous attempt to also run the full `teko test .` on top of it blew both the 20- and 30-min
-  # caps (owner ruling 2026-07-14 — sanitizers.yml's windows-selfhost only builds + `--version`
-  # smokes). The caps here are deliberately generous so CI reveals the ACTUAL duration now that
-  # tests run on their own isolated runner. windows-arm64 and the two emulated riscv64 lanes get
-  # the largest cap of all for the same reason and one more: nothing has ever run `teko test .` on
-  # windows-11-arm or on a musl artifact, so those durations are unknown rather than merely large.
-  test:
+  # THE INTELLIGENCE IS TWO THINGS, and both live here and nowhere else:
+  #   1. WHAT TO GENERATE — `produces` from `plan`, which is why the light path mints ONE Linux
+  #      asset instead of six (the label filter on scripts/cross_compile_linux.sh) rather than
+  #      building all six and throwing five away.
+  #   2. THE LADDER — scripts/build_with_seed_fallback.sh, whose rungs are, in order: the newest
+  #      RELEASED seed builds the tip directly (fast path); else the COMMITTED seed in
+  #      bootstrap/seeds/ builds it directly (rung 0, added this wagon); else the pinned SHA ladder.
+  #      That ordering is an ACCEPTANCE CRITERION, not a preference: the counter-machine's PR on the
+  #      org must go green FIRST TRY, and the pinned SHA rungs are UNREACHABLE wherever the wagons
+  #      were squash-merged (`git fetch --unshallow` fetches branches, not the refs of a
+  #      squashed-and-deleted wagon). bootstrap/seeds/ is IN THE TREE, sha256-verified before
+  #      decompression, and cut FROM the tip — no release, no cache, no external state. That the
+  #      committed seed builds the tip directly is not assumed: native.yml's `seed-debut` proves it
+  #      on all five hosts on every full run.
+  #
+  # `--no-verify --release`: DRY, no test gate — the gate is the `test` layer's whole job, and
+  # running it here would put the cost straight back into the critical path the ruling removed.
+  # `--release` because every published asset is an `-O2` link (release.yml passes it on both
+  # generations), so an artifact built without it would not be the artifact.
+  artifact:
     needs: plan
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    name: test / ${{ matrix.label }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_artifact) }}
+    name: artifact / ${{ matrix.producer }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
     env:
-      # PINNED TO THE RELEASE'S ZIG, not to "some zig". release.yml and native.yml both pin
-      # 0.16.0 (0.13.0 ships an incomplete riscv64 glibc — missing gnu/stubs-lp64d.h). A lane that
-      # built its artifact with a different zig would be testing a binary the release never ships.
+      # PINNED TO THE RELEASE'S ZIG, not to "some zig". release.yml and native.yml both pin 0.16.0
+      # (0.13.0 ships an incomplete riscv64 glibc — missing gnu/stubs-lp64d.h). An asset built with
+      # a different zig is not the asset the release ships.
       ZIG_VERSION: "0.16.0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # Named BEFORE the first step that can fail on a missing tool, so a red run on a host whose
-      # image no lane has exercised (windows-11-arm, ubuntu-24.04-arm here) says WHICH toolchain
-      # was present instead of leaving the reader to infer it from a cc error deep inside a build
-      # log. Same shape as native.yml's `seed-debut`. `unzip`/`tar` are listed because
-      # ci_provision_teko.sh needs one of them to open the release asset, `xz`/`python3`/`7z`
-      # because they are the decompressor chain the committed-seed fallback walks, and `file`
-      # because cross_compile_linux.sh asserts each artifact's architecture with it.
+      # image no lane has exercised (windows-11-arm here) says WHICH toolchain was present instead
+      # of leaving the reader to infer it from a cc error deep inside a build log. Same shape as
+      # native.yml's `seed-debut`. `unzip`/`tar` are listed because ci_provision_teko.sh needs one
+      # of them to open the release asset, `xz`/`python3`/`7z` because they are the decompressor
+      # chain the committed-seed rung walks, and `file` because cross_compile_linux.sh asserts each
+      # asset's architecture with it.
       - name: Report the host toolchain (diagnostic — never fails the job)
         shell: bash
         run: |
@@ -210,12 +228,12 @@ jobs:
             command -v "$t" || echo '(absent)'
           done
 
-      # LINUX ONLY: the six Linux assets are `zig cc` output. The tarball name carries the HOST
-      # arch, and this matrix has both an x86_64 and an aarch64 Linux runner, so the arch is read
-      # from `uname -m` rather than hardcoded as release.yml can afford to (it only ever runs on
-      # ubuntu-latest). Note the name format flipped at zig 0.14.1: `zig-<arch>-linux-<v>`.
+      # LINUX PRODUCER ONLY, and only until the native-production verdict lands. The tarball name
+      # carries the HOST arch; read from `uname -m` rather than hardcoded, so this leg can be moved
+      # to an arm runner without an edit. Note the name format flipped at zig 0.14.1:
+      # `zig-<arch>-linux-<v>`.
       - name: Install zig (the release's exact cross toolchain)
-        if: startsWith(matrix.label, 'linux-')
+        if: matrix.producer == 'linux'
         shell: bash
         run: |
           set -eu
@@ -227,11 +245,134 @@ jobs:
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${zhost}-linux-${ZIG_VERSION}.tar.xz" | tar -xJ
           echo "$PWD/zig-${zhost}-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
-      # riscv64 ONLY: there is no riscv64 runner, so the artifact executes under qemu-user.
-      # `libc6-riscv64-cross` carries ONLY the target loader + shared libc that the DYNAMIC glibc
-      # artifact needs at runtime — no cross compiler, deliberately (see the header note on
-      # `resolve_cc` linking with the host `cc`). This is the exact pair native.yml's
-      # `release-cross-smoke` already installs and runs green.
+      # The second diagnostic, placed for the same reason as the first: the next step that can fail
+      # on a missing tool is the cross-compile, and it fails on an absent `zig`. Never fails.
+      - name: Report the cross toolchain (diagnostic — never fails the job)
+        if: matrix.producer == 'linux'
+        shell: bash
+        run: |
+          command -v zig || echo 'zig (absent)'
+          zig version 2>/dev/null || echo 'zig: not runnable on this host'
+
+      # The seed must RUN on this runner. The Linux producer cross-compiles, so it seeds with the
+      # host's own glibc asset; every other producer is native and seeds with its own label. A shell
+      # `case`, not a matrix field: native.yml deleted its per-cell shell strings for this reason.
+      - name: Provision teko from the latest release (the host-runnable seed)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER: ${{ matrix.producer }}
+        run: |
+          set -eu
+          case "$PRODUCER" in
+            linux) seed=linux-x86_64-glibc ;;
+            *)     seed="$PRODUCER" ;;
+          esac
+          echo "producer '$PRODUCER' — seeding with the host-runnable '$seed'"
+          ./scripts/ci_provision_teko.sh "$seed"
+
+      # THE DRY BUILD + THE LADDER. `out/` receives gen1's binary AND the `teko.c` it was compiled
+      # from; the Linux producer cross-compiles its assets from that same C, so every asset a
+      # producer mints is the same generation of the compiler by construction.
+      - name: Dry build (teko build . --no-verify --release, via the ladder)
+        shell: bash
+        run: sh scripts/build_with_seed_fallback.sh out
+
+      # ONLY the assets `produces` names — the light path mints one Linux asset, not six. The
+      # triples and flags stay in the single source of truth the release itself uses; a label the
+      # script does not know is a hard error there, never a silent no-op.
+      - name: Cross-compile the Linux assets this producer owns
+        if: matrix.producer == 'linux'
+        shell: bash
+        env:
+          PRODUCES: ${{ matrix.produces }}
+        run: sh scripts/cross_compile_linux.sh out/teko.c src /tmp/pkg smoke $PRODUCES
+
+      # THE CONTRACT, MADE LITERAL: one directory per asset label, each holding that asset's binary.
+      # A test leg knows only `<label>/teko[.exe]`, so a producer can change HOW it mints an asset
+      # without the consumer noticing. The loop FAILS if a promised asset is missing — a producer
+      # that uploads less than it promised would otherwise surface as a confusing download error
+      # one job away from its cause.
+      - name: Stage the assets this producer promised
+        shell: bash
+        env:
+          PRODUCER: ${{ matrix.producer }}
+          PRODUCES: ${{ matrix.produces }}
+        run: |
+          set -eu
+          rm -rf stage
+          for label in $PRODUCES; do
+            mkdir -p "stage/$label"
+            case "$PRODUCER" in
+              linux) src="gd-$label/teko" ;;
+              *)     src="out/teko"; [ -f out/teko.exe ] && src="out/teko.exe" ;;
+            esac
+            if [ ! -f "$src" ]; then
+              echo "ERROR: producer '$PRODUCER' promised '$label' but $src does not exist" >&2
+              exit 1
+            fi
+            case "$src" in
+              *.exe) cp "$src" "stage/$label/teko.exe" ;;
+              *)     cp "$src" "stage/$label/teko" ;;
+            esac
+            echo "staged $label <- $src"
+          done
+          ls -lR stage
+
+      - name: Upload the assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: stage
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── test / <asset>: DOWNLOAD AND RUN. NO BUILD. ───────────────────────────────
+  # Every step here is a download, a diagnostic, or `teko test .`. That is the ruling.
+  #
+  # `needs: [plan, artifact]` — one name for the whole producer layer, because `needs:` cannot
+  # reference a matrix leg (see the header note on why that is the right trade rather than a
+  # concession). The consequence is bounded and stated: a test leg starts when the SLOWEST producer
+  # finishes, and pays nothing for the wait.
+  #
+  # A C TOOLCHAIN IS STILL REQUIRED HERE, and that is not a build sneaking back in: `teko test .` IS
+  # a native gate — it emits the #test corpus as C, compiles it and runs it out-of-process (#168).
+  # The compiler under test is the downloaded asset; `cc` is the suite's engine, not a step that
+  # builds the compiler.
+  test:
+    needs: [plan, artifact]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_test) }}
+    name: test / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    steps:
+      # The corpus under test. The asset arrives by download; the SOURCE it compiles is this PR's.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file python3; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      # riscv64 ONLY: there is no riscv64 runner, so the asset executes under qemu-user.
+      # `libc6-riscv64-cross` carries ONLY the target loader + shared libc the DYNAMIC glibc asset
+      # needs at runtime — no cross compiler, deliberately: `resolve_cc`
+      # (src/build/project.tks:721-742) links with the HOST `cc` whenever `TEKO_TARGET` is unset
+      # ("the LINK step always runs ON the host"), and qemu-user passes an `execve` of a host-native
+      # binary straight through to the kernel. So the COMPILER under test is fully emulated riscv64
+      # while the C it emits is compiled and run natively — which is where the emulation cost
+      # belongs. `TEKO_CC=riscv64-linux-gnu-gcc` was considered and REJECTED: it would multiply the
+      # emulated surface by every test binary the suite builds, and it would diverge from the link
+      # line the asset uses on real riscv64 hardware, where `cc` IS native. This is the exact pair
+      # native.yml's `release-cross-smoke` already installs and runs green.
       - name: Install qemu-user-static + the riscv64 loader
         if: contains(matrix.label, 'riscv64')
         shell: bash
@@ -240,83 +381,62 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y qemu-user-static libc6-riscv64-cross
 
-      # The second diagnostic, and it is placed here for the same reason as the first: the NEXT
-      # step that can fail on a missing tool is the cross-build, and it fails on an absent `zig`.
-      # Names the emulator and the sysroot too, so a red riscv64 lane says whether the emulator
-      # was even there. Never fails the job.
-      - name: Report the cross toolchain this lane provisioned (diagnostic — never fails)
-        if: startsWith(matrix.label, 'linux-')
+      - name: Report the emulator (diagnostic — never fails the job)
+        if: contains(matrix.label, 'riscv64')
         shell: bash
         run: |
-          for t in zig qemu-riscv64-static; do
-            printf '%-20s ' "$t"
-            command -v "$t" || echo '(absent)'
-          done
-          zig version 2>/dev/null || echo 'zig: not runnable on this host'
-          qemu-riscv64-static --version 2>/dev/null | head -n1 || echo 'qemu-riscv64-static: not runnable on this host'
+          command -v qemu-riscv64-static || echo 'qemu-riscv64-static (absent)'
+          qemu-riscv64-static --version 2>/dev/null | head -n1 || echo 'qemu-riscv64-static: not runnable'
           ls -d /usr/riscv64-linux-gnu 2>/dev/null || echo '/usr/riscv64-linux-gnu: absent (no riscv64 sysroot)'
 
-      # THE SEED MUST RUN ON THIS RUNNER, which is a different question from which artifact this
-      # lane tests. musl and riscv64 are cross-compiled TARGETS: `ci_provision_teko.sh` would
-      # happily download `teko-linux-riscv64-musl.tar.gz` (the release does publish it), and on a
-      # qemu-enabled host it might even answer `--version` — but bootstrapping gen1 through an
-      # emulated compiler costs ~10× for nothing, since gen1 is a means, not the thing under test.
-      # So the seed is the host's glibc asset and the ARTIFACT is built from gen1 below.
-      # The mapping is a shell `case`, not a matrix field: native.yml deleted its per-cell shell
-      # strings for exactly this reason.
-      - name: Provision teko from the latest release (the host-runnable seed)
+      - name: Download this lane's published asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: dl
+
+      # `actions/upload-artifact` does NOT preserve the executable bit, so restoring it is
+      # MANDATORY, not hygiene — without it every POSIX lane dies at "permission denied" and the
+      # cause sits three steps from the symptom. `--version` is the diagnostic that names the binary
+      # under test BEFORE the suite: it proves the asset loads and reports its version on this host,
+      # and it is the last cheap step before the expensive one.
+      - name: Restore the executable bit and name the asset under test
+        if: runner.os != 'Windows'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           LABEL: ${{ matrix.label }}
         run: |
           set -eu
+          art="dl/$LABEL/teko"
+          if [ ! -f "$art" ]; then
+            echo "ERROR: the producer's upload has no $art" >&2
+            ls -lR dl >&2
+            exit 1
+          fi
+          chmod +x "$art"
+          file "$art" || true
           case "$LABEL" in
-            linux-x86_64-*|linux-riscv64-*) seed=linux-x86_64-glibc ;;
-            linux-arm64-*)                  seed=linux-arm64-glibc ;;
-            *)                              seed="$LABEL" ;;
+            linux-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" --version ;;
+            *)               "$art" --version ;;
           esac
-          echo "artifact under test: $LABEL — seeding with the host-runnable '$seed'"
-          ./scripts/ci_provision_teko.sh "$seed"
 
-      # `bin/` receives BOTH gen1's binary and the `teko.c` it was compiled from — the Linux lanes
-      # cross-build the published artifact from that same C, so the artifact and the host binary
-      # are the same generation of the compiler by construction.
-      - name: Build gen1 (seed compiles the PR corpus, staged fallback if needed → bin/)
-        shell: bash
-        run: sh scripts/build_with_seed_fallback.sh bin
-
-      # ONE artifact, not six: the label filter (added for this lane) makes the shared script
-      # build only the target this leg is named after, so a lane pays one `zig cc`, not six, while
-      # the triples and flags stay in the single source of truth the release itself uses.
-      # Output lands in ./gd-<label>/teko.
-      - name: Cross-build this lane's published artifact from gen1's emitted C
-        if: startsWith(matrix.label, 'linux-')
-        shell: bash
-        env:
-          LABEL: ${{ matrix.label }}
-        run: sh scripts/cross_compile_linux.sh bin/teko.c src /tmp/lane-artifact smoke "$LABEL"
-
-      # ── the suite, run BY the artifact ───────────────────────────────────────
-      # THREE steps, and the split is not cosmetic: the Linux lanes run a cross-built binary
-      # (sometimes under an emulator), macOS runs the natively-built one, and Windows is not a
-      # different path but a different SHELL with an explicit `$LASTEXITCODE` propagation.
-      # EXACTLY ONE of the three runs on any given leg, and the guard step below PROVES it — a leg
-      # whose label matched none of them would otherwise report green having run nothing, which is
-      # the "gate that does not gate" reproduced one level down.
-      - name: Artifact self-test — Linux lanes (the published artifact runs its own gate)
-        if: startsWith(matrix.label, 'linux-')
+      # ── the suite, run BY the asset. THE ONLY WORK THIS LAYER DOES. ───────────
+      # TWO steps, and the split is not cosmetic: Windows is not a different path but a different
+      # SHELL with an explicit `$LASTEXITCODE` propagation. EXACTLY ONE runs on any given leg, and
+      # the guard below PROVES it.
+      - name: Asset self-test — POSIX lanes (the published asset runs its own gate)
+        if: runner.os != 'Windows'
         shell: bash
         env:
           LABEL: ${{ matrix.label }}
         run: |
           set -eu
-          art="./gd-$LABEL/teko"
+          art="dl/$LABEL/teko"
           case "$LABEL" in
             linux-riscv64-*)
-              # `-L` is required by the dynamic glibc artifact and harmless for the static musl
-              # one, so the invocation is uniform — measured in native.yml's release-cross-smoke,
-              # where without it a dynamic artifact dies at "Could not open '/lib/ld-linux-*'".
+              # `-L` is required by the dynamic glibc asset and harmless for the static musl one, so
+              # the invocation is uniform — measured in native.yml's release-cross-smoke, where
+              # without it a dynamic artifact dies at "Could not open '/lib/ld-linux-*'".
               qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" test .
               ;;
             *)
@@ -325,77 +445,142 @@ jobs:
           esac
           : > .lane-ran
 
-      - name: Artifact self-test — macOS (the published artifact runs its own gate)
-        if: matrix.label == 'macos-arm64'
-        shell: bash
-        run: |
-          set -eu
-          ./bin/teko test .
-          : > .lane-ran
-
-      - name: Artifact self-test — Windows lanes (the published artifact runs its own gate)
+      - name: Asset self-test — Windows lanes (the published asset runs its own gate)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          LABEL: ${{ matrix.label }}
         run: |
-          .\bin\teko.exe test .
+          $art = "dl/$env:LABEL/teko.exe"
+          if (-not (Test-Path -LiteralPath $art)) {
+            Get-ChildItem -Recurse dl | Out-String | Write-Host
+            throw "the producer's upload has no $art"
+          }
+          & $art --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $art test .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType File -Force .lane-ran | Out-Null
 
-      # J3 AT THE LEG LEVEL. The three steps above are each guarded by an `if:` over the label, so
-      # a tenth asset whose label matched no predicate would SKIP all three and the leg would go
-      # green having executed no suite at all — and a green leg is what the aggregate `success`
-      # this workflow's gate trusts is made of. The marker file is written by whichever self-test
-      # step ran, so its absence is proof that none did. (A self-test FAILURE fails the leg before
-      # reaching here, which is the outcome that needs no guard.)
-      - name: Guard — the artifact self-test must actually have run
+      # J3 AT THE LEG LEVEL — the fifth occurrence of the gate-that-does-not-gate, one scope down.
+      # The two steps above are each guarded by an `if:`, so a tenth asset whose label matched no
+      # predicate would SKIP both and the leg would go green having executed no suite at all — and a
+      # green leg is exactly what the aggregate `success` the gate trusts is made of. The marker file
+      # is written by whichever self-test step ran, so its absence PROVES none did. (A self-test
+      # FAILURE fails the leg before reaching here, which is the outcome needing no guard.)
+      - name: Guard — the asset self-test must actually have run
         shell: bash
         env:
           LABEL: ${{ matrix.label }}
         run: |
           set -eu
           if [ ! -f .lane-ran ]; then
-            echo "ERROR: no self-test step claimed artifact '$LABEL' — this leg would have" >&2
-            echo "reported success without running 'teko test .' at all. Add the label to one of" >&2
-            echo "the three self-test steps' conditions." >&2
+            echo "ERROR: no self-test step claimed asset '$LABEL' — this leg would have reported" >&2
+            echo "success without running 'teko test .' at all. Add the label to one of the two" >&2
+            echo "self-test steps' conditions." >&2
             exit 1
           fi
-          echo "artifact '$LABEL' — the self-test ran"
+          echo "asset '$LABEL' — the self-test ran"
 
-  # ── test suite gate: the stable required check ───────────────────────────────
-  # Stable required-check name for the branch ruleset — the per-artifact job names are NOT required
-  # checks and are free to change with the matrix (that is the whole point of aggregating). Owner,
-  # 2026-07-26: "a main valida se o gate está verde e não um a um das lanes e sublanes."
+  # ── test suite gate: the stable required check ────────────────────────────────
+  # Stable required-check name for the branch ruleset — the per-asset and per-producer job names are
+  # NOT required checks and are free to change with the matrices (that is the whole point of
+  # aggregating). Owner, 2026-07-26: "Só colocar todos no gate de validação do teste como já é feito
+  # atualmente, a main valida se o gate está verde e não um a um das lanes e sublanes."
   #
-  # `needs: [plan, test]` covers EVERY artifact with no list to maintain: for a matrix job GitHub
-  # folds the legs into one result, which is `success` only when all legs succeeded. `failure`,
-  # `cancelled` and `skipped` are all rejected below by the same `!= success` test — including
-  # `cancelled`, which a "did anything fail?" gate would wave through.
+  # THREE INDEPENDENT ASSERTIONS, because this gate has been vacuously green before:
   #
-  # J3 (the guard against an empty green) has a SECOND half once the matrix is dynamic. A gate
-  # that only asserts "the matrix job was green" is vacuously satisfiable by a `plan` job that
-  # emits the wrong matrix: drop eight artifacts and one green linux leg reports success. So the
-  # gate re-derives the mode from `github.base_ref` ITSELF — not from plan's output — and demands
-  # the exact artifact set that mode requires. A planned-set mismatch is an ERROR, not a warning:
-  # it is indistinguishable from silently un-testing a published asset. (native.yml's `CI gate`
-  # has this same hole against `matrix_build`; closing it there is a separate change, noted here
-  # so it is not lost.)
+  #   J3-STRUCTURAL (new, and the reason the topology above is free to change): the gate READS ITS
+  #   OWN WORKFLOW FILE and fails when any job in it is absent from its own `needs:`. Five times on
+  #   this train a job has run, gone red, and not blocked the merge because a hand-maintained
+  #   `needs:` list had fallen behind the job list. A list cannot fall behind a check that DERIVES
+  #   it. This makes the aggregator self-maintaining under ANY future topology — nine named artifact
+  #   jobs included.
   #
-  # WANT_LABELS IS THE ONE THING THAT MUST MOVE WHEN THE MATRIX DOES. It is duplicated from
-  # `plan` on purpose — an independent statement of the requirement is the only thing a broken
-  # planner cannot satisfy by agreeing with itself.
+  #   J3-PLANNED-SET: a gate that only asserts "the matrix jobs were green" is vacuously satisfiable
+  #   by a `plan` that emits the wrong matrices — drop eight assets and one green leg reports
+  #   success. So the gate re-derives the mode from `github.base_ref` ITSELF, not from plan's output,
+  #   and demands the exact asset set that mode requires; and it cross-checks that the producers'
+  #   `produces` union, the test matrix's labels, and `labels` are the SAME set — a producer minting
+  #   nothing a lane consumes, or a lane with no producer, is caught here rather than as a download
+  #   error. WANT_LABELS is duplicated from `plan` on purpose: an independent statement of the
+  #   requirement is the only thing a broken planner cannot satisfy by agreeing with itself.
+  #
+  #   RESULTS: `failure`, `cancelled` and `skipped` are all rejected by the same `!= success` test —
+  #   including `cancelled`, which a "did anything fail?" gate would wave through. For a matrix job
+  #   GitHub folds the legs into one result that is `success` only when EVERY leg succeeded, and
+  #   because the light/full axis lives entirely inside the matrices, all three needed jobs must be
+  #   `success` in BOTH modes — the gate never has to reason about which jobs are legitimately
+  #   skipped, which is the hole sanitizers.yml's aggregator was caught in.
   test-suite-gate:
     name: Test suite gate
     runs-on: ubuntu-latest
-    needs: [plan, test]
+    needs: [plan, artifact, test]
     if: always()
-    permissions: {}
+    permissions:
+      contents: read
     steps:
+      # Only this workflow file is needed, and only to derive the job list from it.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: J3-structural — every job in this workflow is covered by this gate's needs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          SELF=test-suite-gate
+          WF=.github/workflows/tests.yml
+
+          # Job keys are the only 2-space-indented bare-key lines inside the top-level `jobs:`
+          # block; a key at column 0 ends the block. FAIL-CLOSED by construction: if this extraction
+          # ever broke it would not find SELF either, and the guard below stops the run rather than
+          # passing an empty comparison.
+          JOBS="$(awk '
+            /^jobs:[[:space:]]*$/ { inj = 1; next }
+            inj && /^[^[:space:]#]/ { inj = 0 }
+            inj && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:[[:space:]]*$/, ""); sub(/^  /, ""); print }
+          ' "$WF" | sort)"
+          NEEDED="$(printf '%s' "$NEEDS_JSON" \
+            | python3 -c 'import json,sys; print("\n".join(sorted(json.load(sys.stdin))))')"
+
+          echo "jobs in $WF :"
+          printf '%s\n' "$JOBS" | sed 's/^/  /'
+          echo "needs of $SELF :"
+          printf '%s\n' "$NEEDED" | sed 's/^/  /'
+
+          if ! printf '%s\n' "$JOBS" | grep -qx "$SELF"; then
+            echo "ERROR: the job-list extraction did not find '$SELF' itself — it is broken, and a" >&2
+            echo "broken extraction must not be allowed to pass a comparison." >&2
+            exit 1
+          fi
+
+          EXPECTED="$(printf '%s\n' "$JOBS" | grep -vx "$SELF")"
+          printf '%s\n' "$EXPECTED" > /tmp/j3-expected
+          printf '%s\n' "$NEEDED"   > /tmp/j3-needed
+          MISSING="$(comm -23 /tmp/j3-expected /tmp/j3-needed)"
+          EXTRA="$(comm -13 /tmp/j3-expected /tmp/j3-needed)"
+          echo "missing from needs: ${MISSING:-NONE}"
+          echo "extra in needs    : ${EXTRA:-NONE}"
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: the job(s) above run but cannot block the merge — the gate does not gate." >&2
+            exit 1
+          fi
+          if [ -n "$EXTRA" ]; then
+            echo "ERROR: needs names job(s) this workflow does not define." >&2
+            exit 1
+          fi
+          echo "J3-structural OK — jobs - {$SELF} == needs"
+
       - name: Evaluate results
         env:
           BASE_REF: ${{ github.base_ref }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_FULL: ${{ needs.plan.outputs.full }}
           PLANNED: ${{ needs.plan.outputs.labels }}
+          MATRIX_ARTIFACT: ${{ needs.plan.outputs.matrix_artifact }}
+          MATRIX_TEST: ${{ needs.plan.outputs.matrix_test }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
           set -u
@@ -410,8 +595,9 @@ jobs:
           fi
           echo "mode=$MODE (base_ref='$BASE_REF')"
           echo "plan               = $PLAN_RESULT (full=$PLAN_FULL)"
-          echo "planned artifacts  = $PLANNED"
-          echo "required artifacts = $WANT_LABELS"
+          echo "planned assets     = $PLANNED"
+          echo "required assets    = $WANT_LABELS"
+          echo "artifact (matrix)  = $ARTIFACT_RESULT"
           echo "test (matrix)      = $TEST_RESULT"
 
           FAILED=0
@@ -428,24 +614,46 @@ jobs:
             FAILED=1
           fi
 
-          # …and the artifacts it planned must be exactly the artifacts the mode demands.
-          # Sorted-and-compared as text so an omission, a duplicate and a typo all fail the same
-          # way. Unquoted on purpose — word-splitting is what turns both lists into one token per
-          # label.
-          GOT="$(printf '%s\n' $PLANNED | sort | tr '\n' ' ')"
+          # …and the assets it planned must be exactly the assets the mode demands. Sorted-and-
+          # compared as text so an omission, a duplicate and a typo all fail the same way. Unquoted
+          # on purpose — word-splitting is what turns each list into one token per label.
           WANT="$(printf '%s\n' $WANT_LABELS | sort | tr '\n' ' ')"
+          GOT="$(printf '%s\n' $PLANNED | sort | tr '\n' ' ')"
           if [ "$GOT" != "$WANT" ]; then
-            echo "ERROR: planned artifact set does not match mode=$MODE"
+            echo "ERROR: planned asset set does not match mode=$MODE"
             echo "  planned : $GOT"
             echo "  required: $WANT"
             FAILED=1
           fi
 
-          # One assertion for every leg. A matrix job's aggregate result is `success` only when
-          # every leg succeeded, so this rejects failure, cancellation and a skipped/empty matrix
-          # alike — no per-artifact `needs:` list can fall out of date behind it.
+          # THE TWO LAYERS MUST AGREE WITH EACH OTHER AND WITH `labels`. A producer minting an asset
+          # nobody tests, or a test leg whose asset nobody mints, is a real defect that would
+          # otherwise surface only as a download error inside the consuming leg.
+          # ONE LINE EACH, deliberately: a `python3 -c` whose continuation lines start at column 0
+          # terminates the surrounding YAML block scalar, and indenting them instead would be a
+          # python IndentationError. Both forms were tried; this is the one that is valid in both
+          # languages at once. The trailing space matches WANT's, which `tr '\n' ' '` leaves.
+          PRODUCED="$(printf '%s' "$MATRIX_ARTIFACT" | python3 -c 'import json,sys; print(" ".join(sorted(x for e in json.load(sys.stdin)["include"] for x in e["produces"].split())) + " ")')"
+          TESTED="$(printf '%s' "$MATRIX_TEST" | python3 -c 'import json,sys; print(" ".join(sorted(e["label"] for e in json.load(sys.stdin)["include"])) + " ")')"
+          echo "producers mint     = $PRODUCED"
+          echo "test legs consume  = $TESTED"
+          if [ "$PRODUCED" != "$WANT" ] || [ "$TESTED" != "$WANT" ]; then
+            echo "ERROR: the two layers and the required set do not agree (mode=$MODE)"
+            echo "  minted  : $PRODUCED"
+            echo "  consumed: $TESTED"
+            echo "  required: $WANT"
+            FAILED=1
+          fi
+
+          # One assertion per layer. A matrix job's aggregate result is `success` only when every
+          # leg succeeded, so this rejects failure, cancellation and a skipped/empty matrix alike —
+          # no per-asset `needs:` list can fall out of date behind it.
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (matrix) = $ARTIFACT_RESULT — every producer must succeed"
+            FAILED=1
+          fi
           if [ "$TEST_RESULT" != "success" ]; then
-            echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every artifact must succeed"
+            echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every asset must succeed"
             FAILED=1
           fi
 
@@ -453,5 +661,5 @@ jobs:
             echo "Test suite gate FAILED (mode=$MODE)."
             exit 1
           fi
-          echo "Test suite gate passed (mode=$MODE, artifacts: $PLANNED)."
+          echo "Test suite gate passed (mode=$MODE, assets: $PLANNED)."
           exit 0
