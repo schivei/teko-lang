@@ -226,12 +226,33 @@ fn regr_group_key_separates_two_configurations() {
  * @return void
  */
 fn regr_row_groupable_refuses_what_the_fold_cannot_hold() {
-    teko::assert::is_true(regr_row_groupable(regr_test_row("", teko::list::empty())))
-    teko::assert::is_true(!regr_row_groupable(regr_test_row_kind(TkrKind::CompileFail)))
-    teko::assert::is_true(!regr_row_groupable(regr_test_row_source("")))
-    teko::assert::is_true(!regr_row_groupable(regr_test_row_wellformed()))
-    teko::assert::is_true(!regr_row_groupable(regr_test_row("", teko::list::push(teko::list::empty(), REGR_GROUP_UNGROUPABLE_BACKEND_ENV))))
-    teko::assert::is_true(!regr_row_groupable(regr_test_row_source("if bad() != 0 { return 1 }\nexit(0)\n")))
+    teko::assert::is_true(regr_row_groupable(".", regr_test_row("", teko::list::empty())))
+    teko::assert::is_true(!regr_row_groupable(".", regr_test_row_kind(TkrKind::CompileFail)))
+    teko::assert::is_true(!regr_row_groupable(".", regr_test_row_source("")))
+    teko::assert::is_true(!regr_row_groupable(".", regr_test_row_wellformed()))
+    teko::assert::is_true(!regr_row_groupable(".", regr_test_row("", teko::list::push(teko::list::empty(), REGR_GROUP_UNGROUPABLE_BACKEND_ENV))))
+    teko::assert::is_true(!regr_row_groupable(".", regr_test_row_source("if bad() != 0 { return 1 }\nexit(0)\n")))
+}
+
+#test
+/**
+ * regr_row_source_reads_a_given_source_file_and_a_missing_one — the two halves of the file-based
+ * fold. A row spelling its snippet as `Given source = "<file>"` must contribute the FILE'S TEXT (the
+ * only spelling left once inline code is banned in a `.tkr`), and a row naming a file that is not
+ * there must contribute "" and be refused by `regr_row_groupable` — never crash the plan pass, which
+ * is not the pass that reports a manifest error.
+ *
+ * @return void
+ */
+fn regr_row_source_reads_a_given_source_file_and_a_missing_one() {
+    let inline_row = regr_test_row_source("exit(1)\n")
+    teko::assert::is_true(regr_row_source(".", inline_row) == "exit(1)\n")
+    let missing = regr_test_row_file("__definitely_missing_case__.tks")
+    teko::assert::is_true(regr_row_source(".", missing) == "")
+    teko::assert::is_true(!regr_row_groupable(".", missing))
+    let present = regr_test_row_file("cases/22_null_union_reassign_to_null_backend_diff.tks")
+    teko::assert::is_true(regr_row_source("examples/regressions/cwd_build", present).len > 0)
+    teko::assert::is_true(regr_row_groupable("examples/regressions/cwd_build", present))
 }
 
 #test
@@ -368,6 +389,24 @@ fn regr_test_row_source(src: str) -> Tkr {
         source_inline = src; source_file = b.source_file; env = b.env; target = b.target
         in_place = b.in_place; dep_dir = b.dep_dir
         check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid
+    }
+}
+
+/**
+ * regr_test_row_file — a row whose snippet is named by `Given source = "<file>"` rather than carried
+ * inline. The shape the corpus uses everywhere since inline code was banned in a `.tkr`.
+ *
+ * @param path  the source file, relative to the row's `.tkr` directory
+ * @return      a runnable row naming that file and carrying no inline body
+ */
+fn regr_test_row_file(path: str) -> Tkr {
+    let base = regr_test_row_source("")
+    Tkr {
+        args = base.args; stdin = base.stdin; kind = base.kind; exit = base.exit; stdout = base.stdout
+        stderr = base.stderr; targets = base.targets; expect = base.expect; golden = base.golden
+        diagnostic = base.diagnostic; source_inline = ""; source_file = path; env = base.env
+        target = base.target; in_place = base.in_place; dep_dir = base.dep_dir
+        check_wellformed = base.check_wellformed; check_module_valid = base.check_module_valid
     }
 }
 

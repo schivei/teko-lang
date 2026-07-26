@@ -479,20 +479,49 @@ fn regr_group_main_text(dispatch: str) -> str {
 }
 
 /**
+ * regr_row_source — the SNIPPET TEXT a row contributes to a group, whichever way the row spells it:
+ * the `Given source inline` body, or the contents of the `Given source = "<file>"` file resolved
+ * against `regr_dir`. "" when the row carries neither (a project-based row) or when the named file
+ * cannot be read.
+ *
+ * A file-based row folds exactly like an inline one, and it HAS to: since the owner banned inline
+ * code in a `.tkr` ("está proibido inline code em tkr"), a `.tkr` can only name its snippet as a
+ * file — so a fold that only understood `source_inline` would have quietly charged one build per
+ * scenario for the whole corpus, which is the cost the fold exists to remove. Measured on the .31
+ * corpus at the moment the ban landed: the F5 backend-differential rows alone went from 2 grouped
+ * builds to 30 individual ones until this function existed.
+ *
+ * An unreadable file is NOT an error here: the ordinary run reports a missing `Given source` as the
+ * manifest error it is, and planning must never be the thing that reports it (the same rule
+ * `regr_plan_file` follows for an unparseable `.tkr`).
+ *
+ * @param regr_dir  the directory the row's `.tkr` lives in (a `Given source` is relative to it)
+ * @param t         the lowered row
+ * @return          the snippet text, or "" when the row has none
+ */
+fn regr_row_source(regr_dir: str, t: Tkr) -> str {
+    if t.source_inline.len > 0 { return t.source_inline }
+    if t.source_file.len == 0 { return "" }
+    match teko::io::read_file(regr_dir ~ "/" ~ t.source_file) { str as s => s; error => "" }
+}
+
+/**
  * regr_row_groupable — may this row share a build with the other rows of its configuration? Every
  * exclusion is stated (and argued) in this file's header; the order here is cheapest-test-first.
  *
- * @param t  the lowered row
- * @return   true when the row may be folded into a group
+ * @param regr_dir  the directory the row's `.tkr` lives in (to resolve a `Given source` file)
+ * @param t         the lowered row
+ * @return          true when the row may be folded into a group
  */
-fn regr_row_groupable(t: Tkr) -> bool {
+fn regr_row_groupable(regr_dir: str, t: Tkr) -> bool {
     if t.kind == TkrKind::CompileFail { return false }
-    if t.source_inline.len == 0 { return false }
     if t.dep_dir.len > 0 || t.in_place { return false }
     if t.check_wellformed || t.check_module_valid { return false }
     if regr_env_has(t.env, REGR_GROUP_UNGROUPABLE_BACKEND_ENV) { return false }
     if target_toolchain_skip_reason(t.target).len > 0 { return false }
-    !snippet_stmts_have_return(split_snippet_decls_and_stmts(t.source_inline).stmts)
+    let src = regr_row_source(regr_dir, t)
+    if src.len == 0 { return false }
+    !snippet_stmts_have_return(split_snippet_decls_and_stmts(src).stmts)
 }
 
 /**
@@ -714,20 +743,21 @@ fn regr_group_for_row(acc: RegrPlanAcc, gkey: str, names: []str) -> u64 {
  * @param acc  the accumulator
  * @param t    the lowered row
  * @param key  the row's scratch-file prefix (its identity across the plan and run passes)
+ * @param src  the row's resolved snippet text (`regr_row_source` — inline body or named file)
  * @return     the accumulator with the row bound
  */
-fn regr_plan_add_row(acc: RegrPlanAcc, t: Tkr, key: str) -> RegrPlanAcc {
+fn regr_plan_add_row(acc: RegrPlanAcc, t: Tkr, key: str, src: str) -> RegrPlanAcc {
     let gkey = regr_group_key(t)
-    match regr_plan_twin_of(acc, gkey, t.source_inline) {
+    match regr_plan_twin_of(acc, gkey, src) {
         RegrGroupMember as twin => return regr_plan_reuse(acc, twin, key)
         null => { }
     }
-    let names = snippet_declared_names(split_snippet_decls_and_stmts(t.source_inline).decls)
+    let names = snippet_declared_names(split_snippet_decls_and_stmts(src).decls)
     let idx = regr_group_for_row(acc, gkey, names)
     let fresh = idx == acc.keys.len
     let keys = if fresh { teko::list::push(acc.keys, gkey) } else { acc.keys }
     let specs = if fresh { teko::list::push(acc.specs, RegrGroupSpec { env = t.env; target = t.target }) } else { acc.specs }
-    let member = RegrGroupMember { key = key; group = idx; module = $"m{acc.next_module}"; source = t.source_inline }
+    let member = RegrGroupMember { key = key; group = idx; module = $"m{acc.next_module}"; source = src }
     RegrPlanAcc {
         keys = keys; specs = specs
         claims = regr_claims_add(acc.claims, idx, names)
@@ -785,12 +815,13 @@ fn regr_plan_reuse(acc: RegrPlanAcc, twin: RegrGroupMember, key: str) -> RegrPla
  * `run_one_feature`'s own dispatch: every row of such a feature goes down the compile-fail path,
  * where a successful build would be a failure.
  *
+ * @param regr_dir  the directory the `.tkr` lives in (to resolve a `Given source` file)
  * @param feat    the parsed feature
  * @param prefix  the feature's scratch-file prefix
  * @param acc     the accumulator
  * @return        the accumulator with the feature's groupable rows bound
  */
-fn regr_plan_feature(feat: TkrFeature, prefix: str, acc: RegrPlanAcc) -> RegrPlanAcc {
+fn regr_plan_feature(regr_dir: str, feat: TkrFeature, prefix: str, acc: RegrPlanAcc) -> RegrPlanAcc {
     if tkr_feature_is_compile_fail(feat) { return acc }
     mut cur = acc
     mut si: u64 = 0
@@ -803,7 +834,9 @@ fn regr_plan_feature(feat: TkrFeature, prefix: str, acc: RegrPlanAcc) -> RegrPla
         loop {
             if ri >= specs.len { break }
             let t = specs[ri]
-            if regr_row_groupable(t) { cur = regr_plan_add_row(cur, t, $"{prefix}.{si}.{ri}") }
+            if regr_row_groupable(regr_dir, t) {
+                cur = regr_plan_add_row(cur, t, $"{prefix}.{si}.{ri}", regr_row_source(regr_dir, t))
+            }
             ri = ri + 1
         }
         si = si + 1
@@ -828,7 +861,7 @@ fn regr_plan_file(path: str, prefix: str, acc: RegrPlanAcc) -> RegrPlanAcc {
     mut fi: u64 = 0
     loop {
         if fi >= feats.len { break }
-        cur = regr_plan_feature(feats[fi], $"{prefix}.f{fi}", cur)
+        cur = regr_plan_feature(dirname_of(path), feats[fi], $"{prefix}.f{fi}", cur)
         fi = fi + 1
     }
     cur
