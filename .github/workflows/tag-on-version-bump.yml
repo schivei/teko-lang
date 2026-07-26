@@ -169,6 +169,71 @@ jobs:
           fi
           echo "All required gates GREEN on PR #$PR_NUM head $HEAD_SHA — proceeding to tag + release."
 
+      # ── DO NOT MINT A TAG BEFORE THE BUILD IT WILL PROMOTE EXISTS ───────────────────────────
+      # ADDED 2026-07-26, and it closes a race the release redesign created. `release.yml` no
+      # longer compiles anything: it PROMOTES the prerelease `nightly.yml` published for this
+      # exact commit (owner ruling — "release só precisa promover, não tem que recompilar e
+      # 'jogar fora' algo provado"). Both workflows fire on the SAME push, and the nightly is the
+      # slow one — its riscv64 producers build under CPU emulation. Minting the tag the moment the
+      # PR gate verified would therefore start the release BEFORE its input exists, and the
+      # release would abort with "no nightly to promote" on a perfectly good commit.
+      #
+      # The ordering decision belongs here, next to "do not tag from a red commit": it is the same
+      # gate, one input further back. Failing safe means NOT tagging — this workflow is idempotent,
+      # so re-running it after the nightly lands mints the tag then.
+      #
+      # It watches BOTH the release and the workflow run, deliberately: the release appearing is
+      # the success condition, but a nightly that FAILED would otherwise be waited on until the
+      # deadline for no reason, so a completed-and-not-successful run aborts immediately.
+      - name: Wait for the Nightly Build of this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DERIVED: ${{ steps.derive.outputs.derived }}
+        run: |
+          set -eu
+          if git ls-remote --exit-code --tags origin "refs/tags/$DERIVED" >/dev/null 2>&1; then
+            echo "SKIP: tag '$DERIVED' already exists — nothing to wait for."
+            exit 0
+          fi
+          NIGHTLY="$(sh scripts/nightly_tag.sh "$GITHUB_SHA")"
+          echo "release.yml will promote '$NIGHTLY' (scripts/nightly_tag.sh — the SAME derivation"
+          echo "both the publisher and the promoter use). Waiting for it to be published."
+
+          DEADLINE=$(( $(date +%s) + 18000 ))    # 5h, inside the 6h job ceiling
+          GRACE=$(( $(date +%s) + 600 ))         # 10 min for the run to even appear
+          while :; do
+            if gh release view "$NIGHTLY" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "OK: '$NIGHTLY' is published — the release will have something to promote."
+              exit 0
+            fi
+            INFO="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}" \
+                     --jq '[.workflow_runs[] | select(.name=="Nightly Build")] | sort_by(.run_number) | last | "\(.status)|\(.conclusion)"' 2>/dev/null || true)"
+            ST="${INFO%%|*}"; CC="${INFO##*|}"
+            NOW="$(date +%s)"
+            if [ -z "$INFO" ] || [ "$INFO" = "null" ]; then
+              if [ "$NOW" -gt "$GRACE" ]; then
+                echo "ABORT: no 'Nightly Build' run exists for $GITHUB_SHA after 10 minutes."
+                echo "release.yml promotes that build and compiles nothing, so tagging now would"
+                echo "produce a release that cannot be assembled. NOT tagging '$DERIVED'."
+                exit 1
+              fi
+              echo "  ... no Nightly Build run visible yet (within the 10-minute grace window)"
+            elif [ "$ST" = "completed" ] && [ "$CC" != "success" ]; then
+              echo "ABORT: the Nightly Build for $GITHUB_SHA completed with conclusion '$CC'."
+              echo "There is no build to promote. Fix the nightly, re-run it, then re-run this"
+              echo "workflow — it is idempotent. NOT tagging '$DERIVED'."
+              exit 1
+            else
+              echo "  ... Nightly Build status=$ST conclusion=$CC — waiting"
+            fi
+            if [ "$NOW" -gt "$DEADLINE" ]; then
+              echo "ABORT: '$NIGHTLY' was not published within the deadline."
+              echo "NOT tagging '$DERIVED' — re-run this workflow once the nightly finishes."
+              exit 1
+            fi
+            sleep 60
+          done
+
       - name: Create + push tag if it does not already exist
         env:
           DERIVED: ${{ steps.derive.outputs.derived }}

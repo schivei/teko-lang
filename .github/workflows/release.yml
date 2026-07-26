@@ -24,33 +24,36 @@ name: Bootstrap Release
 # the PR lane (scripts/native_linux_asset.sh) and are simply carried here.
 #
 # ══════════════════════════════════════════════════════════════════════════════════════════════
-# ⚠ THE SOURCE THIS WORKFLOW PROMOTES FROM DOES NOT EXIST YET. READ THIS BEFORE TAGGING.
+# WHERE THE BYTES COME FROM: `.github/workflows/nightly.yml`.
 #
-# Promotion presupposes a NIGHTLY to promote. As of 2026-07-26 NOTHING in this repository
-# publishes one — the only publishers are this workflow (on a tag) and seed-linux-fork.yml (a
-# manual, fork-only, single-artifact cut). The consolidated PR workflow (pr.yml) produces all nine
-# assets on every full run, but as RUN ARTIFACTS with a 1-day retention, not as a release.
+# It runs on every push to `main`, executes the SAME producers pr.yml's `artifact` root runs (the
+# shared scripts/produce_assets.sh over the shared scripts/ci_producer_matrix.sh leg table), and
+# publishes a PRERELEASE holding the nine assets plus the portable bootstrap snapshot.
 #
-# So this workflow FAILS LOUD at "resolve the nightly" until that publisher is built. That is the
-# correct state: the hole is the missing nightly publication, not the deleted build. Reviving a
-# build here to paper over it would re-introduce the exact defect the ruling names.
+# THE TAG IS AN EXACT NAME, NEVER A SEARCH:
 #
-# THE CONTRACT THE MISSING PUBLISHER MUST SATISFY, so promotion is DETERMINISTIC and never a
-# heuristic — "the latest" is not a criterion, an exact name is:
+#     v<A.B.C.D>-nightly_<sha8>
 #
-#   TAG      v<A.B.C.D>-nightly_<sha8>
-#            <A.B.C.D> is teko.tkp's `version` at that commit — the 4th field IS the build number
-#            (scripts/derive_version.sh, owner ruling 2026-07-04). <sha8> is the first 8 hex
-#            characters of the commit the artifacts were built from. Both halves are knowable
-#            from the tag being released, which is what turns the lookup into an EXACT NAME
-#            rather than a search. A second exact form, `v<A.B.C.D>-nightly` (no sha), is also
-#            accepted, for a publisher that keeps one rolling nightly per build number.
-#   KIND     prerelease.
-#   ASSETS   exactly what scripts/package_release.sh emits, for the nine published labels, plus
-#            teko-bootstrap-src.tar.gz.
+# derived by scripts/nightly_tag.sh — the SAME script the publisher calls to mint it and this
+# workflow calls to find it. That sharing is not tidiness: the failure mode of two hand-copied
+# derivations is not a warning and not a red lane, it is this workflow reporting "no nightly to
+# promote" and stopping, discovered only when a release is being cut. One character of drift costs
+# a release.
 #
-# The natural home for that publisher is a `push`-on-main workflow running the SAME producer legs
-# pr.yml's `artifact` job runs. Building it is a separate decision and a separate cargo.
+# <A.B.C.D> is teko.tkp's version — its 4th field IS the build number, which is exactly what the
+# ruling asks the `*` to become. <sha8> is the first 8 hex of the commit the artifacts were built
+# from, i.e. the commit this tag points at.
+#
+# WHAT MAKES THE DELETE AT THE END SAFE (and it is checked, not assumed — see step 4): because the
+# name is a function of (build number, commit), two nightlies can only coexist if they came from
+# DIFFERENT commits, and then they have different names. The one deleted is by construction the
+# one that was just downloaded — the delete step reuses the very output the download used, and
+# re-verifies the tag resolves to THIS commit before removing anything.
+#
+# NOTE ON THE workflow_dispatch VERSION OVERRIDE: it changes the tag this workflow PUBLISHES, not
+# the nightly it looks for. The nightly was named from teko.tkp at build time, so the lookup stays
+# keyed on the manifest — which is correct, and is why the override cannot make the build
+# unfindable.
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 on:
   workflow_dispatch:
@@ -126,43 +129,36 @@ jobs:
           echo "Release version = $V (number $NUM)"
 
       # ── 1. FIND THE BUILD ────────────────────────────────────────────────────────────────────
-      # Two EXACT tag names, tried in order. No "newest prerelease", no date sort, no pattern
-      # match: "the last build" needs a CRITERION, and the criterion is that the nightly's tag
-      # names the same build number and the same commit this tag names.
+      # ONE exact tag name, computed by the SAME script nightly.yml used to mint it. No "newest
+      # prerelease", no date sort, no pattern match, and deliberately NO second accepted spelling:
+      # every additional form a lookup accepts is another way for the wrong build to be promoted —
+      # and then deleted.
       - name: Resolve the nightly to promote
         id: nightly
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NUM: ${{ steps.version.outputs.number }}
         run: |
           set -eu
-          SHA8="$(echo "$GITHUB_SHA" | cut -c1-8)"
-          echo "this tag points at commit $GITHUB_SHA (sha8 $SHA8)"
-          FOUND=""
-          for cand in "v${NUM}-nightly_${SHA8}" "v${NUM}-nightly"; do
-            echo "looking for the nightly release '$cand'"
-            if gh release view "$cand" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              FOUND="$cand"
-              break
-            fi
-          done
-          if [ -z "$FOUND" ]; then
+          NIGHTLY="$(sh scripts/nightly_tag.sh "$GITHUB_SHA")"
+          echo "this tag points at commit $GITHUB_SHA"
+          echo "looking for the nightly release '$NIGHTLY'"
+          if ! gh release view "$NIGHTLY" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::No nightly build exists to promote." >&2
-            echo "Looked for the EXACT tags 'v${NUM}-nightly_${SHA8}' and 'v${NUM}-nightly'." >&2
+            echo "Looked for the EXACT tag '$NIGHTLY' (scripts/nightly_tag.sh)." >&2
             echo "" >&2
-            echo "This workflow no longer builds anything (owner ruling 2026-07-26): the artifact" >&2
-            echo "that passed the gates IS the deliverable, and recompiling here would publish" >&2
-            echo "bytes no gate ever saw. It therefore needs a nightly to promote — and as of" >&2
-            echo "this wagon NOTHING in the repository publishes one. That publisher is the" >&2
-            echo "missing piece; reviving a build here is not the fix. The contract it must" >&2
-            echo "satisfy is written at the top of this file." >&2
+            echo "This workflow builds nothing (owner ruling 2026-07-26): the artifact that passed" >&2
+            echo "the gates IS the deliverable, and recompiling here would publish bytes no gate" >&2
+            echo "ever saw. It promotes what .github/workflows/nightly.yml published for THIS" >&2
+            echo "commit. If that name does not exist, either the nightly for this commit never" >&2
+            echo "ran or it failed — check that workflow's run on $GITHUB_SHA. Reviving a build" >&2
+            echo "here is not the fix." >&2
             echo "" >&2
             echo "Releases currently visible:" >&2
             gh release list --repo "$GITHUB_REPOSITORY" --limit 30 >&2 || true
             exit 1
           fi
-          echo "tag=$FOUND" >> "$GITHUB_OUTPUT"
-          echo "promoting nightly '$FOUND'"
+          echo "tag=$NIGHTLY" >> "$GITHUB_OUTPUT"
+          echo "promoting nightly '$NIGHTLY'"
 
       # ── 2. GIVE THE ASSETS THEIR OFFICIAL NAMES ──────────────────────────────────────────────
       # The official names are what scripts/package_release.sh already emits — `teko-<label>.tar.gz`
@@ -317,7 +313,30 @@ jobs:
           NIGHTLY: ${{ steps.nightly.outputs.tag }}
         run: |
           set -eu
-          echo "deleting the promoted transitional build '$NIGHTLY' (release + tag)"
+          # THE WRONG-NIGHTLY GUARD. `$NIGHTLY` is the very output the download step used, so the
+          # thing deleted is the thing promoted by construction. Two belts on top of that, because
+          # this is the one irreversible step in the workflow:
+          #   1. RE-DERIVE the name and refuse if it moved. A tag name is a function of (build
+          #      number, commit); if re-deriving it now yields something else, the manifest changed
+          #      under the run and nothing should be deleted.
+          #   2. ASSERT THE TAG POINTS AT THIS COMMIT. Two nightlies can only coexist if they came
+          #      from different commits — and then they have different names — but a name is only
+          #      trustworthy if the tag behind it really resolves where it claims. Checked against
+          #      the git ref, not against the release's targetCommitish (which is a branch name for
+          #      a release created from a branch and would prove nothing).
+          EXPECT="$(sh scripts/nightly_tag.sh "$GITHUB_SHA")"
+          if [ "$EXPECT" != "$NIGHTLY" ]; then
+            echo "::error::the nightly name moved during this run ('$NIGHTLY' -> '$EXPECT')." >&2
+            echo "Refusing to delete anything: the assets were promoted from '$NIGHTLY'." >&2
+            exit 1
+          fi
+          TAGSHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${NIGHTLY}" --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "$TAGSHA" ] && [ "$TAGSHA" != "$GITHUB_SHA" ]; then
+            echo "::error::tag '$NIGHTLY' resolves to $TAGSHA, not to this release's commit $GITHUB_SHA." >&2
+            echo "Refusing to delete a build that is not the one just promoted." >&2
+            exit 1
+          fi
+          echo "deleting the promoted transitional build '$NIGHTLY' (release + tag) at $GITHUB_SHA"
           gh release delete "$NIGHTLY" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
 
       - name: Dry run — nothing was published, nothing was deleted
