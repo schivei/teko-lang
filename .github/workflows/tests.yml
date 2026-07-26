@@ -1,20 +1,40 @@
 name: Tests
 
 # ISOLATED test-execution workflow (owner design 2026-07-15): the `teko test .` self-test suite
-# runs HERE — one runner per OS (1 linux, 1 macOS, 1 windows), in PARALLEL with the other tracks
-# (native.yml, sanitizers.yml). Owner's words: "criar em cada ambiente (um por SO: 1 mac, 1 linux
-# e 1 windows) testes em um yml separado, para fugir dos gargalos e que roda em paralelo com as
-# outras trilhas, assim não precisa rodar testes nestes outros diagnósticos para nenhum SO ou
-# Arch." The other workflows' diagnostic jobs therefore NO LONGER run `teko test .` for any OS/arch
+# runs HERE — one runner per HOST — in PARALLEL with the other tracks (native.yml,
+# sanitizers.yml). Owner's words: "criar em cada ambiente (um por SO: 1 mac, 1 linux e 1 windows)
+# testes em um yml separado, para fugir dos gargalos e que roda em paralelo com as outras
+# trilhas, assim não precisa rodar testes nestes outros diagnósticos para nenhum SO ou Arch." The
+# other workflows' diagnostic jobs therefore NO LONGER run `teko test .` for any OS/arch
 # (native.yml's gen1-checks self-test step was removed when this workflow was added).
+#
+# "UM POR SO" BECAME "UM POR HOST" (owner ruling 2026-07-26): "sobre windows-arm64 (e outros
+# hosts), tem que fazer o build inicial e tem que colocar lane de teste se não houverem." Two
+# published artifacts had never been tested by anything: `teko-linux-arm64-{glibc,musl}.tar.gz`
+# and `teko-windows-arm64.zip`. The host set here is now exactly native.yml's `build-test` set —
+# the five GitHub-hosted runners that also back bootstrap/seeds/ and release.yml's build-native.
+#
+# ONE MATRIX, NOT FIVE HAND-WRITTEN JOBS. Three hand-written jobs was already the shape in which
+# the fourth and fifth get forgotten, and the per-job `needs:` list of the aggregator below is
+# exactly where that forgetting becomes invisible (a job outside the list runs, goes red, and
+# does not block the merge — the "gate that does not gate", which this train has hit four times).
+# A single matrix job has ONE name in `needs:`, and GitHub's aggregate result for a matrix job is
+# `success` only when EVERY leg succeeded — a failed, cancelled or absent leg is not `success`,
+# so the gate below rejects it without maintaining a list. Per-host differences (the Windows
+# self-test invocation) are ONE step keyed on `runner.os`, following the precedent native.yml set
+# when it deleted its per-cell `install_deps` shell string: a shell script does not travel inside
+# JSON inside YAML without escaping that is a standing invitation to error.
 #
 # CI runs on PULL REQUESTS (the per-PR gate) plus PUSHES to main + remodel/** integration branches.
 #
-# LIGHT vs FULL (owner proposal 2026-07-24): `test / linux` runs on EVERY PR; `test / macos` and
-# `test / windows` run only when the PR's BASE is main — the wagon that LANDS a stacked train, or a
-# hotfix. The axis is `github.base_ref`, never `github.ref` (on a pull_request that is
-# `refs/pull/N/merge` and matches no branch name). An intermediate wagon PR therefore pays one test
-# runner instead of three, and the whole matrix is paid exactly once, at the landing.
+# LIGHT vs FULL (owner proposal 2026-07-24; hosts revised 2026-07-26):
+#   light  = linux-x86_64 + windows-x86_64
+#   full   = + linux-arm64, macos-arm64, windows-arm64   (base_ref == main)
+# windows-x86_64 rides the light tier for the empirical reason spelled out in native.yml's matrix
+# note (wagons 15 and 16 failed on Windows and only on Windows). The three arm hosts are full-only:
+# each adds an ARCH delta on top of a platform that the light tier already covers, and
+# windows-11-arm is additionally the slowest runner in the set. The axis is `github.base_ref`,
+# never `github.ref` (on a pull_request that is `refs/pull/N/merge` and matches no branch name).
 on:
   pull_request:
     branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
@@ -25,158 +45,204 @@ permissions:
   contents: read
 
 jobs:
-  # ── test / linux ─────────────────────────────────────────────────────────────
+  # ── plan: the mode and the host matrix, emitted once ─────────────────────────
+  # Mirrors native.yml's `changes` job, minus the paths filter (this workflow is already
+  # path-filtered at the trigger). `labels` is emitted alongside `matrix` so the gate can check
+  # WHICH hosts were planned, not merely that the matrix job went green — see the gate's note.
+  plan:
+    name: test plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+      matrix: ${{ steps.decide.outputs.matrix }}
+      labels: ${{ steps.decide.outputs.labels }}
+    steps:
+      - name: Decide (mode + host matrix)
+        id: decide
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          if [ "$BASE_REF" = "main" ]; then full=true; else full=false; fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF')"
+
+          # `label` feeds BOTH the job name and scripts/ci_provision_teko.sh's asset label, so the
+          # check that goes red names the same string the release publishes. `timeout` is per-host
+          # because the hosts are not comparable: measured build-test wall-clock on the same
+          # corpus was 309s linux-x86_64 / 215s windows-x86_64 / 184s macos-arm64 versus 973s on
+          # windows-11-arm (docs/design/compile-time-architecture.md §1.1), and this job runs the
+          # heavier `teko test .` on top of the build.
+          L_X86='{"os":"ubuntu-latest","label":"linux-x86_64","timeout":95}'
+          W_X86='{"os":"windows-latest","label":"windows-x86_64","timeout":125}'
+          L_ARM='{"os":"ubuntu-24.04-arm","label":"linux-arm64","timeout":95}'
+          M_ARM='{"os":"macos-latest","label":"macos-arm64","timeout":95}'
+          W_ARM='{"os":"windows-11-arm","label":"windows-arm64","timeout":180}'
+          if [ "$full" = "true" ]; then
+            echo "matrix={\"include\":[$L_X86,$W_X86,$L_ARM,$M_ARM,$W_ARM]}" >> "$GITHUB_OUTPUT"
+            echo "labels=linux-arm64 linux-x86_64 macos-arm64 windows-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[$L_X86,$W_X86]}" >> "$GITHUB_OUTPUT"
+            echo "labels=linux-x86_64 windows-x86_64" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── test / <host> ────────────────────────────────────────────────────────────
   # Provision the released seed, build gen1 (the PR's compiler under test — the seed compiles
   # the PR corpus into bin/teko, falling back to a staged bootstrap through gen1(main) — see
   # scripts/build_with_seed_fallback.sh — when the raw seed cannot reach the tip), then run
   # gen1's own full test suite (`teko test .`). This is the SAME heavy native pass gen1-checks
-  # used to run; it now lives here so it parallels the diagnostics instead of blocking them.
-  # 45-min budget matches the former gen1-checks cap.
-  test-linux:
-    name: test / linux
-    runs-on: ubuntu-latest
-    timeout-minutes: 95
+  # used to run; it lives here so it parallels the diagnostics instead of blocking them.
+  #
+  # HISTORICAL CAVEAT ON WINDOWS: the gen1 BUILD alone is ~11 min on the shared runner, and the
+  # previous attempt to also run the full `teko test .` on top of it blew both the 20- and 30-min
+  # caps (owner ruling 2026-07-14 — sanitizers.yml's windows-selfhost only builds + `--version`
+  # smokes). The caps here are deliberately generous so CI reveals the ACTUAL duration now that
+  # tests run on their own isolated runner. windows-arm64 gets the largest cap of all for the
+  # same reason and one more: nothing has ever run `teko test .` on that host, so its duration is
+  # unknown rather than merely large. If a cap is exceeded, do NOT silently drop the host — the
+  # owner wants one test runner per host; the relief belongs in the perf work (#168/#265).
+  test:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: test / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Named BEFORE the first step that can fail on a missing tool, so a red run on a host whose
+      # image no lane has exercised (windows-11-arm, ubuntu-24.04-arm here) says WHICH toolchain
+      # was present instead of leaving the reader to infer it from a cc error deep inside a build
+      # log. Same shape as native.yml's `seed-debut`. `unzip`/`tar` are listed because
+      # ci_provision_teko.sh needs one of them to open the release asset, and `xz`/`python3`/`7z`
+      # because they are the decompressor chain the committed-seed fallback walks.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc xz unzip tar curl python3 7z; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
       - name: Provision teko from the latest release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci_provision_teko.sh linux-x86_64
+          LABEL: ${{ matrix.label }}
+        run: ./scripts/ci_provision_teko.sh "$LABEL"
 
       - name: Build gen1 (seed compiles the PR corpus, staged fallback if needed → bin/teko)
         shell: bash
         run: sh scripts/build_with_seed_fallback.sh bin
 
-      - name: gen1 self-test (the PR's compiler runs its own gate)
+      # The one genuinely per-host step, and the reason it is TWO steps keyed on `runner.os`
+      # rather than a matrix field: the Windows invocation is not a different path, it is a
+      # different shell with an explicit `$LASTEXITCODE` propagation. Exactly one of these runs on
+      # any given leg, so a leg can never report green without having executed the suite.
+      - name: gen1 self-test — POSIX hosts (the PR's compiler runs its own gate)
+        if: runner.os != 'Windows'
         shell: bash
         run: ./bin/teko test .
 
-  # ── test / macos ─────────────────────────────────────────────────────────────
-  # FULL-ONLY: base_ref == main.
-  test-macos:
-    name: test / macos
-    if: github.base_ref == 'main'
-    runs-on: macos-latest
-    timeout-minutes: 95
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Provision teko from the latest release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci_provision_teko.sh macos-arm64
-
-      - name: Build gen1 (seed compiles the PR corpus, staged fallback if needed → bin/teko)
-        shell: bash
-        run: sh scripts/build_with_seed_fallback.sh bin
-
-      - name: gen1 self-test (the PR's compiler runs its own gate)
-        shell: bash
-        run: ./bin/teko test .
-
-  # ── test / windows ───────────────────────────────────────────────────────────
-  # The owner's "1 per OS" design explicitly includes Windows. HISTORICAL CAVEAT: the Windows
-  # gen1 BUILD alone is ~11 min on the shared runner, and the previous attempt to also run the
-  # full `teko test .` on top of it blew both the 20- and 30-min caps (owner ruling 2026-07-14 —
-  # sanitizers.yml's windows-selfhost only builds + `--version` smokes). This job is WIRED per the
-  # new design with a generous cap so CI can reveal the ACTUAL duration now that tests run on their
-  # own isolated runner (no other diagnostic work competing on this box). If it still exceeds the
-  # cap it may need the same build-time relief the perf phase is bringing to the other lanes — do
-  # NOT silently drop it; the owner wants one test runner per OS.
-  # LIGHT PATH — deliberately NOT full-only (integrator ruling 2026-07-25). Windows is the only
-  # non-ubuntu lane that rides the light tier, because it is the only one that has caught a
-  # wagon-unique failure on this train: wagon 15 red on `Windows self-host smoke`, wagon 16 red
-  # here (`assert_native` — a weak-symbol seam PE/COFF never resolved). Omitting it from the light
-  # tier would defer every Windows break to the landing wagon, which is exactly how `assert_native`
-  # stayed invisible for as long as it did. Rationale in full: native.yml's matrix note.
-  test-windows:
-    name: test / windows
-    runs-on: windows-latest
-    timeout-minutes: 125
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Provision teko from the latest release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci_provision_teko.sh windows-x86_64
-
-      - name: Build gen1 (seed compiles the PR corpus, staged fallback if needed → bin/teko)
-        shell: bash
-        run: sh scripts/build_with_seed_fallback.sh bin
-
-      - name: gen1 self-test (the PR's compiler runs its own gate)
+      - name: gen1 self-test — Windows hosts (the PR's compiler runs its own gate)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           .\bin\teko.exe test .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # ── test suite gate: aggregates the per-OS test runners, and ASSERTS THE MODE ──
-  # Stable required-check name for the branch ruleset. J3 (the guard against an empty green): a
-  # gate that counts `skipped` as approval would let one broken `if:` skip every runner and still
-  # report green. So the demanded result is asserted per job and per mode:
-  #   * `test / linux` is the light path — it must be `success`; `skipped` is an ERROR.
-  #   * `test / macos` and `test / windows` are full-only — `success` when full, `skipped` when
-  #     light (an unexpected success on light warns: the condition is wrong, but nothing is hidden).
-  # Mirrors the aggregator pattern in native.yml (`CI gate`) and sanitizers.yml (`Sanitizer gate`).
+  # ── test suite gate: the stable required check ───────────────────────────────
+  # Stable required-check name for the branch ruleset — the per-host job names are NOT required
+  # checks and are free to change with the matrix (that is the whole point of aggregating).
+  #
+  # `needs: [plan, test]` covers EVERY host with no list to maintain: for a matrix job GitHub
+  # folds the legs into one result, which is `success` only when all legs succeeded. `failure`,
+  # `cancelled` and `skipped` are all rejected below by the same `!= success` test — including
+  # `cancelled`, which a "did anything fail?" gate would wave through.
+  #
+  # J3 (the guard against an empty green) has a SECOND half once the matrix is dynamic. A gate
+  # that only asserts "the matrix job was green" is vacuously satisfiable by a `plan` job that
+  # emits the wrong matrix: drop four hosts and one green linux leg reports success. So the gate
+  # re-derives the mode from `github.base_ref` ITSELF — not from plan's output — and demands the
+  # exact host set that mode requires. A planned-set mismatch is an ERROR, not a warning: it is
+  # indistinguishable from silently un-testing a host. (native.yml's `CI gate` has this same hole
+  # against `matrix_build`; closing it there is a separate change, noted here so it is not lost.)
   test-suite-gate:
     name: Test suite gate
     runs-on: ubuntu-latest
-    needs: [test-linux, test-macos, test-windows]
+    needs: [plan, test]
     if: always()
     permissions: {}
     steps:
       - name: Evaluate results
         env:
           BASE_REF: ${{ github.base_ref }}
-          LINUX: ${{ needs.test-linux.result }}
-          MACOS: ${{ needs.test-macos.result }}
-          WINDOWS: ${{ needs.test-windows.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+          PLANNED: ${{ needs.plan.outputs.labels }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
           set -u
-          if [ "$BASE_REF" = "main" ]; then MODE=full; else MODE=light; fi
+          if [ "$BASE_REF" = "main" ]; then
+            MODE=full
+            WANT_FULL=true
+            WANT_LABELS="linux-arm64 linux-x86_64 macos-arm64 windows-arm64 windows-x86_64"
+          else
+            MODE=light
+            WANT_FULL=false
+            WANT_LABELS="linux-x86_64 windows-x86_64"
+          fi
           echo "mode=$MODE (base_ref='$BASE_REF')"
-          echo "test / linux   = $LINUX   (light path)"
-          echo "test / macos   = $MACOS   (full only)"
-          echo "test / windows = $WINDOWS   (light path — see native.yml's matrix note)"
+          echo "plan            = $PLAN_RESULT (full=$PLAN_FULL)"
+          echo "planned hosts   = $PLANNED"
+          echo "required hosts  = $WANT_LABELS"
+          echo "test (matrix)   = $TEST_RESULT"
 
           FAILED=0
-          require_light_path() {
-            [ "$2" = "success" ] && return 0
-            echo "ERROR: $1 = $2 (the light path requires success; a skip means a broken condition)"
-            FAILED=1
-          }
-          require_light_path "test / linux"   "$LINUX"
-          require_light_path "test / windows" "$WINDOWS"
 
-          require_full_only() {
-            if [ "$MODE" = "full" ]; then
-              [ "$2" = "success" ] && return 0
-              echo "ERROR: $1 = $2 (full mode requires success)"
-              FAILED=1
-              return 0
-            fi
-            [ "$2" = "skipped" ] && return 0
-            echo "::warning::$1 = $2 on the light path — expected skipped; check its \`if:\` condition."
-          }
-          require_full_only "test / macos"   "$MACOS"
+          # The planner itself is a light-path job: it has no `if:` and must always run.
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: test plan = $PLAN_RESULT (it is unconditional; anything but success is a break)"
+            FAILED=1
+          fi
+
+          # The mode the planner chose must be the mode the base_ref demands.
+          if [ "$PLAN_FULL" != "$WANT_FULL" ]; then
+            echo "ERROR: test plan says full='$PLAN_FULL' but base_ref='$BASE_REF' demands full='$WANT_FULL'"
+            FAILED=1
+          fi
+
+          # …and the hosts it planned must be exactly the hosts the mode demands. Sorted-and-
+          # compared as text so an omission, a duplicate and a typo all fail the same way.
+          GOT="$(printf '%s\n' $PLANNED | sort | tr '\n' ' ')"
+          WANT="$(printf '%s\n' $WANT_LABELS | sort | tr '\n' ' ')"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "ERROR: planned host set does not match mode=$MODE"
+            echo "  planned : $GOT"
+            echo "  required: $WANT"
+            FAILED=1
+          fi
+
+          # One assertion for every leg. A matrix job's aggregate result is `success` only when
+          # every leg succeeded, so this rejects failure, cancellation and a skipped/empty matrix
+          # alike — no per-host `needs:` list can fall out of date behind it.
+          if [ "$TEST_RESULT" != "success" ]; then
+            echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every host must succeed"
+            FAILED=1
+          fi
 
           if [ "$FAILED" = "1" ]; then
             echo "Test suite gate FAILED (mode=$MODE)."
             exit 1
           fi
-          echo "Test suite gate passed (mode=$MODE)."
+          echo "Test suite gate passed (mode=$MODE, hosts: $PLANNED)."
           exit 0
