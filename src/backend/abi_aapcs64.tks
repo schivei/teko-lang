@@ -79,6 +79,26 @@ pub type AbiDescriptor = struct {
      * the register-id lists cannot express (§2.2, D-C).
      */
     shadow_space: u32
+    /**
+     * max_reg_arg_bytes — the largest BY-VALUE aggregate the ABI hands to a
+     * callee IN REGISTERS. A bigger aggregate is passed BY REFERENCE: the CALLER
+     * materializes a copy in its own frame and passes that copy's ADDRESS in ONE
+     * integer argument register, and the callee dereferences it.
+     *
+     * AAPCS64/SysV/LP64D: 16 — a two-eightbyte aggregate (`tk_str`'s
+     * `{ptr; len}`) decomposes into TWO consecutive integer argument registers,
+     * which is why the LIR may flatten such an argument into two scalar operands
+     * (`lower.tks::lower_str_arg_call`) and the isel need do nothing.
+     *
+     * Win64: 8 — Microsoft x64 passes an aggregate in a register ONLY when its
+     * size is 1, 2, 4 or 8 bytes; a 16-byte `tk_str` goes BY REFERENCE. The
+     * flattened two-operand form is therefore WRONG there (the callee would read
+     * the string's own first 16 bytes as a `{ptr; len}` and fault), so the x86
+     * isel re-materializes the pair into a frame slot and passes its address
+     * (`pin_str_pair_by_ref_x86`). The second frame-convention fact the
+     * register-id lists cannot express — the sibling of `shadow_space`.
+     */
+    max_reg_arg_bytes: u32
 }
 
 /**
@@ -169,6 +189,7 @@ pub const AAPCS64: AbiDescriptor = AbiDescriptor {
     spill_slot_bytes = 8 to u32
     spill_slot_align = 8 to u32
     shadow_space = 0 to u32
+    max_reg_arg_bytes = 16 to u32
 }
 
 /**

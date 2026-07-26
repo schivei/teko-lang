@@ -329,3 +329,111 @@ fn xat_select_module_carries_rodata_globals_layouts_through() {
     teko::assert::is_true(selected.rodata.len == 1)
     teko::assert::is_true(selected.funcs.len == 1)
 }
+
+/**
+ * xat_str_pair_call — a `main` whose body materializes a `tk_str`'s flattened
+ * `(ptr, len)` pair (a rodata address + a constant length, exactly what
+ * `lower.tks::lower_str_arg_call` emits) and hands it to `sym` as a two-operand
+ * void call, then returns the length VReg. The fixture behind the Win64
+ * by-reference argument tests.
+ *
+ * @param str sym  the called runtime symbol
+ * @return lir::LFunc  the built function
+ */
+fn xat_str_pair_call(sym: str) -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let p = lir::alloc_vreg(f0)
+    let n = lir::alloc_vreg(p.func)
+    let s0 = lir::append_inst(n.func, 0, lir::global_addr_inst(p.vreg, ".Lstr0", 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::const_int_inst(n.vreg, 10, 0, 0))
+    let args = teko::list::push(teko::list::push(teko::list::empty(), p.vreg), n.vreg)
+    let s2 = lir::append_inst(s1, 0, lir::void_call_inst(sym, args, false, 0, 0))
+    lir::append_inst(s2, 0, lir::ret_inst(n.vreg, 0, 0))
+}
+
+/**
+ * xat_dump_abi — select `f` under an explicit ABI descriptor and render the
+ * machine module as text (the ABI-sensitive sibling of `xat_dump`, which pins
+ * SysV).
+ *
+ * @param AbiDescriptor abi  the ABI register file to select under
+ * @param lir::LFunc f  the function to select and print
+ * @return str  the rendered machine text ("" on a selection error)
+ */
+fn xat_dump_abi(abi: AbiDescriptor, f: lir::LFunc) -> str {
+    let mf = match select_lfunc_x86(abi, f) { MFuncX86 as x => x; error => return "" }
+    minst_print_x86(add_mfunc_x86(empty_mmodule_x86(), mf))
+}
+
+#test
+fn xat_win64_str_pair_travels_by_reference() {
+    let text = xat_dump_abi(WIN64, xat_str_pair_call("tk_println"))
+    // the 16-byte copy's address, then `.ptr` at +0 and `.len` at +8 …
+    teko::assert::str_contains(text, "lea %2, [frame #0]")
+    teko::assert::str_contains(text, "mov.q [%2 + 0], %0")
+    teko::assert::str_contains(text, "mov.q [%2 + 8], %1")
+    // … and that ADDRESS — not the pair — in RCX, the sole argument register used.
+    teko::assert::str_contains(text, "mov.q %p1, %2")
+    teko::assert::str_contains(text, "call @tk_println(%p1)")
+}
+
+#test
+fn xat_win64_str_pair_reserves_one_16_byte_frame_slot() {
+    let mf = match select_lfunc_x86(WIN64, xat_str_pair_call("tk_println")) { MFuncX86 as x => x; error => return }
+    teko::assert::is_true(mf.frame.len == 1)
+    teko::assert::is_true(mf.frame[0].bytes == (16 to u32))
+    teko::assert::is_true(mf.frame[0].align == (8 to u32))
+}
+
+#test
+fn xat_sysv_str_pair_stays_in_two_registers() {
+    let text = xat_dump_abi(SYSV64, xat_str_pair_call("tk_println"))
+    // SysV carries a 2-eightbyte aggregate in RDI/RSI — the byte-identity guardrail:
+    // no frame slot, no stores, both halves pinned as ordinary register arguments.
+    teko::assert::str_contains(text, "call @tk_println(%p7, %p6)")
+    teko::assert::is_false(teko::runtime::str_contains(text, "[frame #"))
+    let mf = match select_lfunc_x86(SYSV64, xat_str_pair_call("tk_println")) { MFuncX86 as x => x; error => return }
+    teko::assert::is_true(mf.frame.len == 0)
+}
+
+#test
+fn xat_win64_non_str_builtin_pair_stays_in_two_registers() {
+    // The by-reference path is keyed on the CLOSED `tk_str`-argument builtin list,
+    // never on "a call with two arguments": an ordinary two-scalar call keeps RCX/RDX.
+    let text = xat_dump_abi(WIN64, xat_str_pair_call("teko__demo__f"))
+    teko::assert::str_contains(text, "call @teko__demo__f(%p1, %p2)")
+    teko::assert::is_false(teko::runtime::str_contains(text, "[frame #"))
+}
+
+/**
+ * xat_no_arg_reg_by_ref_abi — a degenerate register file with NO integer
+ * argument register and Win64's by-reference aggregate rule, the only input that
+ * reaches `pin_str_pair_by_ref_x86`'s "no argument register" internal arm (every
+ * shipped x86-64 descriptor has at least four).
+ *
+ * @return AbiDescriptor  the degenerate register file
+ */
+fn xat_no_arg_reg_by_ref_abi() -> AbiDescriptor {
+    AbiDescriptor {
+        gpr_arg = teko::list::empty()
+        fpr_arg = teko::list::empty()
+        gpr_allocatable = teko::list::push(teko::list::empty(), 3 to u32)
+        fpr_allocatable = teko::list::empty()
+        gpr_caller_saved = teko::list::empty()
+        fpr_caller_saved = teko::list::empty()
+        gpr_spill_scratch = teko::list::empty()
+        fpr_spill_scratch = teko::list::empty()
+        spill_slot_bytes = 8 to u32
+        spill_slot_align = 8 to u32
+        shadow_space = 32 to u32
+        max_reg_arg_bytes = 8 to u32
+    }
+}
+
+#test
+fn xat_by_ref_without_an_argument_register_is_an_internal_stop() {
+    match select_lfunc_x86(xat_no_arg_reg_by_ref_abi(), xat_str_pair_call("tk_println")) {
+        MFuncX86 => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "cannot pass a by-reference aggregate")
+    }
+}

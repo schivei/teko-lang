@@ -953,16 +953,24 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
  * `tk_i64_to_str`/… which `lower_interp` calls by a hardcoded symbol and
  * which stay on the plain scalar path (their own multi-register/return-value
  * ABI is the SEPARATE, wider N2 gap `lower_fat_expr`'s own doc names —
- * REPORTED up, not this crumb's scope). A lone struct-by-value argument
- * decomposes to EXACTLY two consecutive AAPCS64/SysV general registers, so
- * passing (ptr, len) as two flat `LCall` operands reproduces the true C ABI
- * with NO isel/regalloc/stackify change (`lower_str_arg_call`).
+ * REPORTED up, not this crumb's scope).
+ *
+ * The LIR is TARGET-NEUTRAL, so it always flattens the argument into the two
+ * `(ptr, len)` operands `lower_str_arg_call` emits. On an ABI whose
+ * `max_reg_arg_bytes` is 16 (AAPCS64/SysV/LP64D) a 2-eightbyte struct
+ * decomposes into exactly two consecutive integer argument registers, so the
+ * flat pair IS the true C ABI and no backend does anything. On Win64
+ * (`max_reg_arg_bytes` 8) a 16-byte aggregate travels BY REFERENCE, so the flat
+ * pair is NOT the ABI — the x86 isel re-materializes it into a frame slot and
+ * passes that slot's address (`pin_str_pair_by_ref_x86`). This predicate is
+ * `pub` precisely so the backend reads the SAME closed list rather than
+ * re-deriving it (a second copy could drift and would fault silently).
  *
  * @param str sym  the resolved runtime symbol (`call_symbol`'s result)
  * @return bool  true iff `sym` is one of the seven single-`tk_str`-arg
  *               runtime entries
  */
-fn is_str_arg_builtin(sym: str) -> bool {
+pub fn is_str_arg_builtin(sym: str) -> bool {
     sym == "tk_print" || sym == "tk_println" || sym == "tk_eprint" || sym == "tk_eprintln" || sym == "tk_write" || sym == "tk_ewrite" || sym == "tk_panic_str"
 }
 
