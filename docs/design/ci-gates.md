@@ -1,7 +1,8 @@
 # CI gating — the light/full split, and the memory/UB tiers
 
 **Status:** ratified (owner ruling 2026-07-14 for the memory/UB tiers; owner proposal 2026-07-24
-for the light/full split, implemented 2026-07-25).
+for the light/full split, implemented 2026-07-25; owner ruling 2026-07-26 for the HOST set — every
+published host gets a build lane AND a test lane).
 
 ## The axis: `light` vs `full`
 
@@ -21,18 +22,51 @@ runners to re-prove what the landing proves again.
 
 | track | light | full |
 |---|---|---|
-| `tests.yml` | `test / linux` | + `test / macos`, `test / windows` |
-| `native.yml` `build-test` | linux-x86_64 | + linux-arm64, macos-arm64, windows-x86_64 |
+| `tests.yml` `test` | linux-x86_64, windows-x86_64 | + linux-arm64, macos-arm64, windows-arm64 |
+| `native.yml` `build-test` | linux-x86_64, windows-x86_64 | + linux-arm64, macos-arm64, windows-arm64 |
 | `native.yml` `gen1-checks` | ubuntu-latest | + macos-latest |
 | `native.yml` `riscv64-qemu` | — | yes |
 | `native.yml` `ar-elf-macho-coff-validation` | — | yes |
 | `native.yml` `release-cross-smoke` | — | yes |
+| `native.yml` `seeds` | — | yes |
+| `native.yml` `seed-debut` | — | yes (five hosts) |
 | `sanitizers.yml` (all four jobs) | — | yes |
 | `codeql.yml` / `sast.yml` | unchanged (see below) | unchanged |
 
 What survives on the light path is precisely what catches a compiler break: gen1 builds, `teko
 test .` passes (which since D6 includes the ten `.tkr` regressors), and the own==C differential on
 linux.
+
+### The HOST set (owner ruling 2026-07-26)
+
+> "Sobre windows-arm64 (e outros hosts), tem que fazer o build inicial e tem que colocar lane de
+> teste se não houverem."
+
+This **reverses** the 2026-07-06 exclusion of `windows-arm64` from `build-test`. Every host that
+ships a published artifact now has BOTH a build lane (`native.yml` `build-test`) and a test lane
+(`tests.yml` `test`). The gap the ruling closed:
+
+| host | build lane before | test lane before |
+|---|---|---|
+| linux-x86_64 | yes | yes |
+| linux-arm64 | yes | **none** |
+| macos-arm64 | yes | yes |
+| windows-x86_64 | yes | yes |
+| windows-arm64 | **none** | **none** |
+
+`teko-linux-arm64-{glibc,musl}.tar.gz` and `teko-windows-arm64.zip` were published without
+anything ever having run `teko test .` on that hardware.
+
+The two tracks now carry the **same** host set and the **same** split, so a host can no longer be
+built without being tested. The light tier is `linux-x86_64` + `windows-x86_64`; the three arm
+hosts are full-only, because each adds an ARCH delta on top of a platform the light tier already
+covers, and `windows-11-arm` is the slowest runner in the set
+(docs/design/compile-time-architecture.md §1.1).
+
+`tests.yml` is a **matrix**, not one job per host: five hand-written jobs is the shape in which the
+fifth is forgotten out of the aggregator's `needs:` list — and a job outside that list runs, goes
+red, and does not block the merge. A matrix job has one name in `needs:`, and its aggregate result
+is `success` only when every leg succeeded.
 
 `codeql.yml` is deliberately NOT gated: it feeds the `code_scanning` ruleset rule, which requires a
 completed analysis for the PR head, so skipping it leaves the PR blocked "waiting for CodeQL".
@@ -96,7 +130,7 @@ Job `mem-paranoid` (check name **`Memory paranoid (native self-host)`**), aggreg
 - **As of 2026-07-25 this job, like every other job in `sanitizers.yml`, is FULL-only** (see the
   light/full split above): `tsan` carries a 90-min budget and `windows-selfhost` a 100-min one, so
   the whole workflow belongs to the landing. What guards an intermediate wagon PR instead is
-  `test / linux` plus the native self-build gate in `native.yml`. The `TEKO_MEM_PARANOID` self-host
+  `test / linux-x86_64` + `test / windows-x86_64` plus the native self-build gate in `native.yml`. The `TEKO_MEM_PARANOID` self-host
   is also part of every wagon's LOCAL closing ritual, so the oracle still runs per wagon — off the
   shared runners.
 
@@ -118,7 +152,7 @@ Job `asan-default` (check name **`ASan+UBSan+LSan / default dispatch`**), aggreg
 No nightly, no cron schedule, no auto-issue.
 
 > **Trade-off (accepted).** The heavy audit runs once per train, at the landing, rather than on
-> every wagon PR. The light native self-build gate plus `test / linux` guard each wagon.
+> every wagon PR. The light native self-build gate plus `test / linux-x86_64` and `test / windows-x86_64` guard each wagon.
 
 ## Why this is safe
 
