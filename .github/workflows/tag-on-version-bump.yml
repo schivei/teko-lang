@@ -101,9 +101,9 @@ jobs:
       # from a red commit. This step VERIFIES the gates instead of waiting for them.
       #
       # BUG FIXED HERE (2026-07-25, romaneio .31): the previous version waited, in a 60-minute
-      # loop, for "Native Build & Test" and "Sanitizers & Stress" to complete AT $GITHUB_SHA,
-      # commenting that "only the two workflows that actually run on this push are awaited". Those
-      # two workflows — like tests.yml — are `on: pull_request:` ONLY. Nothing runs on this push,
+      # loop, for the CI workflows to complete AT $GITHUB_SHA, commenting that "only the
+      # workflows that actually run on this push are awaited". They are `on: pull_request:`
+      # ONLY. Nothing runs on this push,
       # so the loop awaited runs that cannot exist, burned the full deadline and exited 1: NO TAG
       # was ever minted, and release.yml (which triggers on the tag) was therefore never reached.
       # A gate that cannot pass is worse than no gate: it blocks the release AND costs an hour of
@@ -138,7 +138,13 @@ jobs:
           echo "Gating '$DERIVED': $SHA came from PR #$PR_NUM, head $HEAD_SHA — verifying its runs."
           failed=""
           missing=""
-          for wf in "Native Build & Test" "Sanitizers & Stress"; do
+          # ONE NAME, since 2026-07-26: `native.yml`, `sanitizers.yml`, `sast.yml` and
+          # `tests.yml` were consolidated into `pr.yml` ("Pull Request CI") because `needs:` does
+          # not cross workflow files and every lane now has to stand on one artifact root. THIS
+          # LIST IS LOAD-BEARING — a name that no longer exists reports "no run found" and this
+          # gate ABORTS without tagging, so the release never happens. If the workflow is renamed
+          # again, rename it here in the same commit.
+          for wf in "Pull Request CI"; do
             info="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${HEAD_SHA}" \
                       --jq "[.workflow_runs[] | select(.name==\"$wf\")] | sort_by(.run_number) | last | \"\(.status)|\(.conclusion)\"" || true)"
             st="${info%%|*}"

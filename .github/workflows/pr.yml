@@ -1,0 +1,1853 @@
+name: Pull Request CI
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THE SINGLE `pull_request` WORKFLOW. It replaces, and deletes, four files:
+#   native.yml (Native Build & Test) · tests.yml (Tests) · sanitizers.yml (Sanitizers & Stress)
+#   · sast.yml (SAST Gate)
+#
+# ── WHY ONE FILE (owner ruling 2026-07-26) ────────────────────────────────────────────────────
+# "todas as lanes de pull_request precisam depender dessa lane de artefatos, a lane de artefatos
+# deve executar build seco `teko build . --no-verify --release` e ela deve ter a inteligência
+# sobre o que deve gerar (a escada)" — and, when the structural consequence was put to him,
+# "mesmo que custe (exceto a algumas de push) colocar tudo no mesmo yml" / "se não atravessa,
+# transforme em um único yaml, os únicos independentes são os que esperam push".
+#
+# The structural consequence is a GitHub Actions primitive and there is no way around it:
+# `needs:` DOES NOT CROSS WORKFLOW FILES. For every lane to depend on one artifact root, every
+# lane has to live where that root lives. The cost is a large file; the alternative was eleven
+# jobs each paying for its own seed provision and its own self-host before doing its own work,
+# which is what was measured here before this wagon.
+#
+# STILL INDEPENDENT, and deliberately so:
+#   codeql.yml       — `pull_request`, but owner ruling 2026-07-26: "CodeQL é independente, até
+#                      pq, provavelmente, ainda teremos uma rodada pós linker para ensinar o
+#                      CodeQL e o dependabot a analisarem teko." It is separable ON PURPOSE
+#                      because it has its own wave coming. Consolidating it now would only create
+#                      work to undo. Its required check (`CodeQL`) is published by the
+#                      code-scanning service, not by a job name, and leaving the file where it is
+#                      keeps that name out of the blast radius entirely.
+#   branch-policy.yml — `pull_request`, but it is a source-namespace cancel that runs in seconds
+#                      with no checkout and no compiler. Rooting it on the artifact lane would
+#                      make the CHEAPEST and FASTEST refusal in the repo wait on the most
+#                      expensive job, and it can never be affected by anything the root produces.
+#   release.yml, tag-on-version-bump.yml, mirror-pr-to-org.yml, seed-linux-fork.yml — push /
+#                      workflow_dispatch. Out of the ruling by its own terms.
+#
+# ── THE FIVE REQUIRED CHECKS ARE INVIOLABLE ───────────────────────────────────────────────────
+#   CI gate · Test suite gate · Sanitizer gate · Heavy sanitizer gate (main) · SAST gate
+# They are the only required checks on `main`, and `main` has NO BYPASS — not even for the owner.
+# A name that stops reporting does not go red; it goes PENDING FOREVER and jams the drain. So the
+# five names survive this consolidation verbatim, and scripts/ci_gate_coverage.sh asserts their
+# exact spelling on every run. Leaf check names are free and several changed.
+#
+# ── THE TOPOLOGY ──────────────────────────────────────────────────────────────────────────────
+#   plan ──► artifact ──┬──► test ─────────────────────────────► Test suite gate
+#     (the ROOT: seed,  ├──► cli-surface ──┐
+#      ladder, dry      ├──► regressor-full├─► CI gate
+#      build, the nine  ├──► ar-validation │
+#      assets)          ├──► cross-arch-determinism
+#                       ├──► seed-debut ───┘
+#                       ├──► tsan ────────────────────────────► Sanitizer gate
+#                       ├──► asan-smoke ──┐
+#                       ├──► asan-default ├───────────────────► Heavy sanitizer gate (main)
+#                       ├──► mem-paranoid ┘
+#                       └──► clang-tidy-audit ────────────────► SAST gate
+#
+# EVERY leaf `needs: [plan, artifact]`. EVERY aggregator `needs: artifact` too — see the ROOTED
+# assertion in scripts/ci_gate_coverage.sh: an aggregator that does not stand on the root can
+# report success while the lane every other lane consumes was never green, and (the light-tier
+# case) can report success in a mode where all of its own legs legitimately skipped.
+#
+# ── NO LANE BUT THE ROOT BUILDS ───────────────────────────────────────────────────────────────
+# Eleven jobs used to call scripts/build_with_seed_fallback.sh or scripts/ci_provision_teko.sh:
+# build-test, gen1-checks, riscv64-qemu, ar-elf-macho-coff-validation, seeds, release-cross-smoke,
+# mem-paranoid, asan-default, tsan, windows-selfhost, seed-debut. After this wagon exactly ONE
+# does, and scripts/ci_lane_purity.sh (run by `CI gate`) fails the build if a twelfth appears.
+# Two of the eleven are GONE rather than converted:
+#   * build-test        — it WAS "the seed builds the tip on this host", on the same five hosts
+#                         the artifact producers now cover. The root does it, so the job is not
+#                         moved, it is subsumed.
+#   * windows-selfhost  — same, for windows-x86_64: `artifact / windows-x86_64` self-builds gen1
+#                         on Windows natively and smokes the binary. Duplicate.
+#   * seeds             — DEAD BEFORE THIS WAGON: it invoked scripts/cross_compile_seeds.sh,
+#                         which does not exist in the tree. On any full run it would have failed
+#                         at that step. It also cut its output with zig. Removed.
+#   * release-cross-smoke — it existed to validate release.yml's zig cross-compile from PR CI.
+#                         zig is dead and release.yml no longer builds at all, so there is
+#                         nothing left to smoke. Its ONE unique assertion, the cross-architecture
+#                         emitted-C determinism law, is preserved as `cross-arch-determinism`.
+#
+# ── LIGHT vs FULL ─────────────────────────────────────────────────────────────────────────────
+# The criterion CHANGED this wagon and the reason is in scripts/ci_full_mode.sh. Short version:
+# `full = (base_ref == main)` meant that on a STACKED TRAIN — where every wagon's base is the
+# wagon below it — NO WAGON EVER RAN FULL, so every new lane debuted at the drain. Measured on
+# PR #95: two of nine test lanes ran, and of the four lanes the owner had just ordered created,
+# zero. The rule is now "can this change break this lane": base==main OR a change under
+# .github/workflows/**, scripts/**, src/runtime/**, src/assert/**, src/backend/**, bootstrap/**,
+# or teko.tkp. Every job below declares which tier it is on.
+#
+# TIER SUMMARY
+#   BOTH  plan, artifact, test, cli-surface, tsan, asan-smoke, clang-tidy-audit, all five gates
+#   FULL  regressor-full, ar-validation, cross-arch-determinism, seed-debut, asan-default,
+#         mem-paranoid  (and the full tier widens `artifact`/`test`/`cli-surface`'s matrices)
+#
+# ── ZIG IS DEAD ───────────────────────────────────────────────────────────────────────────────
+# Owner, 2026-07-26: "parar de cross compilar em zig, usar compilação nativa na esteira que irá
+# gerar os artefatos", then "O zig deve morrer agora, imediatamente, sem espera". The six Linux
+# assets are produced by scripts/native_linux_asset.sh with the TARGET's own toolchain — see that
+# file for the per-label mapping and for the glibc-floor argument. riscv64 has no runner, so its
+# NATIVE gcc runs on an EMULATED CPU inside a linux/riscv64 container; the emulation cost is
+# accepted by the owner and deliberately not optimised.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+on:
+  pull_request:
+    branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
+    # The UNION of the four merged workflows' trigger filters. `bootstrap/**` came from native.yml
+    # and is listed because the committed host seeds are `.xz` blobs plus a checksum manifest:
+    # none of the extension globs reach them, so a PR that touched ONLY a seed would have skipped
+    # the very lanes that provision from it.
+    paths: ['**.tkp', '**.tks', '**.tkt', '**.tkr', '**.sh', '**.c', '**.h', '.github/workflows/*.yml', 'bootstrap/**']
+
+permissions:
+  contents: read
+
+jobs:
+  # ══ plan ═══════════════════════════════════════════════════════════════════════════════════
+  # TIER: both. The mode, the path filters, and every matrix, emitted once for the whole file.
+  #
+  # THREE FILTERS, down from the four workflows' three-plus-one:
+  #   run       the compiler-lane allowlist (was native.yml's `changes`). sanitizers.yml's own
+  #             filter was a near-subset (it added .github/lsan-suppressions.txt and dropped
+  #             examples/** + bootstrap/**) and is FOLDED IN here: the difference bought nothing
+  #             but a second list to keep in sync, and erring toward running the sanitizer lanes
+  #             is the safe direction.
+  #   sast_run  src/runtime/** + src/assert/** — genuinely narrower, kept separate.
+  #   full      the light/full axis (see scripts/ci_full_mode.sh for the rule and its history).
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+      run: ${{ steps.decide.outputs.run }}
+      sast_run: ${{ steps.decide.outputs.sast_run }}
+      labels: ${{ steps.decide.outputs.labels }}
+      matrix_artifact: ${{ steps.decide.outputs.matrix_artifact }}
+      matrix_test: ${{ steps.decide.outputs.matrix_test }}
+      matrix_cli: ${{ steps.decide.outputs.matrix_cli }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          list-files: shell
+          filters: |
+            run:
+              - 'src/**'
+              - 'tests/**'
+              - 'examples/**'
+              - 'scripts/**'
+              - 'bootstrap/**'
+              - '.github/lsan-suppressions.txt'
+              - '.github/ci-lane-exceptions.txt'
+              - '.github/workflows/pr.yml'
+            sast:
+              - 'src/runtime/**'
+              - 'src/assert/**'
+              - '.github/sast-baseline.txt'
+              - '.github/workflows/pr.yml'
+            full:
+              - '.github/workflows/**'
+              - 'scripts/**'
+              - 'src/runtime/**'
+              - 'src/assert/**'
+              - 'src/backend/**'
+              - 'bootstrap/**'
+              - 'teko.tkp'
+
+      - name: Decide (mode, allowlists, matrices)
+        id: decide
+        shell: bash
+        env:
+          MATCHED: ${{ steps.filter.outputs.run }}
+          FILES: ${{ steps.filter.outputs.run_files }}
+          SAST_MATCHED: ${{ steps.filter.outputs.sast }}
+          FULL_MATCHED: ${{ steps.filter.outputs.full }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+
+          # ── THE MODE ────────────────────────────────────────────────────────────────────────
+          # base_ref == main is KEPT (the landing wagon pays the full gate whatever it touched),
+          # but it is no longer the ONLY trigger — see the header and scripts/ci_full_mode.sh.
+          # The gates re-derive this INDEPENDENTLY (over the PR's file list, not with dorny) and
+          # fail on disagreement, which is what makes a `skipped` leg trustworthy.
+          full=false
+          reason=""
+          if [ "$BASE_REF" = "main" ]; then full=true; reason="base_ref=main"; fi
+          if [ "$FULL_MATCHED" = "true" ]; then
+            full=true
+            reason="${reason:+$reason, }a full-triggering path changed (workflows/scripts/runtime/assert/backend/seeds/manifest)"
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF'; ${reason:-no full trigger})"
+
+          # ── SAST allowlist ──────────────────────────────────────────────────────────────────
+          [ "$SAST_MATCHED" = "true" ] && sast_run=true || sast_run=false
+          echo "sast_run=$sast_run" >> "$GITHUB_OUTPUT"
+
+          # ── the compiler-lane allowlist + the docs-only guard ───────────────────────────────
+          # The allowlist globs also match Markdown living INSIDE those trees, so a pure-doc edit
+          # would otherwise trigger the whole heavy gate. Skip only when EVERY matched file is
+          # *.md — any single non-Markdown match still forces the run, so this can under-skip but
+          # never over-skip. A trigger-level `paths-ignore` is deliberately NOT used: the five
+          # aggregators are REQUIRED checks, and skipping the workflow would leave them never
+          # reported → the PR hangs "waiting for CI gate" forever.
+          #
+          # NOTE: `artifact` and `test` do NOT consult this flag. They are gated by the trigger's
+          # own `paths:` and nothing else, exactly as tests.yml had them — which is what keeps
+          # `Test suite gate` from ever having a "everything skipped, pass anyway" branch.
+          run=false
+          if [ "$MATCHED" != "true" ]; then
+            echo "No allowlisted path changed — the compiler-diagnostic lanes have nothing to gate."
+          else
+            for f in $FILES; do
+              case "$f" in
+                *.md) ;;
+                *)    run=true ;;
+              esac
+            done
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "run=$run (compiler-diagnostic lanes)"
+
+          # ── PRODUCER LEGS ───────────────────────────────────────────────────────────────────
+          # `producer` names the leg and its uploaded artifact (`teko-assets-<producer>`);
+          # `produces` is its CONTRACT — the asset labels it must mint. `seed` is the label whose
+          # released binary RUNS on this leg's runner, which is not always what it produces: the
+          # two riscv64 legs stand on x86_64 hardware (there is no riscv64 runner) and only the
+          # gcc they drive is riscv64.
+          #
+          # riscv64 gets TWO legs rather than one that mints both. Each leg's expensive half is a
+          # full gcc run under emulation; two legs run them in parallel, one would serialise them.
+          # `emit_c` marks the leg that additionally publishes `out/teko.c`, which is what the
+          # sanitizer lanes consume — they need a DIFFERENTLY COMPILED compiler, the one thing a
+          # downloaded binary cannot be.
+          A_WA='{"producer":"windows-arm64","os":"windows-11-arm","timeout":150,"kind":"native","seed":"windows-arm64","produces":"windows-arm64"}'
+          A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64"}'
+          A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64"}'
+          A_LA='{"producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc linux-arm64-musl"}'
+          A_RG='{"producer":"linux-riscv64-glibc","os":"ubuntu-latest","timeout":300,"kind":"linux","seed":"linux-x86_64-glibc","binfmt":true,"produces":"linux-riscv64-glibc"}'
+          A_RM='{"producer":"linux-riscv64-musl","os":"ubuntu-latest","timeout":300,"kind":"linux","seed":"linux-x86_64-glibc","binfmt":true,"produces":"linux-riscv64-musl"}'
+
+          # ── TEST LEGS ───────────────────────────────────────────────────────────────────────
+          # `os` is the runner that EXECUTES the asset, which is not the runner that minted it:
+          # the riscv64 assets run under qemu-user on x86_64 because no riscv64 runner exists.
+          # `timeout` is a GATE-ONLY budget — the build left this layer.
+          T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
+          T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
+          T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
+          T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
+          T_RG='{"label":"linux-riscv64-glibc","producer":"linux-riscv64-glibc","os":"ubuntu-latest","timeout":180}'
+          T_RM='{"label":"linux-riscv64-musl","producer":"linux-riscv64-musl","os":"ubuntu-latest","timeout":180}'
+          T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45}'
+          T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60}'
+          T_WA='{"label":"windows-arm64","producer":"windows-arm64","os":"windows-11-arm","timeout":90}'
+
+          C_X='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest"}'
+          C_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest"}'
+
+          if [ "$full" = "true" ]; then
+            A_LX='{"producer":"linux-x86_64","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","emit_c":true,"produces":"linux-x86_64-glibc linux-x86_64-musl"}'
+            # SLOWEST FIRST in every matrix: GitHub starts legs in declaration order, so the
+            # emulated riscv64 producers and the ~11-min windows-arm64 one must not queue behind
+            # cheap ones.
+            echo "matrix_artifact={\"include\":[$A_RG,$A_RM,$A_WA,$A_LX,$A_LA,$A_WX,$A_MAC]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_test={\"include\":[$T_RG,$T_RM,$T_WA,$T_WX,$T_XG,$T_XM,$T_AG,$T_AM,$T_MAC]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_cli={\"include\":[$C_X,$C_MAC]}" >> "$GITHUB_OUTPUT"
+            echo "labels=linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
+          else
+            A_LX='{"producer":"linux-x86_64","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","emit_c":true,"produces":"linux-x86_64-glibc"}'
+            echo "matrix_artifact={\"include\":[$A_LX,$A_WX]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_test={\"include\":[$T_WX,$T_XG]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_cli={\"include\":[$C_X]}" >> "$GITHUB_OUTPUT"
+            echo "labels=linux-x86_64-glibc windows-x86_64" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ══ artifact — THE ROOT ════════════════════════════════════════════════════════════════════
+  # TIER: both (the matrix widens on full).
+  #
+  # Owner: "a lane de artefatos deve executar build seco `teko build . --no-verify --release` e
+  # ela deve ter a inteligência sobre o que deve gerar (a escada)."
+  #
+  # THE INTELLIGENCE IS TWO THINGS, and both live here and nowhere else:
+  #   1. WHAT TO GENERATE — `produces`, which is why the light path mints ONE Linux asset instead
+  #      of six rather than building six and discarding five.
+  #   2. THE LADDER — scripts/build_with_seed_fallback.sh: the newest RELEASED seed builds the tip
+  #      directly (fast path); else the COMMITTED seed in bootstrap/seeds/ (rung 0); else the
+  #      pinned SHA ladder.
+  #
+  # `--no-verify --release`: DRY, no test gate. The gate is the `test` layer's whole job and
+  # running it here would put the cost straight back into the critical path the ruling removed.
+  # `--release` because every published asset is an -O2 link, so an asset built without it would
+  # not be the asset.
+  artifact:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_artifact) }}
+    name: artifact / ${{ matrix.producer }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Named BEFORE the first step that can fail on a missing tool, so a red run on a host whose
+      # image no lane has exercised says WHICH toolchain was present instead of leaving the reader
+      # to infer it from a cc error deep inside a build log. `unzip`/`tar` because
+      # ci_provision_teko.sh needs one of them to open the release asset, `xz`/`python3`/`7z`
+      # because they are the decompressor chain the committed-seed rung walks, `docker` because it
+      # is what every native Linux asset is built inside, and `file` because native_linux_asset.sh
+      # asserts each asset's architecture with it.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file xz unzip tar curl python3 7z docker; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      # riscv64 PRODUCERS ONLY. There is no riscv64 runner, so the target's OWN gcc runs on an
+      # emulated CPU inside a linux/riscv64 container. This registers the binfmt handler that
+      # makes `docker run --platform linux/riscv64` possible; native_linux_asset.sh probes the
+      # registration before compiling and fails with a named error if it is missing, so this step
+      # going wrong can never become a silent wrong-arch build.
+      - name: Register binfmt for riscv64 (emulated CPU, native toolchain)
+        if: matrix.binfmt
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      # The seed must RUN on this runner, which is not always what the leg produces — the riscv64
+      # legs stand on x86_64 hardware. `seed` names the host-runnable label explicitly rather than
+      # deriving it, because a derivation the caller can get wrong is a derivation that silently
+      # picks the wrong blob.
+      - name: Provision teko from the latest release (the host-runnable seed)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          set -eu
+          echo "producer '${{ matrix.producer }}' — seeding with the host-runnable '$SEED'"
+          ./scripts/ci_provision_teko.sh "$SEED"
+
+      # THE DRY BUILD + THE LADDER. `out/` receives gen1's binary AND the `teko.c` it was compiled
+      # from. Every asset this producer mints is compiled from that same C, so all of them are the
+      # same generation of the compiler by construction.
+      - name: Dry build (teko build . --no-verify --release, via the ladder)
+        shell: bash
+        run: sh scripts/build_with_seed_fallback.sh out
+
+      # ── the assets ──────────────────────────────────────────────────────────────────────────
+      # Linux: one native container build per label (see scripts/native_linux_asset.sh). Non-Linux
+      # producers are already standing on the target platform, so the dry build above IS the
+      # asset.
+      - name: Build the Linux assets natively (one container per target)
+        if: matrix.kind == 'linux'
+        shell: bash
+        env:
+          PRODUCES: ${{ matrix.produces }}
+        run: |
+          set -eu
+          for label in $PRODUCES; do
+            sh scripts/native_linux_asset.sh "$label" out/teko.c src
+          done
+
+      # THE CONTRACT, MADE LITERAL: one directory per asset label, each holding that asset's
+      # binary. A test leg knows only `<label>/teko[.exe]`, so a producer can change HOW it mints
+      # an asset without the consumer noticing. The loop FAILS if a promised asset is missing — a
+      # producer that uploads less than it promised would otherwise surface as a confusing
+      # download error one job away from its cause.
+      - name: Stage the assets this producer promised
+        shell: bash
+        env:
+          KIND: ${{ matrix.kind }}
+          PRODUCER: ${{ matrix.producer }}
+          PRODUCES: ${{ matrix.produces }}
+        run: |
+          set -eu
+          rm -rf stage
+          for label in $PRODUCES; do
+            mkdir -p "stage/$label"
+            if [ "$KIND" = "linux" ]; then
+              src="gd-$label/teko"
+            else
+              src="out/teko"; [ -f out/teko.exe ] && src="out/teko.exe"
+            fi
+            if [ ! -f "$src" ]; then
+              echo "ERROR: producer '$PRODUCER' promised '$label' but $src does not exist" >&2
+              exit 1
+            fi
+            case "$src" in
+              *.exe) cp "$src" "stage/$label/teko.exe" ;;
+              *)     cp "$src" "stage/$label/teko" ;;
+            esac
+            echo "staged $label <- $src"
+          done
+          ls -lR stage
+
+      - name: Upload the assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: stage
+          if-no-files-found: error
+          retention-days: 1
+
+      # THE EMITTED C, published once. The sanitizer lanes need a compiler built with
+      # `-fsanitize=…`, which no downloaded binary can be; they link this C themselves
+      # (scripts/build_gen1_from_c.sh) instead of re-walking the ladder.
+      - name: Upload the emitted teko.c (the sanitizer lanes' input)
+        if: matrix.emit_c
+        uses: actions/upload-artifact@v4
+        with:
+          name: teko-c
+          path: out/teko.c
+          if-no-files-found: error
+          retention-days: 1
+
+  # ══ test — DOWNLOAD AND RUN. NO BUILD. ═════════════════════════════════════════════════════
+  # TIER: both (two assets on light, all nine on full).
+  #
+  # `needs: [plan, artifact]` — one name for the whole producer layer, because `needs:` cannot
+  # reference a MATRIX LEG. The consequence is bounded and stated: a test leg starts when the
+  # SLOWEST producer finishes, and pays NOTHING for the wait (a queued leg spends zero runner
+  # minutes and zero of its own timeout budget; a leg that BUILDS spends both).
+  #
+  # A C TOOLCHAIN IS STILL REQUIRED HERE, and that is not a build sneaking back in: `teko test .`
+  # IS a native gate — it emits the #test corpus as C, compiles it and runs it out-of-process
+  # (#168). The compiler under test is the downloaded asset; `cc` is the suite's engine.
+  test:
+    needs: [plan, artifact]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_test) }}
+    name: test / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    steps:
+      # The corpus under test. The asset arrives by download; the SOURCE it compiles is this PR's.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file python3; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      # riscv64 ONLY: there is no riscv64 runner, so the asset executes under qemu-user.
+      # `libc6-riscv64-cross` carries ONLY the target loader + shared libc the DYNAMIC glibc asset
+      # needs at runtime — no cross compiler, deliberately: `resolve_cc` links with the HOST `cc`
+      # whenever `TEKO_TARGET` is unset ("the LINK step always runs ON the host"), and qemu-user
+      # passes an `execve` of a host-native binary straight through to the kernel. So the COMPILER
+      # under test is fully emulated riscv64 while the C it emits is compiled and run natively —
+      # which is where the emulation cost belongs.
+      - name: Install qemu-user-static + the riscv64 loader
+        if: contains(matrix.label, 'riscv64')
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-user-static libc6-riscv64-cross
+
+      - name: Report the emulator (diagnostic — never fails the job)
+        if: contains(matrix.label, 'riscv64')
+        shell: bash
+        run: |
+          command -v qemu-riscv64-static || echo 'qemu-riscv64-static (absent)'
+          qemu-riscv64-static --version 2>/dev/null | head -n1 || echo 'qemu-riscv64-static: not runnable'
+          ls -d /usr/riscv64-linux-gnu 2>/dev/null || echo '/usr/riscv64-linux-gnu: absent (no riscv64 sysroot)'
+
+      - name: Download this lane's published asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: dl
+
+      # `actions/upload-artifact` does NOT preserve the executable bit, so restoring it is
+      # MANDATORY, not hygiene — without it every POSIX lane dies at "permission denied" and the
+      # cause sits three steps from the symptom. `--version` is the diagnostic that names the
+      # binary under test BEFORE the suite.
+      - name: Restore the executable bit and name the asset under test
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -eu
+          art="dl/$LABEL/teko"
+          if [ ! -f "$art" ]; then
+            echo "ERROR: the producer's upload has no $art" >&2
+            ls -lR dl >&2
+            exit 1
+          fi
+          chmod +x "$art"
+          file "$art" || true
+          case "$LABEL" in
+            linux-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" --version ;;
+            *)               "$art" --version ;;
+          esac
+
+      # ── the suite, run BY the asset. THE ONLY WORK THIS LAYER DOES. ─────────────────────────
+      # TWO steps, and the split is not cosmetic: Windows is not a different path but a different
+      # SHELL with an explicit `$LASTEXITCODE` propagation. EXACTLY ONE runs on any given leg, and
+      # the guard below PROVES it.
+      - name: Asset self-test — POSIX lanes (the published asset runs its own gate)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -eu
+          art="dl/$LABEL/teko"
+          case "$LABEL" in
+            linux-riscv64-*)
+              # `-L` is required by the dynamic glibc asset and harmless for the static musl one,
+              # so the invocation is uniform — without it a dynamic artifact dies at
+              # "Could not open '/lib/ld-linux-*'".
+              qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" test .
+              ;;
+            *)
+              "$art" test .
+              ;;
+          esac
+          : > .lane-ran
+
+      - name: Asset self-test — Windows lanes (the published asset runs its own gate)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          $art = "dl/$env:LABEL/teko.exe"
+          if (-not (Test-Path -LiteralPath $art)) {
+            Get-ChildItem -Recurse dl | Out-String | Write-Host
+            throw "the producer's upload has no $art"
+          }
+          & $art --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $art test .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType File -Force .lane-ran | Out-Null
+
+      # J3 AT THE LEG LEVEL. The two steps above are each guarded by an `if:`, so an asset whose
+      # label matched no predicate would SKIP both and the leg would go green having executed no
+      # suite at all — and a green leg is exactly what the aggregate `success` the gate trusts is
+      # made of. The marker file is written by whichever self-test step ran, so its absence PROVES
+      # none did.
+      - name: Guard — the asset self-test must actually have run
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -eu
+          if [ ! -f .lane-ran ]; then
+            echo "ERROR: no self-test step claimed asset '$LABEL' — this leg would have reported" >&2
+            echo "success without running 'teko test .' at all. Add the label to one of the two" >&2
+            echo "self-test steps' conditions." >&2
+            exit 1
+          fi
+          echo "asset '$LABEL' — the self-test ran"
+
+  # ══ cli-surface ════════════════════════════════════════════════════════════════════════════
+  # TIER: both (linux-x86_64-glibc on light; + macos-arm64 on full).
+  # WAS `gen1-checks`, which built gen1 from a seed before running any of these. It now validates
+  # the PUBLISHED ASSET, which is strictly better: these harnesses assert the CLI contract users
+  # actually get, and the binary they now run is byte-for-byte the one the release would ship.
+  # The version assertion in cli_flags_test.sh is why scripts/native_linux_asset.sh passes
+  # -DTEKO_VERSION_STRING — an asset that reported 0.0.0.0-dev would fail here, loudly.
+  cli-surface:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix_cli) }}
+    name: cli surface / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The own==C differential and the region-drop unit test compile C with the host cc, so cc is
+      # still needed. macOS ships clang with the Xcode CLT, so only Linux needs an install.
+      - name: Install cc (Linux only — macOS ships clang)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Download the published asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: dl
+
+      - name: Restore the executable bit
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -eu
+          chmod +x "dl/$LABEL/teko"
+          "dl/$LABEL/teko" --version
+
+      - name: CLI flags (identical version string)
+        shell: bash
+        run: ./scripts/cli_flags_test.sh "./dl/${{ matrix.label }}/teko"
+
+      - name: fmt CLI (--check + stdin mode) (issue #229)
+        shell: bash
+        run: ./scripts/fmt_cli_test.sh "./dl/${{ matrix.label }}/teko"
+
+      - name: tk_region_drop_subtree unit test (issue #337 — the adopt bulk-drop primitive)
+        shell: bash
+        run: ./scripts/region_drop_subtree_test.sh
+
+      # ── R1 host-target default (owner ruling 2026-07-24) ────────────────────────────────────
+      # regressor.tkr's F5 backend Examples always pin TEKO_TARGET explicitly, so they never
+      # exercise native_target()'s host-derived default. This step deliberately leaves TEKO_TARGET
+      # unset and asserts the own AOT backend still emits THIS host's own object format (the
+      # reproduced bug: an unset TEKO_TARGET used to hardcode arm64 Mach-O on every host).
+      - name: R1 host-target default (TEKO_TARGET unset)
+        shell: bash
+        env:
+          TEKO: ./dl/${{ matrix.label }}/teko
+        run: ./scripts/target_host_default_test.sh
+
+  # ══ regressor-full ═════════════════════════════════════════════════════════════════════════
+  # TIER: full only. WAS `riscv64-qemu`, and it no longer builds anything.
+  #
+  # This is the ONE lane that runs the regression executor with REGRESSION_REQUIRE_TOOLS=1, and
+  # that flag IS the point: without it a lane whose provisioning broke would honest-SKIP the
+  # riscv/wasm rows and report green — worse than having no lane at all, because it LOOKS like
+  # coverage. With it, an absent cross-gcc / qemu / wasmtime is a hard failure.
+  #
+  # …and BECAUSE the flag is fail-closed for EVERY capability the corpus declares, this is the one
+  # lane that must provision ALL of them: the riscv64 cross toolchain (regressor.tkr's F5
+  # differential cross-compiles and runs own==C under qemu), the riscv binutils that
+  # scripts/check_elf.sh needs, and wasmtime for F7's `Given target = "wasm32-wasi"` scenario.
+  # That is why the flag lives HERE and not on the `test` legs: a lane that cannot run part of the
+  # corpus cannot honestly demand that none of it be skipped.
+  #
+  # NOTE the cross toolchain here is NOT a contradiction of zig's death. It is not building the
+  # COMPILER; it is the link step of the corpus the compiler emits, which is what
+  # `resolve_cc`'s TEKO_TARGET arm calls for on any host.
+  regressor-full:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: regressor / all capabilities (riscv64 + wasm, fail-closed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      WASMTIME_VERSION: "v39.0.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # gcc-riscv64-linux-gnu pulls binutils-riscv64-linux-gnu, which is what
+      # scripts/check_elf.sh needs under ELF_TOOLCHAIN=riscv64-linux-gnu- for the own object's
+      # well-formedness cross-check.
+      - name: Install the riscv64 cross toolchain + QEMU + host clang
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user-static clang
+
+      - name: Install wasmtime (the F7 wasm32-wasi scenario's executor)
+        run: |
+          set -eu
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" | tar -xJ
+          echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
+
+      - name: Verify wasmtime is on PATH (fail loud before the fail-closed run)
+        run: wasmtime --version
+
+      - name: Download the published x86_64 asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-linux-x86_64
+          path: dl
+
+      - name: Restore the executable bit
+        run: |
+          set -eu
+          chmod +x dl/linux-x86_64-glibc/teko
+          dl/linux-x86_64-glibc/teko --version
+
+      - name: The single regression executor, fail-closed on every declared capability
+        shell: bash
+        env:
+          REGRESSION_REQUIRE_TOOLS: "1"
+        run: ./dl/linux-x86_64-glibc/teko test .
+
+  # ══ ar-validation ══════════════════════════════════════════════════════════════════════════
+  # TIER: full only — three OS runners for the archive-container lanes is landing-wagon cost.
+  # Proves the own-native static-archive writer's three containers (GNU/ELF, BSD Mach-O
+  # `__.SYMDEF SORTED`, MS two-linker-member COFF `.lib`) against a REAL host toolchain, then
+  # links + RUNS a C consumer against the archive — the PRIMARY consumibility criterion
+  # (`add(40, 2)` must exit 42). `AR_CHECK_REQUIRE_TOOLS=1` so an honest-skip here is a hard
+  # failure: the toolchains are guaranteed present on these runners.
+  ar-validation:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64-glibc
+            producer: linux-x86_64
+            format: elf
+          - os: macos-latest
+            label: macos-arm64
+            producer: macos-arm64
+            format: macho
+          - os: windows-latest
+            label: windows-x86_64
+            producer: windows-x86_64
+            format: coff
+    name: ar validation / ${{ matrix.label }} (${{ matrix.format }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the published asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-${{ matrix.producer }}
+          path: dl
+
+      - name: Restore the executable bit (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          chmod +x "dl/${{ matrix.label }}/teko"
+          "dl/${{ matrix.label }}/teko" --version
+
+      - name: Build the static-lib fixture (own-native, host-default target)
+        shell: bash
+        env:
+          TEKO_BACKEND: native
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -eu
+          teko="$PWD/dl/$LABEL/teko"
+          [ -f "$teko" ] || teko="$PWD/dl/$LABEL/teko.exe"
+          cd examples/toolchain/ar_link_run
+          "$teko" build . -o bin --no-verify
+          ls -la bin
+
+      - name: Host-toolchain well-formedness gate (ar/nm/ld — ELF/GNU)
+        if: matrix.format == 'elf'
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_elf.sh examples/toolchain/ar_link_run/bin/libar_link_run.a ar_link_run__add
+
+      - name: Host-toolchain well-formedness gate (ar/nm/ld64 — Mach-O)
+        if: matrix.format == 'macho'
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_macho.sh examples/toolchain/ar_link_run/bin/libar_link_run.a ar_link_run__add
+
+      - name: Host-toolchain well-formedness gate (llvm-lib/lib.exe + dumpbin — COFF)
+        if: matrix.format == 'coff'
+        shell: bash
+        env:
+          AR_CHECK_REQUIRE_TOOLS: "1"
+        run: ./scripts/check_ar_coff.sh examples/toolchain/ar_link_run/bin/ar_link_run.lib ar_link_run__add
+
+      - name: Link + run the consumer against the ELF/GNU archive (expect exit 42)
+        if: matrix.format == 'elf'
+        shell: bash
+        run: |
+          set -eu
+          cc -c scripts/ar_link_run_consumer.c -o /tmp/ar_link_run_consumer.o
+          cc /tmp/ar_link_run_consumer.o examples/toolchain/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
+          set +e
+          /tmp/ar_link_run_consumer_bin
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+      - name: Link + run the consumer against the Mach-O archive (expect exit 42)
+        if: matrix.format == 'macho'
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/ar_link_run_consumer.c -o /tmp/ar_link_run_consumer.o
+          clang /tmp/ar_link_run_consumer.o examples/toolchain/ar_link_run/bin/libar_link_run.a -o /tmp/ar_link_run_consumer_bin
+          set +e
+          /tmp/ar_link_run_consumer_bin
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+      # lld-link (the same tool + MSYS path-conversion guard scripts/check_coff.sh already uses)
+      # links + RUNS the consumer natively.
+      - name: Link + run the consumer against the COFF archive (expect exit 42)
+        if: matrix.format == 'coff'
+        shell: bash
+        run: |
+          set -eu
+          clang -c scripts/ar_link_run_consumer.c -o ar_link_run_consumer.o
+          obj_arg=ar_link_run_consumer.o
+          lib_arg="examples/toolchain/ar_link_run/bin/ar_link_run.lib"
+          out_arg=ar_link_run_consumer.exe
+          if command -v cygpath >/dev/null 2>&1; then
+            obj_arg="$(cygpath -w ar_link_run_consumer.o)"
+            lib_arg="$(cygpath -w examples/toolchain/ar_link_run/bin/ar_link_run.lib)"
+            out_arg="$(cygpath -w ar_link_run_consumer.exe)"
+          fi
+          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' lld-link /nologo "/out:$out_arg" /entry:main /subsystem:console "$obj_arg" "$lib_arg"
+          set +e
+          ./ar_link_run_consumer.exe
+          rc=$?
+          set -e
+          echo "consumer exit code: $rc"
+          [ "$rc" -eq 42 ] || { echo "FAIL — expected exit 42, got $rc"; exit 1; }
+
+  # ══ cross-arch-determinism ═════════════════════════════════════════════════════════════════
+  # TIER: full only.
+  #
+  # THE ONE THING `release-cross-smoke` PROVED THAT NOTHING ELSE DOES, carried over intact minus
+  # the zig it used to install: the six Linux artifacts must emit BYTE-IDENTICAL C for the same
+  # project. Determinism is already a law WITHIN one architecture (the gen2 == gen3 fixpoint);
+  # this extends it ACROSS architectures, where a pointer-width, endianness or hash-order leak
+  # into the emitter is invisible to the within-architecture fixpoint and shows up here as a
+  # diverging sha256 and nowhere else.
+  #
+  # It is now a pure CONSUMER: it downloads the six published assets and runs them. The x86_64
+  # pair runs natively; arm64 and riscv64 run under qemu-user with `-L <sysroot>` so the dynamic
+  # glibc artifacts find their loader (measured, not assumed: without `-L` a dynamic
+  # aarch64/riscv64 artifact dies at "Could not open '/lib/ld-linux-*.so.*'").
+  cross-arch-determinism:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: cross-arch determinism (six Linux assets emit identical C)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # qemu-user-static executes the non-native artifacts; the two libc6-*-cross packages carry
+      # ONLY the target loader + shared libc the four glibc artifacts need at runtime — no
+      # compiler.
+      - name: Install qemu-user-static + the arm64/riscv64 loaders
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-user-static libc6-arm64-cross libc6-riscv64-cross
+
+      # Every Linux producer's upload, merged into one tree. Labels are unique across producers,
+      # so `merge-multiple` cannot collide and the result is exactly `dl/<label>/teko`.
+      - name: Download every Linux asset
+        uses: actions/download-artifact@v4
+        with:
+          pattern: teko-assets-linux-*
+          merge-multiple: true
+          path: dl
+
+      - name: Run all six assets + assert identical emitted C
+        shell: bash
+        run: |
+          set -eu
+          # run_art LABEL ARGS… — invoke dl/LABEL/teko, natively or under the right emulator. The
+          # `-L` sysroot is required by the four glibc (dynamic) artifacts and harmless for the
+          # two static musl ones, so the shape is uniform.
+          run_art() {
+            label="$1"; shift
+            case "$label" in
+              *-x86_64-*)  "./dl/$label/teko" "$@" ;;
+              *-arm64-*)   qemu-aarch64-static -L /usr/aarch64-linux-gnu "./dl/$label/teko" "$@" ;;
+              *-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "./dl/$label/teko" "$@" ;;
+              *) echo "run_art: unknown label '$label'" >&2; return 1 ;;
+            esac
+          }
+          REF_SHA=""
+          for label in linux-x86_64-glibc linux-x86_64-musl \
+                       linux-arm64-glibc linux-arm64-musl \
+                       linux-riscv64-glibc linux-riscv64-musl; do
+            echo "=== $label ==="
+            chmod +x "./dl/$label/teko"
+            file "./dl/$label/teko"
+            run_art "$label" --version
+            out="/tmp/xemit-$label"
+            rm -rf "$out"
+            run_art "$label" build examples/smoke/uniontest -o "$out" --no-verify
+            sha="$(sha256sum "$out/uniontest.c" | awk '{print $1}')"
+            echo "$label emitted uniontest.c sha256 $sha"
+            if [ -z "$REF_SHA" ]; then
+              REF_SHA="$sha"
+            elif [ "$sha" != "$REF_SHA" ]; then
+              echo "FAIL — $label emitted DIFFERENT C than the first artifact ($sha != $REF_SHA)" >&2
+              echo "the emitted C must not depend on the architecture the compiler runs on" >&2
+              exit 1
+            fi
+          done
+          echo "all six artifacts ran and emitted byte-identical C ($REF_SHA)"
+
+  # ══ seed-debut ═════════════════════════════════════════════════════════════════════════════
+  # TIER: full only.
+  #
+  # THE ONE LANE OUTSIDE THE ROOT THAT MAY NAME scripts/ci_provision_teko.sh, declared in
+  # .github/ci-lane-exceptions.txt with its reason: the provisioning path IS the subject under
+  # test. Every other lane wants "a working teko on this host" and the root can hand it one; this
+  # lane wants the answer to "does the committed blob still provision and still build the tip, on
+  # this host", which no download can answer.
+  #
+  # PROVENANCE (owner ruling 2026-07-26): the committed blobs are NOT produced by an agent
+  # locally — they are extracted from the ARTIFACTS OF A GREEN CI RUN at bump time and only then
+  # versioned. The wrongly-provenanced blobs were REMOVED, so `bootstrap/seeds/` does not exist in
+  # the tree today. This lane reports that absence honestly and exits 0: an absent transitional
+  # blob is not a failure. On the bump wagon's own run the directory exists, the probe does not
+  # trip, and this is where the seeds debut and must pass.
+  #
+  # WHY IT BUILDS RATHER THAN JUST SMOKING `--version`: a seed's whole job is to compile the tip.
+  # `--version` proves the binary loads on the host, which is necessary and nowhere near
+  # sufficient — a seed that loads and then cannot build is a seed that fails at the moment it is
+  # needed, on the run that needed it.
+  seed-debut:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+          - os: macos-latest
+            label: macos-arm64
+          - os: windows-latest
+            label: windows-x86_64
+          - os: windows-11-arm
+            label: windows-arm64
+    name: seed debut / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # THE HONEST-ABSENCE PROBE. It gates every step below, so while the blobs are out of the
+      # tree this lane costs a checkout and reports why it did nothing — rather than failing on a
+      # missing manifest and teaching everyone to ignore a red lane.
+      - name: Is there a committed seed to debut?
+        id: probe
+        shell: bash
+        run: |
+          set -eu
+          if [ -f bootstrap/seeds/SEEDS.sha256 ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "bootstrap/seeds/SEEDS.sha256 is present — the committed seed debuts on this host."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "bootstrap/seeds/ is ABSENT — there is no committed seed to debut."
+            echo "This is the expected state until the bump wagon extracts the blobs from a green"
+            echo "CI run's artifacts (owner ruling 2026-07-26 on provenance). Reporting the"
+            echo "absence and passing: an absent transitional blob is not a failure."
+          fi
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        if: steps.probe.outputs.present == 'true'
+        shell: bash
+        run: |
+          for t in cc clang gcc xz python3 7z; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      - name: Install cc (Linux only — macOS and the Windows images ship clang)
+        if: steps.probe.outputs.present == 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Provision the COMMITTED seed (sha256-verified before decompression)
+        if: steps.probe.outputs.present == 'true'
+        shell: bash
+        env:
+          TEKO_SEED_PREFER_COMMITTED: "1"
+          LABEL: ${{ matrix.label }}
+        run: ./scripts/ci_provision_teko.sh "$LABEL"
+
+      # The committed seed compiles THIS tip. No fallback ladder here on purpose: the ladder
+      # exists to bridge a released seed to a newer tip, and this seed was cut FROM the tip — if
+      # it cannot build it directly, the committed blob is wrong and that is exactly the finding.
+      - name: Build the tip with the committed seed
+        if: steps.probe.outputs.present == 'true'
+        shell: bash
+        run: teko . -o out --no-verify
+
+  # ══ tsan ═══════════════════════════════════════════════════════════════════════════════════
+  # TIER: both — PROMOTED to the light tier by this wagon, and the promotion is a consequence,
+  # not a preference. This lane's 90-minute budget existed because it walked the seed ladder with
+  # every generation TSan-instrumented; the root removed that, and what is left is ONE
+  # instrumented link of a C file the root already emitted, plus one tiny fixture. A lane that
+  # cheap belongs on every wagon — and `Sanitizer gate` NEEDS a leg that runs in both tiers, or it
+  # is a required check that reports SUCCESS in light mode having asserted nothing (measured on
+  # PR #95).
+  #
+  # WHAT IT STILL ASSERTS on a single-threaded codebase (user-ratified, supersedes #127's
+  # full-suite-under-TSan approach): the test path has ZERO pthread/thread/atomic/spawn in src/,
+  # so a full suite under `-fsanitize=thread` produces NO additional coverage over the other lanes
+  # and only exposes the suite to environmental flake. What TSan CAN still assert is (1) that the
+  # instrumentation builds at all, so the day threading lands the toolchain is already known-good,
+  # and (2) that the runtime executes race-clean end-to-end on a real program. RESTORE the full
+  # `teko test .` gate under TSan incrementally as the concurrency surface lands (S8/ASYNC).
+  tsan:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true'
+    name: TSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Download the emitted teko.c (the root's output)
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-c
+          path: cgen
+
+      - name: Link gen1 under TSan
+        shell: bash
+        env:
+          CC: clang
+          CFLAGS_EXTRA: "-fsanitize=thread -fno-omit-frame-pointer -O1"
+        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
+
+      # SMOKE: build ONE tiny race-clean fixture with the TSan-built compiler and RUN it,
+      # asserting the fixture's deterministic exit code. `timeout` makes any stall fail loud (exit
+      # 124) at a known bound instead of a silent runner SIGTERM (143); bounded TSAN_OPTIONS cap
+      # the footprint on a memory-tight runner while staying correct for FUTURE threading bugs.
+      - name: Smoke (TSan build + run of one regression fixture)
+        shell: bash
+        env:
+          TSAN_OPTIONS: halt_on_error=1:history_size=2:memory_limit_mb=6000:flush_memory_ms=2000
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          proj="examples/regressions/cwd_build"   # tiny; deterministically exits 6
+          echo "== teko build $proj (TSan)"
+          timeout --kill-after=30s 900s ./bin/teko build "$proj" -o "$out" --no-verify --release | tee build.log
+          bin="$(sed -n 's/.*: built //p' build.log | tail -n1)"
+          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+            echo "ERROR: could not locate the built binary from the TSan build output." >&2
+            exit 1
+          fi
+          echo "== run $bin (TSan) — expecting deterministic exit code 6"
+          set +e
+          timeout --kill-after=30s 600s "$bin"
+          code=$?
+          set -e
+          if [ "$code" -ne 6 ]; then
+            echo "ERROR: TSan smoke run exited $code, expected 6 (race/abort/timeout/divergence)." >&2
+            exit 1
+          fi
+          echo "TSan smoke passed: build + run race-clean, exit code 6 as expected."
+
+  # ══ asan-smoke ═════════════════════════════════════════════════════════════════════════════
+  # TIER: both. NEW THIS WAGON, and it exists for one measured reason: on PR #95 the required
+  # check `Heavy sanitizer gate (main)` reported SUCCESS with both of its legs skipped. A required
+  # check that can be green having asserted nothing is not a gate. The heavy legs below genuinely
+  # belong to the full tier — they are a 120- and a 150-minute budget — so the fix is not to make
+  # them cheap, it is to give the aggregator a leg that runs in BOTH tiers.
+  #
+  # It is the same shape as `tsan`: link gen1 from the root's teko.c with ASan+UBSan and prove the
+  # sanitized compiler builds and runs a real program end-to-end. That is a small fraction of
+  # asan-default's corpus, and it is the fraction that catches an instrumentation break, a fresh
+  # UB on the hot path, and a sanitized binary that cannot start — on every wagon rather than at
+  # the drain.
+  asan-smoke:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true'
+    name: ASan+UBSan smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Download the emitted teko.c (the root's output)
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-c
+          path: cgen
+
+      # The wrapper puts an instrumenting `cc` on PATH for the steps AFTER this one, which is what
+      # sanitizes the programs the compiler itself compiles — not just the compiler.
+      - name: Install the instrumenting cc wrapper
+        run: sh scripts/ci_cc_wrap.sh "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Link gen1 under ASan + UBSan
+        shell: bash
+        env:
+          CC: clang
+          CFLAGS_EXTRA: "-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
+        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
+
+      # Leak detection OFF, by construction and not by convenience: the front-end deliberately
+      # holds compiler-lifetime allocations it never frees (core.h S0), reclaimed by the OS at
+      # exit. LSan cannot distinguish that deliberate hold from a real leak on a non-rewound run.
+      - name: Smoke (the sanitized compiler builds + runs one fixture)
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0:quarantine_size_mb=64:malloc_context_size=5
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          proj="examples/regressions/cwd_build"   # tiny; deterministically exits 6
+          ./bin/teko build "$proj" -o "$out" --no-verify --release | tee build.log
+          bin="$(sed -n 's/.*: built //p' build.log | tail -n1)"
+          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+            echo "ERROR: could not locate the built binary from the ASan build output." >&2
+            exit 1
+          fi
+          set +e
+          "$bin"
+          code=$?
+          set -e
+          if [ "$code" -ne 6 ]; then
+            echo "ERROR: ASan smoke run exited $code, expected 6." >&2
+            exit 1
+          fi
+          echo "ASan+UBSan smoke passed."
+
+  # ══ asan-default ═══════════════════════════════════════════════════════════════════════════
+  # TIER: full only. The ~24-min-and-growing ASan+UBSan audit of the PRODUCTION native path.
+  #
+  # This lane is a rolling UB-audit: each pre-existing UB it surfaces is fixed at the ROOT. It has
+  # so far driven root fixes for (1) the #291 trait dynamic-vtable function-pointer-type mismatch;
+  # (2a) `tk_mul_u16` signed-integer-overflow (uint16 operands promote to int); and (2b) a
+  # SYSTEMIC arena under-alignment — `tk_region_alloc` rounded to `_Alignof(max_align_t)` (8 on
+  # arm64) but `ExprKind`/`TExprKind` carry an `__int128` needing 16.
+  #
+  # LSan is OFF here BY CONSTRUCTION, for the same reason as asan-smoke: the native gate compiles
+  # and runs the whole corpus in ONE process with NO rewind, so the arena's process-lifetime
+  # allocations are all held to exit by the S0 discipline. LSan flagged ~132 KB of exactly those
+  # holds and nothing else, so it is not a meaningful oracle on this lane.
+  asan-default:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: ASan+UBSan+LSan / default dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      - name: Download the emitted teko.c (the root's output)
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-c
+          path: cgen
+
+      - name: Install the instrumenting cc wrapper
+        run: sh scripts/ci_cc_wrap.sh "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Link gen1 under ASan + UBSan
+        shell: bash
+        env:
+          CC: clang
+          CFLAGS_EXTRA: "-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
+        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
+
+      - name: Run the gate on gen1 (native, ASan + UBSan)
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0:quarantine_size_mb=64:malloc_context_size=5
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./bin/teko . -o gen2-asan --no-verify --release
+
+      # Widen the corpus of language constructs exercised under ASan by running the SINGLE
+      # regression executor with the sanitized compiler — that is how the lift-pass use-after-free
+      # in tk_emit_tsym was caught.
+      - name: Run the single regression executor on gen1 (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./bin/teko test .
+
+  # ══ mem-paranoid ═══════════════════════════════════════════════════════════════════════════
+  # TIER: full only.
+  #
+  # TEKO_MEM_PARANOID is teko's OWN arena oracle (teko_rt.c #148 Level-2): a RUNTIME getenv that
+  # POISONS every freed arena block and NEVER reuses it, so any use-after-free / arena-reuse-
+  # after-free in the compiler's own C aborts loud. Because it is a runtime switch and not a build
+  # flag, this lane needs NO special build at all — it runs the PUBLISHED asset with the oracle
+  # armed. That is what removed both the seed provision and the ~7-minute self-host that used to
+  # precede the ~11-minute oracle run.
+  #
+  # Because never-reuse disables the arena free-list, the oracle run itself stays heavy — the
+  # regression executor's ~322 scratch builds all run with it armed — which is why the lane stays
+  # on the full tier and keeps its 120-minute ceiling. That ceiling is a ceiling for a STALL, not
+  # a target; the phase's own timing report is what says where the time goes.
+  mem-paranoid:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: Memory paranoid (native self-host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the published x86_64 asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-linux-x86_64
+          path: dl
+
+      - name: Restore the executable bit
+        run: |
+          set -eu
+          chmod +x dl/linux-x86_64-glibc/teko
+          dl/linux-x86_64-glibc/teko --version
+
+      - name: Run the gate on the published asset (TEKO_MEM_PARANOID)
+        env:
+          TEKO_MEM_PARANOID: '1'
+        run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release
+
+      - name: Run the single regression executor (TEKO_MEM_PARANOID)
+        env:
+          TEKO_MEM_PARANOID: '1'
+        run: ./dl/linux-x86_64-glibc/teko test .
+
+  # ══ clang-tidy-audit ═══════════════════════════════════════════════════════════════════════
+  # TIER: both, and path-gated on src/runtime/** + src/assert/**.
+  #
+  # It needs no compiler from the root — it scans the LIVE maintained C (the runtime seam + the
+  # assert seed linked into every generated program) with clang-tidy. It still `needs: artifact`
+  # because the ruling is "todas as lanes de pull_request precisam depender dessa lane" without a
+  # carve-out, and because the cost of complying is zero in practice: the PR's wall clock is
+  # already the root's, so a cheap lane that starts after it does not lengthen anything. The
+  # honest note is that this is the one lane where the dependency buys nothing but uniformity.
+  clang-tidy-audit:
+    needs: [plan, artifact]
+    if: needs.plan.outputs.sast_run == 'true'
+    name: clang-tidy audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-tidy
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tidy
+
+      - name: Run clang-tidy on the live runtime C
+        run: |
+          clang-tidy src/runtime/teko_rt.c src/assert/assert.c \
+            -checks='-*,clang-analyzer-*,cert-*,bugprone-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
+            -warnings-as-errors='clang-analyzer-security.*,clang-analyzer-core.NullDereference' \
+            -- -std=c23 -Isrc/runtime -Isrc/assert \
+            2>&1 | tee clang-tidy-results.txt || true
+
+      - name: Upload clang-tidy results
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-tidy-results
+          path: clang-tidy-results.txt
+
+      - name: Capability audit present
+        run: |
+          test -f src/checker/capability_audit.md \
+            && echo "Capability audit found" \
+            || (echo "Missing capability_audit.md — run C9.2 audit"; exit 1)
+
+      - name: Fail on security findings
+        run: |
+          # Match actual findings: check names appear as [clang-analyzer-...] at end of a
+          # diagnostic line. The config/header list prints them without brackets, so requiring
+          # '[' avoids false positives from run-clang-tidy's enabled-checks summary.
+          if grep -qE '\[clang-analyzer-security\.|\[clang-analyzer-core\.NullDereference' clang-tidy-results.txt; then
+            echo "Security findings detected!"
+            grep -E '\[clang-analyzer-security\.|\[clang-analyzer-core\.NullDereference' clang-tidy-results.txt
+            exit 1
+          fi
+          echo "No security findings"
+
+      # Baselined checks (issue #54): cert-err33-c + clang-analyzer-core.uninitialized.* gate on
+      # NEW findings only. .github/sast-baseline.txt holds the pre-existing (file, check) pairs —
+      # line numbers deliberately excluded so ordinary edits don't churn it.
+      - name: Fail on NEW baselined-check findings
+        run: |
+          grep -E 'warning:.*\[(cert-err33-c|clang-analyzer-core\.uninitialized\.[A-Za-z]+)\]' clang-tidy-results.txt \
+            | sed -E 's|^.*/(src/[^:]+):[0-9]+:[0-9]+: warning: .*\[([a-zA-Z0-9._-]+)\]$|\1 \2|' \
+            | sort -u > found-pairs.txt || true
+          grep -v '^#' .github/sast-baseline.txt | grep -v '^$' | sort -u > baseline-pairs.txt
+
+          NEW_PAIRS="$(comm -23 found-pairs.txt baseline-pairs.txt)"
+          if [ -n "$NEW_PAIRS" ]; then
+            echo "NEW cert-err33-c / core.uninitialized.* findings (not in .github/sast-baseline.txt):"
+            echo "$NEW_PAIRS"
+            echo
+            echo "Full diagnostics:"
+            while read -r file check; do
+              grep -E "/${file//./\\.}:[0-9]+:[0-9]+: warning: .*\[${check//./\\.}\]" clang-tidy-results.txt || true
+            done <<< "$NEW_PAIRS"
+            echo
+            echo "Fix the finding, or (tribunal-level exception) add the pair to .github/sast-baseline.txt."
+            exit 1
+          fi
+          echo "No new baselined-check findings ($(wc -l < found-pairs.txt | tr -d ' ') pre-existing pair groups still baselined)"
+
+  # ══════════════════════════════════════════════════════════════════════════════════════════
+  # THE FIVE AGGREGATORS
+  #
+  # Every one of them runs the SAME two structural proofs before it looks at any result:
+  #
+  #   scripts/ci_gate_coverage.sh — reads THIS FILE and fails when a job is outside every
+  #     aggregator's `needs:`, when an aggregator does not stand on the artifact root, or when one
+  #     of the five required-check names has drifted. Seven times on this train a job has run,
+  #     gone red, and not blocked the merge because a hand-maintained list fell behind. A list
+  #     cannot fall behind a check that DERIVES it.
+  #
+  #   the MODE CROSS-CHECK — scripts/ci_full_mode.sh re-derives light/full from the pull request's
+  #     own changed-file list, INDEPENDENTLY of the dorny filter `plan` used, and the gate fails
+  #     when the two disagree. This is what makes a `skipped` leg trustworthy: without it, a gate
+  #     that accepts "skipped" does so on the word of the very job that decided to skip, which is
+  #     precisely how `Sanitizer gate` and `Heavy sanitizer gate (main)` were caught reporting
+  #     SUCCESS on PR #95 with every leg skipped.
+  #
+  # RESULTS POLICY, shared by all five: `failure`, `cancelled` and `skipped` are all rejected by
+  # the same `!= success` test for a job the mode requires — including `cancelled`, which a "did
+  # anything fail?" gate would wave through.
+  # ══════════════════════════════════════════════════════════════════════════════════════════
+
+  gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    needs: [plan, artifact, cli-surface, regressor-full, ar-validation, cross-arch-determinism, seed-debut]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Structural — every job is covered, every aggregator is rooted
+        run: |
+          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
+            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+
+      # THE PURITY PROOF, run once (here) because it is a property of the whole file: no job but
+      # the root may seed or walk the ladder, and zig may not appear anywhere in .github/workflows
+      # or scripts. See scripts/ci_lane_purity.sh.
+      - name: Structural — only the root builds, and the cross toolchain is gone
+        run: sh scripts/ci_lane_purity.sh .github/workflows/pr.yml artifact
+
+      - name: Cross-check the mode against an independent derivation
+        if: needs.plan.result == 'success'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+        run: |
+          set -euo pipefail
+          derived="$(sh scripts/ci_full_mode.sh | sed -n 's/^full=//p')"
+          echo "plan says full='$PLAN_FULL'; the independent derivation says full='$derived'"
+          if [ "$derived" != "$PLAN_FULL" ]; then
+            echo "ERROR: the planner and an independent re-derivation disagree about the mode." >&2
+            echo "A gate that accepts 'skipped' on the planner's word cannot detect a broken" >&2
+            echo "planner — which is the failure this cross-check exists to catch." >&2
+            exit 1
+          fi
+
+      - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.plan.outputs.run }}
+          FULL: ${{ needs.plan.outputs.full }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
+          CLI_RESULT: ${{ needs.cli-surface.result }}
+          REGRESSOR_RESULT: ${{ needs.regressor-full.result }}
+          AR_RESULT: ${{ needs.ar-validation.result }}
+          DETERMINISM_RESULT: ${{ needs.cross-arch-determinism.result }}
+          DEBUT_RESULT: ${{ needs.seed-debut.result }}
+        run: |
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
+          echo "plan                    = $PLAN_RESULT"
+          echo "plan.run                = $CHANGES"
+          echo "artifact (ROOT)         = $ARTIFACT_RESULT   (both tiers)"
+          echo "cli-surface             = $CLI_RESULT   (both tiers)"
+          echo "regressor-full          = $REGRESSOR_RESULT   (full only)"
+          echo "ar-validation           = $AR_RESULT   (full only)"
+          echo "cross-arch-determinism  = $DETERMINISM_RESULT   (full only)"
+          echo "seed-debut              = $DEBUT_RESULT   (full only)"
+
+          FAILED=0
+
+          # The planner is unconditional; anything but success is a break, and every `if:` below
+          # reads its outputs, so a broken planner must never be waved through.
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"
+            FAILED=1
+          fi
+
+          # The ROOT is unconditional too — it is not path-gated (see plan's note), so it must be
+          # green in every mode and on every PR that triggered this workflow.
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (the ROOT, matrix) = $ARTIFACT_RESULT — every producer must succeed"
+            FAILED=1
+          fi
+
+          if [ "$CHANGES" != "true" ]; then
+            echo "No allowlisted path changed — the compiler-diagnostic lanes had nothing to gate."
+            if [ "$FAILED" = "1" ]; then echo "CI gate FAILED (mode=$MODE)."; exit 1; fi
+            echo "CI gate passed (mode=$MODE, diagnostics not applicable)."
+            exit 0
+          fi
+
+          # A both-tiers job must SUCCEED. `skipped` here is a broken condition, not an absence of
+          # work.
+          require_success() {
+            [ "$2" = "success" ] && return 0
+            echo "ERROR: $1 = $2 (it runs in both tiers; a skip means a broken condition)"
+            FAILED=1
+          }
+          require_success cli-surface "$CLI_RESULT"
+
+          # A full-only job must SUCCEED in full mode and be SKIPPED on the light tier. The mode
+          # itself was cross-checked above against an independent derivation, so "skipped because
+          # the mode does not ask" is now a VERIFIED statement and not a self-report.
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success)"
+              FAILED=1
+              return 0
+            fi
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light tier — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only regressor-full         "$REGRESSOR_RESULT"
+          require_full_only ar-validation          "$AR_RESULT"
+          require_full_only cross-arch-determinism "$DETERMINISM_RESULT"
+          require_full_only seed-debut             "$DEBUT_RESULT"
+
+          if [ "$FAILED" = "1" ]; then
+            echo "CI gate FAILED (mode=$MODE)."
+            exit 1
+          fi
+          echo "CI gate passed (mode=$MODE)."
+          exit 0
+
+  test-suite-gate:
+    name: Test suite gate
+    runs-on: ubuntu-latest
+    needs: [plan, artifact, test]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Structural — every job is covered, every aggregator is rooted
+        run: |
+          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
+            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+
+      - name: Cross-check the mode against an independent derivation
+        if: needs.plan.result == 'success'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+        run: |
+          set -euo pipefail
+          derived="$(sh scripts/ci_full_mode.sh | sed -n 's/^full=//p')"
+          echo "plan says full='$PLAN_FULL'; the independent derivation says full='$derived'"
+          [ "$derived" = "$PLAN_FULL" ] || { echo "ERROR: mode disagreement — see CI gate's note." >&2; exit 1; }
+
+      # THE PLANNED-SET ASSERTION. A gate that only asks "were the matrix jobs green?" is vacuously
+      # satisfiable by a `plan` that emits the wrong matrices — drop eight assets and one green leg
+      # reports success. So this re-derives the REQUIRED asset set from the mode itself and demands
+      # it exactly; and it cross-checks that the producers' `produces` union, the test matrix's
+      # labels, and `labels` are the SAME set — a producer minting nothing a lane consumes, or a
+      # lane with no producer, is caught here rather than as a download error. WANT_LABELS is
+      # duplicated from `plan` on purpose: an independent statement of the requirement is the only
+      # thing a broken planner cannot satisfy by agreeing with itself.
+      - name: Evaluate results
+        env:
+          FULL: ${{ needs.plan.outputs.full }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLANNED: ${{ needs.plan.outputs.labels }}
+          MATRIX_ARTIFACT: ${{ needs.plan.outputs.matrix_artifact }}
+          MATRIX_TEST: ${{ needs.plan.outputs.matrix_test }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          set -u
+          if [ "$FULL" = "true" ]; then
+            MODE=full
+            WANT_LABELS="linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64"
+          else
+            MODE=light
+            WANT_LABELS="linux-x86_64-glibc windows-x86_64"
+          fi
+          echo "mode=$MODE"
+          echo "plan               = $PLAN_RESULT"
+          echo "planned assets     = $PLANNED"
+          echo "required assets    = $WANT_LABELS"
+          echo "artifact (matrix)  = $ARTIFACT_RESULT"
+          echo "test (matrix)      = $TEST_RESULT"
+
+          FAILED=0
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"
+            FAILED=1
+          fi
+
+          # Sorted-and-compared as text so an omission, a duplicate and a typo all fail the same
+          # way. Unquoted on purpose — word-splitting is what turns each list into one token per
+          # label.
+          WANT="$(printf '%s\n' $WANT_LABELS | sort | tr '\n' ' ')"
+          GOT="$(printf '%s\n' $PLANNED | sort | tr '\n' ' ')"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "ERROR: planned asset set does not match mode=$MODE"
+            echo "  planned : $GOT"
+            echo "  required: $WANT"
+            FAILED=1
+          fi
+
+          # ONE LINE EACH, deliberately: a `python3 -c` whose continuation lines start at column 0
+          # terminates the surrounding YAML block scalar, and indenting them instead would be a
+          # python IndentationError. The trailing space matches WANT's, which `tr` leaves.
+          PRODUCED="$(printf '%s' "$MATRIX_ARTIFACT" | python3 -c 'import json,sys; print(" ".join(sorted(x for e in json.load(sys.stdin)["include"] for x in e["produces"].split())) + " ")')"
+          TESTED="$(printf '%s' "$MATRIX_TEST" | python3 -c 'import json,sys; print(" ".join(sorted(e["label"] for e in json.load(sys.stdin)["include"])) + " ")')"
+          echo "producers mint     = $PRODUCED"
+          echo "test legs consume  = $TESTED"
+          if [ "$PRODUCED" != "$WANT" ] || [ "$TESTED" != "$WANT" ]; then
+            echo "ERROR: the two layers and the required set do not agree (mode=$MODE)"
+            FAILED=1
+          fi
+
+          # A matrix job's aggregate result is `success` only when EVERY leg succeeded, so this
+          # rejects failure, cancellation and a skipped/empty matrix alike. Both layers run in
+          # BOTH tiers, so this gate never has to reason about a legitimate skip.
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (matrix) = $ARTIFACT_RESULT — every producer must succeed"
+            FAILED=1
+          fi
+          if [ "$TEST_RESULT" != "success" ]; then
+            echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every asset must succeed"
+            FAILED=1
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo "Test suite gate FAILED (mode=$MODE)."
+            exit 1
+          fi
+          echo "Test suite gate passed (mode=$MODE, assets: $PLANNED)."
+          exit 0
+
+  sanitizer-gate:
+    name: Sanitizer gate
+    runs-on: ubuntu-latest
+    needs: [plan, artifact, tsan]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Structural — every job is covered, every aggregator is rooted
+        run: |
+          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
+            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+
+      - name: Cross-check the mode against an independent derivation
+        if: needs.plan.result == 'success'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+        run: |
+          set -euo pipefail
+          derived="$(sh scripts/ci_full_mode.sh | sed -n 's/^full=//p')"
+          echo "plan says full='$PLAN_FULL'; the independent derivation says full='$derived'"
+          [ "$derived" = "$PLAN_FULL" ] || { echo "ERROR: mode disagreement — see CI gate's note." >&2; exit 1; }
+
+      # THIS GATE USED TO BE ABLE TO REPORT SUCCESS HAVING VALIDATED NOTHING (measured, PR #95:
+      # tsan and windows-selfhost both `skipped`, gate `success`). Two changes close it: its only
+      # remaining leg, `tsan`, now runs in BOTH tiers (the root removed the ladder that made it
+      # expensive), and the root itself is a `needs:` so a red root can never be aggregated green.
+      # windows-selfhost is GONE — `artifact / windows-x86_64` self-builds gen1 on Windows and
+      # smokes the binary, which is verbatim what that lane did.
+      - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.plan.outputs.run }}
+          FULL: ${{ needs.plan.outputs.full }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
+          TSAN: ${{ needs.tsan.result }}
+        run: |
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
+          echo "plan          = $PLAN_RESULT"
+          echo "plan.run      = $CHANGES"
+          echo "artifact ROOT = $ARTIFACT_RESULT   (both tiers)"
+          echo "tsan          = $TSAN   (both tiers)"
+
+          FAILED=0
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
+          fi
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — tsan consumes its output"; FAILED=1
+          fi
+
+          if [ "$CHANGES" != "true" ]; then
+            echo "No allowlisted path changed — nothing for the sanitizer lane to gate."
+            if [ "$FAILED" = "1" ]; then echo "Sanitizer gate FAILED (mode=$MODE)."; exit 1; fi
+            echo "Sanitizer gate passed (mode=$MODE, not applicable)."
+            exit 0
+          fi
+
+          if [ "$TSAN" != "success" ]; then
+            echo "ERROR: tsan = $TSAN (it runs in BOTH tiers; a skip means a broken condition,"
+            echo "and a gate that accepts it is the vacuous green this check exists to close)"
+            FAILED=1
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo "Sanitizer gate FAILED (mode=$MODE)."
+            exit 1
+          fi
+          echo "Sanitizer gate passed (mode=$MODE)."
+          exit 0
+
+  heavy-sanitizer-gate:
+    name: Heavy sanitizer gate (main)
+    runs-on: ubuntu-latest
+    needs: [plan, artifact, asan-smoke, asan-default, mem-paranoid]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Structural — every job is covered, every aggregator is rooted
+        run: |
+          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
+            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+
+      - name: Cross-check the mode against an independent derivation
+        if: needs.plan.result == 'success'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_FULL: ${{ needs.plan.outputs.full }}
+        run: |
+          set -euo pipefail
+          derived="$(sh scripts/ci_full_mode.sh | sed -n 's/^full=//p')"
+          echo "plan says full='$PLAN_FULL'; the independent derivation says full='$derived'"
+          [ "$derived" = "$PLAN_FULL" ] || { echo "ERROR: mode disagreement — see CI gate's note." >&2; exit 1; }
+
+      # The NAME says "(main)" and it is inviolable (required check, no bypass), but the CONTRACT
+      # is no longer "main only". On PR #95 this gate reported SUCCESS with both of its legs
+      # skipped. Two heavy legs genuinely belong on the full tier — 150 and 120 minutes — so the
+      # fix is not to cheapen them; it is `asan-smoke`, a both-tiers leg of the same shape as
+      # tsan, which gives this aggregator something real to assert on every wagon.
+      - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.plan.outputs.run }}
+          FULL: ${{ needs.plan.outputs.full }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
+          SMOKE: ${{ needs.asan-smoke.result }}
+          ASAN_DEFAULT: ${{ needs.asan-default.result }}
+          MEM_PARANOID: ${{ needs.mem-paranoid.result }}
+        run: |
+          set -u
+          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
+          echo "mode=$MODE"
+          echo "plan          = $PLAN_RESULT"
+          echo "plan.run      = $CHANGES"
+          echo "artifact ROOT = $ARTIFACT_RESULT   (both tiers)"
+          echo "asan-smoke    = $SMOKE   (both tiers)"
+          echo "asan-default  = $ASAN_DEFAULT   (full only)"
+          echo "mem-paranoid  = $MEM_PARANOID   (full only)"
+
+          FAILED=0
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
+          fi
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — every leg here consumes its output"; FAILED=1
+          fi
+
+          if [ "$CHANGES" != "true" ]; then
+            echo "No allowlisted path changed — nothing for the memory/UB audit to gate."
+            if [ "$FAILED" = "1" ]; then echo "Heavy sanitizer gate FAILED (mode=$MODE)."; exit 1; fi
+            echo "Heavy sanitizer gate passed (mode=$MODE, not applicable)."
+            exit 0
+          fi
+
+          if [ "$SMOKE" != "success" ]; then
+            echo "ERROR: asan-smoke = $SMOKE (it runs in BOTH tiers; this leg is what stops this"
+            echo "gate from being green having asserted nothing on the light tier)"
+            FAILED=1
+          fi
+
+          require_full_only() {
+            if [ "$MODE" = "full" ]; then
+              [ "$2" = "success" ] && return 0
+              echo "ERROR: $1 = $2 (full mode requires success — a skip here is the bug this gate used to hide)"
+              FAILED=1
+              return 0
+            fi
+            [ "$2" = "skipped" ] && return 0
+            echo "::warning::$1 = $2 on the light tier — expected skipped; check its \`if:\` condition."
+          }
+          require_full_only asan-default "$ASAN_DEFAULT"
+          require_full_only mem-paranoid "$MEM_PARANOID"
+
+          if [ "$FAILED" = "1" ]; then
+            echo "Heavy sanitizer gate FAILED (mode=$MODE)."
+            exit 1
+          fi
+          echo "Heavy sanitizer gate passed (mode=$MODE)."
+          exit 0
+
+  sast-gate:
+    name: SAST gate
+    runs-on: ubuntu-latest
+    needs: [plan, artifact, clang-tidy-audit]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Structural — every job is covered, every aggregator is rooted
+        run: |
+          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
+            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+
+      - name: Evaluate results
+        env:
+          CHANGES: ${{ needs.plan.outputs.sast_run }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ARTIFACT_RESULT: ${{ needs.artifact.result }}
+          TIDY_RESULT: ${{ needs.clang-tidy-audit.result }}
+        run: |
+          set -u
+          echo "plan             = $PLAN_RESULT"
+          echo "plan.sast_run    = $CHANGES"
+          echo "artifact ROOT    = $ARTIFACT_RESULT"
+          echo "clang-tidy-audit = $TIDY_RESULT"
+
+          FAILED=0
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
+          fi
+          if [ "$ARTIFACT_RESULT" != "success" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT"; FAILED=1
+          fi
+
+          if [ "$CHANGES" != "true" ]; then
+            echo "Neither src/runtime/** nor src/assert/** changed — nothing to scan."
+            if [ "$FAILED" = "1" ]; then echo "SAST gate FAILED."; exit 1; fi
+            echo "SAST gate passed (not applicable)."
+            exit 0
+          fi
+
+          if [ "$TIDY_RESULT" != "success" ]; then
+            echo "ERROR: clang-tidy-audit = $TIDY_RESULT (it is path-gated, and the path matched)"
+            FAILED=1
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo "SAST gate FAILED."
+            exit 1
+          fi
+          echo "SAST gate passed."
+          exit 0

@@ -7,7 +7,7 @@
 # infers on its own) relinks the extracted REAL object member — not the `__.SYMDEF
 # SORTED` index member `ar t` lists first. The engine-agnostic byte layout is
 # pinned by the golden tests in `src/backend/objfile_ar_macho_test.tkt`; this script is
-# the external cross-check, run on native.yml's `ar-macho-coff-validation` macos-latest
+# the external cross-check, run on pr.yml's `ar-validation` macos-latest
 # leg (real Apple `ar`/`nm`/`ld` — the ONE toolchain that can validate a BSD
 # `__.SYMDEF SORTED` table). Ported from the `theory/kp16-ar-macho-coff` validation
 # branch (run d44f63c9 = SUCCESS) once real-toolchain validation proved the writer.
@@ -16,7 +16,7 @@
 # runs and prints the underlying tool's OWN stdout+stderr on failure — a silent "exit 1,
 # no output" gate is never acceptable. `AR_CHECK_REQUIRE_TOOLS=1` turns an honest-skip
 # (host/tool absent, or no archive given) into a HARD FAILURE instead of exit 0 — set this
-# on a runner where the toolchain is guaranteed present (native.yml's macos-latest leg),
+# on a runner where the toolchain is guaranteed present (pr.yml's `ar-validation` macos leg),
 # mirroring `validate_wasm_own.sh`'s `REQUIRE_WASM_ENGINE` seam, so a provisioning gap can
 # never masquerade as a silent pass.
 #

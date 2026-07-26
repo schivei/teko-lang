@@ -175,7 +175,7 @@ log "seed FAILED to build the tip directly — engaging the staged bootstrap lad
 #
 # `bootstrap/seeds/` does not. It is IN THE TREE, sha256-verified against SEEDS.sha256 before
 # it is decompressed, and it is cut FROM the train's own tip — so it builds the tip DIRECTLY,
-# with no rungs at all. native.yml's `seed-debut` proves exactly that on all five hosts on every
+# with no rungs at all. pr.yml's `seed-debut` proves exactly that on all five hosts on every
 # full run, which is why this is a rung and not a hope.
 #
 # It is deliberately rung 0 and not rung -1: the newest RELEASED seed is still tried first (fast
