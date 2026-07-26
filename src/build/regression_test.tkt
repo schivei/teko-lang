@@ -724,3 +724,120 @@ fn regr_timing_renders_sub_second_and_second_scales() {
     teko::assert::is_true(regr_ms_text(0) == "0ms")
     teko::assert::is_true(regr_share_text(1, 0) == "0%")
 }
+
+#test
+/**
+ * arch_token_canonical_folds_the_triple_spellings — a compiler triple and this project's canonical
+ * os-arch names disagree on how to spell the same CPU, and the whole host-default capability rule is
+ * a COMPARISON between the two. Folding both sides through this function is what makes the
+ * comparison meaningful; without the `aarch64` → `arm64` fold the rule would fire on a macOS arm64
+ * host, whose `cc` reports `arm64` and whose host default IS arm64. An unknown token passes through,
+ * so a CPU nobody here knows simply never matches instead of being coerced into a wrong answer.
+ *
+ * @return void
+ */
+fn arch_token_canonical_folds_the_triple_spellings() {
+    teko::assert::is_true(arch_token_canonical("aarch64") == "arm64")
+    teko::assert::is_true(arch_token_canonical("arm64") == "arm64")
+    teko::assert::is_true(arch_token_canonical("amd64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("x64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("x86_64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("riscv64") == "riscv64")
+    teko::assert::is_true(arch_token_canonical("") == "")
+    teko::assert::is_true(arch_token_canonical("sparc9") == "sparc9")
+}
+
+#test
+/**
+ * tool_query_line_is_empty_when_the_tool_cannot_answer — the fail-SAFE contract every capability
+ * probe here is built on: an absent executable, or a tool that rejects the question, yields "" and
+ * never a fabricated fact. This is what makes an unmeasurable host behave exactly as it did before
+ * these rules existed, instead of being skipped on a guess.
+ *
+ * @return void
+ */
+fn tool_query_line_is_empty_when_the_tool_cannot_answer() {
+    mut absent: []str = teko::list::push(teko::list::empty(), "teko-no-such-tool-anywhere")
+    absent = teko::list::push(absent, "--version")
+    teko::assert::is_true(tool_query_line(absent) == "")
+    mut refuses: []str = teko::list::push(teko::list::empty(), "sh")
+    refuses = teko::list::push(refuses, "-c")
+    refuses = teko::list::push(refuses, "echo answer; exit 3")
+    teko::assert::is_true(tool_query_line(refuses) == "")
+    mut answers: []str = teko::list::push(teko::list::empty(), "sh")
+    answers = teko::list::push(answers, "-c")
+    answers = teko::list::push(answers, "printf 'first\\nsecond\\n'")
+    teko::assert::is_true(tool_query_line(answers) == "first")
+}
+
+#test
+/**
+ * host_cc_arch_is_canonical_or_unknown — whatever this host's `cc` reports, the reading is either ""
+ * (unmeasurable — no `cc`, or a driver with no `-dumpmachine`) or an already-canonical arch token.
+ * Asserted as that invariant rather than as a fixed value because the self-test lane runs on nine
+ * different hosts; what every one of them must satisfy is that the reading is comparable to
+ * `target_arch_name` without further folding.
+ *
+ * @return void
+ */
+fn host_cc_arch_is_canonical_or_unknown() {
+    let arch = host_cc_arch()
+    teko::assert::is_true(arch == arch_token_canonical(arch))
+    teko::assert::is_false(teko::str::contains(arch, "-"))
+}
+
+#test
+/**
+ * host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row — the rule's three guards,
+ * each of which is an R3 obligation: a C-backend row is never touched (it never emits an object for
+ * a `NativeTarget`), an EXPLICIT cross target is never touched (that is
+ * `host_cc_cannot_link_cross_reason`'s question, and answering it twice would double-report), and a
+ * host row is judged only against the arch this host's `cc` actually targets, and only where an arch
+ * mismatch is actually fatal (ELF — the Mach-O and PE/COFF linkers are cross-arch by design). The
+ * last assertion is an EQUIVALENCE so it holds on every lane: where the arches agree — x86_64-linux,
+ * macos-arm64, windows-x86_64 — the reason is empty and nothing changes; where they cannot, it names
+ * both.
+ *
+ * @return void
+ */
+fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason("", false) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, false) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason("riscv64-linux", true) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason(rt_alien_target_name(), true) == "")
+    if teko_cc_env().len > 0 {
+        teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, true) == "")
+        return
+    }
+    let reason = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
+    let arch = host_cc_arch()
+    let want = target_arch_name(host_default_target())
+    if target_objfmt(host_default_target()) != OBJFMT_ELF {
+        teko::assert::is_true(reason == "")
+        return
+    }
+    if arch.len == 0 || arch == want {
+        teko::assert::is_true(reason == "")
+        return
+    }
+    teko::assert::is_true(reason.len > 0)
+    teko::assert::str_contains(reason, target_name(host_default_target()))
+    teko::assert::str_contains(reason, arch)
+}
+
+#test
+/**
+ * regr_row_skip_line_names_the_row_and_the_reason — an honest skip must be auditable: the line has
+ * to identify WHICH row was skipped and say WHY, and must not read as a failure. A count alone
+ * cannot be checked by anyone.
+ *
+ * @return void
+ */
+fn regr_row_skip_line_names_the_row_and_the_reason() {
+    let line = regr_row_skip_line("own_arith_exit", 1, "no riscv64 sysroot")
+    teko::assert::str_contains(line, "own_arith_exit[1]")
+    teko::assert::str_contains(line, "no riscv64 sysroot")
+    teko::assert::str_contains(line, "skip")
+    teko::assert::is_false(teko::str::contains(line, "FAIL"))
+}
+

@@ -1166,6 +1166,15 @@ fn tkr_env_extend(base: []str, extra: []str) -> []str {
 }
 
 /**
+ * TKR_OWN_BACKEND_ENV — the child-env token that selects the OWN (native) AOT backend for a
+ * scenario: what `Given backend = "own"` lowers to, and the exact spelling `native_backend_selected`
+ * tests for. Named here rather than spelled twice inline because it is now READ as well as written
+ * (`tkr_row_uses_own_backend`), and a producer and a reader that disagree on the token would fail
+ * silently — the reader would simply never match.
+ */
+const TKR_OWN_BACKEND_ENV: str = "TEKO_BACKEND=native"
+
+/**
  * tkr_backend_env — the env token(s) `Given backend` sugars to: `"own"` → `TEKO_BACKEND=native`
  * (the own AOT backend), `"c"` → `TEKO_BACKEND=c` (explicit, for a paired differential
  * `Examples` row — `backend_of` only tests for the exact string `"native"`, so this is
@@ -1178,9 +1187,31 @@ fn tkr_env_extend(base: []str, extra: []str) -> []str {
  * @since 0.3.1
  */
 fn tkr_backend_env(value: str) -> []str {
-    if value == "own" { return teko::list::push(teko::list::empty(), "TEKO_BACKEND=native") }
+    if value == "own" { return teko::list::push(teko::list::empty(), TKR_OWN_BACKEND_ENV) }
     if value == "c" { return teko::list::push(teko::list::empty(), "TEKO_BACKEND=c") }
     teko::list::empty()
+}
+
+/**
+ * tkr_row_uses_own_backend — will this lowered row's build go through the OWN (native) AOT backend?
+ * True iff its child env carries `TKR_OWN_BACKEND_ENV`, which covers BOTH ways a row can ask for it:
+ * the `Given backend = "own"` sugar and a raw `Given env = "TEKO_BACKEND=native"`. Consulted by the
+ * runner's pre-build capability rule, because the own backend is the ONLY path that emits an object
+ * for a `NativeTarget` — a C-backend row hands host-native C to the host `cc` and can never hit an
+ * object-format or arch mismatch.
+ *
+ * @param t  the lowered row
+ * @return   true iff the row builds with the own backend
+ * @since 0.3.1
+ */
+fn tkr_row_uses_own_backend(t: Tkr) -> bool {
+    mut k: u64 = 0
+    loop {
+        if k >= t.env.len { break }
+        if t.env[k] == TKR_OWN_BACKEND_ENV { return true }
+        k = k + 1
+    }
+    false
 }
 
 /**

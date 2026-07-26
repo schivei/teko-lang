@@ -392,6 +392,40 @@ fn tool_on_path(name: str) -> bool {
 }
 
 /**
+ * TOOL_QUERY_PREFIX — the scratch-file prefix every toolchain QUERY (`tool_query_line`) captures
+ * through, inside `REGR_WORK_DIR` (spelled out rather than concatenated from it — a `const` may not
+ * call `~`, #594). One fixed prefix, not a per-call unique one: these queries are idempotent
+ * readings of the host toolchain, so the last one's capture files are the only ones worth keeping,
+ * and a unique prefix per call would litter the work tree with a file per row for no diagnostic
+ * gain.
+ */
+const TOOL_QUERY_PREFIX: str = "bin/.regr-work/.toolquery"
+
+/**
+ * tool_query_line — ASK a host tool a question and read its one-line answer: run `argv`, and on a
+ * ZERO exit return the first line of its stdout with any trailing carriage return stripped (a `sh`
+ * on Windows can deliver CRLF); on any non-zero exit — including the shell's 127 for an absent
+ * executable — return "". The empty answer is therefore ALWAYS "this host could not tell me", never
+ * a fact, which is what lets every caller here fail SAFE by treating "" as "no reason to skip".
+ *
+ * This is the measurement style the capability probes use: ask the very toolchain that will do the
+ * work what it is, rather than infer it from the kernel (`uname -m`) or from a path convention. The
+ * two are NOT interchangeable — a Windows-on-ARM host whose `cc` is an emulated x86-64 toolchain
+ * reports `aarch64` to `uname` and `x86_64` to the compiler, and it is the COMPILER that links.
+ *
+ * @param argv  the tool invocation (argv[0] is the executable)
+ * @return      the first line of the tool's stdout, or "" when it failed or is absent
+ * @since 0.3.1
+ */
+fn tool_query_line(argv: []str) -> str {
+    let cap = run_captured(argv, "", TOOL_QUERY_PREFIX)
+    if cap.exit != 0 { return "" }
+    let line = first_line(cap.stdout)
+    if line.len > 0 && line[line.len - 1] == b'\r' { return teko::str::slice_to(line, line.len - 1) }
+    line
+}
+
+/**
  * REGRESSION_REQUIRE_TOOLS_VAR — the environment-variable key of the fail-closed toggle: on a
  * provisioned CI lane, setting it to `"1"` turns an absent-toolchain honest-skip (`Given target`'s
  * run-wrapper, a leaf-tool `Then` step) into a hard FAILURE instead — a broken provisioning step
@@ -587,6 +621,121 @@ fn host_cc_cannot_link_cross_reason(target: str) -> str {
 }
 
 /**
+ * HOST_CC_MACHINE_FLAG — the flag that makes a gcc/clang-compatible driver print the TARGET TRIPLE
+ * it compiles and links for (`x86_64-linux-gnu`, `aarch64-linux-gnu`, `arm64-apple-darwin24`, …).
+ * A driver that does not understand it exits non-zero, which `tool_query_line` reports as "" — the
+ * fail-safe answer.
+ */
+const HOST_CC_MACHINE_FLAG: str = "-dumpmachine"
+
+/**
+ * arch_token_canonical — one CPU spelled one way. A compiler triple's first field and this project's
+ * canonical os-arch names (`target_arch_name`) do not always agree on the name of the same CPU:
+ * GNU/Linux triples say `aarch64` where the canonical name is `arm64`, and `amd64`/`x64` appear for
+ * `x86_64`. Folding both sides through this function is what lets the two be COMPARED at all; an
+ * unrecognised token is returned unchanged, so a CPU nobody here knows simply never matches.
+ *
+ * @param tok  an arch token from either vocabulary
+ * @return     its canonical spelling
+ * @since 0.3.1
+ */
+fn arch_token_canonical(tok: str) -> str {
+    if tok == "aarch64" { return "arm64" }
+    if tok == "amd64" || tok == "x64" { return "x86_64" }
+    tok
+}
+
+/**
+ * host_cc_arch — the CPU the build host's own `cc` targets, canonically spelled, or "" when this
+ * host cannot say (no `cc`, or a driver with no `-dumpmachine`). Read off the LINKER, not off the
+ * kernel: `uname -m` reports the CPU the OS runs on, which is the wrong question — what decides
+ * whether a link succeeds is the arch the compiler driver itself is built to emit and consume. The
+ * two differ exactly where it would hurt most: on a Windows-on-ARM host running an emulated x86-64
+ * toolchain, `uname -m` says `aarch64` while the `cc` that links says `x86_64`, and it is the `cc`
+ * that is right.
+ *
+ * @return the host `cc`'s target arch, or "" when unknown
+ * @since 0.3.1
+ */
+fn host_cc_arch() -> str {
+    mut argv: []str = teko::list::push(teko::list::empty(), HOST_CC_NAME)
+    argv = teko::list::push(argv, HOST_CC_MACHINE_FLAG)
+    let triple = tool_query_line(argv)
+    mut k: u64 = 0
+    loop {
+        if k >= triple.len { break }
+        if triple[k] == b'-' { break }
+        k = k + 1
+    }
+    arch_token_canonical(teko::str::slice_to(triple, k))
+}
+
+/**
+ * host_cc_cannot_link_host_default_reason — the HOST-DEFAULT sibling of
+ * `host_cc_cannot_link_cross_reason`, and the answer to the one case that one structurally cannot
+ * see. That function only ever fires for a target the build classes as CROSS; a row that declares
+ * no target (or the `HOST_TARGET` sentinel) is by definition NOT cross, so nothing checked whether
+ * this host can link the object the host default would actually produce — and on one host shape it
+ * cannot.
+ *
+ * THE HOST SHAPE. `host_target_for_os` is OS-ONLY (it maps `linux` → `x86_64-linux`
+ * unconditionally), because the arch half needs `teko::arch()`, which is not yet a seed-recognized
+ * builtin. On an aarch64 LINUX host that mapping is simply wrong: `Given backend = "own"` emits an
+ * ELF x86-64 object, the host `cc` refuses to link it, and the row dies with `cc failed to link the
+ * own-backend object` — a message a reader cannot tell apart from a real codegen regression. This
+ * is the same defect the `host_default_target` doc-comment records for the old hardcoded
+ * `Arm64Macho` default, mirrored: there, a linux host emitted arm64 Mach-O; here, an arm64 host
+ * emits x86-64 ELF.
+ *
+ * WHY IT MEASURES THE `cc` AND NOT THE KERNEL. The question is not "what CPU is this host" but "can
+ * the linker that will run accept this object", so the reading comes from `cc -dumpmachine`
+ * (`host_cc_arch`). Every unknown is fail-SAFE: an absent `cc`, a driver without `-dumpmachine`, a
+ * triple this file cannot parse, or a wasm target with no arch at all all yield "" and NO skip, so a
+ * host that cannot be measured behaves exactly as it did before this rule existed.
+ *
+ * WHY ONLY ELF. An arch mismatch is FATAL only where the system linker is arch-locked, and of the
+ * three object formats here that is ELF: `ld` refuses an object whose `e_machine` is not its own,
+ * full stop. The Mach-O and PE/COFF toolchains are cross-arch BY DESIGN — Apple's `ld` takes
+ * `-arch` and builds fat binaries, and the LLVM/MS Windows linkers take the machine type from the
+ * object — so on those hosts a mismatched `-dumpmachine` reading does NOT imply a failed link, and
+ * skipping on it would silence rows that currently pass (the measured case: `windows-arm64`, whose
+ * host default is `x86_64-windows` and whose own-backend rows are green). Narrowing to ELF keeps
+ * this rule fail-CLOSED: where it declines to fire, the host still reports whatever really happens.
+ *
+ * WHY IT IS NOT AN EMPIRICAL LINK PROBE. The obvious alternative — emit a tiny object with the
+ * host-default target and try to link it once — measures the real thing, and is FAIL-OPEN in the one
+ * way that matters: a genuine regression in the own backend's object emission also makes that probe
+ * fail, so every own-backend row would honest-skip and the gate would go GREEN on a real codegen
+ * break. This rule's two inputs are the host `cc` and a pure enum→string function, so no compiler
+ * change can trigger it.
+ *
+ * WHY IT REMOVES ITSELF (R4). The skip is keyed on a MISMATCH between the host `cc`'s arch and the
+ * arch of the target the host default resolves to. The day an `arm64-linux` target exists and
+ * `host_target_for_os` becomes arch-aware, that mismatch stops occurring on an arm64 host and the
+ * rule falls silent on its own — no edit here, and none needed. It stays correct meanwhile for any
+ * OTHER host whose arch the own backend has no target for.
+ *
+ * @param target       the scenario's declared target ("" / `HOST_TARGET` → the host default; an
+ *                     explicit cross belongs to `host_cc_cannot_link_cross_reason`)
+ * @param own_backend  whether the row builds with the own backend (the only path that emits an
+ *                     object for a `NativeTarget`)
+ * @return             "" when this host can link what it would emit, else the honest reason it cannot
+ * @since 0.3.1
+ */
+fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> str {
+    if !own_backend { return "" }
+    if target.len > 0 && target != HOST_TARGET { return "" }
+    if teko_cc_env().len > 0 { return "" }
+    let host = host_default_target()
+    if target_objfmt(host) != OBJFMT_ELF { return "" }
+    let want = target_arch_name(host)
+    if want.len == 0 { return "" }
+    let have = host_cc_arch()
+    if have.len == 0 || have == want { return "" }
+    $"the own backend's host default is {target_name(host)} but the host cc targets {have}, and the host cc cannot link a foreign-arch ELF object — host_target_for_os is OS-only, so there is no {have}-{target_os_name(host)} default until teko::arch() is seed-recognized"
+}
+
+/**
  * target_toolchain_skip_reason — "" when every tool a `Given target` scenario needs is on this
  * host's PATH, else the human-readable reason the scenario cannot honestly run here. Probed BEFORE
  * the artifact is built, because a missing CROSS-LINKER surfaces as a `cc` failure the runner cannot
@@ -608,6 +757,28 @@ fn target_toolchain_skip_reason(target: str) -> str {
     let host_cc = host_cc_cannot_link_cross_reason(target)
     if host_cc.len > 0 { return host_cc }
     match resolve_run_wrapper(target) { []str => ""; error as e => e.message }
+}
+
+/**
+ * tkr_row_capability_skip_reason — "" when this host can honestly run `t`, else the ONE reason it
+ * cannot. The row's whole pre-build capability question in one place: what its DECLARED target needs
+ * (`target_toolchain_skip_reason` — a cross linker, an emulator and its sysroot, a wasm engine) and,
+ * for a row that declares no target at all, whether this host can link what the host default would
+ * emit for it (`host_cc_cannot_link_host_default_reason`). The two are complementary by
+ * construction: the first is silent for a host row, the second is silent for a cross one.
+ *
+ * Both are answered BEFORE any build, which is the whole point — every capability gap in this list
+ * would otherwise surface as a `cc`/`ld`/`exit 255` failure the reader cannot tell apart from a real
+ * compiler regression.
+ *
+ * @param t  the lowered row
+ * @return   "" when the row can run here, else the honest reason it cannot
+ * @since 0.3.1
+ */
+fn tkr_row_capability_skip_reason(t: Tkr) -> str {
+    let missing = target_toolchain_skip_reason(t.target)
+    if missing.len > 0 { return missing }
+    host_cc_cannot_link_host_default_reason(t.target, tkr_row_uses_own_backend(t))
 }
 
 /**
@@ -1877,10 +2048,9 @@ type TkrRowRun = struct {
 
 /**
  * tkr_run_row — build and check ONE expanded scenario row. The row is honest-SKIPPED BEFORE any
- * build when its `Given target` needs a toolchain this host lacks
- * (`target_toolchain_skip_reason`) — probing after the build would let a missing cross-linker
- * surface as an indistinguishable `cc` failure — else the artifact is resolved
- * (`tkr_ensure_artifact`) and checked (`tkr_run_one_row`).
+ * build when this host lacks a capability the row needs (`tkr_row_capability_skip_reason`) —
+ * probing after the build would let a missing cross-linker surface as an indistinguishable `cc`
+ * failure — else the artifact is resolved (`tkr_ensure_artifact`) and checked (`tkr_run_one_row`).
  *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressor project directory
@@ -1892,7 +2062,7 @@ type TkrRowRun = struct {
  * @since 0.3.1
  */
 fn tkr_run_row(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt, groups: RegrGroups) -> TkrRowRun {
-    let missing = target_toolchain_skip_reason(t.target)
+    let missing = tkr_row_capability_skip_reason(t)
     if missing.len > 0 { return TkrRowRun { outcome = tool_skip_or_fail(missing); built = built; times = phase_zero() } }
     match regr_group_slot(groups, prefix) {
         RegrGroupSlot as slot => return tkr_run_grouped_row(t, slot, prefix, built)
@@ -1939,13 +2109,35 @@ fn tkr_run_grouped_row(t: Tkr, slot: RegrGroupSlot, prefix: str, built: RegrBuil
 }
 
 /**
+ * regr_row_skip_line — the report line for ONE honest-skipped scenario row: WHICH row, and WHY.
+ * Shaped like the failure line it stands beside (`<scenario>[<row>]: <message>`) so a reader parses
+ * both the same way, and marked `skip` rather than `FAIL` so neither can be mistaken for the other.
+ *
+ * It exists because a COUNT is not an honest report (M.3). The run summary already says how many
+ * rows were skipped, but a bare count cannot be audited: a reader cannot tell a legitimately absent
+ * cross toolchain from a capability that silently stopped working, and the reason — which every
+ * skip already carries in its `RegrOutcome.message` — was being computed and then dropped.
+ *
+ * @param scenario  the scenario's name
+ * @param row       the expanded `Examples` row index
+ * @param reason    the honest reason the row cannot run on this host
+ * @return          the report line
+ * @since 0.3.1
+ */
+fn regr_row_skip_line(scenario: str, row: u64, reason: str) -> str {
+    $"teko: regression skip {scenario}[{row}]: {reason}"
+}
+
+/**
  * tkr_run_scenarios — run every RUN scenario of a parsed feature, in order: a declarative
  * (verb-less) scenario is honest-SKIPPED without touching any artifact (0.3.1 C1 — this is what
  * lets `regressor.tkr`'s meta contract stay living documentation, never a build); every other
  * scenario expands its `Examples` rows and hands each to `tkr_run_row`. The verdict is the FIRST
  * failure — labelled with the scenario NAME and row index, so a red CI log names the scenario
  * instead of leaving the reader to decode a scratch-path index — else a pass carrying the feature's
- * whole capability-skip tally. Compile-fail scenarios are handled by `tkr_run_compile_fail`.
+ * whole capability-skip tally. A row that is honest-SKIPPED reports its reason on its own line
+ * (`regr_row_skip_line`) as it happens, so the summary's skip COUNT always has an auditable trail
+ * behind it. Compile-fail scenarios are handled by `tkr_run_compile_fail`.
  *
  * @param exe       the absolute path to this compiler binary
  * @param regr_dir  the regressor project directory
@@ -1975,6 +2167,7 @@ fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, bui
             if !rr.outcome.ok && !rr.outcome.skipped {
                 return FeatureRunResult { outcome = regr_fail($"{sc.name}[{ri}]: {rr.outcome.message}"); built = cur; rows = rows }
             }
+            if rr.outcome.skipped { teko::io::println(regr_row_skip_line(sc.name, ri, rr.outcome.message)) }
             skips = skips + rr.outcome.skips
             ri = ri + 1
         }
