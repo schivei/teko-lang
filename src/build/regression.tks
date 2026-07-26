@@ -796,15 +796,39 @@ fn host_cc_arch() -> str {
  */
 fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> str {
     if !own_backend { return "" }
-    if target.len > 0 && target != HOST_TARGET { return "" }
     if teko_cc_env().len > 0 { return "" }
-    let host = host_default_target()
-    if target_objfmt(host) != OBJFMT_ELF { return "" }
-    let want = target_arch_name(host)
+    let sel = match own_backend_target_of_row(target) { NativeTarget as x => x; error => return "" }
+    if !target_links_with_cc(sel) { return "" }
+    if default_cc_for_target(sel) != HOST_CC_NAME { return "" }
+    if target_objfmt(sel) != OBJFMT_ELF { return "" }
+    let want = target_arch_name(sel)
     if want.len == 0 { return "" }
     let have = host_cc_arch()
     if have.len == 0 || have == want { return "" }
-    $"the own backend's host default is {target_name(host)} but the host cc targets {have}, and the host cc cannot link a foreign-arch ELF object — host_target_for_os is OS-only, so there is no {have}-{target_os_name(host)} default until teko::arch() is seed-recognized"
+    $"this row emits a {want} ELF object but the host cc targets {have}, and the host cc cannot link a foreign-arch object — the own backend has no {have}-{target_os_name(sel)} target, because host_target_for_os is OS-only until teko::arch() is seed-recognized"
+}
+
+/**
+ * own_backend_target_of_row — the `NativeTarget` an own-backend row actually emits for: the host
+ * default when the row declares no target (or the literal `HOST_TARGET`), else the declared name
+ * resolved through the build's OWN resolver.
+ *
+ * Split out because comparing target STRINGS is what let a real red through. `HOST_TARGET` is the
+ * literal `"host"`, not a canonical target name, so a guard written as
+ * `target != HOST_TARGET → not my business` silently exempted every row that spells its target
+ * out — and `own_explicit_host_os_arch_runs`, which declares `x86_64-linux`, is exactly such a row.
+ * On an arm64 host it walked past the guard and died in `ld` with
+ * `Relocations in generic ELF (EM: 62)`: the same foreign-arch failure the guard exists to convert
+ * into an honest skip. Resolving to the enum and comparing the ARCH cannot be fooled by a spelling,
+ * an alias (`x86_64-elf`), or a row that names the host default explicitly.
+ *
+ * @param target  the scenario's declared target ("" / `HOST_TARGET` → the host default)
+ * @return        the resolved own-backend target, or the resolver's honest error
+ * @since 0.3.1
+ */
+fn own_backend_target_of_row(target: str) -> NativeTarget | error {
+    if target.len == 0 || target == HOST_TARGET { return host_default_target() }
+    target_from_name(target)
 }
 
 /**
