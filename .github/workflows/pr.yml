@@ -102,11 +102,22 @@ name: Pull Request CI
 on:
   pull_request:
     branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
-    # The UNION of the four merged workflows' trigger filters. `bootstrap/**` came from native.yml
-    # and is listed because the committed host seeds are `.xz` blobs plus a checksum manifest:
-    # none of the extension globs reach them, so a PR that touched ONLY a seed would have skipped
-    # the very lanes that provision from it.
-    paths: ['**.tkp', '**.tks', '**.tkt', '**.tkr', '**.sh', '**.c', '**.h', '.github/workflows/*.yml', 'bootstrap/**']
+    # NO `paths:` FILTER, AND THAT IS THE POINT.
+    #
+    # The five aggregators are REQUIRED checks on `main`, and `main` has no bypass — not even for
+    # the owner. A required check that never REPORTS does not go red; it stays "Expected — waiting
+    # for status" forever, and the only PR pointing at `main` in a stacked train is the drain.
+    # A trigger-level path filter is therefore not a cost optimisation, it is a way to freeze the
+    # drain: any head commit touching only files outside the filter (a README fix, a doc-comment
+    # sweep, a `docs/**` correction) would silently produce NO run at all.
+    #
+    # The four merged workflows each carried such a filter, and their union — `**.tks`, `**.c`,
+    # `bootstrap/**`, … — reached no Markdown outside those trees. This file inherited the hole.
+    #
+    # The cost the filter used to buy is bought instead by `plan`, one level down: it computes
+    # `run` (with a docs-only guard) and every lane INCLUDING the artifact root consults it. So a
+    # docs-only PR costs one ~12s ubuntu job, the aggregators REPORT (green, having asserted that
+    # everything below them was correctly skipped), and nothing hangs.
 
 permissions:
   contents: read
@@ -207,9 +218,11 @@ jobs:
           # aggregators are REQUIRED checks, and skipping the workflow would leave them never
           # reported → the PR hangs "waiting for CI gate" forever.
           #
-          # NOTE: `artifact` and `test` do NOT consult this flag. They are gated by the trigger's
-          # own `paths:` and nothing else, exactly as tests.yml had them — which is what keeps
-          # `Test suite gate` from ever having a "everything skipped, pass anyway" branch.
+          # `artifact` and `test` DO consult this flag, since the trigger no longer filters paths
+          # (see the `on:` block for why it must not). That does not reopen the "everything
+          # skipped, pass anyway" hole the earlier design feared: the five aggregators do not
+          # tolerate the skip, they REQUIRE it — `run=false` demands `skipped` and `run=true`
+          # demands `success`, so a broken `if:` is caught in either direction.
           run=false
           if [ "$MATCHED" != "true" ]; then
             echo "No allowlisted path changed — the compiler-diagnostic lanes have nothing to gate."
@@ -282,6 +295,7 @@ jobs:
   # not be the asset.
   artifact:
     needs: plan
+    if: needs.plan.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix_artifact) }}
@@ -373,6 +387,7 @@ jobs:
   # (#168). The compiler under test is the downloaded asset; `cc` is the suite's engine.
   test:
     needs: [plan, artifact]
+    if: needs.plan.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix_test) }}
@@ -1397,10 +1412,17 @@ jobs:
             FAILED=1
           fi
 
-          # The ROOT is unconditional too — it is not path-gated (see plan's note), so it must be
-          # green in every mode and on every PR that triggered this workflow.
-          if [ "$ARTIFACT_RESULT" != "success" ]; then
-            echo "ERROR: artifact (the ROOT, matrix) = $ARTIFACT_RESULT — every producer must succeed"
+          # The ROOT follows `plan.run`, and this gate demands the matching result in BOTH
+          # directions: green when there is something to build, SKIPPED when there is not. The
+          # second half is the one that matters — it is what stops a docs-only run (or a broken
+          # `if:`) from reporting green while the root quietly did nothing.
+          if [ "$CHANGES" = "true" ]; then
+            if [ "$ARTIFACT_RESULT" != "success" ]; then
+              echo "ERROR: artifact (the ROOT, matrix) = $ARTIFACT_RESULT — every producer must succeed"
+              FAILED=1
+            fi
+          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"
             FAILED=1
           fi
 
@@ -1486,6 +1508,7 @@ jobs:
       - name: Evaluate results
         env:
           FULL: ${{ needs.plan.outputs.full }}
+          CHANGES: ${{ needs.plan.outputs.run }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLANNED: ${{ needs.plan.outputs.labels }}
           MATRIX_ARTIFACT: ${{ needs.plan.outputs.matrix_artifact }}
@@ -1539,15 +1562,29 @@ jobs:
           fi
 
           # A matrix job's aggregate result is `success` only when EVERY leg succeeded, so this
-          # rejects failure, cancellation and a skipped/empty matrix alike. Both layers run in
-          # BOTH tiers, so this gate never has to reason about a legitimate skip.
-          if [ "$ARTIFACT_RESULT" != "success" ]; then
-            echo "ERROR: artifact (matrix) = $ARTIFACT_RESULT — every producer must succeed"
-            FAILED=1
-          fi
-          if [ "$TEST_RESULT" != "success" ]; then
-            echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every asset must succeed"
-            FAILED=1
+          # rejects failure, cancellation and a skipped/empty matrix alike.
+          #
+          # There is exactly ONE legitimate skip — `plan.run=false`, a docs-only PR — and it is
+          # not tolerated, it is DEMANDED. The asset-set cross-checks above stay in force either
+          # way: they read the planner's matrices, which are emitted whether or not the layers
+          # run, so a docs-only PR still proves the two layers agree about what they WOULD build.
+          if [ "$CHANGES" = "true" ]; then
+            if [ "$ARTIFACT_RESULT" != "success" ]; then
+              echo "ERROR: artifact (matrix) = $ARTIFACT_RESULT — every producer must succeed"
+              FAILED=1
+            fi
+            if [ "$TEST_RESULT" != "success" ]; then
+              echo "ERROR: test (matrix over: $PLANNED) = $TEST_RESULT — every asset must succeed"
+              FAILED=1
+            fi
+          else
+            echo "plan.run=false (docs-only) — both layers must be SKIPPED, and are asserted so."
+            for pair in "artifact:$ARTIFACT_RESULT" "test:$TEST_RESULT"; do
+              if [ "${pair#*:}" != "skipped" ]; then
+                echo "ERROR: ${pair%%:*} = ${pair#*:} with plan.run=false — expected skipped"
+                FAILED=1
+              fi
+            done
           fi
 
           if [ "$FAILED" = "1" ]; then
@@ -1613,8 +1650,12 @@ jobs:
           if [ "$PLAN_RESULT" != "success" ]; then
             echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
           fi
-          if [ "$ARTIFACT_RESULT" != "success" ]; then
-            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — tsan consumes its output"; FAILED=1
+          if [ "$CHANGES" = "true" ]; then
+            if [ "$ARTIFACT_RESULT" != "success" ]; then
+              echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — tsan consumes its output"; FAILED=1
+            fi
+          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"; FAILED=1
           fi
 
           if [ "$CHANGES" != "true" ]; then
@@ -1696,8 +1737,12 @@ jobs:
           if [ "$PLAN_RESULT" != "success" ]; then
             echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
           fi
-          if [ "$ARTIFACT_RESULT" != "success" ]; then
-            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — every leg here consumes its output"; FAILED=1
+          if [ "$CHANGES" = "true" ]; then
+            if [ "$ARTIFACT_RESULT" != "success" ]; then
+              echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — every leg here consumes its output"; FAILED=1
+            fi
+          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"; FAILED=1
           fi
 
           if [ "$CHANGES" != "true" ]; then
@@ -1752,6 +1797,7 @@ jobs:
       - name: Evaluate results
         env:
           CHANGES: ${{ needs.plan.outputs.sast_run }}
+          RUN: ${{ needs.plan.outputs.run }}
           PLAN_RESULT: ${{ needs.plan.result }}
           ARTIFACT_RESULT: ${{ needs.artifact.result }}
           TIDY_RESULT: ${{ needs.clang-tidy-audit.result }}
@@ -1766,8 +1812,17 @@ jobs:
           if [ "$PLAN_RESULT" != "success" ]; then
             echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
           fi
-          if [ "$ARTIFACT_RESULT" != "success" ]; then
-            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT"; FAILED=1
+
+          # TWO flags, not one. `sast_run` decides whether there is C to lint; `run` decides
+          # whether the ROOT builds at all. They are independent — a PR touching only
+          # `src/runtime/**.md` sets sast_run=true and run=false — so the root's expected result
+          # is keyed on `run`, never on `sast_run`.
+          if [ "$RUN" = "true" ]; then
+            if [ "$ARTIFACT_RESULT" != "success" ]; then
+              echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT"; FAILED=1
+            fi
+          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
+            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"; FAILED=1
           fi
 
           if [ "$CHANGES" != "true" ]; then
@@ -1777,8 +1832,18 @@ jobs:
             exit 0
           fi
 
-          if [ "$TIDY_RESULT" != "success" ]; then
-            echo "ERROR: clang-tidy-audit = $TIDY_RESULT (it is path-gated, and the path matched)"
+          # The audit hangs off the ROOT by owner ruling (every pull_request lane does), so when
+          # the root is skipped the audit is skipped WITH it — by dependency, not by a broken
+          # condition. Only lintable C can be missed that way, and by construction none changed.
+          if [ "$RUN" != "true" ]; then
+            if [ "$TIDY_RESULT" != "skipped" ]; then
+              echo "ERROR: clang-tidy-audit = $TIDY_RESULT — the ROOT was skipped, so this must be too"
+              FAILED=1
+            else
+              echo "clang-tidy-audit skipped with the ROOT (docs-only change under src/runtime|assert)."
+            fi
+          elif [ "$TIDY_RESULT" != "success" ]; then
+            echo "ERROR: clang-tidy-audit = $TIDY_RESULT (the path matched and the ROOT ran, so it owed a result)"
             FAILED=1
           fi
 
