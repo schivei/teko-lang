@@ -180,6 +180,39 @@ fn rvenc_encodes_i_type_alu() {
 
 #test
 /**
+ * rvenc_encodes_slli — the RV64 I-type shift-immediate `slli a0, a1, shamt`
+ * (funct3 = 1, OP-IMM = 0x13), the step `emit_bigimm_riscv` folds between the
+ * chunks of a 64-bit `li`. The shift amount rides imm12's LOW SIX bits with
+ * `funct6` (imm12's upper six) pinned to zero, so the boundary shamts 0 and 63
+ * are pinned here alongside the 12 isel actually selects.
+ * Assembler-cross-checked.
+ *
+ * @return void
+ */
+fn rvenc_encodes_slli() {
+    rvenc_assert_word(alu_i_riscv(MAluOpRiscv::Slli, rvenc_pg(10 to u32), rvenc_pg(11 to u32), 12 to i32), 0x00C59513 to u32)
+    rvenc_assert_word(alu_i_riscv(MAluOpRiscv::Slli, rvenc_pg(10 to u32), rvenc_pg(11 to u32), 0 to i32), 0x00059513 to u32)
+    rvenc_assert_word(alu_i_riscv(MAluOpRiscv::Slli, rvenc_pg(10 to u32), rvenc_pg(11 to u32), 63 to i32), 0x03F59513 to u32)
+}
+
+#test
+/**
+ * rvenc_rejects_a_malformed_shift_immediate — the `alu_i_shamt_ok_riscv`
+ * malformed-IR guard: a shamt past `RISCV_SHAMT_MAX`, or a negative one, would
+ * overflow into `funct6` and silently encode a DIFFERENT instruction, so both
+ * raise `B2-aluform`. So does `Slli` reaching the register-register encoder —
+ * it is an immediate-only op. isel never selects any of the three.
+ *
+ * @return void
+ */
+fn rvenc_rejects_a_malformed_shift_immediate() {
+    rvenc_assert_stop(alu_i_riscv(MAluOpRiscv::Slli, rvenc_pg(10 to u32), rvenc_pg(11 to u32), 64 to i32), "B2-aluform")
+    rvenc_assert_stop(alu_i_riscv(MAluOpRiscv::Slli, rvenc_pg(10 to u32), rvenc_pg(11 to u32), (0 to i32) - (1 to i32)), "B2-aluform")
+    rvenc_assert_stop(rvenc_alu_r(MAluOpRiscv::Slli, true), "B2-aluform")
+}
+
+#test
+/**
  * rvenc_encodes_loads — every load width/sign form (`ld`/`lw`/`lwu`/`lh`/`lhu`/`lb`/
  * `lbu`) plus a NEGATIVE offset (`ld a0,-8(sp)`), assembler-cross-checked.
  *

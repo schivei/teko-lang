@@ -264,9 +264,12 @@ fn honest_fp_riscv() -> error {
 /**
  * honest_bigimm_riscv — the named honest-stop for an immediate outside the
  * signed 12-bit window (`[-2048, 2047]`) an I-type/S-type field can hold: a
- * 32-bit literal needs the `lui`+`addi` pair (isel's job) and a 64-bit literal
- * the multi-instruction `li`. A REAL RISC-V limit (imm12 is only 12 bits),
- * deferred to 0.3.1 (§9, `B2-bigimm`).
+ * 32-bit literal needs the `lui`+`addi` pair and a 64-bit literal the
+ * multi-instruction `li`, both of which isel now expands
+ * (`emit_lui_addi_riscv`/`emit_bigimm_riscv`) BEFORE the word encoder is
+ * reached. A REAL RISC-V limit (imm12 is only 12 bits), so this stays the
+ * single-word encoder's honest field-width guard (§9, `B2-bigimm`) — a
+ * frame/field displacement past the window still reaches it.
  *
  * @return error  the `B2-bigimm` named honest-stop
  */
@@ -277,9 +280,11 @@ fn honest_bigimm_riscv() -> error {
 /**
  * honest_alu_form_riscv — the internal-invariant guard for an `MAluOpRiscv`
  * reaching the wrong register/immediate encoder: an immediate-only op
- * (`Addi`/`Xori`/`Sltiu`) in a register-register `MAluRRiscv`, or a
- * register-register op in a register-immediate `MAluIRiscv`. isel never selects
- * these crossed forms, so this is a malformed-IR guard, not a language limit.
+ * (`Addi`/`Xori`/`Sltiu`/`Slli`) in a register-register `MAluRRiscv`, a
+ * register-register op in a register-immediate `MAluIRiscv`, or an `Slli`
+ * whose shift amount overflows the RV64 six-bit shamt field
+ * (`alu_i_shamt_ok_riscv`). isel never selects these malformed shapes, so this
+ * is an IR guard, not a language limit.
  *
  * @return error  the `B2-aluform` internal-invariant stop
  */
@@ -416,8 +421,10 @@ fn alu_r_opcode_riscv(has_w: bool, wide: bool) -> u32 {
 
 /**
  * alu_i_funct3_riscv — the I-type `funct3` for a register-immediate ALU op:
- * `addi`(0), `xori`(4), `sltiu`(3). Any register-register op reaching the
- * immediate encoder raises the `B2-aluform` internal-invariant guard.
+ * `addi`(0), `xori`(4), `sltiu`(3), `slli`(1 — the same field the R-type `sll`
+ * carries, the register/immediate form being told apart by the opcode). Any
+ * register-register op reaching the immediate encoder raises the `B2-aluform`
+ * internal-invariant guard.
  *
  * @param MAluOpRiscv op  the register-immediate ALU op
  * @return u32 | error  the 3-bit funct3, or `B2-aluform`
@@ -427,7 +434,29 @@ fn alu_i_funct3_riscv(op: MAluOpRiscv) -> u32 | error {
         Addi => RISCV_FUNCT3_ADDI
         Xori => RISCV_FUNCT3_XORI
         Sltiu => RISCV_FUNCT3_SLTU
+        Slli => RISCV_FUNCT3_SLL
         _ => honest_alu_form_riscv()
+    }
+}
+
+/**
+ * alu_i_shamt_ok_riscv — whether a register-immediate ALU op's immediate is a
+ * LEGAL one for its form. The arithmetic/bitwise forms (`addi`/`xori`/`sltiu`)
+ * take the whole signed imm12 window, so any value `imm12_field_riscv` accepts
+ * is legal for them; the RV64 shift form (`slli`) spends only imm12's low six
+ * bits on the shift amount, with the upper six pinned to `RISCV_FUNCT6_SLLI`,
+ * so it admits exactly `[0, RISCV_SHAMT_MAX]`. isel never selects a wider
+ * shamt (`emit_bigimm_riscv` shifts by `RISCV_IMM12_BITS` and nothing else), so
+ * a rejection here is a malformed-IR guard, not a language limit.
+ *
+ * @param MAluOpRiscv op  the register-immediate ALU op
+ * @param i32 imm  the instruction's immediate field
+ * @return bool  whether `imm` is legal for `op`'s immediate form
+ */
+fn alu_i_shamt_ok_riscv(op: MAluOpRiscv, imm: i32) -> bool {
+    match op {
+        Slli => imm >= (0 to i32) && imm <= RISCV_SHAMT_MAX
+        _ => true
     }
 }
 
@@ -535,8 +564,10 @@ fn encode_alu_r_riscv(i: MAluRRiscv) -> EncWordRiscv | error {
 }
 
 /**
- * encode_alu_i_riscv — a register-immediate12 ALU op (`addi`/`xori`/`sltiu`,
- * OP-IMM = 0x13). The immediate is range-checked (`B2-bigimm`); a
+ * encode_alu_i_riscv — a register-immediate12 ALU op (`addi`/`xori`/`sltiu`/
+ * `slli`, OP-IMM = 0x13). The immediate is range-checked against the signed
+ * imm12 window (`B2-bigimm`) and then against the op's own immediate form
+ * (`alu_i_shamt_ok_riscv` — the RV64 shift amount is only six bits wide); a
  * register-register op reaches `B2-aluform`.
  *
  * @param MAluIRiscv i  the instruction (operands physical)
@@ -544,6 +575,7 @@ fn encode_alu_r_riscv(i: MAluRRiscv) -> EncWordRiscv | error {
  */
 fn encode_alu_i_riscv(i: MAluIRiscv) -> EncWordRiscv | error {
     let funct3 = match alu_i_funct3_riscv(i.op) { u32 as f => f; error as e => return e }
+    if !alu_i_shamt_ok_riscv(i.op, i.imm) { return honest_alu_form_riscv() }
     let imm = match imm12_field_riscv(i.imm) { u32 as v => v; error as e => return e }
     plain_word_riscv(i_type_word_riscv(imm, enc_reg_riscv(i.a), funct3, enc_reg_riscv(i.dst), RISCV_OPCODE_OP_IMM))
 }

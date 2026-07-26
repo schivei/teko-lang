@@ -189,19 +189,19 @@ fn max_i32_riscv() -> i64 {
  * fits_imm12_riscv — true iff `v` fits the signed 12-bit immediate window
  * ([-2048, 2047]) an `addi`/`li`/`sltiu` or a frame/field displacement carries
  * directly. A value outside it needs a `lui`+`addi` pair (a 32-bit constant) or
- * the `B2-bigimm` honest-stop (a 64-bit one).
+ * the `slli`+`addi` chunk chain on top of one (a 64-bit constant).
  *
  * @param i64 v  the value to check
  * @return bool  whether `v` fits a signed 12-bit immediate
  */
 fn fits_imm12_riscv(v: i64) -> bool {
-    v >= -(2048) && v <= (2047)
+    v >= ((0) - RISCV_IMM12_MIN_MAGNITUDE) && v <= RISCV_IMM12_MAX
 }
 
 /**
  * fits_i32_riscv — true iff `v` fits the signed 32-bit range, the precondition
- * a `lui`+`addi` constant materialization requires: a wider literal needs the
- * multi-instruction `li` behind the `B2-bigimm` honest-stop.
+ * a `lui`+`addi` constant materialization requires: a wider literal is peeled
+ * down to one by `emit_bigimm_riscv`'s 12-bit chunk chain.
  *
  * @param i64 v  the value to check
  * @return bool  whether `v` fits an i32
@@ -211,18 +211,87 @@ fn fits_i32_riscv(v: i64) -> bool {
 }
 
 /**
- * lo12_of_bits_riscv — the low 12 bits of a 32-bit pattern read as a signed
- * 12-bit immediate ([-2048, 2047]): the `addi` half of a `lui`+`addi` pair. A
- * low half whose bit 11 is set encodes a negative addend (the `lui` half is
- * pre-incremented to compensate — see `emit_lui_addi_riscv`), so it is folded
- * below zero by subtracting 4096.
+ * RISCV_IMM12_LO_MASK — the low-12-bit mask (`0xFFF`) that peels one `addi`
+ * chunk off a constant's two's-complement pattern (`lo12_of_bits_riscv`).
+ */
+const RISCV_IMM12_LO_MASK: u64 = 4095 to u64
+
+/**
+ * RISCV_IMM12_SIGN_BIT — bit 11 of a 12-bit immediate field (`0x800`). Set
+ * means the raw low half reads NEGATIVE once the CPU sign-extends it, so the
+ * half above it is pre-incremented to compensate — the round-to-nearest
+ * correction shared by `lo12_of_bits_riscv`, `emit_lui_addi_riscv` and
+ * `peel_imm12_riscv`.
+ */
+const RISCV_IMM12_SIGN_BIT: u64 = 2048 to u64
+
+/**
+ * RISCV_IMM12_MODULUS — `2^12`, subtracted from a raw low-12 field whose sign
+ * bit is set to fold it into the signed `[-2048, 2047]` window.
+ */
+const RISCV_IMM12_MODULUS: i32 = 4096 to i32
+
+/**
+ * RISCV_HI20_MASK — the 20-bit mask (`0xFFFFF`) of the U-type `lui` immediate
+ * field (`emit_lui_addi_riscv`).
+ */
+const RISCV_HI20_MASK: u64 = 1048575 to u64
+
+/**
+ * RISCV_BIGIMM_HI_BITS — the width (52) of the high half one 12-bit peel
+ * leaves behind in a 64-bit constant: the RV64 register width (64) less
+ * `RISCV_IMM12_BITS`. `peel_imm12_riscv` sign-extends its result from this
+ * width.
+ */
+const RISCV_BIGIMM_HI_BITS: u64 = 52 to u64
+
+/**
+ * bigimm_hi_mask_riscv — the mask covering `RISCV_BIGIMM_HI_BITS`
+ * (`0x000FFFFFFFFFFFFF`), derived by shifting the all-ones mask rather than
+ * spelling a 52-bit literal (the parser-range workaround `MASK_ALL_U64`
+ * documents).
  *
- * @param u64 bits  the 32-bit two's-complement constant pattern
+ * @return u64  the low-52-bits mask
+ */
+fn bigimm_hi_mask_riscv() -> u64 {
+    MASK_ALL_U64 >> (RISCV_IMM12_BITS to u64)
+}
+
+/**
+ * bigimm_hi_sign_bit_riscv — the sign bit (bit 51) of the 52-bit high half a
+ * 12-bit peel leaves behind.
+ *
+ * @return u64  `2^51`
+ */
+fn bigimm_hi_sign_bit_riscv() -> u64 {
+    (1 to u64) << (RISCV_BIGIMM_HI_BITS - (1 to u64))
+}
+
+/**
+ * bigimm_hi_modulus_riscv — `2^52`, subtracted from a 52-bit high half whose
+ * sign bit is set to read it as a signed i64.
+ *
+ * @return i64  `2^52`
+ */
+fn bigimm_hi_modulus_riscv() -> i64 {
+    ((1 to u64) << RISCV_BIGIMM_HI_BITS) to i64
+}
+
+/**
+ * lo12_of_bits_riscv — the low 12 bits of a constant's two's-complement pattern
+ * read as a signed 12-bit immediate ([-2048, 2047]): the `addi` half of a
+ * `lui`+`addi` pair, and one chunk of `emit_bigimm_riscv`'s chain. A low half
+ * whose bit 11 is set encodes a negative addend (the half above it is
+ * pre-incremented to compensate — see `emit_lui_addi_riscv` and
+ * `peel_imm12_riscv`), so it is folded below zero by subtracting
+ * `RISCV_IMM12_MODULUS`.
+ *
+ * @param u64 bits  the constant's two's-complement pattern
  * @return i32  its low 12 bits as a signed immediate
  */
 fn lo12_of_bits_riscv(bits: u64) -> i32 {
-    let lo_raw = (bits & (4095 to u64)) to u32
-    if lo_raw >= (2048 to u32) { (lo_raw to i32) - (4096 to i32) } else { lo_raw to i32 }
+    let lo_raw = bits & RISCV_IMM12_LO_MASK
+    if lo_raw >= RISCV_IMM12_SIGN_BIT { (lo_raw to i32) - RISCV_IMM12_MODULUS } else { lo_raw to i32 }
 }
 
 /**
@@ -242,33 +311,134 @@ fn lo12_of_bits_riscv(bits: u64) -> i32 {
  */
 fn emit_lui_addi_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv {
     let bits = u64_bits_of(val) & mask32_u64()
-    let hi20 = (((bits + (2048 to u64)) >> (12 to u64)) & (1048575 to u64)) to u32
+    let hi20 = (((bits + RISCV_IMM12_SIGN_BIT) >> (RISCV_IMM12_BITS to u64)) & RISCV_HI20_MASK) to u32
     let lo12 = lo12_of_bits_riscv(bits)
     let ctx1 = selctx_riscv_emit(ctx, lui_riscv(dst, hi20))
     selctx_riscv_emit(ctx1, alu_i_riscv(MAluOpRiscv::Addi, dst, dst, lo12))
 }
 
 /**
+ * peel_imm12_riscv — one step of the 64-bit `li` decomposition: the high half
+ * `val` keeps once its low 12 bits are handed to an `addi`, i.e. the ARITHMETIC
+ * `(val - lo12_of_bits_riscv(val)) >> 12`. It is computed on the
+ * two's-complement PATTERN — a logical shift plus the bit-11 carry, then a
+ * sign-extension from `RISCV_BIGIMM_HI_BITS` — rather than by i64 subtraction,
+ * because the subtraction itself would overflow at the boundaries (`i64::MAX`
+ * has `lo12 = -1`, so `val - lo12` is one past the range; `i64::MIN` is
+ * symmetric). The pattern arithmetic has no such edge: `val` is exactly
+ * `peel_imm12_riscv(val) * 4096 + lo12_of_bits_riscv(val)` modulo `2^64`, which
+ * is precisely what the CPU's own `slli`+`addi` recompose.
+ *
+ * @param i64 val  the value to peel one 12-bit chunk off
+ * @return i64  the signed high half left behind
+ */
+fn peel_imm12_riscv(val: i64) -> i64 {
+    let bits = u64_bits_of(val)
+    let carry = if (bits & RISCV_IMM12_SIGN_BIT) != (0 to u64) { 1 to u64 } else { 0 to u64 }
+    let hi = ((bits >> (RISCV_IMM12_BITS to u64)) + carry) & bigimm_hi_mask_riscv()
+    if (hi & bigimm_hi_sign_bit_riscv()) == (0 to u64) { return hi to i64 }
+    (hi to i64) - bigimm_hi_modulus_riscv()
+}
+
+/**
+ * peel_imm12_n_riscv — `peel_imm12_riscv` applied `n` times: the high half left
+ * after `n` 12-bit chunks have been peeled off `val`.
+ *
+ * @param i64 val  the value to peel
+ * @param u32 n  how many chunks to peel
+ * @return i64  the signed high half after `n` peels
+ */
+fn peel_imm12_n_riscv(val: i64, n: u32) -> i64 {
+    mut v = val
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        v = peel_imm12_riscv(v)
+        i++
+    }
+    v
+}
+
+/**
+ * bigimm_peel_count_riscv — how many 12-bit chunks must be peeled off `val`
+ * before the remaining high half fits the 32-bit `lui`+`addi` base. Each peel
+ * divides the magnitude by 4096, so a 64-bit literal needs at most three
+ * (`(64 - 32) / 12` rounded up) and the loop always terminates.
+ *
+ * @param i64 val  the literal to decompose
+ * @return u32  the peel count (0 when `val` already fits 32 bits)
+ */
+fn bigimm_peel_count_riscv(val: i64) -> u32 {
+    mut n: u32 = 0
+    mut v = val
+    loop {
+        if fits_i32_riscv(v) { break }
+        v = peel_imm12_riscv(v)
+        n++
+    }
+    n
+}
+
+/**
+ * emit_const_base_riscv — the BASE of a constant materialization, for a `val`
+ * already known to fit 32 bits: a single `li` (`addi rd, x0, imm12`) inside the
+ * signed 12-bit window, else the `lui`+`addi` pair.
+ *
+ * @param SelCtxRiscv ctx  the context to extend
+ * @param MReg dst  the destination register
+ * @param i64 val  the 32-bit-range literal to materialize
+ * @return SelCtxRiscv  the advanced context (one or two instructions emitted)
+ */
+fn emit_const_base_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv {
+    if fits_imm12_riscv(val) { return selctx_riscv_emit(ctx, li_riscv(dst, val to i32)) }
+    emit_lui_addi_riscv(ctx, dst, val)
+}
+
+/**
+ * emit_bigimm_riscv — the multi-instruction `li` for a literal beyond the
+ * 32-bit `lui`+`addi` reach: the RISC-V answer to x86's one-word `movabs` and
+ * arm64's MOVZ/MOVK lane chain. RISC-V has no wide-immediate form at all, so
+ * the value is rebuilt from the top down — `emit_const_base_riscv` materializes
+ * the high half that fits 32 bits, then each peeled 12-bit chunk is folded back
+ * in with `slli rd, rd, 12 ; addi rd, rd, chunk`. A zero chunk skips its `addi`
+ * (the `slli` alone already places it), so the sequence costs at most eight
+ * instructions and typically far fewer.
+ *
+ * @param SelCtxRiscv ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param i64 val  the 64-bit literal to materialize
+ * @return SelCtxRiscv  the advanced context
+ */
+fn emit_bigimm_riscv(ctx0: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv {
+    let peels = bigimm_peel_count_riscv(val)
+    mut ctx = emit_const_base_riscv(ctx0, dst, peel_imm12_n_riscv(val, peels))
+    mut left = peels
+    loop {
+        if left == (0 to u32) { break }
+        let chunk = lo12_of_bits_riscv(u64_bits_of(peel_imm12_n_riscv(val, left - (1 to u32))))
+        ctx = selctx_riscv_emit(ctx, alu_i_riscv(MAluOpRiscv::Slli, dst, dst, RISCV_IMM12_BITS to i32))
+        if chunk != (0 to i32) { ctx = selctx_riscv_emit(ctx, alu_i_riscv(MAluOpRiscv::Addi, dst, dst, chunk)) }
+        left = left - (1 to u32)
+    }
+    ctx
+}
+
+/**
  * materialize_const_riscv — materialize the integer literal `val` into `dst`:
  * a single `li` (`addi rd, x0, imm12`) when it fits the signed 12-bit window,
- * a `lui`+`addi` pair when it fits 32 bits, otherwise the named `B2-bigimm`
- * honest-stop (a 64-bit immediate needs the multi-instruction `li` sequence —
- * a REAL RISC-V limit, unlike x86's near-N/A `movabs`; deferred to 0.3.1).
+ * a `lui`+`addi` pair when it fits 32 bits, and the `slli`+`addi` chunk chain on
+ * top of that pair (`emit_bigimm_riscv`) for anything wider. No literal reaches
+ * an honest-stop any more — the former `B2-bigimm` 64-bit-immediate stop is
+ * closed.
  *
  * @param SelCtxRiscv ctx  the context to extend
  * @param MReg dst  the destination register
  * @param i64 val  the literal value to materialize
- * @return SelCtxRiscv | error  the advanced context, or the `B2-bigimm` stop
- * @throws  when `val` exceeds the 32-bit `lui`+`addi` reach (`B2-bigimm`)
+ * @return SelCtxRiscv  the advanced context
  */
-fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv | error {
-    if fits_imm12_riscv(val) {
-        return selctx_riscv_emit(ctx, li_riscv(dst, val to i32))
-    }
-    if fits_i32_riscv(val) {
-        return emit_lui_addi_riscv(ctx, dst, val)
-    }
-    error { message = "isel riscv64: B2-bigimm — a 64-bit integer constant beyond lui+addi needs the multi-instruction li sequence (a REAL RISC-V imm12 limit, unlike x86 movabs), the 64-bit-immediate honest-stop (0.3.1)" }
+fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv {
+    if fits_i32_riscv(val) { return emit_const_base_riscv(ctx, dst, val) }
+    emit_bigimm_riscv(ctx, dst, val)
 }
 
 /**
@@ -280,11 +450,9 @@ fn materialize_const_riscv(ctx: SelCtxRiscv, dst: MReg, val: i64) -> SelCtxRiscv
  * @param SelCtxRiscv ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LConstInt c  the constant op
- * @return SelCtxRiscv | error  the advanced context, or `materialize_const_riscv`'s
- *                              propagated `B2-bigimm` stop
- * @throws  the propagated `B2-bigimm` honest-stop for a 64-bit literal
+ * @return SelCtxRiscv  the advanced context
  */
-fn select_const_int_riscv(ctx0: SelCtxRiscv, inst: lir::LInst, c: lir::LConstInt) -> SelCtxRiscv | error {
+fn select_const_int_riscv(ctx0: SelCtxRiscv, inst: lir::LInst, c: lir::LConstInt) -> SelCtxRiscv {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_riscv_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
     materialize_const_riscv(ctx1, dst, c.val)
