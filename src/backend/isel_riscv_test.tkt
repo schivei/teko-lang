@@ -205,6 +205,123 @@ fn rat_thirty_two_bit_const_is_lui_addi_pair() {
     teko::assert::str_contains(text, "addi %0, %0, #837")
 }
 
+/**
+ * rat_const_dump — a straight-line `main` whose only body is `%0 = const val`
+ * then `ret %0`, selected and rendered. The 64-bit-materialization goldens read
+ * this.
+ *
+ * @param i64 val  the literal to materialize
+ * @return str  the rendered machine text
+ */
+fn rat_const_dump(val: i64) -> str {
+    let c = rat_const(rat_main_ret(), val)
+    rat_dump(rat_ret(c.func, c.vreg))
+}
+
+#test
+/**
+ * rat_sixty_four_bit_const_is_a_slli_chunk_chain — the closed `B2-bigimm`
+ * 64-bit-immediate stop. `2^31` is the exact literal that used to reach it in
+ * the wild: `lfallback_const` (lower.tks) plants it on the never-taken merge
+ * edge of any `if`/`match` whose arms all diverge, so `if c { return a } else {
+ * return b }` in an `i64` function could not be selected for riscv64 at all.
+ * It now materializes as a 32-bit `lui`+`addi` base shifted up by one 12-bit
+ * chunk (the chunk itself is zero, so it costs no `addi`).
+ *
+ * @return void
+ */
+fn rat_sixty_four_bit_const_is_a_slli_chunk_chain() {
+    let text = rat_const_dump(2147483648)
+    teko::assert::str_contains(text, "lui %0, #128")
+    teko::assert::str_contains(text, "addi %0, %0, #0")
+    teko::assert::str_contains(text, "slli %0, %0, #12")
+}
+
+#test
+/**
+ * rat_negative_sixty_four_bit_const_carries_into_the_base — one past `i32::MIN`
+ * (`-2^31 - 1`): its low chunk reads `-1` as a signed `addi`, so the base above
+ * it is pre-incremented (`peel_imm12_riscv`'s bit-11 carry) — the negative-chunk
+ * path the round-to-nearest correction exists for.
+ *
+ * @return void
+ */
+fn rat_negative_sixty_four_bit_const_carries_into_the_base() {
+    let text = rat_const_dump((0) - (2147483649))
+    teko::assert::str_contains(text, "lui %0, #1048448")
+    teko::assert::str_contains(text, "slli %0, %0, #12")
+    teko::assert::str_contains(text, "addi %0, %0, #-1")
+}
+
+#test
+/**
+ * rat_wide_const_chains_two_chunks — a 48-bit literal (`0x123456789ABC`), two
+ * chunks above its 32-bit base: `lui`+`addi` for `0x123456`, then
+ * `slli`+`addi` twice, the second chunk negative. Proves the chain composes
+ * past a single peel.
+ *
+ * @return void
+ */
+fn rat_wide_const_chains_two_chunks() {
+    let text = rat_const_dump(20015998343868)
+    teko::assert::str_contains(text, "lui %0, #291")
+    teko::assert::str_contains(text, "addi %0, %0, #1110")
+    teko::assert::str_contains(text, "slli %0, %0, #12")
+    teko::assert::str_contains(text, "addi %0, %0, #1930")
+    teko::assert::str_contains(text, "addi %0, %0, #-1348")
+}
+
+#test
+/**
+ * rat_peels_down_to_a_thirty_two_bit_base — the decomposition itself: how many
+ * 12-bit chunks each literal sheds before its remainder fits the `lui`+`addi`
+ * base, and what that base is. `2^62` is the deepest case the RV64 range holds
+ * (three peels), and a literal already inside 32 bits sheds none.
+ *
+ * @return void
+ */
+fn rat_peels_down_to_a_thirty_two_bit_base() {
+    teko::assert::is_true(bigimm_peel_count_riscv(74565) == 0)
+    teko::assert::is_true(bigimm_peel_count_riscv(2147483648) == 1)
+    teko::assert::is_true(peel_imm12_n_riscv(2147483648, 1) == 524288)
+    teko::assert::is_true(bigimm_peel_count_riscv(20015998343868) == 2)
+    teko::assert::is_true(peel_imm12_n_riscv(20015998343868, 2) == 1193046)
+    teko::assert::is_true(bigimm_peel_count_riscv(4611686018427387904) == 3)
+    teko::assert::is_true(peel_imm12_n_riscv(4611686018427387904, 3) == 67108864)
+}
+
+#test
+/**
+ * rat_peel_recomposes_its_input — the invariant every chunk step rests on:
+ * `val == peel_imm12_riscv(val) * 4096 + lo12_of_bits_riscv(val)`, i.e. exactly
+ * what the emitted `slli`+`addi` pair recomputes at runtime. Probed on both
+ * signs and on a value whose low chunk is negative.
+ *
+ * @return void
+ */
+fn rat_peel_recomposes_its_input() {
+    teko::assert::is_true(rat_peel_recomposes(2147483648))
+    teko::assert::is_true(rat_peel_recomposes((0) - (2147483649)))
+    teko::assert::is_true(rat_peel_recomposes(20015998343868))
+    teko::assert::is_true(rat_peel_recomposes((0) - (1099511627783)))
+    teko::assert::is_true(rat_peel_recomposes(74565))
+    teko::assert::is_true(rat_peel_recomposes(0))
+}
+
+/**
+ * rat_peel_recomposes — whether one peel step is exactly invertible for `val`:
+ * the high half times `2^12` plus the signed low chunk is `val` again.
+ *
+ * @param i64 val  the probe value (kept well inside the i64 range so the
+ *                 recomposing multiply cannot overflow)
+ * @return bool  whether the peel round-trips
+ */
+fn rat_peel_recomposes(val: i64) -> bool {
+    let hi = peel_imm12_riscv(val)
+    let lo = lo12_of_bits_riscv(u64_bits_of(val)) to i64
+    (hi * RISCV_IMM12_MODULUS) + lo == val
+}
+
 #test
 fn rat_value_compares_lower_per_condition() {
     teko::assert::str_contains(rat_cmp_dump(lir::LBinOp::ICmpLtS), "slt %2, %0, %1")

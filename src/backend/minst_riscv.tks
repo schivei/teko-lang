@@ -7,15 +7,16 @@ use teko::lir
  * `Xor`/`Sll`/`Srl`/`Sra`, plus the M-extension `Mul`/`Div`/`Divu`/`Rem`/
  * `Remu`) each name a single native RV64 instruction — UNLIKE x86, RISC-V is
  * three-address and its division/remainder are one M-extension instruction
- * apiece (§4.2/§4.3). The immediate roots (`Addi`/`Xori`/`Sltiu`) cover the
- * low-12 add of the `lui`+`addi` constant pair, the `not` (`xori rd, rs, -1`),
- * and the set-less-than-immediate step of the value-compare sequence (§4.4).
- * Set-less-than register-register (`slt`/`sltu`) is its own `MSltRiscv` case,
- * so it rides no member here.
+ * apiece (§4.2/§4.3). The immediate roots (`Addi`/`Xori`/`Sltiu`/`Slli`) cover
+ * the low-12 add of the `lui`+`addi` constant pair, the `not`
+ * (`xori rd, rs, -1`), the set-less-than-immediate step of the value-compare
+ * sequence (§4.4), and the 12-bit left shift the 64-bit `li` sequence folds
+ * between its chunks (`emit_bigimm_riscv`). Set-less-than register-register
+ * (`slt`/`sltu`) is its own `MSltRiscv` case, so it rides no member here.
  *
  * @since #387 B2-2
  */
-pub type MAluOpRiscv = enum { Add; Sub; And; Or; Xor; Sll; Srl; Sra; Mul; Div; Divu; Rem; Remu; Addi; Xori; Sltiu }
+pub type MAluOpRiscv = enum { Add; Sub; And; Or; Xor; Sll; Srl; Sra; Mul; Div; Divu; Rem; Remu; Addi; Xori; Sltiu; Slli }
 
 /**
  * MMemSizeRiscv — the access width an `MLoadRiscv`/`MStoreRiscv` transfers, in
@@ -50,8 +51,8 @@ pub type RelocKindRiscv = enum { Call; PcRelHi20; PcRelLo12; Branch; Jal; Abs64 
  * MLiRiscv — `dst = imm` for a small immediate that fits the signed 12-bit
  * window (`addi rd, x0, imm12`), the selection of a small `LConstInt`. A
  * 32-bit literal splits into `MLuiRiscv`+`MAluIRiscv` and a 64-bit literal
- * hits the `B2-bigimm` honest-stop, so this case carries only the ±2048 form
- * (§4.1).
+ * extends that pair with `slli`+`addi` chunk steps (`emit_bigimm_riscv`), so
+ * this case carries only the ±2048 form (§4.1).
  *
  * @since #387 B2-2
  */
@@ -922,7 +923,7 @@ fn alu_op_name_riscv(op: MAluOpRiscv) -> str {
         Add => "add"; Sub => "sub"; And => "and"; Or => "or"; Xor => "xor"
         Sll => "sll"; Srl => "srl"; Sra => "sra"
         Mul => "mul"; Div => "div"; Divu => "divu"; Rem => "rem"; Remu => "remu"
-        Addi => "addi"; Xori => "xori"; Sltiu => "sltiu"
+        Addi => "addi"; Xori => "xori"; Sltiu => "sltiu"; Slli => "slli"
     }
 }
 
