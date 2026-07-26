@@ -21,7 +21,10 @@
 # scripts/build_with_seed_fallback.sh stands on never become reachable from main. A host that
 # finds NO usable published seed therefore has no rung at all. bootstrap/seeds/ holds one
 # xz-compressed seed per HOST THAT RUNS THE COMPILER (five: the GitHub-hosted runner set), cut
-# by the `seeds` job in native.yml with scripts/cross_compile_seeds.sh. This script falls back
+# cut at BUMP TIME from the artifacts of a green CI run (owner ruling 2026-07-26 on provenance;
+# the old `seeds` job that cut them with a cross-compiler is deleted, and so is the
+# scripts/cross_compile_seeds.sh it called, which was already absent from the tree). This script
+# falls back
 # to that blob, and the fallback verifies the archive's sha256 against
 # bootstrap/seeds/SEEDS.sha256 BEFORE decompressing anything.
 #
@@ -35,7 +38,7 @@
 # Environment:
 #   TEKO_SEED_REPO              owner/repo to seed from (default: teko-org/teko-lang).
 #   TEKO_SEED_PREFER_COMMITTED  set to 1 to take the committed bootstrap/seeds/ blob FIRST and
-#                               skip the release probe entirely. The debut lane in native.yml
+#                               skip the release probe entirely. The debut lane in pr.yml
 #                               sets it so the fallback branch is itself exercised on every full
 #                               run — a fallback nothing takes is a fallback nobody has tested.
 #   TEKO_SEEDS_DIR              where the committed seeds live (default: bootstrap/seeds).
@@ -105,7 +108,8 @@ sha256_of() {
 # PUBLISHED TARGET (six Linux ones, glibc x musl x three arches), a seed names a HOST THAT RUNS
 # THE COMPILER. musl and riscv64 are cross-compiled outputs with no runner behind them, so a
 # request for one maps onto the host that actually executes there (x86_64/arm64) or onto nothing
-# (riscv64 — that lane builds gen1 natively on x86_64 instead; see native.yml's riscv64-qemu).
+# (riscv64 — no runner exists, so pr.yml's riscv64 producers stand on x86_64 hardware and only
+# the gcc they drive is riscv64).
 host_seed_label() {
   case "$1" in
     linux-x86_64|linux-x86_64-*)     printf '%s' "linux-x86_64" ;;
