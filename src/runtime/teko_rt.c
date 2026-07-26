@@ -1658,6 +1658,45 @@ tk_ffi_ures tk_rt_setenv(tk_str name, tk_str value) {
     return (tk_ffi_ures){ .ok = true };
 }
 
+// tk_sort_names — byte-lexicographic insertion sort over an owned tk_str array.
+//
+// EXISTS TO MAKE THE COMPILER DETERMINISTIC, not for tidiness. `readdir` returns entries in an
+// order the filesystem chooses; ext4, overlayfs, APFS and tmpfs all disagree. `discover.tks`
+// walks exactly that order and never sorts, so the order in which a project's sources are
+// discovered — and therefore the order declarations are collected and types resolved — was a
+// property of the machine, not of the tree.
+//
+// It stayed invisible while a regression project held one or two files. Folding the corpus into
+// nine projects took `qualified_optional` to 43, and it surfaced immediately: the musl lane
+// failed with `q089_iface_value_hetero_slice/body.tks:57:8: array element type mismatch` on a
+// tree that compiled clean on every other lane and locally.
+//
+// The stake is larger than that red. gen2 == gen3 and the `nightly === gen1` reproducibility gate
+// both assert that the same tree yields the same bytes; a machine-dependent discovery order makes
+// that false by construction, and it would have failed as "non-reproducible build" with no
+// visible cause. Sorting at this boundary fixes it for EVERY caller of list_dir at once, which is
+// why it lives here and not in the one walker that happened to expose it.
+//
+// Insertion sort: directory sizes here are tens of entries, and a simple algorithm with no
+// allocation is worth more than an asymptotic win nothing will ever notice.
+static void tk_sort_names(tk_str *a, size_t n) {
+    for (size_t i = 1; i < n; i += 1) {
+        tk_str key = a[i];
+        size_t j = i;
+        while (j > 0) {
+            tk_str prev = a[j - 1];
+            size_t m = prev.len < key.len ? prev.len : key.len;
+            int c = 0;
+            if (m > 0) c = memcmp(prev.ptr, key.ptr, m);
+            if (c == 0) c = prev.len < key.len ? -1 : (prev.len > key.len ? 1 : 0);
+            if (c <= 0) break;
+            a[j] = prev;
+            j -= 1;
+        }
+        a[j] = key;
+    }
+}
+
 tk_ffi_slres tk_rt_list_dir(tk_str path) {
     char *p = tk_cstr(path);
     DIR *d = opendir(p);
@@ -1678,6 +1717,7 @@ tk_ffi_slres tk_rt_list_dir(tk_str path) {
         n += 1;
     }
     closedir(d);
+    tk_sort_names(out, n);
     return (tk_ffi_slres){ .ok = true, .ptr = out, .len = (uint64_t)n };
 }
 
