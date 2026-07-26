@@ -25,27 +25,44 @@
 # release. The `file` architecture assertion still guards a wrong-arch/failed compile; the
 # release-cross-smoke job (native.yml) additionally RUNS the x86_64 artifact so a future
 # miscompile can never again pass a compile-only gate.
-# This is the SINGLE source of truth shared by two callers:
+# This is the SINGLE source of truth shared by THREE callers:
 #   • release.yml (mode=package) — builds + packages each target for publication;
 #   • native.yml  (mode=smoke)   — PR-CI: builds + arch-checks only, so a broken zig version or
-#                                  target is caught BEFORE merge (no qemu, no publish).
+#                                  target is caught BEFORE merge (no qemu, no publish);
+#   • tests.yml   (mode=smoke, ONE label) — the per-ARTIFACT test lane (owner ruling 2026-07-26:
+#                                  "deveriam ser 9"): each Linux lane builds exactly the artifact
+#                                  it is named after and then RUNS `teko test .` with it. The
+#                                  filter exists so a lane pays for one `zig cc`, not six; the
+#                                  triple/flag table stays here, unduplicated, which is the whole
+#                                  reason this file is the single source of truth.
 #
 # Requires `zig` on PATH (the caller installs the pinned version). Uses package_release.sh for
 # packaging so the smoke and the release exercise identical build flags.
 #
-# Usage: cross_compile_linux.sh <teko_c> <src_dir> <out_dir> [mode]
+# Usage: cross_compile_linux.sh <teko_c> <src_dir> <out_dir> [mode] [labels…]
 #   teko_c   path to the emitted teko.c
 #   src_dir  the repo's src/ (teko_rt.*, assert.*, win32_compat.h)
 #   out_dir  where packaged archives land (mode=package) or scratch (mode=smoke)
 #   mode     "package" (default) or "smoke"
+#   labels…  optional whitespace-separated subset of the six labels to build; empty/absent
+#            means ALL SIX (the release and the six-target smoke keep their old behaviour
+#            with no argument change). A label that matches NOTHING is a hard error, never a
+#            silent no-op — a typo that built zero targets would leave the caller's `gd-<label>/`
+#            missing and the failure would surface far from its cause.
+#
+# Each built target lands in ./gd-<label>/teko (CWD-relative), regardless of mode.
 #
 # POSIX sh only.
 set -eu
 
-TEKO_C="${1:?usage: cross_compile_linux.sh <teko_c> <src_dir> <out_dir> [mode]}"
+TEKO_C="${1:?usage: cross_compile_linux.sh <teko_c> <src_dir> <out_dir> [mode] [labels…]}"
 SRC="${2:?missing src_dir}"
 OUT="${3:?missing out_dir}"
 MODE="${4:-package}"
+# `shift 4` would ABORT under `set -e` on a 3-argument call, and a `|| true` there would leave
+# `$*` holding the first three arguments — i.e. silently reinterpret <teko_c> as a label filter.
+# Guard on `$#` instead: fewer than five arguments means "no filter", explicitly.
+if [ "$#" -gt 4 ]; then shift 4; ONLY="$*"; else ONLY=""; fi
 
 mkdir -p "$OUT"
 
@@ -58,11 +75,27 @@ mkdir -p "$OUT"
 TEKO_VERSION_TAG="$(sh scripts/derive_version.sh 2>/dev/null || echo v0.0.0.0-dev)"
 TEKO_VERSION_STRING="${TEKO_VERSION_TAG#v}"
 
+BUILT=""
+
+# wanted LABEL — true when LABEL is in the caller's filter (or the filter is empty = all six).
+wanted() {
+    [ -z "$ONLY" ] && return 0
+    for w in $ONLY; do
+        [ "$w" = "$1" ] && return 0
+    done
+    return 1
+}
+
 # build_one LABEL TRIPLE STATIC EMIT_BUNDLE ARCH_KEYWORD
 #   STATIC=1 → -static (musl); EMIT_BUNDLE=1 → package_release.sh also emits the portable src
 #   bundle (once, on x86_64-glibc). ARCH_KEYWORD is grepped in `file` output to assert the target.
 build_one() {
     label="$1"; triple="$2"; static="$3"; bundle="$4"; arch_kw="$5"
+    if ! wanted "$label"; then
+        echo "--- $label skipped (not in the requested label set: $ONLY)"
+        return 0
+    fi
+    BUILT="$BUILT $label"
     echo "=== $label ($triple, static=$static) ==="
     gd="gd-$label"
     rm -rf "$gd"; mkdir -p "$gd"
@@ -91,4 +124,19 @@ build_one linux-arm64-musl    aarch64-linux-musl      1 0 "aarch64"
 build_one linux-riscv64-glibc riscv64-linux-gnu.2.28  0 0 "RISC-V"
 build_one linux-riscv64-musl  riscv64-linux-musl      1 0 "RISC-V"
 
-echo "cross_compile_linux: all six Linux targets OK (mode=$MODE)"
+# A filter naming a label that does not exist built NOTHING for it. Say so and fail: the caller
+# is about to look for a `gd-<label>/teko` that was never written, and diagnosing THAT is much
+# harder than reading the typo here.
+for w in $ONLY; do
+    case " $BUILT " in
+        *" $w "*) ;;
+        *) echo "cross_compile_linux: '$w' is not one of the six Linux labels (built:$BUILT)" >&2
+           exit 1 ;;
+    esac
+done
+
+if [ -z "$ONLY" ]; then
+    echo "cross_compile_linux: all six Linux targets OK (mode=$MODE)"
+else
+    echo "cross_compile_linux: requested targets OK (mode=$MODE, built:$BUILT)"
+fi
