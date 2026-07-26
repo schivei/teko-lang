@@ -111,8 +111,24 @@ When (entry verbs — classify the exercise mode, §4).
 
 Then (expectations):
 - `exit` = `<int>` → `Tkr.exit`
-- `stdout` / `stdout bytes` / `stdout sha256` → `Tkr.stdout` (Literal / HEX-Literal / Sha256)
-- `stderr` / `stderr sha256` → `Tkr.stderr`
+- `stdout` / `stdout bytes` / `stdout sha256` / `stdout pattern` → `Tkr.stdout`
+  (Literal / HEX-Literal / Sha256 / Pattern)
+- `stderr` / `stderr sha256` / `stderr bytes` / `stderr pattern` → `Tkr.stderr`
+- `<stream> pattern` = `"<regex>"` → a `teko::regex` pattern SEARCHED for anywhere in the
+  stream. It is a search, not a full match: write `^`/`$` when you want the strict reading
+  (owner ruling 2026-07-26 — an implicit total match was refused, because it would force
+  every pattern to be written `.*<it>.*` while stopping nobody from writing exactly that).
+  The engine is `src/regex/regex.tks`: literals, `.`, `*` `+` `?`, `[...]` classes, `|`,
+  `(...)`, and the `^`/`$` anchors. There are **no escape sequences** — a `\` in a pattern
+  is a compile error, so a pattern cannot match a literal `.` or `(` today. A pattern that
+  does not compile fails its scenario as a broken pattern, never as a mismatch.
+  Use it where the stream is only PARTLY stable across platforms — the canonical case is a
+  deliberate panic, whose marker line is fixed but whose backtrace is a symbol list on glibc
+  and a one-line notice under musl:
+  `Then it traps` + `And stderr pattern = "teko: deliberate panic: <reason>"`.
+  That pair replaced `Then exit = 134` in every panic scenario: 134 is 128+SIGABRT
+  *synthesised by a POSIX shell*, never a value Teko chose, and Windows has no such
+  convention (PR #94). See `TK_PANIC_MARKER` in `src/runtime/teko_rt.h`.
 - `artifact sha256` = `"<hex>"` (with an `on "<os-arch>"` prefix) → a `[golden.<os-arch>]`
   byte golden (`TkrGolden`)
 - `artifact exists` (valueless) → assert the declared artifact FILE was produced (the
@@ -136,7 +152,7 @@ pending` skip otherwise):
 | `built and run` | `binary` (exe) | exit + stdout/stderr of the run child | now (default path) |
 | `compiled` | any | build exit 0 + declared streams (no run) | now |
 | `compilation fails` | (source) | build fails + `diagnostic` substring | now |
-| `it traps` (as `Then it traps`) | `binary` | non-zero exit only | now |
+| `it traps` (as `Then it traps`) | `binary` | non-zero exit only (pair with `stderr pattern` to say WHICH trap) | now |
 | `packaged` | `package` → `.tkl` | build exit 0 + `artifact exists` (the `.tkl`) | now (`project.tks` C7.12 emits `.tkl` — a codec path) |
 | `built as static library` | `static` → `.a` | build exit 0 + `artifact exists` | .30 after **KP16** (own-native `.a` archive writer) |
 | `built as shared library` | `shared` → `.so`/`.dylib`/`.dll` | build exit 0 + `artifact exists` | .30 after **KP16+KP17** (`.o` + system-`ld -shared`) |

@@ -1,6 +1,14 @@
 // src/regex/regex_test.tkt — tests for teko::regex (ROUND 0 minimal engine).
 // Covers: literal match, `.`, `*`/`+`/`?`, character classes, alternation, grouping,
 // anchors — both matching AND non-matching cases, plus a couple of bad-pattern cases.
+//
+// The NON-matching half is the half that matters, and it is not symmetry for its own sake.
+// This engine is now part of the TEST GATE (see the ⚠ note atop regex.tks): the regression
+// runner's `Then <stream> pattern = "…"` step decides other scenarios' verdicts by calling
+// `is_match`. A bug that matches too little makes a good scenario go red — loud, and fixed
+// the same day. A bug that matches too much makes a BROKEN scenario go green, and nothing
+// downstream will ever report it. So every operator a `.tkr` may spell is asserted here in
+// both directions: what it accepts, and — the load-bearing one — what it must refuse.
 
 // helper (not a test): unwrap `bool | error` from is_match_pattern — a bad pattern in
 // these matching tests is itself a test failure (the pattern is meant to compile).
@@ -11,12 +19,93 @@ fn matched(pattern: str, input: str) -> bool {
     }
 }
 
+// helper (not a test): true when `pattern` is REJECTED at compile time. The input is
+// irrelevant — a pattern that does not parse never reaches the matcher.
+fn rejected(pattern: str) -> bool {
+    match teko::regex::is_match_pattern(pattern, "any input at all") {
+        bool => false
+        error => true
+    }
+}
+
+// --- literals + the search (not full-match) semantics `is_match` promises ---
+
+#test
+fn literal_searches_anywhere_in_the_input() {
+    teko::assert::is_true(matched("panic", "6:17: teko: deliberate panic: impossible conversion"))
+    teko::assert::is_true(matched("6:17", "6:17: teko: deliberate panic: impossible conversion"))
+    teko::assert::is_false(matched("panicked", "6:17: teko: deliberate panic: impossible conversion"))
+}
+
+// The pattern shape `.tkr` panic scenarios actually carry: marker + reason, asserted against
+// a stderr that also holds a source position ahead of it and a backtrace after it — the two
+// parts that differ per platform (glibc prints frames, musl prints one notice). Matching must
+// survive both, and must still refuse the WRONG reason.
+#test
+fn panic_marker_pattern_survives_position_and_backtrace() {
+    let glibc = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace:\n./p(+0x1234) [0x55]\n"
+    let musl  = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace unavailable on this platform (no execinfo)\n"
+    teko::assert::is_true(matched("teko: deliberate panic: impossible conversion", glibc))
+    teko::assert::is_true(matched("teko: deliberate panic: impossible conversion", musl))
+    teko::assert::is_false(matched("teko: deliberate panic: integer overflow", glibc))
+    teko::assert::is_false(matched("teko: deliberate panic: impossible conversion", "teko: FATAL signal\n"))
+}
+
+// --- anchors: the escape hatch a scenario uses when it wants exactness ---
+
+#test
+fn start_anchor_refuses_a_mid_string_hit() {
+    teko::assert::is_true(matched("^teko", "teko: deliberate panic: boom"))
+    teko::assert::is_false(matched("^panic", "teko: deliberate panic: boom"))
+}
+
+#test
+fn end_anchor_refuses_a_trailing_remainder() {
+    teko::assert::is_true(matched("boom$", "teko: deliberate panic: boom"))
+    teko::assert::is_false(matched("boom$", "teko: deliberate panic: boom\n"))
+    teko::assert::is_false(matched("panic$", "teko: deliberate panic: boom"))
+}
+
+#test
+fn both_anchors_together_demand_the_whole_input() {
+    teko::assert::is_true(matched("^abc$", "abc"))
+    teko::assert::is_false(matched("^abc$", "abcd"))
+    teko::assert::is_false(matched("^abc$", "zabc"))
+}
+
+// --- `.` (any ONE codepoint — never zero, never a run) ---
+
+#test
+fn dot_matches_exactly_one_codepoint() {
+    teko::assert::is_true(matched("^a.c$", "abc"))
+    teko::assert::is_false(matched("^a.c$", "ac"))
+    teko::assert::is_false(matched("^a.c$", "abbc"))
+}
+
+// --- `*` / `+` (the pair whose difference is the whole "matches too much" risk) ---
+
+#test
+fn star_accepts_zero_but_plus_demands_one() {
+    teko::assert::is_true(matched("^ab*c$", "ac"))
+    teko::assert::is_true(matched("^ab*c$", "abbbc"))
+    teko::assert::is_false(matched("^ab+c$", "ac"))
+    teko::assert::is_true(matched("^ab+c$", "abbbc"))
+}
+
+#test
+fn dot_star_is_not_a_free_pass() {
+    teko::assert::is_true(matched("^a.*z$", "abcz"))
+    teko::assert::is_true(matched("^a.*z$", "az"))
+    teko::assert::is_false(matched("^a.*z$", "abc"))
+}
+
 // --- `?` (zero or one) ---
 
 #test
 fn opt_matches_zero_or_one() {
     teko::assert::is_true(matched("colou?r", "color"))
     teko::assert::is_true(matched("colou?r", "colour"))
+    teko::assert::is_false(matched("^colou?r$", "colouur"))
 }
 
 // --- character classes ---
@@ -25,6 +114,35 @@ fn opt_matches_zero_or_one() {
 fn class_negation_matches() {
     teko::assert::is_true(matched("[^0-9]", "x"))
     teko::assert::is_false(matched("^[^0-9]+$", "abc123"))
+}
+
+#test
+fn class_range_accepts_only_its_members() {
+    teko::assert::is_true(matched("^[0-9]+$", "4711"))
+    teko::assert::is_false(matched("^[0-9]+$", "47a"))
+    teko::assert::is_false(matched("^[0-9]+$", ""))
+    teko::assert::is_true(matched("^[a-z0-9_]+$", "exit_code_7"))
+    teko::assert::is_false(matched("^[a-z0-9_]+$", "exit-code-7"))
+}
+
+// --- alternation ---
+
+#test
+fn alternation_takes_either_branch_and_no_third() {
+    teko::assert::is_true(matched("^cat|dog$", "cat"))
+    teko::assert::is_true(matched("^cat|dog$", "dog"))
+    teko::assert::is_false(matched("^(cat|dog)$", "cow"))
+    teko::assert::is_true(matched("panic: (boom|impossible conversion)", "teko: deliberate panic: boom"))
+    teko::assert::is_false(matched("panic: (boom|impossible conversion)", "teko: deliberate panic: integer overflow"))
+}
+
+// --- grouping (a group is what a quantifier binds to; without it `+` binds one atom) ---
+
+#test
+fn group_binds_the_quantifier_to_the_whole_group() {
+    teko::assert::is_true(matched("^(ab)+$", "abab"))
+    teko::assert::is_false(matched("^(ab)+$", "aba"))
+    teko::assert::is_false(matched("^ab+$", "abab"))
 }
 
 // --- full_match (both ends anchored regardless of literal ^/$) ---
@@ -37,4 +155,27 @@ fn full_match_requires_the_whole_input() {
     }
     teko::assert::is_true(teko::regex::full_match(re, "abbc"))
     teko::assert::is_false(teko::regex::full_match(re, "xabbc"))
+}
+
+// --- bad patterns are REJECTED, never silently treated as literals ---
+//
+// This is the gate's other blind spot. A malformed pattern that quietly degraded to "match
+// nothing" would make a scenario red for the wrong reason; one that degraded to "match
+// everything" would make it green for no reason at all. Both are ruled out by refusing to
+// compile — which is also why `.tkr` patterns cannot yet contain a `\`.
+
+#test
+fn malformed_patterns_are_compile_errors() {
+    teko::assert::is_true(rejected("a("))
+    teko::assert::is_true(rejected("a)"))
+    teko::assert::is_true(rejected("[a-"))
+    teko::assert::is_true(rejected("[z-a]"))
+    teko::assert::is_true(rejected("*x"))
+    teko::assert::is_false(rejected("^a(b|c)*d$"))
+}
+
+#test
+fn escape_sequences_are_refused_not_ignored() {
+    teko::assert::is_true(rejected("a\\.c"))
+    teko::assert::is_true(rejected("\\d+"))
 }
