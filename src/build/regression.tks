@@ -2029,9 +2029,15 @@ fn regr_dir_has_single_tkp(regr_dir: str) -> bool {
  *                   multi-file fallback has no single `.tkp` project or no declared `diagnostic`
  * @since 0.3.1
  */
-fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> CapResult | error {
-    if t.source_inline.len > 0 { return compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix) }
-    if t.source_file.len > 0 { return compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix) }
+fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrArtifact | error {
+    if t.source_inline.len > 0 {
+        let comp = compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix)
+        return TkrArtifact { comp = comp; binp = ""; built = built; fresh = true }
+    }
+    if t.source_file.len > 0 {
+        let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix)
+        return TkrArtifact { comp = comp; binp = ""; built = built; fresh = true }
+    }
     match guard_no_project_build_at_root(regr_dir, t) {
         error as e => return e
         null => { }
@@ -2039,7 +2045,13 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> Ca
     if !regr_dir_has_single_tkp(regr_dir) || t.diagnostic.len == 0 {
         return error { message = "a compile-fail scenario with no `Given source`/`Given source inline` needs a `.tkp` project in " ~ regr_dir ~ " and a `Then diagnostic`" }
     }
-    compile_regressive(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix)
+    // The PROJECT's own failing build, CACHED across every scenario of the file exactly as a
+    // passing project build is. A `diagnostics` project holds one source file per rejected
+    // construct and the compiler reports EVERY diagnostic in ONE build (0.3.1 all-diagnostics
+    // ruling), so N scenarios pin N diagnostics against that single build — never N builds.
+    let fresh = !regr_built_serves(built, RegrBuildKind::Project)
+    let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
+    TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = fresh }
 }
 
 /**
@@ -2057,43 +2069,52 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str) -> Ca
  * @return          the aggregate compile-fail verdict
  * @since 0.3.0.30
  */
-fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) -> FeatureRunResult {
+fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt) -> FeatureRunResult {
     mut rows: []RowTiming = teko::list::empty()
+    mut cur = built
     mut si: u64 = 0
     loop {
         if si >= feat.scenarios.len { break }
         let sc = feat.scenarios[si]
         if tkb_scenario_is_declarative(sc) { si = si + 1; continue }
-        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return compile_fail_result(regr_fail(e.message), rows) }
+        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return compile_fail_result_at(regr_fail(e.message), rows, cur) }
         mut ri: u64 = 0
         loop {
             if ri >= specs.len { break }
             let t = specs[ri]
             let row_prefix = $"{prefix}.{si}.{ri}"
-            let comp = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix) { CapResult as c => c; error as e => return compile_fail_result(regr_fail($"{sc.name}[{ri}]: {e.message}"), rows) }
+            let art = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix, cur) { TkrArtifact as a => a; error as e => return compile_fail_result_at(regr_fail($"{sc.name}[{ri}]: {e.message}"), rows, cur) }
+            cur = art.built
+            let comp = art.comp
             let oc = check_compile_fail(t, comp)
-            let times = PhaseTimes { harness_ns = comp.harness_ns; compile_ns = comp.child_ns; run_ns = 0; builds = 1 }
+            let times = if art.fresh {
+                PhaseTimes { harness_ns = comp.harness_ns; compile_ns = comp.child_ns; run_ns = 0; builds = 1 }
+            } else {
+                phase_zero()
+            }
             rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = false; times = times })
-            if !oc.ok { return compile_fail_result(regr_fail($"{sc.name}[{ri}]: {oc.message}"), rows) }
+            if !oc.ok { return compile_fail_result_at(regr_fail($"{sc.name}[{ri}]: {oc.message}"), rows, cur) }
             ri = ri + 1
         }
         si = si + 1
     }
-    compile_fail_result(regr_pass(), rows)
+    compile_fail_result_at(regr_pass(), rows, cur)
 }
 
 /**
- * compile_fail_result — a `FeatureRunResult` for a COMPILE-FAIL feature: its verdict and its measured
- * rows, with the shared project cache left untouched (a compile-fail feature never builds the
- * regressor project — every row compiles its own snippet).
+ * compile_fail_result_at — a `FeatureRunResult` for a COMPILE-FAIL feature: its verdict, its
+ * measured rows, and the shared project cache THREADED BACK. A compile-fail feature does build the
+ * regressor project when its scenarios declare no source of their own (the `diagnostics` shape), so
+ * the slot it filled must reach the next feature — otherwise every feature would rebuild it.
  *
- * @param oc    the feature's verdict
- * @param rows  the rows measured before the verdict was reached
- * @return      the feature result
+ * @param oc     the feature's verdict
+ * @param rows   the rows measured before the verdict was reached
+ * @param built  the shared project cache as this feature leaves it
+ * @return       the feature result
  * @since 0.3.1
  */
-fn compile_fail_result(oc: RegrOutcome, rows: []RowTiming) -> FeatureRunResult {
-    FeatureRunResult { outcome = oc; built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = "" }; rows = rows }
+fn compile_fail_result_at(oc: RegrOutcome, rows: []RowTiming, built: RegrBuilt) -> FeatureRunResult {
+    FeatureRunResult { outcome = oc; built = built; rows = rows }
 }
 
 /**
@@ -2191,8 +2212,7 @@ fn file_run_of(oc: RegrOutcome, rows: []RowTiming) -> TkrFileRun {
  */
 fn run_one_feature(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt, groups: RegrGroups) -> FeatureRunResult {
     if tkr_feature_is_compile_fail(feat) {
-        let cf = tkr_run_compile_fail(exe, regr_dir, feat, prefix)
-        return FeatureRunResult { outcome = cf.outcome; built = built; rows = cf.rows }
+        return tkr_run_compile_fail(exe, regr_dir, feat, prefix, built)
     }
     tkr_run_scenarios(exe, regr_dir, feat, prefix, built, groups)
 }
