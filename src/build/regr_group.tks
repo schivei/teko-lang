@@ -41,7 +41,10 @@
  *     virtual main a top-level `return e` sets the EXIT CODE, and inside the `entry()` function the
  *     fold moves those statements into it would return a value from a `void` function. One scenario
  *     of the .31 corpus.
- *   - a scenario built by the OWN (native) backend — `REGR_GROUP_UNGROUPABLE_BACKEND_ENV`.
+ *   - a scenario built by the OWN (native) backend, UNLESS its group is SOLO — that backend cannot
+ *     lower a dispatcher, so it may share a build only with rows carrying the byte-identical
+ *     source, which is emitted verbatim with no dispatcher at all (`regr_group_solo`,
+ *     `regr_group_lone_source`).
  *
  * WHY A CONFIGURATION CAN STILL NEED SEVERAL BUILDS (`regr_group_for_row`). Namespaces answer the
  * bare-name collision for everything the language resolves canonically — the `di_same_name_cross_ns`
@@ -106,23 +109,24 @@ const REGR_GROUP_UNKNOWN_ENTRY_EXIT: i32 = 97
 const REGR_GROUP_MIN_MEMBERS: u64 = 2
 
 /**
- * REGR_GROUP_UNGROUPABLE_BACKEND_ENV — the child-env token whose presence makes a row ungroupable:
- * the OWN (native) backend selector that `Given backend = "own"` lowers to (`tkr_backend_env`).
+ * REGR_GROUP_OWN_BACKEND_ENV — the child-env token the OWN (native) backend selector lowers to
+ * (`tkr_backend_env`). A group carrying it must be SOLO (`regr_group_solo`).
  *
- * A group needs a DISPATCHER, and a dispatcher needs to read a selector and compare it — and the
- * own backend can lower none of the three ways to do that today. Measured, not assumed, on the .31
- * corpus: `teko::env::var` returns `str | error` and the backend stops with "unknown variant case
- * `str`"; `teko::env::args` stops with "fat-pointer receiver `call` not yet lowered (N2)"; a `match`
- * over the union stops with "fat-pointer receiver `match-expression` not yet lowered (N2)". The
- * fifteen own-backend rows are exactly the tiny arithmetic programs that stay inside what the
- * backend can lower, which is why they pass one build at a time and could not survive a dispatcher.
+ * A multi-member group needs a DISPATCHER, and a dispatcher needs to read a selector and compare it
+ * — none of which the own backend can lower. RE-MEASURED 2026-07-26, not inherited: `teko::env::var`
+ * returns `str | error` and a `match` over it stops with "fat-pointer receiver `match-expression`
+ * not yet lowered (N2)"; runtime string interpolation stops the same way. What the backend CAN
+ * lower is the whole of the corpus's arithmetic, control flow, `defer`, labelled loops, `match`,
+ * null-unions, function calls and `println` of a LITERAL.
  *
- * This is a capability gate, not a policy: DELETE this constant and its test in
- * `regr_row_groupable` the day the native backend lowers a string compare plus either env or argv,
- * and those rows fold like every other. Until then the honest thing is to leave them their own
- * builds instead of failing a group build on every run to rediscover it.
+ * So an own-backend group is allowed on one condition: every member contributes the SAME source, so
+ * the generated project is that source verbatim and needs no dispatcher at all. That is not a
+ * loophole, it is the shape the corpus was restructured into — the sixteen own-backend
+ * differentials became one program that runs all of them and reports each on its own stdout line
+ * (`examples/regressions/cwd_build/cases/own_differential.tks`), which turned thirty per-scenario
+ * builds into two, one per target.
  */
-const REGR_GROUP_UNGROUPABLE_BACKEND_ENV: str = "TEKO_BACKEND=native"
+const REGR_GROUP_OWN_BACKEND_ENV: str = "TEKO_BACKEND=native"
 
 /**
  * REGR_GROUP_KEY_SEP — the separator joining a group key's parts (the target and each env token).
@@ -517,7 +521,6 @@ fn regr_row_groupable(regr_dir: str, t: Tkr) -> bool {
     if t.kind == TkrKind::CompileFail { return false }
     if t.dep_dir.len > 0 || t.in_place { return false }
     if t.check_wellformed || t.check_module_valid { return false }
-    if regr_env_has(t.env, REGR_GROUP_UNGROUPABLE_BACKEND_ENV) { return false }
     if target_toolchain_skip_reason(t.target).len > 0 { return false }
     let src = regr_row_source(regr_dir, t)
     if src.len == 0 { return false }
@@ -725,7 +728,20 @@ fn regr_plan_empty() -> RegrPlanAcc {
  * @param names  the row's declared bare top-level names
  * @return       the group to place the row in, or `acc.keys.len` for a fresh one
  */
+/**
+ * regr_group_solo — must a group with configuration `gkey` hold members of ONE source only? True for
+ * the own (native) backend, whose limits are stated on `REGR_GROUP_OWN_BACKEND_ENV`: it can compile
+ * any member of the corpus, but it cannot compile the DISPATCHER that a group of two DIFFERENT
+ * sources would need. A solo group is emitted as its single source verbatim, so no dispatcher
+ * exists to lower.
+ *
+ * @param gkey  the group's configuration key
+ * @return      true when the group may hold only one distinct source
+ */
+fn regr_group_solo(gkey: str) -> bool { teko::str::contains(gkey, REGR_GROUP_OWN_BACKEND_ENV) }
+
 fn regr_group_for_row(acc: RegrPlanAcc, gkey: str, names: []str) -> u64 {
+    if regr_group_solo(gkey) { return acc.keys.len }
     mut g: u64 = 0
     loop {
         if g >= acc.keys.len { break }
@@ -919,10 +935,54 @@ pub fn regr_plan_groups(m: Manifest, work: str) -> RegrGroupPlan {
  * @param g        the group index
  * @param dir      the group project directory
  */
+/**
+ * regr_group_lone_source — the single source of group `g` when EVERY member of it contributes that
+ * same one (so exactly one member carries a non-empty `source`), else `null`.
+ *
+ * A group in that shape needs no dispatcher and no `src/m<k>/` module: it IS one program, and it is
+ * written exactly as `compile_snippet_text` writes a one-off snippet — declarations to
+ * `src/regr_decls.tks`, statements to `main.tks`, or the text verbatim when it declares nothing.
+ * That is what lets rows the OWN backend must build share one build, since a dispatcher is the one
+ * thing that backend cannot lower.
+ *
+ * @param members  every member binding (only those of group `g` are read)
+ * @param g        the group index
+ * @return         the group's single source, or `null` when it has several
+ */
+fn regr_group_lone_source(members: []RegrGroupMember, g: u64) -> str | null {
+    mut found = ""
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        let mb = members[i]
+        if mb.group == g && mb.source.len > 0 {
+            found = mb.source
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n == 1 { return found }
+    null
+}
+
 fn regr_group_write_project(members: []RegrGroupMember, g: u64, dir: str) {
     match sh_rm_rf(dir) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(dir, "/src/")) { error => { }; null => { } }
     match teko::io::write_file(dir ~ "/teko.tkp", regr_group_manifest_text()) { error => { }; null => { } }
+    match regr_group_lone_source(members, g) {
+        str as only => {
+            let split = split_snippet_decls_and_stmts(only)
+            if split.decls.len > 0 {
+                match teko::io::write_file(dir ~ "/src/regr_decls.tks", split.decls) { error => { }; null => { } }
+                match teko::io::write_file(dir ~ "/main.tks", split.stmts) { error => { }; null => { } }
+            } else {
+                match teko::io::write_file(dir ~ "/main.tks", only) { error => { }; null => { } }
+            }
+            return
+        }
+        null => { }
+    }
     mut dispatch = ""
     mut i: u64 = 0
     loop {
