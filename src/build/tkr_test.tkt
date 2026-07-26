@@ -312,3 +312,87 @@ fn tkr_rejects_malformed() {
     match tkr_first_lowered(bad_verb) { Tkr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
     teko::assert::is_true(tkr_parses("Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"))
 }
+
+#test
+/**
+ * tkr_lowers_stream_pattern — the `pattern` suffix on a stream noun lowers to
+ * `TkrMatchMode::Pattern` carrying the raw regex source, on stdout and stderr alike, and behind an
+ * `on "<os-arch>"` route as well as at top level.
+ *
+ * @return void
+ */
+fn tkr_lowers_stream_pattern() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"^teko: deliberate panic: boom$\"\n    And stdout pattern = \"[0-9]+\"\n    And on \"wasm\" stderr pattern = \"unreachable\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.kind == TkrKind::Trap)
+            teko::assert::is_true(t.stderr.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.stderr.text == "^teko: deliberate panic: boom$")
+            teko::assert::is_true(t.stdout.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.stdout.text == "[0-9]+")
+            teko::assert::is_true(t.expect.len == 1)
+            teko::assert::is_true(t.expect[0].stderr.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.expect[0].stderr.text == "unreachable")
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * tkr_trap_run — a `CapResult` for the panic-scenario verdict tests: the exit code the host
+ * happened to report, and the stderr the program actually wrote.
+ *
+ * @param exit    the exit code the run reported
+ * @param stderr  the captured stderr bytes
+ * @return        the captured outcome
+ */
+fn tkr_trap_run(exit: i32, stderr: str) -> CapResult {
+    CapResult { exit = exit; stdout = ""; stderr = stderr; harness_ns = 0; child_ns = 0; cmd = "" }
+}
+
+#test
+/**
+ * tkr_pattern_verdict_is_the_panic_proof — the migration this whole step exists for: `Then it
+ * traps` plus a `stderr pattern` accepts a deliberate panic under EITHER host convention (a POSIX
+ * shell's synthesised 128+SIGABRT, and the unrelated number Windows reports), because neither is
+ * consulted; and it still refuses the three ways the old `exit = 134` oracle could be fooled —
+ * the wrong guard firing, the binary never running at all, and a clean exit.
+ *
+ * @return void
+ */
+fn tkr_pattern_verdict_is_the_panic_proof() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: deliberate panic: impossible conversion\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            let glibc = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace:\n./p(+0x1234) [0x55]\n"
+            let musl = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace unavailable on this platform (no execinfo)\n"
+            teko::assert::is_true(check_run(t, HOST_TARGET, tkr_trap_run(134, glibc)).ok)
+            teko::assert::is_true(check_run(t, HOST_TARGET, tkr_trap_run(3, musl)).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(134, "6:17: teko: deliberate panic: integer overflow\n")).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(127, "")).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(0, glibc)).ok)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_uncompilable_pattern_fails_red — a `pattern` that is not a valid regex fails its scenario and
+ * says so in those words. The dangerous alternative would be a pattern that quietly matched
+ * everything: the runner judges every other scenario, so an oracle that cannot parse its own
+ * expectation must go red, never green (M.3).
+ *
+ * @return void
+ */
+fn tkr_uncompilable_pattern_fails_red() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: (\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            let v = check_run(t, HOST_TARGET, tkr_trap_run(134, "teko: (deliberate) panic\n"))
+            teko::assert::is_false(v.ok)
+            teko::assert::is_true(teko::str::contains(v.message, "not a valid regex"))
+        }
+        error => teko::assert::is_true(false)
+    }
+}

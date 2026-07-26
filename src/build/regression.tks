@@ -1281,7 +1281,13 @@ fn compile_failure_message(comp: CapResult) -> str {
 
 /**
  * match_stream — does the captured `actual` stream satisfy the expectation `m`? `Ignore` always
- * holds; `Literal` compares bytes exactly; `Sha256` compares the lowercase-hex sha256 of `actual`.
+ * holds; `Literal` compares bytes exactly; `Sha256` compares the lowercase-hex sha256 of `actual`;
+ * `Pattern` SEARCHES `actual` for the declared `teko::regex` pattern.
+ *
+ * A pattern that will not COMPILE is not a mismatch — it is a broken scenario, and this predicate
+ * cannot say so in a bool. It answers `false`, and `stream_match_failure` (which compiles the same
+ * pattern to build the message) is what distinguishes the two for the reader. Answering `false` is
+ * the safe half of the ambiguity: a scenario with an unparseable pattern goes RED, never green.
  *
  * @param m       the expectation
  * @param actual  the captured stream bytes
@@ -1291,7 +1297,43 @@ fn compile_failure_message(comp: CapResult) -> str {
 fn match_stream(m: TkrMatch, actual: str) -> bool {
     if m.mode == TkrMatchMode::Ignore { return true }
     if m.mode == TkrMatchMode::Literal { return actual == m.text }
+    if m.mode == TkrMatchMode::Pattern {
+        match teko::regex::is_match_pattern(m.text, actual) { bool as b => return b; error => return false }
+    }
     teko::crypto::sha256_hex_of(bytes_of_str(actual)) == m.text
+}
+
+/**
+ * stream_match_failure — the honest failure text for a stream that did not satisfy its
+ * expectation, or "" when it did.
+ *
+ * A `Pattern` expectation gets the long form, because the short one is unreadable: "stderr did not
+ * match the expectation" tells a CI reader neither what was demanded nor what arrived, and the
+ * whole reason patterns exist here is to diagnose output that differs BY PLATFORM — the one case
+ * where the person reading the log cannot reproduce the run. So the message quotes the pattern and
+ * the tail of the stream, the same evidence `exit_mismatch_message` learned to carry. A pattern
+ * that does not COMPILE is reported as exactly that, never as a mismatch: those are faults in
+ * opposite places (the scenario vs. the program), and M.3 forbids conflating them.
+ *
+ * @param m       the effective (override-resolved) expectation
+ * @param actual  the captured stream bytes
+ * @param stream  the stream's name, for the message ("stdout" / "stderr")
+ * @return        the failure message, or "" when the expectation holds
+ * @since 0.3.1
+ */
+fn stream_match_failure(m: TkrMatch, actual: str, stream: str) -> str {
+    if m.mode != TkrMatchMode::Pattern {
+        if match_stream(m, actual) { return "" }
+        return $"{stream} did not match the expectation"
+    }
+    let re = match teko::regex::compile(m.text) {
+        teko::regex::Regex as r => r
+        error as e => return $"{stream} pattern is not a valid regex: {e.message}\n  pattern: {m.text}"
+    }
+    if teko::regex::is_match(re, actual) { return "" }
+    let tail = tail_lines(actual, RUN_FAIL_TAIL_LINES)
+    if tail.len > 0 { return $"{stream} did not contain the declared pattern\n  pattern: {m.text}\n  captured {stream} tail:\n{tail}" }
+    $"{stream} did not contain the declared pattern\n  pattern: {m.text}\n  the program wrote nothing to {stream}"
 }
 
 /**
@@ -1428,8 +1470,10 @@ fn check_run(t: Tkr, target: str, run: CapResult) -> RegrOutcome {
     } else {
         if run.exit != exp_exit { return regr_fail(exit_mismatch_message(run, exp_exit)) }
     }
-    if !match_stream(so, run.stdout) { return regr_fail("stdout did not match the expectation") }
-    if !match_stream(se, run.stderr) { return regr_fail("stderr did not match the expectation") }
+    let out_bad = stream_match_failure(so, run.stdout, "stdout")
+    if out_bad.len > 0 { return regr_fail(out_bad) }
+    let err_bad = stream_match_failure(se, run.stderr, "stderr")
+    if err_bad.len > 0 { return regr_fail(err_bad) }
     regr_pass()
 }
 

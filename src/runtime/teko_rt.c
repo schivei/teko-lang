@@ -1401,8 +1401,8 @@ double tk_float_parse(tk_str s) {
 }
 
 _Noreturn void tk_panic(const char *msg) {
-    // Loud + non-zero (M.1): SIGABRT via abort() (conventional 134).
-    fputs("teko: panic: ", stderr);
+    // Loud + non-zero (M.1): the TK_PANIC_MARKER line first, then SIGABRT via abort().
+    fputs(TK_PANIC_MARKER, stderr);
     fputs(msg, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
@@ -1417,7 +1417,7 @@ _Noreturn void tk_panic(const char *msg) {
 // tolerating embedded NUL (exactly msg.len bytes to stderr). The error case `panic(error)` lowers
 // to its `.message` str at the call site.
 _Noreturn void tk_panic_str(tk_str msg) {
-    fputs("teko: panic: ", stderr);
+    fputs(TK_PANIC_MARKER, stderr);
     fwrite(msg.ptr, 1, msg.len, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
@@ -1446,7 +1446,9 @@ _Noreturn void tk_panic_cast(void) {
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
 
 // (C1.7) positioned OOB — print "line:col: " (same shape as the VM's vm_panic_pos), then the
-// canonical "teko: panic: index out of bounds\n", so VM and native locate identically.
+// canonical TK_PANIC_MARKER line for "index out of bounds", so VM and native locate identically.
+// The position goes BEFORE the marker on purpose: the marker and the reason stay adjacent, so a
+// regressor pattern can assert them together without ever naming a line or column.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
     char buf[32];
     snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
