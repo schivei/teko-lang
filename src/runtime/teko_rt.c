@@ -548,10 +548,17 @@ tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec) {
 // --- Phase 3 str query/slice builtins (query helpers allocate nothing; slice helpers follow
 // tk_str_concat's ownership — a fresh malloc'd buffer the result OWNS, tk_panic on OOM) ---
 
-// tk_str_eq — same length AND same bytes. memcmp (NOT strcmp — strings may hold embedded NUL);
-// a zero-length pair compares equal without touching ptr (memcmp of 0 bytes is well-defined).
+// tk_str_eq — same length AND same bytes. memcmp (NOT strcmp — strings may hold embedded NUL).
+//
+// The empty pair returns BEFORE memcmp, and the reason is not that the comparison would be wrong.
+// An earlier version of this comment argued the call was safe "because memcmp of 0 bytes is
+// well-defined" — true about the READ, false about the CALL. memcmp's parameters carry `nonnull`,
+// so passing a null pointer is undefined regardless of n, and an empty tk_str legitimately carries
+// ptr == NULL. UBSan caught it live: teko_rt.c:555 "null pointer passed as argument 1, which is
+// declared to never be null", on the first run of the ASan+UBSan lane.
 bool tk_str_eq(tk_str a, tk_str b) {
     if (a.len != b.len) return false;
+    if (a.len == 0) return true;
     return memcmp(a.ptr, b.ptr, a.len) == 0;
 }
 
@@ -690,9 +697,13 @@ uint64_t tk_str_len(tk_str s) {
 }
 
 // tk_str_ends_with — the tail of s equals suffix. A suffix longer than s can't match; otherwise
-// memcmp the last suffix.len bytes. An empty suffix matches (memcmp of 0 bytes is equal).
+// memcmp the last suffix.len bytes. An empty suffix matches every string, and returns EARLY for
+// the same reason tk_str_eq does: memcmp's `nonnull` contract is violated by a null argument
+// whatever n is, and an empty suffix legitimately carries ptr == NULL. The early return also
+// avoids forming `s.ptr + s.len` when s itself is the empty str with a null ptr.
 bool tk_str_ends_with(tk_str s, tk_str suffix) {
     if (suffix.len > s.len) return false;
+    if (suffix.len == 0) return true;
     return memcmp(s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
 }
 
