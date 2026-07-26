@@ -392,7 +392,7 @@ fn regr_dir_has_single_tkp_requires_exactly_one_manifest() {
  * @since 0.3.1
  */
 fn regr_built_empty_for_test() -> RegrBuilt {
-    RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = "" }
+    RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = teko::list::empty() }
 }
 
 #test
@@ -903,4 +903,49 @@ fn resolve_run_wrapper_riscv_agrees_with_the_qemu_wrapper() {
     match resolve_run_wrapper("riscv64") { []str as w => { alias = w.len }; error => { } }
     teko::assert::is_true(canonical == want)
     teko::assert::is_true(alias == want)
+}
+
+#test
+/**
+ * regr_src_key_separates_two_configurations_of_one_file — the cache's whole safety argument, as a
+ * law: the SAME `Given source` file under two different child envs is two DIFFERENT builds and must
+ * key apart, while the same file under the same env keys the same. Collapsing the first pair is the
+ * defect class `RegrBuilt` already produced here when it was keyed on `done` alone — a green row
+ * asserting an artifact it never built — and the F5 corpus names one file from four configurations
+ * at once, so this is a live shape, not a hypothetical.
+ *
+ * @return void
+ */
+fn regr_src_key_separates_two_configurations_of_one_file() {
+    let plain: []str = teko::list::empty()
+    let as_c = teko::list::push(teko::list::empty(), "TEKO_BACKEND=c")
+    let as_own = teko::list::push(teko::list::empty(), "TEKO_BACKEND=native")
+    teko::assert::is_true(regr_src_key("cases/x.tks", plain) == regr_src_key("cases/x.tks", plain))
+    teko::assert::is_true(regr_src_key("cases/x.tks", as_c) != regr_src_key("cases/x.tks", as_own))
+    teko::assert::is_true(regr_src_key("cases/x.tks", as_c) != regr_src_key("cases/y.tks", as_c))
+    teko::assert::is_true(regr_src_key("cases/x.tks", plain) != regr_src_key("cases/x.tks", as_c))
+}
+
+#test
+/**
+ * regr_src_cache_misses_then_hits — the lookup law: an empty slot answers `null` for every key, a
+ * remembered entry answers itself for ITS key and still `null` for another, and remembering does not
+ * disturb the project slot the same struct carries.
+ *
+ * @return void
+ */
+fn regr_src_cache_misses_then_hits() {
+    let empty = regr_built_empty_for_test()
+    match regr_src_lookup(empty, "k1") { RegrSrcBuild => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+    let one = regr_src_remember(empty, RegrSrcBuild { key = "k1"; comp = cap_synthetic(1, "boom"); binp = "b1" })
+    match regr_src_lookup(one, "k1") {
+        RegrSrcBuild as hit => {
+            teko::assert::is_true(hit.binp == "b1")
+            teko::assert::is_true(hit.comp.exit == 1)
+        }
+        null => teko::assert::is_true(false)
+    }
+    match regr_src_lookup(one, "k2") { RegrSrcBuild => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+    teko::assert::is_true(!one.done)
+    teko::assert::is_true(one.srcs.len == 1)
 }
