@@ -568,7 +568,31 @@ double   tk_int_to_float(__int128 v, bool sgn);
 uint64_t tk_f64_bits(double x);
 double   tk_f64_from_bits(uint64_t bits);
 
-// tk_panic — fail loud (M.1): "teko: panic: <msg>\n" to stderr, then non-zero exit.
+// TK_PANIC_MARKER — the canonical opening of EVERY deliberate panic line: the word
+// "deliberate" is the whole point. A panic is the program's OWN guard firing (M.1); a
+// crash is the host killing it (tk_rt_crash_handler prints "teko: FATAL signal" instead),
+// and the two must never be confused by whoever reads the log.
+//
+// Why the marker exists at all, and why it is TEXT: a regressor scenario used to prove
+// "this panicked, on purpose, for this reason" by asserting `exit = 134`. That number was
+// never Teko's — it is 128+SIGABRT, SYNTHESISED by a POSIX shell out of the child's wait
+// status, and Windows has no such convention (PR #94's `test / windows` reported exit 127
+// on a run whose stderr plainly carried the panic). An 8-bit exit status is also a channel
+// the child SHARES with the shell and the OS, so it can be forged by either. A line on
+// stderr can be written by nothing but the program itself, which makes it the only evidence
+// that means the same thing on every platform.
+//
+// The line is `TK_PANIC_MARKER <msg>` and NOTHING else: no source position (a positioned
+// guard such as tk_panic_cast prints its own "line:col: " ahead of it) and no backtrace
+// (that follows on its own lines, and degrades to a one-line notice where execinfo is
+// absent). So marker+reason always sit adjacent on one line, and a regressor pattern can
+// assert both at once without depending on either of the parts that move per platform.
+//
+// STABLE: `.tkr` scenarios spell this text literally. Changing it breaks them — deliberately.
+#define TK_PANIC_MARKER "teko: deliberate panic: "
+
+// tk_panic — fail loud (M.1): "teko: deliberate panic: <msg>\n" to stderr, a backtrace,
+// then a non-zero exit (SIGABRT). See TK_PANIC_MARKER above for the line's contract.
 _Noreturn void tk_panic(const char *msg);
 // the Teko-level globals `panic(str)` / `exit(<int>)` (legislator's ruling — no `never` type).
 // tk_panic_str takes a tk_str (ptr+len, tolerates embedded NUL); tk_exit ends with a status code.
