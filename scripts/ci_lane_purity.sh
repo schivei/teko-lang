@@ -42,8 +42,10 @@ set -eu
 WF="${1:?usage: ci_lane_purity.sh <workflow.yml> <root-job> [exceptions] [scan-dir...]}"
 ROOT="${2:?missing root-job}"
 EXC="${3:-.github/ci-lane-exceptions.txt}"
-shift 3 2>/dev/null || shift $#
-SCAN_DIRS="$*"
+# `shift 3` on a 2-argument call is an ERROR IN A SPECIAL BUILTIN, which POSIX says terminates a
+# non-interactive shell — `|| true` does not save it (measured: exit 2, no output). Guard on `$#`
+# instead, exactly as the deleted cross_compile_linux.sh had to for the same reason.
+if [ "$#" -gt 3 ]; then shift 3; SCAN_DIRS="$*"; else SCAN_DIRS=""; fi
 [ -n "$SCAN_DIRS" ] || SCAN_DIRS=".github/workflows scripts"
 
 [ -f "$WF" ] || { echo "ci_lane_purity: no such workflow: $WF" >&2; exit 1; }
@@ -112,6 +114,10 @@ for d in $SCAN_DIRS; do
     [ -d "$d" ] || continue
     for f in "$d"/*; do
         [ -f "$f" ] || continue
+        # THIS FILE IS EXEMPT FROM ITS OWN SWEEP, and the exemption is narrow and named: the
+        # checker has to SAY the word it forbids, in code and not only in prose (the grep
+        # pattern, the variable, the error message). Nothing else is skipped.
+        case "$f" in */ci_lane_purity.sh) continue ;; esac
         # No `-w`: `ziglang.org` in a download URL is exactly the shape that must not slip
         # through, and a word-boundary match would let it (the `l` that follows is a word char).
         out="$(strip_comments "$f" | grep -ni 'zig' || true)"
