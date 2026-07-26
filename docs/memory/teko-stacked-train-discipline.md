@@ -218,6 +218,59 @@ defeito invisível à revisão. Padrão diagnóstico útil: nas mesmas famílias
 caso de borda não fazem a afirmação; as que afirmam não guardam. **Ao corrigir, corrija o comentário
 junto** — senão o próximo leitor reintroduz o defeito com a bênção da documentação.
 
+## O DEGRAU que aposenta o C (owner 2026-07-26)
+
+> *"este trem deve remover toda a compilação C para no trem seguinte ser 100% nativo. Isso não
+> inclui o linker, pois ainda temos libs a debater até lá."*
+> *"como faremos degrau aqui, gen1 != gen2 quando usar native, logo o degrau corrige e aposenta C"*
+
+A .31 mata a compilação C; a .32 nasce 100% nativa. O **linker fica de fora** — as bibliotecas de
+plataforma ainda estão em debate (inventário fechado é a tarefa pré-linker).
+
+**O critério de aceite NÃO é `gen1 == gen2`.** É o mesmo que o bootstrap original já usa, e que o
+`docs/BUILDING.md` já enuncia para a transição C→self-host: *"only the one-time C→self-host
+transition differs cosmetically. Gen-2 vs gen-3 must be byte-identical."*
+
+```
+gen1 = seed (backend C) compila a árvore        → compilador que emite C
+gen2 = gen1 sob TEKO_BACKEND=native             → compilador nativo   ← O DEGRAU: difere de gen1
+gen3 = gen2 compila a árvore                    → BYTE-IDÊNTICO a gen2
+```
+
+`gen1 != gen2` é a definição do degrau, não um defeito. Quando `gen2 == gen3` valer, o seed do trem
+seguinte passa a ser um binário nativo e o C sai do caminho por consequência — ninguém precisa
+apagá-lo à mão.
+
+### Três coisas que decorrem disso e que já mordem hoje
+
+1. **Determinismo virou pré-requisito, não higiene.** O degrau exige igualdade byte-a-byte entre
+   duas execuções. A ordem de descoberta de fontes vinha do `readdir` (ver a armadilha abaixo), o
+   que tornaria `gen2 == gen3` falso por construção — e a falha apareceria como "o degrau não
+   fecha", sem causa visível. Corrigido em `tk_rt_list_dir` antes de o degrau começar, por sorte.
+
+2. **O portão `nightly === gen1` precisa de um QUARTO antecedente: a geração.** Ele mede seed,
+   toolchain e árvore, e afirma que o mesmo commit dá os mesmos bytes. No commit em que o degrau
+   acontece, o binário publicado muda de geração e o portão vai acusar não-reprodutibilidade num
+   commit são. Corrigir junto do degrau, não depois.
+
+3. **Teste unitário e teste de C morrem com o C** (ruling do owner na mesma conversa: *"não deve
+   focar esforços neles"*). Isso reescreve o corte de testes: não é "medir cobertura e podar", é
+   consequência da morte do C. O que sobrevive é o corpus de regressão, que roda o binário.
+
+### O método: escada medida, não inventário de comentário
+
+Contar `honest_stop` em comentário dá 332 e não significa nada. O número que significa é onde o
+compilador para ao compilar A SI PRÓPRIO pelo backend nativo. Medido em 2026-07-26, na árvore do
+vagão 20: passa lexer, parser, **checker (6139 itens)**, monomorph e consteval (591 consts), e para
+em
+
+```
+const struct: initializer is not a struct literal (Tier-A follow-up) (#594)
+```
+
+Esse é o degrau 1. O método é o laço: fechar o stop que ele nomeia, rodar de novo, ler o próximo.
+Cada volta é medível e o progresso é o número de fases vencidas, não a contagem de TODOs.
+
 ## Armadilhas do worktree compartilhado
 
 - **NUNCA `git stash` em worktree de vagão.** O `.git` é compartilhado entre todos os worktrees e a
