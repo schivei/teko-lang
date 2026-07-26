@@ -178,6 +178,46 @@ defeitos reais em duas horas — um seed de assert morto em PE/COFF (weak cruzan
 não existe nesse formato) e um `"/tmp/..."` hardcoded num fixture. O segundo era achável com um
 `grep`. Uma varredura por classe antes do run faz o vagão nascer com lista.
 
+### O que a estreia realmente encontrou (medido, 2026-07-26)
+
+O ruling acima foi tomado sobre uma previsão. A estreia aconteceu no vagão 20, com a base
+retargetada para `main`, e o resultado confirma a previsão com folga. Registrado por CAUSA, não por
+lane, porque uma causa aparecia em várias lanes e isso escondia a contagem:
+
+| causa | achada por | o que era |
+|---|---|---|
+| `dladdr` fora da `libc` | `artifact / linux-*-glibc` | mora em `libdl` até a glibc 2.33; o 2.39 do runner escondia a dependência que o piso de 2.28 exige. **Só apareceu porque o zig morreu** e o build passou a acontecer no piso. |
+| ABI do Win64 | `test / windows-x86_64` **e** `windows-arm64` | `tk_str` (16 bytes) era passado em par de registradores. A MS x64 só passa agregado em registrador nos tamanhos 1/2/4/8; acima disso vai por referência. O callee lia os 16 primeiros bytes da string como `{ptr; len}`. O objeto PE/COFF sempre esteve correto — a hipótese "é do COFF" era minha e estava errada. |
+| `memcmp(NULL, …)` | `ASan+UBSan+LSan` | UB em `tk_str_eq` e `tk_str_ends_with`. **Primeira execução na história do projeto** desta lane (o J2). |
+| sem alvo ELF/aarch64 | `test / linux-arm64-{glibc,musl}` | os assets arm64 eram publicados sem que `teko test .` jamais tivesse rodado naquele hardware. |
+| sonda de capacidade incompleta | `regressor / all capabilities` | ter `qemu-riscv64-static` no PATH não é a capacidade; a capacidade é conseguir executar. |
+
+**A lição que generaliza** é a última linha da tabela, e ela vale para toda lane nova: uma sonda que
+verifica o NOME de uma ferramenta em vez do FATO que ela deve produzir passa verde e a falha reaparece
+depois, disfarçada de regressão real. O mesmo padrão apareceu neste vagão em três lugares diferentes
+(a sonda do qemu, o gatilho com `paths:` que não disparava, e o agregador que aceitava `skipped` como
+aprovação). É a mesma família do "portão que não gateia".
+
+**Corolário para a contagem de risco:** duas das cinco causas (o `dladdr` e a ABI do Win64) eram
+invisíveis por construção antes deste vagão — a primeira porque cross-compilar escondia o piso, a
+segunda porque nenhum fixture do corpus tinha uma chamada de runtime que RETORNA e leva agregado.
+Nenhuma varredura estática as teria achado. O "pré-carregue o vagão" acima continua certo, mas não
+substitui a estreia: ele reduz a lista, não a zera.
+
+### Um comentário errado é pior que nenhum
+
+Duas das causas acima estavam documentadas como SEGURAS por comentários que argumentavam mal:
+
+- `tk_str_eq`: *"a zero-length pair compares equal without touching ptr (memcmp of 0 bytes is
+  well-defined)"* — verdade sobre a leitura, falso sobre a chamada (`nonnull`).
+- `is_str_arg_builtin`: achatar `tk_str` em `(ptr, len)` *"reproduz a verdadeira ABI C sem nenhuma
+  mudança de isel/regalloc/stackify"* — verdade em SysV/AAPCS64/LP64D, falso em Win64.
+
+Nos dois casos o comentário afirmava a conclusão certa para o caso comum e foi ele que tornou o
+defeito invisível à revisão. Padrão diagnóstico útil: nas mesmas famílias, as funções que GUARDAM o
+caso de borda não fazem a afirmação; as que afirmam não guardam. **Ao corrigir, corrija o comentário
+junto** — senão o próximo leitor reintroduz o defeito com a bênção da documentação.
+
 ## Armadilhas do worktree compartilhado
 
 - **NUNCA `git stash` em worktree de vagão.** O `.git` é compartilhado entre todos os worktrees e a
@@ -192,3 +232,12 @@ não existe nesse formato) e um `"/tmp/..."` hardcoded num fixture. O segundo er
 - **Ramo de erro inalcançável não é bug.** Um `error => ""` cuja condição de entrada é a negação exata
   da condição de erro do chamado não pode disparar. Vira higiene (ramo morto que finge ser possível),
   não MEDIUM de corrupção.
+- **Intercalação de stdout com stderr não é causalidade.** O nome do teste vai para stdout, que é
+  block-buffered fora de tty; o pânico, o `abort()` e o segfault vão para stderr, sem buffer. Um crash
+  se atribui ao último nome que passou por um flush — em 2026-07-26 isso custou uma investigação
+  inteira e fez uma carga reportar um defeito de compilador FABRICADO ("acrescentar campo a um struct
+  quebra um teste de spine não relacionado"); o teste real estava ~66 nomes adiante. Medido depois:
+  numa suíte pequena a perda é TOTAL — 41 testes, zero linhas no arquivo. Corrigido na raiz
+  (`tk_flush_out` antes do corpo de cada teste, `709d41c1`), mas a disciplina fica: **antes de tratar
+  uma atribuição de crash como fato, reproduza com `stdbuf -o0`.** Vale para qualquer saída em que
+  dois descritores com políticas de buffer diferentes contam a mesma história.
