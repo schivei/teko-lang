@@ -797,6 +797,7 @@ fn host_cc_arch() -> str {
 fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> str {
     if !own_backend { return "" }
     if teko_cc_env().len > 0 { return "" }
+    if cross_note_for_name(target).is_cross { return "" }
     let sel = match own_backend_target_of_row(target) { NativeTarget as x => x; error => return "" }
     if !target_links_with_cc(sel) { return "" }
     if default_cc_for_target(sel) != HOST_CC_NAME { return "" }
@@ -805,7 +806,7 @@ fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> st
     if want.len == 0 { return "" }
     let have = host_cc_arch()
     if have.len == 0 || have == want { return "" }
-    $"this row emits a {want} ELF object but the host cc targets {have}, and the host cc cannot link a foreign-arch object — the own backend has no {have}-{target_os_name(sel)} target, because host_target_for_os is OS-only until teko::arch() is seed-recognized"
+    $"this row emits for {target_name(sel)} ({want} ELF) but the host cc targets {have}, and the host cc cannot link a foreign-arch object — the own backend has no {have}-{target_os_name(sel)} target, because host_target_for_os is OS-only until teko::arch() is seed-recognized"
 }
 
 /**
@@ -821,6 +822,17 @@ fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> st
  * `Relocations in generic ELF (EM: 62)`: the same foreign-arch failure the guard exists to convert
  * into an honest skip. Resolving to the enum and comparing the ARCH cannot be fooled by a spelling,
  * an alias (`x86_64-elf`), or a row that names the host default explicitly.
+ *
+ * THE DIVISION OF LABOUR IS RESTORED SEMANTICALLY, NOT BY STRING. A genuinely CROSS target stays
+ * `host_cc_cannot_link_cross_reason`'s question, and the caller now asks `cross_note_for_name`
+ * instead of comparing to `HOST_TARGET` — which is what makes the two rules partition rather than
+ * overlap. The distinction is real and host-dependent: on macOS, `x86_64-linux` IS cross and the
+ * cross rule answers; on an arm64 LINUX host the same name is NOT cross (the host default is
+ * OS-derived and says `x86_64-linux`), the cross rule stays silent, and this rule is the only one
+ * that can see the arch mismatch. Getting this wrong is not theoretical: the first version of this
+ * generalisation answered for both, and `macos-arm64` went red on
+ * `host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row` — a lane an x86_64
+ * gate cannot reproduce, because there the two arches agree and every branch collapses.
  *
  * @param target  the scenario's declared target ("" / `HOST_TARGET` → the host default)
  * @return        the resolved own-backend target, or the resolver's honest error
