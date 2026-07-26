@@ -78,17 +78,24 @@ jobs:
           # WINDOWS RIDES THE LIGHT PATH (integrator ruling 2026-07-25), and it is the one
           # deviation from "light = one ubuntu job per track". The reason is empirical, not
           # taste: the last two wagons of this train failed on Windows and ONLY on Windows —
-          # wagon 15 on `Windows self-host smoke`, wagon 16 on `test / windows`
-          # (`assert_native`, a weak-symbol seam that PE/COFF does not resolve at all). Zero
+          # wagon 15 on `Windows self-host smoke`, wagon 16 on `test / windows` (`assert_native`,
+          # a weak-symbol seam that PE/COFF does not resolve at all; the check is named
+          # `test / windows-x86_64` since tests.yml became a host matrix). Zero
           # linux-only and zero macos-only failures in the same span. A light tier that omits
           # the platform where the defects actually live buys runner minutes with blindness,
           # and defers every Windows break to the landing wagon. macOS stays full-only: it has
           # not caught a wagon-unique failure.
+          #
+          # windows-arm64 is BACK on the full path (owner ruling 2026-07-26 — see the build-test
+          # matrix note below). It is full-only, never light: it is the slowest runner in the set
+          # and its delta over windows-x86_64 is the ARCH, not the platform whose defects the
+          # light tier is buying.
           LINUX='{"os":"ubuntu-latest","label":"linux-x86_64","full_gate":true}'
           WINDOWS='{"os":"windows-latest","label":"windows-x86_64"}'
+          WINDOWS_ARM='{"os":"windows-11-arm","label":"windows-arm64"}'
           GEN1_LINUX='{"os":"ubuntu-latest","label":"linux-x86_64"}'
           if [ "$full" = "true" ]; then
-            echo "matrix_build={\"include\":[$LINUX,{\"os\":\"ubuntu-24.04-arm\",\"label\":\"linux-arm64\"},{\"os\":\"macos-latest\",\"label\":\"macos-arm64\"},$WINDOWS]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_build={\"include\":[$LINUX,{\"os\":\"ubuntu-24.04-arm\",\"label\":\"linux-arm64\"},{\"os\":\"macos-latest\",\"label\":\"macos-arm64\"},$WINDOWS,$WINDOWS_ARM]}" >> "$GITHUB_OUTPUT"
             echo "matrix_gen1={\"include\":[$GEN1_LINUX,{\"os\":\"macos-latest\",\"label\":\"macos-arm64\"}]}" >> "$GITHUB_OUTPUT"
           else
             echo "matrix_build={\"include\":[$LINUX,$WINDOWS]}" >> "$GITHUB_OUTPUT"
@@ -114,25 +121,33 @@ jobs:
             echo "Markdown-only change under the allowlisted paths — skipping the heavy gate."
           fi
 
-  # ── matrix: Linux x86_64 (light) + arm64, macOS arm64, Windows x86_64 (full) ──────
+  # ── matrix: linux-x86_64 + windows-x86_64 (light); + linux-arm64, macos-arm64,
+  #           windows-arm64 (full) ────────────────────────────────────────────────
   # NOTE: Windows uses Clang (not MSVC) because the project requires __int128 and
   # other GCC/Clang extensions that MSVC does not support.
   #
   # The matrix is DYNAMIC (`needs.changes.outputs.matrix_build`): the light path builds
-  # linux-x86_64 only — the signal that actually catches a compiler break — and the full path
-  # (base_ref == main) adds linux-arm64 + macos-arm64 + windows-x86_64.
+  # linux-x86_64 + windows-x86_64 — the signal that actually catches a compiler break, plus the
+  # one platform empirically responsible for this train's wagon-unique failures — and the full
+  # path (base_ref == main) adds linux-arm64 + macos-arm64 + windows-arm64.
   #
-  # windows-arm64 is NOT in this matrix. The owner disabled it here on 2026-07-06 because THIS
-  # job — a full self-build gate — was the CI critical path on that runner, and that cost has not
-  # changed, so #304 (the pendency to restore this entry) stays about exactly that and stays
-  # deferred to the perf work (#168/#265).
+  # windows-arm64 IS BACK IN THIS MATRIX (owner ruling 2026-07-26): "sobre windows-arm64 (e outros
+  # hosts), tem que fazer o build inicial e tem que colocar lane de teste se não houverem." That
+  # REVERSES the 2026-07-06 exclusion, which rested on cost — this job was the CI critical path on
+  # that runner at ~973s (docs/design/compile-time-architecture.md §1.1, run 28763999356). Two
+  # things dissolved that premise:
+  #   * that 973s was TWO full gates back-to-back — 359s "Test gate (VM)" + 591s "Native test gate
+  #     (opt-in)" (§1.2). The VM engine is retired (issue #524) and this job now runs ONE gate.
+  #   * it is full-only, so only the LANDING wagon pays it, not every wagon of a stacked train.
+  # #304 (the pendency to restore this entry) is therefore CLOSED BY THIS CHANGE, not deferred.
   #
-  # What DID change, 2026-07-25 with the owner's explicit authorization: the architecture is no
-  # longer untouched by CI. `seed-debut` below builds AND runs a teko compiler on windows-11-arm.
-  # That was the real gap — the fork publishes `teko-windows-arm64.zip` from release.yml's
-  # build-native, and until now no lane had ever built or executed anything on that arch. The
-  # debut lane closes it at one host build instead of the full gate's cost. Whoever revisits #304
-  # should read it as "restore the heavy gate here", not as "windows-arm64 is unexercised".
+  # The prior half-measure stays and is still worth its cost: `seed-debut` below builds AND runs a
+  # teko compiler on windows-11-arm from the COMMITTED seed, which this job does not (it
+  # provisions from the published release). The two lanes exercise different rungs of the same
+  # host, so neither subsumes the other.
+  #
+  # Companion lane: `test / windows-arm64` in tests.yml — the ruling asked for the initial build
+  # AND a test lane, and a build gate is not `teko test .`.
   build-test:
     needs: changes
     if: needs.changes.outputs.run == 'true'
@@ -148,6 +163,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Named BEFORE anything can fail on a missing tool, so a red run on a host whose image we
+      # have never exercised (windows-11-arm, restored 2026-07-26) says WHICH toolchain was
+      # actually present instead of leaving the reader to infer it from a cc error deep inside a
+      # build log. Same shape as `seed-debut`'s diagnostic. `unzip`/`tar` are listed because
+      # ci_provision_teko.sh needs one of them to open the release asset, and `xz`/`python3`/`7z`
+      # because they are the decompressor chain the committed-seed fallback walks.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc xz unzip tar curl python3 7z; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
 
       # The compiler is no longer built from the C bootstrap — it is the previously
       # RELEASED teko binary (Teko-only ruling). CI provisions it by downloading the
