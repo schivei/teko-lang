@@ -61,16 +61,36 @@ regressors), and the sanitizer smoke lanes link the emitted C.
 
 `pr.yml` has `branches:` and no `paths:`, deliberately. The five aggregators are required on
 `main`, `main` has no bypass, and a required check that never REPORTS does not go red — it stays
-"Expected — waiting for status" forever. A head commit touching only files outside a trigger
-filter (a README fix, a `docs/**` correction, a doc-comment sweep) would produce no run at all and
-freeze the PR — and the only PR pointing at `main` in a stacked train is the drain.
+"Expected — waiting for status" forever. A PR whose ENTIRE diff against its base falls outside a
+trigger filter would produce no run at all and freeze — and the only PR pointing at `main` in a
+stacked train is the drain.
+
+**The unit is the PR, not the commit**, and getting that backwards is easy enough that this
+document did, at first. On a `pull_request` event GitHub evaluates `paths:` against every file the
+PR changes relative to its base, not against the head commit; `dorny/paths-filter` does the same.
+So pushing a documentation-only COMMIT onto a PR that also changes `src/**` keeps matching and
+keeps running. Measured live on the wagon-20 branch: a `docs/memory/**` commit still produced
+`run=true`.
+
+That makes the hole narrower than "any docs commit" — and it is still a hole worth closing, because
+the endgame closes with a W15 wagon and a bump, and a wagon that turned out to be documentation-only
+would freeze the one PR that matters.
 
 The cost the filter used to buy is bought one level down instead: `plan` computes `run` with a
-docs-only guard, and **every** lane including the artifact root consults it. A docs-only PR costs
-one ~12s job. The aggregators do not merely tolerate the resulting skips — they **require** them,
-so the cheap path cannot degrade into a vacuous green. All three directions are exercised:
-docs-only passes, `run=true` with a skipped root fails, and a root that ran when `run=false` fails
-too.
+docs-only guard over the PR's file list, and **every** lane including the artifact root consults it.
+A documentation-only PR costs one ~12s job. The aggregators do not merely tolerate the resulting
+skips — they **require** them, so the cheap path cannot degrade into a vacuous green. All three
+directions are exercised: docs-only passes, `run=true` with a skipped root fails, and a root that
+ran when `run=false` fails too.
+
+### `cancelled` reads as `failure`, by omission
+
+The aggregators are `if: always()` and demand `success`, so a run cancelled by `cancel-in-progress`
+reports all five as FAILED. On a superseded SHA that is harmless — nothing gates it — but it does
+mean each superseded push emits five red notifications. Distinguishing `cancelled` and exiting
+quietly is a one-line change per gate and deliberately NOT made: an exception carved into a gate is
+how a gate stops gating, and `cancelled` is also what a runner timeout and a manual stop look like.
+Left as a declared cost, not an oversight.
 
 ## The consolidation (owner ruling 2026-07-26)
 
