@@ -1844,6 +1844,111 @@ pub fn merge_regression_coverage() -> u64 {
 type RegrBuildKind = enum { None; Project; Dependency; InPlace }
 
 /**
+ * RegrSrcBuild — ONE cached `Given source = "<file>"` build: the `key` it is filed under, the
+ * captured build outcome, and the binary it produced.
+ *
+ * @since 0.3.1
+ */
+type RegrSrcBuild = struct {
+    /** the (source file, declared env) identity this build answers for (`regr_src_key`). */
+    key: str
+    /** the captured build outcome, replayed verbatim to every later row with the same key. */
+    comp: CapResult
+    /** the scratch binary this build produced (meaningful when `comp.exit == 0`). */
+    binp: str
+}
+
+/**
+ * regr_src_key — the identity of a standalone-source build: the source FILE plus the row's DECLARED
+ * env, joined by a newline (neither a path nor a `K=V` token may contain one, so no two distinct
+ * builds can collide into one key).
+ *
+ * KEYED ON THE ENV, NOT ON THE FILE ALONE, and that is the whole safety argument. Two rows naming
+ * the same file under a different `Given backend`/`Given target`/`Given env` are legitimately
+ * DIFFERENT builds — collapsing them is the same defect class `RegrBuilt` already produced in this
+ * repo when it was keyed on `done` alone: a green row asserting an artifact it never built. The
+ * F5 corpus is the live proof — `own_differential.tks` is named by four configurations at once.
+ *
+ * The env keyed on is the row's DECLARED env, never the coverage-augmented one: `with_regr_cov_env`
+ * appends a `TEKO_TKCOV=<prefix>.tkcov` token built from the ROW's scratch prefix, so no two rows
+ * ever share that env and a key including it could never hit.
+ *
+ * @param srcp  the resolved source file path
+ * @param env   the row's declared child env (`K=V` tokens)
+ * @return      the cache key
+ * @since 0.3.1
+ */
+fn regr_src_key(srcp: str, env: []str) -> str {
+    mut out = srcp
+    mut i: u64 = 0
+    loop {
+        if i >= env.len { break }
+        out = out ~ "\n" ~ env[i]
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * regr_src_lookup — the cached standalone-source build filed under `key`, or `null` when this
+ * `.tkr` file has not built it yet.
+ *
+ * @param built  the shared cache slot carried into this row
+ * @param key    the identity to look for (`regr_src_key`)
+ * @return       the cached build, or `null`
+ * @since 0.3.1
+ */
+fn regr_src_lookup(built: RegrBuilt, key: str) -> RegrSrcBuild | null {
+    mut i: u64 = 0
+    loop {
+        if i >= built.srcs.len { break }
+        if built.srcs[i].key == key { return built.srcs[i] }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * regr_src_remember — `built` with the standalone-source build `entry` added to its cache.
+ *
+ * @param built  the cache slot to extend
+ * @param entry  the build to file
+ * @return       the extended cache slot
+ * @since 0.3.1
+ */
+fn regr_src_remember(built: RegrBuilt, entry: RegrSrcBuild) -> RegrBuilt {
+    RegrBuilt { done = built.done; kind = built.kind; comp = built.comp; binp = built.binp; srcs = teko::list::push(built.srcs, entry) }
+}
+
+/**
+ * tkr_standalone_artifact — resolve a `Given source = "<file>"` row's artifact, building the file
+ * at most ONCE per (file, declared env) per `.tkr` (`regr_src_key`).
+ *
+ * Every row this serves after the first reports `fresh = false`, exactly as a second row of a shared
+ * PROJECT build does: the measurement must not re-count a build the run never performed. Before this
+ * cache the three `F8 target` rows compiled the identical one-line file three times to read three
+ * substrings out of the identical diagnostic.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param srcp      the resolved source file path
+ * @param t         the lowered row
+ * @param prefix    the row's scratch-file prefix (used only when this row is the one that BUILDS)
+ * @param built     the shared cache slot
+ * @return          the row's artifact, with the cache slot threaded back
+ * @since 0.3.1
+ */
+fn tkr_standalone_artifact(exe: str, srcp: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrArtifact {
+    let key = regr_src_key(srcp, t.env)
+    match regr_src_lookup(built, key) {
+        RegrSrcBuild as hit => return TkrArtifact { comp = hit.comp; binp = hit.binp; built = built; fresh = false }
+        null => { }
+    }
+    let comp = compile_standalone_source(exe, srcp, with_regr_cov_env(t.env, prefix), prefix)
+    let binp = artifact_path_for_target(snippet_project_binp(prefix), t.target)
+    TkrArtifact { comp = comp; binp = binp; built = regr_src_remember(built, RegrSrcBuild { key = key; comp = comp; binp = binp }); fresh = true }
+}
+
+/**
  * RegrBuilt — the lazily-built artifact of a project-based regressor: whether the project's `.tkp`
  * has been compiled yet (`done`), the captured build outcome (`comp`), and the built binary path
  * (`binp`). Threaded so several RUN scenarios (across features, across an entire `.tkr` file) share
@@ -1870,6 +1975,13 @@ type RegrBuilt = struct {
     comp: CapResult
     /** the built binary path (meaningful once `done` and the build succeeded). */
     binp: str
+    /**
+     * every `Given source = "<file>"` build this `.tkr` has already paid for, keyed on (file,
+     * declared env) — `tkr_standalone_artifact`. Separate from the single `done`/`kind` slot above
+     * because a standalone source is not the PROJECT: a `.tkr` may name many of them, and two rows
+     * naming the same one under the same configuration are one build, not two.
+     */
+    srcs: []RegrSrcBuild
 }
 
 /**
@@ -1888,7 +2000,7 @@ fn tkr_ensure_built(exe: str, regr_dir: str, env: []str, prefix: str, built: Reg
     if regr_built_serves(built, RegrBuildKind::Project) { return built }
     let comp = compile_regressive(exe, regr_dir, env, prefix ~ ".compile")
     let name = match regressive_name(regr_dir) { str as s => s; error => "" }
-    RegrBuilt { done = true; kind = RegrBuildKind::Project; comp = comp; binp = regr_dir ~ "/bin/" ~ name }
+    RegrBuilt { done = true; kind = RegrBuildKind::Project; comp = comp; binp = regr_dir ~ "/bin/" ~ name; srcs = built.srcs }
 }
 
 /**
@@ -1995,8 +2107,7 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
         return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
     }
     if t.source_file.len > 0 {
-        let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix)
-        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
+        return tkr_standalone_artifact(exe, regr_dir ~ "/" ~ t.source_file, t, prefix, built)
     }
     if t.dep_dir.len > 0 {
         if regr_built_serves(built, RegrBuildKind::Dependency) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
@@ -2008,14 +2119,14 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
         }
         let comp = compile_regressive(exe, scratch_consumer, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(scratch_consumer) { str as s => s; error => "" }
-        let nb = RegrBuilt { done = true; kind = RegrBuildKind::Dependency; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target) }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::Dependency; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target); srcs = built.srcs }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
     if t.in_place {
         if regr_built_serves(built, RegrBuildKind::InPlace) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
         let comp = compile_in_place(exe, regr_dir, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(regr_dir) { str as s => s; error => "" }
-        let nb = RegrBuilt { done = true; kind = RegrBuildKind::InPlace; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target) }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::InPlace; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target); srcs = built.srcs }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
     let fresh = !regr_built_serves(built, RegrBuildKind::Project)
@@ -2330,8 +2441,7 @@ fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built
         return TkrArtifact { comp = comp; binp = ""; built = built; fresh = true }
     }
     if t.source_file.len > 0 {
-        let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix)
-        return TkrArtifact { comp = comp; binp = ""; built = built; fresh = true }
+        return tkr_standalone_artifact(exe, regr_dir ~ "/" ~ t.source_file, t, prefix, built)
     }
     match guard_no_project_build_at_root(regr_dir, t) {
         error as e => return e
@@ -2448,7 +2558,7 @@ fn tkr_feature_is_compile_fail(feat: TkrFeature) -> bool {
 fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str, groups: RegrGroups) -> TkrFileRun {
     let src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
     let feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
-    mut built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = "" }
+    mut built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = teko::list::empty() }
     mut skips: u64 = 0
     mut rows: []RowTiming = teko::list::empty()
     mut fi: u64 = 0
