@@ -193,10 +193,23 @@ echo '--- container toolchain ---'
 uname -m
 gcc --version | head -n1
 (ldd --version 2>/dev/null | head -n1) || echo 'ldd: absent (musl image)'
+{ echo \"image=$IMAGE\"
+  echo \"arch=\$(uname -m)\"
+  echo \"cc=\$(gcc --version | head -n1)\"
+  echo \"libc=\$( (ldd --version 2>/dev/null | head -n1) || echo musl )\"
+} > $GD/TOOLCHAIN.txt
 echo '--- compiling ---'
 $CC_LINE"
 
 [ -f "$GD/teko" ] || { log "$LABEL: the container reported success but wrote no $GD/teko"; exit 1; }
+
+# THE TOOLCHAIN RECORD (written by the container above, into the mounted tree). It exists for the
+# reproducibility gate in nightly.yml: "same tree + same seed + same toolchain => same bytes" is
+# only assertable if the third antecedent can be CHECKED rather than assumed. When two runs of the
+# same tree disagree on bytes, this file is what says whether the image moved under them — the
+# glibc images are pinned by tag and `riscv64/debian:unstable` is sid, so it moves often.
+[ -f "$GD/TOOLCHAIN.txt" ] || { log "$LABEL: the container wrote no TOOLCHAIN.txt"; exit 1; }
+sed 's/^/    /' "$GD/TOOLCHAIN.txt" >&2
 
 # The architecture assertion survives the toolchain swap unchanged: it is what turns "the build
 # ran" into "the build produced the thing it was asked for". A wrong-arch result here means the

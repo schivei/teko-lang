@@ -124,46 +124,37 @@ jobs:
             echo "SKIP: tag '$DERIVED' already exists — nothing to gate."
             exit 0
           fi
-          SHA="$GITHUB_SHA"
-          PR_NUM="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" \
-                      --jq '[.[] | select(.merged_at != null)] | sort_by(.merged_at) | last | .number' 2>/dev/null || true)"
-          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-            echo "ABORT: $SHA does not resolve to a merged pull request."
-            echo "This gate verifies the CHECKS OF THE PR HEAD (the workflows here are pull_request-only,"
-            echo "so a push commit carries no checks of its own). A direct push to a tagging branch has"
-            echo "nothing to verify — land the bump through a PR, or tag by hand deliberately."
+          # THE SHARED RESOLVER. scripts/originating_pr_run.sh answers "which PR produced this
+          # commit, and which run gated it" — the same question, resolved the same way, that
+          # nightly.yml asks when it goes back for the artifacts that run published. One resolver,
+          # so the two workflows can never disagree about which run stands behind a commit.
+          rc=0
+          OUT="$(sh scripts/originating_pr_run.sh "$GITHUB_SHA" "Pull Request CI")" || rc=$?
+          if [ "$rc" = "3" ]; then
+            echo "ABORT: $GITHUB_SHA does not resolve to a merged pull request."
+            echo "This gate verifies the CHECKS OF THE PR HEAD (the CI workflow is pull_request-only,"
+            echo "so a push commit carries no checks of its own). A direct push to a tagging branch"
+            echo "has nothing to verify — land the bump through a PR, or tag by hand deliberately."
             exit 1
           fi
-          HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha')"
-          echo "Gating '$DERIVED': $SHA came from PR #$PR_NUM, head $HEAD_SHA — verifying its runs."
-          failed=""
-          missing=""
-          # ONE NAME, since 2026-07-26: `native.yml`, `sanitizers.yml`, `sast.yml` and
-          # `tests.yml` were consolidated into `pr.yml` ("Pull Request CI") because `needs:` does
-          # not cross workflow files and every lane now has to stand on one artifact root. THIS
-          # LIST IS LOAD-BEARING — a name that no longer exists reports "no run found" and this
-          # gate ABORTS without tagging, so the release never happens. If the workflow is renamed
-          # again, rename it here in the same commit.
-          for wf in "Pull Request CI"; do
-            info="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${HEAD_SHA}" \
-                      --jq "[.workflow_runs[] | select(.name==\"$wf\")] | sort_by(.run_number) | last | \"\(.status)|\(.conclusion)\"" || true)"
-            st="${info%%|*}"
-            cc="${info##*|}"
-            if [ -z "$info" ] || [ "$info" = "null" ]; then
-              echo "  ? $wf — no run found on the PR head"
-              missing="$missing [$wf]"
-            elif [ "$st" != "completed" ]; then
-              echo "  ? $wf — $st (not completed)"
-              missing="$missing [$wf=$st]"
-            elif [ "$cc" != "success" ]; then
-              echo "  x $wf — completed=$cc"
-              failed="$failed [$wf=$cc]"
-            else
-              echo "  ok $wf — success"
-            fi
-          done
-          if [ -n "$failed" ] || [ -n "$missing" ]; then
-            echo "ABORT: the required gates are not verifiably green on PR #$PR_NUM head $HEAD_SHA:$failed$missing"
+          [ "$rc" = "0" ] || { echo "ABORT: the originating-PR lookup failed (exit $rc)."; exit 1; }
+          PR_NUM="$(printf '%s\n' "$OUT" | sed -n 's/^pr=//p')"
+          HEAD_SHA="$(printf '%s\n' "$OUT" | sed -n 's/^head_sha=//p')"
+          ST="$(printf '%s\n' "$OUT" | sed -n 's/^run_status=//p')"
+          CC="$(printf '%s\n' "$OUT" | sed -n 's/^run_conclusion=//p')"
+          echo "Gating '$DERIVED': $GITHUB_SHA came from PR #$PR_NUM, head $HEAD_SHA."
+          if [ -z "$ST" ]; then
+            echo "ABORT: no 'Pull Request CI' run found on the PR head $HEAD_SHA."
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          if [ "$ST" != "completed" ]; then
+            echo "ABORT: 'Pull Request CI' on PR #$PR_NUM head $HEAD_SHA is $ST (not completed)."
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          if [ "$CC" != "success" ]; then
+            echo "ABORT: 'Pull Request CI' on PR #$PR_NUM head $HEAD_SHA concluded '$CC'."
             echo "NOT tagging '$DERIVED'."
             exit 1
           fi
