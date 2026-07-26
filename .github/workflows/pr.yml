@@ -225,24 +225,12 @@ jobs:
           echo "run=$run (compiler-diagnostic lanes)"
 
           # ── PRODUCER LEGS ───────────────────────────────────────────────────────────────────
-          # `producer` names the leg and its uploaded artifact (`teko-assets-<producer>`);
-          # `produces` is its CONTRACT — the asset labels it must mint. `seed` is the label whose
-          # released binary RUNS on this leg's runner, which is not always what it produces: the
-          # two riscv64 legs stand on x86_64 hardware (there is no riscv64 runner) and only the
-          # gcc they drive is riscv64.
+          # THE LEG TABLE IS NOT HERE. It is scripts/ci_producer_matrix.sh, because `nightly.yml`
+          # runs the SAME producers to mint the build the release promotes, and a leg added to one
+          # workflow and forgotten in the other is a nightly that publishes eight assets or a PR
+          # that gates eight and ships nine — failures that surface at the release. See that
+          # script for what each field means and why riscv64 is two legs.
           #
-          # riscv64 gets TWO legs rather than one that mints both. Each leg's expensive half is a
-          # full gcc run under emulation; two legs run them in parallel, one would serialise them.
-          # `emit_c` marks the leg that additionally publishes `out/teko.c`, which is what the
-          # sanitizer lanes consume — they need a DIFFERENTLY COMPILED compiler, the one thing a
-          # downloaded binary cannot be.
-          A_WA='{"producer":"windows-arm64","os":"windows-11-arm","timeout":150,"kind":"native","seed":"windows-arm64","produces":"windows-arm64"}'
-          A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64"}'
-          A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64"}'
-          A_LA='{"producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc linux-arm64-musl"}'
-          A_RG='{"producer":"linux-riscv64-glibc","os":"ubuntu-latest","timeout":300,"kind":"linux","seed":"linux-x86_64-glibc","binfmt":true,"produces":"linux-riscv64-glibc"}'
-          A_RM='{"producer":"linux-riscv64-musl","os":"ubuntu-latest","timeout":300,"kind":"linux","seed":"linux-x86_64-glibc","binfmt":true,"produces":"linux-riscv64-musl"}'
-
           # ── TEST LEGS ───────────────────────────────────────────────────────────────────────
           # `os` is the runner that EXECUTES the asset, which is not the runner that minted it:
           # the riscv64 assets run under qemu-user on x86_64 because no riscv64 runner exists.
@@ -261,17 +249,15 @@ jobs:
           C_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest"}'
 
           if [ "$full" = "true" ]; then
-            A_LX='{"producer":"linux-x86_64","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","emit_c":true,"produces":"linux-x86_64-glibc linux-x86_64-musl"}'
             # SLOWEST FIRST in every matrix: GitHub starts legs in declaration order, so the
             # emulated riscv64 producers and the ~11-min windows-arm64 one must not queue behind
-            # cheap ones.
-            echo "matrix_artifact={\"include\":[$A_RG,$A_RM,$A_WA,$A_LX,$A_LA,$A_WX,$A_MAC]}" >> "$GITHUB_OUTPUT"
+            # cheap ones. (The producer matrix carries that order inside the shared table.)
+            echo "matrix_artifact=$(sh scripts/ci_producer_matrix.sh full)" >> "$GITHUB_OUTPUT"
             echo "matrix_test={\"include\":[$T_RG,$T_RM,$T_WA,$T_WX,$T_XG,$T_XM,$T_AG,$T_AM,$T_MAC]}" >> "$GITHUB_OUTPUT"
             echo "matrix_cli={\"include\":[$C_X,$C_MAC]}" >> "$GITHUB_OUTPUT"
             echo "labels=linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
           else
-            A_LX='{"producer":"linux-x86_64","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","emit_c":true,"produces":"linux-x86_64-glibc"}'
-            echo "matrix_artifact={\"include\":[$A_LX,$A_WX]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_artifact=$(sh scripts/ci_producer_matrix.sh light)" >> "$GITHUB_OUTPUT"
             echo "matrix_test={\"include\":[$T_WX,$T_XG]}" >> "$GITHUB_OUTPUT"
             echo "matrix_cli={\"include\":[$C_X]}" >> "$GITHUB_OUTPUT"
             echo "labels=linux-x86_64-glibc windows-x86_64" >> "$GITHUB_OUTPUT"
@@ -334,74 +320,25 @@ jobs:
         with:
           platforms: riscv64
 
-      # The seed must RUN on this runner, which is not always what the leg produces — the riscv64
-      # legs stand on x86_64 hardware. `seed` names the host-runnable label explicitly rather than
-      # deriving it, because a derivation the caller can get wrong is a derivation that silently
-      # picks the wrong blob.
-      - name: Provision teko from the latest release (the host-runnable seed)
+      # ── THE SHARED PRODUCTION PATH ──────────────────────────────────────────────────────────
+      # Provision the host-runnable seed, walk the ladder, run the DRY build
+      # (`--no-verify --release`), build each Linux asset with its target's own native toolchain,
+      # and stage `stage/<label>/teko[.exe]`. All of it is scripts/produce_assets.sh, and
+      # `nightly.yml` makes the IDENTICAL call — one production path, not two. That script is also
+      # the reason `seed` is a matrix field rather than a derivation: a producer standing on x86_64
+      # hardware may be minting riscv64 assets, and a derivation the caller can get wrong is a
+      # derivation that silently picks the wrong blob.
+      #
+      # `$PRODUCES` is unquoted deliberately: word-splitting is what turns the contract string into
+      # one argument per asset label.
+      - name: Produce this leg's assets (seed → ladder → dry build → native assets → stage)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SEED: ${{ matrix.seed }}
-        run: |
-          set -eu
-          echo "producer '${{ matrix.producer }}' — seeding with the host-runnable '$SEED'"
-          ./scripts/ci_provision_teko.sh "$SEED"
-
-      # THE DRY BUILD + THE LADDER. `out/` receives gen1's binary AND the `teko.c` it was compiled
-      # from. Every asset this producer mints is compiled from that same C, so all of them are the
-      # same generation of the compiler by construction.
-      - name: Dry build (teko build . --no-verify --release, via the ladder)
-        shell: bash
-        run: sh scripts/build_with_seed_fallback.sh out
-
-      # ── the assets ──────────────────────────────────────────────────────────────────────────
-      # Linux: one native container build per label (see scripts/native_linux_asset.sh). Non-Linux
-      # producers are already standing on the target platform, so the dry build above IS the
-      # asset.
-      - name: Build the Linux assets natively (one container per target)
-        if: matrix.kind == 'linux'
-        shell: bash
-        env:
-          PRODUCES: ${{ matrix.produces }}
-        run: |
-          set -eu
-          for label in $PRODUCES; do
-            sh scripts/native_linux_asset.sh "$label" out/teko.c src
-          done
-
-      # THE CONTRACT, MADE LITERAL: one directory per asset label, each holding that asset's
-      # binary. A test leg knows only `<label>/teko[.exe]`, so a producer can change HOW it mints
-      # an asset without the consumer noticing. The loop FAILS if a promised asset is missing — a
-      # producer that uploads less than it promised would otherwise surface as a confusing
-      # download error one job away from its cause.
-      - name: Stage the assets this producer promised
-        shell: bash
-        env:
           KIND: ${{ matrix.kind }}
-          PRODUCER: ${{ matrix.producer }}
+          SEED: ${{ matrix.seed }}
           PRODUCES: ${{ matrix.produces }}
-        run: |
-          set -eu
-          rm -rf stage
-          for label in $PRODUCES; do
-            mkdir -p "stage/$label"
-            if [ "$KIND" = "linux" ]; then
-              src="gd-$label/teko"
-            else
-              src="out/teko"; [ -f out/teko.exe ] && src="out/teko.exe"
-            fi
-            if [ ! -f "$src" ]; then
-              echo "ERROR: producer '$PRODUCER' promised '$label' but $src does not exist" >&2
-              exit 1
-            fi
-            case "$src" in
-              *.exe) cp "$src" "stage/$label/teko.exe" ;;
-              *)     cp "$src" "stage/$label/teko" ;;
-            esac
-            echo "staged $label <- $src"
-          done
-          ls -lR stage
+        run: sh scripts/produce_assets.sh "$KIND" "$SEED" $PRODUCES
 
       - name: Upload the assets
         uses: actions/upload-artifact@v4

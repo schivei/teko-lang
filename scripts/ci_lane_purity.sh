@@ -12,10 +12,17 @@
 # runs it.
 #
 # ── WHAT IS FORBIDDEN, AND WHERE ──────────────────────────────────────────────────────────────
-#   build_with_seed_fallback   the LADDER          — artifact root only
-#   ci_provision_teko          the SEED            — artifact root only (+ declared exceptions)
-#   cross_compile_linux        the deleted zig cross script — nowhere
+#   produce_assets             the SHARED PRODUCTION PATH   — artifact root only
+#   build_with_seed_fallback   the LADDER                   — artifact root only
+#   ci_provision_teko          the SEED                     — artifact root only (+ exceptions)
+#   cross_compile_linux        the deleted cross script     — nowhere
 #   zig                        the deleted toolchain        — nowhere, in ANY workflow or script
+#
+# `produce_assets` IS THE ONE THAT MATTERS NOW. When the seed/ladder/native-build steps were
+# extracted into scripts/produce_assets.sh so that pr.yml and nightly.yml could share one
+# production path, the older two tokens stopped appearing in pr.yml at all — and a check that only
+# looked for them would have started passing for the wrong reason. Guarding the new name keeps the
+# law exactly as strong as it was: whatever the root does to build, no other lane may do.
 #
 # The zig sweep is deliberately wider than this workflow: the owner's order was "O zig deve morrer
 # agora, imediatamente, sem espera, assim que entregar a carga, já deve estar morto", so the check
@@ -102,6 +109,7 @@ check_token() {
 
 : > "$TMP/violations"
 echo "--- lane purity: who may build ---"
+check_token 'produce_assets'           "$ROOT"
 check_token 'build_with_seed_fallback' "$ROOT"
 check_token 'ci_provision_teko'        "$ROOT"
 check_token 'cross_compile_linux'      ""

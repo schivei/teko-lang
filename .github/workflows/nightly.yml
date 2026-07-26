@@ -1,0 +1,293 @@
+name: Nightly Build
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THE BUILD THAT THE RELEASE PROMOTES.
+#
+# ── THE RULING IT IMPLEMENTS (owner, quoted verbatim) ─────────────────────────────────────────
+# "ao publicar o artefato, publica como '*-nightly', o * troca-se para o número do build que gerou
+# o artefato e não da versão, ai precisa ensinar o release a promover o build (gerar a tag de
+# versão e republicar os binários com os nomes certos), podendo até apagar esse build na sequência
+# (já que não possui tag e é transitório)."
+#
+# `release.yml` was taught to promote in the previous wagon and has been failing loud at "resolve
+# the nightly" ever since, because nothing published one. THIS is what publishes one.
+#
+# ── ONE PRODUCTION PATH, NOT TWO ──────────────────────────────────────────────────────────────
+# Every step that mints an asset lives in scripts/, and pr.yml's `artifact` root runs the SAME
+# scripts with the SAME leg table:
+#   scripts/ci_producer_matrix.sh  the leg table (which producer, which runner, which assets)
+#   scripts/produce_assets.sh      seed → ladder → dry build → native Linux assets → stage/
+#   scripts/native_linux_asset.sh  one target-native container build per Linux label
+#   scripts/nightly_tag.sh         the exact tag name, shared with release.yml's lookup
+# Nothing about production is written twice. That is deliberate and it is the lesson of the
+# consolidation wagon: a drift between what CI proved and what the release shipped is the defect
+# class this whole redesign exists to close.
+#
+# ── WHAT GATES THESE BYTES ────────────────────────────────────────────────────────────────────
+# Stated plainly, because the release's notes make a claim on it: this workflow does NOT re-run
+# the test suite. What gates the bytes is that (a) the commit reached `main` only through a pull
+# request whose five aggregators closed green, and (b) that PR ran `test / <asset>` for all nine
+# assets, each built by THESE scripts on THESE runners. The production path is gated per asset on
+# every full PR run; the nightly re-executes it on the merged commit, which is the commit the
+# release tag will name. Adding a full self-test here would double the cost to re-prove what the
+# PR already proved on the same code with the same producers.
+#
+# ── SCOPE GUARD ───────────────────────────────────────────────────────────────────────────────
+# Only the two repositories that are actually part of this train publish. Same shape as
+# seed-linux-fork.yml's guard, and for the same reason: a random fork of this repo must never
+# start minting releases into its own namespace just because it inherited a workflow file.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+on:
+  push:
+    # BOTH TAGGING CHANNELS, because both of them mint version tags that this build must be
+    # promotable into: `main` is the stable line, and `remodel/**` is the wave umbrella's
+    # INTERMEDIATE BETA SEED line (see tag-on-version-bump.yml's header — every sub-PR merged
+    # into an umbrella bumps the build field and mints a `-beta` tag). A nightly that covered only
+    # main would leave every umbrella tag with nothing to promote.
+    branches:
+      - main
+      - 'remodel/**'
+    # Same allowlist the PR workflow triggers on. A push that changes only prose does not need a
+    # new set of binaries — the previous nightly still describes the same compiler.
+    paths: ['**.tkp', '**.tks', '**.tkt', '**.tkr', '**.sh', '**.c', '**.h', '.github/workflows/*.yml', 'bootstrap/**']
+  workflow_dispatch:
+
+# Creating the prerelease (and its tag) needs contents: write.
+permissions:
+  contents: read
+
+# Keyed on the COMMIT, and deliberately NOT cancel-in-progress. Cancelling an in-flight nightly
+# when a newer commit lands would leave the older commit without a build — and if a version tag is
+# ever pushed at that commit, the release would find nothing to promote. Serialising re-runs of the
+# same sha is all that is wanted here.
+concurrency:
+  group: nightly-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # ── plan: the leg table and the tag, decided once ─────────────────────────────────────────
+  # ALWAYS FULL. A nightly that minted fewer than nine assets would leave the release able to
+  # promote only part of a set, which is worse than not publishing at all: the release would look
+  # successful and ship an incomplete platform matrix.
+  plan:
+    if: github.repository == 'schivei/teko-lang' || github.repository == 'teko-org/teko-lang'
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.decide.outputs.matrix }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide (producer matrix + the exact nightly tag)
+        id: decide
+        shell: bash
+        run: |
+          set -eu
+          M="$(sh scripts/ci_producer_matrix.sh full)"
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "producer matrix: $M"
+
+          # THE TAG. Derived by the same script release.yml calls to look it up — see
+          # scripts/nightly_tag.sh for why a shared derivation is not optional here.
+          T="$(sh scripts/nightly_tag.sh "$GITHUB_SHA")"
+          echo "tag=$T" >> "$GITHUB_OUTPUT"
+          echo "nightly tag: $T (commit $GITHUB_SHA)"
+
+  # ── build: the producers, then packaging ───────────────────────────────────────────────────
+  # The producing half is byte-for-byte pr.yml's `artifact` root. The packaging half is what
+  # differs, and it is only a difference in what is DONE with the result: pr.yml uploads the bare
+  # staged binaries for its test legs to download, this uploads release archives.
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: nightly / ${{ matrix.producer }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Named BEFORE the first step that can fail on a missing tool, so a red run says WHICH
+      # toolchain was present instead of leaving the reader to infer it from a cc error deep
+      # inside a build log.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file xz unzip tar curl python3 7z docker; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+
+      # riscv64 PRODUCERS ONLY. There is no riscv64 runner, so the target's OWN gcc runs on an
+      # emulated CPU inside a linux/riscv64 container. scripts/native_linux_asset.sh probes the
+      # registration before compiling and fails with a named error if it is missing, so this step
+      # going wrong can never become a silent wrong-arch artifact.
+      - name: Register binfmt for riscv64 (emulated CPU, native toolchain)
+        if: matrix.binfmt
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      # THE SHARED PRODUCTION PATH — identical call to the one pr.yml's `artifact` root makes.
+      - name: Produce this leg's assets (seed → ladder → dry build → native assets → stage)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIND: ${{ matrix.kind }}
+          SEED: ${{ matrix.seed }}
+          PRODUCES: ${{ matrix.produces }}
+        run: sh scripts/produce_assets.sh "$KIND" "$SEED" $PRODUCES
+
+      # ── packaging ────────────────────────────────────────────────────────────────────────────
+      # scripts/package_release.sh is the SAME packer the releases have always used, so the
+      # archive layout, the binary name inside it and the per-platform container (.tar.gz vs .zip)
+      # are unchanged by this workflow existing. It wants a directory holding the binary AND the
+      # `teko.c` it was compiled from, which is exactly what the production step leaves behind.
+      #
+      # EMIT_SRC_BUNDLE fires for EXACTLY ONE label. The portable bootstrap snapshot is the same
+      # on every platform — the emitted teko.c is byte-identical across architectures, which
+      # pr.yml's `cross-arch-determinism` lane asserts on every full run — so it is published once.
+      - name: Package the assets this producer minted
+        shell: bash
+        env:
+          PRODUCES: ${{ matrix.produces }}
+        run: |
+          set -eu
+          rm -rf pkg dist
+          mkdir -p dist
+          for label in $PRODUCES; do
+            d="pkg/$label"
+            mkdir -p "$d"
+            cp stage/"$label"/teko "$d/teko" 2>/dev/null || cp stage/"$label"/teko.exe "$d/teko.exe"
+            cp out/teko.c "$d/teko.c"
+            case "$label" in
+              windows-*) ostype=windows ;;
+              *)         ostype=posix ;;
+            esac
+            bundle=0
+            [ "$label" = "linux-x86_64-glibc" ] && bundle=1
+            EMIT_SRC_BUNDLE="$bundle" sh scripts/package_release.sh "$label" "$d" src dist "$ostype"
+          done
+          echo "=== dist/ ==="
+          ls -la dist/
+
+      - name: Upload this producer's archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-dist-${{ matrix.producer }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  # ── publish: one prerelease, one exact tag ─────────────────────────────────────────────────
+  publish:
+    needs: [plan, build]
+    name: publish the nightly prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Every producer's archives, merged. Filenames are unique per label, so `merge-multiple`
+      # cannot collide.
+      - name: Download every producer's archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-dist-*
+          merge-multiple: true
+          path: dist
+
+      # THE COMPLETENESS GATE. A nightly missing an asset is worse than no nightly: the release
+      # would promote it, look successful, and ship an incomplete platform matrix. The nine labels
+      # plus the portable bootstrap snapshot are named literally here — an independent statement of
+      # the requirement, not a count of whatever happened to arrive.
+      - name: Assert the nightly is complete, then combine the checksums
+        shell: bash
+        run: |
+          set -eu
+          echo "=== as downloaded ==="
+          ls -la dist/
+
+          MISSING=""
+          for f in teko-linux-x86_64-glibc.tar.gz \
+                   teko-linux-x86_64-musl.tar.gz \
+                   teko-linux-arm64-glibc.tar.gz \
+                   teko-linux-arm64-musl.tar.gz \
+                   teko-linux-riscv64-glibc.tar.gz \
+                   teko-linux-riscv64-musl.tar.gz \
+                   teko-macos-arm64.tar.gz \
+                   teko-windows-x86_64.zip \
+                   teko-windows-arm64.zip \
+                   teko-bootstrap-src.tar.gz; do
+            if [ ! -f "dist/$f" ]; then
+              MISSING="$MISSING $f"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::the nightly is incomplete — missing:$MISSING" >&2
+            echo "Publishing a partial set would let release.yml promote it and ship a platform" >&2
+            echo "matrix with holes, with nothing red anywhere to say so." >&2
+            exit 1
+          fi
+          echo "all nine assets + the portable bootstrap snapshot are present"
+
+          # Merge the per-platform checksum files into ONE canonical SHA256SUMS.txt, then discard
+          # the per-platform ones — the release regenerates its own over the promoted bytes, and a
+          # release carrying eight redundant sums files would just be noise.
+          ( cd dist && cat SHA256SUMS-*.txt | sort -u > SHA256SUMS.txt && rm -f SHA256SUMS-*.txt )
+          echo "=== SHA256SUMS.txt ==="
+          cat dist/SHA256SUMS.txt
+
+      # ── the prerelease ───────────────────────────────────────────────────────────────────────
+      # `--target $GITHUB_SHA` pins the tag to the commit these bytes were built from, which is
+      # what makes the tag name (which embeds that commit's sha8) TRUE and not merely conventional.
+      #
+      # IDEMPOTENT: re-running this workflow on the same commit clobbers the assets of the same
+      # release rather than failing on an existing tag. That keeps the invariant the promotion
+      # depends on — AT MOST ONE nightly per (build number, commit) — which is what makes
+      # release.yml's delete step unable to remove the wrong one.
+      - name: Publish the nightly prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -eu
+          echo "publishing nightly '$TAG' at commit $GITHUB_SHA"
+          NOTES="$(printf '%s\n' \
+            "Transitory build of \`$GITHUB_SHA\`." \
+            "" \
+            "This is NOT a release. It is the artifact set a version tag promotes:" \
+            "\`release.yml\` looks this tag up by exact name, republishes these exact bytes under" \
+            "the version tag, and then deletes this prerelease — it is transitory by construction" \
+            "(owner ruling 2026-07-26)." \
+            "" \
+            "Every Linux artifact is built with the TARGET's own native toolchain; no" \
+            "cross-compiler is involved. Do not depend on this tag: it disappears when it is" \
+            "promoted.")"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "'$TAG' already exists (a re-run on the same commit) — clobbering its assets."
+            gh release upload "$TAG" dist/teko-*.tar.gz dist/teko-*.zip dist/SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Nightly $TAG" \
+              --notes "$NOTES" \
+              --prerelease \
+              dist/teko-*.tar.gz dist/teko-*.zip dist/SHA256SUMS.txt
+          fi
+          echo "published: $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
