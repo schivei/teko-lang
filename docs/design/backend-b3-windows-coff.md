@@ -789,6 +789,20 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
   vs `tk_println`) is a shared LIR-lowering gap — it KNOWN-STOPs identically on the Windows lane (the
   lld-link rejects the undefined `println`). Already a reported finding; B3 inherits it unchanged.
 
+  **CLOSED, then re-opened and closed again on a DIFFERENT axis (0.3.1, wagon 20).** The symbol gap
+  itself went away (`#comptime-fold` CF5 folds the provably-const interpolation, so `own_print_exit`
+  joined the compared corpus on every lane). The Windows lane then failed on something this section
+  never anticipated: an **ABI** defect, not a COFF one. The LIR flattens `tk_println`'s by-value
+  `tk_str` argument into the scalar pair `(ptr, len)` — the true C ABI on SysV/AAPCS64/LP64D, where a
+  2-eightbyte aggregate decomposes into two consecutive argument registers. Microsoft x64 passes an
+  aggregate in a register ONLY at size 1/2/4/8, so a 16-byte `tk_str` travels BY REFERENCE; the
+  C-built callee compiles to `movq (%rcx),%rcx` / `movl 0x8(%rcx),%r8d` and therefore read the
+  string's own first 16 bytes as `{ptr; len}`, faulting (exit 139). `tk_exit(i32)` is scalar, which
+  is why every `exit(n)` fixture in §9's table stayed green and only this row died. The fix is in the
+  x86 isel (`pin_str_pair_by_ref_x86`), driven by the new `AbiDescriptor.max_reg_arg_bytes` (Win64 8,
+  everyone else 16) — the PE/COFF writer needed no change at all (`check_coff.sh` passed, and
+  `lld-link` resolved the `.rdata` REL32 to the literal, both before and after).
+
 ---
 
 ## 9. Regression fixtures + the gate
