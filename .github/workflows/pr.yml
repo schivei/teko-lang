@@ -119,6 +119,20 @@ on:
     # docs-only PR costs one ~12s ubuntu job, the aggregators REPORT (green, having asserted that
     # everything below them was correctly skipped), and nothing hangs.
 
+# ONE LIVE RUN PER PR. Without this, every push starts a full set — seven native producers plus
+# nine test legs — and the previous set keeps running to completion on a commit nobody will ever
+# merge. On this train that is not a rounding error: the two riscv64 producers are EMULATED and
+# take ~20 min each, so three pushes in an hour meant three sets of them burning in parallel to
+# grade dead commits.
+#
+# Cancelling is safe here because a required check is evaluated on the PR's HEAD commit: a run
+# cancelled by a newer push belongs to a superseded SHA, which no longer gates anything. The
+# group is keyed on the PR ref so distinct PRs never cancel each other, and `github.workflow` is
+# included so this file's runs never collide with another workflow's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
