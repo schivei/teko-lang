@@ -1394,6 +1394,23 @@ void tk_println(tk_str s) {
     fputc('\n', stdout);   // single 0x0A
 }
 
+// tk_flush_out — push stdout to the OS now.
+//
+// Exists for ONE reason, and it is a diagnosis reason. stdout is block-buffered whenever it is not
+// a tty — which is every CI run and every `> log` — while a panic, an assert() abort and a segfault
+// all reach the terminal through stderr, unbuffered. So a crash prints its message while the test
+// NAMES that led up to it are still sitting in stdout's buffer, and the reader attributes the crash
+// to whichever test was last flushed: an offset of up to a whole buffer.
+//
+// That is not hypothetical. It cost a full investigation on this train: an abort was attributed to
+// a spine test ~66 tests before the real one, and the misattribution was reported up as a probable
+// compiler defect ("adding a field to a struct breaks an unrelated test") before `stdbuf -o0`
+// showed the true failure. The test harness calls this after printing each test's name and BEFORE
+// running its body, so the name is on the wire before anything can kill the process.
+void tk_flush_out(void) {
+    fflush(stdout);
+}
+
 // Host output FFI bottoms (scope.c: write/ewrite/eprint/eprintln) — exactly s.len bytes, tolerate
 // embedded NUL. write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
 void tk_write(tk_str s)    { fwrite(s.ptr, 1, s.len, stdout); }

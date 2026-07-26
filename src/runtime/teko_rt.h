@@ -178,6 +178,9 @@ void       tk_regions_free_all(void);
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).
 void tk_println(tk_str s);
+/* Flush stdout now, so a name printed before a crash is not lost in the block buffer.
+   See teko_rt.c for the misdiagnosis that motivated it. */
+void tk_flush_out(void);
 // Host output FFI bottoms (scope.c write/ewrite/eprint/eprintln) — s.len bytes, NUL-tolerant.
 // write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
 void tk_write(tk_str s);
