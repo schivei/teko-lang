@@ -93,14 +93,14 @@ teko test  <dir> --coverage   # also emit a Cobertura cobertura.xml report
 
 ## 7. Continuous integration
 
-Four workflows run on PRs targeting `main` (see `.github/workflows/`):
+Two workflows run on PRs targeting `main` (see `.github/workflows/`):
 
 | Workflow | What it checks |
 |---|---|
-| `native.yml` | Multi-OS/arch build + regression examples, VM == native |
-| `sanitizers.yml` | ASan/UBSan + stress runs |
-| `sast.yml` | clang-tidy security gate — **fails only** on `security.*` / `core.NullDereference` findings |
-| `codeql.yml` | GitHub CodeQL analysis |
+| `pr.yml` | Everything a PR must prove. One `artifact` lane per published asset builds the compiler natively; **every other lane consumes that artifact instead of rebuilding it**, which is why they all sit behind `needs: artifact`. On top of it: the per-asset test and CLI-surface lanes, the full regressor, `ar` validation, cross-arch determinism, seed debut, the sanitizers (TSan, ASan/UBSan, LSan, `TEKO_MEM_PARANOID`) and the clang-tidy security audit — reported through five aggregators. |
+| `codeql.yml` | GitHub CodeQL analysis. Independent by design: it analyses the C runtime, has no dependency on a Teko artifact, and teaching it to read Teko is post-linker work. |
+
+`nightly.yml` is not a PR gate — it runs on pushes to `main` and publishes the prerelease. `release.yml` promotes an already-proven build to its tag; it compiles nothing.
 
 To reproduce the SAST gate locally on macOS, use LLVM 18 (`brew install llvm@18`) — the default `llvm` keg produces noisy `ArrayBound` false positives that CI's clang-18 does not.
 

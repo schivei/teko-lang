@@ -4,9 +4,8 @@
 
 **A self-hosting, all-native programming language — safe by construction, tested by default.**
 
-[![Native Build & Test](https://github.com/teko-org/teko-lang/actions/workflows/native.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/native.yml)
-[![Sanitizers & Stress](https://github.com/teko-org/teko-lang/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/sanitizers.yml)
-[![SAST Gate](https://github.com/teko-org/teko-lang/actions/workflows/sast.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/sast.yml)
+[![Pull Request CI](https://github.com/teko-org/teko-lang/actions/workflows/pr.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/pr.yml)
+[![Nightly Build](https://github.com/teko-org/teko-lang/actions/workflows/nightly.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/nightly.yml)
 [![CodeQL](https://github.com/teko-org/teko-lang/actions/workflows/codeql.yml/badge.svg)](https://github.com/teko-org/teko-lang/actions/workflows/codeql.yml)
 
 <img src="docs/brand/mascot.svg" alt="The Teko mascot — a baby guará (scarlet ibis)" width="280"/>

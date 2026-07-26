@@ -1,15 +1,28 @@
 # CI gating — the light/full split, and the memory/UB tiers
 
 **Status:** ratified (owner ruling 2026-07-14 for the memory/UB tiers; owner proposal 2026-07-24
-for the light/full split, implemented 2026-07-25; owner ruling 2026-07-26 for the HOST set — every
-published host gets a build lane AND a test lane).
+for the light/full split, implemented 2026-07-25; owner rulings 2026-07-26 for the HOST set — every
+published host gets a build lane AND a test lane — and for the CONSOLIDATION, below).
+
+> **Read this first.** The 2026-07-26 consolidation moved every `pull_request` job into a single
+> workflow and put an artifact root under all of them. The tiers, the mode assertions and the
+> ruleset table below are unchanged in substance; only their addresses moved. See
+> "The consolidation" for the mapping.
 
 ## The axis: `light` vs `full`
 
 ```
 full  <=> github.base_ref == 'main'      (the wagon that LANDS a stacked train, or a hotfix)
-light <=> any other base                 (an intermediate wagon PR)
+      OR the PR touches CI, build scripts, the runtime/assert C, the backend, the
+         bootstrap seeds, or teko.tkp
+light <=> any other base AND none of the above touched
 ```
+
+The base is not the only trigger, because it was never a sound one on its own: a wagon that
+rewrites `scripts/` or `src/backend/` is exactly the wagon whose full audits matter, and its base
+is another wagon. The criterion lives in `scripts/ci_full_mode.sh` so the gates can re-derive it
+INDEPENDENTLY — over the PR's own file list, without `dorny` — and fail on disagreement. That
+independent re-derivation is what makes a `skipped` leg trustworthy rather than merely quiet.
 
 Delivery is a **stacked train**: each wagon is a PR based on the previous wagon's branch, and the
 whole train lands in ONE integration at the top wagon, retargeted to `main`. So the only complete
@@ -20,22 +33,85 @@ runners to re-prove what the landing proves again.
 `refs/pull/N/merge` and matches no branch name. That exact mistake was a live bug here — see
 "The J2 bug" below.
 
-| track | light | full |
+| job in `pr.yml` | light | full |
 |---|---|---|
-| `tests.yml` `test` | linux-x86_64, windows-x86_64 | + linux-arm64, macos-arm64, windows-arm64 |
-| `native.yml` `build-test` | linux-x86_64, windows-x86_64 | + linux-arm64, macos-arm64, windows-arm64 |
-| `native.yml` `gen1-checks` | ubuntu-latest | + macos-latest |
-| `native.yml` `riscv64-qemu` | — | yes |
-| `native.yml` `ar-elf-macho-coff-validation` | — | yes |
-| `native.yml` `release-cross-smoke` | — | yes |
-| `native.yml` `seeds` | — | yes |
-| `native.yml` `seed-debut` | — | yes (five hosts) |
-| `sanitizers.yml` (all four jobs) | — | yes |
-| `codeql.yml` / `sast.yml` | unchanged (see below) | unchanged |
+| `artifact / <producer>` | the producers minting the two light assets | all seven producers |
+| `test / <label>` | linux-x86_64-glibc, windows-x86_64 | all nine assets |
+| `cli surface / <label>` | linux-x86_64-glibc | + macos-arm64 |
+| `TSan`, `ASan+UBSan smoke` | yes | yes |
+| `regressor / all capabilities` | — | yes |
+| `ar validation / <label>` | — | yes |
+| `cross-arch determinism` | — | yes |
+| `seed debut / <label>` | — | yes |
+| `ASan+UBSan+LSan / default dispatch` | — | yes |
+| `Memory paranoid (native self-host)` | — | yes |
+| `clang-tidy audit` | path-filtered (`sast_run`) | path-filtered |
+| `codeql.yml` | independent — see below | independent |
 
-What survives on the light path is precisely what catches a compiler break: gen1 builds, `teko
-test .` passes (which since D6 includes the ten `.tkr` regressors), and the own==C differential on
-linux.
+The **producer** matrix narrows with the asset set rather than building nine and discarding seven:
+`produces` is per-leg, so the light path mints one Linux asset instead of six. The two layers are
+cross-checked against each other and against the mode's required set in `Test suite gate`, so a
+host can no longer be built without being tested, nor tested without being built.
+
+What runs on the light path is precisely what catches a compiler break: the assets build, both
+light assets pass `teko test .` on their own hardware (which since D6 includes the `.tkr`
+regressors), and the sanitizer smoke lanes link the emitted C.
+
+### No trigger-level path filter — the freeze the drain cannot survive
+
+`pr.yml` has `branches:` and no `paths:`, deliberately. The five aggregators are required on
+`main`, `main` has no bypass, and a required check that never REPORTS does not go red — it stays
+"Expected — waiting for status" forever. A head commit touching only files outside a trigger
+filter (a README fix, a `docs/**` correction, a doc-comment sweep) would produce no run at all and
+freeze the PR — and the only PR pointing at `main` in a stacked train is the drain.
+
+The cost the filter used to buy is bought one level down instead: `plan` computes `run` with a
+docs-only guard, and **every** lane including the artifact root consults it. A docs-only PR costs
+one ~12s job. The aggregators do not merely tolerate the resulting skips — they **require** them,
+so the cheap path cannot degrade into a vacuous green. All three directions are exercised:
+docs-only passes, `run=true` with a skipped root fails, and a root that ran when `run=false` fails
+too.
+
+## The consolidation (owner ruling 2026-07-26)
+
+> *"todas as lanes de pull_request precisam depender dessa lane de artefatos, a lane de artefatos
+> deve executar build seco `teko build . --no-verify --release` e ela deve ter a inteligência sobre
+> o que deve gerar (a escada)"* — and, on the workflow count: *"se não atravessa, transforme em um
+> único yaml, os únicos independentes são os que esperam push"*.
+
+Three rulings, one shape:
+
+1. **One artifact root.** `artifact / <producer>` builds the compiler and stages that producer's
+   published assets. Every other `pull_request` job downloads them. No lane rebuilds the compiler
+   to test it; the thing under test is the thing that ships.
+2. **One workflow.** `needs:` cannot cross workflows, so an artifact root and five separate YAMLs
+   are mutually exclusive. `native.yml`, `tests.yml`, `sanitizers.yml` and `sast.yml` dissolved into
+   `pr.yml`. Only the `push`-triggered workflows stay independent, because nothing gates them.
+3. **`codeql.yml` stays independent** — a different reason from the `push` ones: it analyses the C
+   runtime, so it does not want a Teko artifact at all, and teaching it (and Dependabot) to read
+   Teko is post-linker work.
+
+### Zig is dead
+
+The assets were cross-compiled with zig. They are now built by the **target's own toolchain**: an
+Alpine or manylinux container of the target architecture, run under `qemu-user-static` + binfmt
+where the host architecture differs. The CPU is emulated; the compiler is not cross. Measured on
+`theory/native-runner-probe` before the redesign, and the riscv64 emulation cost was accepted
+explicitly by the owner.
+
+The immediate payoff was a real defect: `dladdr` lives in `libdl` until glibc 2.33 and folds into
+`libc` at 2.34, so linking against the runner's own glibc 2.39 hid a dependency that the glibc-2.28
+floor requires. Cross-compiling had made the floor invisible; building on the floor made it fail
+loudly, and `-ldl` is now passed on exactly the glibc legs.
+
+### `release.yml` compiles nothing
+
+> *"se o binário gerado na primeira etapa, que passou todos os gates é válido, release só precisa
+> promover, não tem que recompilar e 'jogar fora' algo provado."*
+
+`release.yml` finds the build that already passed the gates, renames its assets to the release
+naming, republishes them under the correct tag, and deletes the transient build. A recompile at
+release time would discard the artifact the gates actually proved and ship a different one.
 
 ### The HOST set (owner ruling 2026-07-26)
 
@@ -43,8 +119,8 @@ linux.
 > teste se não houverem."
 
 This **reverses** the 2026-07-06 exclusion of `windows-arm64` from `build-test`. Every host that
-ships a published artifact now has BOTH a build lane (`native.yml` `build-test`) and a test lane
-(`tests.yml` `test`). The gap the ruling closed:
+ships a published artifact now has BOTH a build lane (`artifact / <producer>`) and a test lane
+(`test / <label>`). The gap the ruling closed:
 
 | host | build lane before | test lane before |
 |---|---|---|
@@ -63,15 +139,16 @@ hosts are full-only, because each adds an ARCH delta on top of a platform the li
 covers, and `windows-11-arm` is the slowest runner in the set
 (docs/design/compile-time-architecture.md §1.1).
 
-`tests.yml` is a **matrix**, not one job per host: five hand-written jobs is the shape in which the
-fifth is forgotten out of the aggregator's `needs:` list — and a job outside that list runs, goes
-red, and does not block the merge. A matrix job has one name in `needs:`, and its aggregate result
-is `success` only when every leg succeeded.
+`test` is a **matrix**, not one job per host: nine hand-written jobs is the shape in which the ninth
+is forgotten out of the aggregator's `needs:` list — and a job outside that list runs, goes red, and
+does not block the merge. A matrix job has one name in `needs:`, and its aggregate result is
+`success` only when every leg succeeded. The matrices are computed in `plan` and consumed via
+`fromJSON`, so adding an asset adds its build lane and its test lane in the same edit.
 
 `codeql.yml` is deliberately NOT gated: it feeds the `code_scanning` ruleset rule, which requires a
 completed analysis for the PR head, so skipping it leaves the PR blocked "waiting for CodeQL".
-`sast.yml` is already narrowly path-filtered to `src/runtime/**` + `src/assert/**` (clang-tidy over
-two C files) and is left as-is.
+`clang-tidy audit` is narrowly path-filtered to `src/runtime/**` + `src/assert/**` (clang-tidy over
+two C files) and keeps that filter, expressed as the `sast_run` output of `plan`.
 
 ### Gates assert the MODE, not merely the absence of failure
 
@@ -99,7 +176,7 @@ not reduce coverage here; it **restored** two lanes.
 
 ## Problem
 
-The heavy sanitizer lane (`asan-default` in `.github/workflows/sanitizers.yml`) rebuilds gen1
+The heavy sanitizer lane (`asan-default`, then in `sanitizers.yml`, today in `pr.yml`) rebuilds gen1
 under `-fsanitize=address,undefined` through a `cc` wrapper and then runs the whole self-host
 gate plus the regressions corpus under ASan shadow memory. That is a genuine, valuable UB audit —
 it surfaced and drove root fixes for the #291 trait-vtable function-pointer mismatch, the
@@ -127,12 +204,11 @@ Job `mem-paranoid` (check name **`Memory paranoid (native self-host)`**), aggreg
   runtime `getenv` that **poisons every freed arena block and never reuses it**, so any
   use-after-free / arena-reuse-after-free in the compiler's own C aborts loud.
 - Cost ≈ one native self-host.
-- **As of 2026-07-25 this job, like every other job in `sanitizers.yml`, is FULL-only** (see the
-  light/full split above): `tsan` carries a 90-min budget and `windows-selfhost` a 100-min one, so
-  the whole workflow belongs to the landing. What guards an intermediate wagon PR instead is
-  `test / linux-x86_64` + `test / windows-x86_64` plus the native self-build gate in `native.yml`. The `TEKO_MEM_PARANOID` self-host
-  is also part of every wagon's LOCAL closing ritual, so the oracle still runs per wagon — off the
-  shared runners.
+- **This job is FULL-only** (see the light/full split above), because it costs a full self-host.
+  What guards an intermediate wagon PR instead is the nine `test / <label>` lanes — every published
+  asset runs `teko test .` on its own hardware on every PR — plus the `TSan` and `ASan+UBSan smoke`
+  lanes, which link the emitted C. The `TEKO_MEM_PARANOID` self-host is also part of every wagon's
+  LOCAL closing ritual, so the oracle still runs per wagon — off the shared runners.
 
 ### HEAVY tier — the MAIN audit (ASan + UBSan + LSan)
 
