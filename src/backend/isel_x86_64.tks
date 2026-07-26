@@ -900,6 +900,114 @@ fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool
 }
 
 /**
+ * X86_STR_ARG_BYTES — the byte size of a `tk_str` (`teko_rt.h:45-48`: a pointer
+ * plus a `size_t`, both 8 bytes on every x86-64 target). The threshold
+ * `max_reg_arg_bytes` is compared against to decide register-vs-reference
+ * passing, and the size of the frame slot the by-reference copy lives in.
+ */
+const X86_STR_ARG_BYTES: u32 = 16 to u32
+
+/**
+ * X86_STR_ARG_ALIGN — the alignment of a `tk_str` frame copy (8: its widest
+ * field is an 8-byte pointer).
+ */
+const X86_STR_ARG_ALIGN: u32 = 8 to u32
+
+/**
+ * X86_STR_LEN_OFFSET — the byte offset of `tk_str`'s `len` field inside the
+ * struct (`ptr` at 0, `len` at 8) — the displacement the by-reference copy's
+ * second store writes at.
+ */
+const X86_STR_LEN_OFFSET: i32 = 8 to i32
+
+/**
+ * str_pair_by_ref_x86 — must this call's argument list, which the TARGET-NEUTRAL
+ * LIR flattened from ONE by-value `tk_str` into the two scalar operands
+ * `(ptr, len)` (`lower.tks::lower_str_arg_call`), be re-materialized and passed
+ * BY REFERENCE instead?
+ *
+ * True exactly when the ABI cannot carry a 16-byte aggregate in registers
+ * (`max_reg_arg_bytes < 16` — Win64, which passes an aggregate in a register
+ * ONLY at size 1/2/4/8) AND the callee is one of the closed set of
+ * single-`tk_str`-argument runtime entries (`lir::is_str_arg_builtin`, read from
+ * the LIR so the list is single-sourced) AND the flat pair is actually present.
+ * On SysV/AAPCS64/LP64D (`max_reg_arg_bytes == 16`) it is always false, so those
+ * targets keep the byte-identical two-register sequence (FIXPOINT).
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param str symbol  the call's already-final runtime symbol
+ * @param []u32 args  the call's flattened argument VRegs
+ * @return bool  true iff the pair must travel by reference
+ */
+fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
+    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+}
+
+/**
+ * pin_str_pair_by_ref_x86 — pass a flattened `(ptr, len)` `tk_str` pair the
+ * Win64 way: BY REFERENCE. Reserve a 16-byte frame slot, take its address
+ * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
+ * the shadow region `compute_frame_layout_x86` already reserves), store `ptr` at
+ * +0 and `len` at +8, then pin that ADDRESS into the ABI's FIRST integer
+ * argument register (RCX) as the call's single `use`.
+ *
+ * This is the whole content of the B3 Windows differential's `own_print_exit`
+ * SIGSEGV: emitting SysV's two-register form on Win64 makes the C-built callee
+ * (`void tk_print(tk_str s)`, which under Win64 compiles to `movq (%rcx), %rcx` /
+ * `movl 0x8(%rcx), %r8d`) read the STRING'S OWN first 16 bytes as `{ptr; len}`
+ * and `fwrite` through the resulting garbage pointer. `tk_exit(i32)` — a scalar —
+ * was unaffected, which is why the `own_exit_code` fixture passed while
+ * `own_print_exit` faulted.
+ *
+ * Both halves store at `Q` width. `len` is a `size_t`, and the SysV path already
+ * relies on the same invariant (it moves the whole 64-bit register into RSI), so
+ * a narrow producer's zero-extended upper half is not a new assumption. Neither
+ * half can be float-class — `lower_str_arg_call` builds the pair from a fat
+ * pointer's address and byte length — so there is no `B1-fp` arm here.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its first GPR arg reg)
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the flattened pair — `args[0]` = ptr, `args[1]` = len
+ * @return PinnedArgsX86 | error  the pinned address, or a NAMED honest-stop
+ */
+fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 | error {
+    let slot = arg_reg(abi, MRegClass::GPR, 0 to u32)
+    if !slot.ok {
+        return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
+    }
+    let frame_slot = ctx0.func.frame.len
+    let with_slot = append_frame_x86(ctx0.func, lir::LAlloca { bytes = X86_STR_ARG_BYTES; align = X86_STR_ARG_ALIGN })
+    let ctx1 = SelCtxX86 { func = with_slot; vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
+    let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+    let ctx2 = selctx_x86_emit(scratch.ctx, frame_addr_x86(scratch.reg, frame_slot))
+    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(args[0], MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
+    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(args[1], MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
+    let ctx5 = selctx_x86_emit(ctx4, mov_x86(slot.reg, scratch.reg, true))
+    PinnedArgsX86 { ctx = ctx5; uses = teko::list::push(teko::list::empty(), slot.reg) }
+}
+
+/**
+ * pin_call_args_x86 — the argument-pinning entry a DIRECT call goes through: the
+ * by-reference `tk_str` path when the target ABI demands it
+ * (`str_pair_by_ref_x86`), else the plain per-argument register pinning
+ * (`pin_args_x86`). An indirect call never reaches a `tk_str` runtime builtin (it
+ * has no symbol), so it stays on `pin_args_x86` directly.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param str symbol  the call's already-final runtime symbol
+ * @param []u32 args  the call's flattened argument VRegs, in declaration order
+ * @param bool variadic  whether the call is variadic (honest-stops downstream)
+ * @return PinnedArgsX86 | error  the pinned args, or a NAMED honest-stop
+ */
+fn pin_call_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, symbol: str, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
+    if !variadic && str_pair_by_ref_x86(abi, symbol, args) {
+        return pin_str_pair_by_ref_x86(abi, ctx0, args)
+    }
+    pin_args_x86(abi, ctx0, args, variadic)
+}
+
+/**
  * select_call_result_x86 — after a call, move its result out of the SysV result
  * register RAX into the result VReg (when the call produces one). The result
  * class is taken as GPR (RAX): `LInst` carries no result type, so a
@@ -922,7 +1030,8 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
 
 /**
  * select_call_x86 — the `LCall` selection (§4.5): lower the arguments into
- * the target ABI's registers (`pin_args_x86`), emit `MCallX86{sym, uses,
+ * the target ABI's registers (`pin_call_args_x86` — which routes a flattened
+ * `tk_str` pair through the by-reference path on an ABI that demands it), emit `MCallX86{sym, uses,
  * ret_reg, has_result, variadic}` with the result pinned to RAX (decision D-A —
  * RAX is the integer result on both SysV and Win64), then move the result out
  * of RAX if the call produces one.
@@ -934,7 +1043,7 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
  * @return SelCtxX86 | error  the advanced context, or a propagated error
  */
 fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir::LCall) -> SelCtxX86 | error {
-    let pinned = match pin_args_x86(abi, ctx0, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
+    let pinned = match pin_call_args_x86(abi, ctx0, c.symbol, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
     let ret_reg = RAX_X86
     let ctx1 = selctx_x86_emit(pinned.ctx, call_x86(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
     select_call_result_x86(ctx1, inst, ret_reg)
