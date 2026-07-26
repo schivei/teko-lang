@@ -283,6 +283,27 @@ fn module_const_count(prog: checker::TProgram) -> u64 {
 }
 
 /**
+ * append_diags — `b`'s diagnostics appended to `a`'s, in order. The build reports FILE-boundary
+ * (parse) diagnostics before DECLARATION-boundary (type) ones, which is the order a reader walks
+ * the pipeline in.
+ *
+ * @param a  the diagnostics collected first
+ * @param b  the diagnostics to append
+ * @return   the concatenation
+ * @since 0.3.1
+ */
+fn append_diags(a: []str, b: []str) -> []str {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
  * Run the checker, monomorphization, and const-inlining phases over `selected` (with
  * `dep_prog`'s signatures pre-seeded), reporting ALL THREE as their own timed
  * `teko build` observability phases: `checker` ticks a live "N/M items" counter as
@@ -298,9 +319,11 @@ fn module_const_count(prog: checker::TProgram) -> u64 {
  * @param dep_prog  the already-typed dependency program (empty when depless)
  * @param report    print the phase lines (`false` for a silent/retry pass)
  * @param tty       render the phases' in-place `\r` updates
- * @return          the fully checked and monomorphized program, or the first error
+ * @param parse_diags  the FILE-boundary lex/parse diagnostics the assembly already collected, so
+ *                     they are reported alongside this phase's declaration-boundary ones
+ * @return          the fully checked and monomorphized program, or every collected diagnostic
  */
-fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool) -> checker::TProgram | error {
+fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, report: bool, tty: bool, parse_diags: []str) -> checker::TProgram | error {
     let mode = report_mode(!report, tty)
     let checker_phase = phase_begin("checker", count_unit_text(0, selected.items.len, "items"), mode)
     mut last: u64 = 0
@@ -309,9 +332,18 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
     let pre = match checker::type_program_with_deps_pre_mono(selected, dep_prog, on_item) {
         checker::PreMono as p => p
         error as e => {
-            phase_end_fail(checker_phase, count_unit_text(last, total_cell, "items"), e.message)
-            return e
+            let all = append_diags(parse_diags, teko::list::push(teko::list::empty(), e.message))
+            phase_end_fail(checker_phase, count_unit_text(last, total_cell, "items"), all[0])
+            return error { message = join_diags(all) }
         }
+    }
+    // Every FILE-boundary (parse) and DECLARATION-boundary (type) diagnostic this build collected,
+    // reported TOGETHER — the `teko test` shape, one line per defect. Monomorphization is NOT
+    // attempted: `pre.prog` is partial by construction when anything failed to type.
+    let collected = append_diags(parse_diags, pre.diags)
+    if collected.len > 0 {
+        phase_end_fail(checker_phase, count_unit_text(last, total_cell, "items"), collected[0])
+        return error { message = join_diags(collected) }
     }
     phase_end_ok(checker_phase, count_unit_text(total_cell, total_cell, "items"))
 
@@ -355,6 +387,10 @@ fn checked_program_of(selected: parser::Program, dep_prog: checker::TProgram, re
 type ParsedFront = struct {
     parsed: parser::Program
     manifest: Manifest
+    /** every FILE-boundary lex/parse diagnostic the assembly collected (empty on a clean parse).
+        Carried rather than raised so the CHECKER still runs over the files that DID parse and the
+        build reports every file's defect in one pass (owner ruling 2026-07-26). */
+    diags: []str
 }
 
 /**
@@ -403,9 +439,9 @@ fn frontend_parse(include_tests: bool, quiet: bool, tty: bool) -> ParsedFront | 
 
     // --- assemble: read+parse every file, MERGE into ONE program (A3) ---
     // assemble bakes file:line:col into the message, so report with an empty path (W-loc).
-    let program = match assemble_sel(files, include_tests, !quiet, tty) { parser::Program as p => p; error as e => return e }
+    let asm = match assemble_sel(files, include_tests, !quiet, tty) { Assembled as a => a; error as e => return e }
 
-    ParsedFront { parsed = program; manifest = m }
+    ParsedFront { parsed = asm.program; manifest = m; diags = asm.diags }
 }
 
 /**
@@ -430,7 +466,7 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool) -> Frontend | error {
     // and reference dep types. m.deps is empty when there is no [dependencies] section → no-op.
     let dep_prog = match load_deps_program(pf.manifest) { checker::TProgram as p => p; error as e => return e }
 
-    let checked = match checked_program_of(selected, dep_prog, !quiet, tty) { checker::TProgram as c => c; error as e => return e }
+    let checked = match checked_program_of(selected, dep_prog, !quiet, tty, pf.diags) { checker::TProgram as c => c; error as e => return e }
 
     Frontend { prog = checked; manifest = pf.manifest }
 }
@@ -2782,7 +2818,7 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool) -> str {
  *  and hand the clean program to the backend at optimization level `opt`. `backend` is the
  *  resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
 fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront) -> i32 {
-    let pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest }
+    let pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags }
     let rel = match frontend_check(pf_prod, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start)
 }

@@ -5957,6 +5957,47 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
 // prints when it can't read the file), then re-attach the STRUCTURED file/line/col (err_loc) and
 // PRESERVE the inner error's expected/actual (err_typed) so a type mismatch still renders
 // "expected X, found Y" after surfacing.
+/**
+ * diag_text_at — the LOCATED message text `surface_at` would bake into its error, without building
+ * the error. The declaration-boundary collector (`type_program_with_deps_pre_mono`) records TEXT,
+ * not errors: a collected diagnostic is never re-thrown, only printed, so the structured
+ * position/expected/actual `surface_at` re-attaches would be carried and dropped. Same location
+ * precedence as `surface_at` — the inner error's own line/col wins over the item's (C1-POS).
+ *
+ * @param file       the item's source file (W-loc-2)
+ * @param item_line  the declaration's line, used when the inner error carries none
+ * @param item_col   the declaration's column, used when the inner error carries none
+ * @param inner      the checker error to locate
+ * @return           the `file:line:col: text` diagnostic string
+ * @since 0.3.1
+ */
+fn diag_text_at(file: str, item_line: u32, item_col: u32, inner: error) -> str {
+    let el = if inner.line != 0 { inner.line } else { item_line }
+    let ec = if inner.line != 0 { inner.col } else { item_col }
+    diag_at(file, el, ec, inner.message)
+}
+
+/**
+ * join_checker_diags — render a collected declaration-boundary diagnostic list as the
+ * newline-separated block the driver prints. Mirrors `teko::build::join_diags`; duplicated rather
+ * than shared because the checker must not depend on the build layer.
+ *
+ * @param diags  the collected diagnostics, in item order
+ * @return       the diagnostics joined by newlines ("" for an empty list)
+ * @since 0.3.1
+ */
+pub fn join_checker_diags(diags: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= diags.len { break }
+        if i > 0 { out = out ~ "\n" }
+        out = out ~ diags[i]
+        i = i + 1
+    }
+    out
+}
+
 fn surface_at(file: str, item_line: u32, item_col: u32, inner: error) -> error {
     let el = if inner.line != 0 { inner.line } else { item_line }
     let ec = if inner.line != 0 { inner.col } else { item_col }
@@ -5989,6 +6030,15 @@ pub type PreMono = struct {
     prog: TProgram
     /** the resolved type table, as `monomorphize` expects it */
     table: TypeTable
+    /**
+     * every DECLARATION-boundary type error collected while typing the item list, in item order
+     * (empty when the program typed cleanly). An item that fails to type contributes its
+     * diagnostic here and NO `TItem` — the walk continues with the next top-level declaration, so
+     * one build reports every declaration's defect instead of stopping at the first (owner ruling
+     * 2026-07-26). The caller must NOT proceed to monomorphization when this is non-empty: `prog`
+     * is a PARTIAL program by construction.
+     */
+    diags: []str
 }
 
 /**
@@ -6018,6 +6068,7 @@ fn no_item_progress(done: u64, total: u64) -> void { }
  */
 pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram) -> TProgram | error {
     let pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress) { PreMono as p => p; error as e => return e }
+    if pre.diags.len > 0 { return error { message = join_checker_diags(pre.diags) } }
     let mono = match monomorphize(pre.prog, pre.table) { TProgram as mp => mp; error as e => return e }
     inline_consts(mono)
 }
@@ -6060,6 +6111,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     let cenv = with_di(seal(menv), di_reg)
     mut items: []TItem = teko::list::empty()
     mut mainbody: []TStatement = teko::list::empty()
+    mut diags: []str = teko::list::empty()
     mut cur = cenv
     mut i = 0
     loop {
@@ -6080,31 +6132,42 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         }
         match it.content {
             parser::Statement as s => {
-                let ts = match type_statement(s, cur, types) {
-                    TypedStmt as x => x
-                    error as e => return surface_at(it.file, line, col, e)
+                match type_statement(s, cur, types) {
+                    TypedStmt as ts => {
+                        items = teko::list::push(items, ts.node)
+                        mainbody = teko::list::push(mainbody, ts.node)
+                        cur = ts.env
+                    }
+                    // DECLARATION-boundary isolation: record and move to the next item.
+                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
                 }
-                items = teko::list::push(items, ts.node)
-                mainbody = teko::list::push(mainbody, ts.node)
-                cur = ts.env
             }
             _ => {
-                let ti = match type_item(it, ienv, types) {
-                    TItem as x => x
-                    error as e => return surface_at(it.file, line, col, e)
-                }
-                items = teko::list::push(items, ti)
-                // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
-                match it.content {
-                    parser::TypeDecl as td => {
-                        let mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
-                        mut mi2 = 0
-                        loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
-                        let citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
-                        mut ci2 = 0
-                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                match type_item(it, ienv, types) {
+                    TItem as ti => {
+                        items = teko::list::push(items, ti)
+                        // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
+                        match it.content {
+                            parser::TypeDecl as td => {
+                                match type_struct_methods(td, it.namespace, it.file, ienv, types) {
+                                    []TItem as mitems => {
+                                        mut mi2 = 0
+                                        loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
+                                    }
+                                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                                }
+                                match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
+                                    []TItem as citems => {
+                                        mut ci2 = 0
+                                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                                    }
+                                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                                }
+                            }
+                            _ => { }
+                        }
                     }
-                    _ => { }
+                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
                 }
             }
         }
@@ -6112,7 +6175,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         on_item(i to u64, program.items.len)
     }
     let lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
-    if lc.failed { return error { message = lc.message } }
+    if lc.failed { diags = teko::list::push(diags, lc.message) }
     // For the result, prepend dep items so the TProgram contains the full program (dep + project).
     // This allows subsequent operations (codegen, VM, coverage) to see all items.
     mut all_items: []TItem = teko::list::empty()
@@ -6129,7 +6192,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         pi++
     }
     let tp = TProgram { items = all_items }
-    PreMono { prog = tp; table = types }
+    PreMono { prog = tp; table = types; diags = diags }
 }
 
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
