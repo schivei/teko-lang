@@ -1562,6 +1562,15 @@ pub fn merge_regression_coverage() -> u64 {
 }
 
 /**
+ * RegrBuildKind — which build shape a `RegrBuilt` cache slot holds. `None` is the empty slot;
+ * the other three are the shapes `tkr_ensure_artifact` can be asked for, and a slot only satisfies
+ * a scenario asking for its OWN kind (see `RegrBuilt.kind` for what keying on `done` alone cost).
+ *
+ * @since 0.3.1
+ */
+type RegrBuildKind = enum { None; Project; Dependency; InPlace }
+
+/**
  * RegrBuilt — the lazily-built artifact of a project-based regressor: whether the project's `.tkp`
  * has been compiled yet (`done`), the captured build outcome (`comp`), and the built binary path
  * (`binp`). Threaded so several RUN scenarios (across features, across an entire `.tkr` file) share
@@ -1574,6 +1583,16 @@ pub fn merge_regression_coverage() -> u64 {
 type RegrBuilt = struct {
     /** true once the project has been compiled (the compile is attempted at most once). */
     done: bool
+    /**
+     * WHICH build shape produced `comp`/`binp`. The cache is keyed on it, because the three shapes
+     * compile genuinely different things: `Project` is `teko <dir> -o bin` from the runner's cwd,
+     * `Dependency` is a SCRATCH consumer copy whose `packages/` was provisioned from a sub-project,
+     * and `InPlace` is `cd <dir> && teko . -o bin` (the #64 CWD-relative shape). Before this field
+     * existed the cache was keyed on `done` alone, so a `.tkr` holding two of the three shapes had
+     * whichever scenario ran FIRST serve the others — the later one asserted the earlier one's
+     * artifact and passed without ever exercising the shape it names.
+     */
+    kind: RegrBuildKind
     /** the captured build outcome (meaningful once `done`). */
     comp: CapResult
     /** the built binary path (meaningful once `done` and the build succeeded). */
@@ -1593,10 +1612,26 @@ type RegrBuilt = struct {
  * @since 0.3.0.30
  */
 fn tkr_ensure_built(exe: str, regr_dir: str, env: []str, prefix: str, built: RegrBuilt) -> RegrBuilt {
-    if built.done { return built }
+    if regr_built_serves(built, RegrBuildKind::Project) { return built }
     let comp = compile_regressive(exe, regr_dir, env, prefix ~ ".compile")
     let name = match regressive_name(regr_dir) { str as s => s; error => "" }
-    RegrBuilt { done = true; comp = comp; binp = regr_dir ~ "/bin/" ~ name }
+    RegrBuilt { done = true; kind = RegrBuildKind::Project; comp = comp; binp = regr_dir ~ "/bin/" ~ name }
+}
+
+/**
+ * regr_built_serves — may the cache slot `built` serve a scenario asking for a `want`-shaped build?
+ * Only when it holds a completed build OF THAT SHAPE. A slot of a different shape does NOT serve:
+ * the caller compiles what it actually asked for and replaces the slot, so a `.tkr` mixing shapes
+ * pays one build per shape instead of silently asserting the wrong artifact.
+ *
+ * @param built  the cache slot carried into this scenario
+ * @param want   the build shape the scenario needs
+ * @return       true when `built` already holds a `want`-shaped artifact
+ * @since 0.3.1
+ */
+fn regr_built_serves(built: RegrBuilt, want: RegrBuildKind) -> bool {
+    if !built.done { return false }
+    built.kind == want
 }
 
 /**
@@ -1691,7 +1726,7 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
         return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
     }
     if t.dep_dir.len > 0 {
-        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
+        if regr_built_serves(built, RegrBuildKind::Dependency) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
         let scratch_consumer = prefix ~ ".consumer"
         match copy_dir(regr_dir, scratch_consumer) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
         match provision_dependency(exe, regr_dir ~ "/" ~ t.dep_dir, scratch_consumer ~ "/packages", prefix ~ ".dep") {
@@ -1700,17 +1735,17 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
         }
         let comp = compile_regressive(exe, scratch_consumer, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(scratch_consumer) { str as s => s; error => "" }
-        let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target) }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::Dependency; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target) }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
     if t.in_place {
-        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
+        if regr_built_serves(built, RegrBuildKind::InPlace) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
         let comp = compile_in_place(exe, regr_dir, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(regr_dir) { str as s => s; error => "" }
-        let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target) }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::InPlace; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target) }
         return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
-    let fresh = !built.done
+    let fresh = !regr_built_serves(built, RegrBuildKind::Project)
     let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
     TkrArtifact { comp = nb.comp; binp = artifact_path_for_target(nb.binp, t.target); built = nb; fresh = fresh }
 }
@@ -2058,7 +2093,7 @@ fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str) 
  * @since 0.3.1
  */
 fn compile_fail_result(oc: RegrOutcome, rows: []RowTiming) -> FeatureRunResult {
-    FeatureRunResult { outcome = oc; built = RegrBuilt { done = false; comp = cap_synthetic(0, ""); binp = "" }; rows = rows }
+    FeatureRunResult { outcome = oc; built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = "" }; rows = rows }
 }
 
 /**
@@ -2097,7 +2132,7 @@ fn tkr_feature_is_compile_fail(feat: TkrFeature) -> bool {
 fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str, groups: RegrGroups) -> TkrFileRun {
     let src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
     let feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
-    mut built = RegrBuilt { done = false; comp = cap_synthetic(0, ""); binp = "" }
+    mut built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = "" }
     mut skips: u64 = 0
     mut rows: []RowTiming = teko::list::empty()
     mut fi: u64 = 0
