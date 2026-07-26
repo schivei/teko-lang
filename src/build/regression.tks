@@ -1298,7 +1298,7 @@ fn match_stream(m: TkrMatch, actual: str) -> bool {
     if m.mode == TkrMatchMode::Ignore { return true }
     if m.mode == TkrMatchMode::Literal { return actual == m.text }
     if m.mode == TkrMatchMode::Pattern {
-        return match teko::regex::is_match_pattern(m.text, actual) { bool as b => b; error => false }
+        match teko::regex::is_match_pattern(m.text, actual) { bool as b => return b; error => return false }
     }
     teko::crypto::sha256_hex_of(bytes_of_str(actual)) == m.text
 }
@@ -1326,12 +1326,11 @@ fn stream_match_failure(m: TkrMatch, actual: str, stream: str) -> str {
         if match_stream(m, actual) { return "" }
         return $"{stream} did not match the expectation"
     }
-    match teko::regex::compile(m.text) {
-        teko::regex::Regex as re => {
-            if teko::regex::is_match(re, actual) { return "" }
-        }
-        error as e => { return $"{stream} pattern is not a valid regex: {e.message}\n  pattern: {m.text}" }
+    let re = match teko::regex::compile(m.text) {
+        teko::regex::Regex as r => r
+        error as e => return $"{stream} pattern is not a valid regex: {e.message}\n  pattern: {m.text}"
     }
+    if teko::regex::is_match(re, actual) { return "" }
     let tail = tail_lines(actual, RUN_FAIL_TAIL_LINES)
     if tail.len > 0 { return $"{stream} did not contain the declared pattern\n  pattern: {m.text}\n  captured {stream} tail:\n{tail}" }
     $"{stream} did not contain the declared pattern\n  pattern: {m.text}\n  the program wrote nothing to {stream}"
