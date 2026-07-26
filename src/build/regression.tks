@@ -522,16 +522,91 @@ fn wrap_argv_with_wrapper(wrapper: []str, argv: []str) -> []str {
 }
 
 /**
+ * CROSS_SYSROOT_ANCHOR — the target shared object whose location the cross toolchain is asked for,
+ * to LOCATE the cross sysroot (`cross_sysroot_for`). `libc.so.6` rather than the loader itself
+ * because it is the one glibc name that does not vary with the target's arch or float ABI (the
+ * loader is `ld-linux-riscv64-lp64d.so.1` on riscv64, `ld-linux-aarch64.so.1` on arm64, …), so the
+ * question stays the same question for every target the runner may grow.
+ */
+const CROSS_SYSROOT_ANCHOR: str = "libc.so.6"
+
+/**
+ * CROSS_SYSROOT_ANCHOR_TAIL — the path tail `cross_sysroot_for` strips to turn the anchor's absolute
+ * location into the sysroot PREFIX. `qemu-user`'s `-L <prefix>` resolves a target binary's ELF
+ * interpreter as `<prefix><interp>` — i.e. `<prefix>/lib/ld-…` — so the prefix is exactly the
+ * anchor's path with its own `/lib/<anchor>` removed. Spelled out rather than concatenated from
+ * `CROSS_SYSROOT_ANCHOR` — a `const` may not call `~` (#594).
+ */
+const CROSS_SYSROOT_ANCHOR_TAIL: str = "/lib/libc.so.6"
+
+/**
+ * cross_sysroot_for — WHERE the cross toolchain `cc` keeps its target's shared libraries and ELF
+ * loader, or "" when it cannot be located. Asks the cross compiler itself
+ * (`<cc> -print-file-name=libc.so.6`), which answers with an absolute path when it has the target
+ * libc and echoes the bare name back when it does not — so the answer is self-validating, and the
+ * path is NOT a magic constant a distro upgrade could invalidate behind our back. Deliberately not
+ * `-print-sysroot`: a Debian/Ubuntu cross gcc answers `/` there, which is true (it is not a
+ * sysroot'd toolchain) and useless (its target libc still lives under `/usr/<triple>`).
+ *
+ * @param cc  the cross compiler command (from `default_cc_for_target`)
+ * @return    the sysroot prefix to hand `qemu-user -L`, or "" when the target libc is not installed
+ * @since 0.3.1
+ */
+fn cross_sysroot_for(cc: str) -> str {
+    if cc.len == 0 || !tool_on_path(cc) { return "" }
+    mut argv: []str = teko::list::push(teko::list::empty(), cc)
+    argv = teko::list::push(argv, teko::str::concat("-print-file-name=", CROSS_SYSROOT_ANCHOR))
+    let where = tool_query_line(argv)
+    if !teko::str::ends_with(where, CROSS_SYSROOT_ANCHOR_TAIL) { return "" }
+    teko::str::slice_to(where, where.len - CROSS_SYSROOT_ANCHOR_TAIL.len)
+}
+
+/** QEMU_RISCV64 — the `qemu-user` binary that executes a riscv64 artifact on a non-riscv64 host. */
+const QEMU_RISCV64: str = "qemu-riscv64-static"
+
+/**
+ * qemu_riscv64_wrapper — the `qemu-user` prefix argv that actually EXECUTES a riscv64 artifact on
+ * this host: `["qemu-riscv64-static", "-L", <sysroot>]`. Both tokens are required, and the second
+ * one is the fix for a capability probe that used to stop half way: having the EMULATOR on PATH is
+ * not the capability, because the artifact is a DYNAMIC riscv64 ELF and `qemu-user` resolves its
+ * interpreter against the HOST filesystem unless `-L` names the target sysroot. Without it the run
+ * dies before the program's first instruction with `qemu-riscv64-static: Could not open
+ * '/lib/ld-linux-riscv64-lp64d.so.1'` and exit 255 — which the runner then reports as `exit 255,
+ * expected 42`, indistinguishable from a real backend regression. That is precisely the confusion
+ * `target_toolchain_skip_reason` exists to prevent, so the sysroot is probed with the emulator,
+ * BEFORE the build, and its absence is an honest named skip rather than a late mystery exit.
+ *
+ * `-L` goes in the ARGV, not in `QEMU_LD_PREFIX`: the runner echoes the whole `sh -c` line in a
+ * failure report, so a visible `-L /usr/riscv64-linux-gnu` is diagnosable and an env var is not.
+ *
+ * @return the emulator prefix argv, or an error naming which half of the capability is missing
+ * @throws when `qemu-riscv64-static` is absent, or when no riscv64 sysroot can be located
+ * @since 0.3.1
+ */
+fn qemu_riscv64_wrapper() -> []str | error {
+    if !tool_on_path(QEMU_RISCV64) { return error { message = teko::str::concat(QEMU_RISCV64, " not found on PATH for target riscv64-linux") } }
+    let cc = default_cc_for_target(NativeTarget::Riscv64Linux)
+    let sysroot = cross_sysroot_for(cc)
+    if sysroot.len == 0 {
+        return error { message = $"{QEMU_RISCV64} is on PATH but no riscv64 sysroot is: `{cc} -print-file-name={CROSS_SYSROOT_ANCHOR}` names no installed target libc, so the emulator could not resolve a dynamic riscv64 binary's loader (install the target libc, e.g. libc6-riscv64-cross)" }
+    }
+    mut w: []str = teko::list::push(teko::list::empty(), QEMU_RISCV64)
+    w = teko::list::push(w, "-L")
+    teko::list::push(w, sysroot)
+}
+
+/**
  * resolve_run_wrapper — the executor prefix argv for `target`: `[]` for a native host target
  * (`""`/`"host"`), `["wasmtime", "run"]` (plus `"-W", "memory64=y"` for `wasm64-wasi`/`wasm64`) for
- * a wasm target, `["qemu-riscv64-static"]` for the riscv cross. Returns an error carrying a
- * human-readable reason when the required tool is absent on this host; the caller
+ * a wasm target, `qemu_riscv64_wrapper()` for the riscv cross. Returns an error carrying a
+ * human-readable reason when the required CAPABILITY is not whole on this host; the caller
  * (`tkr_run_one_row`, via `tool_skip_or_fail`) turns that into an honest os-arch skip, unless the
  * `REGRESSION_REQUIRE_TOOLS` fail-closed flag is set (§7).
  *
  * @param target  the effective os-arch / wasm target ("" / "host" → no wrapper)
- * @return        the run-wrapper argv prefix, or an error naming the missing tool
- * @throws        when `wasmtime`/`qemu-riscv64-static` is required by `target` but not on PATH
+ * @return        the run-wrapper argv prefix, or an error naming the missing capability
+ * @throws        when `wasmtime` / the riscv64 emulator + sysroot are required by `target` and this
+ *                host does not have them
  * @since 0.3.1
  */
 fn resolve_run_wrapper(target: str) -> []str | error {
@@ -548,10 +623,7 @@ fn resolve_run_wrapper(target: str) -> []str | error {
         w = teko::list::push(w, "-W")
         return teko::list::push(w, "memory64=y")
     }
-    if target == "riscv64-linux" || target == "riscv64" {
-        if !tool_on_path("qemu-riscv64-static") { return error { message = teko::str::concat("qemu-riscv64-static not found on PATH for target ", target) } }
-        return teko::list::push(teko::list::empty(), "qemu-riscv64-static")
-    }
+    if target == "riscv64-linux" || target == "riscv64" { return qemu_riscv64_wrapper() }
     no_wrapper
 }
 
@@ -745,8 +817,14 @@ fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> st
  * with NO dedicated cross driver (`host_cc_cannot_link_cross_reason`), which would otherwise reach
  * the host `ld` and fail on the object format.
  *
+ * A capability is checked WHOLE or not at all: having the riscv emulator on PATH is not the riscv
+ * capability, since the artifact is a DYNAMIC riscv64 ELF that also needs a target sysroot for its
+ * loader (`qemu_riscv64_wrapper`). A half-probed capability is worse than an unprobed one — it
+ * PASSES the gate and then dies past the build, which is the very confusion this function exists to
+ * prevent.
+ *
  * @param target  the scenario's declared target ("" / "host" → always runnable)
- * @return        "" when the target is runnable here, else the missing-tool reason
+ * @return        "" when the target is runnable here, else the missing-capability reason
  * @since 0.3.1
  */
 fn target_toolchain_skip_reason(target: str) -> str {

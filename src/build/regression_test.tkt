@@ -841,3 +841,66 @@ fn regr_row_skip_line_names_the_row_and_the_reason() {
     teko::assert::is_false(teko::str::contains(line, "FAIL"))
 }
 
+#test
+/**
+ * cross_sysroot_for_is_empty_when_the_toolchain_cannot_say — the sysroot is PROBED from the cross
+ * compiler, never assumed from a path convention, so every way of not knowing collapses to "": no
+ * compiler named, a compiler that is not installed, and a compiler that echoes the anchor's bare
+ * name back because it has no target libc. "" is what turns into the honest pre-build skip.
+ *
+ * @return void
+ */
+fn cross_sysroot_for_is_empty_when_the_toolchain_cannot_say() {
+    teko::assert::is_true(cross_sysroot_for("") == "")
+    teko::assert::is_true(cross_sysroot_for("teko-no-such-cross-compiler") == "")
+    let rv = cross_sysroot_for(default_cc_for_target(NativeTarget::Riscv64Linux))
+    if rv.len == 0 { return }
+    teko::assert::is_false(teko::str::ends_with(rv, CROSS_SYSROOT_ANCHOR_TAIL))
+}
+
+#test
+/**
+ * qemu_riscv64_wrapper_carries_the_sysroot_or_names_what_is_missing — the vagão-20 half-probe, in
+ * one assertion. Having the emulator on PATH is NOT the riscv64 capability: the artifact is a
+ * dynamic riscv64 ELF, and without `-L <sysroot>` `qemu-user` cannot resolve its loader and exits
+ * 255 before the program starts — reported as `exit 255, expected 42`, indistinguishable from a
+ * backend regression. So a resolved wrapper must carry the flag AND a directory, and an unresolvable
+ * one must say which half is missing. Host-conditional by design: the fail-closed lane provisions
+ * both and takes the first arm, a bare host takes the second.
+ *
+ * @return void
+ */
+fn qemu_riscv64_wrapper_carries_the_sysroot_or_names_what_is_missing() {
+    match qemu_riscv64_wrapper() {
+        []str as w => {
+            teko::assert::is_true(w.len == 3)
+            teko::assert::is_true(w[0] == QEMU_RISCV64)
+            teko::assert::is_true(w[1] == "-L")
+            teko::assert::is_true(w[2].len > 0)
+        }
+        error as e => {
+            teko::assert::is_true(e.message.len > 0)
+            teko::assert::str_contains(e.message, QEMU_RISCV64)
+        }
+    }
+}
+
+#test
+/**
+ * resolve_run_wrapper_riscv_agrees_with_the_qemu_wrapper — `Given target = "riscv64-linux"` and its
+ * bare `"riscv64"` alias must both route to the ONE riscv capability answer, so a corpus that spells
+ * the target either way gets the same sysroot (or the same honest reason) rather than two ideas of
+ * what riscv64 support means.
+ *
+ * @return void
+ */
+fn resolve_run_wrapper_riscv_agrees_with_the_qemu_wrapper() {
+    mut want: u64 = 0
+    match qemu_riscv64_wrapper() { []str as w => { want = w.len }; error => { } }
+    mut canonical: u64 = 0
+    match resolve_run_wrapper("riscv64-linux") { []str as w => { canonical = w.len }; error => { } }
+    mut alias: u64 = 0
+    match resolve_run_wrapper("riscv64") { []str as w => { alias = w.len }; error => { } }
+    teko::assert::is_true(canonical == want)
+    teko::assert::is_true(alias == want)
+}
