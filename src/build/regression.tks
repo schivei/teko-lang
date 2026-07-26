@@ -1637,6 +1637,15 @@ type TkrArtifact = struct {
     binp: str
     /** the (possibly newly-built) shared project cache, threaded back for the next scenario/row. */
     built: RegrBuilt
+    /**
+     * did THIS row actually pay for a compile? False when the artifact came from the shared project
+     * cache (`RegrBuilt.done` — a second/third row of the same project `.tkr`), in which case
+     * `comp` is the FIRST row's captured outcome, replayed. The measurement must not re-count it:
+     * the grouped-row path already states the law ("counting it again per member would report a
+     * build count the run never performed"), and the shared project cache is the same situation —
+     * one build, N rows.
+     */
+    fresh: bool
 }
 
 /**
@@ -1649,7 +1658,7 @@ type TkrArtifact = struct {
  * @since 0.3.1
  */
 fn tkr_artifact_fail(msg: str, built: RegrBuilt) -> TkrArtifact {
-    TkrArtifact { comp = cap_synthetic(1, msg); binp = ""; built = built }
+    TkrArtifact { comp = cap_synthetic(1, msg); binp = ""; built = built; fresh = false }
 }
 
 /**
@@ -1675,14 +1684,14 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
     match guard_no_project_build_at_root(regr_dir, t) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
     if t.source_inline.len > 0 {
         let comp = compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix)
-        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built }
+        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
     }
     if t.source_file.len > 0 {
         let comp = compile_standalone_source(exe, regr_dir ~ "/" ~ t.source_file, with_regr_cov_env(t.env, prefix), prefix)
-        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built }
+        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
     }
     if t.dep_dir.len > 0 {
-        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built } }
+        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
         let scratch_consumer = prefix ~ ".consumer"
         match copy_dir(regr_dir, scratch_consumer) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
         match provision_dependency(exe, regr_dir ~ "/" ~ t.dep_dir, scratch_consumer ~ "/packages", prefix ~ ".dep") {
@@ -1692,17 +1701,18 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
         let comp = compile_regressive(exe, scratch_consumer, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(scratch_consumer) { str as s => s; error => "" }
         let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target) }
-        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb }
+        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
     if t.in_place {
-        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built } }
+        if built.done { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
         let comp = compile_in_place(exe, regr_dir, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
         let name = match regressive_name(regr_dir) { str as s => s; error => "" }
         let nb = RegrBuilt { done = true; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target) }
-        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb }
+        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
     }
+    let fresh = !built.done
     let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
-    TkrArtifact { comp = nb.comp; binp = artifact_path_for_target(nb.binp, t.target); built = nb }
+    TkrArtifact { comp = nb.comp; binp = artifact_path_for_target(nb.binp, t.target); built = nb; fresh = fresh }
 }
 
 /**
@@ -1854,7 +1864,11 @@ fn tkr_run_row(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt, g
         null => { }
     }
     let art = tkr_ensure_artifact(exe, regr_dir, t, prefix, built)
-    let build_times = PhaseTimes { harness_ns = art.comp.harness_ns; compile_ns = art.comp.child_ns; run_ns = 0; builds = 1 }
+    let build_times = if art.fresh {
+        PhaseTimes { harness_ns = art.comp.harness_ns; compile_ns = art.comp.child_ns; run_ns = 0; builds = 1 }
+    } else {
+        phase_zero()
+    }
     if art.comp.exit != 0 {
         return TkrRowRun { outcome = regr_fail(compile_failure_message(art.comp)); built = art.built; times = build_times }
     }
