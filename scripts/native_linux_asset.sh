@@ -119,17 +119,18 @@ TEKO_VERSION_STRING="${TEKO_VERSION_TAG#v}"
 # already ships a compiler). ARCH_KW is grepped in host-side `file` output to assert the result.
 PLATFORM=""
 STATIC=""
+DLLIB=""
 case "$LABEL" in
     linux-x86_64-glibc)
-        IMAGE="$IMG_GLIBC_X86_64"; SETUP=""; ARCH_KW="x86-64" ;;
+        IMAGE="$IMG_GLIBC_X86_64"; SETUP=""; DLLIB="-ldl"; ARCH_KW="x86-64" ;;
     linux-x86_64-musl)
         IMAGE="$IMG_MUSL"; SETUP="apk add --no-cache build-base >/dev/null"; STATIC="-static"; ARCH_KW="x86-64" ;;
     linux-arm64-glibc)
-        IMAGE="$IMG_GLIBC_ARM64"; SETUP=""; ARCH_KW="aarch64" ;;
+        IMAGE="$IMG_GLIBC_ARM64"; SETUP=""; DLLIB="-ldl"; ARCH_KW="aarch64" ;;
     linux-arm64-musl)
         IMAGE="$IMG_MUSL"; SETUP="apk add --no-cache build-base >/dev/null"; STATIC="-static"; ARCH_KW="aarch64" ;;
     linux-riscv64-glibc)
-        IMAGE="$IMG_RISCV_GLIBC"; PLATFORM="linux/riscv64"
+        IMAGE="$IMG_RISCV_GLIBC"; PLATFORM="linux/riscv64"; DLLIB="-ldl"
         SETUP="apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null"
         ARCH_KW="RISC-V" ;;
     linux-riscv64-musl)
@@ -172,9 +173,16 @@ echo "=== $LABEL — native build in $IMAGE${PLATFORM:+ (platform $PLATFORM)} ==
 # There is deliberately NO `-fno-sanitize=undefined` here. That flag existed ONLY because zig cc
 # turns UBSan traps on by default and the checker's boundary INT64_MIN negation then aborted the
 # process; stock gcc does not trap, so the workaround dies with the toolchain that needed it.
+# `-ldl` is REQUIRED, and it is the glibc floor that requires it. `teko_rt.c`'s
+# `tk_obs_dump_table` calls `dladdr`, which lives in `libdl` up to glibc 2.33 and was folded INTO
+# `libc` at 2.34. Building against the floor (manylinux_2_28 → glibc 2.28) therefore needs the
+# explicit link that the runner's own glibc 2.39 made invisible — the exact class of breakage the
+# floor exists to catch, surfacing the first time an asset was built against the libc it promises
+# instead of the newest one available. Harmless on modern glibc, where `libdl` survives as a stub,
+# and on musl, where `dladdr` is in libc: both accept the flag and resolve nothing extra.
 CC_LINE="gcc -std=c2x -w -O2 -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING $STATIC \
     -I$R_SRC/runtime -I$R_SRC/assert \
-    $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm \
+    $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm $DLLIB \
     -o $GD/teko"
 
 docker run --rm ${PLATFORM:+--platform "$PLATFORM"} \
