@@ -4648,20 +4648,180 @@ fn is_fat_type(t: checker::Type) -> bool {
     + its ptr VReg + its len VReg (A1-4, #382 — the plan's two-VReg `FatVReg` threading). */
 pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
 
-/** lower_fat_expr — lower a `str`/`[]T`-typed expression to its (ptr, len) pair. Only the
-    CLOSED set of fat-pointer PRODUCERS is recognized: a string literal (fresh rodata), an
-    array literal (fresh alloca + a compile-time-known element count), and a local bound via
-    `lenv_bind_fat` (a `let` of str/slice type). Any other producer (a call result, a deeper
-    field/index chain, …) honest-stops — those arrive with a wider fat-pointer ABI in a later
-    phase (A1-4, #382). */
+/**
+ * lower_fat_expr — lower a `str`/`[]T`-typed expression to its (ptr, len) pair. Only the
+ * CLOSED set of fat-pointer PRODUCERS is recognized: a string literal (fresh rodata), an
+ * array literal (fresh alloca + a compile-time-known element count), a local bound via
+ * `lenv_bind_fat` (a `let` of str/slice type), a struct field of fat type
+ * (`lower_fat_field`), and — closed at degrau 5 — an `if`-expression whose result is fat
+ * (`lower_if_fat`). Any other producer (a call result, a deeper index chain, a `match`-value,
+ * …) honest-stops — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382;
+ * if-expression producer: degrau 5, cargo/20-degrau5-if-gordo).
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-typed (`str`/`[]T`) expression to lower
+ * @return     the (ptr, len) pair
+ * @throws     when `e`'s kind is outside the closed producer set documented above
+ */
 pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
     match e.kind {
         checker::TStrLit as s => lower_str_lit_fat(ctx, e, s)
         checker::TArrayLit as al => lower_array_lit_fat(ctx, e, al)
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
+        checker::TIfExpr as f => lower_if_fat(ctx, e, f)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
+}
+
+/**
+ * merge_fat_value_args — a fat-value-producing merge's PRE-scalar jump-arg pair: the arm's
+ * tail (ptr, len), in that CONTRACT ORDER (ptr, len — fixed by `lower_fat_field`/
+ * `bind_fat_param`'s own `tk_str{ptr;len}` mirror; this call never reorders it), matching the
+ * merge block's ptr-param-first, len-param-second layout — `close_arm_replaying_defers`
+ * appends the reassigned-scalar args after these two.
+ *
+ * @param ptr  the arm's tail pointer VReg (the merge's first block-param)
+ * @param len  the arm's tail length VReg (the merge's second block-param)
+ * @return     `[ptr, len]`
+ */
+fn merge_fat_value_args(ptr: u32, len: u32) -> []u32 {
+    teko::list::push(teko::list::push(teko::list::empty(), ptr), len)
+}
+
+/**
+ * LowerBlockValueFat — the FAT (`str`/`[]T`) counterpart of `LowerBlockValue`: the outcome of
+ * lowering a fat-value-producing `if`-expression arm's statement block. Either it fell
+ * through with the tail's (ptr, len) pair populated (`terminated=false` — the last statement
+ * was an expression-statement whose value IS the arm's fat result), or an inner control-flow
+ * op (a `return`) already closed the block (`terminated=true`, `ptr`/`len` unused).
+ */
+pub type LowerBlockValueFat = struct { ctx: LowerCtx; terminated: bool; ptr: u32; len: u32 }
+
+/**
+ * lower_block_value_fat — lower a FAT-value if-expression arm's statement block: every
+ * statement but the last lowers as an ordinary effect-only statement; the last is the arm's
+ * TAIL VALUE (an expression-statement), lowered through the fat (ptr, len) path rather than
+ * `lower_block_value`'s single-VReg one. Mirrors `lower_block_value`'s "last statement is the
+ * value" shape, one axis over (scalar -> fat).
+ *
+ * @param ctx   the lowering context positioned at the arm's first statement
+ * @param body  the arm's statement block (checker-guaranteed non-empty)
+ * @return      the fat value outcome
+ * @throws      when the block is empty, an inner statement fails to lower, or the tail is
+ *              neither a value-yielding expression-statement nor a terminating `return`
+ */
+fn lower_block_value_fat(ctx: LowerCtx, body: []checker::TStatement) -> LowerBlockValueFat | error {
+    if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= body.len { break }
+        let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
+        cur = out.ctx
+        if out.terminated { return LowerBlockValueFat { ctx = cur; terminated = true; ptr = 0; len = 0 } }
+        i++
+    }
+    lower_tail_stmt_fat(cur, body[body.len - 1])
+}
+
+/**
+ * lower_tail_stmt_fat — a FAT-value if-expression arm's final statement: an
+ * expression-statement's value IS the arm's tail (ptr, len) pair; any other statement kind is
+ * delegated to `lower_tail_non_expr_fat`. Mirrors `lower_tail_stmt`'s own dispatch.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param s    the tail statement
+ * @return     the fat value outcome
+ * @throws     propagated from lowering the tail
+ */
+fn lower_tail_stmt_fat(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValueFat | error {
+    match s {
+        checker::TExprStmt as es => lower_tail_expr_stmt_fat(ctx, es)
+        _ => lower_tail_non_expr_fat(ctx, s)
+    }
+}
+
+/**
+ * lower_tail_expr_stmt_fat — a FAT-value arm's tail expression-statement: lowered through the
+ * CLOSED fat-producer set (`lower_fat_expr`), so a tail whose own producer sits outside that
+ * set (a diverging `panic`/`exit` call, a nested call result, …) honest-stops with
+ * `lower_fat_expr`'s own NAMED error rather than a fabricated placeholder. The
+ * diverging-tail defensive-constant treatment `lower_tail_expr_stmt`/`diverging_tail_value`
+ * give the SCALAR axis is deliberately NOT mirrored here: no fixture in this closure needs a
+ * diverging fat tail, and inventing untested handling for it would silently open a corner of
+ * the closed set this step never claims to close.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param es   the tail expression-statement
+ * @return     the fat value outcome (never terminated here)
+ * @throws     propagated from `lower_fat_expr`
+ */
+fn lower_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt) -> LowerBlockValueFat | error {
+    let fo = match lower_fat_expr(ctx, es.expr) { LoweredFat as x => x; error as err => return err }
+    LowerBlockValueFat { ctx = fo.ctx; terminated = false; ptr = fo.ptr; len = fo.len }
+}
+
+/**
+ * lower_tail_non_expr_fat — a FAT-value arm's non-expression-statement tail: valid only if it
+ * terminates the arm (a `return`); anything else honest-stops (a checker invariant break — a
+ * fat-typed if-expr arm whose tail neither returns nor yields a value). Mirrors
+ * `lower_tail_non_expr`.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param s    the tail statement
+ * @return     the fat value outcome (`terminated=true` on a `return`)
+ * @throws     when the tail neither returns nor yields a value
+ */
+fn lower_tail_non_expr_fat(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValueFat | error {
+    let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
+    if out.terminated { return LowerBlockValueFat { ctx = out.ctx; terminated = true; ptr = 0; len = 0 } }
+    error { message = "native backend N1: if-expression arm's tail statement does not yield a value (internal)" }
+}
+
+/**
+ * lower_if_fat — `cond ? then : else` for a fat-typed (`str`/`[]T`) if-expression: mirrors
+ * `lower_if_value`'s branch/merge shape EXACTLY, except the merge block carries TWO value
+ * block-params instead of one — the ptr FIRST, the len SECOND. That order is CONTRACT, not a
+ * detail this function may invert: it is the SAME `tk_str{ptr;len}` field order the degrau-4
+ * fat-parameter binding (`bind_fat_param`) and every other fat-producer arm in
+ * `lower_fat_expr` already commit to. The reassigned-scalar merge params (when either arm
+ * mutates an enclosing scalar) follow the ptr/len pair, exactly where `lower_if_value` puts
+ * its own scalar params after its single value param. An `if` with no `else` used as a fat
+ * value is out of the N1 subset, mirroring `lower_if_value`'s own honest-stop.
+ *
+ * Unlike `lower_if_value` (which receives an already-lowered `cond_vreg` from
+ * `lower_if_expr`), this function lowers its OWN condition: `lower_fat_expr`'s dispatch calls
+ * it directly on the whole `TIfExpr` node — there is no separate scalar/fat split at the
+ * condition step the way `lower_if_expr` performs on the RESULT type.
+ *
+ * @param ctx  the lowering context positioned right before the if's condition
+ * @param e    the if-expression node (its `.type` is `str`/`[]T`)
+ * @param f    the typed if (condition + both arms; `has_else` required)
+ * @return     the advanced context (positioned at the merge block) + its (ptr, len) pair
+ * @throws     when the if has no else, or either arm's tail fails to lower
+ * @since 0.3.1 (native backend N2 — if-expression closes as a fat-pointer producer,
+ *              cargo/20-degrau5-if-gordo)
+ */
+fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> LoweredFat | error {
+    if !f.has_else { return error { message = "native backend N1: if-without-else used as a fat value not yet lowered (N2)" } }
+    let co = match lower_expr(ctx, f.cond) { Lowered as x => x; error as err => return err }
+    let names = reassigned_scalars(if_arm_stmts(f), co.ctx.env)
+    let indices = merge_scalar_indices(co.ctx.env, names)
+    let thenb = alloc_block(co.ctx.func)
+    let elseb = alloc_block(thenb.func)
+    let mergeb = alloc_block(elseb.func)
+    let mpp = add_block_param(mergeb.func, mergeb.block_id)
+    let mpl = add_block_param(mpp.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
+    let br = branch_inst(co.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
+    let then_fat = match lower_block_value_fat(ctx_goto(ctx1, thenb.block_id), f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, co.ctx.env)
+    let else_fat = match lower_block_value_fat(else_ctx, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
 }
 
 /**
