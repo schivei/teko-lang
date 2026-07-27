@@ -1978,6 +1978,45 @@ fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: 
 }
 
 /**
+ * The U1 STRUCTURAL-ALIAS gate (owner ruling, cargo/20-unsafe-alias-rejeitado, docs/design/
+ * c-types-and-marshalling-0.3.1.md §9.2): `unsafe` on a `type Name = <type-expr>` alias is
+ * REJECTED, never silently accepted.
+ *
+ * The owner's semantics decides this alone: `unsafe` marks a type's OWN methods as unsafe and
+ * unlocks raw pointers inside its OWN body — "se não usa, não tem pq ser unsafe". A pure alias
+ * (`AliasBody`) has no methods and no body of its own; it is TRANSPARENT (`resolve_named`,
+ * `resolve.tks:794`) — every reference resolves straight THROUGH to the aliased type-expression,
+ * and the alias's own name never survives resolution. `unsafe_carrying_at` looks the stamp up on
+ * a surviving `Named` (`resolve.tks:1158`); for an alias there is none left to find, so the
+ * modifier would otherwise compile and do NOTHING — a safe-looking wrapper could carry unsafe
+ * data straight past the contagion gate (the defect this rejects).
+ *
+ * This holds UNIFORMLY regardless of the alias's right-hand side — a structural target
+ * (`ptr<byte>`, `u64`, `[]T`, a bare union `A | B`) is the silent hole above, and an alias to
+ * ANOTHER already-`unsafe` `Named` type (`unsafe type X = RawBuf`) is equally rejected: `X`
+ * still resolves straight through to `RawBuf`, so `RawBuf`'s OWN stamp already governs every
+ * use of `X` whether or not `X` itself repeats the modifier — the capability belongs to the
+ * type being pointed AT, never to the alias name pointing at it. There is no reading of the
+ * criterion under which an alias earns a referent of its own.
+ *
+ * A struct/class/enum/flags/variant/extern/interface/trait `TypeDecl` is NOT an alias — it stays
+ * NOMINAL through resolution (`resolve_named`'s catch-all arm keeps a `Named{name}`, `resolve.tks:
+ * 795`), so `is_unsafe_type` finds its stamp correctly and contagion already works for every one
+ * of them; only `AliasBody` loses its own identity. That is the whole distinction this gate draws,
+ * and it is why a nominal `unsafe type RawBuf = struct { … }` / `= class { … }` is untouched here —
+ * see `c_string` (`docs/design/c-types-and-marshalling-0.3.1.md` §7.1), a nominal struct rather
+ * than an alias for exactly this reason.
+ *
+ * @param reg  the alias's registration (blamed and located)
+ * @return     one diagnostic iff the alias carries `unsafe` (empty otherwise)
+ * @since 0.3.1
+ */
+fn reject_unsafe_alias(reg: TypeReg) -> []str {
+    if !reg.decl.is_unsafe { return teko::list::empty() }
+    one_diag(decl_diag(reg, $"type alias '{reg.name}' cannot be declared `unsafe` — `unsafe` marks a type's OWN methods as unsafe and unlocks raw pointers inside its OWN body, but a transparent alias (`type {reg.name} = …`) has neither: it has no methods, no body, and resolves straight through to its target, so the modifier has no referent and would otherwise compile as a silent no-op (§9.2, docs/design/c-types-and-marshalling-0.3.1.md). Declare a nominal `unsafe type {reg.name} = struct {{ … }}` (or `class`) instead if you need a real unsafe-typed wrapper — this is why `c_string` is a nominal struct, not an alias."))
+}
+
+/**
  * The R4/W0/W10b DECLARATION GATE over the whole collected table — a PURE VALIDATOR: it reads the
  * table and registers nothing, so the table the next pass sees is byte-identical whether or not a
  * declaration was rejected. That is what makes it a SOFT boundary in the all-diagnostics ruling
@@ -2027,8 +2066,10 @@ fn decl_error_diag(reg: TypeReg, inner: error) -> str {
 
 /**
  * Every diagnostic ONE registered declaration contributes: its body's field/alias type-expressions
- * (the R4 reference escape-gate plus the U2 unsafe-contagion gate) and its per-body-kind contract
- * checks. Bodies with nothing to validate (enum, flags, variant, extern) contribute none.
+ * (the R4 reference escape-gate plus the U2 unsafe-contagion gate), its per-body-kind contract
+ * checks, and — for an `AliasBody` only — the U1 `unsafe`-on-alias rejection
+ * (`reject_unsafe_alias`). Bodies with nothing to validate (enum, flags, variant, extern)
+ * contribute none.
  *
  * (S4) The declaration's own generic type-params go into scope as opaque types, so a generic body
  * field `T` resolves to `Named{T}` instead of "unknown type" — the same handling `func_type` gives
@@ -2044,7 +2085,7 @@ fn validate_one_type_decl(reg: TypeReg, table: TypeTable) -> []str {
     let tbl = type_param_table(decl.type_params, decl.type_constraints, "", table)
     match decl.body {
         parser::StructBody as sb => validate_struct_body(reg, sb, tbl, table)
-        parser::AliasBody as ab => validate_field_slot(reg, "alias", ab.alias, tbl, table)
+        parser::AliasBody as ab => concat_diags(reject_unsafe_alias(reg), validate_field_slot(reg, "alias", ab.alias, tbl, table))
         parser::ClassBody as cb => validate_class_body(reg, cb, tbl, table)
         parser::TraitBody as trb => validate_trait_body(reg, trb, tbl, table)
         parser::InterfaceBody as ib => validate_interface_body(reg, ib, table)
