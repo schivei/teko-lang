@@ -1604,6 +1604,67 @@ fn nested_struct_by_value_field_layout_accounts_for_the_inner_structs_real_width
 }
 
 /**
+ * lwt_class_decl — a `<kind> class [Base] { <fields> }` TypeDecl, wrapped as a
+ * `checker::TItem`: the class counterpart of `lwt_struct_decl`, with no methods, no consts and
+ * no interface list, so a layout assertion over it sees the FIELDS and nothing else.
+ *
+ * @param name       the class's declared name
+ * @param kind       Sealed, Abstract or Virtual
+ * @param has_base   does this class extend `base_name`?
+ * @param base_name  the base class's name (read only when `has_base`)
+ * @param fields     the class's OWN instance fields, in declared order
+ * @return           the declaration, as a typed top-level item
+ */
+fn lwt_class_decl(name: str, kind: parser::ClassKind, has_base: bool, base_name: str, fields: []parser::Field) -> checker::TItem {
+    parser::TypeDecl {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        body = parser::ClassBody {
+            kind = kind; has_base = has_base; base_name = base_name
+            has_base_binding = false; base_binding_name = ""; implements = teko::list::empty()
+            fields = fields; methods = teko::list::empty(); consts = teko::list::empty()
+        }
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""
+        is_unsafe = false; must_free = false
+    }
+}
+
+/**
+ * lwt_class_layout_program — `struct Pair { small: i32; big: i64 }` (the control that must keep
+ * its layout), `virtual class Root { tag: i32; weight: i64 }`, and `class Leaf Root { flag:
+ * byte; extra: i64 }`, whose instance carries Root's fields as a prefix of its own.
+ *
+ * @return  the three-declaration program
+ */
+fn lwt_class_layout_program() -> checker::TProgram {
+    let pair = lwt_struct_decl("Pair", lwt_two_fields(lwt_field("small", "i32"), lwt_field("big", "i64")))
+    let root = lwt_class_decl("Root", parser::ClassKind::Virtual, false, "", lwt_two_fields(lwt_field("tag", "i32"), lwt_field("weight", "i64")))
+    let leaf = lwt_class_decl("Leaf", parser::ClassKind::Sealed, true, "Root", lwt_two_fields(lwt_field("flag", "byte"), lwt_field("extra", "i64")))
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, pair)
+    items = teko::list::push(items, root)
+    items = teko::list::push(items, leaf)
+    checker::TProgram { items = items }
+}
+
+/**
+ * a_class_registers_the_layout_of_its_effective_instance_fields — a `ClassBody` used to fall
+ * through `collect_struct_layout_decl`'s catch-all arm and register NO layout at all, so every
+ * class instantiation honest-stopped with "no layout registered for struct `…`". A class now
+ * registers exactly like a struct: `Root` from its own fields, `Leaf` from the base's fields
+ * FIRST (the field-flattening prefix the checker and the C emitter already fixed) and its own
+ * after. `Pair` is the struct control — a fix that broke the struct arm fails here too.
+ */
+#test
+fn a_class_registers_the_layout_of_its_effective_instance_fields() {
+    let m = match lower_program(lwt_class_layout_program()) { LModule as x => x; error as err => return }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "layout Pair: size=16 align=8 {small@0, big@8}")
+    teko::assert::str_contains(text, "layout Root: size=16 align=8 {tag@0, weight@8}")
+    teko::assert::str_contains(text, "layout Leaf: size=32 align=8 {tag@0, weight@8, flag@16, extra@24}")
+}
+
+/**
  * lwt_virtual_main_returns_the_trailing_top_level_expressions_value — #423,
  * #382: `let x = 40; x + 2` (no explicit `exit`/`return`) — the loose
  * top-level statement list's TRAILING non-void expression becomes the
