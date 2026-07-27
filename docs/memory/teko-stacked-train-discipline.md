@@ -612,3 +612,26 @@ por ela, e nem por isso vira lote de um.
 
 Isto é a mesma lei da seção anterior vista do outro lado: se a carga é o destino default de push,
 o vagão recebe marcos; e drenar N cargas é **um** marco, não N.
+
+
+## A JANELA DE PUSH — interromper CEDO nao e problema (dono, 2026-07-27)
+
+Refina a regra anterior ("empurrar so com o CI terminado ou sinal vermelho"), que na pratica me
+fazia segurar carga por medo de cancelar. O criterio real e de TEMPO DECORRIDO:
+
+> *"interromper um CI no início não é problema, problema é fazer isso depois de uns 5 min do CI
+> ainda em execução."*
+
+Ou seja: nos primeiros minutos de uma corrida, empurre a vontade — o que se perde e desprezivel,
+porque nada de caro terminou. Passados ~5 min, a corrida ja pagou o setup, os produtores estao no
+meio do trabalho e cancelar joga fora medicao real; ai vale esperar.
+
+**O erro que isso corrige, e ele foi meu:** eu empurrei um commit so-de-documentacao sobre uma
+corrida madura e destrui o veredito do degrau 4 por inteiro — `Memory paranoid`, `test /`,
+`ar validation`, `regressor` e `cross-arch` foram todos CANCELADOS sem terem comecado, e os portoes
+"falharam" apenas por recusarem tratar cancelado como passe. O degrau 4 so foi medido no ciclo
+seguinte.
+
+**Corolario operacional:** documentacao acumula e sai junto com o proximo dreno de produto. Um
+commit de doc nunca justifica cancelar uma corrida madura — ele nao tem pressa nenhuma e a corrida
+tem.
