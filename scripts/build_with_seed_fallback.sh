@@ -262,6 +262,79 @@ commit_seed_rung() {
   return 1
 }
 
+# committed_c_rung — RUNG -1: build the compiler from a VERSIONED `teko.c` and let THAT build the
+# tip. Tried before every other rung, and when it works there is no ladder at all: one generation,
+# no pinned SHAs, no ancestor checkouts, no network beyond the checkout already in hand.
+#
+# THE IDEA IS THE OWNER'S (2026-07-27): *"não precisamos construir escada na org, apenas no vagão e
+# versionar a saída teko.c"* — walk the ladder ONCE, on the wagon, and commit the C it produced.
+#
+# WHY A `.c` AND NOT A BINARY, which is what `commit_seed_rung` (rung 0) was designed to hold: a
+# binary is per-host, so the same bootstrap needs five blobs and each one is opaque. A `teko.c` is
+# ONE file that every host specialises with its own `cc` — the same property that makes it the
+# published bootstrap format in the first place.
+#
+# WHY THIS SOLVES WHAT NOTHING ELSE COULD. The released seed cannot build the tip, and after the
+# cast-width debt was paid the reason moved from the checker to codegen: `cyclic value-type
+# dependency` on `checker::Ptr.inner: Type | null`, a recursion whose fix ALREADY EXISTS in the
+# source (`3b0e480`, `315f0d0`) but not in the seed's compiled-in algorithm. Source is only DATA to
+# an already-built binary, so no repository change can reach back and fix it. A committed `teko.c`
+# carries that fix compiled INTO it — which is why this rung works where every other approach was
+# stuck choosing between rewriting the compiler's foundational recursive type and keeping a ladder.
+#
+# THE `.c` IS THE FIRST RUNG'S OUTPUT, deliberately: what the SEED emitted. The compiler built from
+# it has already learned not to emit C, so `gen1 → genN` stays clean and the owner's zero-C law
+# holds by construction rather than by a gate. And because the file is TRACKED, `no_emitted_c.sh`
+# ignores it for free — that gate defines an emission as a `.c` git does NOT track.
+#
+# TRANSITIONAL BY DESIGN. It dies at the next train: once a release is cut FROM this tree, the
+# published seed builds the tip directly and this file is deleted. Nothing here should outlive that
+# — no provenance ceremony, no manifest (owner: *"dado que morre no próximo trem, não tem motivos"*).
+committed_c_rung() {
+  cc_src="${TEKO_BOOTSTRAP_C:-bootstrap/teko.c}"
+  if [ ! -f "$cc_src" ]; then
+    log "rung -1: no committed C at $cc_src — skipping (this is the normal state once a release can seed)"
+    return 1
+  fi
+  if ! command -v cc >/dev/null 2>&1; then
+    log "rung -1: $cc_src is present but no cc is on PATH — skipping"
+    return 1
+  fi
+  cc_out="$PWD/.rung-c"
+  rm -rf "$cc_out"; mkdir -p "$cc_out"
+  cc_log="$(mktemp)"
+  log "rung -1: building the bootstrap compiler from $cc_src"
+  if ! cc -std=c2x -w -O2 -fno-pie -no-pie \
+        -I src/runtime -I src/assert \
+        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
+        -o "$cc_out/teko" >"$cc_log" 2>&1; then
+    log "rung -1: the committed C did not compile — skipping to the next rung. cc said:"
+    sed 's/^/teko-ci:   | /' "$cc_log" >&2
+    rm -f "$cc_log"
+    return 1
+  fi
+  rm -f "$cc_log"
+  log "rung -1: bootstrap compiler ready ($("$cc_out/teko" --version 2>&1 | head -n1))"
+  cc_tip_log="$(mktemp)"
+  if ! build_project "$cc_out/teko" "$PWD" "$OUT_DIR" "$cc_tip_log" "$PWD/src/runtime"; then
+    log "rung -1: the bootstrap compiler could not build the tip — skipping to the next rung."
+    log "----- tip build with the committed-C compiler (failure) -----"
+    sed 's/^/teko-ci:   | /' "$cc_tip_log" >&2
+    rm -f "$cc_tip_log"
+    return 1
+  fi
+  cat "$cc_tip_log"
+  rm -f "$cc_tip_log"
+  phase_mark "rung -1 (committed C, no ladder)"
+  log "rung -1: the tip was built from the committed C — NO LADDER WAS WALKED"
+  return 0
+}
+
+if committed_c_rung; then
+  rm -f "$FAST_LOG"
+  exit 0
+fi
+
 if commit_seed_rung; then
   rm -f "$FAST_LOG"
   exit 0
