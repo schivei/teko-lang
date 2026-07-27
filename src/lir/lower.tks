@@ -163,18 +163,76 @@ pub fn lenv_lookup_fat(env: LEnv, name: str) -> LFatLookup {
     LFatLookup { found = false; has_len = false; ptr = 0; len = 0 }
 }
 
+/**
+ * enum_carrier_ltype — the machine class EVERY declared `enum` rides in: `I32`, four bytes,
+ * four-byte aligned, the SAME width for every enum regardless of how many members it declares.
+ *
+ * THE WIDTH IS NOT CHOSEN HERE — it is read off the contract the project already ships, in three
+ * places that agree:
+ *
+ *   1. The C emitter. `codegen.tks`'s `parser::EnumBody` arm emits `typedef enum tk_t_<M> {
+ *      TK_E_<M>_<MEMBER>, … } tk_t_<M>;` — a plain C enum, compiled with no `-fshort-enums`
+ *      anywhere in the build. Measured on that emitter's own output for a two-member enum:
+ *      `sizeof == 4`, `_Alignof == 4`, and `struct { u32 id; Enum e; bool f }` lays out as
+ *      `size=12 align=4 {id@0, e@4, f@8}`. That is the size the shipping backend has always
+ *      given an enum field, so it is the size this backend owes it.
+ *   2. This backend's OWN discriminant. `lower_null_union_construct` and
+ *      `lower_variant_tag_eq_test` build `{ i32 tag; payload@8 }` and read the tag as `I32`:
+ *      the LIR already spells "a discriminant is four bytes".
+ *   3. The DELIBERATE contrast with `flags`. The same C emitter function picks a `flags` type's
+ *      carrier BY MEMBER COUNT (1–8 -> uint8_t, 9–16 -> uint16_t, 17–32 -> uint32_t, 33–64 ->
+ *      uint64_t, 65–128 -> unsigned __int128) and documents that rule inline, because a `flags`
+ *      value is a BITSET and its width is a function of how many bits it must hold. `enum` gets
+ *      no such rule there: an enum value is an ORDINAL, one member at a time, and 32 bits hold
+ *      every ordinal any declaration can produce. So the count-dependence question is already
+ *      answered — positively for `flags`, negatively for `enum` — in one function, and this
+ *      mirrors that answer instead of inventing a second one.
+ *
+ * ONE TYPE, ONE WIDTH. This same function answers for an enum used as a struct FIELD, as a
+ * function parameter, as a return, as a local, as an array element and as a union payload,
+ * because `ltype_of`/`ltype_of_typeexpr` are the single mapping every one of those sites goes
+ * through. A field carrier that disagreed with the value carrier would store eight bytes into a
+ * four-byte slot and silently trample the next field — which is precisely the failure mode this
+ * one-place answer exists to make unrepresentable.
+ *
+ * @return the machine class an `enum`-typed value and an `enum`-typed field both occupy
+ * @since #594 T-B (the enum carrier)
+ */
+fn enum_carrier_ltype() -> LType { LType::I32 }
+
 /** ltype_of — the machine class of a RESOLVED checker::Type: an integer/float by width,
+    an `enum`'s integer carrier for a Named type registered in `enums` (`enum_carrier_ltype`),
     or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Optional/Variant/
     Func/Byte — all EXERCISED from N2; `byte`'s own I8 mapping is deferred past A1-4, a
     seed-VM match quirk on `checker::Byte` misfires when the SUBJECT is a `Slice{element:
     Byte}` — see `prim_kind_of`'s doc for the narrower, SAFE fix this phase actually needs),
-    or Void for the return-only marker. This is where the semantic type dies and the machine
-    begins. */
-pub fn ltype_of(t: checker::Type) -> LType {
+    or Void for the return-only marker. `enums` is REQUIRED, with no empty default: a caller
+    that forgot it would silently size every enum as an 8-byte pointer at THAT site only, and a
+    per-site disagreement about one type's width is the corruption this parameter prevents.
+    This is where the semantic type dies and the machine begins. */
+pub fn ltype_of(t: checker::Type, enums: []LEnumInfo) -> LType {
     match t {
         checker::Prim as p => ltype_of_prim(p.kind)
         checker::Void => LType::Void
+        checker::Named as n => ltype_of_named(n, enums)
         _ => LType::Ptr
+    }
+}
+
+/**
+ * ltype_of_named — a resolved user type's machine class: a declared `enum`'s integer carrier,
+ * else the address-shaped `Ptr` every other nominal type is held behind in this backend's
+ * memory model (a struct/class value IS its alloca'd base address, §5.1).
+ *
+ * @param n      the resolved nominal type
+ * @param enums  the program's declared-enum table
+ * @return       `enum_carrier_ltype()` when `n` names an enum, else `LType::Ptr`
+ * @since #594 T-B (the enum carrier)
+ */
+fn ltype_of_named(n: checker::Named, enums: []LEnumInfo) -> LType {
+    match find_enum_info(enums, n.name) {
+        LEnumInfo => enum_carrier_ltype()
+        null => LType::Ptr
     }
 }
 
@@ -200,23 +258,50 @@ fn ltype_of_int_prim(k: checker::PrimKind) -> LType {
     LType::I64
 }
 
-/** ltype_of_typeexpr — the machine class of a PARAMETER annotation (a syntactic
-    parser::TypeExpr, since a TFunction carries no resolved Func). A single-segment
-    primitive name maps by width; every other shape (compound path, slice, optional,
-    union, function) collapses to Ptr — the N1 subset only declares scalar params, so
-    Ptr never appears yet, but the mapping is total for the design-ahead contract. */
-pub fn ltype_of_typeexpr(te: parser::TypeExpr) -> LType {
+/** ltype_of_typeexpr — the machine class of a PARAMETER or FIELD annotation (a syntactic
+    parser::TypeExpr, since a TFunction carries no resolved Func and a StructBody carries no
+    resolved field types). A name that resolves to a declared `enum` maps to that enum's integer
+    carrier (`enum_carrier_ltype`, the SAME answer `ltype_of` gives the resolved type — one type,
+    one width); a single-segment primitive name maps by width; every other shape (compound path,
+    slice, optional, union, function) collapses to Ptr. */
+pub fn ltype_of_typeexpr(te: parser::TypeExpr, enums: []LEnumInfo) -> LType {
     match te {
-        parser::NamedType as nt => ltype_of_named_path(nt.path)
+        parser::NamedType as nt => ltype_of_named_path(nt.path, enums)
         _ => LType::Ptr
     }
 }
 
-/** ltype_of_named_path — a single-segment primitive name -> its machine class; a
-    multi-segment path or a non-primitive name -> Ptr. */
-fn ltype_of_named_path(p: parser::Path) -> LType {
+/** ltype_of_named_path — a path naming a declared `enum` -> that enum's integer carrier; a
+    single-segment primitive name -> its machine class; a multi-segment path or any other name
+    -> Ptr. The enum probe runs FIRST and accepts a qualified path (`ns::Color`) as well as a
+    bare one, because a field annotation is written however the source spells it while the enum
+    table holds declared names — `find_enum_info` owns that reconciliation. */
+fn ltype_of_named_path(p: parser::Path, enums: []LEnumInfo) -> LType {
+    match find_enum_info(enums, path_name_of(p)) {
+        LEnumInfo => return enum_carrier_ltype()
+        null => { }
+    }
     if p.segments.len != 1 { return LType::Ptr }
     ltype_of_prim_name(p.segments[0].name)
+}
+
+/**
+ * path_name_of — a syntactic path rendered back as the `a::b::Name` string the name-matching
+ * helpers take (an empty string for the degenerate zero-segment path).
+ *
+ * @param p  the path to render
+ * @return   the path's segments joined by `::`
+ * @since #594 T-B (the enum carrier)
+ */
+fn path_name_of(p: parser::Path) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        out = if i == 0 { p.segments[i].name } else { teko::str::concat(out, "::", p.segments[i].name) }
+        i++
+    }
+    out
 }
 
 /** ltype_of_prim_name — a primitive spelling -> its machine class, else Ptr. */
@@ -1391,14 +1476,16 @@ fn func_type_of(t: checker::Type) -> checker::Func | error {
  * classes).
  *
  * @param []checker::Type ts  the resolved types to map
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           entry carries its integer width, not `Ptr`)
  * @return []LType  their machine classes, in order
  */
-fn types_to_ltypes(ts: []checker::Type) -> []LType {
+fn types_to_ltypes(ts: []checker::Type, enums: []LEnumInfo) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= ts.len { break }
-        out = teko::list::push(out, ltype_of(ts[i]))
+        out = teko::list::push(out, ltype_of(ts[i], enums))
         i++
     }
     out
@@ -1583,8 +1670,8 @@ fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32
 fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered | error {
     let sig = match func_type_of(e.type) { checker::Func as f => f; error as err => return err }
     let target_sym = mangle_fn_symbol(v.func_ns, v.name)
-    let ptypes = types_to_ltypes(sig.params)
-    let ret_ty = ltype_of(sig.ret)
+    let ptypes = types_to_ltypes(sig.params, ctx.enums)
+    let ret_ty = ltype_of(sig.ret, ctx.enums)
     let id = ctx.lifted.len
     let thunk_sym = lift_thunk_symbol(id)
     let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, e.line, e.col)
@@ -1692,14 +1779,16 @@ fn lambda_capture_names(captures: []checker::TCapture) -> []str {
  * (A1-7, #382 — parallels `lambda_capture_names`).
  *
  * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           capture carries its integer width, not `Ptr`)
  * @return []LType  each capture's machine class, in order
  */
-fn lambda_capture_types(captures: []checker::TCapture) -> []LType {
+fn lambda_capture_types(captures: []checker::TCapture, enums: []LEnumInfo) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= captures.len { break }
-        out = teko::list::push(out, ltype_of(captures[i].type))
+        out = teko::list::push(out, ltype_of(captures[i].type, enums))
         i++
     }
     out
@@ -1714,10 +1803,12 @@ fn lambda_capture_types(captures: []checker::TCapture) -> []LType {
  * `build_lambda_env`/`bind_lambda_captures`.
  *
  * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           capture occupies its integer width in the env slot)
  * @return LStructLayout  the env aggregate's resolved layout
  */
-fn lambda_env_layout(captures: []checker::TCapture) -> LStructLayout {
-    layout_of("<closure-env>", lambda_capture_names(captures), lambda_capture_types(captures))
+fn lambda_env_layout(captures: []checker::TCapture, enums: []LEnumInfo) -> LStructLayout {
+    layout_of("<closure-env>", lambda_capture_names(captures), lambda_capture_types(captures, enums))
 }
 
 /**
@@ -1748,7 +1839,7 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
         let off = match field_offset_of(layout, captures[i].name) { u32 as o => o; error as err => return err }
         let addr = ctx_alloc(cur)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, hit.vreg, ltype_of(captures[i].type), line, col))
+        cur = ctx_append(with_addr, store_inst(addr.vreg, hit.vreg, ltype_of(captures[i].type, cur.enums), line, col))
         i++
     }
     Lowered { ctx = cur; vreg = base }
@@ -1784,14 +1875,16 @@ fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::T
  * a `TLambdaParam`'s resolved type rather than a syntactic annotation).
  *
  * @param []checker::TLambdaParam params  the lambda's declared parameters
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           parameter carries its integer width, not `Ptr`)
  * @return []LType  each parameter's machine class, in order
  */
-fn lambda_param_ltypes(params: []checker::TLambdaParam) -> []LType {
+fn lambda_param_ltypes(params: []checker::TLambdaParam, enums: []LEnumInfo) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= params.len { break }
-        out = teko::list::push(out, ltype_of(params[i].type))
+        out = teko::list::push(out, ltype_of(params[i].type, enums))
         i++
     }
     out
@@ -1912,9 +2005,9 @@ pub type LoweredLambda = struct { func: LFunc; rodata: []LRodata; lifted: []LFun
  *                                when the body fails to lower
  */
 fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: LowerCtx, line: u32, col: u32) -> LoweredLambda | error {
-    let ptypes = lambda_param_ltypes(lam.params)
+    let ptypes = lambda_param_ltypes(lam.params, ctx.enums)
     let all_ptypes = env_first_param_types(ptypes)
-    let seed0 = new_func("", (lam.params.len + 1) to u32, all_ptypes, ltype_of(lam.ret))
+    let seed0 = new_func("", (lam.params.len + 1) to u32, all_ptypes, ltype_of(lam.ret, ctx.enums))
     let seed = materialize_lambda_params(seed0, lam, line, col)
     let ctx0 = LowerCtx {
         func = seed.func; block_id = 0; env = seed.env
@@ -1922,7 +2015,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
-    let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret), line, col) { LowerCtx as c => c; error as err => return err }
+    let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
     let closed = match close_lambda_body(done, line, col) { LowerCtx as c => c; error as err => return err }
     LoweredLambda { func = closed.func; rodata = closed.rodata; lifted = closed.lifted }
 }
@@ -1945,7 +2038,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
  *                          lower
  */
 fn lower_lambda(ctx: LowerCtx, e: checker::TExpr, lam: checker::TLambda) -> Lowered | error {
-    let env_layout = lambda_env_layout(lam.captures)
+    let env_layout = lambda_env_layout(lam.captures, ctx.enums)
     let envo = match build_lambda_env(ctx, env_layout, lam.captures, e.line, e.col) { Lowered as x => x; error as err => return err }
     let built = match build_lambda_lfunc(lam, env_layout, envo.ctx, e.line, e.col) { LoweredLambda as x => x; error as err => return err }
     let id = built.lifted.len
@@ -3065,7 +3158,7 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     let merged = add_merge_scalar_params(mp.func, mergeblk.block_id, ctx.env, names)
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
-    let result_ty = ltype_of(e.type)
+    let result_ty = ltype_of(e.type, ctx.enums)
     let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk, result_ty) { LowerBlockValue as x => x; error as err => return err }
     let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
@@ -3122,7 +3215,7 @@ fn lower_safe_field_access(ctx: LowerCtx, e: checker::TExpr, sfa: checker::TSafe
     let name = match named_type_name(unwrap_optional(sfa.receiver.type)) { str as s => s; error as err => return err }
     let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
     let off = match field_offset_of(layout, sfa.field) { u32 as o => o; error as err => return err }
-    let result_ty = ltype_of(unwrap_optional(e.type))
+    let result_ty = ltype_of(unwrap_optional(e.type), ro.ctx.enums)
     let thenb = alloc_block(ro.ctx.func)
     let elseb = alloc_block(thenb.func)
     let mergeb = alloc_block(elseb.func)
@@ -3305,7 +3398,7 @@ fn bind_payload_at8(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerC
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str) -> LowerCtx {
-    bind_payload_at8(ctx, subj.vreg, ltype_of(payload), binding)
+    bind_payload_at8(ctx, subj.vreg, ltype_of(payload, ctx.enums), binding)
 }
 
 /**
@@ -3349,7 +3442,7 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
-    let pty = ltype_of(payload)
+    let pty = ltype_of(payload, ctx.enums)
     let align = null_union_wrapper_align(pty)
     let size = (8 to u32) + ltype_size(pty)
     let base = ctx_alloc(ctx)
@@ -3414,20 +3507,30 @@ fn store_null_union_payload(ctx: LowerCtx, base: u32, pty: LType, e: checker::TE
 }
 
 /**
- * find_enum_info — the LEnumInfo in `enums` named `name`, or `null` (a match
- * subject bound to a plain Named type that is NOT a registered enum — a bare
- * bind pattern over it always matches, A1-5, #382).
+ * find_enum_info — the LEnumInfo in `enums` whose name's LAST SEGMENT matches `name`'s, or
+ * `null` (a subject/annotation naming a type that is NOT a registered enum — a bare bind
+ * pattern over it always matches, A1-5, #382; a field of it is not enum-carried).
+ *
+ * THE MATCH IS BY LAST SEGMENT, and that is not a new decision: `find_variant_info`
+ * (`lower_const.tks`) already reconciles the SAME two spellings the same way, and says why —
+ * a resolved type arrives QUALIFIED (`ns::Color`, `resolve_named`'s `qualify`) while a
+ * declaration table and a field annotation carry the DECLARED spelling (`Color`). An exact
+ * match here silently answered "not an enum" for every enum outside the root namespace, which
+ * made the ordinal test of `lower_named_bind_pattern_test` degrade to an unconditional match.
+ * ONE probe now serves both the ordinal question and the carrier-width question, so the two
+ * can never disagree about what is an enum.
  *
  * @param []LEnumInfo enums  the program's whole enum table
- * @param str name  the subject's Named type name to look up
+ * @param str name  the type name to look up (bare or qualified)
  * @return LEnumInfo?  the matching entry, or `null` when `name` is not a
  *                     registered enum
  */
 fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo | null {
+    let bare = checker::name_last_segment(name)
     mut i: u64 = 0
     loop {
         if i >= enums.len { break }
-        if enums[i].name == name { return enums[i] }
+        if checker::name_last_segment(enums[i].name) == bare { return enums[i] }
         i++
     }
     null
@@ -3876,7 +3979,7 @@ fn bind_whole_subject(ctx: LowerCtx, subj: MatchSubj, name: str) -> LowerCtx {
  */
 fn lower_variant_case_bind(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, binding: str) -> LowerCtx | error {
     let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
-    bind_payload_at8(ctx, subj.vreg, ltype_of(vm.ty), binding)
+    bind_payload_at8(ctx, subj.vreg, ltype_of(vm.ty, ctx.enums), binding)
 }
 
 /**
@@ -4061,7 +4164,7 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> Matc
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type)) { LowerBlockValue as x => x; error as err => return err }
+    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type, ctx.enums)) { LowerBlockValue as x => x; error as err => return err }
     let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
@@ -4131,7 +4234,7 @@ fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, s
     let base_ctx = ctx_with(ctx, merged.func, ctx.block_id, ctx.env)
     let chain = match lower_match_arms_value(base_ctx, e, m.arms, subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
     let fb = ctx_alloc(chain)
-    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, lfallback_const(ltype_of(e.type)), e.line, e.col))
+    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, lfallback_const(ltype_of(e.type, ctx.enums)), e.line, e.col))
     let fallback_args = merge_value_args(fb.vreg, arm_scalar_args(with_zero.env, indices))
     let closed = append_inst(with_zero.func, with_zero.block_id, jump_inst(mergeb.block_id, fallback_args, e.line, e.col))
     Lowered { ctx = ctx_with(with_zero, closed, mergeb.block_id, merged.env); vreg = mp.vreg }
@@ -4375,7 +4478,7 @@ fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> LoweredF
  * @throws     when the reference's type is not a str/slice (an interned aggregate never is otherwise)
  */
 fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata) -> LoweredFat | error {
-    let n = match const_fat_len(e.type, r.bytes.len to u32) { u32 as x => x; error as err => return err }
+    let n = match const_fat_len(e.type, r.bytes.len to u32, ctx.enums) { u32 as x => x; error as err => return err }
     let ptr = ctx_alloc(ctx)
     let with_ptr = ctx_append(ptr.ctx, global_addr_inst(ptr.vreg, r.symbol, e.line, e.col))
     let lenr = ctx_alloc(with_ptr)
@@ -4392,13 +4495,14 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata) -> LoweredFat |
  *
  * @param t         the const's resolved value type (`Str` or `Slice`)
  * @param byte_len  the interned rodata blob's byte length
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
  * @return          the element count the fat pair's len half carries
  * @throws          when `t` is neither a str nor a slice (unreachable for an interned aggregate)
  */
-fn const_fat_len(t: checker::Type, byte_len: u32) -> u32 | error {
+fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | error {
     match t {
         checker::Str => byte_len
-        checker::Slice as s => const_slice_len(s.element, byte_len)
+        checker::Slice as s => const_slice_len(s.element, byte_len, enums)
         _ => error { message = "native backend N1: aggregate const fat receiver is not a str/slice (internal)" }
     }
 }
@@ -4411,11 +4515,12 @@ fn const_fat_len(t: checker::Type, byte_len: u32) -> u32 | error {
  *
  * @param element   the slice's element type
  * @param byte_len  the interned rodata blob's byte length
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
  * @return          the element count
  * @throws          when the element's machine stride is zero (unreachable — rejected at serialize)
  */
-fn const_slice_len(element: checker::Type, byte_len: u32) -> u32 | error {
-    let stride = ltype_size(ltype_of(element))
+fn const_slice_len(element: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | error {
+    let stride = ltype_size(ltype_of(element, enums))
     if stride == 0 { return error { message = "native backend N1: aggregate const slice has a zero-stride element (internal)" } }
     byte_len / stride
 }
@@ -4676,7 +4781,7 @@ fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_na
         let off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
         let addr = ctx_alloc(vo.ctx)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(field_vals[i].type), line, col))
+        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(field_vals[i].type, cur.enums), line, col))
         i++
     }
     Lowered { ctx = cur; vreg = base }
@@ -4696,7 +4801,7 @@ fn lower_field_access(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAcces
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, e.line, e.col))
     let r = ctx_alloc(with_addr)
-    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ltype_of(e.type), e.line, e.col)); vreg = r.vreg }
+    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ltype_of(e.type, r.ctx.enums), e.line, e.col)); vreg = r.vreg }
 }
 
 /** lower_len_field — `recv.len` on a str/slice receiver: the length half of the receiver's
@@ -4773,7 +4878,7 @@ fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Low
 fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Lowered | error {
     let ro = match lower_expr(ctx, ix.receiver) { Lowered as x => x; error as err => return err }
     match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
-    let elem_ty = ltype_of(e.type)
+    let elem_ty = ltype_of(e.type, ro.ctx.enums)
     let addr_out = match index_addr(ro.ctx, ro.vreg, ix.index, ltype_size(elem_ty), e.line, e.col) { Lowered as x => x; error as err => return err }
     let r = ctx_alloc(addr_out.ctx)
     Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
@@ -4786,7 +4891,7 @@ fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> L
     of the A1-3 subset (its length isn't known until then). */
 fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> Lowered | error {
     let elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
-    let elem_ty = ltype_of(elem_t)
+    let elem_ty = ltype_of(elem_t, ctx.enums)
     let stride = ltype_size(elem_ty)
     let total = (al.elements.len to u32) * stride
     let base = ctx_alloc(ctx)
@@ -4807,7 +4912,7 @@ fn store_array_elements(ctx: LowerCtx, base: u32, elements: []checker::TArrayEle
         let offset = (i to u32) * stride
         let addr = ctx_alloc(vo.ctx)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(elem.expr.type), line, col))
+        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(elem.expr.type, cur.enums), line, col))
         i++
     }
     Lowered { ctx = cur; vreg = base }
@@ -4985,7 +5090,7 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
-    store_assign_value(with_addr, addr.vreg, ltype_of(a.bound), a)
+    store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
 }
 
 /**
@@ -5159,8 +5264,8 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
 pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
-    let ptypes = param_ltypes(f.params)
-    mut fn0 = new_func(mangle_fn_symbol(f.namespace, f.name), f.params.len to u32, ptypes, ltype_of(f.return_type))
+    let ptypes = param_ltypes(f.params, enums)
+    mut fn0 = new_func(mangle_fn_symbol(f.namespace, f.name), f.params.len to u32, ptypes, ltype_of(f.return_type, enums))
     mut env = empty_lenv()
     mut i: u64 = 0
     loop {
@@ -5174,7 +5279,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
     }
-    let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type), f.line, f.col) { LowerCtx as c => c; error as err => return err }
+    let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return err }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return err }
     LoweredFunction { func = closed.func; rodata = closed.rodata; lifted = closed.lifted }
 }
@@ -5236,13 +5341,20 @@ fn inst_is_terminator(inst: LInst) -> bool {
     }
 }
 
-/** param_ltypes — the machine class of each parameter annotation (in order). */
-fn param_ltypes(params: []parser::Param) -> []LType {
+/**
+ * param_ltypes — the machine class of each parameter annotation, in declared order.
+ *
+ * @param []parser::Param params  the parameter list to map
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed parameter
+ *                           carries its integer width, not `Ptr`)
+ * @return []LType  each parameter's machine class, in declared order
+ */
+fn param_ltypes(params: []parser::Param, enums: []LEnumInfo) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= params.len { break }
-        out = teko::list::push(out, ltype_of_typeexpr(params[i].type_ann))
+        out = teko::list::push(out, ltype_of_typeexpr(params[i].type_ann, enums))
         i++
     }
     out
@@ -5265,11 +5377,11 @@ fn param_ltypes(params: []parser::Param) -> []LType {
  *                          function or the virtual main fails to lower
  */
 pub fn lower_program(prog: checker::TProgram) -> LModule | error {
-    let layouts = match collect_struct_layouts(prog) { []LStructLayout as ls => ls; error as e => return e }
     let enums = collect_enums(prog)
+    let layouts = match collect_struct_layouts(prog, enums) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
     let variants = collect_variants(prog)
-    mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants) { LModule as x => x; error as e => return e }
+    mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
     mut lifted: []LFunc = teko::list::empty()
     mut i: u64 = 0
@@ -5332,19 +5444,21 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
  * not field-shaped (enum/flags/variant/alias/extern/interface/trait) contributes no layout
  * entry, because none of them reaches a field/index access in this backend.
  *
- * @param prog  the whole typed program, in program order
+ * @param prog   the whole typed program, in program order
+ * @param enums  the program's declared-enum table, collected FIRST because an enum-typed
+ *               field's width decides the offsets of every field after it
  * @return      every registered layout, in the order its declaration appears
  * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
  *              an invariant the checker already enforces, so a miss here is an internal
  *              break, reported as a NAMED stop instead of a guessed layout (M.3)
  */
-fn collect_struct_layouts(prog: checker::TProgram) -> []LStructLayout | error {
+fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo) -> []LStructLayout | error {
     let table = checker::type_table_of(prog)
     mut out: []LStructLayout = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = match collect_struct_layout_item(out, prog.items[i], table) {
+        out = match collect_struct_layout_item(out, prog.items[i], table, enums) {
             []LStructLayout as next => next
             error as e => return e
         }
@@ -5360,12 +5474,13 @@ fn collect_struct_layouts(prog: checker::TProgram) -> []LStructLayout | error {
  * @param acc    every layout resolved so far, in program order
  * @param it     the typed top-level item to inspect
  * @param table  the program's type table, for a class's base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
  * @return       `acc`, extended with `it`'s layout when it declares one
  * @throws       propagated from `collect_struct_layout_decl`
  */
-fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable) -> []LStructLayout | error {
+fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     match it {
-        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table)
+        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table, enums)
         _ => acc
     }
 }
@@ -5389,13 +5504,14 @@ fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: c
  * @param acc    every layout resolved so far, in program order
  * @param td     the type declaration to inspect
  * @param table  the program's type table, for a class's base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
  * @return       `acc`, extended with `td`'s layout when its body is field-shaped
  * @throws       propagated from `class_instance_fields`
  */
-fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable) -> []LStructLayout | error {
+fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     match td.body {
-        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc))
-        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table)
+        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums))
+        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums)
         _ => acc
     }
 }
@@ -5408,15 +5524,16 @@ fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table:
  * @param name   the class's canonical (declaring) name — the key `find_struct_layout` probes
  * @param cb     the class's body
  * @param table  the program's type table, for the base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
  * @return       `acc` with the class's layout appended
  * @throws       propagated from `class_instance_fields`
  */
-fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable) -> []LStructLayout | error {
+fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     let fields = match class_instance_fields(name, cb, table) {
         []parser::Field as fs => fs
         error as e => return e
     }
-    teko::list::push(acc, layout_of_fields(name, fields, acc))
+    teko::list::push(acc, layout_of_fields(name, fields, acc, enums))
 }
 
 /**
@@ -5477,9 +5594,13 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
  * @param []LStructLayout known  every struct layout resolved so far (program
  *                               order) — the lookup table a nested-struct
  *                               field's size/align resolves against
+ * @param []LEnumInfo enums  the program's declared-enum table — an enum-typed field
+ *                           occupies `enum_carrier_ltype()`'s width, not the 8-byte
+ *                           `Ptr` fallback, and that width sets every LATER field's
+ *                           offset as well as the struct's own size/align
  * @return LStructLayout  the resolved size/align/per-field offsets
  */
-fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout) -> LStructLayout {
+fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo) -> LStructLayout {
     mut field_names: []str = teko::list::empty()
     mut field_types: []LType = teko::list::empty()
     mut field_sizes: []u32 = teko::list::empty()
@@ -5488,7 +5609,7 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout) 
     loop {
         if i >= fields.len { break }
         let te = fields[i].type_ann
-        let ft = ltype_of_typeexpr(te)
+        let ft = ltype_of_typeexpr(te, enums)
         let nested = struct_layout_of_field(te, known)
         field_names = teko::list::push(field_names, fields[i].name)
         field_types = teko::list::push(field_types, ft)
@@ -5971,7 +6092,7 @@ fn lower_main_tail_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerMainTail 
  *                                its type is non-void
  */
 fn lower_main_tail_expr(ctx: LowerCtx, es: checker::TExprStmt) -> LowerMainTail | error {
-    if ltype_is_void(ltype_of(es.expr.type)) {
+    if ltype_is_void(ltype_of(es.expr.type, ctx.enums)) {
         let out = match lower_expr_stmt(ctx, es) { LowerStmtOut as x => x; error as err => return err }
         return LowerMainTail { ctx = out.ctx; has_value = false; vreg = 0 }
     }
