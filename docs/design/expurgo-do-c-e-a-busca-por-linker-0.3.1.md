@@ -310,20 +310,152 @@ para analisar) e isso precisa ir ao owner pelo integrador.
 
 ---
 
-## 9. Decomposição em fatias
+## 9. A SEQUÊNCIA — ruling do owner 2026-07-26 (a deleção é o TESTE, não a consequência)
+
+> "O que deverá fazer é que no degrau que constrói o nativo, tem que remover os arquivos .c e .h,
+> aí então gerar a versão que não depende mais de C."
+
+Apagar os `.c`/`.h` ANTES de gerar o compilador nativo torna a ausência de C uma **pré-condição
+verificada por construção**. Portar tudo e apagar depois prova muito menos: nada impede um
+resquício de continuar sendo achado por alguma sondagem.
+
+E a correção de ordem que o owner emitiu logo em seguida, porque a primeira redação juntava dois
+passos que morrem em momentos DIFERENTES:
+
+> "A sondagem tem que morrer antes de gerar a gen1, senão vai dar erro na gen2 mesmo assim,
+> .30->gen1 (já sem sondagem)"
+
+A sondagem vive no FONTE do compilador. Se ela ainda estiver lá quando o gen1 for gerado, **o gen1
+nasce com a sondagem compilada dentro dele** — e é o gen1 que constrói o gen2. Com os arquivos já
+apagados, ele procura, não acha, e o gen2 falha do mesmo jeito.
+
+| passo | estado do FONTE | estado dos ARQUIVOS em disco |
+|---|---|---|
+| 1. mudar o fonte | **sondagem e emissão de C REMOVIDAS** | ainda presentes |
+| 2. `seed .30 → gen1` | idem | **ainda presentes** — e é obrigatório |
+| 3. apagar | idem | **removidos** |
+| 4. `gen1 → gen2` nativo | idem | ausentes ← **o teste** |
+| 5. `gen2 → gen3` nativo | idem | ausentes, byte-idêntico |
+
+**Por que os arquivos precisam SOBREVIVER ao passo 2.** O seed .30 emite C e linka contra
+`teko_rt.c` por comportamento próprio, já compilado dentro dele. Nenhuma mudança nossa no fonte
+muda o que o seed faz. No momento em que o seed constrói o gen1 os arquivos têm que estar em
+disco — não porque o fonte do gen1 precisa, mas porque o **seed** precisa. O gen1 que sai desse
+passo já é um compilador sem sondagem e sem emissão de C; a partir dele os arquivos são inúteis, e
+é aí que se apagam.
+
+### 9.0 O PASSO 1 CRESCEU — refinamento do owner
+
+> "quando .30 for compilar, já não devem existir os emissores ou quaisquer códigos tks dependentes
+> de C, depois para gen2 tem que remover os arquivos"
+
+O passo 1 não é "remover a sondagem": é remover o **EMISSOR** e **todo `.tks` dependente de C**. O
+fonte que o seed .30 compila já não pode saber emitir C — o gen1 nasce, por construção, incapaz.
+
+**A VARREDURA, medida.** Todo `.tks`/`.tkt` que toca C é este conjunto, e ele é pequeno:
+
+| arquivo | linhas | veredito |
+|---|---:|---|
+| `src/codegen/codegen.tks` | 10.727 | **morre inteiro** — é o emissor |
+| `src/codegen/ffi_export.tks` | 407 | **morre** — só existe para `emit_c_header` |
+| `src/codegen/ffi_export_test.tkt` | — | morre com ele |
+| `src/build/project.tks` | 4.446 | **sobrevive**, perde os membros de C |
+| `src/build/project_test.tkt` | — | sobrevive, perde os testes de linha de `cc` |
+| `src/checker/consteval.tks:989` | 1 ref | `tk_emit_c_mode` — inspecionar; é nome de modo, não emissão |
+| `src/lir/lower.tks:5184` | 1 ref | `tk_emit_c` **só em doc-comment** — nada a deletar, texto a atualizar |
+
+**A ARMADILHA de "deletar 10.727 linhas", e ela é real.** `project.tks` chama SETE entradas de
+`codegen::`, e **duas delas não são emissão de C**:
+
+| chamada | linha | o que é |
+|---|---|---|
+| `codegen::tk_emit_tsym` | 1366 | o mapa `.tsym` — **consumido pelo caminho NATIVO** (`project.tks:2019` e `:2295` escrevem `<bin>.tsym` depois de `finish_native_object`/`emit_native_wasm`), é o que resolve o stack trace E4 |
+| `codegen::check_ffi_export` | 1392 | uma REGRA DE CHECKER sobre `exp`/`abi="c"`, não um emissor |
+| `codegen::emit_c_header` | 2528 | morre com `ffi_export.tks` |
+| `codegen::tk_emit_c_test` | 2707 | o harness de teste — **pré-requisito da carga irmã** |
+| `codegen::tk_emit_meta` | 2711 | morre |
+| `codegen::tk_emit_c_test_analyze` | 3597 | morre com o harness |
+| `codegen::tk_emit_c_cov` | 4310 | a TU de cobertura, morre com o harness |
+
+`tk_emit_tsym` e `check_ffi_export` precisam ser **RELOCADOS antes** de `codegen.tks` morrer.
+Apagar o arquivo inteiro leva junto o emissor do `.tsym` e a regra de FFI-export, e o sintoma —
+stack trace nativo sem símbolos — aparece longe da causa.
+
+**ACOPLAMENTO A SEQUENCIAR:** `codegen::tk_emit_c_test` / `tk_emit_c_test_analyze` /
+`tk_emit_c_cov` são o harness de teste, e a carga irmã `cargo/20-gate-sem-c` está portando
+`run_native_gate` para fora do emissor. **O trabalho dela é PRÉ-REQUISITO deste passo 1**, não
+paralelo: deletar o harness antes de o gate ter caminho nativo deixa o projeto sem gate no meio da
+maior deleção da versão. Se o porte dela não fechou, faz-se todo o resto do passo 1 e o harness
+fica por último.
+
+**O que SOBREVIVE, para não deletar demais:** o **linker**. `run_cc`/`build_cc_argv` sobrevivem na
+função de LINKAR objeto nativo em binário; o que morre é COMPILAR C. São duas responsabilidades no
+mesmo corpo (`project.tks:876-878` — "Shared verbatim by `run_cc` … and `link_object`"), e a
+entrega é separá-las, não apagar o arquivo.
+
+**O que "remover a sondagem" inclui**, para não sobrar meio caminho: `TK_RT_DIR` (leitura E
+escrita), `ensure_rt_dir_abs`, `probe_rt_dir`, `share_rt_bases`, `probe_share_rt_dir`, e todo call
+site que dependia de `TK_RT_DIR` estar setado — inclusive o que monta a linha de `cc` com
+`teko_rt.c` (`project.tks:923-924`). Uma sondagem que sempre falha é um caminho morto dentro do
+gen1 que ainda pode disparar erro.
+
+### 9.1 O CRITÉRIO DE PRONTO — o hello world sozinho
+
+Projeto isolado, só o binário, nenhum `.c`/`.h` em lugar nenhum, `TK_RT_DIR` desarmado,
+`share/teko` inexistente. Tem que sair `hello, teko` e exit 0. Não é a suíte, não é o gate.
+
+**Baseline medido HOJE com o seed 0.3.0.30** (`/usr/local/share/teko` neutralizado com restauração
+garantida por `trap`, porque esta máquina TEM o share instalado e medi-lo seria medir a instalação
+e não o binário):
+
+```
+emit C     bin/hello.c   ✓
+cc         bin/hello.c:6:10: fatal error: teko_rt.h: No such file or directory
+           cc1: fatal error: src/runtime/teko_rt.c: No such file or directory
+           cc1: fatal error: src/assert/assert.c: No such file or directory
+           ✗  cc failed to build the generated C
+BUILD_EXIT=1     FECHO: NAO
+```
+
+Um hello world hoje depende de **três** coisas externas ao executável: as fontes do runtime em C
+estagiadas ao lado, um `cc` instalado, e os headers de sistema desse `cc`. É esse estado que o
+passo 3 tem que tornar impossível. O critério exige também que **nenhum `bin/hello.c` seja
+emitido** — construir via C num diretório que por acaso tem o share instalado passa no exit code
+e falha no propósito.
+
+### 9.2 O que bloqueia o passo 3 HOJE — com evidência, para ser resolvido e não contornado
+
+| # | bloqueio | evidência |
+|---|---|---|
+| B1 | o link nativo ainda COMPILA C: `link_object` reusa `build_cc_argv`, que empurra `<rt>/teko_rt.c` e `<asrt>/assert.c` para a linha | `project.tks:923-924`, e `link_object` "Reuses `build_cc_argv` verbatim" (`project.tks:1276`) |
+| B2 | `teko_rt.tks` ainda é circular: `print`/`write` chamam `teko::io::write`, que o lowering resolve para `tk_write` — o próprio símbolo do runtime C | `runtime/teko_rt.tks:44-80`, `lir/lower.tks:1099` |
+| B3 | o gate de teste emite uma unidade de tradução C e a compila com `run_cc` | `project.tks:2681` |
+| B4 | o arena não tem original em Teko — é projeto, não tradução | §3 |
+
+B1 e B2 são a substância do passo 2→3 e são **desta carga**. B3 é da carga irmã
+`cargo/20-gate-sem-c`; enquanto o gate de teste emitir C, o emissor não pode morrer. B4 é o item
+que o owner separou explicitamente.
+
+### 9.3 Fatias
 
 | # | fatia | estado |
 |---|---|---|
 | 1 | este mapa | **entregue** |
-| 2 | `ci_provision_teko.sh` provisiona o runtime da era do seed (§4.4) — desarma a escada ANTES do expurgo | pendente |
-| 3 | busca por LINKER com asserção de arquitetura e recusa nomeada de MinGW (§6) + asserção simétrica em `produce_assets.sh` | pendente |
-| 4 | `teko_rt.tks` fecha o bottom com `extern fn` + o arena vai para Teko (§3) | pendente |
-| 5 | o expurgo dos oito arquivos + o emissor de C + o resíduo de resolução (§1, §7) | pendente |
-| 6 | as lanes (§8) | pendente |
+| 2 | `ci_provision_teko.sh` provisiona o runtime da era do seed (§4.4) — o passo 1 da sequência deixa de depender do repositório | **entregue** |
+| 3a | asserção de arquitetura no asset publicado (`produce_assets.sh`, §6.2 item 5) | **entregue** |
+| 3b | `src/build/linker.tks` — a busca por LINKER, asserção de arquitetura, recusa nomeada de MinGW (§6) | **entregue** |
+| 4 | B2: `teko_rt.tks` fecha o bottom com `extern fn` (write/exit/abort) + o arena vai para Teko | pendente |
+| 5 | B1: `build_cc_argv` se parte — a de compilar C morre, a de linkar objeto vira linha de linker | pendente |
+| 6 | passo 1 do ruling: REMOVER DO FONTE a sondagem inteira e a emissão de C (§7) | pendente |
+| 7 | passo 3: apagar os oito arquivos, DEPOIS do gen1 | pendente |
+| 8 | passos 4 e 5: gen2 e gen3 nativos com os arquivos ausentes + o hello world sozinho (§9.1) | pendente |
+| 9 | as lanes (§8) | pendente |
 
-A ordem é dura: **2 antes de 5**, senão o CI para de construir; **4 antes de 5**, senão o
-compilador novo não tem runtime nenhum.
-
-A fatia 4 depende da carga irmã `cargo/20-gate-sem-c`, que porta `run_native_gate` para fora do
-emissor de C (`project.tks:2681` — o gate de teste ainda monta uma unidade de tradução C e a
-compila com `run_cc`). Enquanto o gate de teste emitir C, o emissor não pode morrer.
+**O que a fatia 2 vale depois da correção de ordem — honestamente, menos do que eu escrevi
+primeiro.** Ela NÃO é mais o que salva a escada: com a ordem corrigida, os `.c`/`.h` do
+repositório estão em disco exatamente quando o seed precisa deles, e a camada 1 da sondagem os
+acha como sempre. O que a fatia 2 continua entregando é higiene de ERA e independência do
+checkout: o seed passa a carregar o runtime do PRÓPRIO release em vez de ler o do repositório que
+está sendo testado (§4.1-4.3, medido), o que é a razão de `build_with_seed_fallback.sh` ter de
+pinar `TK_RT_DIR` por estágio. Ela também é o que mantém o passo 2 possível no dia em que alguém
+apagar os arquivos antes da hora. Vale, mas como higiene — não como pré-requisito.
