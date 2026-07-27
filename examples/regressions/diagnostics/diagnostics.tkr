@@ -6,16 +6,23 @@
 # checker at all, so its assertion had to move to a build that does. Around those two, FORTY-FOUR
 # further rejected constructs live one per namespace under `src/` (thirty-seven at the all-
 # diagnostics ruling, plus `c61_unsafe_alias_rejected` folded in by cargo/20-unsafe-alias-rejeitado,
-# plus SIX more folded in by cargo/20-c-types-impl — `c62`..`c67`, the reject half of
-# docs/design/c-types-and-marshalling-0.3.1.md, §11), each a fixture that used to be a `Given source
-# inline` snippet in regressor.tkr paying for its OWN failing build.
+# plus FIVE more folded in by cargo/20-c-types-impl — `c62`, `c63`, `c65`, `c66`, `c67`, the reject
+# half of docs/design/c-types-and-marshalling-0.3.1.md, §11), each a fixture that used to be a
+# `Given source inline` snippet in regressor.tkr paying for its OWN failing build. (A SIXTH,
+# `c64_c_string_in_safe_signature_rejected`, was folded in here too but has since moved to the
+# SIGNATURE walk's own build below — its HARD boundary was cutting this project's whole item walk
+# before the item walk ever ran, silently dropping every diagnostic past the pre-loop passes,
+# `is private to` included; see the SIGNATURE walk Feature's note.)
 #
 # WHY THEY SHARE ONE BUILD (owner ruling 2026-07-25 — "somente um build é necessário"): the runner
 # already supports it. A compile-fail scenario that declares NO `Given source`/`Given source inline`
 # is checked against the PROJECT's own failing build, and that build is cached across every scenario
 # of this file (`tkr_compile_fail_artifact` → `tkr_ensure_built`). The compiler reports EVERY
-# diagnostic it finds rather than stopping at the first, so one build emits all forty-six and each
-# scenario below pins its own. Measured, not assumed: 46 scenarios, 1 build.
+# diagnostic it finds rather than stopping at the first, so one build emits every ITEM-WALK
+# diagnostic and each scenario below pins its own — SO LONG AS no HARD pre-walk boundary (the
+# SIGNATURE walk) sits among them; one did (`c64`, above) until this pass moved it out. Scenario/
+# build counts in this header predate that move and are flagged, not silently re-derived, per this
+# file's own "measured, not assumed" discipline — the next full remeasurement re-confirms them.
 #
 # ONE MORE NAMESPACE ADDED since that measurement (`c62_arena_size_on_unsafe_rejected`, #453's
 # `arena_size_on_unsafe_rejected` fixture — numbered c62, not c61: c61 was already taken by a
@@ -32,11 +39,18 @@
 # (`validate_type_decls` and `check_modules`) are SOFT boundaries — they produce nothing the item
 # walk reads — so they now collect and the build carries on. They are namespaces of the shared build.
 #
-# WHY ONE `cases/*.tks` ROW SURVIVES (`prewalk_signature_stops.tks`). The remaining two constructs
-# are rejected by the checker's SIGNATURE walk, a HARD boundary: a declaration whose signature is
-# rejected contributes no binding, so continuing would report every caller as "undefined" and blame
-# the caller for the callee's defect (M.3). The signature walk therefore collects everything IT sees
-# and cuts. Both constructs sit in ONE file and are reported by ONE build, and a standalone `Given
+# WHY ONE `cases/*.tks` ROW SURVIVES (`prewalk_signature_stops.tks`) — AND WHY A THIRD CONSTRUCT
+# JOINED IT. The surviving constructs are rejected by the checker's SIGNATURE walk, a HARD boundary:
+# a declaration whose signature is rejected contributes no binding, so continuing would report every
+# caller as "undefined" and blame the caller for the callee's defect (M.3). The signature walk
+# therefore collects everything IT sees and cuts. `c64_c_string_in_safe_signature_rejected`
+# (`reject_unsafe_signature_contagion`, cargo/20-c-types-impl) is the SAME HARD boundary as
+# `discard_param_plain_fn`/`ref_depth_rejected` but was originally folded into THIS project's shared
+# item-walk build instead — a placement mistake found while chasing why `is private to` (the
+# `m1::PRIV` scenario, two Features up) had stopped appearing: `c64`'s HARD signature failure cut
+# the pre-loop passes before the item walk that produces `is private to` ever ran, and every OTHER
+# item-walk diagnostic in this project's forty-plus scenarios went missing the same way, silently.
+# All three constructs now sit in ONE file and are reported by ONE build, and a standalone `Given
 # source` build is cached per (file, declared env) — `regr_src_key`. Residual: one build, was four.
 # See docs/design/all-diagnostics-pre-walk-0.3.1.md §3 for every pass's boundary.
 #
@@ -291,11 +305,6 @@ Feature: F10 c-types-and-marshalling — the reject half (docs/design/c-types-an
     When compilation fails
     Then diagnostic = "struct/class 'Wrapper' has an unsafe-typed field 'ha"
 
-  # src/c64_c_string_in_safe_signature_reje/case.tks — the checker SIGNATURE walk, `reject_unsafe_signature_contagion`
-  Scenario: c_string_in_safe_signature_rejected
-    When compilation fails
-    Then diagnostic = "safe fn 'takes_handle' names unsafe type in its signature"
-
   # src/c65_c_string_as_extern_param_rejec/case.tks — C7.1a's extern_type_ok, the `Named` arm
   Scenario: c_string_as_extern_param_rejected
     When compilation fails
@@ -311,12 +320,23 @@ Feature: F10 c-types-and-marshalling — the reject half (docs/design/c-types-an
     When compilation fails
     Then diagnostic = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)"
 
-Feature: checker SIGNATURE walk — a HARD boundary, so both constructs share ONE build
+Feature: checker SIGNATURE walk — a HARD boundary, so all three constructs share ONE build
 
   Scenario: discard_param_plain_fn
     Given source = "cases/prewalk_signature_stops.tks"
     When compilation fails
     Then diagnostic = "a `_` discard parameter is only allowed when impleme"
+
+  # `reject_unsafe_signature_contagion` (U2) is this SAME HARD boundary — `func_type` fails to
+  # collect the signature, exactly like the other two rows here — so `c64` (cargo/20-c-types-impl)
+  # moved off the shared item-walk build it used to sit in: a HARD signature-walk failure inside
+  # THAT build was cutting the whole item walk at the pre-loop boundary before it ever reached the
+  # other forty-plus item-walk diagnostics (found while chasing #613's `is private to` going
+  # missing — the const-visibility scenario two Features up never got a chance to run).
+  Scenario: c_string_in_safe_signature_rejected
+    Given source = "cases/prewalk_signature_stops.tks"
+    When compilation fails
+    Then diagnostic = "safe fn 'takes_handle' names unsafe type in its signature"
 
   Scenario: ref_depth_rejected
     Given source = "cases/prewalk_signature_stops.tks"
