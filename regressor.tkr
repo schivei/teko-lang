@@ -342,3 +342,23 @@ Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenari
   # SILENT: `(a to u64) * b` with u32 operands joins to u32 WITHOUT the cast and to u64 WITH it, so
   # the cast is load-bearing — the pre-fix predicate ignored the partner operand and rejected it,
   # which would have made every width-widening boundary in the corpus uncompilable.
+
+
+Feature: class layout — a class registers the layout of its effective instance fields
+
+  # The native lowering collected a layout for a `StructBody` only; a `ClassBody` fell through the
+  # catch-all arm of `collect_struct_layout_decl` and registered NOTHING, so EVERY class
+  # instantiation died at compile time with "no layout registered for struct `…`" — one class in
+  # one namespace, with no same-name type anywhere, was enough to trigger it.
+  #
+  # `class_layout_effective_fields` asserts both halves off one build. The class half: an
+  # `abstract` base's fields are the PREFIX of the derived instance (field-flattening composition),
+  # so the inherited AND the own fields must each read back the value they were constructed with,
+  # and a method summing across the boundary must agree — an overlapping or reordered slot shows up
+  # as a wrong exit code, not as a compile error. The struct half is the control: it is the arm
+  # that already worked, so a fix that broke it fails HERE instead of passing quietly.
+  Scenario: class_layout_effective_fields (own-native — a class instance is a field-shaped object)
+    Given target = "host"
+    Given source = "examples/regressions/cwd_build/cases/class_layout_effective_fields.tks"
+    When built and run
+    Then exit = 42
