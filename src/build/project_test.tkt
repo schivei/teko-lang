@@ -602,12 +602,13 @@ fn pt_error_text(v: null | error) -> str {
 
 /**
  * pt_cross_target — a target that is NEVER a host default (`host_target_for_os` only ever answers
- * x86_64-linux, x86_64-windows or arm64-macos), so `cross_note` classifies it as cross on EVERY CI
- * host and the R4/R5 cross assertions below hold platform-independently.
+ * x86_64-linux, x86_64-windows or arm64-macos, so a wasm target can never be one), so `cross_note`
+ * classifies it as cross on EVERY CI host and the R4/R5 cross assertions below hold
+ * platform-independently.
  *
  * @return the always-cross fixture target
  */
-fn pt_cross_target() -> NativeTarget { NativeTarget::Riscv64Linux }
+fn pt_cross_target() -> NativeTarget { NativeTarget::Wasm32Wasi }
 
 #test
 /**
@@ -622,14 +623,12 @@ fn pt_target_name_and_objfmt_are_one_source() {
     teko::assert::is_true(target_name(NativeTarget::X8664Linux) == "x86_64-linux")
     teko::assert::is_true(target_name(NativeTarget::Arm64Macho) == "arm64-macos")
     teko::assert::is_true(target_name(NativeTarget::X8664Windows) == "x86_64-windows")
-    teko::assert::is_true(target_name(NativeTarget::Riscv64Linux) == "riscv64-linux")
     teko::assert::is_true(target_name(NativeTarget::Wasm32Wasi) == "wasm32-wasi")
     match target_from_name(target_name(NativeTarget::X8664Windows)) {
         NativeTarget as t => teko::assert::is_true(t == NativeTarget::X8664Windows)
         error => teko::assert::is_true(false)
     }
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Linux) == OBJFMT_ELF)
-    teko::assert::is_true(target_objfmt(NativeTarget::Riscv64Linux) == OBJFMT_ELF)
     teko::assert::is_true(target_objfmt(NativeTarget::Arm64Macho) == OBJFMT_MACHO)
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Windows) == OBJFMT_COFF)
     teko::assert::is_true(target_objfmt(NativeTarget::Wasm64Wasi) == OBJFMT_WASM)
@@ -654,10 +653,10 @@ fn pt_cross_note_is_empty_for_the_host_target() {
     teko::assert::is_true(here.note == "")
     let cross = cross_note(pt_cross_target())
     teko::assert::is_true(cross.is_cross)
-    teko::assert::str_contains(cross.note, "riscv64-linux")
+    teko::assert::str_contains(cross.note, "wasm32-wasi")
     teko::assert::str_contains(cross.note, target_name(host_default_target()))
     teko::assert::str_contains(cross.note, "not executed")
-    teko::assert::is_true(cross_note_for_name("riscv64-linux").is_cross)
+    teko::assert::is_true(cross_note_for_name("wasm32-wasi").is_cross)
     teko::assert::is_false(cross_note_for_name("").is_cross)
     teko::assert::is_false(cross_note_for_name("some-unknown-target").is_cross)
     teko::assert::is_false(cross_note_for_name(target_name(host_default_target())).is_cross)
@@ -706,7 +705,7 @@ fn pt_static_lib_cross_must_be_pointed_at_and_present() {
     let cross = validate_static_libs_for_target(bare, pt_cross_target())
     teko::assert::is_true(pt_is_error(cross))
     teko::assert::str_contains(pt_error_text(cross), "foo")
-    teko::assert::str_contains(pt_error_text(cross), "riscv64-linux")
+    teko::assert::str_contains(pt_error_text(cross), "wasm32-wasi")
     teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target())))
     let absent = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:__no_such_dir__/libfoo.a\"]\n")
     let miss = validate_static_libs_for_target(absent, host_default_target())
@@ -727,7 +726,7 @@ fn pt_static_lib_cross_must_be_pointed_at_and_present() {
 fn pt_static_validation_honours_the_section_key() {
     let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.arm64-macos]\nfoo = [\"static:foo\"]\n")
     teko::assert::is_false(pt_is_error(validate_static_libs_for_target(m, NativeTarget::X8664Windows)))
-    let own = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.riscv64-linux]\nfoo = [\"static:foo\"]\n")
+    let own = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.wasm32-wasi]\nfoo = [\"static:foo\"]\n")
     teko::assert::is_true(pt_is_error(validate_static_libs_for_target(own, pt_cross_target())))
 }
 
@@ -839,7 +838,6 @@ fn pt_lib_file_present_reads_the_local_tree() {
 fn pt_target_arch_name_completes_the_os_arch_name() {
     teko::assert::is_true((target_arch_name(NativeTarget::X8664Linux) ~ "-" ~ target_os_name(NativeTarget::X8664Linux)) == target_name(NativeTarget::X8664Linux))
     teko::assert::is_true((target_arch_name(NativeTarget::Arm64Macho) ~ "-" ~ target_os_name(NativeTarget::Arm64Macho)) == target_name(NativeTarget::Arm64Macho))
-    teko::assert::is_true((target_arch_name(NativeTarget::Riscv64Linux) ~ "-" ~ target_os_name(NativeTarget::Riscv64Linux)) == target_name(NativeTarget::Riscv64Linux))
     teko::assert::is_true((target_arch_name(NativeTarget::X8664Windows) ~ "-" ~ target_os_name(NativeTarget::X8664Windows)) == target_name(NativeTarget::X8664Windows))
     teko::assert::is_true(target_arch_name(NativeTarget::Wasm32Wasi) == "")
     teko::assert::is_true(target_arch_name(NativeTarget::Wasm64Wasi) == "")

@@ -239,13 +239,12 @@ fn exit_mismatch_message_names_the_origin_and_quotes_the_command() {
 /**
  * cross_cc_for_target_reuses_the_build_s_own_resolution — the pre-build capability probe must name
  * the SAME cross-linker the build then invokes (`resolve_cc`'s `TEKO_TARGET` arm), so the two can
- * never drift: riscv64 resolves to the riscv cross-gcc, a windows target to the MinGW cross-gcc, and
+ * never drift: a windows target resolves to the MinGW cross-gcc, and
  * every host-linked target (host sentinel, "", a wasm target, an unrecognised name) to "".
  *
  * @return void
  */
 fn cross_cc_for_target_reuses_the_build_s_own_resolution() {
-    teko::assert::is_true(cross_cc_for_target("riscv64-linux") == "riscv64-linux-gnu-gcc")
     teko::assert::is_true(cross_cc_for_target("x86_64-windows") == "x86_64-w64-mingw32-gcc")
     teko::assert::is_true(cross_cc_for_target("") == "")
     teko::assert::is_true(cross_cc_for_target(HOST_TARGET) == "")
@@ -258,20 +257,20 @@ fn cross_cc_for_target_reuses_the_build_s_own_resolution() {
  * target_toolchain_skip_reason_is_empty_for_the_host — the host row of a backend x target `Examples`
  * table must never be pre-skipped, however it spells the host ("" or the `HOST_TARGET` sentinel),
  * and a cross target names its missing tool rather than being silently built with the wrong linker.
- * The riscv assertion is host-conditional BY DESIGN: on the provisioned riscv CI lane both tools are
- * present and the reason is empty; anywhere else the reason must be non-empty and name a tool.
+ * The windows assertion is host-conditional BY DESIGN: on a lane provisioned with the MinGW cross-cc
+ * the reason is empty; anywhere else the reason must be non-empty and name a tool.
  *
  * @return void
  */
 fn target_toolchain_skip_reason_is_empty_for_the_host() {
     teko::assert::is_true(target_toolchain_skip_reason("") == "")
     teko::assert::is_true(target_toolchain_skip_reason(HOST_TARGET) == "")
-    let riscv = target_toolchain_skip_reason("riscv64-linux")
-    if tool_on_path("riscv64-linux-gnu-gcc") && tool_on_path("qemu-riscv64-static") {
-        teko::assert::is_true(riscv == "")
+    let win = target_toolchain_skip_reason("x86_64-windows")
+    if tool_on_path("x86_64-w64-mingw32-gcc") {
+        teko::assert::is_true(win == "")
         return
     }
-    teko::assert::is_true(riscv.len > 0)
+    teko::assert::is_true(win.len > 0)
 }
 
 #test
@@ -286,9 +285,9 @@ fn target_toolchain_skip_reason_is_empty_for_the_host() {
 fn tkr_target_env_omits_the_host_sentinel() {
     teko::assert::is_true(tkr_target_env(HOST_TARGET).len == 0)
     teko::assert::is_true(tkr_target_env("").len == 0)
-    let cross = tkr_target_env("riscv64-linux")
+    let cross = tkr_target_env("x86_64-windows")
     teko::assert::is_true(cross.len == 1)
-    teko::assert::is_true(cross[0] == "TEKO_TARGET=riscv64-linux")
+    teko::assert::is_true(cross[0] == "TEKO_TARGET=x86_64-windows")
 }
 
 #test
@@ -302,7 +301,7 @@ fn tkr_target_env_omits_the_host_sentinel() {
 fn tkr_effective_target_folds_the_host_sentinel() {
     teko::assert::is_true(tkr_effective_target("") == teko::os())
     teko::assert::is_true(tkr_effective_target(HOST_TARGET) == teko::os())
-    teko::assert::is_true(tkr_effective_target("riscv64-linux") == "riscv64-linux")
+    teko::assert::is_true(tkr_effective_target("x86_64-windows") == "x86_64-windows")
 }
 
 #test
@@ -591,7 +590,7 @@ fn host_cc_cannot_link_cross_reason_names_the_unlinkable_cross() {
     teko::assert::is_true(host_cc_cannot_link_cross_reason("") == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason(HOST_TARGET) == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason("wasm32-wasi") == "")
-    teko::assert::is_true(host_cc_cannot_link_cross_reason("riscv64-linux") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("x86_64-windows") == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason("some-unknown-target") == "")
     if teko_cc_env().len > 0 { return }
     let alien = host_cc_cannot_link_cross_reason(rt_alien_target_name())
@@ -742,7 +741,6 @@ fn arch_token_canonical_folds_the_triple_spellings() {
     teko::assert::is_true(arch_token_canonical("amd64") == "x86_64")
     teko::assert::is_true(arch_token_canonical("x64") == "x86_64")
     teko::assert::is_true(arch_token_canonical("x86_64") == "x86_64")
-    teko::assert::is_true(arch_token_canonical("riscv64") == "riscv64")
     teko::assert::is_true(arch_token_canonical("") == "")
     teko::assert::is_true(arch_token_canonical("sparc9") == "sparc9")
 }
@@ -803,7 +801,7 @@ fn host_cc_arch_is_canonical_or_unknown() {
 fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
     teko::assert::is_true(host_cc_cannot_link_host_default_reason("", false) == "")
     teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, false) == "")
-    teko::assert::is_true(host_cc_cannot_link_host_default_reason("riscv64-linux", true) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason("x86_64-windows", true) == "")
     teko::assert::is_true(host_cc_cannot_link_host_default_reason(rt_alien_target_name(), true) == "")
     if teko_cc_env().len > 0 {
         teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, true) == "")
@@ -834,75 +832,11 @@ fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
  * @return void
  */
 fn regr_row_skip_line_names_the_row_and_the_reason() {
-    let line = regr_row_skip_line("own_arith_exit", 1, "no riscv64 sysroot")
+    let line = regr_row_skip_line("own_arith_exit", 1, "no wasmtime on PATH")
     teko::assert::str_contains(line, "own_arith_exit[1]")
-    teko::assert::str_contains(line, "no riscv64 sysroot")
+    teko::assert::str_contains(line, "no wasmtime on PATH")
     teko::assert::str_contains(line, "skip")
     teko::assert::is_false(teko::str::contains(line, "FAIL"))
-}
-
-#test
-/**
- * cross_sysroot_for_is_empty_when_the_toolchain_cannot_say — the sysroot is PROBED from the cross
- * compiler, never assumed from a path convention, so every way of not knowing collapses to "": no
- * compiler named, a compiler that is not installed, and a compiler that echoes the anchor's bare
- * name back because it has no target libc. "" is what turns into the honest pre-build skip.
- *
- * @return void
- */
-fn cross_sysroot_for_is_empty_when_the_toolchain_cannot_say() {
-    teko::assert::is_true(cross_sysroot_for("") == "")
-    teko::assert::is_true(cross_sysroot_for("teko-no-such-cross-compiler") == "")
-    let rv = cross_sysroot_for(default_cc_for_target(NativeTarget::Riscv64Linux))
-    if rv.len == 0 { return }
-    teko::assert::is_false(teko::str::ends_with(rv, CROSS_SYSROOT_ANCHOR_TAIL))
-}
-
-#test
-/**
- * qemu_riscv64_wrapper_carries_the_sysroot_or_names_what_is_missing — the vagão-20 half-probe, in
- * one assertion. Having the emulator on PATH is NOT the riscv64 capability: the artifact is a
- * dynamic riscv64 ELF, and without `-L <sysroot>` `qemu-user` cannot resolve its loader and exits
- * 255 before the program starts — reported as `exit 255, expected 42`, indistinguishable from a
- * backend regression. So a resolved wrapper must carry the flag AND a directory, and an unresolvable
- * one must say which half is missing. Host-conditional by design: the fail-closed lane provisions
- * both and takes the first arm, a bare host takes the second.
- *
- * @return void
- */
-fn qemu_riscv64_wrapper_carries_the_sysroot_or_names_what_is_missing() {
-    match qemu_riscv64_wrapper() {
-        []str as w => {
-            teko::assert::is_true(w.len == 3)
-            teko::assert::is_true(w[0] == QEMU_RISCV64)
-            teko::assert::is_true(w[1] == "-L")
-            teko::assert::is_true(w[2].len > 0)
-        }
-        error as e => {
-            teko::assert::is_true(e.message.len > 0)
-            teko::assert::str_contains(e.message, QEMU_RISCV64)
-        }
-    }
-}
-
-#test
-/**
- * resolve_run_wrapper_riscv_agrees_with_the_qemu_wrapper — `Given target = "riscv64-linux"` and its
- * bare `"riscv64"` alias must both route to the ONE riscv capability answer, so a corpus that spells
- * the target either way gets the same sysroot (or the same honest reason) rather than two ideas of
- * what riscv64 support means.
- *
- * @return void
- */
-fn resolve_run_wrapper_riscv_agrees_with_the_qemu_wrapper() {
-    mut want: u64 = 0
-    match qemu_riscv64_wrapper() { []str as w => { want = w.len }; error => { } }
-    mut canonical: u64 = 0
-    match resolve_run_wrapper("riscv64-linux") { []str as w => { canonical = w.len }; error => { } }
-    mut alias: u64 = 0
-    match resolve_run_wrapper("riscv64") { []str as w => { alias = w.len }; error => { } }
-    teko::assert::is_true(canonical == want)
-    teko::assert::is_true(alias == want)
 }
 
 #test
