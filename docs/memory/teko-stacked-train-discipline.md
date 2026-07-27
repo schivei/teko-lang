@@ -257,6 +257,71 @@ apagá-lo à mão.
    focar esforços neles"*). Isso reescreve o corte de testes: não é "medir cobertura e podar", é
    consequência da morte do C. O que sobrevive é o corpus de regressão, que roda o binário.
 
+### O que morre JUNTO com o C — quatro oráculos, e sete lanes
+
+Levantado a pedido do owner (*"não esqueça de lanes de CI que exigem C"*), 2026-07-26. A conta é
+maior que ajustar YAML: metade da verificação do projeto existe **porque** o caminho passa por C.
+
+| lane de `pr.yml` | por que depende do C |
+|---|---|
+| `artifact / <producer>` (7 legs) | `native_linux_asset.sh` compila `teko.c` + `teko_rt.c` + `assert.c` com gcc — a produção de asset INTEIRA é compilação C |
+| `TSan` | baixa o artefato `teko-c` e linka gen1 instrumentado |
+| `ASan+UBSan smoke` | idem |
+| `ASan+UBSan+LSan / default dispatch` | idem — a auditoria pesada |
+| `clang-tidy audit` | varre `src/runtime/teko_rt.c src/assert/assert.c` |
+| `Memory paranoid (native self-host)` | `TEKO_MEM_PARANOID` é um botão do `teko_rt.c` |
+| `codeql.yml` (`c-cpp`) | analisa o C |
+
+**Os quatro oráculos que somem:**
+
+1. **O diferencial `own == C`.** Era o que provava o backend nativo correto por igualdade contra um
+   caminho maduro. Sem C não há contra o que diferir; 31 linhas `| c |` do `regressor.tkr` perdem
+   o sentido.
+2. **Os sanitizadores.** ASan/UBSan/TSan/LSan são o clang instrumentando o C emitido. Um backend
+   que emite objeto direto não tem clang para instrumentá-lo.
+3. **O SAST (`clang-tidy`).**
+4. **A análise CodeQL `c-cpp`.**
+
+**O que sobra provando o compilador:** o valor que cada cenário do corpus afirma por si (exit,
+stdout, trap), o fixpoint `gen2 == gen3`, e o `TEKO_MEM_PARANOID`.
+
+### O oráculo que NÃO morre — e é o que cobria o que os outros não cobriam
+
+Owner, 2026-07-26: *"a arena vai para teko, não há exceções de manter algo em C"*. Consequência
+que melhora a conta acima em vez de piorá-la.
+
+`TEKO_MEM_PARANOID` são **três linhas** em `tk_free_take`: ler o env uma vez e, quando ligado,
+`memset(p, 0xDD, usable); return;` — envenena o bloco e nunca o devolve ao pool. Isso é
+propriedade da **arena**, não do C, e migra com ela sem perder nada.
+
+E o comentário que já estava ao lado dele é o ponto:
+
+> *"Arena reuse is invisible to ASan, so a wrong linearity proof would corrupt silently; with
+> poison, any read-after-park yields 0xDD garbage and the gate/diff harness fails LOUDLY."*
+
+Ou seja: **o ASan nunca cobriu reuso de arena.** O oráculo que cobre o modelo de memória mais
+distintivo do projeto é exatamente o que sobrevive, e ele nunca foi redundante com os
+sanitizadores. Dos quatro que se perdem, nenhum cobria a arena.
+
+### Os *San's: teacháveis, mas não pela .31 (owner 2026-07-26)
+
+> *"quanto aos *San's, se não houver como ensiná-los (não vejo motivos se compararmos com outras
+> linguagens que fazem a mesma abordagem), não tem pq mantê-los."*
+
+O precedente é real e vale registrar o MECANISMO, porque ele não é o que a intuição sugere: Rust e
+Go não pedem ao clang que instrumente — **o próprio compilador emite** a instrumentação (chamadas
+`__asan_*` em torno de load/store; `__tsan_read`/`__tsan_write` em cada acesso) e linka a runtime
+de sanitizador da plataforma. Como o linker do sistema continua nosso até a .33, o caminho existe
+para nós também.
+
+Mas é trabalho de CODEGEN, não de configuração. Ruling aplicado: **saem com o C**, e voltam se e
+quando o backend nativo souber emiti-las. Não seguram a .31.
+
+**Armadilha imediata, e é a da família "portão que não gateia":** se o C sumir e o job `c-cpp` do
+`codeql.yml` continuar no lugar, ele passa **verde analisando nada**. Um gate vazio é pior que
+gate nenhum, porque parece cobertura. Ou o job sai junto com o C, ou entende Teko — e é por isso
+que *ensinar Teko ao CodeQL na .32* (owner, mesma conversa) é **reposição**, não polimento.
+
 ### O método: escada medida, não inventário de comentário
 
 Contar `honest_stop` em comentário dá 332 e não significa nada. O número que significa é onde o
