@@ -5782,11 +5782,22 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
     tf
 }
 
-// (OOP A1, 2026-07-01) type-check EVERY method body on a struct TypeDecl and stamp each into a
-// full TFunction item (namespace = "<owning-ns>::<StructName>", mirroring collect_funcs'
-// registration exactly, so codegen/VM mangle+resolve method calls to these SAME items). Called
-// from both type_program and type_program_with_deps' main loops, alongside the ordinary
-// TypeDecl pass-through — a struct with methods contributes MULTIPLE TItems, not one.
+/**
+ * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
+ * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
+ * registration exactly, so codegen and the VM mangle and resolve method calls to these SAME items).
+ *
+ * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
+ * TypeDecl pass-through — a struct with methods contributes MULTIPLE `TItem`s, not one.
+ *
+ * @param td       the struct or class declaration whose methods to type
+ * @param item_ns  the declaration's own namespace
+ * @param file     the declaration's source file (W-loc-2)
+ * @param env      the sealed top-level environment
+ * @param table    the collected type table
+ * @return         one typed item per method body
+ * @throws         when a method body fails to type
+ */
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable) -> []TItem | error {
     // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
     // list's source differs; a class method is otherwise identical to a struct method. Increment
@@ -5957,47 +5968,6 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
 // prints when it can't read the file), then re-attach the STRUCTURED file/line/col (err_loc) and
 // PRESERVE the inner error's expected/actual (err_typed) so a type mismatch still renders
 // "expected X, found Y" after surfacing.
-/**
- * diag_text_at — the LOCATED message text `surface_at` would bake into its error, without building
- * the error. The declaration-boundary collector (`type_program_with_deps_pre_mono`) records TEXT,
- * not errors: a collected diagnostic is never re-thrown, only printed, so the structured
- * position/expected/actual `surface_at` re-attaches would be carried and dropped. Same location
- * precedence as `surface_at` — the inner error's own line/col wins over the item's (C1-POS).
- *
- * @param file       the item's source file (W-loc-2)
- * @param item_line  the declaration's line, used when the inner error carries none
- * @param item_col   the declaration's column, used when the inner error carries none
- * @param inner      the checker error to locate
- * @return           the `file:line:col: text` diagnostic string
- * @since 0.3.1
- */
-fn diag_text_at(file: str, item_line: u32, item_col: u32, inner: error) -> str {
-    let el = if inner.line != 0 { inner.line } else { item_line }
-    let ec = if inner.line != 0 { inner.col } else { item_col }
-    diag_at(file, el, ec, inner.message)
-}
-
-/**
- * join_checker_diags — render a collected declaration-boundary diagnostic list as the
- * newline-separated block the driver prints. Mirrors `teko::build::join_diags`; duplicated rather
- * than shared because the checker must not depend on the build layer.
- *
- * @param diags  the collected diagnostics, in item order
- * @return       the diagnostics joined by newlines ("" for an empty list)
- * @since 0.3.1
- */
-pub fn join_checker_diags(diags: []str) -> str {
-    mut out = ""
-    mut i: u64 = 0
-    loop {
-        if i >= diags.len { break }
-        if i > 0 { out = out ~ "\n" }
-        out = out ~ diags[i]
-        i = i + 1
-    }
-    out
-}
-
 fn surface_at(file: str, item_line: u32, item_col: u32, inner: error) -> error {
     let el = if inner.line != 0 { inner.line } else { item_line }
     let ec = if inner.line != 0 { inner.col } else { item_col }
@@ -6090,28 +6060,21 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     // the .tkb codec does not carry trait bodies — the same method-serialization gap as
     // struct/class methods — so a dep trait name in an `&`-list surfaces as the conformance
     // check's honest "not an interface" error rather than a silent half-fold).
-    let program0 = match fold_traits(raw_program) { parser::Program as p => p; error as e => return e }
-    let program = canon_class_bases(program0)   // (#152) base_name -> qualified, order-independent base hops
-    // Seed from dep first (build base table + env from dep's type decls + fn signatures).
+    let folded = fold_traits_collected(raw_program)
+    if folded.diags.len > 0 { return PreMono { prog = TProgram { items = teko::list::empty() }; table = teko::list::empty(); diags = folded.diags } }
+    let program = canon_class_bases(folded.program)
     let seed_empty = Collected { types = teko::list::empty(); env = env_empty() }
     let seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
         Collected as s => s
         error as e => return e
     }
-    // Collect from the project on top of the seed.
-    let c = match collect_with_seed(program, seed) { Collected as col => col; error as e => return e }
-    // W-vis-enforce: enforce the module system over the project's own items.
-    // We only check the project's items (not dep items — they were checked when the dep was built).
-    match check_modules(program, c.types) { null => { }; error as e => return e }
-    match check_di(program, c.types) { null => { }; error as e => return e }
-    let di_reg = match build_di_registry(program, c.types) { DiRegistry as r => r; error as e => return e }
-    // (S4 type-generics) stamp concrete decls for written generic uses before typing (no-op when none).
-    let types = instantiate_types(program, c.types)
-    let menv = match register_instance_methods(c.env, types) { Env as e => e; error as e => return e }
-    let cenv = with_di(seal(menv), di_reg)
+    let pre = pre_walk(program, collect_with_seed(program, seed))
+    if pre.cut { return PreMono { prog = TProgram { items = teko::list::empty() }; table = pre.types; diags = pre.diags } }
+    let types = pre.types
+    let cenv = pre.env
     mut items: []TItem = teko::list::empty()
     mut mainbody: []TStatement = teko::list::empty()
-    mut diags: []str = teko::list::empty()
+    mut diags: []str = pre.diags
     mut cur = cenv
     mut i = 0
     loop {
@@ -6139,7 +6102,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
                         cur = ts.env
                     }
                     // DECLARATION-boundary isolation: record and move to the next item.
-                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                 }
             }
             _ => {
@@ -6154,20 +6117,20 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
                                         mut mi2 = 0
                                         loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
                                     }
-                                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                                 }
                                 match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
                                     []TItem as citems => {
                                         mut ci2 = 0
                                         loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
                                     }
-                                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                                 }
                             }
                             _ => { }
                         }
                     }
-                    error as e => { diags = teko::list::push(diags, diag_text_at(it.file, line, col, e)) }
+                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                 }
             }
         }
@@ -6195,24 +6158,68 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     PreMono { prog = tp; table = types; diags = diags }
 }
 
+/**
+ * The checker's PRE-WALK product: the state the declaration-boundary item walk runs against, plus
+ * everything the six pre-walk passes had to say about the program.
+ *
+ * `cut` is the boundary verdict of docs/design/all-diagnostics-pre-walk-0.3.1.md §3 — true when a
+ * HARD pass (the signature walk, the DI registry, the stamped-instance registration) left the state
+ * it produces incomplete. The item walk must NOT run on a cut: it would type bodies against missing
+ * bindings and blame every caller for its callee's defect.
+ */
+type PreWalk = struct {
+    /** the fully stamped type table the item walk resolves against */
+    types: TypeTable
+    /** the sealed top-level environment the item walk types against */
+    env: Env
+    /** every pre-walk diagnostic, in pass order (source, then line, then column within a pass) */
+    diags: []str
+    /** did a HARD pass leave its produced state incomplete? */
+    cut: bool
+}
+
+/**
+ * Run the five pre-walk passes that follow collection and fold their diagnostics into ONE list, in
+ * pass order — the all-diagnostics ruling applied to the checker's pre-walk (issue #68).
+ *
+ * SOFT passes (`check_modules`, the DI overlay check) produce nothing the item walk reads, so their
+ * diagnostics travel WITH the item walk's and the build reports them together. HARD passes (the
+ * signature walk inside `col`, the DI registry, the stamped-instance registration) produce state a
+ * failure leaves incomplete, so each collects everything it can and then sets `cut`.
+ *
+ * @param program  the trait-folded, base-canonicalized program
+ * @param col      the collection pass's outcome (its two diagnostic classes come in with it)
+ * @return         the item walk's state, every pre-walk diagnostic, and the boundary verdict
+ * @since 0.3.1
+ */
+fn pre_walk(program: parser::Program, col: CollectOutcome) -> PreWalk {
+    let table = col.collected.types
+    let module_diags = check_modules(program, table)
+    let di = build_di_registry(program, table)
+    let overlay_diags = di_overlay_diags(program, di, table)
+    let types = instantiate_types(program, table)
+    let insts = register_instance_methods(col.collected.env, types)
+    mut diags = concat_diags(col.decl_diags, col.sig_diags)
+    diags = concat_diags(diags, module_diags)
+    diags = concat_diags(diags, di.diags)
+    diags = concat_diags(diags, overlay_diags)
+    diags = concat_diags(diags, insts.diags)
+    let cut = col.sig_diags.len > 0 || di.diags.len > 0 || insts.diags.len > 0
+    PreWalk { types = types; env = with_di(seal(insts.env), di.registry); diags = diags; cut = cut }
+}
+
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
 pub fn type_program(raw_program: parser::Program) -> TProgram | error {
     // (TR0) FOLD trait derivations FIRST — every later stage (collect, conformance, typing,
     // codegen layout, the VM) sees each deriver's already-folded body; a trait decl itself stays
     // registered (for honest value-position/instantiation errors) but is never emitted.
-    let program0 = match fold_traits(raw_program) { parser::Program as p => p; error as e => return e }
-    let program = canon_class_bases(program0)   // (#152) base_name -> qualified, order-independent base hops
-    let c = match collect(program) { Collected as col => col; error as e => return e }
-    // W-vis-enforce: enforce the module system (namespace qualification + pub/exp) over the
-    // whole flattened program before typing — fail loud on any cross-namespace violation (M.1).
-    match check_modules(program, c.types) { null => { }; error as e => return e }
-    match check_di(program, c.types) { null => { }; error as e => return e }
-    let di_reg = match build_di_registry(program, c.types) { DiRegistry as r => r; error as e => return e }
-    // (S4 type-generics) STAMP concrete decls for written generic uses (`Box<i64>`) into the table
-    // before typing, so field-access / struct-init see concrete fields. No-op when none are used.
-    let types = instantiate_types(program, c.types)
-    let menv = match register_instance_methods(c.env, types) { Env as e => e; error as e => return e }
-    let cenv = with_di(seal(menv), di_reg)
+    let folded = fold_traits_collected(raw_program)
+    if folded.diags.len > 0 { return diags_error(folded.diags) }
+    let program = canon_class_bases(folded.program)
+    let pre = pre_walk(program, collect(program))
+    if pre.diags.len > 0 { return diags_error(pre.diags) }
+    let types = pre.types
+    let cenv = pre.env
     mut items: []TItem = teko::list::empty()
     mut mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
     mut cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)

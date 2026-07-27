@@ -12,7 +12,7 @@ fn collect_types(items: []parser::Item) -> TypeTable {
     loop {
         if i >= items.len { break }
         match items[i].content {
-            parser::TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; namespace = items[i].namespace; vis = td.vis; decl = td }) }
+            parser::TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }) }
             _ => { }
         }
         i++
@@ -214,73 +214,171 @@ fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref
     Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
 }
 
-// register every top-level function's signature (now that all type names exist). (OOP A1) also
-// registers each struct's methods, under a namespace key of "<owning-ns>::<StructName>" (bare
-// StructName at the top level) — `lookup_call`'s qualifier match compares only the LAST segment,
-// so `StructName::method(…)` resolves through the SAME #41 machinery as any other qualified call,
-// with zero new resolution code. Instance dot-calls (`recv.method(…)`) desugar into exactly this
-// same qualified-call shape (see typer.tks::type_method_call) before ever reaching lookup_call.
-fn collect_funcs(items: []parser::Item, table: TypeTable) -> Env | error {
-    mut env = env_empty()
+/**
+ * The SIGNATURE pass's product: the environment grown with every declaration whose signature
+ * resolved, plus the diagnostics of the ones that did not.
+ *
+ * This is a HARD boundary in the all-diagnostics ruling
+ * (docs/design/all-diagnostics-pre-walk-0.3.1.md §3): a declaration whose signature was rejected
+ * contributes NO binding, so a later call to that name would be reported as "undefined" — blaming
+ * the caller for the callee's defect. The pass therefore collects every signature's diagnostic and
+ * the build cuts at its boundary rather than typing bodies against a hole.
+ */
+type SigOutcome = struct {
+    /** the environment, grown with every signature that DID resolve */
+    env: Env
+    /** one located diagnostic per signature that did not resolve, in declaration order */
+    diags: []str
+}
+
+/**
+ * A `SigOutcome` that changed nothing — the identity an item with no signature to register
+ * (a `use`, a loose statement, an enum/flags/variant/extern type) returns.
+ *
+ * @param env  the environment to carry through unchanged
+ * @return     that environment with no diagnostics
+ * @since 0.3.1
+ */
+fn sig_unchanged(env: Env) -> SigOutcome {
+    SigOutcome { env = env; diags = teko::list::empty() }
+}
+
+/**
+ * Register every top-level signature (now that all type names exist), collecting rather than
+ * stopping. (OOP A1) also registers each struct's methods, under a namespace key of
+ * "<owning-ns>::<StructName>" (bare StructName at the top level) — `lookup_call`'s qualifier match
+ * compares only the LAST segment, so `StructName::method(…)` resolves through the SAME #41
+ * machinery as any other qualified call, with zero new resolution code. Instance dot-calls
+ * (`recv.method(…)`) desugar into exactly this same qualified-call shape (see
+ * typer.tks::type_method_call) before ever reaching lookup_call.
+ *
+ * @param items  the program's top-level items, in sorted-path order
+ * @param table  the collected type table (every type name already registered)
+ * @param env0   the environment to grow (empty for a depless project, the dep's for a seeded one)
+ * @return       the grown environment plus every signature diagnostic, in declaration order
+ */
+fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env) -> SigOutcome {
+    mut env = env0
+    mut diags: []str = teko::list::empty()
     mut i = 0
     loop {
         if i >= items.len { break }
-        match items[i].content {
-            parser::Function as f => {
-                let ft = match func_type(f, table, items[i].namespace) {   // (#109 W1) ref_ns = the fn's declaring namespace
-                    Type as t => t
-                    error as e => return e
-                }
-                env = define_fn(env, f.name, ft, items[i].namespace)   // #41: carry the fn's ns
+        let step = collect_item_signature(items[i], table, env)
+        env = step.env
+        diags = concat_diags(diags, step.diags)
+        i++
+    }
+    SigOutcome { env = env; diags = diags }
+}
+
+/**
+ * The signatures ONE top-level item contributes: a function's own, a module const's declared type,
+ * or a struct/class body's methods.
+ *
+ * @param item   the top-level item
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment after this item, plus its signature diagnostics
+ */
+fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env) -> SigOutcome {
+    match item.content {
+        parser::Function as f => collect_fn_signature(item, f, table, env)
+        parser::ConstDecl as cd => collect_const_signature(item, cd, table, env)
+        parser::TypeDecl as td => collect_type_member_signatures(item, td, table, env)
+        _ => sig_unchanged(env)
+    }
+}
+
+/**
+ * A top-level function's signature. (#109 W1) `ref_ns` = the namespace the function is declared
+ * in — the referencing namespace for its param/return annotations. (#41) the binding carries that
+ * namespace so an unqualified same-namespace call resolves.
+ *
+ * @param item   the function's item (its source file and namespace)
+ * @param f      the parsed function
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the function bound, or unchanged plus its diagnostic
+ */
+fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env) -> SigOutcome {
+    match func_type(f, table, item.namespace) {
+        Type as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
+        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
+    }
+}
+
+/**
+ * A module-level const's declared type (#594 crumb 2) — SIGNATURE only: the initializer is neither
+ * evaluated nor validated here.
+ *
+ * @param item   the const's item (its source file and namespace)
+ * @param cd     the parsed const declaration
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the const bound, or unchanged plus its diagnostic
+ */
+fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env) -> SigOutcome {
+    match collect_const_sig(cd, table, item.namespace) {
+        Type as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
+        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
+    }
+}
+
+/**
+ * A type declaration's METHOD signatures. A struct registers its own methods; a class registers its
+ * EFFECTIVE ones (W10b.CLASS increment 2 — an inherited-but-not-overridden method is callable as
+ * `DerivedClass::method(…)` too). Every other body kind contributes none.
+ *
+ * @param item   the type declaration's item (its source file and namespace)
+ * @param td     the parsed type declaration
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the body's methods bound, plus their diagnostics
+ */
+fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, table: TypeTable, env: Env) -> SigOutcome {
+    let method_ns = if item.namespace == "" { td.name } else { item.namespace ~ "::" ~ td.name }
+    match td.body {
+        parser::StructBody as sb => collect_method_signatures(item, td, sb.methods, method_ns, table, env)
+        parser::ClassBody as cb => {
+            let eff = match effective_class_methods(cb, table) {
+                []parser::Function as m => m
+                error as e => return SigOutcome { env = env; diags = one_diag(located_diag(item.file, td.line, td.col, e)) }
             }
-            parser::ConstDecl as cd => {
-                let ct = match collect_const_sig(cd, table, items[i].namespace) {
-                    Type as t => t
-                    error as e => return e
-                }
-                env = define_const(env, cd.name, ct, items[i].namespace, cd.vis)
-            }
-            parser::TypeDecl as td => {
-                match td.body {
-                    parser::StructBody as sb => {
-                        let method_ns = if items[i].namespace == "" { td.name } else { items[i].namespace ~ "::" ~ td.name }
-                        mut mi = 0
-                        loop {
-                            if mi >= sb.methods.len { break }
-                            let mft = match method_func_type(sb.methods[mi], td.name, table, items[i].namespace) {   // (#109 W1) ref_ns = the type's declaring namespace
-                                Type as t => t
-                                error as e => return e
-                            }
-                            env = define_fn(env, sb.methods[mi].name, mft, method_ns)
-                            mi++
-                        }
-                    }
-                    // (W10b.CLASS) same registration as a struct method — the receiver is still
-                    // Named{class_name} (by-value); a Ref<T> receiver is a later increment. Registers
-                    // the EFFECTIVE (base-inherited + own/overridden) methods (increment 2), so an
-                    // inherited-but-not-overridden method is callable as DerivedClass::method(…) too.
-                    parser::ClassBody as cb => {
-                        let method_ns = if items[i].namespace == "" { td.name } else { items[i].namespace ~ "::" ~ td.name }
-                        let eff = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
-                        mut mi = 0
-                        loop {
-                            if mi >= eff.len { break }
-                            let mft = match method_func_type(eff[mi], td.name, table, items[i].namespace) {   // (#109 W1) ref_ns = the type's declaring namespace
-                                Type as t => t
-                                error as e => return e
-                            }
-                            env = define_fn(env, eff[mi].name, mft, method_ns)
-                            mi++
-                        }
-                    }
-                    _ => { }
-                }
-            }
-            _ => { }
+            collect_method_signatures(item, td, eff, method_ns, table, env)
+        }
+        _ => sig_unchanged(env)
+    }
+}
+
+/**
+ * Bind one method list under `method_ns`, collecting rather than stopping — a method whose
+ * signature fails to resolve contributes its diagnostic and no binding, and the next method is
+ * still registered.
+ *
+ * (#109 W1) The referencing namespace for a method's annotations is the TYPE's declaring namespace,
+ * which is the item's own — not the method pseudo-namespace it binds under.
+ *
+ * @param item       the declaring item (its source file and namespace)
+ * @param td         the declaring type
+ * @param methods    the methods to register, in declaration order
+ * @param method_ns  the namespace key the methods bind under ("<owning-ns>::<TypeName>")
+ * @param table      the collected type table
+ * @param env        the environment so far
+ * @return           the environment with the resolvable methods bound, plus the rest's diagnostics
+ */
+fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable, env: Env) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= methods.len { break }
+        match method_func_type(methods[i], td.name, table, item.namespace) {
+            Type as t => { out = define_fn(out, methods[i].name, t, method_ns) }
+            error as e => { diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, e)) }
         }
         i++
     }
-    env
+    SigOutcome { env = out; diags = diags }
 }
 
 /**
@@ -292,32 +390,57 @@ fn collect_funcs(items: []parser::Item, table: TypeTable) -> Env | error {
  * bare dispatch qualifier the same way stamped-instance field access resolves off the bare name.
  * A NON-generic-type body contributes nothing (its methods live on the template, registered as usual).
  *
+ * A HARD boundary in the all-diagnostics ruling (docs/design/all-diagnostics-pre-walk-0.3.1.md
+ * §3): every instance whose method signature fails to resolve contributes its diagnostic and no
+ * binding, so the pass collects them all and the build cuts here rather than typing a dot-call
+ * against a missing method.
+ *
  * @param env    the env to extend (the collected globals, before sealing)
  * @param table  the folded type table (source of the stamped instances + method signatures)
- * @return       the env with every stamped instance method registered
- * @throws       when a method signature fails to resolve (surfaced as at the template)
+ * @return       the env with every resolvable stamped instance method registered, plus the
+ *               diagnostics of the ones that did not resolve
  * @since onda-3 (#254)
  */
-pub fn register_instance_methods(env: Env, table: TypeTable) -> Env | error {
+pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
     mut out = env
-    let insts = table_generic_instances(table)
+    mut diags: []str = teko::list::empty()
+    let insts = table_generic_instance_regs(table)
     mut i = 0
     loop {
         if i >= insts.len { break }
-        let methods = instance_methods_of(insts[i])
-        mut mi = 0
-        loop {
-            if mi >= methods.len { break }
-            let mft = match method_func_type(methods[mi], insts[i].name, table, "") {
-                Type as t => t
-                error as e => return e
-            }
-            out = define_fn(out, methods[mi].name, mft, insts[i].name)
-            mi++
-        }
+        let step = register_one_instance_methods(insts[i], table, out)
+        out = step.env
+        diags = concat_diags(diags, step.diags)
         i++
     }
-    out
+    SigOutcome { env = out; diags = diags }
+}
+
+/**
+ * Bind ONE stamped instance's methods, collecting rather than stopping. The instance name is
+ * already canonical/bare, so it IS the namespace key the dot-call desugaring probes.
+ *
+ * @param inst   the stamped instance's registration
+ * @param table  the folded type table (for signature resolution)
+ * @param env    the environment so far
+ * @return       the environment with the instance's resolvable methods bound, plus the rest's
+ *               diagnostics
+ * @since 0.3.1
+ */
+fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    let methods = instance_methods_of(inst.decl)
+    mut mi = 0
+    loop {
+        if mi >= methods.len { break }
+        match method_func_type(methods[mi], inst.name, table, "") {
+            Type as t => { out = define_fn(out, methods[mi].name, t, inst.name) }
+            error as e => { diags = teko::list::push(diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)) }
+        }
+        mi++
+    }
+    SigOutcome { env = out; diags = diags }
 }
 
 /**
@@ -348,7 +471,7 @@ pub fn type_table_of(prog: TProgram) -> TypeTable {
         if i >= prog.items.len { break }
         match prog.items[i] {
             parser::TypeDecl as td => {
-                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; vis = td.vis; decl = td })
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
             }
             _ => { }
         }
@@ -488,12 +611,21 @@ pub fn effective_class_fields(cb: parser::ClassBody, table: TypeTable) -> []pars
     out
 }
 
-// (W10b.CLASS increment 2) a class's EFFECTIVE methods: the base's effective methods (recursively),
-// each REPLACED by an `override` of the same name if this class declares one, plus this class's
-// own NEW methods appended. This is how a derived instance can call an inherited method it never
-// re-declares (`derived.baseMethod()`) — the caller (collect_funcs/type_struct_methods/
-// type_method_call) always re-types/re-stamps against the CURRENT class's own name, so an
-// inherited method's body is retyped (and re-emitted) once per class that effectively owns it.
+/**
+ * (W10b.CLASS increment 2) A class's EFFECTIVE methods: the base's effective methods (recursively),
+ * each REPLACED by an `override` of the same name if this class declares one, plus this class's own
+ * NEW methods appended.
+ *
+ * This is how a derived instance can call an inherited method it never re-declares
+ * (`derived.baseMethod()`): the caller (`collect_signatures`/`type_struct_methods`/
+ * `type_method_call`) always re-types and re-stamps against the CURRENT class's own name, so an
+ * inherited method's body is retyped (and re-emitted) once per class that effectively owns it.
+ *
+ * @param cb     the class body whose effective method set is wanted
+ * @param table  the collected type table (to walk the base chain)
+ * @return       the effective methods, base-first then this class's own
+ * @throws       when a base name in the chain does not resolve to a class body
+ */
 pub fn effective_class_methods(cb: parser::ClassBody, table: TypeTable) -> []parser::Function | error {
     mut base: []parser::Function = teko::list::empty()
     if cb.has_base {
@@ -636,13 +768,19 @@ pub fn member_accessible(owner: MemberOwner, accessor_type: str, table: TypeTabl
     }
 }
 
-// (W10b.CLASS residual — intern visibility) recover the bare CLASS NAME from a method's
-// registered pseudo-namespace ("<owning-ns>::<ClassName>", or bare "<ClassName>" at the top
-// level — collect_funcs's method_ns convention) — the class name is always the LAST "::"-segment.
-// Used to route a STATIC call (`ClassName::method(…)`)'s visibility check the same way an
-// instance dot-call already is. A manual scan (not `teko::str::last_index_of`, a HOST-ONLY
-// function the VM cannot interpret — this runs inside the checker itself, which the VM DOES
-// interpret when `.tkt` unit tests exercise it directly, e.g. checker_test.tkt).
+/**
+ * (W10b.CLASS residual — intern visibility) Recover the bare CLASS NAME from a method's registered
+ * pseudo-namespace ("<owning-ns>::<ClassName>", or bare "<ClassName>" at the top level —
+ * `collect_signatures`'s `method_ns` convention). The class name is always the LAST "::"-segment.
+ *
+ * Used to route a STATIC call (`ClassName::method(…)`)'s visibility check the same way an instance
+ * dot-call already is. The scan is manual rather than `teko::str::last_index_of`, which is a
+ * HOST-ONLY function the VM cannot interpret — this code runs inside the checker itself, which the
+ * VM DOES interpret when `.tkt` unit tests exercise it directly (e.g. checker_test.tkt).
+ *
+ * @param ns  the method's registered pseudo-namespace
+ * @return    the bare class name (the whole string when it carries no "::")
+ */
 pub fn class_name_from_method_ns(ns: str) -> str {
     mut last_sep: i64 = -1
     mut i: u64 = 0
@@ -1218,43 +1356,76 @@ fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: 
 // bodied method from a sibling trait counts: it IS a deriver method now) or, for a class, an
 // inherited one. A requirement SHARED by several derived traits is naturally satisfied once
 // (each pair checks independently against the same method).
-fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> error | null {
+fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= derives.len { break }
-        let d = derives[i]
-        let tb = match find_trait_body(d.trait_name, table) { parser::TraitBody as t => t; error as e => return e }
-        let decl = match type_table_find(table, d.type_name, "") { parser::TypeDecl as td => td; error => return error { message = $"internal: trait deriver '{d.type_name}' vanished from the type table" } }   // (#109 W1) trait-deriver lookup on a resolved name — no referencing ns
-        let own = match decl.body {
-            parser::StructBody as sb => sb.methods
-            parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
-            _ => teko::list::empty()
-        }
-        mut ri: u64 = 0
-        loop {
-            if ri >= tb.methods.len { break }
-            let req = tb.methods[ri]
-            if req.body.len == 0 {
-                mut found = false
-                mut mi: u64 = 0
-                loop {
-                    if mi >= own.len { break }
-                    if own[mi].name == req.name {
-                        if !method_sig_matches(req, own[mi], table, type_ns_of(table, d.type_name)) {
-                            return error { message = $"'{d.type_name}' method '{req.name}' does not match trait '{d.trait_name}'s required signature" }
-                        }
-                        found = true
-                        break
-                    }
-                    mi++
-                }
-                if !found { return error { message = $"'{d.type_name}' does not satisfy trait '{d.trait_name}' — missing required method '{req.name}'" } }
-            }
-            ri++
-        }
+        diags = concat_diags(diags, one_derive_requirement_diags(derives[i], table))
         i++
     }
-    null
+    diags
+}
+
+/**
+ * The requirement diagnostics of ONE (deriver, trait) pair: every bodyless method the trait
+ * declares must be provided by the deriver with a matching signature. A pure check — it reads the
+ * folded table and rewrites nothing — so it reports every unsatisfied requirement of the pair, not
+ * just the first.
+ *
+ * @param d      the recorded (deriver, trait) pair
+ * @param table  the FOLDED type table
+ * @return       one diagnostic per unsatisfied or mismatched requirement
+ * @since 0.3.1
+ */
+fn one_derive_requirement_diags(d: TraitDerive, table: TypeTable) -> []str {
+    let tb = match find_trait_body(d.trait_name, table) { parser::TraitBody as t => t; error as e => return one_diag(e.message) }
+    let decl = match type_table_find(table, d.type_name, "") {
+        parser::TypeDecl as td => td
+        error => return one_diag($"internal: trait deriver '{d.type_name}' vanished from the type table")
+    }
+    let own = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return one_diag(diag_at("", decl.line, decl.col, e.message)) }
+        _ => teko::list::empty()
+    }
+    mut diags: []str = teko::list::empty()
+    mut ri: u64 = 0
+    loop {
+        if ri >= tb.methods.len { break }
+        let req = tb.methods[ri]
+        if req.body.len == 0 {
+            diags = concat_diags(diags, one_requirement_diag(d, decl, req, own, table))
+        }
+        ri++
+    }
+    diags
+}
+
+/**
+ * The diagnostic ONE bodyless trait method contributes for a deriver: none when the deriver
+ * provides it with a matching signature, a mismatch when the names agree but the signatures do
+ * not, and a missing-method error otherwise.
+ *
+ * @param d      the (deriver, trait) pair being checked
+ * @param decl   the deriver's declaration (for the diagnostic's position)
+ * @param req    the trait's bodyless requirement
+ * @param own    the deriver's own (and, for a class, inherited) methods
+ * @param table  the FOLDED type table (for signature comparison)
+ * @return       the requirement's diagnostic, or an empty list when it is satisfied
+ * @since 0.3.1
+ */
+fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Function, own: []parser::Function, table: TypeTable) -> []str {
+    mut mi: u64 = 0
+    loop {
+        if mi >= own.len { break }
+        if own[mi].name == req.name {
+            if method_sig_matches(req, own[mi], table, type_ns_of(table, d.type_name)) { return teko::list::empty() }
+            return one_diag(diag_at("", own[mi].line, own[mi].col, $"'{d.type_name}' method '{req.name}' does not match trait '{d.trait_name}'s required signature"))
+        }
+        mi++
+    }
+    one_diag(diag_at("", decl.line, decl.col, $"'{d.type_name}' does not satisfy trait '{d.trait_name}' — missing required method '{req.name}'"))
 }
 
 /**
@@ -1332,53 +1503,154 @@ fn append_methods(methods: []parser::Function, extra: []parser::Function) -> []p
     out
 }
 
-/** (TR3) The result of the user-trait fold pass: the rewritten items and the recorded derives. */
-type UserFoldResult = struct { items: []parser::Item; derives: []TraitDerive }
+/**
+ * (TR3) The result of the user-trait fold pass: the rewritten items, the recorded derives, and the
+ * diagnostics of the derivers whose fold failed.
+ *
+ * An item whose fold failed passes through UNFOLDED, so this list being non-empty means the item
+ * set is structurally incomplete — a HARD boundary
+ * (docs/design/all-diagnostics-pre-walk-0.3.1.md §3). The pass still walks every remaining item, so
+ * one build names every deriver that cannot fold; the fold as a whole then cuts.
+ */
+type UserFoldResult = struct {
+    /** the rewritten items, in program order (an unfoldable deriver passes through unchanged) */
+    items: []parser::Item
+    /** the recorded (deriver, USER-trait) pairs, for the requirement check */
+    derives: []TraitDerive
+    /** one located diagnostic per deriver whose fold failed, in program order */
+    diags: []str
+}
+
+/**
+ * (TR3) The rewrite ONE item contributes to the user-trait fold: the item itself (folded when it
+ * derives user traits, unchanged otherwise), the derive list extended with its recorded pairs, and
+ * its fold diagnostic if the fold failed.
+ */
+type FoldedItem = struct {
+    /** the item after the fold (unchanged when it derives nothing, or when its fold failed) */
+    item: parser::Item
+    /** the derive list, extended with this item's recorded (deriver, trait) pairs */
+    derives: []TraitDerive
+    /** this item's fold diagnostic, or an empty list */
+    diags: []str
+}
 
 /**
  * (TR3) PASS 1 — fold every USER trait's members into its deriver(s) and record each (deriver,
  * trait) pair for the requirement check. Structural derives are NOT touched here (their synthesis is
  * PASS 2, over the field set THIS pass produced). A non-deriving decl passes through unchanged.
  *
- * @param program the parsed program
- * @param table   the pre-fold type table
- * @return the rewritten items plus the recorded user-trait derives, or an error if a fold fails
- * @throws when a user-trait member collides unresolvably on a deriver
+ * Derivers are independent of one another, so a deriver whose fold fails contributes its diagnostic
+ * and passes through unfolded while the walk continues — one build names every unfoldable deriver.
+ *
+ * @param program  the parsed program
+ * @param table    the pre-fold type table
+ * @return         the rewritten items, the recorded user-trait derives, and every fold diagnostic
  */
-fn fold_user_traits(program: parser::Program, table: TypeTable) -> UserFoldResult | error {
+fn fold_user_traits(program: parser::Program, table: TypeTable) -> UserFoldResult {
     mut items: []parser::Item = teko::list::empty()
     mut derives: []TraitDerive = teko::list::empty()
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= program.items.len { break }
-        let it = program.items[i]
-        mut content = it.content
-        match it.content {
-            parser::TypeDecl as td => match td.body {
-                parser::StructBody as sb => {
-                    let split = split_trait_derives(sb.implements, table, it.namespace)
-                    if split.traits.len > 0 {
-                        let fm = match fold_trait_members(td.name, sb.fields, sb.methods, sb.consts, split.traits, table, false) { FoldedMembers as f => f; error as e => return e }
-                        content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::StructBody { fields = fm.fields; methods = fm.methods; implements = sb.implements; consts = fm.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
-                        derives = record_user_trait_derives(derives, td.name, split.traits)
-                    }
-                }
-                parser::ClassBody as cb => {
-                    let split = split_trait_derives(cb.implements, table, it.namespace)
-                    if split.traits.len > 0 {
-                        let fm = match fold_trait_members(td.name, cb.fields, cb.methods, cb.consts, split.traits, table, true) { FoldedMembers as f => f; error as e => return e }
-                        content = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts }; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
-                        derives = record_user_trait_derives(derives, td.name, split.traits)
-                    }
-                }
-                _ => { }
-            }
-            _ => { }
-        }
-        items = teko::list::push(items, parser::Item { content = content; namespace = it.namespace; file = it.file })
+        let folded = fold_one_item(program.items[i], table, derives)
+        items = teko::list::push(items, folded.item)
+        derives = folded.derives
+        diags = concat_diags(diags, folded.diags)
         i++
     }
-    UserFoldResult { items = items; derives = derives }
+    UserFoldResult { items = items; derives = derives; diags = diags }
+}
+
+/**
+ * The identity `FoldedItem` — an item that derives no user trait passes through untouched.
+ *
+ * @param it       the item to carry through unchanged
+ * @param derives  the derive list to carry through unchanged
+ * @return         that item and derive list, with no diagnostics
+ * @since 0.3.1
+ */
+fn unfolded_item(it: parser::Item, derives: []TraitDerive) -> FoldedItem {
+    FoldedItem { item = it; derives = derives; diags = teko::list::empty() }
+}
+
+/**
+ * (TR3) The user-trait fold of ONE top-level item — a struct or class body may derive traits;
+ * every other item passes through.
+ *
+ * @param it       the item to fold
+ * @param table    the pre-fold type table
+ * @param derives  the derive list so far
+ * @return         the (possibly rewritten) item, the extended derive list, and any fold diagnostic
+ * @since 0.3.1
+ */
+fn fold_one_item(it: parser::Item, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
+    let td = match it.content { parser::TypeDecl as t => t; _ => return unfolded_item(it, derives) }
+    match td.body {
+        parser::StructBody as sb => fold_struct_item(it, td, sb, table, derives)
+        parser::ClassBody as cb => fold_class_item(it, td, cb, table, derives)
+        _ => unfolded_item(it, derives)
+    }
+}
+
+/**
+ * (TR3) Fold a STRUCT's derived user traits into its body.
+ *
+ * @param it       the struct's item
+ * @param td       the struct's declaration
+ * @param sb       the struct body
+ * @param table    the pre-fold type table
+ * @param derives  the derive list so far
+ * @return         the rewritten item, the extended derive list, and any fold diagnostic
+ * @since 0.3.1
+ */
+fn fold_struct_item(it: parser::Item, td: parser::TypeDecl, sb: parser::StructBody, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
+    let split = split_trait_derives(sb.implements, table, it.namespace)
+    if split.traits.len == 0 { return unfolded_item(it, derives) }
+    let fm = match fold_trait_members(td.name, sb.fields, sb.methods, sb.consts, split.traits, table, false) {
+        FoldedMembers as f => f
+        error as e => return FoldedItem { item = it; derives = derives; diags = one_diag(located_diag(it.file, td.line, td.col, e)) }
+    }
+    let body = parser::StructBody { fields = fm.fields; methods = fm.methods; implements = sb.implements; consts = fm.consts }
+    FoldedItem { item = item_with_body(it, td, body); derives = record_user_trait_derives(derives, td.name, split.traits); diags = teko::list::empty() }
+}
+
+/**
+ * (TR3) Fold a CLASS's derived user traits into its body.
+ *
+ * @param it       the class's item
+ * @param td       the class's declaration
+ * @param cb       the class body
+ * @param table    the pre-fold type table
+ * @param derives  the derive list so far
+ * @return         the rewritten item, the extended derive list, and any fold diagnostic
+ * @since 0.3.1
+ */
+fn fold_class_item(it: parser::Item, td: parser::TypeDecl, cb: parser::ClassBody, table: TypeTable, derives: []TraitDerive) -> FoldedItem {
+    let split = split_trait_derives(cb.implements, table, it.namespace)
+    if split.traits.len == 0 { return unfolded_item(it, derives) }
+    let fm = match fold_trait_members(td.name, cb.fields, cb.methods, cb.consts, split.traits, table, true) {
+        FoldedMembers as f => f
+        error as e => return FoldedItem { item = it; derives = derives; diags = one_diag(located_diag(it.file, td.line, td.col, e)) }
+    }
+    let body = parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = fm.fields; methods = fm.methods; consts = fm.consts }
+    FoldedItem { item = item_with_body(it, td, body); derives = record_user_trait_derives(derives, td.name, split.traits); diags = teko::list::empty() }
+}
+
+/**
+ * The same item, carrying the same declaration with a REWRITTEN body — the one place the fold
+ * rebuilds a `TypeDecl`, so the twenty-odd fields it copies are spelled once.
+ *
+ * @param it    the original item (its namespace and file are preserved)
+ * @param td    the original declaration (every field but the body is preserved)
+ * @param body  the rewritten body
+ * @return      the rewritten item
+ * @since 0.3.1
+ */
+fn item_with_body(it: parser::Item, td: parser::TypeDecl, body: parser::TypeBody) -> parser::Item {
+    let decl = parser::TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = body; vis = td.vis; has_doc = td.has_doc; doc = td.doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
+    parser::Item { content = decl; namespace = it.namespace; file = it.file }
 }
 
 /**
@@ -1460,21 +1732,82 @@ fn synthesize_one_decl(it: parser::Item, folded_table: TypeTable) -> parser::Ite
  * (TR3) PASS 2 driver — synthesize structural methods across every item, threading the
  * user-trait-folded table as the field-view source.
  *
+ * Declarations synthesize independently, so a declaration whose synthesis fails contributes its
+ * diagnostic and passes through un-synthesized while the walk continues — one build names every
+ * declaration whose structural derive cannot be built. The fold as a whole then cuts, because an
+ * un-synthesized deriver is missing methods its users would be blamed for not finding.
+ *
  * @param items        the PASS-1 items
  * @param folded_table the user-trait-folded type table
- * @return the items with structural methods synthesized in, or a located error
- * @throws when a synthesized field shape is unsupported or a nested field does not derive the trait
+ * @return             the items with structural methods synthesized in, plus every synthesis diagnostic
  */
-fn synthesize_structural(items: []parser::Item, folded_table: TypeTable) -> []parser::Item | error {
+fn synthesize_structural(items: []parser::Item, folded_table: TypeTable) -> ItemsOutcome {
     mut out: []parser::Item = teko::list::empty()
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= items.len { break }
-        let synth = match synthesize_one_decl(items[i], folded_table) { parser::Item as it => it; error as e => return e }
-        out = teko::list::push(out, synth)
+        let it = items[i]
+        match synthesize_one_decl(it, folded_table) {
+            parser::Item as synth => { out = teko::list::push(out, synth) }
+            error as e => {
+                out = teko::list::push(out, it)
+                diags = teko::list::push(diags, located_diag(it.file, item_decl_line(it), item_decl_col(it), e))
+            }
+        }
         i++
     }
-    out
+    ItemsOutcome { items = out; diags = diags }
+}
+
+/**
+ * The product of an item-rewriting pass that collects: the rewritten items (every one of them,
+ * failed rewrites passing through unchanged) plus the diagnostics of the ones that failed.
+ */
+type ItemsOutcome = struct {
+    /** the items after the pass, in program order */
+    items: []parser::Item
+    /** one located diagnostic per item the pass could not rewrite, in program order */
+    diags: []str
+}
+
+/**
+ * The line/column value that means "this item carries no source position of its own" — a loose
+ * top-level statement declares nothing to point at. `diag_at` reads it as unknown and omits the
+ * position rather than inventing one (M.3).
+ */
+const NO_DECL_POSITION: u32 = 0
+
+/**
+ * A top-level item's declaration LINE, for locating a diagnostic blamed on the item as a whole.
+ *
+ * @param it  the item
+ * @return    the declaration's 1-based line, or `NO_DECL_POSITION` when the item declares nothing
+ * @since 0.3.1
+ */
+fn item_decl_line(it: parser::Item) -> u32 {
+    match it.content {
+        parser::Function as f => f.line
+        parser::TypeDecl as td => td.line
+        parser::ConstDecl as cd => cd.line
+        _ => NO_DECL_POSITION
+    }
+}
+
+/**
+ * A top-level item's declaration COLUMN, the companion of `item_decl_line`.
+ *
+ * @param it  the item
+ * @return    the declaration's 1-based column, or `NO_DECL_POSITION` when the item declares nothing
+ * @since 0.3.1
+ */
+fn item_decl_col(it: parser::Item) -> u32 {
+    match it.content {
+        parser::Function as f => f.col
+        parser::TypeDecl as td => td.col
+        parser::ConstDecl as cd => cd.col
+        _ => NO_DECL_POSITION
+    }
 }
 
 /**
@@ -1492,20 +1825,50 @@ fn synthesize_structural(items: []parser::Item, folded_table: TypeTable) -> []pa
  * declares no trait and no structural derive at all.
  *
  * @param program the parsed program
- * @return the program with every trait-deriving struct/class folded, or an error if a fold, a
- *         synthesis, or a requirement check fails
+ * @return the program with every trait-deriving struct/class folded, or ONE error carrying every
+ *         fold, synthesis and requirement diagnostic the pass collected
  * @throws when a folded field/method collides unresolvably, a synthesized field shape is
  *         unsupported, or a deriver misses a required method
  */
 pub fn fold_traits(program: parser::Program) -> parser::Program | error {
+    let folded = fold_traits_collected(program)
+    if folded.diags.len > 0 { return diags_error(folded.diags) }
+    folded.program
+}
+
+/**
+ * The COLLECTING form of `fold_traits` — the one the checker's pre-walk drives. It runs the fold's
+ * three stages IN ORDER and cuts BETWEEN them: each stage consumes the previous stage's output, so
+ * a failed stage would make the next one report cascade errors about members the source never
+ * wrote. WITHIN a stage the walk is exhaustive: every deriver that cannot fold, every declaration
+ * that cannot synthesize, and every unsatisfied requirement is named in the same build.
+ *
+ * @param program  the parsed program
+ * @return         the folded program (the input, unchanged, when a stage cut) and every diagnostic
+ * @since 0.3.1
+ */
+fn fold_traits_collected(program: parser::Program) -> FoldOutcome {
     let table = collect_types(program.items)
-    if !program_needs_trait_fold(program, table) { return program }
-    let user = match fold_user_traits(program, table) { UserFoldResult as u => u; error as e => return e }
-    let folded_table = collect_types(user.items)
-    let items = match synthesize_structural(user.items, folded_table) { []parser::Item as it => it; error as e => return e }
-    let folded_types = collect_types(items)
-    match check_trait_requirements(user.derives, folded_types) { error as e => return e; null => { } }
-    parser::Program { items = items }
+    if !program_needs_trait_fold(program, table) { return FoldOutcome { program = program; diags = teko::list::empty() } }
+    let user = fold_user_traits(program, table)
+    if user.diags.len > 0 { return FoldOutcome { program = program; diags = user.diags } }
+    let synth = synthesize_structural(user.items, collect_types(user.items))
+    if synth.diags.len > 0 { return FoldOutcome { program = program; diags = synth.diags } }
+    FoldOutcome { program = parser::Program { items = synth.items }; diags = check_trait_requirements(user.derives, collect_types(synth.items)) }
+}
+
+/**
+ * `fold_traits_collected`'s product: the folded program plus every diagnostic the fold collected.
+ *
+ * A non-empty diagnostic list means `program` is the UNFOLDED input — derivers are missing the
+ * members the fold would have written, so the caller must cut here rather than collect against it
+ * (the HARD boundary of docs/design/all-diagnostics-pre-walk-0.3.1.md §3).
+ */
+type FoldOutcome = struct {
+    /** the folded program, or the input unchanged when the fold cut */
+    program: parser::Program
+    /** every fold/synthesis/requirement diagnostic, in program order */
+    diags: []str
 }
 
 // (#109 W0, tightened) is `reg` a monomorphization-STAMPED generic instance? The shared
@@ -1553,25 +1916,42 @@ fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
 // `Base__g__<mangle>` instances that share the "" namespace bucket with every other stamped
 // instance; that's not a user-facing collision, and stamping already dedups by exact mangled
 // name (resolve.tks::instantiate_types's "already stamped" check).
-fn check_no_duplicate_types(table: TypeTable) -> error | null {
+fn check_no_duplicate_types(table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= table.len { break }
         if w0_is_stamped_generic_reg(table[i], table) { i++; continue }
-        mut j: u64 = i + 1
-        loop {
-            if j >= table.len { break }
-            if !w0_is_stamped_generic_reg(table[j], table) {
-                if table[i].name == table[j].name && table[i].namespace == table[j].namespace {
-                    let ns_label = if table[i].namespace == "" { "<top-level>" } else { table[i].namespace }
-                    return error { message = $"duplicate type '{table[i].name}' in namespace '{ns_label}'" }
-                }
-            }
-            j++
-        }
+        diags = concat_diags(diags, duplicates_of_reg(table, i))
         i++
     }
-    null
+    diags
+}
+
+/**
+ * Every LATER registration in `table` that duplicates the entry at `at` — the inner half of the
+ * W0 ban, extracted so the outer walk stays flat. Reported against the DUPLICATE's own position,
+ * not the first declaration's, so the diagnostic points at the redeclaration a reader must delete.
+ *
+ * @param table  the collected type table
+ * @param at     the index of the registration being compared against
+ * @return       one diagnostic per duplicate found after `at` (empty when there is none)
+ * @since 0.3.1
+ */
+fn duplicates_of_reg(table: TypeTable, at: u64) -> []str {
+    mut diags: []str = teko::list::empty()
+    let reg = table[at]
+    let ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
+    mut j: u64 = at + 1
+    loop {
+        if j >= table.len { break }
+        let other = table[j]
+        if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace {
+            diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' in namespace '{ns_label}'"))
+        }
+        j++
+    }
+    diags
 }
 
 /**
@@ -1597,123 +1977,319 @@ fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: 
     error { message = $"struct/class '{decl_name}' has an unsafe-typed field '{field_name}' — it must be declared `unsafe` (unsafe data cannot be held by a safe type; §2 contagion-by-composition)" }
 }
 
-fn validate_type_decls(table: TypeTable) -> error | null {
-    match check_no_duplicate_types(table) { error as e => return e; null => { } }   // (#109 W0)
+/**
+ * The R4/W0/W10b DECLARATION GATE over the whole collected table — a PURE VALIDATOR: it reads the
+ * table and registers nothing, so the table the next pass sees is byte-identical whether or not a
+ * declaration was rejected. That is what makes it a SOFT boundary in the all-diagnostics ruling
+ * (docs/design/all-diagnostics-pre-walk-0.3.1.md §3): it collects EVERY declaration's diagnostic
+ * and the build carries on into the item walk, instead of one bad field masking the whole program.
+ *
+ * @param table  the collected, already generic-stamped type table
+ * @return       every declaration diagnostic, in table order (empty when the declarations are clean)
+ */
+fn validate_type_decls(table: TypeTable) -> []str {
+    mut diags = check_no_duplicate_types(table)
     mut i = 0
     loop {
         if i >= table.len { break }
-        let decl = table[i].decl
-        let ref_ns = table[i].namespace   // (#109 W1) ref_ns = the type decl's declaring namespace (referencing ns for its field annotations)
-        // (S4) the decl's own generic type-params, opaque, in scope — so a generic body field `T`
-        // resolves to `Named{T}` (not "unknown type"); mirrors func_type's type-param handling. A
-        // `Ref<T>` field is still rejected by R1 (its inner is a Named, not a scalar Prim).
-        let tbl = type_param_table(decl.type_params, decl.type_constraints, "", table)
-        match decl.body {
-            parser::StructBody as sb => {
-                mut f = 0
-                loop {
-                    if f >= sb.fields.len { break }
-                    match resolve_type(sb.fields[f].type_ann, tbl, ref_ns) {
-                        Type as ft => {
-                            match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
-                            match reject_unsafe_field_contagion(decl.name, decl.is_unsafe, sb.fields[f].name, ft, table) { error as e => return e; null => { } }
-                        }
-                        error as e => return e
-                    }
-                    f++
-                }
-                match check_conformance(decl.name, ref_ns, sb.methods, sb.implements, table, true) { error as e => return e; null => { } }   // (W10b.IF) struct members all-public
-            }
-            parser::AliasBody as ab => {
-                match resolve_type(ab.alias, tbl, ref_ns) {
-                    Type as at => {
-                        match at { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
-                        match reject_unsafe_field_contagion(decl.name, decl.is_unsafe, "alias", at, table) { error as e => return e; null => { } }
-                    }
-                    error as e => return e
-                }
-            }
-            parser::ClassBody as cb => {   // (W10b.CLASS) same R4 escape-gate as a struct's fields
-                match class_inheritance_acyclic(decl.name, table) { error as e => return e; null => { } }   // guard cyclic inheritance BEFORE any recursive base-chain walk
-                mut f = 0
-                loop {
-                    if f >= cb.fields.len { break }
-                    match resolve_type(cb.fields[f].type_ann, tbl, ref_ns) {
-                        Type as ft => {
-                            match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
-                            match reject_unsafe_field_contagion(decl.name, decl.is_unsafe, cb.fields[f].name, ft, table) { error as e => return e; null => { } }
-                        }
-                        error as e => return e
-                    }
-                    f++
-                }
-                match validate_class_decl(cb, table) { error as e => return e; null => { } }   // (W10b.CLASS increment 2)
-                // (W10b.IF) a class conforms via its EFFECTIVE methods (inherited base methods count).
-                let eff = match effective_class_methods(cb, table) { []parser::Function as m => m; error as e => return e }
-                match check_conformance(decl.name, ref_ns, eff, cb.implements, table, false) { error as e => return e; null => { } }   // (W10b.IF) class methods need real `pub`
-            }
-            parser::TraitBody as trb => {
-                // (TR0) a trait is a struct-shaped bundle: its field types resolve like a struct's
-                // (same R4 reference escape-gate). Generic traits and the class dispatch markers
-                // are OUTSIDE TR0's unit — honest errors, not silent acceptance. (A bodyless trait
-                // method already IS the requirement; a deriver-defined method IS the override.)
-                if decl.type_params.len > 0 { return error { message = $"a generic trait ('{decl.name}<…>') is not supported (TR0 — a trait is a concrete bundle)" } }
-                mut f = 0
-                loop {
-                    if f >= trb.fields.len { break }
-                    match resolve_type(trb.fields[f].type_ann, tbl, ref_ns) {
-                        Type as ft => {
-                            match ft { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
-                            match reject_unsafe_field_contagion(decl.name, decl.is_unsafe, trb.fields[f].name, ft, table) { error as e => return e; null => { } }
-                        }
-                        error as e => return e
-                    }
-                    f++
-                }
-                mut tmi = 0
-                loop {
-                    if tmi >= trb.methods.len { break }
-                    let m = trb.methods[tmi]
-                    if m.is_abstract || m.is_virtual || m.is_override || m.is_intern {
-                        return error { message = $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a bodyless trait method is the requirement, and a deriver-defined method is the override (TR0)" }
-                    }
-                    tmi++
-                }
-            }
-            parser::InterfaceBody as ib => {
-                // (W10b.IF) an interface's OWN methods must be BODYLESS signatures — an interface is a
-                // pure contract; default method bodies are PROHIBITED by the design.
-                mut mi = 0
-                loop {
-                    if mi >= ib.methods.len { break }
-                    if ib.methods[mi].body.len > 0 { return error { message = $"interface method '{ib.methods[mi].name}' must be a bodyless signature (an interface is a pure contract — no default bodies)" } }
-                    mi++
-                }
-                // its `extends` names must each BE an interface (transitively) and not form a cycle
-                // (seed `seen` with this interface's own name).
-                let eff = match effective_interface_methods(ib, ref_ns, table, teko::list::push(teko::list::empty(), qualify(ref_ns, name_last_segment(decl.name)))) { []parser::Function as m => m; error as e => return e }
-                // no two EFFECTIVE methods (own + inherited) may share a name with a DIFFERENT signature
-                // — a redeclaration conflict, caught HERE (at the interface) with a clear message rather
-                // than later, confusingly, at an implementer. (Same name + same sig is legal — one method.)
-                mut a: u64 = 0
-                loop {
-                    if a >= eff.len { break }
-                    mut b: u64 = a + 1
-                    loop {
-                        if b >= eff.len { break }
-                        if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, type_ns_of(table, decl.name)) {
-                            return error { message = $"interface '{decl.name}' has conflicting signatures for method '{eff[a].name}' (an extended interface declares it differently)" }
-                        }
-                        b++
-                    }
-                    a++
-                }
-            }
-            _ => { }
+        diags = concat_diags(diags, validate_one_type_decl(table[i], table))
+        i++
+    }
+    diags
+}
+
+/**
+ * The located diagnostic line for a message blamed on a registered declaration as a whole (a
+ * `Field` carries no position of its own, so a field-level rejection is reported at its enclosing
+ * declaration's name).
+ *
+ * @param reg  the registration being validated
+ * @param msg  the diagnostic's text
+ * @return     the `file:line:col: msg` line
+ * @since 0.3.1
+ */
+fn decl_diag(reg: TypeReg, msg: str) -> str {
+    diag_at(reg.file, reg.decl.line, reg.decl.col, msg)
+}
+
+/**
+ * The located diagnostic line for an inner checker `error` blamed on a registered declaration —
+ * the error's own position wins when it carries one (C1-POS).
+ *
+ * @param reg    the registration being validated
+ * @param inner  the checker error to locate
+ * @return       the `file:line:col: text` line
+ * @since 0.3.1
+ */
+fn decl_error_diag(reg: TypeReg, inner: error) -> str {
+    located_diag(reg.file, reg.decl.line, reg.decl.col, inner)
+}
+
+/**
+ * Every diagnostic ONE registered declaration contributes: its body's field/alias type-expressions
+ * (the R4 reference escape-gate plus the U2 unsafe-contagion gate) and its per-body-kind contract
+ * checks. Bodies with nothing to validate (enum, flags, variant, extern) contribute none.
+ *
+ * (S4) The declaration's own generic type-params go into scope as opaque types, so a generic body
+ * field `T` resolves to `Named{T}` instead of "unknown type" — the same handling `func_type` gives
+ * a generic signature. A `Ref<T>` field is still rejected by R1: its inner is a Named, not a
+ * scalar Prim.
+ *
+ * @param reg    the registration to validate
+ * @param table  the whole collected type table (for leaf probes and base/interface walks)
+ * @return       the declaration's diagnostics, in declaration order
+ */
+fn validate_one_type_decl(reg: TypeReg, table: TypeTable) -> []str {
+    let decl = reg.decl
+    let tbl = type_param_table(decl.type_params, decl.type_constraints, "", table)
+    match decl.body {
+        parser::StructBody as sb => validate_struct_body(reg, sb, tbl, table)
+        parser::AliasBody as ab => validate_field_slot(reg, "alias", ab.alias, tbl, table)
+        parser::ClassBody as cb => validate_class_body(reg, cb, tbl, table)
+        parser::TraitBody as trb => validate_trait_body(reg, trb, tbl, table)
+        parser::InterfaceBody as ib => validate_interface_body(reg, ib, table)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The R4 + U2 gate over ONE field-like slot of a declaration body (a struct/class/trait field, or
+ * an alias's right-hand side): its annotation must resolve, must not BE a reference (a reference is
+ * pass-down only — it cannot be stored), and must not carry unsafe data into a safe declaration.
+ *
+ * @param reg         the enclosing registration (blamed and located)
+ * @param field_name  the slot's name, as the contagion message spells it
+ * @param ann         the slot's written type annotation
+ * @param tbl         the table WITH the declaration's generic type-params in scope
+ * @param table       the whole collected type table (for the unsafe-carrying leaf probe)
+ * @return            the slot's diagnostics (at most one — the first gate it trips)
+ */
+fn validate_field_slot(reg: TypeReg, field_name: str, ann: parser::TypeExpr, tbl: TypeTable, table: TypeTable) -> []str {
+    let decl = reg.decl
+    let ft = match resolve_type(ann, tbl, reg.namespace) {
+        Type as t => t
+        error as e => return one_diag(decl_error_diag(reg, e))
+    }
+    match ft {
+        Reference => return one_diag(decl_diag(reg, "a reference cannot be stored in a struct/variant/collection"))
+        _ => { }
+    }
+    match reject_unsafe_field_contagion(decl.name, decl.is_unsafe, field_name, ft, table) {
+        error as e => one_diag(decl_error_diag(reg, e))
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * Every field of a body, gated in declaration order — one bad field never hides the next.
+ *
+ * @param reg     the enclosing registration
+ * @param fields  the body's fields, in declaration order
+ * @param tbl     the table WITH the declaration's generic type-params in scope
+ * @param table   the whole collected type table
+ * @return        the fields' diagnostics, in declaration order
+ */
+fn validate_body_fields(reg: TypeReg, fields: []parser::Field, tbl: TypeTable, table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut f: u64 = 0
+    loop {
+        if f >= fields.len { break }
+        diags = concat_diags(diags, validate_field_slot(reg, fields[f].name, fields[f].type_ann, tbl, table))
+        f++
+    }
+    diags
+}
+
+/**
+ * The W10b.IF conformance verdict for a declaration, as a diagnostic list.
+ *
+ * @param reg             the declaring registration
+ * @param methods         the methods that count towards conformance (a class's are its EFFECTIVE ones)
+ * @param implements      the interface names the declaration claims
+ * @param table           the whole collected type table
+ * @param members_public  are the declaration's members implicitly public (a struct's are)?
+ * @return                the conformance diagnostic, or an empty list
+ */
+fn conformance_diags(reg: TypeReg, methods: []parser::Function, implements: []str, table: TypeTable, members_public: bool) -> []str {
+    match check_conformance(reg.decl.name, reg.namespace, methods, implements, table, members_public) {
+        error as e => one_diag(decl_error_diag(reg, e))
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * A struct body's diagnostics: its fields' gates, then its interface conformance (W10b.IF — a
+ * struct's members are all public).
+ *
+ * @param reg    the struct's registration
+ * @param sb     the struct body
+ * @param tbl    the table WITH the declaration's generic type-params in scope
+ * @param table  the whole collected type table
+ * @return       the body's diagnostics, in declaration order
+ */
+fn validate_struct_body(reg: TypeReg, sb: parser::StructBody, tbl: TypeTable, table: TypeTable) -> []str {
+    concat_diags(validate_body_fields(reg, sb.fields, tbl, table), conformance_diags(reg, sb.methods, sb.implements, table, true))
+}
+
+/**
+ * A class body's diagnostics: the inheritance-cycle guard FIRST (a cyclic base chain would make
+ * every recursive base walk below diverge, so it is the one place this validator still cuts), then
+ * the fields' gates, the class-shape rules (W10b.CLASS increment 2) and the conformance check over
+ * the EFFECTIVE methods (W10b.IF — inherited base methods count towards conformance).
+ *
+ * @param reg    the class's registration
+ * @param cb     the class body
+ * @param tbl    the table WITH the declaration's generic type-params in scope
+ * @param table  the whole collected type table
+ * @return       the body's diagnostics, in declaration order
+ */
+fn validate_class_body(reg: TypeReg, cb: parser::ClassBody, tbl: TypeTable, table: TypeTable) -> []str {
+    match class_inheritance_acyclic(reg.decl.name, table) {
+        error as e => return one_diag(decl_error_diag(reg, e))
+        null => { }
+    }
+    mut diags = validate_body_fields(reg, cb.fields, tbl, table)
+    match validate_class_decl(cb, table) {
+        error as e => diags = concat_diags(diags, one_diag(decl_error_diag(reg, e)))
+        null => { }
+    }
+    let eff = match effective_class_methods(cb, table) {
+        []parser::Function as m => m
+        error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
+    }
+    concat_diags(diags, conformance_diags(reg, eff, cb.implements, table, false))
+}
+
+/**
+ * A trait body's diagnostics. (TR0) A trait is a struct-shaped bundle: its field types resolve
+ * like a struct's (same R4 escape-gate). A GENERIC trait is outside TR0's unit and is rejected on
+ * its own, before the fields — the type-params it would need in scope do not exist.
+ *
+ * @param reg    the trait's registration
+ * @param trb    the trait body
+ * @param tbl    the table WITH the declaration's generic type-params in scope
+ * @param table  the whole collected type table
+ * @return       the body's diagnostics, in declaration order
+ */
+fn validate_trait_body(reg: TypeReg, trb: parser::TraitBody, tbl: TypeTable, table: TypeTable) -> []str {
+    let decl = reg.decl
+    if decl.type_params.len > 0 {
+        return one_diag(decl_diag(reg, $"a generic trait ('{decl.name}<…>') is not supported (TR0 — a trait is a concrete bundle)"))
+    }
+    concat_diags(validate_body_fields(reg, trb.fields, tbl, table), trait_method_modifier_diags(reg, trb.methods))
+}
+
+/**
+ * (TR0) The class dispatch markers are outside a trait's unit — an honest error, not silent
+ * acceptance: a bodyless trait method already IS the requirement, and a deriver-defined method IS
+ * the override, so `abstract`/`virtual`/`override`/`intern` have nothing to mean here.
+ *
+ * @param reg      the trait's registration
+ * @param methods  the trait's methods, in declaration order
+ * @return         one diagnostic per offending method
+ */
+fn trait_method_modifier_diags(reg: TypeReg, methods: []parser::Function) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= methods.len { break }
+        let m = methods[i]
+        if m.is_abstract || m.is_virtual || m.is_override || m.is_intern {
+            diags = teko::list::push(diags, decl_diag(reg, $"trait method '{m.name}' may not be `abstract`/`virtual`/`override`/`intern` — a bodyless trait method is the requirement, and a deriver-defined method is the override (TR0)"))
         }
         i++
     }
-    null
+    diags
+}
+
+/**
+ * An interface body's diagnostics: every own method must be a bodyless signature, and the
+ * EFFECTIVE method set (own + inherited) must be free of same-name/different-signature conflicts.
+ * Resolving the effective set also proves each `extends` name IS an interface and that the
+ * extension graph has no cycle.
+ *
+ * @param reg    the interface's registration
+ * @param ib     the interface body
+ * @param table  the whole collected type table
+ * @return       the body's diagnostics, in declaration order
+ */
+fn validate_interface_body(reg: TypeReg, ib: parser::InterfaceBody, table: TypeTable) -> []str {
+    let diags = interface_bodyless_diags(reg, ib.methods)
+    let seen = teko::list::push(teko::list::empty(), qualify(reg.namespace, name_last_segment(reg.decl.name)))
+    let eff = match effective_interface_methods(ib, reg.namespace, table, seen) {
+        []parser::Function as m => m
+        error as e => return concat_diags(diags, one_diag(decl_error_diag(reg, e)))
+    }
+    concat_diags(diags, interface_conflict_diags(reg, eff, table))
+}
+
+/**
+ * (W10b.IF) An interface's OWN methods must be BODYLESS signatures — an interface is a pure
+ * contract, and default method bodies are prohibited by the design.
+ *
+ * @param reg      the interface's registration
+ * @param methods  the interface's own methods, in declaration order
+ * @return         one diagnostic per method that carries a body
+ */
+fn interface_bodyless_diags(reg: TypeReg, methods: []parser::Function) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= methods.len { break }
+        if methods[i].body.len > 0 {
+            diags = teko::list::push(diags, decl_diag(reg, $"interface method '{methods[i].name}' must be a bodyless signature (an interface is a pure contract — no default bodies)"))
+        }
+        i++
+    }
+    diags
+}
+
+/**
+ * No two EFFECTIVE methods (own + inherited) may share a name with a DIFFERENT signature — a
+ * redeclaration conflict, caught HERE (at the interface) with a clear message rather than later,
+ * confusingly, at an implementer. Same name + same signature is legal: it is one method.
+ *
+ * @param reg    the interface's registration
+ * @param eff    the interface's effective method set
+ * @param table  the whole collected type table (for signature comparison)
+ * @return       one diagnostic per conflicting pair
+ */
+fn interface_conflict_diags(reg: TypeReg, eff: []parser::Function, table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
+    let owner_ns = type_ns_of(table, reg.decl.name)
+    mut a: u64 = 0
+    loop {
+        if a >= eff.len { break }
+        mut b: u64 = a + 1
+        loop {
+            if b >= eff.len { break }
+            if eff[a].name == eff[b].name && !method_sig_matches(eff[a], eff[b], table, owner_ns) {
+                diags = teko::list::push(diags, decl_diag(reg, $"interface '{reg.decl.name}' has conflicting signatures for method '{eff[a].name}' (an extended interface declares it differently)"))
+            }
+            b++
+        }
+        a++
+    }
+    diags
+}
+
+/**
+ * The COLLECTION pass's product: the collected (table, env) plus its diagnostics, split by cut
+ * boundary (docs/design/all-diagnostics-pre-walk-0.3.1.md §3).
+ *
+ * The split matters because the two halves of collection differ in what a failure poisons.
+ * `validate_type_decls` is a pure validator over an already-built table, so the table the next
+ * pass reads is complete either way — SOFT, the build carries on. The signature walk DEFINES
+ * bindings, so a rejected signature leaves a hole a later call would be blamed for — HARD, the
+ * build cuts at this pass's boundary.
+ */
+type CollectOutcome = struct {
+    /** the collected type table and top-level environment */
+    collected: Collected
+    /** SOFT — the declaration-gate diagnostics; the table is complete regardless */
+    decl_diags: []str
+    /** HARD — the signature diagnostics; every one of them left a binding undefined */
+    sig_diags: []str
 }
 
 /**
@@ -1727,27 +2303,21 @@ fn validate_type_decls(table: TypeTable) -> error | null {
  * calling it here and again later (`type_program`'s post-collect stamp, kept for callers
  * that only need the table, e.g. mono) is a safe no-op the second time.
  *
- * @param parser::Program program  the parsed (trait-folded, base-canonicalized) program
- * @return Collected | error  the collected type table + top-level environment
+ * @param program  the parsed (trait-folded, base-canonicalized) program
+ * @return         the collected type table + top-level environment, and both diagnostic classes
  */
-fn collect(program: parser::Program) -> Collected | error {
-    let table = instantiate_types(program, collect_types(program.items))
-    match validate_type_decls(table) { error as e => return e; null => { } }   // (MEM Step 0, R4)
-    let env = match collect_funcs(program.items, table) {
-        Env as e => e
-        error as err => return err
-    }
-    Collected { types = table; env = env }
+fn collect(program: parser::Program) -> CollectOutcome {
+    collect_over(program, instantiate_types(program, collect_types(program.items)), env_empty())
 }
 
 /**
  * collect_with_seed — C7.10: collect with a pre-seeded (table, env). Adds the project's type decls
  * on top of the seeded table, then adds the project's function signatures AND module-level const
- * bindings on top of the seeded env (mirroring `collect_funcs`'s own `ConstDecl` arm, #594 crumb
- * 8b) — without the const arm, a project's own `const` was never bound into `env` when a dep was
- * present (the dep-seeded `env` only carried the dep's EXPORTED consts via `seed_dep_consts`), so a
- * bare reference always resolved to a same-name dep const even when the project declared its own.
- * Used by `type_program_with_deps` to inject dep items before type-checking the project.
+ * bindings on top of the seeded env (#594 crumb 8b) — without the const arm, a project's own
+ * `const` was never bound into `env` when a dep was present (the dep-seeded `env` only carried the
+ * dep's EXPORTED consts via `seed_dep_consts`), so a bare reference always resolved to a same-name
+ * dep const even when the project declared its own. Used by `type_program_with_deps` to inject dep
+ * items before type-checking the project.
  *
  * (U2 #333 F1) Same early-stamp ordering as `collect()` — `instantiate_types` runs BEFORE
  * `validate_type_decls`/`func_type` so a project-written `Box<Raw>` (dep or project generic)
@@ -1755,85 +2325,55 @@ fn collect(program: parser::Program) -> Collected | error {
  *
  * @param program  the project's parsed program (dep items are NOT re-typed, only seeded)
  * @param seed     the dep-derived (table, env) to extend
- * @return         the collected type table + environment, project items layered on the seed
+ * @return         the collected table + environment layered on the seed, and both diagnostic classes
  * @since #594
  */
-fn collect_with_seed(program: parser::Program, seed: Collected) -> Collected | error {
-    // Augment the table with the project's type decls (dep types already in seed.types).
-    mut table0 = seed.types
+fn collect_with_seed(program: parser::Program, seed: Collected) -> CollectOutcome {
+    collect_over(program, instantiate_types(program, table_with_project_types(program, seed.types)), seed.env)
+}
+
+/**
+ * The seeded table augmented with the project's own type declarations (dep types are already in
+ * the seed).
+ *
+ * @param program  the project's parsed program
+ * @param seeded   the dep-derived table to extend
+ * @return         the table with one registration per project type declaration appended
+ * @since 0.3.1
+ */
+fn table_with_project_types(program: parser::Program, seeded: TypeTable) -> TypeTable {
+    mut table = seeded
     mut i = 0
     loop {
         if i >= program.items.len { break }
         match program.items[i].content {
             parser::TypeDecl as td => {
-                table0 = teko::list::push(table0, TypeReg { name = td.name; namespace = program.items[i].namespace; vis = td.vis; decl = td })
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = program.items[i].namespace; file = program.items[i].file; vis = td.vis; decl = td })
             }
             _ => { }
         }
         i++
     }
-    let table = instantiate_types(program, table0)
-    match validate_type_decls(table) { error as e => return e; null => { } }   // (MEM Step 0, R4)
-    // Augment the env with the project's function signatures (dep fns already in seed.env).
-    mut env = seed.env
-    mut j = 0
-    loop {
-        if j >= program.items.len { break }
-        match program.items[j].content {
-            parser::Function as f => {
-                let ft = match func_type(f, table, program.items[j].namespace) {   // (#109 W1) ref_ns = the fn's declaring namespace
-                    Type as t => t
-                    error as e => return e
-                }
-                env = define_fn(env, f.name, ft, program.items[j].namespace)
-            }
-            parser::ConstDecl as cd => {
-                let ct = match collect_const_sig(cd, table, program.items[j].namespace) {
-                    Type as t => t
-                    error as e => return e
-                }
-                env = define_const(env, cd.name, ct, program.items[j].namespace, cd.vis)
-            }
-            parser::TypeDecl as td => {
-                match td.body {   // (OOP A1) mirror collect_funcs' struct-method registration
-                    parser::StructBody as sb => {
-                        let method_ns = if program.items[j].namespace == "" { td.name } else { program.items[j].namespace ~ "::" ~ td.name }
-                        mut mi = 0
-                        loop {
-                            if mi >= sb.methods.len { break }
-                            let mft = match method_func_type(sb.methods[mi], td.name, table, program.items[j].namespace) {   // (#109 W1) ref_ns = the type's declaring namespace
-                                Type as t => t
-                                error as e => return e
-                            }
-                            env = define_fn(env, sb.methods[mi].name, mft, method_ns)
-                            mi++
-                        }
-                    }
-                    // (W10b.CLASS) mirrors collect_funcs' class-method registration (increment 2:
-                    // registers the EFFECTIVE, base-inherited methods too)
-                    parser::ClassBody as cb => {
-                        let method_ns = if program.items[j].namespace == "" { td.name } else { program.items[j].namespace ~ "::" ~ td.name }
-                        let eff = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
-                        mut mi = 0
-                        loop {
-                            if mi >= eff.len { break }
-                            let mft = match method_func_type(eff[mi], td.name, table, program.items[j].namespace) {   // (#109 W1) ref_ns = the type's declaring namespace
-                                Type as t => t
-                                error as e => return e
-                            }
-                            env = define_fn(env, eff[mi].name, mft, method_ns)
-                            mi++
-                        }
-                    }
-                    _ => { }
-                }
-            }
-            _ => { }
-        }
-        j++
-    }
-    Collected { types = table; env = env }
+    table
 }
+
+/**
+ * The shared body of both collection entry points: gate the declarations (MEM Step 0, R4), then
+ * register every signature on top of `env0`. Depless and dep-seeded collection differ ONLY in the
+ * table and environment they start from, so they share this walk verbatim.
+ *
+ * @param program  the parsed program whose items carry the signatures
+ * @param table    the fully stamped type table to validate and resolve against
+ * @param env0     the environment to grow (empty for a depless project, the dep's for a seeded one)
+ * @return         the collected (table, env) and both diagnostic classes
+ * @since 0.3.1
+ */
+fn collect_over(program: parser::Program, table: TypeTable, env0: Env) -> CollectOutcome {
+    let decl_diags = validate_type_decls(table)
+    let sig = collect_signatures(program.items, table, env0)
+    CollectOutcome { collected = Collected { types = table; env = sig.env }; decl_diags = decl_diags; sig_diags = sig.diags }
+}
+
 
 // C7.10 — pre-seed the collection environment from an already-typed dep TProgram.
 // Adds the dep's type declarations to `table` and the dep's function signatures to `env`.
@@ -1851,7 +2391,7 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
                 // Carry the dep item's namespace (the dep's own module path — already set when packed).
                 // find_ns_of_titem extracts it from the dep's TItem.
                 let ns = dep_item_ns(dep.items[i])
-                t = teko::list::push(t, TypeReg { name = td.name; namespace = ns; vis = td.vis; decl = td })
+                t = teko::list::push(t, TypeReg { name = td.name; namespace = ns; file = ""; vis = td.vis; decl = td })
             }
             _ => { }
         }
@@ -1863,9 +2403,7 @@ fn seed_from_dep(dep: TProgram, table: TypeTable, env: Env) -> Collected | error
         if j >= dep.items.len { break }
         match dep.items[j] {
             TFunction as f => {
-                // Build the Func type from the resolved return_type + param type annotations.
-                // We resolve param types now (against the merged table `t`) just like collect_funcs.
-                let dtbl = type_param_table(f.type_params, f.type_constraints, "", t)   // (S4) no-op for concrete deps
+                let dtbl = type_param_table(f.type_params, f.type_constraints, "", t)
                 mut params: []Type = teko::list::empty()
                 mut param_names: []str = teko::list::empty()
                 mut defaults: []parser::Expr = teko::list::empty()
