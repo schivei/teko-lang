@@ -3225,6 +3225,87 @@ fn emit_region_alloc(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::T
     cb(out, "; })")
 }
 
+/**
+ * `teko::mem::as_cstr(s: str) -> ptr<byte>` (c-types-and-marshalling-0.3.1.md §7.3/§9.5, crumb
+ * C3+C7) — a fresh NUL-terminated copy of `s`'s bytes, bump-allocated into the ENCLOSING region
+ * (mirroring `emit_buf_ptr`'s allocation site, not `malloc`): the octets are copied byte-by-byte
+ * (no C standard-library string routine is pulled into the generated program's includes) and the
+ * final octet, one past `s.len`, is written `0`. Bulk-freed with the enclosing region, so — unlike
+ * the runtime's OLD `tk_cstr_dup` — no call site of this builtin can outlive its own frame without
+ * the developer choosing a longer-lived region explicitly (the `c_string_in_arena` tier).
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the `str` to copy)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the copy-and-terminate stmt-expr appended, or a codegen error
+ */
+fn emit_as_cstr(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let v = $"_ac{buf.len}"
+    mut out = cb(buf, $"({{ tk_str {v}_s = (")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    let region = cg_enclosing_region_expr(regions)
+    cb(out, $"); uint8_t *{v} = (uint8_t *)tk_region_alloc({region}, (size_t)({v}_s.len + 1)); for (uint64_t {v}_i = 0; {v}_i < {v}_s.len; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} {v}[{v}_s.len] = 0; {v}; }})")
+}
+
+/**
+ * `teko::mem::str_from_c(p: ptr<byte>, max: u64) -> str` (c-types-and-marshalling-0.3.1.md §6,
+ * crumb C2) — the BOUNDED inbound C-string scan: reads AT MOST `max` octets from `p`, stopping at
+ * the first `0`, and copies the result into a fresh Teko `str`. TOTAL on every input (`p` null or
+ * `max == 0` both short-circuit to the empty `str` with no read at all; no `0` in `[0, max)` yields
+ * exactly `max` octets — truncation, not a panic). Inlined as a GNU statement-expression, exactly
+ * like `emit_buf_ptr`/`emit_region_alloc`: no runtime forwarder exists for this shape.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = `p`, args[1] = `max`)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the bounded-scan stmt-expr appended, or a codegen error
+ */
+fn emit_str_from_c(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let v = $"_sfc{buf.len}"
+    mut out = cb(buf, $"({{ const uint8_t *{v}_p = (const uint8_t *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, $"); uint64_t {v}_max = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, $"); uint64_t {v}_n = 0; if ({v}_p != NULL) {{ while ({v}_n < {v}_max && {v}_p[{v}_n] != 0) {{ {v}_n++; }} }} uint8_t *{v}_buf = (uint8_t *)malloc({v}_n ? {v}_n : 1); if (!{v}_buf) abort(); for (uint64_t {v}_i = 0; {v}_i < {v}_n; {v}_i++) {{ {v}_buf[{v}_i] = {v}_p[{v}_i]; }} (tk_str){{ {v}_buf, {v}_n }}; }})")
+}
+
+/**
+ * `teko::mem::region_buf(region: uptr, len: u64, init: str) -> ptr<byte>`
+ * (c-types-and-marshalling-0.3.1.md §7.3, crumb C5) — the NAMED-region twin of `buf_ptr`:
+ * bump-allocates `len` contiguous octets into the CALLER-CHOSEN region (`tk_region_alloc`, not the
+ * enclosing one), copies at most `len` octets of `init` into the front of that buffer, and writes a
+ * NUL terminator at the first octet `init` did not fill (or at the buffer's final octet, when
+ * `init` fills the whole span) — the tier-2 allocation `c_string_in_arena` needs. Inlined, mirroring
+ * `emit_region_alloc`; no runtime forwarder exists for this shape either.
+ *
+ * @param []byte buf  the output buffer
+ * @param CgProg prog  the typed program (for arg emission)
+ * @param checker::TCall c  the typed call (args[0] = the region `uptr`, args[1] = `len`, args[2] = `init`)
+ * @param []str escaping  the escape-analysis frame set
+ * @param []RegionFrame regions  the open region-frame stack
+ * @param []checker::TStatement fn_body  the enclosing function body (defer context)
+ * @param DeferCtx dctx  the defer context
+ * @return []byte | error  the buffer with the named-region alloc-and-terminate stmt-expr appended, or a codegen error
+ */
+fn emit_region_buf(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let v = $"_rb{buf.len}"
+    mut out = cb(buf, $"({{ tk_region *{v}_r = (tk_region *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, $"); uint64_t {v}_len = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[1], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, $"); tk_str {v}_s = (")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[2], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, $"); uint8_t *{v} = (uint8_t *)tk_region_alloc({v}_r, (size_t){v}_len); uint64_t {v}_cn = ({v}_s.len < {v}_len) ? {v}_s.len : {v}_len; for (uint64_t {v}_i = 0; {v}_i < {v}_cn; {v}_i++) {{ {v}[{v}_i] = {v}_s.ptr[{v}_i]; }} if ({v}_cn < {v}_len) {{ {v}[{v}_cn] = 0; }} else if ({v}_len > 0) {{ {v}[{v}_len - 1] = 0; }} {v}; }})")
+}
+
 // (mem::free ruling 2026-07-03) `teko::mem::free(x)` → a void GNU stmt-expr that RECLAIMS x's heap
 // block and SCRUBS the binding so a later read yields empty/null, never the freed buffer:
 //   * []T   → tk_free_block(x.ptr, x.len*sizeof(elem)) parks the backing buffer for same-size reuse,
@@ -3575,6 +3656,9 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             if l == "bytes_from_ptr" { return emit_host_ffi(buf, prog, e, c, "bytes", "tk_bytes_from_ptr", escaping, regions, fn_body, dctx) }   // (C7.1a) ptr+len -> []byte (slice-lift)
             if l == "str_from_utf8" { return emit_host_ffi(buf, prog, e, c, "sres_byteslice", "tk_rt_str_from_utf8", escaping, regions, fn_body, dctx) }   // ROUND 0: ([]byte) -> str | error
             if l == "buf_ptr" { return emit_buf_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "as_cstr" { return emit_as_cstr(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "str_from_c" { return emit_str_from_c(buf, prog, c, escaping, regions, fn_body, dctx) }
+            if l == "region_buf" { return emit_region_buf(buf, prog, c, escaping, regions, fn_body, dctx) }
         }
     }
     mut builtin = ""
@@ -3678,10 +3762,7 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             else if last == "fmt_dyn_i64" { builtin = "tk_fmt_dyn_i64"; has_builtin = true }   // (i64, str) -> str
             else if last == "fmt_dyn_u64" { builtin = "tk_fmt_dyn_u64"; has_builtin = true }   // (u64, str) -> str
             else if last == "f64_g17" { builtin = "tk_f64_g17"; has_builtin = true }   // (f64) -> str (host float renderer)
-            // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
             else if last == "as_ptr" { builtin = "tk_as_ptr"; has_builtin = true }   // (str) -> ptr (raw bytes; borrows, pair with `.len`)
-            else if last == "as_cstr" { builtin = "tk_cstr_dup"; has_builtin = true }   // (str) -> ptr (fresh NUL-terminated copy)
-            else if last == "str_from_cstr" { builtin = "tk_str_from_cstr"; has_builtin = true }   // (ptr) -> str (copy a C string back)
             else if last == "os" { builtin = "tk_rt_os"; has_builtin = true }   // () -> str (host OS — C7.1f)
             else if last == "arch" { builtin = "tk_rt_arch"; has_builtin = true }
             else if last == "version" { builtin = "tk_rt_version"; has_builtin = true }   // () -> str (build version — CLI --version)

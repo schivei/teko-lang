@@ -1,0 +1,39 @@
+/**
+ * `teko::mem::str_from_c(p: ptr<byte>, max: u64) -> str` (c-types-and-marshalling-0.3.1.md §6,
+ * crumb C2) — TOTALITY over all four defined inputs, in one program. `getenv` is reached DIRECTLY
+ * (test-only; a real binding would declare `-> ptr<byte> | null` per §5.4 — this fixture is
+ * proving the BUILTIN's own contract on a genuinely-null address, not modelling honest FFI usage).
+ *
+ * @param name  the environment variable name, already NUL-terminated
+ * @return      the raw value, or a genuinely NULL address when the variable is unset
+ */
+pub extern fn c_getenv_raw(name: ptr<byte>) -> ptr<byte> = "getenv"
+
+/**
+ * entry — F10 c-types-and-marshalling — c_str_from_c_totality. Exit 0 iff every one of the four
+ * §6 cases holds:
+ *   * `p` null            -> the empty `str`
+ *   * a NUL at i < max    -> the first i octets
+ *   * no NUL in [0, max)  -> exactly `max` octets (truncation, not a panic)
+ *   * `max` is 0          -> the empty `str`
+ */
+pub fn entry() {
+    let missing_name = teko::mem::as_cstr("TEKO_C_TYPES_TOTALITY_PROBE_UNSET_VAR")
+    let null_p = c_getenv_raw(missing_name)
+    let case_null = teko::mem::str_from_c(null_p, 10)
+    let case_null_ok = case_null.len == 0
+
+    let terminated = teko::mem::as_cstr("hi")
+    let case_nul_in_bound = teko::mem::str_from_c(terminated, 10)
+    let case_nul_in_bound_ok = case_nul_in_bound.len == 2
+
+    let unterminated = teko::mem::as_ptr("hello")
+    let case_no_nul = teko::mem::str_from_c(unterminated, 5)
+    let case_no_nul_ok = case_no_nul.len == 5
+
+    let case_zero_max = teko::mem::str_from_c(terminated, 0)
+    let case_zero_max_ok = case_zero_max.len == 0
+
+    let ok = case_null_ok && case_nul_in_bound_ok && case_no_nul_ok && case_zero_max_ok
+    exit(if ok { 0 } else { 1 })
+}

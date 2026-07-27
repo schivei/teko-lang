@@ -631,16 +631,52 @@ fn builtin_fn(name: str) -> Type | error {
         p = teko::list::push(p, str_t)
         return Func { params = p; ret = Error { }; variadic = false; param_names = []; n_required = (p).len; defaults = [] }
     }
-    // (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
-    if name == "as_ptr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }   // raw byte pointer (str -> ptr; pair with `.len`, NOT NUL-terminated)
-    if name == "as_cstr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }   // a fresh NUL-terminated copy (str -> ptr; for C `char*` APIs)
-    if name == "str_from_cstr" { return Func { params = teko::list::push(teko::list::empty(), Ptr { inner = null }); ret = str_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Ptr { inner = null })).len; defaults = [] } }   // copy a NUL-terminated C string back (ptr -> str)
-    if name == "bytes_from_ptr" {   // (ptr, u64) -> []byte (copy n octets back)
+    /**
+     * (C7.1a) marshalling primitives — teko::mem: move aggregates across the FFI boundary.
+     * `as_ptr` is the raw byte pointer of a `str` (borrows; pairs with `.len`; NOT NUL-terminated).
+     */
+    if name == "as_ptr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = null }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }
+    /**
+     * `as_cstr(str) -> ptr<byte>` — a fresh NUL-terminated copy of `str`'s bytes, bump-allocated
+     * into the ENCLOSING region (c-types-and-marshalling-0.3.1.md §7.3/§9.5, crumb C3+C7): the
+     * result is a TYPED byte pointer, never the opaque `ptr` (a `void *` reading/writing octets is
+     * `ptr<byte>` by the design's own §5.3 rule), and its storage is bulk-freed with the enclosing
+     * region rather than leaked on the process heap.
+     */
+    if name == "as_cstr" { return Func { params = teko::list::push(teko::list::empty(), str_t); ret = Ptr { inner = Byte { } }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), str_t)).len; defaults = [] } }
+    /**
+     * `str_from_c(p: ptr<byte>, max: u64) -> str` — the BOUNDED inbound C-string scan
+     * (c-types-and-marshalling-0.3.1.md §6, crumb C2), replacing the unbounded `str_from_cstr`
+     * (`strlen` on a foreign pointer). TOTAL: `p` null or `max == 0` yield the empty `str`; a NUL at
+     * octet `i < max` yields the first `i` octets; no NUL in `[0, max)` yields exactly `max` octets
+     * (truncation, not a panic — a fixed-width unterminated C field is a legitimate input).
+     */
+    if name == "str_from_c" {
+        mut sfc: []Type = teko::list::push(teko::list::empty(), Ptr { inner = Byte { } })
+        sfc = teko::list::push(sfc, Prim { kind = PrimKind::U64 })
+        return Func { params = sfc; ret = str_t; variadic = false; param_names = []; n_required = sfc.len; defaults = [] }
+    }
+    /** `bytes_from_ptr(ptr, u64) -> []byte` — copy `n` octets from a foreign pointer back. */
+    if name == "bytes_from_ptr" {
         mut bp: []Type = teko::list::push(teko::list::empty(), Ptr { inner = null })
         bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
         return Func { params = bp; ret = bytes_t; variadic = false; param_names = []; n_required = (bp).len; defaults = [] }
     }
     if name == "buf_ptr" { return buf_ptr_signature() }
+    /**
+     * `region_buf(region: uptr, len: u64, init: str) -> ptr<byte>` — the NAMED-region twin of
+     * `buf_ptr` (c-types-and-marshalling-0.3.1.md §7.3, crumb C5): bump-allocates `len` contiguous
+     * octets INTO the caller-chosen region, copies at most `len` octets of `init` into the front of
+     * that buffer, and writes a NUL terminator at the first octet `init` did not fill (or at the
+     * final octet, when `init` fills the whole span) — the tier-2 allocation `c_string_in_arena`
+     * needs and `buf_ptr`'s enclosing-region form cannot provide (a NAMED region, not the lexical one).
+     */
+    if name == "region_buf" {
+        mut rb: []Type = teko::list::push(teko::list::empty(), Uptr { })
+        rb = teko::list::push(rb, Prim { kind = PrimKind::U64 })
+        rb = teko::list::push(rb, str_t)
+        return Func { params = rb; ret = Ptr { inner = Byte { } }; variadic = false; param_names = []; n_required = rb.len; defaults = [] }
+    }
     // ROUND 0 format helpers — VM-intercepted (try_builtin_call) + native (tk_fmt_*).
     if name == "fmt_f" || name == "fmt_e" || name == "fmt_g" || name == "fmt_n_f" || name == "fmt_p" {
         mut p: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })
