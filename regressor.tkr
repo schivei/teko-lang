@@ -8,19 +8,45 @@
 # therefore moved to the CHANNEL whose configuration it needs, and what is left here is the four
 # DECLARATIVE R0 scenarios — living documentation of what the self-host build already proves.
 #
-# THE CHANNELS, and what each one costs on a host:
+# THE CHANNELS, and what each one costs on this host (measured, `teko: regressions … (N builds`):
 #
-#   * examples/regressions/own_native — the own-backend corpus (F2/F5/F9): ONE program, one `.tkr`
-#     per target that needs its own build (host, riscv64-linux) plus the lone cross rows
-#     (x86_64-windows, x86_64-linux, wasm32-wasi) as `Given source` case files.
 #   * examples/regressions/bulk — the cross-namespace composition regressors and the whole language
 #     corpus, one MEMBER NAMESPACE per scenario under a single build, selected by `TEKO_REGR_ENTRY`.
+#     1 build. (Its codegen-stage KNOWN-STOP pin adds a second one the day the channel goes green:
+#     a build that reaches codegen is one whose checker PASSED, so that pin can share with nothing.)
+#   * examples/regressions/own_native — the own-backend corpus (F2/F5/F9): ONE program, and one build
+#     per TARGET, which is the only axis on it that varies. 4 builds on this host: the host project
+#     itself, plus the lone rows for x86_64-windows, wasm32-wasi and `host-os-arch`.
+#   * examples/regressions/own_native/own_native_riscv64.tkr — the same program for riscv64-linux
+#     under qemu, plus the retired lane's ELF cross-check. 1 build.
 #   * examples/regressions/diagnostics — every checker-stage rejection, one source file per rejected
-#     construct, ONE failing build reporting them all (the 0.3.1 all-diagnostics ruling).
+#     construct, ONE failing build reporting them all (the 0.3.1 all-diagnostics ruling). 6 builds:
+#     that one, plus FOUR checker PRE-WALK stops that provably cannot share it, plus the
+#     unsupported-target boundary, which needs a build whose front end SUCCEEDS.
 #   * examples/regressions/parse_diagnostics — the same for the PARSE stage, which aborts before the
-#     checker runs and so cannot share the checker channel's build.
-#   * examples/regressions/cwd_build — the `cd <project> && teko build .` invocation shape.
-#   * examples/regressions/crossmodule — the `package` (`.tkl`) dependency shape.
+#     checker runs and so cannot share the checker channel's build. 1 build.
+#   * examples/regressions/cwd_build — the `cd <project> && teko build .` invocation shape. 1 build.
+#   * examples/regressions/crossmodule — the `package` (`.tkl`) dependency shape. 1 build.
+#
+# THE ARITHMETIC, stated so the next reader can audit it instead of re-deriving it. Fifteen builds
+# today, and every one of them is a DISTINCT build configuration or a distinct failing stage:
+#
+#     host (bulk) · host (own_native) · x86_64-windows · wasm32-wasi · host-os-arch · riscv64-linux
+#     dependency shape · in-place shape · checker-fail · parse-fail · unsupported-target-fail
+#     + 4 × checker PRE-WALK fail
+#
+# Three of those fifteen are removable, and each names who removes it:
+#
+#   1. the FOUR pre-walk builds collapse into the checker-fail build the day the pre-walk passes
+#      COLLECT instead of stopping at the first error — the all-diagnostics work, not this channel's.
+#      Measured both ways in diagnostics.tkr's header: today, folding one costs 49 diagnostics.
+#   2. the two HOST builds become one the day `bulk` compiles: `own_native`'s corpus is green and
+#      `bulk` is red on a pre-existing monomorph stop, so merging them today would turn sixteen
+#      passing scenarios red to save one build. That is a worse trade than the build is worth.
+#
+# That leaves TEN as the structural floor: eleven configurations minus the one host merge. Going
+# below ten means deleting a target or a build shape that a scenario asserts, which is coverage loss
+# wearing a build count's clothes.
 #
 # THERE IS NO INLINE CODE IN THIS FILE OR IN ANY `.tkr` (owner ruling: "está proibido inline code em
 # tkr"). Every scenario names its source as a file a human can open, compile by hand and diff.
