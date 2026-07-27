@@ -1184,6 +1184,44 @@ fn tkr_target_env(value: str) -> []str {
 }
 
 /**
+ * HOST_OS_ARCH_TARGET — the `Given target` token meaning "THIS host's own os-arch, spelled out".
+ *
+ * It is not the same thing as `HOST_TARGET` (`"host"`) and the difference is the whole point. `host`
+ * means "declare no target at all" — the row exercises the UNSET-`TEKO_TARGET` default path. This
+ * token means "declare a target, and let it be the one this host natively builds" — the row
+ * exercises the EXPLICITLY-SPELLED path, which is a different code path in the build and the one a
+ * real user takes when they pin their own platform.
+ *
+ * WHY IT EXISTS (owner ruling 2026-07-27: *"precisa ensinar o regressor a entender diferentes OSes e
+ * arquiteturas para variar um mesmo teste"*). A row that wanted "the explicitly-spelled host target"
+ * had to hardcode one — `x86_64-linux` — which turns the row into a CROSS row on every other host and
+ * earns it an honest skip there. Hardcoding an architecture where the subject is "an explicit
+ * spelling" is what silently narrows the corpus to one machine. A row whose subject genuinely IS an
+ * architecture (emitting COFF, emitting riscv64 ELF) still names that architecture and still skips
+ * honestly where the toolchain is absent — this token is for the other kind of row, and only that.
+ */
+const HOST_OS_ARCH_TARGET: str = "host-os-arch"
+
+/**
+ * tkr_resolve_target_name — the DECLARED target name a `Given target` value stands for, with
+ * `HOST_OS_ARCH_TARGET` resolved to this host's own os-arch (`x86_64-linux`, `arm64-macos`, …).
+ *
+ * Resolved at LOWERING time, on purpose: every consumer downstream (the run-wrapper resolution, the
+ * cross classification, the toolchain probe, the artifact extension, the object-format check) reads
+ * `Tkr.target` as a real os-arch name, so a token that survived into the lowered row would have to be
+ * understood again at each of those sites — six chances to forget one. Resolving here means exactly
+ * one site knows the token exists.
+ *
+ * @param value  the surface `Given target` value
+ * @return       the same value, or this host's os-arch name when it is `HOST_OS_ARCH_TARGET`
+ * @since 0.3.1
+ */
+fn tkr_resolve_target_name(value: str) -> str {
+    if value != HOST_OS_ARCH_TARGET { return value }
+    target_name(host_default_target())
+}
+
+/**
  * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`/`source`/
  * `source inline`/`env`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
  * unknown Given noun.
@@ -1209,8 +1247,9 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     }
     if noun == "target" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        let env2 = tkr_env_extend(b.env, tkr_target_env(q.text))
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = q.text; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        let name = tkr_resolve_target_name(q.text)
+        let env2 = tkr_env_extend(b.env, tkr_target_env(name))
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = name; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "dependency" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }

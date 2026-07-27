@@ -424,3 +424,50 @@ fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
         error => teko::assert::is_true(false)
     }
 }
+
+#test
+/**
+ * tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch — the `host-os-arch` token means "an
+ * EXPLICITLY spelled target, and let it be the one this host natively builds" (owner ruling
+ * 2026-07-27). Three properties, every one of which a hardcoded `x86_64-linux` fails off x86_64:
+ *
+ *   1. the lowered row's target IS this host's own os-arch name — never the token, never a fixed one;
+ *   2. it is spelled EXPLICITLY, so the row exports `TEKO_TARGET=<that name>` where the plain `host`
+ *      sentinel exports nothing at all — the two exercise different build paths on purpose;
+ *   3. it is never CROSS on the host that resolved it, so the row runs instead of honest-skipping.
+ *
+ * @return void
+ */
+fn tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch() {
+    let src = "Feature: f\n  Scenario: s\n    Given target = \"host-os-arch\"\n    When built and run\n    Then exit = 0\n"
+    let want = target_name(host_default_target())
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.target == want)
+            teko::assert::is_true(t.env.len == 1)
+            teko::assert::is_true(t.env[0] == teko::str::concat("TEKO_TARGET=", want))
+            teko::assert::is_true(!cross_note_for_name(t.target).is_cross)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_plain_host_sentinel_still_declares_no_target — the guard that keeps the two host spellings
+ * apart. `host` must go on meaning "declare NOTHING": it exports no `TEKO_TARGET` token, so the row
+ * exercises the unset-default path. Without this guard the new `host-os-arch` token could quietly be
+ * implemented by widening `host`, which would delete a build path the corpus covers.
+ *
+ * @return void
+ */
+fn tkr_plain_host_sentinel_still_declares_no_target() {
+    let src = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.target == HOST_TARGET)
+            teko::assert::is_true(t.env.len == 0)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
