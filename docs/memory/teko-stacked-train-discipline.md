@@ -340,6 +340,9 @@ Cada volta é medível e o progresso é o número de fases vencidas, não a cont
 
 > *"Não interessa se está verde ou não, é por isso também de usar as cargas caso queira evitar
 > disparar CI, mas é importante sempre exercitar pushes frequentes."*
+>
+> *"Não é só em vermelho, enquanto estiver trabalhando/produzindo, busque usar as cargas, isso
+> diminui o número de alertas de cancelamento."*
 
 A `cargo/**` tem DUAS funções, e usar só a primeira é o erro que esta nota registra:
 
@@ -362,9 +365,166 @@ Tudo a um crash de distância de sumir.
 **A regra invertida é a certa:** vagão vermelho por decisão do owner é vagão que se empurra MAIS
 cedo, não menos. O vermelho já é o estado desejado; não há o que preservar segurando.
 
-**Operacional:** commit por fatia, push por fatia — vagão e cargas. Uma carga que acumula trabalho
-no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que existe. O
-briefing de carga deve exigir push, não só commit.
+### O destino default é a carga — não só no vermelho (owner 2026-07-26, segunda ordem)
+
+A primeira leitura desta regra foi estreita demais: *"enquanto o vagão está vermelho eu empurro
+para as cargas"*. O owner corrigiu o escopo — **não é o vermelho que escolhe o destino, é o estar
+produzindo**. Enquanto há trabalho em voo, a carga é o destino; o vagão recebe **marcos**, não
+fatias.
+
+**O motivo é o alerta de cancelamento, e ele é mecânico.** O `pr.yml` declara
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+
+que é o certo — sem ele cada push do trem empilhado deixa uma corrida órfã queimando runner. Mas
+o preço é que **todo push no vagão com PR aberto cancela a corrida anterior**, e cada
+cancelamento vira notificação para o owner. Empurrar cinco fatias em uma hora não produz cinco
+medições: produz **uma** medição e **quatro alertas de cancelamento**. O sinal que o owner recebe
+fica pior quanto mais frequente é o push — exatamente o oposto do que a regra de push frequente
+quer.
+
+A carga desmancha o conflito porque **as duas metades da regra vivem em ramos diferentes**:
+
+| | frequência | acorda CI? | gera cancelamento? |
+|---|---|---|---|
+| `cargo/**` (sem PR) | **por fatia** | não — os portões são `pull_request`-only | não |
+| vagão (com PR) | **por marco** | sim | só quando há o que medir |
+
+**Marco** é um estado que vale medir, não um relógio: um degrau da escada fechado, uma carga
+drenada para o vagão, o gate local passando, ou o owner pedindo. Fora disso, `cargo/**`.
+
+### QUANDO empurrar o marco — a corrida em voo tem valor, e o vermelho é o que o zera (owner 2026-07-27)
+
+> *"E procure empurrar para o vagão apenas quando o CI estiver terminado ou haver sinal em
+> vermelho e sua carga estiver pronta, se nenhum sinal verde tiver sido emitido, aguarde o
+> término. Ou melhor, se nenhum sinal vermelho tiver sido emitido, aguarde o término."*
+
+Ter um marco pronto **não autoriza** o push por si só. Antes de empurrar no vagão, olhe a corrida
+em voo e decida por ela:
+
+| estado da corrida no HEAD do vagão | ação |
+|---|---|
+| **terminada** (qualquer conclusão) | **empurre** — não há corrida para cancelar, o push é limpo |
+| **em voo, já com pelo menos um check vermelho** | **empurre** se a carga estiver pronta |
+| **em voo, sem nenhum vermelho ainda** | **AGUARDE o término** |
+
+**O princípio, que é o que vale guardar:** o valor de uma corrida em voo é a informação que ela
+**ainda não entregou**. Cancelá-la antes do primeiro vermelho destrói uma medição inteira que
+estava a caminho — inclusive um verde possível, que é a informação mais cara de produzir neste
+projeto. Depois do primeiro vermelho, a corrida já entregou o que importava (a resposta é "não
+passa"), e o que resta dela é marginal: cancelar custa pouco e o push novo mede o estado novo, que
+é mais interessante que terminar de medir um estado já reprovado.
+
+Note que a auto-correção do owner inverte o teste: **não é "espere se ainda não houve verde", é
+"espere se ainda não houve vermelho"**. A diferença importa porque uma corrida longa emite verdes
+parciais o tempo todo (cada lane que fecha) — se o gatilho fosse a ausência de verde, quase nunca
+se esperaria. A ausência de VERMELHO é a condição certa: ela diz "esta corrida ainda pode terminar
+verde", e é exatamente isso que não se joga fora.
+
+**Como conferir, sem adivinhar:** `pull_request_read` com `method: get_check_runs` no PR do vagão.
+Procure `conclusion` em `failure`/`timed_out`/`cancelled` entre os já `completed`; se não houver
+nenhum e houver algum `in_progress`, a resposta é aguardar. **Não infira o estado do relógio nem
+do "já deve ter acabado"** — esta é a mesma armadilha que em 2026-07-26 fez o integrador anunciar
+que uma correção de gatilho não tinha funcionado quando a corrida existia e estava `in_progress`:
+ele mediu o proxy em vez do fato.
+
+**Enquanto aguarda, não pare** — continue produzindo nas cargas. A espera é do PUSH DO VAGÃO, não
+do trabalho. É a mesma regra da seção anterior vista de outro ângulo: se a carga é o destino
+default, aguardar o término da corrida não custa nada, porque não há nada represado esperando o
+vagão.
+
+**Operacional:** commit por fatia, push por fatia — **para a carga**. Uma carga que acumula
+trabalho no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que
+existe. O briefing de carga deve exigir push, não só commit. E o integrador que está ele próprio
+produzindo (não só drenando) abre uma carga para si — **não existe trabalho em voo que pertença
+ao vagão**; o vagão é onde o trabalho pousa.
+
+## POR QUE OS DEFEITOS ESTÃO APARECENDO AGORA — as duas decisões que os tornaram alcançáveis (owner 2026-07-27)
+
+> *"se continuasse em C, veríamos isso muito mais tarde, e pior, se ainda estivesse com centenas de
+> regressores que não possuem concorrência de nome em namespaces diferentes, tbm nunca teria pego
+> até que acontecesse."*
+
+Registrado porque a leitura ingênua da .31 é *"o backend nativo está cheio de bugs"*, e essa
+leitura é falsa e desmotivadora. O que está acontecendo é o **oposto**: os defeitos não foram
+introduzidos, foram **tornados alcançáveis**. Duas decisões independentes fizeram isso, cada uma
+por um mecanismo distinto.
+
+### Decisão 1 — matar o C. O C não escondia os defeitos: ele FAZIA O TRABALHO por nós
+
+O caso do `no layout registered` é a demonstração limpa, e a medição está no repositório:
+
+| | menções a `offset`/`size_of`/`align` |
+|---|---:|
+| `src/codegen/codegen.tks` — o emissor de C, **10.727 linhas** | **15** |
+| `src/lir/lower.tks` + `src/backend/stackify.tks` — só dois arquivos | **220** |
+
+O emissor de C escreve `typedef struct tk_t_<M> { <Ctype> <f>; … }` e **para por aí**: quem calcula
+offset, tamanho e alinhamento é o `cc`. O backend nativo tem que calcular tudo — por isso 220
+contra 15.
+
+Consequência exata, e ela é mais forte do que "veríamos mais tarde": **enquanto o C carregava a
+emissão, o defeito de `ClassBody` não contribuir layout não podia se manifestar — não porque
+estivesse escondido, mas porque a responsabilidade era de outro.** Não havia bug para encontrar;
+havia uma pergunta que nunca tínhamos precisado responder.
+
+**A regra geral, que vale para muito além deste caso:** toda responsabilidade delegada ao compilador
+C — layout, ABI, convenção de chamada, alinhamento, promoção de inteiro — é uma responsabilidade
+sobre a qual **nunca precisamos estar corretos**. Matar o C não cria esses defeitos; ele **revela
+que nunca os resolvemos**. Por isso a contagem de honest-stops subindo na .31 é a **medição
+melhorando**, não o código piorando. Um honest-stop nomeado é uma pergunta que agora sabemos que
+existe.
+
+Corolário para o julgamento da versão: a .31 será avaliada por **quantas dessas perguntas foram
+respondidas**, não por quantas apareceram. Uma versão que descobre 40 e responde 40 é melhor que
+uma que descobre 5 — e a que descobre 5 é a que ainda está delegando.
+
+### Decisão 2 — consolidar o regressor. 200+ projetos eram grandes e RASOS
+
+O outro mecanismo é de configuração, não de responsabilidade.
+
+Enquanto eram **200+ projetos**, cada regressivo era um projeto minúsculo compilado sozinho: **uma
+namespace por build, sem vizinhos**. Nessa configuração, todo defeito que vive na *interação entre
+unidades de compilação* é **inalcançável por construção** — não é que os testes não o pegavam, é
+que não existia arranjo em que ele pudesse acontecer.
+
+A consolidação em **9 diretórios** colocou muitas namespaces **no mesmo build**. Foi isso, e só
+isso, que criou as condições para o defeito de monomorfização aparecer: `q006::Box` (não-genérica)
+e `q084::Box<T>` só podem se atropelar se estiverem **na mesma tabela de tipos**, e antes nunca
+estavam.
+
+**E a configuração antiga é a que NÃO corresponde à realidade.** Um programa de usuário de verdade
+tem muitas namespaces num build só. O regressor de 200+ projetos testava, em massa, um arranjo que
+nenhum usuário habita. Daí a formulação que o owner usou — *"nunca teria pego até que acontecesse"*
+— sendo "acontecesse" o pior lugar possível: na mão de quem usa.
+
+**A lição, e é contraintuitiva o bastante para merecer estar escrita:** cobertura **não é
+contagem**, é a variedade de interações alcançáveis. Ir de 200+ para 9 **diminuiu o número de
+testes e aumentou o que eles pegam**, porque os defeitos que importam num compilador vivem entre
+unidades, não dentro delas.
+
+### O custo da densidade, que é real e tem antídoto
+
+Ambiente denso **encontra** defeitos e ao mesmo tempo **confunde a atribuição** deles — e este
+documento não seria honesto se omitisse que isso já custou caro aqui.
+
+O integrador olhou os três `no layout registered`, viu que as fixtures envolvidas tinham nomes
+homônimos em namespaces diferentes, e formulou a hipótese de que fossem parentes do defeito de
+monomorfização. **Estava errado.** Duas namespaces com `struct Svc` homônimo compilam e rodam; uma
+classe única, uma namespace, zero homônimos, dá o stop. As fixtures eram homônimas **por
+coincidência** — eram simplesmente as que usavam `class`. A densidade fez duas características
+co-ocorrerem, e a co-ocorrência passou por causa.
+
+O antídoto é o que a carga fez para derrubar a hipótese: **repro mínimo**. Isolar uma classe, uma
+namespace, e ver o stop aparecer mesmo assim.
+
+**A dupla certa, nesta ordem:** **densidade para ENCONTRAR, isolamento para ATRIBUIR.** Um ambiente
+denso sem a disciplina do repro mínimo produz diagnósticos plausíveis e errados — que é a única
+coisa pior que não achar o defeito, porque manda o conserto para o lugar errado.
 
 ## Armadilhas do worktree compartilhado
 

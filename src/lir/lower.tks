@@ -419,6 +419,18 @@ fn is_c_keyword(s: str) -> bool {
 pub type LEnumInfo = struct { name: str; members: []str }
 
 /**
+ * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
+ * FOREIGN symbol it binds to (C7.1a: `extern fn f(…) -> T = "sym"`). A call to
+ * an `extern` must target that raw symbol, NOT the Teko namespace mangling —
+ * the mangled name is defined by nobody, so the link fails on an undefined
+ * reference. The C backend already dispatches this way through
+ * `cg_find_function`/`is_extern` (`codegen.tks`); the native backend reads the
+ * same fact out of this whole-program table, threaded read-only through
+ * `LowerCtx` exactly like `enums`.
+ */
+pub type LExternFn = struct { namespace: str; name: str; c_symbol: str }
+
+/**
  * LoopTargets — one active `loop`'s break/continue jump targets (A1-2,
  * #382): `head` is the block a `continue` jumps to (the loop body's own
  * entry), `exit` is the block a `break` jumps to (the block immediately
@@ -455,12 +467,14 @@ pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u6
  * `replay_defers` at each scope exit) + the active loop-target stack (A1-2,
  * #382 — innermost loop last, so a `break`/`continue` resolves by scanning
  * from the end; reset per function/lambda body, since neither construct
- * crosses a function boundary).
+ * crosses a function boundary) + the WHOLE-PROGRAM `extern fn` table (C7.1a —
+ * read-only, like `layouts`/`enums`, so a call to a foreign function resolves
+ * to its declared C symbol instead of the Teko mangling).
  */
 pub type LowerCtx = struct {
     func: LFunc; block_id: u32; env: LEnv
     layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
-    defers: []checker::TDeferStmt; loop_targets: []LoopTargets
+    defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -491,7 +505,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
     LowerCtx {
         func = func; block_id = block_id; env = env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
-        defers = ctx.defers; loop_targets = ctx.loop_targets
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
     }
 }
 
@@ -508,7 +522,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
-        defers = ctx.defers; loop_targets = ctx.loop_targets
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
     }
 }
 
@@ -525,7 +539,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
-        defers = ctx.defers; loop_targets = ctx.loop_targets
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
     }
 }
 
@@ -542,7 +556,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
-        defers = defers; loop_targets = ctx.loop_targets
+        defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
     }
 }
 
@@ -559,7 +573,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
-        defers = ctx.defers; loop_targets = loop_targets
+        defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
     }
 }
 
@@ -937,7 +951,7 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
 fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
     if c.is_closure_call { return lower_closure_call(ctx, e, c) }
     if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
-    let sym = match call_symbol(c) { str as s => s; error as err => return err }
+    let sym = match call_symbol(c, ctx.externs) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_args(ctx, c.args) { LoweredArgs as x => x; error as err => return err }
     lower_call_symbol(lo.ctx, e, sym, lo.vregs)
@@ -1066,10 +1080,12 @@ fn type_is_void(t: checker::Type) -> bool {
 
 /** call_symbol — the LIR symbol a direct call targets: `exit`/`panic` and the io group
     (`print`/`println`/`eprint`/`eprintln`/`write`/`ewrite`) -> their runtime twins, mirroring
-    the C backend's own bare-name builtin dispatch (`codegen.tks:2289-2297`); a Teko-Teko call
-    -> the mangled call_ns::name. A call the N1 subset does not recognize (a builtin other
+    the C backend's own bare-name builtin dispatch (`codegen.tks:2289-2297`); an `extern fn`
+    call -> its declared FOREIGN symbol (C7.1a, resolved through `externs` — the same fact the
+    C backend reads off `TFunction.is_extern`/`c_symbol`); any other Teko-Teko call -> the
+    mangled call_ns::name. A call the N1 subset does not recognize (a builtin other
     than this set) honest-stops. */
-fn call_symbol(c: checker::TCall) -> str | error {
+fn call_symbol(c: checker::TCall, externs: []LExternFn) -> str | error {
     let segs = c.callee.segments
     if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
     let last = segs[segs.len - 1].name
@@ -1085,7 +1101,33 @@ fn call_symbol(c: checker::TCall) -> str | error {
     if c.call_ns.len == 0 && segs.len == 1 {
         return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
     }
-    mangle_fn_symbol(c.call_ns, last)
+    match find_extern_symbol(externs, c.call_ns, last) {
+        str as foreign => foreign
+        null => mangle_fn_symbol(c.call_ns, last)
+    }
+}
+
+/**
+ * find_extern_symbol — the FOREIGN symbol declared by the `extern fn` named
+ * `ns::name`, or `null` when that callee is an ordinary Teko function (C7.1a).
+ * A linear scan mirrors the C backend's own `cg_find_function`: the table holds
+ * one entry per declared `extern`, a set small enough that an index would cost
+ * more than it saves.
+ *
+ * @param []LExternFn externs  the program's whole `extern fn` table
+ * @param str ns  the callee's resolved namespace (`TCall.call_ns`)
+ * @param str name  the callee's last path segment
+ * @return str | null  the declared C symbol, or `null` when no `extern`
+ *                     matches
+ */
+fn find_extern_symbol(externs: []LExternFn, ns: str, name: str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= externs.len { break }
+        if externs[i].namespace == ns && externs[i].name == name { return externs[i].c_symbol }
+        i++
+    }
+    null
 }
 
 /**
@@ -1772,7 +1814,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
     let ctx0 = LowerCtx {
         func = seed.func; block_id = 0; env = seed.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
-        defers = teko::list::empty(); loop_targets = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret), line, col) { LowerCtx as c => c; error as err => return err }
@@ -2617,7 +2659,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
     LowerCtx {
         func = body_done.func; block_id = exit_block; env = exit_env
         layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
-        defers = outer.defers; loop_targets = outer.loop_targets
+        defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
     }
 }
 
@@ -5001,12 +5043,15 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
  *                        `LoweredFunction` carries the GROWN table back out,
  *                        so `lower_program` threads it function-to-function,
  *                        exactly like `rodata`)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a — a call
+ *                             to a foreign function resolves to its declared C
+ *                             symbol, not the Teko mangling)
  * @return LoweredFunction | error  the built `LFunc` + its grown rodata/
  *                                  lifted tables; the `error` arm for a
  *                                  generic/extern function, or when its body
  *                                  fails to lower
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty()) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let ptypes = param_ltypes(f.params)
@@ -5022,7 +5067,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
-        defers = teko::list::empty(); loop_targets = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type), f.line, f.col) { LowerCtx as c => c; error as err => return err }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return err }
@@ -5116,6 +5161,7 @@ fn param_ltypes(params: []parser::Param) -> []LType {
 pub fn lower_program(prog: checker::TProgram) -> LModule | error {
     let layouts = collect_struct_layouts(prog)
     let enums = collect_enums(prog)
+    let externs = collect_externs(prog)
     let variants = collect_variants(prog)
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
@@ -5123,13 +5169,13 @@ pub fn lower_program(prog: checker::TProgram) -> LModule | error {
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted) { LoweredFunction as x => x; error as err => return err }
+    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
 }
 
@@ -5457,6 +5503,56 @@ fn collect_enum_decl(acc: []LEnumInfo, td: parser::TypeDecl) -> []LEnumInfo {
     }
 }
 
+/**
+ * collect_externs — the namespace + name + declared foreign symbol of every
+ * `extern fn` in `prog`, in program order (C7.1a — a call to one must target
+ * that raw symbol, never the Teko mangling, or the link fails on an undefined
+ * reference to a name nobody defines). A non-function item, and a function with
+ * a body, contribute no entry.
+ *
+ * @param checker::TProgram prog  the whole typed program to scan
+ * @return []LExternFn  every declared `extern fn`'s call-resolution entry, in
+ *                      program order
+ */
+fn collect_externs(prog: checker::TProgram) -> []LExternFn {
+    mut out: []LExternFn = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_extern_item(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * collect_extern_item — accumulate `it`'s foreign-symbol entry onto `acc` when
+ * it is an `extern fn`; unchanged for every other item kind.
+ *
+ * @param []LExternFn acc  the extern table accumulated so far
+ * @param checker::TItem it  the program item to fold
+ * @return []LExternFn  `acc`, with `it`'s entry appended when applicable
+ */
+fn collect_extern_item(acc: []LExternFn, it: checker::TItem) -> []LExternFn {
+    match it {
+        checker::TFunction as f => collect_extern_fn(acc, f)
+        _ => acc
+    }
+}
+
+/**
+ * collect_extern_fn — accumulate `f`'s foreign-symbol entry onto `acc` when
+ * `f` is an `extern fn`; unchanged for an ordinary Teko function.
+ *
+ * @param []LExternFn acc  the extern table accumulated so far
+ * @param checker::TFunction f  the function item to fold
+ * @return []LExternFn  `acc`, with `f`'s entry appended when applicable
+ */
+fn collect_extern_fn(acc: []LExternFn, f: checker::TFunction) -> []LExternFn {
+    if !f.is_extern { return acc }
+    teko::list::push(acc, LExternFn { namespace = f.namespace; name = f.name; c_symbol = f.c_symbol })
+}
+
 /** LowerItemOut — the module + accumulated loose statements + the WHOLE-PROGRAM
     lifted closure/thunk-function table (A1-7, #382) after folding one top-level item. */
 pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; lifted: []LFunc }
@@ -5474,13 +5570,14 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  * @param []LEnumInfo enums  the program's enum table
  * @param []LFunc lifted  the whole-program lifted closure/thunk-function
  *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @return LowerItemOut | error  the advanced module + loose-statement/lifted
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -5549,14 +5646,15 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  * @param []LEnumInfo enums  the program's enum table
  * @param []LFunc lifted  the whole-program lifted closure/thunk-function
  *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @return LowerItemOut | error  the advanced module (unchanged `loose`) + the
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
@@ -5578,16 +5676,17 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  *                          (A1-4, #382)
  * @param []LFunc lifted  the whole-program lifted closure/thunk-function
  *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @return LoweredFunction | error  the built virtual-main `LFunc` + its grown
  *                                  rodata/lifted tables; the `error` arm when
  *                                  any loose statement fails to lower
  */
-fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc) -> LoweredFunction | error {
+fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn) -> LoweredFunction | error {
     let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
-        defers = teko::list::empty(); loop_targets = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
