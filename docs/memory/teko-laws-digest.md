@@ -181,3 +181,30 @@ A superficie e `teko::isolate` com `Isolate`, `spawn`, `join`, `fork_join`,
 `hardware_parallelism()` — os VERBOS ja estavam certos no desenho, mudou o substantivo. Zero
 `yield`, zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`) seguem
 RESERVADAS e nao congeladas, conforme MASTER_PLAN:262.
+
+**AGRUPAMENTO DE ISOLAMENTO — DESCARTADO por YAGNI, com gatilho escrito (dono, 2026-07-27).** A
+pergunta era como isolar um CONJUNTO sob um mesmo dominio de arena, e a proposta na mesa era
+`#isolation_group(str)`. Fecho: *"quando chegar o momento do `scope {}` isso se resolve"*.
+
+Por que nao e necessario AGORA, e o argumento e concreto: os tres usos nomeados para concorrencia
+(gate de teste, codegen, regressivos) sao TODOS fork-join com escrita disjunta e leitura apos
+barreira. O pai aloca a entrada compartilhada ANTES de bifurcar, cada membro nasce com raiz propria
+e escreve so na dele, junta-se, o pai le. O compartilhamento e somente-leitura de dado que o pai ja
+alocou — nao precisa de dominio comum, precisa de um ponteiro que sobreviva ao fork, e ele sobrevive
+porque o pai nao morreu.
+
+O caso que PARECIA justificar ja fora morto pelo proprio desenho: se cada teste tem raiz propria, o
+setup caro seria refeito por teste? Nao — `concorrencia-adiantada-s8.md` §5.3 decidiu "uma raia, nao
+um isolate por teste". As raias sao poucas (`hardware_parallelism`) e cada uma roda MUITOS testes em
+sequencia. O setup e por raia, e raia E um isolate. Nao sobra o que agrupar.
+
+**O RISCO QUE A PROPOSTA CARREGAVA, registrado porque ele volta em qualquer superficie por string:**
+`#isolation_group("x")` agrupa por casamento de string SEM namespace — a familia de defeito que esta
+sessao pagou tres vezes (o `builtin_fn` por ultimo segmento sequestrando corpos de usuario; o
+`find_enum_info` por nome nu; o `check_ar` por substring). Dois modulos que escolham o mesmo nome de
+grupo sem se conhecerem fundem os dominios EM SILENCIO, e fusao indevida de arena e invisivel ao
+ASan. Se a ideia voltar, a chave tem de ser QUALIFICADA pelo namespace de escrita.
+
+**GATILHO para reabrir:** um consumidor real que precise de estado MUTAVEL compartilhado entre
+isolates E que nao caiba em fork-join. E mesmo entao a resposta provavelmente nao e um grupo, e
+**canal** — o mecanismo ja reservado para compartilhamento, que por ruling vem DEPOIS.
