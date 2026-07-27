@@ -140,22 +140,6 @@ fn type_ns_of(table: TypeTable, name: str) -> str {
     ""
 }
 
-// (#109 W2) the namespace-aware SOURCE-reference resolver — R0-R5. `path` is the WRITTEN reference,
-// `ref_ns` the namespace of the code that wrote it. Resolves to the ONE declaration the reference
-// names, or a fail-loud error. R1 (type-params) and R2 (builtins) are handled by the callers BEFORE
-// this point (type_param_table registers params in ref_ns; builtin_type runs first). Here:
-//   R3 — BARE (a 1-segment path): resolve STRICTLY within ref_ns. A same-ns entry wins; a name that
-//        exists ONLY in other namespace(s) is REJECTED (the cross-namespace collision fix) with a
-//        diagnostic naming those namespaces. An unknown name → "not a user type" (the caller renders
-//        the final "unknown type" message, unchanged).
-//   R4/R0 — QUALIFIED (a >1-segment path): match the LAST segment AND the qualifier (segments minus
-//        the last). An entry matches when name == last AND its namespace is SELECTED by the qualifier
-//        (equals, or ends-with `::qualifier`) — so `emit::Reader` binds ns `teko::emit`, and a fully
-//        canonical `teko::emit::Reader` binds it exactly (R0). Exactly one match wins; zero → unknown;
-//        two or more → an ambiguity error listing the namespaces.
-//   Privates: found-then-rejected is left to the module-visibility pass (check_modules) — a private
-//        type in another namespace is MENTIONABLE here (so error wording is precise), the existing
-//        visibility check keeps rejecting it.
 /**
  * Resolve a BARE stamped generic-instance name (`Box__g__i64`) to its TypeDecl from ANY namespace, or
  * null when `last` is not a stamped instance name (#254 L4/L5). A stamped instance name is
@@ -168,15 +152,15 @@ fn type_ns_of(table: TypeTable, name: str) -> str {
  *
  * @param last  the path's last segment (the referenced type name)
  * @param table the folded type table
- * @return      the stamped instance's decl, or null when `last` is not a stamped instance name
+ * @return      the stamped instance's registration, or null when `last` is not a stamped instance name
  * @since onda-3 (#254 L4/L5)
  */
-fn resolve_bare_g_instance(last: str, table: TypeTable) -> parser::TypeDecl | null {
+fn resolve_bare_g_instance(last: str, table: TypeTable) -> TypeReg | null {
     if !name_is_g_instance(last) { return null }
     mut g: u64 = 0
     loop {
         if g >= table.len { break }
-        if table[g].name == last { return table[g].decl }
+        if table[g].name == last { return table[g] }
         g++
     }
     null
@@ -195,45 +179,117 @@ fn resolve_bare_g_instance(last: str, table: TypeTable) -> parser::TypeDecl | nu
  */
 type NotUserType = struct { }
 
-fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser::TypeDecl | NotUserType | error {
+/**
+ * (#109 W2) The namespace-aware SOURCE-reference resolver — R0-R5 — answering with the matched
+ * REGISTRATION (the decl PLUS the namespace it is declared in). `path` is the WRITTEN reference,
+ * `ref_ns` the namespace of the code that wrote it. R1 (type-params) and R2 (builtins) are handled
+ * by the callers BEFORE this point (`type_param_table` registers params in ref_ns; `builtin_type`
+ * runs first). R3 (bare) and R4/R0 (qualified) are delegated to `resolve_bare_type_reg` /
+ * `resolve_qualified_type_reg`. Privates: found-then-rejected is left to the module-visibility pass
+ * (`check_modules`) — a private type in another namespace is MENTIONABLE here (so error wording is
+ * precise), and that pass keeps rejecting it.
+ *
+ * Answering with the registration rather than the bare decl is what lets a caller that must key on
+ * the DECLARING namespace — the instantiation pass, which stamps each concrete instance into its
+ * generic base's namespace — obtain it from this ONE scope-correct resolution instead of a second,
+ * order-dependent bare re-probe of the table.
+ *
+ * @param path    the WRITTEN reference path
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched registration, `NotUserType` when nothing matches, or a fail-loud error
+ */
+fn resolve_type_reg(path: parser::Path, table: TypeTable, ref_ns: str) -> TypeReg | NotUserType | error {
     if path.segments.len == 0 { return NotUserType { } }
     let last = path.segments[path.segments.len - 1].name
-    if path.segments.len == 1 {
-        // R3 — BARE: strict own-namespace resolution.
-        mut i: u64 = 0
-        loop {
-            if i >= table.len { break }
-            if table[i].name == last && table[i].namespace == ref_ns { return table[i].decl }
-            i++
-        }
-        // (R1/root) a generic type-PARAM (type_param_table registers it at "") and a root-level ("")
-        // type are bare-visible from ANY namespace — "" is the global root scope. Resolve it before
-        // the cross-namespace collision error, so a bare `T` inside a namespaced fn still resolves.
-        if ref_ns != "" {
-            mut k: u64 = 0
-            loop {
-                if k >= table.len { break }
-                if table[k].name == last && table[k].namespace == "" { return table[k].decl }
-                k++
-            }
-        }
-        match resolve_bare_g_instance(last, table) { parser::TypeDecl as td => return td; null => { } }
-        // No same-ns entry. If the name lives elsewhere, that is the cross-namespace collision — the
-        // reference is not visible bare and MUST be qualified (fail-loud). Otherwise it is simply
-        // unknown (the caller's "unknown type" message stands).
-        mut j: u64 = 0
-        loop {
-            if j >= table.len { break }
-            if table[j].name == last {
-                let nss = namespaces_declaring(table, last)
-                let here = if ref_ns == "" { "<top-level>" } else { ref_ns }
-                return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
-            }
-            j++
-        }
-        return NotUserType { }
+    if path.segments.len == 1 { return resolve_bare_type_reg(last, table, ref_ns) }
+    resolve_qualified_type_reg(path, last, table)
+}
+
+/**
+ * R3 — resolve a BARE (single-segment) type reference to its registration: strict own-namespace
+ * resolution first, then the root ("") scope that type-params and top-level types share, then the
+ * collision-proof stamped-instance names. A name that exists ONLY in other namespaces is rejected
+ * fail-loud; a name that exists nowhere is `NotUserType`.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched registration, `NotUserType`, or the not-visible-bare error
+ */
+fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | NotUserType | error {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].name == last && table[i].namespace == ref_ns { return table[i] }
+        i++
     }
-    // R4 / R0 — QUALIFIED: match last segment + qualifier; unique winner, else ambiguity/unknown.
+    match resolve_root_scope_reg(last, table, ref_ns) { TypeReg as r => return r; null => { } }
+    match resolve_bare_g_instance(last, table) { TypeReg as r => return r; null => { } }
+    match reject_or_unknown_bare_type(last, table, ref_ns) {
+        NotUserType => NotUserType { }
+        error as e => e
+    }
+}
+
+/**
+ * (R1/root) The root-scope registration for a bare name: a generic type-PARAM (registered at "" by
+ * `type_param_table`) and a root-level type are bare-visible from ANY namespace, so a bare `T`
+ * inside a namespaced fn still resolves. Null when the reference is already at the root, or when
+ * the root declares no such name.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the root-scope registration, or null
+ */
+fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | null {
+    if ref_ns == "" { return null }
+    mut k: u64 = 0
+    loop {
+        if k >= table.len { break }
+        if table[k].name == last && table[k].namespace == "" { return table[k] }
+        k++
+    }
+    null
+}
+
+/**
+ * The verdict for a bare reference that matched nothing visible: if the name lives in other
+ * namespace(s), that is the cross-namespace collision — the reference is not visible bare and MUST
+ * be qualified (fail-loud, naming those namespaces). Otherwise it is simply unknown and the caller's
+ * own "unknown type" message stands.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        `NotUserType` when the name is nowhere, else the not-visible-bare error
+ */
+fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str) -> NotUserType | error {
+    mut j: u64 = 0
+    loop {
+        if j >= table.len { break }
+        if table[j].name == last {
+            let nss = namespaces_declaring(table, last)
+            let here = if ref_ns == "" { "<top-level>" } else { ref_ns }
+            return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
+        }
+        j++
+    }
+    NotUserType { }
+}
+
+/**
+ * R4/R0 — resolve a QUALIFIED (multi-segment) type reference to its registration: match the last
+ * segment AND the qualifier; exactly one namespace may win, two or more is an ambiguity error, zero
+ * is `NotUserType`.
+ *
+ * @param path   the WRITTEN reference path (more than one segment)
+ * @param last   the path's last segment
+ * @param table  the folded type table
+ * @return       the unique matching registration, `NotUserType`, or the ambiguity error
+ */
+fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable) -> TypeReg | NotUserType | error {
     let qual = path_qualifier(path, path.segments.len - 1)
     mut winner_idx: i64 = -1
     mut matched_ns = ""
@@ -255,8 +311,25 @@ fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser
         let nss = namespaces_declaring(table, last)
         return error { message = $"ambiguous type reference '{qual}::{last}' — the qualifier matches more than one namespace ({nss}). Use the absolute path (`teko::…::{last}`)." }
     }
-    if winner_idx >= 0 { return table[winner_idx to u64].decl }
+    if winner_idx >= 0 { return table[winner_idx to u64] }
     NotUserType { }
+}
+
+/**
+ * The DECL a written type reference names — `resolve_type_reg` with the declaring namespace dropped,
+ * for the callers that only need the declaration.
+ *
+ * @param path    the WRITTEN reference path
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched decl, `NotUserType` when nothing matches, or a fail-loud error
+ */
+fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser::TypeDecl | NotUserType | error {
+    match resolve_type_reg(path, table, ref_ns) {
+        TypeReg as r => r.decl
+        NotUserType => NotUserType { }
+        error as e => e
+    }
 }
 
 // (#109 order fix) split a SOURCE-WRITTEN type name string on "::" into a Path — so an
@@ -2239,55 +2312,212 @@ fn collect_item_insts(it: parser::Item, acc: []parser::TypeExpr) -> []parser::Ty
     out
 }
 
-// THE PASS: collect instantiation sites, then stamp each concrete decl into the table (dedup by
-// mangled name), scanning each stamped body for transitive instantiations until the worklist drains.
-pub fn instantiate_types(program: parser::Program, table: TypeTable) -> TypeTable {
-    mut work: []parser::TypeExpr = teko::list::empty()
+/**
+ * InstSite — one WRITTEN generic-type use (`Box<i64>`) paired with the namespace whose source text
+ * wrote it. The collectors walk a syntax tree and know nothing of namespaces; the enclosing
+ * `parser::Item` (or, for a transitive use found inside a stamped body, the template's own
+ * declaring namespace) does. Carrying that namespace ALONGSIDE the site is what makes the
+ * instantiation pass resolve each site in the scope it was written in, instead of falling back to a
+ * scope-less bare table probe whose answer is whichever same-bare-named type happens to sit earliest
+ * in the table — i.e. an answer decided by source-discovery order rather than by the program.
+ */
+type InstSite = struct { site: parser::TypeExpr; ref_ns: str }
+
+/**
+ * Tag a freshly collected batch of instantiation sites with the namespace that wrote them and append
+ * it to the worklist. The collectors stay namespace-blind (one walk, one namespace); this is the one
+ * place the two are joined.
+ *
+ * @param sites   the raw sites one collector walk produced
+ * @param ref_ns  the namespace whose source text contains them
+ * @param acc     the worklist so far
+ * @return        `acc` extended with every site, each tagged with `ref_ns`
+ */
+fn tag_inst_sites(sites: []parser::TypeExpr, ref_ns: str, acc: []InstSite) -> []InstSite {
+    mut out = acc
     mut i = 0
-    loop { if i >= program.items.len { break }; work = collect_item_insts(program.items[i], work); i++ }
-    if work.len == 0 { return table }   // no generic type used → unchanged (corpus-safe)
-    mut tbl = table
+    loop {
+        if i >= sites.len { break }
+        out = teko::list::push(out, InstSite { site = sites[i]; ref_ns = ref_ns })
+        i++
+    }
+    out
+}
+
+/**
+ * Every instantiation site the program's items name, each tagged with its item's namespace — the
+ * SEED of the stamping fixpoint (the transitive sites found inside a stamped body are appended as
+ * the worklist drains).
+ *
+ * @param program the flattened program
+ * @return        the seed worklist
+ */
+fn seed_inst_sites(program: parser::Program) -> []InstSite {
+    mut work: []InstSite = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        let raw = collect_item_insts(program.items[i], teko::list::empty())
+        work = tag_inst_sites(raw, program.items[i].namespace, work)
+        i++
+    }
+    work
+}
+
+/**
+ * The generic TEMPLATE registration a written instantiation site names, resolved in the namespace
+ * the site was WRITTEN in (R0/R3/R4 — the same rules `resolve_generic_inst` applies at typing, so
+ * the stamp and the use can never disagree about WHICH `Box` is meant).
+ *
+ * When the scope-correct resolution finds nothing — a reference that is not legally visible bare
+ * from `ref_ns`, which typing will reject on its own — the pass falls back to an ARITY-MATCHED bare
+ * scan so that no site the previous scope-less probe reached is silently lost. That fallback is
+ * arity-matched precisely because the old scope-less probe was not: a non-generic `Box` declared in
+ * ANY other namespace answered the probe for `Box<i64>` and the arity check then discarded the site
+ * forever, leaving `Box__g__i64` unstamped. Both paths are decided by the program, never by the
+ * order the sources were discovered in.
+ *
+ * @param nt      the written generic-type use
+ * @param table   the type table as stamped so far
+ * @param ref_ns  the namespace the use was written in
+ * @return        the template's registration, or null when no generic base of this arity exists
+ */
+fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str) -> TypeReg | null {
+    let arity = nt.args.len
+    match resolve_type_reg(nt.path, table, ref_ns) {
+        TypeReg as r => { if r.decl.type_params.len == arity { return r } }
+        NotUserType => { }
+        error => { }
+    }
+    let name = nt.path.segments[nt.path.segments.len - 1].name
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_last_segment(table[i].name) == name && table[i].decl.type_params.len == arity { return table[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * Resolve one site's type-ARGUMENTS to concrete types, or null when any of them does not concretize
+ * here (a type-param inside a generic body: that site concretizes only when the OUTER generic is
+ * instantiated). Each argument is resolved in the namespace the site was written in; an argument
+ * that misses there is retried in the TEMPLATE's namespace, which covers the transitive sites read
+ * back out of an already-substituted body, where template-scoped and site-scoped spellings are
+ * mixed. Both scopes are properties of the program, so the answer never depends on table order.
+ *
+ * @param nt        the written generic-type use
+ * @param table     the type table as stamped so far
+ * @param ref_ns    the namespace the use was written in
+ * @param template  the resolved template registration (its namespace is the retry scope)
+ * @return          the concrete argument types in order, or null when one does not concretize
+ */
+fn resolve_inst_args(nt: parser::NamedType, table: TypeTable, ref_ns: str, template: TypeReg) -> []Type | null {
+    mut argtypes: []Type = teko::list::empty()
+    mut a = 0
+    loop {
+        if a >= nt.args.len { break }
+        match resolve_inst_arg(nt.args[a], table, ref_ns, template.namespace) {
+            Type as t => argtypes = teko::list::push(argtypes, t)
+            null => return null
+        }
+        a++
+    }
+    argtypes
+}
+
+/**
+ * One type-argument's concrete type: resolved in the site's namespace, retried in the template's.
+ *
+ * @param arg       the written type-argument
+ * @param table     the type table as stamped so far
+ * @param ref_ns    the namespace the use was written in
+ * @param template_ns  the template's declaring namespace (the retry scope)
+ * @return          the concrete type, or null when it resolves in neither scope
+ */
+fn resolve_inst_arg(arg: parser::TypeExpr, table: TypeTable, ref_ns: str, template_ns: str) -> Type | null {
+    match resolve_type(arg, table, ref_ns) { Type as t => return t; error => { } }
+    if template_ns == ref_ns { return null }
+    match resolve_type(arg, table, template_ns) { Type as t => t; error => null }
+}
+
+/**
+ * The concrete `TypeDecl` a template stamps at one instantiation: the template's body with its
+ * type-params substituted by the site's written arguments, renamed to the mangled instance name and
+ * stripped of its own type-params. An instance whose arguments carry unsafe data is itself unsafe
+ * (§2 contagion-by-composition), even when the template is not.
+ *
+ * @param template the generic template's registration
+ * @param mangled  the instance's mangled name (`Box__g__i64`)
+ * @param nt       the written generic-type use (its args are the substitution)
+ * @param argtypes the resolved argument types (for the unsafe-contagion probe)
+ * @param table    the type table as stamped so far
+ * @return         the concrete instance decl to stamp
+ */
+fn stamped_instance_decl(template: TypeReg, mangled: str, nt: parser::NamedType, argtypes: []Type, table: TypeTable) -> parser::TypeDecl {
+    let gen = template.decl
+    let nbody = subst_body_names(gen.body, gen.type_params, nt.args)
+    let inst_unsafe = gen.is_unsafe || generic_args_unsafe_carrying(argtypes, table)
+    parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = inst_unsafe; must_free = gen.must_free }
+}
+
+/**
+ * THE PASS (S4): stamp the CLOSURE of the program's generic-type instantiations into the type table.
+ * Every written use is seeded with the namespace that wrote it, and every stamped body is re-scanned
+ * for the uses IT names (tagged with the template's namespace), so the worklist drains only when no
+ * new instance can be discovered — the set of stamped instances is a fixpoint of the program, not of
+ * the order its sources were visited in. Stamping dedups by exact mangled name, so a repeated use
+ * costs one probe. No generic type used → the table is returned UNCHANGED (corpus-safe).
+ *
+ * @param program the flattened program
+ * @param table   the collected type table
+ * @return        the table plus one concrete decl per reachable generic instantiation
+ */
+pub fn instantiate_types(program: parser::Program, table: TypeTable) -> TypeTable {
+    mut state = StampState { table = table; work = seed_inst_sites(program) }
+    if state.work.len == 0 { return table }
     mut wi = 0
     loop {
-        if wi >= work.len { break }
-        let te = work[wi]
+        if wi >= state.work.len { break }
+        let entry = state.work[wi]
         wi++
-        match te {
-            parser::NamedType as nt => {
-                if nt.args.len == 0 { continue }
-                let name = nt.path.segments[nt.path.segments.len - 1].name
-                // resolve args → concrete types for the mangled name; an unresolved arg (e.g. a
-                // type-param inside a generic body) means this site concretizes only when the OUTER
-                // generic is instantiated — skip it here.
-                mut argtypes: []Type = teko::list::empty()
-                mut ok = true
-                mut a = 0
-                loop {
-                    if a >= nt.args.len { break }
-                    match resolve_type(nt.args[a], tbl, type_ns_of(tbl, name)) { Type as t => argtypes = teko::list::push(argtypes, t); error => { ok = false; break } }   // (#109 W2) resolve args in the generic base's OWN ns (its args are written alongside it)
-                    a++
-                }
-                if !ok { continue }
-                let mangled = generic_inst_name(name, argtypes)
-                match type_table_find(tbl, mangled, "") { parser::TypeDecl => continue; error => { } }   // (#109 W1) already-stamped probe — no referencing ns
-                match type_table_find(tbl, name, "") {   // (#109 W1) generic-base lookup in the program-wide pass — no referencing ns
-                    parser::TypeDecl as gen => {
-                        if gen.type_params.len != nt.args.len { continue }   // arity error surfaces at resolve
-                        let nbody = subst_body_names(gen.body, gen.type_params, nt.args)
-                        let inst_unsafe = gen.is_unsafe || generic_args_unsafe_carrying(argtypes, tbl)
-                        let stamped = parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = inst_unsafe; must_free = gen.must_free }
-                        tbl = teko::list::push(tbl, TypeReg { name = mangled; namespace = type_ns_of(tbl, name); vis = gen.vis; decl = stamped })   // (#109 W2) stamp in the generic base's ns so the substituted body's bare field types resolve there
-                        work = collect_body_insts(nbody, work)   // transitive instantiations in the stamped body
-                    }
-                    error => continue   // unknown base type → reported at typing
-                }
-            }
-            _ => continue
-        }
+        state = stamp_inst_site(entry, state)
     }
-    // (W9.4) normalize generic-INSTANCE references in the stamped bodies to bare stamped names, so
-    // codegen / VM / TKB (reading the syntactic body) agree with the resolved value types.
-    normalize_table_instances(tbl)
+    normalize_table_instances(state.table)
+}
+
+/**
+ * StampState — the instantiation fixpoint's two carried values: the table stamped so far and the
+ * worklist of sites still to consider. Paired so one site's handling is a single pure step
+ * (`stamp_inst_site`) instead of a nest of early-outs mutating two accumulators in place.
+ */
+type StampState = struct { table: TypeTable; work: []InstSite }
+
+/**
+ * One step of the fixpoint: stamp the instance `entry` names, if it names one that is not stamped
+ * yet, and queue the uses the freshly stamped body itself names. Returns `state` UNCHANGED whenever
+ * the site does not (yet) concretize: a non-`NamedType` site, a bare reference with no arguments, a
+ * base that is not a generic of this arity (typing reports it), an argument that is still a
+ * type-param (it concretizes when the OUTER generic is instantiated, from the body re-scan), or an
+ * instance already stamped.
+ *
+ * @param entry the site plus the namespace that wrote it
+ * @param state the table + worklist carried by the fixpoint
+ * @return      the state after this site, unchanged when the site stamps nothing
+ */
+fn stamp_inst_site(entry: InstSite, state: StampState) -> StampState {
+    let nt = match entry.site { parser::NamedType as n => n; _ => return state }
+    if nt.args.len == 0 { return state }
+    let tbl = state.table
+    let template = match generic_template_reg(nt, tbl, entry.ref_ns) { TypeReg as r => r; null => return state }
+    let argtypes = match resolve_inst_args(nt, tbl, entry.ref_ns, template) { []Type as ats => ats; null => return state }
+    let mangled = generic_inst_name(nt.path.segments[nt.path.segments.len - 1].name, argtypes)
+    match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
+    let stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
+    let grown = teko::list::push(tbl, TypeReg { name = mangled; namespace = template.namespace; vis = template.decl.vis; decl = stamped })
+    let queued = tag_inst_sites(collect_body_insts(stamped.body, teko::list::empty()), template.namespace, state.work)
+    StampState { table = grown; work = queued }
 }
 
 // does `name` carry the `__g__` generic-instance infix? (the collision-proof marker a stamped
