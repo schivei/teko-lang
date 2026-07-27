@@ -83,7 +83,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ── OS / arch detection ──────────────────────────────────────────────────────
-# Sets OS (macos|linux), ARCH (x86_64|arm64|riscv64), LIBC (glibc|musl, Linux only), and
+# Sets OS (macos|linux), ARCH (x86_64|arm64), LIBC (glibc|musl, Linux only), and
 # LABEL (release asset label, empty when no prebuilt asset is published for this platform —
 # e.g. Intel macOS).
 detect_platform() {
@@ -99,7 +99,6 @@ detect_platform() {
     case "$uname_m" in
         x86_64|amd64)          ARCH="x86_64" ;;
         arm64|aarch64)         ARCH="arm64" ;;
-        riscv64)               ARCH="riscv64" ;;
         *)                     die "unsupported architecture: $uname_m" ;;
     esac
 

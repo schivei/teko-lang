@@ -105,18 +105,15 @@ sha256_of() {
 
 # host_seed_label LABEL — echoes the committed-seed label for a release asset LABEL, or empty
 # when no host seed exists for it. The two axes are NOT the same: a release LABEL names a
-# PUBLISHED TARGET (six Linux ones, glibc x musl x three arches), a seed names a HOST THAT RUNS
-# THE COMPILER. musl and riscv64 are cross-compiled outputs with no runner behind them, so a
-# request for one maps onto the host that actually executes there (x86_64/arm64) or onto nothing
-# (riscv64 — no runner exists, so pr.yml's riscv64 producers stand on x86_64 hardware and only
-# the gcc they drive is riscv64).
+# PUBLISHED TARGET (four Linux ones, glibc x musl x two arches), a seed names a HOST THAT RUNS
+# THE COMPILER. A musl label has no runner of its own, so a request for one maps onto the host
+# that actually executes there (x86_64/arm64).
 host_seed_label() {
   case "$1" in
     linux-x86_64|linux-x86_64-*)     printf '%s' "linux-x86_64" ;;
     linux-arm64|linux-arm64-*)       printf '%s' "linux-arm64" ;;
     macos-arm64)                     printf '%s' "macos-arm64" ;;
     windows-x86_64)                  printf '%s' "windows-x86_64" ;;
-    windows-arm64)                   printf '%s' "windows-arm64" ;;
     *)                               printf '%s' "" ;;
   esac
 }
@@ -152,7 +149,7 @@ with lzma.open(sys.argv[1]) as f, open(sys.argv[2], "wb") as g:
 seed_from_committed() {
   seed_label="$(host_seed_label "$1")"
   if [ -z "$seed_label" ]; then
-    log "no committed host seed exists for '$1' (musl/riscv64 are cross-compiled targets, not hosts)"
+    log "no committed host seed exists for '$1' (a musl label is a published target, not a host)"
     return 1
   fi
   sums="$SEEDS_DIR/SEEDS.sha256"

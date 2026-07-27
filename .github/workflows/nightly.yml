@@ -74,7 +74,7 @@ concurrency:
 
 jobs:
   # ── plan: the leg table and the tag, decided once ─────────────────────────────────────────
-  # ALWAYS FULL. A nightly that minted fewer than nine assets would leave the release able to
+  # ALWAYS FULL. A nightly that minted fewer than seven assets would leave the release able to
   # promote only part of a set, which is worse than not publishing at all: the release would look
   # successful and ship an incomplete platform matrix.
   plan:
@@ -134,16 +134,6 @@ jobs:
             printf '%-8s ' "$t"
             command -v "$t" || echo '(absent)'
           done
-
-      # riscv64 PRODUCERS ONLY. There is no riscv64 runner, so the target's OWN gcc runs on an
-      # emulated CPU inside a linux/riscv64 container. scripts/native_linux_asset.sh probes the
-      # registration before compiling and fails with a named error if it is missing, so this step
-      # going wrong can never become a silent wrong-arch artifact.
-      - name: Register binfmt for riscv64 (emulated CPU, native toolchain)
-        if: matrix.binfmt
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: riscv64
 
       # THE SHARED PRODUCTION PATH — identical call to the one pr.yml's `artifact` root makes.
       - name: Produce this leg's assets (seed → ladder → dry build → native assets → stage)
@@ -240,7 +230,7 @@ jobs:
   #              seed change between a PR's run and its merge is ORDINARY — and it is the single
   #              most likely honest explanation for two builds of one tree disagreeing.
   #   TOOLCHAIN  the Linux assets are built in pinned container images, but the tags are mutable
-  #              (`riscv64/debian:unstable` IS sid and moves daily); the macOS/Windows assets are
+  #              and can be re-pointed under a build; the macOS/Windows assets are
   #              built by the runner's own clang, pinned by nothing and rotated with the image.
   #
   # WHEN ALL THREE MATCH AND THE BYTES DIFFER, THAT IS THE DEFECT — non-determinism in the build of
@@ -260,7 +250,7 @@ jobs:
   #   * the PR's run predates the artifacts' retention and they are gone — the download fails;
   #   * the PR ran the LIGHT tier and simply never produced that label — the label is absent from
   #     an otherwise present download.
-  # The last one is worth reading twice: on the light tier only two of nine assets exist to compare,
+  # The last one is worth reading twice: on the light tier only two of seven assets exist to compare,
   # so this gate's reach is exactly as wide as the light/full criterion makes it.
   reproducibility:
     needs: [plan, build]
@@ -470,11 +460,8 @@ jobs:
                    teko-linux-x86_64-musl.tar.gz \
                    teko-linux-arm64-glibc.tar.gz \
                    teko-linux-arm64-musl.tar.gz \
-                   teko-linux-riscv64-glibc.tar.gz \
-                   teko-linux-riscv64-musl.tar.gz \
                    teko-macos-arm64.tar.gz \
                    teko-windows-x86_64.zip \
-                   teko-windows-arm64.zip \
                    teko-bootstrap-src.tar.gz; do
             if [ ! -f "dist/$f" ]; then
               MISSING="$MISSING $f"
@@ -486,7 +473,7 @@ jobs:
             echo "matrix with holes, with nothing red anywhere to say so." >&2
             exit 1
           fi
-          echo "all nine assets + the portable bootstrap snapshot are present"
+          echo "all seven assets + the portable bootstrap snapshot are present"
 
           # Merge the per-platform checksum files into ONE canonical SHA256SUMS.txt, then discard
           # the per-platform ones — the release regenerates its own over the promoted bytes, and a
