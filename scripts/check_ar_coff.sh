@@ -121,9 +121,16 @@ if command -v dumpbin >/dev/null 2>&1; then
         fail "dumpbin /LINKERMEMBER found no linker member in $ARCHIVE"
     fi
     if [[ -n "$SYMBOL" ]]; then
-        if ! printf '%s\n' "$linkermember_out" | grep -qi "$SYMBOL"; then
+        # A plain `grep -qi "$SYMBOL"` is a SUBSTRING match anywhere on the line — it silently
+        # PASSES when a longer identifier merely CONTAINS `$SYMBOL` (measured: the own-native
+        # mangler once leaked a `teko_` prefix into the archived symbol, and `teko_ar_link_run__add`
+        # contains `ar_link_run__add`). Anchored to (start-of-line|whitespace) on the left and
+        # (whitespace|end-of-line) on the right — `dumpbin`'s own column boundaries — so a
+        # decorated/prefixed neighbor can never satisfy it.
+        sym_pattern="(^|[[:space:]])${SYMBOL}([[:space:]]|\$)"
+        if ! printf '%s\n' "$linkermember_out" | grep -Eqi "$sym_pattern"; then
             trace "dumpbin /LINKERMEMBER output:"; printf '%s\n' "$linkermember_out" | sed 's/^/      | /' >&2
-            fail "dumpbin /LINKERMEMBER does not list '$SYMBOL'"
+            fail "dumpbin /LINKERMEMBER does not list '$SYMBOL' as a whole word"
         fi
     fi
 else

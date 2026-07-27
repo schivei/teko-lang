@@ -1995,7 +1995,14 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
  * `__.SYMDEF` writer (`emit_static_archive_macho`); `x86_64-windows` via the
  * MS two-linker-member `.lib` writer (`emit_static_archive_coff`); every wasm
  * target is a NAMED honest stop — a wasm module has no static-archive
- * convention to wrap into (M.3 — no fake artifact). `lower_program`
+ * convention to wrap into (M.3 — no fake artifact). Lowers with `flat_symbols
+ * = true` (`teko::lir::mangle_fn_symbol`'s carve-out): the archive itself IS
+ * the published C contract — there is no separate wrapper the way the C
+ * backend's `abi = "c"` reverse-FFI export has — so every function's LIR
+ * symbol must be the BARE mangle (`<ns>__<name>`), never `TEKO_USER_PREFIX`-
+ * decorated, or a real consumer's `extern` declaration fails to link (measured:
+ * `examples/toolchain/ar_link_run` published `teko_ar_link_run__add` where the
+ * archive contract is `ar_link_run__add`). `lower_program`
  * unconditionally synthesizes a virtual `int main()` from the project's loose
  * top-level statements (`emit_native`'s entry point for a `binary` artifact)
  * — a library has none of its own, but `lower_program` is shared with the
@@ -2016,7 +2023,7 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
 fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let raw_lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let raw_lmod = match teko::lir::lower_program(prog, true) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
     let lmod = strip_virtual_main(raw_lmod)
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {

@@ -121,6 +121,12 @@ fn lwt_fn(name: str, ns: str, params: []parser::Param, ret: checker::Type, body:
     }
 }
 
+/** lwt_fn_item — `lwt_fn`, coerced to a `checker::TItem` (the shape a `checker::TProgram.items`
+    list needs — mirrors `lwt_extern_fn`'s own TItem-returning contract). */
+fn lwt_fn_item(name: str, ns: str, params: []parser::Param, ret: checker::Type, body: []checker::TStatement) -> checker::TItem {
+    lwt_fn(name, ns, params, ret, body)
+}
+
 /** lwt_lower_expr_text — lower a single expression (with no registered struct layouts)
     into a fresh i64 fn body and return its printed LIR (for asserting on the emitted
     instructions). */
@@ -139,6 +145,7 @@ fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str 
         func = f0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -1864,4 +1871,63 @@ fn lwt_call_symbol_resolves_the_assert_seed() {
     names = teko::list::push(names, "is_true")
     let no_ext: []LExternFn = teko::list::empty()
     teko::assert::is_true(match call_symbol(lwt_bare_call(names, ""), no_ext) { str as s => s == "teko__assert__is_true"; error => false })
+}
+
+/**
+ * Assert `call_symbol`'s static/shared-archive carve-out (`flat = true`, `mangle_fn_symbol`'s
+ * `flat`): a Teko-Teko call inside a `flat_symbols` module resolves WITHOUT `TEKO_USER_PREFIX` —
+ * the SAME bare mangle a `flat`-lowered function's own declared symbol carries
+ * (`lwt_lower_program_flat_symbols_strips_the_user_prefix`), so the two never drift apart inside
+ * one static/shared archive.
+ */
+#test
+fn lwt_call_symbol_flat_strips_the_user_prefix() {
+    let user = lwt_bare_call(teko::list::push(teko::list::empty(), "add"), "ar_link_run")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(user, no_ext, true) { str as s => s == "ar_link_run__add"; error => false })
+}
+
+/**
+ * Assert `lower_program`'s static/shared-archive carve-out (`flat_symbols = true`,
+ * `emit_static_lib`'s own argument): a top-level function's LIR symbol drops
+ * `TEKO_USER_PREFIX` entirely, publishing exactly the archived symbol a real host
+ * `ar`/`nm`/`ld` must resolve. This is the regression `examples/toolchain/ar_link_run` measures
+ * end to end (KP16's static archive) — before this fix, the archive published
+ * `teko_ar_link_run__add` where the real contract is `ar_link_run__add`, and the consumer's
+ * `extern long long ar_link_run__add(...)` never linked.
+ *
+ * @return void
+ */
+#test
+fn lwt_lower_program_flat_symbols_strips_the_user_prefix() {
+    let body = teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(42)))
+    let f = lwt_fn_item("add", "ar_link_run", teko::list::empty(), lwt_prim(checker::PrimKind::I64), body)
+    let items = teko::list::push(teko::list::empty(), f)
+    let m = match lower_program(checker::TProgram { items = items }, true) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.funcs[0].symbol == "ar_link_run__add")
+}
+
+/**
+ * Assert a Teko-Teko call between two functions inside the SAME `flat_symbols` module resolves
+ * to the SAME flat spelling the callee's own declaration carries — the general (multi-function)
+ * case `lwt_lower_program_flat_symbols_strips_the_user_prefix`'s single-function fixture cannot
+ * exercise: a static/shared archive with internal calls between its own project functions must
+ * keep the call site and the callee's definition consistent, or the archived object never links
+ * against itself.
+ *
+ * @return void
+ */
+#test
+fn lwt_lower_program_flat_symbols_keeps_internal_calls_consistent() {
+    let helper_body = teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(1)))
+    let helper = lwt_fn_item("helper", "ar_link_run", teko::list::empty(), lwt_prim(checker::PrimKind::I64), helper_body)
+    let call = lwt_call(lwt_path1("helper"), "ar_link_run", teko::list::empty(), lwt_prim(checker::PrimKind::I64))
+    let caller_body = teko::list::push(teko::list::empty(), lwt_ret(call))
+    let caller = lwt_fn_item("caller", "ar_link_run", teko::list::empty(), lwt_prim(checker::PrimKind::I64), caller_body)
+    mut items = teko::list::push(teko::list::empty(), helper)
+    items = teko::list::push(items, caller)
+    let m = match lower_program(checker::TProgram { items = items }, true) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @ar_link_run__helper()")
+    teko::assert::is_true(!teko::str::contains(text, "teko_ar_link_run__helper"))
 }

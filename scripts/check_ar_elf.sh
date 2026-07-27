@@ -86,10 +86,18 @@ if [[ "$nm_rc" -ne 0 ]]; then
 fi
 
 if [[ -n "$SYMBOL" ]]; then
-    trace "step: symbol index lists '$SYMBOL'"
-    if ! printf '%s\n' "$nm_out" | grep -q "$SYMBOL"; then
+    trace "step: symbol index lists '$SYMBOL' (whole word, not substring)"
+    # A plain `grep -q "$SYMBOL"` is a SUBSTRING match anywhere on the line — it silently
+    # PASSED when the own-native mangler leaked a `teko_` prefix into the archived symbol
+    # (`teko_ar_link_run__add` CONTAINS `ar_link_run__add`), a "gate that does not gate" that
+    # only the later real-linker step caught. Anchored to (start-of-line|whitespace) on the
+    # left and (whitespace|end-of-line) on the right — nm's own column boundaries, in both the
+    # armap index (`SYMBOL in member.o`) and the per-member listing (`ADDR TYPE SYMBOL`) shapes
+    # — so a longer identifier merely containing `$SYMBOL` can never satisfy it.
+    sym_pattern="(^|[[:space:]])${SYMBOL}([[:space:]]|\$)"
+    if ! printf '%s\n' "$nm_out" | grep -Eq "$sym_pattern"; then
         trace "nm --print-armap output:"; printf '%s\n' "$nm_out" | sed 's/^/      | /' >&2
-        fail "the archive symbol index does not list '$SYMBOL'"
+        fail "the archive symbol index does not list '$SYMBOL' as a whole word"
     fi
 fi
 
