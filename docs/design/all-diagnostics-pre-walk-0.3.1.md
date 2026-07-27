@@ -145,6 +145,21 @@ emits in (file, line, col) order by construction, and pass-ordered concatenation
 The build layer keeps its existing two-level order: FILE-boundary (parse) diagnostics first, then
 everything the checker collected (`project.tks::append_diags`).
 
+## 4.1 Diagnostic quality, which is the point the build count only proxies
+
+The four-folded probe, same fixtures, before and after:
+
+| | before | after |
+|---|---|---|
+| diagnostics printed | 1 | 4 |
+| of those, carrying `file:line:col` | 0 | 4 |
+
+Before, a pre-walk rejection printed one placeless line — `struct/class 'Wrapper' has an
+unsafe-typed field 'buf' …` with no file, no line, no column — and hid the other three. A build
+that reports one error at a time forces N edit/build cycles, and on this project a cycle is the
+whole CI lead time. The `file` field added to `TypeReg` is what makes the declaration-gate
+diagnostics locatable at all.
+
 ## 5. What this does NOT change
 
 * Monomorphization is still never attempted with a non-empty diagnostic list — `PreMono.prog` is a
@@ -154,3 +169,27 @@ everything the checker collected (`project.tks::append_diags`).
 * The `F8 target` rows keep their own build: their subject *is* the build configuration
   (`TEKO_TARGET=<unsupported>`), and a differing configuration is a different build by
   construction. That build is not attributable to this issue.
+
+## 6. Gate, as run
+
+Host: linux x86_64 glibc. Seed: the lane's `teko 0.3.0.30-beta`.
+
+| step | result |
+|---|---|
+| seed → gen1 (`build . --no-verify --release`) | exit 0, self-reported peak 1345.5 MB |
+| `TEKO_MEM_PARANOID=1` seed → gen1 | exit 0, self-reported peak 1908.9 MB |
+| `teko test .` with gen1 — `.tkt` unit suite | 1035 tests, 0 failures |
+| `teko test .` with gen1 — `.tkr` regressors | 10 run, 1 skipped, 6 failed, **19 builds** |
+| `const_ns_qualified_visibility_rejected.tkr` | **regression ok, 3 builds** (was 6) |
+| FIXPOINT gen2 == gen3 | NOT REACHED — see below |
+
+The six regressor failures are all `native backend N1/N2 … not yet lowered / no layout registered`,
+the wagon's known red. Every one was reproduced with the gen1 built from a clean export of
+`origin/ci/0.3.1-lanes-e-seeds`, with the identical message — they pre-date this change.
+
+The FIXPOINT could not be measured because the chain does not reach gen2 on this lane at all:
+gen1 building the tree stops at `const struct: initializer is not a struct literal (Tier-A
+follow-up) (#594)`. That stop reproduces byte-for-byte on the clean base export built with the base
+gen1, so it is pre-existing and outside this change. It is worth naming for a separate fix on two
+counts: it blocks the fixpoint gate, and the message itself is placeless (no `file:line:col`), which
+is the same M.3 gap in the consteval stage that this change closed in the pre-walk stage.
