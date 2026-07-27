@@ -340,6 +340,9 @@ Cada volta é medível e o progresso é o número de fases vencidas, não a cont
 
 > *"Não interessa se está verde ou não, é por isso também de usar as cargas caso queira evitar
 > disparar CI, mas é importante sempre exercitar pushes frequentes."*
+>
+> *"Não é só em vermelho, enquanto estiver trabalhando/produzindo, busque usar as cargas, isso
+> diminui o número de alertas de cancelamento."*
 
 A `cargo/**` tem DUAS funções, e usar só a primeira é o erro que esta nota registra:
 
@@ -362,9 +365,43 @@ Tudo a um crash de distância de sumir.
 **A regra invertida é a certa:** vagão vermelho por decisão do owner é vagão que se empurra MAIS
 cedo, não menos. O vermelho já é o estado desejado; não há o que preservar segurando.
 
-**Operacional:** commit por fatia, push por fatia — vagão e cargas. Uma carga que acumula trabalho
-no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que existe. O
-briefing de carga deve exigir push, não só commit.
+### O destino default é a carga — não só no vermelho (owner 2026-07-26, segunda ordem)
+
+A primeira leitura desta regra foi estreita demais: *"enquanto o vagão está vermelho eu empurro
+para as cargas"*. O owner corrigiu o escopo — **não é o vermelho que escolhe o destino, é o estar
+produzindo**. Enquanto há trabalho em voo, a carga é o destino; o vagão recebe **marcos**, não
+fatias.
+
+**O motivo é o alerta de cancelamento, e ele é mecânico.** O `pr.yml` declara
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+
+que é o certo — sem ele cada push do trem empilhado deixa uma corrida órfã queimando runner. Mas
+o preço é que **todo push no vagão com PR aberto cancela a corrida anterior**, e cada
+cancelamento vira notificação para o owner. Empurrar cinco fatias em uma hora não produz cinco
+medições: produz **uma** medição e **quatro alertas de cancelamento**. O sinal que o owner recebe
+fica pior quanto mais frequente é o push — exatamente o oposto do que a regra de push frequente
+quer.
+
+A carga desmancha o conflito porque **as duas metades da regra vivem em ramos diferentes**:
+
+| | frequência | acorda CI? | gera cancelamento? |
+|---|---|---|---|
+| `cargo/**` (sem PR) | **por fatia** | não — os portões são `pull_request`-only | não |
+| vagão (com PR) | **por marco** | sim | só quando há o que medir |
+
+**Marco** é um estado que vale medir, não um relógio: um degrau da escada fechado, uma carga
+drenada para o vagão, o gate local passando, ou o owner pedindo. Fora disso, `cargo/**`.
+
+**Operacional:** commit por fatia, push por fatia — **para a carga**. Uma carga que acumula
+trabalho no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que
+existe. O briefing de carga deve exigir push, não só commit. E o integrador que está ele próprio
+produzindo (não só drenando) abre uma carga para si — **não existe trabalho em voo que pertença
+ao vagão**; o vagão é onde o trabalho pousa.
 
 ## Armadilhas do worktree compartilhado
 
