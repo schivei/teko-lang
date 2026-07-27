@@ -34,7 +34,23 @@
 #
 # 6.6x on the checker. Owner, 2026-07-27: *"usa o macOS, que é comprovadamente o mais rápido."*
 # A theory is a loop a human waits inside — the runner that shortens the wait is the right runner.
-# If a degrau ever turns out to be arch-specific, THAT is the moment to add a second leg.
+#
+# WHEN A DEGRAU TURNS OUT TO BE PLATFORM-SPECIFIC, SWAP THE HOST — DO NOT ADD A LEG. Owner ruling
+# 2026-07-27: *"vamos escalar pelos mais rápidos, logo, se passar verde e o vagão apontar vermelho,
+# foca no vermelho mais rápido, e o anterior basta trocar o host do CI da theory."* The `runner`
+# dispatch input exists for exactly that, so the swap costs no commit.
+#
+# The working order that follows from it:
+#
+#   1. iterate on the FASTEST host until the theory is green there;
+#   2. reapply to the wagon; if a sublane still reds, pick the FASTEST of the red ones;
+#   3. dispatch this theory with `runner` set to THAT host and iterate there, still one lane;
+#   4. repeat until no sublane reds.
+#
+# What this buys is that a platform-specific defect is hunted at ONE runner's cost instead of the
+# wagon's six-plus-downstream, and the hunt always runs on the quickest host that can still SEE the
+# defect. A second permanent leg would pay for coverage on every push to answer a question that is
+# only ever asked after a specific red — the wagon already provides that coverage.
 #
 # HOW IT IS MEANT TO BE USED: push, read the address, close that degrau on a cargo branch, push
 # again. When step 2 finally reports PASSED and step 3 is green, the theory has done its job — and
@@ -65,11 +81,21 @@ on:
         description: 'run `teko test .` after the fixpoint (off = fixpoint only, ~2 min faster)'
         required: false
         default: 'true'
+      runner:
+        description: 'the host to reproduce on — SWAP this, never add a second leg (see header)'
+        required: false
+        default: 'macos-latest'
+        type: choice
+        options:
+          - macos-latest
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
 
 jobs:
   self-host:
     name: theory / self-host
-    runs-on: macos-latest
+    runs-on: ${{ github.event.inputs.runner || 'macos-latest' }}
     timeout-minutes: 90
     permissions:
       contents: read
