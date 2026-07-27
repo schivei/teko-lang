@@ -59,6 +59,46 @@ reproduces the mask exactly. Parking one case at a time and rebuilding gives the
 So the residual is real, it is exactly the shape the ruling forbids, and it is produced by pass 2
 (`collect`, three of the four) and pass 3 (`check_modules`, one of the four).
 
+### 2.1 What the four `cases/*.tks` rows are NOT
+
+They are not scenarios that *chose* a private build. Read the table above again: with all four
+folded in, the build emits **one** diagnostic and hides thirty-seven. Moving those files into the
+project without changing the compiler does not save four builds — it turns thirty-seven passing
+scenarios into thirty-seven failures, because the diagnostics they pin are never printed. The
+regressor arrangement is downstream of the compiler behaviour, not the other way round.
+
+The DECLARATION-boundary item walk, by contrast, *had* already been converted (owner ruling
+2026-07-26, `PreMono.diags`): that is exactly why thirty-seven scenarios already shared one build.
+The ruling was half-implemented — the item walk, yes; the six passes before it, no.
+
+## 2.2 After — measured on the same fixtures
+
+Rebuilt with the pre-walk passes collecting:
+
+| fixture arrangement | diagnostics in ONE build |
+|---|---|
+| all four `cases/*.tks` folded into `src/` | all FOUR pre-walk diagnostics (was: one) |
+| c55 + c53 folded, c25 + c42 left standalone | all THIRTY-NINE folded scenarios (52 diagnostic lines), every pinned substring present |
+| c25 + c42 merged into ONE `cases/prewalk_signature_stops.tks` | BOTH signature-walk diagnostics |
+
+The last row is the HARD boundary at work: `c25` and `c42` are rejected by the signature walk, which
+leaves an undefined binding behind, so the build cuts before the item walk and cannot report the
+thirty-nine alongside them. They can, however, share one build with each other — the signature walk
+collects both — and a standalone `Given source` build is cached per (file, declared env)
+(`regr_src_key`).
+
+Build delta for `const_ns_qualified_visibility_rejected`:
+
+| | before | after |
+|---|---|---|
+| the project's own failing build | 1 | 1 |
+| pre-walk `cases/*.tks` builds | 4 | 1 |
+| `F8 target` config build (`TEKO_TARGET=x86_64-solaris`, cached across 3 scenarios) | 1 | 1 |
+| **total** | **6** | **3** |
+
+Three builds saved, not five. The `F8 target` build is not attributable to this issue: its subject
+IS the build configuration, and a differing configuration is a different build by construction.
+
 ## 3. The cut boundary of each pass
 
 A pass may keep collecting only while **the state it produces stays usable by the next pass**.
