@@ -5385,7 +5385,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         let no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib }
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
@@ -5416,7 +5416,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     } else {
         ret_stmts
     }
-    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = "" }
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -5721,11 +5721,15 @@ fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr) -> error | null 
  * @param Env env  the typing environment
  * @param TypeTable table  the folded type table
  * @return TFunction | error  the typed function
- *               bad return/trailing value, a label failure, or (U2, §2) a param/return/local of
- *               unsafe type when `f` itself is not `unsafe` — a top-level fn has no owner to OR
- *               in (unlike a method, see `type_method`), so only `f.is_unsafe` itself governs
+ * @throws bad return/trailing value, a label failure, (U2, §2) a param/return/local of unsafe
+ *         type when `f` itself is not `unsafe` — a top-level fn has no owner to OR in (unlike a
+ *         method, see `type_method`), so only `f.is_unsafe` itself governs — or (#453) an
+ *         `#arena_size(N)` directive on an `unsafe fn` (the directive is non-`unsafe` by ruling)
  */
 fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
+    if f.has_arena_size && f.is_unsafe {
+        return error { message = "`#arena_size(N)` may not precede an `unsafe fn` — the directive is non-unsafe by ruling (#453)" }
+    }
     mut local = with_fn_unsafe(env, f.is_unsafe)
     let tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
     let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"   // C7.2: bypass for Teko's own runtime
@@ -5767,7 +5771,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         let no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib }
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
@@ -5777,7 +5781,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
     if lc.failed { return error { message = lc.message } }
     match check_must_free(f, tbl, env.cur_ns, tb.stmts, table) { null => { }; error as e => return e }
     let ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = "" }
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -5850,7 +5854,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
-        let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib }
+        let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size }
         out = teko::list::push(out, stamped)
         mi++
     }
@@ -5939,7 +5943,7 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
         parser::Function as f => {
             let tf = match type_function(f, env, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
-            TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib }
+            TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size }
         }
         parser::TypeDecl as td => {
             // (#109 W3) CANONICALIZE the decl name to "ns::Name" so codegen emits a namespace-distinct
