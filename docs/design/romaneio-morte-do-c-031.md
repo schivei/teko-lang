@@ -161,9 +161,53 @@ A forma de reconquistar o agrupamento é **fechar o honest-stop N2**
 e **não** relaxar a regra do solo: regra relaxada emite dispatcher que o backend recusa, o que
 troca um custo de build por uma falha de compilação.
 
-Isto é decisão do owner porque o alvo de 10 builds é dele. As opções honestas são: fechar o N2
-nesta versão (trabalho de lowering), ou aceitar o custo de build da .31 e fechar o N2 na .32.
-Não há terceira que preserve o alvo.
+~~As opções honestas são: fechar o N2 nesta versão, ou aceitar o custo e fechar na .32. Não há
+terceira que preserve o alvo.~~ **ERRADO — corrigido pelo owner no mesmo dia. Há uma terceira, e é
+a certa.** A frase fica riscada em vez de apagada porque o erro é instrutivo: era a lente, não a
+conta.
+
+> *"Sim há, você que está vendo pela lente errada. Tenho certeza absoluta que a grande maioria das
+> regressões caberiam em um ou dois projetos no máximo, o que liberaria para ti outros 7 canais
+> (projetos de regressão) para utilizar em casos específicos."*
+
+**A distinção que eu não tinha feito, e que é o conteúdo do ruling:**
+
+> **Variação de FONTE não exige projeto separado — exige ARQUIVO separado dentro de um projeto.
+> Só variação de CONFIGURAÇÃO DE BUILD exige build separado.**
+
+`regr_group_solo` existia para contornar variação por linha do eixo **backend**. Esse eixo **acabou
+de morrer**. Restaurar o agrupamento seria restaurar um mecanismo cujo propósito evaporou — e pior,
+pagando por isso com trabalho de lowering (o N2) que nada tem a ver com o problema.
+
+**Payoff imediato: o N2 sai do caminho crítico.** Ele segue dívida por mérito próprio, mas não é
+mais o preço do alvo de 10 builds.
+
+**A medição que confirma o ruling** (`regressor.tkr` pós-excisão, 344 linhas, Features R0/F2/F5/F7/F9):
+o eixo de alvo tem **dois** valores recorrentes — `host` (15×) e `riscv64-linux` (15×) — mais cinco
+avulsos (`x86_64-windows`, `x86_64-linux`, `wasm32-wasi`). **Todo o resto varia só em fonte e exit
+esperado**, isto é: não precisa de build próprio para nada.
+
+**A convergência que fecha o argumento.** Oito dos nove diretórios de `examples/regressions/` são
+testes de **composição cross-namespace**. Juntá-los num projeto só não é apenas economia de build:
+**fortalece o teste**, porque põe mais namespaces interagindo no mesmo build — que é exatamente o
+arranjo em que os defeitos de compilador aparecem (ver a seção "os defeitos foram tornados
+alcançáveis" em `teko-stacked-train-discipline.md`). **Densidade e contagem de build apontam para o
+mesmo lugar**, o que é o sinal mais confiável de que o desenho está certo.
+
+Desenho decorrente, despachado em `cargo/20-regressor-canais`:
+
+| canal | hospeda | builds |
+|---|---|---:|
+| bulk-pass | a maioria, **um arquivo-fonte por cenário** | **2** (host + riscv64) |
+| diagnostics | todos os compile-fail, **um** build que falha | 1 |
+| cross-ns | os 8 de composição, juntos e por isso mais densos | 1 |
+| `cwd_build` | semântica de cwd própria | 1 |
+| avulsos | `wasm32-wasi`, `x86_64-windows` | 2 |
+
+**A lição de método, que vale além deste caso:** quando um mecanismo de otimização quebra porque
+seu eixo morreu, a pergunta certa não é *"como restauro o mecanismo?"* — é *"o mecanismo ainda tem
+propósito?"*. Restaurar por reflexo custa trabalho real para reconstruir um contorno de um problema
+que já não existe.
 
 ## 6. Como este romaneio se verifica
 
