@@ -226,6 +226,63 @@ fi
 # "newest first" self-heals the self-build case without a channel split.
 log "newest-first seed from $REPO (label '$LABEL')"
 
+# stage_seed_runtime TAG BASE — put the SEED's OWN ERA of the C runtime beside the seed binary,
+# in `.seed/runtime`, `.seed/assert`, `.seed/win32_compat.h`.
+#
+# WHY THIS EXISTS (the expurgo-do-C measurement, 2026-07-26). A released seed that still EMITS C
+# has to compile that C against teko_rt.{h,c} + assert.c, and it carries NEITHER: the binary asset
+# stages the executable and nothing else (package_release.sh's bin stage), while the runtime ships
+# in the SEPARATE teko-bootstrap-src.tar.gz of the same release. So the seed has always had to find
+# a runtime on disk, and the compiler's own probe order (ensure_rt_dir_abs, src/build/project.tks)
+# made that <bindir>/.. — which, with the seed unpacked into <checkout>/.seed, is THE CHECKOUT
+# ITSELF. Measured: the seed reads the runtime out of the repository being tested.
+#
+# That is wrong on two counts even before any file is deleted. It couples the seed to the tip's
+# runtime era (the reason build_with_seed_fallback.sh has to pin TK_RT_DIR per stage at all — "sem
+# pinar, mistura eras de runtime e o link falha"), and it makes the repository's C files a CI
+# dependency rather than a product. Staging the runtime from the seed's OWN release removes both:
+# the era matches the binary by construction, and the checkout owes the seed nothing.
+#
+# Best-effort by design, and the honesty is the point (M.3): a release with no bundle logs exactly
+# what was not found and leaves the seed usable — the compiler's remaining probes still apply. It
+# self-disables the day the published seed stops emitting C, because then no bundle is published
+# and nothing here has anything to stage.
+stage_seed_runtime() {
+  srt_tag="$1"; srt_base="$2"
+  srt_bundle="teko-bootstrap-src.tar.gz"
+  rm -f "$srt_bundle"
+  if ! download_ok "${srt_base}/${srt_bundle}" "$srt_bundle"; then
+    log "$srt_tag publishes no $srt_bundle — the seed keeps its own runtime probes"
+    return 1
+  fi
+  # Same integrity policy as the binary: SHA256SUMS.txt of the SAME release, when the host can
+  # hash at all. A listed-but-mismatching bundle is refused; an unlisted one is refused too.
+  srt_digest="$(sha256_of "$srt_bundle")"
+  if [ -n "$srt_digest" ] && [ -f SHA256SUMS.txt ]; then
+    srt_want="$(grep "$srt_bundle" SHA256SUMS.txt | awk '{print $1}' | head -n1)"
+    if [ -z "$srt_want" ] || [ "$srt_want" != "$srt_digest" ]; then
+      log "$srt_tag $srt_bundle sha256 mismatch (expected '${srt_want:-<none>}', got $srt_digest) — not staging it"
+      rm -f "$srt_bundle"
+      return 1
+    fi
+  fi
+  # The bundle's root is a single `teko-bootstrap-src/` directory holding teko.c, runtime/,
+  # assert/ and win32_compat.h; strip it so runtime/ and assert/ land as SIBLINGS directly under
+  # .seed — the "flat bundled-install layout" the compiler's probe already looks for at <bindir>.
+  if ! tar -xzf "$srt_bundle" -C .seed --strip-components=1; then
+    log "$srt_tag $srt_bundle did not unpack — the seed keeps its own runtime probes"
+    rm -f "$srt_bundle"
+    return 1
+  fi
+  rm -f "$srt_bundle" .seed/teko.c .seed/build.sh
+  if [ ! -f .seed/runtime/teko_rt.h ]; then
+    log "$srt_tag $srt_bundle unpacked but carries no runtime/teko_rt.h — not usable as a seed runtime"
+    return 1
+  fi
+  log "$srt_tag runtime staged beside the seed (.seed/runtime, .seed/assert)"
+  return 0
+}
+
 seed_from_tag() {
   tag="$1"
   base="${REPO_URL}/releases/download/${tag}"
@@ -292,6 +349,7 @@ seed_from_tag() {
     log "$tag version mismatch: the tag names $expectnum, the downloaded binary reports '$ver' — trying older"
     return 1
   fi
+  stage_seed_runtime "$tag" "$base" || true
   seed_dir="$(CDPATH='' cd -- .seed && pwd)"
   [ -n "${GITHUB_PATH:-}" ] && printf '%s\n' "$seed_dir" >> "$GITHUB_PATH"
   log "teko $tag ready at $seed_dir (version $ver)"

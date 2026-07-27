@@ -53,6 +53,114 @@ PRODUCES="$*"
 
 log() { printf '%s\n' "produce_assets: $*" >&2; }
 
+# ── THE ARCHITECTURE ASSERTION FOR `native` ASSETS ────────────────────────────────────────────
+#
+# THE DEFECT THIS CLOSES, measured. The PROVENANCE.txt of a published `windows-arm64` asset
+# recorded `host_uname=MINGW64_NT-10.0-26200-ARM64 … x86_64` and
+# `toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project)`: an x86_64 MinGW
+# running under Windows-on-ARM's x86 emulation, on an ARM64 machine, minting an x86_64 PE that
+# was published under the ARM64 label. Nobody chose it — the compiler asked for `cc` and the PATH
+# answered.
+#
+# scripts/native_linux_asset.sh has asserted the architecture of its six Linux assets since it was
+# written (`file | grep ARCH_KW`). The `native` branch here — macos-arm64, windows-x86_64,
+# windows-arm64 — asserted NOTHING, and that asymmetry is the whole hole: the wrong-arch PE passed
+# because no gate on this side ever looked. Closing only the compiler's linker probe would leave
+# this end open, and the defect would come back through it.
+#
+# NO SILENT SKIP (M.3). When neither `file` nor the header read can decide, this FAILS: an
+# assertion that quietly opts out is indistinguishable from an assertion that passed, and it is
+# precisely how the emulated build got published.
+
+# machine_word_of BIN — the target machine of BIN read from its OWN header, with no external
+# tool beyond `od` (POSIX, present on macOS and on Git Bash where `file` may not be). Prints a
+# stable keyword, or "" when the format is not one this understands.
+#   PE:     "MZ" at 0, the PE header offset (e_lfanew) as a little-endian u32 at 0x3C, then the
+#           COFF Machine u16 right after the "PE\0\0" signature: 0x8664 x86-64, 0xAA64 ARM64.
+#   Mach-O: magic 0xFEEDFACF (64-bit, little-endian on disk as cf fa ed fe) then cputype:
+#           0x01000007 x86-64, 0x0100000C ARM64.
+#   ELF:    e_machine u16 at 0x12: 0x3E x86-64, 0xB7 aarch64, 0xF3 riscv.
+machine_word_of() {
+    mw_bin="$1"
+    command -v od >/dev/null 2>&1 || { printf '%s' ""; return 0; }
+    mw_head="$(od -An -tx1 -N4 "$mw_bin" 2>/dev/null | tr -d ' \n')"
+    case "$mw_head" in
+        4d5a*)
+            mw_off_le="$(od -An -tx1 -j60 -N4 "$mw_bin" 2>/dev/null | tr -d ' \n')"
+            [ -n "$mw_off_le" ] || { printf '%s' ""; return 0; }
+            mw_off_be="$(printf '%s' "$mw_off_le" | cut -c7-8)$(printf '%s' "$mw_off_le" | cut -c5-6)$(printf '%s' "$mw_off_le" | cut -c3-4)$(printf '%s' "$mw_off_le" | cut -c1-2)"
+            mw_pe=$((0x$mw_off_be))
+            mw_mach="$(od -An -tx1 -j$((mw_pe + 4)) -N2 "$mw_bin" 2>/dev/null | tr -d ' \n')"
+            case "$mw_mach" in
+                6486) printf '%s' "x86_64" ;;
+                64aa) printf '%s' "arm64" ;;
+                *)    printf '%s' "" ;;
+            esac ;;
+        cffaedfe)
+            mw_cpu="$(od -An -tx1 -j4 -N4 "$mw_bin" 2>/dev/null | tr -d ' \n')"
+            case "$mw_cpu" in
+                07000001) printf '%s' "x86_64" ;;
+                0c000001) printf '%s' "arm64" ;;
+                *)        printf '%s' "" ;;
+            esac ;;
+        7f454c46)
+            mw_em="$(od -An -tx1 -j18 -N2 "$mw_bin" 2>/dev/null | tr -d ' \n')"
+            case "$mw_em" in
+                3e00) printf '%s' "x86_64" ;;
+                b700) printf '%s' "arm64" ;;
+                f300) printf '%s' "riscv64" ;;
+                *)    printf '%s' "" ;;
+            esac ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+# arch_keyword_for LABEL — the machine keyword an asset label PROMISES, or "" when the label
+# carries no architecture claim this can check.
+arch_keyword_for() {
+    case "$1" in
+        *-x86_64|*-x86_64-*) printf '%s' "x86_64" ;;
+        *-arm64|*-arm64-*)   printf '%s' "arm64" ;;
+        *-riscv64|*-riscv64-*) printf '%s' "riscv64" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+# assert_asset_arch LABEL BIN — BIN must be built for the architecture LABEL promises.
+# Applies to the `native` kind; the `linux` kind is already asserted, per target, inside
+# scripts/native_linux_asset.sh, and re-asserting there would just duplicate it.
+assert_asset_arch() {
+    aa_label="$1"; aa_bin="$2"
+    [ "$KIND" = "native" ] || return 0
+    aa_want="$(arch_keyword_for "$aa_label")"
+    if [ -z "$aa_want" ]; then
+        log "'$aa_label' names no architecture — nothing to assert"
+        return 0
+    fi
+    aa_got="$(machine_word_of "$aa_bin")"
+    if [ -z "$aa_got" ] && command -v file >/dev/null 2>&1; then
+        aa_desc="$(file "$aa_bin" 2>/dev/null)"
+        case "$aa_desc" in
+            *x86-64*|*x86_64*) aa_got="x86_64" ;;
+            *aarch64*|*arm64*) aa_got="arm64" ;;
+            *riscv*)           aa_got="riscv64" ;;
+        esac
+    fi
+    if [ -z "$aa_got" ]; then
+        log "FATAL: cannot determine the architecture of '$aa_bin' for label '$aa_label'."
+        log "Neither the binary's own header nor 'file' identified it. This does NOT pass by"
+        log "default: an unasserted asset is how an x86_64 PE was once published as windows-arm64."
+        exit 1
+    fi
+    if [ "$aa_got" != "$aa_want" ]; then
+        log "FATAL: '$aa_label' promises $aa_want but '$aa_bin' is $aa_got."
+        log "A runner that emulates the other architecture, or a toolchain resolved off the PATH"
+        log "instead of chosen, produces exactly this. Refusing to stage a mislabelled asset."
+        exit 1
+    fi
+    log "$aa_label architecture asserted: $aa_got"
+}
+
 # sha256_of FILE — portable digest (sha256sum on Linux, shasum -a 256 on macOS), the same shape
 # scripts/ci_provision_teko.sh uses. Prints `absent` rather than an empty string so a missing file
 # can never be mistaken for a matching digest downstream.
@@ -126,6 +234,7 @@ for label in $PRODUCES; do
         log "promised '$label' but $src does not exist"
         exit 1
     fi
+    assert_asset_arch "$label" "$src"
     case "$src" in
         *.exe) cp "$src" "stage/$label/teko.exe" ;;
         *)     cp "$src" "stage/$label/teko" ;;
