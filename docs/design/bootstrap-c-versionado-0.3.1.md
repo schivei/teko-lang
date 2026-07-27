@@ -80,6 +80,17 @@ a última versão publicada"*. **O que sai é o ARQUIVO, não a ordem em que o r
 antes de o seed ser sequer tentado, porque a presença do arquivo É a declaração de que o seed não
 serve, e tentar o seed primeiro custa ~94s de fracasso já conhecido por job.
 
+## O `--version` diz `0.0.0.0-dev`, e isso NAO e um defeito
+
+O binario que sai deste C se apresenta como `teko "0.0.0.0-dev"`, nao como a versao do vagao 15.
+Levantado e RATIFICADO pelo dono em 2026-07-27: *"sem problemas quanto ao report de versao do
+teko.c do 15"*.
+
+Fica registrado aqui porque o proximo a colher um `teko.c` vai ver essa string e presumir bug. Nao
+e: este binario nunca e publicado nem testado como release — ele existe por uma unica razao,
+construir o tip, e isso ele faz (medido). A versao que importa e a do compilador que ELE produz,
+que le o `teko.tkp` da arvore alvo e se apresenta corretamente.
+
 ## Tamanho
 
 9,9 MB / 215.598 linhas. O dono ratificou: *"é um fardo histórico"*.
