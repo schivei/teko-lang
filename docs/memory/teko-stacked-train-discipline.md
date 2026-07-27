@@ -336,6 +336,36 @@ const struct: initializer is not a struct literal (Tier-A follow-up) (#594)
 Esse é o degrau 1. O método é o laço: fechar o stop que ele nomeia, rodar de novo, ler o próximo.
 Cada volta é medível e o progresso é o número de fases vencidas, não a contagem de TODOs.
 
+## PUSH FREQUENTE, verde ou não — e a carga é o destino que não acorda o CI (owner 2026-07-26)
+
+> *"Não interessa se está verde ou não, é por isso também de usar as cargas caso queira evitar
+> disparar CI, mas é importante sempre exercitar pushes frequentes."*
+
+A `cargo/**` tem DUAS funções, e usar só a primeira é o erro que esta nota registra:
+
+1. **paralelizar a produção** (o que a seção da esteira já dizia), e
+2. **ser o destino de push do trabalho em voo** — `cargo/**` não tem PR e os cinco portões são
+   `pull_request`-only, então empurrar para lá **não dispara CI nenhum**. É push de graça.
+
+**O ambiente é efêmero.** Worktree, branch local e commit local vivem no container; quando ele é
+reciclado, somem. "Guardar para empurrar quando fechar verde" não protege nada — protege um verde
+que nem sempre existe — e arrisca tudo.
+
+**O erro cometido em 2026-07-26, para não repetir:** o integrador segurou o push do vagão
+"até o gate fechar", enquanto o vagão estava vermelho POR DECISÃO do owner (a inversão do backend
+para nativo). Resultado do inventário quando o owner perguntou: **18 commits** não empurrados no
+vagão e **13 branches `cargo/*` sem remoto nenhum** — incluindo o fecho do `B2-bigimm`, a correção
+de ordem da monomorfização, o desdobramento inteiro e 551 linhas de excisão de CI. A carga viva
+tinha mais 2 commits pesados soltos (a excisão do enum `Backend` e o `extern` mirando o símbolo C).
+Tudo a um crash de distância de sumir.
+
+**A regra invertida é a certa:** vagão vermelho por decisão do owner é vagão que se empurra MAIS
+cedo, não menos. O vermelho já é o estado desejado; não há o que preservar segurando.
+
+**Operacional:** commit por fatia, push por fatia — vagão e cargas. Uma carga que acumula trabalho
+no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que existe. O
+briefing de carga deve exigir push, não só commit.
+
 ## Armadilhas do worktree compartilhado
 
 - **NUNCA `git stash` em worktree de vagão.** O `.git` é compartilhado entre todos os worktrees e a
