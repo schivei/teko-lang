@@ -856,7 +856,9 @@ fn check_object_wellformed(objp: str, target: str) -> RegrOutcome {
     mut argv: []str = teko::list::push(teko::list::empty(), script)
     argv = teko::list::push(argv, to_sh_path(objp))
     let cap = run_captured(argv, "", objp ~ ".wellformed")
-    if cap.exit != 0 { return regr_fail(teko::str::concat("object well-formedness check failed: ", first_line(cap.stderr))) }
+    if cap.exit != 0 {
+        return regr_fail($"object well-formedness check failed{captured_output_block(cap)}")
+    }
     regr_pass()
 }
 
@@ -878,7 +880,9 @@ fn check_module_valid(objp: str) -> RegrOutcome {
     mut argv: []str = teko::list::push(teko::list::empty(), "wasm-validate")
     argv = teko::list::push(argv, to_sh_path(objp))
     let cap = run_captured(argv, "", objp ~ ".wasmvalid")
-    if cap.exit != 0 { return regr_fail("wasm-validate rejected the module") }
+    if cap.exit != 0 {
+        return regr_fail($"wasm-validate rejected the module{captured_output_block(cap)}")
+    }
     regr_pass()
 }
 
@@ -1564,11 +1568,47 @@ fn resolve_stream(base: TkrMatch, ov: TkrMatch) -> TkrMatch {
  * @since 0.3.0.29
  */
 fn check_compile_fail(t: Tkr, comp: CapResult) -> RegrOutcome {
-    if comp.exit == 0 { return regr_fail("expected a compile failure but the build succeeded") }
+    if comp.exit == 0 {
+        return regr_fail($"expected a compile failure but the build succeeded{captured_output_block(comp)}")
+    }
     if t.diagnostic.len > 0 && !teko::str::contains(comp.stderr, t.diagnostic) {
-        return regr_fail(teko::str::concat("build failed but its diagnostic omitted: ", t.diagnostic))
+        return regr_fail($"build failed but its diagnostic omitted: {t.diagnostic}{captured_output_block(comp)}")
     }
     regr_pass()
+}
+
+/**
+ * captured_output_block — the build's OWN output, in full, appended to a `compile_fail` verdict.
+ *
+ * THE DEFECT THIS CLOSES, and it cost a full CI cycle to learn (owner, 2026-07-27): *"Isso não
+ * seria problema em diagnosticar se estivesse imprimindo a saída completa do comando de build dos
+ * projetos regressores"*. The verdict used to name only what was EXPECTED —
+ *
+ *     build failed but its diagnostic omitted: nested bare-null optional
+ *
+ * — and said nothing about what actually appeared. That is half a fact: the reader learns the
+ * expectation was missed but not what replaced it, so a regression that is fully described in the
+ * captured stderr becomes undiagnosable from the log and has to be reproduced locally just to be
+ * READ. Under M.3 an honest error names the observation, not only the expectation.
+ *
+ * IN FULL, NOT TAILED, and that is deliberate. `RUN_FAIL_TAIL_LINES` bounds a failed RUN's output
+ * because a program under test can print without limit; a `compile_fail` build is bounded by
+ * construction — the compiler stops at the failure it is being asserted about. Tailing it could cut
+ * the FIRST diagnostic, which is exactly the one that displaced the expected one.
+ *
+ * BOTH STREAMS. The match is on stderr, but a compiler that wrote its complaint to stdout would
+ * otherwise produce a verdict claiming nothing was said at all.
+ *
+ * @param comp  the captured build outcome
+ * @return      the block to append: the two streams verbatim, each explicitly marked when empty
+ * @since 0.3.1
+ */
+fn captured_output_block(comp: CapResult) -> str {
+    mut err = "(the build wrote nothing to stderr)\n"
+    if comp.stderr.len > 0 { err = comp.stderr }
+    mut out = "(the build wrote nothing to stdout)\n"
+    if comp.stdout.len > 0 { out = comp.stdout }
+    $"\n  the build's own output follows IN FULL — this is what the compiler actually said:\n--- build stderr (exit {comp.exit}) ---\n{err}--- build stdout ---\n{out}--- end of build output ---"
 }
 
 /**
