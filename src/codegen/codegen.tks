@@ -8825,6 +8825,65 @@ fn emit_function(buf: []byte, prog: CgProg, f: checker::TFunction) -> []byte | e
     emit_function_cov(buf, prog, f, -1)
 }
 
+/**
+ * cg_frame_region_parent_expr — the C expression `_tkfr`'s opening `tk_region_new(…)` call
+ * passes as its PARENT.
+ *
+ * A `#arena_size(N)`-declared function (#453) gets `NULL` — an INDEPENDENT tree root, never a
+ * child of the shared process root (`tk_region_root()`). This is a CONTRACT, not an incidental
+ * choice: the owner's ruling on the execution-unit model (2026-07-27) is that every isolate —
+ * the language's future unit of concurrent execution, a heap-isolated boundary, NOT a suspension
+ * point like async/await's coroutine — is born with its OWN root, "como se fosse outro programa"
+ * (as if it were another program). `#arena_size` is the first surface to open a region under
+ * that same contract: a function that declares its own arena is its OWN isolation boundary,
+ * exactly like a future isolate's. This crumb does not implement isolates — no scheduling, no
+ * message-passing, no thread — it only honors the boundary at the one call site that already
+ * opens a per-function frame region. Every un-annotated function is UNCHANGED: `tk_region_root()`,
+ * exactly as before (additive by ruling — `src/` does not adopt `#arena_size`).
+ *
+ * The prize this buys NOW, for free: the test-gate's `tk_arena_push`/`tk_arena_pop` bracket the
+ * SHARED process root only (`tk_region_root()`'s own bump position) — a future parallel test
+ * runner rewinding two lanes' marks over that ONE root would rewind them over each OTHER
+ * (`docs/design/concorrencia-adiantada-s8.md`). A test that opens its OWN root via
+ * `#arena_size` never touches that shared mark at all, so the hazard does not need fixing for
+ * it — it is architecturally UNNECESSARY, the stronger outcome.
+ *
+ * @param f  the function being emitted
+ * @return   `"NULL"` (own root) or `"tk_region_root()"` (child of the shared process root)
+ */
+fn cg_frame_region_parent_expr(f: checker::TFunction) -> str {
+    if f.has_arena_size { "NULL" } else { "tk_region_root()" }
+}
+
+/**
+ * cg_emit_arena_presize — the `#arena_size(N)` pre-size gesture (#453): immediately after the
+ * frame region opens, append a single DISCARDED `tk_region_alloc(_tkfr, N)` call.
+ *
+ * `tk_region_alloc`'s chunk allocator sizes a region's first chunk to `max(request, 64 KiB)`
+ * (`TK_REGION_DEFAULT_CHUNK`, `teko_rt.c`) — this call's `N`-byte request is exactly the pre-size
+ * hook the design calls for: it forces ONE up-front malloc of at least `N` bytes instead of
+ * discovering the need incrementally as the function's real allocations run.
+ *
+ * HONEST LIMIT, reported rather than hidden: `tk_region_alloc` has no reserve-WITHOUT-consume
+ * primitive today (every call bumps `used`), so this reservation's own `N` bytes count toward
+ * the chunk's tally. A function whose real work stays under `N` still gets the "one malloc, no
+ * further growth" guarantee — the default-vs-declared chunk (`max(N, 64 KiB)`) leaves headroom
+ * for it; a workload that needs a FULL `N` bytes of its OWN on top of the reservation grows an
+ * ordinary extra chunk (a correctness non-issue, just a second malloc). A byte-exact reserve-
+ * without-consume primitive would need a new `teko_rt` entry point — out of scope for this
+ * Teko-only crumb (reported, not forced). Sizing accuracy is the DEVELOPER's job by ruling
+ * (owner, 2026-07-13): this call only wires the declared number through; it never computes one.
+ *
+ * @param buf  the buffer being emitted into
+ * @param n    the declared byte count (`f.arena_size`)
+ * @return     `buf` with the reservation call appended
+ */
+fn cg_emit_arena_presize(buf: []byte, n: u64) -> []byte {
+    let out = cb(buf, "    (void)tk_region_alloc(_tkfr, ")
+    let sized = cb_u64_digits(out, n)
+    cb(sized, ");\n")
+}
+
 /** emit_function_cov — emit_function with an optional `tk_cov_mark(cov_idx)` entry prologue (#265,
     the native-gate TestCov profile). `cov_idx < 0` emits NO prologue → byte-identical to the
     historical emission (Program/TestPlain and every ordinary caller). A `cov_idx >= 0` marks this
@@ -8849,9 +8908,14 @@ fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: 
     // return edges (emit_return / emit_exprstmt_tail) and at the fall-through end. A function with NO
     // frame-local binding gets NO region — zero bytes, byte-identical to the pre-Step-1 output.
     let escaping = checker::fn_escaping_vars(f)
-    let want_frame = fn_body_has_frame_local(escaping, fbody)
+    let want_frame = fn_body_has_frame_local(escaping, fbody) || f.has_arena_size
     let frame: str = if want_frame { "_tkfr" } else { "" }
-    if want_frame { out = cb(out, "    tk_region *_tkfr = tk_region_new(tk_region_root());\n") }
+    if want_frame {
+        out = cb(out, "    tk_region *_tkfr = tk_region_new(")
+        out = cb(out, cg_frame_region_parent_expr(f))
+        out = cb(out, ");\n")
+        if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
+    }
     // W5a — a fn body's trailing expr-statement carrying a value implicitly returns it.
     // W5b — thread the fn's return type so a tail/return case value is wrapped into a variant
     // return slot (emit_as).
@@ -10168,7 +10232,7 @@ fn cg_lift_lambdas(prog: CgProg) -> LiftResult {
         match prog.items[i] {
             checker::TFunction as f => {
                 let nb = cg_lift_block(f.body, acc)
-                items = teko::list::push(items, checker::TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib })
+                items = teko::list::push(items, checker::TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = nb; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size })
             }
             checker::TStatement as ts => {
                 let ns = cg_lift_stmt(ts, acc)
@@ -10254,7 +10318,7 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc) -> checker::TExpr {
                 mut ps: []parser::Param = teko::list::empty()
                 mut pi = 0
                 loop { if pi >= lam.params.len { break }; ps = teko::list::push(ps, parser::Param { name = lam.params[pi].name; has_type = true; type_ann = checker::type_to_texpr(lam.params[pi].type); is_params = false; has_default = false; default_expr = parser::no_expr() }); pi++ }
-                newfns = teko::list::push(newfns, checker::TFunction { name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = "" })
+                newfns = teko::list::push(newfns, checker::TFunction { name = lam_fn_name(id); type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = lam.ret; body = nbody; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 })
             } else {
                 newlams = teko::list::push(newlams, stamped)
             }

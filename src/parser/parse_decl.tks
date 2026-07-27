@@ -277,7 +277,26 @@ fn skip_export_override_peek(tokens: []lexer::Token, pos: u64) -> u64 {
     k
 }
 
-fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str, allow_receiver: bool, allow_bodyless: bool) -> Parsed<Decl> | error {
+/**
+ * Parse a `fn` declaration's signature + body, from an optional leading doc-comment through the
+ * closing `}` (or the bodyless/`extern` forms). Shared by the top-level `fn` position (real
+ * `is_test`/`os_guard`/`has_arena_size`/`arena_size` attributes threaded in from
+ * `parse_decl_attributes`) and every struct/class METHOD call site (`allow_receiver = true`,
+ * always `is_test = false`, `os_guard = ""`, `has_arena_size = false`, `arena_size = 0` — methods
+ * do not go through the attribute collector in this crumb).
+ *
+ * @param tokens          the full token stream
+ * @param pos             the index of the leading doc-comment/modifier/`fn` keyword
+ * @param is_test         a `#test` attribute precedes it? (top-level only)
+ * @param os_guard        a `#os("…")` conditional-compile guard ("" = all OSes; top-level only)
+ * @param allow_receiver  true for a struct/class method (an untyped 1st param names the receiver)
+ * @param allow_bodyless  true where a signature-only `fn` (no `{ … }`) is legal (interface method)
+ * @param has_arena_size  a `#arena_size(N)` directive precedes it? (#453, top-level only)
+ * @param arena_size      the directive's byte count (valid iff `has_arena_size`)
+ * @return                the parsed `Function` declaration + the resume index
+ * @throws                a malformed signature/body, or `#arena_size`/`#test` before `extern`
+ */
+fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str, allow_receiver: bool, allow_bodyless: bool, has_arena_size: bool, arena_size: u64) -> Parsed<Decl> | error {
     mut p = pos
     mut has_doc = false
     mut doc = ""
@@ -353,6 +372,7 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
     }
     if is_extern {
         if is_test { return err_at(tokens, p, "`#test` may not precede `extern`") }
+        if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede `extern` (there is no Teko body to size)") }
         if export_c_symbol != "" { return err_at(tokens, p, "an `extern` (imported) function may not carry an `exp(\"…\")` export override") }
         if !is_kind_at(tokens, p, lexer::TokenKind::Assign) {
             return err_at(tokens, p, "expected `= \"symbol\"` to bind the C symbol of an `extern` function")
@@ -375,19 +395,20 @@ fn parse_function(tokens: []lexer::Token, pos: u64, is_test: bool, os_guard: str
             p = p + 1
         }
         let no_body: []Statement = teko::list::empty()
-        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe }; next = p }
+        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = true; c_symbol = c_symbol; from_lib = from_lib; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe; has_arena_size = false; arena_size = 0 to u64 }; next = p }
     }
     // (W10b.CLASS increment 2) `abstract fn …` — a SIGNATURE ONLY, no body (abstract classes only;
     // enforced by the checker, not the parser). A bare `;`/newline/`}` follows instead of `{`.
     if (is_abstract || allow_bodyless) && !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
+        if has_arena_size { return err_at(tokens, p, "`#arena_size(…)` may not precede an `abstract fn` (there is no Teko body to size)") }
         let no_body: []Statement = teko::list::empty()
-        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe }; next = p }
+        return Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = no_body; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe; has_arena_size = false; arena_size = 0 to u64 }; next = p }
     }
     if !is_kind_at(tokens, p, lexer::TokenKind::LBrace) {
         return err_at(tokens, p, "expected '{' for the function body")
     }
     let blk = match parse_block(tokens, p) { ParsedList<Statement> as x => x; error as e => return e }
-    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe }; next = blk.next }
+    Parsed<Decl> { node = Function { name = name; type_params = tps.names; type_constraints = tps.constraints; params = params.items; has_return = has_return; return_type = return_type; body = blk.items; vis = vis; has_doc = has_doc; doc = doc; line = name_line; col = name_col; is_test = is_test; is_extern = false; c_symbol = export_c_symbol; from_lib = ""; os_guard = os_guard; is_intern = is_intern; is_abstract = is_abstract; is_virtual = is_virtual; is_override = is_override; has_inject = false; injects = teko::list::empty(); is_unsafe = is_unsafe; has_arena_size = has_arena_size; arena_size = arena_size }; next = blk.next }
 }
 
 // `{ name: T; name: T; … }` — field list; `;`/newline separates; empty `{ }` allowed;
@@ -439,7 +460,7 @@ fn parse_fields(tokens: []lexer::Token, pos: u64) -> ParsedStructBody | error {
     }
     loop {
         if struct_item_is_method(tokens, p) {
-            let m = match parse_function(tokens, p, false, "", true, false) { Parsed<Decl> as x => x; error as e => return e }
+            let m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
             let mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a struct method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -501,7 +522,7 @@ fn parse_class_fields(tokens: []lexer::Token, pos: u64) -> ParsedStructBody | er
     }
     loop {
         if class_item_is_method(tokens, p) {
-            let m = match parse_function(tokens, p, false, "", true, false) { Parsed<Decl> as x => x; error as e => return e }
+            let m = match parse_function(tokens, p, false, "", true, false, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
             let mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a class method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -628,7 +649,7 @@ fn parse_interface_body(tokens: []lexer::Token, pos: u64) -> Parsed<TypeBody> | 
         let idoc = peel_leading_doc(tokens, p)
         let imc = peek_member_const(tokens, idoc.next)
         if imc.is_const || imc.bad_override { return reject_const_member(tokens, imc.kw_pos) }
-        let m = match parse_function(tokens, p, false, "", true, true) { Parsed<Decl> as x => x; error as e => return e }
+        let m = match parse_function(tokens, p, false, "", true, true, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
         let mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "an interface member must be a method signature (`fn …`)") }
         methods = teko::list::push(methods, mf)
         p = m.next
@@ -654,7 +675,7 @@ fn parse_trait_fields(tokens: []lexer::Token, pos: u64) -> ParsedStructBody | er
     }
     loop {
         if struct_item_is_method(tokens, p) {
-            let m = match parse_function(tokens, p, false, "", true, true) { Parsed<Decl> as x => x; error as e => return e }
+            let m = match parse_function(tokens, p, false, "", true, true, false, 0 to u64) { Parsed<Decl> as x => x; error as e => return e }
             let mf = match m.node { Function as f => f; _ => return err_at(tokens, p, "internal: a trait method must parse to a Function") }
             methods = teko::list::push(methods, mf)
             p = m.next
@@ -839,11 +860,12 @@ fn parse_type_decl(tokens: []lexer::Token, pos: u64) -> Parsed<Decl> | error {
 
 /** Collect the leading `#…` attributes before a declaration keyword (each on its own line or
  *  inline): `#test` (D2), `#os("…")` (C7.1f), the three DI lifetimes `#singleton`/`#scoped`/
- *  `#transient` (W10c, precede a `type`), the `#inject(…)` overlay (W10c, precedes a `fn`), and
+ *  `#transient` (W10c, precede a `type`), the `#inject(…)` overlay (W10c, precedes a `fn`),
+ *  `#arena_size(N)` (#453, the 0.3.1 SW1 resource/arena foundation — precedes a `fn`), and
  *  `#must_free` (S2, the 0.1.0.0-beta memory+unsafe remodel #336 — precedes a `type`). A second
- *  lifetime annotation, or a doubled `#must_free`, on one declaration is an honest error. `next`
- *  resumes at the doc/visibility/keyword that follows the block; placement (fn-vs-type) is
- *  enforced by the caller so the message names the actual keyword. */
+ *  lifetime annotation, a doubled `#must_free`, or a doubled `#arena_size(…)`, on one declaration
+ *  is an honest error. `next` resumes at the doc/visibility/keyword that follows the block;
+ *  placement (fn-vs-type) is enforced by the caller so the message names the actual keyword. */
 fn parse_decl_attributes(tokens: []lexer::Token, pos: u64) -> ParsedAttributes | error {
     mut start = pos
     mut is_test = false
@@ -854,6 +876,8 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64) -> ParsedAttributes |
     mut has_inject = false
     mut injects: []InjectBinding = teko::list::empty()
     mut must_free = false
+    mut has_arena_size = false
+    mut arena_size: u64 = 0 to u64
     loop {
         if !is_kind_at(tokens, start, lexer::TokenKind::Hash) { break }
         if !is_kind_at(tokens, start + 1, lexer::TokenKind::Ident) {
@@ -875,6 +899,12 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64) -> ParsedAttributes |
             has_inject = true
             injects = ov.items
             start = skip_seps(tokens, ov.next)
+        } else if attr == "arena_size" {
+            if has_arena_size { return err_at(tokens, start + 1, "a function may carry only one `#arena_size(…)` directive") }
+            let parsed = match parse_arena_size_arg(tokens, start) { ParsedU64 as x => x; error as e => return e }
+            has_arena_size = true
+            arena_size = parsed.value
+            start = skip_seps(tokens, parsed.next)
         } else if attr == "singleton" || attr == "scoped" || attr == "transient" {
             if di_kind != DiKind::None { return err_at(tokens, start + 1, "a type may carry only one lifetime annotation (`#singleton`/`#scoped`/`#transient`)") }
             di_kind = lifetime_kind_of(attr)
@@ -886,10 +916,27 @@ fn parse_decl_attributes(tokens: []lexer::Token, pos: u64) -> ParsedAttributes |
         } else if attr == "inline" {
             return err_at(tokens, start + 1, "`#inline` attaches to a local binding (`#inline let …`) or a struct field (`#inline name: T`), not a declaration")
         } else {
-            return err_at(tokens, start + 1, "unknown attribute (only `#test`, `#os(\"…\")`, `#inject(…)`, the lifetimes `#singleton`/`#scoped`/`#transient`, `#must_free`, and the binding/field `#inline` are recognized)")
+            return err_at(tokens, start + 1, "unknown attribute (only `#test`, `#os(\"…\")`, `#inject(…)`, `#arena_size(N)`, the lifetimes `#singleton`/`#scoped`/`#transient`, `#must_free`, and the binding/field `#inline` are recognized)")
         }
     }
-    ParsedAttributes { is_test = is_test; os_guard = os_guard; di_kind = di_kind; has_key = has_key; key = key; has_inject = has_inject; injects = injects; must_free = must_free; next = start }
+    ParsedAttributes { is_test = is_test; os_guard = os_guard; di_kind = di_kind; has_key = has_key; key = key; has_inject = has_inject; injects = injects; must_free = must_free; has_arena_size = has_arena_size; arena_size = arena_size; next = start }
+}
+
+/** A parsed `u64` literal + the resume index (the `#arena_size(N)` argument's own tiny result
+ *  shape — not worth a whole named type in `result.tks` for one call site). */
+type ParsedU64 = struct { value: u64; next: u64 }
+
+/** Parse the `(N)` byte-count argument of `#arena_size(N)`. `pos` is at the `#`. `N` must be a
+ *  bare positive integer literal (no suffix, no expression) — a compile-time constant the
+ *  developer writes; the compiler never computes or infers it (owner ruling 2026-07-13). */
+fn parse_arena_size_arg(tokens: []lexer::Token, pos: u64) -> ParsedU64 | error {
+    if !is_kind_at(tokens, pos + 2, lexer::TokenKind::LParen) { return err_at(tokens, pos + 2, "expected '(' after `#arena_size`") }
+    if !is_kind_at(tokens, pos + 3, lexer::TokenKind::Number) { return err_at(tokens, pos + 3, "expected a positive integer byte count in `#arena_size(N)`") }
+    let lit = tokens[pos + 3].text
+    let n = match lit_int(lit) { NumInt as v => v; error as e => return err_at(tokens, pos + 3, e.message) }
+    if n.neg || n.mag == (0 to u64) { return err_at(tokens, pos + 3, "`#arena_size(N)` requires a positive byte count") }
+    if !is_kind_at(tokens, pos + 4, lexer::TokenKind::RParen) { return err_at(tokens, pos + 4, "expected ')' to close `#arena_size(…)`") }
+    ParsedU64 { value = n.mag; next = pos + 5 }
 }
 
 /** Map a lifetime attribute name to its `DiKind` (the caller has verified it is one of the three). */
@@ -969,7 +1016,7 @@ fn peel_leading_doc(tokens: []lexer::Token, pos: u64) -> ParsedLeadingDoc {
 fn with_outer_doc(node: Decl, has_doc: bool, doc: str) -> Decl {
     if !has_doc { return node }
     match node {
-        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe }
+        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = true; doc = doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
         TypeDecl as td => TypeDecl { name = td.name; type_params = td.type_params; type_constraints = td.type_constraints; body = td.body; vis = td.vis; has_doc = true; doc = doc; line = td.line; col = td.col; di_kind = td.di_kind; has_di_key = td.has_di_key; di_key = td.di_key; is_unsafe = td.is_unsafe; must_free = td.must_free }
         ConstDecl as cd => ConstDecl { name = cd.name; ty = cd.ty; init = cd.init; vis = cd.vis; has_doc = true; doc = doc; line = cd.line; col = cd.col }
         _ => node
@@ -1210,12 +1257,12 @@ fn parse_decl(tokens: []lexer::Token, pos: u64) -> Parsed<Decl> | error {
 
 /** Parse a `fn` declaration reached through `parse_decl`, applying the collected attributes:
  *  a `#singleton`/`#scoped`/`#transient` lifetime may not precede a function, `#must_free` may
- *  only precede a `type` (S2 #336), and the `#inject` overlay is threaded into the parsed
- *  Function (has_inject/injects). */
+ *  only precede a `type` (S2 #336), and the `#inject` overlay and `#arena_size(N)` (#453) are
+ *  threaded into the parsed Function (has_inject/injects, has_arena_size/arena_size). */
 fn parse_fn_decl_with_attrs(tokens: []lexer::Token, start: u64, attrs: ParsedAttributes) -> Parsed<Decl> | error {
     if attrs.di_kind != DiKind::None { return err_at(tokens, start, "a lifetime annotation (`#singleton`/`#scoped`/`#transient`) may only precede a `type`, not a function") }
     if attrs.must_free { return err_at(tokens, start, "`#must_free` may only precede a `type`") }
-    let d = match parse_function(tokens, start, attrs.is_test, attrs.os_guard, false, false) { Parsed<Decl> as x => x; error as e => return e }
+    let d = match parse_function(tokens, start, attrs.is_test, attrs.os_guard, false, false, attrs.has_arena_size, attrs.arena_size) { Parsed<Decl> as x => x; error as e => return e }
     Parsed<Decl> { node = with_fn_inject(d.node, attrs.has_inject, attrs.injects); next = d.next }
 }
 
@@ -1238,18 +1285,20 @@ fn parse_flags_decl_with_attrs(tokens: []lexer::Token, start: u64, k: u64, attrs
     parse_flags_decl(tokens, start)
 }
 
-/** The function-only attributes (`#test`, `#os`, `#inject`) are all rejected before a `type`. */
+/** The function-only attributes (`#test`, `#os`, `#inject`, `#arena_size`) are all rejected
+ *  before a `type`. */
 fn reject_fn_only_attrs_on_type(tokens: []lexer::Token, k: u64, attrs: ParsedAttributes) -> error | null {
     if attrs.is_test { return err_at(tokens, k, "`#test` may only precede a function") }
     if attrs.os_guard != "" { return err_at(tokens, k, "`#os(\"…\")` may only precede a function") }
     if attrs.has_inject { return err_at(tokens, k, "an `#inject(…)` overlay may only precede a function, not a `type`") }
+    if attrs.has_arena_size { return err_at(tokens, k, "`#arena_size(…)` may only precede a function, not a `type`") }
     null
 }
 
 /** Rebuild a parsed Function with its `#inject` overlay attached (all other fields preserved). */
 fn with_fn_inject(node: Decl, has_inject: bool, injects: []InjectBinding) -> Decl {
     match node {
-        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = has_inject; injects = injects; is_unsafe = f.is_unsafe }
+        Function as f => Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; has_return = f.has_return; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = has_inject; injects = injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
         _ => node
     }
 }
