@@ -206,13 +206,7 @@ build_glibc() {
     # lives in `libdl` up to glibc 2.33 and was folded INTO `libc` at 2.34. The runner's glibc is
     # past that fold, so the flag is a no-op there — but it costs nothing, and dropping it would
     # silently make this line wrong for any host still on the pre-fold split.
-    # `-fno-pie -no-pie` (owner order, 2026-07-27: "Pode desabilitar o PIE"). Ubuntu's gcc defaults
-    # to PIE; the released seed, built under manylinux, was not one, and that difference tracks the
-    # measured x86_64/arm64 timing split exactly (see src/build/project.tks::append_no_pie_flags for
-    # the table and for the honest caveat that 3x is more than PIE alone usually explains). The
-    # trade is ASLR on a build-time tool, which is the same exposure the released seed already
-    # ships with.
-    bg_cc_line="cc -std=c2x -w -O2 -fno-pie -no-pie -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING \
+    bg_cc_line="cc -std=c2x -w -O2 -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING \
         -I$R_SRC/runtime -I$R_SRC/assert \
         $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm -ldl \
         -o $GD/teko"
@@ -281,9 +275,6 @@ build_musl() {
 
     echo "=== $LABEL — native build with musl-gcc (no container) ==="
 
-    # `-static` already yields a non-PIE image (it is `-static-pie` that would not), so the musl
-    # asset needs no extra flag to honour the no-PIE ruling — recorded here so a reader does not
-    # "fix" the asymmetry with the glibc line above by adding a redundant one.
     bm_static="-static"
     bm_cc_line="musl-gcc -std=c2x -w -O2 -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING $bm_static \
         -I$R_SRC/runtime -I$R_SRC/assert \

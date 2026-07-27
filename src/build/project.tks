@@ -925,55 +925,9 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     let tos = target_os(m)
     argv = append_reachable_os_lib_flags(argv, m, link_target_keys(m), reachable)
     argv = append_allow_undef_flag(argv)
-    argv = append_no_pie_flags(argv, tos)
     argv = append_macos_plist_flag(argv, binary, m, tos)
     argv = teko::list::push(argv, "-o")
     teko::list::push(argv, binary)
-}
-
-/**
- * append_no_pie_flags — turn OFF position-independent executables on Linux (owner order,
- * 2026-07-27: *"Pode desabilitar o PIE"*).
- *
- * WHY, MEASURED. Modern Ubuntu's gcc defaults to `-fpie -pie`, so every compiler this build
- * produces was a PIE while the RELEASED seed — built under manylinux, which does not default to
- * it — was not. That difference lines up exactly with the timing split measured on 1d2c3f3, where
- * the phases that run the SEED cost the same on both architectures and the phases that run a
- * LOCALLY BUILT compiler do not:
- *
- *     phase              x86_64   arm64   runs
- *     ladder gen1          74s     74s    the seed (non-PIE)      <- ties
- *     ladder gen2         318s    141s    a locally built compiler (PIE)
- *     dry build gen3      337s    143s    a locally built compiler (PIE)
- *     asset cc             46s     48s    gcc itself              <- ties
- *
- * Same item counts (5913), same peak RSS (1259 MB vs 1255 MB) — the same work, run slower. PIE
- * costs more on x86_64 (a reserved register, calls through the GOT/PLT) than on aarch64, where
- * PC-relative addressing is native and nearly free, which is the shape of that table.
- *
- * STATED HONESTLY: 3x is MORE than PIE alone usually explains (5-15% is the common figure), so
- * this is a HYPOTHESIS UNDER TEST, not a settled cause. If the x86_64 phases fall toward the arm64
- * ones on the next run, it is answered; if they do not, PIE was a coincidence and the real cause
- * is still open — and either outcome is worth the one flag it costs to learn.
- *
- * LINUX ONLY, and that is not caution, it is correctness: arm64 macOS REQUIRES position-
- * independent executables and rejects the flag outright, and the Windows toolchains do not carry
- * this default at all. A flag that broke two platforms to measure a third would be a bad trade.
- *
- * ASLR IS THE THING BEING TRADED AWAY. A non-PIE executable loads at a fixed address, so the
- * kernel can no longer randomize its text segment. For a COMPILER — a build-time tool that reads
- * its own project's sources — that is an acceptable exposure, and it is the same exposure the
- * released seed already ships with. It would NOT be acceptable for a long-lived network-facing
- * binary, and if Teko ever emits one, this decision has to be revisited rather than inherited.
- *
- * @param argv  the argument vector so far
- * @param tos   the target OS ("linux" | "macos" | "windows" | …)
- * @return      argv, with the two no-PIE flags appended on Linux and untouched elsewhere
- * @since 0.3.1
- */
-fn append_no_pie_flags(argv: []str, tos: str) -> []str {
-    if tos != "linux" { return argv }
-    teko::list::push(teko::list::push(argv, "-fno-pie"), "-no-pie")
 }
 
 /**
