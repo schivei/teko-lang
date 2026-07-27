@@ -97,3 +97,20 @@ tamanho do trabalho, não uma licença: sob este critério o baseline tem de che
 Corolário de método, porque o modo de falha é meu e não do código: perseguir honest-stop nativo um
 a um é reativo e não tem fim visível. O degrau 0 é o que força a lista inteira a aparecer de uma
 vez — mesmo raciocínio do `all-diagnostics`, aplicado à escada.
+
+**`unsafe` — o que ele significa, e o que NAO vira regra (dono, 2026-07-27).** *"O unsafe na struct
+ou em uma classe serve para endereçar todos os métodos nela como unsafe e para habilitar ponteiros
+crus, se não usa, não tem pq ser unsafe."*
+
+Consequencia RATIFICADA e em vigor: `unsafe` num ALIAS estrutural (`unsafe type X = ptr<byte>`) e
+erro de compilacao, porque um alias nao tem membros nem corpo — nao ha metodo a enderecar, e a
+capacidade de ponteiro pertence ao tipo aliasado, nao ao alias. Antes disso a grafia compilava e o
+carimbo era **silenciosamente inerte** (alias resolve THROUGH; o carimbo so e procurado num
+`Named`), o que furava o portao de contagio. `unsafe type T = struct/class { … }` continua valido e
+inalterado: ali ha membros.
+
+Consequencia que o dono decidiu NAO transformar em regra: *"convenção apenas"*. Um `unsafe`
+DECORATIVO — struct marcada que nao contem ponteiro cru nem chama nada unsafe — nao e recusado pelo
+checker. Fica como criterio de REVISAO, nao como gate. Nao proponha implementa-lo de novo; a
+decisao foi tomada sabendo que o buraco simetrico (o `unsafe` que anestesia o leitor sem precisar)
+continua aberto, e o custo de o checker decidir NECESSIDADE foi julgado maior que o ganho.
