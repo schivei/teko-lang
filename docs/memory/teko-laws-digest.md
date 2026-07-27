@@ -237,3 +237,47 @@ builtin novo atraves do gen1 (que o tem), nunca atraves de `src/`.
 de c_types nao a leu, e os cinco portoes ficaram vermelhos em 994bcc4 em TODOS os hosts. Foi a
 TERCEIRA quebra consecutiva da mesma carga, e as tres tem a mesma raiz unica: **escrita por leitura,
 nunca compilada.**
+
+## O AGENTE TEM DE COMPILAR. A PROIBICAO ERA MINHA E CUSTOU TRES VAGOES (2026-07-27)
+
+Tres quebras consecutivas do vagao no mesmo dia, todas com a mesma assinatura: carga escrita por
+LEITURA, entregue sem nunca ter sido compilada. Eu tratei isso como falha dos agentes ate ler o
+relatorio final de um deles, que fecha assim:
+
+    "Per protocol I did not run `teko test .`, did not build gen1/gen2/gen3, and did not run the
+     local gate or fixpoint check — since running the compiler was explicitly forbidden this round."
+
+Ele obedeceu. **A PROIBICAO ERA MINHA.** Eu a escrevi para os agentes nao gastarem tempo em builds
+pesados, e ela transformou cada carga num palpite bem argumentado. Um agente que nao compila nao
+esta economizando tempo do trem — esta transferindo o custo para o vagao, onde ele custa um ciclo
+de CI inteiro E o veredito de todas as outras cargas em voo.
+
+**A REGRA AGORA:** quem toca `.tks`/`.tkt` COMPILA e RODA o que tocou antes de entregar. Se o
+ambiente nao permitir construir, a entrega diz isso NA PRIMEIRA LINHA do relatorio, e a carga NAO
+drena — vai para uma fila de "precisa de medicao" em vez de entrar como se estivesse provada.
+"Verificacao por leitura cuidadosa do fluxo de tokens" nao e verificacao, e o custo de descobrir
+isso e sempre pago por quem drena.
+
+**E VALE PARA MIM TAMBEM.** Drenei o degrau 5 conferindo so que mergeava limpo e que respeitava a
+regra aditiva. Nao conferi se RODAVA. Todas as lanes de teste cairam com SIGABRT dentro do proprio
+teste do degrau. Quem drena verifica a mesma coisa que quem escreve.
+
+**A ORDEM: EMPURRA PRIMEIRO, MEDE DEPOIS** (correcao do dono no mesmo dia). A lei acima, escrita
+como "compila e roda ANTES de entregar", induz o erro oposto e o dono cortou na hora: *"O que eles
+não devem fazer: rodar um build tão longo antes de empurrar para a carga, pois se cair a sessão e
+não tiverem empurrado, o trabalho se perde."*
+
+O push para a branch de carga custa segundos; o build custa dezenas de minutos. Medir antes de
+empurrar aposta o trabalho inteiro numa sessao que pode cair no meio do build — e ja caiu. A
+sequencia e:
+
+    escreve -> COMMITA E EMPURRA na branch de carga (dizendo no commit que ainda nao mediu)
+            -> mede -> se reprovar, conserta, EMPURRA DE NOVO, e so entao remede
+
+Vale para trabalho PARCIAL tambem: meio degrau salvo na branch vale mais que um degrau inteiro
+perdido. E vale para quem so VERIFICA, numa forma adaptada — grava o veredito de cada item em
+disco conforme apura, e faz as checagens ESTATICAS (que nao exigem build) primeiro, porque sao as
+que sempre cabem.
+
+As duas leis nao brigam: medir continua OBRIGATORIO e carga nao medida nao drena. O que muda e so
+a ordem, e a ordem e o que separa "carga salva mas sem veredito" de "carga inexistente".
