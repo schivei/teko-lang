@@ -176,12 +176,17 @@ Host: linux x86_64 glibc. Seed: the lane's `teko 0.3.0.30-beta`.
 
 | step | result |
 |---|---|
-| seed → gen1 (`build . --no-verify --release`) | exit 0, self-reported peak 1345.5 MB |
+| seed → gen1 (`build . --no-verify --release`) | exit 0, self-reported peak 1336.6 MB |
 | `TEKO_MEM_PARANOID=1` seed → gen1 | exit 0, self-reported peak 1908.9 MB |
-| `teko test .` with gen1 — `.tkt` unit suite | 1035 tests, 0 failures |
-| `teko test .` with gen1 — `.tkr` regressors | 10 run, 1 skipped, 6 failed, **19 builds** |
+| `teko test .` with gen1 — `.tkt` unit suite | 1034 tests, 0 failures |
+| `teko test .` with gen1 — `.tkr` regressors | 10 run, 1 skipped, 6 failed, **17 builds** |
 | `const_ns_qualified_visibility_rejected.tkr` | **regression ok, 3 builds** (was 6) |
 | FIXPOINT gen2 == gen3 | NOT REACHED — see below |
+
+Run twice: once on this branch alone (19 builds; the peak was 1345.5 MB and the unit suite 1035
+tests) and again after merging `ci/0.3.1-lanes-e-seeds` at `1af0fb66`, which is the table above. The
+two extra builds the merge removed are the sibling carga's, not this one's — this carga's own
+contribution is the same three either way.
 
 The six regressor failures are all `native backend N1/N2 … not yet lowered / no layout registered`,
 the wagon's known red. Every one was reproduced with the gen1 built from a clean export of
