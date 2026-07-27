@@ -4881,8 +4881,35 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
+        checker::TCall as cl => measure_fat_call_shape(ctx, e, cl)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
+}
+
+/**
+ * measure_fat_call_shape — TEMPORARY corpus-measurement probe (degrau `call` gordo, not yet
+ * committed as a real lowering): logs the fat-typed call's shape (closure/iface/plain, its
+ * resolved namespace + last path segment) to stderr and fabricates a placeholder (0, 0) pair so
+ * self-hosting can run PAST this site instead of stopping at the first occurrence — the same
+ * "instrument to measure" method the arithmetic degrau used before choosing its lowering. Deleted
+ * once the real `TCall` lowering lands.
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-typed call expression
+ * @param cl   the call node being measured
+ * @return     a fabricated (0, 0) pair (never a real value)
+ */
+fn measure_fat_call_shape(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat {
+    let segs = cl.callee.segments
+    let last = if segs.len == 0 { "?" } else { segs[segs.len - 1].name }
+    let closure_s = if cl.is_closure_call { "true" } else { "false" }
+    let iface_s = if cl.is_iface_dispatch { "true" } else { "false" }
+    teko::io::eprintln(teko::str::concat("FATCALL closure=", closure_s, " iface=", iface_s, " ns=", cl.call_ns, " name=", last))
+    let r1 = ctx_alloc(ctx)
+    let with1 = ctx_append(r1.ctx, const_int_inst(r1.vreg, 0, e.line, e.col))
+    let r2 = ctx_alloc(with1)
+    let with2 = ctx_append(r2.ctx, const_int_inst(r2.vreg, 0, e.line, e.col))
+    LoweredFat { ctx = with2; ptr = r1.vreg; len = r2.vreg }
 }
 
 /**
