@@ -16,8 +16,10 @@
 #   producer  names the leg and its uploaded artifact (`teko-assets-<producer>`)
 #   os        the runner
 #   timeout   job budget, minutes
-#   kind      `linux` (assets built by scripts/native_linux_asset.sh from the emitted teko.c) or
-#             `native` (the runner IS the target; the dry build's own binary is the asset)
+#   kind      `linux` (assets built by scripts/native_linux_asset.sh from the emitted teko.c —
+#             when `produces` names both a glibc and a musl label, produce_assets.sh builds them
+#             IN PARALLEL on this one runner, not serially; see that script) or `native` (the
+#             runner IS the target; the dry build's own binary is the asset)
 #   seed      the released asset label whose binary RUNS on this runner — NOT always what the leg
 #             produces, so it is a field rather than a derivation the caller can get wrong
 #   produces  the CONTRACT: the asset labels this leg must mint

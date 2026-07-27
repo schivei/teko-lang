@@ -25,9 +25,13 @@
 #      job) and `-O2` because every published asset is a release link.
 #      Leaves out/teko[.exe] AND out/teko.c — every asset this producer mints comes from that one
 #      C, so all of them are the same generation of the compiler by construction.
-#   3. LINUX ONLY: one native container build per label (scripts/native_linux_asset.sh).
-#      Non-Linux producers are already standing on the target platform, so the dry build IS the
-#      asset.
+#   3. LINUX ONLY: one native build per label (scripts/native_linux_asset.sh) — glibc in a
+#      manylinux_2_28 container, musl with the runner's own musl-gcc, no container. When a
+#      producer promises MORE THAN ONE Linux label (glibc + musl), they run IN PARALLEL on this
+#      one runner (owner ruling 2026-07-27), not serially: musl no longer waits behind glibc's
+#      container pull, and there is no second job or artifact hand-off to buy that with — `out/
+#      teko.c` never leaves this process's own filesystem. Non-Linux producers are already
+#      standing on the target platform, so the dry build IS the asset.
 #   4. STAGE: stage/<label>/teko[.exe] — one directory per asset label. That is THE CONTRACT a
 #      consumer sees; a producer can change HOW it mints an asset without the consumer noticing.
 #
@@ -41,6 +45,10 @@
 #
 # POSIX sh only.
 set -eu
+
+# shellcheck source=scripts/ci_phase_clock.sh
+. "$(dirname "$0")/ci_phase_clock.sh"
+phase_clock_init
 
 KIND="${1:?usage: produce_assets.sh <kind> <seed-label> <asset-label>...}"
 SEED="${2:?missing seed-label}"
@@ -170,6 +178,14 @@ sha256_of() {
     fi
 }
 
+# size_of FILE — the binary's byte count, `wc -c` being the one tool this needs that is present
+# on every host in the matrix (POSIX-mandated, unlike `stat`'s divergent -c/-f flags between GNU
+# and BSD). Prints `0` for a missing file rather than failing the caller.
+size_of() {
+    [ -f "$1" ] || { printf '%s' "0"; return 0; }
+    wc -c < "$1" | tr -d ' '
+}
+
 case "$KIND" in
     linux|native) ;;
     *) log "kind must be 'linux' or 'native', not '$KIND'"; exit 1 ;;
@@ -206,11 +222,41 @@ sh scripts/build_with_seed_fallback.sh out
 
 [ -f out/teko.c ] || { log "the dry build produced no out/teko.c"; exit 1; }
 
-# ── 3. the Linux assets, each with its target's own native toolchain ──────────────────────────
+# ── 3. the Linux assets, IN PARALLEL, each with its target's own native toolchain ──────────────
+# THE WALL-CLOCK FIX (owner ruling 2026-07-27): glibc (containerized) and musl (the runner's own
+# musl-gcc, no container — see scripts/native_linux_asset.sh) used to run ONE AFTER THE OTHER on
+# this same runner, so a producer promising both paid for both in full. `out/teko.c` never leaves
+# this process — there is no second job and nothing to hand off — so backgrounding each label's
+# build and waiting on all of them is the WHOLE mechanism; nothing beyond the shell's own job
+# control is introduced to get it.
+#
+# Each label's combined stdout+stderr is captured to its own file rather than interleaved live:
+# two concurrent builds writing directly to this script's stdout would shuffle their lines
+# together mid-word, which is unreadable. The captured log is played back, one label at a time,
+# once that label's job has been waited on — so the ORDER in the log is still deterministic even
+# though the WORK was not.
 if [ "$KIND" = "linux" ]; then
+    ASSET_PIDS=""
     for label in $PRODUCES; do
-        sh scripts/native_linux_asset.sh "$label" out/teko.c src
+        rm -f "asset-log-$label.txt"
+        ( sh scripts/native_linux_asset.sh "$label" out/teko.c src >"asset-log-$label.txt" 2>&1 ) &
+        ASSET_PIDS="$ASSET_PIDS $!:$label"
     done
+    ASSET_FAILED=0
+    for pair in $ASSET_PIDS; do
+        pid="${pair%%:*}"; label="${pair#*:}"
+        if wait "$pid"; then
+            log "asset '$label' — build succeeded"
+        else
+            log "asset '$label' — BUILD FAILED (log follows)"
+            ASSET_FAILED=1
+        fi
+        echo "--- $label build log ---"
+        cat "asset-log-$label.txt"
+        rm -f "asset-log-$label.txt"
+    done
+    [ "$ASSET_FAILED" = 0 ] || { log "one or more Linux asset builds failed"; exit 1; }
+    phase_mark "assets (parallel: $PRODUCES)"
 fi
 
 # ── 4. stage ──────────────────────────────────────────────────────────────────────────────────
@@ -279,8 +325,12 @@ for label in $PRODUCES; do
     } > "stage/$label/PROVENANCE.txt"
     echo "--- stage/$label/PROVENANCE.txt ---"
     cat "stage/$label/PROVENANCE.txt"
+    # THE ONE LINE A READER ACTUALLY WANTS: which asset, how big, which bytes — without opening
+    # PROVENANCE.txt. This is the "uma linha por asset com tamanho e sha256" this wagon asked for.
+    printf 'asset summary: %-24s size=%12s bytes  sha256=%s\n' "$label" "$(size_of "$bin")" "$(sha256_of "$bin")"
 done
 
 ls -lR stage
 
+phase_mark "stage"
 log "OK — staged: $PRODUCES"
