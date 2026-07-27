@@ -89,15 +89,15 @@ new arch primitive. Split:
 
 ```c
 /* tk_rt_arch — the host CPU architecture as a canonical lowercase token
- * ("x86_64" | "arm64" | "riscv64" | "unknown"), selected from the compiler's target
+ * ("x86_64" | "arm64" | "unknown"), selected from the compiler's target
  * predefines. Mirrors tk_rt_os's already-working plain-str shape (no lift). Note "arm64"
  * (not "aarch64") and "x86_64" (not "amd64") are the canonical spellings so the token
  * concatenates directly with tk_rt_os() into a NativeTarget key. [backs teko::arch] */
 tk_str tk_rt_arch(void);
 ```
 
-Selection: `__aarch64__ → "arm64"`, `__x86_64__ → "x86_64"`, `__riscv && __riscv_xlen==64 →
-"riscv64"`, else `"unknown"`. (Implementer maps the predefines; this doc states the contract only.)
+Selection: `__aarch64__ → "arm64"`, `__x86_64__ → "x86_64"`, else `"unknown"`. (Implementer maps
+the predefines; this doc states the contract only.)
 
 Front-end wiring mirrors `os` EXACTLY at the two sites that make it usable by the compiler
 (the compiler is compiled by the frozen C backend, so C emission is what matters):
@@ -228,7 +228,7 @@ Reporting surface: a field on the build report, printed as an explicit line, e.g
 `cross: emitted x86_64-windows on host x86_64-linux — not executed`. This reuses the exact
 honest-skip discipline the regressor already uses for absent run-wrappers
 (`resolve_run_wrapper`, `docs/design/regressor-principal-0.3.1.md` §2g). A cross native build is,
-for the run step, the same shape as a wasm/riscv target whose wrapper is absent: emitted, verified
+for the run step, the same shape as a wasm target whose wrapper is absent: emitted, verified
 well-formed (`check_object_wellformed`, §2f of that doc), NOT run.
 
 ---
@@ -267,7 +267,7 @@ a redesign.
   stripped/deferred).
 
 - **The os-arch key vocabulary — tkr-regression-format.md §6** (ratified): `on "<os-arch>"` routes
-  into `[expect.<os-arch>]`/`[golden.<os-arch>]`; the target set (x86_64/arm64/riscv64 linux, etc.)
+  into `[expect.<os-arch>]`/`[golden.<os-arch>]`; the target set (x86_64/arm64 linux, etc.)
   is the same vocabulary as `[platforms] targets` (TEKO_LEGISLATION.md:302) and `HOST_TARGET`
   (`src/build/manifest.tks:275`). This is the SINGLE os-arch string space (D39) the fill in §4.2
   reuses.

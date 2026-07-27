@@ -459,3 +459,45 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Higiene de diagnóstico:** `unsupported_target_error` (C1) trazia um `teko: ` próprio e toda saída passa por `fail`, que já prefixa `teko: <dir>: ` — a mensagem lia com prefixo duplo. Removido; as mensagens novas (R4/R5) nascem sem prefixo por essa razão.
 - **Ritual:** gen1 pelo seed, `teko test .` (suíte + os 10 regressivos), fixpoint gen1→gen2→gen3 byte-idêntico (binário E `teko.c`), `TEKO_MEM_PARANOID=1` exit 0, auditoria W15 (`git diff … | grep '^+.*//'` vazio).
 - **Reversibilidade:** média — C4/C5/C6 são aditivos e cobertos por `#test` + cenários; o C2 é uma adição de runtime que entra em TODO binário gerado (fixpoint reverificado byte-a-byte).
+
+---
+
+## 2026-07-27 — Remoção completa de `linux-riscv64` e `windows-arm64` (0.3.1)
+
+### D45 · Os dois alvos saem inteiros: backend, alvo, lanes, assets, docs ✅
+- **Ruling do dono:** *"E está decidido, remover completamente suporte a Windows arm64 e Linux
+  riscv64, apagar todos os vestígios, sem dead code."* Critério explícito: nada de branch morto,
+  flag desligada, entrada de enum órfã, teste pulado ou comentário de "quando riscv64 voltar".
+- **As duas remoções têm naturezas diferentes.** `linux-riscv64` era um ALVO NATIVO
+  (`NativeTarget::Riscv64Linux`): saiu o backend inteiro — `isel_riscv`, `minst_riscv`,
+  `regalloc_riscv`, `encode_riscv`, `encode_riscv_consts`, `abi_riscv64`, `objfile_elf_riscv` e os
+  cinco `_test.tkt` correspondentes — mais a entrada do enum, todo `match` que a cobria, o
+  `default_cc_for_target`, os nomes/aliases de `TEKO_TARGET`, o wrapper `qemu-riscv64-static` e a
+  sonda de sysroot cross que só existia para alimentá-lo. `windows-arm64` NUNCA foi alvo nativo —
+  era só rótulo de host/asset de CI, então a remoção foi de lane, matriz, label de seed e asset
+  publicado, sem tocar backend.
+- **`arm64` FICA.** `isel_arm64`, `encode_arm64`, `abi_aapcs64`, `NativeTarget::Arm64Macho` e o host
+  `linux-arm64` continuam — servem macOS/arm64 e Linux/arm64, que sobrevivem.
+- **Exaustividade preservada sem braço `_`:** todo `match` sobre `NativeTarget` que perdeu o braço
+  `Riscv64Linux` continua enumerando os membros restantes; nenhum coringa novo foi introduzido
+  (um `_` cobrindo o buraco seria dead code disfarçado).
+- **Cobertura NÃO perdida:** os 3 testes que exercitavam máquina exclusivamente riscv
+  (`cross_sysroot_for_*`, `qemu_riscv64_wrapper_*`, `resolve_run_wrapper_riscv_*`) saíram com a
+  máquina; toda outra asserção que usava riscv como VEÍCULO foi reapontada para um alvo cross
+  sobrevivente (`x86_64-windows` / `wasm32-wasi`). O `Then object well-formed` sobre ELF continua
+  existindo em `own_explicit_host_os_arch_runs`.
+- **Runtime (exceção maintained-C):** `tk_rt_arch()` perdeu o braço `__riscv` — o token `riscv64`
+  concatenava com `tk_rt_os()` numa chave `<arch>-<os>` que não é mais um `NativeTarget`, então
+  mantê-lo produziria uma chave inválida, não uma informação a mais.
+- **Assets publicados: nove → sete.** Saíram `teko-linux-riscv64-{glibc,musl}.tar.gz` e
+  `teko-windows-arm64.zip`. A lane `cross-arch determinism` passa a comparar QUATRO assets Linux
+  em vez de seis; o passo de binfmt/qemu, os pacotes `libc6-riscv64-cross`/`gcc-riscv64-linux-gnu`
+  e a parametrização `ELF_TOOLCHAIN`/`ELF_MACHINE` do `check_elf.sh` (cujo único chamador era o
+  ramo riscv) foram apagados por não terem mais consumidor.
+- **Docs:** `docs/design/backend-b2-riscv64.md` (o spec do backend removido) foi APAGADO. Registro
+  histórico ficou: as medições e os incidentes que citam as duas lanes permanecem, anotados com a
+  data e o motivo da remoção; o que saiu foi documentação que PROMETIA suporte inexistente
+  (matriz de alvos do roadmap, o follow "arm64 Windows" do #388, a dívida de re-enable #304/#305).
+- **Reversibilidade:** baixa por decisão — é uma remoção, e o histórico do git é o caminho de volta
+  caso o dono reverta o ruling.
+

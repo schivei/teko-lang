@@ -1,5 +1,12 @@
 # Compile-time / CI wall-clock architecture
 
+> **STATUS 0.3.1 — HISTÓRICO NA PARTE riscv64/windows-arm64.** Os dois hosts foram removidos por
+> decisão do owner ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos
+> os vestígios, sem dead code"), junto com o backend RISC-V inteiro. Este documento analisa um
+> pipeline (`build-test`, `native.yml`, `cross_compile_linux.sh`) que já não existe; suas
+> medições ficam como registro, e toda proposta sua sobre essas duas lanes — QW-2 ("riscv smoke",
+> HALT-2 incluído) entre elas — está VAZIA por remoção do alvo, não pendente de ruling.
+
 Status: DESIGN (architect). Companion to the memory review in
 `memory/teko-arena-lifetime-observability.md` (the *memory* axis) and
 `memory/teko-selfbuild-perf-diagnosis.md` (issue #249, the *time* axis this doc

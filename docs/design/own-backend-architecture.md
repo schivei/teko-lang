@@ -58,12 +58,10 @@ The parity set is anchored to the **current release matrix** (`.github/workflows
 | 2 | arm64 (AArch64) | AAPCS64 (Linux) | ELF | Linux arm64 glibc + musl |
 | 3 | x86-64 | SysV | ELF | Linux x86_64 glibc + musl |
 | 4 | x86-64 | Win64 | PE/COFF | `windows-x86_64` release |
-| 5 | arm64 | Win64 (ARM64) | PE/COFF | `windows-arm64` release |
-| 6 | riscv64 | LP64D | ELF | Linux riscv64 glibc + musl |
-| 7 | wasm32 | WASI | Wasm | new (N6a) |
-| 8 | wasm32 | Browser (JS-import RT) | Wasm | new (N6b) |
+| 5 | wasm32 | WASI | Wasm | new (N6a) |
+| 6 | wasm32 | Browser (JS-import RT) | Wasm | new (N6b) |
 
-**Three object formats** the backend must emit: **ELF** (Linux, riscv64), **Mach-O**
+**Three object formats** the backend must emit: **ELF** (Linux), **Mach-O**
 (macOS/arm64), **PE/COFF** (Windows). Wasm is its own container. The Mach-O emitter must not
 regress the `__TEXT,__info_plist` section `run_cc` writes today (`src/build/project.tks:429-437`,
 plist assembled at `:444` — Finder/`mdls`/`Get Info` metadata; plain text, no XML metacharacters).
@@ -293,20 +291,17 @@ that PROVES each issue.
 - Verifies via: C-native == own-native on Linux x86_64 (glibc + musl) in CI; replaces one `zig cc`
   leg of `cross_compile_linux.sh`.
 
-**B2 · N4 — riscv64 LP64D + ELF**
-- Scope: `isel_riscv64.tks`, `abi_lp64d.tks`, `encode_riscv64.tks` (reuse `objfile_elf.tks`).
-- Depends on: B1 (shares the ELF emitter).
-- Files: new `src/backend/isel_riscv64.tks`, `abi_lp64d.tks`, `encode_riscv64.tks`.
-- Verifies via: C-native == own-native on riscv64 (qemu leg) — this is the family the current
-  toolchain fights hardest (`cross_compile_linux.sh` notes the incomplete riscv64 glibc), so it is
-  the clearest independence win.
+**B2 · N4 — riscv64 LP64D + ELF — SHIPPED THEN REMOVED (0.3.1).** Built at #387 and deleted in
+0.3.1 by owner ruling ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar
+todos os vestígios, sem dead code"). Its modules, its `NativeTarget` arm, its CI lanes and its
+design doc are gone; the phase letter is kept so B1/B3 keep their names.
 
-**B3 · N5 — Windows x86_64 + arm64 (Win64 ABI + PE/COFF)**
+**B3 · N5 — Windows x86_64 (Win64 ABI + PE/COFF)**
 - Scope: `abi_win64.tks` (shadow space, differing arg regs), `objfile_coff.tks`; reuse the
   x86_64/arm64 encoders from A4/B1.
 - Depends on: B1 (x86_64 encoder), A4 (arm64 encoder).
 - Files: new `src/backend/abi_win64.tks`, `src/backend/objfile_coff.tks`.
-- Verifies via: C-native == own-native on `windows-x86_64` + `windows-arm64` release lanes.
+- Verifies via: C-native == own-native on the `windows-x86_64` release lane.
 
 ### Phase C — Wasm (settles #224)
 
@@ -344,10 +339,10 @@ that PROVES each issue.
 **E1 · L1 — ELF static linker**
 - Scope: read own objects + runtime object, resolve relocations, lay out sections, write ELF
   `Ehdr`/`Phdr`; replace `cc`-as-linker on the ELF targets.
-- Depends on: B1/B2 (ELF objects to link).
+- Depends on: B1 (ELF objects to link).
 - Files: new `src/link/linker.tks` (format-independent core: reachability, symbol resolution),
   `src/link/link_elf.tks`; tests.
-- Verifies via: own-linked ELF binary passes the 3-way gate on Linux x86_64/arm64/riscv64 — the
+- Verifies via: own-linked ELF binary passes the 3-way gate on Linux x86_64/arm64 — the
   first target with **zero** external toolchain.
 
 **E2 · L2 — Mach-O + PE/COFF static linkers**

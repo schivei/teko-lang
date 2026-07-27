@@ -7,6 +7,14 @@ status: INVESTIGAÇÃO MEDIDA — parcial; a seção "O QUE FALTA MEDIR" nomeia 
 
 # Tempo de build por host — o que o macOS não faz
 
+> **STATUS 0.3.1 — `linux-riscv64` e `windows-arm64` NÃO EXISTEM MAIS.** Por decisão do owner
+> ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos os vestígios, sem
+> dead code"), os dois hosts saíram da matriz de producers, das lanes de teste e do conjunto de
+> assets publicados. As medições abaixo que os citam são REGISTRO HISTÓRICO de corridas reais e
+> ficam como estão; nenhuma delas descreve uma lane que ainda roda. Onde este documento propõe
+> trabalho sobre essas lanes, a proposta está VAZIA por remoção do alvo, não por decisão de
+> priorização.
+
 Cada afirmação deste documento é rotulada:
 
 * **FATO(árvore)** — lido diretamente do repositório, reproduzível com o comando citado.

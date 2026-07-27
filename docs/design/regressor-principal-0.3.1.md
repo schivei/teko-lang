@@ -1,5 +1,12 @@
 # 0.3.1 — `regressor.tkr` AS THE PRIMARY REGRESSION BANK + DEATH OF THE REGRESSION SCRIPTS
 
+> **STATUS 0.3.1 — a metade `riscv` deste plano ficou VAZIA.** `linux-riscv64` foi removido por
+> decisão do owner ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos
+> os vestígios, sem dead code"): as linhas `riscv64-linux` do corpus, o cenário
+> `own_riscv_object_well_formed` e o wrapper `qemu-riscv64-static` saíram junto com o alvo. A
+> decisão D5 ("FOLD riscv/coff into the backends Feature") permanece como registro do que foi
+> decidido em 2026-07-24; hoje ela só tem a metade `coff`.
+
 **DECISIONS CLOSED — ratified by the owner 2026-07-24 (D1-D9 all sealed at ruling level; the
 D5/D7 alternatives were closed in the owner's favor: D5 = FOLD riscv/coff into the backends
 Feature, D7 = DELETE the drained dirs). Default triage principle going forward, owner's literal
@@ -416,11 +423,11 @@ absent host tool is an honest per-scenario skip (never a fabricated pass).
 fn check_object_wellformed(objp: str, target: str) -> RegrOutcome { /* crumb C3 */ }
 ```
 
-### 2g. Target + run-wrapper — `Given target` (wasm/riscv), honest os-arch skip
+### 2g. Target + run-wrapper — `Given target` (wasm), honest os-arch skip
 
-A `Given target = "wasm32-wasi"` (or `"riscv64-linux"`) sets `TEKO_TARGET` in `env` AND selects
-the RUN wrapper: `wasmtime` for wasm (`-W memory64=y` for `wasm64-wasi`), `qemu-riscv64-static`
-for the riscv cross. When the wrapper tool is absent the scenario honest-SKIPS with a named
+A `Given target = "wasm32-wasi"` sets `TEKO_TARGET` in `env` AND selects
+the RUN wrapper: `wasmtime` for wasm (`-W memory64=y` for `wasm64-wasi`).
+When the wrapper tool is absent the scenario honest-SKIPS with a named
 reason and the os-arch in the label (so a macOS dev host skipping the qemu lane is honest, not a
 false green). On a provisioned CI lane, a `REGRESSION_REQUIRE_TOOLS`-style fail-closed turns the
 skip into a hard failure (§7, mirroring the old `REQUIRE_WASM_ENGINE`).
@@ -428,14 +435,14 @@ skip into a hard failure (§7, mirroring the old `REQUIRE_WASM_ENGINE`).
 ```teko
 /**
  * resolve_run_wrapper — the executor prefix argv for `target`: [] for a native host target,
- * `["wasmtime", "run"]` (plus `"-W","memory64=y"` for `wasm64-wasi`) for a wasm target,
- * `["qemu-riscv64-static"]` for the riscv cross. Returns an error tagged `skip:<reason>` when
+ * `["wasmtime", "run"]` (plus `"-W","memory64=y"` for `wasm64-wasi`) for a wasm target.
+ * Returns an error tagged `skip:<reason>` when
  * the required tool is absent on this host (the caller turns it into an honest os-arch skip,
  * unless a fail-closed CI flag is set — §7).
  *
  * @param target  the effective os-arch / wasm target
  * @return        the run-wrapper argv prefix, or a skip-tagged error when its tool is absent
- * @throws        (skip-tagged) when `wasmtime`/`qemu-riscv64-static` is not on PATH
+ * @throws        (skip-tagged) when `wasmtime` is not on PATH
  * @since 0.3.1
  */
 fn resolve_run_wrapper(target: str) -> []str | error { /* crumb C3 */ }
@@ -728,15 +735,15 @@ cross-compile-linux smoke.
 **`tests.yml` — becomes the SOLE regression executor.** `./bin/teko test .` now runs the
 regression phase (because `teko.tkp` declares `[tests] regression = […]`). ADD, on the lanes that
 can host them, provisioning for the backend toolchains the folded differentials need —
-`wasmtime` + `wasm-validate` (F5 wasm / `wasm_target`), `qemu-riscv64-static` +
-`riscv64-linux-gnu-gcc` (F5 riscv), plus the windows lane runs the coff differential NATIVELY.
+`wasmtime` + `wasm-validate` (F5 wasm / `wasm_target`), plus the windows lane runs the coff
+differential NATIVELY.
 Set a fail-closed env (a `REGRESSION_REQUIRE_TOOLS=1`, mirroring the retired
 `REQUIRE_WASM_ENGINE`) on the provisioned lanes so a broken provisioning step is a HARD failure,
 not a silently-green honest-skip (D6/R2).
 
 **Surviving `scripts/*`:** `check_elf.sh`, `check_macho.sh`, `check_coff.sh` — leaf tools the
 `Then object well-formed` verb shells (§2f). External tools the runner invokes: `wasmtime`,
-`wasm-validate`, `qemu-riscv64-static`. **DELETED after C7 green:** `compile_fail_regressions.sh`,
+`wasm-validate`. **DELETED after C7 green:** `compile_fail_regressions.sh`,
 `positive_regressions.sh`, `native_regressions.sh`, `crossmodule_regressions.sh`,
 `diff_c_own.sh`, `validate_wasm_own.sh`.
 

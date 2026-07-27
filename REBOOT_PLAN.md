@@ -1146,10 +1146,10 @@ concretos + symbol table à mão); `class`/`trait`/`interface`; DI/CQRS/convenç
 
 | Camada | Alvos | Status |
 |---|---|---|
-| **v1 (reabilitar conforme o front converge)** | macOS {arm64, x86_64}, Linux {x86_64, arm64}, Windows {x86_64, arm64} | KEEP — emitters golden-testados |
+| **v1 (reabilitar conforme o front converge)** | macOS {arm64, x86_64}, Linux {x86_64, arm64}, Windows {x86_64} | KEEP — emitters golden-testados |
 | **Bring-up do kernel** | 1 **primário** (host) + 1 **cross-prova** | foco da Etapa 1 |
-| **Adiados (infra existe)** | FreeBSD {x86_64, arm64}, Linux riscv64 | oportunístico |
-| **Removidos** | x86(32), arm32, riscv32, AVR, MIPS, PPC64, **WASM (por ora)** | 64-bit-only, nativo-only, sem legado |
+| **Adiados (infra existe)** | FreeBSD {x86_64, arm64} | oportunístico |
+| **Removidos** | x86(32), arm32, riscv32, **riscv64**, **Windows arm64**, AVR, MIPS, PPC64, **WASM (por ora)** | 64-bit-only, nativo-only, sem legado; riscv64 e Windows arm64 removidos em 0.3.1 por decisão do owner |
 
 ---
 

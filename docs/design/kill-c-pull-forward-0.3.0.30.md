@@ -292,9 +292,9 @@ preserves internal mangle if the owner prefers.
 
 | lane host | arch | notes |
 |---|---|---|
-| Linux | **x86_64**, **arm64**, **riscv64** | full matrix; riscv via the riscv objfile/encode/abi |
+| Linux | **x86_64**, **arm64** | full matrix (riscv64 was in this matrix when the doc was written; the target was removed in 0.3.1) |
 | macOS | **arm64** | AAPCS64 (darwin vararg-on-stack variant) |
-| Windows | **x86_64**, **arm64** | COFF; Win64 vararg (float-dup-into-GPR); `#cconv("stdcall")` |
+| Windows | **x86_64** | COFF; Win64 vararg (float-dup-into-GPR); `#cconv("stdcall")` (windows-arm64 was listed here; the host was removed in 0.3.1) |
 
 Own-backend-coupled fixtures (`variadic_*` → KC1) are **"green when the crumb lands"** via `Given
 pending`. **No fixture is gated on E1** — the link is the system `ld` throughout; when E1 lands the same

@@ -3,8 +3,9 @@
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#388**. Mini-umbrella
 `fix/issue-388-windows-coff` (**#402**; base = the umbrella `remodel/backend-build` carrying A1→A4 +
 #443 + B1 + B2, seed `teko 0.3.0.10-beta`). Base for the design: `docs/design/backend-b1-x8664.md`
-(the x86-64 ISA pipeline this REUSES WHOLE) + `docs/design/backend-b2-riscv64.md` (the
-reuse-vs-parallel writer discipline this INVERTS) + `docs/design/own-backend-architecture.md` §2.1
+(the x86-64 ISA pipeline this REUSES WHOLE; the B2 riscv64 plan this doc cites for the
+reuse-vs-parallel writer discipline was deleted with its target in 0.3.1) +
+`docs/design/own-backend-architecture.md` §2.1
 (target #4, x86-64 Win64 PE/COFF) + §3.4/§3.5, grounded in the merged code
 (`src/backend/{minst_x86,isel_x86_64,regalloc_x86,encode_x86_64,abi_sysv64,abi_aapcs64,objfile_elf,
 objfile_macho}.tks`, `src/build/project.tks`, `scripts/{diff_c_own,check_elf,check_macho}.sh`,
@@ -711,22 +712,18 @@ built (inherited `B1-interp`, REPORTED not blocking).
 | FPR spill | — inherited | `detect_fpr_spill` analog errors before encode (A3's `A3-fpr-spill`) | A3's follow-up |
 | `loop` back-edge | — inherited | regalloc honest-stops (`A3-loop`) before encode | A3's `A3-loop` |
 | i128 register-pair ops | — inherited | isel never emits them (rides A2's i128 route) | A2's i128 route |
-| windows-arm64, wasm | later clusters | other targets | B3-follow (arm64 COFF), C1 (#389) |
+| wasm | later clusters | other targets | C1 (#389) — the windows-arm64 row was CANCELLED in 0.3.1 |
 | `--backend`/`--target` flags | later cluster | the real manifest flags (B3 uses env seams) | D1/#390 |
 | own PE/COFF linker (drop clang/lld-link) | later cluster | the COFF static linker | Phase E2/#226 |
 
 Each stop is a NAMED error the pipeline surfaces; a fixture reaching one stops IDENTICALLY on the own
 side and is compared at the stop, never at a fabricated value (M.3, the A4/B1/B2 precedent).
 
-> **windows-arm64 (`#388`'s second half) is a NAMED follow, not part of this MVP.** The arch doc scopes
-> B3 as x86_64 + arm64 Windows. This plan delivers **x86_64 Windows** (the reuse-heavy half) and NAMES
-> **arm64 Windows** as the follow-on: it needs `abi_win64_arm` (AAPCS-on-Windows differs from AAPCS64:
-> different callee-saved set, no red zone) + reuse of the A4 arm64 encoder + `emit_coff` with
-> `Machine=0xAA64` (IMAGE_FILE_MACHINE_ARM64). The `windows-arm64` CI lane is DISABLED (owner ruling
-> 2026-07-06, #304), so its differential cannot run in CI today — the arm64-Windows half waits on that
-> lane's re-enable and is REPORTED up (§8 R-3), keeping #388's x86_64 half a complete, gate-able
-> deliverable (the issue-is-100% law: the x86_64 half is 100% of what CAN be gated now; the arm64 half
-> is honestly blocked on infra, surfaced for the integrator to sequence).
+> **windows-arm64 (`#388`'s second half) is CANCELLED, not pending.** This plan delivered **x86_64
+> Windows** and NAMED **arm64 Windows** as a follow-on blocked on a disabled CI lane. That follow-on
+> was closed by the owner in 0.3.1 — "remover completamente suporte a Windows arm64 e Linux riscv64,
+> apagar todos os vestígios, sem dead code". There is no `abi_win64_arm`, no `Machine=0xAA64` COFF
+> half and no `windows-arm64` lane to re-enable; #388 is CLOSED at its x86_64 half.
 
 ---
 
@@ -779,12 +776,10 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
   R-1 raise. REPORTED for the integrator to sequence (a 0.3.1 DRY-sweep companion), not a B3 blocker.
 - **R-2 · No parallel `minst_x86_interp`.** §6.3 — inherited from B1's R-2; the LIR interp + goldens +
   the executing Windows differential cover the oracle role. REPORTED.
-- **R-3 · windows-arm64 (the second half of #388) is infra-blocked.** §7 — the `windows-arm64` CI lane
-  is DISABLED (owner #304), so its differential cannot gate in CI. The x86_64 half is delivered 100%;
-  the arm64 half (reuse the A4 arm64 encoder + `abi_win64_arm` + `emit_coff` with `Machine=0xAA64`)
-  waits on that lane's re-enable. REPORTED for the integrator to sequence — surfaced, never silently
-  dropped (issue-is-100%: the plan delivers all of #388 that is gate-able today + names the honest
-  infra block on the rest).
+- **R-3 · windows-arm64 (the second half of #388) — CLOSED BY REMOVAL (0.3.1).** §7 — it was reported
+  as infra-blocked on the DISABLED `windows-arm64` lane (owner #304). The owner then removed the host
+  outright in 0.3.1, so the report is resolved by cancellation: #388 is complete at its x86_64 half and
+  there is no arm64-Windows work left to sequence.
 - **R-4 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP (`diff_c_own.sh:190`, `println`
   vs `tk_println`) is a shared LIR-lowering gap — it KNOWN-STOPs identically on the Windows lane (the
   lld-link rejects the undefined `println`). Already a reported finding; B3 inherits it unchanged.
