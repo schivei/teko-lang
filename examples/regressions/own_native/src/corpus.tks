@@ -197,3 +197,86 @@ fn f_null_union_reassign_to_null() -> i64 {
     let b = match x { i64 as v => v; null => 0 }
     a + b
 }
+
+/**
+ * LayoutPair — the STRUCT control of the class-layout probe. It is the arm of the native lowering's
+ * layout collector that already worked, so a fix that broke it fails here instead of passing
+ * quietly.
+ */
+type LayoutPair = struct {
+    /** small — the leading 4-byte field, the one a wrong stride reads back wrong. */
+    small: i32
+
+    /** big — the 8-byte field the leading one must not overlap. */
+    big: i64
+
+    /** flag — the trailing 1-byte field, the one a wrong total size drops. */
+    flag: bool
+}
+
+/**
+ * LayoutBase — an ABSTRACT base whose fields are the PREFIX of every derived instance, which is
+ * what field-flattening composition means for the emitted object.
+ */
+type LayoutBase = abstract class {
+    /** small — the inherited 4-byte field. */
+    pub small: i32
+
+    /** big — the inherited 8-byte field. */
+    pub big: i64
+}
+
+/**
+ * LayoutLeaf — the concrete leaf: `LayoutBase`'s two fields followed by its own two. An overlapping
+ * or reordered slot shows up as a wrong read-back, never as a compile error.
+ */
+type LayoutLeaf = class LayoutBase {
+    /** flag — the leaf's own 1-byte field, placed after the inherited prefix. */
+    pub flag: bool
+
+    /** extra — the leaf's own 8-byte field. */
+    pub extra: i64
+
+    /**
+     * make — the static factory, naming the INHERITED fields alongside its own.
+     *
+     * @param s  the inherited small field
+     * @param b  the inherited big field
+     * @param f  the own flag field
+     * @param e  the own extra field
+     * @return   a fresh LayoutLeaf
+     */
+    pub fn make(s: i32, b: i64, f: bool, e: i64) -> LayoutLeaf { LayoutLeaf { small = s; big = b; flag = f; extra = e } }
+
+    /**
+     * total — sums an INHERITED field with an OWN one, so a slot shared between the two halves of
+     * the flattened layout yields a wrong sum.
+     *
+     * @return small + big + extra
+     */
+    pub fn total(self) -> i64 { self.small + self.big + self.extra }
+}
+
+/**
+ * f_class_layout_effective_fields — a `ClassBody` must register the layout of its EFFECTIVE
+ * instance fields. The native lowering collected a layout for a `StructBody` only; a `ClassBody`
+ * fell through the catch-all arm of `collect_struct_layout_decl` and registered NOTHING, so EVERY
+ * class instantiation died at compile time with "no layout registered for struct `…`" — one class
+ * in one namespace, with no same-name type anywhere, was enough to trigger it.
+ *
+ * @return 0 when the struct control and every inherited and own field read back the value they were
+ *         constructed with, else 1..8 naming the one that failed
+ */
+fn f_class_layout_effective_fields() -> i64 {
+    let pair = LayoutPair { small = 3; big = 7; flag = true }
+    if pair.small != 3 { return 1 }
+    if pair.big != 7 { return 2 }
+    if !pair.flag { return 3 }
+    let leaf = LayoutLeaf::make(2, 13, true, 17)
+    if leaf.small != 2 { return 4 }
+    if leaf.big != 13 { return 5 }
+    if !leaf.flag { return 6 }
+    if leaf.extra != 17 { return 7 }
+    if leaf.total() != 32 { return 8 }
+    0
+}

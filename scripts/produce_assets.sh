@@ -116,12 +116,14 @@ machine_word_of() {
 }
 
 # arch_keyword_for LABEL — the machine keyword an asset label PROMISES, or "" when the label
-# carries no architecture claim this can check.
+# carries no architecture claim this can check. riscv64 left with the target (owner ruling, .31), so
+# no label promises it any more. The DETECTORS above still name riscv64 on purpose: their job is to
+# report what a binary actually IS, and an assertion that can say "got riscv64, promised x86_64"
+# beats one that can only say "cannot determine".
 arch_keyword_for() {
     case "$1" in
         *-x86_64|*-x86_64-*) printf '%s' "x86_64" ;;
         *-arm64|*-arm64-*)   printf '%s' "arm64" ;;
-        *-riscv64|*-riscv64-*) printf '%s' "riscv64" ;;
         *) printf '%s' "" ;;
     esac
 }

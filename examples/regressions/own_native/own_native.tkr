@@ -3,16 +3,17 @@
 # WHY THIS FILE EXISTS AT ALL (0.3.1 channel ruling, owner 2026-07-26). These scenarios used to live
 # in regressor.tkr as `Given source` rows naming ONE case file, and the runner's snippet FOLD gave
 # them one synthesized build per (source, configuration). That fold could never take a
-# `Then object well-formed` row, so the riscv64 half of the corpus paid a SECOND build for the very
-# same program. Making the corpus a PROJECT removes the fold from the picture entirely: a project
-# `.tkr` is compiled at most once (`RegrBuilt`), every scenario of this file runs off that one build,
-# and an object check inspects THAT build's own `.o`.
+# `Then object well-formed` row, so a cross half of the corpus paid a SECOND build for the very same
+# program. Making the corpus a PROJECT removes the fold from the picture entirely: a project `.tkr`
+# is compiled at most once (`RegrBuilt`), every scenario of this file runs off that one build, and an
+# object check inspects THAT build's own `.o`.
 #
-# ONE FILE PER CONFIGURATION, and that is not a stylistic choice: the project cache is keyed on the
-# build SHAPE, not on the env, so the first scenario reaching it fixes the configuration for the whole
-# file. A second target therefore needs a second `.tkr` (own_native_riscv64.tkr), never a second
+# ONE FILE PER PROJECT CONFIGURATION, and that is not a stylistic choice: the project cache is keyed
+# on the build SHAPE, not on the env, so the first scenario reaching it fixes the configuration for
+# the whole file. A second PROJECT target would therefore need a second `.tkr`, never a second
 # `Examples` row — a row that declared a different target would silently assert this file's HOST
-# artifact.
+# artifact. There is exactly one such file today: `linux-riscv64` left the compiler with the
+# riscv64/windows-arm64 removal, and with it the second configuration that ever needed one.
 #
 # The three rows at the end name a `Given source` case file instead: each is a lone row of its own
 # cross target, so a project build would buy nothing and a one-line program is the honest minimum for
@@ -28,7 +29,7 @@ Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado
     Then exit = 42
 
 
-Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar sozinho (target Examples: host E cross para riscv64 sob qemu; herda o CORPUS do extinto scripts/diff_c_own.sh e a lane riscv64-qemu que ele dirigia). O EIXO backend morreu com o emissor de C: cada cenario afirma o proprio exit/stdout/trap, nao a igualdade com um segundo backend.
+Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar sozinho (herda o CORPUS do extinto scripts/diff_c_own.sh). O EIXO backend morreu com o emissor de C: cada cenario afirma o proprio exit/stdout/trap, nao a igualdade com um segundo backend. O EIXO cross riscv64-qemu morreu com o alvo linux-riscv64 (ruling do owner, .31).
 
   Scenario: own_defer_arm_write_propagates (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     When built and run
@@ -134,5 +135,28 @@ Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenari
   # used to prove it — the C backend, which wrapped at the assign all along — is gone with the C
   # emitter, so what proves it now is this scenario's own asserted exit.
   Scenario: null_union_reassign_to_null (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+
+Feature: class layout — a class registers the layout of its effective instance fields
+
+  # The native lowering collected a layout for a `StructBody` only; a `ClassBody` fell through the
+  # catch-all arm of `collect_struct_layout_decl` and registered NOTHING, so EVERY class
+  # instantiation died at compile time with "no layout registered for struct `…`" — one class in
+  # one namespace, with no same-name type anywhere, was enough to trigger it.
+  #
+  # `class_layout_effective_fields` asserts both halves off this channel's ONE build (`corpus.tks`,
+  # `f_class_layout_effective_fields`). The class half: an `abstract` base's fields are the PREFIX
+  # of the derived instance (field-flattening composition), so the inherited AND the own fields must
+  # each read back the value they were constructed with, and a method summing across the boundary
+  # must agree — an overlapping or reordered slot shows up as a wrong exit code, not as a compile
+  # error. The struct half is the control: it is the arm that already worked, so a fix that broke it
+  # fails HERE instead of passing quietly.
+  #
+  # IT IS A MEMBER OF THIS CHANNEL, not a `Given source` row of its own: the defect is in the NATIVE
+  # LOWERING's layout collector, which is exactly what this channel's program exercises, and a member
+  # costs no build (0.3.1 channel ruling).
+  Scenario: class_layout_effective_fields (own-native — a class instance is a field-shaped object)
     When built and run
     Then exit = 42
