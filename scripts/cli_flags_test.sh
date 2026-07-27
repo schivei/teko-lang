@@ -72,23 +72,52 @@ done
 run_flag
 [ "$RC" -eq 2 ] || fail "bare teko exit $RC (want 2)"
 
-# --- --backend : REMOVED (owner ruling 2026-07-24) — every spelling, in every dispatch shape,
-#     is rejected honestly (exit 2) with a message pointing at TEKO_BACKEND, never silently
-#     ignored or mistaken for the project positional. The rejection fires at CLI dispatch,
-#     BEFORE any project directory is resolved, so the positional here need not be a real
-#     buildable project — the repo root itself (always present) is enough. -------------------
+# --- --backend : REMOVED, AND SO IS THE ENV VAR IT USED TO POINT AT ---------------------------
+# Two rulings, one lane. The 2026-07-24 ruling removed the FLAG and had the rejection point the
+# user at `TEKO_BACKEND` — the env var was still the way to pick a backend. The 2026-07-27 ruling
+# removed the env var too ("TEKO_BACKEND é outro que não deve mais existir"), because there is
+# only one backend now. This lane had been asserting the FIRST ruling's prose and went red the
+# moment the second landed — correctly: it was pinning a message that names a thing that must no
+# longer exist.
+#
+# So the assertion is rewritten to guard the RULING instead of echoing the prose:
+#
+#   1. exit 2 — rejected at CLI dispatch, never silently ignored nor mistaken for the project
+#      positional (the original point of this block, unchanged);
+#   2. the message says the flag is gone AND why (`only one backend`) — a user who typed
+#      `--backend` gets told the concept died, not just that the spelling is wrong;
+#   3. the message MUST NOT mention `TEKO_BACKEND`. This is the part that earns its keep: it
+#      turns the lane into an active guard that the env var stays dead. Pointing a user at an
+#      env var the compiler no longer reads is worse than saying nothing — it is an honest-looking
+#      instruction that cannot work (M.3).
+#
+# The rejection fires BEFORE any project directory is resolved, so the positional need not be a
+# real buildable project — the repo root itself (always present) is enough.
 BACKEND_FIXTURE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
+# assert_backend_rejected SHAPE — the three assertions above over the last run_flag's RC/ERR.
+#
+# The NEGATIVE assertion is written as an `if`, not as `grep -q … && fail`. Under this script's
+# `set -eu` the `&&` form is a trap: the PASSING case is grep finding nothing, which makes the
+# whole list return 1 and aborts the run at the exact moment the code is correct. An `if`
+# condition is exempt from `set -e` by definition, so the intent survives the shell.
+assert_backend_rejected() {
+    shape="$1"
+    [ "$RC" -eq 2 ] || fail "'$shape' exit $RC (want 2)"
+    printf '%s\n' "$ERR" | grep -q "only one backend" \
+        || fail "'$shape' stderr does not say the backend concept is gone: $ERR"
+    if printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND"; then
+        fail "'$shape' stderr still points at TEKO_BACKEND, which was removed: $ERR"
+    fi
+}
+
 run_flag build --backend=native "$BACKEND_FIXTURE_DIR"
-[ "$RC" -eq 2 ] || fail "'build --backend=native' exit $RC (want 2)"
-printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'build --backend=native' stderr missing 'TEKO_BACKEND': $ERR"
+assert_backend_rejected 'build --backend=native'
 
 run_flag run --backend native "$BACKEND_FIXTURE_DIR"
-[ "$RC" -eq 2 ] || fail "'run --backend native' exit $RC (want 2)"
-printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'run --backend native' stderr missing 'TEKO_BACKEND': $ERR"
+assert_backend_rejected 'run --backend native'
 
 run_flag "$BACKEND_FIXTURE_DIR" --backend=c
-[ "$RC" -eq 2 ] || fail "'<bare-project> --backend=c' exit $RC (want 2)"
-printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" || fail "'<bare-project> --backend=c' stderr missing 'TEKO_BACKEND': $ERR"
+assert_backend_rejected '<bare-project> --backend=c'
 
 echo "cli_flags_test: PASS ($BIN)"
