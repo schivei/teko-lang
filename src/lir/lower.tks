@@ -1150,33 +1150,37 @@ fn lower_str_arg_call(ctx: LowerCtx, e: checker::TExpr, sym: str, c: checker::TC
     Lowered { ctx = ctx_append(fo.ctx, inst); vreg = 0 }
 }
 
-/** LoweredArgs — the context after lowering an argument list + the VRegs, in order. */
+/** LoweredArgs — the context after lowering an argument list + the VRegs, ABI-FLATTENED, in
+    order. A fat (`str`/`[]T`) argument contributes TWO consecutive VRegs (ptr then len,
+    `lower_arg_vregs`'s contract) — so `vregs.len` is the call's actual incoming register
+    count, not necessarily `args.len`. */
 pub type LoweredArgs = struct { ctx: LowerCtx; vregs: []u32 }
 
 /**
- * lower_args — lower every argument expression left-to-right, collecting
- * each one's VReg.
+ * lower_args — lower every argument expression left-to-right, ABI-FLATTENING each one into
+ * its incoming register(s) (`lower_arg_vregs`).
  *
  * @param LowerCtx ctx  the lowering context
  * @param []checker::TExpr args  the argument list to lower
- * @return LoweredArgs | error  the advanced context + the lowered VRegs, in
- *                              order
+ * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
 fn lower_args(ctx: LowerCtx, args: []checker::TExpr) -> LoweredArgs | error {
     lower_args_from(ctx, args, 0)
 }
 
 /**
- * lower_args_from — lower `args[start..]` left-to-right, collecting each
- * one's VReg (A1-6, #382 — `lower_args` is the `start=0` case; the
- * interface-dispatch path additionally needs the TAIL of an arg list, the
- * receiver at index 0 having already been lowered separately).
+ * lower_args_from — lower `args[start..]` left-to-right, ABI-FLATTENING each one into its
+ * incoming register(s) (A1-6, #382 — `lower_args` is the `start=0` case; the
+ * interface-dispatch path additionally needs the TAIL of an arg list, the receiver at index 0
+ * having already been lowered separately). A fat (`str`/`[]T`) argument contributes its
+ * (ptr, len) pair (`lower_arg_vregs`) — the SAME two-register contract `lower_function`'s
+ * `bind_param` expects on the receiving end, so a caller and callee compiled by this backend
+ * never disagree on a fat argument's register count.
  *
  * @param LowerCtx ctx  the lowering context
  * @param []checker::TExpr args  the full argument list
  * @param u64 start  the first index to lower (0 lowers every argument)
- * @return LoweredArgs | error  the advanced context + the lowered VRegs, in
- *                              order
+ * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
 fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, start: u64) -> LoweredArgs | error {
     mut cur = ctx
@@ -1184,12 +1188,53 @@ fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, start: u64) -> Lowered
     mut i: u64 = start
     loop {
         if i >= args.len { break }
-        let ao = match lower_expr(cur, args[i]) { Lowered as x => x; error as err => return err }
-        cur = ao.ctx
-        vregs = teko::list::push(vregs, ao.vreg)
+        let one = match lower_arg_vregs(cur, args[i]) { LoweredArgs as x => x; error as err => return err }
+        cur = one.ctx
+        vregs = append_vregs(vregs, one.vregs)
         i++
     }
     LoweredArgs { ctx = cur; vregs = vregs }
+}
+
+/**
+ * append_vregs — `xs` with every element of `more` appended, in order — the flattening step
+ * `lower_args_from`'s loop needs now that ONE argument can contribute more than one VReg.
+ *
+ * @param []u32 xs  the VReg list accumulated so far
+ * @param []u32 more  the VReg(s) to append
+ * @return []u32  `xs` followed by `more`, in order
+ */
+fn append_vregs(xs: []u32, more: []u32) -> []u32 {
+    mut out = xs
+    mut i: u64 = 0
+    loop {
+        if i >= more.len { break }
+        out = teko::list::push(out, more[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lower_arg_vregs — lower ONE call argument to its ABI-flattened incoming register(s): a fat
+ * (`str`/`[]T`) argument (`is_fat_type`) flattens through `lower_fat_expr` to its (ptr, len)
+ * pair — ptr FIRST, len SECOND (CONTRACT ORDER, mirroring the C twin's `tk_str{ptr;len}` field
+ * order and the SAME order `lower_function`'s `bind_param` binds on the receiving end); every
+ * other argument lowers to its single VReg via the plain `lower_expr`.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr arg  the argument expression to lower
+ * @return LoweredArgs | error  the advanced context + the argument's VReg(s), in ABI order
+ * @throws  propagated from `lower_fat_expr` (a fat argument whose producer is outside the
+ *          closed set) or from `lower_expr`
+ */
+fn lower_arg_vregs(ctx: LowerCtx, arg: checker::TExpr) -> LoweredArgs | error {
+    if is_fat_type(arg.type) {
+        let fo = match lower_fat_expr(ctx, arg) { LoweredFat as x => x; error as err => return err }
+        return LoweredArgs { ctx = fo.ctx; vregs = two_args(fo.ptr, fo.len) }
+    }
+    let lo = match lower_expr(ctx, arg) { Lowered as x => x; error as err => return err }
+    LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
 }
 
 /** lower_call_symbol — emit the LCall for an ALREADY-RESOLVED symbol over an
@@ -5432,6 +5477,103 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
 }
 
 /**
+ * ParamBind — the running state a function prologue's parameter-binding loop threads: the
+ * `LFunc` built so far, the local `LEnv` built so far, and the NEXT unused incoming register
+ * index — which register a fat parameter's second half, and the parameter that follows it,
+ * both continue from (a fat parameter occupies TWO consecutive registers; a scalar one
+ * occupies ONE).
+ */
+type ParamBind = struct {
+    /**
+     * func — the function built so far, with a `param` inst appended for every incoming
+     * register bound up to this point.
+     */
+    func: LFunc
+    /**
+     * env — the local env built so far, with every parameter's name bound up to this point
+     * (scalar via `lenv_bind`, fat via `lenv_bind_fat`).
+     */
+    env: LEnv
+    /**
+     * next_reg — the next unused incoming register index (the ptr register of the NEXT
+     * parameter, whether it turns out scalar or fat).
+     */
+    next_reg: u32
+}
+
+/**
+ * bind_fn_params — bind every declared parameter into the function prologue, in order,
+ * threading the running func/env/register-index through `bind_param` (`lower_function`'s
+ * prologue, extracted so the fat-vs-scalar branch lives in exactly one place). Named
+ * distinctly from `lir_interp.tks`'s OWN `bind_params` (the VM oracle's block-arg binder,
+ * an unrelated function over `[]u32` — this module has no overload-by-type, so the two
+ * cannot share a name).
+ *
+ * @param LFunc func  the (still paramless-bodied) function to extend — its entry block (id 0)
+ *                     receives one `param` inst per incoming register
+ * @param []parser::Param params  the declared parameter list, in order
+ * @param u32 line  the source line to stamp every emitted `param` inst with
+ * @param u32 col  the source column to stamp every emitted `param` inst with
+ * @return ParamBind  the func/env with every parameter bound
+ */
+fn bind_fn_params(func: LFunc, params: []parser::Param, line: u32, col: u32) -> ParamBind {
+    mut cur = ParamBind { func = func; env = empty_lenv(); next_reg = 0 }
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        cur = bind_param(cur.func, cur.env, cur.next_reg, params[i], line, col)
+        i++
+    }
+    cur
+}
+
+/**
+ * bind_param — bind ONE declared parameter into the function prologue: a SCALAR parameter
+ * (`!typeexpr_is_fat`) reserves ONE incoming register and binds it plainly (`lenv_bind`); a
+ * FAT (`str`/`[]T`) parameter delegates to `bind_fat_param`, which reserves TWO consecutive
+ * incoming registers — ptr FIRST, len SECOND (CONTRACT ORDER, mirroring the C twin's
+ * `tk_str{ptr;len}` field order, `teko_rt.h`) — and binds both through `lenv_bind_fat`, so a
+ * later `.len` read off the parameter resolves with NO memory traffic, exactly like a fat
+ * `let` local (#382 A1-4). THIS ORDER is exactly what every call site (`lower_arg_vregs`)
+ * must also honor — a caller/callee that disagreed on it would read the wrong VReg as a
+ * length, silently, not as a compile error.
+ *
+ * @param LFunc func  the function built so far (its params appended)
+ * @param LEnv env  the local env built so far
+ * @param u32 next_reg  the next unused incoming register index
+ * @param parser::Param p  the declared parameter to bind
+ * @param u32 line  the enclosing function's source line (stamps the `param` inst(s))
+ * @param u32 col  the enclosing function's source column (stamps the `param` inst(s))
+ * @return ParamBind  the advanced func/env/next_reg
+ */
+fn bind_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32) -> ParamBind {
+    if typeexpr_is_fat(p.type_ann) { return bind_fat_param(func, env, next_reg, p, line, col) }
+    let with_inst = append_inst(func, 0, param_inst(next_reg, next_reg, line, col))
+    ParamBind { func = with_inst; env = lenv_bind(env, p.name, next_reg); next_reg = next_reg + 1 }
+}
+
+/**
+ * bind_fat_param — `bind_param`'s FAT arm: append the ptr register's `param` inst at
+ * `next_reg`, then the len register's at `next_reg + 1`, and bind the name to BOTH via
+ * `lenv_bind_fat` (ptr, len — the same contract order `bind_param`'s doc names).
+ *
+ * @param LFunc func  the function built so far
+ * @param LEnv env  the local env built so far
+ * @param u32 next_reg  the ptr register's index (its len register is `next_reg + 1`)
+ * @param parser::Param p  the declared fat parameter to bind
+ * @param u32 line  the enclosing function's source line
+ * @param u32 col  the enclosing function's source column
+ * @return ParamBind  the advanced func/env/next_reg (advanced by TWO)
+ */
+fn bind_fat_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32) -> ParamBind {
+    let ptr_reg = next_reg
+    let len_reg = next_reg + 1
+    let with_ptr = append_inst(func, 0, param_inst(ptr_reg, ptr_reg, line, col))
+    let with_len = append_inst(with_ptr, 0, param_inst(len_reg, len_reg, line, col))
+    ParamBind { func = with_len; env = lenv_bind_fat(env, p.name, ptr_reg, len_reg); next_reg = len_reg + 1 }
+}
+
+/**
  * lower_function — a TFunction -> an LFunc: materialize each parameter as an
  * LParam into VRegs 0..n_params (bound in the env by name), then lower the
  * body (`lower_fn_body`). A NON-void body that falls off the end auto-returns
@@ -5474,17 +5616,10 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let ptypes = param_ltypes(f.params, enums)
-    mut fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), f.params.len to u32, ptypes, ltype_of(f.return_type, enums))
-    mut env = empty_lenv()
-    mut i: u64 = 0
-    loop {
-        if i >= f.params.len { break }
-        fn0 = append_inst(fn0, 0, param_inst(i to u32, i to u32, f.line, f.col))
-        env = lenv_bind(env, f.params[i].name, i to u32)
-        i++
-    }
+    let fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), ptypes.len to u32, ptypes, ltype_of(f.return_type, enums))
+    let bound = bind_fn_params(fn0, f.params, f.line, f.col)
     let ctx0 = LowerCtx {
-        func = fn0; block_id = 0; env = env
+        func = bound.func; block_id = 0; env = bound.env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols
@@ -5552,22 +5687,48 @@ fn inst_is_terminator(inst: LInst) -> bool {
 }
 
 /**
- * param_ltypes — the machine class of each parameter annotation, in declared order.
+ * param_ltypes — the machine class(es) of each parameter annotation, in declared order. A
+ * SCALAR parameter contributes ONE `LType`; a FAT (`str`/`[]T`) parameter (`typeexpr_is_fat`)
+ * contributes TWO — `Ptr` then `I64`, CONTRACT ORDER mirroring the C twin's
+ * `tk_str{ptr;len}` field order (`teko_rt.h`) — because the native calling convention
+ * carries a fat value as its two halves in two separate registers, never as one (the
+ * "tk_str-twin" convention, owner ruling). `lower_function`'s arity (`new_func`'s
+ * `n_params`) is DERIVED from this list's length (`ptypes.len`) rather than counted
+ * separately from `params.len`, so the two can never drift apart — this function is the
+ * ONE place responsible for how many registers a parameter list occupies.
  *
  * @param []parser::Param params  the parameter list to map
  * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed parameter
  *                           carries its integer width, not `Ptr`)
- * @return []LType  each parameter's machine class, in declared order
+ * @return []LType  each parameter's machine class(es), in declared order (a fat parameter's
+ *                  `Ptr` class immediately followed by its `I64` len class)
  */
 fn param_ltypes(params: []parser::Param, enums: []LEnumInfo) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= params.len { break }
-        out = teko::list::push(out, ltype_of_typeexpr(params[i].type_ann, enums))
+        out = append_param_ltypes(out, params[i], enums)
         i++
     }
     out
+}
+
+/**
+ * append_param_ltypes — `out` with ONE parameter's machine class(es) appended: `Ptr, I64`
+ * for a fat (`str`/`[]T`) parameter, else its single `ltype_of_typeexpr` class
+ * (`param_ltypes`'s per-parameter step, extracted so the fat/scalar branch is written once).
+ *
+ * @param []LType out  the machine-class list accumulated so far
+ * @param parser::Param p  the parameter to append
+ * @param []LEnumInfo enums  the program's declared-enum table
+ * @return []LType  `out` with `p`'s machine class(es) appended
+ */
+fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo) -> []LType {
+    if typeexpr_is_fat(p.type_ann) {
+        return teko::list::push(teko::list::push(out, LType::Ptr), LType::I64)
+    }
+    teko::list::push(out, ltype_of_typeexpr(p.type_ann, enums))
 }
 
 /**
