@@ -498,6 +498,81 @@ fn lwt_extern_call_targets_the_declared_c_symbol() {
     teko::assert::is_true(!teko::str::contains(text, "p__c_getpid"))
 }
 
+/**
+ * An `extern fn` declared `-> i32` (`lwt_extern_fn`'s fixed return type) has its call result
+ * cleaned RIGHT AFTER the call: a shift-left by 32 then a SIGNED shift-right by 32 (a sign
+ * round trip through the top of the register). SysV/Win64 both permit the callee to leave the
+ * bits ABOVE the declared 32 unspecified (glibc's `memcmp`, the corpus-documented case —
+ * `examples/probes/arena_bottom/src/bottom.tks:50`), so without this cleanup a Teko read of the
+ * raw call result can misread even a logically-zero/small C `int`.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_i32_return_is_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn("c_memcmp", "p", "memcmp"))
+    let call = lwt_call(lwt_path1("c_memcmp"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @memcmp()")
+    teko::assert::str_contains(text, "const 32")
+    teko::assert::str_contains(text, "= ishl ")
+    teko::assert::str_contains(text, "= ishrs ")
+    teko::assert::is_true(!teko::str::contains(text, "ishru"))
+}
+
+/** lwt_extern_fn_ret — `lwt_extern_fn`, but with an explicit return type (a `u32`/`u64`/`void`
+    fixture needs a return type other than `lwt_extern_fn`'s fixed `i32`). */
+fn lwt_extern_fn_ret(name: str, ns: str, sym: str, ret: checker::Type) -> checker::TItem {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = teko::list::empty(); return_type = ret
+        body = teko::list::empty()
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = sym; from_lib = ""
+    }
+}
+
+/**
+ * An `extern fn` declared `-> u64` returns the WHOLE register: there is nothing ABOVE its
+ * declared width to clean, so its call result carries straight through with no shift pair
+ * (`extern_return_narrow`'s "already the whole register" case — the same reasoning that keeps
+ * `c_aligned_alloc`'s own `u64` declaration in `examples/probes/arena_bottom/src/bottom.tks`
+ * un-narrowed).
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_u64_return_is_not_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn_ret("c_aligned_alloc", "p", "aligned_alloc", checker::Prim { kind = checker::PrimKind::U64 }))
+    let call = lwt_call(lwt_path1("c_aligned_alloc"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::U64 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @aligned_alloc()")
+    teko::assert::is_true(!teko::str::contains(text, "ishl"))
+}
+
+/**
+ * An `extern fn` declared `-> void` returns no value at all: `lower_call_symbol`'s own void
+ * path never allocates a result VReg, so there is nothing for `apply_extern_return_narrow` to
+ * narrow — asserting this holds is what keeps a future edit from dereferencing a void call's
+ * dummy VReg as if it were a real result.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_void_return_is_not_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn_ret("c_free", "p", "free", checker::Void { }))
+    let call = lwt_call(lwt_path1("c_free"), "p", teko::list::empty(), checker::Void { })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @free()")
+    teko::assert::is_true(!teko::str::contains(text, "ishl"))
+}
+
 /** lwt_item — a loose top-level statement as a TItem (the virtual-main path). */
 fn lwt_item(s: checker::TStatement) -> checker::TItem { s }
 

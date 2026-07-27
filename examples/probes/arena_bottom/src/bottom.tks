@@ -47,11 +47,17 @@ pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
  * memory without needing any new compiler primitive, so the probe can assert that what was written
  * is what is there.
  *
- * DECLARED `u64`, NOT `i32`, ON PURPOSE. The native backend does not narrow an `extern fn`'s `i32`
- * return: the callee may leave the upper 32 bits of the return register unspecified (the SysV ABI
- * permits it, and glibc's `memcmp` uses that permission), and Teko then reads the FULL 64-bit
- * register — so even an "equal" result is only reliably zero in its low 32 bits. `blocks_differ`
- * below extracts exactly those bits.
+ * DECLARED `u64` — still CORRECT (it names the return register in full), but NO LONGER
+ * NECESSARY: the reason it was declared this way originally was that the native backend did not
+ * narrow an `extern fn`'s `i32` return (the callee may leave the upper 32 bits of the return
+ * register unspecified — the SysV ABI permits it, and glibc's `memcmp` uses that permission — so
+ * Teko read the FULL 64-bit register, and even an "equal" result was only reliably zero in its
+ * low 32 bits). `lower.tks::apply_extern_return_narrow`/`narrow_extern_return` retired that gap:
+ * an `extern fn` declared `-> i32` now has its call result sign-extended from its low 32 bits
+ * before anything reads it, so `c_memcmp_raw` could be re-declared `-> i32` and compared directly.
+ * `blocks_differ` below keeps the `u64`-plus-modulo idiom anyway (this probe predates the fix and
+ * is not itself the fix's regression fixture) — do NOT copy this idiom into new code believing it
+ * is still required.
  *
  * @param left   the first block's base address
  * @param right  the second block's base address

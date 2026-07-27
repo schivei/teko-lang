@@ -1065,6 +1065,15 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * generic left-to-right scalar path — every other call lowers its arguments
  * plainly (`lower_args`) and emits through `lower_call_symbol`.
  *
+ * An `extern fn` call's raw result additionally passes through
+ * `apply_extern_return_narrow`: SysV/Win64 both permit the callee to leave
+ * the return register's bits ABOVE the DECLARED width unspecified (glibc's
+ * `memcmp`, declared `-> i32`, is the corpus-documented case —
+ * `examples/probes/arena_bottom/src/bottom.tks:50`), so a sub-64-bit integer
+ * return is sign/zero-extended from its declared width before the caller
+ * ever reads it; every other call (Teko-Teko, a runtime builtin, void, or an
+ * extern already returning a whole register) passes through unchanged.
+ *
  * @param LowerCtx ctx  the lowering context
  * @param checker::TExpr e  the call expression (for its type + source
  *                          position)
@@ -1079,7 +1088,8 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_args(ctx, c.args) { LoweredArgs as x => x; error as err => return err }
-    lower_call_symbol(lo.ctx, e, sym, lo.vregs)
+    let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
+    apply_extern_return_narrow(called, ctx.externs, c, e)
 }
 
 /**
@@ -1194,6 +1204,117 @@ fn lower_call_symbol(ctx: LowerCtx, e: checker::TExpr, sym: str, vregs: []u32) -
     let r = ctx_alloc(ctx)
     let inst = call_inst(r.vreg, sym, vregs, false, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+/**
+ * ExternNarrow — the sign/zero-extension shape an `extern fn`'s declared return type demands
+ * at its own call site: the declared width in bits (8/16/32 — the only widths narrower than a
+ * full register the checker's integer prims admit) and its signedness (`is_signed`, NOT
+ * `signed` — the C backend's struct-field emitter does not escape a reserved word the way its
+ * function-symbol mangler does, and `signed` is one, `is_c_keyword`). Produced by
+ * `extern_return_narrow`; consumed by `narrow_extern_return`.
+ */
+type ExternNarrow = struct { width: u32; is_signed: bool }
+
+/**
+ * extern_return_narrow — the `ExternNarrow` an `extern fn`'s declared return type `t` demands,
+ * or `null` when `t` needs none. SysV and Win64 both permit a callee to leave a return
+ * register's bits ABOVE its declared width unspecified (glibc's `memcmp`, declared `-> i32`, is
+ * the corpus-documented case — `examples/probes/arena_bottom/src/bottom.tks:50`), so every
+ * sub-64-bit INTEGER return (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`, and `byte` — the checker's own
+ * "byte AS u8" convention `prim_kind_of` already follows) needs the CALLER to clean it. A
+ * 64-bit integer, `ptr`/`uptr` (already the whole register — nothing above the declared width
+ * to clean), a float (returned in `xmm0`/`v0`, its own separate `B1-fp` limitation), `bool`
+ * (the C ABI's "any nonzero LOW BYTE means true" convention needs a different rule than
+ * sign/zero-extension, not this one — left OPEN), and every non-primitive type (`void`, a
+ * struct/slice/interface — never a raw scalar register) all need no narrowing here.
+ *
+ * @param checker::Type t  the extern's declared return type
+ * @return ExternNarrow | null  the narrowing shape, or `null` when `t` needs none
+ */
+fn extern_return_narrow(t: checker::Type) -> ExternNarrow | null {
+    match t {
+        checker::Prim as p => extern_return_narrow_of_prim(p.kind)
+        checker::Byte => ExternNarrow { width = 8; is_signed = false }
+        _ => null
+    }
+}
+
+/**
+ * extern_return_narrow_of_prim — `extern_return_narrow`'s primitive case: `null` for a float,
+ * for `bool` (the open "nonzero low byte" gap `extern_return_narrow` documents), and for a
+ * 64-bit int (nothing narrower than the whole register to clean); the declared width +
+ * signedness for every other integer prim.
+ *
+ * @param checker::PrimKind k  the extern's declared return PrimKind
+ * @return ExternNarrow | null  the narrowing shape, or `null` when `k` needs none
+ */
+fn extern_return_narrow_of_prim(k: checker::PrimKind) -> ExternNarrow | null {
+    if prim_is_float_kind(k) { return null }
+    if k == checker::PrimKind::Bool { return null }
+    let w = prim_width_of(k)
+    if w >= 64 { return null }
+    ExternNarrow { width = w; is_signed = prim_is_signed_int(k) }
+}
+
+/**
+ * narrow_extern_return — clean an `extern fn` call's raw result to its declared width (C7.1a):
+ * a left shift by `64 - n.width`, then a right shift by the SAME amount (arithmetic when
+ * `n.is_signed`, logical otherwise) — a round trip through the top of the register that discards
+ * every bit above the declared width and sign/zero-extends the low `n.width` bits that remain.
+ * This is exactly the cleanup the C backend gets for free from `cc`'s implicit narrowing
+ * assignment (`int result = memcmp(...);`) — `LUnOp::SExt`/`ZExt` are NOT used here because
+ * both isel backends select them as a bit-preserving identity move (no per-value width to pick
+ * a real narrow form from, `isel_x86_64.tks::select_identity_mov_x86`), which is the correct
+ * choice for a cast between two Teko-produced values (already clean by construction) but would
+ * leave THIS register's garbage bits untouched; `IShl`/`IShrS`/`IShrU` are real bit ops on both
+ * targets and so are the honest fix.
+ *
+ * @param Lowered lo  the already-lowered call (its context + raw result VReg)
+ * @param ExternNarrow n  the declared width/signedness to narrow to
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the advanced context + the narrowed VReg
+ */
+fn narrow_extern_return(lo: Lowered, n: ExternNarrow, line: u32, col: u32) -> Lowered {
+    let width: i64 = n.width to i64
+    let amount: i64 = 64 - width
+    let sc = ctx_alloc(lo.ctx)
+    let with_amount = ctx_append(sc.ctx, const_int_inst(sc.vreg, amount, line, col))
+    let shl = ctx_alloc(with_amount)
+    let with_shl = ctx_append(shl.ctx, bin_inst(shl.vreg, LBinOp::IShl, lo.vreg, sc.vreg, line, col))
+    let shr_op = if n.is_signed { LBinOp::IShrS } else { LBinOp::IShrU }
+    let shr = ctx_alloc(with_shl)
+    let with_shr = ctx_append(shr.ctx, bin_inst(shr.vreg, shr_op, shl.vreg, sc.vreg, line, col))
+    Lowered { ctx = with_shr; vreg = shr.vreg }
+}
+
+/**
+ * apply_extern_return_narrow — `lower_call`'s post-call step: when `c` resolved to a declared
+ * `extern fn` (`find_extern_symbol` non-null) whose return type demands narrowing
+ * (`extern_return_narrow`), clean `lo`'s raw result VReg (`narrow_extern_return`). A Teko-Teko
+ * call, a runtime builtin, a void call, or an extern whose return is already the whole
+ * register/needs a different rule (`extern_return_narrow`'s open cases) passes `lo` through
+ * unchanged.
+ *
+ * @param Lowered lo  the already-lowered call (its context + raw result VReg)
+ * @param []LExternFn externs  the program's whole `extern fn` table
+ * @param checker::TCall c  the call node (its resolved namespace + callee path)
+ * @param checker::TExpr e  the call expression (its type IS the callee's declared return type,
+ *                          `typer.tks:1707`'s `type = f.ret`; its source position)
+ * @return Lowered  `lo`, narrowed when the callee's declared return type demands it
+ */
+fn apply_extern_return_narrow(lo: Lowered, externs: []LExternFn, c: checker::TCall, e: checker::TExpr) -> Lowered {
+    if type_is_void(e.type) { return lo }
+    let segs = c.callee.segments
+    let last = segs[segs.len - 1].name
+    match find_extern_symbol(externs, c.call_ns, last) {
+        str as _ => match extern_return_narrow(e.type) {
+            ExternNarrow as n => narrow_extern_return(lo, n, e.line, e.col)
+            null => lo
+        }
+        null => lo
+    }
 }
 
 /** type_is_void — is `t` the Void marker (no value)? Shared by call lowering (a void call
