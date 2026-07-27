@@ -138,7 +138,7 @@ fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str 
     let ctx0 = LowerCtx {
         func = f0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
-        defers = teko::list::empty(); loop_targets = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -445,6 +445,38 @@ fn lwt_lowers_direct_teko_call_with_mangle() {
     let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(40)), lwt_num_i64(2))
     let call = lwt_call(lwt_path1("add"), "teko::demo", args, checker::Prim { kind = checker::PrimKind::I64 })
     teko::assert::str_contains(lwt_lower_expr_text(call), "%2 = call @teko__demo__add(%0, %1)")
+}
+
+/** lwt_extern_fn — an `extern fn <name>() -> i32 = "<sym>"` declaration in namespace `ns`
+    (C7.1a), the item `collect_externs` folds into the call-resolution table. */
+fn lwt_extern_fn(name: str, ns: str, sym: str) -> checker::TItem {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = teko::list::empty(); return_type = lwt_prim(checker::PrimKind::I32)
+        body = teko::list::empty()
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = sym; from_lib = ""
+    }
+}
+
+/**
+ * A call to an `extern fn` targets the DECLARED FOREIGN SYMBOL, never the Teko namespace
+ * mangling (C7.1a). The mangled spelling (`p__c_getpid`) is defined by nobody, so emitting
+ * it left the own-backend object with an undefined reference the system linker could not
+ * resolve — the C backend has always emitted `cf.c_symbol` here (`codegen.tks`), and the
+ * native lowering now reads the same fact off the whole-program `externs` table.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_targets_the_declared_c_symbol() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn("c_getpid", "p", "getpid"))
+    let call = lwt_call(lwt_path1("c_getpid"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @getpid()")
+    teko::assert::is_true(!teko::str::contains(text, "p__c_getpid"))
 }
 
 /** lwt_item — a loose top-level statement as a TItem (the virtual-main path). */
