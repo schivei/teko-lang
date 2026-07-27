@@ -3,22 +3,30 @@
 # The project it names is still here and still asserted (`m1::PRIV`, #594 crumb 8c / issue #613),
 # and it now carries the `member_const_visibility_leak_rejected` regression too (`leakbase`/
 # `leaksub`, #594 crumb 7) — that project became the PARSE-stage host and can no longer reach the
-# checker at all, so its assertion had to move to a build that does. Around those two, THIRTY-FIVE
+# checker at all, so its assertion had to move to a build that does. Around those two, THIRTY-SEVEN
 # further rejected constructs live one per namespace under `src/`, each a fixture that used to be a
 # `Given source inline` snippet in regressor.tkr paying for its OWN failing build.
 #
 # WHY THEY SHARE ONE BUILD (owner ruling 2026-07-25 — "somente um build é necessário"): the runner
 # already supports it. A compile-fail scenario that declares NO `Given source`/`Given source inline`
 # is checked against the PROJECT's own failing build, and that build is cached across every scenario
-# of this file (`tkr_compile_fail_artifact` → `tkr_ensure_built`). The compiler's item walk reports
-# EVERY diagnostic it finds rather than stopping at the first, so one build emits all thirty-seven
-# and each scenario below pins its own. Measured, not assumed: 37 scenarios, 1 build.
+# of this file (`tkr_compile_fail_artifact` → `tkr_ensure_built`). The compiler reports EVERY
+# diagnostic it finds rather than stopping at the first, so one build emits all thirty-nine and each
+# scenario below pins its own. Measured, not assumed: 39 scenarios, 1 build.
 #
-# WHY FOUR ARE NOT FOLDED (the `cases/*.tks` rows at the end). Their diagnostics come from a checker
-# PRE-WALK pass, which still stops at the FIRST error instead of collecting — folding one of them in
-# masks all thirty-seven behind it. Each was found by measurement (build, see which diagnostic is
-# alone, park it, repeat), not by guessing. They cost one build each until the pre-walk passes
-# collect like the item walk does; that is the residual, and it is four builds, not sixty-five.
+# WHY TWO MORE FOLDED IN (issue #68). `c55_unsafe_field_in_safe_struct` and `c53_reject_flags_65`
+# were two of the four `cases/*.tks` rows that used to buy their own build, because their
+# diagnostics come from a checker PRE-WALK pass that stopped at the first error. Those two passes
+# (`validate_type_decls` and `check_modules`) are SOFT boundaries — they produce nothing the item
+# walk reads — so they now collect and the build carries on. They are namespaces of the shared build.
+#
+# WHY ONE `cases/*.tks` ROW SURVIVES (`prewalk_signature_stops.tks`). The remaining two constructs
+# are rejected by the checker's SIGNATURE walk, a HARD boundary: a declaration whose signature is
+# rejected contributes no binding, so continuing would report every caller as "undefined" and blame
+# the caller for the callee's defect (M.3). The signature walk therefore collects everything IT sees
+# and cuts. Both constructs sit in ONE file and are reported by ONE build, and a standalone `Given
+# source` build is cached per (file, declared env) — `regr_src_key`. Residual: one build, was four.
+# See docs/design/all-diagnostics-pre-walk-0.3.1.md §3 for every pass's boundary.
 #
 # WHY THE `F8 target` ROWS ARE NOT FOLDED EITHER: their subject IS the build configuration
 # (`TEKO_TARGET=<unsupported>`), and a differing configuration is a different build by construction.
@@ -215,27 +223,29 @@ Feature: F9 romaneio .31 — the audit's compile-fail regressions — folded int
     When compilation fails
     Then diagnostic = "a lambda cannot assign to the captured variable `n`"
 
-Feature: checker PRE-WALK stops — one build each until the pre-walk passes collect
+Feature: checker SOFT pre-walk rejections — folded into this project's single failing build
 
+  # src/c55_unsafe_field_in_safe_struct/case.tks — `validate_type_decls`, a SOFT boundary
   Scenario: unsafe_field_in_safe_struct
-    Given source = "cases/c55_unsafe_field_in_safe_struct.tks"
     When compilation fails
     Then diagnostic = "struct/class 'Wrapper' has an unsafe-typed field 'bu"
 
-  Scenario: ref_depth_rejected
-    Given source = "cases/c42_ref_depth_rejected.tks"
+  # src/c53_reject_flags_65/case.tks — `check_modules`, a SOFT boundary
+  Scenario: reject_flags_65
     When compilation fails
-    Then diagnostic = "a reference cannot target another reference (`Ref<Re"
+    Then diagnostic = "a flags type may declare at most 64 members (bit 63 is the last) — wri"
+
+Feature: checker SIGNATURE walk — a HARD boundary, so both constructs share ONE build
 
   Scenario: discard_param_plain_fn
-    Given source = "cases/c25_discard_param_plain_fn.tks"
+    Given source = "cases/prewalk_signature_stops.tks"
     When compilation fails
     Then diagnostic = "a `_` discard parameter is only allowed when impleme"
 
-  Scenario: reject_flags_65
-    Given source = "cases/c53_reject_flags_65.tks"
+  Scenario: ref_depth_rejected
+    Given source = "cases/prewalk_signature_stops.tks"
     When compilation fails
-    Then diagnostic = "a flags type may declare at most 64 members (bit 63 is the last) — wri"
+    Then diagnostic = "a reference cannot target another reference (`Ref<Re"
 
 Feature: F8 target — the TEKO_TARGET boundary (compile-fail; R2 honest error, teko-target-crosslink-0.3.1.md §0)
 
