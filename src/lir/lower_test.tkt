@@ -167,6 +167,40 @@ fn lwt_fold_lifted(m: LModule, lifted: []LFunc) -> LModule {
     cur
 }
 
+/**
+ * lwt_lower_expr_text_with_enums — `lwt_lower_expr_text`, but threading a declared-enum table
+ * (`#594` T-B) instead of the empty default, so an enum-typed comparison/cast/arithmetic
+ * fixture resolves through `prim_kind_of`'s `I32` ordinal carrier (or its own-named honest stop
+ * for a non-enum Named type) instead of always seeing "no enums declared".
+ *
+ * @param checker::TExpr e  the expression to lower
+ * @param []LEnumInfo enums  the declared-enum table to lower against
+ * @return str  the printed LIR module, or `"ERR: <message>"` on an honest stop
+ */
+fn lwt_lower_expr_text_with_enums(e: checker::TExpr, enums: []LEnumInfo) -> str {
+    let f0 = new_func("t", 0, teko::list::empty(), LType::I64)
+    let ctx0 = LowerCtx {
+        func = f0; block_id = 0; env = empty_lenv()
+        layouts = teko::list::empty(); rodata = teko::list::empty(); enums = enums; lifted = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+    }
+    let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
+    let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
+    print_lmodule(lwt_fold_lifted(m0, lo.ctx.lifted))
+}
+
+/**
+ * lwt_color_enums — the declared-enum table for a two-member `Color` enum (`Red`, `Green`),
+ * shared by every `prim_kind_of` enum-ordinal fixture below (mirrors the existing
+ * `lwt_lowers_match_enum_member_pattern_via_registered_ordinal` fixture's own inline table).
+ *
+ * @return []LEnumInfo  a one-entry enum table naming `Color`
+ */
+fn lwt_color_enums() -> []LEnumInfo {
+    teko::list::push(teko::list::empty(), LEnumInfo { name = "Color"; members = teko::list::push(teko::list::push(teko::list::empty(), "Red"), "Green") })
+}
+
 #test
 fn lwt_ltype_of_maps_prims_to_machine_classes() {
     teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I64), teko::list::empty()) { I64 => true; _ => false })
@@ -889,6 +923,84 @@ fn lwt_lowers_match_enum_member_pattern_via_registered_ordinal() {
     teko::assert::str_contains(text, "%3 = icmpeq %0, %2")
     teko::assert::str_contains(text, "branch %3, #B2(), #B3()")
     teko::assert::str_contains(text, "  #B3:\n    jump #B4()")
+}
+
+/**
+ * An `==` comparison between two enum-typed operands resolves through `prim_kind_of`'s `I32`
+ * ordinal carrier (`enum_carrier_ltype`, #594 T-B) instead of the "non-primitive arithmetic
+ * operand" honest stop — the exact shape measured on the compiler's OWN native self-host
+ * corpus (`reg_class == MRegClass::FPR`, hundreds of sites across `src/backend/*`).
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_enum_equality_comparison() {
+    let a = lwt_typed_var("a", checker::Named { name = "Color" })
+    let b = lwt_typed_var("b", checker::Named { name = "Color" })
+    let cmp = lwt_cmp(a, teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, b)))
+    let params = teko::list::push(teko::list::push(teko::list::empty(), lwt_param("a", "Color")), lwt_param("b", "Color"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(cmp))
+    let f = lwt_fn("colors_eq", "teko::demo", params, checker::Prim { kind = checker::PrimKind::Bool }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%2 = icmpeq %0, %1")
+}
+
+/**
+ * The E7 ordinal `to`-cast, enum -> int direction: an enum-typed operand widens through its
+ * `I32` ordinal carrier, sign-extending into a wider integer exactly like any other signed
+ * `I32` source (`cast_int_unop_of`) — measured on the compiler's own `.tkb` codec convention
+ * (`(byte)k` / `(TokenKind)b` ordinal round-trips, `checker/typer.tks`'s own E7 doc-comment).
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_enum_to_int_cast_widens() {
+    let inner = lwt_typed_var("c", checker::Named { name = "Color" })
+    let e = lwt_cast(inner, checker::PrimKind::I64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("c", "Color"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(e))
+    let f = lwt_fn("color_ordinal", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%1 = sext %0")
+}
+
+/**
+ * The E7 ordinal `to`-cast, int -> enum direction: an integer operand narrows into the target
+ * enum's `I32` ordinal carrier exactly like any other same-or-narrower-width int destination
+ * (`cast_int_unop_of`) — the reverse of the widening fixture above, completing the pair E7
+ * actually types both directions of.
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_int_to_enum_cast_narrows() {
+    let inner = lwt_var("n", checker::PrimKind::I64)
+    let e = checker::TExpr { kind = checker::TCast { expr = inner }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
+    let params = teko::list::push(teko::list::empty(), lwt_param("n", "i64"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(e))
+    let f = lwt_fn("as_color", "teko::demo", params, checker::Named { name = "Color" }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%1 = trunc %0")
+}
+
+/**
+ * A Named type that is NOT a declared enum (a plain struct/class, or a `flags` type — neither
+ * measured as an arithmetic operand in the compiler's own corpus) still honest-stops, under its
+ * OWN specifically-named message (`enum_ordinal_kind_of`) rather than the generic
+ * "non-primitive arithmetic operand" catch-all — so a future flags-arithmetic increment finds
+ * its own diagnostic instead of silently reusing this enum fix.
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_still_honest_stops_a_non_enum_named_type() {
+    let left = lwt_num_i64(1)
+    let right = lwt_num_i64(2)
+    let bin = checker::TExpr { kind = checker::TBinary { op = lexer::TokenKind::Plus; left = left; right = right }; type = checker::Named { name = "Circle" }; line = 0; col = 0 }
+    teko::assert::str_contains(lwt_lower_expr_text_with_enums(bin, lwt_color_enums()), "non-enum named-type")
 }
 
 #test
