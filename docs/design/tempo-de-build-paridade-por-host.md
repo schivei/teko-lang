@@ -297,25 +297,44 @@ outra coisa).
 | `v2_4000.c` | 3,23 | clang | `-O0` | 7,27 | — |
 | `v2_4000.c` | 3,23 | clang | `-O2` | 61,67 | 636 MB |
 | `v2_8000.c` | 6,46 | gcc | `-O0` | 47,09 | 783 MB |
+| `v2_8000.c` | 6,46 | gcc | `-O2` | **208,55** | **1154 MB** |
+| `v2_8000.c` | 6,46 | clang | `-O0` | 17,09 | — |
+| `v2_8000.c` | 6,46 | clang | `-O2` | **128,42** | 1154 MB |
 
 Quatro resultados, todos com número:
 
-1. **`-O2` custa 2,5–4,7× o `-O0`** na mesma TU (15,49/3,33 = 4,65; 37,87/9,45 = 4,01;
-   81,09/18,64 = 4,35).
-2. **O custo é SUPERLINEAR no tamanho da TU**: cada duplicação multiplica o tempo de
-   `gcc -O2` por 2,44 e depois por 2,14 — expoente ≈ 1,2. Uma unidade de tradução única
-   e enorme é a pior forma possível de apresentar esse trabalho a um compilador C.
-3. **gcc vs clang quase não importa — REFUTADO como causa.** `gcc -O2` é 1,14–1,31× o
-   `clang -O2`. A hipótese "macOS é rápido porque `cc` é clang lá e gcc aqui" não
-   sobrevive: 30% não explica 4×.
-4. **O pico de RSS cresce mais rápido que a TU**: 263 MB a 0,80 MB, 636 MB a 3,23 MB.
-   Este é o número que a ação T-1 (§10) precisa e que ainda NÃO existe para o `teko.c`
-   real — extrapolar daqui daria alguns GB por processo, e dois em paralelo num runner
-   de 16 GB é apertado o bastante para não se fazer às cegas.
+1. **`-O2` custa 4,0–4,7× o `-O0`** na mesma TU, em todos os tamanhos (4,66 / 4,01 /
+   4,35 / 4,43).
+2. **O custo é SUPERLINEAR no tamanho da TU — mas SÓ no gcc.** Por duplicação de
+   tamanho, `gcc -O2` multiplica por 2,44 → 2,14 → 2,57 (expoente ≈ **1,25**), enquanto
+   `clang -O2` multiplica por 2,34 → 1,94 → 2,08 (expoente ≈ **1,06**, praticamente
+   linear). Uma unidade de tradução única e enorme é a pior forma possível de apresentar
+   esse trabalho a um compilador C, e o gcc paga por isso e o clang quase não.
+3. **gcc vs clang IMPORTA, e a diferença CRESCE com o tamanho da TU.** Este resultado
+   corrige o que uma medição só nos tamanhos pequenos teria concluído:
 
-O item (2) é o achado acionável desta seção e vale para TODOS os hosts: o emissor
-produz UMA TU. Ela é compilada com `-O2`, sozinha, num único núcleo — o resto do runner
-fica ocioso durante o passo mais caro do pipeline inteiro.
+   | TU | `gcc -O2` / `clang -O2` |
+   |---|---:|
+   | 0,80 MB | 1,14× |
+   | 1,61 MB | 1,19× |
+   | 3,23 MB | 1,31× |
+   | 6,46 MB | **1,62×** |
+
+   **`cc` no macOS é clang; `cc` no `ubuntu-latest` é gcc** (`resolve_cc` devolve `"cc"`
+   em todo host, §1.2 — ninguém escolhe, cada SO responde com o seu). O `teko.c` emitido
+   do compilador inteiro é maior que 6,46 MB, então **1,62× é um PISO** para essa parte
+   da vantagem do macOS, e a curva ainda está subindo. Isto é exatamente uma diferença
+   de plataforma "que estamos deixando de fora" no sentido do owner — só que ela mora no
+   `cc` default de cada SO, não numa flag de ABI.
+4. **O pico de RSS cresce mais rápido que a TU**: 263 MB a 0,80 MB, 636 MB a 3,23 MB,
+   **1154 MB a 6,46 MB**. Este é o número que a ação T-1 (§10) precisa e que ainda NÃO
+   existe para o `teko.c` real — extrapolar daqui dá vários GB por processo, e dois em
+   paralelo num runner de 16 GB é apertado o bastante para não se fazer às cegas.
+
+Os itens (2) e (3) juntos são o achado acionável desta seção: o emissor produz UMA TU
+gigante, ela é compilada a `-O2` sozinha num único núcleo enquanto o resto do runner
+fica ocioso, e o compilador que o Linux usa por default é justamente o que degrada
+superlinearmente com esse formato.
 
 ## 6. FATO(árvore) — a camada de MECANISMO DE SO: o que o build realmente pede ao sistema
 
@@ -403,6 +422,33 @@ do que a régua já captura, o trabalho normalizado dela apareceria ACIMA dos ou
 abaixo. **HIPÓTESE, com evidência indireta CONTRA ser a causa do wall-clock — mas com
 uma assimetria de portão real por trás, que vale corrigir por si só.**
 
+### 6.5 As operações de `git` da escada — DIMENSIONADAS E DESCARTADAS
+
+A escada faz, por degrau, um `git checkout --detach` mais um `git clean -fdxq` dentro de
+um worktree de rascunho (`build_with_seed_fallback.sh:313-316`), e uma vez um
+`git fetch --unshallow origin`. I/O de muitos arquivos pequenos é o cenário clássico em
+que NTFS com antivírus em tempo real perde feio para o page cache do Linux — seria uma
+explicação sob medida para o resíduo de ~4× dos dois Windows na §4.2.1.
+
+**FATO(medido, árvore).** Não fecha, por tamanho:
+
+```
+$ git ls-files | wc -l        →  789
+$ git count-objects -vH       →  size-pack: 18.31 MiB
+```
+
+789 arquivos rastreados e um pack de 18 MiB. Mesmo a 10× o custo do Linux, um
+`git clean` sobre 789 arquivos e um `--unshallow` de 18 MiB somam segundos, não minutos.
+**O resíduo de ~4× dos dois Windows continua SEM EXPLICAÇÃO neste documento**, e é a
+única pergunta genuinamente aberta que ele deixa.
+
+O que eu investigaria a seguir, nesta ordem, e por quê: (i) QUAL binário é o `cc` nos dois
+runners Windows — o passo `Report the host toolchain` já imprime isso e ninguém leu; um
+`gcc` de MinGW paga emulação de `fork` no próprio driver e é conhecidamente muito mais
+lento que o mesmo gcc no Linux, o que seria exatamente "uma diferença de API de SO" no
+sentido do owner; (ii) o tempo entre as linhas (2) e (3) da §8 nos dois Windows, que
+isola o custo de UM build ali.
+
 ## 7. FATO(medido) — o download de imagem NÃO é o diferenciador entre x86_64 e arm64
 
 Tamanho comprimido do manifesto das imagens que `native_linux_asset.sh` puxa
@@ -477,7 +523,13 @@ macOS.** Descontado o custo de hardware medido de forma independente (§4.1), o 
 faz **123 unidades de trabalho** e todos os outros fazem **301 a 547** — de 2,4× a 4,4×
 MAIS. O macOS não é rápido; ele é a única lane que está fazendo pouco.
 
-E as duas coisas que os outros fazem e o macOS não estão nomeadas, com o arquivo e a
+**E existe UMA coisa que o macOS tem e os outros não, literal, medida:** o `cc` dele é
+clang, que compila a TU gigante do compilador de forma quase LINEAR no tamanho
+(expoente 1,06), enquanto o `cc` do `ubuntu-latest` é gcc, que degrada a n^1,25 e já
+está **1,62× mais lento numa TU de 6,46 MB — com a curva ainda subindo** (§5.3). Ninguém
+escolheu isso: `resolve_cc` devolve `"cc"` e cada SO responde com o compilador que quiser.
+
+E as duas coisas que os outros FAZEM e o macOS não estão nomeadas, com o arquivo e a
 linha:
 
 1. **As lanes Linux recompilam o compilador inteiro mais duas vezes** (§2). O macOS
@@ -522,6 +574,7 @@ para 2.39 silenciosamente, que é exatamente o que o container existe para imped
 | **T-3** | `actions/cache` para a camada de imagem do container | `.github/workflows/pr.yml` job `artifact` | 561 MB por leg Linux por corrida | BAIXO — cache de entrada de toolchain, não de resultado; não pode mascarar um portão | — |
 | **T-4** | Emitir o programa em VÁRIAS unidades de tradução em vez de uma | compilador (codegen) | `-O2` é SUPERLINEAR no tamanho da TU (§5) e hoje ocupa 1 de 4 núcleos; N unidades dão ganho pelo expoente E por paralelismo | ALTO — muda o artefato, o FIXPOINT e a determinação cross-arch | trabalho de compilador, não de CI |
 | **T-5** | Assertar a arquitetura dos assets `kind = native`, como `native_linux_asset.sh` já faz para os `linux` | `scripts/produce_assets.sh:120` | zero em tempo; fecha a assimetria de portão da §6.4 | BAIXO | — |
+| **T-6** | `TEKO_CC=clang` nos builds da ESCADA e no build seco das lanes Linux (NÃO nos containers, que devem seguir com o gcc do `manylinux` pelo piso de glibc) | `.github/workflows/pr.yml`, job `artifact` | ≥ 1,62× no `cc` desses builds, e o fator cresce com o tamanho da TU (§5.3) | MÉDIO — muda o compilador que constrói o compilador; é byte-seguro pelas próprias leis do projeto (o C emitido é determinístico, FIXPOINT gen2==gen3), mas isso PRECISA ser confirmado por uma corrida, não assumido | confirmar que `clang` existe nos runners Linux (o passo `Report the host toolchain` já imprime) |
 
 **T-1 é o único candidato a "barato e claramente seguro", e ele NÃO foi aplicado nesta
 carga** — falta o número que o qualifica: o pico de RSS de um `gcc -O2` sobre o `teko.c`
