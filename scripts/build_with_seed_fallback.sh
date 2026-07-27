@@ -69,6 +69,10 @@
 #                                   removed, and hide the staleness the pinned path reports).
 set -eu
 
+# shellcheck source=scripts/ci_phase_clock.sh
+. "$(dirname "$0")/ci_phase_clock.sh"
+phase_clock_init
+
 OUT_DIR="${1:-bin}"
 SEED_BIN="${TEKO_SEED_FALLBACK_SEED_BIN:-teko}"
 BASE_BRANCH="${TEKO_SEED_FALLBACK_BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
@@ -158,6 +162,7 @@ FAST_LOG="$(mktemp)"
 if build_project "$SEED_BIN" "$PWD" "$OUT_DIR" "$FAST_LOG"; then
   cat "$FAST_LOG"
   log "seed builds the tip directly — fast path, no fallback engaged"
+  phase_mark "seed direct build (fast path, no ladder)"
   rm -f "$FAST_LOG"
   exit 0
 fi
@@ -334,6 +339,10 @@ stale_pin_fatal() {
 
 if [ "${TEKO_LADDER_DISCOVER:-0}" != "1" ] && [ -n "$LADDER_RUNGS" ]; then
   log "using the PINNED ladder (set TEKO_LADDER_DISCOVER=1 to rediscover the rungs instead)"
+  # Everything up to here — the fast-path attempt, rung 0, ensure_full_history, the scratch
+  # worktree — is one lump in the phase table: by the time it is legible as a NAME here, it is
+  # already done, so this is the earliest point that can honestly report its combined cost.
+  phase_mark "seed + setup da escada"
   RUNG_LOG="$(mktemp)"
   for RUNG_SHA in $LADDER_RUNGS; do
     STAGE=$((STAGE + 1))
@@ -345,6 +354,7 @@ if [ "${TEKO_LADDER_DISCOVER:-0}" != "1" ] && [ -n "$LADDER_RUNGS" ]; then
     CURRENT_BIN="$NEXT_BIN"
     CURRENT_DESC="gen$STAGE(pinned rung $RUNG_SHA)"
     log "ladder stage $STAGE: built pinned rung $RUNG_SHA — that compiler is the new rung"
+    phase_mark "ladder gen$STAGE"
   done
   rm -f "$RUNG_LOG"
   if ! build_project "$CURRENT_BIN" "$PWD" "$OUT_DIR" "$TIP_LOG" "$TIP_RT_DIR"; then
@@ -356,6 +366,7 @@ if [ "${TEKO_LADDER_DISCOVER:-0}" != "1" ] && [ -n "$LADDER_RUNGS" ]; then
     exit 1
   fi
   cat "$TIP_LOG"
+  phase_mark "dry build (gen$((STAGE + 1)))"
   rm -f "$FAST_LOG" "$TIP_LOG"
   log "staged bootstrap complete — tip built by $CURRENT_DESC after $STAGE PINNED ladder stage(s)"
   exit 0

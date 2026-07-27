@@ -322,15 +322,33 @@ jobs:
       # to infer it from a cc error deep inside a build log. `unzip`/`tar` because
       # ci_provision_teko.sh needs one of them to open the release asset, `xz`/`python3`/`7z`
       # because they are the decompressor chain the committed-seed rung walks, `docker` because it
-      # is what every native Linux asset is built inside, and `file` because native_linux_asset.sh
-      # asserts each asset's architecture with it.
+      # is what the glibc Linux asset is built inside, `musl-gcc` because it is what the musl
+      # Linux asset is built with (see the install step just below — it is not on the image by
+      # default, this line only reports whether it is already there), and `file` because
+      # native_linux_asset.sh asserts each asset's architecture with it.
       - name: Report the host toolchain (diagnostic — never fails the job)
         shell: bash
         run: |
-          for t in cc clang gcc file xz unzip tar curl python3 7z docker; do
+          for t in cc clang gcc file xz unzip tar curl python3 7z docker musl-gcc; do
             printf '%-8s ' "$t"
             command -v "$t" || echo '(absent)'
           done
+
+      # musl-tools' AVAILABILITY ON THE arm64 RUNNER IS AN ASSERTION, NOT A CONFIRMED FACT (see
+      # scripts/native_linux_asset.sh's header) — it was verified only on x86_64. This step is
+      # therefore deliberately a WORKFLOW STEP, not logic buried inside a script: if the package
+      # is missing here, THIS step goes red with a legible "Unable to locate package" from apt,
+      # rather than failing deep inside a backgrounded parallel build's captured log. No fallback
+      # to a container exists — a red step here is the FAIL-LOUD this restriction demands, and
+      # the fix is a human decision (route linux-arm64-musl back to Alpine), not a silent retry.
+      - name: Install musl-tools (the musl asset's native, non-container toolchain)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
 
       # ── THE SHARED PRODUCTION PATH ──────────────────────────────────────────────────────────
       # Provision the host-runnable seed, walk the ladder, run the DRY build
