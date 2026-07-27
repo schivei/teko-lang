@@ -1949,3 +1949,54 @@ fn lwt_lower_program_flat_symbols_keeps_internal_calls_consistent() {
     teko::assert::str_contains(text, "call @ar_link_run__helper()")
     teko::assert::is_true(!teko::str::contains(text, "teko_ar_link_run__helper"))
 }
+
+/**
+ * A NEGATIVE const serializes to its two's-complement byte image, and this test exists because the
+ * absence of one is what let the defect ship.
+ *
+ * `lo_byte` used to convert THROUGH `u64` before masking — a shape that is correct in C, where a
+ * conversion reinterprets the bits, and fatal in Teko, where the cast is CHECKED: `to u64` on a
+ * negative `i64` is an impossible conversion, not a reinterpretation. It panicked with
+ * `84:7: teko: deliberate panic: impossible conversion`, and it stayed invisible until enough
+ * consts serialized for a negative one to be reached — the compiler's own self-host hit it at
+ * `consteval 490/490`, not at 1.
+ *
+ * `-1` is the case the old doc-comment CLAIMED to handle (`~0` serializes to `0xFF`) and did not.
+ * `-256` pins the byte boundary: the low byte is zero while every byte above it is the sign fill,
+ * so a mask applied at the wrong width shows up here and nowhere else.
+ *
+ * @return void
+ */
+#test
+fn lwt_serialize_le_of_a_negative_value_is_twos_complement() {
+    let ones = serialize_le(-1, 8)
+    teko::assert::is_true(ones.len == 8)
+    mut i: u64 = 0
+    loop {
+        if i >= ones.len { break }
+        teko::assert::is_true(ones[i] == (0xFF to byte))
+        i++
+    }
+    let boundary = serialize_le(-256, 8)
+    teko::assert::is_true(boundary[0] == (0 to byte))
+    teko::assert::is_true(boundary[1] == (0xFF to byte))
+    teko::assert::is_true(boundary[7] == (0xFF to byte))
+}
+
+/**
+ * A POSITIVE const serializes little-endian, and a value wider than its declared width truncates —
+ * the control arm for the negative case above, so a fix that broke the ordinary path fails here
+ * instead of passing quietly.
+ *
+ * @return void
+ */
+#test
+fn lwt_serialize_le_of_a_positive_value_is_little_endian_and_truncates() {
+    let full = serialize_le(0x0102, 8)
+    teko::assert::is_true(full[0] == (0x02 to byte))
+    teko::assert::is_true(full[1] == (0x01 to byte))
+    teko::assert::is_true(full[2] == (0 to byte))
+    let narrow = serialize_le(0x0102, 1)
+    teko::assert::is_true(narrow.len == 1)
+    teko::assert::is_true(narrow[0] == (0x02 to byte))
+}

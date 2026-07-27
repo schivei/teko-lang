@@ -68,9 +68,22 @@ fn ltype_is_float(t: LType) -> bool {
  * lo_byte — the little-endian byte of `v` at bit offset `shift` (a multiple of 8): shift right, take
  * the low 8 bits (#594 crumb 6). `v` is the value's raw i64 two's-complement register bits (drop-128,
  * 2026-07-24 — the fold carrier is i64; no machine class is ever wider than i64/8 bytes now that
- * `u128`/`i128` are removed from the surface); truncating through `u64` yields the correct two's-
- * complement byte for a negative `v` (e.g. `~0` serializes to `0xFF`), matching how the backend stores
- * a scalar. The `shift >= 64` arm is a defensive invariant (unreachable today, since no field's
+ * `u128`/`i128` are removed from the surface).
+ *
+ * THE MASK HAPPENS IN i64 SPACE, BEFORE ANY CONVERSION, and that ordering is the whole point. This
+ * line used to read `(((v >> shift) to u64) & 0xFF) to byte`, whose doc-comment claimed that
+ * "truncating through `u64` yields the correct two's-complement byte for a negative `v`". That is
+ * true in C, where a conversion REINTERPRETS the bits. Teko's cast is CHECKED: `to u64` on a
+ * negative `i64` is not a reinterpretation, it is an impossible conversion, and it panicked —
+ * `84:7: teko: deliberate panic: impossible conversion`, reached the moment enough consts
+ * serialized to hit a negative one. The comment described a language this is not.
+ *
+ * Masking first is correct for EVERY `i64` including `i64::MIN`: `>>` on a signed value is
+ * arithmetic, so the sign fill is already in place, and `& 0xFF` then yields 0..255 — a value every
+ * later conversion accepts. `~0` still serializes to `0xFF`, and `i64::MIN >> 56` still yields
+ * `0x80`, which is what a machine store of that width writes.
+ *
+ * The `shift >= 64` arm is a defensive invariant (unreachable today, since no field's
  * `ltype_size` exceeds 8 bytes) rather than a live path — kept in case a wider machine class is ever
  * reintroduced, in which case its byte would be the sign-extension fill (all-ones for a negative `v`,
  * all-zeros otherwise), exactly what storing a narrower register into a wider slot does.
@@ -81,7 +94,7 @@ fn ltype_is_float(t: LType) -> bool {
  */
 fn lo_byte(v: i64, shift: u32) -> byte {
     if shift >= 64 { return if v < 0 { 0xFF to byte } else { 0 to byte } }
-    (((v >> shift) to u64) & (0xFF to u64)) to byte
+    ((v >> shift) & (0xFF to i64)) to byte
 }
 
 /**
