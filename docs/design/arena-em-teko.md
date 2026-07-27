@@ -300,6 +300,7 @@ no fonte da base em `const struct: initializer is not a struct literal (#594)`.
 | `tree.tks` | `region_drop_subtree`/`region_register`/`region_lookup` |
 | `marks.tks` | `checkpoint_push`/`checkpoint_pop`/`checkpoint_commit` |
 | `freelist.tks` | `free_take`/`free_park`/`free_block`/`free_purge` + o modo paranoico |
+| `volume_gate.tks` | a prova de volume: empacotamento previsto pela regra e reclaim apos drop |
 
 As 12 funções da carga estão todas implementadas e testadas. `marks.tks` não pode usar
 os nomes `arena_push`/`arena_pop`/`arena_commit` — ver o defeito 3 abaixo.
@@ -312,6 +313,15 @@ Prova de que os gates detectam quebra (mutação, uma por grupo):
 | `region_drop` sem o unlink do registro | segfault na varredura |
 | `region_reaches` para no primeiro nível | exit 60 (subárvore sobrevive) |
 | `free_block` sem o poison | exit 69 (oráculo mudo) |
+| chunk nunca reusado depois do primeiro bloco | exit 53 (bump deixa de compartilhar) |
+| `region_release` sem liberar os chunks | exit 72 (volume deixa de reclamar) |
+
+A prova de volume compara com a REGRA do gêmeo em C, não com uma corrida anterior:
+`predicted_chunks(count, size)` = `ceil(count / floor(65536 / ceil16(size)))`, conferido
+em nove tamanhos (abaixo, em cima e acima do alinhamento; frações do chunk; o chunk
+inteiro; três chunks). Depois 400 ciclos de criar-encher-dropar de 256 KB cada: a
+maioria tem que cair no MESMO endereço de chunk do primeiro ciclo, o que só acontece se
+cada drop devolveu os blocos ao alocador. Tudo em 0,17 s.
 
 ---
 
@@ -335,6 +345,9 @@ Contorno: declarar `u64` e extrair `% 2^32`.
 
 **3. `a && b` com chamada do lado direito não lowera.**
 `integer operator not yet lowered (N2)`. Vira guarda explícita.
+
+**3b. `teko::mem::peak_rss()` não linka no backend nativo:** ele lowera para um símbolo
+indefinido `peak_rss` em vez do símbolo do runtime, e o binário morre no `ld`.
 
 **4. O PIOR: uma função do usuário com o nome de um builtin injetado é silenciosamente
 substituída pelo builtin.** `pub fn arena_push(control: u64)` foi aceita pelo checker
