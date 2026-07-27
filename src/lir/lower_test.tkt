@@ -161,11 +161,11 @@ fn lwt_fold_lifted(m: LModule, lifted: []LFunc) -> LModule {
 
 #test
 fn lwt_ltype_of_maps_prims_to_machine_classes() {
-    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I64)) { I64 => true; _ => false })
-    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::U32)) { I32 => true; _ => false })
-    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I8)) { I8 => true; _ => false })
-    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::F64)) { F64 => true; _ => false })
-    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::Bool)) { I8 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I64), teko::list::empty()) { I64 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::U32), teko::list::empty()) { I32 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I8), teko::list::empty()) { I8 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::F64), teko::list::empty()) { F64 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::Bool), teko::list::empty()) { I8 => true; _ => false })
 }
 
 /** lwt_binop_is — did lbinop_of return exactly `want` (not an error)? */
@@ -1601,6 +1601,102 @@ fn nested_struct_by_value_field_layout_accounts_for_the_inner_structs_real_width
     let text = print_lmodule(m)
     teko::assert::str_contains(text, "layout Point: size=16 align=8 {x@0, y@8}")
     teko::assert::str_contains(text, "layout Line: size=32 align=8 {a@0, p@8, c@24}")
+}
+
+/**
+ * lwt_enum_decl — an `enum <name> { <members> }` TypeDecl, wrapped as a `checker::TItem`: the
+ * enum counterpart of `lwt_struct_decl`, so a layout assertion can place an enum-typed FIELD
+ * next to scalar fields and read the carrier width straight off the offsets.
+ *
+ * @param name     the enum's declared name
+ * @param members  the member spellings, in declared (ordinal) order
+ * @return         the declaration, as a typed top-level item
+ * @since #594 T-B (the enum carrier)
+ */
+fn lwt_enum_decl(name: str, members: []str) -> checker::TItem {
+    parser::TypeDecl {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        body = parser::EnumBody { members = members }
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""
+        is_unsafe = false; must_free = false
+    }
+}
+
+/**
+ * lwt_two_members — a two-element `[]str` member list, in order.
+ *
+ * @param a  the first member spelling
+ * @param b  the second member spelling
+ * @return   `[a, b]`
+ * @since #594 T-B (the enum carrier)
+ */
+fn lwt_two_members(a: str, b: str) -> []str {
+    teko::list::push(teko::list::push(teko::list::empty(), a), b)
+}
+
+/**
+ * lwt_five_members — a five-element `[]str` member list, in order: the WIDER enum of the
+ * carrier test, present to prove the carrier does NOT grow with the member count.
+ *
+ * @param a  the first member spelling
+ * @param b  the second member spelling
+ * @param c  the third member spelling
+ * @param d  the fourth member spelling
+ * @param e  the fifth member spelling
+ * @return   `[a, b, c, d, e]`
+ * @since #594 T-B (the enum carrier)
+ */
+fn lwt_five_members(a: str, b: str, c: str, d: str, e: str) -> []str {
+    teko::list::push(teko::list::push(teko::list::push(lwt_two_members(a, b), c), d), e)
+}
+
+/**
+ * lwt_enum_carrier_layout_program — the enum-carrier layout fixture, shaped to make every part
+ * of the decision observable in ONE dump:
+ *
+ *   `enum Cls { GPR; FPR }`                         — two members
+ *   `enum Wide { A; B; C; D; E }`                   — five members, same carrier
+ *   `struct Reg { id: u32; cls: Cls; phys: byte }`  — the `MReg` shape of `minst.tks`
+ *   `struct Both { w: Wide; big: i64 }`             — an enum ahead of an 8-aligned field
+ *
+ * @return the four-declaration program
+ * @since #594 T-B (the enum carrier)
+ */
+fn lwt_enum_carrier_layout_program() -> checker::TProgram {
+    let cls = lwt_enum_decl("Cls", lwt_two_members("GPR", "FPR"))
+    let wide = lwt_enum_decl("Wide", lwt_five_members("A", "B", "C", "D", "E"))
+    let reg = lwt_struct_decl("Reg", lwt_three_fields(lwt_field("id", "u32"), lwt_field("cls", "Cls"), lwt_field("phys", "byte")))
+    let both = lwt_struct_decl("Both", lwt_two_fields(lwt_field("w", "Wide"), lwt_field("big", "i64")))
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cls)
+    items = teko::list::push(items, wide)
+    items = teko::list::push(items, reg)
+    items = teko::list::push(items, both)
+    checker::TProgram { items = items }
+}
+
+/**
+ * an_enum_typed_field_occupies_its_four_byte_integer_carrier_not_a_pointer — #594 T-B: an
+ * `enum`-typed field used to fall through `ltype_of_typeexpr`'s total `Ptr` fallback and
+ * register as an 8-byte pointer, which (a) mis-stated the size, align and EVERY later offset of
+ * any struct containing one, and (b) made the aggregate-const serializer reject the field as
+ * "pointer/slice-bearing" (the `MReg`/`reg_class` stop).
+ *
+ * The asserted numbers are the C emitter's, not this backend's invention: `codegen.tks` emits a
+ * Teko `enum` as a plain C `enum`, and `cc` gives that 4 bytes at align 4, so
+ * `struct { u32 id; Cls cls; bool phys }` measures `size=12 align=4 {id@0, cls@4, phys@8}` —
+ * exactly what `Reg` asserts here. `Wide` (five members) shares `Cls`'s carrier: the width is
+ * FIXED, not a function of the member count (that rule belongs to `flags`, which is a bitset).
+ * `Both` proves the carrier interacts with alignment like any other 4-byte scalar — `w`@0, then
+ * four bytes of padding before the 8-aligned `big`@8.
+ */
+#test
+fn an_enum_typed_field_occupies_its_four_byte_integer_carrier_not_a_pointer() {
+    let m = match lower_program(lwt_enum_carrier_layout_program()) { LModule as x => x; error as err => return }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "layout Reg: size=12 align=4 {id@0, cls@4, phys@8}")
+    teko::assert::str_contains(text, "layout Both: size=16 align=8 {w@0, big@8}")
 }
 
 /**
