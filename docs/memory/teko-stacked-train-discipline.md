@@ -549,3 +549,48 @@ coisa pior que não achar o defeito, porque manda o conserto para o lugar errado
   (`tk_flush_out` antes do corpo de cada teste, `709d41c1`), mas a disciplina fica: **antes de tratar
   uma atribuição de crash como fato, reproduza com `stdbuf -o0`.** Vale para qualquer saída em que
   dois descritores com políticas de buffer diferentes contam a mesma história.
+
+## LEAD TIME É O CUSTO, CYCLE TIME NÃO É (owner 2026-07-27)
+
+> *"Não, ela custou 2h08m19s, o tempo de build conta, pois precede a ocorrência. É a diferença de
+> lead time e cicle time."*
+
+Correção de **medição**, não de opinião, e por isso fica gravada: o integrador reportou o **cycle
+time** de uma falha e o apresentou como o custo dela.
+
+O episódio: a lane `cli surface` foi vermelha porque afirmava a prosa de um ruling já superado.
+O integrador mediu as duas lanes que falharam — **23 segundos** — e concluiu que "a falha custou 23
+segundos, o caro é a re-execução". O owner refez a conta e ela **fecha exata**:
+
+```
+2h07m56s   o bloco de artefato — A FILA
++     23s   as duas lanes cli surface — O TOQUE
+= 2h08m19s
+```
+
+**O build não é despesa alheia à falha: é a fila em que a falha esteve parada.** Ele *precede* a
+ocorrência, então entra no relógio. Cycle time é o tempo de toque no item; **lead time é o relógio
+desde o instante em que o defeito ficou descobrível até ser descoberto**, e é ele que se paga.
+
+**O que essa distinção reordena, imediatamente:**
+
+- **Otimizar cycle time aqui não vale nada.** Fazer o `cli surface` rodar em 5s em vez de 23s
+  economiza 18 segundos de um lead time de duas horas.
+- **A lacuna de fail-fast passa a ser defeito de LEAD TIME.** Medido no mesmo run: `artifact /
+  macos-arm64` terminou 02:56:19; `cli surface / macos-arm64` só pôde começar 03:33:08, porque
+  `needs: artifact` numa matriz espera **todas** as pernas e `artifact / windows-arm64` levou
+  38m48s. Uma assertion de 9 segundos esperou **36m49s** por um binário que ela nem testa.
+- **A investigação de tempo de build muda de categoria.** Não é fatura de runner: enquanto a perna
+  mais lenta levar 38m48s, esse é o **piso de lead time de todo defeito** que o repositório é capaz
+  de detectar depois do build. É o tempo que qualquer erro fica invisível.
+
+**A regra operacional que sai disso:** ao relatar o custo de uma falha de CI, relate o **lead
+time** — da descoberta possível à descoberta real — e diga qual parte é fila e qual é toque.
+Relatar só o toque faz uma falha cara parecer barata, que é exatamente o erro que esta seção
+registra.
+
+**E o corolário desconfortável, que é o motivo de a nota existir:** o defeito era detectável por
+`grep -rn TEKO_BACKEND scripts/` **antes** do merge, em segundos. O integrador drenou a excisão da
+env var sem varrer os scripts que afirmavam sobre a mensagem antiga. Lead time de 2h08m19s para um
+defeito de lead time potencial de dois segundos — **a varredura de consumidores de uma string que
+se está removendo faz parte da remoção**, não é zelo opcional.
