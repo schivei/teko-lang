@@ -41,13 +41,13 @@ mão; o honest-stop de `encode_rodata` **FICA**. A opção (b) — descer o fio 
 2. **Costura consistente entre os 3 writers (o requisito do brief).** A opção (a) fixa
    a costura correta e uniforme: cada objeto neutro de writer ganha uma **lista
    paralela de relocations rodata-internas** (`ElfObject.rodata_relocs`), separada da
-   lista `.text`-relativa existente. Quando a cadeia completa (crumb futuro), o bridge
-   `x86_reloc_reqs`/`riscv_reloc_reqs` (e os equivalentes Mach-O/COFF) **particiona os
+   lista `.text`-relativa existente. Quando a cadeia completa (crumb futuro), os bridges por-ISA
+   (e os equivalentes Mach-O/COFF) **particionam os
    `Reloc*` por `.sect`** em duas listas: `Text`→`relocs`, `Rodata`→`rodata_relocs`.
    O discriminador `RelocSect` (T-B1) é **consumido no bridge**; o writer recebe listas
    já pré-classificadas, com semânticas de offset fisicamente separadas
-   (`.text`-relativo vs `.rodata`-relativo). T-B3 (Mach-O/COFF) e T-B4 (wasm) adotam a
-   MESMA lista-paralela nos seus objetos neutros. Isto é mais limpo e menos superfície
+   (`.text`-relativo vs `.rodata`-relativo). Os writers de formatos múltiplos (Mach-O/COFF, wasm)
+   adotam a MESMA lista-paralela nos seus objetos neutros. Isto é mais limpo e menos superfície
    de erro do que carregar um `sect` no request neutro e particionar em tempo de
    emissão em cada writer.
 
@@ -101,32 +101,20 @@ bloqueado é apenas a POPULAÇÃO da `rodata_relocs` a partir de um const Tier-B
   `[Ehdr(64)][.text][pad8][.rodata][pad8][.symtab][.strtab][.shstrtab][pad8]
   [.rela.text][pad8][SHT]`. `rela_offset = align8(shstrtab_offset + shstrtab_len)`,
   `rela_size = nrela*24`, `shoff = align8(rela_offset + rela_size)`.
-- **Bridges (onde entrariam os offsets rodata-relativos):** `x86_reloc_reqs`
-  (`:988`) e `riscv_reloc_reqs` (`objfile_elf_riscv.tks:15`) mapeiam cada `RelocX86`/
-  `RelocRiscv` → `ElfRelocReq`, com `rtype = elf_reloc_type(r.kind)` /
-  `riscv_reloc_type(r.kind)`. Hoje **só produzem relocations `.text`-relativas**.
-  `elf_reloc_type(Abs64)=1` (`:392`, R_X86_64_64) e `riscv_reloc_type(Abs64)=2`
-  (`encode_riscv.tks:746`, R_RISCV_64) — o tipo absoluto que um ponteiro data→data usa
-  JÁ existe e está mapeado.
+- **Bridges (onde entrariam os offsets rodata-relativos):** os bridges por-ISA mapeiam
+  cada tipo de reloc nativo → `ElfRelocReq`, com `rtype` selecionado por tipo de reloc.
+  Hoje **só produzem relocations `.text`-relativas**. Os tipos absolutos (como `R_X86_64_64`)
+  que um ponteiro data→data usa JÁ existem e estão mapeados nas implementações.
 - **Símbolo de seção `.rodata`:** `elf_build_symbols` (`:287`) emite UM símbolo
   `STT_SECTION` para `.rodata` no índice **1** (logo após o null, quando há rodata,
   `:289-290`); os locais rodata-nomeados NÃO viram símbolos individuais. `first_global`
   = `elf_first_global_index` (`:326`).
 
-### 1.3 Compartilhamento x86/riscv
-
-`emit_elf_object` (`:956`) é ISA-agnóstico. `emit_elf` (`:1013`) e `emit_elf_riscv`
-(`objfile_elf_riscv.tks:43`) constroem `ElfObject` e delegam. **Uma única edição do
-writer serve as duas ISAs**: o mesmo `.rela.rodata` sai para x86-64 (R_X86_64_64) e
-riscv64 (R_RISCV_64), com `objfile_elf_riscv_test.tkt` como gate paralelo. Os DOIS
-sites de construção de `ElfObject` (`:1014`, `objfile_elf_riscv.tks:44`) são os únicos
-em produção; nenhum teste constrói `ElfObject` diretamente hoje.
-
 ---
 
 ## 2. Assinaturas exatas do widening + emissão da nova seção (W15 verbatim)
 
-### 2.0 Prova do reloc type (data→data, x86-64 e riscv64)
+### 2.0 Prova do reloc type (data→data, x86-64)
 
 **x86-64:** o campo dentro de `.rodata` guarda o ENDEREÇO ABSOLUTO de 64 bits de outro
 datum de `.rodata`. Pela System V AMD64 psABI (tabela "Relocation Types"):
@@ -136,11 +124,9 @@ datum de `.rodata`. Pela System V AMD64 psABI (tabela "Relocation Types"):
 "section-symbol + addend" que o writer JÁ usa para text→rodata (só que aqui com o tipo
 absoluto `64` em vez de `PC32`, e r_offset dentro de `.rodata`). Isto é o que `gas`
 emite para um `.quad label` com `label` local em `.rodata`. `elf_reloc_type(Abs64)=1`
-já cobre.
-
-**riscv64:** o análogo absoluto de 64 bits é `R_RISCV_64` = **value 2**, `S + A`
-(RISC-V ELF psABI). `riscv_reloc_type(Abs64)=2` já cobre. **Nenhum tipo de reloc novo é
-necessário** — o `rtype` numérico chega pré-mapeado ao writer ISA-agnóstico.
+já cobre. Os tipos de relocação absolutos análogos existem para outras ISAs também.
+**Nenhum tipo de reloc novo é necessário** — o `rtype` numérico chega pré-mapeado ao
+writer ISA-agnóstico.
 
 ### 2.1 `ElfObject` ganha o eixo rodata: `rodata_relocs` (`objfile_elf.tks:911`)
 
@@ -178,7 +164,7 @@ byte-inerte): de "`.text`-section-relative byte offset" para
 Edições de literal (ambos os sites de produção passam a lista vazia):
 
 - `emit_elf` (`objfile_elf.tks:1014`): adicionar `rodata_relocs = teko::list::empty()`.
-- `emit_elf_riscv` (`objfile_elf_riscv.tks:44`): idem.
+  (outros backends têm funções análogas de emissão de ELF).
 
 ### 2.2 `ElfLayout` ganha os campos de `.rela.rodata` (`objfile_elf.tks:538`)
 
@@ -388,7 +374,7 @@ mencionando `.rela.rodata` condicional; mudança só de doc.)
 ## 3. PROVA de byte-identidade quando não há rodata-reloc
 
 Nenhum produtor emite um `rodata_relocs` não-vazio hoje: os bridges `x86_reloc_reqs`/
-`riscv_reloc_reqs` setam `rodata_relocs = teko::list::empty()`, e o honest-stop
+Os bridges de backend setam `rodata_relocs = teko::list::empty()`, e o honest-stop
 `encode_rodata` de T-B1 impede qualquer const Tier-B de existir a montante. Logo, em
 TODA compilação real `has_rr = false`, e:
 
@@ -405,15 +391,15 @@ TODA compilação real `has_rr = false`, e:
    7×64 bytes como antes.
 
 ⇒ Cada byte idêntico ao pré-T-B2. Os goldens de `objfile_elf_test.tkt` /
-`objfile_elf_riscv_test.tkt` (ex.: `exit`-object = 688 bytes, `shoff=240`, `e_shnum=7`,
+testes paralelos de outros backends (ex.: `exit`-object = 688 bytes, `shoff=240`, `e_shnum=7`,
 `e_shstrndx=5`) e o **fixpoint gen1==gen2** são a prova viva. **QED.**
 
 ---
 
 ## 4. Fixtures a ADICIONAR
 
-Todas em `objfile_elf_test.tkt` (x86) com espelho em `objfile_elf_riscv_test.tkt`
-(riscv), construindo `ElfObject` À MÃO e chamando o `pub fn emit_elf_object`
+Todas em `objfile_elf_test.tkt` (x86) com espelho em testes paralelos de outros backends
+(outros backends), construindo `ElfObject` À MÃO e chamando o `pub fn emit_elf_object`
 diretamente — o padrão-precedente de `el_abs64_module`/`el_rodata_off_module`, agora um
 nível abaixo (no writer neutro) porque o eixo rodata vive em `ElfObject`, não em
 `EncodedModuleX86`. Rodam idênticas na VM e no harness nativo (mesma saída de bytes).
@@ -468,7 +454,7 @@ el_u32_at(obj, 716) == 2           // sh_info = .rodata
 el_u32_at(obj, 728) == 24          // sh_entsize
 ```
 
-Espelho riscv em `objfile_elf_riscv_test.tkt`: idêntico, mas `e_machine=EM_RISCV`,
+Testes paralelos em outros backends: idêntico nos estruturais, mas com `e_machine` apropriado,
 `e_flags=EF_RISCV_FLOAT_ABI_DOUBLE`, `rtype = 2` (R_RISCV_64) — assert `el_u32_at(...,
 208) == 2`. (Os demais offsets são iguais; `e_flags` não muda o tamanho.)
 
@@ -507,13 +493,13 @@ o arquivo compila a cada passo.
 | # | Arquivo | Edit | Gate de regressão (`.tkt`) |
 |---|---|---|---|
 | E1 | `src/backend/objfile_elf.tks` | `ElfObject.rodata_relocs` (§2.1) + generalizar doc de `offset`; setar `rodata_relocs = teko::list::empty()` em `emit_elf` (`:1014`) | `objfile_elf_test.tkt`, `objfile_coff_test.tkt` (compila; goldens byte-idênticos) |
-| E2 | `src/backend/objfile_elf_riscv.tks` | `rodata_relocs = teko::list::empty()` em `emit_elf_riscv` (`:44`) | `objfile_elf_riscv_test.tkt` |
+| E2 | backends alternativos (ELF) | `rodata_relocs = teko::list::empty()` em funções de emissão de ELF | testes paralelos dos backends |
 | E3 | `src/backend/objfile_elf.tks` | `ElfLayout` +4 campos (§2.2); `compute_elf_layout` (§2.5) | goldens ELF byte-idênticos (mesmos offsets/shoff) |
 | E4 | `src/backend/objfile_elf.tks` | `elf_section_names(has_rodata_relocs)` (§2.3) + callsite | goldens ELF (7 nomes quando `false`) |
 | E5 | `src/backend/objfile_elf.tks` | `emit_elf_header` recebe `nsects` (§2.4) + callsite | goldens ELF (`e_shnum==7` inalterado) |
 | E6 | `src/backend/objfile_elf.tks` | extrair `elf_resolve_rela` + `elf_build_rodata_relas` (§2.6); `elf_build_relas` reusa | goldens de `.rela.text` byte-idênticos (prova a extração) |
-| E7 | `src/backend/objfile_elf.tks` | `emit_elf_shdrs` 8º header condicional (§2.7); `emit_elf_object` costura (§2.8) | **todos** os goldens ELF/riscv byte-idênticos (`has_rr=false`) |
-| E8 | `objfile_elf_test.tkt` + `objfile_elf_riscv_test.tkt` | fixtures §4 | os próprios testes novos (verde) |
+| E7 | `src/backend/objfile_elf.tks` | `emit_elf_shdrs` 8º header condicional (§2.7); `emit_elf_object` costura (§2.8) | **todos** os goldens ELF de múltiplos backends byte-idênticos (`has_rr=false`) |
+| E8 | `objfile_elf_test.tkt` + testes paralelos de outros backends | fixtures §4 | os próprios testes novos (verde) |
 
 > Writers Mach-O/COFF/wasm e a VM **NÃO são tocados** em T-B2 (são T-B3/T-B4/T-B5). O
 > honest-stop `encode_rodata` de T-B1 **permanece** — não editar `encode_*.tks`.
@@ -522,7 +508,7 @@ o arquivo compila a cada passo.
 
 - **Por-edit:** o `.tkt` do arquivo (tabela) — cada edit é gate-able só.
 - **RITUAL POINT — fim de T-B2:** gate COMPLETO — todos os goldens de backend
-  byte-idênticos (`objfile_elf_test.tkt`, `objfile_elf_riscv_test.tkt`,
+  byte-idênticos (`objfile_elf_test.tkt`, testes paralelos de outros backends,
   `objfile_coff_test.tkt`, `objfile_macho_test.tkt`, `encode_*_test.tkt`,
   `lower_test.tkt`, `lir_interp_test.tkt`, `tkb_test.tkt`) + **fixpoint gen1==gen2** +
   ambas as engines (VM + nativo) + 100% de cobertura do delta (as fixtures §4 cobrem o
@@ -563,7 +549,7 @@ o arquivo compila a cada passo.
 5. **`rtype` do rodata-reloc precisa ser absoluto (R_X86_64_64 / R_RISCV_64).** Um
    `PC32` dobrado em `.rela.rodata` produziria um ponteiro relativo errado.
    *Resolução:* provado §2.0 pela SysV/RISC-V psABI; o bridge futuro mapeará
-   `RelocX86::Abs64`/`RelocRiscv::Abs64` (já em `elf_reloc_type`/`riscv_reloc_type`); a
+   `RelocX86::Abs64`/`RelocRiscv::Abs64` (já em `elf_reloc_type`/funções de mapeamento por backend); a
    fixture §4.1 fixa `rtype=1`/`rtype=2` explicitamente.
 
 **Sem tensão genuína não resolvida → sem HALT.**
@@ -575,8 +561,8 @@ o arquivo compila a cada passo.
 T-B2 entrega o writer ELF completo e provado HOJE. O que resta atrás do honest-stop de
 T-B1 (não faz parte de T-B2, mas nomeado para o implementer):
 
-- **Popular `rodata_relocs`** a partir de um const Tier-B real: o bridge
-  `x86_reloc_reqs`/`riscv_reloc_reqs` particionar `Reloc*` por `.sect`, e
+- **Popular `rodata_relocs`** a partir de um const Tier-B real: os bridges por-ISA
+  particionarem `Reloc*` por `.sect`, e
   `encode_rodata` deixar de honest-stopar (produzindo `Reloc` com `sect=Rodata` a
   partir de `LRodata.relocs`). Isso é o crumb que fecha a cadeia (junto com T-B5); só
   então `has_rr=true` ocorre em compilação real. Até lá, `.rela.rodata` só é exercitada
