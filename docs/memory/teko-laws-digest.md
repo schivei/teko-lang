@@ -114,3 +114,33 @@ DECORATIVO — struct marcada que nao contem ponteiro cru nem chama nada unsafe 
 checker. Fica como criterio de REVISAO, nao como gate. Nao proponha implementa-lo de novo; a
 decisao foi tomada sabendo que o buraco simetrico (o `unsafe` que anestesia o leitor sem precisar)
 continua aberto, e o custo de o checker decidir NECESSIDADE foi julgado maior que o ganho.
+
+**O MODELO DE EXECUCAO DE TESTE E DE CONCORRENCIA (dono, 2026-07-27).** *"cada um [teste] deve
+executar em corotina e corotina deve ser thread isolada, logo, cada corotina tem sua própria root
+assim que nasce (como se fosse outro programa). Depois entrariam estruturas de sincronização e
+compartilhamento (como canais)."*
+
+Tres invariantes, nesta ordem, e a ordem e a decisao:
+
+  1. **corrotina == thread ISOLADA** (1:1, o que o MASTER_PLAN ja fixara com "1:1 OS threads
+     first"; M:N e backing posterior sob a mesma superficie).
+  2. **raiz de arena PROPRIA ao nascer** — "como se fosse outro programa". Nao e marca numa raiz
+     compartilhada, e raiz de arvore: `tk_region_new(NULL)` no nascimento, `tk_region_drop` na
+     morte.
+  3. **sincronizacao e compartilhamento vem DEPOIS** (canais). Nao antecipe: o desenho S8 ja
+     reservou `channel<T>` deliberadamente porque nenhum dos tres ganhos (gate, codegen,
+     regressor) usa canal — todos sao fork-join com escrita disjunta e leitura apos barreira.
+
+**A CONSEQUENCIA QUE VALE MAIS QUE A REGRA:** com raiz por corrotina, `tk_arena_push`/`tk_arena_pop`
+deixam de ser NECESSARIOS nesse caminho. Eles existem porque os testes compartilham
+`tk_region_root()` e precisam marcar/rebobinar dentro dela. O defeito que o desenho S8 mediu —
+push/pop nao recebem alca, empilham sobre a raiz do PROCESSO, o gate faz push/pop ao redor de CADA
+teste, duas raias rebobinam uma sobre a outra e **o sintoma e nenhum** (reuso de arena e invisivel
+ao ASan) — **nao precisa ser consertado, precisa ser tornado desnecessario.** Tornar um defeito
+inalcancavel e melhor resultado que corrigi-lo.
+
+**O CHAO EM C JA ESTA COMPLETO** e isso foi verificado, nao suposto (`src/runtime/teko_rt.h:148-161`):
+`tk_region_new(parent)` com `parent = NULL` ja devolve raiz de arvore independente; `alloc`, `drop`,
+`drop_subtree` existem. O unico singleton de processo e `tk_region_root()`, e e so a ele que
+push/pop se amarram. Threads bottom em `pthread` da libc. **Nao ha uma linha de C a escrever** para
+nenhum dos tres invariantes — ruling do dono de que nao se escreve mais C continua integro.
