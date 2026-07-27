@@ -358,3 +358,37 @@ sem um aviso sequer; o sintoma foi o mark stack ficar em zero depois de um push.
 `arena_commit`, `intern_get`, `cov_mark` e companhia são nomes minados em qualquer
 namespace. Para o porte real do arena isto é bloqueante: as funções do arena têm
 exatamente esses nomes.
+
+
+---
+
+## 9. O que NAO rodou, e por que
+
+**`teko test .` (a baseline de ~1042 unitarios): NAO CONCLUIU.** Foi disparado com o
+seed disponivel e morreu no timeout de 15 minutos sem produzir uma linha de saida. Nao
+ha verde a declarar aqui.
+
+O que da confianca estrutural, e nao substitui a medicao: esta carga **nao toca um so
+arquivo sob `src/`**. O diff contra o ponto de branch e inteiramente
+`examples/probes/` mais este documento, entao a suite de unitarios do compilador esta
+literalmente inalterada.
+
+**O compilador nao foi reconstruido, e nao podia ser.** `scripts/fetch_teko.sh` falha
+com HTTP 403 (o acesso ao GitHub esta desabilitado nesta sessao), e **todo** binario
+`teko` em disco falha ao compilar o fonte da base:
+
+* `0.3.0.16-beta` (o instalado em `/usr/local/bin`) nem parseia doc-comment;
+* `0.3.0.30-beta` para em `src/checker/comptime_fold.tks:1569:45`;
+* os gen1 mais recentes de outras faixas param todos em
+  `const struct: initializer is not a struct literal (Tier-A follow-up) (#594)`.
+
+O compilador que construiu e rodou tudo desta carga foi `/tmp/gate20g/mp/teko`, um gen1
+de faixa irma. Por isso a implementacao de referencia vive em `examples/probes/` e nao
+em `src/`: mexer no compilador sem poder recompila-lo produziria codigo nao validado, e
+o arena e a peca onde uma implementacao sutilmente errada e pior que nenhuma.
+
+**As duas costuras (P1 e P2) nao foram implementadas no compilador** — sao mudanca de
+`builtin_fn` + `lower.tks`, exatamente o que nao pode ser validado aqui. O que existe e
+o projeto delas (secao 2), a medida do custo (uma instrucao LIR ja existente cada), e
+uma implementacao completa que as usa por tras de uma funcao so, para que a troca seja
+uma linha quando o seed certo estiver disponivel.
