@@ -319,3 +319,80 @@ tem de ser um COMPILADOR — binario ou C versionado — nunca uma reescrita do 
 passado. Reescrever o corpus para caber num seed que sera descartado e a cauda balancando o
 cachorro, e este registro existe para a proxima pessoa nao gastar os mesmos 271k tokens
 redescobrindo.
+
+### ADENDO (mesmo dia, horas depois): O DONO DISSOLVEU A CONTRADICAO REBAIXANDO O D1 A WARNING
+
+O registro acima continua correto no que MEDIU — e errado no que concluiu ser inevitavel. A
+contradicao era real, mas ela nao vinha das duas geracoes: vinha do D1 ser um ERRO. Ruling do
+dono, 2026-07-27: *"Mas, o cast, nestes casos, nao deveria ser falha, deveria ser warning, o que
+nao nos exime de nao ter warnings no proprio compilador (lembra? <= 2%)."*
+
+Com o D1 como WARNING, o mesmo texto compila nas duas geracoes: o seed le o cast e fica satisfeito
+com B.22; o gen1 le o cast, imprime `teko: warning: redundant cast: ...` no stderr, e segue. Os
+18 casts que o seed exige passam a ser pagaveis. A grafia que nao existia passa a existir.
+
+**A LICAO, e ela e sobre projeto de diagnostico, nao sobre cast:** um diagnostico que e ERRO
+define o que e ESPELHAVEL. Numa cadeia de bootstrap ha sempre duas ou mais geracoes lendo o mesmo
+fonte com regras diferentes, e cada regra promovida a erro estreita a intersecao das grafias
+aceitas por todas elas. Quando essa intersecao fica vazia, nao ha patch no corpus — foi o que o
+registro acima mediu. A saida barata nem sempre e uma ponte de compilador: e checar se a regra
+precisava mesmo ser erro. **Higiene de estilo vira WARNING; so vira ERRO o que produz programa
+errado.** Um cast redundante nao produz programa errado — produz programa feio, e feiura tem
+outro instrumento.
+
+**O INSTRUMENTO QUE FICA COM A POLITICA e o D4: ARITH-CAST-RATE <= 2%** (`metrics.tks`,
+`run_arith_cast_gate` em `project.tks`), que continua REPROVANDO o build. O dono citou o `<= 2%`
+na mesma frase da reversao exatamente para isso: rebaixar o D1 nao afrouxa a politica, muda quem
+a carrega — de "nenhum cast redundante e espelhavel" para "no maximo 2% das expressoes aritmeticas
+carregam conversao". Consequencia direta na implementacao: o sitio de mesmo-tipo em `type_cast`
+PRESERVA o no `TCast` na arvore tipada em vez de dobra-lo, porque `expr_has_conversion` conta nos
+`TCast` — dobrar teria desligado o teto junto com o erro, silenciosamente.
+
+**E a ESCADA, ela ainda morre?** Sim, e pela mesma porta: versionar o `teko.c` do primeiro degrau.
+Este adendo nao substitui aquela saida, remove o motivo pelo qual ela era a UNICA. Sao coisas
+independentes — uma resolve a grafia, a outra resolve o tempo.
+
+## RETORNO DE STRUCT/CLASS POR VALOR DEVOLVE PONTEIRO PENDURADO (2026-07-27) — CORRUPCAO SILENCIOSA
+
+Achado por um agente na bissecao do `bulk`, e REPRODUZIDO DE FORMA INDEPENDENTE aqui antes de ser
+escalado — porque um achado desta gravidade nao se repassa no boca a boca.
+
+**Repro minimo** (projeto de 3 linhas, backend nativo, compilador do vagao 20):
+
+    let a = gad::Counter::make(1)
+    let b = gad::Counter::make(2)
+    exit(a.get())          // esperado 1 — MEDIDO: 2
+
+Nao ha crash, nao ha aviso, nao ha panico. O valor simplesmente e outro.
+
+**A causa, no assembly emitido** (`objdump`, x86_64):
+
+    teko_sretprobe__gad__Counter__make:
+        push %rbp; mov %rsp,%rbp
+        sub  $0x10,%rsp        <- aloca o RETORNO no PROPRIO frame
+        lea  (%rsp),%rcx       <- toma o endereco dele
+        mov  %rax,(%rsi)       <- escreve o campo
+        mov  %rcx,%rax         <- RETORNA esse endereco
+        leave                  <- e destroi o frame que o contem
+        ret
+
+O chamador recebe um ponteiro para memoria morta. Duas chamadas seguidas reusam o MESMO offset de
+pilha, entao a segunda sobrescreve o resultado da primeira antes que ele seja lido. Confirmado no
+call site: dois `call` para o mesmo endereco, `%rax` guardado em `%rbx`, e `%rbx` ja aponta para o
+que a segunda chamada escreveu.
+
+**NAO E UM DEGRAU FALTANDO, E UMA ABI ERRADA.** Nao existe convencao `sret`
+(caller-allocated return storage) em lugar nenhum de `src/lir/lower.tks` — o retorno agregado
+simplesmente nunca foi projetado. Isso e diferente de todo honest-stop `N1/N2` que fechamos hoje:
+um honest-stop RECUSA compilar e diz o endereco; este COMPILA e mente. A distincao importa na hora
+de priorizar: um degrau custa uma feature, este custa confianca em todo programa ja compilado que
+retorne struct por valor.
+
+**Alcance:** transversal aos dois backends nativos (x86_64 e arm64 compartilham o front-end de
+lowering). NAO afeta o caminho pelo backend C — la quem gerencia retorno de agregado e o compilador
+C, que faz certo. E por isso que a escada nunca tropecou nisso e por isso que o `teko.c` versionado
+CONTORNA o defeito em vez de esperar por ele.
+
+**Consequencia pratica registrada:** enquanto isso nao fechar, nenhum binario produzido pelo backend
+proprio que retorne struct/class por valor e confiavel, e o `bulk` nao fecha verde — nem depois de
+resolvido o `fat-pointer receiver call` (N2), que e um problema SEPARADO no mesmo arquivo.

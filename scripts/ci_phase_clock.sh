@@ -36,10 +36,24 @@ PHASE_CLOCK_STATE="${TEKO_CI_PHASE_STATE:-.ci-phase-clock}"
 # set it (the common case: every stage after the very first inherits the same epoch). Also seeds
 # the last-mark state file so the FIRST phase_mark call reports its own duration rather than the
 # time since the Unix epoch.
+#
+# A NEW EPOCH ALWAYS RESETS THE STATE FILE, and the older `[ -f … ] ||` form is why this comment
+# exists. The state file lives IN THE WORKTREE (`.ci-phase-clock`), so it outlives the process that
+# wrote it; when a later run started with no inherited epoch, it minted a fresh epoch but KEPT the
+# stale mark, and the first phase reported its duration as the time since some previous run. Caught
+# by measurement, 2026-07-27: a rung -1 build that took 358s was logged as `+2808s (t=358s)` — the
+# two numbers on the same line contradicting each other, which is the only reason it was noticed.
+#
+# An inherited epoch is the opposite case and must NOT reset: there the state file is precisely the
+# handoff between stages of the same job. So the reset is conditioned on the epoch being NEW, not on
+# the file being absent. A clock that misreports is worse than no clock — this one exists because
+# the owner asked for delivery time to be auditable, and an unaudited auditor is the wrong shape.
 phase_clock_init() {
     if [ -z "${TEKO_CI_PHASE_EPOCH:-}" ]; then
         TEKO_CI_PHASE_EPOCH="$(date +%s)"
         export TEKO_CI_PHASE_EPOCH
+        printf '%s' "$TEKO_CI_PHASE_EPOCH" > "$PHASE_CLOCK_STATE"
+        return 0
     fi
     [ -f "$PHASE_CLOCK_STATE" ] || printf '%s' "$TEKO_CI_PHASE_EPOCH" > "$PHASE_CLOCK_STATE"
 }

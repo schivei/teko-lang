@@ -3563,7 +3563,8 @@ fn run_analyzer(dir: str, fe: Frontend) -> i32 {
  */
 fn arith_cast_rate_line(r: checker::ArithCastRateReport) -> str {
     let pct = checker::arith_cast_rate_pct(r)
-    $"teko: arith-cast-rate: {r.with_conversion}/{r.total} ({pct:F2}%), ceiling <=2.00%"
+    let ceiling = checker::ARITH_CAST_RATE_CEILING
+    $"teko: arith-cast-rate: {r.with_conversion}/{r.total} ({pct:F2}%), ceiling <={ceiling:F2}%"
 }
 
 /**
@@ -3579,10 +3580,48 @@ fn arith_cast_rate_line(r: checker::ArithCastRateReport) -> str {
  * @since 0.3.1 (C5)
  */
 fn run_arith_cast_gate(dir: str, fe: Frontend) -> i32 {
+    arith_cast_verdict(report_arith_cast_rate(fe))
+}
+
+/**
+ * report_arith_cast_rate — compute the ARITH-CAST-RATE and PRINT it, with no verdict attached.
+ *
+ * Split out from `run_arith_cast_gate` so the number can be reported EARLY — right after the
+ * front end, before the test gate — while the pass/fail verdict stays at the end of
+ * `test_project`. The reason is that the two belong at different points in the run and used to
+ * be welded at the wrong one:
+ *
+ * - the METRIC is a property of the typed SOURCE (`fe.prog`). It needs no test to have passed and
+ *   no binary to have been produced. Reporting it behind the test gate meant it only ever spoke
+ *   when everything else was already green — precisely when it is least needed. On a tree whose
+ *   suite is red (wagon 20, `fat-pointer receiver call` / N2) it would never have printed at all,
+ *   which is how a gate ships and delivers nothing.
+ * - the VERDICT must NOT come first, and that is the other half of the split: failing early on a
+ *   cast-rate ceiling would return before the test gate ran and hide every test failure behind a
+ *   style metric. A gate that masks defects is worse than one that runs late.
+ *
+ * @param fe  the already-assembled front-end product (checked program + manifest)
+ * @return    the accumulated report, already printed
+ * @since 0.3.1 (C5); split 2026-07-27
+ */
+fn report_arith_cast_rate(fe: Frontend) -> checker::ArithCastRateReport {
     let r = checker::arith_cast_rate_report(fe.prog)
     teko::io::println(arith_cast_rate_line(r))
+    r
+}
+
+/**
+ * arith_cast_verdict — the D4 pass/fail on an ALREADY-COMPUTED report (nothing is re-walked and
+ * nothing is re-printed; `report_arith_cast_rate` did both).
+ *
+ * @param r  the report computed earlier in the run
+ * @return   0 when the rate is at or under the ceiling, else 1 (the CI-facing failure)
+ * @since 0.3.1 (C5); split 2026-07-27
+ */
+fn arith_cast_verdict(r: checker::ArithCastRateReport) -> i32 {
     if checker::arith_cast_rate_gate_ok(r) { return 0 }
-    teko::io::eprintln("teko: arith-cast-rate gate FAILED — the D4 ceiling (<=2%) was exceeded")
+    let ceiling = checker::ARITH_CAST_RATE_CEILING
+    teko::io::eprintln($"teko: arith-cast-rate gate FAILED — the D4 ceiling (<={ceiling:F2}%) was exceeded")
     1
 }
 
@@ -4366,6 +4405,9 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     ensure_rt_dir_abs()
     let exe = self_exe_path()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    // Reported HERE, verdict at the END — see `report_arith_cast_rate` for why the two are split.
+    // The number is a property of the typed source, so it prints even on a tree whose suite fails.
+    let acr = report_arith_cast_rate(fe)
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
     if trc != 0 { return trc }
     let pre_regr_cob = coverage::cov_cobertura(fe.prog)
@@ -4384,7 +4426,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     }
     if has_regr && regr_rc != 0 { return regr_rc }
     if arith_cast_gate {
-        let acrc = run_arith_cast_gate(dir, fe)
+        let acrc = arith_cast_verdict(acr)
         if acrc != 0 { return acrc }
     }
     if per_test_cov { return run_per_test_cov(dir, fe) }

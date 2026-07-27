@@ -244,16 +244,26 @@ fn join_unchanged_without_cast(inner: PrimKind, outer: PrimKind, other: PrimKind
  *
  * Keeping this ONE function is the fix for the defect it replaces: the same two guards used
  * to live only at the arithmetic site, so `(a to i64) - (b to i64)` compiled while
- * `(a to i64) < (b to i64)` was a hard error.
+ * `(a to i64) < (b to i64)` was a hard error. Since the 2026-07-27 owner ruling the verdict
+ * is a WARNING at both sites (`warn_redundant_cast`) rather than a rejection, but the two
+ * sites must still AGREE — a construct that warns as arithmetic and stays silent as a
+ * comparison would be the same drift wearing a quieter costume.
+ *
+ * Returns the offending OPERAND rather than just its type, because the D1 diagnostic became a
+ * warning (owner 2026-07-27) and a warning has no return path to be positioned on the way out:
+ * `warn_redundant_cast` must name `file:line:col` itself, and the operand is what carries the
+ * line/col (`type_expr` stamps every typed node with its source position). Returning the bare
+ * `Type` — which is all an ERROR needed, since `surface_at` positioned it later — would have
+ * silently downgraded a precisely-located diagnostic into an unlocatable one.
  *
  * @param l  the typed left operand
  * @param r  the typed right operand
- * @return   the redundant cast's own type, or `null` when neither side carries one
+ * @return   the operand carrying the redundant cast, or `null` when neither side does
  * @since    0.3.1
  */
-fn redundant_widen_cast_of(l: TExpr, r: TExpr) -> Type | null {
-    if !operand_may_flag_partner(r) && cast_widen_is_redundant(l, r.type) { return l.type }
-    if !operand_may_flag_partner(l) && cast_widen_is_redundant(r, l.type) { return r.type }
+fn redundant_widen_cast_of(l: TExpr, r: TExpr) -> TExpr | null {
+    if !operand_may_flag_partner(r) && cast_widen_is_redundant(l, r.type) { return l }
+    if !operand_may_flag_partner(l) && cast_widen_is_redundant(r, l.type) { return r }
     null
 }
 

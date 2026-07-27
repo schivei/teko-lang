@@ -158,6 +158,61 @@ ensure_full_history() {
   git fetch origin "$BASE_BRANCH"
 }
 
+committed_c_rung() {
+  cc_src="${TEKO_BOOTSTRAP_C:-bootstrap/teko.c}"
+  if [ ! -f "$cc_src" ]; then
+    log "rung -1: no committed C at $cc_src — skipping (this is the normal state once a release can seed)"
+    return 1
+  fi
+  if ! command -v cc >/dev/null 2>&1; then
+    log "rung -1: $cc_src is present but no cc is on PATH — skipping"
+    return 1
+  fi
+  cc_out="$PWD/.rung-c"
+  rm -rf "$cc_out"; mkdir -p "$cc_out"
+  cc_log="$(mktemp)"
+  # NO `-fno-pie -no-pie` HERE, and that is a measurement, not an oversight. Disabling PIE was the
+  # standing hypothesis for the generation-to-generation slowdown; measured on the wagon it made the
+  # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
+  # function only because rung -1 was written while the experiment was still live.
+  log "rung -1: building the bootstrap compiler from $cc_src"
+  if ! cc -std=c2x -w -O2 \
+        -I src/runtime -I src/assert \
+        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
+        -o "$cc_out/teko" >"$cc_log" 2>&1; then
+    log "rung -1: the committed C did not compile — skipping to the next rung. cc said:"
+    sed 's/^/teko-ci:   | /' "$cc_log" >&2
+    rm -f "$cc_log"
+    return 1
+  fi
+  rm -f "$cc_log"
+  log "rung -1: bootstrap compiler ready ($("$cc_out/teko" --version 2>&1 | head -n1))"
+  cc_tip_log="$(mktemp)"
+  if ! build_project "$cc_out/teko" "$PWD" "$OUT_DIR" "$cc_tip_log" "$PWD/src/runtime"; then
+    log "rung -1: the bootstrap compiler could not build the tip — skipping to the next rung."
+    log "----- tip build with the committed-C compiler (failure) -----"
+    sed 's/^/teko-ci:   | /' "$cc_tip_log" >&2
+    rm -f "$cc_tip_log"
+    return 1
+  fi
+  cat "$cc_tip_log"
+  rm -f "$cc_tip_log"
+  phase_mark "rung -1 (committed C, no ladder)"
+  log "rung -1: the tip was built from the committed C — NO LADDER WAS WALKED"
+  return 0
+}
+
+# THE COMMITTED C RUNS BEFORE THE SEED IS EVEN TRIED, and that ordering is the point rather than an
+# optimization. `bootstrap/teko.c` is only ever committed BECAUSE the released seed cannot build
+# this tip — that is the whole reason the file exists — so trying the seed first is a failure we
+# have already paid for and already know the answer to. Measured: the seed's doomed attempt walks
+# the checker to item 784 before dying on B.22, ~94s per job, six jobs, every push. When the seed
+# can build the tip again the FILE is what goes away (owner: *"podemos apagar o teko.c e voltar a
+# construcao normal"*), not this ordering.
+if committed_c_rung; then
+  exit 0
+fi
+
 FAST_LOG="$(mktemp)"
 if build_project "$SEED_BIN" "$PWD" "$OUT_DIR" "$FAST_LOG"; then
   cat "$FAST_LOG"
@@ -290,50 +345,6 @@ commit_seed_rung() {
 # TRANSITIONAL BY DESIGN. It dies at the next train: once a release is cut FROM this tree, the
 # published seed builds the tip directly and this file is deleted. Nothing here should outlive that
 # — no provenance ceremony, no manifest (owner: *"dado que morre no próximo trem, não tem motivos"*).
-committed_c_rung() {
-  cc_src="${TEKO_BOOTSTRAP_C:-bootstrap/teko.c}"
-  if [ ! -f "$cc_src" ]; then
-    log "rung -1: no committed C at $cc_src — skipping (this is the normal state once a release can seed)"
-    return 1
-  fi
-  if ! command -v cc >/dev/null 2>&1; then
-    log "rung -1: $cc_src is present but no cc is on PATH — skipping"
-    return 1
-  fi
-  cc_out="$PWD/.rung-c"
-  rm -rf "$cc_out"; mkdir -p "$cc_out"
-  cc_log="$(mktemp)"
-  log "rung -1: building the bootstrap compiler from $cc_src"
-  if ! cc -std=c2x -w -O2 -fno-pie -no-pie \
-        -I src/runtime -I src/assert \
-        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
-        -o "$cc_out/teko" >"$cc_log" 2>&1; then
-    log "rung -1: the committed C did not compile — skipping to the next rung. cc said:"
-    sed 's/^/teko-ci:   | /' "$cc_log" >&2
-    rm -f "$cc_log"
-    return 1
-  fi
-  rm -f "$cc_log"
-  log "rung -1: bootstrap compiler ready ($("$cc_out/teko" --version 2>&1 | head -n1))"
-  cc_tip_log="$(mktemp)"
-  if ! build_project "$cc_out/teko" "$PWD" "$OUT_DIR" "$cc_tip_log" "$PWD/src/runtime"; then
-    log "rung -1: the bootstrap compiler could not build the tip — skipping to the next rung."
-    log "----- tip build with the committed-C compiler (failure) -----"
-    sed 's/^/teko-ci:   | /' "$cc_tip_log" >&2
-    rm -f "$cc_tip_log"
-    return 1
-  fi
-  cat "$cc_tip_log"
-  rm -f "$cc_tip_log"
-  phase_mark "rung -1 (committed C, no ladder)"
-  log "rung -1: the tip was built from the committed C — NO LADDER WAS WALKED"
-  return 0
-}
-
-if committed_c_rung; then
-  rm -f "$FAST_LOG"
-  exit 0
-fi
 
 if commit_seed_rung; then
   rm -f "$FAST_LOG"

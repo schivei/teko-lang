@@ -52,20 +52,34 @@ type ValBinding = struct {
  *  extra parameter threaded through every statement/expression typer — same shape as
  *  `owner_type`. `false` for every non-`unsafe` fn (the overwhelming default), so a
  *  corpus with zero `unsafe` types types byte-identically. */
-pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool }
+/** `file` — the source file of the item CURRENTLY being typed, set once per item by
+ *  `type_item` (`with_file`), exactly like `cur_ns`/`owner_type`/`fn_unsafe` above and for
+ *  the same reason: a per-item fact the deep expression typers need without threading a
+ *  parameter through every one of them.
+ *
+ *  WHO NEEDS IT AND WHY IT DID NOT EXIST BEFORE: only a WARNING does. An ERROR is returned
+ *  upward and `surface_at` stamps the file on it at item level, where the file is already in
+ *  hand — so for the checker's entire error surface this field would be dead weight. A
+ *  warning has no return path: `warn_redundant_cast` (D1) prints at the moment of detection
+ *  and must name the file ITSELF or emit a bare `451:23:` that cannot distinguish
+ *  `typer.tks` from `encode_x86_64.tks`. Any future checker warning inherits the same need.
+ *
+ *  `""` when unset (the unit tests' `env_empty`), which renders as a position with no file —
+ *  degraded but never wrong. */
+pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str }
 
 // an empty env (no bindings, no current namespace, not inside any class method).
-pub fn env_empty() -> Env { Env { base = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false } }
+pub fn env_empty() -> Env { Env { base = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = "" } }
 
 /** (W10c/MEM-3) set the program DI registry once — the typer seeds it onto the base env after the
  *  DI pass so `type_function` can resolve each `#inject` binding to its provider. */
 pub fn with_di(env: Env, di: DiRegistry) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 /** (W10c/MEM-3) set the DI-injected locals in scope for the fn body about to be typed. */
 pub fn with_injects(env: Env, injects: []DiInjectBind) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 /**
@@ -77,7 +91,7 @@ pub fn with_injects(env: Env, injects: []DiInjectBind) -> Env {
  * @return Env  `env` with `fn_unsafe` set
  */
 pub fn with_fn_unsafe(env: Env, fn_unsafe: bool) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file }
 }
 
 /** (W10c/MEM-3) the DI-injected binding named `name` in scope, or an error if none — the signal a
@@ -98,25 +112,38 @@ pub fn seal(env: Env) -> Env {
     mut b = env.base
     mut i: u64 = 0
     loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
-    Env { base = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe }
+    Env { base = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 // (#41) set the namespace currently being type-checked — the typed pass sets it per item.
-pub fn with_ns(env: Env, ns: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe } }
+pub fn with_ns(env: Env, ns: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file } }
+
+/**
+ * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
+ * from the same place (`type_item`) off the same `parser::Item`, and read only by the checker's
+ * WARNING surface, which has no return path to be positioned on (see the `file` field's own
+ * note).
+ *
+ * @param env   the environment to derive from
+ * @param file  the item's source file path as the parser recorded it
+ * @return      `env` with `file` set
+ * @since       0.3.1
+ */
+pub fn with_file(env: Env, file: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file } }
 
 // (W10b.CLASS) set the DECLARING class of the method body about to be typed ("" clears it —
 // used when entering a free function).
-pub fn with_owner(env: Env, owner: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe } }
+pub fn with_owner(env: Env, owner: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file } }
 
 // define a LOCAL name (append). `is_mut`: a `mut` binding passes true; everything else false (B.21).
 // Locals carry no namespace ("").
 pub fn define(env: Env, name: str, t: Type, is_mut: bool) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = is_mut; ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = is_mut; ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 // (#41) define a TOP-LEVEL FUNCTION binding carrying its declaring namespace.
 pub fn define_fn(env: Env, name: str, t: Type, ns: str) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 /**
@@ -135,7 +162,7 @@ pub fn define_fn(env: Env, name: str, t: Type, ns: str) -> Env {
  * @since #594
  */
 pub fn define_const(env: Env, name: str, t: Type, ns: str, vis: parser::Visibility) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
