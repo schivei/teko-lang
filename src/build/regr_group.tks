@@ -20,7 +20,7 @@
  *      NAMESPACE (`src/m<k>/body.tks` → `<project>::m<k>`, the directory-is-namespace rule of
  *      `discover`), which is the language's own answer to that collision (`di_same_name_cross_ns`
  *      proves it end-to-end for classes, interfaces and DI providers alike);
- *   3. a scenario whose BUILD CONFIGURATION differs (`Given backend`, `Given target`, `Given env`)
+ *   3. a scenario whose BUILD CONFIGURATION differs (`Given target`, `Given env`)
  *      may not share a build with one that does not — the group key IS the child env plus the
  *      target, so a differing configuration is a different group by construction.
  *
@@ -109,26 +109,6 @@ const REGR_GROUP_UNKNOWN_ENTRY_EXIT: i32 = 97
 const REGR_GROUP_MIN_MEMBERS: u64 = 2
 
 /**
- * REGR_GROUP_OWN_BACKEND_ENV — the child-env token the OWN (native) backend selector lowers to
- * (`tkr_backend_env`). A group carrying it must be SOLO (`regr_group_solo`).
- *
- * A multi-member group needs a DISPATCHER, and a dispatcher needs to read a selector and compare it
- * — none of which the own backend can lower. RE-MEASURED 2026-07-26, not inherited: `teko::env::var`
- * returns `str | error` and a `match` over it stops with "fat-pointer receiver `match-expression`
- * not yet lowered (N2)"; runtime string interpolation stops the same way. What the backend CAN
- * lower is the whole of the corpus's arithmetic, control flow, `defer`, labelled loops, `match`,
- * null-unions, function calls and `println` of a LITERAL.
- *
- * So an own-backend group is allowed on one condition: every member contributes the SAME source, so
- * the generated project is that source verbatim and needs no dispatcher at all. That is not a
- * loophole, it is the shape the corpus was restructured into — the sixteen own-backend
- * differentials became one program that runs all of them and reports each on its own stdout line
- * (`examples/regressions/cwd_build/cases/own_differential.tks`), which turned thirty per-scenario
- * builds into two, one per target.
- */
-const REGR_GROUP_OWN_BACKEND_ENV: str = "TEKO_BACKEND=native"
-
-/**
  * REGR_GROUP_KEY_SEP — the separator joining a group key's parts (the target and each env token).
  * A newline, because an env token is `K=V` and a target is an os-arch name — neither may contain
  * one, so no two distinct configurations can ever collide into one key.
@@ -137,7 +117,7 @@ const REGR_GROUP_KEY_SEP: str = "\n"
 
 /**
  * RegrGroupSpec — the BUILD CONFIGURATION shared by every member of one group: the per-scenario
- * child env (`Given env`/`Given backend`/`Given target` already lowered to `K=V` tokens) and the
+ * child env (`Given env`/`Given target` already lowered to `K=V` tokens) and the
  * declared target. Two rows may share a build exactly when both match.
  */
 pub type RegrGroupSpec = struct {
@@ -729,16 +709,28 @@ fn regr_plan_empty() -> RegrPlanAcc {
  * @return       the group to place the row in, or `acc.keys.len` for a fresh one
  */
 /**
- * regr_group_solo — must a group with configuration `gkey` hold members of ONE source only? True for
- * the own (native) backend, whose limits are stated on `REGR_GROUP_OWN_BACKEND_ENV`: it can compile
- * any member of the corpus, but it cannot compile the DISPATCHER that a group of two DIFFERENT
- * sources would need. A solo group is emitted as its single source verbatim, so no dispatcher
- * exists to lower.
+ * regr_group_solo — must a group hold members of ONE source only? ALWAYS, now.
  *
- * @param gkey  the group's configuration key
- * @return      true when the group may hold only one distinct source
+ * The rule used to key on the `TEKO_BACKEND=native` child-env token, because only the rows that
+ * OPTED IN to the own backend could not carry a dispatcher. The `TEKO_BACKEND` selector was
+ * EXCISED (owner ruling 2026-07-26 — the own backend is the only emission route), so every row
+ * builds native and the exemption has no rows left to exempt.
+ *
+ * A multi-member group needs a DISPATCHER, and a dispatcher needs to read a selector and compare
+ * it — which the own backend still cannot lower: `teko::env::var` returns `str | error` and a
+ * `match` over it stops with "fat-pointer receiver `match-expression` not yet lowered (N2)", and
+ * runtime string interpolation stops the same way. Until THAT honest-stop falls, a dispatcher
+ * cannot be built at all, so grouping by shared source is the only shape available.
+ *
+ * WHAT THIS COSTS, said out loud: grouping was what took the corpus from 126 builds to 44. Solo
+ * groups give that back. The way to earn it again is to close the named stop above, not to relax
+ * this rule — a relaxed rule would emit a dispatcher the backend refuses, and the corpus would go
+ * red at build time instead of honestly slow.
+ *
+ * @param gkey  the group's configuration key (unused — the answer no longer depends on it)
+ * @return      true, always
  */
-fn regr_group_solo(gkey: str) -> bool { teko::str::contains(gkey, REGR_GROUP_OWN_BACKEND_ENV) }
+fn regr_group_solo(gkey: str) -> bool { true }
 
 fn regr_group_for_row(acc: RegrPlanAcc, gkey: str, names: []str) -> u64 {
     if regr_group_solo(gkey) { return acc.keys.len }
@@ -1136,7 +1128,7 @@ pub fn regr_group_slot(gs: RegrGroups, key: str) -> RegrGroupSlot | null {
 /**
  * regr_with_entry_env — `t` with the group selector (`REGR_GROUP_ENTRY_VAR=<module>`) appended to
  * its child env, so the group binary runs THIS row's snippet. Appended to the row's OWN env rather
- * than replacing it: a `Given env`/`Given backend` token still has to reach the child.
+ * than replacing it: a `Given env` token still has to reach the child.
  *
  * @param t       the lowered row
  * @param module  the row's module namespace inside its group

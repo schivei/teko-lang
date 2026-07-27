@@ -124,7 +124,7 @@ pub type Tkr = struct {
     source_inline: str
     /** an explicit standalone source file, relative to `regr_dir` (from `Given source`); "" when none. @since 0.3.1 */
     source_file: str
-    /** per-scenario child env (`K=V` tokens) applied to compile AND run; from `Given env`/`Given backend`/`Given target`. [] when none. @since 0.3.1 */
+    /** per-scenario child env (`K=V` tokens) applied to compile AND run; from `Given env`/`Given target`. [] when none. @since 0.3.1 */
     env: []str
     /** the effective os-arch target (from `Given target`); "" or the `HOST_TARGET` sentinel (`"host"`) → the build host's native target. @since 0.3.1 */
     target: str
@@ -1146,7 +1146,7 @@ fn tkr_lower_new() -> TkrLower {
 
 /**
  * tkr_env_extend — `base` with every token of `extra` appended, in order. The accumulator step
- * `Given env`/`Given backend`/`Given target` use to grow the per-scenario child env without a
+ * `Given env`/`Given target` use to grow the per-scenario child env without a
  * general list-concat builtin (none exists in `teko::list`).
  *
  * @param base   the env tokens accumulated so far
@@ -1166,58 +1166,9 @@ fn tkr_env_extend(base: []str, extra: []str) -> []str {
 }
 
 /**
- * TKR_OWN_BACKEND_ENV — the child-env token that selects the OWN (native) AOT backend for a
- * scenario: what `Given backend = "own"` lowers to, and the exact spelling `native_backend_selected`
- * tests for. Named here rather than spelled twice inline because it is now READ as well as written
- * (`tkr_row_uses_own_backend`), and a producer and a reader that disagree on the token would fail
- * silently — the reader would simply never match.
- */
-const TKR_OWN_BACKEND_ENV: str = "TEKO_BACKEND=native"
-
-/**
- * tkr_backend_env — the env token(s) `Given backend` sugars to: `"own"` → `TEKO_BACKEND=native`
- * (the own AOT backend), `"c"` → `TEKO_BACKEND=c` (explicit, for a paired differential
- * `Examples` row — `backend_of` only tests for the exact string `"native"`, so this is
- * functionally the default but documents intent), anything else → `[]` (an unrecognised backend
- * name sets no env — M.3 is the caller's concern were this ever load-bearing; today it is purely
- * additive sugar).
- *
- * @param value  the declared backend name (`"own"` | `"c"` | other)
- * @return       the env token(s) the name sugars to, or `[]` for an unrecognised name
- * @since 0.3.1
- */
-fn tkr_backend_env(value: str) -> []str {
-    if value == "own" { return teko::list::push(teko::list::empty(), TKR_OWN_BACKEND_ENV) }
-    if value == "c" { return teko::list::push(teko::list::empty(), "TEKO_BACKEND=c") }
-    teko::list::empty()
-}
-
-/**
- * tkr_row_uses_own_backend — will this lowered row's build go through the OWN (native) AOT backend?
- * True iff its child env carries `TKR_OWN_BACKEND_ENV`, which covers BOTH ways a row can ask for it:
- * the `Given backend = "own"` sugar and a raw `Given env = "TEKO_BACKEND=native"`. Consulted by the
- * runner's pre-build capability rule, because the own backend is the ONLY path that emits an object
- * for a `NativeTarget` — a C-backend row hands host-native C to the host `cc` and can never hit an
- * object-format or arch mismatch.
- *
- * @param t  the lowered row
- * @return   true iff the row builds with the own backend
- * @since 0.3.1
- */
-fn tkr_row_uses_own_backend(t: Tkr) -> bool {
-    mut k: u64 = 0
-    loop {
-        if k >= t.env.len { break }
-        if t.env[k] == TKR_OWN_BACKEND_ENV { return true }
-        k = k + 1
-    }
-    false
-}
-
-/**
  * tkr_target_env — the env token(s) `Given target` sugars to: a real cross target `t` →
  * `TEKO_TARGET=<t>`; the `HOST_TARGET` sentinel (`"host"`) and the empty value → NO token at all.
- * The sentinel exists so a backend×target `Examples` table can spell its HOST row explicitly, and
+ * The sentinel exists so a target `Examples` table can spell its HOST row explicitly, and
  * for that row "the build host's own target" must mean exactly what an UNSET `TEKO_TARGET` means
  * (`native_target()`'s R1 host-derived default). Exporting `TEKO_TARGET=host` instead would hand
  * the own backend an unrecognised target name and earn its honest R2 stop on every host — turning
@@ -1234,7 +1185,7 @@ fn tkr_target_env(value: str) -> []str {
 
 /**
  * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`/`source`/
- * `source inline`/`env`/`backend`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
+ * `source inline`/`env`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
  * unknown Given noun.
  *
  * @param b      the lowering accumulator
@@ -1255,10 +1206,6 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     if noun == "env" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
         return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, xs); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
-    }
-    if noun == "backend" {
-        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, tkr_backend_env(q.text)); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "target" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }

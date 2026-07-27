@@ -1,6 +1,19 @@
 # regressor.tkr — the compiler as its own full-stack regressor (0.3.1, regressor-principal
 # design doc, C5). `[tests] regression` (teko.tkp) lists this file FIRST.
 #
+# O EIXO `backend` MORREU (owner 2026-07-26: *"TEKO_BACKEND é outro que não deve mais existir, dado
+# que deve remover qq resquício de C para dar lugar ao native"*). Saiu a linha `Given backend`
+# (20x), saiu a coluna `backend` das 16 tabelas `Examples`, sairam as 31 linhas `| c |`; as 31
+# linhas `| own |` viraram a linha unica do cenario. 62 linhas de Examples viraram 31.
+#
+# ZERO CENARIO PERDIDO: os 24 nomes de cenario sao os mesmos antes e depois. O que morreu foi o
+# EIXO, nao o caso — cada cenario continua afirmando o proprio exit/stdout/trap.
+#
+# O QUE ISSO CUSTA, e o proximo leitor precisa saber: **o diferencial `own == C` era o oraculo do
+# backend nativo.** Um valor errado emitido pelo nativo era pego por discordar do emissor de C, que
+# era a implementacao de referencia. Com o C fora do trem, o que prova o nativo passa a ser (a) o
+# valor que cada cenario afirma por si e (b) o fixpoint `gen2 == gen3`. Menos rede, de proposito.
+#
 # THERE IS NO INLINE CODE IN THIS FILE ANY MORE (owner ruling: "está proibido inline code em tkr").
 # It carried 275 `Given source inline` blocks and 13.956 lines; every snippet is now a `.tks` file on
 # disk. The scenarios did not leave the regressor — they left the SOURCE-CARRYING role, and the build
@@ -43,9 +56,10 @@ Feature: R0 — the compiler is its own full-stack regressor (exe native, declar
     # NEVER gen3 — the two-generation fixpoint is the release invariant.
 
 
-  Scenario: the emitted code agrees across backends
-    # verified-by: own==C (F5 backend Examples below) and own==wasm (F5 target-routed scenarios) —
-    # the native backend's output matches the C emitter and the wasm target on the shared corpus.
+  Scenario: the emitted code agrees across targets
+    # verified-by: own==wasm (F5 target-routed scenarios) — o mesmo corpus compilado para host e
+    # para wasm32-wasi concorda. O arco own==C que este cenario tambem afirmava MORREU com o
+    # emissor de C (ruling do owner 2026-07-26): nao ha segundo backend contra o que diferir.
 
 # F3 — the NULL-UNION matrix (regressor-principal-0.3.1.md §3.1). Every shape × operation ×
 # recursion cell the owner's mandate calls for, EACH a real, runnable regressive — no partial
@@ -65,206 +79,166 @@ Feature: R0 — the compiler is its own full-stack regressor (exe native, declar
 
 Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
 
-  Scenario Outline: own_arith_exit (backend-differential — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
-    Given backend = "<backend>"
+  Scenario Outline: own_arith_exit (own-native — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_sub_exit (backend-differential — same fold-opacity rationale, MUL/SUB)
-    Given backend = "<backend>"
+  Scenario Outline: own_sub_exit (own-native — same fold-opacity rationale, MUL/SUB)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
 
-Feature: F5 backends — the own-native differential corpus (backend x target Examples; own == C, transitively, on the host AND cross to riscv64 under qemu; folds scripts/diff_c_own.sh's CORPUS and the retired riscv64-qemu lane it drove)
+Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar sozinho (target Examples: host E cross para riscv64 sob qemu; herda o CORPUS do extinto scripts/diff_c_own.sh e a lane riscv64-qemu que ele dirigia). O EIXO backend morreu com o emissor de C: cada cenario afirma o proprio exit/stdout/trap, nao a igualdade com um segundo backend.
 
-  Scenario Outline: own_defer_arm_write_propagates (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_defer_arm_write_propagates (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_exit_code (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_exit_code (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_exit_zero (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_exit_zero (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_if_exit (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_if_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_if_value_rhs_shadow_then_outer_reassign (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_if_value_rhs_shadow_then_outer_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_logical_not (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_logical_not (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_loop_nested_range (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_loop_nested_range (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_loop_range_native (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_loop_range_native (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_match_arm_reassign_vs_shadow (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_match_arm_reassign_vs_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_match_exit (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_match_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_match_reassign_then_shadow (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_match_reassign_then_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_print_exit (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_print_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
@@ -272,26 +246,21 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
     And stdout pattern = "answer=42!"
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
 
-  Scenario Outline: own_value_if_rhs_reassign (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: own_value_if_rhs_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "<target>"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
     Then exit = <exit>
 
     Examples:
-      | backend | target        | program                                     | exit |
-      | c       | host          | own_differential                            | 42   |
-      | own     | host          | own_differential                            | 42   |
-      | c       | riscv64-linux | own_differential                            | 42   |
-      | own     | riscv64-linux | own_differential                            | 42   |
+      | target        | program                                     | exit |
+      | host          | own_differential                            | 42   |
+      | riscv64-linux | own_differential                            | 42   |
 
   # The riscv64 lane's OBJECT cross-check, restored alongside the differential rows above: the
   # retired riscv64-qemu job asserted own == C under qemu AND ran scripts/check_elf.sh over the
@@ -306,7 +275,6 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
   # this row free. It is NOT foldable into a GROUP for the same reason it never was: in a group the
   # inspected `.o` would be the whole group's, not this row's.
   Scenario: own_riscv_object_well_formed (the retired riscv64-qemu lane's ELF cross-check)
-    Given backend = "own"
     Given target = "riscv64-linux"
     Given source = "examples/regressions/cwd_build/cases/06_own_exit_code_backend_differential_own_c.tks"
     When built and run
@@ -322,7 +290,6 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
   # target_toolchain_skip_reason.
 
   Scenario: own_cross_x86_64_windows_emits_coff_and_skips_the_run (0.3.1 C5 — emitted, not executed)
-    Given backend = "own"
     Given target = "x86_64-windows"
     Given source = "examples/regressions/cwd_build/cases/19_own_cross_x86_64_windows_emits_coff_and.tks"
     When built and run
@@ -335,7 +302,6 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
   # so host_cc_cannot_link_cross_reason skips the row honestly instead of dying in `ld`.
 
   Scenario: own_explicit_host_os_arch_runs (0.3.1 C5 — the reproduced-good path)
-    Given backend = "own"
     Given target = "x86_64-linux"
     Given source = "examples/regressions/cwd_build/cases/20_own_explicit_host_os_arch_runs_0_3_1_c5.tks"
     When built and run
@@ -346,7 +312,6 @@ Feature: F5 backends — the own-native differential corpus (backend x target Ex
 Feature: F7 host_cli_io — observable host surface (folded from the retired regressor_crumbs_c0_c4.tkr, dir removido)
 
   Scenario: an explicit env token reaches an own-backend wasm32-wasi build (or honest-skips without the toolchain)
-    Given backend = "own"
     Given target = "wasm32-wasi"
     Given source = "examples/regressions/cwd_build/cases/21_an_explicit_env_token_reaches_an_own_bac.tks"
     When built and run
@@ -359,8 +324,7 @@ Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenari
   # only at the binding: `x = null` after a `T | null` binding used to write a raw `const 0` into the
   # VReg the `match` then reads as the wrapper's base address — a load from address 0. The `c` rows
   # are the differential control: the C backend wrapped at the assign all along.
-  Scenario Outline: null_union_reassign_to_null (backend-differential — own == C, transitively)
-    Given backend = "<backend>"
+  Scenario Outline: null_union_reassign_to_null (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
     Given target = "host"
     Given source = "examples/regressions/cwd_build/cases/<program>.tks"
     When built and run
@@ -371,9 +335,8 @@ Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenari
     # opened two groups of their own instead of joining the host groups the rest of the corpus
     # already pays for. Measured: 2 builds became 0.
     Examples:
-      | backend | program          | exit |
-      | c       | own_differential | 42   |
-      | own     | own_differential | 42   |
+      | program          | exit |
+      | own_differential | 42   |
 
   # (A-S7, the D1 direction with ZERO coverage before this) A GENUINE boundary cast must stay
   # SILENT: `(a to u64) * b` with u32 operands joins to u32 WITHOUT the cast and to u64 WITH it, so
