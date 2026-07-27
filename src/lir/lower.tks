@@ -1257,11 +1257,42 @@ fn lower_call_indirect(ctx: LowerCtx, e: checker::TExpr, target: u32, args: []u3
  */
 fn lower_iface_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
     if c.args.len == 0 { return error { message = "native backend N1: malformed interface-dispatch call (internal)" } }
+    match aggregate_receiver_dispatch_stop(ctx, c.args[0].type) { error as stop => return stop; null => { } }
     let ro = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
     let fp = lower_iface_fatptr(ro.ctx, ro.vreg, e.line, e.col)
     let tgt = lower_iface_slot(fp.ctx, fp.vtable, c.iface_slot, e.line, e.col)
     let rest = match lower_args_from(tgt.ctx, c.args, 1) { LoweredArgs as x => x; error as err => return err }
     lower_call_indirect(rest.ctx, e, tgt.vreg, iface_call_args(fp.data, rest.vregs))
+}
+
+/**
+ * aggregate_receiver_dispatch_stop — the NAMED honest-stop (M.3) for a dynamic dispatch whose
+ * receiver is a FIELD-SHAPED AGGREGATE instead of an interface fat pointer.
+ *
+ * The checker rewrites a method call on a `virtual`/`abstract`-class-typed receiver into the very
+ * same vtable-slot dispatch an interface call uses (typer.tks, "VIRTUAL DISPATCH through a
+ * POLYMORPHIC-BASE-typed receiver"). An interface VALUE is the fat pointer `{data@0, vtable@8}`
+ * this lowering indexes; a CLASS instance is not — it is a bare field-shaped object with no type
+ * identity in it at all, so reading its bytes 8..16 as a vtable address and calling through them
+ * jumps to whatever the second field happens to hold. Giving a polymorphic class object a vtable
+ * slot is an ABI decision (it changes the object's size and every field offset), so this backend
+ * NAMES the gap instead of guessing at it — a compile-time stop, never a silent miscompile (M.1).
+ *
+ * The discriminator needs no type table: an interface declares no fields and therefore registers
+ * NO layout, while a struct or class registers one. A receiver type with a registered layout is
+ * consequently an aggregate, and an aggregate can never be the fat pointer this path requires.
+ *
+ * @param ctx  the lowering context, for its registered struct/class layouts
+ * @param t    the receiver's resolved static type
+ * @return     `null` when the receiver is a legal fat-pointer contract value
+ * @throws     the named stop when the receiver is an aggregate (a polymorphic base class)
+ */
+fn aggregate_receiver_dispatch_stop(ctx: LowerCtx, t: checker::Type) -> error | null {
+    let name = match t { checker::Named as n => n.name; _ => return null }
+    match find_struct_layout(ctx.layouts, name) {
+        LStructLayout => error { message = teko::str::concat("native backend N1: dynamic dispatch through the polymorphic base class `", name, "` is not yet lowered — a class instance carries no vtable (N2)") }
+        error => null
+    }
 }
 
 /**
