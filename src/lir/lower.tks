@@ -1586,10 +1586,11 @@ fn native_builtin_symbol(last: str) -> str | null {
  *                 (`is_list_builtin_call`) — it has no `.tks` declaration for `find_extern_symbol`/
  *                 the mangler to resolve EITHER, so without this check it would silently fall
  *                 through to `mangle_fn_symbol(c.call_ns, last, flat)` and target a symbol no
- *                 function ever defines (a link-time failure at best); this degrau's own
- *                 `lower_call_fat` is the first caller to ever reach that fallthrough for a
- *                 fat-returning callee, so it is named here instead of left silent (call-gordo
- *                 degrau, #382 N2)
+ *                 function ever defines (a link-time failure at best). That family is now
+ *                 INTERCEPTED upstream by `lower_call_fat`/`lower_list_builtin`, which lowers it to
+ *                 the runtime's own grow entries, so this arm survives only as the backstop for a
+ *                 future caller that reaches the symbol resolver with one of them directly
+ *                 (list-builtin degrau; call-gordo degrau, #382 N2)
  */
 fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> str | error {
     let segs = c.callee.segments
@@ -5011,6 +5012,11 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
  * closes only the PLAIN direct-call producer, the shape the corpus probe measured actually
  * reaching this site (#382 N2, call-gordo degrau).
  *
+ * The `teko::list::*`/`teko::mem::push_fo` GROWTH-BUILTIN family is intercepted BEFORE the
+ * hidden-out-slot convention is applied (`lower_list_builtin`): those calls target the runtime's
+ * OWN fixed C ABI (`tk_slice_push`), which owes this backend no hidden length register — its
+ * length travels through an explicit `uint64_t *out_len` argument instead (list-builtin degrau).
+ *
  * @param ctx  the lowering context
  * @param e    the fat-typed call expression (its type is `str`/`[]T`)
  * @param cl   the call node
@@ -5021,6 +5027,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
 fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
     if cl.is_closure_call { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
     if cl.is_iface_dispatch { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
+    if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     let lo = match lower_args(ctx, cl.args) { LoweredArgs as x => x; error as err => return err }
     let slot = ctx_alloc(lo.ctx)
@@ -5031,6 +5038,262 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     let lenr = ctx_alloc(with_call)
     let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+}
+
+/**
+ * lower_list_builtin — the checker's OWN generic growth-builtin family (`is_list_builtin_call`:
+ * `teko::list::empty`, `teko::list::push`, `teko::mem::push_fo`, `teko::list::with_cap`) lowered to
+ * its runtime backing. These calls leave NO declaration behind for the mangler to resolve, so
+ * without this arm `call_symbol` honest-stopped on every one of them — the single step that kept
+ * the own backend from compiling any program that grows a list, the compiler itself included.
+ *
+ * `empty()` needs no runtime at all (the empty slice IS the (null, 0) pair); `push`/`push_fo` route
+ * to the amortized runtime grow (`slice_push_symbol`), the SAME entry points the retired C emitter
+ * targeted, so one buffer-growth policy serves both producers.
+ *
+ * @param ctx  the lowering context
+ * @param e    the builtin call expression (its type carries the concretized `[]T`)
+ * @param cl   the call node
+ * @return     the grown/empty slice as its (ptr, len) pair
+ * @throws     for `teko::list::with_cap` (no compiler source calls it, and its sentinel result type
+ *             carries no element width to size the buffer with — a NAMED stop rather than a guess),
+ *             or propagated from lowering the base/item
+ */
+fn lower_list_builtin(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
+    let last = cl.callee.segments[cl.callee.segments.len - 1].name
+    if last == "empty" { return lower_list_empty(ctx, e) }
+    if last == "push" || last == "push_fo" { return lower_list_push(ctx, e, cl, slice_push_symbol(last)) }
+    error { message = "native backend N1: `teko::list::with_cap` has no native lowering yet (N2)" }
+}
+
+/**
+ * slice_push_symbol — the runtime grow entry a push spelling targets: the plain amortized
+ * `tk_slice_push` for `teko::list::push`, and the free-old-on-grow `tk_slice_push_fo` for the
+ * `teko::mem::push_fo` DECREE (the caller asserts the base is a linear chain, so the superseded
+ * buffer is parked at the grow). The region-scoped third variant (`tk_slice_push_r`) is NOT
+ * selectable here: this backend has no S1 region frames to grow into, so every push is a root push.
+ *
+ * @param last  the callee path's last segment (`push` or `push_fo`)
+ * @return      the runtime symbol the `LCall` targets
+ */
+fn slice_push_symbol(last: str) -> str {
+    if last == "push_fo" { return "tk_slice_push_fo" }
+    "tk_slice_push"
+}
+
+/**
+ * lower_list_empty — `teko::list::empty()`: the empty slice's (ptr, len) pair is a pair of zero
+ * constants, with no runtime call and no element type needed. The retired C emitter required a
+ * CONCRETE element type here only because it had to spell a struct literal's typename; the own
+ * backend's fat pair is type-erased, so a bare sentinel `empty()` lowers just as well as an
+ * annotated one.
+ *
+ * @param ctx  the lowering context
+ * @param e    the `empty()` call expression (its source position)
+ * @return     the (null, 0) pair
+ */
+fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat {
+    let p = ctx_alloc(ctx)
+    let with_ptr = ctx_append(p.ctx, const_int_inst(p.vreg, 0, e.line, e.col))
+    let l = ctx_alloc(with_ptr)
+    let with_len = ctx_append(l.ctx, const_int_inst(l.vreg, 0, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = p.vreg; len = l.vreg }
+}
+
+/**
+ * lower_list_push — `teko::list::push(base, item)` / `teko::mem::push_fo(base, item)`: the
+ * value-semantics grow-by-one, lowered to the runtime's amortized copy-grow. The runtime takes the
+ * item BY ADDRESS and returns the length through an out-parameter, so the caller reserves two frame
+ * slots — one sized to the element, one to the `u64` length — stores the item into the first, and
+ * loads the new length back out of the second once the call returns:
+ *
+ *   `<sym>(base.ptr, base.len, &item, sizeof(elem), &out_len)` -> the grown buffer's pointer
+ *
+ * The element is restricted to a REGISTER VALUE (`is_register_value_type`): a primitive or an
+ * enum's carrier. The coercion `lower_value_into_type` performs for a declared-type placement (the
+ * union wrapper a bare case needs when it flows into a `[]Variant`) is therefore not reachable
+ * here — a variant element is an aggregate and stops first (`aggregate_element_push_stop`) — so the
+ * item lowers plainly.
+ *
+ * @param ctx  the lowering context
+ * @param e    the push call expression (its type is the result `[]T`)
+ * @param cl   the call node (`args[0]` the base slice, `args[1]` the item)
+ * @param sym  the runtime grow symbol (`slice_push_symbol`)
+ * @return     the grown slice's (ptr, len) pair
+ * @throws     on a malformed call, on a FAT element type (`fat_element_push_stop`), on an
+ *             AGGREGATE element type (`aggregate_element_push_stop`), or propagated from lowering
+ *             the base/item
+ */
+fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str) -> LoweredFat | error {
+    if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
+    let elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
+    if is_fat_type(elem) { return fat_element_push_stop() }
+    if !is_register_value_type(elem, ctx.enums) { return aggregate_element_push_stop() }
+    let elem_lt = ltype_of(elem, ctx.enums)
+    if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
+    let base = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
+    let item = match lower_expr(base.ctx, cl.args[1]) { Lowered as x => x; error as err => return err }
+    let slots = reserve_push_slots(item.ctx, item.vreg, elem_lt, e)
+    let args = push_call_args(base.ptr, base.len, slots.item_slot, slots.esz, slots.len_slot)
+    let called = ctx_alloc(slots.ctx)
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, args, false, e.line, e.col))
+    let lenr = ctx_alloc(with_call)
+    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slots.len_slot, LType::I64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+}
+
+/**
+ * fat_element_push_stop — the NAMED honest stop for pushing onto a slice whose ELEMENT is itself
+ * fat (`[]str`, `[][]T`). Such an element's machine image is two words, not the one word
+ * `ltype_of` reports for it, and the element WIDTH is a whole-backend fact: the array literal's
+ * store stride, the index load, and this push's `sizeof` argument must pick the same number or the
+ * buffer is read back shifted. Widening all three (and giving `lower_fat_expr` an index producer to
+ * read the pair back with) is its own degrau; refusing here keeps the scalar-element push honest
+ * instead of emitting a call that agrees with nothing.
+ *
+ * @return  the honest stop, always
+ */
+fn fat_element_push_stop() -> error {
+    error { message = "native backend N1: a push onto a slice of FAT elements (`[]str`/`[][]T`) needs the two-word element stride the array-literal store and the index load do not carry yet (N2)" }
+}
+
+/**
+ * aggregate_element_push_stop — the NAMED honest stop for pushing an AGGREGATE element (a
+ * `struct`/`class` instance, a variant wrapper, an `Optional`, a closure). This backend's value for
+ * such a type is the ADDRESS of an alloca, and an alloca is ONE frame slot reserved per
+ * INSTRUCTION, not per execution: the canonical `loop { out = push(out, T { … }) }` would push the
+ * SAME address every iteration, so the finished list would read back as N copies of the last item.
+ * Storing the element BY VALUE instead (a layout-sized stride the array-literal store and the index
+ * load would have to adopt too, and a deep copy for the aggregate FIELDS that are themselves
+ * addresses) is the next degrau; a silently aliasing push is not an acceptable stand-in for it.
+ *
+ * @return  the honest stop, always
+ */
+fn aggregate_element_push_stop() -> error {
+    error { message = "native backend N1: a push whose element is an AGGREGATE (`struct`/`class`/variant/optional/closure) needs slice elements held BY VALUE — this backend's aggregate value is the address of a per-INSTRUCTION frame slot, so a push in a loop would store the same address every iteration (N2)" }
+}
+
+/**
+ * is_register_value_type — is a value of type `t` a SELF-CONTAINED register value, as opposed to
+ * the address of a frame slot this backend may reuse? True for the primitives (every integer,
+ * float, `bool`, `byte`) and for a declared `enum` (its integer carrier); false for every
+ * aggregate, whose `Ptr` machine class is an ADDRESS rather than the value itself. The distinction
+ * is invisible in `ltype_of` — a struct and a `ptr<T>` are both `Ptr` there — but it is exactly
+ * what decides whether a value may be COPIED INTO A CONTAINER that outlives its producing
+ * statement.
+ *
+ * @param t      the element type to classify
+ * @param enums  the program's declared-enum table (an enum's carrier IS a register value)
+ * @return       true iff a value of `t` is the whole datum, not a pointer to it
+ */
+fn is_register_value_type(t: checker::Type, enums: []LEnumInfo) -> bool {
+    match t {
+        checker::Prim => true
+        checker::Named as n => match find_enum_info(enums, n.name) { LEnumInfo => true; null => false }
+        _ => false
+    }
+}
+
+/**
+ * push_elem_type — the CONCRETE element type of a push call. The call's own `.type` answers it
+ * directly in the ordinary case, but `type_assign` may overwrite that type with the sentinel
+ * (`[]<Void>`) when `push(xs, i)` is assigned back into a sentinel-typed `xs`, so the base
+ * argument's concretized slice type and finally the item's own type are consulted in turn. Mirrors
+ * the retired C emitter's `get_push_elem` fallback chain exactly — one recovery rule, so the two
+ * producers can never disagree about which element a given push grows.
+ *
+ * @param e   the push call expression
+ * @param cl  the call node
+ * @return    the element type the pushed buffer holds
+ * @throws    when neither the call, its base, nor its item carries a concrete type (internal)
+ */
+fn push_elem_type(e: checker::TExpr, cl: checker::TCall) -> checker::Type | error {
+    match e.type {
+        checker::Slice as sl => match sl.element { checker::Void => { }; _ => return sl.element }
+        _ => return error { message = "native backend N1: `teko::list::push` result is not a slice (internal)" }
+    }
+    if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" } }
+    match cl.args[0].type {
+        checker::Slice as base_sl => match base_sl.element { checker::Void => { }; _ => return base_sl.element }
+        _ => { }
+    }
+    let it = cl.args[1].type
+    match it {
+        checker::Slice as item_sl => match item_sl.element {
+            checker::Void => return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" }
+            _ => { }
+        }
+        _ => { }
+    }
+    it
+}
+
+/**
+ * PushSlots — the frame slots and constants one lowered push needs beside its base pair: the
+ * address of the stored item, the element-size constant, and the address of the length
+ * out-parameter, plus the context they were appended into.
+ */
+type PushSlots = struct {
+    /**
+     * ctx — the lowering context advanced past the two allocas, the item store, and the size constant.
+     */
+    ctx: LowerCtx
+    /**
+     * item_slot — the VReg holding the address of the frame slot the item was stored into.
+     */
+    item_slot: u32
+    /**
+     * esz — the VReg holding the element's byte size (the runtime's `sizeof` argument).
+     */
+    esz: u32
+    /**
+     * len_slot — the VReg holding the address of the `u64` length out-parameter slot.
+     */
+    len_slot: u32
+}
+
+/**
+ * reserve_push_slots — build a push's by-address operands: alloca a slot the width of ONE element
+ * and store the already-lowered item into it, materialize the element size as a constant, and
+ * alloca the 8-byte slot the runtime writes the grown length into. Each alloca is selected once and
+ * becomes ONE static frame slot, so a push inside a loop reuses its slots rather than growing the
+ * stack per iteration.
+ *
+ * @param ctx      the lowering context, positioned after the item's own instructions
+ * @param item     the VReg holding the item's value
+ * @param elem_lt  the element's machine class (its size fixes both the slot and the `sizeof` arg)
+ * @param e        the push call expression (its source position)
+ * @return         the two slot addresses + the size constant
+ */
+fn reserve_push_slots(ctx: LowerCtx, item: u32, elem_lt: LType, e: checker::TExpr) -> PushSlots {
+    let islot = ctx_alloc(ctx)
+    let with_islot = ctx_append(islot.ctx, alloca_inst(islot.vreg, ltype_size(elem_lt), ltype_align(elem_lt), e.line, e.col))
+    let with_store = ctx_append(with_islot, store_inst(islot.vreg, item, elem_lt, e.line, e.col))
+    let esz = ctx_alloc(with_store)
+    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, ltype_size(elem_lt) to i64, e.line, e.col))
+    let lslot = ctx_alloc(with_esz)
+    let with_lslot = ctx_append(lslot.ctx, alloca_inst(lslot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    PushSlots { ctx = with_lslot; item_slot = islot.vreg; esz = esz.vreg; len_slot = lslot.vreg }
+}
+
+/**
+ * push_call_args — the runtime grow's five operands in ABI ORDER, the order
+ * `tk_slice_push`/`tk_slice_push_fo` declare: `(ptr, len, &item, esz, &out_len)`. Written out here
+ * so the ONE place that fixes the order is named, rather than inline at the call site.
+ *
+ * @param base_ptr   the base slice's pointer half
+ * @param base_len   the base slice's length half
+ * @param item_slot  the address of the stored item
+ * @param esz        the element's byte size
+ * @param len_slot   the address of the length out-parameter
+ * @return           the five argument VRegs, in ABI order
+ */
+fn push_call_args(base_ptr: u32, base_len: u32, item_slot: u32, esz: u32, len_slot: u32) -> []u32 {
+    mut out: []u32 = teko::list::push(teko::list::empty(), base_ptr)
+    out = teko::list::push(out, base_len)
+    out = teko::list::push(out, item_slot)
+    out = teko::list::push(out, esz)
+    teko::list::push(out, len_slot)
 }
 
 /**

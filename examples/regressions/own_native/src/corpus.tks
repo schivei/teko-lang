@@ -280,3 +280,119 @@ fn f_class_layout_effective_fields() -> i64 {
     if leaf.total() != 32 { return 8 }
     0
 }
+
+/**
+ * LpShade — a plain declared `enum`, whose value is its integer CARRIER rather than an address.
+ * A slice of these is the non-primitive half of the register-value element set the native list
+ * builtin lowers.
+ */
+type LpShade = enum { Dim; Mid; Bright }
+
+/**
+ * f_list_push_scalar_loop — the canonical accumulation the whole compiler is written in:
+ * `loop { xs = teko::list::push(xs, …) }` growing an empty list, then read back by index. It
+ * exercises the runtime's amortized grow (the in-place live-tail hit AND the geometric copy-grow,
+ * since eight pushes cross several doublings) through the native lowering's `(ptr, len, &item,
+ * sizeof, &out_len)` call shape.
+ *
+ * @return 0 when the length and every element read back as pushed, else 1..3 naming the failure
+ */
+fn f_list_push_scalar_loop() -> i64 {
+    mut xs: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 8 { break }
+        xs = teko::list::push(xs, i * 3)
+        i++
+    }
+    if xs.len != 8 { return 1 }
+    mut sum: u64 = 0
+    mut j: u64 = 0
+    loop {
+        if j >= xs.len { break }
+        sum = sum + xs[j]
+        j++
+    }
+    if sum != 84 { return 2 }
+    if xs[7] != 21 { return 3 }
+    0
+}
+
+/**
+ * f_list_push_value_semantics — a push RETURNS a new list and never mutates its base: two pushes
+ * onto the SAME base must produce two independent lists, and the base itself must keep its own
+ * length. This is the assertion the runtime's in-place live-tail cache is most likely to break, so
+ * it is pinned separately from the plain accumulation.
+ *
+ * @return 0 when both branches and the shared base read back independently, else 1..5
+ */
+fn f_list_push_value_semantics() -> i64 {
+    let base = teko::list::push(teko::list::push(teko::list::empty(), 10), 20)
+    let left = teko::list::push(base, 30)
+    let right = teko::list::push(base, 40)
+    if base.len != 2 { return 1 }
+    if left.len != 3 { return 2 }
+    if right.len != 3 { return 3 }
+    if left[2] != 30 { return 4 }
+    if right[2] != 40 { return 5 }
+    0
+}
+
+/**
+ * f_list_push_fo_widths — the `teko::mem::push_fo` DECREE (the free-old-on-grow runtime entry) over
+ * a NARROW element: a `[]u32` element is four bytes wide, so the `sizeof` the lowering hands the
+ * runtime must be the ELEMENT's width and not the register's, or the buffer reads back shifted.
+ *
+ * @return 0 when the decreed chain reads back as pushed, else 1..3 naming the failure
+ */
+fn f_list_push_fo_widths() -> i64 {
+    mut xs: []u32 = teko::list::empty()
+    mut i: u32 = 0
+    loop {
+        if i >= 6 { break }
+        xs = teko::mem::push_fo(xs, i + 100)
+        i++
+    }
+    if xs.len != 6 { return 1 }
+    if xs[0] != 100 { return 2 }
+    if xs[5] != 105 { return 3 }
+    0
+}
+
+/**
+ * f_list_push_bool_and_enum — the two remaining register-value element classes: a `bool` (a
+ * one-byte carrier) and a declared `enum` (its integer carrier). A slice of either must round-trip
+ * through the grow with its own width.
+ *
+ * @return 0 when both slices read back as pushed, else 1..4 naming the failure
+ */
+fn f_list_push_bool_and_enum() -> i64 {
+    mut flags: []bool = teko::list::empty()
+    flags = teko::list::push(flags, true)
+    flags = teko::list::push(flags, false)
+    flags = teko::list::push(flags, true)
+    if flags.len != 3 { return 1 }
+    if !flags[0] { return 2 }
+    if flags[1] { return 3 }
+    mut shades: []LpShade = teko::list::empty()
+    shades = teko::list::push(shades, LpShade::Bright)
+    shades = teko::list::push(shades, LpShade::Dim)
+    if shades[0] != LpShade::Bright { return 4 }
+    0
+}
+
+/**
+ * f_list_empty_has_no_elements — a bare `teko::list::empty()` is the (null, 0) pair: its length is
+ * zero with no runtime call at all, and pushing onto it starts a fresh buffer rather than growing
+ * whatever the previous list left in the allocator's live-tail cache.
+ *
+ * @return 0 when the empty list is empty and the fresh push holds only its own item, else 1..3
+ */
+fn f_list_empty_has_no_elements() -> i64 {
+    let e: []u64 = teko::list::empty()
+    if e.len != 0 { return 1 }
+    let one = teko::list::push(e, 7)
+    if one.len != 1 { return 2 }
+    if one[0] != 7 { return 3 }
+    0
+}

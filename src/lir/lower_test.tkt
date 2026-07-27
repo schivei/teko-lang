@@ -1981,20 +1981,140 @@ fn lwt_honest_stop_on_fat_iface_dispatch_result() {
 }
 
 /**
- * lwt_honest_stop_on_list_push_builtin_call_no_native_backing — `teko::list::push`/`empty`
- * (the checker's GENERIC list-growth builtins, `call_ns=""`, no `.tks` declaration) name their
- * own gap (`is_list_builtin_call`) instead of silently falling through `call_symbol`'s mangler
- * to a symbol no function defines — the first caller ever able to REACH that fallthrough for a
- * fat-returning builtin, since `lower_fat_expr`'s own TCall arm previously honest-stopped before
- * `call_symbol` ever ran (call-gordo degrau, #382 N2).
+ * lwt_slice_of — a `[]T` slice type over the primitive kind `k` (the list-builtin fixtures'
+ * element type).
+ *
+ * @param k  the element's primitive kind
+ * @return   the `[]k` slice type
+ */
+fn lwt_slice_of(k: checker::PrimKind) -> checker::Type { checker::Slice { element = lwt_prim(k) } }
+
+/**
+ * lwt_list_empty_call — a `teko::list::empty()` builtin call node typed as `[]k` (the checker
+ * CONCRETIZES a sentinel base to the result element type before the backend ever sees it).
+ *
+ * @param k  the element's primitive kind
+ * @return   the typed `empty()` call
+ */
+fn lwt_list_empty_call(k: checker::PrimKind) -> checker::TExpr {
+    lwt_call(lwt_path2("list", "empty"), "", teko::list::empty(), lwt_slice_of(k))
+}
+
+/**
+ * lwt_push_call — a growth-builtin call node `<ns>::<name>(base, item)` typed as `[]k`, the shape
+ * `type_list_builtin` leaves behind for `teko::list::push` and `teko::mem::push_fo`.
+ *
+ * @param ns    the callee path's namespace segment (`list` or `mem`)
+ * @param name  the callee path's last segment (`push` or `push_fo`)
+ * @param base  the base slice argument
+ * @param item  the pushed item argument
+ * @param k     the element's primitive kind
+ * @return      the typed push call
+ */
+fn lwt_push_call(ns: str, name: str, base: checker::TExpr, item: checker::TExpr, k: checker::PrimKind) -> checker::TExpr {
+    let args = teko::list::push(teko::list::push(teko::list::empty(), base), item)
+    lwt_call(lwt_path2(ns, name), "", args, lwt_slice_of(k))
+}
+
+/**
+ * lwt_lowers_list_push_to_the_runtime_grow — `teko::list::push(empty(), 7)` lowers to the runtime's
+ * amortized grow: the empty base is the (null, 0) constant pair, the item is stored into its own
+ * frame slot, and `tk_slice_push` is called with `(ptr, len, &item, sizeof, &out_len)`, the length
+ * arriving through the out-slot rather than through this backend's Teko-only hidden return register
+ * (list-builtin degrau).
  *
  * @return void
  */
 #test
-fn lwt_honest_stop_on_list_push_builtin_call_no_native_backing() {
-    let elem_ty = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }
-    let call = lwt_call(lwt_path2("list", "push"), "", teko::list::empty(), elem_ty)
-    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "growth builtin has no native runtime backing yet")
+fn lwt_lowers_list_push_to_the_runtime_grow() {
+    let base = lwt_list_empty_call(checker::PrimKind::I64)
+    let call = lwt_push_call("list", "push", base, lwt_num_i64(7), checker::PrimKind::I64)
+    let text = lwt_lower_expr_text(lwt_len_field(call))
+    teko::assert::str_contains(text, "call @tk_slice_push(")
+    teko::assert::str_contains(text, "alloca 8, align 8")
+    teko::assert::str_contains(text, "store.i64")
+    teko::assert::str_contains(text, "load.i64")
+}
+
+/**
+ * lwt_lowers_push_fo_to_the_free_old_grow — the `teko::mem::push_fo` DECREE targets the
+ * free-old-on-grow runtime entry, not the plain one: the two spellings must never collapse onto one
+ * symbol, since only the decreed chain may park its superseded buffer (list-builtin degrau).
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_push_fo_to_the_free_old_grow() {
+    let base = lwt_list_empty_call(checker::PrimKind::I64)
+    let call = lwt_push_call("mem", "push_fo", base, lwt_num_i64(7), checker::PrimKind::I64)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "call @tk_slice_push_fo(")
+}
+
+/**
+ * lwt_lowers_list_push_element_size_from_the_element_class — the `sizeof` operand is the ELEMENT's
+ * machine width, not the register width the item happens to be lowered into: a `[]u32` push stores
+ * 4 bytes and tells the runtime 4, so the buffer the index load walks with a 4-byte stride agrees
+ * with the buffer the grow wrote (list-builtin degrau).
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_list_push_element_size_from_the_element_class() {
+    let base = lwt_list_empty_call(checker::PrimKind::U32)
+    let call = lwt_push_call("list", "push", base, lwt_num(7, checker::PrimKind::U32), checker::PrimKind::U32)
+    let text = lwt_lower_expr_text(lwt_len_field(call))
+    teko::assert::str_contains(text, "alloca 4, align 4")
+    teko::assert::str_contains(text, "store.i32")
+    teko::assert::str_contains(text, "const 4")
+}
+
+/**
+ * lwt_lowers_list_empty_to_a_null_pair — a bare `teko::list::empty()` needs no runtime call and no
+ * element type: its (ptr, len) pair is two zero constants, so `empty().len` folds to `const 0` with
+ * no memory traffic at all (list-builtin degrau).
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_list_empty_to_a_null_pair() {
+    let text = lwt_lower_expr_text(lwt_len_field(lwt_list_empty_call(checker::PrimKind::I64)))
+    teko::assert::str_contains(text, "const 0")
+    teko::assert::is_true(!teko::str::contains(text, "call @"))
+}
+
+/**
+ * lwt_honest_stop_on_aggregate_element_push — a push whose element is a `struct`/`class` instance
+ * stops by name: this backend's aggregate value is the address of a per-INSTRUCTION frame slot, so
+ * storing that address would make `loop { out = push(out, T { … }) }` read back as N copies of the
+ * last item. Holding elements BY VALUE is the next named degrau (list-builtin degrau).
+ *
+ * @return void
+ */
+#test
+fn lwt_honest_stop_on_aggregate_element_push() {
+    let p_slice = checker::Slice { element = checker::Named { name = "P" } }
+    let base = lwt_call(lwt_path2("list", "empty"), "", teko::list::empty(), p_slice)
+    let item = lwt_typed_var("p", checker::Named { name = "P" })
+    let args = teko::list::push(teko::list::push(teko::list::empty(), base), item)
+    let call = lwt_call(lwt_path2("list", "push"), "", args, p_slice)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "element is an AGGREGATE")
+}
+
+/**
+ * lwt_honest_stop_on_fat_element_push — a push onto a slice whose ELEMENT is fat (`[]str`) stops by
+ * name: the element's two-word image is not the one-word width the array-literal store stride and
+ * the index load use, and a `sizeof` that disagrees with them would read the buffer back shifted
+ * (list-builtin degrau — the next named step).
+ *
+ * @return void
+ */
+#test
+fn lwt_honest_stop_on_fat_element_push() {
+    let str_slice = checker::Slice { element = checker::Str { } }
+    let base = lwt_call(lwt_path2("list", "empty"), "", teko::list::empty(), str_slice)
+    let args = teko::list::push(teko::list::push(teko::list::empty(), base), lwt_strlit("hi"))
+    let call = lwt_call(lwt_path2("list", "push"), "", args, str_slice)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "slice of FAT elements")
 }
 
 /**
