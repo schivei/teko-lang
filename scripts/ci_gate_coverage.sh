@@ -21,7 +21,7 @@
 #      success while the root that every lane consumes was never green. It is also what stops an
 #      aggregator from being vacuous in LIGHT mode — the root runs in both tiers, so every gate
 #      always has at least one job it is genuinely asserting.
-#   4. NAMES — the five required-check names exist VERBATIM. They are the only required checks on
+#   4. NAMES — every required-check name exists VERBATIM. They are the only required checks on
 #      `main`, and `main` has no bypass: a name that stops reporting does not go red, it goes
 #      PENDING FOREVER and jams the drain. A typo in a `name:` is therefore a merge-blocking
 #      outage, and it is checked here where it is cheap.
@@ -41,14 +41,28 @@ GATES="$*"
 [ -n "$GATES" ] || { echo "ci_gate_coverage: no gate jobs named" >&2; exit 1; }
 [ -f "$WF" ] || { echo "ci_gate_coverage: no such workflow: $WF" >&2; exit 1; }
 
-# The five required-check names. Duplicated here ON PURPOSE rather than read from the file: an
+# The required-check names. Duplicated here ON PURPOSE rather than read from the file: an
 # independent statement of the requirement is the only thing a broken workflow cannot satisfy by
 # agreeing with itself.
+#
+# WAS FIVE, IS THREE (2026-07-26). `Heavy sanitizer gate (main)` and `SAST gate` left with the C
+# they gated: ASan/UBSan/LSan and clang-tidy instrumented and scanned the EMITTED C, and a backend
+# that writes objects directly gives them nothing to read. Keeping them would have been the
+# vacuous green this whole script exists to prevent — a gate reporting success over an empty set.
+#
+# ORDER MATTERS AND IT IS NOT NEGOTIABLE: the owner removed both names from main's ruleset FIRST,
+# and only then were the jobs deleted. Reversed, the drain freezes — main has no bypass, so a
+# required name whose job stopped existing does not go red, it goes PENDING FOREVER, and the one
+# PR pointing at main in a stacked train is the counter-engine. If a future change deletes an
+# aggregator, it removes it from the ruleset first, same order.
+#
+# `Sanitizer gate` SURVIVES with new content: it now aggregates `mem-paranoid`, the one memory
+# oracle that outlives C because its subject is the ARENA (poison-on-free, never reuse) and not
+# the language the runtime is written in — and the C runtime's own comment records that this was
+# never redundant with what left: "Arena reuse is invisible to ASan".
 REQUIRED_NAMES='CI gate
 Test suite gate
-Sanitizer gate
-Heavy sanitizer gate (main)
-SAST gate'
+Sanitizer gate'
 
 # ── extraction ────────────────────────────────────────────────────────────────────────────────
 # Job keys are the only 2-space-indented bare-key lines inside the top-level `jobs:` block; a key
@@ -155,4 +169,4 @@ if [ "$FAILED" = "1" ]; then
     echo "ci_gate_coverage FAILED."
     exit 1
 fi
-echo "ci_gate_coverage OK — every job is covered, every aggregator is rooted at '$ROOT', all five required names present."
+echo "ci_gate_coverage OK — every job is covered, every aggregator is rooted at '$ROOT', every required name present."

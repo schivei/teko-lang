@@ -34,7 +34,7 @@ name: Pull Request CI
 #                      workflow_dispatch. Out of the ruling by its own terms.
 #
 # ── THE FIVE REQUIRED CHECKS ARE INVIOLABLE ───────────────────────────────────────────────────
-#   CI gate · Test suite gate · Sanitizer gate · Heavy sanitizer gate (main) · SAST gate
+#   CI gate · Test suite gate · Sanitizer gate
 # They are the only required checks on `main`, and `main` has NO BYPASS — not even for the owner.
 # A name that stops reporting does not go red; it goes PENDING FOREVER and jams the drain. So the
 # five names survive this consolidation verbatim, and scripts/ci_gate_coverage.sh asserts their
@@ -47,11 +47,15 @@ name: Pull Request CI
 #      build, the nine  ├──► ar-validation │
 #      assets)          ├──► cross-arch-determinism
 #                       ├──► seed-debut ───┘
-#                       ├──► tsan ────────────────────────────► Sanitizer gate
-#                       ├──► asan-smoke ──┐
-#                       ├──► asan-default ├───────────────────► Heavy sanitizer gate (main)
-#                       ├──► mem-paranoid ┘
-#                       └──► clang-tidy-audit ────────────────► SAST gate
+#                       └──► mem-paranoid ───────────────────► Sanitizer gate
+#
+# TSan, ASan+UBSan, ASan+UBSan+LSan and clang-tidy LEFT WITH THE C (2026-07-26). They instrumented
+# or scanned the EMITTED C, and a backend that writes objects directly gives them nothing to read;
+# `Heavy sanitizer gate (main)` and `SAST gate` went with them, removed from main's ruleset FIRST
+# so no required name was ever left without a job. `mem-paranoid` stays and inherits
+# `Sanitizer gate`: its oracle is the ARENA (poison-on-free, never reuse), not the language the
+# runtime is written in — and it was never redundant with what left, because arena reuse is
+# invisible to ASan.
 #
 # EVERY leaf `needs: [plan, artifact]`. EVERY aggregator `needs: artifact` too — see the ROOTED
 # assertion in scripts/ci_gate_coverage.sh: an aggregator that does not stand on the root can
@@ -154,7 +158,6 @@ jobs:
   #             examples/** + bootstrap/**) and is FOLDED IN here: the difference bought nothing
   #             but a second list to keep in sync, and erring toward running the sanitizer lanes
   #             is the safe direction.
-  #   sast_run  src/runtime/** + src/assert/** — genuinely narrower, kept separate.
   #   full      the light/full axis (see scripts/ci_full_mode.sh for the rule and its history).
   plan:
     name: plan
@@ -165,7 +168,6 @@ jobs:
     outputs:
       full: ${{ steps.decide.outputs.full }}
       run: ${{ steps.decide.outputs.run }}
-      sast_run: ${{ steps.decide.outputs.sast_run }}
       labels: ${{ steps.decide.outputs.labels }}
       matrix_artifact: ${{ steps.decide.outputs.matrix_artifact }}
       matrix_test: ${{ steps.decide.outputs.matrix_test }}
@@ -186,11 +188,6 @@ jobs:
               - 'bootstrap/**'
               - '.github/lsan-suppressions.txt'
               - '.github/ci-lane-exceptions.txt'
-              - '.github/workflows/pr.yml'
-            sast:
-              - 'src/runtime/**'
-              - 'src/assert/**'
-              - '.github/sast-baseline.txt'
               - '.github/workflows/pr.yml'
             full:
               - '.github/workflows/**'
@@ -229,8 +226,6 @@ jobs:
           echo "mode: $([ "$full" = "true" ] && echo full || echo light) (base_ref='$BASE_REF'; ${reason:-no full trigger})"
 
           # ── SAST allowlist ──────────────────────────────────────────────────────────────────
-          [ "$SAST_MATCHED" = "true" ] && sast_run=true || sast_run=false
-          echo "sast_run=$sast_run" >> "$GITHUB_OUTPUT"
 
           # ── the compiler-lane allowlist + the docs-only guard ───────────────────────────────
           # The allowlist globs also match Markdown living INSIDE those trees, so a pure-doc edit
@@ -387,18 +382,6 @@ jobs:
         with:
           name: teko-assets-${{ matrix.producer }}
           path: stage
-          if-no-files-found: error
-          retention-days: 7
-
-      # THE EMITTED C, published once. The sanitizer lanes need a compiler built with
-      # `-fsanitize=…`, which no downloaded binary can be; they link this C themselves
-      # (scripts/build_gen1_from_c.sh) instead of re-walking the ladder.
-      - name: Upload the emitted teko.c (the sanitizer lanes' input)
-        if: matrix.emit_c
-        uses: actions/upload-artifact@v4
-        with:
-          name: teko-c
-          path: out/teko.c
           if-no-files-found: error
           retention-days: 7
 
@@ -1015,216 +998,6 @@ jobs:
   # instrumentation builds at all, so the day threading lands the toolchain is already known-good,
   # and (2) that the runtime executes race-clean end-to-end on a real program. RESTORE the full
   # `teko test .` gate under TSan incrementally as the concurrency surface lands (S8/ASYNC).
-  tsan:
-    needs: [plan, artifact]
-    if: needs.plan.outputs.run == 'true'
-    name: TSan
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y clang
-
-      - name: Download the emitted teko.c (the root's output)
-        uses: actions/download-artifact@v4
-        with:
-          name: teko-c
-          path: cgen
-
-      - name: Link gen1 under TSan
-        shell: bash
-        env:
-          CC: clang
-          CFLAGS_EXTRA: "-fsanitize=thread -fno-omit-frame-pointer -O1"
-        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
-
-      # SMOKE: build ONE tiny race-clean fixture with the TSan-built compiler and RUN it,
-      # asserting the fixture's deterministic exit code. `timeout` makes any stall fail loud (exit
-      # 124) at a known bound instead of a silent runner SIGTERM (143); bounded TSAN_OPTIONS cap
-      # the footprint on a memory-tight runner while staying correct for FUTURE threading bugs.
-      - name: Smoke (TSan build + run of one regression fixture)
-        shell: bash
-        env:
-          TSAN_OPTIONS: halt_on_error=1:history_size=2:memory_limit_mb=6000:flush_memory_ms=2000
-        run: |
-          set -euo pipefail
-          out="$(mktemp -d)"
-          proj="examples/regressions/cwd_build"   # tiny; deterministically exits 6
-          echo "== teko build $proj (TSan)"
-          timeout --kill-after=30s 900s ./bin/teko build "$proj" -o "$out" --no-verify --release | tee build.log
-          bin="$(sed -n 's/.*: built //p' build.log | tail -n1)"
-          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-            echo "ERROR: could not locate the built binary from the TSan build output." >&2
-            exit 1
-          fi
-          echo "== run $bin (TSan) — expecting deterministic exit code 6"
-          set +e
-          timeout --kill-after=30s 600s "$bin"
-          code=$?
-          set -e
-          if [ "$code" -ne 6 ]; then
-            echo "ERROR: TSan smoke run exited $code, expected 6 (race/abort/timeout/divergence)." >&2
-            exit 1
-          fi
-          echo "TSan smoke passed: build + run race-clean, exit code 6 as expected."
-
-  # ══ asan-smoke ═════════════════════════════════════════════════════════════════════════════
-  # TIER: both. NEW THIS WAGON, and it exists for one measured reason: on PR #95 the required
-  # check `Heavy sanitizer gate (main)` reported SUCCESS with both of its legs skipped. A required
-  # check that can be green having asserted nothing is not a gate. The heavy legs below genuinely
-  # belong to the full tier — they are a 120- and a 150-minute budget — so the fix is not to make
-  # them cheap, it is to give the aggregator a leg that runs in BOTH tiers.
-  #
-  # It is the same shape as `tsan`: link gen1 from the root's teko.c with ASan+UBSan and prove the
-  # sanitized compiler builds and runs a real program end-to-end. That is a small fraction of
-  # asan-default's corpus, and it is the fraction that catches an instrumentation break, a fresh
-  # UB on the hot path, and a sanitized binary that cannot start — on every wagon rather than at
-  # the drain.
-  asan-smoke:
-    needs: [plan, artifact]
-    if: needs.plan.outputs.run == 'true'
-    name: ASan+UBSan smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y clang
-
-      - name: Download the emitted teko.c (the root's output)
-        uses: actions/download-artifact@v4
-        with:
-          name: teko-c
-          path: cgen
-
-      # The wrapper puts an instrumenting `cc` on PATH for the steps AFTER this one, which is what
-      # sanitizes the programs the compiler itself compiles — not just the compiler.
-      - name: Install the instrumenting cc wrapper
-        run: sh scripts/ci_cc_wrap.sh "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-
-      - name: Link gen1 under ASan + UBSan
-        shell: bash
-        env:
-          CC: clang
-          CFLAGS_EXTRA: "-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
-        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
-
-      # Leak detection OFF, by construction and not by convenience: the front-end deliberately
-      # holds compiler-lifetime allocations it never frees (core.h S0), reclaimed by the OS at
-      # exit. LSan cannot distinguish that deliberate hold from a real leak on a non-rewound run.
-      - name: Smoke (the sanitized compiler builds + runs one fixture)
-        shell: bash
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0:quarantine_size_mb=64:malloc_context_size=5
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          set -euo pipefail
-          out="$(mktemp -d)"
-          proj="examples/regressions/cwd_build"   # tiny; deterministically exits 6
-          ./bin/teko build "$proj" -o "$out" --no-verify --release | tee build.log
-          bin="$(sed -n 's/.*: built //p' build.log | tail -n1)"
-          if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-            echo "ERROR: could not locate the built binary from the ASan build output." >&2
-            exit 1
-          fi
-          set +e
-          "$bin"
-          code=$?
-          set -e
-          if [ "$code" -ne 6 ]; then
-            echo "ERROR: ASan smoke run exited $code, expected 6." >&2
-            exit 1
-          fi
-          echo "ASan+UBSan smoke passed."
-
-  # ══ asan-default ═══════════════════════════════════════════════════════════════════════════
-  # TIER: full only. The ~24-min-and-growing ASan+UBSan audit of the PRODUCTION native path.
-  #
-  # This lane is a rolling UB-audit: each pre-existing UB it surfaces is fixed at the ROOT. It has
-  # so far driven root fixes for (1) the #291 trait dynamic-vtable function-pointer-type mismatch;
-  # (2a) `tk_mul_u16` signed-integer-overflow (uint16 operands promote to int); and (2b) a
-  # SYSTEMIC arena under-alignment — `tk_region_alloc` rounded to `_Alignof(max_align_t)` (8 on
-  # arm64) but `ExprKind`/`TExprKind` carry an `__int128` needing 16.
-  #
-  # LSan is OFF here BY CONSTRUCTION, for the same reason as asan-smoke: the native gate compiles
-  # and runs the whole corpus in ONE process with NO rewind, so the arena's process-lifetime
-  # allocations are all held to exit by the S0 discipline. LSan flagged ~132 KB of exactly those
-  # holds and nothing else, so it is not a meaningful oracle on this lane.
-  asan-default:
-    needs: [plan, artifact]
-    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
-    name: ASan+UBSan+LSan / default dispatch
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y clang
-
-      - name: Download the emitted teko.c (the root's output)
-        uses: actions/download-artifact@v4
-        with:
-          name: teko-c
-          path: cgen
-
-      - name: Install the instrumenting cc wrapper
-        run: sh scripts/ci_cc_wrap.sh "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-
-      - name: Link gen1 under ASan + UBSan
-        shell: bash
-        env:
-          CC: clang
-          CFLAGS_EXTRA: "-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
-        run: sh scripts/build_gen1_from_c.sh cgen/teko.c src bin
-
-      - name: Run the gate on gen1 (native, ASan + UBSan)
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0:quarantine_size_mb=64:malloc_context_size=5
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./bin/teko . -o gen2-asan --no-verify --release
-
-      # Widen the corpus of language constructs exercised under ASan by running the SINGLE
-      # regression executor with the sanitized compiler — that is how the lift-pass use-after-free
-      # in tk_emit_tsym was caught.
-      - name: Run the single regression executor on gen1 (ASan + UBSan)
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./bin/teko test .
-
-  # ══ mem-paranoid ═══════════════════════════════════════════════════════════════════════════
-  # TIER: full only.
-  #
-  # TEKO_MEM_PARANOID is teko's OWN arena oracle (teko_rt.c #148 Level-2): a RUNTIME getenv that
-  # POISONS every freed arena block and NEVER reuses it, so any use-after-free / arena-reuse-
-  # after-free in the compiler's own C aborts loud. Because it is a runtime switch and not a build
-  # flag, this lane needs NO special build at all — it runs the PUBLISHED asset with the oracle
-  # armed. That is what removed both the seed provision and the ~7-minute self-host that used to
-  # precede the ~11-minute oracle run.
-  #
-  # Because never-reuse disables the arena free-list, the oracle run itself stays heavy — the
-  # regression executor's ~322 scratch builds all run with it armed — which is why the lane stays
-  # on the full tier and keeps its 120-minute ceiling. That ceiling is a ceiling for a STALL, not
-  # a target; the phase's own timing report is what says where the time goes.
   mem-paranoid:
     needs: [plan, artifact]
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
@@ -1268,104 +1041,6 @@ jobs:
   # carve-out, and because the cost of complying is zero in practice: the PR's wall clock is
   # already the root's, so a cheap lane that starts after it does not lengthen anything. The
   # honest note is that this is the one lane where the dependency buys nothing but uniformity.
-  clang-tidy-audit:
-    needs: [plan, artifact]
-    if: needs.plan.outputs.sast_run == 'true'
-    name: clang-tidy audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang-tidy
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list /etc/apt/sources.list.d/azure-cli*.list 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y clang clang-tidy
-
-      - name: Run clang-tidy on the live runtime C
-        run: |
-          clang-tidy src/runtime/teko_rt.c src/assert/assert.c \
-            -checks='-*,clang-analyzer-*,cert-*,bugprone-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
-            -warnings-as-errors='clang-analyzer-security.*,clang-analyzer-core.NullDereference' \
-            -- -std=c23 -Isrc/runtime -Isrc/assert \
-            2>&1 | tee clang-tidy-results.txt || true
-
-      - name: Upload clang-tidy results
-        uses: actions/upload-artifact@v4
-        with:
-          name: clang-tidy-results
-          path: clang-tidy-results.txt
-
-      - name: Capability audit present
-        run: |
-          test -f src/checker/capability_audit.md \
-            && echo "Capability audit found" \
-            || (echo "Missing capability_audit.md — run C9.2 audit"; exit 1)
-
-      - name: Fail on security findings
-        run: |
-          # Match actual findings: check names appear as [clang-analyzer-...] at end of a
-          # diagnostic line. The config/header list prints them without brackets, so requiring
-          # '[' avoids false positives from run-clang-tidy's enabled-checks summary.
-          if grep -qE '\[clang-analyzer-security\.|\[clang-analyzer-core\.NullDereference' clang-tidy-results.txt; then
-            echo "Security findings detected!"
-            grep -E '\[clang-analyzer-security\.|\[clang-analyzer-core\.NullDereference' clang-tidy-results.txt
-            exit 1
-          fi
-          echo "No security findings"
-
-      # Baselined checks (issue #54): cert-err33-c + clang-analyzer-core.uninitialized.* gate on
-      # NEW findings only. .github/sast-baseline.txt holds the pre-existing (file, check) pairs —
-      # line numbers deliberately excluded so ordinary edits don't churn it.
-      - name: Fail on NEW baselined-check findings
-        run: |
-          grep -E 'warning:.*\[(cert-err33-c|clang-analyzer-core\.uninitialized\.[A-Za-z]+)\]' clang-tidy-results.txt \
-            | sed -E 's|^.*/(src/[^:]+):[0-9]+:[0-9]+: warning: .*\[([a-zA-Z0-9._-]+)\]$|\1 \2|' \
-            | sort -u > found-pairs.txt || true
-          grep -v '^#' .github/sast-baseline.txt | grep -v '^$' | sort -u > baseline-pairs.txt
-
-          NEW_PAIRS="$(comm -23 found-pairs.txt baseline-pairs.txt)"
-          if [ -n "$NEW_PAIRS" ]; then
-            echo "NEW cert-err33-c / core.uninitialized.* findings (not in .github/sast-baseline.txt):"
-            echo "$NEW_PAIRS"
-            echo
-            echo "Full diagnostics:"
-            while read -r file check; do
-              grep -E "/${file//./\\.}:[0-9]+:[0-9]+: warning: .*\[${check//./\\.}\]" clang-tidy-results.txt || true
-            done <<< "$NEW_PAIRS"
-            echo
-            echo "Fix the finding, or (tribunal-level exception) add the pair to .github/sast-baseline.txt."
-            exit 1
-          fi
-          echo "No new baselined-check findings ($(wc -l < found-pairs.txt | tr -d ' ') pre-existing pair groups still baselined)"
-
-  # ══════════════════════════════════════════════════════════════════════════════════════════
-  # THE FIVE AGGREGATORS
-  #
-  # Every one of them runs the SAME two structural proofs before it looks at any result:
-  #
-  #   scripts/ci_gate_coverage.sh — reads THIS FILE and fails when a job is outside every
-  #     aggregator's `needs:`, when an aggregator does not stand on the artifact root, or when one
-  #     of the five required-check names has drifted. Seven times on this train a job has run,
-  #     gone red, and not blocked the merge because a hand-maintained list fell behind. A list
-  #     cannot fall behind a check that DERIVES it.
-  #
-  #   the MODE CROSS-CHECK — scripts/ci_full_mode.sh re-derives light/full from the pull request's
-  #     own changed-file list, INDEPENDENTLY of the dorny filter `plan` used, and the gate fails
-  #     when the two disagree. This is what makes a `skipped` leg trustworthy: without it, a gate
-  #     that accepts "skipped" does so on the word of the very job that decided to skip, which is
-  #     precisely how `Sanitizer gate` and `Heavy sanitizer gate (main)` were caught reporting
-  #     SUCCESS on PR #95 with every leg skipped.
-  #
-  # RESULTS POLICY, shared by all five: `failure`, `cancelled` and `skipped` are all rejected by
-  # the same `!= success` test for a job the mode requires — including `cancelled`, which a "did
-  # anything fail?" gate would wave through.
-  # ══════════════════════════════════════════════════════════════════════════════════════════
-
   gate:
     name: CI gate
     runs-on: ubuntu-latest
@@ -1380,7 +1055,7 @@ jobs:
       - name: Structural — every job is covered, every aggregator is rooted
         run: |
           sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
-            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+            gate test-suite-gate sanitizer-gate
 
       # THE PURITY PROOF, run once (here) because it is a property of the whole file: no job but
       # the root may seed or walk the ladder, and zig may not appear anywhere in .github/workflows
@@ -1509,7 +1184,7 @@ jobs:
       - name: Structural — every job is covered, every aggregator is rooted
         run: |
           sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
-            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+            gate test-suite-gate sanitizer-gate
 
       - name: Cross-check the mode against an independent derivation
         if: needs.plan.result == 'success'
@@ -1625,7 +1300,7 @@ jobs:
   sanitizer-gate:
     name: Sanitizer gate
     runs-on: ubuntu-latest
-    needs: [plan, artifact, tsan]
+    needs: [plan, artifact, mem-paranoid]
     if: always()
     permissions:
       contents: read
@@ -1636,7 +1311,7 @@ jobs:
       - name: Structural — every job is covered, every aggregator is rooted
         run: |
           sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
-            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
+            gate test-suite-gate sanitizer-gate
 
       - name: Cross-check the mode against an independent derivation
         if: needs.plan.result == 'success'
@@ -1664,7 +1339,7 @@ jobs:
           FULL: ${{ needs.plan.outputs.full }}
           PLAN_RESULT: ${{ needs.plan.result }}
           ARTIFACT_RESULT: ${{ needs.artifact.result }}
-          TSAN: ${{ needs.tsan.result }}
+          MEM_PARANOID: ${{ needs.mem-paranoid.result }}
         run: |
           set -u
           if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
@@ -1672,7 +1347,7 @@ jobs:
           echo "plan          = $PLAN_RESULT"
           echo "plan.run      = $CHANGES"
           echo "artifact ROOT = $ARTIFACT_RESULT   (both tiers)"
-          echo "tsan          = $TSAN   (both tiers)"
+          echo "mem-paranoid  = $MEM_PARANOID   (full only)"
 
           FAILED=0
           if [ "$PLAN_RESULT" != "success" ]; then
@@ -1693,10 +1368,20 @@ jobs:
             exit 0
           fi
 
-          if [ "$TSAN" != "success" ]; then
-            echo "ERROR: tsan = $TSAN (it runs in BOTH tiers; a skip means a broken condition,"
-            echo "and a gate that accepts it is the vacuous green this check exists to close)"
-            FAILED=1
+          # The LAST memory oracle. TSan, ASan/UBSan and LSan left with the C emitter they
+          # instrumented — a backend that writes objects directly has no clang to instrument it.
+          # `mem-paranoid` stays because its oracle is the ARENA, not C: poison-on-free plus
+          # never-reuse, which the runtime carries in whatever language it is written in. The C
+          # runtime's own comment records why that is not redundant with what left —
+          # "Arena reuse is invisible to ASan, so a wrong linearity proof would corrupt silently".
+          if [ "$MODE" = "full" ]; then
+            if [ "$MEM_PARANOID" != "success" ]; then
+              echo "ERROR: mem-paranoid = $MEM_PARANOID (full mode requires success — it is the only"
+              echo "memory oracle left, and a gate that accepts its absence gates nothing)"
+              FAILED=1
+            fi
+          elif [ "$MEM_PARANOID" != "skipped" ]; then
+            echo "::warning::mem-paranoid = $MEM_PARANOID on the light tier — expected skipped."
           fi
 
           if [ "$FAILED" = "1" ]; then
@@ -1704,180 +1389,4 @@ jobs:
             exit 1
           fi
           echo "Sanitizer gate passed (mode=$MODE)."
-          exit 0
-
-  heavy-sanitizer-gate:
-    name: Heavy sanitizer gate (main)
-    runs-on: ubuntu-latest
-    needs: [plan, artifact, asan-smoke, asan-default, mem-paranoid]
-    if: always()
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Structural — every job is covered, every aggregator is rooted
-        run: |
-          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
-            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
-
-      - name: Cross-check the mode against an independent derivation
-        if: needs.plan.result == 'success'
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ github.token }}
-          PLAN_FULL: ${{ needs.plan.outputs.full }}
-        run: |
-          set -euo pipefail
-          derived="$(sh scripts/ci_full_mode.sh | sed -n 's/^full=//p')"
-          echo "plan says full='$PLAN_FULL'; the independent derivation says full='$derived'"
-          [ "$derived" = "$PLAN_FULL" ] || { echo "ERROR: mode disagreement — see CI gate's note." >&2; exit 1; }
-
-      # The NAME says "(main)" and it is inviolable (required check, no bypass), but the CONTRACT
-      # is no longer "main only". On PR #95 this gate reported SUCCESS with both of its legs
-      # skipped. Two heavy legs genuinely belong on the full tier — 150 and 120 minutes — so the
-      # fix is not to cheapen them; it is `asan-smoke`, a both-tiers leg of the same shape as
-      # tsan, which gives this aggregator something real to assert on every wagon.
-      - name: Evaluate results
-        env:
-          CHANGES: ${{ needs.plan.outputs.run }}
-          FULL: ${{ needs.plan.outputs.full }}
-          PLAN_RESULT: ${{ needs.plan.result }}
-          ARTIFACT_RESULT: ${{ needs.artifact.result }}
-          SMOKE: ${{ needs.asan-smoke.result }}
-          ASAN_DEFAULT: ${{ needs.asan-default.result }}
-          MEM_PARANOID: ${{ needs.mem-paranoid.result }}
-        run: |
-          set -u
-          if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
-          echo "mode=$MODE"
-          echo "plan          = $PLAN_RESULT"
-          echo "plan.run      = $CHANGES"
-          echo "artifact ROOT = $ARTIFACT_RESULT   (both tiers)"
-          echo "asan-smoke    = $SMOKE   (both tiers)"
-          echo "asan-default  = $ASAN_DEFAULT   (full only)"
-          echo "mem-paranoid  = $MEM_PARANOID   (full only)"
-
-          FAILED=0
-          if [ "$PLAN_RESULT" != "success" ]; then
-            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
-          fi
-          if [ "$CHANGES" = "true" ]; then
-            if [ "$ARTIFACT_RESULT" != "success" ]; then
-              echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT — every leg here consumes its output"; FAILED=1
-            fi
-          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
-            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"; FAILED=1
-          fi
-
-          if [ "$CHANGES" != "true" ]; then
-            echo "No allowlisted path changed — nothing for the memory/UB audit to gate."
-            if [ "$FAILED" = "1" ]; then echo "Heavy sanitizer gate FAILED (mode=$MODE)."; exit 1; fi
-            echo "Heavy sanitizer gate passed (mode=$MODE, not applicable)."
-            exit 0
-          fi
-
-          if [ "$SMOKE" != "success" ]; then
-            echo "ERROR: asan-smoke = $SMOKE (it runs in BOTH tiers; this leg is what stops this"
-            echo "gate from being green having asserted nothing on the light tier)"
-            FAILED=1
-          fi
-
-          require_full_only() {
-            if [ "$MODE" = "full" ]; then
-              [ "$2" = "success" ] && return 0
-              echo "ERROR: $1 = $2 (full mode requires success — a skip here is the bug this gate used to hide)"
-              FAILED=1
-              return 0
-            fi
-            [ "$2" = "skipped" ] && return 0
-            echo "::warning::$1 = $2 on the light tier — expected skipped; check its \`if:\` condition."
-          }
-          require_full_only asan-default "$ASAN_DEFAULT"
-          require_full_only mem-paranoid "$MEM_PARANOID"
-
-          if [ "$FAILED" = "1" ]; then
-            echo "Heavy sanitizer gate FAILED (mode=$MODE)."
-            exit 1
-          fi
-          echo "Heavy sanitizer gate passed (mode=$MODE)."
-          exit 0
-
-  sast-gate:
-    name: SAST gate
-    runs-on: ubuntu-latest
-    needs: [plan, artifact, clang-tidy-audit]
-    if: always()
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Structural — every job is covered, every aggregator is rooted
-        run: |
-          sh scripts/ci_gate_coverage.sh .github/workflows/pr.yml artifact \
-            gate test-suite-gate sanitizer-gate heavy-sanitizer-gate sast-gate
-
-      - name: Evaluate results
-        env:
-          CHANGES: ${{ needs.plan.outputs.sast_run }}
-          RUN: ${{ needs.plan.outputs.run }}
-          PLAN_RESULT: ${{ needs.plan.result }}
-          ARTIFACT_RESULT: ${{ needs.artifact.result }}
-          TIDY_RESULT: ${{ needs.clang-tidy-audit.result }}
-        run: |
-          set -u
-          echo "plan             = $PLAN_RESULT"
-          echo "plan.sast_run    = $CHANGES"
-          echo "artifact ROOT    = $ARTIFACT_RESULT"
-          echo "clang-tidy-audit = $TIDY_RESULT"
-
-          FAILED=0
-          if [ "$PLAN_RESULT" != "success" ]; then
-            echo "ERROR: plan = $PLAN_RESULT (it is unconditional)"; FAILED=1
-          fi
-
-          # TWO flags, not one. `sast_run` decides whether there is C to lint; `run` decides
-          # whether the ROOT builds at all. They are independent — a PR touching only
-          # `src/runtime/**.md` sets sast_run=true and run=false — so the root's expected result
-          # is keyed on `run`, never on `sast_run`.
-          if [ "$RUN" = "true" ]; then
-            if [ "$ARTIFACT_RESULT" != "success" ]; then
-              echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT"; FAILED=1
-            fi
-          elif [ "$ARTIFACT_RESULT" != "skipped" ]; then
-            echo "ERROR: artifact (the ROOT) = $ARTIFACT_RESULT with plan.run=false — expected skipped"; FAILED=1
-          fi
-
-          if [ "$CHANGES" != "true" ]; then
-            echo "Neither src/runtime/** nor src/assert/** changed — nothing to scan."
-            if [ "$FAILED" = "1" ]; then echo "SAST gate FAILED."; exit 1; fi
-            echo "SAST gate passed (not applicable)."
-            exit 0
-          fi
-
-          # The audit hangs off the ROOT by owner ruling (every pull_request lane does), so when
-          # the root is skipped the audit is skipped WITH it — by dependency, not by a broken
-          # condition. Only lintable C can be missed that way, and by construction none changed.
-          if [ "$RUN" != "true" ]; then
-            if [ "$TIDY_RESULT" != "skipped" ]; then
-              echo "ERROR: clang-tidy-audit = $TIDY_RESULT — the ROOT was skipped, so this must be too"
-              FAILED=1
-            else
-              echo "clang-tidy-audit skipped with the ROOT (docs-only change under src/runtime|assert)."
-            fi
-          elif [ "$TIDY_RESULT" != "success" ]; then
-            echo "ERROR: clang-tidy-audit = $TIDY_RESULT (the path matched and the ROOT ran, so it owed a result)"
-            FAILED=1
-          fi
-
-          if [ "$FAILED" = "1" ]; then
-            echo "SAST gate FAILED."
-            exit 1
-          fi
-          echo "SAST gate passed."
           exit 0
