@@ -136,14 +136,14 @@ fn tkr_outline_expands() {
 }
 
 /**
- * backend_target_outline_src — the two-column backend x target `Scenario Outline` shape the F5
- * differential corpus uses: one Given per dimension, four rows crossing the two backends with the
- * host sentinel and the riscv cross target.
+ * multi_column_outline_src — the two-column `Scenario Outline` shape the F5 corpus uses: one
+ * `Given` per dimension, four rows crossing an ordinary env flavour with the host sentinel and the
+ * riscv cross target.
  *
  * @return the `.tkr` source text
  */
-fn backend_target_outline_src() -> str {
-    "Feature: f\n  Scenario Outline: diff\n    Given backend = \"<backend>\"\n    Given target = \"<target>\"\n    When built and run\n    Then exit = 0\n    Examples:\n      | backend | target        |\n      | c       | host          |\n      | own     | host          |\n      | c       | riscv64-linux |\n      | own     | riscv64-linux |\n"
+fn multi_column_outline_src() -> str {
+    "Feature: f\n  Scenario Outline: diff\n    Given env = \"TEKO_FOO=<flavour>\"\n    Given target = \"<target>\"\n    When built and run\n    Then exit = 0\n    Examples:\n      | flavour | target        |\n      | a       | host          |\n      | b       | host          |\n      | a       | riscv64-linux |\n      | b       | riscv64-linux |\n"
 }
 
 /**
@@ -165,27 +165,31 @@ fn env_has_token(env: []str, token: str) -> bool {
 
 #test
 /**
- * tkr_backend_target_outline_crosses_both_dimensions — the grammar already supports an N-column
- * `Examples` table (`tkr_table_cells` + `tkr_subst_row` are column-count agnostic), so the
- * differential corpus gains its riscv dimension as two extra ROWS, not a duplicated feature. Pins
- * the cross: four rows, each carrying its backend token, and `TEKO_TARGET` exported ONLY for the
- * real cross target (the host sentinel means "unset", the own backend's R1 default).
+ * tkr_multi_column_outline_crosses_both_dimensions — the grammar supports an N-column `Examples`
+ * table (`tkr_table_cells` + `tkr_subst_row` are column-count agnostic), so a corpus gains a second
+ * dimension as extra ROWS, not a duplicated feature. Pins the cross: four rows, each carrying its
+ * own env token, and `TEKO_TARGET` exported ONLY for the real cross target (the host sentinel means
+ * "unset", the own backend's R1 default).
+ *
+ * The dimensions used to be backend x target. The BACKEND one died with the C emitter (owner ruling
+ * 2026-07-26 — there is one backend now), so the cross is re-pinned over an ordinary `Given env`
+ * column, which exercises the same column-agnostic machinery.
  *
  * @return void
  */
-fn tkr_backend_target_outline_crosses_both_dimensions() {
-    match parse_tkr(backend_target_outline_src()) {
+fn tkr_multi_column_outline_crosses_both_dimensions() {
+    match parse_tkr(multi_column_outline_src()) {
         []TkrFeature as fs => match tkr_expand_outline(fs[0].scenarios[0]) {
             []Tkr as xs => {
                 teko::assert::is_true(xs.len == 4)
                 teko::assert::is_true(xs[0].target == HOST_TARGET)
-                teko::assert::is_true(env_has_token(xs[0].env, "TEKO_BACKEND=c"))
+                teko::assert::is_true(env_has_token(xs[0].env, "TEKO_FOO=a"))
                 teko::assert::is_false(env_has_token(xs[0].env, "TEKO_TARGET=host"))
-                teko::assert::is_true(env_has_token(xs[1].env, "TEKO_BACKEND=native"))
+                teko::assert::is_true(env_has_token(xs[1].env, "TEKO_FOO=b"))
                 teko::assert::is_true(xs[2].target == "riscv64-linux")
-                teko::assert::is_true(env_has_token(xs[2].env, "TEKO_BACKEND=c"))
+                teko::assert::is_true(env_has_token(xs[2].env, "TEKO_FOO=a"))
                 teko::assert::is_true(env_has_token(xs[2].env, "TEKO_TARGET=riscv64-linux"))
-                teko::assert::is_true(env_has_token(xs[3].env, "TEKO_BACKEND=native"))
+                teko::assert::is_true(env_has_token(xs[3].env, "TEKO_FOO=b"))
                 teko::assert::is_true(env_has_token(xs[3].env, "TEKO_TARGET=riscv64-linux"))
             }
             error => teko::assert::is_true(false)
@@ -399,56 +403,21 @@ fn tkr_uncompilable_pattern_fails_red() {
 
 #test
 /**
- * tkr_row_uses_own_backend_reads_the_env_the_sugar_writes — the runner's pre-build capability rule
- * needs to know whether a row will go through the OWN backend, and the only durable record of that
- * on a lowered row is the child-env token. The predicate must therefore agree with `tkr_backend_env`
- * for the sugar (`Given backend = "own"` / `"c"` / absent) AND catch the raw spelling a scenario can
- * always fall back to (`Given env = "TEKO_BACKEND=native"`) — a rule that saw only the sugar would
- * silently let the raw form through to the very failure it exists to prevent.
+ * tkr_row_capability_skip_reason_matches_the_host_default_rule — a HOST row is skipped exactly when
+ * `host_cc_cannot_link_host_default_reason` says this host cannot link what the own backend would
+ * emit, and carries that reason verbatim. Written as an EQUIVALENCE rather than as a fixed
+ * expectation so it holds on every lane: on x86_64-linux, macos-arm64 and windows-x86_64 both sides
+ * are empty and the row runs; on an aarch64-linux host both sides are the same non-empty reason and
+ * the row honest-skips.
  *
- * @return void
- */
-fn tkr_row_uses_own_backend_reads_the_env_the_sugar_writes() {
-    let own = "Feature: f\n  Scenario: s\n    Given backend = \"own\"\n    When built and run\n    Then exit = 0\n"
-    let c = "Feature: f\n  Scenario: s\n    Given backend = \"c\"\n    When built and run\n    Then exit = 0\n"
-    let bare = "Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"
-    let raw = "Feature: f\n  Scenario: s\n    Given env = \"TEKO_BACKEND=native\"\n    When built and run\n    Then exit = 0\n"
-    match tkr_first_lowered(own) { Tkr as t => teko::assert::is_true(tkr_row_uses_own_backend(t)); error => teko::assert::is_true(false) }
-    match tkr_first_lowered(c) { Tkr as t => teko::assert::is_false(tkr_row_uses_own_backend(t)); error => teko::assert::is_true(false) }
-    match tkr_first_lowered(bare) { Tkr as t => teko::assert::is_false(tkr_row_uses_own_backend(t)); error => teko::assert::is_true(false) }
-    match tkr_first_lowered(raw) { Tkr as t => teko::assert::is_true(tkr_row_uses_own_backend(t)); error => teko::assert::is_true(false) }
-}
-
-#test
-/**
- * tkr_row_capability_skip_reason_spares_the_c_backend_host_row — the plainest row there is (no
- * target, C backend) must never be pre-skipped on any host: it compiles host-native C with the host
- * `cc`, so no arch or object-format mismatch is reachable. This is the R3 guard on the whole
- * capability rule — the overwhelming majority of the corpus is exactly this shape, and a rule that
- * touched it would turn a green gate into a green-looking gate that checked nothing.
- *
- * @return void
- */
-fn tkr_row_capability_skip_reason_spares_the_c_backend_host_row() {
-    let bare = "Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"
-    let c_host = "Feature: f\n  Scenario: s\n    Given backend = \"c\"\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
-    match tkr_first_lowered(bare) { Tkr as t => teko::assert::is_true(tkr_row_capability_skip_reason(t) == ""); error => teko::assert::is_true(false) }
-    match tkr_first_lowered(c_host) { Tkr as t => teko::assert::is_true(tkr_row_capability_skip_reason(t) == ""); error => teko::assert::is_true(false) }
-}
-
-#test
-/**
- * tkr_row_capability_skip_reason_matches_the_host_default_rule — an own-backend HOST row is skipped
- * exactly when `host_cc_cannot_link_host_default_reason` says this host cannot link what the own
- * backend would emit, and carries that reason verbatim. Written as an EQUIVALENCE rather than as a
- * fixed expectation so it holds on every lane: on x86_64-linux, macos-arm64 and windows-x86_64 both
- * sides are empty and the row runs; on an aarch64-linux host both sides are the same non-empty
- * reason and the row honest-skips.
+ * This ALSO absorbs the R3 guard the retired `..._spares_the_c_backend_host_row` test carried: the
+ * plainest row there is (no backend sugar, host target) is now an own-backend row like every other,
+ * so the equivalence covers it instead of a second, separate expectation.
  *
  * @return void
  */
 fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
-    let own_host = "Feature: f\n  Scenario: s\n    Given backend = \"own\"\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
+    let own_host = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
     let want = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
     match tkr_first_lowered(own_host) {
         Tkr as t => teko::assert::is_true(tkr_row_capability_skip_reason(t) == want)
