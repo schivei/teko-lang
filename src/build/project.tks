@@ -1451,21 +1451,6 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
 }
 
 /**
- * native_backend_selected — is `TEKO_BACKEND=native` in the environment (D-B,
- * #385 A4-5)? This is now the SOLE code-generation-backend selector (owner ruling
- * 2026-07-24 removed the earlier `--backend` CLI flag as unused surface — TEKO_BACKEND
- * is the transitional seam the differential gate scripts (`diff_c_own.sh`,
- * `validate_wasm_own.sh`) already drive alongside `TEKO_TARGET`). OFF by default (any
- * other value or an unset variable → false → the C backend), so a flagless, env-free
- * build stays byte-identical and the FIXPOINT holds.
- *
- * @return true iff `TEKO_BACKEND` is exactly "native"
- */
-fn native_backend_selected() -> bool {
-    match teko::env::var("TEKO_BACKEND") { str as v => v == "native"; error => false }
-}
-
-/**
  * backend_of — resolve the code-generation backend for a build: `Backend::Native`
  * iff `native_backend_selected()` (the `TEKO_BACKEND=native` env seam), else the
  * default `Backend::C`. The earlier `--backend={c,native}` CLI flag was REMOVED
@@ -1476,77 +1461,36 @@ fn native_backend_selected() -> bool {
  * @return the resolved backend — `Backend::Native` or `Backend::C`
  */
 fn backend_of() -> Backend {
-    if native_backend_selected() { Backend::Native } else { Backend::C }
+    if c_backend_selected() { Backend::C } else { Backend::Native }
 }
 
-/** BACKEND_FLAG_PREFIX — the `--backend=` CLI prefix (D39: the flag's spelling, named once). */
-const BACKEND_FLAG_PREFIX: str = "--backend="
-
-/** BACKEND_FLAG_PREFIX_LEN — the prefix's byte length, so the value slice never re-counts it. */
-const BACKEND_FLAG_PREFIX_LEN: u64 = 10 to u64
+/** TEKO_BACKEND_C_VALUE — the one env value that still asks for the retiring C emitter. */
+const TEKO_BACKEND_C_VALUE: str = "c"
 
 /**
- * backend_flag_value — the text after `--backend=` in `args`, or "" when the flag is absent.
- * The LAST occurrence wins, matching how a shell user expects a repeated flag to behave.
+ * c_backend_selected — is `TEKO_BACKEND=c` in the environment?
  *
- * @param args  the full CLI argument vector
- * @return      the flag's value ("native" / "c" / anything else), or "" when not passed
+ * THE DEFAULT INVERTED ON 2026-07-26, by owner ruling. Until then the default was
+ * `Backend::C` and `TEKO_BACKEND=native` opted in; now NATIVE IS THE DEFAULT and `c` is what
+ * must be asked for. His words: *"deve sim manter --backend sem ressuscitar, o que tem que fazer
+ * é apenas passar pelo caminho de native e não mais pelo caminho de emissão de C (default hoje)"*
+ * — and, on the train: *"é o fim da linha para o C que não pode mais embarcar no trem, está
+ * barrado."*
+ *
+ * WHY A DEFAULT AND NOT A FLAG. I had restored `--backend=native` for this and the owner
+ * reversed it: a flag is a CHOICE, and there is no choice to offer. A flag also fails open —
+ * every call site that forgets it silently keeps emitting C, green, and the C path survives by
+ * omission. Inverting the default fails CLOSED: everything that does not ask for C gets native,
+ * and what breaks, breaks visibly.
+ *
+ * The `c` value survives only as the differential's other arm (`Given backend = "c"` in the
+ * regressor, `TEKO_BACKEND=c` in `tkr.tks`) and dies with the C emitter itself.
+ *
+ * @return true when the environment still asks for the C emitter
  * @since 0.3.1
  */
-fn backend_flag_value(args: []str) -> str {
-    mut found = ""
-    mut i: u64 = 0
-    loop {
-        if i >= args.len { break }
-        let a = args[i]
-        if a.len > BACKEND_FLAG_PREFIX_LEN && teko::str::slice_to(a, BACKEND_FLAG_PREFIX_LEN) == BACKEND_FLAG_PREFIX {
-            found = teko::str::slice_from(a, BACKEND_FLAG_PREFIX_LEN)
-        }
-        i = i + 1
-    }
-    found
-}
-
-/**
- * backend_of_args — the backend for this invocation: the `--backend=` FLAG when present, else the
- * `TEKO_BACKEND` env, else `Backend::C`.
- *
- * The flag was removed on 2026-07-24 ("já não estava mesmo sendo usado") and is RESTORED here by
- * owner ruling 2026-07-26: the .31 train's dry builds must pass `--backend=native` so the whole
- * chain is proven native, and an env var is the wrong surface for something a build command must
- * state about itself — it does not survive being copied out of a log, and a lane that forgets it
- * silently builds the other backend.
- *
- * FLAG BEATS ENV, deliberately: the env is ambient and the flag is a statement about THIS build,
- * so the more specific wins. An unrecognised value is NOT an error here — anything that is not
- * `native` resolves to C, exactly as the env seam already treats anything that is not `native`.
- *
- * @param args  the full CLI argument vector
- * @return      the resolved backend
- * @since 0.3.1
- */
-fn backend_of_args(args: []str) -> Backend {
-    let v = backend_flag_value(args)
-    if v.len == 0 { return backend_of() }
-    if v == BACKEND_NATIVE_VALUE { Backend::Native } else { Backend::C }
-}
-
-/** BACKEND_NATIVE_VALUE — the one value of `--backend=`/`TEKO_BACKEND` that selects the own AOT
- *  backend. Named once so the flag and the env can never drift apart (D39). */
-const BACKEND_NATIVE_VALUE: str = "native"
-
-/**
- * backend_arg_has_prefix — is `a` a `--backend=…` option? The sibling of `opt_arg_has_prefix`,
- * and it exists for the same reason: `project_arg_of` scans for the first POSITIONAL argument, so
- * every flag it does not recognise would be mistaken for the project directory. Forgetting this
- * makes `teko build . --backend=native` try to build a project called `--backend=native`.
- *
- * @param a  one CLI argument
- * @return   true when `a` carries the `--backend=` prefix
- * @since 0.3.1
- */
-fn backend_arg_has_prefix(a: str) -> bool {
-    a.len > BACKEND_FLAG_PREFIX_LEN && teko::str::slice_to(a, BACKEND_FLAG_PREFIX_LEN) == BACKEND_FLAG_PREFIX
+fn c_backend_selected() -> bool {
+    match teko::env::var("TEKO_BACKEND") { str as v => v == TEKO_BACKEND_C_VALUE; error => false }
 }
 
 /**
@@ -3245,7 +3189,6 @@ fn project_arg_of(args: []str, start: u64) -> str {
         else if args[i] == ALLOW_UNDEF_FLAG { i = i + 1 }
         else if args[i] == REGR_TIMINGS_FLAG { i = i + 1 }
         else if opt_arg_has_prefix(args[i]) { i = i + 1 }
-        else if backend_arg_has_prefix(args[i]) { i = i + 1 }
         else { return args[i] }
     }
     ""
