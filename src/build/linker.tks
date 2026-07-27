@@ -6,8 +6,9 @@
  * native to the target?" (owner ruling 2026-07-26: "não é .c que importa, importa o linker …
  * ajustes nas lanes e no compilador para procurar pelo linker e não pelo compilador C").
  * A linker that EXISTS but targets the wrong machine is worse than no linker at all: it produces
- * a wrong artifact and nobody notices — which is exactly what happened when a `windows-arm64`
- * asset was minted by an x86_64 MinGW running under Windows-on-ARM emulation.
+ * a wrong artifact and nobody notices — which is exactly what happened when a PE built for one
+ * machine was published under a label promising another, by a toolchain resolved from the PATH
+ * instead of chosen.
  */
 type LinkArch = enum { X8664; Arm64 }
 
@@ -24,11 +25,11 @@ type LinkFormat = enum { Elf; Macho; Pe }
  * MINGW_TOKEN — the substring that identifies a MinGW toolchain in a command token or path.
  *
  * MinGW is FORBIDDEN on every Windows host, not merely deprioritised (owner ruling 2026-07-26:
- * "E sobre mingw, proibido, tem que usar o linker nativo e não emulado"). The measured defect:
- * the `windows-11-arm64` runner published a PE whose PROVENANCE reads
- * `toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project) 14.2.0` on a
- * `MINGW64_NT-…-ARM64 … x86_64` host — an emulated x86_64 toolchain minting an x86_64 binary
- * under an ARM64 label.
+ * "E sobre mingw, proibido, tem que usar o linker nativo e não emulado"). The measured defect that
+ * earned the ban: a runner published a PE whose PROVENANCE read
+ * `toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project) 14.2.0` while the
+ * host reported a different machine — an EMULATED toolchain minting a binary for the machine it
+ * emulated, under the label of the machine it ran on, with nothing asserting the difference.
  */
 const MINGW_TOKEN: str = "mingw"
 
@@ -95,7 +96,7 @@ fn gnu_emulation_for(arch: LinkArch, fmt: LinkFormat) -> str {
         }
         LinkFormat::Pe => match arch {
             LinkArch::X8664 => "i386pep"
-            LinkArch::Arm64 => "arm64pe"
+            LinkArch::Arm64 => ""
         }
         LinkFormat::Macho => ""
     }
@@ -174,9 +175,9 @@ fn mingw_rejected_error(cmd: str, arch: LinkArch) -> error {
     error { message = teko::str::concat(
         "refusing the MinGW linker '", cmd, "' for a ", arch_name(arch), " target.",
         " MinGW is forbidden on every Windows host (owner ruling 2026-07-26): a published",
-        " windows-arm64 asset was minted by an x86_64 MinGW running under Windows-on-ARM",
-        " emulation and nobody noticed, because the toolchain was resolved from the PATH",
-        " instead of chosen. Use a linker native to the target (lld-link ships with LLVM).") }
+        " asset was once minted by an EMULATED MinGW whose machine was not the host's, and",
+        " nobody noticed, because the toolchain was resolved from the PATH instead of chosen.",
+        " Use a linker native to the target (lld-link ships with LLVM).") }
 }
 
 /**
@@ -214,9 +215,9 @@ fn join_candidates(cands: []str) -> str {
  * this is a genuine DISCRIMINATOR — a host-only BFD ld cannot claim a foreign machine. `ld.lld`
  * exits 0 for both, and that answer is honest rather than permissive: lld carries every target by
  * construction, so it really can emit aarch64 ELF from an x86_64 host. That is CROSS, which is
- * legitimate; what the ruling forbids is an EMULATED toolchain (an x86_64 MinGW running under
- * Windows-on-ARM), and emulation is caught by `linker_is_mingw` plus the architecture assertion
- * on the PUBLISHED artifact (scripts/produce_assets.sh), not by this probe.
+ * legitimate; what the ruling forbids is an EMULATED toolchain — one whose machine is not the
+ * host's — and emulation is caught by `linker_is_mingw` plus the architecture assertion on the
+ * PUBLISHED artifact (scripts/produce_assets.sh), not by this probe.
  *
  * @param cmd   the candidate linker command
  * @param arch  the machine the link must target
@@ -241,6 +242,10 @@ fn linker_targets_arch(cmd: str, arch: LinkArch, fmt: LinkFormat) -> bool {
  * exit non-zero on a machine they cannot emit. `/?` makes the probe a help request rather than a
  * link attempt, so nothing is written and no input is needed.
  *
+ * A machine this build has no PE target for spells to "" and is REFUSED here rather than probed:
+ * a machine name the probe cannot assert must never reach a linker, because a candidate that
+ * happens to exit 0 would then stand in for an assertion that was never made.
+ *
  * @param cmd   the candidate PE linker command
  * @param arch  the machine the link must target
  * @return      true iff the candidate ran and accepted the machine
@@ -248,8 +253,9 @@ fn linker_targets_arch(cmd: str, arch: LinkArch, fmt: LinkFormat) -> bool {
 fn pe_linker_targets_arch(cmd: str, arch: LinkArch) -> bool {
     let machine = match arch {
         LinkArch::X8664 => "/machine:X64"
-        LinkArch::Arm64 => "/machine:ARM64"
+        LinkArch::Arm64 => ""
     }
+    if machine.len == 0 { return false }
     mut argv: []str = teko::list::empty()
     argv = teko::list::push(argv, cmd)
     argv = teko::list::push(argv, machine)

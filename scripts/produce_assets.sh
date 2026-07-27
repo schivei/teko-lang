@@ -55,18 +55,16 @@ log() { printf '%s\n' "produce_assets: $*" >&2; }
 
 # ── THE ARCHITECTURE ASSERTION FOR `native` ASSETS ────────────────────────────────────────────
 #
-# THE DEFECT THIS CLOSES, measured. The PROVENANCE.txt of a published `windows-arm64` asset
-# recorded `host_uname=MINGW64_NT-10.0-26200-ARM64 … x86_64` and
-# `toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project)`: an x86_64 MinGW
-# running under Windows-on-ARM's x86 emulation, on an ARM64 machine, minting an x86_64 PE that
-# was published under the ARM64 label. Nobody chose it — the compiler asked for `cc` and the PATH
-# answered.
+# THE DEFECT THIS CLOSES, measured. A published asset's PROVENANCE.txt recorded a host whose
+# machine and a toolchain whose machine DISAGREED — an emulated toolchain minting a PE for the
+# machine it emulated, published under the label of the machine it ran on. Nobody chose it: the
+# compiler asked for `cc` and the PATH answered.
 #
-# scripts/native_linux_asset.sh has asserted the architecture of its six Linux assets since it was
-# written (`file | grep ARCH_KW`). The `native` branch here — macos-arm64, windows-x86_64,
-# windows-arm64 — asserted NOTHING, and that asymmetry is the whole hole: the wrong-arch PE passed
-# because no gate on this side ever looked. Closing only the compiler's linker probe would leave
-# this end open, and the defect would come back through it.
+# scripts/native_linux_asset.sh has asserted the architecture of its Linux assets since it was
+# written (`file | grep ARCH_KW`). The `native` branch here asserted NOTHING, and that asymmetry
+# is the whole hole: the wrong-arch PE passed because no gate on this side ever looked. Closing
+# only the compiler's linker probe would leave this end open, and the defect would come back
+# through it.
 #
 # NO SILENT SKIP (M.3). When neither `file` nor the header read can decide, this FAILS: an
 # assertion that quietly opts out is indistinguishable from an assertion that passed, and it is
@@ -79,7 +77,7 @@ log() { printf '%s\n' "produce_assets: $*" >&2; }
 #           COFF Machine u16 right after the "PE\0\0" signature: 0x8664 x86-64, 0xAA64 ARM64.
 #   Mach-O: magic 0xFEEDFACF (64-bit, little-endian on disk as cf fa ed fe) then cputype:
 #           0x01000007 x86-64, 0x0100000C ARM64.
-#   ELF:    e_machine u16 at 0x12: 0x3E x86-64, 0xB7 aarch64, 0xF3 riscv.
+#   ELF:    e_machine u16 at 0x12: 0x3E x86-64, 0xB7 aarch64.
 machine_word_of() {
     mw_bin="$1"
     command -v od >/dev/null 2>&1 || { printf '%s' ""; return 0; }
@@ -108,7 +106,6 @@ machine_word_of() {
             case "$mw_em" in
                 3e00) printf '%s' "x86_64" ;;
                 b700) printf '%s' "arm64" ;;
-                f300) printf '%s' "riscv64" ;;
                 *)    printf '%s' "" ;;
             esac ;;
         *) printf '%s' "" ;;
@@ -116,10 +113,7 @@ machine_word_of() {
 }
 
 # arch_keyword_for LABEL — the machine keyword an asset label PROMISES, or "" when the label
-# carries no architecture claim this can check. riscv64 left with the target (owner ruling, .31), so
-# no label promises it any more. The DETECTORS above still name riscv64 on purpose: their job is to
-# report what a binary actually IS, and an assertion that can say "got riscv64, promised x86_64"
-# beats one that can only say "cannot determine".
+# carries no architecture claim this can check.
 arch_keyword_for() {
     case "$1" in
         *-x86_64|*-x86_64-*) printf '%s' "x86_64" ;;
@@ -145,13 +139,12 @@ assert_asset_arch() {
         case "$aa_desc" in
             *x86-64*|*x86_64*) aa_got="x86_64" ;;
             *aarch64*|*arm64*) aa_got="arm64" ;;
-            *riscv*)           aa_got="riscv64" ;;
         esac
     fi
     if [ -z "$aa_got" ]; then
         log "FATAL: cannot determine the architecture of '$aa_bin' for label '$aa_label'."
         log "Neither the binary's own header nor 'file' identified it. This does NOT pass by"
-        log "default: an unasserted asset is how an x86_64 PE was once published as windows-arm64."
+        log "default: an unasserted asset is how a PE was once published under a foreign machine."
         exit 1
     fi
     if [ "$aa_got" != "$aa_want" ]; then
