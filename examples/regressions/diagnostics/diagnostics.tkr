@@ -1,0 +1,295 @@
+# diagnostics.tkr — the CHECKER-STAGE compile-fail CHANNEL.
+#
+# The project it names is still here and still asserted (`m1::PRIV`, #594 crumb 8c / issue #613),
+# and it now carries the `member_const_visibility_leak_rejected` regression too (`leakbase`/
+# `leaksub`, #594 crumb 7) — that project became the PARSE-stage host and can no longer reach the
+# checker at all, so its assertion had to move to a build that does. Around those two, THIRTY-SEVEN
+# further rejected constructs live one per namespace under `src/`, each a fixture that used to be a
+# `Given source inline` snippet in regressor.tkr paying for its OWN failing build.
+#
+# WHY THEY SHARE ONE BUILD (owner ruling 2026-07-25 — "somente um build é necessário"): the runner
+# already supports it. A compile-fail scenario that declares NO `Given source`/`Given source inline`
+# is checked against the PROJECT's own failing build, and that build is cached across every scenario
+# of this file (`tkr_compile_fail_artifact` → `tkr_ensure_built`). The compiler reports EVERY
+# diagnostic it finds rather than stopping at the first, so one build emits all thirty-nine and each
+# scenario below pins its own. Measured, not assumed: 39 scenarios, 1 build.
+#
+# WHY TWO MORE FOLDED IN (issue #68). `c55_unsafe_field_in_safe_struct` and `c53_reject_flags_65`
+# were two of the four `cases/*.tks` rows that used to buy their own build, because their
+# diagnostics come from a checker PRE-WALK pass that stopped at the first error. Those two passes
+# (`validate_type_decls` and `check_modules`) are SOFT boundaries — they produce nothing the item
+# walk reads — so they now collect and the build carries on. They are namespaces of the shared build.
+#
+# WHY ONE `cases/*.tks` ROW SURVIVES (`prewalk_signature_stops.tks`). The remaining two constructs
+# are rejected by the checker's SIGNATURE walk, a HARD boundary: a declaration whose signature is
+# rejected contributes no binding, so continuing would report every caller as "undefined" and blame
+# the caller for the callee's defect (M.3). The signature walk therefore collects everything IT sees
+# and cuts. Both constructs sit in ONE file and are reported by ONE build, and a standalone `Given
+# source` build is cached per (file, declared env) — `regr_src_key`. Residual: one build, was four.
+# See docs/design/all-diagnostics-pre-walk-0.3.1.md §3 for every pass's boundary.
+#
+#   * put all four in a project of their own and the build reports exactly ONE diagnostic; remove
+#     that one and the build reports the next, alone — the checker PRE-WALK stops at the FIRST error
+#     instead of collecting, so four cases in one build are one diagnostic, not four;
+#   * fold ONE of them into THIS project and the build's diagnostic count falls from FIFTY to ONE.
+#     Every scenario below would go red to save a single build.
+#
+# They cost one build each until the pre-walk passes collect like the item walk does. That is the
+# residual between this repository's regression build count and the owner's target of ten per host,
+# and it belongs to the all-diagnostics work, not here.
+#
+# WHY THE `F8 target` ROWS ARE NOT FOLDED EITHER, and the reason is stronger than "a differing
+# configuration is a different build". Their subject is the diagnostic `unsupported TEKO_TARGET`,
+# which the build emits only AFTER the front end has succeeded — measured: building this project with
+# `TEKO_TARGET=x86_64-solaris` reports the thirty-seven CHECKER rejections and never reaches the
+# target error at all. A build whose checker must fail and a build whose checker must pass are
+# mutually exclusive; those three rows share ONE build with each other (`regr_src_key` caches on
+# (file, declared env)) and can share none with this one.
+Feature: the two cross-namespace visibility rejections, in one build
+
+  Scenario: the root namespace may not read another namespace's private const, even namespace-qualified
+    When compilation fails
+    Then diagnostic = "is private to"
+
+  Scenario: a subclass's own namespace may not read a private const inherited from its base's namespace
+    When compilation fails
+    Then diagnostic = "member const `SECRET` is private to `Base`"
+
+Feature: F3 null-union — the strict compile-fail boundary — folded into this project's single failing build
+
+  # src/c01_bare_null_into_a_non_nullable_slot_is_reject/case.tks
+  Scenario: bare null into a non-nullable slot is rejected
+    When compilation fails
+    Then diagnostic = "value type does not match annotation"
+
+Feature: F3 null-union — KNOWN-STOP (promote to a positive scenario the day it closes) — folded into this project's single failing build
+
+  # src/c03_an_interface_cannot_yet_be_a_null_union_memb/case.tks
+  Scenario: an interface cannot yet be a null-union member
+    When compilation fails
+    Then diagnostic = "interface cannot be a variant member"
+
+Feature: F1 diagnostics — folded EXPECT_COMPILE_FAIL single-file fixtures (dobrado, dir removido) — folded into this project's single failing build
+
+  # src/c04_loop_label_lowercase/case.tks
+  Scenario: loop_label_lowercase
+    When compilation fails
+    Then diagnostic = "loop label must be UPPER_SNAKE"
+
+  # src/c05_loop_range_counter_leak/case.tks
+  Scenario: loop_range_counter_leak
+    When compilation fails
+    Then diagnostic = "undefined name: i"
+
+  # src/c06_loop_three_part_nonbool_cond/case.tks
+  Scenario: loop_three_part_nonbool_cond
+    When compilation fails
+    Then diagnostic = "needs a bool"
+
+  # src/c09_reject_f16/case.tks
+  Scenario: reject_f16
+    When compilation fails
+    Then diagnostic = "type 'f16' was removed"
+
+  # src/c10_reject_i128/case.tks
+  Scenario: reject_i128
+    When compilation fails
+    Then diagnostic = "type 'i128' was removed"
+
+  # src/c12_reject_u128/case.tks
+  Scenario: reject_u128
+    When compilation fails
+    Then diagnostic = "type 'u128' was removed"
+
+  # src/c17_adopt_break_outside_loop/case.tks
+  Scenario: adopt_break_outside_loop
+    When compilation fails
+    Then diagnostic = "`break`/`continue` outside a loop"
+
+  # src/c18_adopt_break_unknown_label/case.tks
+  Scenario: adopt_break_unknown_label
+    When compilation fails
+    Then diagnostic = "`break`/`continue` to an unknown loop label (no enclosing loop carries"
+
+  # src/c19_adopt_return_type_mismatch/case.tks
+  Scenario: adopt_return_type_mismatch
+    When compilation fails
+    Then diagnostic = "return value does not match the function's declared return type"
+
+  # src/c20_arena_manual_leak/case.tks
+  Scenario: arena_manual_leak
+    When compilation fails
+    Then diagnostic = "`#must_free` value `a` is dropped without being freed on this path — c"
+
+  # src/c27_extern_reachability/case.tks
+  Scenario: extern_reachability
+    When compilation fails
+    Then diagnostic = "arithmetic needs a numeric operand (int or float)"
+
+  # src/c28_free_aliased_rejected/case.tks
+  Scenario: free_aliased_rejected
+    When compilation fails
+    Then diagnostic = "cannot free `xs` — it is aliased (another binding still holds it); `me"
+
+  # src/c29_free_captured_by_container_rejected/case.tks
+  Scenario: free_captured_by_container_rejected
+    When compilation fails
+    Then diagnostic = "cannot free `xs` — it is aliased (another binding still holds it); `me"
+
+  # src/c30_free_field_extract_rejected/case.tks
+  Scenario: free_field_extract_rejected
+    When compilation fails
+    Then diagnostic = "cannot free `obj` — it is aliased (another binding still holds it); `m"
+
+  # src/c31_iface_value_struct_rejected/case.tks
+  Scenario: iface_value_struct_rejected
+    When compilation fails
+    Then diagnostic = "a `struct` value cannot be used as the interface"
+
+  # src/c34_lit_neg_unsigned/case.tks
+  Scenario: lit_neg_unsigned
+    When compilation fails
+    Then diagnostic = "a negative literal cannot be annotated as an unsigned type (M.1)"
+
+  # src/c35_lit_slice_overflow/case.tks
+  Scenario: lit_slice_overflow
+    When compilation fails
+    Then diagnostic = "literal out of range for the annotated type (M.1 — fail early)"
+
+  # src/c36_lit_trunc_cast/case.tks
+  Scenario: lit_trunc_cast
+    When compilation fails
+    Then diagnostic = "constant out of range for the cast target (M.1 — fail early)"
+
+  # src/c37_lit_u8_overflow/case.tks
+  Scenario: lit_u8_overflow
+    When compilation fails
+    Then diagnostic = "literal out of range for the annotated type (M.1 — fail early)"
+
+  # src/c38_masked_compound_assign_shift/case.tks
+  Scenario: masked_compound_assign_shift
+    When compilation fails
+    Then diagnostic = "mixed-sign integer arithmetic has no lossless common type here (W-RULE"
+
+  # src/c39_must_free_leak/case.tks
+  Scenario: must_free_leak
+    When compilation fails
+    Then diagnostic = "`#must_free` value `h` is dropped without being freed on this path — c"
+
+  # src/c40_redundant_cast_same_type/case.tks
+  Scenario: redundant_cast_same_type
+    When compilation fails
+    Then diagnostic = "redundant cast"
+
+  # src/c46_ref_local_unnamed_source_rejected/case.tks
+  Scenario: ref_local_unnamed_source_rejected
+    When compilation fails
+    Then diagnostic = "`let`/`const` cannot bind a reference — a reference binding is spelled"
+
+  # src/c48_ref_null_deref_unnarrowed_rejected/case.tks
+  Scenario: ref_null_deref_unnarrowed_rejected
+    When compilation fails
+    Then diagnostic = "cannot dereference a `Ref<T> | null` — narrow it to a bare `Ref<T>` fi"
+
+  # src/c49_ref_null_local_escape_rejected/case.tks
+  Scenario: ref_null_local_escape_rejected
+    When compilation fails
+    Then diagnostic = "a function cannot return an optional reference (`Ref<T> | null`) — ref"
+
+  # src/c50_ref_nullable_binding_rejected/case.tks
+  Scenario: ref_nullable_binding_rejected
+    When compilation fails
+    Then diagnostic = "a `ref` binding's source must be the referent's own type (or another r"
+
+  # src/c51_ref_of_immutable_rejected/case.tks
+  Scenario: ref_of_immutable_rejected
+    When compilation fails
+    Then diagnostic = "cannot take a reference to immutable `x`"
+
+  # src/c52_ref_return_local_rejected/case.tks
+  Scenario: ref_return_local_rejected
+    When compilation fails
+    Then diagnostic = "a `-> ref T` function may return only one of its own `ref` parameters "
+
+  # src/c56_width_rule_int_float_reject/case.tks
+  Scenario: width_rule_int_float_reject
+    When compilation fails
+    Then diagnostic = "no mixed int/float"
+
+  # src/c57_width_rule_mixed_sign_reject/case.tks
+  Scenario: width_rule_mixed_sign_reject
+    When compilation fails
+    Then diagnostic = "no lossless common type"
+
+Feature: F9 romaneio .31 — the audit's compile-fail regressions — folded into this project's single failing build
+
+  # src/c58_d1_class3_noop_widen_still_rejected/case.tks
+  Scenario: d1_class3_noop_widen_still_rejected
+    When compilation fails
+    Then diagnostic = "redundant cast"
+
+  # src/c59_ref_forwarding_wrong_referent_rejected/case.tks
+  Scenario: ref_forwarding_wrong_referent_rejected
+    When compilation fails
+    Then diagnostic = "a forwarded `ref` binding must name the SAME referent type"
+
+  # src/c60_lambda_write_to_copy_capture_rejected/case.tks
+  Scenario: lambda_write_to_copy_capture_rejected
+    When compilation fails
+    Then diagnostic = "a lambda cannot assign to the captured variable `n`"
+
+Feature: checker SOFT pre-walk rejections — folded into this project's single failing build
+
+  # src/c55_unsafe_field_in_safe_struct/case.tks — `validate_type_decls`, a SOFT boundary
+  Scenario: unsafe_field_in_safe_struct
+    When compilation fails
+    Then diagnostic = "struct/class 'Wrapper' has an unsafe-typed field 'bu"
+
+  # src/c53_reject_flags_65/case.tks — `check_modules`, a SOFT boundary
+  Scenario: reject_flags_65
+    When compilation fails
+    Then diagnostic = "a flags type may declare at most 64 members (bit 63 is the last) — wri"
+
+Feature: checker SIGNATURE walk — a HARD boundary, so both constructs share ONE build
+
+  Scenario: discard_param_plain_fn
+    Given source = "cases/prewalk_signature_stops.tks"
+    When compilation fails
+    Then diagnostic = "a `_` discard parameter is only allowed when impleme"
+
+  Scenario: ref_depth_rejected
+    Given source = "cases/prewalk_signature_stops.tks"
+    When compilation fails
+    Then diagnostic = "a reference cannot target another reference (`Ref<Re"
+
+Feature: F8 target — the TEKO_TARGET boundary (compile-fail; R2 honest error, teko-target-crosslink-0.3.1.md §0)
+
+  # An unrecognised TEKO_TARGET must be a COMPILE error naming the value AND listing the supported
+  # set — never a silent mis-lower to some other object format (the pre-0.3.1 arm64/Mach-O fallback,
+  # which is how a linux x86_64 host came to emit a Mach-O arm64 object).
+  #
+  # ALL THREE NAME THE SAME BAD TARGET, and that is deliberate. They are three PROPERTIES of ONE
+  # message: `unsupported_target_error` (src/build/project.tks) concatenates the offending name with
+  # a fixed supported-set list, and every unrecognised spelling reaches it through the same
+  # `target_from_name` lookup miss — so a second spelling re-proves the identical path and buys
+  # nothing but a build. They used to declare three different bad names (`bogus-arch`,
+  # `x86_64-solaris`, `not-a-target`) and cost three builds; sharing one, they cost ONE, because a
+  # standalone `Given source` build is now cached per (file, declared env) — `regr_src_key`. The
+  # value kept is the one a scenario actually ASSERTS by literal.
+  Scenario: an unsupported TEKO_TARGET is an honest compile error listing the supported set
+    Given target = "x86_64-solaris"
+    Given source = "cases/target_boundary.tks"
+    When compilation fails
+    Then diagnostic = "unsupported TEKO_TARGET"
+
+  Scenario: the unsupported-target diagnostic names the offending value
+    Given target = "x86_64-solaris"
+    Given source = "cases/target_boundary.tks"
+    When compilation fails
+    Then diagnostic = "x86_64-solaris"
+
+  Scenario: the unsupported-target diagnostic lists a canonical supported name
+    Given target = "x86_64-solaris"
+    Given source = "cases/target_boundary.tks"
+    When compilation fails
+    Then diagnostic = "supported targets: x86_64-linux"
