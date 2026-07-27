@@ -451,6 +451,13 @@ type CgIndex = struct {
     last: CgNameTable
     /** `namespace ~ "::" ~ name` -> the first `TFunction` item carrying that pair. */
     fns: CgNameTable
+    /**
+     * The same-last-segment CHAIN, one entry per item: for a `TypeDecl` at index `i`, the index
+     * (biased by one) of the NEXT declaration sharing its bare last segment, or `0` at the end of
+     * the chain. Entered through `last`, it enumerates exactly the same-bare cousins, in item
+     * order, that a namespace-precise resolution has to discriminate between.
+     */
+    same_last_next: []u64
 }
 
 /**
@@ -567,6 +574,31 @@ fn cg_table_build(keys_in: []str, slots_in: []u64) -> CgNameTable {
 }
 
 /**
+ * cg_table_bucket_of — the bucket `key` occupies, or the capacity when the key is absent.
+ *
+ * The chain builder needs the BUCKET (a stable per-key cell it can thread a tail pointer through),
+ * where every other caller wants the slot; keeping the two apart is what lets the chain be built in
+ * one forward pass over the items with no second hash table.
+ *
+ * @param t    the table to probe
+ * @param key  the key to locate
+ * @return     the bucket index, or `t.mask + 1` when `key` is absent
+ * @since cargo/20-codegen-perf
+ */
+fn cg_table_bucket_of(t: CgNameTable, key: str) -> u64 {
+    let miss = t.mask + 1
+    if t.slots.len == 0 { return miss }
+    let h = teko::runtime::str_hash(key)
+    mut at = h & t.mask
+    loop {
+        if t.slots[at] == 0 { return miss }
+        if t.hashes[at] == h && t.keys[at] == key { return at }
+        at = (at + 1) & t.mask
+    }
+    miss
+}
+
+/**
  * The item index (biased by one) `key` maps to, or `0` when the key is absent or the table is empty.
  *
  * An EMPTY table answers `0` for every key, which is what makes the index optional: a `CgProg` built
@@ -621,11 +653,42 @@ fn cg_index_of(items: []checker::TItem) -> CgIndex {
         }
         i++
     }
+    let last_table = cg_table_build(last_k, last_v)
     CgIndex {
         exact = cg_table_build(exact_k, exact_v)
-        last = cg_table_build(last_k, last_v)
+        last = last_table
         fns = cg_table_build(fn_k, fn_v)
+        same_last_next = cg_same_last_chain(items.len, last_table, last_k, last_v)
     }
+}
+
+/**
+ * cg_same_last_chain — thread every declaration to the next one sharing its bare last segment.
+ *
+ * One forward pass over the (already collected) last-segment keys, carrying a per-bucket TAIL so the
+ * chain comes out in item order: the head lives in the `last` table and each link lands in the entry
+ * of the declaration it follows.
+ *
+ * @param items_len   the program's item count (the chain array's length)
+ * @param last_table  the built last-segment table, which owns the chain heads
+ * @param last_k      each declaration's bare last segment, in item order
+ * @param last_v      each declaration's item index biased by one, parallel to `last_k`
+ * @return            the chain: `[i]` is the next same-last declaration after item `i`, biased by
+ *                    one, or `0`
+ * @since cargo/20-codegen-perf
+ */
+fn cg_same_last_chain(items_len: u64, last_table: CgNameTable, last_k: []str, last_v: []u64) -> []u64 {
+    mut chain = cg_zeros(items_len)
+    mut tail = cg_zeros(last_table.mask + 2)
+    mut n: u64 = 0
+    loop {
+        if n >= last_k.len { break }
+        let bucket = cg_table_bucket_of(last_table, last_k[n])
+        if tail[bucket] != 0 { chain[tail[bucket] - 1] = last_v[n] }
+        tail[bucket] = last_v[n]
+        n++
+    }
+    chain
 }
 
 /**
@@ -668,7 +731,8 @@ fn cg_prog_bare(p: checker::TProgram) -> CgProg {
         keys = teko::list::empty()
         slots = teko::list::empty()
     }
-    CgProg { items = p.items; ix = CgIndex { exact = empty; last = empty; fns = empty } }
+    let ix = CgIndex { exact = empty; last = empty; fns = empty; same_last_next = teko::list::empty() }
+    CgProg { items = p.items; ix = ix }
 }
 
 /**
@@ -868,25 +932,64 @@ fn cg_find_decl_ns(prog: CgProg, path: parser::Path, ref_ns: str) -> parser::Typ
     } else {
         qual = embedded_qual
     }
+    if prog.ix.same_last_next.len == 0 { return cg_find_decl_ns_scan(prog, last, qual, ref_ns, qualified) }
+    mut cur = cg_table_get(prog.ix.last, last)
+    let head = cur
+    loop {
+        if cur == 0 { break }
+        match prog.items[cur - 1] {
+            parser::TypeDecl as d => { if cg_decl_ns_matches(d, qual, ref_ns, qualified) { return d } }
+            _ => { }
+        }
+        cur = prog.ix.same_last_next[cur - 1]
+    }
+    cg_decl_at(prog, head)
+}
+
+/**
+ * cg_decl_ns_matches — does declaration `d` satisfy the namespace side of a ns-precise resolution?
+ *
+ * A QUALIFIED reference binds a decl whose namespace is the written qualifier or ends in it (so a
+ * partially-written `emit::Reader` still reaches `teko::emit::Reader`); a BARE reference binds its
+ * own namespace's decl.
+ *
+ * @param d          the candidate declaration (already known to share the reference's last segment)
+ * @param qual       the reference's namespace qualifier (empty for a bare reference)
+ * @param ref_ns     the namespace the reference is written in
+ * @param qualified  whether the reference carried a qualifier at all
+ * @return           true iff `d` is the namespace-precise binding for the reference
+ * @since cargo/20-codegen-perf
+ */
+fn cg_decl_ns_matches(d: parser::TypeDecl, qual: str, ref_ns: str, qualified: bool) -> bool {
+    let dns = checker::name_qualifier(d.name)
+    if !qualified { return dns == ref_ns }
+    dns == qual || teko::runtime::str_ends_with(dns, "::" ~ qual)
+}
+
+/**
+ * cg_find_decl_ns_scan — the ORDER-DEFINING linear form of the namespace-precise resolution, kept as
+ * the chain walk's reference semantics and as the fallback for an unindexed `CgProg`.
+ *
+ * @param prog       codegen's threaded program view
+ * @param last       the reference's bare last segment
+ * @param qual       the reference's namespace qualifier (empty for a bare reference)
+ * @param ref_ns     the namespace the reference is written in
+ * @param qualified  whether the reference carried a qualifier at all
+ * @return           the ns-precise declaration, else the first last-segment match
+ * @throws           when no declaration carries that last segment at all
+ */
+fn cg_find_decl_ns_scan(prog: CgProg, last: str, qual: str, ref_ns: str, qualified: bool) -> parser::TypeDecl | error {
     mut i = 0
     loop {
         if i >= prog.items.len { break }
         match prog.items[i] {
             parser::TypeDecl as d => {
-                if checker::name_last_segment(d.name) == last {
-                    let dns = checker::name_qualifier(d.name)
-                    if qualified {
-                        if dns == qual || teko::runtime::str_ends_with(dns, "::" ~ qual) { return d }
-                    } else {
-                        if dns == ref_ns { return d }
-                    }
-                }
+                if checker::name_last_segment(d.name) == last && cg_decl_ns_matches(d, qual, ref_ns, qualified) { return d }
             }
             _ => { }
         }
         i++
     }
-    // fallback: any last-segment match (a root-ns type, or the no-collision common case)
     mut j = 0
     loop {
         if j >= prog.items.len { break }
@@ -8265,6 +8368,10 @@ fn cg_fn_is_self_recursive(f: checker::TFunction) -> bool {
  * @return      the enclosing MODULE namespace for a method's owner-named ns, else `ns` unchanged
  */
 fn cg_fn_ref_ns(prog: CgProg, ns: str) -> str {
+    if prog.ix.exact.slots.len != 0 {
+        if cg_table_get(prog.ix.exact, ns) != 0 { return checker::name_qualifier(ns) }
+        return ns
+    }
     mut i = 0
     loop {
         if i >= prog.items.len { break }
