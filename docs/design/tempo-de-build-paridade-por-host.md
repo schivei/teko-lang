@@ -213,6 +213,37 @@ Os dois legs `riscv64` ficam de fora de propósito: o fator de 2,91 que a mesma 
 dá para eles mede um job cujo custo era 85% execução emulada, mistura diferente da de
 hoje — usá-lo seria comparar duas emulações distintas fingindo que são uma.
 
+### 4.2.1 MODELO(previsão falseável) — decompondo em "builds do compilador"
+
+Este é um modelo, não um fato, e está aqui porque é FALSEÁVEL por UMA linha de log
+(§8.2) — quem tiver acesso à API confirma ou mata em dois minutos.
+
+`macos-arm64` = 123 s. Na corrida `28763999356` o `Test gate (VM)` do macOS — um
+self-build COMPLETO mais a execução de 863 `#test` — custou 75 s; um build
+`--no-verify` (sem o gate) fica bem abaixo disso. Se o macOS pagou os **3 builds** da
+escada fixada (§3), cada build sai a **~41 s**, e 3 × 41 = 123 s fecha exatamente.
+
+Aplicando 41 s × o fator de host e comparando com o observado:
+
+| lane | 3 builds de escada, previsto | observado | resíduo |
+|---|---:|---:|---:|
+| `macos-arm64` | 123 s | 123 s | **1,0×** |
+| `linux-arm64` | 222 s | 543 s | 2,4× |
+| `linux-x86_64` | 207 s | 918 s | 4,4× |
+| `windows-x86_64` | 144 s | 613 s | **4,3×** |
+| `windows-arm64` | 651 s | 2328 s | **3,6×** |
+
+Os resíduos de `linux-arm64` e `linux-x86_64` têm explicação nomeada e com número: são
+as duas compilações de container da §2 (pull de 561 MB + `apk add build-base` + um
+`gcc -O2` sobre a TU inteira). Os resíduos dos DOIS Windows não têm — eles não fazem
+container nenhum. **Se o modelo estiver certo, sobra um fator ~4 específico do Windows
+que nenhuma medição deste documento explica, e é exatamente ali que a tese de mecanismo
+de SO do owner teria onde morar.**
+
+Duas leituras de log matam ou confirmam o modelo inteiro: a linha (2) da §8 diz se cada
+host pagou 1 ou 3 builds, e as linhas (3) dão o custo de UM build por host diretamente,
+sem modelo nenhum no meio.
+
 ### 4.3 As três conclusões que essa tabela força
 
 **(a) `windows-arm64` NÃO é uma anomalia estrutural — REFUTADO.** O achado de que uma
@@ -251,27 +282,36 @@ valor, chamadas intra-TU para folhas, tabela de ponteiros que mantém TODAS as f
 alcançáveis — sem isso o `-O2` elimina as estáticas não referenciadas e a medição mede
 outra coisa).
 
-| TU | MB | cc | opt | segundos |
-|---|---:|---|---|---:|
-| `v2_1000.c` | 0,80 | gcc | `-O0` | 3,33 |
-| `v2_1000.c` | 0,80 | gcc | `-O2` | **15,49** |
-| `v2_1000.c` | 0,80 | clang | `-O0` | 1,75 |
-| `v2_1000.c` | 0,80 | clang | `-O2` | 13,54 |
-| `v2_2000.c` | 1,61 | gcc | `-O0` | 9,45 |
-| `v2_2000.c` | 1,61 | gcc | `-O2` | **37,87** |
-| `v2_2000.c` | 1,61 | clang | `-O0` | 3,37 |
-| `v2_2000.c` | 1,61 | clang | `-O2` | 31,74 |
-| `v2_4000.c` | 3,23 | gcc | `-O0` | 18,64 |
+| TU | MB | cc | opt | segundos | pico RSS |
+|---|---:|---|---|---:|---:|
+| `v2_1000.c` | 0,80 | gcc | `-O0` | 3,33 | 161 MB |
+| `v2_1000.c` | 0,80 | gcc | `-O2` | **15,49** | 263 MB |
+| `v2_1000.c` | 0,80 | clang | `-O0` | 1,75 | — |
+| `v2_1000.c` | 0,80 | clang | `-O2` | 13,54 | 263 MB |
+| `v2_2000.c` | 1,61 | gcc | `-O0` | 9,45 | 299 MB |
+| `v2_2000.c` | 1,61 | gcc | `-O2` | **37,87** | 351 MB |
+| `v2_2000.c` | 1,61 | clang | `-O0` | 3,37 | — |
+| `v2_2000.c` | 1,61 | clang | `-O2` | 31,74 | 351 MB |
+| `v2_4000.c` | 3,23 | gcc | `-O0` | 18,64 | 389 MB |
+| `v2_4000.c` | 3,23 | gcc | `-O2` | **81,09** | **636 MB** |
+| `v2_4000.c` | 3,23 | clang | `-O0` | 7,27 | — |
+| `v2_4000.c` | 3,23 | clang | `-O2` | 61,67 | 636 MB |
+| `v2_8000.c` | 6,46 | gcc | `-O0` | 47,09 | 783 MB |
 
-Três resultados, todos com número:
+Quatro resultados, todos com número:
 
-1. **`-O2` custa 4,0–4,7× o `-O0`** na mesma TU (15,49/3,33 = 4,65; 37,87/9,45 = 4,01).
-2. **O custo é SUPERLINEAR no tamanho da TU**: dobrar a TU multiplica o tempo de
-   `gcc -O2` por 2,44 e o de `clang -O2` por 2,34. Uma unidade de tradução única e
-   enorme é a pior forma possível de apresentar esse trabalho a um compilador C.
-3. **gcc vs clang quase não importa — REFUTADO como causa.** `gcc -O2` é apenas
-   1,14–1,19× o `clang -O2`. A hipótese "macOS é rápido porque `cc` é clang lá e gcc
-   aqui" não sobrevive: 14% não explica 4×.
+1. **`-O2` custa 2,5–4,7× o `-O0`** na mesma TU (15,49/3,33 = 4,65; 37,87/9,45 = 4,01;
+   81,09/18,64 = 4,35).
+2. **O custo é SUPERLINEAR no tamanho da TU**: cada duplicação multiplica o tempo de
+   `gcc -O2` por 2,44 e depois por 2,14 — expoente ≈ 1,2. Uma unidade de tradução única
+   e enorme é a pior forma possível de apresentar esse trabalho a um compilador C.
+3. **gcc vs clang quase não importa — REFUTADO como causa.** `gcc -O2` é 1,14–1,31× o
+   `clang -O2`. A hipótese "macOS é rápido porque `cc` é clang lá e gcc aqui" não
+   sobrevive: 30% não explica 4×.
+4. **O pico de RSS cresce mais rápido que a TU**: 263 MB a 0,80 MB, 636 MB a 3,23 MB.
+   Este é o número que a ação T-1 (§10) precisa e que ainda NÃO existe para o `teko.c`
+   real — extrapolar daqui daria alguns GB por processo, e dois em paralelo num runner
+   de 16 GB é apertado o bastante para não se fazer às cegas.
 
 O item (2) é o achado acionável desta seção e vale para TODOS os hosts: o emissor
 produz UMA TU. Ela é compilada com `-O2`, sozinha, num único núcleo — o resto do runner
