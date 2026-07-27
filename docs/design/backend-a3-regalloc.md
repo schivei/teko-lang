@@ -800,12 +800,11 @@ standard linear-scan-with-holes extension), landed when A1/A2 exercise `loop` en
 interp. This is stated up front so no one claims A3 covers loops.
 
 > **✅ LANDED by #389 F2 (loop-liveness extension), 2026-07-13.** The honest-stop is REMOVED across
-> all three regalloc backends (`regalloc.tks`/`regalloc_x86.tks`/`regalloc_riscv.tks`): each
+> all three regalloc backends (`regalloc.tks`/`regalloc_x86.tks`/um regalloc): each
 > `compute_intervals*` now describes the loops via `natural_loops*` (one `NaturalLoop{header_pt,
 > latch_pt}` per retreating edge — the §6.2 replacement for the bare `has_back_edge` bool) and
 > widens every header-live interval over its loop body with the shared, register-abstract
 > `extend_over_loops` (only `end` grows; `crosses_call` recomputed; `LiveInterval` stays a single
-> `[start,end]`). The x86 lane is the executing linux-x86_64 own==C differential and the riscv lane
 > runs under QEMU, so the extension is mirrored to all three — own-native now compiles range-`for`
 > (and every) loop and matches C (`own_loop_range_native`, `own_loop_nested_range`,
 > `scripts/diff_c_own.sh`). True lifetime holes remain the deferred QUALITY-only follow-up.

@@ -87,13 +87,12 @@ so we do not claim it.
 | `encode_arm64_test.tkt` | 70 | 1,940 | AArch64 instruction encodings (hex golden) |
 | `encode_x86_64_test.tkt` | 65 | 1,519 | x86-64 encodings (hex golden) |
 | `isel_x86_64_test.tkt` | 62 | 1,005 | x86-64 instruction selection |
-| `isel_riscv_test.tkt` | 57 | 903 | RISC-V isel |
-| `encode_riscv_test.tkt` | 51 | 1,385 | RISC-V encodings |
-| `regalloc_test.tkt` / `_x86` / `_riscv` / `_match` | 42/33/30/3 | — | register allocation |
+| um isel de backend | 57 | 903 | RISC-V isel |
+| um backend encoder | 51 | 1,385 | RISC-V encodings |
+| `regalloc_test.tkt` / `_x86` / `` / `_match` | 42/33/30/3 | — | register allocation |
 | `isel_arm64_test.tkt` | 38 | 753 | AArch64 isel |
 | `minst_interp_test.tkt` / `minst_*` | 35/14/10/8 | — | MInst interpreter **oracle** (active, not the retired VM) |
-| `objfile_*` (elf/macho/coff/wasm/elf_riscv) | 71 total | — | object-file emission per format |
-| `abi_*` (sysv64/win64/riscv64) | 32 total | — | ABI lowering |
+| `objfile_*`
 
 **Poda posture:** **KEEP essentially all.** Each `#test` here is a distinct golden vector (a
 unique byte string / a distinct isel pattern / a distinct spill scenario). They are already

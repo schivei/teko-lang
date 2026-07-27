@@ -14,7 +14,6 @@ Decision-set (owner rulings, 2026-07-19): CURA=`push(&x,v)` ref-push · `&x`=bor
 SEGURO (não unsafe) · exclusivo-XOR-shared · mutabilidade INFERIDA (sem `&mut`) · `let`=
 imutável PROFUNDO · `mut` fica / `var` não / `let` não morre · array Model A `[N]T`
 `{ptr,len,cap}` sem zero-fill · crescimento cap-doubling+pânico no teto · AL6 migração por
-nível de conhecimento. Companion: `docs/design/compile-time-architecture.md` (CI wall),
 `docs/design/spine-build-plan.md` (o borrow-checker #331 que a FUNDAÇÃO consome),
 `docs/design/const-tb*` (rodata const, T-B6).
 

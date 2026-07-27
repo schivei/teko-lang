@@ -24,7 +24,6 @@ priority order:
    `teko` is a single self-contained toolchain — the precondition for the bare-metal / OS-in-Teko
    direction (a compiler that needs `cc` cannot bootstrap a kernel).
 2. **Cross-compile speed.** The honest verdict is already quantified in
-   `docs/design/compile-time-architecture.md` §5: the own backend **wins big on cross-compile**
    (`:438-455` — the current cross path re-runs `zig cc` **six times**, once per Linux artifact;
    the own backend lowers the front-end **once** and emits N cheap machine-code lowerings), and
    wins on independence. It wins only **~2.4% on a local self-build** (`:429-436`; `cc` is 0.69s of
@@ -291,8 +290,6 @@ that PROVES each issue.
 - Verifies via: C-native == own-native on Linux x86_64 (glibc + musl) in CI; replaces one `zig cc`
   leg of `cross_compile_linux.sh`.
 
-**B2 · N4 — riscv64 LP64D + ELF — SHIPPED THEN REMOVED (0.3.1).** Built at #387 and deleted in
-0.3.1 by owner ruling ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar
 todos os vestígios, sem dead code"). Its modules, its `NativeTarget` arm, its CI lanes and its
 design doc are gone; the phase letter is kept so B1/B3 keep their names.
 

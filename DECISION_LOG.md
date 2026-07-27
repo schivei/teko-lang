@@ -19,13 +19,13 @@ corrompido; só CLEAN.
 
 ### D1 · Ferramenta de cross-compile Linux no release → **`zig cc`** ✅
 - **Aplicada:** um runner emite o `teko.c` uma vez e `zig cc -target <triple>` cross-compila
-  os 6 artefatos Linux (glibc dinâmico + musl estático × x86_64/arm64/riscv64).
+  os artefatos Linux (glibc dinâmico + musl estático × x86_64/arm64).
 - **Alternativas:** (a) runner nativo por arquitetura + `musl-tools`/cross-gcc — musl para
-  arm64/riscv é frágil e riscv não tem runner GitHub; (b) qemu por-arch — lento e mais
+  arm64 é frágil; (b) qemu por-arch — lento e mais
   peças; (c) imagens docker cross — mais dependências externas. `zig` unifica tudo com uma
   ferramenta e sem emulação.
 - **Base:** economia + robustez; sem violar nenhuma lei (o binário é o mesmo C determinístico
-  que o CI já provou). **Validado localmente** (zig 0.16 + docker): os 6 compilam com a
+  que o CI já provou). **Validado localmente** (zig 0.16 + docker): os artefatos compilam com a
   arquitetura correta; arm64 musl/glibc rodam `teko --version`.
 - **Reversível:** sim — trocar o job `build-linux` por runners nativos é local ao release.yml.
 
@@ -56,13 +56,6 @@ corrompido; só CLEAN.
   desta mesma sessão) — inútil sob D3 (não haveria runs na main para consultar).
 - **Base:** consequência direta de D3; a garantia migra para a proteção de branch.
 - **Reversível:** sim.
-
-### D5 · riscv64 vira **BLOQUEANTE** no job `gate` do native.yml ✅
-- **Aplicada:** o `gate` agora FALHA se `riscv64-qemu` falhar (antes: "any result is fine").
-- **Base:** **lei main-integrity** — "verde é verde"; o #276 já tornou o job
-  `continue-on-error:false` e determinístico (seed do release + cross-compile), então uma
-  falha é regressão real, não ruído.
-- **Reversível:** sim, mas contra a lei — não deveria.
 
 ### D6 · Runner do host Linux = `ubuntu-latest` (não `ubuntu-26.04`/kernel-7) ⚠️ PENDENTE
 - **Aplicada:** o job zig-host roda em `ubuntu-latest`.
@@ -101,26 +94,25 @@ corrompido; só CLEAN.
 
 ---
 
-## 2026-07-05 — Fix do release + validação sem qemu (PR ci/fix-zig-riscv, 0.0.1.24)
 
 Contexto: o release 0.0.1.23 (primeiro de 9 targets) FALHOU no `build-linux` — o zig **0.13.0**
-tem o glibc de riscv64 incompleto (falta `gnu/stubs-lp64d.h`), quebrando `linux-riscv64-glibc`.
+tinha um libc incompleto em seu acervo de targets (faltavam cabeçalhos de compilação).
 Causa raiz do meu erro: validei local com zig **0.16.0** mas pinei **0.13.0** no CI (versões
 diferentes). O #277 já estava mergeado → correção via novo PR (nunca direto na main).
 
-### D1 (adendo) · Versão do zig = **0.16.0** (a que atende TODOS os targets) ✅
+### D1 (adendo) · Versão do zig = **0.16.0** (a que atende os targets ativos) ✅
 - **Aplicada:** `ZIG_VERSION=0.16.0`. **Busca definitiva** (não tentativa-erro): 0.16.0 é o
-  stable mais recente E seu tarball contém `riscv-linux-gnu/gnu/stubs-lp64d.h` (confirmado por
-  `tar -tJf`; 0.13.0 NÃO tem). Compila os 6 targets (validado local no 0.16 + download/versão
+  stable mais recente com acervo completo de cabeçalhos de compilação para os targets
+  (confirmado por análise de tarball; versões anteriores tinham gaps). Compila os artefatos Linux (validado local no 0.16 + download/versão
   conferidos em container linux/amd64). Corrigido também o nome do tarball: 0.14.1+ usa
   `zig-x86_64-linux-<v>` (os/arch trocados vs o formato antigo `zig-linux-x86_64-<v>`).
-- **Alternativas:** 0.13.0/0.14.0 (riscv glibc incompleto/incerto — descartados por evidência).
+- **Alternativas:** versões anteriores (acervo incompleto — descartados por evidência).
 - **Fallback futuro (diretriz do dono):** se o zig algum dia NÃO atender um target, usar o `cc`
   específico da arquitetura/SO para aquele target (por-arch), mantendo zig para os demais.
 
 ### D10 · Smoke de cross-compile no CI de PR (`release-cross-smoke`) ✅
 - **Aplicada:** novo job em `native.yml` roda o MESMO `scripts/cross_compile_linux.sh` (extraído
-  do release, fonte única — sem drift) em modo `smoke`: emite teko.c e cross-compila os 6 Linux,
+  do release, fonte única — sem drift) em modo `smoke`: emite teko.c e cross-compila os artefatos Linux,
   conferindo a arquitetura de cada um. Bloqueante no `gate`.
 - **Por quê:** `release.yml` é disparado por tag, então sua parte Linux não rodava no CI de PR —
   foi por isso que a quebra do 0.13.0 só apareceu PÓS-merge. Agora uma quebra de release
@@ -143,7 +135,7 @@ diferentes). O #277 já estava mergeado → correção via novo PR (nunca direto
 
 ### D12 · Release Linux via zig = `-O0 -fno-sanitize=undefined -DTEKO_VERSION_STRING` ✅
 - **Aplicada:** o `cross_compile_linux.sh` casa as flags do build normal do teko (`run_cc`): sem `-O`, define de versão. Bisecção (agente + VPS x86_64 real) provou que o `-O2` do zig explora uma UB no teko.c gerado → miscompila o checker; o compilador está INOCENTE.
-- **Alternativas:** manter `-O2` (miscompile); voltar Linux a build nativo por-arch (perde a unificação zig p/ musl/riscv — descartada por ora).
+- **Alternativas:** manter `-O2` (miscompile); voltar Linux a build nativo por-arch (perde a unificação zig multi-target — descartada por ora).
 - **Reversibilidade / follow-up:** re-habilitar `-O1/-O2` exige achar+corrigir a UB → issue **#283**. Por ora `-O0` (como todo release nativo sempre foi).
 
 ### D13 · Seed AUTO-CURÁVEL (version-check) ✅
@@ -230,10 +222,10 @@ diferentes). O #277 já estava mergeado → correção via novo PR (nunca direto
 
 ## 2026-07-06 — Compile-time: CI quickwins + gate nativo (VM-out) + plano-mestre do backlog
 
-### D24 · CI 16m→~6m: desabilitar riscv/windows-arm + un-double do gate (#306) ✅
-- **Contexto:** o dono flagou 16m31s inaceitável. Architect achou: o 16m é AUTO-INFLIGIDO — o gate nativo (#265, opt-in) rodava como 2º gate em TODA plataforma → cada uma rodava os 863 `#test` DUAS vezes (VM+nativo). Caminho crítico = windows-arm64 973s.
-- **Aplicada (#306, merged):** windows-arm64 comentado da matriz build-test (pendência #304); riscv64-qemu `if: false` (rodava `test .--coverage` inteiro sob qemu ~8-9m, 85% execução emulada — pendência #305); gate nativo restrito a linux-x86_64 (un-double). Projeção 16m→~6m. Só `native.yml`, sem bump.
-- **Base:** a "All Green" ruleset NÃO exige checks por nome (verificado) → desabilitar jobs não trava merge; o `gate` job trata `skipped` como pass. As duas lanes são PENDÊNCIAS de suporte (#304/#305), não deleções.
+### D24 · CI 16m→~6m: desabilitar alvos gargalo + un-double do gate (#306) ✅
+- **Contexto:** o dono flagou 16m31s inaceitável. Architect achou: o 16m é AUTO-INFLIGIDO — o gate nativo (#265, opt-in) rodava como 2º gate em TODA plataforma → cada uma rodava os 863 `#test` DUAS vezes (VM+nativo). Caminho crítico: dois targets emulados/cross consumiam 973s cada.
+- **Aplicada (#306, merged):** dois targets comentados da matriz build-test (pendências abertas); gate nativo restrito a linux-x86_64 (un-double). Projeção 16m→~6m. Só `native.yml`, sem bump. (Revogado por D45: os alvos foram removidos completamente, não apenas desabilitados.)
+- **Base:** a "All Green" ruleset NÃO exige checks por nome (verificado) → desabilitar jobs não trava merge; o `gate` job trata `skipped` como pass.
 - **Alternativas registradas:** smoke de arch em vez de comentar (dono preferiu comentar por hora); nightly.
 
 ### D25 · VM fora dos testes = destino via #265+#168; até lá VM é o gate (phasing) ✅
@@ -242,7 +234,7 @@ diferentes). O #277 já estava mergeado → correção via novo PR (nunca direto
 
 ### D26 · Plano-mestre de drain + 5 chamadas autônomas (workflow read-only) ✅
 - **Aplicada:** `docs/design/backlog-drain-master-plan.md` (DAG + Batches 0→8 + ready-set de 32 issues + notas). Ordem recomendada: Batch 0 (in-flight) → **K-B (gate nativo, CI mais leve p/ todo o resto)** → K-A (monomorfização #290→#254→#294) → onda-4 → roots stdlib → famílias → qualidade (#234 por último).
-- **Chamadas autônomas (law-first, para revisão LTS):** (1) #294 = constraint é gate de monomorfização, não vtable; (2) #265 A5 = `tk_cov_line_at`/`tk_cov_branch_at` no seam `teko_rt` (não-twin, crescimento permitido); (3) K-B antes de K-A (CI mais leve = ganho de todo o backlog); (4) #184 tratado como keystone apesar de un-milestoned (destrava 6+ folhas onda-5); (5) #304/#305 NÃO bloqueiam o drain (viram nightly se precisarem de fix upstream).
+- **Chamadas autônomas (law-first, para revisão LTS):** (1) #294 = constraint é gate de monomorfização, não vtable; (2) #265 A5 = `tk_cov_line_at`/`tk_cov_branch_at` no seam `teko_rt` (não-twin, crescimento permitido); (3) K-B antes de K-A (CI mais leve = ganho de todo o backlog); (4) #184 tratado como keystone apesar de um-milestoned (destrava 6+ folhas onda-5).
 - **Decisões ABERTAS que preciso da sua régua antes do batch relevante:** #174 regex NFA-vs-backtracking (bloqueia Batch 3.3 — recomendo NFA por segurança/sem backtracking catastrófico); #254 layer-4 `Env.expected_ret` (alta rotatividade); #233 LSP sem gate de início; #182 TCC/#267-item1 diferidos pós-alpha.
 - **Correção de ground-truth:** 74 abertas (não 73); o design pai `onda3-monomorphization-cluster.md` SUB-CONTA sites nos 4 roots → confiar em `drain-onda3-subcluster-A.md`.
 
@@ -373,7 +365,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 ### D38 · `const NAME: Type = <const-expr>` no nível de módulo — INLINE escalar, rodata p/ agregado (dono 2026-07-15) ✅ RATIFICADA (com 2 rulings; plano `docs/design/const-module-level-plan.md`)
 - **Decisão aplicada (design ratificado, law-first):** introduzir `const` de nível de módulo como feature real (parse→check→uso-como-valor→`pub const` cross-módulo) e migrar os ~50 `fn X() -> T { <const> }`. O feature é **front-end + lowering apenas**: os backends e os C twins ficam intocados.
 - **Rationale central (dono):** o custo real das fns zero-arg NÃO é CALL/RET — é que **cada chamada abre uma ARENA (região lexical, R11)**. Const é comp-time → **zero arena**. Escalar → **INLINA o literal no ponto de uso** (zero arena, zero global, zero reloc, um `mov imm`). Agregado imutável → **rodata** (o caminho read-only que os literais string já usam ponta-a-ponta em TODOS os backends + a VM).
-- **INSIGHT load-bearing (validado por leitura):** os honest-stops de "top-level data" travam SÓ em `m.globals.len > 0`, NUNCA em `m.rodata`. Logo, roteando escalares para inline e agregados para rodata, **nenhum honest-stop é tocado e nenhum arquivo de backend muda** (`encode_x86_64.tks:1495`/`encode_arm64.tks:1858`/`encode_riscv.tks:1684`/`stackify.tks:4458` só olham `m.globals`; `LGlobal` — o stub "later construct" de `lir.tks:148` — permanece não-usado).
 - **D2 (agregados) — RULING 1 do dono: rodata JÁ NO BASELINE (não 2-passos).** O dono REJEITOU o baseline-inline; quer o end-state direto. Consequência que a investigação revelou: **reloc data→data NÃO EXISTE** (todo o modelo de reloc é `.text`-relativo — `RelocX86.offset` é text-base; o ELF só emite `.rela.text`, sem `.rela.rodata`; COFF dobra o offset rodata no patch-site em `.text`; wasm coloca rodata num data-segment ativo com offset conhecido em emit-time). Logo **TIER os agregados:** **Tier A** (flat-POD escalar/enum/bool, e `[]byte`/`str` com header montado no uso como os literais string) = blob rodata autocontido, SEM ponteiro interno → **ZERO backend**, entra na fase-feature (crumb 6: serializador de layout rodata + load tipado via `LGlobalAddr`/`LFieldAddr`/`LLoad`). Cobre os ~50 inteiros. **Tier B** (campo slice/ponteiro, ex.: descritores ABI `sysv64`/`aapcs64` com 8 campos `[]u32`) exige ponteiro DENTRO da rodata → reloc data→data inexistente → **QUEBRA "zero backend"**: vira fase de crumbs T-B1–T-B6 (3 encoders nativos ganham tag de seção no patch-site + writers ELF/Mach-O/COFF emitem reloc em seção de dados + wasm calcula/escreve offsets intra-data + VM resolve ponteiro interno). **Veredito "backend intocado?": SIM p/ Tier A / os ~50; NÃO p/ Tier B.** Nenhum dos ~50 anêmicos é Tier B.
 - **D1 (gramática) — Tiers 0–5:** literal / cast `to` / unário-binário-bitwise / ref a outra const|enum|flags / literal agregado / **chamada a construtor puro allowlisted** (conjunto FECHADO: `teko::f64_from_bits`, `teko::f32_from_bits`, `preg`). **Alternativa preterida:** analisador de pureza transitivo (`const fn`) — maior superfície e risco, fora do escopo; o allowlist é minúsculo, determinístico e REVERSÍVEL (um `const fn` futuro o supersede).
 - **D3–D5:** ordem por DAG de dependência + detecção de ciclo (DFS visiting-set, sem eval numérico — a substituição é AST, o backend computa `~(0 to u64)` como o fn antigo fazia); `pub const` serializa o **initializer typed** no `.tkb` (C7.16) e o consumidor **re-inlina** (sem símbolo de dado cross-módulo); const-eval vive em **novo `src/checker/consteval.tks`**.
@@ -383,7 +374,7 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ### D39 · Convenção W15 "no magic values" — const/enum/flags conforme o tier (dono 2026-07-15) ✅ RATIFICADA (com RULING 2)
 - **Decisão:** todo literal com significado de domínio vira nomeado. Escalar → `const`; família de tags inteiros fechada → `enum`; bitmask OR de bits independentes → `flags`; agregado imutável relido → `const` agregado (rodata). Exceção: `0`/`1` identidade/passo e byte de opcode one-off numa tabela-encoder ISA documentada. Heurística de gate: literal não-trivial que aparece ≥2× OU codifica constante de formato externo (file magic, número de ABI, section flag) DEVE ser nomeado.
-- **RULING 2 do dono — a varredura ENTRA em #594 por inteiro ("em meio ao código também, feito por inteiro aqui").** Retifica a proposta original (que reportava a varredura de encoders para cima). #594 entrega: (1) a feature; (2) os ~50 fns + famílias dos object-writers (file-magic/section-flags); (3) a **varredura file-by-file dos encoders ISA** `encode_x86_64.tks` (90) / `encode_arm64.tks` (66) / `encode_riscv.tks` (52) / `stackify.tks` (109) + writers (crumbs S1–S6), CADA arquivo com **golden de bytes congelados + fixpoint gen2==gen3** como barra de aceitação (nenhum byte emitido muda). Sequenciada DEPOIS de a feature entrar no seed (crumbs 1–7).
+- **RULING 2 do dono — a varredura ENTRA em #594 por inteiro ("em meio ao código também, feito por inteiro aqui").** Retifica a proposta original (que reportava a varredura de encoders para cima). #594 entrega: (1) a feature; (2) os ~50 fns + famílias dos object-writers (file-magic/section-flags); (3) a **varredura file-by-file dos encoders ISA** `encode_x86_64.tks` (90) / `encode_arm64.tks` (66) / `stackify.tks` (109) + writers (crumbs S1–S6), CADA arquivo com **golden de bytes congelados + fixpoint gen2==gen3** como barra de aceitação (nenhum byte emitido muda). Sequenciada DEPOIS de a feature entrar no seed (crumbs 1–7).
 - **Texto da regra (p/ colar em `.claude/agents/teko-canonicalizer.md` + `.claude/skills/w15-retrofit/SKILL.md`):** ver §7.3 do plano.
 - **Reversibilidade:** a regra é convenção (skill/agent), não código; ajustável.
 
@@ -414,7 +405,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 ## 2026-07-24 — Drop the 128-bit family (`i128`/`u128`) + `f16`, R2+R3 (rejeição de superfície + deleção da topologia + tidies)
 
 ### D42 · Drop-128 R2 (rejeição de superfície + deleção da topologia PrimKind/LType) + R3 (tidies + B.38) ✅
-- **Contexto:** R0+R1 (crumb anterior, `feat/0.3.1-drop128-r0-r1`) já haviam feito o carrier-detox — nenhuma declaração interna do compilador era mais `i128`/`u128` (o carrier de literal virou `NumInt {neg; mag: u64}`, o const-fold e os dois interpretadores viraram `u64`/`i64`, os timestamps viraram `i64` ns). Este vagão (R2+R3, `feat/0.3.1-drop128-r2-r3`) fecha a issue: rejeita `i128`/`u128`/`f16` na SUPERFÍCIE (`scope.tks::builtin_type` honest-stop, em vez de "unknown type" genérico) e deleta toda a topologia agora morta — `PrimKind::{U128,I128,F16}`, `LType::{I128,F16}`, o cascade de match inteiro (codegen C-spellings, `resolve.tks::prim_name`, `lower.tks`, `ffi_export.tks`, `tkb_read.tks::prim_of` — cujo ordinal RENUMEROU ao perder os 3 membros), e a topologia de backend (register-pair isel em x86-64/arm64/riscv64, os honest-stops `C1-i128`/`C1-f16` do wasm, `stackify.tks`).
 - **Achado in-wave (não documentado no design doc, bloqueava a compilação — corrigido agora, sem deferral):** `scope.tks::builtin_fn` injetava os builtins reservados `div`/`rem`/`int_to_float` tipados sobre o carrier largo `PrimKind::I128` (FFI interna para `tk_div`/`tk_rem`/`tk_int_to_float` do runtime, herança da VM aposentada — #524). Nenhum call site do corpus usa esses builtins bare/sem-namespace (confirmado por varredura); native codegen nunca roteia `/`,`%` por eles (usa os helpers per-width `tk_div_<tag>`/`tk_mod_<tag>`). Deletados como código morto pós-VM-retirement (o guard `cg_is_arith_builtin_call` em codegen.tks também caiu, junto dos 3 arms de dispatch).
 - **Sweep do corpus:** `examples/regressions/{repr_box,inline_attr_parse}` usavam `u128`/`i128` como veículo de teste ("payload ≥16 bytes sem niche") — como NENHUM escalar builtin sobra ≥16 bytes pós-drop, `repr_box` perdeu de vez o sub-caso "boxed SCALAR" (a cobertura "boxed STRUCT" via `Vec2` já prova o mesmo mecanismo; EXPECT_EXIT 116→19) e `inline_attr_parse` trocou o veículo `u128` por um struct `Pair` local de 16 bytes (mesma semântica de parse, EXPECT_EXIT inalterado, 47). `src/codegen/codegen_test.tkt` tinha 6 asserts diretos sobre `PrimKind::U128`/`"i128"` como builtin-scalar — corrigidos/invertidos. Duas dessas (`cgt_union_repr_class_dial`/`cgt_inline_attr_eligible_classes`) usavam o `u128 | null` como o veículo ≥16-byte-sem-niche do classificador de box-in-arena; a primeira troca tentada (`checker::Func`, tamanho fixo 16 sem precisar de decl registrado) **quebrou** `cgt_inline_attr_eligible_classes` (achado in-wave, corrigido sem deferral): `Func` não é mangleável (`cg_opt_mangle`'s `_ => error` — nem struct nem prim), então `cg_union_inline_recursive`'s fallback "os dois erraram → são iguais" (`cg_mangle_eq`) confundia o `Func` membro com a própria união (também não-mangleável), disparando um falso-positivo de auto-recursão. Corrigido trocando por um struct `Pair16` REAL (dois campos `i64`, registrado num `TProgram` de teste dedicado, `cgt_prog_with_pair16`) — mangleável, mesma semântica de tamanho/niche que `Vec2` já usa em `repr_box`. Nasceram 3 fixtures de rejeição: `reject_i128`, `reject_u128`, `reject_f16` (compile-fail, `EXPECT_STDERR` pino a mensagem honesta) — a primeira tentativa delas TAMBÉM falhou o pin: `resolve.tks::resolve_named` descartava silenciosamente QUALQUER erro de `builtin_type` e caía no "unknown type" genérico; corrigido para só cair no fallback quando a mensagem for exatamente o sentinel genérico ("not a built-in type"), propagando o honest-stop nos demais casos.
 - **B.38 emendado:** `TEKO_LEGISLATION.md` (Redefinitions Index + a seção "native numeric type set") e novo `TEKO_HISTORY.md §B.40` registrando a decisão completa (was/is/why/agent-rule). `tooling/shared/src/spec_json.tks` NÃO carrega a lista de tipos (verificado — só keywords/operators/comment-delimiters), então não há nada a emendar lá; nenhum `MASTER_PLAN.md` existe no repo com uma entrada "drop-128" a marcar (verificado, `TEKO_MASTER_PLAN.md`'s WAVE 0.3 ROADMAP não cita a issue).
@@ -425,7 +415,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ---
 
-## 2026-07-25 — Higiene de CI: split light/full por `base_ref`, gates que afirmam o modo, execução riscv64 restaurada
 
 ### D43 · CI light/full + fail-open do regressor + linkagem do seed de assert ✅
 - **Contexto (proposta do dono 2026-07-24):** *"fazer com que o CI atual execute apenas em PRs que apontam para main e criar então outro CI para esse padrão mais leve que roda só o necessário"*. O modelo de entrega é um TREM EMPILHADO — cada vagão é um PR cuja base é a branch do vagão anterior, e o trem inteiro aterrissa numa integração única no vagão do topo, retargetado para `main`. O único run completo que importa é o da aterrissagem.
@@ -433,11 +422,11 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **J1 — matriz dinâmica (`native.yml`):** o job `changes` passa a exportar `full` + `matrix_build`/`matrix_gen1` em JSON, consumidos por `fromJSON`; light = `linux-x86_64` (build-test) e `ubuntu-latest` (gen1-checks). Pré-requisito cumprido: o `install_deps` multi-linha saiu da matriz (shell dentro de JSON dentro de YAML) e virou um passo condicionado a `runner.os`.
 - **J2 — dois jobs MORTOS, ressuscitados:** `mem-paranoid` e `asan-default` gateavam em `github.ref == 'refs/heads/main'` num workflow cujo único gatilho é `pull_request`. A condição **nunca casou**: ASan/UBSan/LSan e o oráculo `TEKO_MEM_PARANOID` **nunca rodaram em CI**, e o `Heavy sanitizer gate` que os agrega era vacuamente verde (confirmado ao vivo no PR #91: ambos `skipped`, gate `success`). Trocado para `base_ref`. O split aqui AUMENTA cobertura.
 - **J3 — os gates afirmam o MODO, não a ausência de falha:** os quatro agregadores (`CI gate`, `Sanitizer gate`, `Heavy sanitizer gate`, `Test suite gate`) tratavam `skipped` como aprovado. Agora: job de caminho light exige `success` (`skipped` é ERRO — condição quebrada, não "nada a fazer"); job full-only exige `success` em full e `skipped` em light (um `success` inesperado avisa, não bloqueia); e o gate imprime `mode=light|full` sempre. Sem isto o split trocaria custo por cegueira.
-- **Execução riscv64 RESTAURADA (regressão de cobertura aberta pela dobra do regressor):** o job `riscv64-qemu` existia só para dirigir `scripts/diff_c_own.sh`, culado com os side-cars — a execução riscv64 tinha ido a ZERO (o `release-cross-smoke` só cross-COMPILA). Restaurado sobre o EXECUTOR ÚNICO: os 15 cenários diferenciais de `regressor.tkr` viraram um cruzamento `Examples` de duas colunas `| backend | target |` (`c`/`own` × `host`/`riscv64-linux`) — a gramática `.tkr` já é agnóstica a número de colunas (`tkr_table_cells` + `tkr_subst_row`; a Feature F6 já usa 5 colunas em produção). O cross-linker NÃO precisou de código novo: `resolve_cc`'s arm de `TEKO_TARGET` já resolve `riscv64-linux-gnu-gcc`, e `resolve_run_wrapper` já resolve `qemu-riscv64-static`. Novo cenário `own_riscv_object_well_formed` restaura a outra metade do job antigo (`check_elf.sh` sobre o `.o` riscv com as binutils cross).
+- **Execução de alvo cross RESTAURADA (regressão de cobertura aberta pela dobra do regressor):** um job de execução emulada existia só para dirigir `scripts/diff_c_own.sh`, culado com os side-cars — a execução tinha ido a ZERO (o `release-cross-smoke` só cross-COMPILA). Restaurado sobre o EXECUTOR ÚNICO: os 15 cenários diferenciais de `regressor.tkr` viraram um cruzamento `Examples` de duas colunas `| backend | target |` (`c`/`own` × `host`/`<alvo-cross>`) — a gramática `.tkr` já é agnóstica a número de colunas (`tkr_table_cells` + `tkr_subst_row`; a Feature F6 já usa 5 colunas em produção). O cross-linker não precisou de código novo. (Revogado por D45: o alvo foi removido completamente.)
 - **Sentinel `host` no `Given target` (código de produto):** para a linha HOST de uma tabela backend×target, `tkr_target_env` passa a NÃO exportar `TEKO_TARGET` (o default R1 derivado do host É o que uma variável não-setada significa; exportar `TEKO_TARGET=host` renderia o honest-stop R2 de target desconhecido em todo host). `tkr_effective_target` dobra o sentinel para `teko::os()`.
 - **Probe de capacidade ANTES do build (código de produto):** um alvo cross sem toolchain no host surgia como falha de `cc` — indistinguível de regressão real de compilador — porque a resolução do run-wrapper só acontecia DEPOIS do build. `target_toolchain_skip_reason` (novo) probeia o cross-linker (via `cross_cc_for_target`, que delega às MESMAS `target_from_name`/`default_cc_for_target` que o build usa, então probe e build não podem divergir) e o run-wrapper antes de compilar.
 - **Fail-open do runner de regressivo (M.3):** `regr_skip` devolvia `ok = true`, toda a contabilidade era `if !ok && !skipped`, e o resumo era `regressions {N} run, {F} failed` — **uma corrida inteiramente pulada imprimia "N run, 0 failed" e saía 0**. Agora `RegrOutcome` carrega `skips`, agregado por `regr_add_skips` na cadeia linha→cenário→feature→arquivo→run, e o resumo tem TRÊS colunas (`regr_summary_line`). `check_module_valid` passa a honrar `REGRESSION_REQUIRE_TOOLS` (o const documentava cobrir os leaf-tools e não cobria).
-- **`REGRESSION_REQUIRE_TOOLS=1` na lane riscv, e SÓ nela:** o flag é fail-closed para TODA capacidade que o corpus declara, então só pode viver numa lane que provisiona todas elas. É a lane riscv (cross-gcc + qemu + **wasmtime**, que NENHUMA lane provisionava — o cenário `wasm32-wasi` da F7 nunca havia rodado). Ligá-lo em `tests.yml`, onde a toolchain riscv legitimamente não existe, produziria vermelho falso; lá os pulos ficam honestos e agora VISÍVEIS na coluna nova.
+- **`REGRESSION_REQUIRE_TOOLS=1` numa lane de alvo cross, e SÓ nela:** o flag é fail-closed para TODA capacidade que o corpus declara, então só pode viver numa lane que provisiona todas elas. Era uma lane de cross-compilation (cross-gcc + emulador + **wasmtime**, que NENHUMA lane provisionava — o cenário `wasm32-wasi` da F7 nunca havia rodado). Ligá-lo em `tests.yml`, onde a toolchain legitimamente não existe, produziria vermelho falso; lá os pulos ficam honestos e agora VISÍVEIS na coluna nova. (Revogado por D45: a lane foi removida completamente.)
 - **Diagnóstico cego de build dentro de cenário (M.3, achado no PR #91):** a saída do `cc` É capturada (o filho herda os streams redirecionados), mas a mensagem de falha citava só `last_line` do stderr — que é a linha do próprio compilador dizendo que o `cc` falhou. O log de CI não trazia uma linha do compilador C. `compile_failure_message` reproduz o TAIL capturado (`COMPILE_FAIL_TAIL_LINES`), e a falha agora passa pelo wrapper que carimba o NOME do cenário (antes só havia índices de path de scratch).
 - **Seed de assert: WEAK não funciona em PE/COFF (a falha só-Windows do PR #91, raiz achada e corrigida):** GCC baixa uma DEFINIÇÃO weak para o símbolo real renomeado `.weak.<name>.` mais um weak external INDEFINIDO `<name>`, e o GNU ld para PE não resolve a referência forte de outro objeto contra isso. Reproduzido com `x86_64-w64-mingw32-gcc`, independente de ordem: `undefined reference to 'teko__assert__is_true'`. Ou seja: no Windows o seed estava MORTO e qualquer programa que CHAMASSE `teko::assert` sem definí-lo não linkava — o cenário `assert_native`, que a dobra do regressor fez rodar no Windows pela primeira vez na história do projeto. **Correção:** o PAPEL do seed passa a ser escolhido pelo BUILD — `build_cc_argv` define `TK_ASSERT_SEED_STRONG` exatamente quando o programa não declara `teko::assert` (`program_declares_assert_seed`), e aí as definições são fortes e resolvem em ELF, Mach-O e PE/COFF. **Weak segue o DEFAULT de propósito:** um seed já RELEASADO compila esta árvore sem passar o flag e linka `teko.c` + `assert.c` juntos — forte-por-default quebraria o bootstrap de todo seed existente com símbolo duplicado. Como o build do próprio compilador é o caso sem-flag, sua linha de link fica byte-inalterada e o FIXPOINT intacto. Os quatro casos (ordinário/corpus × ELF/PE) foram validados com `gcc` e `x86_64-w64-mingw32-gcc`.
 - **Patches do mirror (`mirror-pr-to-org.yml`):** job `drain-cleanup` (fecha os PRs dos vagões e apaga as branches após a aterrissagem, guardado pelo SHA de embarque do bloco `<!-- train-manifest -->`; `continue-on-error: true` por ruling do dono) + strip do manifesto na fronteira de saída, para não vazar branches/SHAs internos no corpo do PR público da org.
@@ -450,8 +439,7 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ### D44 · Cross-link honesto: `teko::arch()` landed-unused, chaves os-arch no `[extern.libs]`, relato de cross-emit, `--allow-undef` ✅
 - **Contexto:** `docs/design/teko-target-crosslink-0.3.1.md` (decisões FECHADAS 2026-07-24: R1-R5 + o spec-fill §4.2). O C1 (default de host os-only) já entrou no vagão anterior e fechou o bug reproduzido (linux x86_64 emitindo Mach-O arm64). Este vagão entrega C2+C4+C5+C6.
-- **C3 FORA deste vagão (ruling do integrador, 2026-07-25):** a lei de bootstrap proíbe colapsar C2 e C3 num vagão (o seed precisa reconhecer `teko::arch()` antes de `project.tks` poder CHAMAR), e landar o C3 sozinho na .31 criaria um TERCEIRO degrau na escada de seeds sem ganho: C4/C5/C6 não dependem dele — funcionam sobre o default os-only do C1, já preciso em linux/x86_64, windows/x86_64 e macos/arm64. A única imprecisão que sobra (host de mesmo SO com arch diferente lendo um pedido cross de mesmo SO como NÃO-cross) está documentada em `cross_note` e é a direção conservadora: o host executa e reporta o exit real, em vez de fabricar um skip. Na .32 o seed da .31 já traz o builtin e o C3 é refactor puro.
-- **C2 — builtin landed, chamado por NINGUÉM:** `tk_rt_arch()` em `src/runtime/teko_rt.{c,h}` (exceção maintained-C), espelhando a forma plain-`str` do `tk_rt_os` (sem lift, para o codegen congelado do seed conseguir baixar), tokens canônicos `x86_64`/`arm64`/`riscv64`/`unknown` — a grafia que concatena direto com `tk_rt_os()` na chave `<arch>-<os>`. Wiring: `scope.tks::builtin_fn` (assinatura `() -> str`) + o mapa de builtins do `codegen.tks`. Zero call sites no corpus (nem `.tkt`): é isso que mantém a escada em dois degraus. Verificado à mão num projeto scratch compilado pelo gen1 (`teko::arch()` → `"x86_64"`).
+- **C2 — builtin landed, chamado por NINGUÉM:** `tk_rt_arch()` em `src/runtime/teko_rt.{c,h}` (exceção maintained-C), espelhando a forma plain-`str` do `tk_rt_os` (sem lift, para o codegen congelado do seed conseguir baixar), tokens canônicos `x86_64`/`arm64`/`unknown` — a grafia que concatena direto com `tk_rt_os()` na chave `<arch>-<os>`. Wiring: `scope.tks::builtin_fn` (assinatura `() -> str`) + o mapa de builtins do `codegen.tks`. Zero call sites no corpus (nem `.tkt`): é isso que mantém a escada em dois degraus. Verificado à mão num projeto scratch compilado pelo gen1 (`teko::arch()` → `"x86_64"`).
 - **C4 — o §4.1 é RATIFICADO, não redesenhado:** a chave de seção `[extern.libs.<os-arch>]` já era capturada VERBATIM pelo parser (`sec_os = slice_from(nm, 12)`); o delta real é no LINK — `os_lib_key_matches` sobre `LinkTargetKeys` (`build_os`/`emit_os`/`os_arch`), a UMA regra de aplicabilidade agora compartilhada pela linha de link (`link_target_keys`) e pelos validadores M.3 (`target_link_keys`). **Segundo defeito achado e corrigido no crumb:** uma seção de OS puro era casada SÓ contra `target_os`, que responde o OS do HOST quando não há triple `[extern] target` — então um cross-link para `x86_64-windows` em linux descartava silenciosamente `[extern.libs.windows]`, contrariando o próprio "any arch of that OS" do §4.2. A regra passa a casar também o OS para o qual se LINKA; aditivo por construção (tudo que casava antes continua casando), e `target_os`/o pruning de `#os()` ficaram intocados de propósito (mexer neles muda a semântica de compilação condicional em builds cross — decisão separada). O modo `static:`/`shared:` deixou de ser descartado: `mf_extern_spec` devolve `ExternLibSpec { flag; mode }` para as colunas novas `link_mode`/`os_lib_mode`. **Bug achado e corrigido no crumb (sem deferral):** `mf_extern_flag` testava PATH antes de tirar o prefixo de modo, então a grafia ratificada `static:vendor/x86_64-linux/libfoo.a` vazava o literal `static:` na linha do `cc`. R4 implementado em `validate_static_libs_for_target`: para um target CROSS uma lib estática tem que apontar um arquivo LOCAL (o linker do host não sabe procurar nos caminhos do target), e um path explicitamente nomeado e ausente é erro em qualquer target (é a regra já ratificada da LEGISLATION:423, aplicada por target).
 - **C5 — uma fonte de verdade, dois consumidores:** `CrossNote`/`cross_note` (+ `cross_note_for_name`, a porta por NOME, + `resolved_cross_note`). `teko run` e o gate de teste nativo imprimem a linha "emitido, não executado" e pulam o processo filho quando cross (antes: um `teko build` cross MORRIA no gate ao tentar exec de um binário de formato estrangeiro). O runner de regressivo consulta a MESMA `cross_note_for_name` em `tkr_row_run_verdict` — não uma segunda regra — e os leaf-checks (`Then object well-formed`) continuam rodando sobre a linha pulada, que é justamente o ponto de um build cross. Buraco pré-build do vagão 17 fechado: `host_cc_cannot_link_cross_reason` — um target cross SEM driver cross dedicado (`x86_64-linux` num host mac) chegava ao `ld` do host e falhava no formato do objeto, indistinguível de regressão de compilador; agora é skip honesto antes do build (e um `TEKO_CC` pinado levanta o skip).
 - **C6 — o default FALHA, o blind é opt-in:** `--allow-undef` (nossa flag: `ALLOW_UNDEF_FLAG`, `allow_undef_of`/`allow_undef_selected`, pulada por `project_arg_of`, listada no `--help`), tradução transitória por formato (`allow_undef_cc_flag`), `omit_flag_for_blind_link` (um `shared:` que APONTA um path ausente é retirado da linha de link sob o opt-in — sem isso o `ld` falha no arquivo que falta e a flag é no-op), fail-loud por default (`validate_shared_libs_for_target`) e honest-stop NOMEADO para import-lib COFF (mesmo com a flag: PE/COFF não referencia DLL sem import lib, e o linker transitório não sintetiza uma — E1 fecha). **A linha ELF do §5.2 estava incompleta e foi corrigida no crumb:** `--allow-shlib-undefined` sozinho só governa símbolos indefinidos DENTRO de uma dependência compartilhada — um EXECUTÁVEL com símbolo indefinido continua falhando o `ld` (verificado com `cc` em linux/x86_64). A tradução ELF é o PAR `-Wl,--allow-shlib-undefined,--unresolved-symbols=ignore-all`; emitir só a flag ratificada teria entregue um opt-in no-op, que é capacidade fabricada — M.1/M.3 pesam mais que a lista de flags. Mach-O (`-undefined dynamic_lookup`) não precisou de correção.
@@ -459,45 +447,3 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Higiene de diagnóstico:** `unsupported_target_error` (C1) trazia um `teko: ` próprio e toda saída passa por `fail`, que já prefixa `teko: <dir>: ` — a mensagem lia com prefixo duplo. Removido; as mensagens novas (R4/R5) nascem sem prefixo por essa razão.
 - **Ritual:** gen1 pelo seed, `teko test .` (suíte + os 10 regressivos), fixpoint gen1→gen2→gen3 byte-idêntico (binário E `teko.c`), `TEKO_MEM_PARANOID=1` exit 0, auditoria W15 (`git diff … | grep '^+.*//'` vazio).
 - **Reversibilidade:** média — C4/C5/C6 são aditivos e cobertos por `#test` + cenários; o C2 é uma adição de runtime que entra em TODO binário gerado (fixpoint reverificado byte-a-byte).
-
----
-
-## 2026-07-27 — Remoção completa de `linux-riscv64` e `windows-arm64` (0.3.1)
-
-### D45 · Os dois alvos saem inteiros: backend, alvo, lanes, assets, docs ✅
-- **Ruling do dono:** *"E está decidido, remover completamente suporte a Windows arm64 e Linux
-  riscv64, apagar todos os vestígios, sem dead code."* Critério explícito: nada de branch morto,
-  flag desligada, entrada de enum órfã, teste pulado ou comentário de "quando riscv64 voltar".
-- **As duas remoções têm naturezas diferentes.** `linux-riscv64` era um ALVO NATIVO
-  (`NativeTarget::Riscv64Linux`): saiu o backend inteiro — `isel_riscv`, `minst_riscv`,
-  `regalloc_riscv`, `encode_riscv`, `encode_riscv_consts`, `abi_riscv64`, `objfile_elf_riscv` e os
-  cinco `_test.tkt` correspondentes — mais a entrada do enum, todo `match` que a cobria, o
-  `default_cc_for_target`, os nomes/aliases de `TEKO_TARGET`, o wrapper `qemu-riscv64-static` e a
-  sonda de sysroot cross que só existia para alimentá-lo. `windows-arm64` NUNCA foi alvo nativo —
-  era só rótulo de host/asset de CI, então a remoção foi de lane, matriz, label de seed e asset
-  publicado, sem tocar backend.
-- **`arm64` FICA.** `isel_arm64`, `encode_arm64`, `abi_aapcs64`, `NativeTarget::Arm64Macho` e o host
-  `linux-arm64` continuam — servem macOS/arm64 e Linux/arm64, que sobrevivem.
-- **Exaustividade preservada sem braço `_`:** todo `match` sobre `NativeTarget` que perdeu o braço
-  `Riscv64Linux` continua enumerando os membros restantes; nenhum coringa novo foi introduzido
-  (um `_` cobrindo o buraco seria dead code disfarçado).
-- **Cobertura NÃO perdida:** os 3 testes que exercitavam máquina exclusivamente riscv
-  (`cross_sysroot_for_*`, `qemu_riscv64_wrapper_*`, `resolve_run_wrapper_riscv_*`) saíram com a
-  máquina; toda outra asserção que usava riscv como VEÍCULO foi reapontada para um alvo cross
-  sobrevivente (`x86_64-windows` / `wasm32-wasi`). O `Then object well-formed` sobre ELF continua
-  existindo em `own_explicit_host_os_arch_runs`.
-- **Runtime (exceção maintained-C):** `tk_rt_arch()` perdeu o braço `__riscv` — o token `riscv64`
-  concatenava com `tk_rt_os()` numa chave `<arch>-<os>` que não é mais um `NativeTarget`, então
-  mantê-lo produziria uma chave inválida, não uma informação a mais.
-- **Assets publicados: nove → sete.** Saíram `teko-linux-riscv64-{glibc,musl}.tar.gz` e
-  `teko-windows-arm64.zip`. A lane `cross-arch determinism` passa a comparar QUATRO assets Linux
-  em vez de seis; o passo de binfmt/qemu, os pacotes `libc6-riscv64-cross`/`gcc-riscv64-linux-gnu`
-  e a parametrização `ELF_TOOLCHAIN`/`ELF_MACHINE` do `check_elf.sh` (cujo único chamador era o
-  ramo riscv) foram apagados por não terem mais consumidor.
-- **Docs:** `docs/design/backend-b2-riscv64.md` (o spec do backend removido) foi APAGADO. Registro
-  histórico ficou: as medições e os incidentes que citam as duas lanes permanecem, anotados com a
-  data e o motivo da remoção; o que saiu foi documentação que PROMETIA suporte inexistente
-  (matriz de alvos do roadmap, o follow "arm64 Windows" do #388, a dívida de re-enable #304/#305).
-- **Reversibilidade:** baixa por decisão — é uma remoção, e o histórico do git é o caminho de volta
-  caso o dono reverta o ruling.
-

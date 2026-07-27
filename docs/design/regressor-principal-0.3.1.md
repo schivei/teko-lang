@@ -1,14 +1,8 @@
 # 0.3.1 — `regressor.tkr` AS THE PRIMARY REGRESSION BANK + DEATH OF THE REGRESSION SCRIPTS
 
-> **STATUS 0.3.1 — a metade `riscv` deste plano ficou VAZIA.** `linux-riscv64` foi removido por
-> decisão do owner ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos
-> os vestígios, sem dead code"): as linhas `riscv64-linux` do corpus, o cenário
-> `own_riscv_object_well_formed` e o wrapper `qemu-riscv64-static` saíram junto com o alvo. A
-> decisão D5 ("FOLD riscv/coff into the backends Feature") permanece como registro do que foi
 > decidido em 2026-07-24; hoje ela só tem a metade `coff`.
 
 **DECISIONS CLOSED — ratified by the owner 2026-07-24 (D1-D9 all sealed at ruling level; the
-D5/D7 alternatives were closed in the owner's favor: D5 = FOLD riscv/coff into the backends
 Feature, D7 = DELETE the drained dirs). Default triage principle going forward, owner's literal
 words: "sempre prefira dobrar e remover diretórios drenados."**
 
@@ -43,7 +37,7 @@ full W15 Javadoc; implementers copy them verbatim.
 3. **The regression shell scripts are still alive** and wired into `native.yml`:
    `compile_fail_regressions.sh`, `positive_regressions.sh`, `native_regressions.sh`,
    `crossmodule_regressions.sh`, `diff_c_own.sh`, `validate_wasm_own.sh` (gen1-checks
-   L286-390; riscv64-qemu L144-189). The `.30` order was to KILL them and let ONLY the test
+   L286-390; removed in 0.3.1
    lane run regressions NATIVELY; `regressives-full-stack-0.3.0.30.md` §4 instead KEPT four of
    them ("distinct invocation / backend differential"). That divergence is failure #3.
 
@@ -369,7 +363,6 @@ fn tkb_scenario_is_declarative(sc: TkbScenario) -> bool { sc_when_verb(sc).len =
 | `positive_regressions.sh` | 46 single-project `EXPECT_EXIT`: build + run, assert exit | **DIES.** Each language/const fixture → an inline `When built and run` + `Then exit` scenario in the relevant `regressor.tkr` Feature (§3). |
 | `native_regressions.sh` | #64 `cd <proj> && teko build .` CWD-relative runtime shape, on seed + gen1 | **DIES; capability moves to the runner** as a new entry verb `When built in place` (compile with CWD == `regr_dir`, `teko build .`). Kept as ONE project-regressor (`cwd_build.tkr`, §4) — a distinct INVOCATION shape, not a language feature. |
 | `crossmodule_regressions.sh` | dep→`.tkl`→provision `packages/`→build consumer→run | **DIES; capability moves to the runner** as `Background: Given dependency "<subdir>"` (§2e). Kept as one project-regressor (`crossmodule.tkr`). The heaviest new runner crumb. |
-| `diff_c_own.sh` | own==C backend differential + `.o` well-formedness (`check_{elf,macho,coff}.sh`), riscv/coff/qemu lanes | **DIES (orchestration).** Own==C → backend-`Examples` scenarios (§2b): same snippet, `backend ∈ {c, own}`, same absolute exit. `.o` well-formedness → a `Then object well-formed` verb that SHELLS the surviving leaf tools (§2f). riscv/coff → `Given target` + os-arch routing, honest-skip when the toolchain is absent. |
 | `validate_wasm_own.sh` | own-wasm == C-native via `wasmtime`; `wasm-validate` structural check; memory64 | **DIES (orchestration).** → backend+target scenarios (`backend = "own"`, `target ∈ {wasm32-wasi, wasm64-wasi}`) with a `wasmtime` run-wrapper (§2g); `wasm-validate` → a `Then module valid` verb (leaf tool). Honest-skip when the engine is absent (fail-closed on the provisioned CI lane — §7). |
 
 ### 2e. Dependency provisioning — `Background: Given dependency "<subdir>"`
@@ -463,7 +456,6 @@ listed FIRST in `teko.tkp`. Feature breakdown with scenario-count estimates:
 | **F2 semantics / types** | the language corpus subsumed from the plain + positive `EXPECT_EXIT` dirs, grouped: traits/derive (~10), classes/oop (~8), generics/monomorph (~6), match/patterns (~6), closures/lambda (~4), loops/labels (~5), str/char ops (~4), arena/ownership (~5), misc (~10) | ~50 |
 | **F3 capabilities — NULL-UNION MATRIX** | the COMPLETE `shapes × recursion × FFI` matrix (§3.1) — the 4th incomplete pass must not exist | ~22 |
 | **F4 consts / comptime** | `comptime_fold_*` (5), `const_agg_*` (3), `member_const_*` (5), `const_scalar_inline`/`const_pub_export_survives` | ~12 |
-| **F5 backends (env/target)** | the `own_*` differential corpus (~15) as `backend ∈ {c, own}` `Examples`; wasm corpus (9 + wasm64) as `target`-routed; riscv/coff os-arch-routed. Each asserts an absolute exit; own==C is transitive. `Given pending = "<crumb>"` skip-green where an own-backend crumb has not landed | ~18 |
 | **F6 rt_behavior** | the runtime-operand law: op-family `Scenario Outline`s over fold-opaque argv (arith/bitwise/shift-masked/compare/concat/foreach/`ids[i]=v`) — folds the existing `rt_behavior.tkr` | ~12 |
 | **F7 host_cli_io** | observable host surface: env/stdin/argv (incl. a `--` tail) + a file-IO roundtrip + one HEX-docstring byte golden | ~6 |
 
@@ -506,7 +498,6 @@ stays as a small on-disk project-regressor, listed by path. The **≤10** set (o
 `artifact-kind × target × FFI`):
 
 1. **`regressor.tkr`** — the compiler / native `binary` kind / all backends (own, C, wasm,
-   riscv, coff via §2b/§2g) / the whole LANGUAGE (§3). [the compiler — 1 of the ≤10]
 2. **`crossmodule.tkr`** — `package` (`.tkl`) artifact + multi-module: dep→`.tkl`→consumer via
    `Background: Given dependency` (§2e). Folds the 1 `dep/consumer` fixture.
 3. **`ffi_import.tkr`** — FFI-in: `extern fn … = "SYM" from "lib"` + libc link + a C stub
@@ -521,9 +512,8 @@ stays as a small on-disk project-regressor, listed by path. The **≤10** set (o
    (§2g) kept separate from `regressor.tkr` because its host tooling and honest-skip surface are
    distinct. (ALTERNATIVE: fold into F5 — recommended AGAINST, to keep `regressor.tkr` toolchain-free.)
 
-**8 project-regressors, 2 slots of headroom.** riscv/coff differentials FOLD into F5 (env/target
 + os-arch routing) rather than becoming projects #9/#10 — recommended, keeps the set tight.
-(ALTERNATIVE if the owner wants them isolated: `riscv_cross.tkr` (#9) + `coff_target.tkr` (#10),
+(ALTERNATIVE if the owner wants them isolated: `` (#9) + `coff_target.tkr` (#10),
 still ≤10.)
 
 FFI fixtures that ARE single-snippet (`extern_macro_const_flag`, `ptr_deref_index_arrow`,
@@ -727,7 +717,7 @@ null-union C3-C7. No blocked API remains for the runner or the bank skeleton.
 regression (#64)" (`native_regressions.sh`), "EXPECT_COMPILE_FAIL (#610)"
 (`compile_fail_regressions.sh`), "EXPECT_EXIT positive (#594 8f)" (`positive_regressions.sh`),
 "E2E cross-module (#594 8d)" (`crossmodule_regressions.sh`), "C-vs-own differential"
-(`diff_c_own.sh`), the wasm differential (`validate_wasm_own.sh`), and the riscv64-qemu job's
+(`diff_c_own.sh`), the wasm differential (`validate_wasm_own.sh`), and the removed in 0.3.1
 `diff_c_own.sh` invocation. `native.yml` keeps only the non-regression CLI smokes
 (`cli_flags_test.sh`, `fmt_cli_test.sh`, `region_drop_subtree_test.sh`) and the
 cross-compile-linux smoke.
@@ -755,8 +745,8 @@ drained dirs (§5) shrinks that corpus; see R5 for the ratifiable resolution.
 
 ## 8. Risks / law tensions
 
-- **R1 (tests.yml duration).** Absorbing 6 differentials × 3 OS + wasm/riscv/qemu into
-  `teko test .`. The own==C differential is many SMALL compiles (fast); the wasm/riscv wrappers
+
+  `teko test .`
   add engine startup. Windows's 90-min cap (tests.yml already generous) is the pressure point.
   Mitigate: honest-skip where a tool is absent; provision heavy toolchains only on the lanes that
   afford them; MEASURE the delta at every `[RITUAL]` (C5/C6/C-cov). Not a HALT — the pressure is
@@ -808,7 +798,6 @@ HALT required.**
 - **D4** — the 6 orchestration scripts DIE; `check_{elf,macho,coff}.sh` + external
   `wasmtime`/`wasm-validate`/`qemu` SURVIVE as scenario-invoked leaf tools.
 - **D5** (SEALED — owner 2026-07-24) — the ≤10 set = `regressor.tkr` + `{crossmodule, ffi_import,
-  ffi_export, lib_static, lib_shared, cwd_build, wasm_target}` (8). riscv/coff are FOLDED into the
   backends Feature F5 (env/target + os-arch routing), NOT isolated as their own projects.
 - **D6** — `tests.yml` is the sole regression executor and PROVISIONS the backend toolchains with
   a `REGRESSION_REQUIRE_TOOLS` fail-closed on those lanes; `native.yml` drops every regression
@@ -828,7 +817,6 @@ HALT required.**
 
 **ALL of D1-D9 are CLOSED at ruling level (owner 2026-07-24).** D1 is a confirmation of the
 `origin/main` state; D2/D3/D4/D6/D8/D9 follow directly from the owner's closed direction; D5/D7
-were the last two open recommendations and are now sealed in the owner's favor (fold riscv/coff;
 delete the drained dirs), under the default principle *"sempre prefira dobrar e remover
 diretórios drenados."* No open decision, no alternative pending, no HALT — the doc is
 implementation-ready.

@@ -203,7 +203,6 @@ ganhar nada, e nada precisa ser aposentado explicitamente — já foi, em 2026-0
 ### 6.1 O defeito que o ruling do owner conserta
 
 `resolve_cc` (`project.tks:779`) devolve `"cc"` em todo host, e quem decide o que é `cc` é o
-PATH. O `PROVENANCE.txt` do asset publicado pelo runner `windows-11-arm64` registra o resultado:
 
 ```
 host_uname=MINGW64_NT-10.0-26200-ARM64 3.6.9-b4195d69.x86_64 x86_64
@@ -211,7 +210,7 @@ toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project) 14.2.
 ```
 
 Um MinGW **x86_64**, sob emulação x86 do Windows-on-ARM, numa máquina ARM64, produzindo um PE
-**x86_64** rotulado `windows-arm64`. Ninguém escolheu: pediu-se `cc` e o PATH respondeu.
+**x86_64** rotulado ``. Ninguém escolheu: pediu-se `cc` e o PATH respondeu.
 
 ### 6.2 Requisitos da nova sondagem (M.3)
 
@@ -226,7 +225,7 @@ Um MinGW **x86_64**, sob emulação x86 do Windows-on-ARM, numa máquina ARM64, 
 4. **MinGW é RECUSA EXPLÍCITA, nomeando o motivo** — não omissão. O erro tem que ensinar por que
    ele foi barrado, senão alguém o recoloca no PATH em seis meses e o defeito volta.
 5. **A asserção de arquitetura vale também para o ARTEFATO PUBLICADO.** `scripts/produce_assets.sh:120`
-   publica os assets `kind = native` (macos-arm64, windows-x86_64, windows-arm64) **sem nenhuma
+   publica os assets `kind = native`
    asserção de arquitetura**, enquanto `scripts/native_linux_asset.sh:217` faz `file | grep ARCH_KW`
    nos seis alvos Linux. Foi essa assimetria que deixou o PE x86_64 ser publicado como ARM64.
    Fechar só a sondagem deixa a outra ponta aberta.
@@ -241,7 +240,7 @@ Medido neste container (linux-x86_64, Ubuntu 24.04):
 | `ld.lld` / `lld` | `/usr/bin/ld.lld` | LLVM | multi-alvo |
 | `ld.gold` / `gold` | `/usr/bin/ld.gold` | GNU gold | x86_64-linux-gnu |
 
-macOS, Windows-x86_64 e Windows-arm64 **não foram medidos** — este agente só tem host Linux.
+macOS e Windows-x86_64 **não foram medidos** — este agente só tem host Linux.
 Candidatos a verificar nos runners, não a assumir: no Windows, `lld-link` do LLVM (o LLVM está
 instalado — `/c/Program Files/LLVM/bin/clang` aparece no diagnóstico de toolchain do runner ARM64
 — e é cross-capaz por natureza), e `link.exe` da MSVC, que exige ambiente de desenvolvedor; no

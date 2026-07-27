@@ -63,7 +63,6 @@ For the **for-each** heads there is no `_first` at all: the "step" is the
 
 | Component | (a) step-field | (b) init-field desugar (CHOSEN) |
 |---|---|---|
-| arm64 / x86-64 / riscv64 / wasm | unchanged (consume LIR) | **unchanged** (consume LIR) |
 | LIR `lower.tks` loop mechanism (`LoopTargets`, `lower_continue`, `close_loop_body`) | **changed** (step block, continue routing) | **unchanged** — `lower_loop` only lowers `init` before the existing loop |
 | C codegen loop mechanism (`emit_loop` continue/while) | **changed** (cont-label at step, bare `continue`→goto) | **unchanged** — `emit_loop` only wraps a non-empty `init` in a `{ }` scope |
 | VM `run_loop` | **changed** (step on continue+fall-through) | **unchanged** — `exec` only runs `init` once in a base/pop scope |

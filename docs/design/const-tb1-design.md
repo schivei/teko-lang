@@ -7,7 +7,7 @@ swept). **This crumb changes ZERO emitted bytes** — it is pure type widening p
 consumer-side honest-stop scaffold that never fires today.
 
 > Scope of T-B1 (verbatim from §8): "widen the reloc model: add a patch-site SECTION
-> tag to `RelocX86` / arm64/riscv `Reloc` (today `.text`-only,
+> tag to `RelocX86` / arm64 `Reloc` (today `.text`-only,
 > `encode_x86_64.tks:1310`); the LIR carries a data-section relocation entry for a
 > rodata-internal pointer field." T-B1 delivers the TYPES + the plumbing seam;
 > emission is T-B2 (ELF `.rela.rodata`), T-B3 (Mach-O/COFF rodata relocs), T-B4
@@ -23,26 +23,24 @@ consumer-side honest-stop scaffold that never fires today.
 | ISA | struct | file:line | fields | kind enum |
 |---|---|---|---|---|
 | x86-64 | `RelocX86` | `encode_x86_64.tks:1844–1864` | `offset: u32` (`:1849`), `sym: str` (`:1854`), `kind: RelocKindX86` (`:1858`), `addend: i64` (`:1863`) | `RelocKindX86 = enum { Plt32; Pc32; Abs64 }` `minst_x86.tks:47` |
-| arm64 | `Reloc` | `encode_arm64.tks:2066–2081` | `offset: u32` (`:2071`), `sym: str` (`:2075`), `kind: MRelocKind` (`:2080`) | `MRelocKind = enum { PageHi; PageLo; Call }` `minst.tks:42` — **NO absolute-pointer kind** |
-| riscv64 | `RelocRiscv` | `encode_riscv.tks:1798–1821` | `offset: u32` (`:1804`), `sym: str` (`:1810`), `kind: RelocKindRiscv` (`:1815`), `addend: i64` (`:1820`) | `RelocKindRiscv = enum { Call; PcRelHi20; PcRelLo12; Branch; Jal; Abs64 }` `minst_riscv.tks:47` |
+| arm64 | `Reloc` | `encode_arm64.tks:2066–2081` | `offset: u32` (`:2071`), `sym: str` (`:2075`), `kind: MRelocKind` (`:2080`) | `MRelocKind = enum { PageHi; PageLo; Call }` `minst.tks:42` |
 
 The `offset` field's doc is explicit that it is **`.text`-base-relative**
 (`encode_x86_64.tks:1846–1848` "relative to this function's `.text` base";
-`encode_arm64.tks:2068–2070`; `encode_riscv.tks:1800–1803`). There is no field that
+`encode_arm64.tks:2068–2070`). There is no field that
 says *which section the patched field lives in* — the answer is hard-wired to
 `.text`. The module-level doc on each `EncodedModule*.relocs` repeats it: "every
 relocation, `.text`-section-relative (module-rebased)" (`encode_x86_64.tks:1921`,
-`encode_arm64.tks:2450`, `encode_riscv.tks:2286`).
+`encode_arm64.tks:2450`).
 
 ### 1.2 How a rodata reference works today (text→rodata only)
 
 - A rodata pointer is materialized **in code** at the use site: `encode_lea_rip_x86`
   (`encode_x86_64.tks:1309`) emits `lea dst,[rip+disp32]` with a zeroed disp32 and a
   reloc whose patch site is in `.text`; arm64 uses the ADRP+ADD pair
-  (`isel_arm64.tks:1559`), riscv the AUIPC+ADDI pair (`encode_riscv.tks:2080`).
+  (`isel_arm64.tks:1559`).
 - The rodata blob itself is **flat bytes with no internal pointer**: `encode_rodata`
-  (`encode_arm64.tks:2638`, called `encode_x86_64.tks:2425`,
-  `encode_riscv.tks:2491`) lays each `LRodata` entry at a running offset and emits
+  (`encode_arm64.tks:2638`, called `encode_x86_64.tks:2425`) lays each `LRodata` entry at a running offset and emits
   **one defined, file-local, section-2 `Symbol` per entry** (`encode_arm64.tks:2646`)
   — bytes + symbols, **never a relocation**. `ModuleRodata = { bytes; syms }`
   (`encode_arm64.tks:2600–2607`).
@@ -77,9 +75,9 @@ relocation, `.text`-section-relative (module-rebased)" (`encode_x86_64.tks:1921`
    to rodata symbol S".
 3. **`encode_rodata` produces only symbols, never relocs** — the consumer end has no
    path from an internal-pointer field to a `Reloc`.
-4. **arm64 `MRelocKind` has no absolute-pointer kind** (x86/riscv already have
+4. **arm64 `MRelocKind`
    `Abs64` with numeric mappings — `elf_reloc_type` `objfile_elf.tks:392`,
-   `riscv_reloc_type` `encode_riscv.tks:746`, `coff_reloc_type`
+   um mapeador de reloc um backend encoder, `coff_reloc_type`
    `objfile_coff.tks:341`; arm64 `reloc_type_value` `objfile_macho.tks:200` maps only
    PageHi/PageLo/Call). **Deferred to T-B3** (the writer that needs the number).
 5. **No writer path for a rodata patch site** (`.rela.rodata` / `.rdata` reloc /
@@ -95,7 +93,7 @@ typed AST. `Reloc*`, `EncodedModule*`, and `LModule`/`LRodata` are produced stri
 DOWNSTREAM (lower → encode → objfile) and consumed in-process to emit bytes; **none of
 them cross `serialize_program`/`deserialize_program`** (grep for `LModule`/`LRodata`
 serialization in `src/emit/*.tks` is empty). Therefore widening `RelocX86`/`Reloc`/
-`RelocRiscv` **cannot** touch any `.tkb`. Widening `LRodata` cannot touch the codec
+um tipo de reloc **cannot** touch any `.tkb`. Widening `LRodata` cannot touch the codec
 either (`LModule` is never serialized). `.tkc` references (`build/project.tks`,
 `codegen/codegen.tks`) are the C-backend object cache, not a `Reloc*` serialization.
 **Conclusion: the widening is codec-inert.**
@@ -144,18 +142,15 @@ flags each site — the mechanical driver). The rebasing helpers PRESERVE `r.sec
     sect: RelocSect
 ```
 
-Same field + doc on arm64 `Reloc` (`encode_arm64.tks:2066`, after `kind`) and riscv
-`RelocRiscv` (`encode_riscv.tks:1798`, after `addend`), adjusting `.text`→`__text`
+um tipo de reloc (um backend encoder, after `addend`), adjusting `.text`→`__text`
 wording for arm64.
 
 Literal edits (add `sect = RelocSect::Text`, or `sect = r.sect` in a rebaser):
 
 - x86: `encode_x86_64.tks:2131` (build), `:2327` (`rebase_relocs_x86` → `sect = r.sect`).
 - arm64: `encode_arm64.tks:2340` (build), `:2504` (`rebase_relocs` → `sect = r.sect`).
-- riscv: `encode_riscv.tks:2199` (build), `:2322` (`rebase_relocs_riscv` → `sect = r.sect`).
 
-> `MRelocKind`/`RelocKindX86`/`RelocKindRiscv` are **NOT touched in T-B1**. The
-> absolute-pointer kind a data reloc needs already exists for x86 (`Abs64`) and riscv
+> `MRelocKind`/`RelocKindX86`/um enum de reloc are **NOT touched in T-B1**. The
 > (`Abs64`); arm64 gains it in **T-B3** (with its `reloc_type_value` number). T-B1
 > never constructs a `Rodata` reloc, so no kind is needed yet.
 
@@ -219,8 +214,8 @@ pub type LRodata = struct { symbol: str; bytes: []byte; relocs: []LDataReloc }
 `encode_rodata` gains a scan of each entry's `relocs`; if any is non-empty it
 honest-stops (a rodata-internal pointer needs the T-B2..T-B5 writer/VM path). Its
 return type becomes `ModuleRodata | error` (arm64 `encode_arm64.tks:2638`) and the
-x86/riscv analogs; the three `encode_module*` callers (`encode_x86_64.tks:2425`,
-`encode_arm64.tks:2735`, `encode_riscv.tks:2491`) match the new arm. Because every
+`encode_module*` callers (`encode_x86_64.tks:2425`,
+`encode_arm64.tks:2735`, um backend encoder) match the new arm. Because every
 `relocs` is empty today, the honest-stop is unreachable and the output is
 byte-identical.
 
@@ -276,7 +271,7 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error
     let rod = match encode_rodata(m.rodata) { ModuleRodata as x => x; error as e => return e }
 ```
 
-(the x86/riscv variants return `ModuleRodataX86`/`ModuleRodataRiscv` — match those
+`ModuleRodataX86` — match those
 names as they exist).
 
 ### 2.5 Writer defensive honest-stop (scaffold, never fires)
@@ -319,8 +314,8 @@ could add a `Rodata` one):
 4. **Codec-inert** (§1.5): `Reloc*`/`LRodata` never cross `serialize_program`, so no
    `.tkb` byte moves; `.tkc` object cache is unrelated.
 5. **Guards:** the existing byte-exact tests are the proof — `encode_x86_64_test.tkt`,
-   `encode_arm64_test.tkt`, `encode_riscv_test.tkt` (instruction/module goldens),
-   `objfile_elf_test.tkt`, `objfile_elf_riscv_test.tkt`, `objfile_macho_test.tkt`,
+   `encode_arm64_test.tkt`, um backend encoder (instruction/module goldens),
+   `objfile_elf_test.tkt`, um backend ELF writer, `objfile_macho_test.tkt`,
    `objfile_coff_test.tkt` (object-file goldens), `lower_test.tkt`,
    `lir_interp_test.tkt`, `tkb_test.tkt` — must ALL stay byte-for-byte green, and
    **fixpoint gen1==gen2** is the final proof that the self-hosting compiler emits
@@ -339,10 +334,10 @@ Each edit is independently gate-able; run the listed `.tkt` after each.
 | E3 | `src/backend/minst.tks` | `RelocSect` enum (§2.1) | `minst_test.tkt` compiles |
 | E4 | `src/backend/encode_x86_64.tks` | `sect` on `RelocX86` (`:1844`); `sect = RelocSect::Text` at `:2131`; `sect = r.sect` at `:2327`; `encode_rodata` guard + `\| error` + callsite `:2425` | `encode_x86_64_test.tkt`, `objfile_elf_test.tkt`, `objfile_coff_test.tkt` (all goldens byte-identical) |
 | E5 | `src/backend/encode_arm64.tks` | `sect` on `Reloc` (`:2066`); `sect = RelocSect::Text` at `:2340`; `sect = r.sect` at `:2504`; `encode_rodata` guard + `\| error` + callsite `:2735` | `encode_arm64_test.tkt`, `objfile_macho_test.tkt` |
-| E6 | `src/backend/encode_riscv.tks` | `sect` on `RelocRiscv` (`:1798`); `sect = RelocSect::Text` at `:2199`; `sect = r.sect` at `:2322`; `encode_rodata` guard + `\| error` + callsite `:2491` | `encode_riscv_test.tkt`, `objfile_elf_riscv_test.tkt` |
+| E6 | `` | `sect` on um tipo de reloc (`:1798`); `sect = RelocSect::Text` at `:2199`; `sect = r.sect` at `:2322`; `encode_rodata` guard + `\| error` + callsite `:2491` | um backend encoder, um backend ELF writer |
 | E7 | test helpers (`lir_interp_test.tkt:432`, `lower_test.tkt`, `stackify_test.tkt`, `objfile_coff_test.tkt:117` `co_noreloc_module` if it builds `RelocX86`/`LRodata`) | add the new default fields to test-side literals | the touched `.tkt` themselves |
 
-> The writers (`objfile_elf.tks`, `objfile_elf_riscv.tks`, `objfile_macho.tks`,
+> The writers (`objfile_elf.tks`, um backend ELF writer, `objfile_macho.tks`,
 > `objfile_coff.tks`) are **NOT edited in T-B1** (§2.5 decision). They are T-B2/T-B3.
 
 ---
@@ -354,9 +349,9 @@ under the VM and the native harness (same `error`/exit outcome).
 
 1. **The gate fires (new behavior):** hand-build an `LModule` with one `LRodata {
    symbol = "k"; bytes = <8 zero bytes>; relocs = [data_reloc(0, "other")] }` and call
-   `encode_module_x86` / `encode_module` (arm64) / `encode_module_riscv`. **Expected:
+   `encode_module_x86` / `encode_module` (arm64) / ``. **Expected:
    the `error` arm** (`honest_data_reloc`, message contains "T-B"). Add to
-   `encode_x86_64_test.tkt`, `encode_arm64_test.tkt`, `encode_riscv_test.tkt`. This is
+   `encode_x86_64_test.tkt`, `encode_arm64_test.tkt`, um backend encoder. This is
    the ONE test that proves the new field is wired end-to-end to the honest-stop.
 2. **Default is inert (byte-identity):** build the same module with `relocs =
    teko::list::empty()` and assert `encode_module*` returns `ModuleRodata`/

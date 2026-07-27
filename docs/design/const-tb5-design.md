@@ -297,7 +297,7 @@ e é o que faz T-B5 ser "o último elo antes do 🔑 SEED BUMP #3". Prova:
    seed NO bump. O bump é depois de T-B5. Os writers (T-B2/T-B3), o wasm (T-B4) e a VM
    (T-B5) já entram. O ÚNICO elo consumidor que falta no caminho NATIVO é o **encoder
    bridge**: `encode_rodata` produzir `Reloc sect=Rodata` a partir de `LRodata.relocs`,
-   e o bridge ELF (`x86_reloc_reqs`/`riscv_reloc_reqs`) particionar por `.sect`
+   e o bridge ELF (`x86_reloc_reqs`/``) particionar por `.sect`
    (Mach-O/COFF já particionam, T-B3). Se esse bridge ficasse em T-B6, o seed do bump
    NÃO o teria → quando o seed compilasse o source Tier-B de T-B6, `encode_rodata`
    honest-stoparia no primeiro const Tier-B → **quebra de self-hosting**. Logo o bridge
@@ -320,7 +320,7 @@ e é o que faz T-B5 ser "o último elo antes do 🔑 SEED BUMP #3". Prova:
 Hoje `encode_rodata` (`encode_arm64.tks:2679`) honest-stopa via `honest_data_reloc`
 (`:2645`) + `rodata_has_internal_relocs` (`:2658`). Em T-B5 esses DOIS helpers são
 REMOVIDOS (scaffolding de T-B1 cujo trabalho terminou) e `encode_rodata` emite um
-`Reloc`/`RelocX86`/`RelocRiscv` por `LDataReloc`, com o offset re-baseado ao offset
+`Reloc`/`RelocX86`/um tipo de reloc por `LDataReloc`, com o offset re-baseado ao offset
 corrente do blob dentro do `.rodata`/`__const` concatenado:
 
 ```teko
@@ -375,14 +375,8 @@ tagueada do módulo (o modelo T-B1/T-B2/T-B3: uma lista, tagueada por `.sect`):
     EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs(mt.relocs, rod.relocs) }
 ```
 
-> x86 (`encode_x86_64.tks`) e riscv (`encode_riscv.tks`) espelham: `ModuleRodataX86`/
-> `ModuleRodataRiscv` ganham `relocs: []RelocX86`/`[]RelocRiscv`; `rodata_reloc_of`
-> usa `RelocKindX86::Abs64` (addend `0`) / `RelocKindRiscv::Abs64`; `EncodedModuleX86`/
-> `EncodedModuleRiscv.relocs` recebem `append_relocs(mt.relocs, rod.relocs)`. Os kinds
-> `Abs64` já existem para os três (arm64 ganhou em T-B3; x86/riscv desde sempre).
-
 **(b) Bridge ELF particiona por `.sect`.** `x86_reloc_reqs` (`objfile_elf.tks:1083`) e
-`riscv_reloc_reqs` (`objfile_elf_riscv.tks:15`) hoje mapeiam TODA reloc → `relocs` e
+`` (um backend ELF writer) hoje mapeiam TODA reloc → `relocs` e
 setam `rodata_relocs = teko::list::empty()` (`:1116`/`:51`). Em T-B5 particionam por
 `r.sect`: um `Text` → `relocs` (o offset é `.text`-relativo, como hoje), um `Rodata` →
 `rodata_relocs` (o offset é `.rodata`-relativo). Como toda reloc é `Text` hoje,
@@ -398,7 +392,7 @@ TODA compilação real `LRodata.relocs` é vazio ⇒ `encode_rodata` produz `rel
 `append_relocs(mt.relocs, [])` = `mt.relocs` (idêntico) ⇒ a partição ELF/Mach-O/COFF põe
 tudo em `text`/`relocs` e a partição rodata vazia ⇒ `.rela.rodata`/`__const`/`.rdata`
 relocs vazios ⇒ cada objeto byte-idêntico. Os goldens `encode_*_test.tkt`,
-`objfile_{elf,elf_riscv,macho,coff}_test.tkt` + **fixpoint gen1==gen2** são a prova. As
+`` + **fixpoint gen1==gen2** são a prova. As
 únicas fixtures que MUDAM de expectativa são as três de T-B1 (§5, "o gate dispara") que
 assertavam o honest-stop `encode_module*` — agora invertem para "produz a `Rodata`
 reloc" (§5.7 abaixo).
@@ -484,17 +478,17 @@ regressão do helper que a resolução reusa) — reafirma o comportamento exist
 ### 5.7 (encoder bridge) o honest-stop INVERTE + a `Rodata` reloc é produzida
 
 - **Inverter T-B1 §5-fixture 1** em `encode_x86_64_test.tkt`, `encode_arm64_test.tkt`,
-  `encode_riscv_test.tkt`: o mesmo `LModule` à mão com `LRodata{ bytes=<8 zero>;
+  um backend encoder: o mesmo `LModule` à mão com `LRodata{ bytes=<8 zero>;
   relocs=[data_reloc(0,"other")] }` que ANTES assertava o erro `honest_data_reloc` agora
   assere que `encode_module*` devolve um `EncodedModule*` cujo `relocs` contém UMA
-  `Reloc`/`RelocX86`/`RelocRiscv` com `sect == RelocSect::Rodata`, `kind == Abs64`,
+  `Reloc`/`RelocX86`/um tipo de reloc com `sect == RelocSect::Rodata`, `kind == Abs64`,
   `sym == "other"`, `offset == 0`.
 - **End-to-end encoder→writer**: um `LModule` de 2 entradas (slot + alvo) →
   `encode_module_x86` → `emit_elf` → assere a linha `.rela.rodata` (os MESMOS bytes que
   a fixture T-B2 §4.1 fixou à mão, agora dirigidos pelo encoder). Espelho arm64→`emit_macho`
   (a `__const` reloc `0x0E000001` de T-B3 §4.1) e x86→`emit_coff` (a `.rdata` reloc de
   T-B3 §4.3). Prova que a cadeia produtor-de-reloc→writer encadeia.
-- **Partição ELF unitária**: `x86_reloc_reqs`/`riscv_reloc_reqs` sobre um `enc.relocs`
+- **Partição ELF unitária**: `x86_reloc_reqs`/`` sobre um `enc.relocs`
   com uma `Text` + uma `Rodata` devolve `relocs.len==1` (a text) e `rodata_relocs.len==1`
   (a rodata); sobre só-`Text` devolve `rodata_relocs` vazia (o braço byte-idêntico).
 
@@ -527,9 +521,8 @@ arquivo compila a cada passo.
 | E3 | `src/lir/lir_interp_test.tkt` | helper `iwt_rodata_rel` + `iwt_tb5_deref_module` + fixtures §5.1–§5.6 | os próprios testes novos (verde) |
 | E4 | `src/backend/encode_arm64.tks` | remover `honest_data_reloc`+`rodata_has_internal_relocs`; `ModuleRodata.relocs`+`rodata_reloc_of`+`append_rodata_relocs`; `encode_rodata -> ModuleRodata`; `encode_module` concatena (§4.2) | `encode_arm64_test.tkt`, `objfile_macho_test.tkt` (goldens byte-idênticos) |
 | E5 | `src/backend/encode_x86_64.tks` | espelho x86 (`RelocX86::Abs64`, addend 0) | `encode_x86_64_test.tkt`, `objfile_coff_test.tkt`, `objfile_elf_test.tkt` |
-| E6 | `src/backend/encode_riscv.tks` | espelho riscv (`RelocRiscv::Abs64`) | `encode_riscv_test.tkt`, `objfile_elf_riscv_test.tkt` |
-| E7 | `src/backend/objfile_elf.tks` + `objfile_elf_riscv.tks` | `x86_reloc_reqs`/`riscv_reloc_reqs` particionam por `.sect` em `relocs`/`rodata_relocs` (§4.2b) | `objfile_elf_test.tkt`, `objfile_elf_riscv_test.tkt` (byte-idênticos) |
-| E8 | `encode_{x86_64,arm64,riscv}_test.tkt` | inverter as 3 fixtures T-B1 §5-1 (honest-stop→reloc produzida) + as end-to-end §5.7 | os próprios testes |
+| E7 | `src/backend/objfile_elf.tks` + um backend ELF writer | `x86_reloc_reqs`/`` particionam por `.sect` em `relocs`/`rodata_relocs` (§4.2b) | `objfile_elf_test.tkt`, um backend ELF writer (byte-idênticos) |
+| E8 | `` | inverter as 3 fixtures T-B1 §5-1 (honest-stop→reloc produzida) + as end-to-end §5.7 | os próprios testes |
 
 > Mach-O/COFF writers **NÃO são tocados** — `macho_partition_relocs`/`coff_partition_relocs`
 > (T-B3) já leem `enc.relocs` por `.sect`; recebem os `Rodata` relocs assim que E4/E5 os
@@ -596,7 +589,7 @@ deste crumb, nomeado):
   `data_reloc` entries para cada campo slice/ponteiro. É o crumb produtor (T-B6). Só
   então `resolve_rodata_relocs`/`encode_rodata`/os writers/`wasm_relocate_rodata` recebem
   `relocs` não-vazio em compilação real.
-- **Migrar os descritores ABI** (`SYSV64`/`AAPCS64`/`RISCV64_LP64D`/`WIN64`, `UPPER_SNAKE`
+- **Migrar os descritores ABI** (`SYSV64`/`AAPCS64`/`WIN64`, `UPPER_SNAKE`
   por D7) para consts rodata e o **espelho source-level dual-engine** (§5.8) — o programa
   Tier-B real lido idêntico na VM e no nativo. Ambos são T-B6, atrás do BUMP #3. Nada
   disso bloqueia T-B5 — a cadeia consumidora inteira está pronta e provada.

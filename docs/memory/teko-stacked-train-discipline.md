@@ -6,11 +6,6 @@ source: owner rulings 2026-07-23/24/25 (fila serial → trem empilhado → dreno
 
 # Trem empilhado — disciplina de vagões (0.3.1+)
 
-> **Nota 0.3.1.** As lanes `linux-riscv64-*` e `windows-arm64` citadas nos incidentes abaixo NÃO
-> EXISTEM MAIS: o owner removeu os dois alvos ("remover completamente suporte a Windows arm64 e
-> Linux riscv64, apagar todos os vestígios, sem dead code"). Os incidentes ficam como registro —
-> a LEI que cada um ensinou continua valendo sobre as lanes que sobraram.
-
 O modelo de entrega deixou de ser "PRs paralelos na main" e passou a ser um **trem**: cada
 vagão é um PR cuja **base é a branch do vagão anterior**, não a main. Trabalhar sobre a
 superfície do vagão de baixo é deliberado — expõe problema e solução cedo.
@@ -156,7 +151,6 @@ termina, mas não é lá que ela pode nascer.
 
 O split light/full do CI (`base_ref == main` ⇒ full) tem um efeito de segunda ordem: as lanes
 full-only rodam **pela primeira vez** no vagão que aterrissa. Na .31 isso concentrou OITO estreias
-num único momento — lane riscv64 restaurada, ASan/UBSan/LSan, `TEKO_MEM_PARANOID`, Windows
 self-host, `test / macos`, três `ar validation`, cross-smoke — e duas delas (ASan e mem-paranoid)
 **nunca haviam rodado na história do projeto**, porque gateavam em `github.ref == 'refs/heads/main'`,
 condição que nunca casa num evento `pull_request`.
@@ -192,10 +186,9 @@ lane, porque uma causa aparecia em várias lanes e isso escondia a contagem:
 | causa | achada por | o que era |
 |---|---|---|
 | `dladdr` fora da `libc` | `artifact / linux-*-glibc` | mora em `libdl` até a glibc 2.33; o 2.39 do runner escondia a dependência que o piso de 2.28 exige. **Só apareceu porque o zig morreu** e o build passou a acontecer no piso. |
-| ABI do Win64 | `test / windows-x86_64` **e** `windows-arm64` | `tk_str` (16 bytes) era passado em par de registradores. A MS x64 só passa agregado em registrador nos tamanhos 1/2/4/8; acima disso vai por referência. O callee lia os 16 primeiros bytes da string como `{ptr; len}`. O objeto PE/COFF sempre esteve correto — a hipótese "é do COFF" era minha e estava errada. |
+| ABI do Win64 | `test / windows-x86_64` **e** `` | `tk_str` (16 bytes) era passado em par de registradores. A MS x64 só passa agregado em registrador nos tamanhos 1/2/4/8; acima disso vai por referência. O callee lia os 16 primeiros bytes da string como `{ptr; len}`. O objeto PE/COFF sempre esteve correto — a hipótese "é do COFF" era minha e estava errada. |
 | `memcmp(NULL, …)` | `ASan+UBSan+LSan` | UB em `tk_str_eq` e `tk_str_ends_with`. **Primeira execução na história do projeto** desta lane (o J2). |
 | sem alvo ELF/aarch64 | `test / linux-arm64-{glibc,musl}` | os assets arm64 eram publicados sem que `teko test .` jamais tivesse rodado naquele hardware. |
-| sonda de capacidade incompleta | `regressor / all capabilities` | ter `qemu-riscv64-static` no PATH não é a capacidade; a capacidade é conseguir executar. |
 
 **A lição que generaliza** é a última linha da tabela, e ela vale para toda lane nova: uma sonda que
 verifica o NOME de uma ferramenta em vez do FATO que ela deve produzir passa verde e a falha reaparece
@@ -583,7 +576,7 @@ desde o instante em que o defeito ficou descobrível até ser descoberto**, e é
   economiza 18 segundos de um lead time de duas horas.
 - **A lacuna de fail-fast passa a ser defeito de LEAD TIME.** Medido no mesmo run: `artifact /
   macos-arm64` terminou 02:56:19; `cli surface / macos-arm64` só pôde começar 03:33:08, porque
-  `needs: artifact` numa matriz espera **todas** as pernas e `artifact / windows-arm64` levou
+  `needs: artifact` numa matriz espera **todas** as pernas e `` levou
   38m48s. Uma assertion de 9 segundos esperou **36m49s** por um binário que ela nem testa.
 - **A investigação de tempo de build muda de categoria.** Não é fatura de runner: enquanto a perna
   mais lenta levar 38m48s, esse é o **piso de lead time de todo defeito** que o repositório é capaz

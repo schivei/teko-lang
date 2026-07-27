@@ -7,8 +7,6 @@ status: INVESTIGAÇÃO MEDIDA — parcial; a seção "O QUE FALTA MEDIR" nomeia 
 
 # Tempo de build por host — o que o macOS não faz
 
-> **STATUS 0.3.1 — `linux-riscv64` e `windows-arm64` NÃO EXISTEM MAIS.** Por decisão do owner
-> ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos os vestígios, sem
 > dead code"), os dois hosts saíram da matriz de producers, das lanes de teste e do conjunto de
 > assets publicados. As medições abaixo que os citam são REGISTRO HISTÓRICO de corridas reais e
 > ficam como estão; nenhuma delas descreve uma lane que ainda roda. Onde este documento propõe
@@ -35,9 +33,7 @@ workflow `.github/workflows/pr.yml`, job `artifact`, ambas em modo `full`:
 | `linux-arm64` | 8m52s | 9m03s |
 | `windows-x86_64` | 11m54s | 10m13s |
 | `linux-x86_64` | **16m28s** | **15m18s** |
-| `linux-riscv64-glibc` | 25m15s | — |
-| `linux-riscv64-musl` | 25m41s | — |
-| `windows-arm64` | >44m (cancelada) | — |
+| `` | >44m (cancelada) | — |
 
 O outlier a explicar é `linux-x86_64`: é a mais lenta de todas as lanes não emuladas,
 perde para `windows-x86_64` no MESMO x86_64 e para `linux-arm64` no MESMO sistema
@@ -114,10 +110,9 @@ A conta, em modo `full`:
 |---|---|---|---:|---:|
 | `macos-arm64` | native | 1 label | **1** (só o build seco) | 0 |
 | `windows-x86_64` | native | 1 label | **1** | 0 |
-| `windows-arm64` | native | 1 label | **1** | 0 |
+| `` | native | 1 label | **1** | 0 |
 | `linux-x86_64` | linux | `linux-x86_64-glibc linux-x86_64-musl` | **3** | 2 |
 | `linux-arm64` | linux | `linux-arm64-glibc linux-arm64-musl` | **3** | 2 |
-| `linux-riscv64-*` | linux | 1 label | **2** (1 nativa + 1 emulada) | 1 |
 
 **Esta é a coisa que o macOS não faz e os Linux fazem.** O leg macOS constrói o
 compilador uma vez e publica esse binário. O leg `linux-x86_64` constrói o compilador
@@ -175,11 +170,10 @@ o número não veio de suposição: veio de uma medição que **já estava no re
 
 ### 4.1 FATO(medido, já registrado) — o custo por host de um trabalho IDÊNTICO
 
-`docs/design/compile-time-architecture.md` §1.1 registra a corrida `28763999356`, em que
 o job `build-test` rodou **os mesmos passos em todos os cinco hosts**:
 
 ```
- 973s  build-test / windows-arm64
+
  332s  build-test / linux-arm64
  309s  build-test / linux-x86_64
  215s  build-test / windows-x86_64
@@ -199,10 +193,9 @@ Normalizada com `macos-arm64 = 1,00`:
 | `windows-x86_64` | 1,17 |
 | `linux-x86_64` | 1,68 |
 | `linux-arm64` | 1,80 |
-| `windows-arm64` | **5,29** |
+| `` | **5,29** |
 
 A mesma fonte (`docs/design/ci-gates.md`, linha 159) já dizia em prosa o que este número
-diz com precisão: *"`windows-11-arm` is the slowest runner in the set"*.
 
 ### 4.2 MODELO(calibrado) — quanto TRABALHO cada lane fez, descontado o hardware
 
@@ -213,11 +206,10 @@ obtém-se o trabalho de cada lane numa unidade comum ("segundos-macOS"):
 |---|---:|---:|---:|
 | `macos-arm64` | 123 | 1,00 | **123** |
 | `linux-arm64` | 543 | 1,80 | 301 |
-| `windows-arm64` | 2328 | 5,29 | 440 |
+| `` | 2328 | 5,29 | 440 |
 | `windows-x86_64` | 613 | 1,17 | 525 |
 | `linux-x86_64` | 918 | 1,68 | **547** |
 
-Os dois legs `riscv64` ficam de fora de propósito: o fator de 2,91 que a mesma corrida
 dá para eles mede um job cujo custo era 85% execução emulada, mistura diferente da de
 hoje — usá-lo seria comparar duas emulações distintas fingindo que são uma.
 
@@ -239,7 +231,7 @@ Aplicando 41 s × o fator de host e comparando com o observado:
 | `linux-arm64` | 222 s | 543 s | 2,4× |
 | `linux-x86_64` | 207 s | 918 s | 4,4× |
 | `windows-x86_64` | 144 s | 613 s | **4,3×** |
-| `windows-arm64` | 651 s | 2328 s | **3,6×** |
+| `` | 651 s | 2328 s | **3,6×** |
 
 Os resíduos de `linux-arm64` e `linux-x86_64` têm explicação nomeada e com número: são
 as duas compilações de container da §2 (pull de 561 MB + `apk add build-base` + um
@@ -254,9 +246,7 @@ sem modelo nenhum no meio.
 
 ### 4.3 As três conclusões que essa tabela força
 
-**(a) `windows-arm64` NÃO é uma anomalia estrutural — REFUTADO.** O achado de que uma
-lane nativa (38m48s) perde para `riscv64` sob emulação de CPU (25m49s) é real, mas a
-causa está medida e é o runner: `windows-11-arm` custa **5,29× o macOS em trabalho
+**(a) `` NÃO é uma anomalia estrutural — REFUTADO.** O achado de que uma
 idêntico**, medido numa corrida de outra geração de workflow. Normalizada, essa lane faz
 **440** unidades — MENOS que `windows-x86_64` (525) e que `linux-x86_64` (547). Ela é a
 lane mais lenta do relógio e uma das mais econômicas em trabalho. Não há otimização de
@@ -404,7 +394,7 @@ milissegundos. **HIPÓTESE, com o número que a torna implausível como causa pr
 mas ela permanece como higiene e como o único item da tese "flag de SO" que de fato
 existe na árvore.**
 
-### 6.4 `windows-arm64` sob emulação de x86_64 — NÃO REFUTADA, NÃO CONFIRMADA
+### 6.4 `` sob emulação de x86_64 — NÃO REFUTADA, NÃO CONFIRMADA
 
 A hipótese é séria e o mecanismo existe (Windows on ARM emula PE AMD64 de forma
 transparente). Duas observações de árvore que a tornam VERIFICÁVEL e, ao mesmo tempo,
@@ -420,11 +410,11 @@ if ! file "$GD/teko" | grep -q "$ARCH_KW"; then … exit 1; fi
 
 `scripts/produce_assets.sh`, no ramo `kind = native` (macOS e os dois Windows),
 simplesmente copia `out/teko[.exe]` para `stage/<label>/` — **sem nenhuma verificação
-equivalente**. Um `teko.exe` AMD64 publicado como `windows-arm64` passaria: a lane `test`
+equivalente**. Um `teko.exe` AMD64 publicado como `` passaria: a lane `test`
 o executa no próprio runner ARM64, que o emula, e a lane fica verde.
 
 **Porém a §4.3(a) já removeu a urgência:** descontado o fator de host 5,29 medido de
-forma independente, `windows-arm64` faz 440 unidades de trabalho — MENOS que
+forma independente, `` faz 440 unidades de trabalho — MENOS que
 `windows-x86_64` (525) e `linux-x86_64` (547). Se a lane estivesse emulando o `cc` além
 do que a régua já captura, o trabalho normalizado dela apareceria ACIMA dos outros, não
 abaixo. **HIPÓTESE, com evidência indireta CONTRA ser a causa do wall-clock — mas com
@@ -509,7 +499,7 @@ acesso à API extrai isso com `get_job_logs` e a diferença de timestamps ISO en
    variável livre.**
 4. `=== <label> — native build in <image> ===` e `native_linux_asset: <label> OK` —
    início e fim de cada build de container. A diferença dá pull + `apk add` + `gcc -O2`.
-5. A saída do passo `Report the host toolchain` em `windows-arm64` — se `cc`/`gcc`
+5. A saída do passo `Report the host toolchain` em `` — se `cc`/`gcc`
    resolvem para um caminho x86_64, §6.4 vira FATO em vez de hipótese.
 
 Com (3) e (4) a comparação `linux-x86_64` × `linux-arm64` fecha: se as linhas (3)
@@ -552,15 +542,13 @@ linha:
 
 **Sobre a tese de mecanismo de SO** (*"alguma flag de abi, alguma syscall"*): ela foi
 testada item a item na §6. Spawn de processo: refutado, são DOIS por build. Buffer de
-stdout: refutado, não há flush por linha. Emulação silenciosa em `windows-arm64`:
+stdout: refutado, não há flush por linha. Emulação silenciosa em ``:
 possível, mas a normalização da §4.3(a) argumenta contra ela ser a causa do relógio.
 **Existe exatamente UM item real dessa família na árvore** (§6.3): a arena aloca por
 `posix_memalign`/`_aligned_malloc` em chunks de 64 KB, sem `mmap`, sem `VirtualAlloc` e
 sem NENHUM ajuste por SO — e o dimensionamento (~1600 chamadas para 100 MB de arena) diz
 que ele não move um relógio de dezenas de minutos.
 
-**Sobre `windows-arm64` (38m48s) perder para `riscv64` emulado (25m49s):** é real e não
-é anomalia estrutural. `windows-11-arm` custa **5,29× o macOS em trabalho idêntico**,
 medido na corrida `28763999356` e já registrado em `docs/design/ci-gates.md`. Normalizada,
 essa lane é uma das que MENOS trabalho fazem. É um runner lento fazendo o mesmo que os
 outros — e "hardware" aqui é a resposta honesta, com o número que a sustenta.
@@ -594,5 +582,5 @@ que é pior que a lane lenta. **A medição pendente está nomeada; a mudança n
 
 **T-5 é o único que não custa nada e não depende de medição nenhuma**, e é o que eu
 recomendaria aplicar primeiro — não por tempo, mas porque a §6.4 mostrou que o projeto
-publica três assets (`macos-arm64`, `windows-x86_64`, `windows-arm64`) sem nunca conferir
+publica três assets (`macos-arm64`, `windows-x86_64`, ``) sem nunca conferir
 a arquitetura deles, enquanto confere as seis Linux.
