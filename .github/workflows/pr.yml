@@ -685,7 +685,26 @@ jobs:
         shell: bash
         env:
           REGRESSION_REQUIRE_TOOLS: "1"
-        run: ./dl/linux-x86_64-glibc/teko test . --arith-cast-gate
+        run: ./dl/linux-x86_64-glibc/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
+
+      # NO SKIPS IN THE COMPILER'S OWN CI, evaluated AFTER the lane rather than inside the
+      # executor. Owner ruling 2026-07-27: *"não podem haver skips, se houver é falha (deve ser
+      # avaliado após a execução da lane para não imputar o comportamento no fonte do teko mas sim
+      # no CI)"*.
+      #
+      # A skipped row is a legitimate outcome for a USER — their machine may genuinely lack a
+      # cross-linker. It is never a legitimate outcome HERE: a row nobody ran is inconclusive, and
+      # reporting green over it is the same class of lie the fixpoint's soft mode was. Keeping the
+      # rule in a post-lane script is what stops that policy from leaking into `teko test`'s
+      # semantics and thence into every user's project.
+      #
+      # `REGRESSION_REQUIRE_TOOLS=1` above already turns a PROVISIONABLE capability gap into a hard
+      # failure. This catches what that flag cannot: a regressor that reports `ok` while carrying
+      # skipped rows inside it — a green line over unexecuted work.
+      - name: No skips — every declared row must have run
+        if: always()
+        shell: bash
+        run: sh scripts/no_skips_gate.sh teko-test.log
 
   # ══ ar-validation ══════════════════════════════════════════════════════════════════════════
   # TIER: full only — three OS runners for the archive-container lanes is landing-wagon cost.
