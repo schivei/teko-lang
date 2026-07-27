@@ -469,7 +469,6 @@ mantém build+read simétricos. Pode ser um sub-passo separado se o gate quiser 
 
 ### 5.1 O problema: os corpos atuais NÃO são const-expr
 
-`aapcs64()`/`sysv64()`/`[target removido]_lp64d()`/`win64()` constroem os `[]u32` via `push_range`
 (um LOOP) e helpers (`sysv_gpr_arg_seq`, …). `push_range` NÃO está no allowlist Tier-5 (D1) —
 é uma fn com loop, não um construtor de literal único. Logo o inicializador do const tem de
 ser um **array LITERAL** (Tier 4). Cada `push_range(a, b)` é expandido para a sua sequência
@@ -526,16 +525,11 @@ Os irmãos expandem os seus `push_range`/helpers idem:
   ``, ``, ``,
   ``, ``, `win64_gpr_arg_seq`,
   `win64_gpr_allocatable`, `win64_gpr_caller_saved`, `win64_fpr_allocatable`, e as 4 fábricas
-  `aapcs64`/`sysv64`/`[target removido]_lp64d`/`win64` (agora consts). **MANTER** `contains_u32` (usado
   por `is_caller_saved`/`is_callee_saved`), `arg_reg`, `allocatable_pool`, `is_caller_saved`,
   `is_callee_saved`, `spill_scratch`, `AbiDescriptor`, `ArgReg` — inalterados (consomem o
   descritor por parâmetro).
-- Use-sites (grep `aapcs64\(\)|sysv64\(\)|win64\(\)|[target removido]_lp64d\(\)`):
   - `src/build/project.tks:1168,1169` → `teko::backend::AAPCS64`;
     `:1193,1194,1195` → `SYSV64`; `:1223,1224,1225` → `WIN64`; `:1252,1253` → uma ABI.
-  - `` → `arg_reg(RISCV64_LP64D, …)`.
-  - Doc-comments que citam `sysv64()`/`aapcs64()`/`[target removido]_lp64d()` (encode_x86_64.tks:2466,
-
 `SYSV64`/… (Javadoc W15).
 
 ### 5.3 A EXIGÊNCIA de byte-identidade dos goldens de regalloc
@@ -757,7 +751,6 @@ de granularidade em aberto, com recomendação de INCLUIR (fecha o Tier-B de ver
 - `/home/user/teko-lang/src/backend/abi_aapcs64.tks` — `AAPCS64` const, remover
   `push_range`/`aapcs64`.
 - `/home/user/teko-lang/src/backend/abi_sysv64.tks` — `SYSV64` const, remover helpers/`sysv64`.
-- `/home/user/teko-lang/src/backend/abi_[target removido].tks` — uma ABI const, remover helpers.
 - `/home/user/teko-lang/src/backend/abi_win64.tks` — `WIN64` const, remover helpers.
 - `/home/user/teko-lang/src/build/project.tks` — use-sites `:1168-1253`.
 - `` — use-sites `:150,636,1041` + docs.

@@ -375,11 +375,6 @@ tagueada do módulo (o modelo T-B1/T-B2/T-B3: uma lista, tagueada por `.sect`):
     EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs(mt.relocs, rod.relocs) }
 ```
 
-> `ModuleRodataRiscv` ganham `relocs: []RelocX86`/`[]RelocRiscv`; `rodata_reloc_of`
-> usa `RelocKindX86::Abs64` (addend `0`) / um enum de reloc; `EncodedModuleX86`/
-> `EncodedModuleRiscv.relocs` recebem `append_relocs(mt.relocs, rod.relocs)`. Os kinds
-> `Abs64`
-
 **(b) Bridge ELF particiona por `.sect`.** `x86_reloc_reqs` (`objfile_elf.tks:1083`) e
 `` (um backend ELF writer) hoje mapeiam TODA reloc → `relocs` e
 setam `rodata_relocs = teko::list::empty()` (`:1116`/`:51`). Em T-B5 particionam por
@@ -594,7 +589,7 @@ deste crumb, nomeado):
   `data_reloc` entries para cada campo slice/ponteiro. É o crumb produtor (T-B6). Só
   então `resolve_rodata_relocs`/`encode_rodata`/os writers/`wasm_relocate_rodata` recebem
   `relocs` não-vazio em compilação real.
-- **Migrar os descritores ABI** (`SYSV64`/`AAPCS64`/`RISCV64_LP64D`/`WIN64`, `UPPER_SNAKE`
+- **Migrar os descritores ABI** (`SYSV64`/`AAPCS64`/`WIN64`, `UPPER_SNAKE`
   por D7) para consts rodata e o **espelho source-level dual-engine** (§5.8) — o programa
   Tier-B real lido idêntico na VM e no nativo. Ambos são T-B6, atrás do BUMP #3. Nada
   disso bloqueia T-B5 — a cadeia consumidora inteira está pronta e provada.

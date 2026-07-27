@@ -142,7 +142,6 @@ regression in this opcode's encoding?* Two live checks exist:
 | regalloc | `regalloc_test.tkt` + `_x86`/``/`_match` | 108 | spill/allocation | yes (surface) |
 | stackify | `stackify_test.tkt` | 168 | wasm stackification/valtype/mem-op | yes (surface) |
 | objfile | `` | 71 | object-file bytes per format | yes (surface) |
-| abi | `abi_{sysv64,win64,[target removido]}_test.tkt` | 32 | ABI lowering | yes (surface) |
 | minst (structural) | `minst_test.tkt` + `_x86`/`` | 32 | MInst shape/builders | yes (surface) |
 | **T2-eligible subtotal** | | **754** | | |
 | minst_interp (ORACLE) | `minst_interp_test.tkt` | 35 | differential oracle | **NO → T3** |

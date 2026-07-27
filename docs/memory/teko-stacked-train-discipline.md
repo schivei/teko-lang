@@ -6,7 +6,6 @@ source: owner rulings 2026-07-23/24/25 (fila serial → trem empilhado → dreno
 
 # Trem empilhado — disciplina de vagões (0.3.1+)
 
-> **Nota 0.3.1.** As lanes `linux-[target removido]-*` e `` citadas nos incidentes abaixo NÃO
 > EXISTEM MAIS: o owner removeu os dois alvos ("remover completamente suporte a Windows arm64 e
 > a LEI que cada um ensinou continua valendo sobre as lanes que sobraram.
 
@@ -193,7 +192,6 @@ lane, porque uma causa aparecia em várias lanes e isso escondia a contagem:
 | ABI do Win64 | `test / windows-x86_64` **e** `` | `tk_str` (16 bytes) era passado em par de registradores. A MS x64 só passa agregado em registrador nos tamanhos 1/2/4/8; acima disso vai por referência. O callee lia os 16 primeiros bytes da string como `{ptr; len}`. O objeto PE/COFF sempre esteve correto — a hipótese "é do COFF" era minha e estava errada. |
 | `memcmp(NULL, …)` | `ASan+UBSan+LSan` | UB em `tk_str_eq` e `tk_str_ends_with`. **Primeira execução na história do projeto** desta lane (o J2). |
 | sem alvo ELF/aarch64 | `test / linux-arm64-{glibc,musl}` | os assets arm64 eram publicados sem que `teko test .` jamais tivesse rodado naquele hardware. |
-| sonda de capacidade incompleta | `regressor / all capabilities` | ter `qemu-[target removido]-static` no PATH não é a capacidade; a capacidade é conseguir executar. |
 
 **A lição que generaliza** é a última linha da tabela, e ela vale para toda lane nova: uma sonda que
 verifica o NOME de uma ferramenta em vez do FATO que ela deve produzir passa verde e a falha reaparece

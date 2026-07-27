@@ -285,7 +285,7 @@ fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, secidx: u
 /**
  * elf_build_rodata_relas — resolve cada `rodata_relocs` de `obj` numa linha
  * `Elf64_Rela` de `.rela.rodata`: um ponteiro data→data cujo alvo é um datum `.rodata`
- * local vira R_X86_64_64/R_RISCV_64 contra o símbolo de seção `.rodata` com o offset
+ * local vira R_X86_64_64 contra o símbolo de seção `.rodata` com o offset
  * do alvo dobrado no addend, e cujo `r_offset` é o byte offset do slot de ponteiro
  * DENTRO de `.rodata` (#594 T-B2). Vazia hoje (o honest-stop `encode_rodata` de T-B1
  * impede qualquer produtor), então `.rela.rodata` nunca é emitida em compilação real.
@@ -454,9 +454,6 @@ el_u32_at(obj, 716) == 2           // sh_info = .rodata
 el_u32_at(obj, 728) == 24          // sh_entsize
 ```
 
-Testes paralelos em outros backends: idêntico nos estruturais, mas com `e_machine` apropriado,
-`e_flags=EF_RISCV_FLOAT_ABI_DOUBLE`, `rtype = 2` (R_RISCV_64) — assert `el_u32_at(...,
-208) == 2`. (Os demais offsets são iguais; `e_flags` não muda o tamanho.)
 
 ### 4.2 (ii) `ElfObject` SEM rodata-reloc → objeto byte-idêntico ao golden
 

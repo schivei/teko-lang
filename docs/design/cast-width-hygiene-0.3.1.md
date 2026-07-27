@@ -5,7 +5,7 @@
 > (W-RULE in the checker) — DONE.** **C2 (backend no-op confirmation) — DONE.** **C6
 > (`teko::casting` stdlib module) — DONE.**
 > **C3 (signature sweep, branch `feat/0.3.1-cast-width-c3c5`) — DONE.** Widened ~30
-> frame-slot/count declarations (`MFrameAddr`/`Riscv`/`X86.slot`, `Spilled`/`AssignLookup.slot`,
+> frame-slot/count declarations (`MFrameAddr`/`X86.slot`, `Spilled`/`AssignLookup.slot`,
 > `next_slot`, `frame_base`, `count_spills`/`append_spill_slots`,
 > `emit_gpr_reload`/`emit_gpr_store` + `rewrite_inst`/`block`/`func` × 3 archs,
 > `slot_offset`/``, `frame_slot_addr`, `block_pos`→`block_rpo_pos`) `u32`→`u64`,

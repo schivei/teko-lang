@@ -1,8 +1,5 @@
 # 0.3.1 — `regressor.tkr` AS THE PRIMARY REGRESSION BANK + DEATH OF THE REGRESSION SCRIPTS
 
-> **STATUS 0.3.1 — a metade `` deste plano ficou VAZIA.** `linux-[target removido]` foi removido por
-> os vestígios, sem dead code"): as linhas `[target removido]-linux` do corpus, o cenário
-> `` e o wrapper `qemu-[target removido]-static` saíram junto com o alvo. A
 > decidido em 2026-07-24; hoje ela só tem a metade `coff`.
 
 **DECISIONS CLOSED — ratified by the owner 2026-07-24 (D1-D9 all sealed at ruling level; the

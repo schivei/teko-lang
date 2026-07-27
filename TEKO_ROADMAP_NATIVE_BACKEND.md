@@ -28,7 +28,6 @@
 > mesmos termos do C. Os dois backends coexistem atrás de uma flag até então.
 >
 > vestígios, sem dead code"). O backend RISC-V inteiro (isel/minst/regalloc/encode/ABI/
-> ELF-adapter, o alvo `NativeTarget::Riscv64Linux` e `docs/design/backend-b2-[target removido].md`)
 > e foi apagado da matriz, das lanes e dos assets publicados. As tabelas abaixo já
 > refletem a matriz PÓS-remoção.
 

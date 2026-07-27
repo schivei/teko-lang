@@ -287,7 +287,6 @@ The pool helpers mirror `abi_sysv64.tks`'s `sysv_gpr_arg_seq`/`sysv_gpr_allocata
     shadow_space: u32
 ```
 
-> **Fixpoint guardrail.** `aapcs64()`/`sysv64()`/`[target removido]_lp64d()` each add `shadow_space = 0 to u32`.
 > Because `compute_frame_layout_x86` only reserves shadow space when `abi.shadow_space > 0`, the arm64,
 > default-build fixpoint are the guardrail. The stable-seed lane parses the new field fine (a struct
 > field + field access is core syntax in every seed — no staged-syntax hazard).
@@ -632,7 +631,7 @@ fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
 }
 ```
 
-The `Arm64Macho`/`X8664Linux`/`Riscv64Linux` arms are UNCHANGED (verbatim A4/B1/B2 bodies), so the
+The `Arm64Macho`/`X8664Linux` arms are UNCHANGED (verbatim A4/B1/B2 bodies), so the
 default build stays byte-identical (FIXPOINT) and all three existing differentials are untouched.
 `finish_native_object` is REUSED verbatim — it writes `<stem>.o`, links via `resolve_cc`'s compiler
 (on the Windows runner that is host `clang`, which drives `lld-link`), and prints the exclusive
@@ -771,11 +770,7 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
   R-1 raise. REPORTED for the integrator to sequence (a 0.3.1 DRY-sweep companion), not a B3 blocker.
 - **R-2 · No parallel `minst_x86_interp`.** §6.3 — inherited from B1's R-2; the LIR interp + goldens +
   the executing Windows differential cover the oracle role. REPORTED.
-
-  as infra-blocked on the DISABLED `` lane (owner #304). The owner then removed the host
-  outright in 0.3.1, so the report is resolved by cancellation: #388 is complete at its x86_64 half and
-  there is no arm64-Windows work left to sequence.
-- **R-4 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP (`diff_c_own.sh:190`, `println`
+- **R-3 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP (`diff_c_own.sh:190`, `println`
   vs `tk_println`) is a shared LIR-lowering gap — it KNOWN-STOPs identically on the Windows lane (the
   lld-link rejects the undefined `println`). Already a reported finding; B3 inherits it unchanged.
 
@@ -872,8 +867,7 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
   green + `llvm-readobj --sections/--symbols/--relocations` / `lld-link` consumability on the emitted object (any host,
   machine-free).
 - The **KEYSTONE full CI ritual at B3-4**: the whole gate — both engines + fixpoint + the **windows-x86_64
-  C-vs-own leg green** (executing the PE NATIVELY on the runner) + the macOS byte-test lane green + all
-  here** (arm64-Windows is the named infra-blocked follow, R-3).
+  C-vs-own leg green** (executing the PE NATIVELY on the runner) + the macOS byte-test lane green.
 
 ---
 

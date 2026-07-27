@@ -203,7 +203,6 @@ ganhar nada, e nada precisa ser aposentado explicitamente — já foi, em 2026-0
 ### 6.1 O defeito que o ruling do owner conserta
 
 `resolve_cc` (`project.tks:779`) devolve `"cc"` em todo host, e quem decide o que é `cc` é o
-PATH. O `PROVENANCE.txt` do asset publicado pelo runner `windows-11-arm64` registra o resultado:
 
 ```
 host_uname=MINGW64_NT-10.0-26200-ARM64 3.6.9-b4195d69.x86_64 x86_64
@@ -241,7 +240,7 @@ Medido neste container (linux-x86_64, Ubuntu 24.04):
 | `ld.lld` / `lld` | `/usr/bin/ld.lld` | LLVM | multi-alvo |
 | `ld.gold` / `gold` | `/usr/bin/ld.gold` | GNU gold | x86_64-linux-gnu |
 
-macOS, Windows-x86_64 e Windows-arm64 **não foram medidos** — este agente só tem host Linux.
+macOS e Windows-x86_64 **não foram medidos** — este agente só tem host Linux.
 Candidatos a verificar nos runners, não a assumir: no Windows, `lld-link` do LLVM (o LLVM está
 instalado — `/c/Program Files/LLVM/bin/clang` aparece no diagnóstico de toolchain do runner ARM64
 — e é cross-capaz por natureza), e `link.exe` da MSVC, que exige ambiente de desenvolvedor; no

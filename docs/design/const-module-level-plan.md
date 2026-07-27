@@ -120,7 +120,6 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 The honest-stops that block "top-level data" fire only on **`m.globals`** (the
 `LGlobal` table), never on **`m.rodata`**. String literals already flow read-only
 data + a `Pc32`/`Abs64` relocation through **every** backend (C, x86_64, arm64,
-[target removido], wasm) and both object writers (ELF/Mach-O/COFF/wasm) **and** the LIR
 interpreter (`rodata_base_of` / `interp_global_addr`). Therefore:
 
 - **Scalars never touch data at all** (inlined literals).
@@ -203,7 +202,6 @@ the whole reloc model is `.text`-relative (verified §5.1). Two tiers:**
   data section**. That relocation **does not exist** in any writer/encoder/VM
   (§5.1 verdict). This tier BREAKS "zero backend" and becomes a dedicated backend
   phase (§8 crumbs T-B*). The flagship Tier-B consts are the ABI descriptors
-  (`sysv64`/`aapcs64`/`[target removido]_lp64d`/`win64` — eight `[]u32` slice fields each,
   `abi_aapcs64.tks:14`). **None of the owner's ~50 anemic-const sites are Tier B**
   — they are all Tier A — so the ~50 migrate with zero backend change; Tier B is
   only reached when the pointer-bearing aggregate FACTORIES are also converted.
@@ -736,7 +734,6 @@ pointer): they materialize in `m.rodata` at the feature baseline (D2, RULING 1).
 **Not in the owner's ~50.** Only reached if the pointer-bearing aggregate factories
 are converted:
 
-- `src/backend/abi_{sysv64,aapcs64,[target removido],win64}.tks` ABI descriptors — eight
   `[]u32` slice fields (`abi_aapcs64.tks:14`). Full rodata materialization needs a
   data→data reloc (§5.1) → deferred behind crumbs T-B1..T-B5, OR legitimately stay
   `fn` (a genuine pointer-bearing aggregate whose per-call construction is honest
@@ -755,7 +752,6 @@ are converted:
   owner's "convert TUDO" targets *constant* returns; a factory that seeds fresh
   mutable state is a different category and correctly stays a fn.
 - `nan()`/`inf()` are Tier-5 consts (allowlisted `f64_from_bits`) → migrate.
-- The ABI descriptors (`sysv64`, `aapcs64`, `[target removido]_lp64d`, `win64`) are
   **pointer-bearing aggregates (Tier B, §6.5b)** — they are NOT in the owner's ~50
   and require the data-reloc backend phase (§8 T-B*) before they can be rodata
   consts. Until then they stay `fn` (honest per-call construction).
