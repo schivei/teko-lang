@@ -1,0 +1,46 @@
+/**
+ * Reg — a physical-register descriptor, the flat-POD struct family a backend's register consts
+ * belong to (the fixture's stand-in for the compiler's own `MReg`).
+ */
+type Reg = struct {
+    /** the ISA register number. */
+    id: i64
+    /** which register file the register lives in. */
+    klass: i64
+    /** whether the operand names a PHYSICAL register (always true for a constructed one). */
+    is_phys: bool
+}
+
+/**
+ * preg — the allowlisted comptime constructor of a physical-register operand (Tier 5 of the const
+ * grammar): the whole body is one struct literal binding both parameters plus its own `is_phys`
+ * literal, which is exactly the shape the checker's const canonicalization splices.
+ *
+ * @param id     the ISA register number
+ * @param klass  which register file the register lives in
+ * @return       the physical-register operand
+ */
+pub fn preg(id: i64, klass: i64) -> Reg {
+    Reg { id = id; klass = klass; is_phys = true }
+}
+
+/**
+ * RAX — a struct const initialized by a COMPTIME CONSTRUCTOR CALL rather than by a struct literal.
+ * The register number is spelled as a folded op-tree (`3 + 4`) so the canonicalization is proven to
+ * splice the argument the fold produced, not the argument as it was written.
+ */
+const RAX: Reg = preg(3 + 4, 3)
+
+/**
+ * reg_score — read every field of a register const back out, the way a register allocator reads its
+ * pinned operands: `id * 6 + klass + is_phys`. Any field the canonicalization dropped or reordered
+ * changes this total.
+ *
+ * @param r  the register descriptor to score
+ * @return   `r.id * 6 + r.klass + r.is_phys`
+ */
+fn reg_score(r: Reg) -> i64 {
+    r.id * 6 + r.klass + (r.is_phys to i64)
+}
+
+exit(reg_score(RAX))
