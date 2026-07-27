@@ -5155,11 +5155,12 @@ fn param_ltypes(params: []parser::Param) -> []LType {
  * @param checker::TProgram prog  the whole typed program to lower
  * @return LModule | error  the built module (functions + rodata/globals/
  *                          layouts, every lifted closure/thunk folded in,
- *                          A1-7 #382); the `error` arm when any function or
- *                          the virtual main fails to lower
+ *                          A1-7 #382); the `error` arm when a declared
+ *                          aggregate has no representable layout, or when any
+ *                          function or the virtual main fails to lower
  */
 pub fn lower_program(prog: checker::TProgram) -> LModule | error {
-    let layouts = collect_struct_layouts(prog)
+    let layouts = match collect_struct_layouts(prog) { []LStructLayout as ls => ls; error as e => return e }
     let enums = collect_enums(prog)
     let externs = collect_externs(prog)
     let variants = collect_variants(prog)
@@ -5216,37 +5217,135 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
     cur
 }
 
-/** collect_struct_layouts — the declared-order, natural-alignment layout of every `struct`
-    type declaration in `prog` (A1-3, #382). A generic struct's type-parameter field
-    annotations collapse to Ptr (ltype_of_typeexpr's total fallback) — harmless, since no
-    A1-3 fixture instantiates one; a NON-struct type declaration (enum/class/variant/…)
-    contributes no layout entry. */
-fn collect_struct_layouts(prog: checker::TProgram) -> []LStructLayout {
+/**
+ * collect_struct_layouts — the declared-order, natural-alignment layout of every FIELD-SHAPED
+ * type declaration in `prog`: a `struct` body's own fields, and a `class` body's effective
+ * instance fields (A1-3, #382).
+ *
+ * A generic struct's type-parameter field annotations collapse to Ptr (ltype_of_typeexpr's
+ * total fallback) — harmless, since no A1-3 fixture instantiates one; a declaration that is
+ * not field-shaped (enum/flags/variant/alias/extern/interface/trait) contributes no layout
+ * entry, because none of them reaches a field/index access in this backend.
+ *
+ * @param prog  the whole typed program, in program order
+ * @return      every registered layout, in the order its declaration appears
+ * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
+ *              an invariant the checker already enforces, so a miss here is an internal
+ *              break, reported as a NAMED stop instead of a guessed layout (M.3)
+ */
+fn collect_struct_layouts(prog: checker::TProgram) -> []LStructLayout | error {
+    let table = checker::type_table_of(prog)
     mut out: []LStructLayout = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = collect_struct_layout_item(out, prog.items[i])
+        out = match collect_struct_layout_item(out, prog.items[i], table) {
+            []LStructLayout as next => next
+            error as e => return e
+        }
         i++
     }
     out
 }
 
-/** collect_struct_layout_item — accumulate `it`'s layout (a struct TypeDecl) onto `acc`,
-    unchanged for every other item kind. */
-fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem) -> []LStructLayout {
+/**
+ * collect_struct_layout_item — accumulate `it`'s layout onto `acc` when it is a field-shaped
+ * type declaration, unchanged for every other item kind (a function, a `use`, a const, …).
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param it     the typed top-level item to inspect
+ * @param table  the program's type table, for a class's base-chain walk
+ * @return       `acc`, extended with `it`'s layout when it declares one
+ * @throws       propagated from `collect_struct_layout_decl`
+ */
+fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable) -> []LStructLayout | error {
     match it {
-        parser::TypeDecl as td => collect_struct_layout_decl(acc, td)
+        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table)
         _ => acc
     }
 }
 
-/** collect_struct_layout_decl — accumulate `td`'s layout onto `acc` when its body is a
-    `StructBody`; unchanged for any other type-declaration shape (enum/class/variant/…). */
-fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl) -> []LStructLayout {
+/**
+ * collect_struct_layout_decl — accumulate `td`'s layout onto `acc` when its body is field-
+ * shaped: a `StructBody` contributes its own declared fields, a `ClassBody` its effective
+ * instance fields (`class_instance_fields`); every other body shape is unchanged.
+ *
+ * A class registers under the SAME table as a struct because this backend has one aggregate
+ * representation: a class value is a field-shaped object, addressed by the very
+ * `find_struct_layout` lookup a struct value uses. Leaving the ClassBody arm out is what made
+ * every class instantiation honest-stop with "no layout registered".
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param td     the type declaration to inspect
+ * @param table  the program's type table, for a class's base-chain walk
+ * @return       `acc`, extended with `td`'s layout when its body is field-shaped
+ * @throws       propagated from `class_instance_fields`
+ */
+fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable) -> []LStructLayout | error {
     match td.body {
         parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc))
+        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table)
         _ => acc
+    }
+}
+
+/**
+ * push_class_layout — `acc` extended with the layout of the class named `name`, built from its
+ * instance fields exactly as a struct's is built from `StructBody.fields`.
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param name   the class's canonical (declaring) name — the key `find_struct_layout` probes
+ * @param cb     the class's body
+ * @param table  the program's type table, for the base-chain walk
+ * @return       `acc` with the class's layout appended
+ * @throws       propagated from `class_instance_fields`
+ */
+fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable) -> []LStructLayout | error {
+    let fields = match class_instance_fields(name, cb, table) {
+        []parser::Field as fs => fs
+        error as e => return e
+    }
+    teko::list::push(acc, layout_of_fields(name, fields, acc))
+}
+
+/**
+ * class_instance_fields — the members of a class that OCCUPY A SLOT, in the order they occupy
+ * it: `checker::effective_class_fields`, i.e. every ancestor's instance fields (base-first,
+ * recursively) followed by the class's own, each in declared order.
+ *
+ * That order is NOT chosen here. Class inheritance in Teko is field-flattening composition, and
+ * the checker (`effective_class_fields`, "the base's fields as a PREFIX of the derived struct")
+ * plus the C emitter already fixed base-before-own everywhere a class's data shape is used;
+ * this backend mirrors that single decision rather than inventing a second one.
+ *
+ * DELIBERATELY EXCLUDED, each because it occupies no instance slot:
+ *   - `methods` — statically dispatched by mangled symbol; a class carries no vtable pointer
+ *     (dynamic dispatch is not in this backend, and an interface is a compile-time contract
+ *     that emits no runtime representation at all).
+ *   - `consts` — static TYPE members reached as `ClassName::NAME`; the AST's own contract for
+ *     them is that each "occupies NO layout slot".
+ *   - `implements` — conformance, checked at compile time, with no field of its own.
+ *   - the base-binding name (`Base(parent)`) — a NAME instance methods use to reach inherited
+ *     members of the SAME flattened object, not a second embedded object.
+ *   - the C emitter's hidden trailing `tk_region *` per-object arena handle — a property of
+ *     THAT emitter's object-region retention, which this backend does not implement. Adding an
+ *     unused pointer slot here would only mis-state the object's size.
+ *
+ * An abstract class is never instantiated, but it still registers a layout: its fields are a
+ * prefix of every concrete subclass's, and a uniform rule costs less than a special case.
+ *
+ * @param name   the class's canonical name, for the honest-stop message
+ * @param cb     the class's body
+ * @param table  the program's type table, for the base-chain walk
+ * @return       the slot-occupying fields, in slot order
+ * @throws       when the base chain cannot be walked (an unknown or non-class base) — the
+ *               checker rejects both before lowering, so a miss here is an internal break and
+ *               is NAMED as one rather than answered with a partial, silently wrong layout
+ */
+fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeTable) -> []parser::Field | error {
+    match checker::effective_class_fields(cb, table) {
+        []parser::Field as fs => fs
+        error as e => error { message = teko::str::concat("native backend N1: no layout for class `", name, "`: ", e.message, " (internal)") }
     }
 }
 
