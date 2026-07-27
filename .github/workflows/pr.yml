@@ -807,21 +807,43 @@ jobs:
   # ══ cross-arch-determinism ═════════════════════════════════════════════════════════════════
   # TIER: full only.
   #
-  # THE ONE THING `release-cross-smoke` PROVED THAT NOTHING ELSE DOES, carried over intact minus
-  # the zig it used to install: the six Linux artifacts must emit BYTE-IDENTICAL C for the same
-  # project. Determinism is already a law WITHIN one architecture (the gen2 == gen3 fixpoint);
-  # this extends it ACROSS architectures, where a pointer-width, endianness or hash-order leak
-  # into the emitter is invisible to the within-architecture fixpoint and shows up here as a
-  # diverging sha256 and nowhere else.
+  # THE ONE THING `release-cross-smoke` PROVED THAT NOTHING ELSE DOES: the six Linux artifacts
+  # must emit BYTE-IDENTICAL output for the same project. Determinism is already a law WITHIN one
+  # architecture (the gen2 == gen3 fixpoint); this extends it ACROSS architectures, where a
+  # pointer-width, endianness or hash-order leak into the emitter is invisible to the
+  # within-architecture fixpoint and shows up here as a diverging sha256 and nowhere else.
   #
-  # It is now a pure CONSUMER: it downloads the six published assets and runs them. The x86_64
-  # pair runs natively; arm64 and riscv64 run under qemu-user with `-L <sysroot>` so the dynamic
-  # glibc artifacts find their loader (measured, not assumed: without `-L` a dynamic
-  # aarch64/riscv64 artifact dies at "Could not open '/lib/ld-linux-*.so.*'").
+  # ── THE SUBJECT CHANGED WITH THE BACKEND, THE ORACLE DID NOT (2026-07-27) ────────────────────
+  # This lane used to hash the emitted `uniontest.c`. Native is now the only backend, so no `.c`
+  # is written and the old assertion has no subject. Deleting the lane was the wrong call: the
+  # leak class it catches — the HOST's word size / endianness / hash order bleeding into what the
+  # compiler EMITS — has no other oracle in the project, and it got MORE dangerous with the native
+  # backend, not less, because the emitter now writes machine code and relocations by hand instead
+  # of delegating to a C compiler.
+  #
+  # So the subject moves from the emitted C to the emitted OBJECT, and the assertion gets stronger:
+  # the object is what actually ships.
+  #
+  # THE TARGET MUST BE PINNED, and this is the part that is easy to get wrong. Emitted C was
+  # target-independent (the `cc` did the targeting); an OBJECT is not. Left to the host-aware
+  # default, the six assets would each emit for their OWN architecture and differ for a completely
+  # legitimate reason — a green-looking lane asserting nothing, or a red one blaming the wrong
+  # thing. Pinning `--target` to one value makes the HOST the only variable, which is precisely the
+  # leak this lane exists to catch.
+  #
+  # It is a pure CONSUMER: it downloads the six published assets and runs them. The x86_64 pair
+  # runs natively; arm64 and riscv64 run under qemu-user with `-L <sysroot>` so the dynamic glibc
+  # artifacts find their loader (measured, not assumed: without `-L` a dynamic aarch64/riscv64
+  # artifact dies at "Could not open '/lib/ld-linux-*.so.*'").
+  #
+  # EXPECTED RED UNTIL THE LADDER REACHES IT: `uniontest` currently stops at the honest
+  # `native backend N1: field/index access on a non-struct receiver not yet lowered (N2)`. That is
+  # the ladder working — the lane turns green when that rung closes, and until then it is naming a
+  # real gap instead of hiding one.
   cross-arch-determinism:
     needs: [plan, artifact]
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
-    name: cross-arch determinism (six Linux assets emit identical C)
+    name: cross-arch determinism (six Linux assets emit an identical object)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -847,10 +869,14 @@ jobs:
           merge-multiple: true
           path: dl
 
-      - name: Run all six assets + assert identical emitted C
+      - name: Run all six assets + assert an identical emitted object
         shell: bash
         run: |
           set -eu
+          # The target every asset emits FOR. Pinned on purpose — see the job comment: leaving it
+          # to the host-aware default makes the six outputs differ legitimately and the lane stops
+          # measuring anything.
+          PINNED_TARGET="x86_64-linux"
           # run_art LABEL ARGS… — invoke dl/LABEL/teko, natively or under the right emulator. The
           # `-L` sysroot is required by the four glibc (dynamic) artifacts and harmless for the
           # two static musl ones, so the shape is uniform.
@@ -873,18 +899,31 @@ jobs:
             run_art "$label" --version
             out="/tmp/xemit-$label"
             rm -rf "$out"
-            run_art "$label" build examples/smoke/uniontest -o "$out" --no-verify
-            sha="$(sha256sum "$out/uniontest.c" | awk '{print $1}')"
-            echo "$label emitted uniontest.c sha256 $sha"
+            run_art "$label" build examples/smoke/uniontest -o "$out" \
+                    --target="$PINNED_TARGET" --no-verify
+            # Located, not assumed: the object's on-disk name comes from the project stem and the
+            # output layout, and a hard-coded path that silently stops matching would turn this
+            # lane into a `sha256sum` error instead of the determinism verdict it owes.
+            obj="$(find "$out" -name '*.o' -type f | sort | head -n1)"
+            if [ -z "$obj" ]; then
+              echo "FAIL — $label emitted no object under $out" >&2
+              echo "contents:" >&2
+              find "$out" -type f | sed 's/^/  /' >&2
+              exit 1
+            fi
+            sha="$(sha256sum "$obj" | awk '{print $1}')"
+            echo "$label emitted $(basename "$obj") for $PINNED_TARGET, sha256 $sha"
             if [ -z "$REF_SHA" ]; then
               REF_SHA="$sha"
             elif [ "$sha" != "$REF_SHA" ]; then
-              echo "FAIL — $label emitted DIFFERENT C than the first artifact ($sha != $REF_SHA)" >&2
-              echo "the emitted C must not depend on the architecture the compiler runs on" >&2
+              echo "FAIL — $label emitted a DIFFERENT object than the first artifact ($sha != $REF_SHA)" >&2
+              echo "every asset emitted for the SAME pinned target ($PINNED_TARGET), so the only" >&2
+              echo "variable is the architecture the compiler RAN on — a pointer-width," >&2
+              echo "endianness or hash-order leak into the emitter is the thing this catches" >&2
               exit 1
             fi
           done
-          echo "all six artifacts ran and emitted byte-identical C ($REF_SHA)"
+          echo "all six artifacts ran and emitted a byte-identical object for $PINNED_TARGET ($REF_SHA)"
 
   # ══ seed-debut ═════════════════════════════════════════════════════════════════════════════
   # TIER: full only.
