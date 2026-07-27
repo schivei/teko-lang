@@ -236,6 +236,29 @@ dessa linha de link, não a causa. Quem destrava o critério do gen2 é o runtim
 C recompilada a cada link (um objeto/arquivo pré-construído embutido, ou o runtime em Teko), e
 isso é do vagão do runtime, não desta carga nem da do expurgo.
 
+## 2.5 O censo de regressões já é o mesmo vão, medido por outro lado
+
+O gate rodado nesta árvore (`teko test .`, compilador semeado da 0.3.0.30) deu **1034 testes
+unitários, zero falha**, e **6 regressões falhando** — o mesmo número do censo. Cada uma foi
+reproduzida com o compilador de BASE (gen1 construído de `cargo/20-degrau-native` sem as minhas
+mudanças), então nenhuma é regressão desta carga. O que elas dizem, porém, é mais do que
+"pré-existente":
+
+| cenário | diagnóstico com o compilador de base |
+|---------|--------------------------------------|
+| `cwd_build` | `native backend N1: builtin `is_alpha` not yet lowered (N2)` |
+| `di_same_name_cross_ns` | `internal: generic instance `Box__g__i64` was not stamped` |
+| `iface_value_name_collision_factory` | `native backend N1: a `null` in this position needs the null-union wrapper … (N2)` |
+| `member_const_cross_ns_pub_inherit` | `native backend N1: no layout registered for struct …` |
+| `qualified_optional` | `native backend N1: field/index access on a non-struct receiver not yet lowered (N2)` |
+| `same_bare_method_dispatch` | `native backend N1: no layout registered for struct …` |
+
+**Cinco das seis são paradas do backend próprio.** O censo herdado as nomeia por outro rótulo
+(`is_alpha`, três de layout de ClassBody, `qualified_optional`, `same_bare_method_dispatch`), mas a
+causa comum é a mesma de §2.3: desde a excisão da rota C, TODO cenário de regressão passa pelo
+backend próprio, e ele ainda não os compila. O censo de regressões e o vão N2 são o mesmo fato
+medido de dois lados.
+
 ## 3. O plano — decomposição em fatias
 
 A ordem é obrigatória: **o caminho novo funciona antes de o velho sair**. Nenhuma fatia deleta
