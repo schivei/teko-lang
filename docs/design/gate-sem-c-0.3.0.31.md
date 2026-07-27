@@ -200,6 +200,42 @@ A restrição inviolável da carga nomeia exatamente este caso — *"Se em algum
 escolher entre 'gate que não roda' e 'gate que ainda emite C', pare e reporte"*. É o que se faz
 aqui.
 
+## 2.4 O critério do gen2 sozinho — e por que o harness NÃO é quem o bloqueia
+
+Critério novo do trem: *o binário do gen2 sozinho, num diretório vazio, sem nenhum `.c`/`.h` e sem
+`/usr/local/share/teko`, tem que compilar e rodar um hello world.* Medido aqui, e o resultado
+importa porque aponta para outro lugar.
+
+Com o `share` instalado presente, o binário sozinho JÁ faz hello world nativo:
+
+```
+/tmp/hw/  ->  hw.tkp + src/main.tks + o binário, e nada mais
+./teko build .   ->  teko: .: built bin/hw (own backend)
+./bin/hw         ->  "hello world", exit 0
+```
+
+Tirando as fontes de runtime do alcance, ele para — e para no LINKER, não no harness:
+
+```
+TK_RT_DIR=/nonexistent-rt ./teko build .
+cc1: fatal error: /nonexistent-rt/teko_rt.c: No such file or directory
+cc1: fatal error: /assert/assert.c: No such file or directory
+teko: .: cc failed to link the own-backend object
+```
+
+A causa é `build_cc_argv`:923–924: **toda** ligação — inclusive a do `link_object`, a rota nativa
+que o ruling preserva — põe `teko_rt.c` e `assert.c` na linha de `cc` e os RECOMPILA do fonte.
+Não existe caminho de runtime pré-compilado: `manifest.tks`/`project.tks` sabem consumir `.a`/`.o`
+de `[extern.libs]`, mas o runtime próprio nunca é um deles, e `scripts/package_release.sh`
+distribui `runtime/teko_rt.c` + `assert/assert.c` como FONTE, com a linha de build em C no
+cabeçalho.
+
+**Portanto o passo (3) do bootstrap novo — apagar os `.c`/`.h` — não quebra o gate de teste:
+quebra a ligação de QUALQUER programa, hello world incluído.** O harness é um consumidor a mais
+dessa linha de link, não a causa. Quem destrava o critério do gen2 é o runtime deixar de ser fonte
+C recompilada a cada link (um objeto/arquivo pré-construído embutido, ou o runtime em Teko), e
+isso é do vagão do runtime, não desta carga nem da do expurgo.
+
 ## 3. O plano — decomposição em fatias
 
 A ordem é obrigatória: **o caminho novo funciona antes de o velho sair**. Nenhuma fatia deleta
