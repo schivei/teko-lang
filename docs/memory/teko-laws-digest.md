@@ -208,3 +208,32 @@ ASan. Se a ideia voltar, a chave tem de ser QUALIFICADA pelo namespace de escrit
 **GATILHO para reabrir:** um consumidor real que precise de estado MUTAVEL compartilhado entre
 isolates E que nao caiba em fork-join. E mesmo entao a resposta provavelmente nao e um grupo, e
 **canal** — o mecanismo ja reservado para compartilhamento, que por ruling vem DEPOIS.
+
+## CARGA ADITIVA: quem ensina um builtin novo NAO pode consumi-lo em `src/` (2026-07-27)
+
+Quem tipa `src/` e o SEED — um binario ja congelado. Entao uma carga que ensina um builtin novo ao
+compilador tem DOIS lados e eles nao podem viajar no mesmo degrau:
+
+- lado COMPILADOR (`checker/scope.tks`, `codegen/codegen.tks`, `checker/typer.tks`): compila sob o
+  seed sem drama, porque e CODIGO NOVO e nao USO NOVO. Vai junto, sempre.
+- lado CONSUMIDOR (qualquer `.tks` sob `src/` que CHAME o builtin novo, ou dependa de uma
+  assinatura RETIPADA): o seed rejeita. Pedir isso e pedir que o passado conheca o futuro.
+
+Retipar conta como builtin novo. `as_cstr` continuou existindo e ainda assim quebrou tudo, porque
+mudou de `ptr` opaco para `ptr<byte>` no mesmo commit que passou a depender da forma nova.
+
+**A saida NAO e uma forma transitoria em `src/`.** Tentei: declarei o campo como `ptr` opaco com um
+doc-comment longo explicando que apertaria depois. Meia-verdade em `src/` custa o vagao inteiro e a
+proxima pessoa herda uma grafia que o desenho nao manda. A saida e ESTACIONAR o consumidor fora do
+`source = "src"` (`staged/`), na grafia FINAL, com uma condicao de reentrada verificavel por grep
+contra o seed vigente. Volta sem edicao quando o degrau chegar.
+
+**Fixtures nao sao consumidoras.** As sete desta carga carregavam CÓPIA LOCAL declarada como tal —
+por isso a saida do modulo nao quebrou nenhuma. Isso e o padrao correto: a fixture exercita o
+builtin novo atraves do gen1 (que o tem), nunca atraves de `src/`.
+
+**Como esta lei foi descoberta:** a carga irmã (`#arena_size`) ja a tinha enunciado — *"aditivo —
+`src/` NAO adota nesta carga, e a razao e dura: o seed precisa continuar construindo gen1"*. A carga
+de c_types nao a leu, e os cinco portoes ficaram vermelhos em 994bcc4 em TODOS os hosts. Foi a
+TERCEIRA quebra consecutiva da mesma carga, e as tres tem a mesma raiz unica: **escrita por leitura,
+nunca compilada.**

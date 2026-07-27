@@ -864,7 +864,19 @@ externs `unsafe` on evidence rather than hope. *Fixture:* `c_extern_unsafe_accep
 *I could not build (the assignment forbids it) — the fixture IS the measurement.*
 **Ritual: full gate** (it touches the parser's documented contract).
 
-**C1 — `src/c_types/c_types.tks`: the alias inventory ONLY. [UNBLOCKED]**
+> **ONDE O MÓDULO MORA — corrigido em campo, 2026-07-27.** O módulo saiu de `src/c_types/` para
+> `staged/c_types/`, fora do `source = "src"` do `teko.tkp`. Não é recuo de desenho: o arquivo está
+> inteiro e na grafia final. É a escada. Quem tipa `src/` é o SEED 0.3.0, e o módulo consome
+> `region_buf` (builtin novo) e o `as_cstr` retipado — ambos nascidos NESTA carga. Os cinco portões
+> ficaram vermelhos em 994bcc4, em todos os hosts, exatamente nisso. A regra que a carga irmã
+> (`#arena_size`) já tinha enunciado vale aqui sem exceção: uma carga que ensina um builtin novo é
+> ADITIVA — entrega o lado COMPILADOR (`checker/scope.tks`, `codegen/codegen.tks`, que compilam sob
+> o seed por serem código novo e não uso novo) e `src/` NÃO adota. As sete fixtures não dependem do
+> módulo: cada uma carrega uma cópia local declarada como tal, e é por elas que os builtins novos
+> são exercitados através do gen1. Reentrada em `src/c_types/`, sem edição, no primeiro degrau cujo
+> seed já traga `as_cstr -> ptr<byte>` e `region_buf`.
+
+**C1 — `staged/c_types/c_types.tks`: the alias inventory ONLY. [UNBLOCKED]**
 The twelve aliases of §5.1, full Javadoc each, plus a module doc-comment carrying §5.2's exclusion
 table verbatim (the reasons must live in the code, not only here). Zero checker, zero codegen.
 *Delivers:* the layer's safe half. *Also delivers the §2.1 measurement:* it is the first
