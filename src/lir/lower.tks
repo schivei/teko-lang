@@ -859,7 +859,7 @@ fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata | null {
 fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
     let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
     let ro = match lower_expr(lo.ctx, b.right) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(e.type) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(e.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let op = match lbinop_of(b.op, k) { LBinOp as o => o; error as err => return err }
     let r = ctx_alloc(ro.ctx)
     let inst = bin_inst(r.vreg, op, lo.vreg, ro.vreg, e.line, e.col)
@@ -881,7 +881,7 @@ fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowere
 fn lower_unary(ctx: LowerCtx, e: checker::TExpr, u: checker::TUnary) -> Lowered | error {
     let ao = match lower_expr(ctx, u.operand) { Lowered as x => x; error as err => return err }
     if is_logical_not(u.op) { return lower_logical_not(ao, e.line, e.col) }
-    let k = match prim_kind_of(u.operand.type) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(u.operand.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let op = match lunop_of(u.op, k) { LUnOp as o => o; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
@@ -925,26 +925,68 @@ fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
     to/from a non-primitive honest-stops. */
 fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | error {
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
-    let src = match prim_kind_of(c.expr.type) { checker::PrimKind as p => p; error as err => return err }
-    let dst = match prim_kind_of(e.type) { checker::PrimKind as p => p; error as err => return err }
+    let src = match prim_kind_of(c.expr.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let dst = match prim_kind_of(e.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, cast_unop_of(src, dst), ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
-/** prim_kind_of — the PrimKind of a resolved primitive type; `byte` maps to `U8` (A1-4,
-    #382 — "byte AS u8", the same convention the checker's own `cast_kind` uses, so a
-    `byte to <numeric>` cast picks the right sign/width family). Any other non-prim
-    honest-stops (its node is out of the arithmetic subset). ONLY ever called on an
-    operand's OWN type here (a cast/binary/unary/in-expr operand, never a container's
-    element type) — safe against a seed-VM match quirk where `checker::Byte` as an arm
-    misfires when the SUBJECT is instead `Slice{element: Byte}` (verified: a BARE `Byte`
-    subject resolves correctly; do not widen this match's use to a container type). */
-fn prim_kind_of(t: checker::Type) -> checker::PrimKind | error {
+/**
+ * prim_kind_of — the PrimKind of a resolved primitive-SHAPED type: an injected prim as-is;
+ * `byte` mapped to `U8` (A1-4, #382 — "byte AS u8", the same convention the checker's own
+ * `cast_kind` uses, so a `byte to <numeric>` cast picks the right sign/width family); or a
+ * declared `enum`'s ordinal, `enum_carrier_ltype`'s SAME `I32` width every other enum-typed
+ * site (a field, a param, a variant tag, …) already carries it at (#594 T-B — one type, one
+ * width). The enum case is not theoretical: measured on the compiler's own self-host corpus,
+ * an enum operand reaches an arithmetic site as an `==`/`!=` comparison between two enum-typed
+ * TCompare operands (`reg_class == MRegClass::FPR`, hundreds of sites across `src/backend/*`)
+ * and as the E7 ordinal `to`-cast in either direction (`type_cast`'s enum-ordinal pair). Every
+ * OTHER Named shape (a plain struct/class, or a `flags` type — its bitset carrier is a
+ * SEPARATE, not-yet-measured width-by-member-count rule, `enum_carrier_ltype`'s own "positively
+ * for flags" contrast, deliberately NOT folded in here) honest-stops under its OWN named error
+ * (`enum_ordinal_kind_of`), distinct from the catch-all below so a future flags-arithmetic
+ * increment finds its own diagnostic instead of this one silently swallowing it. ONLY ever
+ * called on an operand's OWN type here (a cast/binary/unary/compare/in-expr operand, never a
+ * container's element type) — safe against a seed-VM match quirk where `checker::Byte` as an
+ * arm misfires when the SUBJECT is instead `Slice{element: Byte}` (verified: a BARE `Byte`
+ * subject resolves correctly; do not widen this match's use to a container type).
+ *
+ * @param checker::Type t  the operand's own type
+ * @param []LEnumInfo enums  the program's declared-enum table (`ctx.enums`), consulted ONLY to
+ *                           tell an enum-declared Named type apart from every other Named shape
+ * @return checker::PrimKind  the operand's arithmetic-site PrimKind
+ * @throws  when `t` is a shape this backend does not yet resolve to a PrimKind (propagated
+ *          from `enum_ordinal_kind_of` for a non-enum Named, or the catch-all for str/slice/
+ *          func/ptr/… )
+ */
+fn prim_kind_of(t: checker::Type, enums: []LEnumInfo) -> checker::PrimKind | error {
     match t {
         checker::Prim as p => p.kind
         checker::Byte => checker::PrimKind::U8
+        checker::Named as n => enum_ordinal_kind_of(n, enums)
         _ => error { message = "native backend N1: non-primitive arithmetic operand not yet lowered (N2)" }
+    }
+}
+
+/**
+ * enum_ordinal_kind_of — the ordinal `PrimKind` (`I32`, `enum_carrier_ltype`'s width) of a
+ * Named type that names a declared `enum`. Every OTHER Named shape (a plain struct/class, or a
+ * `flags` type) is a DISTINCT, specifically-named honest stop: a `flags` value needs its own
+ * not-yet-measured bitset-width rule (`enum_carrier_ltype`'s "positively for flags" contrast),
+ * and a plain struct/class was never a legal arithmetic operand to begin with (the CHECKER
+ * already rejects it — `is_numeric`/`is_comparable` in `checker/expr.tks` — so reaching here
+ * with one would be an internal invariant break, not a language gap).
+ *
+ * @param checker::Named n  the resolved Named type to classify
+ * @param []LEnumInfo enums  the program's declared-enum table
+ * @return checker::PrimKind  `I32` when `n` names a declared enum
+ * @throws  when `n` names a non-enum Named type (a struct/class or a `flags` type)
+ */
+fn enum_ordinal_kind_of(n: checker::Named, enums: []LEnumInfo) -> checker::PrimKind | error {
+    match find_enum_info(enums, n.name) {
+        LEnumInfo => checker::PrimKind::I32
+        null => error { message = "native backend N1: non-enum named-type (struct/class/flags) arithmetic operand not yet lowered (N2)" }
     }
 }
 
@@ -1003,7 +1045,7 @@ fn lower_compare_terms(ctx: LowerCtx, e: checker::TExpr, prev_type: checker::Typ
         if i >= rest.len { break }
         let term = rest[i]
         let ro = match lower_expr(cur, term.operand) { Lowered as x => x; error as err => return err }
-        let k = match prim_kind_of(pt) { checker::PrimKind as p => p; error as err => return err }
+        let k = match prim_kind_of(pt, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
         let op = match cmp_lbinop_of(term.op, k) { LBinOp as o => o; error as err => return err }
         let r = ctx_alloc(ro.ctx)
         cur = ctx_append(r.ctx, bin_inst(r.vreg, op, pv, ro.vreg, e.line, e.col))
@@ -5254,7 +5296,7 @@ fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lower
 fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr) -> Lowered | error {
     if ine.elems.len == 0 { return error { message = "native backend N1: empty `in`-expression not yet lowered (N2)" } }
     let lo = match lower_expr(ctx, ine.lhs) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(ine.lhs.type) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(ine.lhs.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let eq = if prim_is_float_kind(k) { LBinOp::FCmpEq } else { LBinOp::ICmpEq }
     mut cur = lo.ctx
     mut acc: u32 = 0
@@ -5693,7 +5735,7 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     let cur = lenv_lookup(ctx.env, a.name)
     if !cur.found { return error { message = teko::str::concat("native backend N1: unbound local `", a.name, "` (internal)") } }
     let vo = match lower_expr(ctx, a.value) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(a.bound) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
     let r = ctx_alloc(vo.ctx)
@@ -5736,7 +5778,7 @@ fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAs
     let cr = ctx_alloc(ctx)
     let with_load = ctx_append(cr.ctx, load_inst(cr.vreg, addr, field_ty, a.value.line, a.value.col))
     let vo = match lower_expr(with_load, a.value) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(a.bound) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
     let rr = ctx_alloc(vo.ctx)
