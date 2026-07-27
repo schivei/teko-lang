@@ -351,3 +351,48 @@ PRESERVA o no `TCast` na arvore tipada em vez de dobra-lo, porque `expr_has_conv
 **E a ESCADA, ela ainda morre?** Sim, e pela mesma porta: versionar o `teko.c` do primeiro degrau.
 Este adendo nao substitui aquela saida, remove o motivo pelo qual ela era a UNICA. Sao coisas
 independentes — uma resolve a grafia, a outra resolve o tempo.
+
+## RETORNO DE STRUCT/CLASS POR VALOR DEVOLVE PONTEIRO PENDURADO (2026-07-27) — CORRUPCAO SILENCIOSA
+
+Achado por um agente na bissecao do `bulk`, e REPRODUZIDO DE FORMA INDEPENDENTE aqui antes de ser
+escalado — porque um achado desta gravidade nao se repassa no boca a boca.
+
+**Repro minimo** (projeto de 3 linhas, backend nativo, compilador do vagao 20):
+
+    let a = gad::Counter::make(1)
+    let b = gad::Counter::make(2)
+    exit(a.get())          // esperado 1 — MEDIDO: 2
+
+Nao ha crash, nao ha aviso, nao ha panico. O valor simplesmente e outro.
+
+**A causa, no assembly emitido** (`objdump`, x86_64):
+
+    teko_sretprobe__gad__Counter__make:
+        push %rbp; mov %rsp,%rbp
+        sub  $0x10,%rsp        <- aloca o RETORNO no PROPRIO frame
+        lea  (%rsp),%rcx       <- toma o endereco dele
+        mov  %rax,(%rsi)       <- escreve o campo
+        mov  %rcx,%rax         <- RETORNA esse endereco
+        leave                  <- e destroi o frame que o contem
+        ret
+
+O chamador recebe um ponteiro para memoria morta. Duas chamadas seguidas reusam o MESMO offset de
+pilha, entao a segunda sobrescreve o resultado da primeira antes que ele seja lido. Confirmado no
+call site: dois `call` para o mesmo endereco, `%rax` guardado em `%rbx`, e `%rbx` ja aponta para o
+que a segunda chamada escreveu.
+
+**NAO E UM DEGRAU FALTANDO, E UMA ABI ERRADA.** Nao existe convencao `sret`
+(caller-allocated return storage) em lugar nenhum de `src/lir/lower.tks` — o retorno agregado
+simplesmente nunca foi projetado. Isso e diferente de todo honest-stop `N1/N2` que fechamos hoje:
+um honest-stop RECUSA compilar e diz o endereco; este COMPILA e mente. A distincao importa na hora
+de priorizar: um degrau custa uma feature, este custa confianca em todo programa ja compilado que
+retorne struct por valor.
+
+**Alcance:** transversal aos dois backends nativos (x86_64 e arm64 compartilham o front-end de
+lowering). NAO afeta o caminho pelo backend C — la quem gerencia retorno de agregado e o compilador
+C, que faz certo. E por isso que a escada nunca tropecou nisso e por isso que o `teko.c` versionado
+CONTORNA o defeito em vez de esperar por ele.
+
+**Consequencia pratica registrada:** enquanto isso nao fechar, nenhum binario produzido pelo backend
+proprio que retorne struct/class por valor e confiavel, e o `bulk` nao fecha verde — nem depois de
+resolvido o `fat-pointer receiver call` (N2), que e um problema SEPARADO no mesmo arquivo.
