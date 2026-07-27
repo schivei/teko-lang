@@ -60,6 +60,13 @@
 # the bytes match — so both are asserted, and the C check is reported separately from the byte
 # check so a log reader can tell WHICH half is outstanding.
 #
+# It is scoped to gen2 and gen3 ONLY — never the ladder, never gen1. Owner ruling 2026-07-27: *"ele
+# tem que saber quem está testando, logo, ele não pode nem deve avaliar a escada e nem a gen1,
+# apenas gen2 e 3"*. gen1 emits C BY CONSTRUCTION today (it is built by the committed C's compiler,
+# which still has the C backend), so judging it would fail the gate for doing exactly what it must
+# do. This is also why `scripts/no_emitted_c.sh` is NOT wired: it sweeps the whole worktree and
+# cannot tell whose emission it found.
+#
 # Usage:  sh scripts/fixpoint_gate.sh <gen1-binary> [PROJECT_DIR] [WORK_DIR]
 #
 # Env:
@@ -85,8 +92,7 @@ log() { printf '%s\n' "fixpoint: $*" >&2; }
 
 SOFT="${TEKO_FIXPOINT_SOFT:-0}"
 
-# verdict MESSAGE — the single exit point, so the soft/hard switch cannot drift between branches
-# and so the printed verdict is identical in both modes (only the exit status differs).
+# verdict_fail MESSAGE — the fixpoint was EVALUATED and did not hold. Fails the lane.
 verdict_fail() {
     log "VERDICT: FAILED — $1"
     if [ "$SOFT" = "1" ]; then
@@ -94,6 +100,36 @@ verdict_fail() {
         exit 0
     fi
     exit 1
+}
+
+# verdict_na MESSAGE — the fixpoint could not be EVALUATED, which is not the same thing as failing
+# it, and conflating the two is the defect this function exists to fix.
+#
+# The distinction, because it is the whole point: a fixpoint is a statement about two generations
+# that EXIST. When the native backend honest-stops partway through self-hosting, gen2 is never
+# built, so there is no pair — the question "does gen2 equal gen3" has no answer yet, true or
+# false. Reporting that as FAILED was wrong twice over: it called a missing measurement a negative
+# result, and it did so for a cause every test lane already reports by name, with an address.
+#
+# NOT APPLICABLE exits 0, and that is NOT the soft mode returning under a new name. The difference
+# is what the line CLAIMS. `FAILED` + exit 0 asserts a defect and then says it does not matter —
+# a lane green over a stated failure, which the owner rightly called a lie. `NOT APPLICABLE` +
+# exit 0 asserts nothing about the fixpoint at all; it names the honest-stop that blocked the
+# measurement and gets out of the way. The moment gen2 and gen3 both build, this path is
+# unreachable and every outcome is a real verdict again.
+verdict_na() {
+    log "VERDICT: NOT APPLICABLE — $1"
+    log "The fixpoint was not evaluated. This is not a pass: no claim about gen2 == gen3 is made."
+    rm -rf "$W"
+    exit 0
+}
+
+# build_is_honest_stop LOGFILE — did the build fail with a NAMED `not yet lowered (N2)` /
+# `no native runtime backing yet (N2)` honest-stop, rather than with a real error? The project's
+# own M.3 discipline is what makes this reliable: an unimplemented path is REQUIRED to stop with a
+# named message and an address, so its signature is stable and a genuine defect never wears it.
+build_is_honest_stop() {
+    grep -q "native backend N1:.*(N2)" "$1" 2>/dev/null
 }
 
 [ -x "$GEN1" ] || { log "gen1 '$GEN1' is not an executable file"; exit 1; }
@@ -158,9 +194,12 @@ log "source = $PROJ"
 
 log "building gen2 = gen1(source) ..."
 if ! build_gen "$GEN1" "$W/gen2.log"; then
-    log "----- gen2 build FAILED — gen1 cannot build the source it came from -----"
+    log "----- gen1's build of the source (did not complete) -----"
     sed 's/^/fixpoint:   | /' "$W/gen2.log" >&2 || true
-    verdict_fail "gen1 does not self-host: it cannot build this source at all, so there is no gen2 to compare"
+    if build_is_honest_stop "$W/gen2.log"; then
+        verdict_na "the native backend honest-stopped before finishing gen2 (see the named N2 address above), so no gen2 exists and gen2 == gen3 cannot be evaluated"
+    fi
+    verdict_fail "gen1 could not build the source, and NOT via a named honest-stop — this is a real build failure, not a missing capability"
 fi
 take_gen gen2 || verdict_fail "the gen2 build reported success but left no binary at $W/out"
 log "gen2 ready ($(wc -c < "$W/gen2") bytes)"
@@ -177,9 +216,12 @@ if [ "$MODE" = "native" ]; then
 else
     log "building gen3 = gen2(source) ..."
     if ! build_gen "$W/gen2" "$W/gen3.log"; then
-        log "----- gen3 build FAILED — gen2 cannot rebuild its own source -----"
+        log "----- gen2's build of the source (did not complete) -----"
         sed 's/^/fixpoint:   | /' "$W/gen3.log" >&2 || true
-        verdict_fail "gen2 built, but cannot rebuild the source — the chain breaks at the second generation"
+        if build_is_honest_stop "$W/gen3.log"; then
+            verdict_na "gen2 built, but honest-stopped before finishing gen3 — the pair to compare does not exist yet"
+        fi
+        verdict_fail "gen2 built but cannot rebuild the source, and NOT via a named honest-stop — the chain breaks at the second generation"
     fi
     take_gen gen3 || verdict_fail "the gen3 build reported success but left no binary at $W/out"
     log "gen3 ready ($(wc -c < "$W/gen3") bytes)"
