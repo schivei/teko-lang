@@ -21,12 +21,20 @@
 # exists to SHIP a compiler; none of them helps answer whether the compiler can rebuild itself. A
 # theory that reproduces the production pipeline is just a slower copy of it.
 #
-# ONE LEG, x86_64, ON PURPOSE. The degraus this hunts (`ltype_of(Named) = Ptr`, aggregate value
-# semantics, the per-instruction frame slot) live in the SHARED front half of lowering, not in an
-# arch backend — they reproduce identically on arm64, as the wagon's own six lanes have shown all
-# day by failing with the same message on every one. Paying for a second architecture to hear the
-# same sentence twice is the runner burn this file exists to avoid. If a degrau ever turns out to
-# be arch-specific, THAT is the moment to add the leg.
+# ONE LEG, macos-arm64, ON PURPOSE — and the arch is chosen for SPEED, not coverage.
+#
+# The degraus this hunts (`ltype_of(Named) = Ptr`, aggregate value semantics, the per-instruction
+# frame slot) live in the SHARED front half of lowering, not in an arch backend — they reproduce
+# identically everywhere, as the wagon's own six lanes have shown all day by failing with the same
+# sentence on every one. So the leg is free to be picked on wall-clock alone, and the macOS runner
+# wins by a wide margin. Measured on the SAME tree and the SAME phase, from this wagon's own logs:
+#
+#     macos-arm64     checker 5940/5940 items     2.2s
+#     linux-x86_64    checker 5940/5940 items    14.6s
+#
+# 6.6x on the checker. Owner, 2026-07-27: *"usa o macOS, que é comprovadamente o mais rápido."*
+# A theory is a loop a human waits inside — the runner that shortens the wait is the right runner.
+# If a degrau ever turns out to be arch-specific, THAT is the moment to add a second leg.
 #
 # HOW IT IS MEANT TO BE USED: push, read the address, close that degrau on a cargo branch, push
 # again. When step 2 finally reports PASSED and step 3 is green, the theory has done its job — and
@@ -61,7 +69,7 @@ on:
 jobs:
   self-host:
     name: theory / self-host
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 90
     permissions:
       contents: read
@@ -83,15 +91,13 @@ jobs:
       # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
       # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
       # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
+      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
+      # cross capabilities need installing.
       - name: Provision the two capabilities the suite needs (mingw cross-linker, wasmtime)
         shell: bash
         run: |
           set -eu
-          sudo apt-get update -y
-          sudo apt-get install -y clang gcc-mingw-w64-x86-64
-          x86_64-w64-mingw32-gcc --version | head -n1
-          curl -sSf https://wasmtime.dev/install.sh | bash
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          brew install mingw-w64 wasmtime
 
       - name: Verify both are on PATH (fail loud before the run, not inside it)
         shell: bash
