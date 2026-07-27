@@ -1604,6 +1604,84 @@ fn lwt_fat_local_reassign_honest_stops_on_later_fat_use() {
     teko::assert::str_contains(out, "`s` is not a fat-pointer local")
 }
 
+/** lwt_slice_param — a `[]<elem_tname>`-typed `parser::Param` (the fat-parameter
+    counterpart of `lwt_param`, which only builds a `NamedType` — a fat parameter's
+    annotation is `parser::SliceType`, per `typeexpr_is_fat`). */
+fn lwt_slice_param(name: str, elem_tname: str) -> parser::Param {
+    parser::Param { name = name; has_type = true; type_ann = parser::SliceType { element = lwt_named_te(elem_tname) }; is_params = false; has_default = false; default_expr = parser::no_expr() }
+}
+
+/**
+ * lwt_lowers_str_param_len_reads_the_fat_length_with_no_memory_traffic — the
+ * degrau-4 regression: `fn f(s: str) -> u64 { return s.len }` used to
+ * HONEST-STOP with "`s` is not a fat-pointer local (internal)" because
+ * `lower_function` bound EVERY parameter through the scalar `lenv_bind` — a
+ * `str`/`[]T` parameter carried only its PTR half into the env, so `s.len`
+ * could never resolve. A fat-typed parameter now binds through
+ * `bind_fat_param`/`lenv_bind_fat` with BOTH its ptr (VReg 0) and len (VReg 1)
+ * incoming registers, so `.len` reads the length register directly — the
+ * SAME "no memory traffic" proof `lwt_lowers_str_len_reads_the_fat_length_with_no_memory_traffic`
+ * pins for a fat `let` local, but here for the PARAMETER path.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_param_len_reads_the_fat_length_with_no_memory_traffic() {
+    let params = teko::list::push(teko::list::empty(), lwt_param("s", "str"))
+    let len_access = lwt_field_access(lwt_typed_var("s", checker::Str { }), "len", lwt_prim(checker::PrimKind::U64))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(len_access))
+    let f = lwt_fn("str_param_len", "teko::demo", params, lwt_prim(checker::PrimKind::U64), body)
+    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "(%0: ptr, %1: i64) -> i64")
+    teko::assert::str_contains(text, "%0 = param 0")
+    teko::assert::str_contains(text, "%1 = param 1")
+    teko::assert::str_contains(text, "ret %1")
+    teko::assert::is_true(!teko::str::contains(text, "load."))
+}
+
+/**
+ * lwt_lowers_slice_param_len_reads_the_fat_length_with_no_memory_traffic — the
+ * `[]T` sibling of the `str` param fixture above: a `[]i64` parameter ALSO
+ * binds fat (ptr@0, len@1) and `.len` resolves with no memory traffic.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_slice_param_len_reads_the_fat_length_with_no_memory_traffic() {
+    let params = teko::list::push(teko::list::empty(), lwt_slice_param("xs", "i64"))
+    let len_access = lwt_field_access(lwt_typed_var("xs", checker::Slice { element = lwt_prim(checker::PrimKind::I64) }), "len", lwt_prim(checker::PrimKind::U64))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(len_access))
+    let f = lwt_fn("slice_param_len", "teko::demo", params, lwt_prim(checker::PrimKind::U64), body)
+    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "(%0: ptr, %1: i64) -> i64")
+    teko::assert::str_contains(text, "ret %1")
+    teko::assert::is_true(!teko::str::contains(text, "load."))
+}
+
+/**
+ * lwt_calling_a_str_param_forwards_both_ptr_and_len — the CALL-SITE half of the
+ * degrau-4 fix: a function that just forwards its own `str` parameter as an
+ * argument to another Teko function must push BOTH the ptr and the len
+ * VReg — a caller/callee arity mismatch on a fat argument is not a compile
+ * error, it is a garbage length silently read at the callee. `lower_args_from`
+ * (via `lower_arg_vregs`) now flattens a fat argument into its (ptr, len) pair,
+ * matching `bind_fat_param`'s receiving-end contract exactly.
+ *
+ * @return void
+ */
+#test
+fn lwt_calling_a_str_param_forwards_both_ptr_and_len() {
+    let params = teko::list::push(teko::list::empty(), lwt_param("s", "str"))
+    let forward = lwt_call(lwt_path1("take"), "teko::demo", teko::list::push(teko::list::empty(), lwt_typed_var("s", checker::Str { })), lwt_prim(checker::PrimKind::U64))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(forward))
+    let f = lwt_fn("forward_str_param", "teko::demo", params, lwt_prim(checker::PrimKind::U64), body)
+    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "call @teko_teko__demo__take(%0, %1)")
+}
+
 /**
  * lwt_honest_stop_on_break_outside_a_loop — a bare `break` with no
  * enclosing `loop` on its lowering path is a checker invariant break
