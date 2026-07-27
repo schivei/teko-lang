@@ -579,8 +579,8 @@ now-dead arm in the SAME crumb (or the matches go non-exhaustive): `type.tks:11-
 
 #### B8(.32) — delete the backend register-pair / ABI-128 / interp-width-128 topology  — **L**
 The isel i128 routes + honest-stops — `isel_x86_64.tks` (~11 incl. `select_const_int_x86`'s register-pair
-stop, now unreachable), `isel_arm64.tks` (~35), `isel_riscv.tks` (~29); the 128-bit ABI classification —
-`abi_{sysv64,aapcs64,win64,riscv64}.tks` (the size-16 / eightbyte-pair legs — the ABI files carry NO
+stop, now unreachable), `isel_arm64.tks` (~35), um isel de backend (~29); the 128-bit ABI classification —
+`abi_{sysv64,aapcs64,win64,[target removido]}.tks` (the size-16 / eightbyte-pair legs — the ABI files carry NO
 literal `128`; key on the size-16/two-register path, not a grep); `lower.tks` residual; `stackify.tks`
 `C1-i128` stop; the `if width == 128` arms remaining in `lir_interp`/`minst_interp` (the carrier already
 went in A4); `lir_print` residual. Prune the isel `_test.tkt` i128/F16 cases. **Ritual:** GATE-G +

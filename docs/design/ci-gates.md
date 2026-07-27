@@ -138,8 +138,7 @@ release time would discard the artifact the gates actually proved and ship a dif
 
 The RULE that ruling established stands: every host that ships a published artifact has BOTH a
 build lane (`artifact / <producer>`) and a test lane (`test / <label>`). Its windows-arm64
-INSTANCE does not — that host, and `linux-riscv64` with it, was removed from the published set in
-0.3.1 by a later owner ruling ("remover completamente suporte a Windows arm64 e Linux riscv64,
+INSTANCE does not — that host, and `linux-[target removido]` with it, was removed from the published set in
 apagar todos os vestígios, sem dead code"), so the rule now has nothing to say about them. The gap
 the earlier ruling closed, over the hosts that survive:
 

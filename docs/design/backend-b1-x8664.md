@@ -701,7 +701,6 @@ is a named future add (`B1-interp`, optional), REPORTED not blocking (§10 R-2).
 | FPR spill | — inherited | `detect_fpr_spill` analog errors before encode (A3's `A3-fpr-spill`) | A3's follow-up |
 | `loop` back-edge | — inherited | regalloc honest-stops (`A3-loop`) before encode | A3's `A3-loop` |
 | i128 register-pair ops | — inherited | isel never emits them (rides A2's i128 route) | A2's i128 route |
-| PE/COFF, riscv64, wasm | later clusters | other targets | B2/B3 (#387/#388), C1 (#389) |
 | `--backend`/`--target` flags | later cluster | the real manifest flags (B1 uses env seams) | D1/#390 |
 | own ELF linker (drop `cc`) | later cluster | the ELF static linker | Phase E1/#226 |
 

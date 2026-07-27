@@ -290,8 +290,6 @@ that PROVES each issue.
 - Verifies via: C-native == own-native on Linux x86_64 (glibc + musl) in CI; replaces one `zig cc`
   leg of `cross_compile_linux.sh`.
 
-**B2 · N4 — riscv64 LP64D + ELF — SHIPPED THEN REMOVED (0.3.1).** Built at #387 and deleted in
-0.3.1 by owner ruling ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar
 todos os vestígios, sem dead code"). Its modules, its `NativeTarget` arm, its CI lanes and its
 design doc are gone; the phase letter is kept so B1/B3 keep their names.
 

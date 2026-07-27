@@ -27,10 +27,8 @@
 > o backend nativo alcançar paridade funcional + o portão de teste (D2–D4) verde nos
 > mesmos termos do C. Os dois backends coexistem atrás de uma flag até então.
 >
-> **linux-riscv64 e windows-arm64 saíram da matriz em 0.3.1, por decisão do owner**
-> ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos os
 > vestígios, sem dead code"). O backend RISC-V inteiro (isel/minst/regalloc/encode/ABI/
-> ELF-adapter, o alvo `NativeTarget::Riscv64Linux` e `docs/design/backend-b2-riscv64.md`)
+> ELF-adapter, o alvo `NativeTarget::Riscv64Linux` e `docs/design/backend-b2-[target removido].md`)
 > foi apagado; `windows-arm64` nunca foi alvo nativo — era um rótulo de host/asset de CI,
 > e foi apagado da matriz, das lanes e dos assets publicados. As tabelas abaixo já
 > refletem a matriz PÓS-remoção.

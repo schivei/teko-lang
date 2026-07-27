@@ -7,8 +7,7 @@ status: INVESTIGAÇÃO MEDIDA — parcial; a seção "O QUE FALTA MEDIR" nomeia 
 
 # Tempo de build por host — o que o macOS não faz
 
-> **STATUS 0.3.1 — `linux-riscv64` e `windows-arm64` NÃO EXISTEM MAIS.** Por decisão do owner
-> ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos os vestígios, sem
+> **STATUS 0.3.1 — `linux-[target removido]` e `windows-arm64` NÃO EXISTEM MAIS.** Por decisão do owner
 > dead code"), os dois hosts saíram da matriz de producers, das lanes de teste e do conjunto de
 > assets publicados. As medições abaixo que os citam são REGISTRO HISTÓRICO de corridas reais e
 > ficam como estão; nenhuma delas descreve uma lane que ainda roda. Onde este documento propõe
@@ -35,8 +34,8 @@ workflow `.github/workflows/pr.yml`, job `artifact`, ambas em modo `full`:
 | `linux-arm64` | 8m52s | 9m03s |
 | `windows-x86_64` | 11m54s | 10m13s |
 | `linux-x86_64` | **16m28s** | **15m18s** |
-| `linux-riscv64-glibc` | 25m15s | — |
-| `linux-riscv64-musl` | 25m41s | — |
+| `linux-[target removido]-glibc` | 25m15s | — |
+| `linux-[target removido]-musl` | 25m41s | — |
 | `windows-arm64` | >44m (cancelada) | — |
 
 O outlier a explicar é `linux-x86_64`: é a mais lenta de todas as lanes não emuladas,
@@ -117,7 +116,7 @@ A conta, em modo `full`:
 | `windows-arm64` | native | 1 label | **1** | 0 |
 | `linux-x86_64` | linux | `linux-x86_64-glibc linux-x86_64-musl` | **3** | 2 |
 | `linux-arm64` | linux | `linux-arm64-glibc linux-arm64-musl` | **3** | 2 |
-| `linux-riscv64-*` | linux | 1 label | **2** (1 nativa + 1 emulada) | 1 |
+| `linux-[target removido]-*` | linux | 1 label | **2** (1 nativa + 1 emulada) | 1 |
 
 **Esta é a coisa que o macOS não faz e os Linux fazem.** O leg macOS constrói o
 compilador uma vez e publica esse binário. O leg `linux-x86_64` constrói o compilador
@@ -216,7 +215,7 @@ obtém-se o trabalho de cada lane numa unidade comum ("segundos-macOS"):
 | `windows-x86_64` | 613 | 1,17 | 525 |
 | `linux-x86_64` | 918 | 1,68 | **547** |
 
-Os dois legs `riscv64` ficam de fora de propósito: o fator de 2,91 que a mesma corrida
+Os dois legs `[target removido]` ficam de fora de propósito: o fator de 2,91 que a mesma corrida
 dá para eles mede um job cujo custo era 85% execução emulada, mistura diferente da de
 hoje — usá-lo seria comparar duas emulações distintas fingindo que são uma.
 
@@ -254,7 +253,7 @@ sem modelo nenhum no meio.
 ### 4.3 As três conclusões que essa tabela força
 
 **(a) `windows-arm64` NÃO é uma anomalia estrutural — REFUTADO.** O achado de que uma
-lane nativa (38m48s) perde para `riscv64` sob emulação de CPU (25m49s) é real, mas a
+lane nativa (38m48s) perde para `[target removido]` sob emulação de CPU (25m49s) é real, mas a
 causa está medida e é o runner: `windows-11-arm` custa **5,29× o macOS em trabalho
 idêntico**, medido numa corrida de outra geração de workflow. Normalizada, essa lane faz
 **440** unidades — MENOS que `windows-x86_64` (525) e que `linux-x86_64` (547). Ela é a
@@ -558,7 +557,7 @@ possível, mas a normalização da §4.3(a) argumenta contra ela ser a causa do 
 sem NENHUM ajuste por SO — e o dimensionamento (~1600 chamadas para 100 MB de arena) diz
 que ele não move um relógio de dezenas de minutos.
 
-**Sobre `windows-arm64` (38m48s) perder para `riscv64` emulado (25m49s):** é real e não
+**Sobre `windows-arm64` (38m48s) perder para `[target removido]` emulado (25m49s):** é real e não
 é anomalia estrutural. `windows-11-arm` custa **5,29× o macOS em trabalho idêntico**,
 medido na corrida `28763999356` e já registrado em `docs/design/ci-gates.md`. Normalizada,
 essa lane é uma das que MENOS trabalho fazem. É um runner lento fazendo o mesmo que os

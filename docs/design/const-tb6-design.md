@@ -469,7 +469,7 @@ mantém build+read simétricos. Pode ser um sub-passo separado se o gate quiser 
 
 ### 5.1 O problema: os corpos atuais NÃO são const-expr
 
-`aapcs64()`/`sysv64()`/`riscv64_lp64d()`/`win64()` constroem os `[]u32` via `push_range`
+`aapcs64()`/`sysv64()`/`[target removido]_lp64d()`/`win64()` constroem os `[]u32` via `push_range`
 (um LOOP) e helpers (`sysv_gpr_arg_seq`, …). `push_range` NÃO está no allowlist Tier-5 (D1) —
 é uma fn com loop, não um construtor de literal único. Logo o inicializador do const tem de
 ser um **array LITERAL** (Tier 4). Cada `push_range(a, b)` é expandido para a sua sequência
@@ -526,15 +526,15 @@ Os irmãos expandem os seus `push_range`/helpers idem:
   `riscv_gpr_arg_seq`, `riscv_gpr_allocatable`, `riscv_gpr_caller_saved`,
   `riscv_fpr_allocatable`, `riscv_fpr_caller_saved`, `win64_gpr_arg_seq`,
   `win64_gpr_allocatable`, `win64_gpr_caller_saved`, `win64_fpr_allocatable`, e as 4 fábricas
-  `aapcs64`/`sysv64`/`riscv64_lp64d`/`win64` (agora consts). **MANTER** `contains_u32` (usado
+  `aapcs64`/`sysv64`/`[target removido]_lp64d`/`win64` (agora consts). **MANTER** `contains_u32` (usado
   por `is_caller_saved`/`is_callee_saved`), `arg_reg`, `allocatable_pool`, `is_caller_saved`,
   `is_callee_saved`, `spill_scratch`, `AbiDescriptor`, `ArgReg` — inalterados (consomem o
   descritor por parâmetro).
-- Use-sites (grep `aapcs64\(\)|sysv64\(\)|win64\(\)|riscv64_lp64d\(\)`):
+- Use-sites (grep `aapcs64\(\)|sysv64\(\)|win64\(\)|[target removido]_lp64d\(\)`):
   - `src/build/project.tks:1168,1169` → `teko::backend::AAPCS64`;
     `:1193,1194,1195` → `SYSV64`; `:1223,1224,1225` → `WIN64`; `:1252,1253` → `RISCV64_LP64D`.
   - `src/backend/isel_riscv.tks:150,636,1041` → `arg_reg(RISCV64_LP64D, …)`.
-  - Doc-comments que citam `sysv64()`/`aapcs64()`/`riscv64_lp64d()` (encode_x86_64.tks:2466,
+  - Doc-comments que citam `sysv64()`/`aapcs64()`/`[target removido]_lp64d()` (encode_x86_64.tks:2466,
     isel_x86_64.tks:472,1133-1134, regalloc_x86.tks:869/893, regalloc_riscv.tks:862/886,
     isel_riscv.tks:610,1013) → atualizar o texto para `SYSV64`/… (Javadoc W15).
 
@@ -557,7 +557,7 @@ Essa é a barra do ritual.
   escalares — os 12 campos, 4 descritores. Roda no C backend (as fns ainda existem). Verde =
   a expansão de array-literal é EXATA. Depois de verde, remover as fns e o golden de
   equivalência (a fn some).
-- **Regalloc goldens (`regalloc_test.tkt`, `regalloc_x86_test.tkt`, `regalloc_riscv_test.tkt`,
+- **Regalloc goldens (`regalloc_test.tkt`, `regalloc_x86_test.tkt`, um regalloc,
   `regalloc_match_test.tkt`): INALTERADOS e byte-idênticos.** São a prova de que os valores
   lidos não mudaram. Se um byte muda, a expansão está errada.
 
@@ -566,7 +566,7 @@ Essa é a barra do ritual.
 Este crumb é o PRIMEIRO a popular `LRodata.relocs`, então quando o compilador é compilado
 PELO CAMINHO NATIVO/WASM (ou quando uma fixture compila um `const AAPCS64` por esses
 caminhos), aparecem entradas rodata reais + relocs data→data:
-- **Object goldens (`objfile_elf_test.tkt`, `objfile_elf_riscv_test.tkt`, `objfile_macho_test.tkt`,
+- **Object goldens (`objfile_elf_test.tkt`, um backend ELF writer, `objfile_macho_test.tkt`,
   `objfile_coff_test.tkt`, `objfile_wasm_test.tkt`):** se alguma fixture passar a compilar um
   descritor const pelo caminho nativo, a partição `.rela.rodata`/`__const`/`.rdata`/data-segment
   ganha entradas. Re-baseiam UMA vez, depois congelam. As fixtures T-B2/T-B3/T-B4 já fixaram os
@@ -630,7 +630,7 @@ T-B6 o destrava e o entrega.
 
 ### 7.6 (migração) regalloc + abi goldens inalterados
 
-`abi_sysv64_test.tkt`/`abi_win64_test.tkt`/`abi_riscv64_test.tkt` + os 4 `regalloc_*_test.tkt`
+`abi_sysv64_test.tkt`/`abi_win64_test.tkt`/uma ABI + os 4 `regalloc_*_test.tkt`
 passam byte-idênticos (só as chamadas `sysv64()`→`SYSV64` nos próprios testes, se houver, e o
 golden de equivalência §6.1 temporário).
 
@@ -667,7 +667,7 @@ golden de equivalência §6.1 temporário).
 | E2 | `src/lir/lower.tks` | `typeexpr_is_fat` + campo fat = 16B em `layout_of_fields`/`field_size_of`/`field_align_of` (§4.1) | `lower_test.tkt` §7.4 |
 | E3 | `src/lir/lower.tks` | `lower_fat_field` + braço `TFieldAccess` em `lower_fat_expr`; (opc.) `store_struct_fields` grava as 2 metades (§4.2/§4.3) | `lir_interp_test.tkt` §7.3 |
 | E4 | `src/lir/lower.tks` | `const_leaf_symbol`, `const_fat_field`, `serialize_const`/`const_named_bytes`/`const_struct_bytes`/`const_struct_blob` → `ConstImage`, `intern_aggregate_const_decl` interna leaves+blob (§3) — ABRE o gate `:5142` p/ campo slice | `lower_test.tkt` §7.1/§7.2 |
-| E5 | `src/backend/abi_aapcs64.tks` + `abi_sysv64.tks` + `abi_riscv64.tks` + `abi_win64.tks` | golden de equivalência (§6.1) → migrar as 4 fábricas p/ `const UPPER_SNAKE` array-literal → remover as fns mortas (§5) | `abi_*_test.tkt` (equivalência verde, depois byte-idêntico) |
+| E5 | `src/backend/abi_aapcs64.tks` + `abi_sysv64.tks` + uma ABI + `abi_win64.tks` | golden de equivalência (§6.1) → migrar as 4 fábricas p/ `const UPPER_SNAKE` array-literal → remover as fns mortas (§5) | `abi_*_test.tkt` (equivalência verde, depois byte-idêntico) |
 | E6 | `src/build/project.tks`, `src/backend/isel_riscv.tks` + doc-comments | use-sites `x()` → `X` (§5.2) | `regalloc_*_test.tkt` byte-idêntico |
 | E7 | fixtures | §7.5 dual-engine mirror + §7.3 reader + §7.1 produtor | os próprios testes |
 
@@ -757,12 +757,12 @@ de granularidade em aberto, com recomendação de INCLUIR (fecha o Tier-B de ver
 - `/home/user/teko-lang/src/backend/abi_aapcs64.tks` — `AAPCS64` const, remover
   `push_range`/`aapcs64`.
 - `/home/user/teko-lang/src/backend/abi_sysv64.tks` — `SYSV64` const, remover helpers/`sysv64`.
-- `/home/user/teko-lang/src/backend/abi_riscv64.tks` — `RISCV64_LP64D` const, remover helpers.
+- `/home/user/teko-lang/src/backend/abi_[target removido].tks` — `RISCV64_LP64D` const, remover helpers.
 - `/home/user/teko-lang/src/backend/abi_win64.tks` — `WIN64` const, remover helpers.
 - `/home/user/teko-lang/src/build/project.tks` — use-sites `:1168-1253`.
 - `/home/user/teko-lang/src/backend/isel_riscv.tks` — use-sites `:150,636,1041` + docs.
 - doc-comments em `encode_x86_64.tks`, `isel_x86_64.tks`, `regalloc_x86.tks`,
-  `regalloc_riscv.tks`.
+  um regalloc.
 - fixtures: `lower_test.tkt`, `lir_interp_test.tkt`, `abi_*_test.tkt`, `regalloc_*_test.tkt`,
   object goldens (re-baseline se nativo-compilado).
 - **Sem tocar:** os C twins; `serialize_const:5142` braço `_` (mantido p/ formas

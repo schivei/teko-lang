@@ -20,7 +20,6 @@ A1–A4 + B1–B3). Base for the design: `docs/design/own-backend-architecture.m
 > `.o` linked by `cc`), the "link" is different (a Wasm module linker `wasm-ld`, or `zig cc
 > -target wasm32-wasi` as its driver). The differential is **execution equivalence** (own-wasm exit /
 > stdout == C-path wasm), NOT byte-identity — the codegen differs by construction, exactly like the
-> riscv64/qemu lane. The hard tail (SIMD/threads/multi-value/reference-types/GC/exceptions, i128, the
 > full-teko_rt browser port, the own Wasm linker) is scoped forward as **named** honest-stops.
 
 ---
@@ -76,7 +75,6 @@ A1–A4 + B1–B3). Base for the design: `docs/design/own-backend-architecture.m
 
 - **Differential (risk #5).** own-wasm vs **C-path wasm** (`zig cc -target wasm32-wasi` on the C twin),
   both run under **`wasmtime`**; **byte-identity NOT expected** → assert **exit code + stdout** equal
-  (the riscv/qemu precedent). Oracles: `wasm-tools validate` (or `wasm-validate`) for well-formedness,
   `wasm2wat` for debugging, `wasmtime` to execute. A `have_tool` gate honest-skips the lane with a
   named reason when the oracles are absent.
 
@@ -750,12 +748,10 @@ turned into a new issue.
 - **own-path wasm:** `TEKO_BACKEND=native TEKO_TARGET=wasm32-wasi teko build <fixture> -o <ownbin>` →
   `emit_native_wasm` → `<stem>.wasm`.
 - **Run both under `wasmtime`** (`wasmtime run <mod.wasm>`), capture exit code + stdout, assert equal.
-  **Byte-identity is NOT expected** (different codegen) — this is the riscv64/qemu lane's model
   (execution equivalence), NOT the arm64/x86 goldens' byte model.
 
 ### 7.2 Oracles + availability gate (the new lane in `diff_c_own.sh`)
 
-The wasm lane is selected by `TEKO_DIFF_TARGET=wasm32-wasi` (explicit, like the riscv lane — the CI
 host is not a wasm host) and honest-skips (exit 0, named reason) when its oracles are absent:
 
 - `wasm-tools validate` (or `wasm-validate` from wabt) — well-formedness of BOTH modules before
@@ -764,7 +760,6 @@ host is not a wasm host) and honest-skips (exit 0, named reason) when its oracle
   are documented fallbacks; the lane probes `wasmtime` first.)
 - `wasm2wat` — for failure diagnostics only (dump the own module on a mismatch).
 
-Availability check pattern (mirrors the riscv lane's `command -v riscv64-linux-gnu-gcc`/`qemu-…`
 gates): `command -v wasmtime` AND (`command -v wasm-tools` OR `command -v wasm-validate`) AND `command
 -v zig` — any missing → `echo "diff_c_own: skipped — wasm lane needs wasmtime + wasm-tools + zig; not
 found on this host"; exit 0`. Local resources for the runner: zig (present), Docker (a

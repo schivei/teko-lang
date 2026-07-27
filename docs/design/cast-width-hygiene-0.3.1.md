@@ -15,7 +15,7 @@
 > lossless-widen (class 3) — guarded against a literal partner (adoption depends on the
 > partner's PRE-cast type) and against a partner that is ITSELF an equally-removable `to`
 > (two mutually-"redundant" casts can jointly establish the real computed width — found and
-> fixed during the sweep itself, `encode_riscv.tks::resolve_word_riscv`). Swept ~200+
+> fixed during the sweep itself, um backend encoder). Swept ~200+
 > corpus-wide redundant casts (the bulk "bare literal to i64/f64" pattern + individually
 > verified class-3 sites); D1 flips on in the SAME commit, corpus never red between wagons.
 > **C5 (ARITH-CAST-RATE probe + CI flag) — DONE**, `--arith-cast-gate` wired and unit-tested;
@@ -86,7 +86,7 @@ total numeric casts  `x to <numtype>`   : 2649        (26.4 casts / KLOC)
 ```
 
 Densest files (numeric casts): `stackify.tks` **169**, `codegen.tks` **117**,
-`stackify_consts.tks` **114**, `encode_arm64_consts.tks` **103**, `encode_riscv_consts.tks` **98**,
+`stackify_consts.tks` **114**, `encode_arm64_consts.tks` **103**, um backend encoder **98**,
 `objfile_macho.tks` **97**, `objfile_elf.tks` **86**, `encode_x86_consts.tks` **86**,
 `math/checked.tks` **77**, `emit/tkb_write.tks` **77**. The backend/emit tier is where the manual
 equalizations concentrate.
@@ -110,7 +110,7 @@ reach. Concrete:
 `.len to u32` (**90 sites**) is the emblematic case. `.len` is `u64`; a field/param/index that is
 declared `u32` forces `x.len to u32`, a **u64→u32 narrowing that PANICS on overflow** (the checked
 cast is fail-loud — `TEKO_LEGISLATION.md` conversions block). Real sites:
-`encode_arm64.tks:1311,1757,1955,2053`, `encode_riscv.tks:1069,1469,1638,1809` — every one is
+`encode_arm64.tks:1311,1757,1955,2053`, um backend encoder — every one is
 `<something>.len to u32` feeding a `u32` offset/index/count. **If the offset/count fields were
 their natural `u64` (or a deliberate `usize`-style width), the cast — and its panic edge —
 vanishes.** The `x to u32)` count (306) is the upper bound of this class: casts jammed against a

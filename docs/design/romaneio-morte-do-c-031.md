@@ -183,7 +183,7 @@ pagando por isso com trabalho de lowering (o N2) que nada tem a ver com o proble
 mais o preço do alvo de 10 builds.
 
 **A medição que confirma o ruling** (`regressor.tkr` pós-excisão, 344 linhas, Features R0/F2/F5/F7/F9):
-o eixo de alvo tem **dois** valores recorrentes — `host` (15×) e `riscv64-linux` (15×) — mais cinco
+o eixo de alvo tem **dois** valores recorrentes — `host` (15×) e `[target removido]-linux` (15×) — mais cinco
 avulsos (`x86_64-windows`, `x86_64-linux`, `wasm32-wasi`). **Todo o resto varia só em fonte e exit
 esperado**, isto é: não precisa de build próprio para nada.
 
@@ -198,7 +198,6 @@ Desenho decorrente, despachado em `cargo/20-regressor-canais`:
 
 | canal | hospeda | builds |
 |---|---|---:|
-| bulk-pass | a maioria, **um arquivo-fonte por cenário** | **2** (host + riscv64) |
 | diagnostics | todos os compile-fail, **um** build que falha | 1 |
 | cross-ns | os 8 de composição, juntos e por isso mais densos | 1 |
 | `cwd_build` | semântica de cwd própria | 1 |

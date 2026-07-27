@@ -407,7 +407,7 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 ## 2026-07-24 — Drop the 128-bit family (`i128`/`u128`) + `f16`, R2+R3 (rejeição de superfície + deleção da topologia + tidies)
 
 ### D42 · Drop-128 R2 (rejeição de superfície + deleção da topologia PrimKind/LType) + R3 (tidies + B.38) ✅
-- **Contexto:** R0+R1 (crumb anterior, `feat/0.3.1-drop128-r0-r1`) já haviam feito o carrier-detox — nenhuma declaração interna do compilador era mais `i128`/`u128` (o carrier de literal virou `NumInt {neg; mag: u64}`, o const-fold e os dois interpretadores viraram `u64`/`i64`, os timestamps viraram `i64` ns). Este vagão (R2+R3, `feat/0.3.1-drop128-r2-r3`) fecha a issue: rejeita `i128`/`u128`/`f16` na SUPERFÍCIE (`scope.tks::builtin_type` honest-stop, em vez de "unknown type" genérico) e deleta toda a topologia agora morta — `PrimKind::{U128,I128,F16}`, `LType::{I128,F16}`, o cascade de match inteiro (codegen C-spellings, `resolve.tks::prim_name`, `lower.tks`, `ffi_export.tks`, `tkb_read.tks::prim_of` — cujo ordinal RENUMEROU ao perder os 3 membros), e a topologia de backend (register-pair isel em x86-64/arm64/riscv64, os honest-stops `C1-i128`/`C1-f16` do wasm, `stackify.tks`).
+- **Contexto:** R0+R1 (crumb anterior, `feat/0.3.1-drop128-r0-r1`) já haviam feito o carrier-detox — nenhuma declaração interna do compilador era mais `i128`/`u128` (o carrier de literal virou `NumInt {neg; mag: u64}`, o const-fold e os dois interpretadores viraram `u64`/`i64`, os timestamps viraram `i64` ns). Este vagão (R2+R3, `feat/0.3.1-drop128-r2-r3`) fecha a issue: rejeita `i128`/`u128`/`f16` na SUPERFÍCIE (`scope.tks::builtin_type` honest-stop, em vez de "unknown type" genérico) e deleta toda a topologia agora morta — `PrimKind::{U128,I128,F16}`, `LType::{I128,F16}`, o cascade de match inteiro (codegen C-spellings, `resolve.tks::prim_name`, `lower.tks`, `ffi_export.tks`, `tkb_read.tks::prim_of` — cujo ordinal RENUMEROU ao perder os 3 membros), e a topologia de backend (register-pair isel em x86-64/arm64/[target removido], os honest-stops `C1-i128`/`C1-f16` do wasm, `stackify.tks`).
 - **Achado in-wave (não documentado no design doc, bloqueava a compilação — corrigido agora, sem deferral):** `scope.tks::builtin_fn` injetava os builtins reservados `div`/`rem`/`int_to_float` tipados sobre o carrier largo `PrimKind::I128` (FFI interna para `tk_div`/`tk_rem`/`tk_int_to_float` do runtime, herança da VM aposentada — #524). Nenhum call site do corpus usa esses builtins bare/sem-namespace (confirmado por varredura); native codegen nunca roteia `/`,`%` por eles (usa os helpers per-width `tk_div_<tag>`/`tk_mod_<tag>`). Deletados como código morto pós-VM-retirement (o guard `cg_is_arith_builtin_call` em codegen.tks também caiu, junto dos 3 arms de dispatch).
 - **Sweep do corpus:** `examples/regressions/{repr_box,inline_attr_parse}` usavam `u128`/`i128` como veículo de teste ("payload ≥16 bytes sem niche") — como NENHUM escalar builtin sobra ≥16 bytes pós-drop, `repr_box` perdeu de vez o sub-caso "boxed SCALAR" (a cobertura "boxed STRUCT" via `Vec2` já prova o mesmo mecanismo; EXPECT_EXIT 116→19) e `inline_attr_parse` trocou o veículo `u128` por um struct `Pair` local de 16 bytes (mesma semântica de parse, EXPECT_EXIT inalterado, 47). `src/codegen/codegen_test.tkt` tinha 6 asserts diretos sobre `PrimKind::U128`/`"i128"` como builtin-scalar — corrigidos/invertidos. Duas dessas (`cgt_union_repr_class_dial`/`cgt_inline_attr_eligible_classes`) usavam o `u128 | null` como o veículo ≥16-byte-sem-niche do classificador de box-in-arena; a primeira troca tentada (`checker::Func`, tamanho fixo 16 sem precisar de decl registrado) **quebrou** `cgt_inline_attr_eligible_classes` (achado in-wave, corrigido sem deferral): `Func` não é mangleável (`cg_opt_mangle`'s `_ => error` — nem struct nem prim), então `cg_union_inline_recursive`'s fallback "os dois erraram → são iguais" (`cg_mangle_eq`) confundia o `Func` membro com a própria união (também não-mangleável), disparando um falso-positivo de auto-recursão. Corrigido trocando por um struct `Pair16` REAL (dois campos `i64`, registrado num `TProgram` de teste dedicado, `cgt_prog_with_pair16`) — mangleável, mesma semântica de tamanho/niche que `Vec2` já usa em `repr_box`. Nasceram 3 fixtures de rejeição: `reject_i128`, `reject_u128`, `reject_f16` (compile-fail, `EXPECT_STDERR` pino a mensagem honesta) — a primeira tentativa delas TAMBÉM falhou o pin: `resolve.tks::resolve_named` descartava silenciosamente QUALQUER erro de `builtin_type` e caía no "unknown type" genérico; corrigido para só cair no fallback quando a mensagem for exatamente o sentinel genérico ("not a built-in type"), propagando o honest-stop nos demais casos.
 - **B.38 emendado:** `TEKO_LEGISLATION.md` (Redefinitions Index + a seção "native numeric type set") e novo `TEKO_HISTORY.md §B.40` registrando a decisão completa (was/is/why/agent-rule). `tooling/shared/src/spec_json.tks` NÃO carrega a lista de tipos (verificado — só keywords/operators/comment-delimiters), então não há nada a emendar lá; nenhum `MASTER_PLAN.md` existe no repo com uma entrada "drop-128" a marcar (verificado, `TEKO_MASTER_PLAN.md`'s WAVE 0.3 ROADMAP não cita a issue).
@@ -418,7 +418,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ---
 
-## 2026-07-25 — Higiene de CI: split light/full por `base_ref`, gates que afirmam o modo, execução riscv64 restaurada
 
 ### D43 · CI light/full + fail-open do regressor + linkagem do seed de assert ✅
 - **Contexto (proposta do dono 2026-07-24):** *"fazer com que o CI atual execute apenas em PRs que apontam para main e criar então outro CI para esse padrão mais leve que roda só o necessário"*. O modelo de entrega é um TREM EMPILHADO — cada vagão é um PR cuja base é a branch do vagão anterior, e o trem inteiro aterrissa numa integração única no vagão do topo, retargetado para `main`. O único run completo que importa é o da aterrissagem.
@@ -455,17 +454,15 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ---
 
-## 2026-07-27 — Remoção completa de `linux-riscv64` e `windows-arm64` (0.3.1)
+## 2026-07-27 — Remoção completa de `linux-[target removido]` e `windows-arm64` (0.3.1)
 
 ### D45 · Os dois alvos saem inteiros: backend, alvo, lanes, assets, docs ✅
 - **Ruling do dono:** *"E está decidido, remover completamente suporte a Windows arm64 e Linux
-  riscv64, apagar todos os vestígios, sem dead code."* Critério explícito: nada de branch morto,
-  flag desligada, entrada de enum órfã, teste pulado ou comentário de "quando riscv64 voltar".
-- **As duas remoções têm naturezas diferentes.** `linux-riscv64` era um ALVO NATIVO
+- **As duas remoções têm naturezas diferentes.** `linux-[target removido]` era um ALVO NATIVO
   (`NativeTarget::Riscv64Linux`): saiu o backend inteiro — `isel_riscv`, `minst_riscv`,
-  `regalloc_riscv`, `encode_riscv`, `encode_riscv_consts`, `abi_riscv64`, `objfile_elf_riscv` e os
+  `regalloc_riscv`, `encode_riscv`, `encode_riscv_consts`, `abi_[target removido]`, `objfile_elf_riscv` e os
   cinco `_test.tkt` correspondentes — mais a entrada do enum, todo `match` que a cobria, o
-  `default_cc_for_target`, os nomes/aliases de `TEKO_TARGET`, o wrapper `qemu-riscv64-static` e a
+  `default_cc_for_target`, os nomes/aliases de `TEKO_TARGET`, o wrapper `qemu-[target removido]-static` e a
   sonda de sysroot cross que só existia para alimentá-lo. `windows-arm64` NUNCA foi alvo nativo —
   era só rótulo de host/asset de CI, então a remoção foi de lane, matriz, label de seed e asset
   publicado, sem tocar backend.
@@ -474,20 +471,17 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Exaustividade preservada sem braço `_`:** todo `match` sobre `NativeTarget` que perdeu o braço
   `Riscv64Linux` continua enumerando os membros restantes; nenhum coringa novo foi introduzido
   (um `_` cobrindo o buraco seria dead code disfarçado).
-- **Cobertura NÃO perdida:** os 3 testes que exercitavam máquina exclusivamente riscv
-  (`cross_sysroot_for_*`, `qemu_riscv64_wrapper_*`, `resolve_run_wrapper_riscv_*`) saíram com a
-  máquina; toda outra asserção que usava riscv como VEÍCULO foi reapontada para um alvo cross
+  (`cross_sysroot_for_*`, `qemu_[target removido]_wrapper_*`, `resolve_run_wrapper_riscv_*`) saíram com a
   sobrevivente (`x86_64-windows` / `wasm32-wasi`). O `Then object well-formed` sobre ELF continua
   existindo em `own_explicit_host_os_arch_runs`.
-- **Runtime (exceção maintained-C):** `tk_rt_arch()` perdeu o braço `__riscv` — o token `riscv64`
+- **Runtime (exceção maintained-C):** `tk_rt_arch()` perdeu o braço `__riscv` — o token `[target removido]`
   concatenava com `tk_rt_os()` numa chave `<arch>-<os>` que não é mais um `NativeTarget`, então
   mantê-lo produziria uma chave inválida, não uma informação a mais.
-- **Assets publicados: nove → sete.** Saíram `teko-linux-riscv64-{glibc,musl}.tar.gz` e
+- **Assets publicados: nove → sete.** Saíram `teko-linux-[target removido]-{glibc,musl}.tar.gz` e
   `teko-windows-arm64.zip`. A lane `cross-arch determinism` passa a comparar QUATRO assets Linux
-  em vez de seis; o passo de binfmt/qemu, os pacotes `libc6-riscv64-cross`/`gcc-riscv64-linux-gnu`
+  em vez de seis; o passo de binfmt/qemu, os pacotes `libc6-[target removido]-cross`/`gcc-[target removido]-linux-gnu`
   e a parametrização `ELF_TOOLCHAIN`/`ELF_MACHINE` do `check_elf.sh` (cujo único chamador era o
-  ramo riscv) foram apagados por não terem mais consumidor.
-- **Docs:** `docs/design/backend-b2-riscv64.md` (o spec do backend removido) foi APAGADO. Registro
+- **Docs:** `docs/design/backend-b2-[target removido].md` (o spec do backend removido) foi APAGADO. Registro
   histórico ficou: as medições e os incidentes que citam as duas lanes permanecem, anotados com a
   data e o motivo da remoção; o que saiu foi documentação que PROMETIA suporte inexistente
   (matriz de alvos do roadmap, o follow "arm64 Windows" do #388, a dívida de re-enable #304/#305).

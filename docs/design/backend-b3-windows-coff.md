@@ -3,7 +3,6 @@
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#388**. Mini-umbrella
 `fix/issue-388-windows-coff` (**#402**; base = the umbrella `remodel/backend-build` carrying A1→A4 +
 #443 + B1 + B2, seed `teko 0.3.0.10-beta`). Base for the design: `docs/design/backend-b1-x8664.md`
-(the x86-64 ISA pipeline this REUSES WHOLE; the B2 riscv64 plan this doc cites for the
 reuse-vs-parallel writer discipline was deleted with its target in 0.3.1) +
 `docs/design/own-backend-architecture.md` §2.1
 (target #4, x86-64 Win64 PE/COFF) + §3.4/§3.5, grounded in the merged code
@@ -143,7 +142,6 @@ The task flags two potential HALTs. Both have clear winners; recorded (§8), not
 **Chosen: a parallel `objfile_coff.tks` writer, mirroring `emit_macho`'s shape.**
 
 - **COFF diverges from ELF structurally, not scalarly.** The B2 ELF generalization was clean because
-  x86-ELF and riscv-ELF are the SAME container modulo `e_machine`/`e_flags`/reloc-type. COFF differs in
   EVERY record: `IMAGE_SYMBOL` is 18 bytes with an 8-byte inline-or-offset name UNION (ELF: 24 bytes,
   4-byte `st_name` offset); `IMAGE_RELOCATION` is 10 bytes with **no addend field** (the addend rides
   in-place in `.text`, like Mach-O — ELF `.rela` carries an explicit 8-byte `r_addend`); relocations
@@ -289,9 +287,8 @@ The pool helpers mirror `abi_sysv64.tks`'s `sysv_gpr_arg_seq`/`sysv_gpr_allocata
     shadow_space: u32
 ```
 
-> **Fixpoint guardrail.** `aapcs64()`/`sysv64()`/`riscv64_lp64d()` each add `shadow_space = 0 to u32`.
+> **Fixpoint guardrail.** `aapcs64()`/`sysv64()`/`[target removido]_lp64d()` each add `shadow_space = 0 to u32`.
 > Because `compute_frame_layout_x86` only reserves shadow space when `abi.shadow_space > 0`, the arm64,
-> riscv64 and x86-64-Linux frame images are BYTE-IDENTICAL to today — B1's x86 frame goldens + the
 > default-build fixpoint are the guardrail. The stable-seed lane parses the new field fine (a struct
 > field + field access is core syntax in every seed — no staged-syntax hazard).
 
@@ -686,7 +683,6 @@ placement, and the FIRST executing own==C differential that runs the artifact NA
 | Win64 frame goldens (`sub rsp,32` shadow) + B1 SysV frame goldens byte-identical | ✓ | ✓ |
 | `.obj` well-formedness (`llvm-readobj --sections/--symbols/--relocations` / `llvm-objdump` / `lld-link`) | ✓ | ✓ (llvm tools cross-format) |
 | **executing `C-native == own-native` differential** | ✓ (runs the PE natively) | honest-skip (cannot run PE) |
-| arm64 Mach-O + x86-64 ELF + riscv64 ELF differentials | unchanged | unchanged |
 
 ### 6.3 The interp oracle — NO parallel `minst_x86_interp` (inherited from B1's R-2)
 
@@ -721,7 +717,6 @@ side and is compared at the stop, never at a fabricated value (M.3, the A4/B1/B2
 
 > **windows-arm64 (`#388`'s second half) is CANCELLED, not pending.** This plan delivered **x86_64
 > Windows** and NAMED **arm64 Windows** as a follow-on blocked on a disabled CI lane. That follow-on
-> was closed by the owner in 0.3.1 — "remover completamente suporte a Windows arm64 e Linux riscv64,
 > apagar todos os vestígios, sem dead code". There is no `abi_win64_arm`, no `Machine=0xAA64` COFF
 > half and no `windows-arm64` lane to re-enable; #388 is CLOSED at its x86_64 half.
 
@@ -878,7 +873,6 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
   machine-free).
 - The **KEYSTONE full CI ritual at B3-4**: the whole gate — both engines + fixpoint + the **windows-x86_64
   C-vs-own leg green** (executing the PE NATIVELY on the runner) + the macOS byte-test lane green + all
-  three prior differentials (arm64 Mach-O, x86-64 ELF, riscv64 ELF) unchanged. **#388 x86_64 CLOSES
   here** (arm64-Windows is the named infra-blocked follow, R-3).
 
 ---

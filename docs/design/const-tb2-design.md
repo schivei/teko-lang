@@ -549,7 +549,7 @@ o arquivo compila a cada passo.
 5. **`rtype` do rodata-reloc precisa ser absoluto (R_X86_64_64 / R_RISCV_64).** Um
    `PC32` dobrado em `.rela.rodata` produziria um ponteiro relativo errado.
    *Resolução:* provado §2.0 pela SysV/RISC-V psABI; o bridge futuro mapeará
-   `RelocX86::Abs64`/`RelocRiscv::Abs64` (já em `elf_reloc_type`/funções de mapeamento por backend); a
+   `RelocX86::Abs64`/um tipo de reloc (já em `elf_reloc_type`/funções de mapeamento por backend); a
    fixture §4.1 fixa `rtype=1`/`rtype=2` explicitamente.
 
 **Sem tensão genuína não resolvida → sem HALT.**

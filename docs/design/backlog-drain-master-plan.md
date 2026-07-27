@@ -15,7 +15,6 @@ This folds the five milestone readiness assessments + the three crumb-level drai
   Full set: `158 159 163 164 167 168 171 172 173 174 178 179 180 182 183 184 186–226 (contiguous) 228 230 231 233 234 249 254 265 267 270 282 283 290 294 299 301 304 305`.
 - **2 draft PRs in flight:** **#307** (fixes **#299**, `fix/issue-299`) and **#300** (advances **#184**, `fix/issue-184`, milestoned Onda-2). Both are the head of the ready-set — reconcile/merge these FIRST.
 - **Milestone-1 "1 open" = PR #300 itself** (no separate Onda-2 issue remains; the monomorphic-stdlib milestone is effectively closed pending #300/#184).
-- **CI is ~6 m** after #306 (`disable riscv/windows-arm + un-double gate`). The re-enable debt (**#304** windows-arm64, **#305** riscv64-qemu) was CANCELLED in 0.3.1: the owner removed both targets outright, so there is nothing left to re-enable.
 - **Blocker-source keystones already CLOSED:** #157, #162, #165, #169, #181, #185, #221, #227, #229, #296 (#303), #160, #161, #166, #177.
 - **5 `keystone`-labeled OPEN issues:** #163, #164 — plus the onda-3 cluster #254 and the native-gate #265/#168 are the load-bearing keystones this plan sequences first.
 

@@ -27,7 +27,7 @@
 > **Sources (read at authoring):** `src/lir/lower.tks` (TAST→LIR, "N1 subset" #221 — 60 honest-stops),
 > `src/lir/lir.tks`, `src/backend/isel_{x86_64,arm64,riscv}.tks` (32 honest-stops, dominated by the
 > `B1-fp` float family + i128), `src/backend/encode_*`, `objfile_{elf,macho,coff}.tks`,
-> `abi_{sysv64,aapcs64,win64,riscv64}.tks`, `regalloc*`, `lir_interp.tks`/`minst_interp.tks`,
+> `abi_{sysv64,aapcs64,win64,[target removido]}.tks`, `regalloc*`, `lir_interp.tks`/`minst_interp.tks`,
 > `src/codegen/codegen.tks` (`cb_fn_name` the `__` mangle; `f.c_symbol` extern no-mangle at :7515),
 > the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + `vm-retirement.md:327`
 > (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkr-regression-format.md`,
@@ -45,8 +45,8 @@ The own AOT backend is **mature in its BOTTOM half, immature in its TOP half:**
 | **isel** | `isel_{x86_64,arm64,riscv}.tks` | mature for **integer/control/memory**; 32 honest-stops in x86 dominated by the **`B1-fp` FLOAT family** + **i128** materialization. |
 | **encode** | `encode_{x86_64,arm64,riscv}.tks` | mature, tested (~80 KB each); full integer/mem/control instruction set. |
 | **regalloc** | `regalloc{,_x86,_riscv}.tks` | present, tested. |
-| **objfile** | `objfile_{elf,macho,coff}.tks`, `objfile_elf_riscv.tks` | emit **relocatable objects** with undef symbols + relocations; needs completion to the **whole-program** section/symbol/reloc set + **`.a` archive** emission. Final link is the **system `ld`**; the own **E1 linker** (`objfile_elf.tks:383`) is a LATER *link-independence* epic, **NOT a kill-C prerequisite** (§4). |
-| **ABI** | `abi_{sysv64,aapcs64,win64,riscv64}.tks` | classification tables present, tested — **no varargs** rule set yet. |
+| **objfile** | `objfile_{elf,macho,coff}.tks`, um backend ELF writer | emit **relocatable objects** with undef symbols + relocations; needs completion to the **whole-program** section/symbol/reloc set + **`.a` archive** emission. Final link is the **system `ld`**; the own **E1 linker** (`objfile_elf.tks:383`) is a LATER *link-independence* epic, **NOT a kill-C prerequisite** (§4). |
+| **ABI** | `abi_{sysv64,aapcs64,win64,[target removido]}.tks` | classification tables present, tested — **no varargs** rule set yet. |
 | **oracle** | `lir_interp.tks`, `minst_interp.tks` | interpret the covered subset, **mirroring the C backend's honest-stops** — how the native path is validated **without producing binaries** today. |
 
 **The 60 `lower.tks` honest-stops, categorized:**
@@ -292,7 +292,7 @@ preserves internal mangle if the owner prefers.
 
 | lane host | arch | notes |
 |---|---|---|
-| Linux | **x86_64**, **arm64** | full matrix (riscv64 was in this matrix when the doc was written; the target was removed in 0.3.1) |
+| Linux | **x86_64**, **arm64** | full matrix ([target removido] was in this matrix when the doc was written; the target was removed in 0.3.1) |
 | macOS | **arm64** | AAPCS64 (darwin vararg-on-stack variant) |
 | Windows | **x86_64** | COFF; Win64 vararg (float-dup-into-GPR); `#cconv("stdcall")` (windows-arm64 was listed here; the host was removed in 0.3.1) |
 
