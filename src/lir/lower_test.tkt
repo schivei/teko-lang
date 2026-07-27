@@ -1409,6 +1409,12 @@ fn lwt_lowers_defer_fires_before_a_void_lambdas_fall_through_return() {
  * via `lower_function` and run through `interp_lmodule` yields exit code 42
  * — before the fix the fall-through body closed with a valueless `ret`, so
  * the interp's `is_return` outcome carried 0, not 42.
+ *
+ * IT ADDRESSES THE FUNCTION THROUGH `mangle_fn_symbol`, NOT BY THE BARE NAME, and that is not
+ * ceremony. `lower_function` keys the emitted function by the MANGLED symbol, so a literal `"f"`
+ * stops resolving the moment the mangler moves — which is exactly what the `teko_*` user prefix
+ * did. Computing the address from the mangler is not tautological here: the SUBJECT of this test
+ * is the interpreter's return value, and the symbol is only how the function is reached.
  */
 #test
 fn lwt_interp_runs_function_trailing_expression_as_return_value() {
@@ -1416,7 +1422,7 @@ fn lwt_interp_runs_function_trailing_expression_as_return_value() {
     let f = lwt_fn("f", "", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 }, body)
     let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
     let m = add_func(empty_module(), lf)
-    teko::assert::is_true(interp_lmodule(m, "f", teko::list::empty()) == (42))
+    teko::assert::is_true(interp_lmodule(m, mangle_fn_symbol("", "f"), teko::list::empty()) == (42))
 }
 
 /**
