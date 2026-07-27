@@ -103,12 +103,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # `|| true` ON EVERY LINE, and `continue-on-error` on top, because the step is named
+      # "never fails the job" and MUST actually not. It did: this ran `nproc`, which does not exist
+      # on macOS, and the Actions bash shell runs with `-e` — so the diagnostic killed the run in
+      # 15 seconds, before the question was ever asked. A step that reports facts must not be able
+      # to invent one.
       - name: Report the host toolchain (diagnostic — never fails the job)
+        continue-on-error: true
         shell: bash
         run: |
-          cc --version | head -n1
-          nproc
-          free -m || true
+          cc --version | head -n1 || true
+          # nproc is GNU coreutils (Linux); sysctl is the macOS equivalent. Try both, care about
+          # neither.
+          (nproc || sysctl -n hw.ncpu) 2>/dev/null || true
+          (free -m || vm_stat | head -n4) 2>/dev/null || true
+          uname -srm || true
 
       # BOTH CAPABILITIES ARE PROVISIONED, or the suite would SKIP two rows and `no_skips_gate.sh`
       # would fail this run for a reason that has nothing to do with the question being asked. A
