@@ -68,11 +68,31 @@ jobs:
       # THE LADDER IS THE PRICE OF ADMISSION HERE, not part of the measurement. It exists only to
       # obtain a compiler that can build this tree at all; its own phase timings are already
       # reported by the producing lane and are not what this experiment is about.
+      # PROVISION FIRST, THEN WALK. `build_with_seed_fallback.sh` resolves the seed as a bare
+      # `teko` ON THE PATH — it does not provision one. In the producing lane that step is done by
+      # `produce_assets.sh` just before it calls the ladder, and calling the ladder directly
+      # without repeating it is exactly the mistake this comment exists to stop: it fails with a
+      # bare `teko: not found` from inside the rung build, which reads like a broken pin rather
+      # than a missing seed. Measured on the first dispatch of this workflow.
+      - name: Provision the released seed and put it on PATH
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          set -eu
+          sh scripts/ci_provision_teko.sh "$SEED"
+          [ -d .seed ] || { echo "provisioning reported success but left no .seed" >&2; exit 1; }
+          echo "$PWD/.seed" >> "$GITHUB_PATH"
+
       - name: Walk the ladder to obtain generation 0 (the wagon's seed cannot build this tree)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/build_with_seed_fallback.sh gen0
+        run: |
+          set -eu
+          teko --version
+          sh scripts/build_with_seed_fallback.sh gen0
 
       - name: Chain the generations from there and measure each one
         shell: bash
