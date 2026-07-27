@@ -593,13 +593,23 @@ pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u6
  * `loop_targets` — `lower_return` and the trailing-tail auto-return both read it so a bare case
  * value flowing back through a `T | error`-shaped return slot is coerced into the uniform
  * tag+payload wrapper via `lower_value_into_type`, mirroring the C backend's `emit_return`
- * threading `ret_type` into `emit_as_r`, #382 degrau N2).
+ * threading `ret_type` into `emit_as_r`, #382 degrau N2) + `has_ret_len_slot`/`ret_len_slot`
+ * (the CURRENT FUNCTION'S own fat-return out-slot, reset per function/lambda body exactly like
+ * `ret_type` — a `str`/`[]T`-returning `fn` reserves ONE hidden trailing incoming register for
+ * the caller-supplied length-out address (`bind_ret_len_slot`), so `lower_return`/`lower_fn_body`
+ * can STORE the tail value's length half through it before the ordinary single-VReg `LRet`
+ * carries the ptr half — the callee-side contract `lower_call_fat`'s caller-side alloca+load
+ * mirrors exactly. `has_ret_len_slot=false` for every OTHER body (a void/scalar-returning `fn`,
+ * or a lambda — fat-returning closures are a NARROWER, still-closed gap, #382 degrau N2 call-gordo)
+ * so `lower_return`/`lower_fn_body`'s fat arm can honest-stop instead of storing through an unset
+ * slot when reached somewhere this backend does not yet wire the hidden parameter for).
  */
 pub type LowerCtx = struct {
     func: LFunc; block_id: u32; env: LEnv
     layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
     flat_symbols: bool; ret_type: checker::Type
+    has_ret_len_slot: bool; ret_len_slot: u32
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -632,6 +642,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
     }
 }
 
@@ -650,6 +661,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
     }
 }
 
@@ -668,6 +680,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
     }
 }
 
@@ -686,6 +699,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
     }
 }
 
@@ -704,6 +718,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
     }
 }
 
@@ -1110,7 +1125,12 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * `is_str_arg_builtin`) routes to `lower_str_arg_call`, which lowers that ONE
  * argument through the (ptr, len) FAT pair (`lower_fat_expr`) instead of the
  * generic left-to-right scalar path — every other call lowers its arguments
- * plainly (`lower_args`) and emits through `lower_call_symbol`.
+ * plainly (`lower_args`) and emits through `lower_call_symbol`. A call whose OWN result is
+ * fat (`str`/`[]T`, `is_fat_type(e.type)`) routes to `lower_call_fat` instead — the callee
+ * needs its hidden length out-slot argument REGARDLESS of whether this particular call site
+ * ends up reading the length back (a statement-level call whose value is discarded still owes
+ * the callee that register, exactly like a fat PARAMETER's ptr+len pair is never optional) —
+ * only the ptr half is kept as this function's own single-VReg result (call-gordo degrau, #382 N2).
  *
  * An `extern fn` call's raw result additionally passes through
  * `apply_extern_return_narrow`: SysV/Win64 both permit the callee to leave
@@ -1132,11 +1152,29 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
 fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
     if c.is_closure_call { return lower_closure_call(ctx, e, c) }
     if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
+    if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_args(ctx, c.args) { LoweredArgs as x => x; error as err => return err }
     let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
     apply_extern_return_narrow(called, ctx.externs, c, e)
+}
+
+/**
+ * lower_call_fat_as_scalar — `lower_call`'s fat-result arm: `lower_call_fat`'s (ptr, len) pair,
+ * keeping only the ptr half as this SCALAR call site's own single VReg (the len half is still
+ * computed — the callee's hidden out-slot argument is never optional — just unread here, mirroring
+ * how a fat local's ptr VReg alone still resolves under `lenv_lookup`'s plain, non-fat scan).
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-typed call expression
+ * @param c    the call node
+ * @return     the advanced context + the call's ptr-half VReg
+ * @throws     propagated from `lower_call_fat`
+ */
+fn lower_call_fat_as_scalar(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    let fo = match lower_call_fat(ctx, e, c) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.ptr }
 }
 
 /**
@@ -1543,7 +1581,15 @@ fn native_builtin_symbol(last: str) -> str | null {
  *                 the callee's own declaration uses (`LowerCtx.flat_symbols`, threaded in by the
  *                 caller)
  * @return         the symbol the LCall targets
- * @throws         on an empty callee path, or on a bare builtin the N1 subset does not lower yet
+ * @throws         on an empty callee path, on a bare builtin the N1 subset does not lower yet, or
+ *                 on the generic `teko::list::*`/`teko::mem::push_fo` growth-builtin family
+ *                 (`is_list_builtin_call`) — it has no `.tks` declaration for `find_extern_symbol`/
+ *                 the mangler to resolve EITHER, so without this check it would silently fall
+ *                 through to `mangle_fn_symbol(c.call_ns, last, flat)` and target a symbol no
+ *                 function ever defines (a link-time failure at best); this degrau's own
+ *                 `lower_call_fat` is the first caller to ever reach that fallthrough for a
+ *                 fat-returning callee, so it is named here instead of left silent (call-gordo
+ *                 degrau, #382 N2)
  */
 fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> str | error {
     let segs = c.callee.segments
@@ -1552,6 +1598,9 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> s
     if c.call_ns.len == 0 {
         match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
         match native_builtin_symbol(last) { str as s => return s; null => { } }
+        if is_list_builtin_call(c.callee) {
+            return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
+        }
         if segs.len == 1 {
             return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
         }
@@ -1560,6 +1609,29 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> s
         str as foreign => foreign
         null => mangle_fn_symbol(c.call_ns, last, flat)
     }
+}
+
+/**
+ * is_list_builtin_call — recognizes a callee path shaped like the checker's OWN
+ * `teko::list::push`/`teko::list::empty`/`teko::mem::push_fo` GENERIC builtin family
+ * (`typer.tks`'s `type_list_builtin`, mirrored here since the checker leaves NO declaration
+ * behind for these — `call_ns` stays empty exactly like an `teko::assert::*`/io/cov/arena
+ * builtin, C7.1a's sibling gap). Recognized by the LAST TWO path segments (`list::push`/
+ * `list::empty`/`mem::push_fo`), rooted at `teko` (or bare `list::*`/`mem::push_fo`) — the SAME
+ * shape `type_list_builtin` matches, so the two families never disagree about which calls this
+ * one covers.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee` names one of the three list/mem growth builtins
+ */
+fn is_list_builtin_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    if segs.len < 2 { return false }
+    let last = segs[segs.len - 1].name
+    let prev = segs[segs.len - 2].name
+    let is_pushfo = prev == "mem" && last == "push_fo"
+    if prev != "list" && !is_pushfo { return false }
+    segs.len == 2 || segs[0].name == "teko"
 }
 
 /**
@@ -1709,8 +1781,11 @@ fn lower_call_indirect(ctx: LowerCtx, e: checker::TExpr, target: u32, args: []u3
  *                          the node is malformed
  *
  * @since #382 A1-6
+ * @throws  the fat-result honest stop (below) when `e.type` is `str`/`[]T` — a vtable target's
+ *          hidden fat-return out-slot is not yet wired (call-gordo degrau, #382 N2)
  */
 fn lower_iface_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if is_fat_type(e.type) { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
     if c.args.len == 0 { return error { message = "native backend N1: malformed interface-dispatch call (internal)" } }
     match aggregate_receiver_dispatch_stop(ctx, c.args[0].type) { error as stop => return stop; null => { } }
     let ro = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
@@ -2040,8 +2115,11 @@ fn closure_call_args(env: u32, rest: []u32) -> []u32 {
  * @return Lowered | error  the advanced context + the call's result VReg (0
  *                          for a void call), or a NAMED internal error when
  *                          the node is malformed
+ * @throws  the fat-result honest stop (below) when `e.type` is `str`/`[]T` — a closure's
+ *          hidden fat-return out-slot is not yet wired (call-gordo degrau, #382 N2)
  */
 fn lower_closure_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if is_fat_type(e.type) { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
     if c.callee.segments.len == 0 { return error { message = "native backend N1: empty closure-call path (internal)" } }
     let name = c.callee.segments[c.callee.segments.len - 1].name
     let hit = lenv_lookup(ctx.env, name)
@@ -2310,6 +2388,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
+        has_ret_len_slot = false; ret_len_slot = 0
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -2484,6 +2563,10 @@ fn bind_target_name(t: parser::BindTarget) -> str | error {
  * @return LowerStmtOut | error  the advanced (terminated) context, or a
  *                               NAMED internal error when a pending defer
  *                               body fails to lower
+ * @implNote when the enclosing function's own return type is fat (`str`/`[]T`), the value
+ *           lowers through `lower_return_fat` instead — its length half is stored through the
+ *           hidden out-slot (`bind_ret_len_slot`) before the single-VReg `LRet` carries the ptr
+ *           half (call-gordo degrau, #382 N2).
  */
 fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
     let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
@@ -2491,9 +2574,31 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
         let vinst = ret_void_inst(r.value.line, r.value.col)
         return LowerStmtOut { ctx = ctx_append(replayed, vinst); terminated = true }
     }
+    if is_fat_type(replayed.ret_type) { return lower_return_fat(replayed, r) }
     let lo = match lower_return_value(replayed, r.value) { Lowered as x => x; error as err => return err }
     let inst = ret_inst(lo.vreg, r.value.line, r.value.col)
     LowerStmtOut { ctx = ctx_append(lo.ctx, inst); terminated = true }
+}
+
+/**
+ * lower_return_fat — an explicit `return e` whose enclosing function's own return type is fat
+ * (`str`/`[]T`): lower `e` through the (ptr, len) pair (`lower_fat_expr`), store the length half
+ * through the hidden out-slot (`ctx.ret_len_slot`, `bind_ret_len_slot`'s own register), then emit
+ * the ordinary single-VReg `LRet` carrying only the ptr half — mirrors `lower_call_fat`'s caller-
+ * side alloca+load exactly, one axis over (store vs load). Refuses (rather than storing through
+ * an unset slot) when the enclosing body never reserved one (`!ctx.has_ret_len_slot` — a fat-
+ * returning LAMBDA, which this degrau does not wire the hidden parameter for).
+ *
+ * @param ctx  the lowering context (already past the pending-defer replay)
+ * @param r    the return node (`r.has_value` already true)
+ * @return     the terminated context
+ * @throws     when the enclosing body has no reserved out-slot, or propagated from lowering `e`
+ */
+fn lower_return_fat(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    let fo = match lower_fat_expr(ctx, r.value) { LoweredFat as x => x; error as err => return err }
+    let stored = ctx_append(fo.ctx, store_inst(fo.ctx.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
+    LowerStmtOut { ctx = ctx_append(stored, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
 }
 
 /**
@@ -3201,6 +3306,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
+        has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
     }
 }
 
@@ -4860,14 +4966,16 @@ fn is_fat_type(t: checker::Type) -> bool {
 pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
 
 /**
- * lower_fat_expr — lower a `str`/`[]T`-typed expression to its (ptr, len) pair. Only the
- * CLOSED set of fat-pointer PRODUCERS is recognized: a string literal (fresh rodata), an
- * array literal (fresh alloca + a compile-time-known element count), a local bound via
- * `lenv_bind_fat` (a `let` of str/slice type), a struct field of fat type
- * (`lower_fat_field`), and — closed at degrau 5 — an `if`-expression whose result is fat
- * (`lower_if_fat`). Any other producer (a call result, a deeper index chain, a `match`-value,
- * …) honest-stops — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382;
- * if-expression producer: degrau 5, cargo/20-degrau5-if-gordo).
+ * lower_fat_expr — lower a `str`/`[]T`-typed expression to its (ptr, len) pair. The CLOSED set of
+ * fat-pointer PRODUCERS: a string literal (fresh rodata), an array literal (fresh alloca + a
+ * compile-time-known element count), a local bound via `lenv_bind_fat` (a `let` of str/slice
+ * type), a struct field of fat type (`lower_fat_field`), an `if`-expression whose result is fat
+ * (`lower_if_fat`, degrau 5), and — closed at the `call` degrau — a DIRECT call whose own result
+ * is fat (`lower_call_fat`; measured via a corpus probe to be the shape that actually reaches
+ * this site — a closure-call/interface-dispatch receiver is `lower_call_fat`'s OWN narrower named
+ * stop, not this one). Any other producer (a deeper index chain, a `match`-value, …) honest-stops
+ * — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382; if-expression
+ * producer: degrau 5, cargo/20-degrau5-if-gordo; call producer: call-gordo degrau, #382 N2).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed (`str`/`[]T`) expression to lower
@@ -4881,35 +4989,48 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
-        checker::TCall as cl => measure_fat_call_shape(ctx, e, cl)
+        checker::TCall as cl => lower_call_fat(ctx, e, cl)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
 }
 
 /**
- * measure_fat_call_shape — TEMPORARY corpus-measurement probe (degrau `call` gordo, not yet
- * committed as a real lowering): logs the fat-typed call's shape (closure/iface/plain, its
- * resolved namespace + last path segment) to stderr and fabricates a placeholder (0, 0) pair so
- * self-hosting can run PAST this site instead of stopping at the first occurrence — the same
- * "instrument to measure" method the arithmetic degrau used before choosing its lowering. Deleted
- * once the real `TCall` lowering lands.
+ * lower_call_fat — lower a DIRECT call's fat (`str`/`[]T`) RESULT to its (ptr, len) pair: the
+ * caller allocates an 8-byte out-slot for the length half (`ret_len_out_slot`'s own mirror on the
+ * CALL side), passes its address as ONE EXTRA argument appended AFTER the call's own
+ * ABI-flattened args, then reads the length back out of that slot once the call returns — its
+ * ptr half arrives in the call's ordinary single result VReg, unchanged. This is the caller-side
+ * half of the SAME hidden-out-parameter contract `lower_function`'s `bind_ret_len_slot` reserves
+ * on the callee side: both sides agree because both are lowered by this SAME backend (mirrors
+ * `bind_fat_param`'s "a caller and callee compiled by this backend never disagree" doc) — no true
+ * platform-ABI register pair (SysV's RAX:RDX) is needed, since a fat-returning Teko function is
+ * never called from outside this backend's own output.
+ *
+ * A closure-call or interface-dispatch receiver honest-stops by name (their own vtable/thunk
+ * calling convention does not yet reserve this hidden slot on the callee side) — this degrau
+ * closes only the PLAIN direct-call producer, the shape the corpus probe measured actually
+ * reaching this site (#382 N2, call-gordo degrau).
  *
  * @param ctx  the lowering context
- * @param e    the fat-typed call expression
- * @param cl   the call node being measured
- * @return     a fabricated (0, 0) pair (never a real value)
+ * @param e    the fat-typed call expression (its type is `str`/`[]T`)
+ * @param cl   the call node
+ * @return     the (ptr, len) pair
+ * @throws     when the call is a closure/interface-dispatch call (a NAMED, narrower honest stop
+ *             than `lower_fat_expr`'s generic one), or propagated from resolving/lowering
  */
-fn measure_fat_call_shape(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat {
-    let segs = cl.callee.segments
-    let last = if segs.len == 0 { "?" } else { segs[segs.len - 1].name }
-    let closure_s = if cl.is_closure_call { "true" } else { "false" }
-    let iface_s = if cl.is_iface_dispatch { "true" } else { "false" }
-    teko::io::eprintln(teko::str::concat("FATCALL closure=", closure_s, " iface=", iface_s, " ns=", cl.call_ns, " name=", last))
-    let r1 = ctx_alloc(ctx)
-    let with1 = ctx_append(r1.ctx, const_int_inst(r1.vreg, 0, e.line, e.col))
-    let r2 = ctx_alloc(with1)
-    let with2 = ctx_append(r2.ctx, const_int_inst(r2.vreg, 0, e.line, e.col))
-    LoweredFat { ctx = with2; ptr = r1.vreg; len = r2.vreg }
+fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
+    if cl.is_closure_call { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
+    if cl.is_iface_dispatch { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
+    let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
+    let lo = match lower_args(ctx, cl.args) { LoweredArgs as x => x; error as err => return err }
+    let slot = ctx_alloc(lo.ctx)
+    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    let all_args = teko::list::push(lo.vregs, slot.vreg)
+    let called = ctx_alloc(with_slot)
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, all_args, false, e.line, e.col))
+    let lenr = ctx_alloc(with_call)
+    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
 }
 
 /**
@@ -5911,13 +6032,43 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  *                           `codegen.tks:4742-4749` — a defer here can still
  *                           observe every body-local, but never affects the
  *                           already-captured trailing value).
+ * @implNote a fat (`str`/`[]T`) `ctx.ret_type` routes the whole body through `lower_fn_body_fat`
+ *           instead — the trailing tail's length half stores through the hidden out-slot exactly
+ *           like an explicit fat `return` (call-gordo degrau, #382 N2).
  */
 fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32) -> LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
+    if is_fat_type(ctx.ret_type) { return lower_fn_body_fat(ctx, body, line, col) }
     let tail = match lower_block_value(ctx, body, ret_ty, ctx.ret_type) { LowerBlockValue as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     ctx_append(replayed, ret_inst(tail.vreg, line, col))
+}
+
+/**
+ * lower_fn_body_fat — `lower_fn_body`'s fat-return arm: the FAT tail-value walk
+ * (`lower_block_value_fat`, the same machinery an `if`-expression's fat arm uses) instead of the
+ * scalar one, then store the trailing value's length half through the hidden out-slot before the
+ * single-VReg `LRet` carries its ptr half — mirrors `lower_return_fat`, one axis over
+ * (explicit return vs trailing auto-return). Refuses when the enclosing body reserved no out-slot
+ * (a fat-returning lambda), exactly like `lower_return_fat`.
+ *
+ * @param ctx   the lowering context
+ * @param body  the function body's statement list (non-empty, `lower_fn_body`'s own guard)
+ * @param line  the source line to propagate onto the synthesized `ret`
+ * @param col   the source column to propagate onto the synthesized `ret`
+ * @return      the context after lowering every statement, its block already closed with the
+ *              `LRet`
+ * @throws      when the enclosing body has no reserved out-slot, or propagated from lowering the
+ *              trailing tail
+ */
+fn lower_fn_body_fat(ctx: LowerCtx, body: []checker::TStatement, line: u32, col: u32) -> LowerCtx | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    let tail = match lower_block_value_fat(ctx, body) { LowerBlockValueFat as x => x; error as err => return err }
+    if tail.terminated { return tail.ctx }
+    let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
+    let stored = ctx_append(replayed, store_inst(replayed.ret_len_slot, tail.len, LType::I64, line, col))
+    ctx_append(stored, ret_inst(tail.ptr, line, col))
 }
 
 /**
@@ -6018,6 +6169,25 @@ fn bind_fat_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line:
 }
 
 /**
+ * bind_ret_len_slot — reserve the ONE hidden TRAILING incoming register a `str`/`[]T`-returning
+ * `fn`'s prologue owes its caller: the address of an 8-byte slot the CALLER allocated
+ * (`lower_call_fat`'s own `alloca`) for this function's length half. Appended after every
+ * DECLARED parameter is bound (`bound.next_reg`, `lower_function`'s own call site), so it never
+ * collides with a real parameter's register — the env is passed through UNCHANGED (the slot has
+ * no source-level name; only `LowerCtx.ret_len_slot` remembers its VReg).
+ *
+ * @param bound  the `ParamBind` after every declared parameter is bound
+ * @param line   the enclosing function's source line (stamps the `param` inst)
+ * @param col    the enclosing function's source column (stamps the `param` inst)
+ * @return       the advanced `ParamBind` (its `env` unchanged, `next_reg` advanced by one)
+ */
+fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
+    let reg = bound.next_reg
+    let with_inst = append_inst(bound.func, 0, param_inst(reg, reg, line, col))
+    ParamBind { func = with_inst; env = bound.env; next_reg = reg + 1 }
+}
+
+/**
  * lower_function — a TFunction -> an LFunc: materialize each parameter as an
  * LParam into VRegs 0..n_params (bound in the env by name), then lower the
  * body (`lower_fn_body`). A NON-void body that falls off the end auto-returns
@@ -6055,18 +6225,29 @@ fn bind_fat_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line:
  *                                  lifted tables; the `error` arm for a
  *                                  generic/extern function, or when its body
  *                                  fails to lower
+ *
+ * @implNote a `str`/`[]T`-returning `f` reserves ONE hidden TRAILING parameter register
+ *           (`bind_ret_len_slot`) past its declared ones — the caller-supplied length out-slot
+ *           address `lower_return`/`lower_fn_body`'s fat arm stores the tail value's length half
+ *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
+ *           degrau, #382 N2).
  */
 pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
+    let fat_ret = is_fat_type(f.return_type)
     let ptypes = param_ltypes(f.params, enums)
-    let fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), ptypes.len to u32, ptypes, ltype_of(f.return_type, enums))
+    let all_ptypes = if fat_ret { teko::list::push(ptypes, LType::Ptr) } else { ptypes }
+    let fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), all_ptypes.len to u32, all_ptypes, ltype_of(f.return_type, enums))
     let bound = bind_fn_params(fn0, f.params, f.line, f.col)
+    let slot_reg = bound.next_reg
+    let with_slot = if fat_ret { bind_ret_len_slot(bound, f.line, f.col) } else { bound }
     let ctx0 = LowerCtx {
-        func = bound.func; block_id = 0; env = bound.env
+        func = with_slot.func; block_id = 0; env = with_slot.env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
+        has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return err }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return err }
@@ -6852,6 +7033,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
+        has_ret_len_slot = false; ret_len_slot = 0
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }

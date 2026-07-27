@@ -147,6 +147,7 @@ fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str 
         layouts = layouts; rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -184,6 +185,7 @@ fn lwt_lower_expr_text_with_enums(e: checker::TExpr, enums: []LEnumInfo) -> str 
         layouts = teko::list::empty(); rodata = teko::list::empty(); enums = enums; lifted = teko::list::empty()
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -475,11 +477,25 @@ fn lwt_println_arity_mismatch_honest_stops() {
     teko::assert::str_contains(lwt_lower_expr_text(call), "expects exactly one str argument")
 }
 
+/**
+ * lwt_println_of_a_direct_call_producer_lowers_through_the_hidden_out_slot — `println(mk_str())`
+ * USED to honest-stop ("fat-pointer receiver `call` not yet lowered") because `lower_fat_expr`'s
+ * closed producer set had no `TCall` arm; a direct call is now a closed producer
+ * (`lower_call_fat`), so `mk_str()`'s own out-slot alloca/call/load sequence feeds straight into
+ * `tk_println`'s two-argument `(ptr, len)` call, exactly like a `let`-bound fat local would
+ * (call-gordo degrau, #382 N2).
+ *
+ * @return void
+ */
 #test
-fn lwt_println_of_a_non_fat_producer_honest_stops() {
+fn lwt_println_of_a_direct_call_producer_lowers_through_the_hidden_out_slot() {
     let inner = lwt_call(lwt_path1("mk_str"), "teko::demo", teko::list::empty(), checker::Str { })
     let call = lwt_call(lwt_path1("println"), "", teko::list::push(teko::list::empty(), inner), checker::Void { })
-    teko::assert::str_contains(lwt_lower_expr_text(call), "not yet lowered (N2)")
+    let text = lwt_lower_expr_text(call)
+    teko::assert::str_contains(text, "%0 = alloca 8, align 8")
+    teko::assert::str_contains(text, "%1 = call @teko_teko__demo__mk_str(%0)")
+    teko::assert::str_contains(text, "%2 = load.i64 %0")
+    teko::assert::str_contains(text, "call @tk_println(%1, %2)")
 }
 
 /**
@@ -1889,6 +1905,96 @@ fn lwt_honest_stop_on_fat_if_without_else_as_a_value() {
     let then_blk = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_strlit("a")))
     let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = then_blk }; type = checker::Str { }; line = 0; col = 0 }
     teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(ifexpr)), "if-without-else used as a fat value not yet lowered")
+}
+
+/**
+ * lwt_lowers_str_returning_function_stores_length_through_hidden_out_slot — the call-gordo
+ * degrau's CALLEE-side proof: a `fn` declared `-> str` reserves ONE hidden TRAILING parameter
+ * register past its (zero, here) declared ones (`%0 = param 0`), and its `return "hi"` stores
+ * the literal's length (2) through that slot (`store.i64 %0, %2`) before the ordinary
+ * single-VReg `LRet` carries the ptr half (`ret %1`) — `bind_ret_len_slot`'s own contract.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_returning_function_stores_length_through_hidden_out_slot() {
+    let body = teko::list::push(teko::list::empty(), lwt_ret(lwt_strlit("hi")))
+    let f = lwt_fn("make_str", "teko::demo", teko::list::empty(), checker::Str { }, body)
+    let lfo = match lower_function(f) { LoweredFunction as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(with_rodata(add_func(empty_module(), lfo.func), lfo.rodata))
+    teko::assert::str_contains(text, "func @teko_teko__demo__make_str(%0: ptr) -> ptr {")
+    teko::assert::str_contains(text, "%0 = param 0")
+    teko::assert::str_contains(text, "%1 = global_addr @.Lstr0")
+    teko::assert::str_contains(text, "%2 = const 2")
+    teko::assert::str_contains(text, "store.i64 %0, %2")
+    teko::assert::str_contains(text, "ret %1")
+}
+
+/**
+ * lwt_lowers_str_call_result_allocates_out_slot_and_loads_the_length_back — the call-gordo
+ * degrau's CALLER-side proof: `make_str().len` (a direct `TCall` receiver `lower_fat_expr`
+ * previously honest-stopped on, "fat-pointer receiver `call` not yet lowered") now allocates
+ * an 8-byte out-slot (`%0 = alloca 8, align 8`), passes its address as the call's ONE (here,
+ * only) argument (`%1 = call @teko_teko__demo__make_str(%0)`), and loads the length back out
+ * of it afterward (`%2 = load.i64 %0`) — `lower_call_fat`'s own caller-side contract, the
+ * mirror of the callee-side fixture above.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_call_result_allocates_out_slot_and_loads_the_length_back() {
+    let call = lwt_call(lwt_path1("make_str"), "teko::demo", teko::list::empty(), checker::Str { })
+    let text = lwt_lower_expr_text(lwt_len_field(call))
+    teko::assert::str_contains(text, "%0 = alloca 8, align 8")
+    teko::assert::str_contains(text, "%1 = call @teko_teko__demo__make_str(%0)")
+    teko::assert::str_contains(text, "%2 = load.i64 %0")
+}
+
+/**
+ * lwt_honest_stop_on_fat_closure_call_result — a closure-call whose result is fat honest-stops
+ * by NAME (`lower_call_fat`'s own narrower stop) rather than silently under-passing the hidden
+ * out-slot argument the callee-side convention (`bind_ret_len_slot`) now expects — a closure's
+ * own thunk calling convention does not yet reserve it (call-gordo degrau, #382 N2).
+ *
+ * @return void
+ */
+#test
+fn lwt_honest_stop_on_fat_closure_call_result() {
+    let fty = lwt_func_type(teko::list::empty(), checker::Str { })
+    let call = lwt_closure_call("f", teko::list::empty(), fty, checker::Str { })
+    teko::assert::str_contains(lwt_lower_expr_text(call), "fat-pointer closure-call result not yet lowered")
+}
+
+/**
+ * lwt_honest_stop_on_fat_iface_dispatch_result — the interface-dispatch sibling of
+ * `lwt_honest_stop_on_fat_closure_call_result`: a vtable-dispatched method whose result is fat
+ * also honest-stops by name instead of mismatching the callee-side hidden-slot convention
+ * (call-gordo degrau, #382 N2).
+ *
+ * @return void
+ */
+#test
+fn lwt_honest_stop_on_fat_iface_dispatch_result() {
+    let recv = lwt_num_i64(1)
+    let call = lwt_iface_call("Speaker", "speak", 0, teko::list::push(teko::list::empty(), recv), checker::Str { })
+    teko::assert::str_contains(lwt_lower_expr_text(call), "fat-pointer interface-dispatch result not yet lowered")
+}
+
+/**
+ * lwt_honest_stop_on_list_push_builtin_call_no_native_backing — `teko::list::push`/`empty`
+ * (the checker's GENERIC list-growth builtins, `call_ns=""`, no `.tks` declaration) name their
+ * own gap (`is_list_builtin_call`) instead of silently falling through `call_symbol`'s mangler
+ * to a symbol no function defines — the first caller ever able to REACH that fallthrough for a
+ * fat-returning builtin, since `lower_fat_expr`'s own TCall arm previously honest-stopped before
+ * `call_symbol` ever ran (call-gordo degrau, #382 N2).
+ *
+ * @return void
+ */
+#test
+fn lwt_honest_stop_on_list_push_builtin_call_no_native_backing() {
+    let elem_ty = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }
+    let call = lwt_call(lwt_path2("list", "push"), "", teko::list::empty(), elem_ty)
+    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "growth builtin has no native runtime backing yet")
 }
 
 /**
