@@ -71,3 +71,29 @@ source: TEKO_CONSTITUTION.md, TEKO_LEGISLATION.md, TEKO_MASTER_PLAN.md (wave con
 
   Ordem decidida: **medir na .31, reestruturar na .32** — paralelizar o runner mexe em determinismo de
   saída (ordem de linhas, interleaving de captura) e esse risco não entra no trem que está fechando.
+
+---
+
+**A ESCADA DA MORTE DO C — critério BINÁRIO (dono, 2026-07-27, repetido; a primeira vez foi de
+madrugada e a segunda porque eu o re-derivei em vez de aplicá-lo).** A sequência tem numeração
+própria e começa no ZERO — ela NÃO é a escada de lowering nativo (const struct / enum carrier /
+`lo_byte`), que é outro eixo:
+
+  * **degrau 0 — seed (.30) compila gen1** a partir de um fonte que JÁ expurgou 100% dos emissores
+    e das dependências de C. O `teko.c` produzido NESTE degrau é inevitável e legítimo: o seed só
+    sabe passar por C.
+  * **degrau 1 — gen1, ANTES de compilar gen2, remove todos os `.c` e `.h`** e compila sem eles.
+    E tem que funcionar.
+
+**O TESTE DE ACERTO, literal:** *"quando gen1 compilar gen2 e ainda houver dependência de C ou
+quaisquer emissões de C (seja analisador, teste ou teko.c), é pq fez errado."*
+
+Isso não admite exceção **e não admite justificativa**, e é aí que eu errei duas vezes: o baseline
+não-vazio de `scripts/no_emitted_c.sh` (`bin/teko-tktest.c`, `bin/teko-regrcov.c`) NÃO é uma
+"verdade medida e declarada" como o próprio arquivo diz — é o defeito, escrito por extenso. O
+argumento de que portar o gate hoje trocaria "um gate que emite C" por "nenhum gate" descreve o
+tamanho do trabalho, não uma licença: sob este critério o baseline tem de chegar a VAZIO.
+
+Corolário de método, porque o modo de falha é meu e não do código: perseguir honest-stop nativo um
+a um é reativo e não tem fim visível. O degrau 0 é o que força a lista inteira a aparecer de uma
+vez — mesmo raciocínio do `all-diagnostics`, aplicado à escada.
