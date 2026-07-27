@@ -599,3 +599,23 @@ registra.
 env var sem varrer os scripts que afirmavam sobre a mensagem antiga. Lead time de 2h08m19s para um
 defeito de lead time potencial de dois segundos — **a varredura de consumidores de uma string que
 se está removendo faz parte da remoção**, não é zelo opcional.
+
+### O DRENO É UM MARCO SÓ — drenar tudo de uma vez (owner 2026-07-27)
+
+> *"quanto a ordem, deveria drenar tudo de uma vez"*
+
+O integrador drenou carga a carga, cada uma com seu merge e seu push. **Custo medido num único
+dia: cinco pushes no vagão → cinco corridas de CI e quatro cancelamentos.** Drenando tudo junto
+seria **uma** corrida. Cada corrida custa da ordem de duas horas de runner e cada cancelamento vira
+alerta para o owner.
+
+**O erro conceitual:** tratar cada CARGA como um marco. A carga não é marco — ela já está protegida
+no seu próprio branch, que não acorda CI. **O marco é o DRENO**, e um dreno é um evento, não uma
+sequência.
+
+**Operacional:** acumule as cargas prontas, faça TODOS os merges **localmente**, e empurre **uma
+vez**. Se uma delas conflitar, ela sai do lote e vira carga de reconciliação — o lote não espera
+por ela, e nem por isso vira lote de um.
+
+Isto é a mesma lei da seção anterior vista do outro lado: se a carga é o destino default de push,
+o vagão recebe marcos; e drenar N cargas é **um** marco, não N.
