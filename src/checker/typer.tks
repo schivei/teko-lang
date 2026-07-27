@@ -5928,7 +5928,7 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
         } else {
             td.name
         }
-        let mf = match type_method(methods[mi], td.name, env, table, use_base_binding, base_binding_name, base_name, declaring_class) {
+        let mf = match type_method(methods[mi], td.name, with_file(env, file), table, use_base_binding, base_binding_name, base_name, declaring_class) {
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
@@ -5970,7 +5970,7 @@ fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: E
     loop {
         if i >= eff.len { break }
         let cd = eff[i]
-        let ti = match type_const_decl(cd, env, table) { TConstDecl as x => x; error as e => return surface_at(file, cd.line, cd.col, e) }
+        let ti = match type_const_decl(cd, with_file(env, file), table) { TConstDecl as x => x; error as e => return surface_at(file, cd.line, cd.col, e) }
         out = teko::list::push(out, TConstDecl { name = member_const_symbol(type_canonical, cd.name); namespace = item_ns; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col })
         i++
     }
@@ -6343,7 +6343,10 @@ pub fn type_program(raw_program: parser::Program) -> TProgram | error {
             parser::Statement as s => {
                 // type with the THREADED scope `cur` (not the base env) so a loose `let args = …`
                 // is visible to the following statements; advance `cur` to the binding's env.
-                let ts = match type_statement(s, cur, types) {
+                // `with_file` here and not only in `type_item`: a loose statement is typed on THIS
+                // path, which bypasses `type_item` entirely, so without it every warning raised
+                // from a virtual-main statement would name a line in no file (measured).
+                let ts = match type_statement(s, with_file(cur, it.file), types) {
                     TypedStmt as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }

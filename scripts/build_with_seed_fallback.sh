@@ -303,8 +303,12 @@ committed_c_rung() {
   cc_out="$PWD/.rung-c"
   rm -rf "$cc_out"; mkdir -p "$cc_out"
   cc_log="$(mktemp)"
+  # NO `-fno-pie -no-pie` HERE, and that is a measurement, not an oversight. Disabling PIE was the
+  # standing hypothesis for the generation-to-generation slowdown; measured on the wagon it made the
+  # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
+  # function only because rung -1 was written while the experiment was still live.
   log "rung -1: building the bootstrap compiler from $cc_src"
-  if ! cc -std=c2x -w -O2 -fno-pie -no-pie \
+  if ! cc -std=c2x -w -O2 \
         -I src/runtime -I src/assert \
         "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
