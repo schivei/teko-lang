@@ -714,11 +714,6 @@ built (inherited `B1-interp`, REPORTED not blocking).
 Each stop is a NAMED error the pipeline surfaces; a fixture reaching one stops IDENTICALLY on the own
 side and is compared at the stop, never at a fabricated value (M.3, the A4/B1/B2 precedent).
 
-`#388`'s second half) is CANCELLED, not pending.** This plan delivered **x86_64
-> Windows** and NAMED **arm64 Windows** as a follow-on blocked on a disabled CI lane. That follow-on
-> apagar todos os vestígios, sem dead code". There is no `abi_win64_arm`, no `Machine=0xAA64` COFF
-> half and no `` lane to re-enable; #388 is CLOSED at its x86_64 half.
-
 ---
 
 ## 8. Deferrals + recorded decisions (law-first — NO HALT) + reported findings

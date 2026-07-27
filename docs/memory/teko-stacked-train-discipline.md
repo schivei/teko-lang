@@ -6,9 +6,6 @@ source: owner rulings 2026-07-23/24/25 (fila serial → trem empilhado → dreno
 
 # Trem empilhado — disciplina de vagões (0.3.1+)
 
-> EXISTEM MAIS: o owner removeu os dois alvos ("remover completamente suporte a Windows arm64 e
-> a LEI que cada um ensinou continua valendo sobre as lanes que sobraram.
-
 O modelo de entrega deixou de ser "PRs paralelos na main" e passou a ser um **trem**: cada
 vagão é um PR cuja **base é a branch do vagão anterior**, não a main. Trabalhar sobre a
 superfície do vagão de baixo é deliberado — expõe problema e solução cedo.
