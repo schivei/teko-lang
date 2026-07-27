@@ -44,10 +44,27 @@ name: Pull Request CI
 #   plan ──► artifact ──┬──► test ─────────────────────────────► Test suite gate
 #     (the ROOT: seed,  ├──► cli-surface ──┐
 #      ladder, dry      ├──► regressor-full├─► CI gate
-#      build, the nine  ├──► ar-validation │
-#      assets)          ├──► cross-arch-determinism
-#                       ├──► seed-debut ───┘
+#      build, one leg   ├──► ar-validation │
+#      PER PUBLISHED    ├──► cross-arch-determinism
+#      LABEL)           ├──► seed-debut ───┘
 #                       └──► mem-paranoid ───────────────────► Sanitizer gate
+#
+# ── ONE PRODUCING LEG PER LABEL: THE FOUR LINUX SUBLANES ──────────────────────────────────────
+# Owner order, 2026-07-27: *"espero ver 4 sublanes de execução, não duas, não três, não uma, para
+# Linux"*. Each Linux label is its own leg and walks the WHOLE path alone — seed, ladder, dry
+# build, its one asset. The ladder IS duplicated across the four, deliberately: *"Tem que
+# duplicar, pois depois do teko.c, a escada não depende mais dele, e se fosse para não duplicar,
+# estaríamos fazendo o primeiro degrau antes de todas as sublanes."*
+#
+# THE CLOCK THIS OPTIMISES IS DELIVERY, NOT MACHINE TIME — the owner is explicit: *"Não estou
+# falando de relógio de máquina (cicle time), mas sim relógio de processo (o maior tempo de todos
+# os tempos)"*. Hoisting the shared ladder into its own job that the four legs consume was BUILT
+# AND REJECTED here: it is a BARRIER (nothing starts until the ladder ends, so delivery becomes
+# ladder + upload + queue + download + asset, WORSE than a duplicated leg that starts at t=0) and
+# it splits an asset's delivery time across two jobs, which kills the very thing being asked for:
+# *"A questão é a percepção, delivery time, que não tem hoje ou pior, não é auditável /
+# observável."* With one leg per label, a leg's own wall clock IS the delivery time of that asset,
+# readable straight off the run page. See scripts/ci_producer_matrix.sh for the measured table.
 #
 # TSan, ASan+UBSan, ASan+UBSan+LSan and clang-tidy LEFT WITH THE C (2026-07-26). They instrumented
 # or scanned the EMITTED C, and a backend that writes objects directly gives them nothing to read;
@@ -98,8 +115,9 @@ name: Pull Request CI
 # ── ZIG IS DEAD ───────────────────────────────────────────────────────────────────────────────
 # Owner, 2026-07-26: "parar de cross compilar em zig, usar compilação nativa na esteira que irá
 # gerar os artefatos", then "O zig deve morrer agora, imediatamente, sem espera". The four Linux
-# assets are produced by scripts/native_linux_asset.sh with the TARGET's own toolchain — see that
-# file for the per-label mapping and for the glibc-floor argument.
+# assets are produced by scripts/native_linux_asset.sh with the TARGET's own toolchain, ON THE
+# RUNNER, with NO CONTAINER of any kind — see that file for the per-label mapping and for what the
+# glibc floor traded when the manylinux image went with it.
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 on:
   pull_request:
@@ -260,14 +278,18 @@ jobs:
           # ── TEST LEGS ───────────────────────────────────────────────────────────────────────
           # `os` is the runner that EXECUTES the asset, which need not be the runner that minted
           # it. `timeout` is a GATE-ONLY budget — the build left this layer.
-          T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
-          T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
-          T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
-          T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
+          # `producer` NAMES THE UPLOAD THIS LEG DOWNLOADS. With one producing leg per published
+          # label (the four Linux sublanes), a Linux label's producer IS that label — the two
+          # columns are equal here, and stay separate fields only because they are NOT equal for
+          # a `native` producer, which mints under its own host name.
+          T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":45}'
+          T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":45}'
+          T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":45}'
+          T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":45}'
           T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45}'
           T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60}'
 
-          C_X='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest"}'
+          C_X='{"label":"linux-x86_64-glibc","producer":"linux-x86_64-glibc","os":"ubuntu-latest"}'
           C_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest"}'
 
           if [ "$full" = "true" ]; then
@@ -321,28 +343,33 @@ jobs:
       # image no lane has exercised says WHICH toolchain was present instead of leaving the reader
       # to infer it from a cc error deep inside a build log. `unzip`/`tar` because
       # ci_provision_teko.sh needs one of them to open the release asset, `xz`/`python3`/`7z`
-      # because they are the decompressor chain the committed-seed rung walks, `docker` because it
-      # is what the glibc Linux asset is built inside, `musl-gcc` because it is what the musl
-      # Linux asset is built with (see the install step just below — it is not on the image by
-      # default, this line only reports whether it is already there), and `file` because
-      # native_linux_asset.sh asserts each asset's architecture with it.
+      # because they are the decompressor chain the committed-seed rung walks, `cc` because it is
+      # what the glibc Linux asset is now built with (NO CONTAINER — owner order 2026-07-27),
+      # `musl-gcc` because it is what the musl Linux asset is built with (see the install step
+      # just below — it is not on the image by default, this line only reports whether it is
+      # already there), and `file` because native_linux_asset.sh asserts each asset's
+      # architecture with it.
       - name: Report the host toolchain (diagnostic — never fails the job)
         shell: bash
         run: |
-          for t in cc clang gcc file xz unzip tar curl python3 7z docker musl-gcc; do
+          for t in cc clang gcc file xz unzip tar curl python3 7z musl-gcc; do
             printf '%-8s ' "$t"
             command -v "$t" || echo '(absent)'
           done
 
-      # musl-tools' AVAILABILITY ON THE arm64 RUNNER IS AN ASSERTION, NOT A CONFIRMED FACT (see
-      # scripts/native_linux_asset.sh's header) — it was verified only on x86_64. This step is
-      # therefore deliberately a WORKFLOW STEP, not logic buried inside a script: if the package
-      # is missing here, THIS step goes red with a legible "Unable to locate package" from apt,
-      # rather than failing deep inside a backgrounded parallel build's captured log. No fallback
-      # to a container exists — a red step here is the FAIL-LOUD this restriction demands, and
-      # the fix is a human decision (route linux-arm64-musl back to Alpine), not a silent retry.
+      # musl-tools INSTALLS ON BOTH LINUX RUNNERS — measured green on `ubuntu-24.04-arm` across
+      # three separate runs on 2026-07-27, so this is a CONFIRMED FACT and no longer the assertion
+      # an earlier revision of this comment called it. It stays a WORKFLOW STEP rather than logic
+      # buried inside a script so a regression goes red HERE with a legible "Unable to locate
+      # package" from apt instead of failing deep inside a build log. THERE IS NO CONTAINER TO
+      # FALL BACK TO AND NONE IS COMING BACK: a red step here is the fail-loud, and the fix is to
+      # fix the toolchain, never to route a label back to Alpine.
+      #
+      # Gated on the LABEL, not on `kind`: with one leg per published label the glibc legs never
+      # touch musl-gcc, so making them wait ~15s for a package they do not use would be delivery
+      # time spent on nothing.
       - name: Install musl-tools (the musl asset's native, non-container toolchain)
-        if: matrix.kind == 'linux'
+        if: endsWith(matrix.producer, '-musl')
         shell: bash
         run: |
           set -eu
@@ -609,7 +636,7 @@ jobs:
       - name: Download the published x86_64 asset
         uses: actions/download-artifact@v4
         with:
-          name: teko-assets-linux-x86_64
+          name: teko-assets-linux-x86_64-glibc
           path: dl
 
       - name: Restore the executable bit
@@ -640,7 +667,7 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux-x86_64-glibc
-            producer: linux-x86_64
+            producer: linux-x86_64-glibc
             format: elf
           - os: macos-latest
             label: macos-arm64
@@ -1003,7 +1030,7 @@ jobs:
       - name: Download the published x86_64 asset
         uses: actions/download-artifact@v4
         with:
-          name: teko-assets-linux-x86_64
+          name: teko-assets-linux-x86_64-glibc
           path: dl
 
       - name: Restore the executable bit
