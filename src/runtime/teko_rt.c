@@ -1869,8 +1869,8 @@ tk_str tk_rt_os(void) {
     return (tk_str){ (const tk_byte *)s, strlen(s) };
 }
 
-// (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64" /
-// "riscv64" (else "unknown"), selected from the compiler's own target predefines. Mirrors
+// (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64"
+// (else "unknown"), selected from the compiler's own target predefines. Mirrors
 // tk_rt_os's already-working plain-str shape (no {ok,value,err} lift), so the released seed's
 // frozen codegen.c can lower it. The canonical spellings are "arm64" (not "aarch64") and
 // "x86_64" (not "amd64") so the token concatenates directly with tk_rt_os() into the
@@ -1881,8 +1881,6 @@ tk_str tk_rt_arch(void) {
     static const char *s = "arm64";
 #elif defined(__x86_64__) || defined(_M_X64)
     static const char *s = "x86_64";
-#elif defined(__riscv) && (__riscv_xlen == 64)
-    static const char *s = "riscv64";
 #else
     static const char *s = "unknown";
 #endif

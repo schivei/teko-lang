@@ -8,18 +8,14 @@
 # used to reach for `zig cc -target <triple>` now names a LABEL here and gets a binary produced
 # by the compiler that actually ships on that platform.
 #
-# ── WHAT "NATIVE" MEANS FOR EACH OF THE SIX LABELS ────────────────────────────────────────────
+# ── WHAT "NATIVE" MEANS FOR EACH OF THE FOUR LABELS ───────────────────────────────────────────
 # The axis is (ARCH x LIBC). A toolchain is NATIVE when it is the target platform's own gcc,
-# running against the target platform's own libc headers and objects. Which CPU executes that gcc
-# is a separate question, and for riscv64 the answer is "an emulated one" — that is emulation of
-# the RUNNER, not cross-compilation of the ARTIFACT.
+# running against the target platform's own libc headers and objects, on the target's own CPU.
 #
 #   linux-x86_64-glibc   container quay.io/pypa/manylinux_2_28_x86_64   host CPU (x86_64)
 #   linux-x86_64-musl    container alpine (x86_64)                      host CPU (x86_64)
 #   linux-arm64-glibc    container quay.io/pypa/manylinux_2_28_aarch64  host CPU (arm64 runner)
 #   linux-arm64-musl     container alpine (arm64)                       host CPU (arm64 runner)
-#   linux-riscv64-glibc  container riscv64/debian:unstable              qemu/binfmt (emulated)
-#   linux-riscv64-musl   container alpine --platform linux/riscv64      qemu/binfmt (emulated)
 #
 # ── WHY THE glibc ASSETS GO THROUGH manylinux_2_28 AND NOT THE RUNNER'S OWN cc ────────────────
 # A dynamically linked glibc binary carries a FLOOR: it will not start on a system whose glibc is
@@ -31,28 +27,19 @@
 # this problem: a glibc-2.28 sysroot with a modern gcc, same architecture, no cross-compilation.
 # The published promise is therefore kept BY CONSTRUCTION rather than by hope.
 #
-# THE riscv64 glibc FLOOR IS A KNOWN DELTA and is not hidden: there is no glibc-2.28-era riscv64
-# base image (riscv64 support landed in glibc 2.27 and no LTS distro ships an image that old for
-# it), so that asset links against the container's glibc. riscv64 hardware and distros are all
-# recent, so the practical exposure is nil — but it IS a change from the zig pin and is stated
-# here rather than discovered later.
-#
 # ── WHY CONTAINERS AND NOT THE RUNNER, EVEN WHERE THE ARCH MATCHES ────────────────────────────
-# Uniformity is the point. One code path builds all six, so the PR artifact lane and the release
+# Uniformity is the point. One code path builds all four, so the PR artifact lane and the release
 # mint their assets with byte-identical commands; a divergence between "what CI proved" and "what
 # the release shipped" is precisely the class of break `release-cross-smoke` existed to catch,
 # and it is closed here by removing the divergence instead of by adding a lane to watch it.
 #
 # ── REQUIREMENTS ──────────────────────────────────────────────────────────────────────────────
 #   * `docker` on PATH (present on every GitHub-hosted Linux runner).
-#   * for the riscv64 labels: binfmt registered for riscv64 — the caller does this
-#     (`docker/setup-qemu-action`, or `docker run --privileged tonistiigi/binfmt --install`).
-#     A missing registration fails here with a named error, never with a silent wrong-arch build.
 #   * the CWD must be the repo root, and <teko_c>/<src_dir> must live inside it: the container
 #     sees the CWD mounted at /w, so a path outside it cannot be reached and is refused up front.
 #
 # Usage: native_linux_asset.sh <label> <teko_c> <src_dir>
-#   label     one of the six labels above
+#   label     one of the four labels above
 #   teko_c    path to the emitted teko.c (repo-relative, or absolute under the CWD)
 #   src_dir   the repo's src/ (teko_rt.*, assert.*)
 #
@@ -60,8 +47,7 @@
 # consumer (the staging step, package_release.sh) is unchanged by the toolchain swap.
 #
 # Image overrides (all optional — for pinning or for a mirror; never to reintroduce a cross
-# toolchain): TEKO_IMG_GLIBC_X86_64, TEKO_IMG_GLIBC_ARM64, TEKO_IMG_MUSL, TEKO_IMG_RISCV_GLIBC,
-# TEKO_IMG_RISCV_MUSL.
+# toolchain): TEKO_IMG_GLIBC_X86_64, TEKO_IMG_GLIBC_ARM64, TEKO_IMG_MUSL.
 #
 # POSIX sh only.
 set -eu
@@ -73,8 +59,6 @@ SRC="${3:?missing src_dir}"
 IMG_GLIBC_X86_64="${TEKO_IMG_GLIBC_X86_64:-quay.io/pypa/manylinux_2_28_x86_64}"
 IMG_GLIBC_ARM64="${TEKO_IMG_GLIBC_ARM64:-quay.io/pypa/manylinux_2_28_aarch64}"
 IMG_MUSL="${TEKO_IMG_MUSL:-alpine:3.21}"
-IMG_RISCV_GLIBC="${TEKO_IMG_RISCV_GLIBC:-riscv64/debian:unstable}"
-IMG_RISCV_MUSL="${TEKO_IMG_RISCV_MUSL:-alpine:3.21}"
 
 log() { printf '%s\n' "native_linux_asset: $*" >&2; }
 
@@ -114,10 +98,9 @@ TEKO_VERSION_TAG="$(sh scripts/derive_version.sh 2>/dev/null || echo v0.0.0.0-de
 TEKO_VERSION_STRING="${TEKO_VERSION_TAG#v}"
 
 # ── per-label toolchain selection ─────────────────────────────────────────────────────────────
-# PLATFORM is empty when the image runs on the host CPU; `--platform linux/riscv64` is what routes
-# an image through binfmt. SETUP is the in-container package install (empty where the image
-# already ships a compiler). ARCH_KW is grepped in host-side `file` output to assert the result.
-PLATFORM=""
+# Every image runs on the host CPU. SETUP is the in-container package install (empty where the
+# image already ships a compiler). ARCH_KW is grepped in host-side `file` output to assert the
+# result.
 STATIC=""
 DLLIB=""
 case "$LABEL" in
@@ -129,37 +112,16 @@ case "$LABEL" in
         IMAGE="$IMG_GLIBC_ARM64"; SETUP=""; DLLIB="-ldl"; ARCH_KW="aarch64" ;;
     linux-arm64-musl)
         IMAGE="$IMG_MUSL"; SETUP="apk add --no-cache build-base >/dev/null"; STATIC="-static"; ARCH_KW="aarch64" ;;
-    linux-riscv64-glibc)
-        IMAGE="$IMG_RISCV_GLIBC"; PLATFORM="linux/riscv64"; DLLIB="-ldl"
-        SETUP="apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null"
-        ARCH_KW="RISC-V" ;;
-    linux-riscv64-musl)
-        IMAGE="$IMG_RISCV_MUSL"; PLATFORM="linux/riscv64"
-        SETUP="apk add --no-cache build-base >/dev/null"; STATIC="-static"; ARCH_KW="RISC-V" ;;
     *)
-        log "'$LABEL' is not one of the six Linux labels"
-        log "  linux-{x86_64,arm64,riscv64}-{glibc,musl}"
+        log "'$LABEL' is not one of the four Linux labels"
+        log "  linux-{x86_64,arm64}-{glibc,musl}"
         exit 1 ;;
 esac
-
-# The host must be able to RUN the image. For a host-CPU image that is trivially true; for the
-# emulated pair it depends on binfmt, and a missing registration is the one environmental failure
-# that would otherwise surface as an unreadable "exec format error" three layers down.
-if [ -n "$PLATFORM" ]; then
-    if ! docker run --rm --platform "$PLATFORM" "$IMAGE" uname -m >/dev/null 2>&1; then
-        log "cannot execute '$IMAGE' as $PLATFORM on this host."
-        log "riscv64 has no GitHub runner, so its NATIVE gcc runs on an EMULATED CPU: the caller"
-        log "must register binfmt first (docker/setup-qemu-action, or"
-        log "  docker run --privileged --rm tonistiigi/binfmt --install riscv64)."
-        log "Reintroducing a cross-compiler is NOT the fallback — there is none."
-        exit 1
-    fi
-fi
 
 GD="gd-$LABEL"
 rm -rf "$GD"; mkdir -p "$GD"
 
-echo "=== $LABEL — native build in $IMAGE${PLATFORM:+ (platform $PLATFORM)} ==="
+echo "=== $LABEL — native build in $IMAGE ==="
 
 # ONE `sh -c` inside the container: the package install, a toolchain diagnostic that names the
 # compiler and libc actually present (so a wrong or drifted image is legible at the TOP of the
@@ -185,7 +147,7 @@ CC_LINE="gcc -std=c2x -w -O2 -DTEKO_VERSION_STRING=$TEKO_VERSION_STRING $STATIC 
     $R_TEKO_C $R_SRC/runtime/teko_rt.c $R_SRC/assert/assert.c -lm $DLLIB \
     -o $GD/teko"
 
-docker run --rm ${PLATFORM:+--platform "$PLATFORM"} \
+docker run --rm \
     -v "$PWD:/w" -w /w "$IMAGE" \
     sh -c "set -eu
 ${SETUP:-true}
@@ -207,7 +169,7 @@ $CC_LINE"
 # reproducibility gate in nightly.yml: "same tree + same seed + same toolchain => same bytes" is
 # only assertable if the third antecedent can be CHECKED rather than assumed. When two runs of the
 # same tree disagree on bytes, this file is what says whether the image moved under them — the
-# glibc images are pinned by tag and `riscv64/debian:unstable` is sid, so it moves often.
+# images are pinned by tag, so a moved tag is visible here rather than inferred.
 [ -f "$GD/TOOLCHAIN.txt" ] || { log "$LABEL: the container wrote no TOOLCHAIN.txt"; exit 1; }
 sed 's/^/    /' "$GD/TOOLCHAIN.txt" >&2
 

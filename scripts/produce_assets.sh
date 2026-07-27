@@ -2,7 +2,7 @@
 # scripts/produce_assets.sh — THE SINGLE PRODUCTION PATH for a published teko asset.
 #
 # ── WHY IT IS A SCRIPT AND NOT WORKFLOW STEPS ────────────────────────────────────────────────
-# Two things now mint the nine published assets: `pr.yml`'s `artifact` root (per PR, so every
+# Two things now mint the seven published assets: `pr.yml`'s `artifact` root (per PR, so every
 # asset is gated) and `nightly.yml` (per push to main, so the release has something to promote).
 # If those two carried their own copies of "provision the seed, walk the ladder, dry-build, build
 # the native Linux assets, stage them", they would drift — and a drift between what CI proved and
@@ -11,16 +11,13 @@
 #
 # WHAT A CALLER STILL OWNS, and why it cannot live here:
 #   * `actions/checkout` — this script runs inside the tree.
-#   * binfmt registration for riscv64 — a privileged `docker run` that GitHub exposes as an
-#     action; scripts/native_linux_asset.sh PROBES the registration and fails with a named error
-#     if the caller forgot it, so the split cannot become a silent wrong-arch build.
 #   * what to do with the result — pr.yml uploads `stage/` as a run artifact; nightly.yml packages
 #     it with scripts/package_release.sh. Producing and publishing are different jobs.
 #
 # ── WHAT IT DOES, IN ORDER ───────────────────────────────────────────────────────────────────
 #   1. Provision the host-runnable seed (scripts/ci_provision_teko.sh) and put it on PATH. The
-#      seed label is NOT derived here: a producer standing on x86_64 hardware may be minting
-#      riscv64 assets, so the caller states which released binary RUNS on this runner. A
+#      seed label is NOT derived here: the label a producer MINTS is not always the label whose
+#      binary RUNS on its runner, so the caller states which released binary does. A
 #      derivation the caller can get wrong is a derivation that silently picks the wrong blob.
 #   2. THE DRY BUILD + THE LADDER (scripts/build_with_seed_fallback.sh): the newest RELEASED seed
 #      builds the tip directly; else the COMMITTED seed in bootstrap/seeds/; else the pinned SHA

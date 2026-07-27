@@ -199,9 +199,8 @@ host_seed_label() {
     Darwin) printf '%s' "macos-arm64" ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
       case "$hs_arch" in
-        x86_64|amd64)        printf '%s' "windows-x86_64" ;;
-        aarch64|arm64|ARM64) printf '%s' "windows-arm64" ;;
-        *)                   printf '%s' "" ;;
+        x86_64|amd64)  printf '%s' "windows-x86_64" ;;
+        *)             printf '%s' "" ;;
       esac ;;
     *) printf '%s' "" ;;
   esac

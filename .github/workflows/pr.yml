@@ -64,7 +64,7 @@ name: Pull Request CI
 #
 # ── NO LANE BUT THE ROOT BUILDS ───────────────────────────────────────────────────────────────
 # Eleven jobs used to call scripts/build_with_seed_fallback.sh or scripts/ci_provision_teko.sh:
-# build-test, gen1-checks, riscv64-qemu, ar-elf-macho-coff-validation, seeds, release-cross-smoke,
+# build-test, gen1-checks, regressor-full, ar-elf-macho-coff-validation, seeds, release-cross-smoke,
 # mem-paranoid, asan-default, tsan, windows-selfhost, seed-debut. After this wagon exactly ONE
 # does, and scripts/ci_lane_purity.sh (run by `CI gate`) fails the build if a twelfth appears.
 # Two of the eleven are GONE rather than converted:
@@ -97,11 +97,9 @@ name: Pull Request CI
 #
 # ── ZIG IS DEAD ───────────────────────────────────────────────────────────────────────────────
 # Owner, 2026-07-26: "parar de cross compilar em zig, usar compilação nativa na esteira que irá
-# gerar os artefatos", then "O zig deve morrer agora, imediatamente, sem espera". The six Linux
+# gerar os artefatos", then "O zig deve morrer agora, imediatamente, sem espera". The four Linux
 # assets are produced by scripts/native_linux_asset.sh with the TARGET's own toolchain — see that
-# file for the per-label mapping and for the glibc-floor argument. riscv64 has no runner, so its
-# NATIVE gcc runs on an EMULATED CPU inside a linux/riscv64 container; the emulation cost is
-# accepted by the owner and deliberately not optimised.
+# file for the per-label mapping and for the glibc-floor argument.
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 on:
   pull_request:
@@ -131,11 +129,9 @@ on:
     # docs-only PR costs one ~12s ubuntu job, the aggregators REPORT (green, having asserted that
     # everything below them was correctly skipped), and nothing hangs.
 
-# ONE LIVE RUN PER PR. Without this, every push starts a full set — seven native producers plus
-# nine test legs — and the previous set keeps running to completion on a commit nobody will ever
-# merge. On this train that is not a rounding error: the two riscv64 producers are EMULATED and
-# take ~20 min each, so three pushes in an hour meant three sets of them burning in parallel to
-# grade dead commits.
+# ONE LIVE RUN PER PR. Without this, every push starts a full set — four producers plus six test
+# legs — and the previous set keeps running to completion on a commit nobody will ever merge,
+# burning parallel capacity to grade dead commits.
 #
 # Cancelling is safe here because a required check is evaluated on the PR's HEAD commit: a run
 # cancelled by a newer push belongs to a superseded SHA, which no longer gates anything. The
@@ -257,35 +253,31 @@ jobs:
           # ── PRODUCER LEGS ───────────────────────────────────────────────────────────────────
           # THE LEG TABLE IS NOT HERE. It is scripts/ci_producer_matrix.sh, because `nightly.yml`
           # runs the SAME producers to mint the build the release promotes, and a leg added to one
-          # workflow and forgotten in the other is a nightly that publishes eight assets or a PR
-          # that gates eight and ships nine — failures that surface at the release. See that
-          # script for what each field means and why riscv64 is two legs.
+          # workflow and forgotten in the other is a nightly that publishes six assets or a PR
+          # that gates six and ships seven — failures that surface at the release. See that
+          # script for what each field means.
           #
           # ── TEST LEGS ───────────────────────────────────────────────────────────────────────
-          # `os` is the runner that EXECUTES the asset, which is not the runner that minted it:
-          # the riscv64 assets run under qemu-user on x86_64 because no riscv64 runner exists.
-          # `timeout` is a GATE-ONLY budget — the build left this layer.
+          # `os` is the runner that EXECUTES the asset, which need not be the runner that minted
+          # it. `timeout` is a GATE-ONLY budget — the build left this layer.
           T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
           T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64","os":"ubuntu-latest","timeout":45}'
           T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
           T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64","os":"ubuntu-24.04-arm","timeout":45}'
-          T_RG='{"label":"linux-riscv64-glibc","producer":"linux-riscv64-glibc","os":"ubuntu-latest","timeout":180}'
-          T_RM='{"label":"linux-riscv64-musl","producer":"linux-riscv64-musl","os":"ubuntu-latest","timeout":180}'
           T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45}'
           T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60}'
-          T_WA='{"label":"windows-arm64","producer":"windows-arm64","os":"windows-11-arm","timeout":90}'
 
           C_X='{"label":"linux-x86_64-glibc","producer":"linux-x86_64","os":"ubuntu-latest"}'
           C_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest"}'
 
           if [ "$full" = "true" ]; then
             # SLOWEST FIRST in every matrix: GitHub starts legs in declaration order, so the
-            # emulated riscv64 producers and the ~11-min windows-arm64 one must not queue behind
-            # cheap ones. (The producer matrix carries that order inside the shared table.)
+            # slowest legs must not queue behind cheap ones. (The producer matrix carries that
+            # order inside the shared table.)
             echo "matrix_artifact=$(sh scripts/ci_producer_matrix.sh full)" >> "$GITHUB_OUTPUT"
-            echo "matrix_test={\"include\":[$T_RG,$T_RM,$T_WA,$T_WX,$T_XG,$T_XM,$T_AG,$T_AM,$T_MAC]}" >> "$GITHUB_OUTPUT"
+            echo "matrix_test={\"include\":[$T_WX,$T_XG,$T_XM,$T_AG,$T_AM,$T_MAC]}" >> "$GITHUB_OUTPUT"
             echo "matrix_cli={\"include\":[$C_X,$C_MAC]}" >> "$GITHUB_OUTPUT"
-            echo "labels=linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
+            echo "labels=linux-arm64-glibc linux-arm64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-x86_64" >> "$GITHUB_OUTPUT"
           else
             echo "matrix_artifact=$(sh scripts/ci_producer_matrix.sh light)" >> "$GITHUB_OUTPUT"
             echo "matrix_test={\"include\":[$T_WX,$T_XG]}" >> "$GITHUB_OUTPUT"
@@ -340,25 +332,14 @@ jobs:
             command -v "$t" || echo '(absent)'
           done
 
-      # riscv64 PRODUCERS ONLY. There is no riscv64 runner, so the target's OWN gcc runs on an
-      # emulated CPU inside a linux/riscv64 container. This registers the binfmt handler that
-      # makes `docker run --platform linux/riscv64` possible; native_linux_asset.sh probes the
-      # registration before compiling and fails with a named error if it is missing, so this step
-      # going wrong can never become a silent wrong-arch build.
-      - name: Register binfmt for riscv64 (emulated CPU, native toolchain)
-        if: matrix.binfmt
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: riscv64
-
       # ── THE SHARED PRODUCTION PATH ──────────────────────────────────────────────────────────
       # Provision the host-runnable seed, walk the ladder, run the DRY build
       # (`--no-verify --release`), build each Linux asset with its target's own native toolchain,
       # and stage `stage/<label>/teko[.exe]`. All of it is scripts/produce_assets.sh, and
       # `nightly.yml` makes the IDENTICAL call — one production path, not two. That script is also
-      # the reason `seed` is a matrix field rather than a derivation: a producer standing on x86_64
-      # hardware may be minting riscv64 assets, and a derivation the caller can get wrong is a
-      # derivation that silently picks the wrong blob.
+      # the reason `seed` is a matrix field rather than a derivation: the label a leg PRODUCES is
+      # not always the label whose binary RUNS on its runner, and a derivation the caller can get
+      # wrong is a derivation that silently picks the wrong blob.
       #
       # `$PRODUCES` is unquoted deliberately: word-splitting is what turns the contract string into
       # one argument per asset label.
@@ -420,29 +401,6 @@ jobs:
             command -v "$t" || echo '(absent)'
           done
 
-      # riscv64 ONLY: there is no riscv64 runner, so the asset executes under qemu-user.
-      # `libc6-riscv64-cross` carries ONLY the target loader + shared libc the DYNAMIC glibc asset
-      # needs at runtime — no cross compiler, deliberately: `resolve_cc` links with the HOST `cc`
-      # whenever `TEKO_TARGET` is unset ("the LINK step always runs ON the host"), and qemu-user
-      # passes an `execve` of a host-native binary straight through to the kernel. So the COMPILER
-      # under test is fully emulated riscv64 while the C it emits is compiled and run natively —
-      # which is where the emulation cost belongs.
-      - name: Install qemu-user-static + the riscv64 loader
-        if: contains(matrix.label, 'riscv64')
-        shell: bash
-        run: |
-          set -eu
-          sudo apt-get update -y
-          sudo apt-get install -y qemu-user-static libc6-riscv64-cross
-
-      - name: Report the emulator (diagnostic — never fails the job)
-        if: contains(matrix.label, 'riscv64')
-        shell: bash
-        run: |
-          command -v qemu-riscv64-static || echo 'qemu-riscv64-static (absent)'
-          qemu-riscv64-static --version 2>/dev/null | head -n1 || echo 'qemu-riscv64-static: not runnable'
-          ls -d /usr/riscv64-linux-gnu 2>/dev/null || echo '/usr/riscv64-linux-gnu: absent (no riscv64 sysroot)'
-
       - name: Download this lane's published asset
         uses: actions/download-artifact@v4
         with:
@@ -468,10 +426,7 @@ jobs:
           fi
           chmod +x "$art"
           file "$art" || true
-          case "$LABEL" in
-            linux-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" --version ;;
-            *)               "$art" --version ;;
-          esac
+          "$art" --version
 
       # ── the suite, run BY the asset. THE ONLY WORK THIS LAYER DOES. ─────────────────────────
       # TWO steps, and the split is not cosmetic: Windows is not a different path but a different
@@ -485,17 +440,7 @@ jobs:
         run: |
           set -eu
           art="dl/$LABEL/teko"
-          case "$LABEL" in
-            linux-riscv64-*)
-              # `-L` is required by the dynamic glibc asset and harmless for the static musl one,
-              # so the invocation is uniform — without it a dynamic artifact dies at
-              # "Could not open '/lib/ld-linux-*'".
-              qemu-riscv64-static -L /usr/riscv64-linux-gnu "$art" test .
-              ;;
-            *)
-              "$art" test .
-              ;;
-          esac
+          "$art" test .
           : > .lane-ran
 
       - name: Asset self-test — Windows lanes (the published asset runs its own gate)
@@ -603,27 +548,22 @@ jobs:
         run: ./scripts/target_host_default_test.sh
 
   # ══ regressor-full ═════════════════════════════════════════════════════════════════════════
-  # TIER: full only. WAS `riscv64-qemu`, and it no longer builds anything.
+  # TIER: full only. It no longer builds anything.
   #
   # This is the ONE lane that runs the regression executor with REGRESSION_REQUIRE_TOOLS=1, and
   # that flag IS the point: without it a lane whose provisioning broke would honest-SKIP the
-  # riscv/wasm rows and report green — worse than having no lane at all, because it LOOKS like
-  # coverage. With it, an absent cross-gcc / qemu / wasmtime is a hard failure.
+  # wasm rows and report green — worse than having no lane at all, because it LOOKS like
+  # coverage. With it, an absent wasmtime is a hard failure.
   #
   # …and BECAUSE the flag is fail-closed for EVERY capability the corpus declares, this is the one
-  # lane that must provision ALL of them: the riscv64 cross toolchain (regressor.tkr's F5
-  # differential cross-compiles and runs own==C under qemu), the riscv binutils that
-  # scripts/check_elf.sh needs, and wasmtime for F7's `Given target = "wasm32-wasi"` scenario.
+  # lane that must provision ALL of them: the host binutils that scripts/check_elf.sh needs, and
+  # wasmtime for F7's `Given target = "wasm32-wasi"` scenario.
   # That is why the flag lives HERE and not on the `test` legs: a lane that cannot run part of the
   # corpus cannot honestly demand that none of it be skipped.
-  #
-  # NOTE the cross toolchain here is NOT a contradiction of zig's death. It is not building the
-  # COMPILER; it is the link step of the corpus the compiler emits, which is what
-  # `resolve_cc`'s TEKO_TARGET arm calls for on any host.
   regressor-full:
     needs: [plan, artifact]
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
-    name: regressor / all capabilities (riscv64 + wasm, fail-closed)
+    name: regressor / all capabilities (wasm, fail-closed)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -634,13 +574,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # gcc-riscv64-linux-gnu pulls binutils-riscv64-linux-gnu, which is what
-      # scripts/check_elf.sh needs under ELF_TOOLCHAIN=riscv64-linux-gnu- for the own object's
-      # well-formedness cross-check.
-      - name: Install the riscv64 cross toolchain + QEMU + host clang
+      - name: Install the host clang the corpus links with
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user-static clang
+          sudo apt-get install -y clang
 
       - name: Install wasmtime (the F7 wasm32-wasi scenario's executor)
         run: |
@@ -826,14 +763,14 @@ jobs:
   #
   # THE TARGET MUST BE PINNED, and this is the part that is easy to get wrong. Emitted C was
   # target-independent (the `cc` did the targeting); an OBJECT is not. Left to the host-aware
-  # default, the six assets would each emit for their OWN architecture and differ for a completely
+  # default, the four assets would each emit for their OWN architecture and differ for a completely
   # legitimate reason — a green-looking lane asserting nothing, or a red one blaming the wrong
   # thing. Pinning `--target` to one value makes the HOST the only variable, which is precisely the
   # leak this lane exists to catch.
   #
-  # It is a pure CONSUMER: it downloads the six published assets and runs them. The x86_64 pair
-  # runs natively; arm64 and riscv64 run under qemu-user with `-L <sysroot>` so the dynamic glibc
-  # artifacts find their loader (measured, not assumed: without `-L` a dynamic aarch64/riscv64
+  # It is a pure CONSUMER: it downloads the four published assets and runs them. The x86_64 pair
+  # runs natively; the arm64 pair runs under qemu-user with `-L <sysroot>` so the dynamic glibc
+  # artifact finds its loader (measured, not assumed: without `-L` a dynamic aarch64
   # artifact dies at "Could not open '/lib/ld-linux-*.so.*'").
   #
   # EXPECTED RED UNTIL THE LADDER REACHES IT: `uniontest` currently stops at the honest
@@ -843,7 +780,7 @@ jobs:
   cross-arch-determinism:
     needs: [plan, artifact]
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
-    name: cross-arch determinism (six Linux assets emit an identical object)
+    name: cross-arch determinism (four Linux assets emit an identical object)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -852,13 +789,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # qemu-user-static executes the non-native artifacts; the two libc6-*-cross packages carry
-      # ONLY the target loader + shared libc the four glibc artifacts need at runtime — no
+      # qemu-user-static executes the non-native artifacts; libc6-arm64-cross carries
+      # ONLY the target loader + shared libc the glibc artifact needs at runtime — no
       # compiler.
-      - name: Install qemu-user-static + the arm64/riscv64 loaders
+      - name: Install qemu-user-static + the arm64 loader
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y qemu-user-static libc6-arm64-cross libc6-riscv64-cross
+          sudo apt-get install -y qemu-user-static libc6-arm64-cross
 
       # Every Linux producer's upload, merged into one tree. Labels are unique across producers,
       # so `merge-multiple` cannot collide and the result is exactly `dl/<label>/teko`.
@@ -869,30 +806,28 @@ jobs:
           merge-multiple: true
           path: dl
 
-      - name: Run all six assets + assert an identical emitted object
+      - name: Run all four assets + assert an identical emitted object
         shell: bash
         run: |
           set -eu
           # The target every asset emits FOR. Pinned on purpose — see the job comment: leaving it
-          # to the host-aware default makes the six outputs differ legitimately and the lane stops
+          # to the host-aware default makes the four outputs differ legitimately and the lane stops
           # measuring anything.
           PINNED_TARGET="x86_64-linux"
           # run_art LABEL ARGS… — invoke dl/LABEL/teko, natively or under the right emulator. The
-          # `-L` sysroot is required by the four glibc (dynamic) artifacts and harmless for the
-          # two static musl ones, so the shape is uniform.
+          # `-L` sysroot is required by the glibc (dynamic) artifact and harmless for the
+          # static musl one, so the shape is uniform.
           run_art() {
             label="$1"; shift
             case "$label" in
               *-x86_64-*)  "./dl/$label/teko" "$@" ;;
               *-arm64-*)   qemu-aarch64-static -L /usr/aarch64-linux-gnu "./dl/$label/teko" "$@" ;;
-              *-riscv64-*) qemu-riscv64-static -L /usr/riscv64-linux-gnu "./dl/$label/teko" "$@" ;;
               *) echo "run_art: unknown label '$label'" >&2; return 1 ;;
             esac
           }
           REF_SHA=""
           for label in linux-x86_64-glibc linux-x86_64-musl \
-                       linux-arm64-glibc linux-arm64-musl \
-                       linux-riscv64-glibc linux-riscv64-musl; do
+                       linux-arm64-glibc linux-arm64-musl; do
             echo "=== $label ==="
             chmod +x "./dl/$label/teko"
             file "./dl/$label/teko"
@@ -923,7 +858,7 @@ jobs:
               exit 1
             fi
           done
-          echo "all six artifacts ran and emitted a byte-identical object for $PINNED_TARGET ($REF_SHA)"
+          echo "all four artifacts ran and emitted a byte-identical object for $PINNED_TARGET ($REF_SHA)"
 
   # ══ seed-debut ═════════════════════════════════════════════════════════════════════════════
   # TIER: full only.
@@ -960,8 +895,6 @@ jobs:
             label: macos-arm64
           - os: windows-latest
             label: windows-x86_64
-          - os: windows-11-arm
-            label: windows-arm64
     name: seed debut / ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -1261,7 +1194,7 @@ jobs:
           set -u
           if [ "$FULL" = "true" ]; then
             MODE=full
-            WANT_LABELS="linux-arm64-glibc linux-arm64-musl linux-riscv64-glibc linux-riscv64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-arm64 windows-x86_64"
+            WANT_LABELS="linux-arm64-glibc linux-arm64-musl linux-x86_64-glibc linux-x86_64-musl macos-arm64 windows-x86_64"
           else
             MODE=light
             WANT_LABELS="linux-x86_64-glibc windows-x86_64"

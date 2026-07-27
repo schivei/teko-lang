@@ -7,7 +7,7 @@
 # The old rule was ONE line: `full = (base_ref == "main")`. On a STACKED TRAIN every wagon's base
 # is the wagon below it, so NO WAGON EVER RAN FULL. The consequence was not theoretical: on #95,
 # two of nine test lanes ran, and of the four lanes the owner had just ordered into existence
-# (linux-arm64-musl, both riscv64, windows-arm64) exactly zero ran. Every one of them would have
+# (linux-arm64-musl among them) exactly zero ran. Every one of them would have
 # DEBUTED at the drain — the least reversible moment there is. Worse, both sanitizer aggregators
 # reported SUCCESS having validated nothing, because "all legs skipped" is indistinguishable from
 # "all legs passed" to a gate that only asks `!= failure`.
@@ -30,7 +30,7 @@
 #                         fixed was invisible on a max_align_t>=16 host and fatal on arm64.
 #   src/assert/**         same seam, same reason.
 #   src/backend/**        the own-AOT emitters ARE the per-arch/per-format code (ELF/Mach-O/COFF,
-#                         x86_64/arm64/riscv64). A change here is the definition of "can break a
+#                         x86_64/arm64). A change here is the definition of "can break a
 #                         lane the light tier does not run".
 #   bootstrap/**          the committed host seeds are per-HOST blobs.
 #   teko.tkp              the version the binaries embed and the tag the release derives.

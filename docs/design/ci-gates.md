@@ -114,10 +114,8 @@ Three rulings, one shape:
 ### Zig is dead
 
 The assets were cross-compiled with zig. They are now built by the **target's own toolchain**: an
-Alpine or manylinux container of the target architecture, run under `qemu-user-static` + binfmt
-where the host architecture differs. The CPU is emulated; the compiler is not cross. Measured on
-`theory/native-runner-probe` before the redesign, and the riscv64 emulation cost was accepted
-explicitly by the owner.
+Alpine or manylinux container of the target architecture, on that architecture's own runner. The
+compiler is not cross. Measured on `theory/native-runner-probe` before the redesign.
 
 The immediate payoff was a real defect: `dladdr` lives in `libdl` until glibc 2.33 and folds into
 `libc` at 2.34, so linking against the runner's own glibc 2.39 hid a dependency that the glibc-2.28
@@ -138,9 +136,12 @@ release time would discard the artifact the gates actually proved and ship a dif
 > "Sobre windows-arm64 (e outros hosts), tem que fazer o build inicial e tem que colocar lane de
 > teste se não houverem."
 
-This **reverses** the 2026-07-06 exclusion of `windows-arm64` from `build-test`. Every host that
-ships a published artifact now has BOTH a build lane (`artifact / <producer>`) and a test lane
-(`test / <label>`). The gap the ruling closed:
+The RULE that ruling established stands: every host that ships a published artifact has BOTH a
+build lane (`artifact / <producer>`) and a test lane (`test / <label>`). Its windows-arm64
+INSTANCE does not — that host, and `linux-riscv64` with it, was removed from the published set in
+0.3.1 by a later owner ruling ("remover completamente suporte a Windows arm64 e Linux riscv64,
+apagar todos os vestígios, sem dead code"), so the rule now has nothing to say about them. The gap
+the earlier ruling closed, over the hosts that survive:
 
 | host | build lane before | test lane before |
 |---|---|---|
@@ -148,16 +149,14 @@ ships a published artifact now has BOTH a build lane (`artifact / <producer>`) a
 | linux-arm64 | yes | **none** |
 | macos-arm64 | yes | yes |
 | windows-x86_64 | yes | yes |
-| windows-arm64 | **none** | **none** |
 
-`teko-linux-arm64-{glibc,musl}.tar.gz` and `teko-windows-arm64.zip` were published without
-anything ever having run `teko test .` on that hardware.
+`teko-linux-arm64-{glibc,musl}.tar.gz` was published without anything ever having run
+`teko test .` on that hardware.
 
 The two tracks now carry the **same** host set and the **same** split, so a host can no longer be
-built without being tested. The light tier is `linux-x86_64` + `windows-x86_64`; the three arm
+built without being tested. The light tier is `linux-x86_64` + `windows-x86_64`; the two arm
 hosts are full-only, because each adds an ARCH delta on top of a platform the light tier already
-covers, and `windows-11-arm` is the slowest runner in the set
-(docs/design/compile-time-architecture.md §1.1).
+covers.
 
 `test` is a **matrix**, not one job per host: nine hand-written jobs is the shape in which the ninth
 is forgotten out of the aggregator's `needs:` list — and a job outside that list runs, goes red, and

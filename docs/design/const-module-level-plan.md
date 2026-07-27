@@ -1006,7 +1006,8 @@ may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per 
 - **S2** `src/backend/encode_x86_64.tks` (90): ModRM/REX field masks → `const`,
   opcode families → an `enum`/named table.
 - **S3** `src/backend/encode_arm64.tks` (66): field masks/shifts → `const`.
-- **S4** `src/backend/encode_riscv.tks` (52): funct/opcode fields → `enum`/`const`.
+- **S4** ~~`src/backend/encode_riscv.tks` (52): funct/opcode fields → `enum`/`const`.~~ **VOID —
+  the file was deleted with the riscv64 target in 0.3.1 (owner ruling).**
 - **S5** `src/backend/objfile_{elf,macho,coff,wasm}.tks` residual (header fields,
   alignments) → `const`/`flags` (the file-magic/section-flag families already done
   in crumb 10; S5 mops up the rest).
