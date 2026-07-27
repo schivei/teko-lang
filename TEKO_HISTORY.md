@@ -6780,7 +6780,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   rather than falling through to a generic "unknown type" error (M.3). Every internal carrier the ~11
   subsystems used is narrowed to a plain `i64`/`u64` (a sign+64-bit-magnitude pair for the literal/
   const-fold carriers, a raw 64-bit two's-complement register for the two interpreters), and the whole
-  128-bit backend topology (register-pair isel routes on x86-64/arm64/riscv64, the wasm `C1-i128`/`C1-f16`
+  128-bit backend topology (register-pair isel routes on multiple targets, the wasm `C1-i128`/`C1-f16`
   honest-stops, the `PrimKind`/`LType` enum members and their match cascades) is deleted as dead code —
   no producer can ever construct a value needing it again.
 

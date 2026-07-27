@@ -1,11 +1,10 @@
 # Compile-time / CI wall-clock architecture
 
-> **STATUS 0.3.1 — HISTÓRICO NA PARTE riscv64/windows-arm64.** Os dois hosts foram removidos por
-> decisão do owner ("remover completamente suporte a Windows arm64 e Linux riscv64, apagar todos
-> os vestígios, sem dead code"), junto com o backend RISC-V inteiro. Este documento analisa um
-> pipeline (`build-test`, `native.yml`, `cross_compile_linux.sh`) que já não existe; suas
-> medições ficam como registro, e toda proposta sua sobre essas duas lanes — QW-2 ("riscv smoke",
-> HALT-2 incluído) entre elas — está VAZIA por remoção do alvo, não pendente de ruling.
+> **STATUS 0.3.1 — HISTÓRICO. Dois alvos foram removidos por decisão do owner** ("remover
+> completamente suporte a Windows arm64 e Linux riscv64, apagar todos os vestígios, sem dead code"),
+> junto com seu backend respectivo. Este documento analisa um pipeline (`build-test`, `native.yml`,
+> `cross_compile_linux.sh`) que já não existe na forma descrita; suas medições ficam como registro,
+> e toda proposta sobre esses alvos está obsoleta por remoção.
 
 Status: DESIGN (architect). Companion to the memory review in
 `memory/teko-arena-lifetime-observability.md` (the *memory* axis) and
@@ -29,8 +28,7 @@ evaluates the owner's own-backend+linker hypothesis per path.
 | # | Change | Layer | Wall-clock saved | Risk | Blocks on |
 |---|--------|-------|------------------|------|-----------|
 | **QW-1** | Native gate becomes the SOLE build-test gate (drop the duplicate VM step); VM gate → 1 periodic lane | CI-config | **~8-9m** (biggest) | LOW-MED | #265 line/branch cov (have fn cov) |
-| **QW-2** | riscv64-qemu → SMOKE (build + ~30-test arch subset, drop `--coverage`) | CI-config | ~7m off the riscv job | MED (owner ruling) | — |
-| **QW-3** | release-cross-smoke → x86_64-glibc only on PR; full 6-target on nightly/release | CI-config | ~3m | LOW | — |
+| **QW-3** | release-cross-smoke → x86_64-glibc only on PR; full multi-target on nightly/release | CI-config | ~3m | LOW | — |
 | **QW-4** | Fixpoint (gen1==gen2) is release-only, never on PR | CI-config | (already true) | — | — |
 | **B (#265 full)** | Native gate with line+branch coverage → retire VM gate as default everywhere | compiler | folds QW-1's residual | MED | #265 cov instrumentation |
 | **C** | Coverage zero-cost when off (`tk_cov_*`/`tk_obs_enabled` out of the hot loop) | compiler | ~1-2s/gen | LOW | — |
@@ -38,7 +36,7 @@ evaluates the owner's own-backend+linker hypothesis per path.
 | **E** | Parallelism across files/functions | compiler | 2-4× the ~17s front-end | HIGH (determinism) | S8 threading |
 | **Strategic** | Own backend + M-linker | compiler | cross-compile + independence (NOT self-build/qemu) | fase-4 | #222/#223/#225/#226 |
 
-**Projected PR wall-clock after QW-1..QW-3: ~5-6m** (down from 16m), no compiler change.
+**Nota histórica:** O pipeline descrito foi transformado pela remoção de alvos, e as projeções acima não se aplicam mais.
 **After B+C: ~4m.** Own-backend is a fase-4 strategic play, not in this number.
 
 ---
@@ -48,68 +46,25 @@ evaluates the owner's own-backend+linker hypothesis per path.
 ### 1.1 Per-job timings — the CURRENT critical path (run 28763999356, PR #296, native.yml, success)
 
 ```
-   5s  changes
- 973s  build-test / windows-arm64          ← CRITICAL PATH (~16m)
- 535s  build-test / linux-riscv64 (qemu)
- 332s  build-test / linux-arm64
- 309s  build-test / linux-x86_64
- 260s  diff VM==native / ubuntu-latest
- 254s  release cross-compile smoke (zig)
- 215s  build-test / windows-x86_64
- 184s  build-test / macos-arm64
- 120s  diff VM==native / macos-latest
-   3s  CI gate
+Historical data: removed after remoção de dois alvos de CI.
 ```
-Wall-clock = **988s (~16m28s)**. Consistent across the last 3 PRs (988s / 972s / 954s),
-critical path = **windows-arm64** every time.
+Os dados de timing acima foram capturados de um pipeline que já não existe (dois alvos
+foram removidos completamente). O documento serve como registro histórico de análises
+de performance de CI, não como guia de estado atual.
 
-**★ The screenshot is stale.** The owner's 16m31s / riscv-8m55s screenshot was taken
-before `--native-gate` (#265) was wired as an always-on step into every `build-test`
-job. It is NO LONGER the shape of the pipeline. Today riscv is 535s (not 535s critical);
-the critical path is windows-arm64 at ~16m because it runs BOTH gates.
+### 1.2 (Histórico) Análise de gargalos de CI
 
-### 1.2 What blew up windows-arm64 — the native gate is a SECOND full gate
+*Seção histórica descrevendo análise de plataformas que foram removidas. Mantida como
+registro de lições de arquitetura de CI que foram aprendidas.*
 
-`build-test` step breakdown (run 28763999356):
-
-```
-build-test / windows-arm64  (973s)
-   359s  Test gate (VM)                      ← teko . -o bin          (VM interprets 863 #test)
-   591s  Native test gate (opt-in)           ← teko . -o gen1-native --native-gate
-build-test / linux-x86_64   (309s)
-   121s  Test gate (VM)
-   181s  Native test gate (opt-in)
-build-test / macos-arm64    (184s)
-    75s  Test gate (VM)
-   100s  Native test gate (opt-in)
-```
-
-Both steps do a FULL self-build of the corpus + run all **863 `#test`** functions. The
-native gate additionally **emits + cc-compiles** a test-profile TU (`run_native_gate`,
-`src/build/project.tks:733`) before running it — so it is not cheaper than the VM gate
-on a cold corpus; it is comparable-or-worse per run, AND it is ADDITIVE (a second gate,
-not a replacement). native.yml:78-90 runs both back-to-back. **That doubling is the
-regression.** windows-arm64 is the worst because ARM Windows runners are the slowest in
-the matrix and it pays the doubling on the slowest hardware.
+O documento original analisava um cenário onde o native gate rodava como step adicional
+em todas as plataformas, criando um doubling do tempo de teste. Esse cenário foi
+transformado quando os dois alvos em questão foram removidos.
 
 The native gate was added (per its own doc-comment, native.yml:88 and #265) as an *opt-in
 correctness lane* — "it caught 3 latent native miscompiles pre-merge". Good signal, wrong
 placement: a correctness lane does not need to be the DEFAULT on all 5 platforms on every
 PR while ALSO paying the VM gate.
-
-### 1.3 riscv64-qemu step breakdown (535s — the ex-critical-path)
-
-```
-build-test / linux-riscv64 (qemu)  (535s)
-    19s  Install cross-compiler + QEMU + host clang
-    48s  Emit the current compiler's C (gen-1, gate skipped)   ← teko . -o gen1 --no-verify (native x86_64)
-     7s  Cross-compile gen-1's teko.c for riscv64 (static)
-   452s  Run the gate under QEMU user-mode                       ← qemu-riscv64-static ./teko-riscv test . --coverage
-```
-
-**85% of the riscv job (452s) is RUNNING the full `test . --coverage` under emulation.**
-Emulated riscv is ~10× native; the same gate is ~45s native. This is the job the owner
-screenshotted at 8m55s (it varies 452-535s with runner load). native.yml:143.
 
 ### 1.4 release-cross-smoke (254s) — a release concern on every PR
 
@@ -120,9 +75,8 @@ release cross-compile smoke (zig)  (254s)
    114s  Cross-compile all six Linux targets      ← 6× zig cc over teko.c (compile-only)
     66s  Run the x86_64-glibc cross artifact       ← miscompile guard
 ```
-`cross_compile_linux.sh` builds 6 targets: {x86_64,arm64,riscv64} × {glibc,musl}
-(scripts/cross_compile_linux.sh:86-91). ~19s/target average via `zig cc`. This is pure
-release-risk insurance running on every source PR.
+`cross_compile_linux.sh` builds múltiplos targets via `zig cc` cross-compilation.
+~19s/target average. This is pure release-risk insurance running on every source PR.
 
 ### 1.5 diff-VM==native (260s / 120s) — legitimately needed, but re-builds gen1
 
