@@ -1,0 +1,130 @@
+# own_native.tkr — the HOST configuration of the own-backend corpus channel.
+#
+# WHY THIS FILE EXISTS AT ALL (0.3.1 channel ruling, owner 2026-07-26). These scenarios used to live
+# in regressor.tkr as `Given source` rows naming ONE case file, and the runner's snippet FOLD gave
+# them one synthesized build per (source, configuration). That fold could never take a
+# `Then object well-formed` row, so the riscv64 half of the corpus paid a SECOND build for the very
+# same program. Making the corpus a PROJECT removes the fold from the picture entirely: a project
+# `.tkr` is compiled at most once (`RegrBuilt`), every scenario of this file runs off that one build,
+# and an object check inspects THAT build's own `.o`.
+#
+# ONE FILE PER CONFIGURATION, and that is not a stylistic choice: the project cache is keyed on the
+# build SHAPE, not on the env, so the first scenario reaching it fixes the configuration for the whole
+# file. A second target therefore needs a second `.tkr` (own_native_riscv64.tkr), never a second
+# `Examples` row — a row that declared a different target would silently assert this file's HOST
+# artifact.
+#
+# The three rows at the end name a `Given source` case file instead: each is a lone row of its own
+# cross target, so a project build would buy nothing and a one-line program is the honest minimum for
+# "does the emitter produce a well-formed object for that target".
+Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
+
+  Scenario: own_arith_exit (own-native — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_sub_exit (own-native — same fold-opacity rationale, MUL/SUB)
+    When built and run
+    Then exit = 42
+
+
+Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar sozinho (target Examples: host E cross para riscv64 sob qemu; herda o CORPUS do extinto scripts/diff_c_own.sh e a lane riscv64-qemu que ele dirigia). O EIXO backend morreu com o emissor de C: cada cenario afirma o proprio exit/stdout/trap, nao a igualdade com um segundo backend.
+
+  Scenario: own_defer_arm_write_propagates (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_exit_code (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_exit_zero (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_if_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_if_value_rhs_shadow_then_outer_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_logical_not (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_loop_nested_range (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_loop_range_native (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_match_arm_reassign_vs_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_match_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_match_reassign_then_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  Scenario: own_print_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+    And stdout pattern = "answer=42!"
+
+  Scenario: own_value_if_rhs_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42
+
+  # (0.3.1 C5) The CROSS-EMIT row: TEKO_TARGET names a target this host may be able to BUILD but
+  # cannot EXECUTE. R3 says emit normally; C5 says report "emitted, not executed" and skip the run
+  # instead of failing on an exec of a foreign-format binary. The RUN is honest-skipped by
+  # cross_note_for_name (the same classification the build's own report uses) while `Then object
+  # well-formed` still asserts the emitted object IS the requested format — which is the whole point
+  # of a cross build. On a host with no cross toolchain the row skips earlier, at
+  # target_toolchain_skip_reason.
+  Scenario: own_cross_x86_64_windows_emits_coff_and_skips_the_run (0.3.1 C5 — emitted, not executed)
+    Given target = "x86_64-windows"
+    Given source = "cases/cross_exit42.tks"
+    When built and run
+    Then exit = 42
+    Then object well-formed
+
+  # (0.3.1 C5) The host os-arch spelled EXPLICITLY: the reproduced-good path of the motivating bug
+  # (TEKO_TARGET=x86_64-linux made the whole vertical work, exit 42). On an x86_64 linux host this
+  # RUNS for real; on any other host it is a cross target whose link step would reach the host `cc`,
+  # so host_cc_cannot_link_cross_reason skips the row honestly instead of dying in `ld`.
+  Scenario: own_explicit_host_os_arch_runs (0.3.1 C5 — the reproduced-good path)
+    Given target = "x86_64-linux"
+    Given source = "cases/cross_exit42.tks"
+    When built and run
+    Then exit = 42
+    Then object well-formed
+
+
+Feature: F7 host_cli_io — observable host surface (folded from the retired regressor_crumbs_c0_c4.tkr, dir removido)
+
+  Scenario: an explicit env token reaches an own-backend wasm32-wasi build (or honest-skips without the toolchain)
+    Given target = "wasm32-wasi"
+    Given source = "cases/wasm_exit7.tks"
+    When built and run
+    Then exit = 7
+
+
+Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenario)
+
+  # (B-S1) The own backend coerces into a null-union at EVERY placement that declares a type, not
+  # only at the binding: `x = null` after a `T | null` binding used to write a raw `const 0` into the
+  # VReg the `match` then reads as the wrapper's base address — a load from address 0. The arc that
+  # used to prove it — the C backend, which wrapped at the assign all along — is gone with the C
+  # emitter, so what proves it now is this scenario's own asserted exit.
+  Scenario: null_union_reassign_to_null (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
+    When built and run
+    Then exit = 42

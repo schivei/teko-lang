@@ -1,47 +1,49 @@
 # regressor.tkr — the compiler as its own full-stack regressor (0.3.1, regressor-principal
 # design doc, C5). `[tests] regression` (teko.tkp) lists this file FIRST.
 #
-# O EIXO `backend` MORREU (owner 2026-07-26: *"TEKO_BACKEND é outro que não deve mais existir, dado
-# que deve remover qq resquício de C para dar lugar ao native"*). Saiu a linha `Given backend`
-# (20x), saiu a coluna `backend` das 16 tabelas `Examples`, sairam as 31 linhas `| c |`; as 31
-# linhas `| own |` viraram a linha unica do cenario. 62 linhas de Examples viraram 31.
+# IT BUILDS NOTHING, and that is the whole point of the CHANNEL layout (owner ruling 2026-07-26:
+# *"tenho certeza absoluta que a grande maioria das regressões caberiam em um ou dois projetos no
+# máximo"*). A variation in SOURCE needs a separate FILE inside one project; only a variation in
+# BUILD CONFIGURATION earns a separate build. Every executable scenario this file used to carry
+# therefore moved to the CHANNEL whose configuration it needs, and what is left here is the four
+# DECLARATIVE R0 scenarios — living documentation of what the self-host build already proves.
 #
-# ZERO CENARIO PERDIDO: os 24 nomes de cenario sao os mesmos antes e depois. O que morreu foi o
-# EIXO, nao o caso — cada cenario continua afirmando o proprio exit/stdout/trap.
+# THE CHANNELS, and what each one costs on a host:
 #
-# O QUE ISSO CUSTA, e o proximo leitor precisa saber: **o diferencial `own == C` era o oraculo do
-# backend nativo.** Um valor errado emitido pelo nativo era pego por discordar do emissor de C, que
-# era a implementacao de referencia. Com o C fora do trem, o que prova o nativo passa a ser (a) o
-# valor que cada cenario afirma por si e (b) o fixpoint `gen2 == gen3`. Menos rede, de proposito.
+#   * examples/regressions/own_native — the own-backend corpus (F2/F5/F9): ONE program, one `.tkr`
+#     per target that needs its own build (host, riscv64-linux) plus the lone cross rows
+#     (x86_64-windows, x86_64-linux, wasm32-wasi) as `Given source` case files.
+#   * examples/regressions/bulk — the cross-namespace composition regressors and the whole language
+#     corpus, one MEMBER NAMESPACE per scenario under a single build, selected by `TEKO_REGR_ENTRY`.
+#   * examples/regressions/diagnostics — every checker-stage rejection, one source file per rejected
+#     construct, ONE failing build reporting them all (the 0.3.1 all-diagnostics ruling).
+#   * examples/regressions/parse_diagnostics — the same for the PARSE stage, which aborts before the
+#     checker runs and so cannot share the checker channel's build.
+#   * examples/regressions/cwd_build — the `cd <project> && teko build .` invocation shape.
+#   * examples/regressions/crossmodule — the `package` (`.tkl`) dependency shape.
 #
-# THERE IS NO INLINE CODE IN THIS FILE ANY MORE (owner ruling: "está proibido inline code em tkr").
-# It carried 275 `Given source inline` blocks and 13.956 lines; every snippet is now a `.tks` file on
-# disk. The scenarios did not leave the regressor — they left the SOURCE-CARRYING role, and the build
-# count left with them:
+# THERE IS NO INLINE CODE IN THIS FILE OR IN ANY `.tkr` (owner ruling: "está proibido inline code em
+# tkr"). Every scenario names its source as a file a human can open, compile by hand and diff.
 #
-#   * 65 COMPILE-FAIL scenarios -> one namespace each under the two project-regressors that must fail
-#     to compile, sharing those projects' single failing builds (24 parse-stage in
-#     member_const_visibility_leak_rejected, 37 checker-stage in
-#     const_ns_qualified_visibility_rejected, plus 4 checker PRE-WALK stops and 3 F8 target rows that
-#     provably cannot share one).
-#   * 187 RUNNABLE scenarios -> one MEMBER NAMESPACE each under the five runnable project-regressors,
-#     selected by `TEKO_REGR_ENTRY` and running off those projects' SINGLE builds. Each scenario's
-#     text moved, unchanged, into its host project's own `.tkr`; only the selector was added.
-#   * what REMAINS below: the four declarative R0 scenarios (living documentation — they build
-#     nothing), and the scenarios whose BUILD CONFIGURATION is the thing under test (the own backend,
-#     a cross target, a post-build object check) or whose statements carry a top-level `return`.
-#     Those cannot share a build with anything by construction, so they keep one each and name their
-#     source with `Given source = "examples/regressions/cwd_build/cases/<case>.tks"` — the same build
-#     count they always had, with the source now a file a human can open, compile by hand and diff.
+# THE F3 NULL-UNION MATRIX (regressor-principal-0.3.1.md §3.1) lives in the channels, not here: every
+# shape × operation × recursion cell is a runnable member of `bulk`, and two cells are HONEST GAPS
+# pinned as compile-fail scenarios rather than silently dropped — a slice whose ELEMENT is itself a
+# null-union (`[]T` where `T = X | null`) is REJECTED today (the parser reads `[](` as a FUNCTION
+# type; spelled through an alias it reaches codegen's "optional/slice inner type not yet supported"),
+# and an `Iface | null` (interface-in-union) construction is a checker-level KNOWN-STOP. The day
+# support lands each pin fails LOUDLY, forcing a conscious promotion to a positive scenario. FFI
+# `ptr<T> | null`/`uptr | null` (§3.1 "FFI") is NOT authored — there is no existing in-tree
+# `ptr<T>`/`uptr` USAGE pattern to model a snippet against safely; flagged for the architect/owner,
+# not guessed.
 #
-# The root-project guard (`guard_no_project_build_at_root`) still refuses a scenario here with no
-# inline/explicit source — every executable scenario below names its `Given source`.
+# The root-project guard (`guard_no_project_build_at_root`) refuses a scenario here with no
+# inline/explicit source — which is exactly why every scenario below is declarative.
 Feature: R0 — the compiler is its own full-stack regressor (exe native, declarative).
 
   # The compiler is a native `binary` artifact, so R0 already IS the regressor of the "exe native"
   # artifact kind AND of the whole LANGUAGE. The curated regressors under examples/regressions cover
   # only what R0 structurally CANNOT exercise (other artifact kinds, targets, FFI) — never language
-  # features (those live in the Features below + the checker `#test` suite).
+  # features (those live in the channels above + the checker `#test` suite).
 
   Scenario: the compiler compiles the whole language
     # verified-by: the seed builds gen1 from the umbrella sources (teko . -o bin) — the self-host build.
@@ -57,288 +59,8 @@ Feature: R0 — the compiler is its own full-stack regressor (exe native, declar
 
 
   Scenario: the emitted code agrees across targets
-    # verified-by: own==wasm (F5 target-routed scenarios) — o mesmo corpus compilado para host e
-    # para wasm32-wasi concorda. O arco own==C que este cenario tambem afirmava MORREU com o
-    # emissor de C (ruling do owner 2026-07-26): nao ha segundo backend contra o que diferir.
-
-# F3 — the NULL-UNION matrix (regressor-principal-0.3.1.md §3.1). Every shape × operation ×
-# recursion cell the owner's mandate calls for, EACH a real, runnable regressive — no partial
-# pass. Two cells are HONEST GAPS, not silently dropped: a slice whose ELEMENT is itself a
-# null-union (`[]T` where `T = X | null`) is REJECTED today (the parser reads `[](` as a FUNCTION
-# type; spelled through an alias it reaches codegen's "optional/slice inner type not yet
-# supported"), and an `Iface | null` (interface-in-union) construction is a checker-level
-# KNOWN-STOP. Both are PINNED as compile-fail rows — the interface one in
-# examples/regressions/const_ns_qualified_visibility_rejected, the slice one in
-# member_const_visibility_leak_rejected (parse half) and examples/regressions/qualified_optional
-# (codegen half) — so the day support lands each pin fails LOUDLY (an XSTOP, mirroring
-# `diff_c_own.sh`'s KNOWN_STOP convention), forcing a conscious promotion to a positive scenario.
-# FFI `ptr<T> | null`/`uptr | null` (§3.1 "FFI") is NOT authored — no existing in-tree
-# `ptr<T>`/`uptr` USAGE pattern to model a snippet against safely within this wave; flagged for the
-# architect/owner, not guessed.
-
-
-Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
-
-  Scenario Outline: own_arith_exit (own-native — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_sub_exit (own-native — same fold-opacity rationale, MUL/SUB)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-
-Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar sozinho (target Examples: host E cross para riscv64 sob qemu; herda o CORPUS do extinto scripts/diff_c_own.sh e a lane riscv64-qemu que ele dirigia). O EIXO backend morreu com o emissor de C: cada cenario afirma o proprio exit/stdout/trap, nao a igualdade com um segundo backend.
-
-  Scenario Outline: own_defer_arm_write_propagates (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_exit_code (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_exit_zero (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_if_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_if_value_rhs_shadow_then_outer_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_logical_not (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_loop_nested_range (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_loop_range_native (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_match_arm_reassign_vs_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_match_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_match_reassign_then_shadow (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_print_exit (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-    And stdout pattern = "answer=42!"
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-
-  Scenario Outline: own_value_if_rhs_reassign (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "<target>"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    Examples:
-      | target        | program                                     | exit |
-      | host          | own_differential                            | 42   |
-      | riscv64-linux | own_differential                            | 42   |
-
-  # The riscv64 lane's OBJECT cross-check, restored alongside the differential rows above: the
-  # retired riscv64-qemu job asserted own == C under qemu AND ran scripts/check_elf.sh over the
-  # own-emitted riscv .o with the riscv binutils. The differential rows cannot carry that step —
-  # `Then object well-formed` is per-scenario, and their `c` rows emit no `.o` at all — so the
-  # object check lives here, pinned to the own backend on the cross target.
-
-  # It names the SAME source as `own_exit_code`'s own/riscv64 row — the two files were byte-identical
-  # (`exit(42)`), so the second one was a duplicate paying for a duplicate build. What this scenario
-  # asserts is that the own backend's riscv64 output is a well-formed ELF, and ANY own/riscv64 object
-  # proves that; the standalone build is cached per (file, declared env), so sharing the file makes
-  # this row free. It is NOT foldable into a GROUP for the same reason it never was: in a group the
-  # inspected `.o` would be the whole group's, not this row's.
-  Scenario: own_riscv_object_well_formed (the retired riscv64-qemu lane's ELF cross-check)
-    Given target = "riscv64-linux"
-    Given source = "examples/regressions/cwd_build/cases/06_own_exit_code_backend_differential_own_c.tks"
-    When built and run
-    Then exit = 42
-    Then object well-formed
-
-  # (0.3.1 C5) The CROSS-EMIT rows: TEKO_TARGET names a target this host may be able to BUILD but
-  # cannot EXECUTE. R3 says emit normally; C5 says report "emitted, not executed" and skip the run
-  # instead of failing on an exec of a foreign-format binary. The RUN is honest-skipped by
-  # cross_note_for_name (the same classification the build's own report uses) while `Then object
-  # well-formed` still asserts the emitted object IS the requested format — which is the whole point
-  # of a cross build. On a host with no cross toolchain the row skips earlier, at
-  # target_toolchain_skip_reason.
-
-  Scenario: own_cross_x86_64_windows_emits_coff_and_skips_the_run (0.3.1 C5 — emitted, not executed)
-    Given target = "x86_64-windows"
-    Given source = "examples/regressions/cwd_build/cases/19_own_cross_x86_64_windows_emits_coff_and.tks"
-    When built and run
-    Then exit = 42
-    Then object well-formed
-
-  # (0.3.1 C5) The host os-arch spelled EXPLICITLY: the reproduced-good path of the motivating bug
-  # (TEKO_TARGET=x86_64-linux made the whole vertical work, exit 42). On an x86_64 linux host this
-  # RUNS for real; on any other host it is a cross target whose link step would reach the host `cc`,
-  # so host_cc_cannot_link_cross_reason skips the row honestly instead of dying in `ld`.
-
-  Scenario: own_explicit_host_os_arch_runs (0.3.1 C5 — the reproduced-good path)
-    Given target = "x86_64-linux"
-    Given source = "examples/regressions/cwd_build/cases/20_own_explicit_host_os_arch_runs_0_3_1_c5.tks"
-    When built and run
-    Then exit = 42
-    Then object well-formed
-
-
-Feature: F7 host_cli_io — observable host surface (folded from the retired regressor_crumbs_c0_c4.tkr, dir removido)
-
-  Scenario: an explicit env token reaches an own-backend wasm32-wasi build (or honest-skips without the toolchain)
-    Given target = "wasm32-wasi"
-    Given source = "examples/regressions/cwd_build/cases/21_an_explicit_env_token_reaches_an_own_bac.tks"
-    When built and run
-    Then exit = 7
-
-
-Feature: F9 romaneio .31 — the audit's positive regressions (backend x scenario)
-
-  # (B-S1) The own backend coerces into a null-union at EVERY placement that declares a type, not
-  # only at the binding: `x = null` after a `T | null` binding used to write a raw `const 0` into the
-  # VReg the `match` then reads as the wrapper's base address — a load from address 0. The `c` rows
-  # are the differential control: the C backend wrapped at the assign all along.
-  Scenario Outline: null_union_reassign_to_null (own-native — o cenario afirma o proprio valor; nao ha mais arco C contra o que diferir)
-    Given target = "host"
-    Given source = "examples/regressions/cwd_build/cases/<program>.tks"
-    When built and run
-    Then exit = <exit>
-
-    # `Given target = "host"` is not decoration: the fold keys a group on target-plus-env, and an
-    # ABSENT target keys as "" while an explicit one keys as `host` — so without it these two rows
-    # opened two groups of their own instead of joining the host groups the rest of the corpus
-    # already pays for. Measured: 2 builds became 0.
-    Examples:
-      | program          | exit |
-      | own_differential | 42   |
-
-  # (A-S7, the D1 direction with ZERO coverage before this) A GENUINE boundary cast must stay
-  # SILENT: `(a to u64) * b` with u32 operands joins to u32 WITHOUT the cast and to u64 WITH it, so
-  # the cast is load-bearing — the pre-fix predicate ignored the partner operand and rejected it,
-  # which would have made every width-widening boundary in the corpus uncompilable.
+    # verified-by: the own_native channel compiles ONE program for the host, for riscv64-linux (run
+    # under qemu), for x86_64-windows and for wasm32-wasi, and every target asserts the same exit —
+    # plus `Then object well-formed` on each cross target. The arc own==C that this scenario also
+    # asserted MORREU with the emissor de C (ruling do owner 2026-07-26): there is no second backend
+    # left to differ against.

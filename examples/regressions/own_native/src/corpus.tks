@@ -1,0 +1,199 @@
+/**
+ * f_arith — the fold-opaque MUL/ADD probe. `n` is a `mut` local, so const-folding may not collapse
+ * the expression at compile time and the native backend must actually emit the two arithmetic
+ * instructions.
+ *
+ * @return 42, the value `main.tks` pins
+ */
+fn f_arith() -> i64 { mut n = 3; n * 10 + 12 }
+
+/**
+ * f_sub — the fold-opaque MUL/SUB probe, the subtraction twin of `f_arith` and opaque for the same
+ * reason: `n` is a `mut` local.
+ *
+ * @return 42, the value `main.tks` pins
+ */
+fn f_sub() -> i64 { mut n = 3; n * 20 - 18 }
+
+/**
+ * f_defer — a `defer` registered INSIDE a match arm must run when that arm's scope ends and its
+ * write must be visible to the enclosing function afterwards.
+ *
+ * @return 101 — the initial 1 plus the deferred arm's +100
+ */
+fn f_defer() -> i64 {
+    mut s = 1
+    let x = 1
+    match x {
+        1 => { defer { s = s + 100 } }
+        _ => { }
+    }
+    s
+}
+
+/**
+ * f_exit_code — the smallest possible exit-code probe: a literal return the whole vertical must
+ * carry from the emitter to the process status.
+ *
+ * @return 42
+ */
+fn f_exit_code() -> i64 { 42 }
+
+/**
+ * f_exit_zero — the SUCCESS status, pinned separately from `f_exit_code` because zero is the value
+ * a broken vertical is most likely to produce by accident.
+ *
+ * @return 0
+ */
+fn f_exit_zero() -> i64 { 0 }
+
+/**
+ * f_if_exit — an `if`/`else` whose BOTH arms diverge with `return`, so the function has no
+ * fall-through tail for the emitter to reach.
+ *
+ * @return 1 — the then-arm, since 5 > 3
+ */
+fn f_if_exit() -> i64 { if 5 > 3 { return 1 } else { return 2 } }
+
+/**
+ * f_if_value_rhs_shadow — a value-`if` whose arm SHADOWS an outer `x` and whose enclosing block then
+ * REASSIGNS that outer `x`. The shadow must not alias the outer binding, so the reassignment is the
+ * value observed at the end.
+ *
+ * @return 7 — the reassigned outer `x` (the shadowed 99 cancels out through `seen - seen`)
+ */
+fn f_if_value_rhs_shadow() -> i64 {
+    mut x = 1
+    mut seen = 0
+    if 1 == 1 {
+        let y = if 1 == 1 { let x = 99; x } else { 0 }
+        seen = y
+        x = 7
+    }
+    x + seen - seen
+}
+
+/**
+ * f_logical_not — logical negation over a `bool` local and over two comparison expressions, each
+ * guarding an early return so a mis-lowered `!` is observable as a wrong exit code.
+ *
+ * @return 7 — reached only when all three negations evaluate correctly
+ */
+fn f_logical_not() -> i64 {
+    mut b = true
+    if !b { return 1 }
+    if !(1 < 2) { return 2 }
+    if !(2 < 1) { return 7 }
+    0
+}
+
+/**
+ * f_loop_nested_range — LABELLED control flow across nested range loops: `continue OUTER` from the
+ * inner loop must resume the OUTER loop's next iteration, and `break OUTER` must leave both.
+ *
+ * @return 0 when the accumulated sum is the expected 4, else 1
+ */
+fn f_loop_nested_range() -> i64 {
+    mut sum = 0
+    OUTER: loop mut i in 0..3 {
+        loop mut j in 0..3 {
+            if j == 2 { continue OUTER }
+            if i == 2 { break OUTER }
+            sum = sum + i + j
+        }
+    }
+    if sum != 4 { return 1 }
+    0
+}
+
+/**
+ * f_loop_range_native — the four range-loop laws in one body: an exclusive range, an inclusive
+ * range, `continue` inside a range, and a bound that is SNAPSHOT at loop entry (writing `n` inside
+ * the body must not extend the iteration count).
+ *
+ * @return 0 when all four hold, else 1/2/3/4 naming the one that failed
+ */
+fn f_loop_range_native() -> i64 {
+    mut s = 0
+    loop mut i in 0..3 { s = s + i }
+    if s != 3 { return 1 }
+    mut s2 = 0
+    loop mut i in 0..=3 { s2 = s2 + i }
+    if s2 != 6 { return 2 }
+    mut s3 = 0
+    loop mut i in 0..5 { if i == 2 { continue }; s3 = s3 + i }
+    if s3 != 8 { return 3 }
+    mut n = 3
+    mut cnt = 0
+    loop mut i in 0..n { n = 100; cnt = cnt + 1 }
+    if cnt != 3 { return 4 }
+    0
+}
+
+/**
+ * f_match_arm_reassign_vs_shadow — a match arm that REASSIGNS an outer local beside an arm that
+ * SHADOWS it. The two must not share a slot: the taken arm decides which of the two effects the
+ * caller observes.
+ *
+ * @return 6 — 5 from the reassigning arm plus 1 from the untouched outer binding
+ */
+fn f_match_arm_reassign_vs_shadow() -> i64 {
+    let k1 = 1
+    mut a = 1
+    match k1 { 1 => { a = 5 }; _ => { mut a = 99; a = a + 1 } }
+    let k0 = 0
+    mut b = 1
+    match k0 { 1 => { b = 5 }; _ => { mut b = 99; b = b + 1 } }
+    a + b
+}
+
+/**
+ * f_match_exit — a value-`match` used as the function's tail expression, so the arm's value is the
+ * returned one.
+ *
+ * @return 7 — the arm selected by subject 0
+ */
+fn f_match_exit() -> i64 { let k = 0; match k { 0 => 7; _ => 9 } }
+
+/**
+ * f_match_reassign_then_shadow — one arm that first REASSIGNS the outer `x` and then SHADOWS it. The
+ * shadow's later writes must not reach the outer binding the function returns.
+ *
+ * @return 3 — the reassignment, never the shadow's 100
+ */
+fn f_match_reassign_then_shadow() -> i64 {
+    let k = 1
+    mut x = 1
+    match k { 1 => { x = 3; mut x = 99; x = x + 1 }; _ => { } }
+    x
+}
+
+/**
+ * f_value_if_rhs_reassign — a value-`if` whose arm REASSIGNS the outer local it also reads, so the
+ * write must be visible both to the arm's own value and to the enclosing function.
+ *
+ * @return 5 — the reassigned `x` (the arm's value cancels through `seen - seen`)
+ */
+fn f_value_if_rhs_reassign() -> i64 {
+    mut x = 1
+    mut seen = 0
+    if 1 == 1 { let y = if 1 == 1 { x = 5; x } else { 0 }; seen = y }
+    x + seen - seen
+}
+
+/**
+ * f_null_union_reassign_to_null — (B-S1) the own backend must coerce into a null-union at EVERY
+ * placement that declares a type, not only at the binding. `x = null` after a `T | null` binding
+ * used to write a raw `const 0` into the VReg the following `match` then read as the wrapper's base
+ * address — a load from address 0.
+ *
+ * @return 42 — 40 from the null arm plus 2 from the re-assigned value arm
+ */
+fn f_null_union_reassign_to_null() -> i64 {
+    mut x: i64 | null = 5
+    x = null
+    let a = match x { i64 as v => v; null => 40 }
+    x = 2
+    let b = match x { i64 as v => v; null => 0 }
+    a + b
+}
