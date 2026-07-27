@@ -723,6 +723,7 @@ fn type_logical_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error
  * @param table  the folded type table
  * @return       the typed binary (or lowered bignum call) expression, or a type error
  * @throws       on a void operand, an incompatible operand type, or a non-binary operator
+ * @see          warn_redundant_cast — the D1 class-3 WARNING this emits in passing (never a failure)
  */
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     if b.op == lexer::TokenKind::Tilde { return type_tilde_chain(b, env, table) }
@@ -736,7 +737,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     let l = ops.l
     let r = ops.r
     if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
-        match redundant_widen_cast_of(l, r) { Type as t => return err_redundant_cast(t); null => { } }
+        match redundant_widen_cast_of(l, r) { Type as t => warn_redundant_cast(t); null => { } }
     }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
@@ -772,7 +773,7 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
  * type_compare — type a comparison chain (`a < b <= c`), operand by operand. Each step adopts a
  * bare numeric literal to its partner's type through the very function the binary ops use
  * (`adopt_binop_operands`, so `c < 0x20` compares a `byte` against a `u8`-adopted literal), applies
- * the SHARED D1 class-3 diagnostic
+ * the SHARED D1 class-3 WARNING
  * (`redundant_widen_cast_of` — the same guarded decision `type_binary` uses, so an arithmetic and a
  * comparison spelling of the same operand pair always agree), and checks comparability.
  *
@@ -780,7 +781,8 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
  * @param env    the typing environment
  * @param table  the folded type table
  * @return       the typed comparison (always `bool`), or a type error
- * @throws       on a `void` operand, a redundant widen cast, or an incomparable operand pair
+ * @throws       on a `void` operand or an incomparable operand pair — NOT on a redundant widen
+ *               cast, which only warns (owner ruling 2026-07-27, `warn_redundant_cast`)
  */
 fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error {
     mut first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
@@ -796,7 +798,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
         if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
         let adopted = adopt_binop_operands(prev, raw)
         if i == 0 { first = adopted.l }
-        match redundant_widen_cast_of(adopted.l, adopted.r) { Type as t => return err_redundant_cast(t); null => { } }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { Type as t => warn_redundant_cast(t); null => { } }
         if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
         prev = adopted.r
@@ -1945,26 +1947,56 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
 }
 
 /**
- * err_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9,
- * owner ruling 2026-07-24): a direct compile ERROR, no warn phase — *"prefiro
- * que falhe para evitarmos de cair no mesmo erro."* Fires on a provable no-op
+ * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
+ * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
  * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
  * sign-check already performs), never on a genuine narrow/widen the source
  * still needs.
  *
+ * WHY IT IS NO LONGER AN ERROR (owner ruling 2026-07-27, REVERSING the
+ * 2026-07-24 ruling that made it a hard failure — *"prefiro que falhe para
+ * evitarmos de cair no mesmo erro"*): *"o cast, nestes casos, não deveria ser
+ * falha, deveria ser warning, o que não nos exime de não ter warnings no
+ * próprio compilador (lembra? <= 2%)."*
+ *
+ * The reversal is not a softening of the policy — it moves enforcement to the
+ * instrument that can actually carry it. D1-as-error made a redundant cast
+ * UNSPELLABLE, and a bootstrap chain has two compilers that disagree about
+ * which spelling is redundant: the released seed applies B.22 (*"operands must
+ * be the same type — no promotion"*) and REQUIRES the cast, while a
+ * locally-built gen1 has the W-RULE (`widen_int_binop`) and therefore proves
+ * that same cast a no-op. As an error, no single source text satisfies both —
+ * measured on the wagon: 17 of the 18 B.22 casts the seed demands make gen1
+ * reject the tree outright. As a warning, one text compiles under both and the
+ * seed's demand becomes payable.
+ *
+ * The ceiling that keeps redundant casts from returning en masse is D4, and it
+ * is untouched and still HARD: ARITH-CAST-RATE ≤ 2% (`metrics.tks`,
+ * `run_arith_cast_gate` in `project.tks`) fails the build. That is why the
+ * same-type site below deliberately keeps the `TCast` node in the typed tree
+ * instead of folding it away — a warned cast must still be COUNTED by the gate,
+ * or downgrading this diagnostic would have quietly disabled the ≤2% ceiling
+ * along with it.
+ *
  * @param t  the redundant cast's own (unchanged) type
- * @return   the diagnostic error
  * @since    0.3.1
  */
-fn err_redundant_cast(t: Type) -> error {
-    error { message = $"redundant cast: this `to {type_render(t)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it" }
+fn warn_redundant_cast(t: Type) {
+    teko::io::eprintln($"teko: warning: redundant cast: this `to {type_render(t)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
 }
 
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
     let target = match resolve_type(c.target, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the cast's enclosing namespace
-    if type_eq(inner.type, target) { return err_redundant_cast(target) }
+    // D1 class 1 — same type. Warn and TYPE IT ANYWAY, returning the identity `TCast`: falling
+    // through instead would hand a non-prim same-type pair to `cast_check` (prim-only) and blame it
+    // for a construct that is merely superfluous, and dropping the node would hide the cast from the
+    // D4 ≤2% gate that now carries the policy.
+    if type_eq(inner.type, target) {
+        warn_redundant_cast(target)
+        return TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }
+    }
     // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
     // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
     // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors expr.c type_cast.)

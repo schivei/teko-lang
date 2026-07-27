@@ -128,14 +128,17 @@ fn casts_allowed() {
 }
 
 /**
- * same_type_cast_is_redundant_error — `x to T` where `x` is already `T` used to be a legal
- * no-op; D1 (`cast-width-hygiene-0.3.1.md` §4/§9, owner ruling 2026-07-24) ratifies it a
- * direct compile ERROR instead, so `cast_types_to` now reports the failure (`error` arm),
- * not a successful `i32` cast.
+ * same_type_cast_is_redundant_warning — `x to T` where `x` is already `T` is D1 class 1
+ * (`cast-width-hygiene-0.3.1.md` §4/§9). The 2026-07-24 ruling made it a direct compile
+ * ERROR; the 2026-07-27 ruling REVERSED that to a WARNING (*"o cast, nestes casos, não
+ * deveria ser falha, deveria ser warning"*), so `type_cast` prints to stderr and TYPES the
+ * expression anyway — `cast_types_to` sees the `TExpr` arm with the target type again, as it
+ * did before D1 existed. The ≤2% ARITH-CAST-RATE gate (D4, `metrics.tks`) is what now bounds
+ * the class, and it counts this cast precisely because the `TCast` node survives.
  */
 #test
-fn same_type_cast_is_redundant_error() {
-    teko::assert::is_false(cast_types_to("f", i32t(), "i32", PrimKind::I32))
+fn same_type_cast_is_redundant_warning() {
+    teko::assert::is_true(cast_types_to("f", i32t(), "i32", PrimKind::I32))
 }
 
 // --- byte↔int cast helpers (byte casts AS u8 — B.36) ---
@@ -1534,5 +1537,55 @@ fn bitwise_mixed_sign_equal_width_rejected_u32_i32() {
     match type_binary(arith_binop(lexer::TokenKind::Pipe), env, empty_table()) {
         TExpr => teko::assert::is_true(false)
         error as e => teko::assert::str_contains(e.message, "no lossless common type")
+    }
+}
+
+/** cast_widen_binop — build `(a to <target>) <op> b`, the D1 class-3 shape: an explicit lossless
+    widen on the left, a NATURALLY-typed variable on the right (neither a literal nor a cast, so
+    `operand_may_flag_partner` does not veto the diagnostic). */
+fn cast_widen_binop(op: lexer::TokenKind, target_name: str) -> parser::Binary {
+    parser::Binary { op = op; left = ek(cast_of("a", target_name)); right = e_var("b") }
+}
+
+/** d1_class3_noop_widen_warns_but_types_arith — `(a to i64) + b` with `a: i32`, `b: i64` is D1
+    class 3: the W-RULE would join to `i64` without the cast, so the cast changed nothing. It was a
+    hard compile ERROR; the 2026-07-27 owner ruling made it a WARNING, so the expression TYPES and
+    carries the joined `i64` type. This is the behavioural half of the reversal — the printed
+    warning itself goes to stderr and is not observable from a unit test.
+
+    It replaces the `c58_d1_class3_noop_widen_still_rejected` compile-fail fixture, which was
+    deleted with the rejection it pinned: a construct that no longer fails cannot live in a
+    compile-fail channel. */
+#test
+fn d1_class3_noop_widen_warns_but_types_arith() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
+    let te = match type_binary(cast_widen_binop(lexer::TokenKind::Plus, "i64"), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I64))
+}
+
+/** d1_class3_noop_widen_warns_but_types_compare — the SAME operand pair spelled as a comparison,
+    `(a to i64) < b`. `redundant_widen_cast_of` is shared by both sites precisely so the two can
+    never disagree, and the reversal has to hold at both: the comparison types to `bool` instead of
+    failing, exactly as the arithmetic spelling types to `i64`. */
+#test
+fn d1_class3_noop_widen_warns_but_types_compare() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
+    let crest = teko::list::push(teko::list::empty(), parser::CmpTerm { op = lexer::TokenKind::Lt; operand = e_var("b") })
+    let cmp = parser::Compare { first = ek(cast_of("a", "i64")); rest = crest }
+    let te = match type_compare(cmp, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
+}
+
+/** d1_class1_same_type_cast_keeps_its_node — the warned same-type `x to T` must still be a `TCast`
+    in the typed tree, not folded to its operand. The D4 ≤2% ARITH-CAST-RATE gate counts `TCast`
+    nodes (`metrics.tks::expr_has_conversion`), so folding the node away would have silently
+    disabled the very ceiling the owner named as what the warning does NOT exempt us from. */
+#test
+fn d1_class1_same_type_cast_keeps_its_node() {
+    let env = define(empty_env(), "f", i32t(), false)
+    let te = match type_cast(cast_of("f", "i32"), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.kind {
+        TCast => teko::assert::is_true(true)
+        _ => teko::assert::is_true(false)
     }
 }

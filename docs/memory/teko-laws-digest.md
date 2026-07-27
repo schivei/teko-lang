@@ -319,3 +319,35 @@ tem de ser um COMPILADOR — binario ou C versionado — nunca uma reescrita do 
 passado. Reescrever o corpus para caber num seed que sera descartado e a cauda balancando o
 cachorro, e este registro existe para a proxima pessoa nao gastar os mesmos 271k tokens
 redescobrindo.
+
+### ADENDO (mesmo dia, horas depois): O DONO DISSOLVEU A CONTRADICAO REBAIXANDO O D1 A WARNING
+
+O registro acima continua correto no que MEDIU — e errado no que concluiu ser inevitavel. A
+contradicao era real, mas ela nao vinha das duas geracoes: vinha do D1 ser um ERRO. Ruling do
+dono, 2026-07-27: *"Mas, o cast, nestes casos, nao deveria ser falha, deveria ser warning, o que
+nao nos exime de nao ter warnings no proprio compilador (lembra? <= 2%)."*
+
+Com o D1 como WARNING, o mesmo texto compila nas duas geracoes: o seed le o cast e fica satisfeito
+com B.22; o gen1 le o cast, imprime `teko: warning: redundant cast: ...` no stderr, e segue. Os
+18 casts que o seed exige passam a ser pagaveis. A grafia que nao existia passa a existir.
+
+**A LICAO, e ela e sobre projeto de diagnostico, nao sobre cast:** um diagnostico que e ERRO
+define o que e ESPELHAVEL. Numa cadeia de bootstrap ha sempre duas ou mais geracoes lendo o mesmo
+fonte com regras diferentes, e cada regra promovida a erro estreita a intersecao das grafias
+aceitas por todas elas. Quando essa intersecao fica vazia, nao ha patch no corpus — foi o que o
+registro acima mediu. A saida barata nem sempre e uma ponte de compilador: e checar se a regra
+precisava mesmo ser erro. **Higiene de estilo vira WARNING; so vira ERRO o que produz programa
+errado.** Um cast redundante nao produz programa errado — produz programa feio, e feiura tem
+outro instrumento.
+
+**O INSTRUMENTO QUE FICA COM A POLITICA e o D4: ARITH-CAST-RATE <= 2%** (`metrics.tks`,
+`run_arith_cast_gate` em `project.tks`), que continua REPROVANDO o build. O dono citou o `<= 2%`
+na mesma frase da reversao exatamente para isso: rebaixar o D1 nao afrouxa a politica, muda quem
+a carrega — de "nenhum cast redundante e espelhavel" para "no maximo 2% das expressoes aritmeticas
+carregam conversao". Consequencia direta na implementacao: o sitio de mesmo-tipo em `type_cast`
+PRESERVA o no `TCast` na arvore tipada em vez de dobra-lo, porque `expr_has_conversion` conta nos
+`TCast` — dobrar teria desligado o teto junto com o erro, silenciosamente.
+
+**E a ESCADA, ela ainda morre?** Sim, e pela mesma porta: versionar o `teko.c` do primeiro degrau.
+Este adendo nao substitui aquela saida, remove o motivo pelo qual ela era a UNICA. Sao coisas
+independentes — uma resolve a grafia, a outra resolve o tempo.

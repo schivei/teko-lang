@@ -1,6 +1,8 @@
 # Cast & Width Hygiene — definitive fix (0.3.1)
 
-> **Status:** DECISIONS CLOSED — ruling-level, owner 2026-07-24 (counter-round cumprido).
+> **Status:** DECISIONS CLOSED — ruling-level, owner 2026-07-24 (counter-round cumprido),
+> **with D1 REVERSED on 2026-07-27: the `redundant cast` diagnostic is a WARNING, not an error**
+> (§4, §9). D2–D5 stand as ratified.
 > **Implementation progress (branch `feat/0.3.1-cast-width-a`, base `327d50d4`):** **C1
 > (W-RULE in the checker) — DONE.** **C2 (backend no-op confirmation) — DONE.** **C6
 > (`teko::casting` stdlib module) — DONE.**
@@ -10,14 +12,17 @@
 > `emit_gpr_reload`/`emit_gpr_store` + `rewrite_inst`/`block`/`func` × 3 archs,
 > `slot_offset`/``, `frame_slot_addr`, `block_pos`→`block_rpo_pos`) `u32`→`u64`,
 > deleting the `.len to u32`/`.len to u64` casts they existed only to satisfy.
-> **C4 (corpus cast sweep + the D1 `redundant cast` error, "varre → liga") — DONE.** `type_cast`
-> rejects a same-type cast (class 1); `type_binary`/`type_compare` reject a redundant
+> **C4 (corpus cast sweep + the D1 `redundant cast` diagnostic, "varre → liga") — DONE.**
+> **Since 2026-07-27 the diagnostic is a WARNING, not an error** (§4/§9 — the owner reversed the
+> 2026-07-24 ruling because as an error it was unsatisfiable across the seed/gen1 boundary; D4's
+> ≤2% gate carries the enforcement now). `type_cast`
+> flags a same-type cast (class 1); `type_binary`/`type_compare` flag a redundant
 > lossless-widen (class 3) — guarded against a literal partner (adoption depends on the
 > partner's PRE-cast type) and against a partner that is ITSELF an equally-removable `to`
 > (two mutually-"redundant" casts can jointly establish the real computed width — found and
 > fixed during the sweep itself, um backend encoder). Swept ~200+
 > corpus-wide redundant casts (the bulk "bare literal to i64/f64" pattern + individually
-> verified class-3 sites); D1 flips on in the SAME commit, corpus never red between wagons.
+> verified class-3 sites); D1 flipped on in the SAME commit, corpus never red between wagons.
 > **C5 (ARITH-CAST-RATE probe + CI flag) — DONE**, `--arith-cast-gate` wired and unit-tested;
 > current corpus reads CAST-DENSITY 23.3/KLOC (was 25.7/KLOC pre-C3/C4) and ARITH-CAST-RATE
 > 3.40% — ABOVE the D4 ≤2% ceiling, so the flag is NOT yet wired as a blocking CI step (would
@@ -26,7 +31,7 @@
 > files (C3's own explicitly out-of-scope "highest blast radius" tier) or an owner
 > re-ratification of the threshold/scope — an open item for the integrator, not silently
 > deferred. §9 records the closed rulings; the plan below is aligned to them (D1 direct-error,
-> D2 rejected → no new cast syntax, D3 peer-type, D4 ≤2% gate, D5 = swap declarant types to u64).
+> D2 rejected → no new cast syntax, D3 peer-type, D4 ≤2% gate, D5 = swap declarant types to u64) — with D1 REVERSED to a warning on 2026-07-27, which makes the D4 gap above the only remaining enforcement of the class and therefore no longer a deferrable item.
 >
 > **Owner rulings recorded verbatim (dated 2026-07-24):**
 > 1. *"Casting deve ser feito com muita cautela e em casos excepcionais (raríssimos); o
@@ -288,18 +293,42 @@ the widen the source used to spell.
    the cast is a no-op. The probe removes each candidate `TCast`, re-runs `type_binary`, and keeps
    the removal iff the result type is unchanged.
 
-**Anti-regression diagnostic (D1 — RATIFIED AS DIRECT ERROR, owner 2026-07-24):** add a
-**W15-style `redundant cast` ERROR** (not a warning). A `x to T` that is provably a no-op (class 1
-or 3 above) is a compile error. Owner, literal: *"prefiro que falhe para evitarmos de cair no mesmo
-erro."* **No warn phase.** **Sequencing note (owner):** the error is enabled **in the SAME wagon as
-the C4 sweep** — the sweep deletes the redundant casts and the *same* commit turns the error on
-("varre → liga"), so the corpus is **never red between wagons**. This makes "cautela" a **language
-rule**, not a discipline the next author forgets.
+**Anti-regression diagnostic (D1 — REVERSED TO A WARNING, owner 2026-07-27; was a direct ERROR,
+owner 2026-07-24):** a `x to T` that is provably a no-op (class 1 or 3 above) emits a **`redundant
+cast` WARNING on stderr** and compiles. Owner, literal: *"o cast, nestes casos, não deveria ser
+falha, deveria ser warning, o que não nos exime de não ter warnings no próprio compilador (lembra?
+<= 2%)."* The superseded ruling read: *"prefiro que falhe para evitarmos de cair no mesmo erro."*
+
+**Why the reversal, in one paragraph, because "we softened a rule" is the wrong reading.**
+D1-as-error made a redundant cast *unspellable*, and a bootstrap chain has **two compilers that
+disagree about which casts are redundant**. The released seed predates the W-RULE: it applies B.22
+(*"operands must be the same type — no promotion"*) and therefore **requires** the cast. A
+locally-built gen1 has `widen_int_binop` and therefore **proves that same cast a no-op**. Under
+D1-as-error no single source text satisfies both — measured on wagon 20: of the 18 casts the seed
+demands, **17 make gen1 reject the tree outright** (`teko test .` aborts, 0/1008). That
+contradiction is what the seed-fallback ladder exists to route around. As a warning, one text
+compiles under both, and the seed's B.22 debt becomes payable.
+
+**What holds the line instead: D4, unchanged and still hard.** The ARITH-CAST-RATE ≤ 2% gate
+(§5, `metrics.tks`, `run_arith_cast_gate`) **fails the build**. The owner named it in the same
+breath as the reversal for exactly that reason — a warning does not exempt the compiler's own source
+from being ≥98% cast-free. One consequence in the implementation: the same-type site keeps the
+`TCast` node in the typed tree instead of folding it away, because `expr_has_conversion` counts
+`TCast` nodes; folding it would have quietly disabled the ceiling along with the error.
+
+**Sequencing note (SUPERSEDED).** The 2026-07-24 ruling required the error to be enabled **in the
+SAME wagon as the C4 sweep** ("varre → liga") so the corpus was never red between wagons. With D1 a
+warning there is nothing to sequence: a redundant cast never reds a build, so the sweep lands
+independently of the diagnostic.
 
 **Lossy-cast form (D2 — REJECTED, owner 2026-07-24).** Owner, literal: *"não gostei."* **NO new
 cast surface** — `to!` and `narrow()` are **dead**; **`to` remains the one and only cast form**.
-Rationale accepted: with **D1-as-error**, every surviving `to` is **intentional by definition** (a
-redundant one won't compile), so a distinct lossy form buys nothing. **The protection against
+Rationale accepted: with **D1**, every surviving `to` is **flagged if it is not intentional** (a
+redundant one warns, and D4 caps how many may accumulate), so a distinct lossy form buys nothing.
+The rejection was originally argued from *D1-as-error* — "a redundant one won't compile" — and the
+2026-07-27 reversal to a warning does **not** reopen it: the argument was that a distinguished lossy
+spelling adds nothing on top of a diagnostic that already names every no-op cast, and a warning
+names them just as precisely. **The protection against
 silent truncation stays exactly the PHASE16 one — a *checked* cast that fails loud at runtime** —
 which is **already fully implemented today** (see §4.1); there is **no implementation gap**, so
 nothing here becomes a crumb and nothing becomes new syntax.
@@ -386,8 +415,8 @@ for the clean base.
 | **C2 — DONE** | **Backend confirm = no-op.** Verify the synthetic widen lowers through `cast_int_unop_of`/`emit_cast` byte-identically to a hand-written `to`; add a differential fixture (`a:u32 + b:u64` with & without the manual cast → identical binary). **No backend code change.** | **S** | native gate; emit goldens re-baselined ONLY where a genuine widen now differs (expected — §7) | C1 — confirmed by inspection (`widen_operand` emits the SAME `TCast{expr;type}` shape `type_cast` builds for a manual `to`, so `lir/lower.tks::cast_int_unop_of`/`codegen.tks::emit_cast` are untouched) plus the `width_rule_same_sign_widen`/`width_rule_mixed_sign_peer_ok` VM==native fixtures |
 | **C6 — DONE** | **`teko::casting` stdlib module (D5 refinement — no-panic checked converters).** New module `src/casting/casting.tks` (namespace `teko::casting`); per-source→dest checked converters returning `T \| error` (§10 surface). Additive; **built and SEEDED before C3/C4 so the inevitable narrows they meet can route to `casting::*` (error) instead of a bare `to` (panic).** Family derived from the *surviving-narrow* inventory, NOT the cartesian product. | **M** | full gate; VM==native on every converter's round-trip + at-boundary reject proof; **100% coverage (W15/D39)**; each converter has an executable `.tks` proof | C1 (fixed set) — shipped 8 converters (`u64_to_u32`, `i64_to_u32`, `u64_to_u8`, `u32_to_u8`, `u64_to_u16`, `u32_to_u16`, `i64_to_i32`, `u32_to_i32`), each with an in-range + out-of-range `#test` (`src/casting/casting_test.tkt`) plus the `casting_native_roundtrip` VM==native regression fixture |
 | **C3** | **Signature sweep (`.len` etc.).** Widen internal count/length/offset params from `u32`/`i32` to `u64` where no wire reason; the genuine wire narrow becomes **one `casting::*` call (recoverable flow) or one guarded `to` (internal invariant) at the serialization boundary** (§10.2 policy); delete the 15 `.len to u64` no-ops. ~30–50 decl edits → ~120 call-site cast deletions. | **L** | full gate; per-file fixpoint; the 90 `.len to u32` panic edges gone (assert via an overflow fixture that used to panic) | C1, C2, **C6**, ref adoption (SW4) |
-| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `stackify/codegen/stackify_consts/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turns the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner) so the corpus is **never red between wagons**. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; VM==native unchanged; a seeded redundant cast now FAILS to compile; CAST-DENSITY reported | C3, C6 |
-| **C5** | **Metric gate + probe.** Ship the ARITH-CAST-RATE probe and wire it into CI (≤2%, D4) so the class cannot return. **The probe counts a bare `to` AND a `teko::casting::*` call as the SAME "conversion" unit** (§5) — both are the raríssima exception the gate bounds. **No warn phase and no D2 surface work** — both removed by the owner's rulings; the anti-regression *error* already landed inside C4. | **M** | full gate; CI metric gate green (≤2% counting `to` + `casting::*`); the D1 error stays silent on a genuine boundary cast, fires on a seeded no-op | C4 |
+| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `stackify/codegen/stackify_consts/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turned the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner 2026-07-24) so the corpus was **never red between wagons**. **That diagnostic is a WARNING since the 2026-07-27 reversal** (§4/§9) — the sweep this crumb performed still stands, only its enforcement moved to D4's ≤2% gate. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; VM==native unchanged; a seeded redundant cast is diagnosed (as an ERROR when this crumb landed, as a WARNING since 2026-07-27); CAST-DENSITY reported | C3, C6 |
+| **C5** | **Metric gate + probe.** Ship the ARITH-CAST-RATE probe and wire it into CI (≤2%, D4) so the class cannot return. **The probe counts a bare `to` AND a `teko::casting::*` call as the SAME "conversion" unit** (§5) — both are the raríssima exception the gate bounds. **No D2 surface work** — removed by the owner's ruling; the anti-regression diagnostic already landed inside C4 (as an error then, as a warning since 2026-07-27), which is precisely why THIS gate is the one that has to bite. | **M** | full gate; CI metric gate green (≤2% counting `to` + `casting::*`); the D1 diagnostic stays silent on a genuine boundary cast, fires on a seeded no-op | C4 |
 
 **Ritual points (full gate must pass):** end of **C1** (rule cemented — the seed everything else
 dogfoods), end of **C6** (the `casting` module is a seeded stdlib surface the sweeps depend on —
@@ -466,15 +495,22 @@ the mixed-sign lossy case still stops) and honors M.0/M.3 (fixed widths, no plat
 ## 9. Decisions — CLOSED (ruling-level, owner 2026-07-24, counter-round cumprido)
 
 All five are ratified by the owner; none remains open. Attribution `owner 2026-07-24`; literal
-owner text quoted where given.
+owner text quoted where given. **One has since been REVERSED — D1, on 2026-07-27 — and it is
+recorded below as the reversal it is, not rewritten to look like the original ruling.**
 
-- **D1 — `redundant cast` = DIRECT ERROR. RATIFIED.** No warn phase. Owner, literal: *"prefiro que
-  falhe para evitarmos de cair no mesmo erro."* **Sequencing (owner):** the error is enabled **in
-  the SAME wagon as the C4 sweep** ("varre → liga"), so the corpus is **never red between wagons**.
-  (§4, crumb C4.)
+- **D1 — `redundant cast` = WARNING. RATIFIED 2026-07-27, REVERSING the 2026-07-24 DIRECT ERROR.**
+  Owner, literal (2026-07-27): *"o cast, nestes casos, não deveria ser falha, deveria ser warning, o
+  que não nos exime de não ter warnings no próprio compilador (lembra? <= 2%)."* Superseded ruling
+  (2026-07-24), literal: *"prefiro que falhe para evitarmos de cair no mesmo erro."*
+  **Why:** as an error the diagnostic was unsatisfiable across the bootstrap chain — the seed's B.22
+  demands the cast, gen1's W-RULE proves it redundant, and 17 of 18 measured cases made gen1 reject
+  the tree. **What replaces the enforcement:** D4's ARITH-CAST-RATE ≤ 2%, which still fails the
+  build and is untouched. **Sequencing:** the "varre → liga" note is void — a warning never reds a
+  build, so nothing needs to land in the same wagon as the C4 sweep. (§4, crumb C4.)
 - **D2 — lossy-cast distinct form. REJECTED.** Owner, literal: *"não gostei."* **No new cast
-  syntax** — `to!`/`narrow()` are dead; **`to` remains the only cast form.** With D1-as-error every
-  surviving `to` is intentional by definition. Silent-truncation protection stays the **PHASE16
+  syntax** — `to!`/`narrow()` are dead; **`to` remains the only cast form.** Every no-op `to` is
+  named by D1 (as a warning since 2026-07-27) and bounded by D4, so a distinguished lossy spelling
+  adds nothing. Silent-truncation protection stays the **PHASE16
   checked cast (fail-loud at runtime)**, confirmed already implemented in §4.1
   (`teko_rt.h:752-769` / `teko_rt.tks:685+` / `codegen.tks:2353-2431 emit_cast`) — **no
   implementation gap, so nothing here becomes a crumb or new grammar.**
