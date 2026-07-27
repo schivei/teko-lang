@@ -240,18 +240,43 @@ emissão de C; a deleção é o vagão seguinte.
   (`cov_mark(idx)`) e marcas de linha/branch. O caminho barato é um transform de AST tipada
   (prepend de `TExprStmt`), o caro é instrumentar no LIR. Depende de (e) para o dump.
 
-- **F6 — a prova automática de zero `.c`.** Um passo do próprio gate que varre o diretório de
-  trabalho depois da suíte e FALHA se qualquer `.c` não-versionado apareceu. Escrito como parte do
-  gate, não conferência manual — senão o C volta em silêncio.
+- **F6 — a prova automática de zero `.c`.** ENTREGUE nesta carga como CATRACA:
+  `scripts/no_emitted_c.sh`. Todo `.c` presente que o git não rastreia é, por definição, emitido;
+  o script compara esse conjunto, EXATO, com a baseline declarada — falha se cresce (sítio novo) e
+  falha se encolhe (sítio morreu e a baseline não foi atualizada), para não apodrecer virando
+  carimbo. A baseline hoje é `bin/teko-tktest.c` + `bin/teko-regrcov.c`, e o cabeçalho carrega a
+  medição de §2.3 como justificativa. Vira lista vazia quando F4/F7 pousarem. NÃO está ligado ao
+  `pr.yml` — o workflow é do vagão, e a carga proíbe tocá-lo.
 
 - **F7 — os sítios sob flag.** `--analyzer`, `--per-test-cov` e o `regrcov`.
 
 ---
 
-## 4. O ponto de decisão do owner
+## 4. Os pontos de decisão do owner
 
-**(e) é um bloqueio real, não um detalhe.** O contrato do gate termina em
-`tk_cov_dump(getenv("TEKO_TKCOV"))`; sem uma forma honesta de chamá-lo de Teko, o gate nativo não
+### 4.1 O bloqueio de ordem: o backend próprio precede o gate
+
+A medição de §2.3 é o achado que reordena a esteira. A sequência que a carga desenhou era
+
+> 1. o gate para de precisar do emissor; 2. o emissor é deletado; 3. mede-se o que sobra do runtime.
+
+e ela tem um degrau escondido ANTES do (1): o backend próprio precisa compilar o programa do
+compilador. Hoje ele não compila nem `$"{x}"`. Enquanto isso não mudar, **matar o emissor de C não
+deixa o projeto sem gate por descuido — deixa por construção**, porque o binário do gate é o
+programa do compilador.
+
+Duas leituras possíveis, e a escolha é do owner:
+
+1. **Fechar o vão N2 primeiro** (F-1), e só então portar o gate. É o caminho que preserva o gate a
+   todo instante, e é um vagão inteiro.
+2. **Aceitar que o emissor de C sobreviva enquanto o backend próprio amadurece**, com a catraca de
+   F6 impedindo que o conjunto de `.c` cresça em silêncio. O decreto de zero C continua sendo o
+   destino; o que muda é a data.
+
+### 4.2 O bloqueio de superfície: `tk_cov_dump` não tem forma chamável de Teko
+
+Independente de 4.1, quando o gate nativo for portado ele esbarra em (e). O contrato do gate termina
+em `tk_cov_dump(getenv("TEKO_TKCOV"))`; sem uma forma honesta de chamá-lo de Teko, o gate nativo não
 consegue devolver a cobertura ao pai. As saídas possíveis:
 
 1. **Superfície nova em C** — `void tk_cov_dump_s(tk_str path)` ao lado do `tk_cov_dump(const
