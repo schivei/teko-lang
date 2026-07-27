@@ -614,17 +614,23 @@ Isto é a mesma lei da seção anterior vista do outro lado: se a carga é o des
 o vagão recebe marcos; e drenar N cargas é **um** marco, não N.
 
 
-## A JANELA DE PUSH — interromper CEDO nao e problema (dono, 2026-07-27)
+## A JANELA DE PUSH — UM MINUTO (dono, 2026-07-27, corrigido pelo proprio dono)
 
 Refina a regra anterior ("empurrar so com o CI terminado ou sinal vermelho"), que na pratica me
 fazia segurar carga por medo de cancelar. O criterio real e de TEMPO DECORRIDO:
 
 > *"interromper um CI no início não é problema, problema é fazer isso depois de uns 5 min do CI
-> ainda em execução."*
+> ainda em execução."* — e, logo em seguida, apertando: *"considere 1min ao invés dos 5min que
+> mencionei."*
 
-Ou seja: nos primeiros minutos de uma corrida, empurre a vontade — o que se perde e desprezivel,
-porque nada de caro terminou. Passados ~5 min, a corrida ja pagou o setup, os produtores estao no
-meio do trabalho e cancelar joga fora medicao real; ai vale esperar.
+**A JANELA E DE UM MINUTO.** Passado isso, a corrida ja esta trabalhando e cancelar joga fora
+medicao real. Na pratica isso quase elimina o meio-termo: ou se empurra IMEDIATAMENTE, ou se espera
+a corrida fechar.
+
+Por que um minuto e nao cinco, medido nesta lane: o `artifact` e o gargalo e ele comeca quase
+imediato — os quatro produtores entram em ~40s do inicio do run. Aos 3 minutos eles ja estao no meio
+da escada de bootstrap. "Recem-comecado" e "produtor no meio do trabalho" praticamente coincidem, e
+por isso a folga de cinco minutos era generosa demais para valer como criterio.
 
 **O erro que isso corrige, e ele foi meu:** eu empurrei um commit so-de-documentacao sobre uma
 corrida madura e destrui o veredito do degrau 4 por inteiro — `Memory paranoid`, `test /`,
