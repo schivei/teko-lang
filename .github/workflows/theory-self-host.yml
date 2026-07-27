@@ -6,11 +6,10 @@
 # para validar e encontrar ao invés de queimar muitos runners, algo simples, finalizar a escada e
 # passar fixpoint + testes, nada mais, validado isso, reaplica no vagão 20."*
 #
-# WHAT MAKES THIS A THEORY AND NOT A LANE. It gates NOTHING, publishes NOTHING, and runs only on
-# `workflow_dispatch`. Its whole job is to answer one question per dispatch — "what stops the
-# compiler from building itself today?" — and print the address. The wagon's own six sublanes
-# answer the same question, but they cost six runners plus every downstream lane to say it once.
-# This costs ONE.
+# WHAT MAKES THIS A THEORY AND NOT A LANE. It gates NOTHING and publishes NOTHING. Its whole job is
+# to answer one question per push — "what stops the compiler from building itself today?" — and
+# print the address. The wagon's own six sublanes answer the same question, but they cost six
+# runners plus every downstream lane to say it once. This costs ONE.
 #
 # WHY IT IS SO SHORT, and the shortness is the design rather than a corner cut. Three steps:
 #
@@ -29,15 +28,29 @@
 # same sentence twice is the runner burn this file exists to avoid. If a degrau ever turns out to
 # be arch-specific, THAT is the moment to add the leg.
 #
-# HOW IT IS MEANT TO BE USED: dispatch, read the address, close that degrau on a cargo branch,
-# dispatch again. When step 2 finally reports PASSED and step 3 is green, the theory has done its
-# job — and the fix, already proven, is reapplied to the wagon (owner: *"validado isso, reaplica no
-# vagão 20"*).
+# HOW IT IS MEANT TO BE USED: push, read the address, close that degrau on a cargo branch, push
+# again. When step 2 finally reports PASSED and step 3 is green, the theory has done its job — and
+# the fix, already proven, is reapplied to the wagon (owner: *"validado isso, reaplica no vagão
+# 20"*). At that moment the `out/teko.c` this very run produced is ALREADY the `bootstrap/teko.c`
+# the wagon wants: harvest it before moving on, because the next state may regress.
 #
 # DELETE THIS FILE when the wagon self-hosts. It has no reason to outlive that day.
 name: theory · self-host (one runner, one question)
 
+# FIRES ON PUSH TO `theory/**`, not only on dispatch. Owner ruling 2026-07-27: *"um CI de push com
+# tudo em uma lane, o importante mesmo seria passar no fixpoint, mas ter execução de testes agiliza
+# o teu trabalho tbm."* Pushing IS the question — a dispatch that has to be remembered is a feedback
+# loop with a human in the middle of it.
+#
+# SCOPED TO `theory/**` DELIBERATELY, and NOT to `cargo/**`. Cargo branches are where agents commit
+# every few minutes on purpose (push early, push often, so a dropped session costs nothing) — one
+# runner per intermediate commit would burn dozens of runners to re-answer a question nobody asked
+# yet. The theory branch is the deliberate "I think this is ready" gesture, and that is exactly when
+# the runner is worth spending.
 on:
+  push:
+    branches:
+      - 'theory/**'
   workflow_dispatch:
     inputs:
       run_tests:
@@ -63,6 +76,30 @@ jobs:
           nproc
           free -m || true
 
+      # BOTH CAPABILITIES ARE PROVISIONED, or the suite would SKIP two rows and `no_skips_gate.sh`
+      # would fail this run for a reason that has nothing to do with the question being asked. A
+      # theory that reds on its own missing toolchain teaches nothing.
+      #
+      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
+      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
+      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
+      - name: Provision the two capabilities the suite needs (mingw cross-linker, wasmtime)
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y clang gcc-mingw-w64-x86-64
+          x86_64-w64-mingw32-gcc --version | head -n1
+          curl -sSf https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Verify both are on PATH (fail loud before the run, not inside it)
+        shell: bash
+        run: |
+          set -eu
+          x86_64-w64-mingw32-gcc --version | head -n1
+          wasmtime --version
+
       # NO SEED IS PROVISIONED AND NONE IS NEEDED. `build_with_seed_fallback.sh` enters through
       # rung -1, which compiles the committed `bootstrap/teko.c` with the runner's own cc and
       # builds the tip in ONE generation. No download, no ladder, no git history — the whole reason
@@ -85,7 +122,7 @@ jobs:
       # compiler already known not to reproduce itself — the owner's own words: *"se nem consegue
       # gerar gen2, nem tem que perder tempo com testes"*.
       - name: The suite (only reachable once the fixpoint holds)
-        if: ${{ github.event.inputs.run_tests != 'false' }}
+        if: ${{ github.event.inputs.run_tests != 'false' }}   # vazio num push => roda
         shell: bash
         env:
           REGRESSION_REQUIRE_TOOLS: "1"
