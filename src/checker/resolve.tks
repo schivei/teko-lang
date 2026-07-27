@@ -2,9 +2,25 @@
 
 use teko::parser
 
-// a registered user type: name + the NAMESPACE it was declared in (A3 provenance) + its
-// VISIBILITY (private/pub/exp) + its parsed declaration. namespace/vis drive W-vis-enforce.
-type TypeReg = struct { name: str; namespace: str; vis: parser::Visibility; decl: parser::TypeDecl }
+/**
+ * A registered user type: its name, the NAMESPACE it was declared in (A3 provenance), the SOURCE
+ * FILE it was written in (W-loc-2), its VISIBILITY (private/pub/exp) and its parsed declaration.
+ * `namespace`/`vis` drive W-vis-enforce; `file` lets a table-walking pass
+ * (`validate_type_decls`) locate its diagnostic at `file:line:col` instead of emitting a bare,
+ * placeless message.
+ */
+type TypeReg = struct {
+    /** the type's declared name, as written */
+    name: str
+    /** the namespace the declaration was collected under (A3 provenance) */
+    namespace: str
+    /** the source file the declaration was written in ("" for a synthesized or dep-seeded entry) */
+    file: str
+    /** the declaration's visibility (private/pub/exp) */
+    vis: parser::Visibility
+    /** the parsed declaration itself */
+    decl: parser::TypeDecl
+}
 pub type TypeTable = []TypeReg
 
 // (#109 W3) the CANONICAL name of a type: "ns::Name" (bare "Name" at the root ns). The semantic
@@ -659,7 +675,7 @@ fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, ta
     let body: parser::TypeBody = if ifaces.len > 0 { parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } } else { parser::ExternBody { } }
     let carried_constraints = teko::list::push(teko::list::empty(), own_constraint)
     let d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
-    TypeReg { name = name; namespace = ns; vis = parser::Visibility::Private; decl = d }
+    TypeReg { name = name; namespace = ns; file = ""; vis = parser::Visibility::Private; decl = d }
 }
 
 /** (S4) Extend the type table with generic type-params as OPAQUE nominal types, so a generic
@@ -2515,7 +2531,7 @@ fn stamp_inst_site(entry: InstSite, state: StampState) -> StampState {
     let mangled = generic_inst_name(nt.path.segments[nt.path.segments.len - 1].name, argtypes)
     match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
     let stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
-    let grown = teko::list::push(tbl, TypeReg { name = mangled; namespace = template.namespace; vis = template.decl.vis; decl = stamped })
+    let grown = teko::list::push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
     let queued = tag_inst_sites(collect_body_insts(stamped.body, teko::list::empty()), template.namespace, state.work)
     StampState { table = grown; work = queued }
 }
@@ -2567,6 +2583,29 @@ pub fn find_generic_template(table: TypeTable, base: str) -> TemplateReg | null 
 // (S4) the concrete generic-type INSTANCE decls stamped into the table (the `__g__`-marked entries),
 // for the mono pass to emit as program items so codegen sees the concrete struct/variant. TypeReg is
 // file-private, so this accessor exposes just the decls. (C: tk_table_generic_instances.)
+/**
+ * Every stamped generic INSTANCE registration in the table — the `table_generic_instances` view
+ * that keeps the REGISTRATION (and so the source file it was stamped from) instead of only the
+ * declaration, so a pass that reports against an instance can locate its diagnostic at the
+ * template's file (W-loc-2).
+ *
+ * @param table  the collected type table
+ * @return       the registrations of the stamped, fully concrete generic instances, in table order
+ * @since 0.3.1
+ */
+pub fn table_generic_instance_regs(table: TypeTable) -> TypeTable {
+    mut out: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_is_g_instance(table[i].name) {
+            if table[i].decl.type_params.len == 0 { out = teko::list::push(out, table[i]) }
+        }
+        i++
+    }
+    out
+}
+
 pub fn table_generic_instances(table: TypeTable) -> []parser::TypeDecl {
     mut out: []parser::TypeDecl = teko::list::empty()
     mut i = 0
@@ -2725,7 +2764,7 @@ pub fn normalize_table_instances(table: TypeTable) -> TypeTable {
         if i >= table.len { break }
         if name_is_g_instance(table[i].name) {
             let nd = normalize_inst_decl(table[i].decl, table)
-            out = teko::list::push(out, TypeReg { name = table[i].name; namespace = table[i].namespace; vis = table[i].vis; decl = nd })
+            out = teko::list::push(out, TypeReg { name = table[i].name; namespace = table[i].namespace; file = table[i].file; vis = table[i].vis; decl = nd })
         } else {
             out = teko::list::push(out, table[i])
         }
