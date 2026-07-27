@@ -167,6 +167,15 @@ if build_project "$SEED_BIN" "$PWD" "$OUT_DIR" "$FAST_LOG"; then
   exit 0
 fi
 log "seed FAILED to build the tip directly — engaging the staged bootstrap ladder"
+# WHY, NOT JUST THAT. This branch used to discard $FAST_LOG entirely: the log said the seed
+# failed and never said what it said. That is the single most expensive unexplained line in the
+# pipeline — engaging the ladder costs 392s of a 780s job on x86_64, 215s of 412s on arm64 — and
+# it was unauditable, so "why does the seed fail" only ever had guesses. Owner ruling on the
+# regressor's twin defect, 2026-07-27: *"Isso não seria problema em diagnosticar se estivesse
+# imprimindo a saída completa do comando de build"*. Same rule, dearer instance.
+log "----- the seed's own build of the tip (failure) — this is WHY the ladder is engaging -----"
+sed 's/^/teko-ci:   | /' "$FAST_LOG" >&2
+log "----- end of the seed's failed build -----"
 
 # ── RUNG 0: THE COMMITTED SEED. Tried BEFORE the pinned SHA ladder, and the ordering is the
 # whole point (owner acceptance criterion 2026-07-26 — the counter-machine's PR on the ORG must
@@ -354,6 +363,17 @@ if [ "${TEKO_LADDER_DISCOVER:-0}" != "1" ] && [ -n "$LADDER_RUNGS" ]; then
     CURRENT_BIN="$NEXT_BIN"
     CURRENT_DESC="gen$STAGE(pinned rung $RUNG_SHA)"
     log "ladder stage $STAGE: built pinned rung $RUNG_SHA — that compiler is the new rung"
+    # THE PER-GENERATION REPORT, printed on SUCCESS and not only on failure. `phase_mark` gives
+    # the stage's wall clock; this gives its BREAKDOWN — checker, codegen, cc, peak RSS — which is
+    # the only way to tell "this generation did more work" from "this generation ran the same work
+    # slower". Owner observation, 2026-07-27: *"cada degrau fica mais lento, e pior, eu notei isso
+    # até buildando o mesmo código na mesma sessão, a próxima geração parece ficar mais lenta"*.
+    # A degradation across generations is invisible to the stage timings alone, because each stage
+    # compiles a DIFFERENT (larger) tree; only the per-phase numbers separate the two causes. The
+    # log is ~15 lines per stage — the cheapest possible price for the one measurement that can
+    # confirm or kill that observation.
+    log "----- gen$STAGE build report (rung $RUNG_SHA) -----"
+    sed 's/^/teko-ci:   | /' "$RUNG_LOG" >&2
     phase_mark "ladder gen$STAGE"
   done
   rm -f "$RUNG_LOG"
