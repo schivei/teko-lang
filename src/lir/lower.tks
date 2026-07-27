@@ -588,13 +588,18 @@ pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u6
  * to its declared C symbol instead of the Teko mangling) + `flat_symbols` (the static/shared-
  * archive carve-out, read-only for the whole lowering of a program — `mangle_fn_symbol`'s `flat`
  * argument threads through from here, both at a function's own declaration and at every
- * `call_symbol` resolution, so the two stay consistent).
+ * `call_symbol` resolution, so the two stay consistent) + `ret_type` (the CURRENT FUNCTION/
+ * lambda's own DECLARED return type, reset per function/lambda body exactly like `defers`/
+ * `loop_targets` — `lower_return` and the trailing-tail auto-return both read it so a bare case
+ * value flowing back through a `T | error`-shaped return slot is coerced into the uniform
+ * tag+payload wrapper via `lower_value_into_type`, mirroring the C backend's `emit_return`
+ * threading `ret_type` into `emit_as_r`, #382 degrau N2).
  */
 pub type LowerCtx = struct {
     func: LFunc; block_id: u32; env: LEnv
     layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
-    flat_symbols: bool
+    flat_symbols: bool; ret_type: checker::Type
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -626,7 +631,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         func = func; block_id = block_id; env = env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
     }
 }
 
@@ -644,7 +649,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
     }
 }
 
@@ -662,7 +667,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
     }
 }
 
@@ -680,7 +685,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
     }
 }
 
@@ -698,7 +703,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
     }
 }
 
@@ -2262,7 +2267,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         func = seed.func; block_id = 0; env = seed.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
-        flat_symbols = ctx.flat_symbols
+        flat_symbols = ctx.flat_symbols; ret_type = lam.ret
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -2340,17 +2345,22 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
  * lower_value_into_type — lower `value` COERCED into the declared type `bound`: when `bound` is a
  * null-bearing two-member union (`T | null`) and the value's own natural type is not already that
  * union (a bare `null` literal, or the payload type `T` directly), build the own backend's uniform
- * tag+payload wrapper via `lower_null_union_construct`; every other declared type lowers the value
- * plainly. The checker types an assignable value at its OWN narrow type and leaves the wrap to the
- * backend — the C backend does it in `emit_as`, on EVERY placement (binding, assign, return,
- * argument, field), and this is the own-backend analog.
+ * tag+payload wrapper via `lower_null_union_construct`; when `bound` is any OTHER (general,
+ * non-null-bearing) variant, `lower_value_into_variant` does the same generalized to an arbitrary
+ * member count/index; every other declared type lowers the value plainly. The checker types an
+ * assignable value at its OWN narrow type and leaves the wrap to the backend — the C backend does
+ * it in `emit_as`, on EVERY placement (binding, assign, return, argument, field), and this is the
+ * own-backend analog.
  *
  * Every own-backend placement that KNOWS its declared type routes through here: `lower_binding`
- * (`b.bound`), `lower_assign_simple` and `store_assign_value` (`a.bound`). The placements that do
- * NOT carry one — a call argument (a direct call's `TCall` has no callee signature) and a struct
- * literal field (the layout keeps machine classes, not checker types) — are closed at the other
- * end instead, by `lower_null_lit`'s honest-stop, so no placement can write a raw `const 0` into a
- * VReg that a later `match` reads as the wrapper's base address (that was a deref of address 0).
+ * (`b.bound`), `lower_assign_simple` and `store_assign_value` (`a.bound`), `lower_return_value`
+ * (`ctx.ret_type`) and `lower_tail_expr_stmt` (`target_ty` — an if/match arm's own enclosing
+ * result type, or, via `lower_fn_body`, the enclosing function's return type, #382 degrau N2). The
+ * placements that do NOT carry a declared type — a call argument (a direct call's `TCall` has no
+ * callee signature) and a struct literal field (the layout keeps machine classes, not checker
+ * types) — are closed at the other end instead, by `lower_null_lit`'s honest-stop, so no placement
+ * can write a raw `const 0` into a VReg that a later `match` reads as the wrapper's base address
+ * (that was a deref of address 0).
  *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Type bound  the DECLARED type of the slot the value is placed into
@@ -2363,7 +2373,7 @@ fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TE
     match bound {
         checker::Variant as v => match null_union_payload(v) {
             checker::Type as payload => lower_value_into_null_union(ctx, payload, value)
-            null => lower_expr(ctx, value)
+            null => lower_value_into_variant(ctx, v, value)
         }
         _ => lower_expr(ctx, value)
     }
@@ -2385,6 +2395,28 @@ fn lower_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: che
     match value.type {
         checker::Variant => lower_expr(ctx, value)
         _ => lower_null_union_construct(ctx, payload, value)
+    }
+}
+
+/**
+ * lower_value_into_variant — the general (non-null-bearing) `checker::Variant` arm of
+ * `lower_value_into_type`: a value ALREADY typed as the variant itself (re-flowing an existing
+ * union value — the same passthrough `lower_value_into_null_union` uses for `T | null`) passes
+ * through unwrapped; any other value (a bare case, e.g. a `Box` or a bare `error{…}` flowing into
+ * a declared `Box | error` slot) is wrapped via `lower_variant_construct` at its own matched
+ * member index (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Variant v  the declared variant the value is placed into
+ * @param checker::TExpr value  the typed value expression being placed into the variant slot
+ * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
+ * @throws  propagated from lowering the value, or when its type names no member of `v`
+ * @since 0.3.1 (own-backend general variant construction, degrau N2)
+ */
+fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    match value.type {
+        checker::Variant => lower_expr(ctx, value)
+        _ => lower_variant_construct(ctx, v, value)
     }
 }
 
@@ -2417,9 +2449,27 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
         let vinst = ret_void_inst(r.value.line, r.value.col)
         return LowerStmtOut { ctx = ctx_append(replayed, vinst); terminated = true }
     }
-    let lo = match lower_expr(replayed, r.value) { Lowered as x => x; error as err => return err }
+    let lo = match lower_return_value(replayed, r.value) { Lowered as x => x; error as err => return err }
     let inst = ret_inst(lo.vreg, r.value.line, r.value.col)
     LowerStmtOut { ctx = ctx_append(lo.ctx, inst); terminated = true }
+}
+
+/**
+ * lower_return_value — an explicit `return e`'s value, coerced into the enclosing function's
+ * own declared return type (`ctx.ret_type`) exactly like the trailing-tail auto-return
+ * (`lower_tail_expr_stmt`'s doc): a diverging (`Void`-typed) value — a `panic`/`exit` call, by
+ * the checker's own invariant — passes through PLAIN (`return` already terminates the block, so
+ * a divergent value's own bits are never observed, and no variant member is `Void` to wrap it
+ * as); any other value is coerced via `lower_value_into_type` (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::TExpr value  the typed return value
+ * @return Lowered  the lowered (and, when the return slot is a non-null variant, coerced) value
+ * @throws  propagated from lowering or coercing `value`
+ */
+fn lower_return_value(ctx: LowerCtx, value: checker::TExpr) -> Lowered | error {
+    if type_is_void(value.type) { return lower_expr(ctx, value) }
+    lower_value_into_type(ctx, ctx.ret_type, value)
 }
 
 /** lower_expr_stmt — an expression statement: lower for effect (the call), discard the
@@ -3108,7 +3158,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         func = body_done.func; block_id = exit_block; env = exit_env
         layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
-        flat_symbols = body_done.flat_symbols
+        flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
     }
 }
 
@@ -3254,9 +3304,13 @@ pub type LowerBlockValue = struct { ctx: LowerCtx; terminated: bool; vreg: u32 }
     the last lowers as an ordinary effect-only statement; the last is the arm's TAIL VALUE
     (an expression-statement) unless it already terminated the block on its own. `result_ty`
     is the enclosing if/match/function's own result machine class — threaded through to
-    `lower_tail_expr_stmt`'s diverging-tail fallback (C7). Mirrors emit_branch_value's "last
-    statement is the value" shape (codegen.tks). */
-fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
+    `lower_tail_expr_stmt`'s diverging-tail fallback (C7). `target_ty` is that SAME enclosing
+    construct's own CHECKER type — threaded through to `lower_tail_expr_stmt`'s value coercion,
+    so a bare case flowing into a declared `T | error` slot (whether the slot is an if/match's
+    own result or, via `lower_fn_body`, the enclosing FUNCTION's return type) gets wrapped into
+    the uniform tag+payload shape (#382, degrau N2). Mirrors emit_branch_value's "last statement
+    is the value" shape (codegen.tks). */
+fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
     mut cur = ctx
     mut i: u64 = 0
@@ -3267,15 +3321,15 @@ fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LTyp
         if out.terminated { return LowerBlockValue { ctx = cur; terminated = true; vreg = 0 } }
         i++
     }
-    lower_tail_stmt(cur, body[body.len - 1], result_ty)
+    lower_tail_stmt(cur, body[body.len - 1], result_ty, target_ty)
 }
 
 /** lower_tail_stmt — an if-expression arm's final statement: an expression-statement's
     value IS the arm's tail value; any other statement kind is delegated to
     lower_tail_non_expr. */
-fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
+fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
     match s {
-        checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty)
+        checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty, target_ty)
         _ => lower_tail_non_expr(ctx, s)
     }
 }
@@ -3289,21 +3343,29 @@ fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType) -> L
  * value` fallback of the arm's own `result_ty` stands in instead — the exact own-backend gap
  * C7's `T | null` panic-hook arm exposed (the placeholder VReg colliding, by pure VReg-number
  * coincidence, with an unrelated live value elsewhere in the function). Any other (non-Void)
- * tail yields its own value normally.
+ * tail is lowered COERCED into `target_ty` (`lower_value_into_type`) — a bare case value stays
+ * unwrapped when `target_ty` is not itself a variant, and is wrapped into the uniform
+ * tag+payload shape when it is (#382, degrau N2).
  *
  * @param LowerCtx ctx  the lowering context positioned at the tail statement
  * @param checker::TExprStmt es  the tail expression-statement
  * @param LType result_ty  the enclosing arm's own expected result machine class
+ * @param checker::Type target_ty  the enclosing arm's own DECLARED checker type (the if/match
+ *                                 expression's, or — via `lower_fn_body` — the enclosing
+ *                                 function's return type)
  * @return LowerBlockValue  the value outcome (never terminated here — a diverging tail still
  *                          falls through with a placeholder, keeping the arm's own control-flow
  *                          shape identical to every sibling's, C7)
  * @throws  propagated from lowering the tail expression
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
-fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType) -> LowerBlockValue | error {
-    let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
-    if !type_is_void(es.expr.type) { return LowerBlockValue { ctx = lo.ctx; terminated = false; vreg = lo.vreg } }
-    diverging_tail_value(lo.ctx, result_ty)
+fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
+    if type_is_void(es.expr.type) {
+        let diverging = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+        return diverging_tail_value(diverging.ctx, result_ty)
+    }
+    let lo = match lower_value_into_type(ctx, target_ty, es.expr) { Lowered as x => x; error as err => return err }
+    LowerBlockValue { ctx = lo.ctx; terminated = false; vreg = lo.vreg }
 }
 
 /**
@@ -3410,10 +3472,10 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     let result_ty = ltype_of(e.type, ctx.enums)
-    let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk, result_ty) { LowerBlockValue as x => x; error as err => return err }
+    let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
     let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    let else_val = match lower_block_value(else_ctx, f.else_blk, result_ty) { LowerBlockValue as x => x; error as err => return err }
+    let else_val = match lower_block_value(else_ctx, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
     let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
@@ -3533,30 +3595,104 @@ fn lower_match_subject(ctx: LowerCtx, subject: checker::TExpr) -> MatchSubjOut |
 type VariantMember = struct { index: u32; ty: checker::Type }
 
 /**
- * find_variant_member — the NAMED member of `members` whose last path segment
- * is `case_name`, or a NAMED internal error (an out-of-scope non-nominal member
- * — prim/str/ error/... — is not a case A1-5 selects by name; A1-6+ widens
- * this) (A1-5, #382).
+ * find_variant_member — the member of `members` whose CASE NAME is
+ * `case_name`, or a NAMED internal error (every other non-nominal member —
+ * prim/str/byte/slice/... — is not a case A1-5 selects by name; A1-6+ widens
+ * this) (A1-5, #382). A `Named` member's case name is its CANONICAL name's
+ * last path segment (`checker::resolve`'s "ns::Name" convention, #109 W3 —
+ * mirrors the checker's OWN `variant_member_by_name`), while `error`'s is the
+ * literal keyword — the ONLY spelling `error` ever reaches a match pattern
+ * under (`variant_member_named`). `case_name` itself is always the pattern's
+ * BARE last segment, so a Named member's FULL canonical name compared
+ * verbatim would reject every namespaced case, and `checker::Error`'s own
+ * `_`-arm miss would reject the built-in error case outright — both are the
+ * gap `examples/smoke/uniontest`'s `Box | error` match exposed once the
+ * earlier construction-site honest-stop stopped masking it (degrau N2).
  *
  * @param []checker::Type members  the variant subject's declared members, in
  *                                 order
  * @param str case_name  the pattern's case name (a bind/field pattern's last
- *                       path segment)
+ *                       path segment, or the literal `error`)
  * @return VariantMember  the matching member's declared index + its own Type
- * @throws  when no member of `members` is Named `case_name` (an internal
+ * @throws  when no member of `members` is named `case_name` (an internal
  *          invariant break)
  */
 fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMember | error {
     mut i: u64 = 0
     loop {
         if i >= members.len { break }
-        match members[i] {
-            checker::Named as n => { if n.name == case_name { return VariantMember { index = i to u32; ty = members[i] } } }
-            _ => { }
-        }
+        if variant_member_named(members[i], case_name) { return VariantMember { index = i to u32; ty = members[i] } }
         i++
     }
     error { message = teko::str::concat("native backend N1: unknown variant case `", case_name, "` (internal)") }
+}
+
+/**
+ * variant_member_named — does variant member `member` carry the case name
+ * `case_name`? A `Named` member matches by its CANONICAL name's last path
+ * segment (`checker::name_last_segment`, #109 W3); the built-in `error`
+ * member matches the literal keyword `"error"` (its ONE surface spelling —
+ * `error_struct_name`'s doc); every other non-nominal member (a primitive,
+ * `str`, `byte`, a slice) is not a case A1-5 selects by name (degrau N2).
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param str case_name  the pattern's case name to test against
+ * @return bool  whether `member` is the case `case_name` names
+ */
+fn variant_member_named(member: checker::Type, case_name: str) -> bool {
+    match member {
+        checker::Named as n => checker::name_last_segment(n.name) == case_name
+        checker::Error => case_name == error_struct_name()
+        _ => false
+    }
+}
+
+/**
+ * variant_member_index_of — the index of `members` whose type is `value_ty`: the BY-TYPE
+ * counterpart of `find_variant_member`'s BY-NAME lookup, used at CONSTRUCTION (a bare value
+ * flowing into a declared variant slot has no case NAME to match by, only its own resolved
+ * type — `lower_variant_construct`'s doc). Matches a `Named` member by name (mirrors
+ * `find_variant_member`) and every other member kind (`error`, a primitive, `str`, `byte`, a
+ * slice) by its own KIND (`variant_member_type_matches`) — the same NAMED-vs-non-nominal split
+ * the checker's own `variant_covered` uses to decide coverage (#382, degrau N2).
+ *
+ * @param []checker::Type members  the variant's declared members, in order
+ * @param checker::Type value_ty  the value's own resolved type
+ * @return u32  the matching member's declared index
+ * @throws  when no member of `members` matches `value_ty` (an internal invariant break — the
+ *          checker already guarantees an assignable value names some member)
+ */
+fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_member_type_matches(members[i], value_ty) { return i to u32 }
+        i++
+    }
+    error { message = "native backend N1: value's type is not a member of its declared variant (internal)" }
+}
+
+/**
+ * variant_member_type_matches — does variant member `member` match a value of type `value_ty`?
+ * A `Named` member matches by canonical NAME (two structurally-equal-but-differently-named
+ * types are DIFFERENT cases); every other member kind matches by its own KIND alone — the non-
+ * nominal cases this backend's A1-5+ subset constructs (`error`, a primitive/`byte`/`str`/slice)
+ * carry no further per-case identity beyond their kind (#382, degrau N2).
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param checker::Type value_ty  the value's own resolved type
+ * @return bool  whether `member` is the case `value_ty` belongs to
+ */
+fn variant_member_type_matches(member: checker::Type, value_ty: checker::Type) -> bool {
+    match member {
+        checker::Named as mn => match value_ty { checker::Named as vn => mn.name == vn.name; _ => false }
+        checker::Error => match value_ty { checker::Error => true; _ => false }
+        checker::Prim as mp => match value_ty { checker::Prim as vp => mp.kind == vp.kind; _ => false }
+        checker::Str => match value_ty { checker::Str => true; _ => false }
+        checker::Byte => match value_ty { checker::Byte => true; _ => false }
+        checker::Slice => match value_ty { checker::Slice => true; _ => false }
+        _ => false
+    }
 }
 
 /**
@@ -3694,32 +3830,62 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  */
 fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
     let pty = ltype_of(payload, ctx.enums)
-    let align = null_union_wrapper_align(pty)
+    let align = variant_wrapper_align(pty)
     let size = (8 to u32) + ltype_size(pty)
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, e.line, e.col))
     match e.kind {
-        checker::TNullLit => store_null_union_tag(with_alloca, base.vreg, 0, e.line, e.col)
-        _ => store_null_union_payload(with_alloca, base.vreg, pty, e)
+        checker::TNullLit => store_variant_tag(with_alloca, base.vreg, 0, e.line, e.col)
+        _ => store_variant_payload(with_alloca, base.vreg, 1, pty, e)
     }
 }
 
 /**
- * null_union_wrapper_align — the tag+payload wrapper's alignment: the payload's own alignment
- * when it is wider than the `i32` tag word, else the tag word's own 4-byte alignment.
+ * lower_variant_construct — build the own backend's uniform tag+payload wrapper for a bare case
+ * `value` flowing into a GENERAL (non-null-bearing) declared variant `v`: find its member index
+ * by TYPE (`variant_member_index_of` — a bare value has no case name to match by), allocate
+ * `{ i32 tag; <payload> }` sized to `value`'s OWN payload width (tag@0, payload@8 — the SAME
+ * fixed layout `lower_variant_tag_eq_test`/`bind_payload_at8` read regardless of which case is
+ * active; a later read through this SAME instance already knows, from the tag test that matched
+ * it, to read exactly this width — `lower_null_union_construct`'s exact shape, generalized from
+ * the fixed 0/1 tag to an arbitrary member index), then store the index as the tag and the
+ * lowered value as the payload.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param checker::Variant v  the declared variant `value` is placed into
+ * @param checker::TExpr value  the bare case value being wrapped
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering `value`, or when its type names no member of `v`
+ * @since 0.3.1 (own-backend general variant construction, degrau N2)
+ */
+fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    let index = match variant_member_index_of(v.members, value.type) { u32 as x => x; error as e => return e }
+    let pty = ltype_of(value.type, ctx.enums)
+    let align = variant_wrapper_align(pty)
+    let size = (8 to u32) + ltype_size(pty)
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, value.line, value.col))
+    store_variant_payload(with_alloca, base.vreg, index to i64, pty, value)
+}
+
+/**
+ * variant_wrapper_align — the tag+payload wrapper's alignment: the payload's own alignment
+ * when it is wider than the `i32` tag word, else the tag word's own 4-byte alignment. Shared by
+ * every variant construction (null-bearing or general) — the wrapper shape is uniform (#382,
+ * degrau N2).
  *
  * @param LType pty  the payload's machine class
  * @return u32  the wrapper's alignment in bytes
  */
-fn null_union_wrapper_align(pty: LType) -> u32 {
+fn variant_wrapper_align(pty: LType) -> u32 {
     let pa = ltype_align(pty)
     if pa > (4 to u32) { pa } else { 4 to u32 }
 }
 
 /**
- * store_null_union_tag — store `index` as the wrapper's `i32` tag word (offset 0), leaving the
- * payload slot's bytes unspecified (a `null` construction never reads them back — the `tag == 0`
- * test never binds a payload).
+ * store_variant_tag — store `index` as the wrapper's `i32` tag word (offset 0), leaving the
+ * payload slot's bytes unspecified (a tag-only construction — the null-union's absent case —
+ * never reads them back).
  *
  * @param LowerCtx ctx  the lowering context to append the store's instructions into
  * @param u32 base  the wrapper's alloca'd base-address VReg
@@ -3728,7 +3894,7 @@ fn null_union_wrapper_align(pty: LType) -> u32 {
  * @param u32 col  the source column to stamp the emitted instructions with
  * @return Lowered  the wrapper's base address, unchanged
  */
-fn store_null_union_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u32) -> Lowered {
+fn store_variant_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u32) -> Lowered {
     let tagr = ctx_alloc(ctx)
     let with_tag = ctx_append(tagr.ctx, const_int_inst(tagr.vreg, index, line, col))
     let addr = ctx_alloc(with_tag)
@@ -3738,18 +3904,21 @@ fn store_null_union_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u3
 }
 
 /**
- * store_null_union_payload — store tag `1` (the null-union's sole present case) then the
- * lowered payload `e` at the wrapper's fixed offset 8.
+ * store_variant_payload — store `index` as the wrapper's tag (`store_variant_tag`) then the
+ * lowered payload `e` at the wrapper's fixed offset 8 — generalizes the null-union's hard-coded
+ * tag `1` to an arbitrary member INDEX, so the SAME store serves both the null-union's single
+ * present case and any case of a general (2+ non-null-member) variant (#382, degrau N2).
  *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
  * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param i64 index  the payload's own member index (the case being constructed)
  * @param LType pty  the payload's machine class
  * @param checker::TExpr e  the payload value to lower and store
  * @return Lowered  the wrapper's base address
  * @throws  propagated from lowering `e`
  */
-fn store_null_union_payload(ctx: LowerCtx, base: u32, pty: LType, e: checker::TExpr) -> Lowered | error {
-    let tagged = store_null_union_tag(ctx, base, 1, e.line, e.col)
+fn store_variant_payload(ctx: LowerCtx, base: u32, index: i64, pty: LType, e: checker::TExpr) -> Lowered | error {
+    let tagged = store_variant_tag(ctx, base, index, e.line, e.col)
     let vo = match lower_expr(tagged.ctx, e) { Lowered as x => x; error as err => return err }
     let paddr = ctx_alloc(vo.ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
@@ -4415,7 +4584,7 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> Matc
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type, ctx.enums)) { LowerBlockValue as x => x; error as err => return err }
+    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
     let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
@@ -4948,14 +5117,56 @@ fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr) -> Low
     Lowered { ctx = cur; vreg = acc }
 }
 
-/** named_type_name — the canonical name of a `Named` (struct) type, for looking up its
-    registered layout; any other type shape (the receiver isn't a struct) is out of the
-    A1-3 subset. */
+/**
+ * named_type_name — the canonical struct-layout-table NAME of a field/index-accessible type: a
+ * `Named` (user struct/class) type's own declared name, or `error_struct_name()`'s reserved
+ * name for the built-in `error` (its ONE constructible shape, `error { message = <str> }`,
+ * registers a synthetic single-field layout — `error_struct_layout`, #382 degrau N2). Every
+ * OTHER type shape (`str`/`[]T` — fat, read through `lower_fat_field`/`.len`, never this path;
+ * an enum — no fields, only a `match` tag test; a bare union — no fields of its own) is out of
+ * this backend's current subset.
+ *
+ * @param checker::Type t  the receiver/construction-site type to resolve
+ * @return str  the registered layout's name
+ * @throws  when `t` is a shape this backend does not yet resolve a struct layout for
+ */
 fn named_type_name(t: checker::Type) -> str | error {
     match t {
         checker::Named as n => n.name
+        checker::Error => error_struct_name()
         _ => error { message = "native backend N1: field/index access on a non-struct receiver not yet lowered (N2)" }
     }
+}
+
+/**
+ * error_struct_name — the reserved layout-table name the built-in `error` type registers under
+ * (`named_type_name`/`error_struct_layout`). `error` is a keyword, so no user `Named` struct can
+ * ever declare this literal name — there is no collision to guard against.
+ *
+ * @return str  the reserved name (`"error"`)
+ * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ */
+fn error_struct_name() -> str { "error" }
+
+/**
+ * error_struct_layout — the built-in `error` type's synthetic `LStructLayout`: ONE field,
+ * `message: str` (fat, 16 bytes — `layout_of_sized`'s packer sizes/aligns it like any other
+ * FAT struct field). `error`'s only constructible shape is `error { message = <str> }` (the
+ * checker's `type_struct_lit` Error-branch), so a single `message` field is the COMPLETE
+ * representation this subset ever needs to build — the diagnostic fields (`file`/`line`/`col`/
+ * `expected`/`actual`) a checker-internal `tk_error` carries have no Teko-surface constructor
+ * and stay out of scope, unchanged from the pre-existing `lower_field_access` exclusion note
+ * (#382, degrau N2).
+ *
+ * @return LStructLayout  the registered `error` layout
+ * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ */
+fn error_struct_layout() -> LStructLayout {
+    let field_names = teko::list::push(teko::list::empty(), "message")
+    let field_types = teko::list::push(teko::list::empty(), LType::Ptr)
+    let field_sizes = teko::list::push(teko::list::empty(), ltype_size(LType::Ptr) * (2 to u32))
+    let field_aligns = teko::list::push(teko::list::empty(), ltype_align(LType::Ptr))
+    layout_of_sized(error_struct_name(), field_names, field_types, field_sizes, field_aligns)
 }
 
 /** find_struct_layout — the registered LStructLayout named `name`, or a NAMED internal
@@ -5449,7 +5660,11 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  * `close_lambda_body`). Reuses `lower_block_value`'s "last statement is the
  * tail value" walk, so a trailing `if`/`match` EXPRESSION in tail position
  * already resolves through the SAME machinery an if-expression arm uses — no
- * duplicated control-flow logic.
+ * duplicated control-flow logic. The trailing value is coerced into `ctx.ret_type` (the
+ * function/lambda's own DECLARED return type, threaded via `LowerCtx` — `lower_block_value`'s
+ * `target_ty`) exactly like an explicit `return` (`lower_return`), so a bare case value falling
+ * through as the trailing tail of a `T | error`-returning body is wrapped into the uniform
+ * tag+payload shape too (#382, degrau N2).
  *
  * @param LowerCtx ctx  the lowering context
  * @param []checker::TStatement body  the function/lambda's statement list
@@ -5470,7 +5685,7 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  */
 fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32) -> LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
-    let tail = match lower_block_value(ctx, body, ret_ty) { LowerBlockValue as x => x; error as err => return err }
+    let tail = match lower_block_value(ctx, body, ret_ty, ctx.ret_type) { LowerBlockValue as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     ctx_append(replayed, ret_inst(tail.vreg, line, col))
@@ -5622,7 +5837,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         func = bound.func; block_id = 0; env = bound.env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
-        flat_symbols = flat_symbols
+        flat_symbols = flat_symbols; ret_type = f.return_type
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return err }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return err }
@@ -5817,7 +6032,9 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
 /**
  * collect_struct_layouts — the declared-order, natural-alignment layout of every FIELD-SHAPED
  * type declaration in `prog`: a `struct` body's own fields, and a `class` body's effective
- * instance fields (A1-3, #382).
+ * instance fields (A1-3, #382), SEEDED with the built-in `error` type's own synthetic layout
+ * (`error_struct_layout` — `error` is never a `parser::TypeDecl` in `prog.items`, so it needs
+ * this ONE seed entry rather than a program-order slot, #382 degrau N2).
  *
  * A generic struct's type-parameter field annotations collapse to Ptr (ltype_of_typeexpr's
  * total fallback) — harmless, since no A1-3 fixture instantiates one; a declaration that is
@@ -5827,14 +6044,15 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
  * @param prog   the whole typed program, in program order
  * @param enums  the program's declared-enum table, collected FIRST because an enum-typed
  *               field's width decides the offsets of every field after it
- * @return      every registered layout, in the order its declaration appears
+ * @return      every registered layout (the seeded `error` layout first, then every
+ *              declaration's own, in the order it appears)
  * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
  *              an invariant the checker already enforces, so a miss here is an internal
  *              break, reported as a NAMED stop instead of a guessed layout (M.3)
  */
 fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo) -> []LStructLayout | error {
     let table = checker::type_table_of(prog)
-    mut out: []LStructLayout = teko::list::empty()
+    mut out: []LStructLayout = teko::list::push(teko::list::empty(), error_struct_layout())
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
@@ -6404,7 +6622,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         func = fn0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
-        flat_symbols = flat_symbols
+        flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
