@@ -397,6 +397,46 @@ A carga desmancha o conflito porque **as duas metades da regra vivem em ramos di
 **Marco** é um estado que vale medir, não um relógio: um degrau da escada fechado, uma carga
 drenada para o vagão, o gate local passando, ou o owner pedindo. Fora disso, `cargo/**`.
 
+### QUANDO empurrar o marco — a corrida em voo tem valor, e o vermelho é o que o zera (owner 2026-07-27)
+
+> *"E procure empurrar para o vagão apenas quando o CI estiver terminado ou haver sinal em
+> vermelho e sua carga estiver pronta, se nenhum sinal verde tiver sido emitido, aguarde o
+> término. Ou melhor, se nenhum sinal vermelho tiver sido emitido, aguarde o término."*
+
+Ter um marco pronto **não autoriza** o push por si só. Antes de empurrar no vagão, olhe a corrida
+em voo e decida por ela:
+
+| estado da corrida no HEAD do vagão | ação |
+|---|---|
+| **terminada** (qualquer conclusão) | **empurre** — não há corrida para cancelar, o push é limpo |
+| **em voo, já com pelo menos um check vermelho** | **empurre** se a carga estiver pronta |
+| **em voo, sem nenhum vermelho ainda** | **AGUARDE o término** |
+
+**O princípio, que é o que vale guardar:** o valor de uma corrida em voo é a informação que ela
+**ainda não entregou**. Cancelá-la antes do primeiro vermelho destrói uma medição inteira que
+estava a caminho — inclusive um verde possível, que é a informação mais cara de produzir neste
+projeto. Depois do primeiro vermelho, a corrida já entregou o que importava (a resposta é "não
+passa"), e o que resta dela é marginal: cancelar custa pouco e o push novo mede o estado novo, que
+é mais interessante que terminar de medir um estado já reprovado.
+
+Note que a auto-correção do owner inverte o teste: **não é "espere se ainda não houve verde", é
+"espere se ainda não houve vermelho"**. A diferença importa porque uma corrida longa emite verdes
+parciais o tempo todo (cada lane que fecha) — se o gatilho fosse a ausência de verde, quase nunca
+se esperaria. A ausência de VERMELHO é a condição certa: ela diz "esta corrida ainda pode terminar
+verde", e é exatamente isso que não se joga fora.
+
+**Como conferir, sem adivinhar:** `pull_request_read` com `method: get_check_runs` no PR do vagão.
+Procure `conclusion` em `failure`/`timed_out`/`cancelled` entre os já `completed`; se não houver
+nenhum e houver algum `in_progress`, a resposta é aguardar. **Não infira o estado do relógio nem
+do "já deve ter acabado"** — esta é a mesma armadilha que em 2026-07-26 fez o integrador anunciar
+que uma correção de gatilho não tinha funcionado quando a corrida existia e estava `in_progress`:
+ele mediu o proxy em vez do fato.
+
+**Enquanto aguarda, não pare** — continue produzindo nas cargas. A espera é do PUSH DO VAGÃO, não
+do trabalho. É a mesma regra da seção anterior vista de outro ângulo: se a carga é o destino
+default, aguardar o término da corrida não custa nada, porque não há nada represado esperando o
+vagão.
+
 **Operacional:** commit por fatia, push por fatia — **para a carga**. Uma carga que acumula
 trabalho no worktree para "reportar no fim" está guardando o trabalho no lugar mais frágil que
 existe. O briefing de carga deve exigir push, não só commit. E o integrador que está ele próprio

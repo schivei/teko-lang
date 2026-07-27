@@ -122,6 +122,49 @@ backend nativo comparando-o com um segundo backend independente. O que o substit
 self-host) e mais fraco em outra (não tem segunda opinião). Registrar isso é obrigação; fingir que
 a troca é neutra, não.
 
+## 5-bis. A DEPENDÊNCIA QUE O ROMANEIO NÃO TINHA — o gate passa pelo emissor
+
+Achado da carga `cargo/20-degrau-native` (2026-07-27), e é o item mais importante deste documento
+depois da seção 2, porque **contradiz a ordem que a seção 2 propõe**:
+
+> **O emissor de C não pode morrer antes de `run_native_gate` ter porto.** O `teko test .` inteiro
+> passa pelo emissor — `codegen::tk_emit_c_test` + `run_cc` emitem e compilam um `teko-tktest.c`.
+> Matar o emissor hoje deixa o projeto **sem gate nenhum**.
+
+Isso não é motivo para não matar; é a dependência que precisa estar escrita **antes** de alguém
+tentar. A ordem corrigida fica:
+
+1. portar o harness de teste para o caminho nativo (o gate para de precisar de `run_cc`);
+2. **então** deletar o emissor (as 10.727 linhas);
+3. **então** medir de novo os 17/10 e portar o que sobrar do runtime.
+
+Fazer (2) antes de (1) é ficar cego no meio da maior deleção da versão.
+
+**Resíduo declarado pela mesma carga, e é coerente com o ruling do linker:** `run_cc` **sobrevive**
+à excisão do seletor. São 4 chamadores, todos gates de teste/cobertura, o maior sendo
+`run_native_gate`. `build_cc_argv` também fica — é compartilhado com `link_object` (é como o objeto
+nativo vira binário) e é ele que põe `teko_rt.c` na linha de link. Ou seja: parte do que a seção 4
+conta como "script/função que nomeia C" é **link**, e o link fica por ruling explícito
+(*"Isso não inclui o linker"*). O denominador da seção 4 continua correto; o numerador de mortes
+é menor do que ele.
+
+## 5-ter. CUSTO DE BUILD REABERTO PELA EXCISÃO — decisão do owner pendente
+
+Também da mesma carga, e vai direto contra o alvo vinculante de **10 builds por host**:
+
+`regr_group_solo` chaveava em `TEKO_BACKEND=native` porque só as linhas que optavam pelo backend
+próprio não podiam ter dispatcher. **Sem seletor, toda linha é own → todo grupo vira SOLO.**
+Agrupar foi exatamente o que levou o regressor de **126 → 44 builds**; solo devolve esse custo.
+
+A forma de reconquistar o agrupamento é **fechar o honest-stop N2**
+`fat-pointer receiver match-expression not yet lowered` — que é o que `teko::env::var` exige —
+e **não** relaxar a regra do solo: regra relaxada emite dispatcher que o backend recusa, o que
+troca um custo de build por uma falha de compilação.
+
+Isto é decisão do owner porque o alvo de 10 builds é dele. As opções honestas são: fechar o N2
+nesta versão (trabalho de lowering), ou aceitar o custo de build da .31 e fechar o N2 na .32.
+Não há terceira que preserve o alvo.
+
 ## 6. Como este romaneio se verifica
 
 Os números acima são reprodutíveis com o repositório em mãos:
