@@ -144,3 +144,26 @@ inalcancavel e melhor resultado que corrigi-lo.
 `drop_subtree` existem. O unico singleton de processo e `tk_region_root()`, e e so a ele que
 push/pop se amarram. Threads bottom em `pthread` da libc. **Nao ha uma linha de C a escrever** para
 nenhum dos tres invariantes — ruling do dono de que nao se escreve mais C continua integro.
+
+**"CORROTINA" AQUI E ISOLAMENTO, NAO SUSPENSAO (dono, 2026-07-27):** *"não é suspensão (como
+async/await) é isolamento"*.
+
+Os dois modelos garantem coisas OPOSTAS, e por isso a palavra importa:
+
+  * **suspensao** (async/await): varias unidades dividem UMA thread, cedem em pontos de `await`, e
+    **compartilham tudo**. Isolamento nao e propriedade — e o que se abre mao em troca de troca de
+    contexto barata.
+  * **isolamento** (este modelo): cada unidade e thread propria com raiz de arena propria, "como se
+    fosse outro programa". Nada e compartilhado ate que uma estrutura EXPLICITA compartilhe (canais,
+    e canais vem depois).
+
+**RISCO DE NOME, e ele e a razao deste registro.** "Corrotina" carrega expectativa de suspensao:
+quem le importa `yield`, `await`, escalonamento cooperativo e memoria comum. Se a superficie se
+chamar corrotina e entregar isolamento, o NOME MENTE — a mesma classe de defeito que o projeto
+persegue em toda parte. A palavra pode ser usada na CONVERSA; nao pode vazar para a superficie.
+
+A superficie ja esta correta e isso foi verificado, nao presumido: o desenho drenado
+(`docs/design/concorrencia-adiantada-s8.md`) nomeia a camada de capacidade `teko::task` — `Task`,
+`spawn`, `join`, `fork_join`, `hardware_parallelism()`. Vocabulario de isolamento, zero `yield`,
+zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`) seguem
+RESERVADAS e nao congeladas, conforme MASTER_PLAN:262.
