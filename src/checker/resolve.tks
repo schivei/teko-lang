@@ -1580,15 +1580,32 @@ fn named_type_is_null(nt: parser::NamedType) -> bool {
  * `null | error` and `error | null` share one resolved type (and one mangled typedef). A null-free
  * member list is returned unchanged (behavior-preserving for the existing corpus).
  *
+ * Recognizes BOTH bare-null representations `from_is_bare_null` already treats as the same value
+ * (the concrete `Null` a `null | X` annotation resolves to, AND the `Optional{Void}` sentinel a
+ * bare `null` LITERAL adopts when typed with no expected-type context, e.g. a `match` arm whose
+ * body is exactly `null`) — collapsing either into the single canonical `Null{}` leading member.
+ * Without this, a `match` joining a bare `null` arm against a concrete case (`type_join`) left the
+ * literal's `Optional{Void}` sentinel as an ordinary VARIANT MEMBER instead of `Null`, so this
+ * function's old `Null`-only test never fired: the union normalizer's whole POINT (never emit an
+ * un-normalized null-bearing union) silently failed for exactly the case a bare `null` arm
+ * produces. Downstream, both the (now-retired) C backend's `cg_union_niche_member` and the own
+ * backend's `null_union_payload` classify a null-union SOLELY by a literal `Null` member, so the
+ * un-normalized union fell through their niche/tag detection entirely — the own backend's generic
+ * BY-NAME variant lowering then bound the union's non-null case at the WRONG index (no `null`
+ * pattern has a name to look up), and the write silently landed on the wrong payload slot instead
+ * of raising an honest stop (found chasing the `bulk.tkr` KNOWN-STOP pin, `bare_null_match_arm_
+ * optional.tks`: it went from a loud "nested bare-null optional" compile error to a SILENT
+ * miscompile — the exact regression a correct normalizer here prevents).
+ *
  * @param members  the resolved union members (source order)
- * @return         the members with any `Null` moved to (a single) index 0
+ * @return         the members with any bare-null member collapsed to a single leading `Null`
  */
 fn union_normalize_null(members: []Type) -> []Type {
     mut has_null = false
     mut i = 0
     loop {
         if i >= members.len { break }
-        match members[i] { Null => has_null = true; _ => { } }
+        if from_is_bare_null(members[i]) { has_null = true }
         i++
     }
     if !has_null { return members }
@@ -1596,7 +1613,7 @@ fn union_normalize_null(members: []Type) -> []Type {
     mut j = 0
     loop {
         if j >= members.len { break }
-        match members[j] { Null => { }; _ => out = teko::list::push(out, members[j]) }
+        if !from_is_bare_null(members[j]) { out = teko::list::push(out, members[j]) }
         j++
     }
     out

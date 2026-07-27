@@ -19,9 +19,14 @@ pub unsafe type Arena = struct {
 /**
  * A LOCAL COPY of `teko::c_types::c_string`'s tier-2 constructor (c-types-and-marshalling-0.3.1.md
  * §7.2, crumb C6) — see `staged/c_types/c_types.tks` for the canonical, fully-documented original.
+ * Takes the ARENA'S OWN `region` handle, not the `#must_free` `Arena` itself, by value — an
+ * `Arena` byval parameter would read as an ownership transfer to `#must_free`'s tracker while the
+ * caller ALSO keeps freeing its own binding, which is exactly the double-ownership the tracker
+ * correctly refuses (`cannot free 'a' — it is aliased`). Every OTHER reader of `a.region` in this
+ * corpus (`q023_arena_manual_ok`, `q196_mem_region_buf_roundtrip`) borrows the field the same way.
  */
-pub unsafe fn local_cstring_in_arena(a: Arena, s: str) -> ptr<byte> {
-    teko::mem::region_buf(a.region, s.len + 1, s)
+pub unsafe fn local_cstring_in_arena(region: uptr, s: str) -> ptr<byte> {
+    teko::mem::region_buf(region, s.len + 1, s)
 }
 
 /**
@@ -39,7 +44,7 @@ pub unsafe fn probe_outlives() -> i32 {
     mut cs_len: u64 = 0
     adopt {
         let payload = "outlives the block"
-        cs_ptr = local_cstring_in_arena(a, payload)
+        cs_ptr = local_cstring_in_arena(a.region, payload)
         cs_len = payload.len
     }
     let read_back = teko::mem::str_from_c(cs_ptr, cs_len + 1)
