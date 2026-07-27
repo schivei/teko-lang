@@ -6,7 +6,6 @@
 
 This folds the five milestone readiness assessments + the three crumb-level drain docs
 (`drain-265-168-native-gate.md`, `drain-onda3-subcluster-A.md`, `drain-fase3-stdlib-order.md`,
-`onda3-monomorphization-cluster.md`, `compile-time-architecture.md`) into ONE actionable topo-order.
 
 ---
 

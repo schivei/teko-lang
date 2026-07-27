@@ -175,7 +175,6 @@ o número não veio de suposição: veio de uma medição que **já estava no re
 
 ### 4.1 FATO(medido, já registrado) — o custo por host de um trabalho IDÊNTICO
 
-`docs/design/compile-time-architecture.md` §1.1 registra a corrida `28763999356`, em que
 o job `build-test` rodou **os mesmos passos em todos os cinco hosts**:
 
 ```
