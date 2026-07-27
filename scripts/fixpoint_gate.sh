@@ -9,17 +9,36 @@
 #
 # WHAT IT PROVES, and why it is NOT the ladder wearing a different hat. The ladder chained
 # generations over DIFFERENT sources (distinct SHAs) to cross a capability gap. This chains
-# generations over the SAME source to prove the compiler reproduces itself:
+# generations over the SAME source to prove the compiler reproduces itself.
 #
-#     gen1  = the compiler this lane just produced      (built by the bootstrap C — given to us)
-#     gen2  = gen1(source)                              (first self-build)
-#     gen3  = gen2(source)                              (second self-build)
-#     ASSERT gen2 == gen3, byte for byte
+# THERE ARE TWO FIXPOINTS, AND WHICH ONE IS CORRECT DEPENDS ON WHERE gen1 CAME FROM. The rule is
+# one line: compare the first two generations that share a CODE GENERATOR. Owner ruling
+# 2026-07-27: *"o fixpoint irá migrar de gen2 === gen3 para gen1 === gen2, quando tivermos o
+# último teko.c"*.
 #
-# gen1 is deliberately NOT compared: it was produced by a DIFFERENT compiler (today the versioned
-# `bootstrap/teko.c`, harvested from wagon 15), so `gen1 != gen2` is expected and healthy — it is
-# the bootstrap generation, not a fixpoint candidate. The fixpoint begins where the compiler starts
-# feeding on its own output.
+#   BOOTSTRAP MODE — `bootstrap/teko.c` is present (today)
+#     gen1 = cc(bootstrap/teko.c)     <- built by the C COMPILER, not by the native backend
+#     gen2 = gen1(source)             <- native backend
+#     gen3 = gen2(source)             <- native backend
+#     ASSERT gen2 == gen3
+#   gen1 is deliberately NOT compared here, and not because it is untrustworthy: it came out of
+#   gcc/clang while gen2 came out of Teko's own backend. Two different code generators emitting
+#   the same program cannot agree byte for byte — the same reason one `out/teko.c` compiled with
+#   `cc` and with `musl-gcc` yields two different assets. The fixpoint begins where the compiler
+#   starts feeding on its own output.
+#
+#   NATIVE MODE — no `bootstrap/teko.c` (the end state)
+#     gen1 = seed(source)             <- the PUBLISHED release binary, native backend
+#     gen2 = gen1(source)             <- native backend
+#     ASSERT gen1 == gen2
+#   With the C gone from the chain entirely — none emitted, none consumed — gen1 already shares
+#   its generator with gen2, so the third generation buys nothing and one build per lane is saved.
+#
+# THE MODE IS NOT CONFIGURED, IT IS OBSERVED. The discriminator is the presence of the very file
+# whose existence means "the seed cannot build this tree" — `bootstrap/teko.c`, the same condition
+# `build_with_seed_fallback.sh`'s rung -1 keys off. So the day that file is deleted (owner:
+# *"podemos apagar o teko.c e voltar a construção normal pegando a última versão publicada"*) this
+# gate migrates by itself, in the same commit, with nobody remembering to flip it.
 #
 # WHY IT DID NOT EXIST UNTIL NOW, stated plainly because the gap is the interesting part: the
 # fixpoint is cited as a standing guardrail in README.md, TEKO_MASTER_PLAN.md, TEKO_HISTORY.md,
@@ -48,6 +67,9 @@
 #                          Same reason build_with_seed_fallback.sh pins it: a compiler resolves
 #                          teko_rt.{h,c} relative to ITS OWN argv[0], so a generation living
 #                          outside the tree would otherwise compile against the wrong runtime.
+#   TEKO_FIXPOINT_MODE     `bootstrap` | `native` — force the mode instead of observing it. Only
+#                          for testing the gate itself; CI must let it observe, or the automatic
+#                          migration above stops being automatic.
 #   TEKO_FIXPOINT_SOFT     set to 1 to REPORT the verdict and exit 0 anyway. Intended for the
 #                          window in which the native backend cannot yet build the compiler at all
 #                          (`fat-pointer receiver call not yet lowered (N2)`), where a hard failure
@@ -117,6 +139,19 @@ take_gen() {
     rm -rf "$W/out"
 }
 
+# ── observe the mode ──────────────────────────────────────────────────────────────────────────
+BOOTSTRAP_C="${TEKO_BOOTSTRAP_C:-$PROJ/bootstrap/teko.c}"
+if [ -n "${TEKO_FIXPOINT_MODE:-}" ]; then
+    MODE="$TEKO_FIXPOINT_MODE"
+    log "mode = $MODE (FORCED via TEKO_FIXPOINT_MODE — CI must not do this)"
+elif [ -f "$BOOTSTRAP_C" ]; then
+    MODE=bootstrap
+    log "mode = bootstrap ($BOOTSTRAP_C is present, so gen1 came out of cc, not the native backend)"
+else
+    MODE=native
+    log "mode = native (no committed C — gen1 already shares its generator with gen2)"
+fi
+
 log "gen1 = $GEN1"
 log "source = $PROJ"
 "$GEN1" --version >&2 2>&1 || true
@@ -130,41 +165,54 @@ fi
 take_gen gen2 || verdict_fail "the gen2 build reported success but left no binary at $W/out"
 log "gen2 ready ($(wc -c < "$W/gen2") bytes)"
 
-log "building gen3 = gen2(source) ..."
-if ! build_gen "$W/gen2" "$W/gen3.log"; then
-    log "----- gen3 build FAILED — gen2 cannot rebuild its own source -----"
-    sed 's/^/fixpoint:   | /' "$W/gen3.log" >&2 || true
-    verdict_fail "gen2 built, but cannot rebuild the source — the chain breaks at the second generation"
+# LEFT and RIGHT are the two generations the mode says share a generator. Naming them once keeps
+# the assertions below identical in both modes — the mode chooses the OPERANDS, never the rule.
+if [ "$MODE" = "native" ]; then
+    cp "$GEN1" "$W/gen1"
+    LEFT=gen1
+    RIGHT=gen2
+    # gen1's own emitted-C is unknown to us here (it was built by the lane, not by this script),
+    # so the zero-C assertion in native mode rests on gen2 — the generation this script watched.
+    printf '%s' "$(cat "$W/gen2.emitted-c")" > "$W/gen1.emitted-c"
+else
+    log "building gen3 = gen2(source) ..."
+    if ! build_gen "$W/gen2" "$W/gen3.log"; then
+        log "----- gen3 build FAILED — gen2 cannot rebuild its own source -----"
+        sed 's/^/fixpoint:   | /' "$W/gen3.log" >&2 || true
+        verdict_fail "gen2 built, but cannot rebuild the source — the chain breaks at the second generation"
+    fi
+    take_gen gen3 || verdict_fail "the gen3 build reported success but left no binary at $W/out"
+    log "gen3 ready ($(wc -c < "$W/gen3") bytes)"
+    LEFT=gen2
+    RIGHT=gen3
 fi
-take_gen gen3 || verdict_fail "the gen3 build reported success but left no binary at $W/out"
-log "gen3 ready ($(wc -c < "$W/gen3") bytes)"
 
 # ── the two assertions, reported SEPARATELY so a partial arrival is legible ────────────────────
 FIX_OK=1
 
-if cmp -s "$W/gen2" "$W/gen3"; then
-    log "byte-identity: gen2 == gen3  ✓"
+if cmp -s "$W/$LEFT" "$W/$RIGHT"; then
+    log "byte-identity: $LEFT == $RIGHT  ✓"
 else
     FIX_OK=0
-    log "byte-identity: gen2 != gen3  ✗"
-    log "  gen2 $(wc -c < "$W/gen2") bytes, gen3 $(wc -c < "$W/gen3") bytes"
-    cmp "$W/gen2" "$W/gen3" >&2 2>&1 || true
+    log "byte-identity: $LEFT != $RIGHT  ✗"
+    log "  $LEFT $(wc -c < "$W/$LEFT") bytes, $RIGHT $(wc -c < "$W/$RIGHT") bytes"
+    cmp "$W/$LEFT" "$W/$RIGHT" >&2 2>&1 || true
 fi
 
-C2="$(cat "$W/gen2.emitted-c" 2>/dev/null || echo '?')"
-C3="$(cat "$W/gen3.emitted-c" 2>/dev/null || echo '?')"
-if [ "$C2" = "0" ] && [ "$C3" = "0" ]; then
+CL="$(cat "$W/$LEFT.emitted-c" 2>/dev/null || echo '?')"
+CR="$(cat "$W/$RIGHT.emitted-c" 2>/dev/null || echo '?')"
+if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
     log "zero-C: neither generation emitted a teko.c  ✓"
 else
     # NOT a failure of the byte check, and deliberately not folded into it. Emitting C is the
     # EXPECTED state until the native backend can build the compiler; what this line does is make
     # the outstanding half visible on every run instead of only when someone reads a build log.
-    log "zero-C: gen2 emitted-c=$C2, gen3 emitted-c=$C3  ✗ (the native backend does not yet build the compiler)"
+    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  ✗ (the native backend does not yet build the compiler)"
     FIX_OK=0
 fi
 
 [ "$FIX_OK" = "1" ] || verdict_fail "the fixpoint has not arrived — see the two lines above for which half is outstanding"
 
-log "VERDICT: PASSED — gen2 == gen3 byte for byte, and neither emitted C"
+log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte, and neither emitted C"
 rm -rf "$W"
 exit 0

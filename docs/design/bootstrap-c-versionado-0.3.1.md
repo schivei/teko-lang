@@ -57,9 +57,36 @@ degrau N2 são **o mesmo evento visto de dois lados**. Hoje o C versionado gera 
 compilador dele emite C; no dia em que o nativo construir o compilador, não gera, e o ciclo termina
 sozinho, sem ninguém precisar declarar que terminou.
 
-`scripts/no_emitted_c.sh` já existe (escrito para a ordem de zero-C de 26/07) e **nenhum workflow o
-chama**. É literalmente o gate que detecta esse evento; ligá-lo é o passo que fecha o ciclo. Ele
-exclui `.c` rastreados pelo git por construção, então `bootstrap/teko.c` não conflita com ele.
+O gate que detecta esse evento é o `scripts/fixpoint_gate.sh`, que roda em cada sublane logo após a
+compilação. O zero-C dele é escopado a **gen2/gen3 apenas** — ruling do dono 2026-07-27: *"ele tem
+que saber quem está testando, logo, ele não pode nem deve avaliar a escada e nem a gen1, apenas
+gen2 e 3"*. É por isso que o `scripts/no_emitted_c.sh` NÃO foi ligado: ele varre a árvore inteira e
+não sabe quem está testando, então acusaria a escada e a gen1 — que emitem C por construção e
+devem emitir.
+
+## O FIXPOINT MIGRA SOZINHO QUANDO ESTE ARQUIVO SAIR
+
+Ruling do dono 2026-07-27: *"o fixpoint irá migrar de gen2 === gen3 para gen1 === gen2, quando
+tivermos o último teko.c"*. A regra por trás cabe numa linha: **compare as duas primeiras gerações
+que compartilham GERADOR DE CÓDIGO**.
+
+    hoje (bootstrap/teko.c presente)      gen1 = cc(teko.c)   <- gerador: gcc/clang
+                                          gen2 = gen1(fonte)  <- gerador: backend nativo
+                                          gen3 = gen2(fonte)  <- gerador: backend nativo
+                                          compara gen2 == gen3
+
+    fim (bootstrap/teko.c apagado)        gen1 = seed(fonte)  <- gerador: backend nativo
+                                          gen2 = gen1(fonte)  <- gerador: backend nativo
+                                          compara gen1 == gen2
+
+Hoje a gen1 sai do `cc` e a gen2 do backend próprio: dois geradores distintos emitindo o mesmo
+programa não batem byte a byte — a mesma razão pela qual um `out/teko.c` compilado com `cc` e com
+`musl-gcc` dá dois assets diferentes. No fim não há C nenhum na cadeia — nem emitido, nem consumido
+— então a gen1 já compartilha gerador com a gen2 e a terceira geração não compra nada.
+
+**O modo não é configurado, é OBSERVADO**: o discriminador é a presença deste próprio arquivo, a
+mesma condição do rung -1. No dia em que ele for apagado, o fixpoint migra no mesmo commit, sem
+ninguém precisar lembrar de virar uma chave.
 
 ## Como atualizar
 
