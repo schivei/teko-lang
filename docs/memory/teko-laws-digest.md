@@ -281,3 +281,41 @@ que sempre cabem.
 
 As duas leis nao brigam: medir continua OBRIGATORIO e carga nao medida nao drena. O que muda e so
 a ordem, e a ordem e o que separa "carga salva mas sem veredito" de "carga inexistente".
+
+## A DIVIDA DE CAST-WIDTH NAO E PAGAVEL: SEED E GEN1 EXIGEM GRAFIAS OPOSTAS (2026-07-27)
+
+Medido, com A/B direto, depois de 271k tokens gastos para provar que o caminho NAO existe — e
+esse resultado negativo vale mais que a maioria dos positivos do dia.
+
+O seed 0.3.0.30 recusa aritmetica de largura mista com `B.22 (no promotion)`, e por isso nao
+constroi o tip: e o que engata a escada e custa 392s de 780s por job. A correcao obvia e por o
+cast explicito. Ela funciona — o checker do seed passou a atravessar a arvore INTEIRA pela
+primeira vez (5929/5929, contra parar no item 784).
+
+**E o gen1 rejeita exatamente os mesmos casts**, um a um:
+
+    checker 7928/7928 ✗ encode_x86_64.tks:451: redundant cast: this `to i64` is a provable
+                        no-op (cast-width-hygiene D1) — delete it
+
+Porque o gen1 tem a W-RULE (`widen_int_binop`, typer.tks), que auto-alarga a largura mista que o
+seed recusa. Com ela, o cast vira no-op PROVAVEL, e o sweep D1 — que veio no MESMO vagao que a
+W-RULE — existe precisamente para recusar isso.
+
+**NAO HA GRAFIA QUE SATISFACA OS DOIS.** O seed exige o cast; o gen1 o proibe. Nao e questao de
+achar a forma certa: as duas geracoes tem regras contraditorias sobre a mesma linha. O proprio
+`build_with_seed_fallback.sh` ja dizia isso e ninguem tinha ligado os pontos: *"the cast-width
+wagon ADDED the W-RULE and DELETED the now-redundant manual casts, so its own head requires a
+W-RULE-capable compiler while an older generation dies on it with B.22"*.
+
+**E POR ISSO QUE A ESCADA EXISTE.** Nao e desleixo nem pino velho: e a unica ponte entre duas
+geracoes cujas regras se excluem. E e por isso que a saida do dono e a UNICA limpa — versionar o
+`teko.c` do primeiro degrau. Esse C carrega a W-RULE COMPILADA dentro dele, entao o compilador que
+sai dali aceita o corpus na grafia D1 (sem casts), e a contradicao deixa de existir em vez de ser
+contornada.
+
+**A LEI GERAL, que vale alem deste caso:** quando o seed e o tip discordam sobre a FORMA de uma
+linha (nao sobre uma capacidade que falta), nao existe patch no corpus que sirva aos dois. A ponte
+tem de ser um COMPILADOR — binario ou C versionado — nunca uma reescrita do fonte para agradar o
+passado. Reescrever o corpus para caber num seed que sera descartado e a cauda balancando o
+cachorro, e este registro existe para a proxima pessoa nao gastar os mesmos 271k tokens
+redescobrindo.
