@@ -1745,3 +1745,112 @@ fn cgt_inline_attr_eligible_classes() {
     let ptrniche: checker::Type = cgt_ptr_null()
     teko::assert::is_true(match inline_attr_eligible(p, ptrniche) { error => true; null => false })
 }
+
+/**
+ * One (namespace, name) pair the C and native manglers must spell identically.
+ */
+type CgtManglePair = struct {
+    /** The declaring namespace, "" for a lifted lambda. */
+    ns: str
+    /** The bare function name. */
+    name: str
+}
+
+/**
+ * The pairs `cgt_mangle_parity_c_and_native` compares: a deep namespace, a bare-root namespace,
+ * the empty namespace, and a name that collides with a C keyword (so the escape is compared too).
+ *
+ * @return  the parity cases, in a fixed order
+ */
+fn cgt_mangle_parity_pairs() -> []CgtManglePair {
+    mut xs: []CgtManglePair = teko::list::empty()
+    xs = teko::list::push(xs, CgtManglePair { ns = "teko::checker"; name = "type_eq" })
+    xs = teko::list::push(xs, CgtManglePair { ns = "demo"; name = "add" })
+    xs = teko::list::push(xs, CgtManglePair { ns = ""; name = "lifted" })
+    xs = teko::list::push(xs, CgtManglePair { ns = "teko::math"; name = "div" })
+    xs
+}
+
+/**
+ * Assert the C backend's `cb_fn_name` and the native backend's `teko::lir::mangle_fn_symbol` emit
+ * the SAME symbol for the same (namespace, name), and that each one carries the `teko_` user
+ * prefix — the invariant that keeps a program's C-emitted and natively-emitted symbols
+ * interchangeable, and keeps every user symbol out of the runtime's `tk_` family.
+ */
+#test
+fn cgt_mangle_parity_c_and_native() {
+    let pairs = cgt_mangle_parity_pairs()
+    mut i: u64 = 0
+    loop {
+        if i >= pairs.len { break }
+        let c_side = str(cb_fn_name(cgt_empty(), pairs[i].ns, pairs[i].name))
+        let native_side = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name)
+        teko::assert::is_true(c_side == native_side)
+        teko::assert::is_true(teko::str::slice_to(c_side, TEKO_USER_PREFIX.len) == TEKO_USER_PREFIX)
+        i++
+    }
+}
+
+/**
+ * Assert the mangle spells the whole symbol, not just its prefix: a namespaced function keeps its
+ * `::`-to-`__` namespace mangle behind the user prefix, and an un-namespaced (lifted) one is the
+ * prefix plus the bare name.
+ */
+#test
+fn cgt_mangle_spells_prefix_namespace_and_name() {
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "teko::checker", "type_eq")) == "teko_teko__checker__type_eq")
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "", "lifted")) == "teko_lifted")
+}
+
+/**
+ * A call node with a resolved namespace and a bare callee name, for the origin-namespace tests.
+ *
+ * @param ns    the resolved namespace ("" when the checker resolved no declaration)
+ * @param name  the callee's bare name
+ * @return      the call node
+ */
+fn cgt_call_ns(ns: str, name: str) -> checker::TCall {
+    checker::TCall {
+        callee = cgt_path1(name); args = teko::list::empty(); call_ns = ns
+        is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0
+    }
+}
+
+/**
+ * A program declaring `probe::mine::arena_push` (a real body) and `probe::sys::getpid` (an
+ * `extern fn`) — the two shapes `cg_call_is_user_declared` has to tell apart.
+ *
+ * @return  the indexed emitter program
+ */
+fn cgt_prog_with_colliding_names() -> CgProg {
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cgt_fn0("arena_push", "probe::mine", checker::Void { }, cgt_empty_stmts()))
+    let ext = cgt_fn0("getpid", "probe::sys", checker::Void { }, cgt_empty_stmts())
+    items = teko::list::push(items, checker::TFunction {
+        name = ext.name; type_params = ext.type_params; type_constraints = ext.type_constraints
+        namespace = ext.namespace; params = ext.params; return_type = ext.return_type; body = ext.body
+        vis = ext.vis; has_doc = ext.has_doc; doc = ext.doc; file = ext.file; line = ext.line; col = ext.col
+        is_test = ext.is_test; is_extern = true; c_symbol = "getpid"; from_lib = "c"
+    })
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * Assert a call the checker RESOLVED to a DECLARED body is never mistaken for a builtin, even when
+ * its bare name IS one: `cg_call_is_user_declared` answers `true` for the user's `arena_push` (user
+ * code owns the symbol) and `false` for the unresolved builtin call. This is the predicate that
+ * stopped the emitter from silently swapping a user body for the runtime's `tk_arena_push`.
+ *
+ * The two callees that carry a namespace and are still NOT declarations answer `false` as well: an
+ * `extern fn` (which must reach its foreign symbol and the host-FFI lifters) and a `teko::mem`
+ * builtin (whose `call_ns` the checker stamps synthetically, with no declaration behind it).
+ */
+#test
+fn cgt_user_declared_beats_a_bare_builtin_name() {
+    let prog = cgt_prog_with_colliding_names()
+    teko::assert::is_true(cg_call_is_user_declared(prog, cgt_call_ns("probe::mine", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("probe::sys", "getpid")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("teko::mem", "free")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "println")))
+}

@@ -365,21 +365,69 @@ fn cb_tysym(buf: []byte, name: str) -> []byte {
     }
     out
 }
+
+/**
+ * The prefix EVERY LINKER SYMBOL that user code declares is emitted under (owner ruling
+ * 2026-07-27): user code is `teko_*`, the runtime's builtins are `tk_*`, and the two families are
+ * therefore disjoint by construction — no user function, in any namespace and under any name, can
+ * be spelled the same as a runtime symbol. `src/lir/lower.tks` carries the identical constant for
+ * the native backend, and `cgt_mangle_parity_c_and_native` proves the two agree byte for byte.
+ *
+ * Two surfaces deliberately do NOT carry it:
+ *   * an `extern fn` — it exists to name the LITERAL foreign symbol (`getpid`, `aligned_alloc`), so
+ *     both backends resolve the extern table BEFORE reaching a mangler;
+ *   * the reverse-FFI `abi = "c"` export — its C symbol is a published contract with the consuming
+ *     C program (`cg_c_export_symbol`), already project-root-prefixed by construction;
+ *   * `main`, the C entry point, which is emitted literally.
+ * Generated TYPE names (`tk_t_`, `tk_opt_`, `tk_slice_`, …) are out of scope too: a C typedef has no
+ * linkage, so a clash there is a `cc` error rather than a silent substitution.
+ */
+const TEKO_USER_PREFIX: str = "teko_"
+
+/**
+ * The C typedef name a user TYPE is emitted under: `tk_t_` + the mangled namespace + `__` + the
+ * mangled bare name. The canonical NAME may itself read `ns::Name`, which `cb_tysym` flattens to
+ * `ns__Name` (#109 W3).
+ *
+ * This one does NOT carry `TEKO_USER_PREFIX`, and deliberately so. The prefix ruling governs the
+ * LINKER SYMBOL space, where a user function silently became a runtime function; a C typedef has no
+ * linkage at all, lives only inside the generated translation unit, and shares that space with the
+ * rest of the generated type family (`tk_opt_`, `tk_slice_`, `tk_u_`, `tk_tag_`, `tk_base_`,
+ * `tk_vt_`). A name clash there is a `cc` redefinition error — loud, never a silent substitution.
+ *
+ * @param buf        the emit buffer
+ * @param namespace  the type's declaring namespace ("" for a root-less type)
+ * @param name       the type's canonical name
+ * @return           the buffer with the typedef name appended
+ */
 fn mangle_type_name(buf: []byte, namespace: str, name: str) -> []byte {
     mut out = cb(buf, "tk_t_")
     if namespace.len > 0 {
         out = cb_tysym(out, namespace)
         out = cb(out, "__")
     }
-    cb_tysym(out, name)   // (#109 W3) the canonical NAME may itself be "ns::Name" → "ns__Name"
+    cb_tysym(out, name)
 }
 
-// (#49) a top-level user FUNCTION's C name = its namespace mangled (each `:` -> `_`) + `__` + the
-// bare (keyword-escaped) name, so same-named functions across namespaces (and libc clashes like
-// `div`) never collide. An empty namespace (a local/builtin) -> the bare name. Def and call agree by
-// using this for BOTH the definition/prototype and the resolved call (TCall.call_ns). (C: cb_fn_name.)
+/**
+ * The C symbol a top-level user FUNCTION is emitted under: `TEKO_USER_PREFIX` + the namespace with
+ * every `:` rewritten to `_` + `__` + the bare (keyword-escaped) name.
+ *
+ * The prefix is what makes user symbols and runtime builtins DISJOINT BY CONSTRUCTION (owner ruling
+ * 2026-07-27): everything user code declares is `teko_*`, everything the runtime provides is `tk_*`,
+ * so no user function — whatever it is named, in whatever namespace — can ever be spelled the same
+ * as a builtin. The namespace mangle on top of it keeps same-named functions across namespaces (and
+ * libc clashes like `div`) apart. An empty namespace (a lifted lambda) yields just the prefix + the
+ * bare name. Definition, prototype and resolved call all go through here, so they agree by
+ * construction; `main` is the one deliberate exception and is emitted literally, never through this.
+ *
+ * @param buf   the emit buffer
+ * @param ns    the function's declaring namespace ("" for a lifted lambda)
+ * @param name  the function's bare name
+ * @return      the buffer with the C symbol appended
+ */
 fn cb_fn_name(buf: []byte, ns: str, name: str) -> []byte {
-    mut out = buf
+    mut out = cb(buf, TEKO_USER_PREFIX)
     if ns.len != 0 {
         mut i = 0
         loop {
@@ -3304,9 +3352,68 @@ fn emit_iface_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: checke
     cb(out, "); })")
 }
 
-// emit_call — a TCall. The callee path -> a C identifier joined by "__" (single-segment
-// in M0). Non-shadowable built-ins `print`/`println` (bare, or under `teko`) map to
-// tk_print/tk_println. (C: TK_TEXPR_CALL branch.)
+/**
+ * The last path segment of a call's callee — the BARE name every builtin table is keyed by.
+ *
+ * @param c  the checked call
+ * @return   the bare name, or "" for the (internal) empty path
+ */
+fn cg_call_bare_name(c: checker::TCall) -> str {
+    let segs = c.callee.segments
+    if segs.len == 0 { return "" }
+    segs[segs.len - 1].name
+}
+
+/**
+ * Did this call resolve to a Teko DECLARATION written in the program, as opposed to an injected
+ * builtin? The answer keys on the ORIGIN NAMESPACE, never on the bare name: the checker fills
+ * `TCall.call_ns` only when `lookup_call` found a real declaration, and leaves it empty when the
+ * name fell through to `builtin_fn`. So a non-empty `call_ns` IS the proof that user code — not the
+ * runtime — owns the symbol, and every bare-name builtin table below must stand down.
+ *
+ * Two kinds of callee carry a namespace and are still NOT a user declaration, so the emitted
+ * program is asked for the body rather than trusting `call_ns` alone:
+ *   * an `extern fn` — it exists precisely to name a foreign C symbol, and the host-FFI lifters
+ *     (`emit_host_ffi`) are the machinery that adapts the runtime's fixed-ABI result into the
+ *     program's own result type;
+ *   * `teko::mem::free` / `region_new` / `region_alloc` — builtins the checker stamps with a
+ *     SYNTHETIC `call_ns` of `"teko::mem"` (its `#must_free` dataflow keys on that exact string),
+ *     even though no such function is declared anywhere.
+ * Every real declaration IS in `prog.items`: a method and a stamped generic instance are hoisted to
+ * top-level `TFunction`s under their own namespace, which is the very reason `cb_fn_name` can name
+ * them. So "found, with a body" is the whole test.
+ *
+ * @param prog  codegen's threaded program view
+ * @param c     the checked call
+ * @return      true when user code declared the callee, so no builtin interception may fire
+ */
+fn cg_call_is_user_declared(prog: CgProg, c: checker::TCall) -> bool {
+    if c.call_ns.len == 0 { return false }
+    match cg_find_function(prog, c.call_ns, cg_call_bare_name(c)) {
+        checker::TFunction as f => !f.is_extern
+        error => false
+    }
+}
+
+/**
+ * Emit a `TCall`: the callee path becomes a C identifier joined by `__` and prefixed `teko_`
+ * (`cb_fn_name`), an injected builtin becomes its `tk_*` runtime twin, and an `extern fn` becomes
+ * its declared foreign symbol verbatim. The two families are DISJOINT BY CONSTRUCTION — user code
+ * is `teko_*`, the runtime is `tk_*` — and the choice between them is made by
+ * `cg_call_is_user_declared` (the origin namespace), never by the bare name.
+ *
+ * @param buf       the emit buffer
+ * @param prog      codegen's threaded program view
+ * @param ret_type  the type the call's result lands in (drives arg wrapping)
+ * @param e         the whole call expression
+ * @param c         the checked call
+ * @param escaping  the names escaping the enclosing frame
+ * @param regions   the enclosing region frames
+ * @param fn_body   the enclosing function's statements
+ * @param dctx      the enclosing defer context
+ * @return          the buffer with the call appended
+ * @throws          when a part of the call has no lowering (an unknown builtin, a bad signature)
+ */
 fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     // (W10b.D3) a DYNAMIC contract-method call dispatches through the receiver's vtable —
     // FIRST, before any builtin name-sniffing below could collide with a method name.
@@ -3321,6 +3428,7 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
     // so the local always wins over the namespace fn); codegen just has to respect that verdict.
     if c.is_closure_call { return emit_closure_call(buf, prog, ret_type, c, escaping, regions, fn_body, dctx) }
     let p = c.callee
+    let user_declared = cg_call_is_user_declared(prog, c)
     if p.segments.len == 1 && checker::is_di_materializer_call(p.segments[0].name) {
         mut dout = cb(buf, p.segments[0].name)
         dout = cb(dout, "(")
@@ -3337,9 +3445,9 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
     // routes "@fo" → tk_slice_push_fo, which parks the superseded buffer on the free-list.
     // Typing/semantics are teko::list::push's; only the allocation strategy differs. (C twin: the
     // same shared push emitter, selected via g_cg_push_frame = "@fo".)
-    let is_pushfo = p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" &&
+    let is_pushfo = !user_declared && p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" &&
     p.segments[p.segments.len - 1].name == "push_fo"
-    if is_pushfo || (p.segments.len >= 2 && p.segments[0].name == "teko" &&
+    if is_pushfo || (!user_declared && p.segments.len >= 2 && p.segments[0].name == "teko" &&
         p.segments[p.segments.len - 2].name == "list") {
         let llast = p.segments[p.segments.len - 1].name
         if llast == "empty" {
@@ -3354,20 +3462,20 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             return emit_list_with_cap(buf, prog, e, c, escaping, regions, fn_body, dctx, "")
         }
     }
-    // teko::mem::free(x) — manual dealloc (the checker proved x is a mutable heap variable).
-    if p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" && p.segments[p.segments.len - 1].name == "free" {
+    let mem_op = !user_declared && p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem"
+    if mem_op && p.segments[p.segments.len - 1].name == "free" {
         return emit_mem_free(buf, prog, c, escaping, regions, fn_body, dctx)
     }
-    if p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" && p.segments[p.segments.len - 1].name == "region_new" {
+    if mem_op && p.segments[p.segments.len - 1].name == "region_new" {
         return cb(buf, "(uintptr_t)tk_region_new(tk_region_root())")
     }
-    if p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem" && p.segments[p.segments.len - 1].name == "region_alloc" {
+    if mem_op && p.segments[p.segments.len - 1].name == "region_alloc" {
         return emit_region_alloc(buf, prog, e, c, escaping, regions, fn_body, dctx)
     }
     // E2 (native): err_loc/err_typed adorn an error VALUE with diagnostic position/types.
     // `error` is now the full tk_error struct (E2-NATIVE), so these call tk_error_loc /
     // tk_error_types (teko_rt.h) which return a modified copy — native parity with the VM.
-    if p.segments.len >= 1 {
+    if p.segments.len >= 1 && !user_declared {
         let pe = p.segments[p.segments.len - 1].name
         if pe == "err_loc" {
             // tk_error_loc(e, line, col) — returns a copy with line/col set.
@@ -3446,13 +3554,9 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             return o
         }
     }
-    // Host-FFI bottoms with a VARIANT/OPTIONAL or argv return: lifted from a fixed-ABI runtime
-    // result into the program's result type (the runtime can't name the generated sum/optional
-    // structs — teko_rt.h). Intercepted BY NAME (these names are not user-shadowed: the only
-    // definitions are pure FFI forwarders), ahead of the plain map. (C: emit_host_ffi dispatch.)
     if p.segments.len >= 1 {
         let l = p.segments[p.segments.len - 1].name
-        let addr2 = (p.segments.len == 1) || (p.segments[0].name == "teko")
+        let addr2 = !user_declared && ((p.segments.len == 1) || (p.segments[0].name == "teko"))
         if addr2 {
             if l == "read_file" { return emit_host_ffi(buf, prog, e, c, "sres", "tk_rt_read_file", escaping, regions, fn_body, dctx) }
             if l == "var" { return emit_host_ffi(buf, prog, e, c, "sres", "tk_rt_getenv", escaping, regions, fn_body, dctx) }
@@ -3473,12 +3577,11 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
             if l == "buf_ptr" { return emit_buf_ptr(buf, prog, c, escaping, regions, fn_body, dctx) }
         }
     }
-    // Non-shadowable built-ins: `print`/`println`, either bare or under `teko`.
     mut builtin = ""
     mut has_builtin = false
     if p.segments.len >= 1 {
         let last = p.segments[p.segments.len - 1].name
-        let addressable = (p.segments.len == 1) || (p.segments[0].name == "teko")
+        let addressable = !user_declared && ((p.segments.len == 1) || (p.segments[0].name == "teko"))
         let assert_sym = if c.call_ns.len == 0 { cg_assert_c_symbol(p) } else { "" }
         if assert_sym.len != 0 { builtin = assert_sym; has_builtin = true }
         else if addressable {
@@ -10177,9 +10280,10 @@ fn cg_emit_lambda_decls(buf: []byte, prog: CgProg, lams: []checker::TLambda, pro
             }
             out = cb(out, teko::str::concat("} __tkenv_", ids, ";\n"))
         }
-        // lifted fn signature: R __tkclo_<id>(void *envp, params)
         out = match emit_type(out, prog, lam.ret) { []byte as o => o; error as e => return e }
-        out = cb(out, teko::str::concat(" __tkclo_", ids, "(void *envp"))
+        out = cb(out, " ")
+        out = cb_fn_name(out, "", lam_fn_name(lam.lift_id))
+        out = cb(out, "(void *envp")
         mut pi = 0
         loop {
             if pi >= lam.params.len { break }

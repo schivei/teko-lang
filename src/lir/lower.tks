@@ -367,13 +367,30 @@ fn prim_width_of(k: checker::PrimKind) -> u32 {
     1
 }
 
-/** mangle_fn_symbol — the LIR symbol for a Teko-Teko call target: the namespace with each
-    `:` replaced by `_`, then `__`, then the C-keyword-escaped bare name — byte-identical to
-    the C backend's cb_fn_name so the native and C paths name the same symbol. An empty
-    namespace (a local/builtin) yields the bare (escaped) name. */
+/**
+ * The prefix EVERY symbol that user code declares is emitted under (owner ruling 2026-07-27):
+ * user code is `teko_*`, the runtime's builtins are `tk_*`, so the two families are disjoint by
+ * construction. `src/codegen/codegen.tks` carries the identical constant for the C backend, and
+ * `cgt_mangle_parity_c_and_native` proves the two manglers agree byte for byte.
+ */
+const TEKO_USER_PREFIX: str = "teko_"
+
+/**
+ * The LIR symbol a Teko-Teko call target is emitted under: `TEKO_USER_PREFIX`, then the namespace
+ * with each `:` replaced by `_`, then `__`, then the C-keyword-escaped bare name — byte-identical
+ * to the C backend's `cb_fn_name`, so the native and C paths name the same symbol. An empty
+ * namespace (a lifted lambda) yields just the prefix and the escaped bare name.
+ *
+ * `main` is the one symbol deliberately kept un-prefixed, and it never comes through here:
+ * `lower_virtual_main` builds it with `new_func("main", …)` directly.
+ *
+ * @param ns    the declaring namespace ("" for a lifted lambda)
+ * @param name  the bare function name
+ * @return      the emitted symbol
+ */
 pub fn mangle_fn_symbol(ns: str, name: str) -> str {
-    mut sym = ""
-    if ns.len != 0 { sym = teko::str::concat(mangle_ns(ns), "__") }
+    mut sym = TEKO_USER_PREFIX
+    if ns.len != 0 { sym = teko::str::concat(sym, mangle_ns(ns), "__") }
     teko::str::concat(sym, escape_c_keyword(name))
 }
 
@@ -1144,6 +1161,33 @@ fn builtin_arena_symbol(last: str) -> str | null {
 }
 
 /**
+ * assert_seed_symbol — the C ASSERT SEED symbol a `teko::assert::<name>` call lowers to when the
+ * program does not declare `teko::assert` itself (`src/assert/assert.c` realizes the trio as
+ * `teko__assert__*`; `src/assert/assert.h` is its header). Keyed on the callee PATH — the reserved
+ * `teko` root plus an `assert` parent segment — exactly as the C backend's `cg_assert_c_symbol`
+ * keys it, so the two backends name the same symbol.
+ *
+ * Without this, a program that CALLS `teko::assert::is_true` without defining it fell through to
+ * the plain mangler and emitted the bare `is_true`, which links against nothing: the native tail
+ * had no assert resolution at all and only survived because the compiler's OWN corpus declares
+ * `teko::assert`, so its mangle happened to spell the seed's symbol.
+ *
+ * @param callee  the call's callee path
+ * @return        the seed symbol, or `null` when this is not an assert-seed call
+ */
+fn assert_seed_symbol(callee: parser::Path) -> str | null {
+    let segs = callee.segments
+    if segs.len < 2 { return null }
+    if segs[0].name != "teko" { return null }
+    if segs[segs.len - 2].name != "assert" { return null }
+    let last = segs[segs.len - 1].name
+    if last == "is_true" || last == "is_false" || last == "str_contains" {
+        return teko::str::concat("teko__assert__", last)
+    }
+    null
+}
+
+/**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
  * three families the N1 call path resolves DIRECTLY: io/process, coverage sinks and arena
  * checkpoints. Split into one predicate per family so a family grows without lengthening the
@@ -1158,22 +1202,34 @@ fn native_builtin_symbol(last: str) -> str | null {
     builtin_arena_symbol(last)
 }
 
-/** call_symbol — the LIR symbol a direct call targets: an ADDRESSABLE bare builtin ->
-    its runtime twin (`native_builtin_symbol`); an `extern fn`
-    call -> its declared FOREIGN symbol (C7.1a, resolved through `externs` — the same fact the
-    C backend reads off `TFunction.is_extern`/`c_symbol`); any other Teko-Teko call -> the
-    mangled call_ns::name. A call the N1 subset does not recognize (a builtin other
-    than this set) honest-stops. */
+/**
+ * call_symbol — the LIR symbol a direct call targets, decided by the callee's ORIGIN NAMESPACE and
+ * never by its bare name. An UNRESOLVED callee (`call_ns` empty — the checker found no declaration
+ * and fell through to `builtin_fn`) is the only one that may mean a builtin, and lowers to its
+ * runtime twin (`native_builtin_symbol`); an `extern fn` lowers to its declared FOREIGN symbol
+ * VERBATIM (C7.1a, resolved through `externs` — the same fact the C backend reads off
+ * `TFunction.is_extern`/`c_symbol`, and the reason `find_extern_symbol` is consulted BEFORE the
+ * mangler); any other Teko-Teko call lowers to the `teko_`-prefixed mangle of `call_ns::name`.
+ *
+ * Keying on the namespace is what makes the two families disjoint: before it, a user function whose
+ * bare name happened to match a builtin (`arena_push`, `one_byte`, …) was silently emitted as the
+ * RUNTIME symbol — it type-checked with the user's own arity and then never ran its own body.
+ *
+ * @param c        the checked call
+ * @param externs  the program's whole `extern fn` table
+ * @return         the symbol the LCall targets
+ * @throws         on an empty callee path, or on a bare builtin the N1 subset does not lower yet
+ */
 fn call_symbol(c: checker::TCall, externs: []LExternFn) -> str | error {
     let segs = c.callee.segments
     if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
     let last = segs[segs.len - 1].name
-    let addressable = (segs.len == 1) || (segs[0].name == "teko")
-    if addressable {
+    if c.call_ns.len == 0 {
+        match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
         match native_builtin_symbol(last) { str as s => return s; null => { } }
-    }
-    if c.call_ns.len == 0 && segs.len == 1 {
-        return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
+        if segs.len == 1 {
+            return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
+        }
     }
     match find_extern_symbol(externs, c.call_ns, last) {
         str as foreign => foreign

@@ -1685,3 +1685,87 @@ fn lwt_virtual_main_returns_the_trailing_top_level_expressions_value() {
     teko::assert::str_contains(text, "ret %2")
     teko::assert::is_true(!teko::str::contains(text, "const 0"))
 }
+
+/**
+ * A callee path over the given segment names.
+ *
+ * @param names  the path segments, root first
+ * @return       the parsed-shape path `call_symbol` reads
+ */
+fn lwt_path(names: []str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        segs = teko::list::push(segs, parser::Segment { name = names[i] })
+        i++
+    }
+    parser::Path { segments = segs }
+}
+
+/**
+ * A call node over a path and a resolved namespace, for the symbol-resolution tests.
+ *
+ * @param names  the callee path's segments
+ * @param ns     the resolved namespace ("" when the checker resolved no declaration)
+ * @return       the call node
+ */
+fn lwt_bare_call(names: []str, ns: str) -> checker::TCall {
+    checker::TCall {
+        callee = lwt_path(names); args = teko::list::empty(); call_ns = ns
+        is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0
+    }
+}
+
+/**
+ * A one-entry extern table.
+ *
+ * @param ns      the extern's declaring namespace
+ * @param name    the extern's Teko name
+ * @param symbol  the declared foreign C symbol
+ * @return        the table `call_symbol` consults
+ */
+fn lwt_externs(ns: str, name: str, symbol: str) -> []LExternFn {
+    teko::list::push(teko::list::empty(), LExternFn { namespace = ns; name = name; c_symbol = symbol })
+}
+
+/**
+ * Assert `call_symbol` decides by ORIGIN NAMESPACE, never by bare name: a call the checker
+ * resolved to a user declaration gets the `teko_` mangle even when its bare name is a builtin's
+ * (the `arena_push` hijack), while the same bare name with no resolved namespace still gets the
+ * runtime twin. This is the native half of the disjointness the prefix ruling buys.
+ */
+#test
+fn lwt_call_symbol_keys_on_the_origin_namespace() {
+    let user = lwt_bare_call(teko::list::push(teko::list::empty(), "arena_push"), "probe::mine")
+    let builtin = lwt_bare_call(teko::list::push(teko::list::empty(), "arena_push"), "")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(user, no_ext) { str as s => s == "teko_probe__mine__arena_push"; error => false })
+    teko::assert::is_true(match call_symbol(builtin, no_ext) { str as s => s == "tk_arena_push"; error => false })
+}
+
+/**
+ * Assert an `extern fn` still lowers to its declared foreign symbol VERBATIM — no `teko_` prefix,
+ * no namespace mangle. This is the invariant that keeps `getpid`/`aligned_alloc`/`free`/`memcmp`
+ * linkable, and it holds because `find_extern_symbol` is consulted BEFORE the mangler.
+ */
+#test
+fn lwt_call_symbol_leaves_an_extern_verbatim() {
+    let ext = lwt_bare_call(teko::list::push(teko::list::push(teko::list::empty(), "sys"), "getpid"), "probe::sys")
+    let table = lwt_externs("probe::sys", "getpid", "getpid")
+    teko::assert::is_true(match call_symbol(ext, table) { str as s => s == "getpid"; error => false })
+}
+
+/**
+ * Assert a `teko::assert` call the program does NOT declare resolves to the C assert seed's
+ * `teko__assert__*` symbol on the native tail too — before this, the native backend had no assert
+ * resolution at all and emitted the bare `is_true`, which links against nothing.
+ */
+#test
+fn lwt_call_symbol_resolves_the_assert_seed() {
+    mut names: []str = teko::list::push(teko::list::empty(), "teko")
+    names = teko::list::push(names, "assert")
+    names = teko::list::push(names, "is_true")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(lwt_bare_call(names, ""), no_ext) { str as s => s == "teko__assert__is_true"; error => false })
+}
