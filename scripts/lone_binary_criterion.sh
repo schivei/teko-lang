@@ -69,7 +69,13 @@ for sd in $SHARE_DIRS; do
     [ -d "$sd" ] && { mv "$sd" "$sd.lone-hidden"; log "neutralised $sd (restored on exit)"; }
 done
 
-( cd "$WORK" && unset TK_RT_DIR && ./bin/teko . -o bin )
+# `--no-verify --release`, like every other build on the train (owner ruling 2026-07-27: *"O build
+# sempre deve ser se o `--no-verify --release`, o teste já será executado na lane adequada"*). This
+# call carried NEITHER, so it was the one place that still ran the test gate inside a build — the
+# gate is the test layer's whole job, and paying for it here bought a second, slower copy of a
+# verdict another lane already owns. `--release` because a build that is not an -O2 link is not the
+# build this criterion claims to be exercising.
+( cd "$WORK" && unset TK_RT_DIR && ./bin/teko . -o bin --no-verify --release )
 BUILD_EXIT=$?
 
 for sd in $SHARE_DIRS; do
