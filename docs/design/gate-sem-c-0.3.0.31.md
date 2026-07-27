@@ -148,17 +148,72 @@ que é pior que C sobreviver mais um dia, porque cega a cobertura em vez do gate
 
 ---
 
+## 2.3 A MEDIÇÃO — o backend próprio não compila o compilador (bloqueio de fato)
+
+F1 foi executado antes de qualquer porte, e o resultado inverte a ordem do plano. Método: a
+semente 0.3.0.30 constrói `gen1` desta árvore (rota C, `--no-verify --release`); `gen1` — que é o
+compilador PÓS-EXCISÃO, logo backend próprio e só ele — é então mandado construir a mesma árvore.
+
+```
+seed  build .            -> gen1                                    OK   (146.5s, rota C)
+gen1  build . --no-verify -> gen2
+      teko: .: const struct: initializer is not a struct literal (Tier-A follow-up) (#594)
+```
+
+A parada vem de `src/lir/lower_const.tks`:486 — **antes** de qualquer função ser lowerada. E não é
+um caso de borda do compilador: um programa de CINCO linhas já para.
+
+```
+use teko::env
+use teko::io
+let a = teko::env::args()
+teko::io::println($"argc={a.len}")
+```
+```
+gen1 build .  ->  teko: .: native backend N1: fat-pointer receiver `call` not yet lowered (N2)
+```
+
+O que o backend próprio constrói hoje, provado no mesmo gen1, é isto e pouco mais:
+
+```
+use teko::io
+teko::io::println("hello")
+42
+```
+```
+gen1 build .  ->  teko: .: built bin/argprobe (own backend)      ./bin/argprobe -> "hello", exit 42
+```
+
+O inventário ESTÁTICO das paradas honestas do caminho nativo (`src/lir` + `src/backend`) mede o
+tamanho do vão: **53 mensagens distintas**, entre elas a família de ponto flutuante INTEIRA
+(`A4-fp`/`B1-fp` — toda operação, todo literal, todo argumento, todo retorno f32/f64),
+interpolação (`bool`/`float`/spec estático/spec dinâmico/furo de tipo qualquer), funções
+genéricas, binding com desestruturação, padrões de `match` por alternação/faixa/slice/`null`,
+atribuição composta, atribuição por deref de referência e atribuição a elemento de slice.
+
+**Consequência para esta carga.** O binário de gate É o programa do compilador mais um `main` que
+chama os `#test`. Se o backend próprio não lowera o programa do compilador SEM testes, não há
+como ele produzir o binário de gate COM testes. Portar `run_native_gate` para a rota nativa hoje
+não trocaria C por nativo: trocaria **gate** por **nenhum gate**.
+
+A restrição inviolável da carga nomeia exatamente este caso — *"Se em algum momento você tiver que
+escolher entre 'gate que não roda' e 'gate que ainda emite C', pare e reporte"*. É o que se faz
+aqui.
+
 ## 3. O plano — decomposição em fatias
 
 A ordem é obrigatória: **o caminho novo funciona antes de o velho sair**. Nenhuma fatia deleta
 emissão de C; a deleção é o vagão seguinte.
 
-- **F0 — o mapa** (este documento).
+- **F0 — o mapa** (este documento). FEITO.
 
-- **F1 — medir o backend próprio sobre os corpos de teste.** Lowerar os `#test` como funções
-  comuns (um modo em `lower_program`) e emitir o `.o`, sem gate ainda. Entrega: a lista de
-  honest-stops que os 1042 corpos de teste provocam no backend próprio. É a medida que decide se
-  F2 é uma fatia ou um vagão.
+- **F1 — medir o backend próprio.** FEITO, §2.3: ele não compila o compilador, nem um programa de
+  cinco linhas com interpolação. F2..F7 ficam BLOQUEADOS atrás de F-1.
+
+- **F-1 (nova, e primeira) — fechar o vão N2 do backend próprio até ele compilar o programa do
+  compilador.** É o pré-requisito de tudo o que segue e é um VAGÃO, não uma fatia: 53 paradas
+  honestas distintas, com a família de ponto flutuante inteira dentro. Sem ela, não existe binário
+  de gate nativo — logo não existe gate sem C.
 
 - **F2 — o `main` de gate nativo.** `lower_gate_program(prog, gate_stmts)`: modo em que
   `lower_item_function` NÃO descarta `is_test`, as statements soltas são descartadas, e o
@@ -167,10 +222,15 @@ emissão de C; a deleção é o vagão seguinte.
   `<teste>`/`cov_leave`/`println`/`arena_pop`). Índices de `prog.items` preservados: o transform
   não insere nem remove itens, então o `idx` de cobertura continua o mesmo do pai.
 
-- **F3 — os builtins que faltam no LIR.** Estender `call_symbol` com a tabela
-  `cov_* → tk_cov_*`, `arena_push/pop/commit → tk_arena_*`, e adicionar o builtin `flush_out`
-  (checker + LIR + codegen C, para paridade). Sem C novo: todos os símbolos já existem em
-  `teko_rt.h`.
+- **F3 — os builtins que faltam no LIR.** ENTREGUE nesta carga: `call_symbol` ganhou a tabela
+  `cov_* → tk_cov_*` e `arena_push/pop/commit → tk_arena_*`, em três predicados por família
+  (`builtin_io_symbol`/`builtin_cov_symbol`/`builtin_arena_symbol`). Sem C novo — todo símbolo já
+  existe em `teko_rt.h`, e todo nome já é builtin do checker (`scope.tks`:496–536). É um
+  pré-requisito de F2 e ao mesmo tempo conserta um erro latente: `teko::cov_line_hit(...)` e
+  companhia, que o PRÓPRIO `teko::coverage` chama, caíam antes no ramo de mangling
+  (`mangle_fn_symbol("", "cov_line_hit")`) e teriam produzido um símbolo indefinido no link em vez
+  de uma parada honesta. `flush_out` ficou de FORA: `tk_flush_out` existe no runtime mas não é
+  builtin do checker, e criar superfície de linguagem que nada ainda consome não é honesto.
 
 - **F4 — veredito sem cobertura.** `run_native_gate` passa a emitir `.o` + `link_object` em vez
   de `.c` + `run_cc`. Contagem de testes e exit code idênticos. A cobertura ainda vem do caminho

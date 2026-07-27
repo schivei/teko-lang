@@ -1078,9 +1078,88 @@ fn type_is_void(t: checker::Type) -> bool {
     match t { checker::Void => true; _ => false }
 }
 
-/** call_symbol — the LIR symbol a direct call targets: `exit`/`panic` and the io group
-    (`print`/`println`/`eprint`/`eprintln`/`write`/`ewrite`) -> their runtime twins, mirroring
-    the C backend's own bare-name builtin dispatch (`codegen.tks:2289-2297`); an `extern fn`
+/**
+ * builtin_io_symbol — the runtime twin of an ADDRESSABLE process/io builtin: `exit`/`panic`
+ * and the io group (`print`/`println`/`eprint`/`eprintln`/`write`/`ewrite`), mirroring the C
+ * backend's own bare-name builtin dispatch (`codegen.tks:2289-2297`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*` runtime symbol, or `null` when `last` names no io/process builtin
+ */
+fn builtin_io_symbol(last: str) -> str | null {
+    if last == "exit" { return "tk_exit" }
+    if last == "panic" { return "tk_panic_str" }
+    if last == "print" { return "tk_print" }
+    if last == "println" { return "tk_println" }
+    if last == "eprint" { return "tk_eprint" }
+    if last == "eprintln" { return "tk_eprintln" }
+    if last == "write" { return "tk_write" }
+    if last == "ewrite" { return "tk_ewrite" }
+    null
+}
+
+/**
+ * builtin_cov_symbol — the runtime twin of an ADDRESSABLE coverage-sink builtin (D3/D3-branch/
+ * D3-line, `checker/scope.tks:496-536`). The sinks are a HOST side-channel, so every one of them
+ * is a direct `tk_cov_*` call with scalar arguments only — exactly the shape the N1 call path
+ * already lowers. The compiler's own `teko::coverage` reporting reads them (`cov_distinct`,
+ * `cov_is_marked`, `cov_line_hit`, `cov_branch_hit`) and the NATIVE test gate writes them
+ * (`cov_enter`/`cov_leave` around each `#test`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_cov_*` runtime symbol, or `null` when `last` names no coverage builtin
+ */
+fn builtin_cov_symbol(last: str) -> str | null {
+    if last == "cov_reset" { return "tk_cov_reset" }
+    if last == "cov_mark" { return "tk_cov_mark" }
+    if last == "cov_distinct" { return "tk_cov_distinct" }
+    if last == "cov_is_marked" { return "tk_cov_is_marked" }
+    if last == "cov_branches_on" { return "tk_cov_branches_on" }
+    if last == "cov_branch_reset" { return "tk_cov_branch_reset" }
+    if last == "cov_enter" { return "tk_cov_enter" }
+    if last == "cov_leave" { return "tk_cov_leave" }
+    if last == "cov_branch" { return "tk_cov_branch" }
+    if last == "cov_branch_hit" { return "tk_cov_branch_hit" }
+    if last == "cov_lines_on" { return "tk_cov_lines_on" }
+    if last == "cov_line_reset" { return "tk_cov_line_reset" }
+    if last == "cov_line" { return "tk_cov_line" }
+    if last == "cov_line_hit" { return "tk_cov_line_hit" }
+    null
+}
+
+/**
+ * builtin_arena_symbol — the runtime twin of an ADDRESSABLE root-region checkpoint builtin
+ * (#109 test-gate memory): `arena_push`/`arena_pop`/`arena_commit`. The native test gate brackets
+ * every `#test` with a push/pop pair, so the whole per-test span is bulk-freed instead of
+ * accumulating across the run.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_arena_*` runtime symbol, or `null` when `last` names no arena builtin
+ */
+fn builtin_arena_symbol(last: str) -> str | null {
+    if last == "arena_push" { return "tk_arena_push" }
+    if last == "arena_pop" { return "tk_arena_pop" }
+    if last == "arena_commit" { return "tk_arena_commit" }
+    null
+}
+
+/**
+ * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
+ * three families the N1 call path resolves DIRECTLY: io/process, coverage sinks and arena
+ * checkpoints. Split into one predicate per family so a family grows without lengthening the
+ * others.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
+ */
+fn native_builtin_symbol(last: str) -> str | null {
+    match builtin_io_symbol(last) { str as s => return s; null => { } }
+    match builtin_cov_symbol(last) { str as s => return s; null => { } }
+    builtin_arena_symbol(last)
+}
+
+/** call_symbol — the LIR symbol a direct call targets: an ADDRESSABLE bare builtin ->
+    its runtime twin (`native_builtin_symbol`); an `extern fn`
     call -> its declared FOREIGN symbol (C7.1a, resolved through `externs` — the same fact the
     C backend reads off `TFunction.is_extern`/`c_symbol`); any other Teko-Teko call -> the
     mangled call_ns::name. A call the N1 subset does not recognize (a builtin other
@@ -1090,14 +1169,9 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn) -> str | error {
     if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
     let last = segs[segs.len - 1].name
     let addressable = (segs.len == 1) || (segs[0].name == "teko")
-    if addressable && last == "exit" { return "tk_exit" }
-    if addressable && last == "panic" { return "tk_panic_str" }
-    if addressable && last == "print" { return "tk_print" }
-    if addressable && last == "println" { return "tk_println" }
-    if addressable && last == "eprint" { return "tk_eprint" }
-    if addressable && last == "eprintln" { return "tk_eprintln" }
-    if addressable && last == "write" { return "tk_write" }
-    if addressable && last == "ewrite" { return "tk_ewrite" }
+    if addressable {
+        match native_builtin_symbol(last) { str as s => return s; null => { } }
+    }
     if c.call_ns.len == 0 && segs.len == 1 {
         return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
     }
