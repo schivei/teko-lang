@@ -47,12 +47,41 @@ pub extern fn c_memset(block: u64, value: i32, count: u64) -> u64 = "memset"
  * memory without needing any new compiler primitive, so the probe can assert that what was written
  * is what is there.
  *
+ * DECLARED `u64`, NOT `i32`, ON PURPOSE. The native backend does not narrow an `extern fn`'s `i32`
+ * return: the callee may leave the upper 32 bits of the return register unspecified (the SysV ABI
+ * permits it, and glibc's `memcmp` uses that permission), and Teko then reads the FULL 64-bit
+ * register — so even an "equal" result is only reliably zero in its low 32 bits. `blocks_differ`
+ * below extracts exactly those bits.
+ *
  * @param left   the first block's base address
  * @param right  the second block's base address
  * @param count  how many bytes to compare
- * @return       0 when the two blocks hold identical bytes
+ * @return       the return register in full; only its low 32 bits are the C result
  */
-pub extern fn c_memcmp(left: u64, right: u64, count: u64) -> i32 = "memcmp"
+pub extern fn c_memcmp_raw(left: u64, right: u64, count: u64) -> u64 = "memcmp"
+
+/**
+ * The number of distinct values a 32-bit C `int` holds — the modulus that recovers the C result
+ * from the return register's low half.
+ *
+ * @return  2^32
+ */
+pub fn int32_radix() -> u64 {
+    4294967296
+}
+
+/**
+ * Tests whether two raw blocks hold different bytes, reading only the half of `c_memcmp_raw`'s
+ * return that the ABI actually defines.
+ *
+ * @param left   the first block's base address
+ * @param right  the second block's base address
+ * @param count  how many bytes to compare
+ * @return       true when the two blocks differ within `count` bytes
+ */
+pub fn blocks_differ(left: u64, right: u64, count: u64) -> bool {
+    c_memcmp_raw(left, right, count) % int32_radix() != 0
+}
 
 /**
  * The chunk alignment the arena demands of every payload base: the C twin's `TK_ARENA_ALIGN`, the
@@ -152,7 +181,7 @@ pub fn prove_chunk_is_writable(value: i32) {
     demand(left != right, 12)
     c_memset(left, value, default_chunk_bytes())
     c_memset(right, value, default_chunk_bytes())
-    demand(c_memcmp(left, right, default_chunk_bytes()) == 0, 13)
+    demand(!blocks_differ(left, right, default_chunk_bytes()), 13)
     release_chunk(left)
     release_chunk(right)
 }
@@ -173,7 +202,7 @@ pub fn prove_bump_offset_addresses_memory(offset: u64, count: u64) {
     c_memset(chunk, 0, default_chunk_bytes())
     c_memset(chunk + offset, poison_byte(), count)
     c_memset(reference, poison_byte(), count)
-    demand(c_memcmp(chunk + offset, reference, count) == 0, 14)
+    demand(!blocks_differ(chunk + offset, reference, count), 14)
     demand_untouched_prefix(chunk, offset)
     release_chunk(chunk)
     release_chunk(reference)
@@ -193,7 +222,7 @@ pub fn demand_untouched_prefix(chunk: u64, offset: u64) {
     if offset == 0 { return }
     let zeroes = acquire_chunk()
     c_memset(zeroes, 0, default_chunk_bytes())
-    demand(c_memcmp(chunk, zeroes, offset) == 0, 15)
+    demand(!blocks_differ(chunk, zeroes, offset), 15)
     release_chunk(zeroes)
 }
 
