@@ -303,7 +303,7 @@ correctness cost. But by design intent the owner's "maximum death now" is achiev
   surface spellings at `codegen.tks:1122,1160,2089,2107,6109`); own-backend type plumbing only —
   `lir.tks:20` (`F16` LType member), `:540` (`F16 => 2` in `ltype_size`), `lower.tks:184,371`.
 - **Zero uses** in the compiler corpus / `.tkt` / `examples`, EXCEPT: the three isel `_test.tkt`
-  (`isel_{arm64,riscv,x86_64}_test.tkt`) exercise the F16 *type plumbing* (Wave-B deletes those cases),
+  (``) exercise the F16 *type plumbing* (Wave-B deletes those cases),
   and `examples/regressions/enum_member_shadows_primkind/src/kinds.tks` uses `F16` as a **user enum
   member name** mirroring PrimKind's shape (issue #263) — that is an identifier, NOT the builtin `f16`
   type, and **must survive** the sweep. The f16 sweep keys on the builtin type `f16`, never the token.
@@ -620,7 +620,7 @@ carries exactly ONE re-baseline).
 | `examples/regressions/u128_high_bit/` | exit 255 (`u128::MAX >> 120`) | u128 removed | **DELETE** (no i64/u64 analogue) |
 | `examples/regressions/lit_i128_if_assign/` | exit 7 (over-i64 literal → i128) | over-i64 → **u64** | **CONVERT** → `lit_over_i64_u64`, EXPECT_EXIT stays 7 |
 | `examples/regressions/lit_arg_if_over_i64/` | exit 7 (`2^63` round-trip) | `2^63` fits u64 | **CONVERT** (retype to u64), EXPECT_EXIT stays 7 |
-| `isel_{x86_64,arm64,riscv}_test.tkt` | exercise i128 + F16 plumbing | removed | **PRUNE** the 128/F16 cases |
+| `` | exercise i128 + F16 plumbing | removed | **PRUNE** the 128/F16 cases |
 | `enum_member_shadows_primkind/src/kinds.tks` | user enum member `F16` | unaffected | **KEEP** (identifier, not the builtin) |
 
 **Rejection fixtures born (native exit codes; VM is retired — native-only, cf. `vm-retirement.md`):**

@@ -34,7 +34,7 @@ objfile_macho}.tks`, `src/build/project.tks`, `scripts/{diff_c_own,check_elf,che
   `arg_reg(abi, …)` reading the new descriptor. The two deltas are surgically small: a new ABI
   descriptor and a new object writer. (§1.)
 - **Decision-1 (the flagged tension) — COFF is a PARALLEL writer (`objfile_coff.tks`), NOT a
-  generalization of the neutral ELF core; resolved law-first, NO HALT.** B2 folded x86/riscv ELF into
+
   `emit_elf_object` BECAUSE ELF↔ELF share the container byte-for-byte modulo three scalars
   (`e_machine`/`e_flags`/reloc-type). **COFF shares almost nothing structurally with ELF** — an 18-byte
   `IMAGE_SYMBOL` with the 8-byte inline-name-or-strtab-offset union (ELF has a 4-byte `st_name`
@@ -71,7 +71,7 @@ objfile_macho}.tks`, `src/build/project.tks`, `scripts/{diff_c_own,check_elf,che
   the Windows C-vs-own differential lane + `check_coff.sh` (**#388 CLOSES here**).
 - **Differential placement — WINDOWS RUNS PE NATIVELY (no qemu), macOS byte-tests.** The executing
   `C-native == own-native` differential runs on the **windows-x86_64** runner (which executes PE
-  directly — the key advantage over B2's qemu-riscv case), wired onto the existing `windows-selfhost`
+`windows-selfhost`
   lane (`sanitizers.yml`, already self-builds gen-1 on Windows and is already BLOCKING in the sanitizer
   gate). Locally on macOS-arm64: COFF goldens (byte-vectors, assembler-cross-checked with
   `clang -target x86_64-windows-msvc -c` → a real COFF `.obj`) run machine-free; `llvm-readobj --sections/--symbols/--relocations`
@@ -708,17 +708,17 @@ built (inherited `B1-interp`, REPORTED not blocking).
 | FPR spill | — inherited | `detect_fpr_spill` analog errors before encode (A3's `A3-fpr-spill`) | A3's follow-up |
 | `loop` back-edge | — inherited | regalloc honest-stops (`A3-loop`) before encode | A3's `A3-loop` |
 | i128 register-pair ops | — inherited | isel never emits them (rides A2's i128 route) | A2's i128 route |
-| wasm | later clusters | other targets | C1 (#389) — the windows-arm64 row was CANCELLED in 0.3.1 |
+
 | `--backend`/`--target` flags | later cluster | the real manifest flags (B3 uses env seams) | D1/#390 |
 | own PE/COFF linker (drop clang/lld-link) | later cluster | the COFF static linker | Phase E2/#226 |
 
 Each stop is a NAMED error the pipeline surfaces; a fixture reaching one stops IDENTICALLY on the own
 side and is compared at the stop, never at a fabricated value (M.3, the A4/B1/B2 precedent).
 
-> **windows-arm64 (`#388`'s second half) is CANCELLED, not pending.** This plan delivered **x86_64
+`#388`'s second half) is CANCELLED, not pending.** This plan delivered **x86_64
 > Windows** and NAMED **arm64 Windows** as a follow-on blocked on a disabled CI lane. That follow-on
 > apagar todos os vestígios, sem dead code". There is no `abi_win64_arm`, no `Machine=0xAA64` COFF
-> half and no `windows-arm64` lane to re-enable; #388 is CLOSED at its x86_64 half.
+> half and no `` lane to re-enable; #388 is CLOSED at its x86_64 half.
 
 ---
 
@@ -771,8 +771,8 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
   R-1 raise. REPORTED for the integrator to sequence (a 0.3.1 DRY-sweep companion), not a B3 blocker.
 - **R-2 · No parallel `minst_x86_interp`.** §6.3 — inherited from B1's R-2; the LIR interp + goldens +
   the executing Windows differential cover the oracle role. REPORTED.
-- **R-3 · windows-arm64 (the second half of #388) — CLOSED BY REMOVAL (0.3.1).** §7 — it was reported
-  as infra-blocked on the DISABLED `windows-arm64` lane (owner #304). The owner then removed the host
+
+  as infra-blocked on the DISABLED `` lane (owner #304). The owner then removed the host
   outright in 0.3.1, so the report is resolved by cancellation: #388 is complete at its x86_64 half and
   there is no arm64-Windows work left to sequence.
 - **R-4 · `own_print_exit` (LIR builtin-call surface).** The KNOWN-STOP (`diff_c_own.sh:190`, `println`
@@ -822,7 +822,7 @@ the COFF `.o` via host `clang -target x86_64-windows` (which drives `lld-link`) 
 B3 adds NO new fixtures; it adds the Windows own-native column to the existing corpus
 (`diff_c_own.sh:153`):
 
-| fixture | program | expected exit | VM | C-native | own-arm64 | own-x86 | own-riscv | **own-win (new)** |
+
 |---|---|---|---|---|---|---|---|---|
 | `own_exit_zero` | `exit(0)` | 0 | ✓ | ✓ | ✓ | ✓ | ✓ | **win-run** |
 | `own_exit_code` | `exit(42)` | 42 | ✓ | ✓ | ✓ | ✓ | ✓ | **win-run** (`mov ecx,42` + shadow `sub rsp,32` + `call`) |
@@ -930,7 +930,7 @@ B2 (done, #387) ─▶ B3-1 ─────▶ B3-2 ──────▶ B3-3 �
 
 **Files:** new `src/backend/abi_win64.tks`, `objfile_coff.tks`, and their `*_test.tkt`; new
 `scripts/check_coff.sh`; touched `src/backend/abi_aapcs64.tks` (the additive `shadow_space` field —
-arm64/riscv/sysv set 0, byte-preserving), `src/backend/encode_x86_64.tks` (`func_makes_call_x86` + the
+`src/backend/encode_x86_64.tks` (`func_makes_call_x86` + the
 `compute_frame_layout_x86` shadow reservation — FRAME side-table only, the ISA encoder untouched),
 `src/build/project.tks` (`NativeTarget::X8664Windows` + `target_from_name` + `emit_native_win`),
 `scripts/diff_c_own.sh` (the windows lane), `.github/workflows/sanitizers.yml` (the `windows-selfhost`

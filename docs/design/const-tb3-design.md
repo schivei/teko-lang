@@ -28,7 +28,7 @@ LIR, honest-stop `honest_data_reloc` em `encode_rodata`; ELF `ElfObject.rodata_r
 (`objfile_macho.tks:735`) e `emit_coff(enc: EncodedModuleX86)`
 (`objfile_coff.tks:708`). **NÃO existe** `MachoObject`/`CoffObject`: ao contrário do
 ELF — cujo `ElfObject` (`objfile_elf.tks:986`) é um objeto neutro porque `emit_elf`
-(x86) e `emit_elf_riscv` COMPARTILHAM o writer `emit_elf_object` (duas ISAs, um só
+(x86) e `` COMPARTILHAM o writer `emit_elf_object` (duas ISAs, um só
 writer) — Mach-O é arm64-only e COFF é x86-only. Cada um tem UMA ISA, então nunca
 houve motivo para um objeto neutro intermediário, e por isso consomem o
 `EncodedModule*` da própria ISA.

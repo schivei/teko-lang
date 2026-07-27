@@ -211,7 +211,7 @@ toolchain_cc=cc.exe (x86_64-posix-seh-rev2, Built by MinGW-Builds project) 14.2.
 ```
 
 Um MinGW **x86_64**, sob emulação x86 do Windows-on-ARM, numa máquina ARM64, produzindo um PE
-**x86_64** rotulado `windows-arm64`. Ninguém escolheu: pediu-se `cc` e o PATH respondeu.
+**x86_64** rotulado ``. Ninguém escolheu: pediu-se `cc` e o PATH respondeu.
 
 ### 6.2 Requisitos da nova sondagem (M.3)
 
@@ -226,7 +226,7 @@ Um MinGW **x86_64**, sob emulação x86 do Windows-on-ARM, numa máquina ARM64, 
 4. **MinGW é RECUSA EXPLÍCITA, nomeando o motivo** — não omissão. O erro tem que ensinar por que
    ele foi barrado, senão alguém o recoloca no PATH em seis meses e o defeito volta.
 5. **A asserção de arquitetura vale também para o ARTEFATO PUBLICADO.** `scripts/produce_assets.sh:120`
-   publica os assets `kind = native` (macos-arm64, windows-x86_64, windows-arm64) **sem nenhuma
+   publica os assets `kind = native`
    asserção de arquitetura**, enquanto `scripts/native_linux_asset.sh:217` faz `file | grep ARCH_KW`
    nos seis alvos Linux. Foi essa assimetria que deixou o PE x86_64 ser publicado como ARM64.
    Fechar só a sondagem deixa a outra ponta aberta.

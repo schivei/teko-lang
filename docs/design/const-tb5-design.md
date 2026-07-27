@@ -297,7 +297,7 @@ e é o que faz T-B5 ser "o último elo antes do 🔑 SEED BUMP #3". Prova:
    seed NO bump. O bump é depois de T-B5. Os writers (T-B2/T-B3), o wasm (T-B4) e a VM
    (T-B5) já entram. O ÚNICO elo consumidor que falta no caminho NATIVO é o **encoder
    bridge**: `encode_rodata` produzir `Reloc sect=Rodata` a partir de `LRodata.relocs`,
-   e o bridge ELF (`x86_reloc_reqs`/`riscv_reloc_reqs`) particionar por `.sect`
+   e o bridge ELF (`x86_reloc_reqs`/``) particionar por `.sect`
    (Mach-O/COFF já particionam, T-B3). Se esse bridge ficasse em T-B6, o seed do bump
    NÃO o teria → quando o seed compilasse o source Tier-B de T-B6, `encode_rodata`
    honest-stoparia no primeiro const Tier-B → **quebra de self-hosting**. Logo o bridge
@@ -378,10 +378,10 @@ tagueada do módulo (o modelo T-B1/T-B2/T-B3: uma lista, tagueada por `.sect`):
 > `ModuleRodataRiscv` ganham `relocs: []RelocX86`/`[]RelocRiscv`; `rodata_reloc_of`
 > usa `RelocKindX86::Abs64` (addend `0`) / um enum de reloc; `EncodedModuleX86`/
 > `EncodedModuleRiscv.relocs` recebem `append_relocs(mt.relocs, rod.relocs)`. Os kinds
-> `Abs64` já existem para os três (arm64 ganhou em T-B3; x86/riscv desde sempre).
+> `Abs64`
 
 **(b) Bridge ELF particiona por `.sect`.** `x86_reloc_reqs` (`objfile_elf.tks:1083`) e
-`riscv_reloc_reqs` (um backend ELF writer) hoje mapeiam TODA reloc → `relocs` e
+`` (um backend ELF writer) hoje mapeiam TODA reloc → `relocs` e
 setam `rodata_relocs = teko::list::empty()` (`:1116`/`:51`). Em T-B5 particionam por
 `r.sect`: um `Text` → `relocs` (o offset é `.text`-relativo, como hoje), um `Rodata` →
 `rodata_relocs` (o offset é `.rodata`-relativo). Como toda reloc é `Text` hoje,
@@ -397,7 +397,7 @@ TODA compilação real `LRodata.relocs` é vazio ⇒ `encode_rodata` produz `rel
 `append_relocs(mt.relocs, [])` = `mt.relocs` (idêntico) ⇒ a partição ELF/Mach-O/COFF põe
 tudo em `text`/`relocs` e a partição rodata vazia ⇒ `.rela.rodata`/`__const`/`.rdata`
 relocs vazios ⇒ cada objeto byte-idêntico. Os goldens `encode_*_test.tkt`,
-`objfile_{elf,elf_riscv,macho,coff}_test.tkt` + **fixpoint gen1==gen2** são a prova. As
+`` + **fixpoint gen1==gen2** são a prova. As
 únicas fixtures que MUDAM de expectativa são as três de T-B1 (§5, "o gate dispara") que
 assertavam o honest-stop `encode_module*` — agora invertem para "produz a `Rodata`
 reloc" (§5.7 abaixo).
@@ -493,7 +493,7 @@ regressão do helper que a resolução reusa) — reafirma o comportamento exist
   a fixture T-B2 §4.1 fixou à mão, agora dirigidos pelo encoder). Espelho arm64→`emit_macho`
   (a `__const` reloc `0x0E000001` de T-B3 §4.1) e x86→`emit_coff` (a `.rdata` reloc de
   T-B3 §4.3). Prova que a cadeia produtor-de-reloc→writer encadeia.
-- **Partição ELF unitária**: `x86_reloc_reqs`/`riscv_reloc_reqs` sobre um `enc.relocs`
+- **Partição ELF unitária**: `x86_reloc_reqs`/`` sobre um `enc.relocs`
   com uma `Text` + uma `Rodata` devolve `relocs.len==1` (a text) e `rodata_relocs.len==1`
   (a rodata); sobre só-`Text` devolve `rodata_relocs` vazia (o braço byte-idêntico).
 
@@ -526,8 +526,8 @@ arquivo compila a cada passo.
 | E3 | `src/lir/lir_interp_test.tkt` | helper `iwt_rodata_rel` + `iwt_tb5_deref_module` + fixtures §5.1–§5.6 | os próprios testes novos (verde) |
 | E4 | `src/backend/encode_arm64.tks` | remover `honest_data_reloc`+`rodata_has_internal_relocs`; `ModuleRodata.relocs`+`rodata_reloc_of`+`append_rodata_relocs`; `encode_rodata -> ModuleRodata`; `encode_module` concatena (§4.2) | `encode_arm64_test.tkt`, `objfile_macho_test.tkt` (goldens byte-idênticos) |
 | E5 | `src/backend/encode_x86_64.tks` | espelho x86 (`RelocX86::Abs64`, addend 0) | `encode_x86_64_test.tkt`, `objfile_coff_test.tkt`, `objfile_elf_test.tkt` |
-| E7 | `src/backend/objfile_elf.tks` + um backend ELF writer | `x86_reloc_reqs`/`riscv_reloc_reqs` particionam por `.sect` em `relocs`/`rodata_relocs` (§4.2b) | `objfile_elf_test.tkt`, um backend ELF writer (byte-idênticos) |
-| E8 | `encode_{x86_64,arm64,riscv}_test.tkt` | inverter as 3 fixtures T-B1 §5-1 (honest-stop→reloc produzida) + as end-to-end §5.7 | os próprios testes |
+| E7 | `src/backend/objfile_elf.tks` + um backend ELF writer | `x86_reloc_reqs`/`` particionam por `.sect` em `relocs`/`rodata_relocs` (§4.2b) | `objfile_elf_test.tkt`, um backend ELF writer (byte-idênticos) |
+| E8 | `` | inverter as 3 fixtures T-B1 §5-1 (honest-stop→reloc produzida) + as end-to-end §5.7 | os próprios testes |
 
 > Mach-O/COFF writers **NÃO são tocados** — `macho_partition_relocs`/`coff_partition_relocs`
 > (T-B3) já leem `enc.relocs` por `.sect`; recebem os `Rodata` relocs assim que E4/E5 os

@@ -101,7 +101,7 @@ hoje).
 Provado com linhas: o caminho wasm é `LModule` → `wasm_assemble_program`
 (`stackify.tks:5993`) → `WasmModule` → `emit_wasm` (`objfile_wasm.tks:799`). **NÃO
 existe `EncodedModule`/`EncodedModuleX86` no caminho wasm** — esses são saídas dos
-encoders NATIVOS (x86/arm64/riscv). Consequência decisiva para a costura:
+
 
 > **O wasm consome `LRodata.relocs` DIRETAMENTE (nível LIR), não `Reloc*.sect`.** Em
 > T-B2/T-B3 os writers ELF/Mach-O/COFF particionam a lista `Reloc*` pelo discriminador
@@ -243,7 +243,7 @@ inalterados, só `segment.bytes` mudou, então o symtab e o memory-plan são id�
 
 **O caminho wasm NÃO passa pelo `encode_rodata` nativo.** Provado: `encode_rodata` (e o
 seu honest-stop `honest_data_reloc` de T-B1) vive nos encoders NATIVOS
-(`encode_arm64.tks`/x86/riscv); `wasm_layout_rodata` é **PARALELO, não reusado** — o
+(`encode_arm64.tks``wasm_layout_rodata` é **PARALELO, não reusado** — o
 próprio doc o diz (`stackify.tks:4922-4923`: "Mirrors `encode_arm64.tks`'s
 `encode_rodata`, PARALLELED rather than reused"). Logo o honest-stop de T-B1 **não
 protege o caminho wasm**: hoje, se uma `LRodata` chegasse com `relocs` não-vazio ao

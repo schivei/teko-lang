@@ -1,8 +1,8 @@
 # 0.3.1 — `regressor.tkr` AS THE PRIMARY REGRESSION BANK + DEATH OF THE REGRESSION SCRIPTS
 
-> **STATUS 0.3.1 — a metade `riscv` deste plano ficou VAZIA.** `linux-[target removido]` foi removido por
+> **STATUS 0.3.1 — a metade `` deste plano ficou VAZIA.** `linux-[target removido]` foi removido por
 > os vestígios, sem dead code"): as linhas `[target removido]-linux` do corpus, o cenário
-> `own_riscv_object_well_formed` e o wrapper `qemu-[target removido]-static` saíram junto com o alvo. A
+> `` e o wrapper `qemu-[target removido]-static` saíram junto com o alvo. A
 > decidido em 2026-07-24; hoje ela só tem a metade `coff`.
 
 **DECISIONS CLOSED — ratified by the owner 2026-07-24 (D1-D9 all sealed at ruling level; the
@@ -516,7 +516,7 @@ stays as a small on-disk project-regressor, listed by path. The **≤10** set (o
    distinct. (ALTERNATIVE: fold into F5 — recommended AGAINST, to keep `regressor.tkr` toolchain-free.)
 
 + os-arch routing) rather than becoming projects #9/#10 — recommended, keeps the set tight.
-(ALTERNATIVE if the owner wants them isolated: `riscv_cross.tkr` (#9) + `coff_target.tkr` (#10),
+(ALTERNATIVE if the owner wants them isolated: `` (#9) + `coff_target.tkr` (#10),
 still ≤10.)
 
 FFI fixtures that ARE single-snippet (`extern_macro_const_flag`, `ptr_deref_index_arrow`,
@@ -748,8 +748,8 @@ drained dirs (§5) shrinks that corpus; see R5 for the ratifiable resolution.
 
 ## 8. Risks / law tensions
 
-- **R1 (tests.yml duration).** Absorbing 6 differentials × 3 OS + wasm/riscv/qemu into
-  `teko test .`. The own==C differential is many SMALL compiles (fast); the wasm/riscv wrappers
+
+  `teko test .`
   add engine startup. Windows's 90-min cap (tests.yml already generous) is the pressure point.
   Mitigate: honest-skip where a tool is absent; provision heavy toolchains only on the lanes that
   afford them; MEASURE the delta at every `[RITUAL]` (C5/C6/C-cov). Not a HALT — the pressure is

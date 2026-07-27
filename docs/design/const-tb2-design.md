@@ -143,7 +143,7 @@ as duas listas têm semânticas de offset distintas (`.text`-relativo vs
      * `encode_rodata` de T-B1 impede qualquer produtor de povoá-la), o que mantém o
      * objeto byte-idêntico e todos os goldens intactos; o bridge por-ISA a popula
      * (particionando os `Reloc*` por `RelocSect`) só quando a cadeia T-B abrir. Cada
-     * entrada é resolvida como uma linha de `.rela.rodata` (R_X86_64_64 / R_RISCV_64
+     * entrada é resolvida como uma linha de `.rela.rodata` (R_X86_64_64
      * contra o símbolo de seção `.rodata`, com o offset do alvo dobrado no addend).
      */
     rodata_relocs: []ElfRelocReq
@@ -546,7 +546,7 @@ o arquivo compila a cada passo.
    particiona `Reloc*`→(text, rodata). *Resolução:* documentado aqui como a costura
    canônica; T-B3/T-B4 herdam-na sem redescobrir. Sem tensão.
 
-5. **`rtype` do rodata-reloc precisa ser absoluto (R_X86_64_64 / R_RISCV_64).** Um
+5. **`rtype` do rodata-reloc precisa ser absoluto (R_X86_64_64).** Um
    `PC32` dobrado em `.rela.rodata` produziria um ponteiro relativo errado.
    *Resolução:* provado §2.0 pela SysV/RISC-V psABI; o bridge futuro mapeará
    `RelocX86::Abs64`/um tipo de reloc (já em `elf_reloc_type`/funções de mapeamento por backend); a

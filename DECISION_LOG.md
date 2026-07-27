@@ -94,7 +94,6 @@ corrompido; só CLEAN.
 
 ---
 
-## 2026-07-05 — Fix do release + validação sem qemu (PR ci/fix-zig-riscv, 0.0.1.24)
 
 Contexto: o release 0.0.1.23 (primeiro de 9 targets) FALHOU no `build-linux` — o zig **0.13.0**
 tinha um libc incompleto em seu acervo de targets (faltavam cabeçalhos de compilação).
@@ -366,7 +365,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 ### D38 · `const NAME: Type = <const-expr>` no nível de módulo — INLINE escalar, rodata p/ agregado (dono 2026-07-15) ✅ RATIFICADA (com 2 rulings; plano `docs/design/const-module-level-plan.md`)
 - **Decisão aplicada (design ratificado, law-first):** introduzir `const` de nível de módulo como feature real (parse→check→uso-como-valor→`pub const` cross-módulo) e migrar os ~50 `fn X() -> T { <const> }`. O feature é **front-end + lowering apenas**: os backends e os C twins ficam intocados.
 - **Rationale central (dono):** o custo real das fns zero-arg NÃO é CALL/RET — é que **cada chamada abre uma ARENA (região lexical, R11)**. Const é comp-time → **zero arena**. Escalar → **INLINA o literal no ponto de uso** (zero arena, zero global, zero reloc, um `mov imm`). Agregado imutável → **rodata** (o caminho read-only que os literais string já usam ponta-a-ponta em TODOS os backends + a VM).
-- **INSIGHT load-bearing (validado por leitura):** os honest-stops de "top-level data" travam SÓ em `m.globals.len > 0`, NUNCA em `m.rodata`. Logo, roteando escalares para inline e agregados para rodata, **nenhum honest-stop é tocado e nenhum arquivo de backend muda** (`encode_x86_64.tks:1495`/`encode_arm64.tks:1858`/`encode_riscv.tks:1684`/`stackify.tks:4458` só olham `m.globals`; `LGlobal` — o stub "later construct" de `lir.tks:148` — permanece não-usado).
 - **D2 (agregados) — RULING 1 do dono: rodata JÁ NO BASELINE (não 2-passos).** O dono REJEITOU o baseline-inline; quer o end-state direto. Consequência que a investigação revelou: **reloc data→data NÃO EXISTE** (todo o modelo de reloc é `.text`-relativo — `RelocX86.offset` é text-base; o ELF só emite `.rela.text`, sem `.rela.rodata`; COFF dobra o offset rodata no patch-site em `.text`; wasm coloca rodata num data-segment ativo com offset conhecido em emit-time). Logo **TIER os agregados:** **Tier A** (flat-POD escalar/enum/bool, e `[]byte`/`str` com header montado no uso como os literais string) = blob rodata autocontido, SEM ponteiro interno → **ZERO backend**, entra na fase-feature (crumb 6: serializador de layout rodata + load tipado via `LGlobalAddr`/`LFieldAddr`/`LLoad`). Cobre os ~50 inteiros. **Tier B** (campo slice/ponteiro, ex.: descritores ABI `sysv64`/`aapcs64` com 8 campos `[]u32`) exige ponteiro DENTRO da rodata → reloc data→data inexistente → **QUEBRA "zero backend"**: vira fase de crumbs T-B1–T-B6 (3 encoders nativos ganham tag de seção no patch-site + writers ELF/Mach-O/COFF emitem reloc em seção de dados + wasm calcula/escreve offsets intra-data + VM resolve ponteiro interno). **Veredito "backend intocado?": SIM p/ Tier A / os ~50; NÃO p/ Tier B.** Nenhum dos ~50 anêmicos é Tier B.
 - **D1 (gramática) — Tiers 0–5:** literal / cast `to` / unário-binário-bitwise / ref a outra const|enum|flags / literal agregado / **chamada a construtor puro allowlisted** (conjunto FECHADO: `teko::f64_from_bits`, `teko::f32_from_bits`, `preg`). **Alternativa preterida:** analisador de pureza transitivo (`const fn`) — maior superfície e risco, fora do escopo; o allowlist é minúsculo, determinístico e REVERSÍVEL (um `const fn` futuro o supersede).
 - **D3–D5:** ordem por DAG de dependência + detecção de ciclo (DFS visiting-set, sem eval numérico — a substituição é AST, o backend computa `~(0 to u64)` como o fn antigo fazia); `pub const` serializa o **initializer typed** no `.tkb` (C7.16) e o consumidor **re-inlina** (sem símbolo de dado cross-módulo); const-eval vive em **novo `src/checker/consteval.tks`**.
@@ -442,7 +440,6 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ### D44 · Cross-link honesto: `teko::arch()` landed-unused, chaves os-arch no `[extern.libs]`, relato de cross-emit, `--allow-undef` ✅
 - **Contexto:** `docs/design/teko-target-crosslink-0.3.1.md` (decisões FECHADAS 2026-07-24: R1-R5 + o spec-fill §4.2). O C1 (default de host os-only) já entrou no vagão anterior e fechou o bug reproduzido (linux x86_64 emitindo Mach-O arm64). Este vagão entrega C2+C4+C5+C6.
-- **C3 FORA deste vagão (ruling do integrador, 2026-07-25):** a lei de bootstrap proíbe colapsar C2 e C3 num vagão (o seed precisa reconhecer `teko::arch()` antes de `project.tks` poder CHAMAR), e landar o C3 sozinho na .31 criaria um TERCEIRO degrau na escada de seeds sem ganho: C4/C5/C6 não dependem dele — funcionam sobre o default os-only do C1, já preciso em linux/x86_64, windows/x86_64 e macos/arm64. A única imprecisão que sobra (host de mesmo SO com arch diferente lendo um pedido cross de mesmo SO como NÃO-cross) está documentada em `cross_note` e é a direção conservadora: o host executa e reporta o exit real, em vez de fabricar um skip. Na .32 o seed da .31 já traz o builtin e o C3 é refactor puro.
 - **C2 — builtin landed, chamado por NINGUÉM:** `tk_rt_arch()` em `src/runtime/teko_rt.{c,h}` (exceção maintained-C), espelhando a forma plain-`str` do `tk_rt_os` (sem lift, para o codegen congelado do seed conseguir baixar), tokens canônicos `x86_64`/`arm64`/`unknown` — a grafia que concatena direto com `tk_rt_os()` na chave `<arch>-<os>`. Wiring: `scope.tks::builtin_fn` (assinatura `() -> str`) + o mapa de builtins do `codegen.tks`. Zero call sites no corpus (nem `.tkt`): é isso que mantém a escada em dois degraus. Verificado à mão num projeto scratch compilado pelo gen1 (`teko::arch()` → `"x86_64"`).
 - **C4 — o §4.1 é RATIFICADO, não redesenhado:** a chave de seção `[extern.libs.<os-arch>]` já era capturada VERBATIM pelo parser (`sec_os = slice_from(nm, 12)`); o delta real é no LINK — `os_lib_key_matches` sobre `LinkTargetKeys` (`build_os`/`emit_os`/`os_arch`), a UMA regra de aplicabilidade agora compartilhada pela linha de link (`link_target_keys`) e pelos validadores M.3 (`target_link_keys`). **Segundo defeito achado e corrigido no crumb:** uma seção de OS puro era casada SÓ contra `target_os`, que responde o OS do HOST quando não há triple `[extern] target` — então um cross-link para `x86_64-windows` em linux descartava silenciosamente `[extern.libs.windows]`, contrariando o próprio "any arch of that OS" do §4.2. A regra passa a casar também o OS para o qual se LINKA; aditivo por construção (tudo que casava antes continua casando), e `target_os`/o pruning de `#os()` ficaram intocados de propósito (mexer neles muda a semântica de compilação condicional em builds cross — decisão separada). O modo `static:`/`shared:` deixou de ser descartado: `mf_extern_spec` devolve `ExternLibSpec { flag; mode }` para as colunas novas `link_mode`/`os_lib_mode`. **Bug achado e corrigido no crumb (sem deferral):** `mf_extern_flag` testava PATH antes de tirar o prefixo de modo, então a grafia ratificada `static:vendor/x86_64-linux/libfoo.a` vazava o literal `static:` na linha do `cc`. R4 implementado em `validate_static_libs_for_target`: para um target CROSS uma lib estática tem que apontar um arquivo LOCAL (o linker do host não sabe procurar nos caminhos do target), e um path explicitamente nomeado e ausente é erro em qualquer target (é a regra já ratificada da LEGISLATION:423, aplicada por target).
 - **C5 — uma fonte de verdade, dois consumidores:** `CrossNote`/`cross_note` (+ `cross_note_for_name`, a porta por NOME, + `resolved_cross_note`). `teko run` e o gate de teste nativo imprimem a linha "emitido, não executado" e pulam o processo filho quando cross (antes: um `teko build` cross MORRIA no gate ao tentar exec de um binário de formato estrangeiro). O runner de regressivo consulta a MESMA `cross_note_for_name` em `tkr_row_run_verdict` — não uma segunda regra — e os leaf-checks (`Then object well-formed`) continuam rodando sobre a linha pulada, que é justamente o ponto de um build cross. Buraco pré-build do vagão 17 fechado: `host_cc_cannot_link_cross_reason` — um target cross SEM driver cross dedicado (`x86_64-linux` num host mac) chegava ao `ld` do host e falhava no formato do objeto, indistinguível de regressão de compilador; agora é skip honesto antes do build (e um `TEKO_CC` pinado levanta o skip).
@@ -454,16 +451,12 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 
 ---
 
-## 2026-07-27 — Remoção completa de `linux-[target removido]` e `windows-arm64` (0.3.1)
 
 ### D45 · Os dois alvos saem inteiros: backend, alvo, lanes, assets, docs ✅
 - **Ruling do dono:** *"E está decidido, remover completamente suporte a Windows arm64 e Linux
 - **As duas remoções têm naturezas diferentes.** `linux-[target removido]` era um ALVO NATIVO
-  (`NativeTarget::Riscv64Linux`): saiu o backend inteiro — `isel_riscv`, `minst_riscv`,
-  `regalloc_riscv`, `encode_riscv`, `encode_riscv_consts`, `abi_[target removido]`, `objfile_elf_riscv` e os
   cinco `_test.tkt` correspondentes — mais a entrada do enum, todo `match` que a cobria, o
   `default_cc_for_target`, os nomes/aliases de `TEKO_TARGET`, o wrapper `qemu-[target removido]-static` e a
-  sonda de sysroot cross que só existia para alimentá-lo. `windows-arm64` NUNCA foi alvo nativo —
   era só rótulo de host/asset de CI, então a remoção foi de lane, matriz, label de seed e asset
   publicado, sem tocar backend.
 - **`arm64` FICA.** `isel_arm64`, `encode_arm64`, `abi_aapcs64`, `NativeTarget::Arm64Macho` e o host
@@ -471,14 +464,11 @@ Doc de base completo: `docs/design/memory-unsafe-backend-remodel.md`. Fecha a di
 - **Exaustividade preservada sem braço `_`:** todo `match` sobre `NativeTarget` que perdeu o braço
   `Riscv64Linux` continua enumerando os membros restantes; nenhum coringa novo foi introduzido
   (um `_` cobrindo o buraco seria dead code disfarçado).
-  (`cross_sysroot_for_*`, `qemu_[target removido]_wrapper_*`, `resolve_run_wrapper_riscv_*`) saíram com a
   sobrevivente (`x86_64-windows` / `wasm32-wasi`). O `Then object well-formed` sobre ELF continua
   existindo em `own_explicit_host_os_arch_runs`.
-- **Runtime (exceção maintained-C):** `tk_rt_arch()` perdeu o braço `__riscv` — o token `[target removido]`
   concatenava com `tk_rt_os()` numa chave `<arch>-<os>` que não é mais um `NativeTarget`, então
   mantê-lo produziria uma chave inválida, não uma informação a mais.
 - **Assets publicados: nove → sete.** Saíram `teko-linux-[target removido]-{glibc,musl}.tar.gz` e
-  `teko-windows-arm64.zip`. A lane `cross-arch determinism` passa a comparar QUATRO assets Linux
   em vez de seis; o passo de binfmt/qemu, os pacotes `libc6-[target removido]-cross`/`gcc-[target removido]-linux-gnu`
   e a parametrização `ELF_TOOLCHAIN`/`ELF_MACHINE` do `check_elf.sh` (cujo único chamador era o
 - **Docs:** `docs/design/backend-b2-[target removido].md` (o spec do backend removido) foi APAGADO. Registro

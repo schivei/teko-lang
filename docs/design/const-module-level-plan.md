@@ -162,7 +162,7 @@ silently inlining an arbitrary call (least-surprise, law-first).
   The closed allowlist for the current corpus is exactly:
   - `teko::f64_from_bits` / `teko::f32_from_bits` (builtins; `inf`, `nan`),
   - `preg` (`src/backend/minst.tks:886` — body is a single `MReg { … }` literal;
-    `rax_x86`, `rcx_x86`, `riscv_zero_reg`, …).
+    `rax_x86`, `rcx_x86`, ``, …).
 
   Rationale for an explicit allowlist over a general purity analyzer: the set is
   tiny and closed, deterministic, and reversible; a transitive-purity pass is a
@@ -1005,7 +1005,7 @@ may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per 
 - **S2** `src/backend/encode_x86_64.tks` (90): ModRM/REX field masks → `const`,
   opcode families → an `enum`/named table.
 - **S3** `src/backend/encode_arm64.tks` (66): field masks/shifts → `const`.
-- **S4** ~~`src/backend/encode_riscv.tks` (52): funct/opcode fields → `enum`/`const`.~~ **VOID —
+- **S4** ~~`` (52): funct/opcode fields → `enum`/`const`.~~ **VOID —
 - **S5** `src/backend/objfile_{elf,macho,coff,wasm}.tks` residual (header fields,
   alignments) → `const`/`flags` (the file-magic/section-flag families already done
   in crumb 10; S5 mops up the rest).
@@ -1018,7 +1018,7 @@ may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per 
 A SEPARATE, LATER track (not required by the owner's ~50). Delivers the data→data
 relocation absent today (§5.1), then migrates the ABI descriptors.
 - **T-B1** widen the reloc model: add a patch-site SECTION tag to `RelocX86` /
-  arm64/riscv `Reloc` (today `.text`-only, `encode_x86_64.tks:1310`); the LIR carries
+`Reloc` (today `.text`-only, `encode_x86_64.tks:1310`); the LIR carries
   a data-section relocation entry for a rodata-internal pointer field.
 - **T-B2** ELF writer: emit a `.rela.rodata` section (add to the section set at
   `objfile_elf.tks:455`) + its relas.
@@ -1031,7 +1031,7 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
   capability is now in the seed; T-B6's source may use pointer-bearing aggregate
   consts. (T-B1..T-B5 may each tag an intermediate `-beta` if a later T-B crumb's
   source uses an earlier one's capability.)
-- **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`RISCV64_LP64D`/`WIN64`,
+- **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`WIN64`,
   `UPPER_SNAKE` per D7) and any other pointer-bearing aggregate to rodata consts.
 - **Fixtures:** `const AAPCS64: AbiDescriptor = …` emits ONE rodata blob with data
   relocs to its `[]u32` leaf arrays; both engines read identical register lists; all

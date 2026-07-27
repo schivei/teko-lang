@@ -7,12 +7,12 @@ mergeados + 🔑 SEED BUMP #3 (0.3.0.25 / T25)** — a cadeia data→data CONSUM
 completa e no seed: `LDataReloc`/`LRodata.relocs` na LIR (`lir.tks:154/175`); a VM resolve
 o ponteiro rodata-interno na semeadura (`lir_interp.tks:181 resolve_rodata_relocs`); o
 encoder-bridge nativo produz `Reloc sect=Rodata` (`encode_arm64.tks:2679 encode_rodata` +
-irmãos x86/riscv); ELF `.rela.rodata` / Mach-O `__const` / COFF `.rdata` / wasm
+`.rela.rodata` / Mach-O `__const` / COFF `.rdata` / wasm
 `wasm_relocate_rodata`. Predecessores: `const-tb{1,2,3,4,5}-design.md`. crumb 6 (Tier-A →
 rodata): `lower.tks:5137 serialize_const`.
 
 > **Escopo de T-B6 (verbatim §8):** "migrate the ABI descriptors
-> (`SYSV64`/`AAPCS64`/`RISCV64_LP64D`/`WIN64`, `UPPER_SNAKE` per D7) and any other
+> (`SYSV64`/`AAPCS64`/`WIN64`, `UPPER_SNAKE` per D7) and any other
 > pointer-bearing aggregate to rodata consts." Ritual (§8): "regalloc golden tests (they
 > consume the ABI descriptors) must be byte-identical after T-B6." Este é o crumb PRODUTOR:
 > `serialize_const` deixa de honest-stopar agregados pointer-bearing, emite os bytes do
@@ -143,7 +143,7 @@ que consuma LIR consegue LER o const — só o C backend (que ignora rodata e in
 - VM: `resolve_rodata_relocs` (`lir_interp.tks:236`) sobrescreve cada slot de ponteiro
   rodata-interno com o índice-de-célula do datum-alvo na semeadura (T-B5 §2). Alvo
   desconhecido → erro nomeado → `interp_lmodule` mapeia a `-1`.
-- Nativo: `encode_rodata` (`encode_arm64.tks:2679` + x86/riscv) produz `Reloc sect=Rodata`
+- Nativo: `encode_rodata` (`encode_arm64.tks:2679``Reloc sect=Rodata`
   por `LDataReloc`, re-baseado ao offset do blob no `.rodata`/`__const` concatenado; os
   writers ELF/Mach-O/COFF/wasm aplicam a relocation UMA vez na emissão.
 - **Hoje `serialize_const` honest-stopa pointer-bearing → todo `LRodata.relocs` é vazio →
@@ -506,7 +506,7 @@ Os irmãos expandem os seus `push_range`/helpers idem:
   `gpr_caller_saved = [0,1,2,6,7,8,9,10,11]`; `fpr_arg = [0..7]`; `fpr_allocatable = [0..13]`;
   `fpr_caller_saved = [0..15]`; `gpr_spill_scratch = [10,11]`; `fpr_spill_scratch = [14,15]`;
   `shadow_space = 0`. (todos `to u32`.)
-- **`RISCV64_LP64D`**: `gpr_arg = [10..17]`; `gpr_allocatable = [5,6,7,10..17,28,9,18..27]`;
+- **uma ABI**: `gpr_arg = [10..17]`; `gpr_allocatable = [5,6,7,10..17,28,9,18..27]`;
   `gpr_caller_saved = [1,5,6,7,10..17,28..31]`; `fpr_arg = [10..17]`;
   `fpr_allocatable = [0..7,10..17,28,29,8,9,18..27]`; `fpr_caller_saved = [0..7,10..17,28..31]`;
   `gpr_spill_scratch = [29,30,31]`; `fpr_spill_scratch = [30,31]`; `shadow_space = 0`.
@@ -523,8 +523,8 @@ Os irmãos expandem os seus `push_range`/helpers idem:
 ### 5.2 Remover as fns mortas + atualizar use-sites
 
 - Remover: `push_range`, `sysv_gpr_arg_seq`, `sysv_gpr_allocatable`, `sysv_gpr_caller_saved`,
-  `riscv_gpr_arg_seq`, `riscv_gpr_allocatable`, `riscv_gpr_caller_saved`,
-  `riscv_fpr_allocatable`, `riscv_fpr_caller_saved`, `win64_gpr_arg_seq`,
+  ``, ``, ``,
+  ``, ``, `win64_gpr_arg_seq`,
   `win64_gpr_allocatable`, `win64_gpr_caller_saved`, `win64_fpr_allocatable`, e as 4 fábricas
   `aapcs64`/`sysv64`/`[target removido]_lp64d`/`win64` (agora consts). **MANTER** `contains_u32` (usado
   por `is_caller_saved`/`is_callee_saved`), `arg_reg`, `allocatable_pool`, `is_caller_saved`,
@@ -532,15 +532,15 @@ Os irmãos expandem os seus `push_range`/helpers idem:
   descritor por parâmetro).
 - Use-sites (grep `aapcs64\(\)|sysv64\(\)|win64\(\)|[target removido]_lp64d\(\)`):
   - `src/build/project.tks:1168,1169` → `teko::backend::AAPCS64`;
-    `:1193,1194,1195` → `SYSV64`; `:1223,1224,1225` → `WIN64`; `:1252,1253` → `RISCV64_LP64D`.
-  - `src/backend/isel_riscv.tks:150,636,1041` → `arg_reg(RISCV64_LP64D, …)`.
+    `:1193,1194,1195` → `SYSV64`; `:1223,1224,1225` → `WIN64`; `:1252,1253` → uma ABI.
+  - `` → `arg_reg(RISCV64_LP64D, …)`.
   - Doc-comments que citam `sysv64()`/`aapcs64()`/`[target removido]_lp64d()` (encode_x86_64.tks:2466,
-    isel_x86_64.tks:472,1133-1134, regalloc_x86.tks:869/893, regalloc_riscv.tks:862/886,
-    isel_riscv.tks:610,1013) → atualizar o texto para `SYSV64`/… (Javadoc W15).
+
+`SYSV64`/… (Javadoc W15).
 
 ### 5.3 A EXIGÊNCIA de byte-identidade dos goldens de regalloc
 
-`regalloc_module`/`_x86`/`_riscv` recebem o descritor por parâmetro e LEEM os mesmos campos.
+`regalloc_module`/`_x86`/`` recebem o descritor por parâmetro e LEEM os mesmos campos.
 Como os VALORES de `AAPCS64` são idênticos aos de `aapcs64()` (§6.1 prova), o resultado de
 regalloc é byte-a-byte o mesmo. **Só a materialização do descritor muda** (fn-call+arena →
 rodata-load no nativo/VM, ou inline no C backend) — os bytes que regalloc EMITE não mudam.
@@ -668,7 +668,7 @@ golden de equivalência §6.1 temporário).
 | E3 | `src/lir/lower.tks` | `lower_fat_field` + braço `TFieldAccess` em `lower_fat_expr`; (opc.) `store_struct_fields` grava as 2 metades (§4.2/§4.3) | `lir_interp_test.tkt` §7.3 |
 | E4 | `src/lir/lower.tks` | `const_leaf_symbol`, `const_fat_field`, `serialize_const`/`const_named_bytes`/`const_struct_bytes`/`const_struct_blob` → `ConstImage`, `intern_aggregate_const_decl` interna leaves+blob (§3) — ABRE o gate `:5142` p/ campo slice | `lower_test.tkt` §7.1/§7.2 |
 | E5 | `src/backend/abi_aapcs64.tks` + `abi_sysv64.tks` + uma ABI + `abi_win64.tks` | golden de equivalência (§6.1) → migrar as 4 fábricas p/ `const UPPER_SNAKE` array-literal → remover as fns mortas (§5) | `abi_*_test.tkt` (equivalência verde, depois byte-idêntico) |
-| E6 | `src/build/project.tks`, `src/backend/isel_riscv.tks` + doc-comments | use-sites `x()` → `X` (§5.2) | `regalloc_*_test.tkt` byte-idêntico |
+| E6 | `src/build/project.tks`, `` + doc-comments | use-sites `x()` → `X` (§5.2) | `regalloc_*_test.tkt` byte-idêntico |
 | E7 | fixtures | §7.5 dual-engine mirror + §7.3 reader + §7.1 produtor | os próprios testes |
 
 Ordem tal que o arquivo compila a cada passo: E1→E2→E3 dão o reader/layout; E4 o produtor
@@ -757,10 +757,10 @@ de granularidade em aberto, com recomendação de INCLUIR (fecha o Tier-B de ver
 - `/home/user/teko-lang/src/backend/abi_aapcs64.tks` — `AAPCS64` const, remover
   `push_range`/`aapcs64`.
 - `/home/user/teko-lang/src/backend/abi_sysv64.tks` — `SYSV64` const, remover helpers/`sysv64`.
-- `/home/user/teko-lang/src/backend/abi_[target removido].tks` — `RISCV64_LP64D` const, remover helpers.
+- `/home/user/teko-lang/src/backend/abi_[target removido].tks` — uma ABI const, remover helpers.
 - `/home/user/teko-lang/src/backend/abi_win64.tks` — `WIN64` const, remover helpers.
 - `/home/user/teko-lang/src/build/project.tks` — use-sites `:1168-1253`.
-- `/home/user/teko-lang/src/backend/isel_riscv.tks` — use-sites `:150,636,1041` + docs.
+- `` — use-sites `:150,636,1041` + docs.
 - doc-comments em `encode_x86_64.tks`, `isel_x86_64.tks`, `regalloc_x86.tks`,
   um regalloc.
 - fixtures: `lower_test.tkt`, `lir_interp_test.tkt`, `abi_*_test.tkt`, `regalloc_*_test.tkt`,

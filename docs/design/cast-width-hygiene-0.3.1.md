@@ -8,7 +8,7 @@
 > frame-slot/count declarations (`MFrameAddr`/`Riscv`/`X86.slot`, `Spilled`/`AssignLookup.slot`,
 > `next_slot`, `frame_base`, `count_spills`/`append_spill_slots`,
 > `emit_gpr_reload`/`emit_gpr_store` + `rewrite_inst`/`block`/`func` × 3 archs,
-> `slot_offset`/`_riscv`, `frame_slot_addr`, `block_pos`→`block_rpo_pos`) `u32`→`u64`,
+> `slot_offset`/``, `frame_slot_addr`, `block_pos`→`block_rpo_pos`) `u32`→`u64`,
 > deleting the `.len to u32`/`.len to u64` casts they existed only to satisfy.
 > **C4 (corpus cast sweep + the D1 `redundant cast` error, "varre → liga") — DONE.** `type_cast`
 > rejects a same-type cast (class 1); `type_binary`/`type_compare` reject a redundant

@@ -89,7 +89,7 @@ A1–A4 + B1–B3). Base for the design: `docs/design/own-backend-architecture.m
 ## 1. The assessed starting point — what C1 consumes, REUSES, and PARALLELS
 
 C1 consumes `lir::lower_program(prog) -> LModule | error` (`src/lir/lower.tks`) DIRECTLY — the same
-entry `emit_native_arm64`/`_x86`/`_riscv`/`_win` call before handing to isel. The `LModule`
+entry `emit_native_arm64`/`_x86`/``/`_win` call before handing to isel. The `LModule`
 (`lir.tks:155`) is `{ funcs: []LFunc; rodata: []LRodata; globals: []LGlobal; layouts: []LStructLayout }`.
 Each `LFunc` (`lir.tks:141`) is `{ symbol; n_params; param_types: []LType; ret_type: LType; blocks:
 []LBlock; next_vreg }`; each `LBlock` (`lir.tks:136`) is `{ id; params: []u32; insts: []LInst }`; each
@@ -125,7 +125,7 @@ surface here.
   `objfile_coff.tks` (a per-format module writer producing `[]byte`); the LEB128 byte idiom parallels
   A4's `emit_u32_le` little-endian `teko::list::push(buf, (x & 0xFF) to byte)`.
 - **The differential PATTERN** — `scripts/diff_c_own.sh` gains a wasm lane exactly as B1/B2/B3 added
-  the linux/riscv/windows lanes (own build behind the `TEKO_BACKEND=native` seam + `TEKO_TARGET`,
+`TEKO_BACKEND=native` seam + `TEKO_TARGET`,
   the `"(own backend)"` success marker, an oracle-availability honest-skip).
 - **The `examples/regressions/own_*` corpus** — the SAME six fixtures the register lanes diff
   (`own_exit_zero`, `own_exit_code`, `own_arith_exit`, `own_sub_exit`, `own_if_exit`, `own_match_exit`)
@@ -790,7 +790,7 @@ The register targets flow through `emit_native` (`project.tks:786`) → `emit_na
  * + the link/glue tail (§9), so a single `emit_native_wasm` handles both, keyed
  * by the variant.
  */
-type NativeTarget = enum { Arm64Macho; X8664Linux; Riscv64Linux; X8664Windows; Wasm32Wasi; Wasm32Browser }
+type NativeTarget = enum { Arm64Macho; X8664Linux; X8664Windows; Wasm32Wasi; Wasm32Browser }
 
 /**
  * emit_native_wasm — the wasm own-backend tail (#389 C1): lower the program to

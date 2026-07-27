@@ -922,7 +922,7 @@ Closing #389 honestly required **SIX real own-backend compiler fixes**, each sep
   `if !cond` mis-branched on both own backends; now `ICmpEq(operand,0)`. The range-`for` desugar was
   the first own-backend code to use `!`. `src/lir/lower.tks`.
 - **F2** (#563) — own-native regalloc §6.2 loop-liveness extension across all three allocators
-  (arm64/x86/riscv): removed the loop honest-stop, widen header-live intervals to the latch.
+
   own-native now compiles loops. `src/backend/regalloc*.tks`.
 - **F1b** (#564) — defer-write-propagation (statement-arm scalar sampled post-`replay_defers`) +
   value-if/match RHS reassignment threading. `src/lir/lower.tks`.
@@ -1179,7 +1179,7 @@ exit(s)
 
 - **BLOCKER B-1 · wasmtime (and WABT) availability in CI.** Today NO workflow provisions wasmtime or
   `wasm-validate` (audited: `native.yml`/`sanitizers.yml`/`release.yml` install only cc/clang/zig/
-  qemu/riscv-gcc). Wired as-is, C1-8c's leg would HONEST-SKIP (exit 0) forever and the keystone would
+
   close #389 on a *vacuously* green leg — not a real gate. **What unblocks it:** add a wasmtime install
   step (the official release tarball is deterministic and offline-cacheable, the same pattern
   `native.yml`'s zig step already uses; WABT via `apt-get install -y wabt`). This is a genuine external

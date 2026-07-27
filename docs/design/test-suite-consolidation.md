@@ -89,10 +89,10 @@ so we do not claim it.
 | `isel_x86_64_test.tkt` | 62 | 1,005 | x86-64 instruction selection |
 | um isel de backend | 57 | 903 | RISC-V isel |
 | um backend encoder | 51 | 1,385 | RISC-V encodings |
-| `regalloc_test.tkt` / `_x86` / `_riscv` / `_match` | 42/33/30/3 | — | register allocation |
+| `regalloc_test.tkt` / `_x86` / `` / `_match` | 42/33/30/3 | — | register allocation |
 | `isel_arm64_test.tkt` | 38 | 753 | AArch64 isel |
 | `minst_interp_test.tkt` / `minst_*` | 35/14/10/8 | — | MInst interpreter **oracle** (active, not the retired VM) |
-| `objfile_*` (elf/macho/coff/wasm/elf_riscv) | 71 total | — | object-file emission per format |
+| `objfile_*`
 | `abi_*` (sysv64/win64/[target removido]) | 32 total | — | ABI lowering |
 
 **Poda posture:** **KEEP essentially all.** Each `#test` here is a distinct golden vector (a
