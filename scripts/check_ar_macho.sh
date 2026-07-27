@@ -90,10 +90,20 @@ if [[ "$nm_rc" -ne 0 ]]; then
 fi
 
 if [[ -n "$SYMBOL" ]]; then
-    trace "step: symbol index lists '$SYMBOL'"
-    if ! printf '%s\n' "$nm_out" | grep -q "$SYMBOL"; then
+    trace "step: symbol index lists '$SYMBOL' (whole word, not substring)"
+    # A plain `grep -q "$SYMBOL"` is a SUBSTRING match anywhere on the line — it silently PASSED
+    # when the own-native mangler leaked a `teko_` prefix into the archived symbol
+    # (`teko_ar_link_run__add` CONTAINS `ar_link_run__add`), a "gate that does not gate" that
+    # only the later real-linker step caught. Anchored to (start-of-line|whitespace) on the left
+    # and (whitespace|end-of-line) on the right — nm's own column boundaries — so a longer
+    # identifier merely containing `$SYMBOL` can never satisfy it. The ONE allowed prefix is a
+    # SINGLE leading `_`: Mach-O's own C-symbol decoration (`_ar_link_run__add`), which every
+    # object this writer emits carries legitimately and which `$SYMBOL` (the bare Teko-facing
+    # name) never itself includes.
+    sym_pattern="(^|[[:space:]])_?${SYMBOL}([[:space:]]|\$)"
+    if ! printf '%s\n' "$nm_out" | grep -Eq "$sym_pattern"; then
         trace "nm -a output:"; printf '%s\n' "$nm_out" | sed 's/^/      | /' >&2
-        fail "the archive symbol index does not list '$SYMBOL'"
+        fail "the archive symbol index does not list '$SYMBOL' as a whole word (with an optional Mach-O leading underscore)"
     fi
 fi
 

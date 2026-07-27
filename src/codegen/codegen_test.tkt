@@ -1794,6 +1794,40 @@ fn cgt_mangle_parity_c_and_native() {
 }
 
 /**
+ * The native mangler's `abi=c`-adjacent static/shared-archive carve-out (`mangle_fn_symbol`'s
+ * `flat` argument, `emit_static_lib`'s `flat_symbols = true`): `flat` strips EXACTLY
+ * `TEKO_USER_PREFIX`, changing nothing else about the mangle — every pair's `flat` spelling is
+ * the SAME prefixed spelling with that one prefix removed.
+ *
+ * There is no `cb_fn_name` counterpart to compare against here (unlike
+ * `cgt_mangle_parity_c_and_native` above): a static/shared archive is an own-native-ONLY
+ * artifact kind (`emit_static_lib` — the C backend never builds one), and the C backend's OWN
+ * externally-published name for its `abi = "c"` reverse-FFI export is the SEPARATE
+ * `cg_c_export_symbol`/`flatten_canonical` (a single-underscore join with no `TEKO_USER_PREFIX`
+ * to begin with, and no `cb_fn_name` involvement at all — the wrapper's forward call keeps using
+ * `cb_fn_name` UN-carved, see `ffx_wrappers_forward_to_internal`). `cb_fn_name` itself carries no
+ * `flat` mode, and needs none.
+ *
+ * The concrete regression this guards: `examples/toolchain/ar_link_run` (KP16's static archive)
+ * failed its real host `ar`/`nm`/`ld` link+run before this fix — the archive published
+ * `teko_ar_link_run__add`, but the consumer's `extern long long ar_link_run__add(...)` needed
+ * exactly `ar_link_run__add`.
+ */
+#test
+fn cgt_mangle_native_flat_strips_prefix_only() {
+    let pairs = cgt_mangle_parity_pairs()
+    mut i: u64 = 0
+    loop {
+        if i >= pairs.len { break }
+        let prefixed = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name)
+        let flat = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name, true)
+        teko::assert::is_true(prefixed == teko::str::concat(TEKO_USER_PREFIX, flat))
+        i++
+    }
+    teko::assert::is_true(teko::lir::mangle_fn_symbol("ar_link_run", "add", true) == "ar_link_run__add")
+}
+
+/**
  * Assert the mangle spells the whole symbol, not just its prefix: a namespaced function keeps its
  * `::`-to-`__` namespace mangle behind the user prefix, and an un-namespaced (lifted) one is the
  * prefix plus the bare name.
