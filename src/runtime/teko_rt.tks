@@ -1,27 +1,3 @@
-// src/runtime/teko_rt.tks   (namespace 'teko::runtime')
-//
-// teko::runtime — the EXECUTION runtime for GENERATED Teko programs (M.1 fail-loud).
-// The metal bottom: print/println write bytes to the host, the panics fail loud and
-// abort, the F3 guards turn raw division and narrowing casts into checked ops that
-// PANIC rather than corrupt. This is the canonical Teko ORIGINAL of src/runtime/
-// teko_rt.{c,h} — they must stay SEMANTICALLY EQUIVALENT.
-//
-// WHY A PAIR (M.3 — honesty). Like main.tks and driver.tks, this file is the canonical
-// SOURCE but is NOT YET SEED-COMPILABLE. Its true realization rides the host primitives
-// the bootstrap does not yet expose as materialized .tks pairs:
-//   * print/println bottom out at the host write (the FFI bottom — crumb C1, DEFERRED).
-//   * panic bottoms out at the host abort/exit (the same deferred `extern`/syscall edge).
-// Until those primitives land, the C/H seed (teko_rt.{c,h}) is what generated programs
-// actually link; this .tks is the target materialization will hit. The pairing closes the
-// runtime SUPREME-RULE gap (no .c/.h without a .tks) HONESTLY — it does not pretend the
-// metal bottom already exists in Teko.
-//
-// FAIL LOUD (M.1). Every panic prints "teko: deliberate panic: <msg>" to stderr and exits
-// non-zero. The word "deliberate" is the marker a regressor scenario asserts on instead of
-// an exit code — see TK_PANIC_MARKER in teko_rt.h for why the proof had to move to stderr.
-// SINGLE-EVALUATION (F3). Each guard takes its operands BY VALUE — the caller computes
-// each once — so codegen never duplicates an operand subtree.
-
 // ─── C7.14: concrete list type instantiations — SUPREME-RULE twin ─────────────
 // In C: teko_rt.h defines TK_RT_LIST(T, Name) and instantiates three concrete
 // growable-array types. Each generates a struct {T *ptr; size_t len; size_t cap}
@@ -39,45 +15,90 @@
 // SUPREME-RULE gap: the C macro expansion in the header is twinned here with an
 // honest documentation of the Teko-surface equivalence. (C7.14)
 
-// --- output: write a str VIEW (len BYTES, NOT NUL-terminated; embedded NUL tolerated) ---
+/**
+ * teko::runtime — the EXECUTION runtime for GENERATED Teko programs (M.1 fail-loud). The metal
+ * bottom: `print`/`println` write bytes to the host, the panics fail loud and abort, the F3
+ * guards turn raw division and narrowing casts into checked ops that PANIC rather than corrupt.
+ * This is the canonical Teko ORIGINAL of `src/runtime/teko_rt.{c,h}` — they must stay
+ * SEMANTICALLY EQUIVALENT.
+ *
+ * THE METAL BOTTOM IS REAL, NOT DEFERRED. `extern fn` to a foreign symbol resolves and links
+ * TODAY — proven elsewhere in this tree (`examples/probes/arena_bottom`, the bulk regression's
+ * `q026`/`q170` bodies, `builtin_name_not_hijacked`'s `getpid`) — there is no missing compiler
+ * primitive left to justify calling this bottom "deferred". `print`, `println`, `write`,
+ * `ewrite`, `eprint`, `eprintln` below each DECLARE their OWN `extern fn` directly; none of them
+ * delegates to a helper Teko function, and no new C is written by this file.
+ *
+ * WHY THE `str` PARAMETER STILL NAMES A `teko_rt` SYMBOL (an honest scope note). A general
+ * `extern fn` parameter is restricted to a primitive/`byte`/`ptr`/`uptr`/`extern type` handle
+ * (C7.1a) — `str` is a fat `{ptr, len}` pair, not one of those. The checker (C7.2) and the native
+ * lowering (`lir/lower.tks::is_str_arg_builtin`) carry exactly ONE closed exception: a
+ * `str`-taking `extern fn` declared `from "teko_rt"` whose bound symbol is one of seven names —
+ * `tk_print`/`tk_println`/`tk_eprint`/`tk_eprintln`/`tk_write`/`tk_ewrite`/`tk_panic_str` — the
+ * runtime's own io/panic group. That is the ONE door the compiler opens for a `str`-shaped host
+ * call, and it is what every function below binds through. Widening that door to arbitrary
+ * foreign symbols is a separate, larger compiler change — out of this file's scope.
+ *
+ * THE RESIDUAL THIS FILE DOES NOT CLOSE (honest, not swept under the rug). A bare
+ * `print(...)`/`write(...)`/`panic(...)` call anywhere in Teko source — including the compiler's
+ * own — still lowers DIRECTLY to `tk_print`/`tk_write`/`tk_panic_str` via the native backend's
+ * builtin dispatch (`lir/lower.tks::native_builtin_symbol`), never reaching the bodies here. Only
+ * a FULLY QUALIFIED `teko::runtime::print(...)` (as `teko_rt_test.tkt` already does for this
+ * namespace's other functions, e.g. `teko::runtime::str_eq`) resolves to what is declared below.
+ * Rerouting the bare-name dispatch to call INTO this file — so a plain `print("x")` anywhere runs
+ * this code instead of the parallel C path — is the next step toward retiring `teko_rt.c`; it
+ * touches the native backend's core call lowering and needs the full self-host gate to validate,
+ * so it is not this change.
+ *
+ * FAIL LOUD (M.1). Every panic prints "teko: deliberate panic: <msg>" to stderr and exits
+ * non-zero. The word "deliberate" is the marker a regressor scenario asserts on instead of an
+ * exit code — see TK_PANIC_MARKER in teko_rt.h for why the proof had to move to stderr.
+ *
+ * SINGLE-EVALUATION (F3). Each guard takes its operands BY VALUE — the caller computes each once
+ * — so codegen never duplicates an operand subtree.
+ *
+ * @param s  the exact bytes to write to stdout, unchanged (no newline, no NUL added)
+ */
+exp extern fn print(s: str) -> void = "tk_print" from "teko_rt"
 
-// print — write exactly s.len bytes from s to stdout; no newline, no NUL.
-exp fn print(s: str) {
-    teko::io::write(s)   // DEFERRED host write (FFI bottom — C1)
-}
+/**
+ * `print(s)` followed by a single `\n` (0x0A) on stdout.
+ *
+ * @param s  the bytes to write before the trailing newline
+ */
+exp extern fn println(s: str) -> void = "tk_println" from "teko_rt"
 
-// println — print(s) then a single '\n' (0x0A).
-exp fn println(s: str) {
-    print(s)
-    teko::io::write("\n")
-}
+/**
+ * Write exactly `s.len` bytes from `s` to stdout — no newline, no NUL. The same host bottom as
+ * `print` (both bind the runtime's stdout-side twin); kept as a distinct name because
+ * `teko::io` and the bare-name builtin surface both address it as `write`.
+ *
+ * @param s  the exact bytes to write, unchanged
+ */
+exp extern fn write(s: str) -> void = "tk_write" from "teko_rt"
 
-// --- host output FFI bottoms (scope.c: write/ewrite/eprint/eprintln) ---
-// Exactly s.len bytes, embedded NUL tolerated. These bottom out at the SAME deferred host
-// write edge as print/println (FFI bottom — C1): write → stdout; ewrite/eprint → stderr;
-// eprintln → stderr + '\n'. The C twins (teko_rt.c::tk_write/tk_ewrite/tk_eprint/tk_eprintln)
-// carry the behavior until the host primitives land as materialized .tks pairs.
+/**
+ * Write exactly `s.len` bytes from `s` to stderr — no newline, no NUL.
+ *
+ * @param s  the exact bytes to write, unchanged
+ */
+exp extern fn ewrite(s: str) -> void = "tk_ewrite" from "teko_rt"
 
-// write — write exactly s.len bytes from s to stdout; no newline, no NUL. (C: tk_write.)
-exp fn write(s: str) {
-    teko::io::write(s)   // DEFERRED host write (FFI bottom — C1)
-}
+/**
+ * Write exactly `s.len` bytes from `s` to stderr — no newline, no NUL. Behaviorally identical to
+ * `ewrite`; kept as a distinct name because the bare-name builtin surface addresses a stderr
+ * write as either `eprint` or `ewrite` depending on call site.
+ *
+ * @param s  the exact bytes to write, unchanged
+ */
+exp extern fn eprint(s: str) -> void = "tk_eprint" from "teko_rt"
 
-// ewrite — write exactly s.len bytes from s to stderr; no newline, no NUL. (C: tk_ewrite.)
-exp fn ewrite(s: str) {
-    teko::io::ewrite(s)   // DEFERRED host write (FFI bottom — C1)
-}
-
-// eprint — write exactly s.len bytes from s to stderr; no newline, no NUL. (C: tk_eprint.)
-exp fn eprint(s: str) {
-    teko::io::ewrite(s)   // DEFERRED host write (FFI bottom — C1)
-}
-
-// eprintln — eprint(s) then a single '\n' (0x0A) on stderr. (C: tk_eprintln.)
-exp fn eprintln(s: str) {
-    teko::io::ewrite(s)   // DEFERRED host write (FFI bottom — C1)
-    teko::io::ewrite("\n")
-}
+/**
+ * `eprint(s)` followed by a single `\n` (0x0A) on stderr.
+ *
+ * @param s  the bytes to write before the trailing newline
+ */
+exp extern fn eprintln(s: str) -> void = "tk_eprintln" from "teko_rt"
 
 // float_parse — teko::float::parse(str) -> f64. strtod over a NUL-terminated copy of s
 // (s may contain no NUL and is not NUL-terminated); a non-numeric / empty string yields 0.0
@@ -644,6 +665,17 @@ exp fn f64_g17(x: f64) -> str {
 // codegen emits nothing for it. (C: tk_regions_free_all.)
 
 /**
+ * The libc process-abort primitive, reached DIRECTLY as a foreign symbol — `panic`'s termination
+ * bottom. Zero parameters and a `void` return trivially satisfy the general `extern fn` typing
+ * rule (C7.1a: a primitive, `byte`, `ptr`, `uptr`, an `extern type` handle, or absent — `void`
+ * needs none of those), so this needs no `teko_rt` bypass: it is portable libc `abort()`, present
+ * under the same name on every target this compiler ships for (POSIX and the Windows UCRT).
+ *
+ * @return  nothing (diverges — `abort()` never returns; it raises `SIGABRT` and the process ends)
+ */
+exp extern fn rt_abort() -> void = "abort" from "c"
+
+/**
  * panic — write the TK_PANIC_MARKER line (`"teko: deliberate panic: <msg>\n"`) to stderr, then a
  * stack trace (C1.9), then abort.
  *
@@ -657,26 +689,57 @@ exp fn f64_g17(x: f64) -> str {
  * @return     void (diverges — the host abort never returns)
  */
 exp fn panic(msg: str) {
-    teko::io::ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
-    teko::abort()   // DEFERRED host abort (the same `extern` edge)
+    ewrite(teko::str::concat("teko: deliberate panic: ", msg, "\n"))
+    rt_abort()
 }
 
+/**
+ * The division-by-zero panic (F3's checked `div`/`mod` guard).
+ *
+ * @return  nothing (diverges — see `panic`)
+ */
 exp fn panic_div0() { panic("division by zero") }
+
+/**
+ * The index-out-of-bounds panic (a slice/array access whose index is outside `[0, len)`).
+ *
+ * @return  nothing (diverges — see `panic`)
+ */
 exp fn panic_oob() { panic("index out of bounds") }
-exp fn panic_cast() { panic("impossible conversion") }   // the `x to T` guard — B.36 / M.1
+
+/**
+ * The impossible-narrowing-conversion panic — the `x to T` guard (B.36 / M.1) fires this when
+ * `x` does not fit `T`.
+ *
+ * @return  nothing (diverges — see `panic`)
+ */
+exp fn panic_cast() { panic("impossible conversion") }
+
+/**
+ * The integer-overflow panic, reserved for the profile-dependent `+`/`-`/`*` overflow guard
+ * (DEFERRED — not yet wired by codegen; this entry point exists for that future caller).
+ *
+ * @return  nothing (diverges — see `panic`)
+ */
 exp fn panic_overflow() { panic("integer overflow") }
 
-// (C1.7-CAST) Native-only globals: _tk_cast_loc_line / _tk_cast_loc_col (defined in teko_rt.c).
-// codegen wraps every tk_to_* call in a GNU statement-expression that stores the cast node's
-// source position into these globals just before the call; tk_panic_cast() reads them to prefix
-// "line:col: " on the panic message, matching the VM's positioned cast panic.
-// The VM carries position differently (via its own eval frame) — no Teko-side twin needed here.
-
-// (C1.7) positioned OOB — print "line:col: " then the canonical OOB panic, so VM and native locate
-// index-out-of-bounds identically (mirror of teko_rt.c::tk_panic_oob_at + the VM's vm_panic_pos).
+/**
+ * The POSITIONED out-of-bounds panic: prints `"line:col: "` then the canonical OOB panic, so the
+ * VM and the native backend locate an index-out-of-bounds failure identically (mirror of
+ * `teko_rt.c::tk_panic_oob_at` and the VM's `vm_panic_pos`). Native-only globals
+ * `_tk_cast_loc_line`/`_tk_cast_loc_col` (defined in `teko_rt.c`) carry the SAME position for the
+ * cast guard: codegen wraps every `tk_to_*` call in a statement-expression that stores the cast
+ * node's source position into those globals just before the call, and `tk_panic_cast()` reads them
+ * to prefix `"line:col: "` the same way; the VM carries its own position via its eval frame
+ * instead, so it needs no Teko-side twin for that half.
+ *
+ * @param line  the 1-based source line of the failing index expression
+ * @param col   the 1-based source column of the failing index expression
+ * @return      nothing (diverges — see `panic`)
+ */
 exp fn panic_oob_at(line: u32, col: u32) {
-    teko::io::ewrite(teko::str::concat(teko::u64_to_str(line to u64), ":", teko::u64_to_str(col to u64)))
-    teko::io::ewrite(": ")
+    ewrite(teko::str::concat(teko::u64_to_str(line to u64), ":", teko::u64_to_str(col to u64)))
+    ewrite(": ")
     panic_oob()
 }
 
