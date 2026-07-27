@@ -20,12 +20,12 @@ medidas e registradas, exigem S8 agora:
    emissão de C vivem no caminho de teste (`run_native_gate`, `run_analyzer`,
    `build_regression_cov_exe`), e o critério do owner é binário: quando gen1 compilar gen2 e ainda
    houver qualquer emissão de C — analisador, teste ou `teko.c` — foi feito errado. O desenho que o
-   owner deu para o gate sem C **é uma corrotina por `#test`**, com handler próprio de exit e panic.
-   Sem a corrotina não há esse gate.
+   owner deu para o gate sem C **é um ISOLATE por `#test`**, com handler próprio de exit e panic.
+   Sem o isolate não há esse gate.
 2. **Um `#test` que falha mata a suíte inteira.** Medido no CI: `teko: deliberate panic: assertion
    failed: str_contains` → exit 134, e nenhum teste posterior roda. É a patologia do
    `all-diagnostics` reencarnada no runner — um erro escondendo todos os outros. O isolamento por
-   corrotina não é conforto: é o que faz o gate **relatar tudo**.
+   isolate não é conforto: é o que faz o gate **relatar tudo**.
 
 O documento responde, em ordem: o invariante de ordenação está satisfeito? qual é o chão sem C?
 qual é a superfície? como o panic é capturado? quem sintetiza o `main`? como o determinismo é
@@ -264,7 +264,7 @@ pub unsafe extern fn sys_thread_self() -> u64 = "pthread_self"
 O espelho `#os("windows")` liga `CreateThread` / `WaitForSingleObject` / `ExitThread` /
 `GetCurrentThreadId` com a mesma forma. `#os("macos")` reusa o corpo POSIX.
 
-### 3.2 L1 — `teko::task`, a capacidade completa
+### 3.2 L1 — `teko::isolate`, a capacidade completa
 
 ```teko
 /**
@@ -275,7 +275,7 @@ O espelho `#os("windows")` liga `CreateThread` / `WaitForSingleObject` / `ExitTh
  *
  * @since S8
  */
-pub unsafe type Task = struct {
+pub unsafe type Isolate = struct {
     /** O identificador de thread do SO, lido de volta do bloco que `sys_thread_create` escreveu. */
     handle: u64
 
@@ -297,7 +297,7 @@ pub unsafe type Task = struct {
  * @throws       quando o SO recusa criar a thread (limite de threads, memória)
  * @since S8
  */
-pub unsafe fn spawn(entry: cabi fn(ptr<byte>) -> ptr<byte>, ctx: ptr<byte>, lane: u64) -> Task | error
+pub unsafe fn spawn(entry: cabi fn(ptr<byte>) -> ptr<byte>, ctx: ptr<byte>, lane: u64) -> Isolate | error
 
 /**
  * Espera `t` terminar. Depois deste retorno, tudo que a tarefa escreveu está visível ao chamador.
@@ -311,7 +311,7 @@ pub unsafe fn spawn(entry: cabi fn(ptr<byte>) -> ptr<byte>, ctx: ptr<byte>, lane
  * @throws   quando o SO recusa a junção (alça inválida, junção dupla)
  * @since S8
  */
-pub unsafe fn join(t: Task) -> null | error
+pub unsafe fn join(t: Isolate) -> null | error
 
 /**
  * Executa `count` itens de trabalho em até `lanes` threads e retorna quando o último terminar.
@@ -492,7 +492,7 @@ consumida pelo lowering e descartada; o binário do gate carrega **símbolos**, 
 o oposto do que `run_native_gate(dir, out_dir, prog: checker::TProgram, m, tty)` faz hoje, que é
 entregar o `prog` inteiro ao emissor e mantê-lo vivo enquanto o gate roda.
 
-### 5.3 Uma raia, não uma corrotina por teste
+### 5.3 Uma raia, não um isolate por teste
 
 O desenho entrega **uma** função `cabi` de raia, não uma por teste:
 
@@ -713,7 +713,7 @@ disciplinar.
 **8.8 — `errno` e o retorno de `pthread_create`.**
 `pthread_create` **não** define `errno`; devolve o código de erro. Ignorar o retorno numa raia que
 falhou ao criar produz um `join` sobre alça inválida, cujo comportamento é indefinido e cujo sintoma
-típico é travamento sob carga, não erro. Guarda: `spawn` devolve `Task | error` e o `error` é
+típico é travamento sob carga, não erro. Guarda: `spawn` devolve `Isolate | error` e o `error` é
 verificado no sítio — afirmado por fixture com limite de threads artificialmente baixo.
 
 **8.9 — Registro de DI por região.**
@@ -745,7 +745,7 @@ mais seria pior.
 | **C3** | **`panic`/`exit` em Teko** | retargetar `call_symbol` de `tk_panic_str`/`tk_exit` para `teko::rt::panic`/`teko::rt::exit`, em Teko, com bottom por `extern fn` para `write`/`abort`. Saída não-guardada **byte-idêntica**, exit 134 preservado | C7; e fecha o *"FFI bottom, crumb C1, DEFERRED"* de `teko_rt.tks` | **sim** |
 | **C4** | **Região raiz por tarefa** | `arena_push`/`pop`/`commit` passam a operar sobre a raiz da tarefa chamadora. É a peça de §8.1 e é **bloqueante** | C5 em diante | **sim** |
 | **C5** | **`teko::thread::sys`** | ligações `extern fn` guardadas por `#os` (POSIX + Win32) | C6 | **sim** |
-| **C6** | **`teko::task` (L1)** | `Task`, `spawn`, `join`, `fork_join`, `hardware_parallelism`; a lei do fork-join determinístico escrita no doc-comment de `fork_join` | C7, C10, C12 | **sim** |
+| **C6** | **`teko::isolate` (L1)** | `Isolate`, `spawn`, `join`, `fork_join`, `hardware_parallelism`; a lei do fork-join determinístico escrita no doc-comment de `fork_join` | C7, C10, C12 | **sim** |
 | **C7** | **Raia guardada** | `guard_lane`/`unguard_lane`; `panic`/`exit` guardados depositam veredito e chamam `sys_thread_exit`; posições de diagnóstico migram para o registro da raia (§8.4) | C10 | **sim** |
 | **C8** | **Sonda de dependência entre testes** | suíte serial em ordem invertida e em ordem embaralhada com semente. **Pode falhar — é o objetivo** | C10, com confiança em vez de esperança | sem fixpoint |
 | **C9** | **`main` de gate sintetizado, `lanes = 1`** | `src/build/gate.tks`; `lower_item_function` para de descartar `is_test` sob modo gate; `run_native_gate` emite `.o` + `link_object`. Vereditos e exit code **idênticos** aos de hoje | C10; e o degrau 0 | **sim** |

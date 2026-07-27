@@ -145,8 +145,8 @@ inalcancavel e melhor resultado que corrigi-lo.
 push/pop se amarram. Threads bottom em `pthread` da libc. **Nao ha uma linha de C a escrever** para
 nenhum dos tres invariantes — ruling do dono de que nao se escreve mais C continua integro.
 
-**"CORROTINA" AQUI E ISOLAMENTO, NAO SUSPENSAO (dono, 2026-07-27):** *"não é suspensão (como
-async/await) é isolamento"*.
+**O NOME E `isolate` — ISOLAMENTO, NAO SUSPENSAO (dono, 2026-07-27):** *"não é suspensão (como
+async/await) é isolamento"*, e em seguida, sobre a grafia: *"isolate então"*.
 
 Os dois modelos garantem coisas OPOSTAS, e por isso a palavra importa:
 
@@ -157,13 +157,27 @@ Os dois modelos garantem coisas OPOSTAS, e por isso a palavra importa:
     fosse outro programa". Nada e compartilhado ate que uma estrutura EXPLICITA compartilhe (canais,
     e canais vem depois).
 
-**RISCO DE NOME, e ele e a razao deste registro.** "Corrotina" carrega expectativa de suspensao:
-quem le importa `yield`, `await`, escalonamento cooperativo e memoria comum. Se a superficie se
-chamar corrotina e entregar isolamento, o NOME MENTE — a mesma classe de defeito que o projeto
-persegue em toda parte. A palavra pode ser usada na CONVERSA; nao pode vazar para a superficie.
+**POR QUE `isolate`, e por que NAO as obvias.** O nome tinha de nomear a PROPRIEDADE que o dono
+definiu, nao o mecanismo — porque o mecanismo pode mudar (MASTER_PLAN:260 fixa 1:1 primeiro com M:N
+como backing posterior SOB A MESMA SUPERFICIE).
 
-A superficie ja esta correta e isso foi verificado, nao presumido: o desenho drenado
-(`docs/design/concorrencia-adiantada-s8.md`) nomeia a camada de capacidade `teko::task` — `Task`,
-`spawn`, `join`, `fork_join`, `hardware_parallelism()`. Vocabulario de isolamento, zero `yield`,
-zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`) seguem
+  * **`isolate` ESCOLHIDO** — diz literalmente a frase do dono ("como se fosse outro programa"):
+    unidade com heap proprio que nada compartilha ate uma mensagem explicita. Ha precedente (Dart,
+    V8), entao ninguem importa `yield`/`await` junto. Sobrevive ao M:N sem passar a mentir. Zero
+    colisao na arvore.
+  * **`corrotina`/`coroutine` REJEITADO** — carrega expectativa de SUSPENSAO: quem le importa
+    `yield`, `await`, escalonamento cooperativo e memoria comum, que e o oposto do que se garante.
+  * **`task` REJEITADO** — era o que o desenho usava, e carrega o MESMO defeito: em C#, Rust e
+    Python, *task* e justamente a coisa de suspensao. Trocar uma palavra que mente por outra que
+    mente igual nao e correcao.
+  * **`thread` REJEITADO** — honesto hoje, falso no dia do M:N, e descreve o mecanismo em vez da
+    garantia.
+  * **`actor` REJEITADO** — traz caixa-postal, identidade e supervisao junto; e mais modelo do que
+    foi pedido.
+  * **`process` e `lane` INDISPONIVEIS** — ja ocupados nesta arvore (`teko::process::run_quiet` e
+    subprocesso de verdade; `lane` e lane de CI).
+
+A superficie e `teko::isolate` com `Isolate`, `spawn`, `join`, `fork_join`,
+`hardware_parallelism()` — os VERBOS ja estavam certos no desenho, mudou o substantivo. Zero
+`yield`, zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`) seguem
 RESERVADAS e nao congeladas, conforme MASTER_PLAN:262.
