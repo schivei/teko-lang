@@ -102,14 +102,15 @@ completo ao custo de um endereço codificado e de introduzir `mmap` onde hoje s�
 
 ### P3 — a string C do probe de ambiente (menor)
 
-`TEKO_MEM_PARANOID` é lido por `getenv` uma vez, preguiçosamente. `getenv` quer um
-`char *` NUL-terminado; `teko::str::as_cstr` produz um, mas **aloca** (`malloc`, por
-`capability_audit.md` 4b — fora do arena, então não é circular, mas é uma alocação no
-caminho do primeiro `free`). O caminho limpo é o endereço de um literal NUL-terminado
-em rodata, que é `LGlobalAddr` sobre a tabela de literais que a LIR já mantém.
+`TEKO_MEM_PARANOID` e lido por `getenv` uma vez, preguicosamente. `getenv` quer um
+`char *` NUL-terminado, e Teko nao sabe pegar o endereco de um literal em rodata. O
+caminho limpo e `LGlobalAddr` sobre a tabela de literais que a LIR ja mantem.
 
-Sem P3 o modo paranoico ainda funciona (via `as_cstr`, cujo `malloc` não passa pelo
-arena); com P3 ele fica sem alocação nenhuma.
+Sem P3, a implementacao de referencia SOLETRA o nome byte a byte num bloco cru
+(`control.tks::spell_paranoid_var`) e chama `getenv` direto. Funciona, nao aloca no
+caminho do arena, e nao e bonito. `teko::env::var` nao serve por dois motivos
+independentes: devolve `str | error`, e o backend nativo nao lowera `match` sobre
+receptor fat-pointer (secao 7, defeito 2); e o resultado dela seria alocado.
 
 ---
 
@@ -278,3 +279,69 @@ de chunks e footprint com o gêmeo em C, para provar que o comportamento de chun
   corrompe na memória de todo programa emitido, inclusive a do próprio compilador. É
   por isso que este documento vem antes do código, e é por isso que cada grupo de §5
   tem teste que afirma comportamento, não ausência de crash.
+
+
+---
+
+## 7. Estado da implementação de referência
+
+`examples/probes/arena_teko` — projeto próprio, backend nativo, `exit 42` = tudo vale.
+Ele não vive em `src/` porque pôr o arena lá exige recompilar o compilador, e o seed
+correto (o binário RELEASED) não é alcançável neste container: todo seed em disco falha
+no fonte da base em `const struct: initializer is not a struct literal (#594)`.
+
+| arquivo | conteúdo |
+|---------|----------|
+| `word.tks` | a costura P1: `load_word`/`store_word`, `compare_bytes`, `round_up_align`/`round_down_align`, `raw_alloc` |
+| `layout.tks` | todos os offsets da §3, como `const` |
+| `control.tks` | a costura P2: o bloco de controle, o probe do `TEKO_MEM_PARANOID` |
+| `chunk.tks` | `chunk_try`/`chunk_free`/`chunk_free_list`/`chunk_free_until`/`chunk_fit_offset` |
+| `region.tks` | `region_new`/`region_root`/`region_alloc`/`region_drop`/`regions_free_all` |
+| `tree.tks` | `region_drop_subtree`/`region_register`/`region_lookup` |
+| `marks.tks` | `checkpoint_push`/`checkpoint_pop`/`checkpoint_commit` |
+| `freelist.tks` | `free_take`/`free_park`/`free_block`/`free_purge` + o modo paranoico |
+
+As 12 funções da carga estão todas implementadas e testadas. `marks.tks` não pode usar
+os nomes `arena_push`/`arena_pop`/`arena_commit` — ver o defeito 3 abaixo.
+
+Prova de que os gates detectam quebra (mutação, uma por grupo):
+
+| mutação | resultado |
+|---------|-----------|
+| `chunk_fit_offset` devolve sempre 0 | exit 51 (aliasing) |
+| `region_drop` sem o unlink do registro | segfault na varredura |
+| `region_reaches` para no primeiro nível | exit 60 (subárvore sobrevive) |
+| `free_block` sem o poison | exit 69 (oráculo mudo) |
+
+---
+
+## 8. Defeitos do backend nativo achados construindo isto
+
+Nenhum destes dá erro de compilação. Todos dão RESPOSTA ERRADA, que é a categoria que
+um arena não pode carregar.
+
+**1. O retorno `i32` de um `extern fn` não é narrowed.** O callee deixa os 32 bits
+altos do registrador de retorno indefinidos (o SysV ABI permite; o `memcmp` da glibc
+usa a permissão) e Teko compara o registrador de 64 bits inteiro. Medido:
+`memcmp("\x07","\xc8",1)`, um -193 verdadeiro, lê como POSITIVO enorme; um `i32`
+local negativo compara certo no mesmo binário; um `to i64` explícito não corrige.
+Contorno: declarar `u64` e extrair `% 2^32`.
+
+**2. `match` sobre receptor fat-pointer não lowera.**
+`fat-pointer receiver match-expression not yet lowered (N2)` — atinge todo
+`match x { str as v => …; error => … }`, que é a forma canônica de ler
+`teko::env::var`. Também `panic(msg)` com `str` local
+(`N1: not a fat-pointer local`).
+
+**3. `a && b` com chamada do lado direito não lowera.**
+`integer operator not yet lowered (N2)`. Vira guarda explícita.
+
+**4. O PIOR: uma função do usuário com o nome de um builtin injetado é silenciosamente
+substituída pelo builtin.** `pub fn arena_push(control: u64)` foi aceita pelo checker
+com a aridade do usuário — a chamada `arena_push(control)` typechecou — e o backend
+emitiu a chamada ao `tk_arena_push()` do runtime em C. O corpo do usuário nunca rodou,
+sem um aviso sequer; o sintoma foi o mark stack ficar em zero depois de um push.
+`builtin_fn` resolve por ÚLTIMO SEGMENTO do caminho, então `arena_push`, `arena_pop`,
+`arena_commit`, `intern_get`, `cov_mark` e companhia são nomes minados em qualquer
+namespace. Para o porte real do arena isto é bloqueante: as funções do arena têm
+exatamente esses nomes.
