@@ -1,0 +1,138 @@
+---
+section: romaneio
+created: 2026-07-27
+source: ruling do owner — "este trem deve remover toda a compilação C"; medição em ci/0.3.1-lanes-e-seeds @ 47f269ab
+status: INVENTÁRIO MEDIDO — não é plano de execução, é a lista contra a qual a .31 será julgada
+---
+
+# Romaneio da morte do C — o que exatamente precisa sumir na .31
+
+O ruling do owner, na forma final:
+
+> *"Quando digo matar .c e .h versionados, quero dizer que tudo é teko puro, todos estes arquivos
+> devem ser expurgados do código fonte majoritariamente, sem remanescentes ou sobressalentes."*
+> — inclui `src/runtime/teko_rt.c`.
+>
+> *"o único backend na versão atual deve ser native, logo, nem mesmo o enumerado se faz mais
+> necessário ou mesmo as funções que roteavam para backend em C."*
+>
+> *"TEKO_BACKEND é outro que não deve mais existir."*
+
+Critério de aceite, também dele: `seed .30 → gen1` **via C, inevitável**; `gen1 → gen2` nativo;
+`gen2 → gen3` nativo e **byte-idêntico**. Única exceção que sobrevive: um `.h` **emitido** quando
+`abi=c` — que é saída do compilador, não fonte versionada.
+
+Este documento é **medição**, não plano. Ele existe porque "matar o C" é grande demais para caber
+na cabeça de quem executa, e um alvo que não é contável não é verificável.
+
+## 1. Fontes C versionadas — 8 arquivos, 3.894 linhas
+
+| linhas | arquivo | o que é | destino |
+|---:|---|---|---|
+| 2.580 | `src/runtime/teko_rt.c` | o runtime | **reescrever em Teko** (a arena inclusa, sem exceção) |
+| 865 | `src/runtime/teko_rt.h` | declarações do runtime | morre junto |
+| 172 | `src/win32_compat.h` | compat Win32 | morre junto |
+| 55 | `src/assert/assert.c` | seed de assert | morre junto |
+| 23 | `src/assert/assert.h` | idem | morre junto |
+| 91 | `scripts/region_drop_subtree_test.c` | teste C do arena | **morre com o C** (ruling: testes C morrem com o C) |
+| 85 | `scripts/tk_arena_commit_test.c` | teste C do arena | idem |
+| 23 | `scripts/ar_link_run_consumer.c` | consumidor do teste de `ar` | idem |
+
+**Zero exceções na tabela.** Não há linha aqui que o ruling permita manter.
+
+## 2. A superfície de runtime é MUITO menor do que o arquivo sugere
+
+Esta é a medição que muda a estimativa do trabalho, e por isso é a mais importante do romaneio:
+
+- `teko_rt.c` **define 156 símbolos** `tk_*`.
+- O caminho **nativo** (`src/lir/**` + `src/backend/**`) nomeia **17** símbolos `tk_*`.
+- Desses, **10** são de fato definidos pelo runtime:
+
+  `tk_print` · `tk_println` · `tk_write` · `tk_eprint` · `tk_eprintln` · `tk_ewrite` ·
+  `tk_str` · `tk_str_concat` · `tk_i64_to_str` · `tk_u64_to_str`
+
+**Logo: 146 dos 156 símbolos existem para servir o EMISSOR DE C, não o backend nativo.** Matar o
+emissor não deixa 2.580 linhas de C para portar — deixa **dez símbolos**, todos de I/O e conversão
+de inteiro para string, mais o arena.
+
+Corolário para quem executa: **a ordem certa é matar o emissor PRIMEIRO e medir de novo.** Portar
+`teko_rt.c` inteiro para Teko antes disso é portar 146 símbolos que estão prestes a ficar órfãos.
+
+### O arena, que é caso à parte
+
+12 funções, e o owner foi explícito de que ela **vai para Teko sem exceção**:
+
+`tk_arena_push` · `tk_arena_pop` · `tk_arena_commit` ·
+`tk_region_new` · `tk_region_alloc` · `tk_region_drop` · `tk_region_drop_subtree` ·
+`tk_region_lookup` · `tk_region_register` · `tk_region_root` · `tk_region` · `tk_regions_free_all`
+
+O arena não aparece na lista dos 10 porque o caminho nativo não a chama **por nome** — ela é a
+disciplina de memória do programa emitido, não uma chamada que o backend escreve. Portá-la é
+trabalho de projeto próprio, não de tradução linha-a-linha, e é o único item deste romaneio que não
+se resolve deletando alguma coisa.
+
+## 3. Proporções do código Teko
+
+| | linhas |
+|---|---:|
+| `src/codegen/codegen.tks` — o emissor de C | **10.727** |
+| `src/lir/**` — lowering para LIR | 8.474 |
+| `src/backend/**` — isel, regalloc, stackify, objfile | 33.464 |
+
+O caminho nativo já é **quatro vezes** o emissor de C. O C não é a implementação principal com um
+experimento nativo ao lado; é o contrário, há muito tempo. As 10.727 linhas do emissor são a maior
+deleção única da .31.
+
+## 4. Superfície de CI e scripts
+
+**Workflows que nomeiam C:** `pr.yml`, `nightly.yml`, `release.yml`, `codeql.yml`.
+
+`codeql.yml` merece nota própria: seu job `c-cpp` fica **sem entrada** no instante em que o emissor
+morre. A regra de ordem é a mesma do `ci_gate_coverage.sh` — **remover o nome do ruleset antes de
+deletar o job**, nunca o contrário, porque `main` não tem bypass e um check requerido cujo job
+sumiu não fica vermelho, fica **PENDENTE PARA SEMPRE**. O owner já sinalizou que ensinar Teko ao
+CodeQL é trabalho da .32; até lá o job sai e o oráculo fica em falta — o que é **reposição
+pendente**, não polimento, e está registrado como tal.
+
+**Scripts:** 27 `.sh` em `scripts/`, dos quais **19 nomeiam C** de alguma forma (`cc`/`clang`/`gcc`,
+`teko_rt`, `TEKO_BACKEND`, ou um `.c`). Nem todos morrem — vários apenas *linkam*, e **o linker
+fica**: *"Isso não inclui o linker, pois ainda temos libs a debater até lá."* A triagem
+linka-versus-compila é trabalho da carga que fizer a excisão, e este romaneio só afirma o
+denominador.
+
+Os três de morte certa, porque seu assunto é o C e não o link:
+`scripts/region_drop_subtree_test.sh` · `scripts/tk_arena_commit_test.sh` ·
+`scripts/build_gen1_from_c.sh` (este último só depois que o degrau `seed .30 → gen1` deixar de ser
+o caminho — isto é, na **.32**, não nesta).
+
+## 5. Os oráculos que morrem junto, e o que fica em falta
+
+O que instrumentava ou lia o C emitido não tem o que ler quando o backend escreve objeto direto.
+Já saíram do `pr.yml` nesta versão: `Heavy sanitizer gate (main)` (ASan/UBSan/LSan) e `SAST gate`
+(clang-tidy). Sobreviveu `Sanitizer gate`, **com conteúdo novo**: agora agrega `mem-paranoid`, o
+único oráculo de memória que sobrevive ao C porque seu assunto é o **arena** (poison-on-free, nunca
+reuso) e não a linguagem em que o runtime está escrito. O próprio comentário do runtime em C já
+registrava que isso nunca foi redundante: *"Arena reuse is invisible to ASan"*.
+
+Fica em falta, para repor na .32: **CodeQL entendendo Teko** e o diferencial `own == C`
+(`scripts/diff_c_own.sh`), que por construção deixa de existir quando um dos dois lados morre. A
+perda do diferencial é real e deve ser dita em voz alta: era o oráculo que pegava miscompilação do
+backend nativo comparando-o com um segundo backend independente. O que o substitui é o **fixpoint
+`gen2 == gen3` byte-idêntico**, que é mais forte em uma dimensão (auto-consistência total sob
+self-host) e mais fraco em outra (não tem segunda opinião). Registrar isso é obrigação; fingir que
+a troca é neutra, não.
+
+## 6. Como este romaneio se verifica
+
+Os números acima são reprodutíveis com o repositório em mãos:
+
+```sh
+git ls-files '*.c' '*.h' | xargs wc -l           # 8 arquivos, 3894 linhas
+grep -o '^[a-z_0-9]* *\**tk_[a-z_0-9]*(' src/runtime/teko_rt.c \
+  | grep -o 'tk_[a-z_0-9]*' | sort -u | wc -l     # 156 definidos
+grep -rho 'tk_[a-z_0-9]*' src/lir/*.tks src/backend/*.tks | sort -u | wc -l   # 17 nomeados
+```
+
+Refaça a terceira medição **depois** que o emissor morrer. Se os 10 não caírem para perto de zero
+depois de portar I/O e conversão para Teko, a premissa da seção 2 está errada e o romaneio precisa
+ser corrigido em vez de seguido.
