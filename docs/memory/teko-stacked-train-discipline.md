@@ -443,6 +443,89 @@ existe. O briefing de carga deve exigir push, não só commit. E o integrador qu
 produzindo (não só drenando) abre uma carga para si — **não existe trabalho em voo que pertença
 ao vagão**; o vagão é onde o trabalho pousa.
 
+## POR QUE OS DEFEITOS ESTÃO APARECENDO AGORA — as duas decisões que os tornaram alcançáveis (owner 2026-07-27)
+
+> *"se continuasse em C, veríamos isso muito mais tarde, e pior, se ainda estivesse com centenas de
+> regressores que não possuem concorrência de nome em namespaces diferentes, tbm nunca teria pego
+> até que acontecesse."*
+
+Registrado porque a leitura ingênua da .31 é *"o backend nativo está cheio de bugs"*, e essa
+leitura é falsa e desmotivadora. O que está acontecendo é o **oposto**: os defeitos não foram
+introduzidos, foram **tornados alcançáveis**. Duas decisões independentes fizeram isso, cada uma
+por um mecanismo distinto.
+
+### Decisão 1 — matar o C. O C não escondia os defeitos: ele FAZIA O TRABALHO por nós
+
+O caso do `no layout registered` é a demonstração limpa, e a medição está no repositório:
+
+| | menções a `offset`/`size_of`/`align` |
+|---|---:|
+| `src/codegen/codegen.tks` — o emissor de C, **10.727 linhas** | **15** |
+| `src/lir/lower.tks` + `src/backend/stackify.tks` — só dois arquivos | **220** |
+
+O emissor de C escreve `typedef struct tk_t_<M> { <Ctype> <f>; … }` e **para por aí**: quem calcula
+offset, tamanho e alinhamento é o `cc`. O backend nativo tem que calcular tudo — por isso 220
+contra 15.
+
+Consequência exata, e ela é mais forte do que "veríamos mais tarde": **enquanto o C carregava a
+emissão, o defeito de `ClassBody` não contribuir layout não podia se manifestar — não porque
+estivesse escondido, mas porque a responsabilidade era de outro.** Não havia bug para encontrar;
+havia uma pergunta que nunca tínhamos precisado responder.
+
+**A regra geral, que vale para muito além deste caso:** toda responsabilidade delegada ao compilador
+C — layout, ABI, convenção de chamada, alinhamento, promoção de inteiro — é uma responsabilidade
+sobre a qual **nunca precisamos estar corretos**. Matar o C não cria esses defeitos; ele **revela
+que nunca os resolvemos**. Por isso a contagem de honest-stops subindo na .31 é a **medição
+melhorando**, não o código piorando. Um honest-stop nomeado é uma pergunta que agora sabemos que
+existe.
+
+Corolário para o julgamento da versão: a .31 será avaliada por **quantas dessas perguntas foram
+respondidas**, não por quantas apareceram. Uma versão que descobre 40 e responde 40 é melhor que
+uma que descobre 5 — e a que descobre 5 é a que ainda está delegando.
+
+### Decisão 2 — consolidar o regressor. 200+ projetos eram grandes e RASOS
+
+O outro mecanismo é de configuração, não de responsabilidade.
+
+Enquanto eram **200+ projetos**, cada regressivo era um projeto minúsculo compilado sozinho: **uma
+namespace por build, sem vizinhos**. Nessa configuração, todo defeito que vive na *interação entre
+unidades de compilação* é **inalcançável por construção** — não é que os testes não o pegavam, é
+que não existia arranjo em que ele pudesse acontecer.
+
+A consolidação em **9 diretórios** colocou muitas namespaces **no mesmo build**. Foi isso, e só
+isso, que criou as condições para o defeito de monomorfização aparecer: `q006::Box` (não-genérica)
+e `q084::Box<T>` só podem se atropelar se estiverem **na mesma tabela de tipos**, e antes nunca
+estavam.
+
+**E a configuração antiga é a que NÃO corresponde à realidade.** Um programa de usuário de verdade
+tem muitas namespaces num build só. O regressor de 200+ projetos testava, em massa, um arranjo que
+nenhum usuário habita. Daí a formulação que o owner usou — *"nunca teria pego até que acontecesse"*
+— sendo "acontecesse" o pior lugar possível: na mão de quem usa.
+
+**A lição, e é contraintuitiva o bastante para merecer estar escrita:** cobertura **não é
+contagem**, é a variedade de interações alcançáveis. Ir de 200+ para 9 **diminuiu o número de
+testes e aumentou o que eles pegam**, porque os defeitos que importam num compilador vivem entre
+unidades, não dentro delas.
+
+### O custo da densidade, que é real e tem antídoto
+
+Ambiente denso **encontra** defeitos e ao mesmo tempo **confunde a atribuição** deles — e este
+documento não seria honesto se omitisse que isso já custou caro aqui.
+
+O integrador olhou os três `no layout registered`, viu que as fixtures envolvidas tinham nomes
+homônimos em namespaces diferentes, e formulou a hipótese de que fossem parentes do defeito de
+monomorfização. **Estava errado.** Duas namespaces com `struct Svc` homônimo compilam e rodam; uma
+classe única, uma namespace, zero homônimos, dá o stop. As fixtures eram homônimas **por
+coincidência** — eram simplesmente as que usavam `class`. A densidade fez duas características
+co-ocorrerem, e a co-ocorrência passou por causa.
+
+O antídoto é o que a carga fez para derrubar a hipótese: **repro mínimo**. Isolar uma classe, uma
+namespace, e ver o stop aparecer mesmo assim.
+
+**A dupla certa, nesta ordem:** **densidade para ENCONTRAR, isolamento para ATRIBUIR.** Um ambiente
+denso sem a disciplina do repro mínimo produz diagnósticos plausíveis e errados — que é a única
+coisa pior que não achar o defeito, porque manda o conserto para o lugar errado.
+
 ## Armadilhas do worktree compartilhado
 
 - **NUNCA `git stash` em worktree de vagão.** O `.git` é compartilhado entre todos os worktrees e a
