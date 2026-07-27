@@ -737,7 +737,7 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     let l = ops.l
     let r = ops.r
     if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
-        match redundant_widen_cast_of(l, r) { Type as t => warn_redundant_cast(t); null => { } }
+        match redundant_widen_cast_of(l, r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
     }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
@@ -798,7 +798,7 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
         if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
         let adopted = adopt_binop_operands(prev, raw)
         if i == 0 { first = adopted.l }
-        match redundant_widen_cast_of(adopted.l, adopted.r) { Type as t => warn_redundant_cast(t); null => { } }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
         if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
         prev = adopted.r
@@ -1981,8 +1981,8 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
  * @param t  the redundant cast's own (unchanged) type
  * @since    0.3.1
  */
-fn warn_redundant_cast(t: Type) {
-    teko::io::eprintln($"teko: warning: redundant cast: this `to {type_render(t)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
+fn warn_redundant_cast(env: Env, e: TExpr) {
+    teko::io::eprintln($"{diag_at(env.file, e.line, e.col, "")}warning: redundant cast: this `to {type_render(e.type)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
 }
 
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
@@ -1994,8 +1994,9 @@ fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     // for a construct that is merely superfluous, and dropping the node would hide the cast from the
     // D4 ≤2% gate that now carries the policy.
     if type_eq(inner.type, target) {
-        warn_redundant_cast(target)
-        return TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }
+        let noop = TExpr { kind = TCast { expr = inner }; type = target; line = inner.line; col = inner.col }
+        warn_redundant_cast(env, noop)
+        return noop
     }
     // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
     // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
@@ -6016,9 +6017,14 @@ fn type_const_decl(cd: parser::ConstDecl, env: Env, table: TypeTable) -> TConstD
 }
 
 fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
+    // Stamp the item's source file onto the env, the twin of the `with_ns` the caller already
+    // does. Only the checker's WARNING surface reads it: an error is positioned on the way out
+    // by `surface_at`, which has the file in hand, but a warning is printed where it is found
+    // and would otherwise name a line in no file at all (`scope.tks::Env.file`).
+    let fenv = with_file(env, item.file)
     match item.content {
         parser::Function as f => {
-            let tf = match type_function(f, env, table) { TFunction as x => x; error as e => return e }
+            let tf = match type_function(f, fenv, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
             TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size }
         }
@@ -6033,11 +6039,11 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
         }
         parser::UseDecl as ud => ud   // seed no-op (alias resolution is the checker's, later)
         parser::Statement as s => {
-            let ts = match type_statement(s, env, table) { TypedStmt as x => x; error as e => return e }
+            let ts = match type_statement(s, fenv, table) { TypedStmt as x => x; error as e => return e }
             ts.node
         }
         parser::ConstDecl as cd => {
-            let ti = match type_const_decl(cd, env, table) { TConstDecl as x => x; error as e => return e }
+            let ti = match type_const_decl(cd, fenv, table) { TConstDecl as x => x; error as e => return e }
             TConstDecl { name = ti.name; namespace = item.namespace; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col }
         }
     }
