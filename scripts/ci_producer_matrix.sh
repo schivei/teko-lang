@@ -56,6 +56,35 @@
 #   seed      the released asset label whose binary RUNS on this runner — NOT always what the leg
 #             produces, so it is a field rather than a derivation the caller can get wrong
 #   produces  the CONTRACT: the asset labels this leg must mint
+#   fixpoint_backend
+#             the backend gen2 and gen3 are built with in `scripts/fixpoint_gate.sh` — `native`
+#             or `c`. THE PLATFORM-SEQUENCING LEVER, and it lives here because the leg table is
+#             where a platform's stage is declared. See the block below.
+#
+# ── THE LEVER: WHICH LEGS GENERATE NATIVE (owner ruling 2026-07-28) ───────────────────────────
+# Owner, 2026-07-28: *"Só tem uma falha, gen2 e gen3 estão emitindo C e não deveriam, reabilite o
+# check de emissão (somente nas pernas Linux), verá que não passará nada."*
+#
+# The four Linux legs — `linux-x86_64-glibc`, `linux-x86_64-musl`, `linux-arm64-glibc`,
+# `linux-arm64-musl` — carry `"fixpoint_backend":"native"`. macOS, Windows and wasm carry `"c"`,
+# because the platform-sequenced plan (docs/memory/0.3.1-plano-sequenciado-por-plataforma.md)
+# migrates them at 0.3.1.1–0.3.1.4 and retires the C route after that.
+#
+# THE RED IS THE PRODUCT, NOT AN ACCIDENT. The native backend does not build the compiler yet —
+# `docs/memory/0.3.1.0-linux-native-first-stop.md` names the stop it reaches today, by address —
+# so the four Linux legs are EXPECTED to fail, and that failure is the honest measurement of how
+# far the native self-build gets. The owner asked for it in as many words: *"verá que não passará
+# nada."* It is not to be softened with `continue-on-error`, a narrowed criterion, or files
+# excluded from the emission check; the address it reports IS the deliverable.
+#
+# TO TURN IT BACK: set the leg's `fixpoint_backend` to `"c"`. Nothing else moves — the emission
+# check is DERIVED from this field inside `fixpoint_gate.sh` (a native generation that emits C is
+# a defect on any leg), so one word per leg is the whole switch, in both directions.
+#
+# WHY A FIELD AND NOT AN `if:` ON THE STEP: `endsWith(matrix.producer, '-musl')`-style predicates
+# already exist in pr.yml for the toolchain install, and every one of them is a place a seventh leg
+# gets forgotten. This table is consumed by pr.yml AND nightly.yml from ONE definition; a stage
+# declared as a field cannot be set for a leg in one workflow and missed in the other.
 #
 # LEG ORDER IS SLOWEST-FIRST. GitHub starts matrix legs in declaration order, so the slowest
 # producer must not queue behind cheap ones — and with one leg per label that ordering matters
@@ -69,16 +98,16 @@ set -eu
 MODE="${1:?usage: ci_producer_matrix.sh <light|full>}"
 
 # The arm64 legs lead: their runner pool is the scarcer one, so they must not queue behind x86_64.
-A_AG='{"producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc"}'
-A_AM='{"producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-musl"}'
-A_XM='{"producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-musl"}'
-A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64"}'
-A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64"}'
+A_AG='{"producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc","fixpoint_backend":"native"}'
+A_AM='{"producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-musl","fixpoint_backend":"native"}'
+A_XM='{"producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-musl","fixpoint_backend":"native"}'
+A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64","fixpoint_backend":"c"}'
+A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64","fixpoint_backend":"c"}'
 
 # linux-x86_64-glibc is declared in both tiers and is the ONLY Linux leg on light: it is the asset
 # every fixed-name consumer downloads (the wasm regressor, mem-paranoid), so a light run without
 # it would leave those lanes with nothing to fetch.
-A_XG='{"producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-glibc"}'
+A_XG='{"producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-glibc","fixpoint_backend":"native"}'
 
 case "$MODE" in
     full)

@@ -417,8 +417,29 @@ jobs:
       # green over a stated failure. Owner ruling 2026-07-27: *"se ele diz que falhou, deveria ter
       # saído com exit(1) para sinalizar vermelha a lane"* and *"se esse vagão fechar verde é pura
       # mentira"*. Losing downstream visibility is a cost; a green that is false is a defect.
+      #
+      # ── THE BACKEND IS PER-LEG, AND THE FOUR LINUX LEGS ARE NATIVE FROM HERE ─────────────────
+      # Owner ruling 2026-07-28: *"Só tem uma falha, gen2 e gen3 estão emitindo C e não deveriam,
+      # reabilite o check de emissão (somente nas pernas Linux), verá que não passará nada."*
+      #
+      # `matrix.fixpoint_backend` comes from scripts/ci_producer_matrix.sh — `native` on the four
+      # Linux legs, `c` on macOS and Windows, per the platform-sequenced plan. It is set ON THE
+      # STEP and never on the job or the workflow: a wide `TEKO_BACKEND` pin leaks into everything
+      # below it and turns the native regressors green by compiling them down the C route
+      # (measured; scripts/fixpoint_gate.sh records the case). `TEKO_FIXPOINT_BACKEND` is read in
+      # exactly one place — `build_gen` — so gen2 and gen3 move and the ladder and gen1 do not.
+      #
+      # THE EMISSION CHECK RIDES ALONG, DERIVED: a `native` backend arms zero-C inside the gate,
+      # so no leg can flip to native and keep emitting C in silence. No second knob to forget.
+      #
+      # THESE FOUR LEGS ARE EXPECTED TO GO RED, and that is the deliverable, not a regression to
+      # patch around. The native backend does not build the compiler yet and the stop it reaches
+      # is named by address in docs/memory/0.3.1.0-linux-native-first-stop.md. The red measures
+      # the distance left. To turn it back, one word per leg in ci_producer_matrix.sh.
       - name: Fixpoint — gen2 == gen3 over the same source, and no emitted C
         shell: bash
+        env:
+          TEKO_FIXPOINT_BACKEND: ${{ matrix.fixpoint_backend }}
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
 
       # ── THE HARVEST: gen1's C, ONE FILE PER PRODUCER, AND ONLY OVER A GREEN FIXPOINT ─────────
