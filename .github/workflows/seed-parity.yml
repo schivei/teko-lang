@@ -7,7 +7,9 @@ name: seed parity (canonical vs fork)
 # conseguem fazer build da main (já sincronizei)."*
 #
 #   1. ARE THE BYTES EQUAL?      -> REPORTED, never fatal.
-#   2. CAN EACH ONE BUILD main?  -> FATAL. This is the acceptance criterion.
+#   2. CAN EACH ONE BUILD main AND PASS ITS OWN SUITE?  -> FATAL. The acceptance criterion
+#      (owner, 2026-07-28: *"com os testes, só pra garantir e ser rápido"*). One runner, one job,
+#      both seeds — fast because nothing is rebuilt that a release already published.
 #
 # The split is the whole design. `teko-org` publishes through `scripts/produce_assets.sh`; the fork
 # publishes through `seed-linux-fork.yml`, which runs a bare `teko build . --no-verify --release`
@@ -141,7 +143,16 @@ jobs:
             echo "::group::$who builds main"
             if TEKO_BACKEND="$TEKO_SELFHOST_BACKEND" "$bin" . -o "out-$who" --no-verify --release; then
               test -x "out-$who/teko" || { echo "$who: build reported success but produced no binary" >&2; bad=1; }
-              echo "$who: OK — $("out-$who/teko" --version)"
+              echo "$who: built — $("out-$who/teko" --version)"
+              # THE SUITE, ON THE NATIVE DEFAULT, and the asymmetry with the line above is deliberate.
+              # The BUILD is a compiler self-build and needs the C pin; the SUITE is the thing the
+              # native backend exists to be measured by. Pinning C here would make it pass down the
+              # road we are retiring — `scripts/fixpoint_gate.sh` recorded exactly that when a wide
+              # pin turned `diagnostics.tkr` green without fixing anything.
+              if ! "out-$who/teko" test .; then
+                echo "$who: built main but its own suite FAILED" >&2
+                bad=1
+              fi
             else
               echo "$who: FAILED to build main" >&2
               bad=1
@@ -149,4 +160,4 @@ jobs:
             echo "::endgroup::"
           done
           [ "$bad" -eq 0 ] || { echo "at least one published seed cannot build main" >&2; exit 1; }
-          echo "BOTH seeds build main."
+          echo "BOTH seeds build main AND pass their own suite."
