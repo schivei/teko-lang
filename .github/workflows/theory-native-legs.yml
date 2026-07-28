@@ -1,0 +1,192 @@
+# 0.3.1.0 — THE FOUR LINUX LEGS, NATIVE, MEASURED FOR REAL
+#
+# DISPOSABLE INSTRUMENT. NEVER MERGED, NEVER A PULL REQUEST. Owner ruling 2026-07-28:
+# *"quanto a 'discovery' para saber se o que precisa corrigir, pode usar branches 'theory/**',
+# estas nunca devem ser mergeadas e nem gerado PR, é para validação, pode criar ymls
+# personalizados para push para validação."*
+#
+# WHAT IT MEASURES, and why the prediction was not enough. `cargo/0.3.1.0-native-legs` pulls the
+# lever (`fixpoint_backend: native` on the four Linux legs) and re-arms the emission check. The
+# prediction, measured on one x86_64 machine, is that all four stop while BUILDING gen2, at
+# `teko::backend::wrap_plain_words` — degrau 4. A prediction from one host is a guess about four:
+# arm64 and musl each have their own isel path, and a stop that differs by leg is exactly the
+# divergence a single local run averages away.
+#
+# THE VALUE OF THIS RUN IS THE TEXT OF THE FAILURE, NOT ITS COLOUR. Every leg is EXPECTED to be
+# red. So the measurement step captures the gate's output, prints it in full, extracts the stop
+# address and the generation that stopped, and only THEN re-raises the gate's exit status. The
+# leg still reports red — nothing here softens a check — it just refuses to die before printing.
+#
+# `fail-fast: false` FOR THE SAME REASON: four legs stopping is the landscape; one leg stopping
+# and three cancelled is a rumour.
+#
+# THE CHAIN IS THE REAL ONE, not a shortcut: the published release seeds gen0, gen0 builds gen1,
+# both down the C route (`scripts/build_with_seed_fallback.sh`), and the gate then builds gen2 and
+# gen3 NATIVE. Same scripts, same table, same lever the cargo branch ships — this file adds
+# instrumentation around them and changes none of them.
+name: theory / 0.3.1.0 native legs
+
+on:
+  push:
+    branches:
+      - 'theory/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: theory-native-legs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # THE LEG TABLE IS NOT COPIED HERE. It is read from scripts/ci_producer_matrix.sh — the same
+  # definition pr.yml and nightly.yml read — and filtered to the Linux producers. A theory run that
+  # measured a hand-typed matrix would be measuring this file instead of the change under test.
+  plan:
+    name: plan (the Linux legs, from the shipped table)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.decide.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter the producer table to the Linux legs
+        id: decide
+        shell: bash
+        run: |
+          set -eu
+          FULL="$(sh scripts/ci_producer_matrix.sh full)"
+          M="$(printf '%s' "$FULL" | jq -c '{include: [.include[] | select(.producer | startswith("linux-"))]}')"
+          printf 'matrix=%s\n' "$M" >> "$GITHUB_OUTPUT"
+          printf 'the legs this run measures:\n'
+          printf '%s' "$M" | jq -r '.include[] | "  \(.producer)  backend=\(.fixpoint_backend)  runner=\(.os)"'
+
+  measure:
+    name: measure / ${{ matrix.producer }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        continue-on-error: true
+        shell: bash
+        run: |
+          cc --version | head -n1 || true
+          nproc || true
+          free -m || true
+          uname -srm || true
+
+      # The musl legs build their asset with musl-gcc; the ladder itself uses the runner's cc. The
+      # install is kept because a leg that differs from the artifact root's environment measures a
+      # different machine than the one the cargo branch will run on.
+      - name: Install musl-tools
+        if: endsWith(matrix.producer, '-musl')
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version
+
+      # `matrix.seed` is the released label whose binary RUNS on this runner — NOT what the leg
+      # produces. A musl leg on x86_64 seeds from the glibc asset; deriving it from the producer
+      # would fetch a binary that cannot execute here.
+      - name: Provision the published release (the chain's first link)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          set -eu
+          sh scripts/ci_provision_teko.sh "$SEED"
+          ls -la .seed/
+
+      - name: gen1 — release -> gen0 -> gen1 (both links down the C route)
+        shell: bash
+        run: |
+          set -eu
+          sh scripts/build_with_seed_fallback.sh out
+          ls -la out/
+
+      # THE MEASUREMENT. `set +e` and the captured status are NOT a softening: the status is
+      # re-raised by the report step below, so the leg reports exactly what the gate decided. What
+      # is bought is the right to print before dying.
+      - name: THE MEASUREMENT — gen2/gen3 with the lever pulled
+        id: fixpoint
+        shell: bash
+        env:
+          TEKO_FIXPOINT_BACKEND: ${{ matrix.fixpoint_backend }}
+        run: |
+          set +e
+          echo "backend for gen2/gen3: ${TEKO_FIXPOINT_BACKEND}"
+          sh scripts/fixpoint_gate.sh out/teko . .fixpoint > fixpoint.log 2>&1
+          echo "$?" > fixpoint.status
+          exit 0
+
+      # WHAT THIS RUN EXISTS TO PRODUCE. Four blocks, in the order a reader needs them:
+      #   1. WHERE it stopped — which generation the chain died building
+      #   2. THE ADDRESS — the native backend's own `N1 … [in \`…\`]` line, the one fact worth having
+      #   3. THE EMISSION CHECK — every `.c` the gate attributed to a generation, by name
+      #   4. THE WHOLE LOG — because the three above are a summary and a summary can be wrong
+      - name: The stop, the address, and the emitted C
+        if: ${{ always() && steps.fixpoint.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -eu
+          STATUS="$(cat fixpoint.status 2>/dev/null || echo '?')"
+
+          echo "::group::WHERE IT STOPPED (${{ matrix.producer }}, backend=${{ matrix.fixpoint_backend }})"
+          if grep -q 'gen3 ready' fixpoint.log; then
+              echo "reached: gen3 was built — the chain is complete; the verdict is about the comparison"
+          elif grep -q 'gen2 ready' fixpoint.log; then
+              echo "stopped: while building gen3 (gen2 exists, gen2 cannot rebuild the source)"
+          elif grep -q 'building gen2' fixpoint.log; then
+              echo "stopped: while building gen2 (gen1 cannot build the source it came from)"
+          else
+              echo "stopped: before the chain started — read the whole log below"
+          fi
+          echo "gate exit status: $STATUS"
+          echo "::endgroup::"
+
+          echo "::group::THE ADDRESS — what the native backend cannot lower yet"
+          grep -E 'native backend N1|isel |not yet lowered|\[in `' fixpoint.log || \
+              echo "(no N1 address in the log — the stop is of another family; read the whole log)"
+          echo "::endgroup::"
+
+          echo "::group::THE EMISSION CHECK — every .c attributed to a generation"
+          grep -E 'zero-C|emitted:' fixpoint.log || echo "(the emission check was never reached)"
+          echo "-- raw lists left by the gate --"
+          for f in .fixpoint/*.emitted-c-list; do
+              [ -e "$f" ] || { echo "(none — no generation completed)"; break; }
+              echo "== $f"
+              cat "$f"
+          done
+          echo "::endgroup::"
+
+          echo "::group::THE WHOLE GATE LOG"
+          cat fixpoint.log
+          echo "::endgroup::"
+
+          echo "re-raising the gate's verdict: exit $STATUS"
+          exit "$STATUS"
+
+      - name: Upload this leg's measurement
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: theory-fixpoint-${{ matrix.producer }}
+          path: |
+            fixpoint.log
+            fixpoint.status
+            .fixpoint/*.log
+            .fixpoint/*.emitted-c
+            .fixpoint/*.emitted-c-list
+          if-no-files-found: warn
+          retention-days: 7
