@@ -71,10 +71,11 @@ fn lvt_error_lit(msg: str) -> checker::TExpr {
 /**
  * lvt_lower_return_wraps_named_case_into_declared_variant — an EXPLICIT `return Box { v = 7 }`
  * out of a function declared `-> Box | error` is wrapped into the uniform tag+payload shape
- * (`lower_return_value`, via `ctx.ret_type`): the wrapper allocates 16 bytes (`i32` tag + `Ptr`
- * payload, both 8-byte aligned) distinct from `Box`'s OWN 8-byte alloca, and stores tag `0`
- * (`Box`'s member index in `[Box, error]`) before storing the `Box` payload at offset 8 (degrau
- * N2).
+ * (`lower_return_value`, via `ctx.ret_type`): the wrapper allocates the UNIFORM 24 bytes
+ * (`variant_wrapper_bytes` — `i32` tag@0, ptr@8, len@16, 8-byte aligned) distinct from `Box`'s OWN
+ * 8-byte alloca, and stores tag `0` (`Box`'s member index in `[Box, error]`) before storing the
+ * `Box` payload at offset 8. The width is the SAME 24 for this address-shaped case as for a fat
+ * one — one shape, one set of offsets (degrau N2; 0.3.1.0 degrau 6 for the width).
  */
 fn lvt_lower_return_wraps_named_case_into_declared_variant() {
     let ret_ty = lvt_variant_named_error("Box")
@@ -82,7 +83,7 @@ fn lvt_lower_return_wraps_named_case_into_declared_variant() {
     let f = lwt_fn("mk_ok", "teko::demo", teko::list::empty(), ret_ty, body)
     let lf = match lower_function(f, lvt_layouts()) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "alloca 16, align 8")
+    teko::assert::str_contains(text, "alloca 24, align 8")
     teko::assert::str_contains(text, "alloca 8, align 8")
     teko::assert::str_contains(text, "= const 0")
     teko::assert::str_contains(text, "store.i32")
@@ -105,7 +106,7 @@ fn lvt_lower_fn_body_trailing_wraps_bare_error_into_declared_variant() {
     let f = lwt_fn("mk_err", "teko::demo", teko::list::empty(), ret_ty, body)
     let lf = match lower_function(f, lvt_layouts()) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "alloca 16, align 8")
+    teko::assert::str_contains(text, "alloca 24, align 8")
     teko::assert::str_contains(text, "= const 1")
     teko::assert::str_contains(text, "store.i32")
     teko::assert::str_contains(text, "ret %")
