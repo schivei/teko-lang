@@ -173,8 +173,8 @@ W="$(cd "$W" && pwd)"
 # keeps running on the native default, which is what it is for.
 #
 # ── THE LEVER, AND IT IS THIS LINE ────────────────────────────────────────────────────────────
-# `bg_backend="${TEKO_FIXPOINT_BACKEND:-c}"`, three lines below, is where the 0.3.1.0 chain is
-# switched on. The owner's chain builds gen2 and gen3 NATIVE; they are built with `c` today only
+# `bg_backend="${TEKO_FIXPOINT_BACKEND:-c}"`, the third line of `build_gen` below, is where the
+# 0.3.1.0 chain is switched on. The owner's chain builds gen2 and gen3 NATIVE; they run `c` only
 # because the native backend does not build the compiler yet, and a leg that flipped before its
 # native self-build passes would go red for a stop that is already named, by address, elsewhere.
 #
