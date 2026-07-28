@@ -125,28 +125,6 @@ jobs:
           (free -m || vm_stat | head -n4) 2>/dev/null || true
           uname -srm || true
 
-      # BOTH CAPABILITIES ARE PROVISIONED, or the suite would SKIP two rows and `no_skips_gate.sh`
-      # would fail this run for a reason that has nothing to do with the question being asked. A
-      # theory that reds on its own missing toolchain teaches nothing.
-      #
-      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
-      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
-      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
-      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
-      # cross capabilities need installing.
-      - name: Provision the two capabilities the suite needs (mingw cross-linker, wasmtime)
-        shell: bash
-        run: |
-          set -eu
-          brew install mingw-w64 wasmtime
-
-      - name: Verify both are on PATH (fail loud before the run, not inside it)
-        shell: bash
-        run: |
-          set -eu
-          x86_64-w64-mingw32-gcc --version | head -n1
-          wasmtime --version
-
       # NO SEED IS PROVISIONED AND NONE IS NEEDED. `build_with_seed_fallback.sh` enters through
       # rung -1, which compiles the committed `bootstrap/teko.c` with the runner's own cc and
       # builds the tip in ONE generation. No download, no ladder, no git history — the whole reason
@@ -164,6 +142,40 @@ jobs:
       - name: THE QUESTION — does the compiler rebuild itself, and does gen2 == gen3?
         shell: bash
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+
+      # PROVISIONED HERE, AFTER THE FIXPOINT, AND THE ORDER IS THE WHOLE POINT. These two capabilities
+      # serve the SUITE and nothing else — the fixpoint needs only `cc`, which every runner already
+      # has. Installing them first meant every RED run paid for a toolchain it would never reach:
+      # measured on run `dcbea9d`, 39s of brew in front of a verdict that arrived 5s after gen1. That
+      # is 39s of an agent's wait, on every failed attempt, buying nothing.
+      #
+      # Owner ruling 2026-07-28: *"A questão não é acelerar os agentes, mas reduzir o tempo de espera
+      # deles."* Moving two steps down the file is the cheapest 26% that exists here — a red run drops
+      # from ~150s to ~111s, and a green run pays exactly what it paid before, just later.
+      #
+      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
+      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
+      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
+      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
+      # cross capabilities need installing.
+      #
+      # BOTH ARE PROVISIONED, never one: the suite would SKIP the missing one's rows and
+      # `no_skips_gate.sh` would fail the run for a reason that has nothing to do with the question
+      # being asked. A lane that reds on its own missing toolchain teaches nothing.
+      - name: Provision the two capabilities the SUITE needs (mingw cross-linker, wasmtime)
+        if: ${{ github.event.inputs.run_tests != 'false' }}
+        shell: bash
+        run: |
+          set -eu
+          brew install mingw-w64 wasmtime
+
+      - name: Verify both are on PATH (fail loud before the suite, not inside it)
+        if: ${{ github.event.inputs.run_tests != 'false' }}
+        shell: bash
+        run: |
+          set -eu
+          x86_64-w64-mingw32-gcc --version | head -n1
+          wasmtime --version
 
       # Only reached when the fixpoint HELD. A suite run before that point would be testing a
       # compiler already known not to reproduce itself — the owner's own words: *"se nem consegue
