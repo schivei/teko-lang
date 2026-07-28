@@ -1996,16 +1996,54 @@ fn render_func(f: Func) -> str {
 
 // (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the
 // variant branch of resolve.c::tk_type_render.
+// A BARE `null` MEMBER RENDERS LAST, whatever position it holds internally. Owner ruling
+// 2026-07-28: *"a mensagem precisa de correção, pois ela induz a erro, não é `null | T` é
+// `T | null`"*.
+//
+// The two orders are not a disagreement about the type. `union_normalize_null` deliberately
+// collapses any bare null into a single LEADING member, so the canonical internal form of every
+// nullable union has `Null` first — including one the programmer wrote as `u64 | null`. Rendering
+// that order back verbatim shows a spelling nobody typed: a stop reading ``arithmetic operand of
+// type `null | u64` `` sends its reader hunting for a declaration that does not exist in the
+// source, which is time this wagon already spent.
+//
+// The canonical order is untouched — `type_eq`, `exhaustive` and the backends go on reading `Null`
+// first — and only the HUMAN rendering moves it to the tail, which is how the language is written
+// and how `T | null` appears in every fixture and doc.
 fn render_members(members: []Type) -> str {
     if members.len == 0 { return "<empty variant>" }
-    mut out = type_render(members[0])
+    let ordered = null_member_last(members)
+    mut out = type_render(ordered[0])
     mut i = 1
     loop {
-        if i >= members.len { break }
-        out = $"{out} | {type_render(members[i])}"
+        if i >= ordered.len { break }
+        out = $"{out} | {type_render(ordered[i])}"
         i++
     }
     out
+}
+
+/**
+ * null_member_last — the members with a bare `null` moved to the END, for RENDERING only.
+ *
+ * The exact inverse of `union_normalize_null`'s leading-null canonicalization, applied at the one
+ * place a human reads a type. Nothing else may use it: the canonical order is what `type_eq`,
+ * `exhaustive` and the backends agree on, so reordering it anywhere but inside a message would
+ * change meaning instead of presentation.
+ *
+ * @param members  the union's members in canonical order (bare null first, when present)
+ * @return         the same members with the bare null last; unchanged when there is none
+ */
+fn null_member_last(members: []Type) -> []Type {
+    if !from_is_bare_null(members[0]) { return members }
+    mut out: []Type = teko::list::empty()
+    mut i = 1
+    loop {
+        if i >= members.len { break }
+        out = teko::list::push(out, members[i])
+        i++
+    }
+    teko::list::push(out, Null { })
 }
 
 // ── (S4) type-generic INSTANTIATION pass ────────────────────────────────────────────────────────
