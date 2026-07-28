@@ -263,58 +263,21 @@ fn selctx_scratch(ctx: SelCtx, reg_class: MRegClass) -> FreshScratch {
 }
 
 /**
- * two_pow_64 — the constant 2^64 as an i128, computed via multiplication
- * (`2^32 * 2^32`) rather than a decimal literal: the released seed's
- * integer-literal parser caps at `u64::MAX` and 2^64 overflows it, so every
- * bit-pattern helper below shares this arithmetic workaround instead of
- * writing the literal directly.
+ * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (drop-128, 2026-07-24 —
+ * `val` is now the i64 carrier itself, not a wider i128): a non-negative value casts
+ * directly (`i64 -> u64` is a CHECKED cast, M.1, but always passes for a non-negative
+ * source); a negative value's magnitude is formed via `-(val + 1)` (never overflowing —
+ * the classic `i64::MIN`-safe negation, avoided even at the boundary since `val + 1` and its
+ * negation both stay in range), cast to `u64` (safe — the magnitude is non-negative and `<=
+ * 2^63`), then the two's-complement pattern is `u64::MAX - magnitude + 1`.
  *
- * @return i128  2^64
- */
-fn two_pow_64() -> i128 {
-    let half = 4294967296 to i128
-    half * half
-}
-
-/**
- * `MAX_I64_I128` — `i64::MAX` as an i128 (a literal that fits the parser's
- * working range directly, unlike `u64::MAX`/2^64 above).
- */
-const MAX_I64_I128: i128 = 9223372036854775807 to i128
-
-/**
- * `MIN_I64_I128` — `i64::MIN` as an i128, computed as `-(MAX_I64_I128) - 1` so
- * no literal ever names the boundary value directly (a literal for
- * `-9223372036854775808` risks the same parser-range issue `two_pow_64`
- * works around).
- */
-const MIN_I64_I128: i128 = -(MAX_I64_I128) - (1 to i128)
-
-/**
- * fits_i64 — true iff `v` lies within the i64 range, the precondition every
- * A2-2 constant materialization requires: full i128 register-pair
- * materialization is deferred (the plan's §6.3 i128-helper decision,
- * generalized to constants beyond a single 64-bit register).
- *
- * @param i128 v  the value to check
- * @return bool  whether `v` fits an i64
- */
-fn fits_i64(v: i128) -> bool {
-    v >= MIN_I64_I128 && v <= MAX_I64_I128
-}
-
-/**
- * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (already
- * known, by the caller's precondition, to fit an i64): a non-negative value
- * casts directly; a negative one is shifted into the non-negative range by
- * adding 2^64 BEFORE casting, since a checked numeric cast never
- * reinterprets a negative source as unsigned.
- *
- * @param i128 val  the value to convert, fitting an i64
+ * @param i64 val  the value to convert
  * @return u64  its 64-bit two's-complement bit pattern
  */
-fn u64_bits_of(val: i128) -> u64 {
-    if val < (0 to i128) { (val + two_pow_64()) to u64 } else { val to u64 }
+fn u64_bits_of(val: i64) -> u64 {
+    if val >= (0) { return val to u64 }
+    let mag = ((0) - (val + (1))) to u64 + (1 to u64)
+    (MASK_ALL_U64 - mag) + (1 to u64)
 }
 
 /**
@@ -375,7 +338,7 @@ fn lane_shift_u32(i: u32) -> u32 {
  * @return u32  the lane's 16-bit value
  */
 fn lane_value(bits: u64, i: u32) -> u32 {
-    let shift = (i to u64) * (16 to u64)
+    let shift = i * (16 to u64)
     ((bits >> shift) & (65535 to u64)) to u32
 }
 
@@ -505,21 +468,17 @@ fn materialize_bits(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool) -> SelCtx {
  * width `wide` (the `LConstInt` selection, and the GPR staging step of
  * `LConstFloat`'s bit materialization): converts `val` to its two's-
  * complement bit pattern, masks it to `wide`'s width, then emits the
- * minimal MOVZ/MOVK/MOVN sequence.
+ * minimal MOVZ/MOVK/MOVN sequence. `val` is always in i64 range (the LIR's
+ * own carrier, drop-128 2026-07-24), so no register-pair materialization is
+ * ever needed.
  *
  * @param SelCtx ctx0  the context to extend
  * @param MReg dst  the destination register
- * @param i128 val  the literal value to materialize
+ * @param i64 val  the literal value to materialize
  * @param bool wide  true for the 64-bit X form, false for 32-bit W
- * @return SelCtx | error  the advanced context, or a NAMED error when
- *                         `val` needs more than 64 bits (i128 register-pair
- *                         materialization, deferred alongside §6.3's
- *                         i128-helper decision)
+ * @return SelCtx  the advanced context
  */
-fn materialize_int(ctx0: SelCtx, dst: MReg, val: i128, wide: bool) -> SelCtx | error {
-    if !fits_i64(val) {
-        return error { message = "isel arm64: an i128 constant beyond 64 bits needs register-pair materialization, deferred alongside the i128 mul/div helper-call decision (§6.3)" }
-    }
+fn materialize_int(ctx0: SelCtx, dst: MReg, val: i64, wide: bool) -> SelCtx {
     let bits = u64_bits_of(val) & mask_for(wide)
     materialize_bits(ctx0, dst, bits, wide)
 }
@@ -527,16 +486,16 @@ fn materialize_int(ctx0: SelCtx, dst: MReg, val: i128, wide: bool) -> SelCtx | e
 /**
  * select_const_int — the `LConstInt` selection: materialize its value into
  * a fresh 64-bit GPR (A2-2 defaults every untyped constant to the widest,
- * no-information-loss form — matching `LConstInt.val`'s own i128 carrier
- * choice — since the LIR carries no per-value width for a bare constant).
+ * no-information-loss form — matching `LConstInt.val`'s own i64 carrier
+ * choice, drop-128 2026-07-24 — since the LIR carries no per-value width
+ * for a bare constant).
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LConstInt c  the constant op
- * @return SelCtx | error  the advanced context, or `materialize_int`'s
- *                         propagated error
+ * @return SelCtx  the advanced context
  */
-fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx | error {
+fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
     materialize_int(ctx1, dst, c.val, true)
@@ -548,25 +507,18 @@ fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx
  * across the GPR/FPR boundary into the result (§3.1 of the isel plan).
  * Always the f64/D form, the same widest-default reasoning as
  * `select_const_int`. `c.bits` is decoded through `decode_signed64` FIRST
- * (not widened directly) — a raw `u64 to i128` widen treats every pattern
- * as non-negative, so half of all IEEE patterns (any with the top bit set,
- * i.e. every negative double) would wrongly exceed `materialize_int`'s
- * i64-range precondition; `decode_signed64` re-derives the SAME 64-bit
- * pattern as its signed two's-complement reading, which always fits an
- * i64 by construction, so `materialize_int`'s error arm below is
- * structurally required by its `SelCtx | error` signature but never
- * actually reachable through THIS call site.
+ * (not widened directly) so the GPR staging value is the exact signed
+ * two's-complement i64 reading of the IEEE bit pattern.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LConstFloat c  the constant op
- * @return SelCtx | error  the advanced context, or `materialize_int`'s
- *                         propagated error
+ * @return SelCtx  the advanced context
  */
-fn select_const_float(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstFloat) -> SelCtx | error {
+fn select_const_float(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstFloat) -> SelCtx {
     let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
     let scratch = selctx_scratch(ctx1, MRegClass::GPR)
-    let materialized = match materialize_int(scratch.ctx, scratch.reg, decode_signed64(c.bits), true) { SelCtx as x => x; error as e => return e }
+    let materialized = materialize_int(scratch.ctx, scratch.reg, decode_signed64(c.bits), true)
     selctx_emit(materialized, fmov_inst(true, vreg(inst.result, MRegClass::FPR), scratch.reg))
 }
 
@@ -865,21 +817,19 @@ fn select_un(ctx0: SelCtx, inst: lir::LInst, u: lir::LUn) -> SelCtx {
 
 /**
  * mregclass_of_ltype — the register file a machine class lives in: FPR for
- * F16/F32/F64, GPR for every integer width and Ptr/Void.
+ * F32/F64, GPR for every integer width and Ptr/Void.
  *
  * @param lir::LType t  the machine class
  * @return MRegClass  its register file
  */
 fn mregclass_of_ltype(t: lir::LType) -> MRegClass {
     match t {
-        lir::LType::F16 => MRegClass::FPR
         lir::LType::F32 => MRegClass::FPR
         lir::LType::F64 => MRegClass::FPR
         lir::LType::I8 => MRegClass::GPR
         lir::LType::I16 => MRegClass::GPR
         lir::LType::I32 => MRegClass::GPR
         lir::LType::I64 => MRegClass::GPR
-        lir::LType::I128 => MRegClass::GPR
         lir::LType::Ptr => MRegClass::GPR
         lir::LType::Void => MRegClass::GPR
     }
@@ -887,7 +837,7 @@ fn mregclass_of_ltype(t: lir::LType) -> MRegClass {
 
 /**
  * ltype_is_wide — whether a machine class occupies the 64-bit register
- * form: true for I64/I128/Ptr/F64, false for every narrower class.
+ * form: true for I64/Ptr/F64, false for every narrower class.
  *
  * @param lir::LType t  the machine class
  * @return bool  its width flag
@@ -895,28 +845,14 @@ fn mregclass_of_ltype(t: lir::LType) -> MRegClass {
 fn ltype_is_wide(t: lir::LType) -> bool {
     match t {
         lir::LType::I64 => true
-        lir::LType::I128 => true
         lir::LType::Ptr => true
         lir::LType::F64 => true
         lir::LType::I8 => false
         lir::LType::I16 => false
         lir::LType::I32 => false
-        lir::LType::F16 => false
         lir::LType::F32 => false
         lir::LType::Void => false
     }
-}
-
-/**
- * ltype_is_i128 — true iff `t` is the 128-bit integer class (the one
- * machine class no single GPR can hold — register-pair params are out of
- * A2-2 scope).
- *
- * @param lir::LType t  the machine class
- * @return bool  whether `t` is `I128`
- */
-fn ltype_is_i128(t: lir::LType) -> bool {
-    match t { lir::LType::I128 => true; _ => false }
 }
 
 /**
@@ -932,7 +868,7 @@ fn gpr_index_before(param_types: []lir::LType, index: u32) -> u32 {
     mut count: u32 = 0
     mut i: u64 = 0
     loop {
-        if i >= (index to u64) { break }
+        if i >= index { break }
         if mregclass_of_ltype(param_types[i]) == MRegClass::GPR { count++ }
         i++
     }
@@ -951,7 +887,7 @@ fn fpr_index_before(param_types: []lir::LType, index: u32) -> u32 {
     mut count: u32 = 0
     mut i: u64 = 0
     loop {
-        if i >= (index to u64) { break }
+        if i >= index { break }
         if mregclass_of_ltype(param_types[i]) == MRegClass::FPR { count++ }
         i++
     }
@@ -1000,19 +936,15 @@ fn param_slot(reg_class: MRegClass, index: u32) -> ParamSlot {
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LParam p  the parameter op
  * @return SelCtx | error  the advanced context, or a NAMED error when
- *                         `p.index` is out of range (internal), names an
- *                         `I128` parameter (register-pair ABI, deferred),
- *                         or overflows the 8-register window (the stack
- *                         slot, deferred to A2-5)
+ *                         `p.index` is out of range (internal) or overflows
+ *                         the 8-register window (the stack slot, deferred
+ *                         to A2-5)
  */
 fn select_param(ctx0: SelCtx, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtx | error {
-    if (p.index to u64) >= f.param_types.len {
+    if p.index >= f.param_types.len {
         return error { message = "isel arm64: param index out of range (internal)" }
     }
     let ty = f.param_types[p.index to u64]
-    if ltype_is_i128(ty) {
-        return error { message = "isel arm64: an i128 parameter needs a register-pair ABI slot, deferred alongside i128 materialization (§6.3)" }
-    }
     let reg_class = mregclass_of_ltype(ty)
     let wide = ltype_is_wide(ty)
     let class_index = if reg_class == MRegClass::FPR { fpr_index_before(f.param_types, p.index) } else { gpr_index_before(f.param_types, p.index) }
@@ -1436,9 +1368,8 @@ fn select_branch(ctx0: SelCtx, f: lir::LFunc, br: lir::LBranch) -> SelCtx | erro
 
 /**
  * mem_size_of — the load/store transfer size for a machine class: B/H/W/X for
- * the integer widths (and Ptr = X), S/D for f32/f64. An i128 (register-pair
- * transfer) and an f16 (no single-register size) honest-stop, as does a
- * void-typed access (malformed).
+ * the integer widths (and Ptr = X), S/D for f32/f64. A void-typed access
+ * (malformed) honest-stops.
  *
  * @param lir::LType t  the accessed value's machine class
  * @return MMemSize | error  the transfer size, or a NAMED honest-stop
@@ -1452,8 +1383,6 @@ fn mem_size_of(t: lir::LType) -> MMemSize | error {
         lir::LType::Ptr => MMemSize::X
         lir::LType::F32 => MMemSize::S
         lir::LType::F64 => MMemSize::D
-        lir::LType::I128 => error { message = "isel arm64: an i128 memory access needs a register-pair transfer, deferred alongside i128 materialization (§6.3)" }
-        lir::LType::F16 => error { message = "isel arm64: an f16 memory access has no single-register transfer size in A2-4" }
         lir::LType::Void => error { message = "isel arm64: a void-typed memory access is malformed (internal)" }
     }
 }
@@ -1469,7 +1398,7 @@ fn mem_size_of(t: lir::LType) -> MMemSize | error {
  * @return SelCtx  the advanced context
  */
 fn select_alloca(ctx0: SelCtx, inst: lir::LInst, a: lir::LAlloca) -> SelCtx {
-    let slot = ctx0.func.frame.len to u32
+    let slot = ctx0.func.frame.len
     let ctx1 = SelCtx { func = append_frame(ctx0.func, a); vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, true)

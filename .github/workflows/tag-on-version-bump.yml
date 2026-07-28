@@ -58,6 +58,10 @@ on:
 permissions:
   contents: write
   actions: write
+  # The release gate resolves the PR this push came from (`commits/<sha>/pulls`) and reads its
+  # check runs; both need read access beyond `contents`.
+  pull-requests: read
+  checks: read
 
 # Never run two taggers concurrently for the same ref — avoids a race where two
 # pushes both see the tag missing and both try to create it.
@@ -75,6 +79,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+      pull-requests: read
+      checks: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,17 +97,24 @@ jobs:
           echo "teko.tkp-derived tag = $DERIVED"
 
       # ── RELEASE GATE ────────────────────────────────────────────────────────────
-      # The manifest-bump push and the CI workflows fire on the SAME commit IN PARALLEL.
-      # The tag minted below triggers release.yml (build + publish), so it must NEVER be
-      # created from a red commit. Block here until the push-triggered CI concludes GREEN
-      # on this exact SHA. Only the two workflows that actually run on this push are
-      # awaited — "Native Build & Test" (the CI gate) and "Sanitizers & Stress" (the
-      # Sanitizer gate). SAST/CodeQL is pull_request-only: it already gated the sub-PR
-      # merge and does not run on this push, so awaiting it would hang (and force-adding
-      # it to the push would re-run CodeQL on every seed bump — pure cost). Idempotent: a
-      # manifest touch that did not bump the version leaves the tag present, so we skip
-      # WITHOUT waiting. A red or timed-out gate exits non-zero → no tag, no release.
-      - name: Gate the release — require CI green on this commit before tagging
+      # The tag minted below triggers release.yml (build + publish), so it must NEVER be created
+      # from a red commit. This step VERIFIES the gates instead of waiting for them.
+      #
+      # BUG FIXED HERE (2026-07-25, romaneio .31): the previous version waited, in a 60-minute
+      # loop, for the CI workflows to complete AT $GITHUB_SHA, commenting that "only the
+      # workflows that actually run on this push are awaited". They are `on: pull_request:`
+      # ONLY. Nothing runs on this push,
+      # so the loop awaited runs that cannot exist, burned the full deadline and exited 1: NO TAG
+      # was ever minted, and release.yml (which triggers on the tag) was therefore never reached.
+      # A gate that cannot pass is worse than no gate: it blocks the release AND costs an hour of
+      # runner per attempt.
+      #
+      # Waiting "at the right SHA" is not the fix either: under squash-merge the commit that lands
+      # on main is a NEW commit, and the checks ran on the PR's head, a different SHA. So the gate
+      # resolves the PR this commit came from and verifies the checks of ITS head — the runs that
+      # actually gated the merge. If the PR cannot be resolved (a direct push, a non-squash merge),
+      # this fails LOUD rather than tagging in the dark.
+      - name: Gate the release — verify the originating PR's checks were green
         env:
           DERIVED: ${{ steps.derive.outputs.derived }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -111,39 +124,105 @@ jobs:
             echo "SKIP: tag '$DERIVED' already exists — nothing to gate."
             exit 0
           fi
-          SHA="$GITHUB_SHA"
-          DEADLINE=$(( $(date +%s) + 60 * 60 ))   # 60 min ceiling for the ASan long-pole
-          echo "Gating '$DERIVED' on the push CI for $SHA (CI gate + Sanitizer gate)…"
+          # THE SHARED RESOLVER. scripts/originating_pr_run.sh answers "which PR produced this
+          # commit, and which run gated it" — the same question, resolved the same way, that
+          # nightly.yml asks when it goes back for the artifacts that run published. One resolver,
+          # so the two workflows can never disagree about which run stands behind a commit.
+          rc=0
+          OUT="$(sh scripts/originating_pr_run.sh "$GITHUB_SHA" "Pull Request CI")" || rc=$?
+          if [ "$rc" = "3" ]; then
+            echo "ABORT: $GITHUB_SHA does not resolve to a merged pull request."
+            echo "This gate verifies the CHECKS OF THE PR HEAD (the CI workflow is pull_request-only,"
+            echo "so a push commit carries no checks of its own). A direct push to a tagging branch"
+            echo "has nothing to verify — land the bump through a PR, or tag by hand deliberately."
+            exit 1
+          fi
+          [ "$rc" = "0" ] || { echo "ABORT: the originating-PR lookup failed (exit $rc)."; exit 1; }
+          PR_NUM="$(printf '%s\n' "$OUT" | sed -n 's/^pr=//p')"
+          HEAD_SHA="$(printf '%s\n' "$OUT" | sed -n 's/^head_sha=//p')"
+          ST="$(printf '%s\n' "$OUT" | sed -n 's/^run_status=//p')"
+          CC="$(printf '%s\n' "$OUT" | sed -n 's/^run_conclusion=//p')"
+          echo "Gating '$DERIVED': $GITHUB_SHA came from PR #$PR_NUM, head $HEAD_SHA."
+          if [ -z "$ST" ]; then
+            echo "ABORT: no 'Pull Request CI' run found on the PR head $HEAD_SHA."
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          if [ "$ST" != "completed" ]; then
+            echo "ABORT: 'Pull Request CI' on PR #$PR_NUM head $HEAD_SHA is $ST (not completed)."
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          if [ "$CC" != "success" ]; then
+            echo "ABORT: 'Pull Request CI' on PR #$PR_NUM head $HEAD_SHA concluded '$CC'."
+            echo "NOT tagging '$DERIVED'."
+            exit 1
+          fi
+          echo "All required gates GREEN on PR #$PR_NUM head $HEAD_SHA — proceeding to tag + release."
+
+      # ── DO NOT MINT A TAG BEFORE THE BUILD IT WILL PROMOTE EXISTS ───────────────────────────
+      # ADDED 2026-07-26, and it closes a race the release redesign created. `release.yml` no
+      # longer compiles anything: it PROMOTES the prerelease `nightly.yml` published for this
+      # exact commit (owner ruling — "release só precisa promover, não tem que recompilar e
+      # 'jogar fora' algo provado"). Both workflows fire on the SAME push, and the nightly is the
+      # slow one — it mints every published asset from scratch. Minting the tag the moment the
+      # PR gate verified would therefore start the release BEFORE its input exists, and the
+      # release would abort with "no nightly to promote" on a perfectly good commit.
+      #
+      # The ordering decision belongs here, next to "do not tag from a red commit": it is the same
+      # gate, one input further back. Failing safe means NOT tagging — this workflow is idempotent,
+      # so re-running it after the nightly lands mints the tag then.
+      #
+      # It watches BOTH the release and the workflow run, deliberately: the release appearing is
+      # the success condition, but a nightly that FAILED would otherwise be waited on until the
+      # deadline for no reason, so a completed-and-not-successful run aborts immediately.
+      - name: Wait for the Nightly Build of this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DERIVED: ${{ steps.derive.outputs.derived }}
+        run: |
+          set -eu
+          if git ls-remote --exit-code --tags origin "refs/tags/$DERIVED" >/dev/null 2>&1; then
+            echo "SKIP: tag '$DERIVED' already exists — nothing to wait for."
+            exit 0
+          fi
+          NIGHTLY="$(sh scripts/nightly_tag.sh "$GITHUB_SHA")"
+          echo "release.yml will promote '$NIGHTLY' (scripts/nightly_tag.sh — the SAME derivation"
+          echo "both the publisher and the promoter use). Waiting for it to be published."
+
+          DEADLINE=$(( $(date +%s) + 18000 ))    # 5h, inside the 6h job ceiling
+          GRACE=$(( $(date +%s) + 600 ))         # 10 min for the run to even appear
           while :; do
-            all_done=1
-            failed=""
-            for wf in "Native Build & Test" "Sanitizers & Stress"; do
-              info="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}" \
-                        --jq "[.workflow_runs[] | select(.name==\"$wf\")] | sort_by(.run_number) | last | \"\(.status)|\(.conclusion)\"" || true)"
-              st="${info%%|*}"
-              cc="${info##*|}"
-              if [ -z "$info" ] || [ "$st" != "completed" ]; then
-                echo "  · $wf — ${st:-pending}"
-                all_done=0
-              elif [ "$cc" != "success" ]; then
-                echo "  ✗ $wf — completed=$cc"
-                failed="$failed [$wf=$cc]"
-              else
-                echo "  ✓ $wf — success"
+            if gh release view "$NIGHTLY" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "OK: '$NIGHTLY' is published — the release will have something to promote."
+              exit 0
+            fi
+            INFO="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}" \
+                     --jq '[.workflow_runs[] | select(.name=="Nightly Build")] | sort_by(.run_number) | last | "\(.status)|\(.conclusion)"' 2>/dev/null || true)"
+            ST="${INFO%%|*}"; CC="${INFO##*|}"
+            NOW="$(date +%s)"
+            if [ -z "$INFO" ] || [ "$INFO" = "null" ]; then
+              if [ "$NOW" -gt "$GRACE" ]; then
+                echo "ABORT: no 'Nightly Build' run exists for $GITHUB_SHA after 10 minutes."
+                echo "release.yml promotes that build and compiles nothing, so tagging now would"
+                echo "produce a release that cannot be assembled. NOT tagging '$DERIVED'."
+                exit 1
               fi
-            done
-            if [ -n "$failed" ]; then
-              echo "ABORT: required CI not green on $SHA:$failed"
-              echo "NOT tagging '$DERIVED'. Fix the failure and re-push (which re-bumps/re-tags)."
+              echo "  ... no Nightly Build run visible yet (within the 10-minute grace window)"
+            elif [ "$ST" = "completed" ] && [ "$CC" != "success" ]; then
+              echo "ABORT: the Nightly Build for $GITHUB_SHA completed with conclusion '$CC'."
+              echo "There is no build to promote. Fix the nightly, re-run it, then re-run this"
+              echo "workflow — it is idempotent. NOT tagging '$DERIVED'."
+              exit 1
+            else
+              echo "  ... Nightly Build status=$ST conclusion=$CC — waiting"
+            fi
+            if [ "$NOW" -gt "$DEADLINE" ]; then
+              echo "ABORT: '$NIGHTLY' was not published within the deadline."
+              echo "NOT tagging '$DERIVED' — re-run this workflow once the nightly finishes."
               exit 1
             fi
-            [ "$all_done" = "1" ] && { echo "All required gates GREEN on $SHA — proceeding to tag + release."; break; }
-            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-              echo "TIMEOUT waiting for CI on $SHA — NOT tagging (safe default)."
-              exit 1
-            fi
-            echo "…waiting 30s"
-            sleep 30
+            sleep 60
           done
 
       - name: Create + push tag if it does not already exist

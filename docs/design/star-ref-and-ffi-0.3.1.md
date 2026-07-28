@@ -58,9 +58,21 @@ testing and is deleted with kill-C.
 
 ## 1. The ratified `ref` surface (post-.31 corpus)
 
+**SUPERSEDED (dono 2026-07-24 — ref-adoption vagão):** the "4 positions" below (incl. `-> ref T`
+return type and the `a(ref x)` call-site expression operator) is corrected. `ref` is a BINDING
+keyword ONLY, in the SAME family as `let`/`mut`: `ref r: T = e` (a local; note the annotated `T` is
+the REFERENT's type, not `ref T`) and `fn f(ref r: T)` (a param). There is no `ref`-typed return
+position and no `ref`-as-expression-operator; a call site simply passes the bare mutable/ref-typed
+source (`f(x)`), auto-ref'd by the checker when the param is `ref`. `let` binding any form of a
+reference remains illegal (unchanged), and a `ref` binding's source must be mutable (a `var`) or
+another reference — never a `let`. The 2 surviving positions below are marked; the rest is
+historical record of the .30/.31 draft, not deleted.
+
 - **`Ref<T>` internal + invisible;** no `.value` at the surface.
-- **`ref` keyword, 4 positions:** `mut ref r: T` (**`let ref` illegal** — tripartite), `fn a(ref b: T)`,
-  `-> ref T`, **`a(ref x)`** (replaces `&x`).
+- **`ref` keyword, 4 positions:** `mut ref r: T` (**`let ref` illegal** — tripartite) — SURVIVES
+  (as `ref r: T = e`, dropping the redundant `mut`) —, `fn a(ref b: T)` — SURVIVES —,
+  `-> ref T` — SUPERSEDED, dropped —, **`a(ref x)`** (replaces `&x`) — SUPERSEDED, dropped (plain
+  `a(x)` auto-refs).
 - **Transparent use** (type-directed auto-deref; `r = v` = R4 write-through).
 - **`*` / `&` = `unsafe`-only raw-pointer operators** (§2).
 

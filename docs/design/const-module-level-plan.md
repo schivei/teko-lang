@@ -112,7 +112,7 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 | Lowering per item | `src/lir/lower.tks:4529` (`lower_program`), `:4828` (`lower_item`) | must handle a const item (mostly a no-op — see §5) |
 | LIR rodata (WORKS) | `src/lir/lir.tks:143` (`LRodata`), `:262` (`LGlobalAddr`), `lower.tks:3759` (`intern_rodata`) | string literals already intern rodata + reference it |
 | LIR global (STUB) | `src/lir/lir.tks:148` (`LGlobal`) | "top-level consts are a later construct" — we DO NOT use this |
-| Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, `encode_riscv.tks:1684`, `stackify.tks:4458` | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
+| Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, um backend encoder, `stackify.tks:4458` | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
 | rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff,wasm}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend AND interpreted in the VM |
 
 ### 2.1 The critical insight (validated)
@@ -120,7 +120,6 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 The honest-stops that block "top-level data" fire only on **`m.globals`** (the
 `LGlobal` table), never on **`m.rodata`**. String literals already flow read-only
 data + a `Pc32`/`Abs64` relocation through **every** backend (C, x86_64, arm64,
-riscv64, wasm) and both object writers (ELF/Mach-O/COFF/wasm) **and** the LIR
 interpreter (`rodata_base_of` / `interp_global_addr`). Therefore:
 
 - **Scalars never touch data at all** (inlined literals).
@@ -162,7 +161,7 @@ silently inlining an arbitrary call (least-surprise, law-first).
   The closed allowlist for the current corpus is exactly:
   - `teko::f64_from_bits` / `teko::f32_from_bits` (builtins; `inf`, `nan`),
   - `preg` (`src/backend/minst.tks:886` — body is a single `MReg { … }` literal;
-    `rax_x86`, `rcx_x86`, `riscv_zero_reg`, …).
+    `rax_x86`, `rcx_x86`, ``, …).
 
   Rationale for an explicit allowlist over a general purity analyzer: the set is
   tiny and closed, deterministic, and reversible; a transitive-purity pass is a
@@ -203,7 +202,6 @@ the whole reloc model is `.text`-relative (verified §5.1). Two tiers:**
   data section**. That relocation **does not exist** in any writer/encoder/VM
   (§5.1 verdict). This tier BREAKS "zero backend" and becomes a dedicated backend
   phase (§8 crumbs T-B*). The flagship Tier-B consts are the ABI descriptors
-  (`sysv64`/`aapcs64`/`riscv64_lp64d`/`win64` — eight `[]u32` slice fields each,
   `abi_aapcs64.tks:14`). **None of the owner's ~50 anemic-const sites are Tier B**
   — they are all Tier A — so the ~50 migrate with zero backend change; Tier B is
   only reached when the pointer-bearing aggregate FACTORIES are also converted.
@@ -636,7 +634,6 @@ pointer (a slice/pointer field) needs a reloc the toolchain cannot emit.
 | C backend (`--backend=c`) | — | none (INLINE-AT-USE: `inline_aggregate_consts` substitutes a clone of the checked initializer at every use; the decl stays a no-op residual — NOT a `static const`, since a runtime-allocated `[]T`/aggregate has no C static initializer, #607) | data-init pointer resolvable in C init, but see VM/native — sequence with them |
 | x86_64 (`encode_x86_64.tks`) | `honest_globals_x86` (`:1495`) | none (text→rodata load exists) | **widen `RelocX86` with a patch-site SECTION tag + emit data-section relocs** |
 | arm64 (`encode_arm64.tks`) | `honest_globals`/`A4-globals` (`:1858`) | none | **same: data-section reloc emission** |
-| riscv64 (`encode_riscv.tks`) | `honest_globals_riscv` (`:1684`) | none | **same** |
 | wasm (`stackify.tks`/`objfile_wasm.tks`) | `wasm_honest_globals`/`C1-globals` (`:4458`) | none | **compute+write intra-data i32 offsets in the data segment (no reloc, but new)** |
 | ELF writer | — | none | **new `.rela.rodata` section + rela emission** |
 | Mach-O writer | — | none | **new rodata-section (local) relocations** |
@@ -737,7 +734,6 @@ pointer): they materialize in `m.rodata` at the feature baseline (D2, RULING 1).
 **Not in the owner's ~50.** Only reached if the pointer-bearing aggregate factories
 are converted:
 
-- `src/backend/abi_{sysv64,aapcs64,riscv64,win64}.tks` ABI descriptors — eight
   `[]u32` slice fields (`abi_aapcs64.tks:14`). Full rodata materialization needs a
   data→data reloc (§5.1) → deferred behind crumbs T-B1..T-B5, OR legitimately stay
   `fn` (a genuine pointer-bearing aggregate whose per-call construction is honest
@@ -756,7 +752,6 @@ are converted:
   owner's "convert TUDO" targets *constant* returns; a factory that seeds fresh
   mutable state is a different category and correctly stays a fn.
 - `nan()`/`inf()` are Tier-5 consts (allowlisted `f64_from_bits`) → migrate.
-- The ABI descriptors (`sysv64`, `aapcs64`, `riscv64_lp64d`, `win64`) are
   **pointer-bearing aggregates (Tier B, §6.5b)** — they are NOT in the owner's ~50
   and require the data-reloc backend phase (§8 T-B*) before they can be rodata
   consts. Until then they stay `fn` (honest per-call construction).
@@ -796,7 +791,7 @@ Hex-literal-with-cast density (proxy for magic values), by file:
 - `src/backend/stackify.tks` — 109 hits (wasm opcodes, LEB masks, value-type
   bytes). Highest priority: opcode/section families → enum/flags/const table.
 - `src/backend/encode_x86_64.tks` — 90; `encode_arm64.tks` — 66;
-  `encode_riscv.tks` — 52 (ISA opcode/ModRM/immediate masks). Recurring masks
+  um backend encoder — 52 (ISA opcode/ModRM/immediate masks). Recurring masks
   (`0xFF`, `0x1F`, field shifts) → named `const`; opcode families → an enum/table.
 - `src/backend/objfile_{wasm,macho,elf,coff}.tks` — 24/20/14/9 (file magic,
   section flags, symbol info) → `const`/`flags`/`enum` per 6.3.
@@ -807,7 +802,7 @@ in full** — "em meio ao código também, feito por inteiro aqui." So #594 deli
 in order: (1) the `const`/`enum`/`flags` feature; (2) the ~50 nullary-fn constants +
 the object-writer file-magic/section-flag families (6.3); (3) **a file-by-file sweep
 of the ISA encoders** `encode_x86_64.tks` (90 hits), `encode_arm64.tks` (66),
-`encode_riscv.tks` (52), `stackify.tks` (109), plus the object writers, turning each
+um backend encoder (52), `stackify.tks` (109), plus the object writers, turning each
 recurring opcode / mask / field constant into `const`/`enum`/`flags` per the W15
 rule. The sweep is sequenced AFTER the feature reaches the bootstrap seed (crumbs
 1–7) so the encoders may spell `const`/`enum`/`flags`, and each file is its own
@@ -1006,7 +1001,7 @@ may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per 
 - **S2** `src/backend/encode_x86_64.tks` (90): ModRM/REX field masks → `const`,
   opcode families → an `enum`/named table.
 - **S3** `src/backend/encode_arm64.tks` (66): field masks/shifts → `const`.
-- **S4** `src/backend/encode_riscv.tks` (52): funct/opcode fields → `enum`/`const`.
+- **S4** ~~`` (52): funct/opcode fields → `enum`/`const`.~~ **VOID —
 - **S5** `src/backend/objfile_{elf,macho,coff,wasm}.tks` residual (header fields,
   alignments) → `const`/`flags` (the file-magic/section-flag families already done
   in crumb 10; S5 mops up the rest).
@@ -1019,7 +1014,7 @@ may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per 
 A SEPARATE, LATER track (not required by the owner's ~50). Delivers the data→data
 relocation absent today (§5.1), then migrates the ABI descriptors.
 - **T-B1** widen the reloc model: add a patch-site SECTION tag to `RelocX86` /
-  arm64/riscv `Reloc` (today `.text`-only, `encode_x86_64.tks:1310`); the LIR carries
+`Reloc` (today `.text`-only, `encode_x86_64.tks:1310`); the LIR carries
   a data-section relocation entry for a rodata-internal pointer field.
 - **T-B2** ELF writer: emit a `.rela.rodata` section (add to the section set at
   `objfile_elf.tks:455`) + its relas.
@@ -1032,7 +1027,7 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
   capability is now in the seed; T-B6's source may use pointer-bearing aggregate
   consts. (T-B1..T-B5 may each tag an intermediate `-beta` if a later T-B crumb's
   source uses an earlier one's capability.)
-- **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`RISCV64_LP64D`/`WIN64`,
+- **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`WIN64`,
   `UPPER_SNAKE` per D7) and any other pointer-bearing aggregate to rodata consts.
 - **Fixtures:** `const AAPCS64: AbiDescriptor = …` emits ONE rodata blob with data
   relocs to its `[]u32` leaf arrays; both engines read identical register lists; all
@@ -1098,7 +1093,7 @@ No genuine unresolved tension → no HALT.
   `src/lir/lir_interp.tks`, `src/io/stream.tks`, `src/backend/minst.tks`,
   `src/compress/gzip.tks`.
 - RULING-2 sweep (crumbs S1–S6): `encode_x86_64.tks`, `encode_arm64.tks`,
-  `encode_riscv.tks`, `stackify.tks`, `objfile_*.tks` — frozen bytes.
+  um backend encoder, `stackify.tks`, `objfile_*.tks` — frozen bytes.
 - **Feature + Tier A: ZERO backend encoder/writer changes, ZERO C twins.**
 - **Tier B ONLY (crumbs T-B1–T-B6, pointer-bearing aggregates):** the 3 native
   encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs), wasm

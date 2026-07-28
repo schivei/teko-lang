@@ -28,7 +28,7 @@ LIR, honest-stop `honest_data_reloc` em `encode_rodata`; ELF `ElfObject.rodata_r
 (`objfile_macho.tks:735`) e `emit_coff(enc: EncodedModuleX86)`
 (`objfile_coff.tks:708`). **NÃO existe** `MachoObject`/`CoffObject`: ao contrário do
 ELF — cujo `ElfObject` (`objfile_elf.tks:986`) é um objeto neutro porque `emit_elf`
-(x86) e `emit_elf_riscv` COMPARTILHAM o writer `emit_elf_object` (duas ISAs, um só
+(x86) e `` COMPARTILHAM o writer `emit_elf_object` (duas ISAs, um só
 writer) — Mach-O é arm64-only e COFF é x86-only. Cada um tem UMA ISA, então nunca
 houve motivo para um objeto neutro intermediário, e por isso consomem o
 `EncodedModule*` da própria ISA.
@@ -821,7 +821,7 @@ o arquivo compila a cada passo.
 - **Por-edit:** o `.tkt` do arquivo (tabela) — cada edit é gate-able só.
 - **RITUAL POINT — fim de T-B3:** gate COMPLETO — todos os goldens de backend
   byte-idênticos (`objfile_macho_test.tkt`, `objfile_coff_test.tkt`,
-  `objfile_elf_test.tkt`, `objfile_elf_riscv_test.tkt`, `encode_*_test.tkt`,
+  `objfile_elf_test.tkt`, um backend ELF writer, `encode_*_test.tkt`,
   `minst_test.tkt`, `lower_test.tkt`, `lir_interp_test.tkt`, `tkb_test.tkt`) +
   **fixpoint gen1==gen2** + ambas as engines (VM + nativo) + 100% de cobertura do
   delta (as fixtures §4.1/§4.3 cobrem o braço rodata-reloc; §4.2/§4.4 o colapso; §4.5

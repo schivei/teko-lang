@@ -13,7 +13,7 @@ owns), grounded in the merged code (`src/backend/minst.tks`, `regalloc.tks`, `ab
 > `if`/`match` CFGs now allocate correctly after #443), turns it into arm64 machine bytes, wraps them
 > in a Mach-O object, links that against the C-built `teko_rt` via `cc`-as-linker, and runs it. A4
 > owns the frame prologue/epilogue + `MFrameAddr` resolution A3 explicitly deferred (§6.1, "A4-frame").
-> It emits **no** cross-target code (ELF/PE/x86/riscv/wasm are Phases B/C), does **not** add the
+
 > `--backend` flag (D1/#390 owns it — A4 uses a temporary env seam), and does **not** build the own
 > linker (Phase E/#226 — A4 links via `cc`). The hard tail (FP encoding, big-frame/big-imm forms,
 > data globals/GOT relocs, the own-linker `__info_plist`) is scoped forward as **named** honest-stops
@@ -668,7 +668,7 @@ side already built by the existing gate.
 | i128 register-pair ops | — (inherited) | isel never emits them (`isel §6.3`) — rides A2 | A2's i128 route |
 | FP-value spill | — (inherited) | `detect_fpr_spill` errors in A3 before A4 | A3's `A3-fpr-spill` |
 | `loop` back-edge | — (inherited) | regalloc honest-stops (`A3-loop`) before A4 | A3's `A3-loop` |
-| ELF/PE/COFF, x86/riscv/wasm | later clusters | other targets | Phases B (#386–#388), C (#389) |
+
 | `--backend={c,native}` flag | later cluster | the real manifest flag (A4 uses the env seam) | D1/#390 |
 | own linker (drop `cc`) | later cluster | Mach-O static linker (+ object `__info_plist`) | Phase E/#226 |
 

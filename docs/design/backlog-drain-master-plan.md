@@ -6,7 +6,6 @@
 
 This folds the five milestone readiness assessments + the three crumb-level drain docs
 (`drain-265-168-native-gate.md`, `drain-onda3-subcluster-A.md`, `drain-fase3-stdlib-order.md`,
-`onda3-monomorphization-cluster.md`, `compile-time-architecture.md`) into ONE actionable topo-order.
 
 ---
 
@@ -16,7 +15,6 @@ This folds the five milestone readiness assessments + the three crumb-level drai
   Full set: `158 159 163 164 167 168 171 172 173 174 178 179 180 182 183 184 186–226 (contiguous) 228 230 231 233 234 249 254 265 267 270 282 283 290 294 299 301 304 305`.
 - **2 draft PRs in flight:** **#307** (fixes **#299**, `fix/issue-299`) and **#300** (advances **#184**, `fix/issue-184`, milestoned Onda-2). Both are the head of the ready-set — reconcile/merge these FIRST.
 - **Milestone-1 "1 open" = PR #300 itself** (no separate Onda-2 issue remains; the monomorphic-stdlib milestone is effectively closed pending #300/#184).
-- **CI is ~6 m** after #306 (`disable riscv/windows-arm + un-double gate`). The re-enable debt is **#304** (windows-arm64) + **#305** (riscv64-qemu) — un-milestoned, `fase-6-qualidade`.
 - **Blocker-source keystones already CLOSED:** #157, #162, #165, #169, #181, #185, #221, #227, #229, #296 (#303), #160, #161, #166, #177.
 - **5 `keystone`-labeled OPEN issues:** #163, #164 — plus the onda-3 cluster #254 and the native-gate #265/#168 are the load-bearing keystones this plan sequences first.
 
@@ -205,7 +203,7 @@ Off the self-build critical path — schedule opportunistically between heavier 
 | security| **#183** [R] capabilities/sandboxing (independent) |
 | release | **#267** item-2 [R] tag-sans-release fallback ; item-1 (LTS-default) post-alpha |
 | toolchain| **#182** [deferred post-alpha] TCC bundle (NOT an alpha blocker) |
-| backend | **#222** [R, #221✓] Linux-x86_64 ref → **#223** ∥ **#224** [B:#222] arm64/riscv/win · wasm → **#225** [B:#223 #224] 3-way diff CI → **#226** [B:#225] custom linker |
+| backend | **#222** [R, #221✓] Linux-x86_64 ref → **#223** ∥ **#224** [B:#222] arm64/win · wasm → **#225** [B:#223 #224] 3-way diff CI → **#226** [B:#225] custom linker |
 | tooling | **#228** [R, #227✓] editor plugins ∥ **#230** [R] docgen ∥ **#231** [R, #229✓] lint ; **#233** LSP DEFERRED (no start gate) |
 
 ### BATCH 8 — QUALIDADE & perf (some ride the keystones; #234 last)

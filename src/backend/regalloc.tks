@@ -204,16 +204,16 @@ fn reachable_blocks(f: MFunc) -> []u32 {
  *
  * @param []u32 order  the RPO block-id order
  * @param u32 id  the block id to rank
- * @return u32  the 0-based RPO position, or `order.len`
+ * @return u64  the 0-based RPO position, or `order.len`
  */
-fn block_pos(order: []u32, id: u32) -> u32 {
+fn block_pos(order: []u32, id: u32) -> u64 {
     mut i: u64 = 0
     loop {
         if i >= order.len { break }
-        if order[i] == id { return i to u32 }
+        if order[i] == id { return i }
         i++
     }
-    order.len to u32
+    order.len
 }
 
 /**
@@ -1034,8 +1034,10 @@ pub type Spilled = struct {
     vreg_id: u32
     /**
      * slot — the spill-slot index (A3-4 finalizes it to a frame offset).
+     * `u64` (D5, `cast-width-hygiene-0.3.1.md` §3/C3) — a pure internal
+     * count, no wire-format reason to stay narrow.
      */
-    slot: u32
+    slot: u64
 }
 
 /**
@@ -1306,10 +1308,10 @@ fn remove_active(active: []ActiveEntry, vreg_id: u32) -> []ActiveEntry {
  *
  * @param []RegAssignment assignments  the assignments so far
  * @param u32 vreg_id  the victim vreg
- * @param u32 slot  its new spill slot
+ * @param u64 slot  its new spill slot
  * @return []RegAssignment  the updated assignments
  */
-fn mark_spilled(assignments: []RegAssignment, vreg_id: u32, slot: u32) -> []RegAssignment {
+fn mark_spilled(assignments: []RegAssignment, vreg_id: u32, slot: u64) -> []RegAssignment {
     mut out: []RegAssignment = teko::list::empty()
     mut i: u64 = 0
     loop {
@@ -1358,7 +1360,7 @@ fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult {
     mut active: []ActiveEntry = teko::list::empty()
     mut assignments: []RegAssignment = teko::list::empty()
     mut used_callee: []u32 = teko::list::empty()
-    mut next_slot: u32 = 0
+    mut next_slot: u64 = 0
     mut i: u64 = 0
     loop {
         if i >= sorted.len { break }
@@ -1413,9 +1415,10 @@ pub type AssignLookup = struct {
      */
     phys: u32
     /**
-     * slot — the spill-relative frame slot (when `is_spill`).
+     * slot — the spill-relative frame slot (when `is_spill`). `u64` (D5,
+     * `cast-width-hygiene-0.3.1.md` §3/C3) — a pure internal count.
      */
-    slot: u32
+    slot: u64
 }
 
 /**
@@ -1424,7 +1427,7 @@ pub type AssignLookup = struct {
  * @return AssignLookup  found=false
  */
 fn al_none() -> AssignLookup {
-    AssignLookup { found = false; is_spill = false; phys = 0 to u32; slot = 0 to u32 }
+    AssignLookup { found = false; is_spill = false; phys = 0 to u32; slot = 0 }
 }
 
 /**
@@ -1437,7 +1440,7 @@ fn al_none() -> AssignLookup {
  */
 fn in_lookup(r: InReg, vreg_id: u32) -> AssignLookup {
     if r.vreg_id == vreg_id {
-        AssignLookup { found = true; is_spill = false; phys = r.phys; slot = 0 to u32 }
+        AssignLookup { found = true; is_spill = false; phys = r.phys; slot = 0 }
     } else {
         al_none()
     }
@@ -1640,10 +1643,10 @@ fn minst_cat(a: []MInst, b: []MInst) -> []MInst {
  * legal, §1.4). Both the address and the value live in `sv`.
  *
  * @param MReg sv  the GPR scratch to reload into
- * @param u32 slot  the absolute frame slot
+ * @param u64 slot  the absolute frame slot
  * @return []MInst  the reload sequence
  */
-fn emit_gpr_reload(sv: MReg, slot: u32) -> []MInst {
+fn emit_gpr_reload(sv: MReg, slot: u64) -> []MInst {
     let fa = frame_addr_inst(sv, slot)
     let ld = load_inst(MMemSize::X, false, sv, MMem { base = sv; offset = 0 to i32 })
     teko::list::push(minst_single(fa), ld)
@@ -1656,10 +1659,10 @@ fn emit_gpr_reload(sv: MReg, slot: u32) -> []MInst {
  *
  * @param MReg dsv  the GPR scratch holding the value to store
  * @param MReg asv  a distinct GPR scratch for the slot address
- * @param u32 slot  the absolute frame slot
+ * @param u64 slot  the absolute frame slot
  * @return []MInst  the store sequence
  */
-fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u32) -> []MInst {
+fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
     let fa = frame_addr_inst(asv, slot)
     let st = store_inst(MMemSize::X, dsv, MMem { base = asv; offset = 0 to i32 })
     teko::list::push(minst_single(fa), st)
@@ -1676,11 +1679,11 @@ fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u32) -> []MInst {
  * @param AbiDescriptor abi  the register file (for spill scratch)
  * @param ScanResult sr  the allocation
  * @param MReg u  the use operand
- * @param u32 frame_base  the first spill frame slot index
+ * @param u64 frame_base  the first spill frame slot index
  * @param UseAcc acc  the table/reloads/counter so far
  * @return UseAcc  the updated accumulator
  */
-fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u32, acc: UseAcc) -> UseAcc {
+fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u64, acc: UseAcc) -> UseAcc {
     if u.is_phys { return acc }
     if subst_has(acc.table, u.id) { return acc }
     let la = assign_lookup(sr, u.id)
@@ -1727,10 +1730,10 @@ type UseAcc = struct {
  * @param AbiDescriptor abi  the register file (for spill scratch)
  * @param ScanResult sr  the allocation
  * @param MInst inst  the instruction to rewrite
- * @param u32 frame_base  the first spill frame slot index
+ * @param u64 frame_base  the first spill frame slot index
  * @return []MInst  the reloads ++ the rewritten instruction ++ the store
  */
-pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u32) -> []MInst {
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64) -> []MInst {
     let ir = inst_regs(inst)
     mut acc = UseAcc { table = teko::list::empty(); reloads = teko::list::empty(); nth = 0 to u32 }
     mut ui: u64 = 0
@@ -1770,10 +1773,10 @@ pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base:
  * each) in `sr`.
  *
  * @param ScanResult sr  the allocation
- * @return u32  the spill count
+ * @return u64  the spill count
  */
-fn count_spills(sr: ScanResult) -> u32 {
-    mut n: u32 = 0
+fn count_spills(sr: ScanResult) -> u64 {
+    mut n: u64 = 0
     mut i: u64 = 0
     loop {
         if i >= sr.assignments.len { break }
@@ -1853,12 +1856,12 @@ fn detect_fpr_spill(sr: ScanResult, f: MFunc) -> bool {
  *
  * @param AbiDescriptor abi  the register file (for slot size/align)
  * @param []lir::LAlloca frame  the function's existing frame table
- * @param u32 spills  the spill count
+ * @param u64 spills  the spill count
  * @return []lir::LAlloca  the extended frame table
  */
-fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u32) -> []lir::LAlloca {
+fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u64) -> []lir::LAlloca {
     mut out = frame
-    mut i: u32 = 0
+    mut i: u64 = 0
     loop {
         if i >= spills { break }
         out = teko::list::push(out, lir::LAlloca { bytes = abi.spill_slot_bytes; align = abi.spill_slot_align })
@@ -1875,10 +1878,10 @@ fn append_spill_slots(abi: AbiDescriptor, frame: []lir::LAlloca, spills: u32) ->
  * @param AbiDescriptor abi  the register file
  * @param ScanResult sr  the allocation
  * @param MBlock b  the block to rewrite
- * @param u32 frame_base  the first spill frame slot index
+ * @param u64 frame_base  the first spill frame slot index
  * @return MBlock  the rewritten block
  */
-fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u32) -> MBlock {
+fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u64) -> MBlock {
     mut insts: []MInst = teko::list::empty()
     mut ii: u64 = 0
     loop {
@@ -1900,7 +1903,7 @@ fn rewrite_block(abi: AbiDescriptor, sr: ScanResult, b: MBlock, frame_base: u32)
  * @return MFunc  the fully-colored function
  */
 fn rewrite_func(abi: AbiDescriptor, f: MFunc, sr: ScanResult) -> MFunc {
-    let frame_base = f.frame.len to u32
+    let frame_base = f.frame.len
     let frame = append_spill_slots(abi, f.frame, count_spills(sr))
     mut blocks: []MBlock = teko::list::empty()
     mut bi: u64 = 0

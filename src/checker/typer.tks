@@ -9,12 +9,17 @@
 use teko::lexer
 use teko::parser
 
-// ---- leaves ----
+/**
+ * type_number — the leaf typing of a number literal (N1/N2, B.38): adopts a DEFAULT type — `i64`
+ * for an integer literal, `f64` for a float. An annotation/expected type re-adopts a fitting
+ * literal at the binding/cast site (`annotated_literal_ok`/`const_range_check`), where the full
+ * int set (`u8..u64`/`i8..i64`) and the float set (`f32`/`f64`) come into play (literal typing in
+ * annotated context: C6).
+ *
+ * @param n  the parsed number literal
+ * @return   the typed leaf, defaulted to `i64`/`f64`
+ */
 fn type_number(n: parser::Number) -> TExpr {
-    // N1/N2 (B.38): the leaf adopts a DEFAULT — i64 for an integer literal, f64 for a float.
-    // An annotation/expected type re-adopts a fitting literal at the binding/cast site
-    // (annotated_literal_ok / const_range_check), where the full int set (incl u128/i128)
-    // and the float set (f16/f32) come into play. [literal typing in annotated context: C6]
     let k = if n.is_float { PrimKind::F64 } else { PrimKind::I64 }
     TExpr { kind = TNumber { is_float = n.is_float; value = n.value; fval = n.fval }; type = Prim { kind = k }; line = 0; col = 0 }
 }
@@ -55,53 +60,101 @@ fn type_var(v: parser::Var, env: Env) -> TExpr | error {
 // (W10) CLOSURE LITERALS — type a `(params) => body` lambda, analyse its captures.
 // ============================================================================
 
-// collect the NAMES a lambda body READS (`refs`) and the names it BINDS internally (`bound` —
-// inner `let`s + nested-lambda params), so the free variables are `refs − bound − <params>`.
-fn lam_collect_block(stmts: []parser::Statement, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the names a lambda body's statements READ (`refs`), the names they BIND internally
+ * (`bound` — inner `let`s + nested-lambda params) and the names they ASSIGN TO by bare name
+ * (`writes`), transitively over every statement in `stmts`, so the free variables are
+ * `refs − bound − <params>` and the assigned free variables are `writes − bound − <params>`
+ * (0.3.1 — `ref` params, write-through, replacing the pre-adoption `Ref<[]str>` spelling;
+ * `str_set_add`'s explicit `.value` read stays — passing a `ref` argument bare into a plain-value
+ * parameter is not yet checker-auto-deref'd at a call site).
+ *
+ * @param stmts   the statement block to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
+ */
+fn lam_collect_block(stmts: []parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     mut i = 0
-    loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound); i++ }
+    loop { if i >= stmts.len { break }; lam_collect_stmt(stmts[i], refs, bound, writes); i++ }
 }
-fn lam_collect_stmt(s: parser::Statement, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the read/bound/written names of a single lambda-body statement `s` — the
+ * per-statement-kind dispatch `lam_collect_block` folds over a whole block. A bare-name `Assign`
+ * (`AssignKind::Simple`, no walkable `.target` expr) registers its `name` in BOTH `refs` and
+ * `writes`: in `refs` because a `ref`-bound write-through assignment (`r = v`) has no
+ * `FieldAccess` target to recurse into the way the pre-adoption `r.value = v` spelling did, so it
+ * would otherwise never be captured; in `writes` because the capture is by COPY unless the name is
+ * `ref`-bound, and only the caller (`type_lambda`, which has the enclosing scope) can tell the two
+ * apart and reject the copy case honestly. A `Field`/`Index` target is still walked via `.target`.
+ *
+ * @param s       the statement to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
+ */
+fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     match s {
         parser::Binding as b => {
-            lam_collect_expr(b.value, refs, bound)
+            lam_collect_expr(b.value, refs, bound, writes)
             match b.target {
-                parser::SimpleName as sn => bound.value = str_set_add(bound.value, sn.name)
-                parser::DestructurePattern as dp => { mut j = 0; loop { if j >= dp.names.len { break }; bound.value = str_set_add(bound.value, dp.names[j]); j++ } }
+                parser::SimpleName as sn => bound = str_set_add(bound.value, sn.name)
+                parser::DestructurePattern as dp => { mut j = 0; loop { if j >= dp.names.len { break }; bound = str_set_add(bound.value, dp.names[j]); j++ } }
             }
         }
-        parser::Assign as a => { lam_collect_expr(a.value, refs, bound); if parser::assign_has_target(a.kind) { lam_collect_expr(a.target, refs, bound) } }
-        parser::Return as r => if r.has_value { lam_collect_expr(r.value, refs, bound) } else { }
-        parser::LoopStmt as l => { lam_collect_block(l.init, refs, bound); lam_collect_block(l.body, refs, bound) }
-        parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound)
-        parser::DeferStmt as d => lam_collect_block(d.body, refs, bound)
-        parser::AdoptStmt as a => lam_collect_block(a.body, refs, bound)
+        parser::Assign as a => {
+            lam_collect_expr(a.value, refs, bound, writes)
+            if parser::assign_has_target(a.kind) {
+                lam_collect_expr(a.target, refs, bound, writes)
+            } else {
+                refs = str_set_add(refs.value, a.name)
+                writes = str_set_add(writes.value, a.name)
+            }
+        }
+        parser::Return as r => if r.has_value { lam_collect_expr(r.value, refs, bound, writes) } else { }
+        parser::LoopStmt as l => { lam_collect_block(l.init, refs, bound, writes); lam_collect_block(l.body, refs, bound, writes) }
+        parser::ExprStmt as es => lam_collect_expr(es.expr, refs, bound, writes)
+        parser::DeferStmt as d => lam_collect_block(d.body, refs, bound, writes)
+        parser::AdoptStmt as a => lam_collect_block(a.body, refs, bound, writes)
         parser::BreakStmt => { }
         parser::ContinueStmt => { }
     }
 }
-fn lam_collect_expr(e: parser::Expr, refs: Ref<[]str>, bound: Ref<[]str>) -> void {
+/**
+ * Collects the read/bound/written names of a single lambda-body expression `e` — the
+ * per-expression-kind dispatch `lam_collect_stmt`/`lam_collect_block` recurse through. An
+ * expression carries no assignment of its own, but the BLOCKS inside one (an `if`/`match` arm, a
+ * nested lambda body) do, so `writes` is threaded through unchanged. Two arms carry history worth
+ * keeping: `Borrow` (`&x`) recurses because a free read transits through the borrowed operand (AL
+ * wave F1), and `SafeMethodCall` is the NP-OOP receiver/args walk (issue #116).
+ *
+ * @param e       the expression to scan
+ * @param refs    accumulates every read name (by-reference, write-through)
+ * @param bound   accumulates every internally-bound name (by-reference, write-through)
+ * @param writes  accumulates every bare-name assignment target (by-reference, write-through)
+ */
+fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str, ref writes: []str) -> void {
     match e.kind {
-        parser::Var as v => refs.value = str_set_add(refs.value, v.name)
-        parser::Binary as b => { lam_collect_expr(b.left, refs, bound); lam_collect_expr(b.right, refs, bound) }
-        parser::Unary as u => lam_collect_expr(u.operand, refs, bound)
-        parser::Compare as c => { lam_collect_expr(c.first, refs, bound); mut i = 0; loop { if i >= c.rest.len { break }; lam_collect_expr(c.rest[i].operand, refs, bound); i++ } }
-        parser::Call as cl => { if cl.callee.segments.len == 1 { refs.value = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound); i++ } }
-        parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound); lam_collect_block(f.then_blk, refs, bound); if f.has_else { lam_collect_block(f.else_blk, refs, bound) } }
-        parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound); i++ } }
-        parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound)
-        parser::SafeFieldAccess as sfa => lam_collect_expr(sfa.receiver, refs, bound)
-        parser::Coalesce as co => { lam_collect_expr(co.left, refs, bound); lam_collect_expr(co.right, refs, bound) }
-        parser::Cast as ct => lam_collect_expr(ct.expr, refs, bound)
-        parser::Borrow as b => lam_collect_expr(b.operand, refs, bound)   // &x — free reads transit through the borrowed operand (AL wave F1)
-        parser::MethodCall as mc => { lam_collect_expr(mc.receiver, refs, bound); mut i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound); i++ } }
-        parser::SafeMethodCall as smc => { lam_collect_expr(smc.receiver, refs, bound); mut i = 0; loop { if i >= smc.args.len { break }; lam_collect_expr(smc.args[i], refs, bound); i++ } }   // (NP-OOP, issue #116)
-        parser::StructLit as sl => { mut i = 0; loop { if i >= sl.field_vals.len { break }; lam_collect_expr(sl.field_vals[i], refs, bound); i++ } }
-        parser::Index as ix => { lam_collect_expr(ix.receiver, refs, bound); lam_collect_expr(ix.index, refs, bound) }
-        parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound); i++ } }
-        parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound); mut i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound); i++ } }
-        parser::ArrayLit as a => { mut i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound); i++ } }
-        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound.value = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound) }   // a NESTED lambda's params are bound; its free reads transit to the outer
+        parser::Var as v => refs = str_set_add(refs.value, v.name)
+        parser::Binary as b => { lam_collect_expr(b.left, refs, bound, writes); lam_collect_expr(b.right, refs, bound, writes) }
+        parser::Unary as u => lam_collect_expr(u.operand, refs, bound, writes)
+        parser::Compare as c => { lam_collect_expr(c.first, refs, bound, writes); mut i = 0; loop { if i >= c.rest.len { break }; lam_collect_expr(c.rest[i].operand, refs, bound, writes); i++ } }
+        parser::Call as cl => { if cl.callee.segments.len == 1 { refs = str_set_add(refs.value, cl.callee.segments[0].name) }; mut i = 0; loop { if i >= cl.args.len { break }; lam_collect_expr(cl.args[i], refs, bound, writes); i++ } }
+        parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound, writes); lam_collect_block(f.then_blk, refs, bound, writes); if f.has_else { lam_collect_block(f.else_blk, refs, bound, writes) } }
+        parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound, writes); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound, writes); i++ } }
+        parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound, writes)
+        parser::SafeFieldAccess as sfa => lam_collect_expr(sfa.receiver, refs, bound, writes)
+        parser::Coalesce as co => { lam_collect_expr(co.left, refs, bound, writes); lam_collect_expr(co.right, refs, bound, writes) }
+        parser::Cast as ct => lam_collect_expr(ct.expr, refs, bound, writes)
+        parser::Borrow as b => lam_collect_expr(b.operand, refs, bound, writes)
+        parser::MethodCall as mc => { lam_collect_expr(mc.receiver, refs, bound, writes); mut i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound, writes); i++ } }
+        parser::SafeMethodCall as smc => { lam_collect_expr(smc.receiver, refs, bound, writes); mut i = 0; loop { if i >= smc.args.len { break }; lam_collect_expr(smc.args[i], refs, bound, writes); i++ } }
+        parser::StructLit as sl => { mut i = 0; loop { if i >= sl.field_vals.len { break }; lam_collect_expr(sl.field_vals[i], refs, bound, writes); i++ } }
+        parser::Index as ix => { lam_collect_expr(ix.receiver, refs, bound, writes); lam_collect_expr(ix.index, refs, bound, writes) }
+        parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound, writes); i++ } }
+        parser::InExpr as n => { lam_collect_expr(n.lhs, refs, bound, writes); mut i = 0; loop { if i >= n.elems.len { break }; lam_collect_expr(n.elems[i], refs, bound, writes); i++ } }
+        parser::ArrayLit as a => { mut i = 0; loop { if i >= a.elements.len { break }; lam_collect_expr(a.elements[i].expr, refs, bound, writes); i++ } }
+        parser::Lambda as lam => { mut i = 0; loop { if i >= lam.params.len { break }; bound = str_set_add(bound.value, lam.params[i].name); i++ }; lam_collect_block(lam.body, refs, bound, writes) }
         parser::Number => { }
         parser::StrLit => { }
         parser::ByteLit => { }
@@ -124,6 +177,47 @@ fn lam_param_type(p: parser::LambdaParam, idx: u64, exp_params: []Type, table: T
     if idx < exp_params.len { return exp_params[idx] }
     error { message = $"cannot infer the type of closure parameter `{p.name}` — annotate it (`{p.name}: T`) or give the closure a target type" }
 }
+/**
+ * lam_reject_copy_capture_write — reject a lambda body that ASSIGNS to a captured variable whose
+ * capture is by COPY. A capture is by reference only when the enclosing binding is itself
+ * `Reference`-typed (`type_lambda`'s `by_ref`); for every other type the closure gets a copy, so
+ * `mut n = 0; let g = () => { n = 5; 0 }` used to type-check, run, and DISCARD the write with no
+ * diagnostic at all — the worst M.3 category, a miscompilation of a program that looks legal.
+ *
+ * Names bound INSIDE the body (inner `let`s, the lambda's own params — the `bound` set) are the
+ * lambda's own locals and are never captures. A name that resolves to a global/function (`ns != ""`)
+ * or does not resolve at all is left alone: the body's own typing already reported the latter.
+ *
+ * True mutable capture is a language design decision, not a bug fix — this names the barrier
+ * instead of silently losing the write.
+ *
+ * @param writes  the bare-name assignment targets the body collected
+ * @param bound   the names the body binds internally (its own locals + params)
+ * @param env     the ENCLOSING typing environment (decides ref-bound vs copy)
+ * @return        `null` when every assigned name is `ref`-bound or body-local
+ * @throws        when the body assigns to a by-copy captured variable
+ */
+fn lam_reject_copy_capture_write(writes: []str, bound: []str, env: Env) -> null | error {
+    mut i: u64 = 0
+    loop {
+        if i >= writes.len { break }
+        let nm = writes[i]
+        if !str_set_has(bound, nm) {
+            match lookup_binding(env, nm) {
+                ValBinding as b => {
+                    let by_ref = match b.type { Reference => true; _ => false }
+                    if b.ns.len == 0 && !by_ref {
+                        return error { message = $"a lambda cannot assign to the captured variable `{nm}` — the capture is by COPY, so the write would be lost; take it as a `ref` parameter instead" }
+                    }
+                }
+                error => { }
+            }
+        }
+        i++
+    }
+    null
+}
+
 fn type_lambda(lam: parser::Lambda, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
     mut exp_params: []Type = teko::list::empty()
     match expected { Func as ef => exp_params = ef.params; _ => { } }
@@ -147,9 +241,11 @@ fn type_lambda(lam: parser::Lambda, expected: Type, env: Env, table: TypeTable) 
     // 3. capture analysis — free vars (refs − bound − params) that resolve to an ENCLOSING LOCAL.
     mut refs: []str = teko::list::empty()
     mut bnd: []str = teko::list::empty()
+    mut writes: []str = teko::list::empty()
     mut j = 0
     loop { if j >= lam.params.len { break }; bnd = str_set_add(bnd, lam.params[j].name); j++ }
-    lam_collect_block(lam.body, refs, bnd)
+    lam_collect_block(lam.body, refs, bnd, writes)
+    match lam_reject_copy_capture_write(writes, bnd, env) { error as e => return e; null => { } }
     mut captures: []TCapture = teko::list::empty()
     mut k = 0
     loop {
@@ -199,7 +295,7 @@ fn flatten_tilde_chain(e: parser::Expr, acc: []parser::Expr) -> []parser::Expr {
     }
 }
 
-fn tilde_str_lit_text(e: parser::Expr) -> str? {
+fn tilde_str_lit_text(e: parser::Expr) -> str | null {
     match e.kind {
         parser::StrLit as s => s.text
         // (2026-07-01) `$"no holes"` / `$@"""no holes"""` — interpolated syntax with ZERO holes
@@ -369,7 +465,7 @@ fn bignum_adopt_operand(e: TExpr, kind: str) -> TExpr | error {
     match e.kind {
         TNumber as n => {
             if n.is_float { return error { message = $"a floating-point literal cannot adopt `{kind}` — write it with a `bi`/`d` suffix or convert explicitly with `{kind}::of(...)`" } }
-            if !value_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
+            if !numint_fits(n.value, PrimKind::I64) { return error { message = $"integer literal is too large to adopt into `{kind}` — write it with a `bi`/`d` suffix" } }
             let lit = TExpr { kind = e.kind; type = Prim { kind = PrimKind::I64 }; line = e.line; col = e.col }
             bignum_call(kind, "of", teko::list::push(teko::list::empty(), lit), bignum_named(kind))
         }
@@ -430,7 +526,7 @@ fn type_bignum_binop(op: lexer::TokenKind, l: TExpr, r: TExpr, lk: str, rk: str)
  * @param next  the next bool comparison term
  * @return      `acc && next`, or `next` when `acc` is `null`
  */
-fn combine_and(acc: TExpr?, next: TExpr) -> TExpr {
+fn combine_and(acc: TExpr | null, next: TExpr) -> TExpr {
     match acc {
         TExpr as a => TExpr { kind = TBinary { op = lexer::TokenKind::AndAnd; left = a; right = next }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
         null => next
@@ -452,7 +548,7 @@ fn combine_and(acc: TExpr?, next: TExpr) -> TExpr {
  */
 fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: TypeTable, kind: str) -> TExpr | error {
     mut prev = match bignum_adopt_operand(first, kind) { TExpr as te => te; error as e => return e }
-    mut acc: TExpr? = null
+    mut acc: TExpr | null = null
     mut i = 0
     loop {
         if i >= rest.len { break }
@@ -461,7 +557,7 @@ fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: T
         mut cmp_args: []TExpr = teko::list::push(teko::list::empty(), prev)
         cmp_args = teko::list::push(cmp_args, cur)
         let cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
-        let zero = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+        let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
         let term = TCmpTerm { op = rest[i].op; operand = zero }
         let one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
         acc = combine_and(acc, one_cmp)
@@ -529,36 +625,76 @@ fn type_shift_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
 }
 
 /**
+ * widen_int_binop — join two INTEGER operand types under the W-RULE (`int_arith_join`,
+ * `expr.tks`, §2.1/§2.2) and widen whichever side is narrower to the common result, or
+ * surface the honest "no lossless common type" stop when none exists. Shared by
+ * `type_arith_binop` and `type_bitwise_binop` (both integer-eligible operator classes) so
+ * `+ - * / % & | ^` complete the B.22 sign-check's arithmetic sibling identically.
+ *
+ * @param op  the binary operator token, carried through to the built `TBinary`
+ * @param l   the typed left operand (an integer `Prim`)
+ * @param r   the typed right operand (an integer `Prim`)
+ * @return    the typed binary expression at the W-RULE-joined width
+ * @throws    when `l.type` and `r.type` share no lossless common integer type (W-RULE §2.2 —
+ *            equal-width mixed sign, or the unsigned side equal-or-wider than the signed side)
+ */
+fn widen_int_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    let joined = match int_arith_join(prim_kind_of(l.type), prim_kind_of(r.type)) {
+        PrimKind as k => k
+        error as e => return err_binop_type_mismatch(e.message, l, r)
+    }
+    let lw = widen_operand(l, joined)
+    let rw = widen_operand(r, joined)
+    TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+}
+
+/**
  * type_arith_binop — type an arithmetic operator (`+ - * /`) over the native numeric set (ints AND
- * floats). Same-type only (no promotion, no mixed int/float — B.22; a cross-family operand needs an
- * explicit `to`).
+ * floats). Same-type operands take the fast identity path; different-width same-family operands
+ * (both integer, or both float) WIDEN under the W-RULE (`widen_int_binop` / `float_arith_join`,
+ * completing B.22 into arithmetic — `cast-width-hygiene-0.3.1.md` §2); a mixed-sign integer pair
+ * with no lossless common type, or a cross-family (int×float) pair, is an honest compile error
+ * demanding an explicit `to` (B.38 — int×float stays unchanged).
  *
  * @param op  the arithmetic operator token
  * @param l   the typed left operand
  * @param r   the typed right operand
  * @return    the typed arithmetic expression, or a type error
- * @throws    when the left operand is not numeric, or the operands differ in type
+ * @throws    when the left operand is not numeric, the operands are int×float, or a mixed-sign
+ *            integer pair has no lossless common type (W-RULE §2.2)
  */
 fn type_arith_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
     if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
-    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r) }
-    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if is_integer(l.type) && is_integer(r.type) { return widen_int_binop(op, l, r) }
+    if is_float(l.type) && is_float(r.type) {
+        let joined = float_arith_join(prim_kind_of(l.type), prim_kind_of(r.type))
+        let lw = widen_operand(l, joined)
+        let rw = widen_operand(r, joined)
+        return TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+    }
+    err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r)
 }
 
 /**
  * type_bitwise_binop — type a bitwise/remainder operator (`% & | ^`): integer operands only (not a
- * float — B.38), same-type (no promotion — B.22).
+ * float — B.38). Same-type operands take the fast identity path; different-width operands WIDEN
+ * under the W-RULE (`widen_int_binop`, completing B.22 into arithmetic — `cast-width-hygiene-
+ * 0.3.1.md` §2); a mixed-sign pair with no lossless common type is an honest compile error
+ * demanding an explicit `to`.
  *
  * @param op  the bitwise/remainder operator token
  * @param l   the typed left operand
  * @param r   the typed right operand
  * @return    the typed expression, or a type error
- * @throws    when the left operand is not an integer, or the operands differ in type
+ * @throws    when the left operand is not an integer, the right operand is not an integer, or a
+ *            mixed-sign integer pair has no lossless common type (W-RULE §2.2)
  */
 fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
     if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
-    if !type_eq(l.type, r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
-    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if !is_integer(r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
+    widen_int_binop(op, l, r)
 }
 
 /**
@@ -587,6 +723,7 @@ fn type_logical_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error
  * @param table  the folded type table
  * @return       the typed binary (or lowered bignum call) expression, or a type error
  * @throws       on a void operand, an incompatible operand type, or a non-binary operator
+ * @see          warn_redundant_cast — the D1 class-3 WARNING this emits in passing (never a failure)
  */
 fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     if b.op == lexer::TokenKind::Tilde { return type_tilde_chain(b, env, table) }
@@ -599,6 +736,9 @@ fn type_binary(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
     let ops = adopt_binop_operands(l0, r0)
     let l = ops.l
     let r = ops.r
+    if op_is_arith(b.op) || op_is_arith_bitwise(b.op) {
+        match redundant_widen_cast_of(l, r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+    }
     if op_is_shift(b.op) { return type_shift_binop(b.op, l, r) }
     if op_is_arith(b.op) { return type_arith_binop(b.op, l, r) }
     if op_is_arith_bitwise(b.op) { return type_bitwise_binop(b.op, l, r) }
@@ -629,35 +769,44 @@ fn type_unary(u: parser::Unary, env: Env, table: TypeTable) -> TExpr | error {
     error { message = "not a unary operator" }
 }
 
+/**
+ * type_compare — type a comparison chain (`a < b <= c`), operand by operand. Each step adopts a
+ * bare numeric literal to its partner's type through the very function the binary ops use
+ * (`adopt_binop_operands`, so `c < 0x20` compares a `byte` against a `u8`-adopted literal), applies
+ * the SHARED D1 class-3 WARNING
+ * (`redundant_widen_cast_of` — the same guarded decision `type_binary` uses, so an arithmetic and a
+ * comparison spelling of the same operand pair always agree), and checks comparability.
+ *
+ * @param c      the comparison chain node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed comparison (always `bool`), or a type error
+ * @throws       on a `void` operand or an incomparable operand pair — NOT on a redundant widen
+ *               cast, which only warns (owner ruling 2026-07-27, `warn_redundant_cast`)
+ */
 fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error {
     mut first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
-    mut prev = first.type
-    if type_is_void(prev) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    if type_is_void(first.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
     let fk = bignum_kind(first.type)
     if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
+    mut prev = first
     mut terms: []TCmpTerm = teko::list::empty()
     mut i = 0
     loop {
         if i >= c.rest.len { break }
-        mut cur = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
-        if type_is_void(cur.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
-        // numeric-literal adoption (parity with binary ops): a literal operand adopts the OTHER's
-        // numeric type so `c < 0x20` (byte vs int-literal) and `0x20 < c` compare (byte = u8).
-        let cur_is_num = match cur.kind { TNumber => true; _ => false }
-        let first_is_num = match first.kind { TNumber => true; _ => false }
-        if cur_is_num && literal_adopts(cur, prev) {
-            cur = TExpr { kind = cur.kind; type = prev; line = cur.line; col = cur.col }
-        } else if i == 0 && first_is_num && literal_adopts(first, cur.type) {
-            first = TExpr { kind = first.kind; type = cur.type; line = first.line; col = first.col }
-            prev = cur.type
-        }
-        if !is_comparable(prev, cur.type) { return error { message = "operands are not comparable" } }
-        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = cur })
-        prev = cur.type
+        let raw = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        let adopted = adopt_binop_operands(prev, raw)
+        if i == 0 { first = adopted.l }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+        if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
+        prev = adopted.r
         i++
     }
     TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
+
 
 /**
  * Marker: the call is not a `teko::list::*` builtin — `type_list_builtin` falls back so its
@@ -982,7 +1131,7 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExp
     }
     // any/none: compare (recv & mask) against a zero-valued flags literal (the same pattern as
     // an enum ordinal cast — codegen/VM read the NAMED flags type off the node, not the literal).
-    let zero = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = rt; line = 0; col = 0 }
+    let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
     let cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
     let term = TCmpTerm { op = cmp_op; operand = zero }
     TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
@@ -994,7 +1143,7 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExp
 type IfaceDispatch = struct { iface: str; method: parser::Function; slot: u32 }
 
 /** (S6) find `method` within `eff` (an interface's own effective methods), returning its slot. */
-fn find_method_slot(eff: []parser::Function, method: str) -> IfaceDispatch? {
+fn find_method_slot(eff: []parser::Function, method: str) -> IfaceDispatch | null {
     mut i: u64 = 0
     loop {
         if i >= eff.len { break }
@@ -1070,7 +1219,7 @@ fn is_type_param_decl(decl: parser::TypeDecl) -> bool {
     recompute that SAME error here so the honest stop names the real reason instead of the generic
     "method typing is deferred" — resolve::type_param_table has no error channel, so this is where
     the swallowed error re-surfaces, at the first attempted operation on `T` (never silently lost). */
-fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable) -> error? {
+fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable) -> error | null {
     if !is_type_param_decl(decl) { return null }
     match constraint_interfaces(decl.type_constraints[0], table) {
         []str => null
@@ -1245,7 +1394,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
  * @see          struct_conforms_but_not_class — the predicate this diagnoses
  * @since 0.3.0.29 interface-value keystone
  */
-fn struct_iface_named_stop(from: Type, to: Type, table: TypeTable) -> error? {
+fn struct_iface_named_stop(from: Type, to: Type, table: TypeTable) -> error | null {
     if !struct_conforms_but_not_class(from, to, table) { return null }
     teko::error::err_typed(error { message = "a `struct` value cannot be used as the interface `<Iface>` — a struct has no stable address to dispatch through. Make the implementer a `class` (`type T = class & <Iface>`), or take it by a generic contract-bound parameter (`fn f<T: <Iface>>(x: T)`), which dispatches statically. (interface-value boxing of a struct is deferred to the safety spine — docs/design/interface-value-type.md §4)" }, type_render(to), type_render(from))
 }
@@ -1367,6 +1516,23 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
     rewrite_segment_at(c.callee, owner_idx, inst)
 }
 
+/**
+ * Types a call expression: resolves the callee (a builtin, a same/qualified-namespace function, or
+ * a local closure value), types every argument against the resolved signature — widening (B.14),
+ * literal-adoption (C6), generic type-param inference (S4), AUTO-REF (a `mut` lvalue passed where a
+ * `ref<T>` param is expected), and transparent auto-deref (0.3.1 — a `ref`-typed argument that does
+ * NOT already satisfy the parameter directly peels one `Reference` layer via `deref_ref_value`, so a
+ * `ref` binding is usable bare as a call argument, no `.value`; a `ref`-typed argument that already
+ * widens as-is — forwarding into a `ref T` param, or into a `ref T | null` union, the null-union R2
+ * relaxation — is left alone, never derefed away from a shape that already fits) — and produces the
+ * typed `TCall`.
+ *
+ * @param c0     the untyped call node (post generic-static-callee retargeting if type-args are given)
+ * @param env    the typing environment (bindings + current namespace)
+ * @param table  the resolved type table (signatures, decls, generics)
+ * @return       the typed call expression, its type the callee's resolved return type
+ * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
+ */
 fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
     let c = if c0.type_args.len == 0 { c0 } else {
         let rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
@@ -1498,6 +1664,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             loop {
                 if i >= targs.len { break }
                 mut a = targs[i]
+                if !assignable_to(a.type, f.params[i], table) { a = deref_ref_value(a) }
                 // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T —
                 // the compiler takes the reference (codegen emits `&`). Requires a `mut` variable (you
                 // can't reference an immutable binding — there'd be nothing to mutate). A value ALREADY
@@ -1559,29 +1726,42 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
 // (M.4). *(Redefines the early compile-forbid rule — see the Redefinitions Index; the prior rule
 // over-applied M.1, forbidding what a guard makes non-silent.)*
 
-// does a constant INTEGER value (i128 carrier) fit the target integer prim's range? (B.38 —
-// extended to the full int set, incl 128-bit.) Floats are handled separately (float_fits);
-// Bool is never a literal target. The carrier is signed i128, so an unsigned target gates on
-// v >= 0 first; u128's upper bound is the carrier max, so non-negativity is its only gate.
-fn value_fits(v: i128, k: PrimKind) -> bool {
+/**
+ * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38 —
+ * the full int set is now u8..u64/i8..i64, the 128-bit surface types having been removed,
+ * drop-128 2026-07-24.) Replaces the old i128-carrier `value_fits` (carrier-detoxed off i128,
+ * §2.1). Floats are handled separately (`float_fits`); Bool is never a literal target. An
+ * unsigned target rejects a negative `v` first, then gates the magnitude against its max; a
+ * signed target gates the magnitude against its positive max (non-negative `v`) or against
+ * `2^(w-1)` (negative `v` — the extra headroom that admits e.g. `i8::MIN = -128`, magnitude 128).
+ *
+ * @param v  the resolved literal carrier
+ * @param k  the target integer prim kind
+ * @return   true iff `v` is representable in `k`
+ */
+fn numint_fits(v: parser::NumInt, k: PrimKind) -> bool {
     if prim_is_float(k) { return false }   // an int literal does not fit a float type (N1/N2)
-    if k == PrimKind::U8 { return v >= 0 && v <= 255 }
-    if k == PrimKind::U16 { return v >= 0 && v <= 65535 }
-    if k == PrimKind::U32 { return v >= 0 && v <= 4294967295 }
-    if k == PrimKind::U64 { return v >= 0 && v <= 18446744073709551615 }
-    if k == PrimKind::U128 { return v >= 0 }   // i128 max < u128 max → any v>=0 fits
-    if k == PrimKind::I8 { return v >= -128 && v <= 127 }
-    if k == PrimKind::I16 { return v >= -32768 && v <= 32767 }
-    if k == PrimKind::I32 { return v >= -2147483648 && v <= 2147483647 }
-    if k == PrimKind::I64 { return v >= (-9223372036854775807 - 1) && v <= 9223372036854775807 }
-    if k == PrimKind::I128 { return true }   // v is already an i128
-    false   // Bool — not a numeric range (guarded by the caller)
+    if k == PrimKind::U8 { return !v.neg && v.mag <= 255 }
+    if k == PrimKind::U16 { return !v.neg && v.mag <= 65535 }
+    if k == PrimKind::U32 { return !v.neg && v.mag <= 4294967295 }
+    if k == PrimKind::U64 { return !v.neg && v.mag <= 18446744073709551615 }
+    if k == PrimKind::I8 { return if v.neg { v.mag <= 128 } else { v.mag <= 127 } }
+    if k == PrimKind::I16 { return if v.neg { v.mag <= 32768 } else { v.mag <= 32767 } }
+    if k == PrimKind::I32 { return if v.neg { v.mag <= 2147483648 } else { v.mag <= 2147483647 } }
+    if k == PrimKind::I64 { return if v.neg { v.mag <= 9223372036854775808 } else { v.mag <= 9223372036854775807 } }
+    false
 }
 
-// does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a float constant
-// is accepted into ANY float width — precision/range loss of float CONSTANTS is permissive for
-// now (the runtime/codegen rounding-loss note in §5 still applies). Tightening f16/f32 over-range
-// to a compile error is deferred (no fail-early for float consts yet).
+/**
+ * float_fits — does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a
+ * float constant is accepted into ANY float width — precision/range loss of float CONSTANTS is
+ * permissive for now (the runtime/codegen rounding-loss note in §5 still applies). Tightening
+ * `f32` over-range to a compile error is deferred (no fail-early for float consts yet).
+ *
+ * @param v  the constant float value (unused — every width currently accepts any value)
+ * @param k  the target float prim kind
+ * @return   whether `k` is a float prim
+ */
 fn float_fits(v: f64, k: PrimKind) -> bool { prim_is_float(k) }
 
 // is `from -> to` a DEFINED conversion? Any integer↔integer is (the loss is runtime/codegen's,
@@ -1605,24 +1785,31 @@ fn cast_kind(t: Type) -> PrimKind | error {
 // is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
 // runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
 // Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
-fn cast_check(from: Type, to: Type) -> error? {
+fn cast_check(from: Type, to: Type) -> error | null {
     if type_eq(from, to) { return null }   // same type — a no-op
     match cast_kind(from) { PrimKind => { }; error as e => return e }
     match cast_kind(to) { PrimKind => { }; error as e => return e }
     null   // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
 }
 
-// a CONSTANT literal already out of the target's range is a compile error (M.1 — fail early);
-// non-constant operands are guarded at runtime by codegen. Direct literals only (comptime folding deferred).
-fn const_range_check(e: parser::Expr, target: Type) -> error? {
+/**
+ * const_range_check — a CONSTANT literal already out of the target's range is a compile error
+ * (M.1 — fail early); non-constant operands are guarded at runtime by codegen. Direct literals
+ * only (comptime folding deferred). Only the int-literal → int-target case is statically
+ * range-checkable (B.38, u8..u64/i8..i64); float→int / int→float / float→float constant
+ * conversions are runtime-guarded (trunc toward zero, overflow/NaN/∞ → panic — §5) — the checker
+ * permits them, the fit is codegen/VM's.
+ *
+ * @param e       the candidate literal expression
+ * @param target  the cast/annotation target type
+ * @return        an error naming the out-of-range constant, or null when the fit is fine
+ */
+fn const_range_check(e: parser::Expr, target: Type) -> error | null {
     match e.kind {
         parser::Number as n => match cast_kind(target) {   // byte target → U8 range (0..255)
             PrimKind as k => {
-                // only the int-literal → int-target case is statically range-checkable (B.38, incl 128).
-                // float→int / int→float / float→float constant conversions are runtime-guarded (trunc
-                // toward zero, overflow/NaN/∞ → panic — §5); the checker permits them, the fit is codegen/VM.
                 if n.is_float || !prim_is_int(k) { null }
-                else if value_fits(n.value, k) { null }
+                else if numint_fits(n.value, k) { null }
                 else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
             }
             error => null   // non-numeric target: cast_check already rejected it
@@ -1638,7 +1825,7 @@ fn const_range_check(e: parser::Expr, target: Type) -> error? {
 // NOTE: the counter-validation does NOT yet re-prove the binding-level fit — a forged typed tree
 // `bound=u8, value=300` would currently pass revalidate. That re-proof lands with `validate_statement`
 // (deferred; named gap — §VI). The front-line type check above already rejects such source.
-fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
+fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error | null {
     match value.kind {
         // an ARRAY LITERAL `[e0, e1, …]` annotated as `[]E` — adopts element-wise: every non-spread
         // element must itself be a fitting bare literal for E (recurses through nested arrays via
@@ -1649,7 +1836,7 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
         parser::ArrayLit as al => match ann {
             Slice as s => {
                 mut i = 0
-                mut result: error? = null
+                mut result: error | null = null
                 loop {
                     if i >= al.elements.len { break }
                     if !al.elements[i].is_spread {
@@ -1664,8 +1851,6 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
             }
             _ => error { message = "value type does not match annotation" }
         }
-        // a NEGATIVE numeric literal `-N` (unary minus over a NUMBER) — adopts a SIGNED int
-        // annotation that N fits, or a float annotation for `-3.14` (parse_lit's `mut d: i128 = -1`).
         parser::Unary as u => {
             if u.op == lexer::TokenKind::Minus {
                 match u.operand.kind {
@@ -1678,7 +1863,7 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
                             } else {
                                 if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
                                 else if !prim_is_signed(p.kind) { error { message = "a negative literal cannot be annotated as an unsigned type (M.1)" } }
-                                else if value_fits(n.value, p.kind) { null }
+                                else if numint_fits(n.value, p.kind) { null }
                                 else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
                             }
                         }
@@ -1700,7 +1885,7 @@ fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error? {
                 } else {
                     // an integer literal adopts an integer annotation only; never a float type (N1).
                     if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
-                    else if value_fits(n.value, p.kind) { null }
+                    else if numint_fits(n.value, p.kind) { null }
                     else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
                 }
             }
@@ -1761,10 +1946,58 @@ fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
     (is_int_cast_end(from) && is_flags_named(to, table))
 }
 
+/**
+ * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
+ * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
+ * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
+ * sign-check already performs), never on a genuine narrow/widen the source
+ * still needs.
+ *
+ * WHY IT IS NO LONGER AN ERROR (owner ruling 2026-07-27, REVERSING the
+ * 2026-07-24 ruling that made it a hard failure — *"prefiro que falhe para
+ * evitarmos de cair no mesmo erro"*): *"o cast, nestes casos, não deveria ser
+ * falha, deveria ser warning, o que não nos exime de não ter warnings no
+ * próprio compilador (lembra? <= 2%)."*
+ *
+ * The reversal is not a softening of the policy — it moves enforcement to the
+ * instrument that can actually carry it. D1-as-error made a redundant cast
+ * UNSPELLABLE, and a bootstrap chain has two compilers that disagree about
+ * which spelling is redundant: the released seed applies B.22 (*"operands must
+ * be the same type — no promotion"*) and REQUIRES the cast, while a
+ * locally-built gen1 has the W-RULE (`widen_int_binop`) and therefore proves
+ * that same cast a no-op. As an error, no single source text satisfies both —
+ * measured on the wagon: 17 of the 18 B.22 casts the seed demands make gen1
+ * reject the tree outright. As a warning, one text compiles under both and the
+ * seed's demand becomes payable.
+ *
+ * The ceiling that keeps redundant casts from returning en masse is D4, and it
+ * is untouched and still HARD: ARITH-CAST-RATE ≤ 2% (`metrics.tks`,
+ * `run_arith_cast_gate` in `project.tks`) fails the build. That is why the
+ * same-type site below deliberately keeps the `TCast` node in the typed tree
+ * instead of folding it away — a warned cast must still be COUNTED by the gate,
+ * or downgrading this diagnostic would have quietly disabled the ≤2% ceiling
+ * along with it.
+ *
+ * @param t  the redundant cast's own (unchanged) type
+ * @since    0.3.1
+ */
+fn warn_redundant_cast(env: Env, e: TExpr) {
+    teko::io::eprintln($"{diag_at(env.file, e.line, e.col, "")}warning: redundant cast: this `to {type_render(e.type)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
+}
+
 fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
     let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
     if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
     let target = match resolve_type(c.target, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the cast's enclosing namespace
+    // D1 class 1 — same type. Warn and TYPE IT ANYWAY, returning the identity `TCast`: falling
+    // through instead would hand a non-prim same-type pair to `cast_check` (prim-only) and blame it
+    // for a construct that is merely superfluous, and dropping the node would hide the cast from the
+    // D4 ≤2% gate that now carries the policy.
+    if type_eq(inner.type, target) {
+        let noop = TExpr { kind = TCast { expr = inner }; type = target; line = inner.line; col = inner.col }
+        warn_redundant_cast(env, noop)
+        return noop
+    }
     // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
     // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
     // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors expr.c type_cast.)
@@ -1905,6 +2138,17 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
 // counter — both twin checkers produce the same name for the same node).
 fn safe_binder_name(line: u32, col: u32) -> str { $"__tkq{line}_{col}" }
 
+/**
+ * unread_guard_placeholder — a syntactically-valid but never-evaluated `TArm.guard` for an arm
+ * built with `has_when = false`; every consumer skips the guard field entirely in that case, so
+ * its content is inert (the concrete zero literal is arbitrary — any well-typed `TExpr` would do).
+ *
+ * @return a placeholder integer-literal expression
+ */
+fn unread_guard_placeholder() -> TExpr {
+    TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Void { }; line = 0; col = 0 }
+}
+
 // build the typed `match recv { null => <null:R?>; <Inner> as binder => <armv> }`.
 // `armv` is the already-typed present-arm value (the member call/read on the binder).
 fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TExpr {
@@ -1918,7 +2162,7 @@ fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TEx
         null_body = teko::list::push(null_body, TExprStmt { expr = TExpr { kind = TNullLit { }; type = result; line = 0; col = 0 } })
     }
     mut arms: []TArm = teko::list::empty()
-    let guard_ph = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }   // placeholder, gated by has_when (never read)
+    let guard_ph = unread_guard_placeholder()
     arms = teko::list::push(arms, TArm { pattern = parser::NullPattern { }; has_when = false; guard = guard_ph; body = null_body })
     // present arm: `<Inner> as binder => <armv>` — the pattern re-resolves nominally in the
     // VM/codegen exactly like a user-written `match` over a `T?`.
@@ -2058,7 +2302,7 @@ fn type_foreach_elem_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTab
     let tn = match elem_type_name(inner) { str as s => s; error as e => return e }
     let e2 = define(env, bp.binding, inner, false)
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }
+    mut guard = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Void { }; line = 0; col = 0 }
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -2340,7 +2584,7 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
                 Prim as p => {
                     if !type_eq(val.type, ft) {
                         let fits = if num.is_float { prim_is_float(p.kind) }
-                        else { prim_is_int(p.kind) && value_fits(num.value, p.kind) }
+                        else { prim_is_int(p.kind) && numint_fits(num.value, p.kind) }
                         if fits { val = TExpr { kind = val.kind; type = ft; line = val.line; col = val.col } }
                     }
                 }
@@ -2424,24 +2668,28 @@ fn interp_is_numeric(t: Type) -> bool {
 // Format specs: static (`:literal`) → validate hole is numeric; dynamic (`:[arg1,…]`) → validate
 // each arg is str. Named/variant types with specs → honest-stop. Result type is always `str`.
 /**
- * The calendar `to_string` function name for a Date/Time-shaped hole type, or "" if the hole is
- * not a Date/Time value.
+ * The calendar `to_string` function name for a date/time-shaped hole type, or "" if the hole is
+ * not a date/time value.
  *
- * A static format spec on a `Named` hole whose bare type name is `Date`, `Time`, or `DateTime`
- * is a CALENDAR PATTERN (`$"{d:yyyy-MM-dd}"`), not a numeric spec; it desugars to a call to the
- * type's own-namespace formatter (`date_to_string` for a Date/DateTime, `time_to_string` for a
- * Time). Recognizing by bare last segment lets a re-declared local `Date`/`Time` (a standalone
- * project cannot `use teko::time`) format identically to the canonical `teko::time` types.
+ * A static format spec on a `Named` hole whose bare type name is `Date`/`date`, `Time`/`time`,
+ * or `DateTime`/`datetime` is a CALENDAR PATTERN (`$"{d:yyyy-MM-dd}"`), not a numeric spec; it
+ * desugars to a call to the type's own-namespace formatter (`date_to_string` for a date/
+ * datetime, `time_to_string` for a time). Recognizing by bare last segment lets a re-declared
+ * local `Date`/`Time` (a standalone project cannot `use teko::time`) format identically to the
+ * canonical `teko::time` types. BOTH casings are recognized: the PascalCase spelling predates
+ * the drop-128 A6 redesign (2026-07-24), which renamed `teko::time`'s own types to lowercase
+ * (`date`/`time`/`datetime`) — this stays back-compatible with any pre-existing local
+ * re-declaration using the old PascalCase names.
  *
  * @param t  the hole's resolved type
- * @return   "date_to_string" / "time_to_string" for a Date/Time/DateTime hole, else ""
+ * @return   "date_to_string" / "time_to_string" for a date/time/datetime hole, else ""
  */
 fn datetime_formatter_of(t: Type) -> str {
     match t {
         Named as n => {
             let bare = name_last_segment(n.name)
-            if bare == "Date" || bare == "DateTime" { return "date_to_string" }
-            if bare == "Time" { return "time_to_string" }
+            if bare == "Date" || bare == "DateTime" || bare == "date" || bare == "datetime" { return "date_to_string" }
+            if bare == "Time" || bare == "time" { return "time_to_string" }
             ""
         }
         _ => ""
@@ -2683,7 +2931,7 @@ type MemberConstHit = struct { cd: parser::ConstDecl; declaring: parser::TypeDec
  * @return       the resolved const plus its actual declaring type, or null when not found
  * @since #594
  */
-fn resolve_member_const_hit(owner: parser::TypeDecl, seg: str, table: TypeTable) -> MemberConstHit? {
+fn resolve_member_const_hit(owner: parser::TypeDecl, seg: str, table: TypeTable) -> MemberConstHit | null {
     let own = body_consts(owner.body)
     mut i: u64 = 0
     loop {
@@ -2714,7 +2962,7 @@ fn resolve_member_const_hit(owner: parser::TypeDecl, seg: str, table: TypeTable)
  * @return        null when the access is allowed, else a located visibility error
  * @since #594
  */
-fn member_const_visible(hit: MemberConstHit, table: TypeTable, ref_ns: str) -> error? {
+fn member_const_visible(hit: MemberConstHit, table: TypeTable, ref_ns: str) -> error | null {
     match hit.cd.vis {
         parser::Visibility::Private => {
             let decl_ns = type_ns_of(table, hit.declaring.name)
@@ -2749,7 +2997,7 @@ fn member_const_visible(hit: MemberConstHit, table: TypeTable, ref_ns: str) -> e
  * @return       the typed reference to the member const, or null when not found
  * @since #594
  */
-fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable) -> TExpr? {
+fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable) -> TExpr | null {
     let hit = match resolve_member_const_hit(owner, seg, table) { MemberConstHit as h => h; null => return null }
     let owner_ns = type_ns_of(table, owner.name)
     let rty = match resolve_type(hit.cd.ty, table, owner_ns) { Type as t => t; error => return null }
@@ -2772,7 +3020,7 @@ fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable) -> TEx
  *                the `type_expr` wrapper)
  * @since #594
  */
-fn ns_value_visible(b: ValBinding, ref_ns: str) -> error? {
+fn ns_value_visible(b: ValBinding, ref_ns: str) -> error | null {
     match b.vis {
         parser::Visibility::Private => {
             if b.ns != ref_ns {
@@ -2858,17 +3106,17 @@ fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env) -> TExpr | e
             mut j: u64 = 0
             loop {
                 if j >= eb.members.len { break }
-                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j to u128 }; type = et; line = 0; col = 0 } }   // (#50) enum member VALUE = its ordinal
+                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j }; type = et; line = 0; col = 0 } }
                 j++
             }
             error { message = $"no member `{member}` in enum `{tname}`" }
         }
         parser::FlagsBody as fb => {
-            if fb.members.len > 128 { return error { message = "flags type has more than 128 members (u128 overflow)" } }
+            if fb.members.len > 64 { return error { message = "a flags type may declare at most 64 members (bit 63 is the last) — write this as two flags types instead" } }
             mut j: u64 = 0
             loop {
                 if j >= fb.members.len { break }
-                if fb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = (1 to u128) << j }; type = et; line = 0; col = 0 } }   // (#50) flags member VALUE = 1 << ordinal (power-of-2)
+                if fb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = (1 to u64) << j }; type = et; line = 0; col = 0 } }
                 j++
             }
             error { message = $"no member `{member}` in the flags type `{tname}`" }
@@ -3247,7 +3495,7 @@ fn match_arms_all_consume_must_free(m: TMatchExpr, name: str) -> bool {
  * @param []TStatement body  the fn's typed body
  * @return error?  an error naming the first dropped `#must_free` param, or nothing
  */
-fn check_must_free_params(f: parser::Function, tbl: TypeTable, ns: str, body: []TStatement) -> error? {
+fn check_must_free_params(f: parser::Function, tbl: TypeTable, ns: str, body: []TStatement) -> error | null {
     mut i = 0
     loop {
         if i >= f.params.len { break }
@@ -3293,7 +3541,7 @@ fn must_free_dropped_message(name: str) -> str {
  * @param TypeTable table  the type table (kind probes for each binding's bound type)
  * @return error?  an error naming the first dropped `#must_free` local, or nothing
  */
-fn check_must_free_locals(stmts: []TStatement, table: TypeTable) -> error? {
+fn check_must_free_locals(stmts: []TStatement, table: TypeTable) -> error | null {
     mut i: u64 = 0
     loop {
         if i >= stmts.len { break }
@@ -3316,7 +3564,7 @@ fn check_must_free_locals(stmts: []TStatement, table: TypeTable) -> error? {
  * @param TypeTable table  the type table (kind probes for a binding's bound type)
  * @return error?  an error naming the first dropped `#must_free` local, or nothing
  */
-fn check_must_free_locals_stmt(s: TStatement, stmts: []TStatement, i: u64, table: TypeTable) -> error? {
+fn check_must_free_locals_stmt(s: TStatement, stmts: []TStatement, i: u64, table: TypeTable) -> error | null {
     match s {
         TBinding as b => match b.target {
             parser::SimpleName as sn => match b.bound {
@@ -3343,7 +3591,7 @@ fn check_must_free_locals_stmt(s: TStatement, stmts: []TStatement, i: u64, table
  * @param TypeTable table  the type table (kind probes for each binding's bound type)
  * @return error?  an error naming the first dropped `#must_free` local inside `e`'s branches, or nothing
  */
-fn check_must_free_locals_expr(e: TExpr, table: TypeTable) -> error? {
+fn check_must_free_locals_expr(e: TExpr, table: TypeTable) -> error | null {
     match e.kind {
         TIfExpr as f => {
             match check_must_free_locals(f.then_blk, table) { null => { }; error as er => return er }
@@ -3383,7 +3631,7 @@ fn check_must_free_locals_expr(e: TExpr, table: TypeTable) -> error? {
  * @param TypeTable table  the outer type table (kind probes)
  * @return error?  an error naming the first dropped `#must_free` handle, or nothing
  */
-fn check_must_free(f: parser::Function, tbl: TypeTable, ns: str, body: []TStatement, table: TypeTable) -> error? {
+fn check_must_free(f: parser::Function, tbl: TypeTable, ns: str, body: []TStatement, table: TypeTable) -> error | null {
     match check_must_free_params(f, tbl, ns, body) { null => { }; error as e => return e }
     check_must_free_locals(body, table)
 }
@@ -3475,7 +3723,7 @@ fn type_if_stmt(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error 
 fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
     let e2 = match check_pattern(a.pattern, subject, env, table) { Env as e => e; error as err => return err }
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
-    mut guard = TExpr { kind = TNumber { is_float = false; value = 0; fval = 0.0 }; type = Void { }; line = 0; col = 0 }   // placeholder, gated by has_when (never read when absent)
+    mut guard = unread_guard_placeholder()
     if a.has_when {
         let g = match type_expr(a.guard, e2, table) { TExpr as te => te; error as err => return err }
         if !is_bool(g.type) { return error { message = "a `when` guard must be a bool" } }
@@ -3664,11 +3912,72 @@ fn type_array_lit_expected(a: parser::ArrayLit, expected: Type, env: Env, table:
     TExpr { kind = TArrayLit { elements = elems }; type = expected; line = 0; col = 0 }
 }
 
-// Type a binding's value with the annotation as its expected type (so a generic constructor targets
-// the concrete instance from `: Box<i64>`).
+/**
+ * Types a `ref` binding's initializer against the annotated Reference target (owner ruling
+ * 2026-07-24): `ref r: T = x` REQUIRES `x` to be a mutable variable (aliased, write-through — R7)
+ * or another already-Reference-typed expression (forwarded plainly). There is no third case — a
+ * fresh value/expression cannot become a `ref` binding's source (no expression-position `ref x`
+ * exists to spell it, and no silent copy-fallback: an honest error names the real fix). The typed
+ * value keeps its BARE (unwrapped) type on the mutable-var path — codegen's `emit_as_r` detects the
+ * `Reference`-expected / non-`Reference`-value mismatch and emits the `&` itself, mirroring
+ * `type_call`'s call-argument auto-ref.
+ *
+ * BOTH paths check the referent. The forwarding path used to return the source reference the moment
+ * its type was a `Reference`, BEFORE the `type_eq` below, so `ref q: Big = p` with `p: ref i64`
+ * type-checked and then wrote through a `Big`-shaped view of an `i64` cell — a memory-safety hole
+ * from a re-annotation the checker never compared. A forward now requires `type_eq(src.inner,
+ * rf.inner)`: the alias may be re-spelled, never re-typed.
+ *
+ * @param bv     the binding's value expression
+ * @param rf     the annotated `Reference` target
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed initializer (bare-typed on the alias path, `Reference`-typed on the
+ *               forwarding path)
+ * @throws       when the source is neither a mutable variable nor an already-`Reference` value, or
+ *               when a forwarded reference names a DIFFERENT referent type than the annotation
+ */
+fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: TypeTable) -> TExpr | error {
+    let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
+    match v.type {
+        Reference as src => {
+            if !type_eq(src.inner, rf.inner) {
+                return teko::error::err_typed(error { message = "a forwarded `ref` binding must name the SAME referent type as the reference it aliases" }, type_render(rf.inner), type_render(src.inner))
+            }
+            return v
+        }
+        _ => { }
+    }
+    if !type_eq(v.type, rf.inner) {
+        return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
+    }
+    match bv.kind {
+        parser::Var as var => match lookup_binding(env, var.name) {
+            ValBinding as vb => {
+                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" } }
+                v
+            }
+            error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" }
+        }
+        _ => error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" }
+    }
+}
+
+/**
+ * Types a binding's value with the annotation as its expected type (so a generic constructor
+ * targets the concrete instance from `: Box<i64>`) — or, when the annotation is a `Reference`
+ * (a `ref` binding), routes through `type_ref_binding_value`'s mutable-source/forwarding rule
+ * instead of the ordinary widening/literal-adoption path (0.3.1 — owner ruling 2026-07-24).
+ *
+ * @param b      the binding whose value is typed
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed initializer
+ */
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr | error {
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
+        match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
         return type_value_expected(b.value, at, env, table)
     }
     type_expr(b.value, env, table)
@@ -3677,7 +3986,15 @@ fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr |
 /**
  * Type-checks a `let`/`mut`/`const` binding statement, producing its typed `TBinding` node and
  * the environment extended with the newly bound name (a `SimpleName` target; a
- * `DestructurePattern` target is left as a refinement — the environment is returned unchanged).
+ * `DestructurePattern` target is left as a refinement — the environment is returned unchanged). A
+ * `ref` binding (`at` resolves to `Reference`, owner ruling 2026-07-24) skips the ordinary
+ * widening/literal-adopt check entirely — `type_binding_value` (via `type_ref_binding_value`)
+ * already validated the mutable-source/forwarding rule and typed `v` accordingly (bare on the
+ * alias path, since a bare-typed alias value is never "assignable to" its own `Reference`
+ * wrapper); `bound` is always set to the annotation `at` when one is given, unconditionally. A
+ * top-level `Reference` bound type is legal ONLY on a genuine `ref` binding (`BindKind::Mut`,
+ * `parse_ref_binding`'s desugar) — a `let`/`const` binding can never carry one (deep immutability
+ * is the whole point of `let`; the tripartite law: `let` protects, `mut` unlocks, `ref` aliases).
  *
  * @param parser::Binding b  the parsed binding (target, optional annotation, initializer)
  * @param Env env  the typing environment (read for `env.fn_unsafe`, U2's local-containment gate)
@@ -3694,7 +4011,8 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
-        if !assignable_to(v.type, at, table) {   // B.14 widening (case → variant) OR C6: a fitting literal adopts T (leaf stays i64)
+        let is_ref_binding = match at { Reference => true; _ => false }
+        if !is_ref_binding && !assignable_to(v.type, at, table) {
             // (C1.8/E2) wrap with expected=type_render(at), actual=type_render(v.type) — mirrors
             // typer.c type_binding's tk_error_types wrap of annotated_literal_reason's message.
             match struct_iface_named_stop(v.type, at, table) { error as se => return se; null => { } }
@@ -3733,7 +4051,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
         return error { message = "an empty list needs a known element type; annotate the binding (e.g. `mut xs: []i32 = teko::list::empty()`)" }
     }
     match bound {
-        Reference => { }
+        Reference => if b.kind != parser::BindKind::Mut { return error { message = "`let`/`const` cannot bind a reference — a reference binding is spelled `ref r: T = x` (write-through, requires a mutable source)" } }
         _ => if type_contains_ref(bound) && !is_ref_null_variant(bound) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
     if !env.fn_unsafe && unsafe_carrying(bound, table) {
@@ -4080,7 +4398,7 @@ fn slice_element_widens(pt: Type, arg_type: Type) -> bool {
 
 // check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
 // match-arm returns await the divergence item — arm bodies are expressions, not statements).
-fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> error? {
+fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> error | null {
     mut i = 0
     loop {
         if i >= stmts.len { break }
@@ -4092,7 +4410,7 @@ fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> error? {
 
 // the trailing value-expr of a block (its last statement, when that is an expr-statement),
 // or null. (C: tblock_trailing.)
-fn tblock_trailing(stmts: []TStatement) -> TExpr? {
+fn tblock_trailing(stmts: []TStatement) -> TExpr | null {
     if stmts.len == 0 { return null }
     match stmts[stmts.len - 1] {
         TExprStmt as es => es.expr
@@ -4102,7 +4420,7 @@ fn tblock_trailing(stmts: []TStatement) -> TExpr? {
 
 // the block's trailing value-expr IF it is a numeric literal (else null) — for the if/match
 // literal cross-adoption (a `64` branch adopts a sibling's numeric type). (C: tl/el + NUMBER tag.)
-fn trailing_number(stmts: []TStatement) -> TExpr? {
+fn trailing_number(stmts: []TStatement) -> TExpr | null {
     match tblock_trailing(stmts) {
         TExpr as t => match t.kind { TNumber => t; _ => null }
         null => null
@@ -4122,7 +4440,7 @@ fn number_fits_member(n: TNumber, m: Type) -> bool {
     match cast_kind(m) {
         PrimKind as k => {
             if n.is_float { prim_is_float(k) && float_fits(n.fval, k) }
-            else { prim_is_int(k) && value_fits(n.value, k) }
+            else { prim_is_int(k) && numint_fits(n.value, k) }
         }
         error => false
     }
@@ -4461,7 +4779,7 @@ fn retype_returns_in_expr(e: TExpr, ret: Type, table: TypeTable) -> TExpr {
     }
 }
 
-fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error? {
+fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error | null {
     match s {
         TReturn as r => {
             if r.has_value {
@@ -4483,7 +4801,7 @@ fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error? {
 
 // returns can also live inside a top-level `if`'s blocks (`if c { return e }`) and inside a
 // `match`'s arm blocks (arm bodies are blocks now — a `return` inside one is checked — B.20).
-fn check_returns_inexpr(e: TExpr, ret: Type, table: TypeTable) -> error? {
+fn check_returns_inexpr(e: TExpr, ret: Type, table: TypeTable) -> error | null {
     match e.kind {
         TIfExpr as f => {
             match check_returns(f.then_blk, ret, table) { null => { }; error as e => return e }
@@ -4585,7 +4903,7 @@ fn ref_trailing_is_passdown(stmts: []TStatement, ref_params: []str) -> bool {
  * @return            null when every returned reference is a sound pass-down, else the reject error
  * @throws            when a returned reference is not an own-`ref`-parameter pass-down
  */
-fn check_ref_return_passdown(stmts: []TStatement, ref_params: []str) -> error? {
+fn check_ref_return_passdown(stmts: []TStatement, ref_params: []str) -> error | null {
     mut i = 0
     loop {
         if i >= stmts.len { break }
@@ -4643,7 +4961,7 @@ fn collect_ref_param_names(params: []parser::Param, tbl: TypeTable, ns: str) -> 
  * @return            null when sound, else the reject error
  * @throws            when a reference `return` is not a pass-down
  */
-fn check_ref_return_passdown_stmt(s: TStatement, ref_params: []str) -> error? {
+fn check_ref_return_passdown_stmt(s: TStatement, ref_params: []str) -> error | null {
     match s {
         TReturn as r => {
             if !r.has_value { return null }
@@ -4666,7 +4984,7 @@ fn check_ref_return_passdown_stmt(s: TStatement, ref_params: []str) -> error? {
  * @return            null when sound, else the reject error
  * @throws            when a nested reference `return` is not a pass-down
  */
-fn check_ref_return_passdown_inexpr(e: TExpr, ref_params: []str) -> error? {
+fn check_ref_return_passdown_inexpr(e: TExpr, ref_params: []str) -> error | null {
     match e.kind {
         TIfExpr as f => {
             match check_ref_return_passdown(f.then_blk, ref_params) { null => { }; error as e => return e }
@@ -4687,7 +5005,7 @@ fn check_ref_return_passdown_inexpr(e: TExpr, ref_params: []str) -> error? {
 
 // the trailing-value check — ONLY when the last statement is an expression (else: NO claim, the
 // guard against false-rejecting a body that ends in a diverging loop/if/match — the every-path item).
-fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> error? {
+fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> error | null {
     if stmts.len == 0 { return null }
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
@@ -4815,12 +5133,56 @@ fn check_labels(stmts: []TStatement, scope: []str, in_loop: bool, seen: []str) -
     LabelCheck { failed = false; message = ""; seen = acc }
 }
 
-// C7.1a: an `extern` param/return type must be primitive (int/float/bool) or `byte` — the
-// only shapes that marshal 1:1 across the C ABI. `ptr`/`uptr` join next; `void` is allowed
-// for the RETURN only (handled by the caller). Rejects str/slice/optional/variant/named.
-// C7.1a: is `t` legal across the extern boundary? prims/byte/ptr/uptr, OR an `extern type`
-// opaque handle (a Named whose decl is an ExternBody) — but NOT an ordinary Teko struct/enum/
-// variant (those would be unsupported by-value aggregate FFI). `void` is handled by the caller.
+/**
+ * Is `v` a two-member ABSENCE union `{ null, ptr<T> }` — the ONE null-union shape the extern
+ * boundary may cross (c-types-and-marshalling-0.3.1.md §5.4.4/§9.8, crumb C2b)? This is a
+ * CHECKER-LOCAL mirror of codegen's niche test (`cg_union_niche_member` ∩ `cg_type_is_niche_able`,
+ * `codegen.tks:1868-1916`) restricted to the ONE member that is BOTH niche-able (a spare NULL
+ * bit-pattern to lower bare, with no tag word) AND already `extern_type_ok`-admissible on its own:
+ * `Ptr`. That restriction is not an approximation of the codegen predicate — it is its EXACT
+ * intersection with `extern_type_ok`'s base admit list, because every OTHER niche-able shape
+ * (`Str`, `Error`, a class `Named`) is already excluded by `extern_type_ok` for reasons that have
+ * nothing to do with nullability (a fat `{ptr,len}` value or a by-value aggregate is not a 1:1 C
+ * ABI shape either way), so checking `Ptr` alone reproduces the full predicate's admitted set
+ * without threading a `CgProg` into the checker layer. `Uptr` is excluded AUTOMATICALLY, for the
+ * right reason: an integer has no spare bit-pattern (`0` is data), so `uptr | null` can never
+ * satisfy this test — no special case needed to bar it (`c_uptr_null_union_extern_rejected`).
+ *
+ * @param v  the resolved union to test
+ * @return   true iff `v` is exactly `{ null, ptr<T> }` for some `T`
+ */
+fn extern_null_union_ok(v: Variant) -> bool {
+    if v.members.len != 2 { return false }
+    mut null_count = 0
+    mut other: Type | null = null
+    mut i = 0
+    loop {
+        if i >= v.members.len { break }
+        match v.members[i] {
+            Null => null_count = null_count + 1
+            _ => other = v.members[i]
+        }
+        i++
+    }
+    if null_count != 1 { return false }
+    match other {
+        Type as t => match t { Ptr => true; _ => false }
+        null => false
+    }
+}
+
+/**
+ * C7.1a — is `t` legal across the `extern` boundary? A primitive (int/float/bool), `byte`,
+ * `ptr`, `uptr`, an `extern type` opaque handle (a `Named` whose declaration IS an `ExternBody`),
+ * or a `ptr<T> | null` absence union (C2b, `extern_null_union_ok`) — the only shapes that marshal
+ * 1:1 across the C ABI. Rejects an ordinary Teko struct/enum/variant (unsupported by-value
+ * aggregate FFI), `str`, and a slice/optional. `void` is handled by the CALLER, for the return
+ * position only.
+ *
+ * @param t      the resolved param or return type
+ * @param table  the program's type table (to probe a `Named`'s declaration body)
+ * @return       true iff `t` may cross an `extern` signature
+ */
 fn extern_type_ok(t: Type, table: TypeTable) -> bool {
     match t {
         Prim => true
@@ -4831,6 +5193,7 @@ fn extern_type_ok(t: Type, table: TypeTable) -> bool {
             parser::TypeDecl as td => match td.body { parser::ExternBody => true; _ => false }
             error => false
         }
+        Variant as v => extern_null_union_ok(v)
         _ => false
     }
 }
@@ -4882,7 +5245,7 @@ fn params_have_discard(ps: []parser::Param) -> bool {
  * @param name  the method name to find
  * @return      the matching method, or null
  */
-fn method_named(ms: []parser::Function, name: str) -> parser::Function? {
+fn method_named(ms: []parser::Function, name: str) -> parser::Function | null {
     mut i: u64 = 0
     loop {
         if i >= ms.len { break }
@@ -4924,7 +5287,7 @@ fn type_implements_list(name: str, ref_ns: str, table: TypeTable) -> []str {
  * @param ref_ns  the conforming type's namespace (interface lookups resolve here)
  * @return        the matching interface method, or null
  */
-fn find_interface_method(impls: []str, name: str, table: TypeTable, ref_ns: str) -> parser::Function? {
+fn find_interface_method(impls: []str, name: str, table: TypeTable, ref_ns: str) -> parser::Function | null {
     mut i: u64 = 0
     loop {
         if i >= impls.len { break }
@@ -4956,7 +5319,7 @@ fn find_interface_method(impls: []str, name: str, table: TypeTable, ref_ns: str)
  * @param table        the folded type table
  * @return             the governing base/interface method, or null when none matches
  */
-fn discard_governing_sig(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable) -> parser::Function? {
+fn discard_governing_sig(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable) -> parser::Function | null {
     match type_table_find(table, struct_name, ref_ns) {
         parser::TypeDecl as td => match td.body {
             parser::ClassBody as cb => {
@@ -5001,7 +5364,7 @@ fn discard_param_name(idx: u64) -> str { $"_tk_discard_{idx}" }
  * @throws        when `gov` is null (a discard param in a self-owned signature), when `idx` has no
  *                matching governing slot, or when the governing param type fails to resolve
  */
-fn discard_param_type(gov: parser::Function?, idx: u64, table: TypeTable, ref_ns: str) -> Type | error {
+fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, ref_ns: str) -> Type | error {
     match gov {
         parser::Function as g => {
             if idx >= g.params.len { return error { message = "a `_` discard parameter has no matching slot in the implemented/overridden signature" } }
@@ -5052,7 +5415,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     // parsing) must be REWRITTEN to a real Named(struct_name) TypeExpr before it ever reaches
     // codegen, or emit_function_sig recurses on an empty path (M.1 crash). Every other param's
     // type_ann is already meaningful from parsing and passes through unchanged.
-    let discard_gov: parser::Function? = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, env.cur_ns, table) } else { null }
+    let discard_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, env.cur_ns, table) } else { null }
     mut fixed_params: []parser::Param = teko::list::empty()
     mut i: u64 = 0
     loop {
@@ -5100,7 +5463,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         let no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib }
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
@@ -5131,7 +5494,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
     } else {
         ret_stmts
     }
-    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = "" }
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
@@ -5148,7 +5511,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
  * @param TFunction tf  the fully-typed function
  * @return error?  null when every ref-to-local is spine-sound, else the R5 reject error
  */
-fn check_ref_storability(tf: TFunction) -> error? {
+fn check_ref_storability(tf: TFunction) -> error | null {
     if !fn_has_ref_param(tf) {
         if !stmts_have_free(tf.body) { return null }
     }
@@ -5188,7 +5551,7 @@ fn mem_free_target_name(e: TExpr) -> str {
  * @param Spine spine  the enclosing function's spine
  * @return error?  null when the free is sound (unique target) or `e` is not a free, else the reject
  */
-fn check_free_site(e: TExpr, spine: Spine) -> error? {
+fn check_free_site(e: TExpr, spine: Spine) -> error | null {
     let target = mem_free_target_name(e)
     if target == "" { return null }
     let ci = cell_of(spine, target)
@@ -5279,7 +5642,7 @@ fn fn_has_ref_param(tf: TFunction) -> bool {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the first reject error
  */
-fn check_ref_storability_block(stmts: []TStatement, spine: Spine) -> error? {
+fn check_ref_storability_block(stmts: []TStatement, spine: Spine) -> error | null {
     mut i = 0
     loop {
         if i >= stmts.len { break }
@@ -5298,7 +5661,7 @@ fn check_ref_storability_block(stmts: []TStatement, spine: Spine) -> error? {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the reject error
  */
-fn check_ref_storability_stmt(s: TStatement, spine: Spine) -> error? {
+fn check_ref_storability_stmt(s: TStatement, spine: Spine) -> error | null {
     match s {
         TBinding as b => match check_ref_bind_storable(b, spine) { error as e => return e; null => check_ref_storability_expr(b.value, spine) }
         TAssign as a => match check_ref_assign_storable(a, spine) { error as e => return e; null => check_ref_storability_expr(a.value, spine) }
@@ -5320,7 +5683,7 @@ fn check_ref_storability_stmt(s: TStatement, spine: Spine) -> error? {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the reject error
  */
-fn check_ref_storability_expr(e: TExpr, spine: Spine) -> error? {
+fn check_ref_storability_expr(e: TExpr, spine: Spine) -> error | null {
     match e.kind {
         TIfExpr as f => match check_ref_storability_block(f.then_blk, spine) { error as er => return er; null => if f.has_else { check_ref_storability_block(f.else_blk, spine) } else { null } }
         TMatchExpr as m => check_ref_storability_match(m, spine)
@@ -5335,7 +5698,7 @@ fn check_ref_storability_expr(e: TExpr, spine: Spine) -> error? {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the reject error
  */
-fn check_ref_storability_match(m: TMatchExpr, spine: Spine) -> error? {
+fn check_ref_storability_match(m: TMatchExpr, spine: Spine) -> error | null {
     mut i = 0
     loop {
         if i >= m.arms.len { break }
@@ -5358,7 +5721,7 @@ fn check_ref_storability_match(m: TMatchExpr, spine: Spine) -> error? {
  * @return       null when sound, else the R5 reject error
  * @throws       error when the ref-to-local's referent does not provably outlive the borrow
  */
-fn check_ref_bind_storable(b: TBinding, spine: Spine) -> error? {
+fn check_ref_bind_storable(b: TBinding, spine: Spine) -> error | null {
     let is_ref_bind = match b.bound {
         Reference => true
         _ => is_ref_null_variant(b.bound) && type_contains_ref(b.value.type)
@@ -5378,7 +5741,7 @@ fn check_ref_bind_storable(b: TBinding, spine: Spine) -> error? {
  * @param Spine spine  the function's spine fact
  * @return error?  null when sound, else the reject error
  */
-fn check_ref_assign_storable(a: TAssign, spine: Spine) -> error? {
+fn check_ref_assign_storable(a: TAssign, spine: Spine) -> error | null {
     match a.kind {
         parser::AssignKind::Simple => match a.bound { Reference => ref_borrow_or_error(spine, a.name, a.value); _ => null }
         _ => null
@@ -5416,7 +5779,7 @@ fn ref_bind_referent_name(value: TExpr) -> str {
  * @param TExpr value  the RHS expression (its borrowed / aliased local name is the referent)
  * @return error?  null when the borrow provably outlives, else the R5 reject error
  */
-fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr) -> error? {
+fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr) -> error | null {
     let borrow = cell_of(spine, target)
     let referent = cell_of(spine, ref_bind_referent_name(value))
     if borrow >= 0 {
@@ -5436,11 +5799,15 @@ fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr) -> error? {
  * @param Env env  the typing environment
  * @param TypeTable table  the folded type table
  * @return TFunction | error  the typed function
- *               bad return/trailing value, a label failure, or (U2, §2) a param/return/local of
- *               unsafe type when `f` itself is not `unsafe` — a top-level fn has no owner to OR
- *               in (unlike a method, see `type_method`), so only `f.is_unsafe` itself governs
+ * @throws bad return/trailing value, a label failure, (U2, §2) a param/return/local of unsafe
+ *         type when `f` itself is not `unsafe` — a top-level fn has no owner to OR in (unlike a
+ *         method, see `type_method`), so only `f.is_unsafe` itself governs — or (#453) an
+ *         `#arena_size(N)` directive on an `unsafe fn` (the directive is non-`unsafe` by ruling)
  */
 fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
+    if f.has_arena_size && f.is_unsafe {
+        return error { message = "`#arena_size(N)` may not precede an `unsafe fn` — the directive is non-unsafe by ruling (#453)" }
+    }
     mut local = with_fn_unsafe(env, f.is_unsafe)
     let tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
     let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"   // C7.2: bypass for Teko's own runtime
@@ -5482,7 +5849,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
             return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
         }
         let no_body: []TStatement = teko::list::empty()
-        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib }
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     }
     let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
     match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
@@ -5492,16 +5859,27 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
     if lc.failed { return error { message = lc.message } }
     match check_must_free(f, tbl, env.cur_ns, tb.stmts, table) { null => { }; error as e => return e }
     let ret_stmts = retype_union_returns(tb.stmts, ret, table)
-    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = "" }
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
     match check_ref_storability(tf) { null => { }; error as e => return e }
     tf
 }
 
-// (OOP A1, 2026-07-01) type-check EVERY method body on a struct TypeDecl and stamp each into a
-// full TFunction item (namespace = "<owning-ns>::<StructName>", mirroring collect_funcs'
-// registration exactly, so codegen/VM mangle+resolve method calls to these SAME items). Called
-// from both type_program and type_program_with_deps' main loops, alongside the ordinary
-// TypeDecl pass-through — a struct with methods contributes MULTIPLE TItems, not one.
+/**
+ * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
+ * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
+ * registration exactly, so codegen and the VM mangle and resolve method calls to these SAME items).
+ *
+ * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
+ * TypeDecl pass-through — a struct with methods contributes MULTIPLE `TItem`s, not one.
+ *
+ * @param td       the struct or class declaration whose methods to type
+ * @param item_ns  the declaration's own namespace
+ * @param file     the declaration's source file (W-loc-2)
+ * @param env      the sealed top-level environment
+ * @param table    the collected type table
+ * @return         one typed item per method body
+ * @throws         when a method body fails to type
+ */
 fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable) -> []TItem | error {
     // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
     // list's source differs; a class method is otherwise identical to a struct method. Increment
@@ -5550,11 +5928,11 @@ fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, 
         } else {
             td.name
         }
-        let mf = match type_method(methods[mi], td.name, env, table, use_base_binding, base_binding_name, base_name, declaring_class) {
+        let mf = match type_method(methods[mi], td.name, with_file(env, file), table, use_base_binding, base_binding_name, base_name, declaring_class) {
             TFunction as x => x
             error as e => return surface_at(file, methods[mi].line, methods[mi].col, e)
         }
-        let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib }
+        let stamped = TFunction { name = mf.name; type_params = mf.type_params; type_constraints = mf.type_constraints; params = mf.params; return_type = mf.return_type; body = mf.body; vis = mf.vis; has_doc = mf.has_doc; doc = mf.doc; namespace = method_ns; file = file; line = methods[mi].line; col = methods[mi].col; is_test = mf.is_test; is_extern = mf.is_extern; c_symbol = mf.c_symbol; from_lib = mf.from_lib; has_arena_size = mf.has_arena_size; arena_size = mf.arena_size }
         out = teko::list::push(out, stamped)
         mi++
     }
@@ -5592,7 +5970,7 @@ fn type_type_member_consts(td: parser::TypeDecl, item_ns: str, file: str, env: E
     loop {
         if i >= eff.len { break }
         let cd = eff[i]
-        let ti = match type_const_decl(cd, env, table) { TConstDecl as x => x; error as e => return surface_at(file, cd.line, cd.col, e) }
+        let ti = match type_const_decl(cd, with_file(env, file), table) { TConstDecl as x => x; error as e => return surface_at(file, cd.line, cd.col, e) }
         out = teko::list::push(out, TConstDecl { name = member_const_symbol(type_canonical, cd.name); namespace = item_ns; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col })
         i++
     }
@@ -5639,11 +6017,16 @@ fn type_const_decl(cd: parser::ConstDecl, env: Env, table: TypeTable) -> TConstD
 }
 
 fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
+    // Stamp the item's source file onto the env, the twin of the `with_ns` the caller already
+    // does. Only the checker's WARNING surface reads it: an error is positioned on the way out
+    // by `surface_at`, which has the file in hand, but a warning is printed where it is found
+    // and would otherwise name a line in no file at all (`scope.tks::Env.file`).
+    let fenv = with_file(env, item.file)
     match item.content {
         parser::Function as f => {
-            let tf = match type_function(f, env, table) { TFunction as x => x; error as e => return e }
+            let tf = match type_function(f, fenv, table) { TFunction as x => x; error as e => return e }
             // (#49) stamp the declaring namespace from the parsed item so codegen mangles the C name.
-            TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib }
+            TFunction { name = tf.name; type_params = tf.type_params; type_constraints = tf.type_constraints; params = tf.params; return_type = tf.return_type; body = tf.body; vis = tf.vis; has_doc = tf.has_doc; doc = tf.doc; namespace = item.namespace; file = item.file; line = f.line; col = f.col; is_test = tf.is_test; is_extern = tf.is_extern; c_symbol = tf.c_symbol; from_lib = tf.from_lib; has_arena_size = tf.has_arena_size; arena_size = tf.arena_size }
         }
         parser::TypeDecl as td => {
             // (#109 W3) CANONICALIZE the decl name to "ns::Name" so codegen emits a namespace-distinct
@@ -5656,11 +6039,11 @@ fn type_item(item: parser::Item, env: Env, table: TypeTable) -> TItem | error {
         }
         parser::UseDecl as ud => ud   // seed no-op (alias resolution is the checker's, later)
         parser::Statement as s => {
-            let ts = match type_statement(s, env, table) { TypedStmt as x => x; error as e => return e }
+            let ts = match type_statement(s, fenv, table) { TypedStmt as x => x; error as e => return e }
             ts.node
         }
         parser::ConstDecl as cd => {
-            let ti = match type_const_decl(cd, env, table) { TConstDecl as x => x; error as e => return e }
+            let ti = match type_const_decl(cd, fenv, table) { TConstDecl as x => x; error as e => return e }
             TConstDecl { name = ti.name; namespace = item.namespace; ty = ti.ty; init = ti.init; vis = ti.vis; has_doc = ti.has_doc; doc = ti.doc; line = cd.line; col = cd.col }
         }
     }
@@ -5704,6 +6087,15 @@ pub type PreMono = struct {
     prog: TProgram
     /** the resolved type table, as `monomorphize` expects it */
     table: TypeTable
+    /**
+     * every DECLARATION-boundary type error collected while typing the item list, in item order
+     * (empty when the program typed cleanly). An item that fails to type contributes its
+     * diagnostic here and NO `TItem` — the walk continues with the next top-level declaration, so
+     * one build reports every declaration's defect instead of stopping at the first (owner ruling
+     * 2026-07-26). The caller must NOT proceed to monomorphization when this is non-empty: `prog`
+     * is a PARTIAL program by construction.
+     */
+    diags: []str
 }
 
 /**
@@ -5733,6 +6125,7 @@ fn no_item_progress(done: u64, total: u64) -> void { }
  */
 pub fn type_program_with_deps(raw_program: parser::Program, dep_prog: TProgram) -> TProgram | error {
     let pre = match type_program_with_deps_pre_mono(raw_program, dep_prog, no_item_progress) { PreMono as p => p; error as e => return e }
+    if pre.diags.len > 0 { return error { message = join_checker_diags(pre.diags) } }
     let mono = match monomorphize(pre.prog, pre.table) { TProgram as mp => mp; error as e => return e }
     inline_consts(mono)
 }
@@ -5754,27 +6147,21 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     // the .tkb codec does not carry trait bodies — the same method-serialization gap as
     // struct/class methods — so a dep trait name in an `&`-list surfaces as the conformance
     // check's honest "not an interface" error rather than a silent half-fold).
-    let program0 = match fold_traits(raw_program) { parser::Program as p => p; error as e => return e }
-    let program = canon_class_bases(program0)   // (#152) base_name -> qualified, order-independent base hops
-    // Seed from dep first (build base table + env from dep's type decls + fn signatures).
+    let folded = fold_traits_collected(raw_program)
+    if folded.diags.len > 0 { return PreMono { prog = TProgram { items = teko::list::empty() }; table = teko::list::empty(); diags = folded.diags } }
+    let program = canon_class_bases(folded.program)
     let seed_empty = Collected { types = teko::list::empty(); env = env_empty() }
     let seed = match seed_from_dep(dep_prog, seed_empty.types, seed_empty.env) {
         Collected as s => s
         error as e => return e
     }
-    // Collect from the project on top of the seed.
-    let c = match collect_with_seed(program, seed) { Collected as col => col; error as e => return e }
-    // W-vis-enforce: enforce the module system over the project's own items.
-    // We only check the project's items (not dep items — they were checked when the dep was built).
-    match check_modules(program, c.types) { null => { }; error as e => return e }
-    match check_di(program, c.types) { null => { }; error as e => return e }
-    let di_reg = match build_di_registry(program, c.types) { DiRegistry as r => r; error as e => return e }
-    // (S4 type-generics) stamp concrete decls for written generic uses before typing (no-op when none).
-    let types = instantiate_types(program, c.types)
-    let menv = match register_instance_methods(c.env, types) { Env as e => e; error as e => return e }
-    let cenv = with_di(seal(menv), di_reg)
+    let pre = pre_walk(program, collect_with_seed(program, seed))
+    if pre.cut { return PreMono { prog = TProgram { items = teko::list::empty() }; table = pre.types; diags = pre.diags } }
+    let types = pre.types
+    let cenv = pre.env
     mut items: []TItem = teko::list::empty()
     mut mainbody: []TStatement = teko::list::empty()
+    mut diags: []str = pre.diags
     mut cur = cenv
     mut i = 0
     loop {
@@ -5795,39 +6182,53 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         }
         match it.content {
             parser::Statement as s => {
-                let ts = match type_statement(s, cur, types) {
-                    TypedStmt as x => x
-                    error as e => return surface_at(it.file, line, col, e)
+                // `with_file` — the COLLECT-ALL twin of the fail-fast loop's own stamp. This is the
+                // loop that actually runs, so missing it here made every warning from a virtual-main
+                // statement file-less even after the other one was fixed (measured, not reviewed).
+                match type_statement(s, with_file(cur, it.file), types) {
+                    TypedStmt as ts => {
+                        items = teko::list::push(items, ts.node)
+                        mainbody = teko::list::push(mainbody, ts.node)
+                        cur = ts.env
+                    }
+                    // DECLARATION-boundary isolation: record and move to the next item.
+                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                 }
-                items = teko::list::push(items, ts.node)
-                mainbody = teko::list::push(mainbody, ts.node)
-                cur = ts.env
             }
             _ => {
-                let ti = match type_item(it, ienv, types) {
-                    TItem as x => x
-                    error as e => return surface_at(it.file, line, col, e)
-                }
-                items = teko::list::push(items, ti)
-                // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
-                match it.content {
-                    parser::TypeDecl as td => {
-                        let mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
-                        mut mi2 = 0
-                        loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
-                        let citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
-                        mut ci2 = 0
-                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                match type_item(it, ienv, types) {
+                    TItem as ti => {
+                        items = teko::list::push(items, ti)
+                        // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
+                        match it.content {
+                            parser::TypeDecl as td => {
+                                match type_struct_methods(td, it.namespace, it.file, ienv, types) {
+                                    []TItem as mitems => {
+                                        mut mi2 = 0
+                                        loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
+                                    }
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                                }
+                                match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
+                                    []TItem as citems => {
+                                        mut ci2 = 0
+                                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                                    }
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                                }
+                            }
+                            _ => { }
+                        }
                     }
-                    _ => { }
+                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
                 }
             }
         }
         i++
-        on_item(i to u64, program.items.len to u64)
+        on_item(i to u64, program.items.len)
     }
     let lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
-    if lc.failed { return error { message = lc.message } }
+    if lc.failed { diags = teko::list::push(diags, lc.message) }
     // For the result, prepend dep items so the TProgram contains the full program (dep + project).
     // This allows subsequent operations (codegen, VM, coverage) to see all items.
     mut all_items: []TItem = teko::list::empty()
@@ -5844,7 +6245,57 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
         pi++
     }
     let tp = TProgram { items = all_items }
-    PreMono { prog = tp; table = types }
+    PreMono { prog = tp; table = types; diags = diags }
+}
+
+/**
+ * The checker's PRE-WALK product: the state the declaration-boundary item walk runs against, plus
+ * everything the six pre-walk passes had to say about the program.
+ *
+ * `cut` is the boundary verdict of docs/design/all-diagnostics-pre-walk-0.3.1.md §3 — true when a
+ * HARD pass (the signature walk, the DI registry, the stamped-instance registration) left the state
+ * it produces incomplete. The item walk must NOT run on a cut: it would type bodies against missing
+ * bindings and blame every caller for its callee's defect.
+ */
+type PreWalk = struct {
+    /** the fully stamped type table the item walk resolves against */
+    types: TypeTable
+    /** the sealed top-level environment the item walk types against */
+    env: Env
+    /** every pre-walk diagnostic, in pass order (source, then line, then column within a pass) */
+    diags: []str
+    /** did a HARD pass leave its produced state incomplete? */
+    cut: bool
+}
+
+/**
+ * Run the five pre-walk passes that follow collection and fold their diagnostics into ONE list, in
+ * pass order — the all-diagnostics ruling applied to the checker's pre-walk (issue #68).
+ *
+ * SOFT passes (`check_modules`, the DI overlay check) produce nothing the item walk reads, so their
+ * diagnostics travel WITH the item walk's and the build reports them together. HARD passes (the
+ * signature walk inside `col`, the DI registry, the stamped-instance registration) produce state a
+ * failure leaves incomplete, so each collects everything it can and then sets `cut`.
+ *
+ * @param program  the trait-folded, base-canonicalized program
+ * @param col      the collection pass's outcome (its two diagnostic classes come in with it)
+ * @return         the item walk's state, every pre-walk diagnostic, and the boundary verdict
+ * @since 0.3.1
+ */
+fn pre_walk(program: parser::Program, col: CollectOutcome) -> PreWalk {
+    let table = col.collected.types
+    let module_diags = check_modules(program, table)
+    let di = build_di_registry(program, table)
+    let overlay_diags = di_overlay_diags(program, di, table)
+    let types = instantiate_types(program, table)
+    let insts = register_instance_methods(col.collected.env, types)
+    mut diags = concat_diags(col.decl_diags, col.sig_diags)
+    diags = concat_diags(diags, module_diags)
+    diags = concat_diags(diags, di.diags)
+    diags = concat_diags(diags, overlay_diags)
+    diags = concat_diags(diags, insts.diags)
+    let cut = col.sig_diags.len > 0 || di.diags.len > 0 || insts.diags.len > 0
+    PreWalk { types = types; env = with_di(seal(insts.env), di.registry); diags = diags; cut = cut }
 }
 
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
@@ -5852,19 +6303,13 @@ pub fn type_program(raw_program: parser::Program) -> TProgram | error {
     // (TR0) FOLD trait derivations FIRST — every later stage (collect, conformance, typing,
     // codegen layout, the VM) sees each deriver's already-folded body; a trait decl itself stays
     // registered (for honest value-position/instantiation errors) but is never emitted.
-    let program0 = match fold_traits(raw_program) { parser::Program as p => p; error as e => return e }
-    let program = canon_class_bases(program0)   // (#152) base_name -> qualified, order-independent base hops
-    let c = match collect(program) { Collected as col => col; error as e => return e }
-    // W-vis-enforce: enforce the module system (namespace qualification + pub/exp) over the
-    // whole flattened program before typing — fail loud on any cross-namespace violation (M.1).
-    match check_modules(program, c.types) { null => { }; error as e => return e }
-    match check_di(program, c.types) { null => { }; error as e => return e }
-    let di_reg = match build_di_registry(program, c.types) { DiRegistry as r => r; error as e => return e }
-    // (S4 type-generics) STAMP concrete decls for written generic uses (`Box<i64>`) into the table
-    // before typing, so field-access / struct-init see concrete fields. No-op when none are used.
-    let types = instantiate_types(program, c.types)
-    let menv = match register_instance_methods(c.env, types) { Env as e => e; error as e => return e }
-    let cenv = with_di(seal(menv), di_reg)
+    let folded = fold_traits_collected(raw_program)
+    if folded.diags.len > 0 { return diags_error(folded.diags) }
+    let program = canon_class_bases(folded.program)
+    let pre = pre_walk(program, collect(program))
+    if pre.diags.len > 0 { return diags_error(pre.diags) }
+    let types = pre.types
+    let cenv = pre.env
     mut items: []TItem = teko::list::empty()
     mut mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
     mut cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)
@@ -5901,7 +6346,10 @@ pub fn type_program(raw_program: parser::Program) -> TProgram | error {
             parser::Statement as s => {
                 // type with the THREADED scope `cur` (not the base env) so a loose `let args = …`
                 // is visible to the following statements; advance `cur` to the binding's env.
-                let ts = match type_statement(s, cur, types) {
+                // `with_file` here and not only in `type_item`: a loose statement is typed on THIS
+                // path, which bypasses `type_item` entirely, so without it every warning raised
+                // from a virtual-main statement would name a line in no file (measured).
+                let ts = match type_statement(s, with_file(cur, it.file), types) {
                     TypedStmt as x => x
                     error as e => return surface_at(it.file, line, col, e)
                 }

@@ -178,6 +178,9 @@ void       tk_regions_free_all(void);
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).
 void tk_println(tk_str s);
+/* Flush stdout now, so a name printed before a crash is not lost in the block buffer.
+   See teko_rt.c for the misdiagnosis that motivated it. */
+void tk_flush_out(void);
 // Host output FFI bottoms (scope.c write/ewrite/eprint/eprintln) — s.len bytes, NUL-tolerant.
 // write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
 void tk_write(tk_str s);
@@ -404,8 +407,19 @@ tk_ffi_ures tk_rt_setenv(tk_str name, tk_str value);
 tk_ffi_slres tk_rt_list_dir(tk_str path);
 // teko::str::last_index_of(hay, needle) — byte index of the LAST occurrence, or not-found.
 tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle);
+// TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
+// child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
+// signalled one, so <= 191), which makes a negative provably outside that space and therefore
+// unambiguous. This replaces the old sentinel 127, which collided with THREE other meanings at
+// once — the POSIX exec-failed convention, `sh`'s own "command not found", and a child that simply
+// chose to exit 127 — so a CI failure reading `exit 127` could not be attributed to any of them.
+// What is STILL ambiguous, honestly: the POSIX child arm must `_exit(127)` after a failed execvp,
+// because the exec'd-image failure has no other channel; that one case remains indistinguishable
+// from a child exiting 127. Everything the PARENT can see is now separated.
+#define TK_RT_SPAWN_FAILED (-1)
 // teko::process::run(argv) — fork/exec argv[0] with argv, wait, return its exit status
-// (127 when argv is empty / exec fails). Takes the slice as ptr+len (no generated type).
+// (TK_RT_SPAWN_FAILED when argv is empty or the child could not be started at all). Takes the
+// slice as ptr+len (no generated type).
 int32_t tk_rt_run(const tk_str *argv, uint64_t n);
 // teko::process::run_quiet(argv) — same contract as tk_rt_run, but the child's stdout/stderr
 // are redirected to the null device (issue #73: the cc flag-family probe uses this so a
@@ -417,6 +431,10 @@ void    tk_set_args(int argc, char **argv);
 tk_str *tk_rt_args(uint64_t *n);
 // (C7.1f) the host OS name: "macos"/"linux"/"windows"/"unknown" (teko::os; per-OS resolution + `#os`).
 tk_str tk_rt_os(void);
+// (0.3.1 C2) the host CPU architecture: "x86_64"/"arm64"/"unknown" (teko::arch). The
+// canonical token that concatenates with tk_rt_os() into the "<arch>-<os>" target key; mirrors
+// tk_rt_os's plain-str shape so the released seed's frozen codegen can lower it.
+tk_str tk_rt_arch(void);
 // (CLI --version) the build's version string — the RAW project-manifest `version` + `-<suffix>`
 // (e.g. "0.0.1.0-bootstrap"). Compiled from the TEKO_VERSION_STRING define injected by both build
 // paths (CMake for the bootstrap, run_cc for self-host), never a runtime file read. (teko::env::version)
@@ -431,45 +449,41 @@ uint64_t tk_peak_rss(void);
 // output is a security defect, never a soft error here).
 tk_slice_byte tk_rt_secure_bytes(uint64_t n);
 
-// ---- Date/Time placeholder types (ROUND 0) ----
-// Five value types: DateTime (signed ns since Unix epoch), TimeSpan (signed ns duration),
-// Time (ns since midnight), Date (days since 1970-01-01 = 0), DateTimeOffset (DateTime + offset).
-// DateTime.ticks is i128 (signed) so DateTime - DateTime always fits in TimeSpan (i128).
-typedef struct { __int128  ticks;                         } tk_datetime;
-typedef struct { __int128  ticks;                         } tk_timespan;
-typedef struct { uint64_t  ticks;                         } tk_time;
-typedef struct { int32_t   days;                          } tk_date;
-typedef struct { __int128  ticks; int16_t offset_minutes; } tk_datetimeoffset;
+// ---- teko::time (drop-128 A6 redesign, owner-ratified table 2026-07-24) ----
+// Carrier structs, EVERY field <= 64 bits (no __int128 anywhere in this surface):
+//   date      — i32 days since 1970-01-01 (Gregorian proleptic, +-5.88M years)
+//   time      — u64 ns since midnight, domain 0..86_399_999_999_999 (23:59:59.999999999)
+//   span      — i64 ns signed duration/delta (+-292 years); also the monotonic-clock reading
+//   datetime  — {days: i32; ticks: u64} — civil date+time-of-day, no timezone
+//   dto       — datetime + offset_minutes: i16 — civil with a FIXED UTC offset (a geographic
+//               zone id is Tier 2, deferred to .32+)
+// timestamp (i64 UNIX seconds) is a REPRESENTATION, not a carrier struct.
+//
+// An extern fn's struct param/return uses THIS header's typedef, never the mangled typedef
+// codegen generates for the SAME-shaped Teko type — the two are layout-identical but nominally
+// distinct C types, so a Teko `let`/field can never hold a value fresh off an extern call (a
+// compile error, not a runtime corruption). So EVERY host-dependent read below returns a bare
+// SCALAR (never one of the carrier structs) — teko::time's pure Teko constructors then compose
+// the scalar into the ergonomic struct, entirely on the Teko side, fully storable/composable
+// from that point on (src/time/time.tks). `tk_rt_date_from_days`/`tk_rt_date_year`/
+// `tk_rt_date_month`/`tk_rt_date_day_of_month` are the ONE exception, kept ONLY for the
+// pre-existing `examples/regressions/time_types` fixture's own direct extern re-declaration
+// (its ORIGINAL extern-chained calling shape, unchanged) — teko::time's own module no longer
+// calls them (civil_from_days, already pure Teko, does the same calendar math).
+typedef struct { int32_t  days;                          } tk_date;
+typedef struct { uint64_t ticks;                         } tk_time;
+typedef struct { int64_t  ticks;                         } tk_span;
 
-tk_datetime       tk_rt_datetime_now(void);
-tk_datetimeoffset tk_rt_datetime_local_now(void);
-tk_date           tk_rt_date_today(void);
-tk_time           tk_rt_time_now_utc(void);
-tk_timespan       tk_rt_timespan_from_ns(int64_t ns);
-tk_date           tk_rt_date_from_days(int32_t days);
-
-__int128 tk_rt_datetime_to_unix_ns(tk_datetime dt);
+tk_date  tk_rt_date_from_days(int32_t days);
 int32_t  tk_rt_date_year(tk_date d);
 int32_t  tk_rt_date_month(tk_date d);
 int32_t  tk_rt_date_day_of_month(tk_date d);
-int32_t  tk_rt_time_hour(tk_time t);
-int32_t  tk_rt_time_minute(tk_time t);
-int32_t  tk_rt_time_second(tk_time t);
-int16_t  tk_rt_dto_offset_minutes(tk_datetimeoffset dto);
 
-// --- arithmetic (ROUND 0) ---
-// DateTime +/- TimeSpan = DateTime; DateTime - DateTime = TimeSpan (always fits, both i128).
-// TimeSpan +/- TimeSpan = TimeSpan. Date +/- (days: i32) = Date. Comparisons via raw ticks/days
-// (exposed already through the accessors above) — no dedicated compare fn needed (Teko can
-// compare the extracted i128/i32 with native `<`/`==`).
-tk_datetime tk_rt_datetime_add(tk_datetime dt, tk_timespan span);
-tk_datetime tk_rt_datetime_sub(tk_datetime dt, tk_timespan span);
-tk_timespan tk_rt_datetime_diff(tk_datetime a, tk_datetime b);      // a - b
-tk_timespan tk_rt_timespan_add(tk_timespan a, tk_timespan b);
-tk_timespan tk_rt_timespan_sub(tk_timespan a, tk_timespan b);
-__int128    tk_rt_timespan_to_ns(tk_timespan span);
-tk_date     tk_rt_date_add_days(tk_date d, int32_t days);
-int32_t     tk_rt_date_diff_days(tk_date a, tk_date b);             // a - b, in days
+// --- host clock reads (SCALAR-only, see above) ---
+int32_t  tk_rt_wall_days(void);            // days since 1970-01-01, UTC, host wall clock
+uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall clock
+int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
+int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
 // D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
 // record which production functions executed during a `teko test` run WITHOUT a Teko
@@ -557,7 +571,31 @@ double   tk_int_to_float(__int128 v, bool sgn);
 uint64_t tk_f64_bits(double x);
 double   tk_f64_from_bits(uint64_t bits);
 
-// tk_panic — fail loud (M.1): "teko: panic: <msg>\n" to stderr, then non-zero exit.
+// TK_PANIC_MARKER — the canonical opening of EVERY deliberate panic line: the word
+// "deliberate" is the whole point. A panic is the program's OWN guard firing (M.1); a
+// crash is the host killing it (tk_rt_crash_handler prints "teko: FATAL signal" instead),
+// and the two must never be confused by whoever reads the log.
+//
+// Why the marker exists at all, and why it is TEXT: a regressor scenario used to prove
+// "this panicked, on purpose, for this reason" by asserting `exit = 134`. That number was
+// never Teko's — it is 128+SIGABRT, SYNTHESISED by a POSIX shell out of the child's wait
+// status, and Windows has no such convention (PR #94's `test / windows` reported exit 127
+// on a run whose stderr plainly carried the panic). An 8-bit exit status is also a channel
+// the child SHARES with the shell and the OS, so it can be forged by either. A line on
+// stderr can be written by nothing but the program itself, which makes it the only evidence
+// that means the same thing on every platform.
+//
+// The line is `TK_PANIC_MARKER <msg>` and NOTHING else: no source position (a positioned
+// guard such as tk_panic_cast prints its own "line:col: " ahead of it) and no backtrace
+// (that follows on its own lines, and degrades to a one-line notice where execinfo is
+// absent). So marker+reason always sit adjacent on one line, and a regressor pattern can
+// assert both at once without depending on either of the parts that move per platform.
+//
+// STABLE: `.tkr` scenarios spell this text literally. Changing it breaks them — deliberately.
+#define TK_PANIC_MARKER "teko: deliberate panic: "
+
+// tk_panic — fail loud (M.1): "teko: deliberate panic: <msg>\n" to stderr, a backtrace,
+// then a non-zero exit (SIGABRT). See TK_PANIC_MARKER above for the line's contract.
 _Noreturn void tk_panic(const char *msg);
 // the Teko-level globals `panic(str)` / `exit(<int>)` (legislator's ruling — no `never` type).
 // tk_panic_str takes a tk_str (ptr+len, tolerates embedded NUL); tk_exit ends with a status code.

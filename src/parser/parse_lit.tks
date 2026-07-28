@@ -1,53 +1,87 @@
 // src/parser/parse_lit.tks   (namespace 'teko::parser')
 
-// a Number token's text (decimal digits with `_` separators) → the raw integer (N1 —
-// TEKO_CORRECTION_PLAN §5). The literal node carries the raw value; its resolved type
-// (set by the typer) decides the real width/signedness. The canonical Teko carrier is
-// the widest native int (i128); the C bootstrap uses __int128. Dogfooding `to`:
-// byte→i128 widens (ok).
-fn lit_int(text: str) -> i128 {
+/**
+ * lit_overflow_err — the located-free "literal too wide" error (drop-128, 2026-07-24): a
+ * decimal/hex/binary `Number` literal's magnitude cannot exceed `u64::MAX` — the language's
+ * widest integer is 64-bit. A wider constant is a distinct literal FORM, a `bi` BigInt
+ * literal (`teko::numeric::bigint`), never a `Number`.
+ *
+ * @return the overflow error (the caller positions it via the enclosing `Parsed<Expr>`)
+ */
+fn lit_overflow_err() -> error {
+    error { message = "integer literal exceeds u64::MAX — the language's widest integer is 64-bit; write it as a BigInt: `123bi`" }
+}
+
+/**
+ * lit_int_accum — fold one decoded digit `d` (`0 <= d < radix`) into the running magnitude
+ * `acc`, erroring when `acc * radix + d` would overflow `u64::MAX` (checked BEFORE the
+ * multiply via the standard `acc > (MAX - d) / radix` guard — never a silent wrap, M.1).
+ *
+ * @param acc    the magnitude accumulated so far
+ * @param d      the next digit's value
+ * @param radix  2, 10, or 16
+ * @return       the new accumulated magnitude, or an overflow error
+ * @throws       when the accumulation would exceed `u64::MAX`
+ */
+fn lit_int_accum(acc: u64, d: u64, radix: u64) -> u64 | error {
+    if acc > (18446744073709551615 - d) / radix { return lit_overflow_err() }
+    acc * radix + d
+}
+
+/**
+ * lit_int — a Number token's text (decimal/hex/binary digits with `_` separators) → its
+ * sign-magnitude literal carrier (N1 — TEKO_CORRECTION_PLAN §5; drop-128, 2026-07-24). The
+ * literal node carries the raw magnitude (always non-negative here — a source negative
+ * parses as `Unary(Minus, Number)`, never a negative `Number`); its resolved type (set by
+ * the typer) decides the real width/signedness.
+ *
+ * @param text  the Number token's text
+ * @return      the literal's magnitude carrier, or an overflow error
+ * @throws      when the literal's magnitude exceeds `u64::MAX` (`lit_overflow_err`)
+ */
+fn lit_int(text: str) -> NumInt | error {
     // hex `0x…` / binary `0b…` (B.28) decode by radix; `_` separators ignored.
     if text.len >= 2 && text[0] == b'0' && (text[1] == b'x' || text[1] == b'X') {
-        mut acc: i128 = 0
+        mut acc: u64 = 0
         mut i = 2
         loop {
             if i >= text.len { break }
             let c = text[i]
             if c == b'_' { i++; continue }
-            mut d: i128 = -1
-            if c >= b'0' && c <= b'9' { d = (c to i128) - (b'0' to i128) }
-            else if c >= b'a' && c <= b'f' { d = (c to i128) - (b'a' to i128) + 10 }
-            else if c >= b'A' && c <= b'F' { d = (c to i128) - (b'A' to i128) + 10 }
+            mut d: i64 = -1
+            if c >= b'0' && c <= b'9' { d = (c to i64) - (b'0' to i64) }
+            else if c >= b'a' && c <= b'f' { d = (c to i64) - (b'a' to i64) + 10 }
+            else if c >= b'A' && c <= b'F' { d = (c to i64) - (b'A' to i64) + 10 }
             if d < 0 { break }
-            acc = acc * 16 + d
+            acc = match lit_int_accum(acc, d to u64, 16) { u64 as v => v; error as e => return e }
             i++
         }
-        return acc
+        return numint_of_u64(acc)
     }
     if text.len >= 2 && text[0] == b'0' && (text[1] == b'b' || text[1] == b'B') {
-        mut acc: i128 = 0
+        mut acc: u64 = 0
         mut i = 2
         loop {
             if i >= text.len { break }
             let c = text[i]
             if c == b'_' { i++; continue }
             if c != b'0' && c != b'1' { break }
-            acc = acc * 2 + (c to i128) - (b'0' to i128)
+            acc = match lit_int_accum(acc, (c to u64) - (b'0' to u64), 2) { u64 as v => v; error as e => return e }
             i++
         }
-        return acc
+        return numint_of_u64(acc)
     }
-    mut acc: i128 = 0
+    mut acc: u64 = 0
     mut i = 0
     loop {
         if i >= text.len { break }
         let c = text[i]
         if c != b'_' {
-            acc = acc * 10 + (c to i128) - (b'0' to i128)
+            acc = match lit_int_accum(acc, (c to u64) - (b'0' to u64), 10) { u64 as v => v; error as e => return e }
         }
         i++
     }
-    acc
+    numint_of_u64(acc)
 }
 
 // a FLOAT Number token's text (`3.14`, `1.5e3`) → f64 (the default; an annotation picks

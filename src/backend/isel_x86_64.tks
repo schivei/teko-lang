@@ -165,22 +165,18 @@ const RCX_X86: MReg = preg(1, MRegClass::GPR)
  * select_const_int_x86 — the `LConstInt` selection: one `mov r64, imm` (the
  * encoder later narrows to `mov r32, imm32` / `movabs r64, imm64` from the
  * value). Defaults to the widest, no-information-loss 64-bit form, matching
- * `LConstInt.val`'s own i128 carrier choice, since the LIR carries no per-value
- * width for a bare constant. A value beyond the i64 range needs register-pair
- * materialization (inherited from A2's i128 route) and honest-stops.
+ * `LConstInt.val`'s own i64 two's-complement carrier (drop-128, 2026-07-24),
+ * since the LIR carries no per-value width for a bare constant.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LConstInt c  the constant op
- * @return SelCtxX86 | error  the advanced context, or the i128 honest-stop
+ * @return SelCtxX86  the advanced context
  */
-fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) -> SelCtxX86 | error {
-    if !fits_i64(c.val) {
-        return error { message = "isel x86-64: an i128 constant beyond 64 bits needs register-pair materialization (the i128-inherited stop, A2's i128 route)" }
-    }
+fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) -> SelCtxX86 {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    selctx_x86_emit(ctx1, movimm_x86(dst, c.val to i64, true))
+    selctx_x86_emit(ctx1, movimm_x86(dst, c.val, true))
 }
 
 /**
@@ -470,9 +466,9 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 | 
  * the SAME isel code receives arguments in SysV registers on x86-linux and in
  * the Win64 registers on x86_64-windows (the byte-identical SysV path passes
  * `SYSV64`, exactly the descriptor the old hardcode named). A float-class
- * parameter needs an XMM move (the `B1-fp` stop), an i128 parameter a
- * register-pair slot (the i128-inherited stop), and a parameter past the ABI's
- * integer-argument register window the stack-arg slot (the `B1-args` stop).
+ * parameter needs an XMM move (the `B1-fp` stop), and a parameter past the
+ * ABI's integer-argument register window the stack-arg slot (the `B1-args`
+ * stop).
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
@@ -482,13 +478,10 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 | 
  * @return SelCtxX86 | error  the advanced context, or a NAMED honest-stop
  */
 fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtxX86 | error {
-    if (p.index to u64) >= f.param_types.len {
+    if p.index >= f.param_types.len {
         return error { message = "isel x86-64: param index out of range (internal)" }
     }
     let ty = f.param_types[p.index to u64]
-    if ltype_is_i128(ty) {
-        return error { message = "isel x86-64: an i128 parameter needs a register-pair ABI slot (the i128-inherited stop)" }
-    }
     if mregclass_of_ltype(ty) == MRegClass::FPR {
         return error { message = "isel x86-64: B1-fp — a float parameter arrives in an XMM register via an SSE move, the float honest-stop (0.3.1)" }
     }
@@ -678,7 +671,7 @@ fn select_fused_branch_x86(ctx1: SelCtxX86, dc: DefCmp, taken: u32) -> SelCtxX86
 fn select_boolean_branch_x86(ctx1: SelCtxX86, cond: u32, taken: u32) -> SelCtxX86 | error {
     let c_info = vinfo_get(ctx1.vinfo, cond)
     let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
-    let cz = selctx_x86_emit(scratch.ctx, movimm_x86(scratch.reg, 0 to i64, c_info.wide))
+    let cz = selctx_x86_emit(scratch.ctx, movimm_x86(scratch.reg, 0, c_info.wide))
     let cc = selctx_x86_emit(cz, cmp_x86(vreg(cond, MRegClass::GPR), scratch.reg, c_info.wide))
     selctx_x86_emit(cc, jcc_x86(MCond::NE, taken))
 }
@@ -713,9 +706,7 @@ fn select_branch_x86(ctx0: SelCtxX86, f: lir::LFunc, br: lir::LBranch) -> SelCtx
 /**
  * mem_size_of_x86 — the load/store transfer size for a machine class: B/W/D/Q
  * for the integer widths (and Ptr = Q). A float access (F32/F64) needs an SSE
- * move (the `B1-fp` stop), an i128 access a register-pair transfer (the
- * i128-inherited stop), an f16 access has no single-register size, and a
- * void-typed access is malformed.
+ * move (the `B1-fp` stop), and a void-typed access is malformed.
  *
  * @param lir::LType t  the accessed value's machine class
  * @return MMemSizeX86 | error  the transfer size, or a NAMED honest-stop
@@ -729,8 +720,6 @@ fn mem_size_of_x86(t: lir::LType) -> MMemSizeX86 | error {
         lir::LType::Ptr => MMemSizeX86::Q
         lir::LType::F32 => error { message = "isel x86-64: B1-fp — an f32 memory access uses an SSE move, the float honest-stop (0.3.1)" }
         lir::LType::F64 => error { message = "isel x86-64: B1-fp — an f64 memory access uses an SSE move, the float honest-stop (0.3.1)" }
-        lir::LType::I128 => error { message = "isel x86-64: an i128 memory access needs a register-pair transfer (the i128-inherited stop)" }
-        lir::LType::F16 => error { message = "isel x86-64: an f16 memory access has no single-register transfer size (0.3.1)" }
         lir::LType::Void => error { message = "isel x86-64: a void-typed memory access is malformed (internal)" }
     }
 }
@@ -747,7 +736,7 @@ fn mem_size_of_x86(t: lir::LType) -> MMemSizeX86 | error {
  * @return SelCtxX86  the advanced context
  */
 fn select_alloca_x86(ctx0: SelCtxX86, inst: lir::LInst, a: lir::LAlloca) -> SelCtxX86 {
-    let slot = ctx0.func.frame.len to u32
+    let slot = ctx0.func.frame.len
     let ctx1 = SelCtxX86 { func = append_frame_x86(ctx0.func, a); vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx2 = selctx_x86_set_vinfo(ctx1, inst.result, MRegClass::GPR, true)
@@ -911,6 +900,114 @@ fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool
 }
 
 /**
+ * X86_STR_ARG_BYTES — the byte size of a `tk_str` (`teko_rt.h:45-48`: a pointer
+ * plus a `size_t`, both 8 bytes on every x86-64 target). The threshold
+ * `max_reg_arg_bytes` is compared against to decide register-vs-reference
+ * passing, and the size of the frame slot the by-reference copy lives in.
+ */
+const X86_STR_ARG_BYTES: u32 = 16 to u32
+
+/**
+ * X86_STR_ARG_ALIGN — the alignment of a `tk_str` frame copy (8: its widest
+ * field is an 8-byte pointer).
+ */
+const X86_STR_ARG_ALIGN: u32 = 8 to u32
+
+/**
+ * X86_STR_LEN_OFFSET — the byte offset of `tk_str`'s `len` field inside the
+ * struct (`ptr` at 0, `len` at 8) — the displacement the by-reference copy's
+ * second store writes at.
+ */
+const X86_STR_LEN_OFFSET: i32 = 8 to i32
+
+/**
+ * str_pair_by_ref_x86 — must this call's argument list, which the TARGET-NEUTRAL
+ * LIR flattened from ONE by-value `tk_str` into the two scalar operands
+ * `(ptr, len)` (`lower.tks::lower_str_arg_call`), be re-materialized and passed
+ * BY REFERENCE instead?
+ *
+ * True exactly when the ABI cannot carry a 16-byte aggregate in registers
+ * (`max_reg_arg_bytes < 16` — Win64, which passes an aggregate in a register
+ * ONLY at size 1/2/4/8) AND the callee is one of the closed set of
+ * single-`tk_str`-argument runtime entries (`lir::is_str_arg_builtin`, read from
+ * the LIR so the list is single-sourced) AND the flat pair is actually present.
+ * On SysV/AAPCS64/LP64D (`max_reg_arg_bytes == 16`) it is always false, so those
+ * targets keep the byte-identical two-register sequence (FIXPOINT).
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param str symbol  the call's already-final runtime symbol
+ * @param []u32 args  the call's flattened argument VRegs
+ * @return bool  true iff the pair must travel by reference
+ */
+fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
+    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+}
+
+/**
+ * pin_str_pair_by_ref_x86 — pass a flattened `(ptr, len)` `tk_str` pair the
+ * Win64 way: BY REFERENCE. Reserve a 16-byte frame slot, take its address
+ * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
+ * the shadow region `compute_frame_layout_x86` already reserves), store `ptr` at
+ * +0 and `len` at +8, then pin that ADDRESS into the ABI's FIRST integer
+ * argument register (RCX) as the call's single `use`.
+ *
+ * This is the whole content of the B3 Windows differential's `own_print_exit`
+ * SIGSEGV: emitting SysV's two-register form on Win64 makes the C-built callee
+ * (`void tk_print(tk_str s)`, which under Win64 compiles to `movq (%rcx), %rcx` /
+ * `movl 0x8(%rcx), %r8d`) read the STRING'S OWN first 16 bytes as `{ptr; len}`
+ * and `fwrite` through the resulting garbage pointer. `tk_exit(i32)` — a scalar —
+ * was unaffected, which is why the `own_exit_code` fixture passed while
+ * `own_print_exit` faulted.
+ *
+ * Both halves store at `Q` width. `len` is a `size_t`, and the SysV path already
+ * relies on the same invariant (it moves the whole 64-bit register into RSI), so
+ * a narrow producer's zero-extended upper half is not a new assumption. Neither
+ * half can be float-class — `lower_str_arg_call` builds the pair from a fat
+ * pointer's address and byte length — so there is no `B1-fp` arm here.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its first GPR arg reg)
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the flattened pair — `args[0]` = ptr, `args[1]` = len
+ * @return PinnedArgsX86 | error  the pinned address, or a NAMED honest-stop
+ */
+fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 | error {
+    let slot = arg_reg(abi, MRegClass::GPR, 0 to u32)
+    if !slot.ok {
+        return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
+    }
+    let frame_slot = ctx0.func.frame.len
+    let with_slot = append_frame_x86(ctx0.func, lir::LAlloca { bytes = X86_STR_ARG_BYTES; align = X86_STR_ARG_ALIGN })
+    let ctx1 = SelCtxX86 { func = with_slot; vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
+    let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+    let ctx2 = selctx_x86_emit(scratch.ctx, frame_addr_x86(scratch.reg, frame_slot))
+    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(args[0], MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
+    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(args[1], MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
+    let ctx5 = selctx_x86_emit(ctx4, mov_x86(slot.reg, scratch.reg, true))
+    PinnedArgsX86 { ctx = ctx5; uses = teko::list::push(teko::list::empty(), slot.reg) }
+}
+
+/**
+ * pin_call_args_x86 — the argument-pinning entry a DIRECT call goes through: the
+ * by-reference `tk_str` path when the target ABI demands it
+ * (`str_pair_by_ref_x86`), else the plain per-argument register pinning
+ * (`pin_args_x86`). An indirect call never reaches a `tk_str` runtime builtin (it
+ * has no symbol), so it stays on `pin_args_x86` directly.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param str symbol  the call's already-final runtime symbol
+ * @param []u32 args  the call's flattened argument VRegs, in declaration order
+ * @param bool variadic  whether the call is variadic (honest-stops downstream)
+ * @return PinnedArgsX86 | error  the pinned args, or a NAMED honest-stop
+ */
+fn pin_call_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, symbol: str, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
+    if !variadic && str_pair_by_ref_x86(abi, symbol, args) {
+        return pin_str_pair_by_ref_x86(abi, ctx0, args)
+    }
+    pin_args_x86(abi, ctx0, args, variadic)
+}
+
+/**
  * select_call_result_x86 — after a call, move its result out of the SysV result
  * register RAX into the result VReg (when the call produces one). The result
  * class is taken as GPR (RAX): `LInst` carries no result type, so a
@@ -933,8 +1030,10 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
 
 /**
  * select_call_x86 — the `LCall` selection (§4.5): lower the arguments into
- * the target ABI's registers (`pin_args_x86`), emit `MCallX86{sym, uses,
- * ret_reg, has_result, variadic}` with the result pinned to RAX (decision D-A —
+ * the target ABI's registers (`pin_call_args_x86` — which routes a flattened
+ * `tk_str` pair through the by-reference path on an ABI that demands it), emit
+ * `MCallX86{sym, uses, ret_reg, has_result, variadic}` with the result pinned to
+ * RAX (decision D-A —
  * RAX is the integer result on both SysV and Win64), then move the result out
  * of RAX if the call produces one.
  *
@@ -945,7 +1044,7 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
  * @return SelCtxX86 | error  the advanced context, or a propagated error
  */
 fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir::LCall) -> SelCtxX86 | error {
-    let pinned = match pin_args_x86(abi, ctx0, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
+    let pinned = match pin_call_args_x86(abi, ctx0, c.symbol, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
     let ret_reg = RAX_X86
     let ctx1 = selctx_x86_emit(pinned.ctx, call_x86(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
     select_call_result_x86(ctx1, inst, ret_reg)

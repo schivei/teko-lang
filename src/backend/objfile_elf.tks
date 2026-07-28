@@ -71,19 +71,6 @@ fn build_elf_strtab(names: []str) -> ElfStrtab {
 const EM_X86_64: u32 = 62 to u32
 
 /**
- * EM_RISCV — the `Elf64_Ehdr.e_machine` value identifying a RISC-V object
- * (the RISC-V psABI machine number; the rv64 adapter's ISA-varying input).
- */
-const EM_RISCV: u32 = 243 to u32
-
-/**
- * EF_RISCV_FLOAT_ABI_DOUBLE — the RISC-V `Elf64_Ehdr.e_flags` bit declaring the
- * LP64D hard-float double ABI (the RV64GC calling convention this backend
- * targets); x86-64 objects carry `e_flags = 0` (no machine flags defined).
- */
-const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x0004 to u32
-
-/**
  * ELF_BYTE_MASK — the low-byte mask the little-endian field serializers apply
  * per lane (`(v >> lane) & 0xFF`), narrowing each half/quarter to one `byte`.
  */
@@ -194,7 +181,7 @@ fn elf_has_rodata_section(symbols: []Symbol) -> bool {
 
 /**
  * elf_append_text_locals — append each file-local `.text` symbol (a defined,
- * file-local, section-1 `Symbol` — the RISC-V `.Lpcrel_hiN` pcrel-pair labels of
+ * file-local, section-1 `Symbol` — a pcrel-pair label an ISA may synthesize,
  * §7.2) to `out` as an `STB_LOCAL|STT_NOTYPE` entry (`st_info = 0x00`,
  * `st_shndx = 1`, section-relative `st_value`). x86-64 produces NO section-1
  * local (only section-2 rodata locals, globals, and undefined externs), so this
@@ -273,7 +260,7 @@ fn elf_append_undefined(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
  * elf_build_symbols — the object's `Elf64_Sym` table in the ELF-required
  * LOCAL-then-GLOBAL order: the reserved null symbol, then (when rodata is
  * present) the `.rodata` `STT_SECTION` local symbol, then every file-local
- * `.text` label (the RISC-V `.Lpcrel_hiN` locals, §7.2 — none for x86), then
+ * `.text` label (§7.2 — none for x86), then
  * every defined function as `GLOBAL|FUNC` at its section-relative `.text` offset
  * (`st_shndx = 1`), then every undefined extern as `GLOBAL|NOTYPE`
  * (`st_shndx = SHN_UNDEF`). The neutral `Symbol` list's per-rodata locals are NOT
@@ -370,7 +357,7 @@ fn elf_rodata_secsym_index(syms: []ElfSym) -> u32 {
     mut i: u64 = 0
     loop {
         if i >= syms.len { break }
-        if syms[i].info == (st_info(STB_LOCAL, STT_SECTION) to u32) && syms[i].shndx == (2 to u32) { return i to u32 }
+        if syms[i].info == st_info(STB_LOCAL, STT_SECTION) && syms[i].shndx == (2 to u32) { return i to u32 }
         i++
     }
     syms.len to u32
@@ -516,14 +503,14 @@ fn elf_build_relas(obj: ElfObject, syms: []ElfSym) -> []ElfRela {
 fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, secidx: u32) -> ElfRela {
     let hit = elf_rodata_hit(symbols, r.sym)
     let symidx = if hit.found { secidx } else { elf_symbol_index(syms, r.sym) }
-    let addend = if hit.found { r.addend + (hit.offset to i64) } else { r.addend }
+    let addend = if hit.found { r.addend + hit.offset } else { r.addend }
     ElfRela { offset = r.offset; symidx = symidx; rtype = r.rtype; addend = addend }
 }
 
 /**
  * elf_build_rodata_relas — resolve each `rodata_relocs` entry of `obj` into a
  * `.rela.rodata` row: a data→data pointer whose target is a `.rodata`-local
- * datum becomes R_X86_64_64/R_RISCV_64 against the `.rodata` section symbol with
+ * datum becomes R_X86_64_64 against the `.rodata` section symbol with
  * the target's offset folded onto the addend, its `r_offset` being the pointer
  * slot's byte offset INSIDE `.rodata` (#594 T-B2). Empty today (T-B1's
  * `encode_rodata` honest-stop keeps every producer out), so `.rela.rodata` is
@@ -553,7 +540,7 @@ fn elf_build_rodata_relas(obj: ElfObject, syms: []ElfSym) -> []ElfRela {
  * @return u64  the packed `r_info`
  */
 fn elf_rela_info(symidx: u32, rtype: u32) -> u64 {
-    ((symidx to u64) << (32 to u64)) | (rtype to u64)
+    ((symidx to u64) << (32 to u64)) | rtype
 }
 
 /**
@@ -753,9 +740,9 @@ const ELF_MAGIC: []byte = [0x7F to byte, 0x45 to byte, 0x4C to byte, 0x46 to byt
 /**
  * emit_elf_header — the 64-byte `Elf64_Ehdr`: the `e_ident` magic (`\x7fELF` +
  * ELFCLASS64 + ELFDATA2LSB + EV_CURRENT + ELFOSABI_SYSV + 8 pad bytes), then
- * `e_type = ET_REL`(1), the supplied `e_machine` (EM_X86_64=62 / EM_RISCV=243),
+ * `e_type = ET_REL`(1), the supplied `e_machine` (EM_X86_64=62),
  * `e_version = 1`, zero `e_entry`/`e_phoff`, the computed `e_shoff`, the supplied
- * `e_flags` (0 for x86-64 / EF_RISCV_FLOAT_ABI_DOUBLE=0x0004 for RV64 LP64D),
+ * `e_flags` (0 for x86-64 — no machine flags defined),
  * `e_ehsize = 64`, zero program-header fields, `e_shentsize = 64`, `e_shnum =
  * nsects` (7, or 8 with `.rela.rodata`), and `e_shstrndx = 5` (`.shstrtab`). The
  * `e_machine`/`e_flags` are the ONLY ISA-varying bytes of the reused header
@@ -763,8 +750,8 @@ const ELF_MAGIC: []byte = [0x7F to byte, 0x45 to byte, 0x4C to byte, 0x46 to byt
  *
  * @param []byte buf  the (empty) buffer to extend
  * @param ElfLayout lay  the resolved layout (for `e_shoff`)
- * @param u32 e_machine  the ELF `e_machine` (62=x86-64, 243=riscv)
- * @param u32 e_flags  the ELF `e_flags` (0=x86-64, 0x0004=RV64 LP64D hard-float)
+ * @param u32 e_machine  the ELF `e_machine` (62=x86-64)
+ * @param u32 e_flags  the ELF `e_flags` (0=x86-64)
  * @param u32 nsects  the section-header count emitted as `e_shnum`
  * @return []byte  `buf` followed by the 64-byte Ehdr
  */
@@ -965,8 +952,7 @@ fn emit_elf_relas(buf: []byte, relas: []ElfRela) -> []byte {
  * symbol NAME (resolved to an index by the writer), the NUMERIC `R_<arch>_*` type
  * (each per-ISA encoder maps its own `RelocKind*` → the number, so the writer
  * holds no ISA knowledge), and the addend. This is the ISA-agnostic form of
- * `RelocX86`/`RelocRiscv` — the per-ISA reloc's `kind` is already lowered to
- * `rtype`.
+ * `RelocX86` — the per-ISA reloc's `kind` is already lowered to `rtype`.
  *
  * @since #387 B2-7
  */
@@ -993,23 +979,22 @@ pub type ElfRelocReq = struct {
 
 /**
  * ElfObject — the ISA-agnostic input to the shared ELF64 writer: the machine id
- * (`e_machine`: EM_X86_64=62, EM_RISCV=243), the ABI flags (`e_flags`: 0 for
- * x86-64, EF_RISCV_FLOAT_ABI_DOUBLE=0x0004 for RV64 LP64D), the `.text`/`.rodata`
- * section images, the neutral `Symbol` list (local-then-global-then-undefined,
- * now INCLUDING per-pcrel-pair `.text` label locals — §7.2), and the resolved
- * `ElfRelocReq` rows. Both `emit_elf` (x86) and `emit_elf_riscv` build this and
- * call `emit_elf_object`; the writer is ISA-agnostic, so E1 (the ELF static
- * linker) reuses it unchanged.
+ * (`e_machine`: EM_X86_64=62), the ABI flags (`e_flags`: 0 for x86-64), the
+ * `.text`/`.rodata` section images, the neutral `Symbol` list
+ * (local-then-global-then-undefined, now INCLUDING per-pcrel-pair `.text` label
+ * locals — §7.2), and the resolved `ElfRelocReq` rows. `emit_elf` (x86) builds
+ * this and calls `emit_elf_object`; the writer is ISA-agnostic, so E1 (the ELF
+ * static linker) reuses it unchanged.
  *
  * @since #387 B2-7
  */
 pub type ElfObject = struct {
     /**
-     * e_machine — the ELF `e_machine` (62=x86-64, 243=riscv).
+     * e_machine — the ELF `e_machine` (62=x86-64).
      */
     e_machine: u32
     /**
-     * e_flags — the ELF `e_flags` (0=x86-64, 0x0004=RV64 LP64D hard-float).
+     * e_flags — the ELF `e_flags` (0=x86-64).
      */
     e_flags: u32
     /**
@@ -1038,7 +1023,7 @@ pub type ElfObject = struct {
      * `encode_rodata` honest-stop keeps every producer out), which keeps the
      * object byte-identical and every golden intact; the per-ISA bridge populates
      * it (partitioning the `Reloc*` by `RelocSect`) only once the T-B chain opens.
-     * Each entry resolves to one `.rela.rodata` row (R_X86_64_64 / R_RISCV_64
+     * Each entry resolves to one `.rela.rodata` row (R_X86_64_64
      * against the `.rodata` section symbol, the target's offset folded onto the
      * addend).
      */
@@ -1053,8 +1038,8 @@ pub type ElfObject = struct {
  * `.strtab`, `.shstrtab`, the `.rela.text` `Elf64_Rela` table) + the seven
  * `Elf64_Shdr` headers. Enough for `cc`/`ld` to link into a runnable executable
  * against the C-built `teko_rt` (D-2 option 1 bootstrap). No ISA knowledge remains
- * past this boundary — the per-ISA `emit_elf`/`emit_elf_riscv` adapters supply the
- * machine, flags, and numeric reloc types, so E1 (the ELF static linker) reuses
+ * past this boundary — the per-ISA `emit_elf` adapter supplies the machine, flags,
+ * and numeric reloc types, so E1 (the ELF static linker) reuses
  * this verbatim. A defined function's `st_value` stays the bare section-relative
  * `.text` offset (the exact inverse of Mach-O's rebased `n_value`).
  *

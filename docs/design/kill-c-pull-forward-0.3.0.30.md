@@ -25,9 +25,8 @@
 > ./bin/teko test .` **+ fixpoint gen1==gen2**.
 >
 > **Sources (read at authoring):** `src/lir/lower.tks` (TAST→LIR, "N1 subset" #221 — 60 honest-stops),
-> `src/lir/lir.tks`, `src/backend/isel_{x86_64,arm64,riscv}.tks` (32 honest-stops, dominated by the
+> `src/lir/lir.tks`, `` (32 honest-stops, dominated by the
 > `B1-fp` float family + i128), `src/backend/encode_*`, `objfile_{elf,macho,coff}.tks`,
-> `abi_{sysv64,aapcs64,win64,riscv64}.tks`, `regalloc*`, `lir_interp.tks`/`minst_interp.tks`,
 > `src/codegen/codegen.tks` (`cb_fn_name` the `__` mangle; `f.c_symbol` extern no-mangle at :7515),
 > the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + `vm-retirement.md:327`
 > (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkr-regression-format.md`,
@@ -42,11 +41,10 @@ The own AOT backend is **mature in its BOTTOM half, immature in its TOP half:**
 | layer | file(s) | state |
 |---|---|---|
 | **TAST → LIR lowering** | `lir/lower.tks` | **"N1 reference subset" (#221) — the big gap.** 60 NAMED honest-stops. Lowers only: integer/float **literals**, **integer** arithmetic/unary, locals, `to` numeric casts, **direct** calls (Teko-Teko + `exit`/`panic`), `let`, `return`, expr-statements, basic `if`/`match`. |
-| **isel** | `isel_{x86_64,arm64,riscv}.tks` | mature for **integer/control/memory**; 32 honest-stops in x86 dominated by the **`B1-fp` FLOAT family** + **i128** materialization. |
-| **encode** | `encode_{x86_64,arm64,riscv}.tks` | mature, tested (~80 KB each); full integer/mem/control instruction set. |
-| **regalloc** | `regalloc{,_x86,_riscv}.tks` | present, tested. |
-| **objfile** | `objfile_{elf,macho,coff}.tks`, `objfile_elf_riscv.tks` | emit **relocatable objects** with undef symbols + relocations; needs completion to the **whole-program** section/symbol/reloc set + **`.a` archive** emission. Final link is the **system `ld`**; the own **E1 linker** (`objfile_elf.tks:383`) is a LATER *link-independence* epic, **NOT a kill-C prerequisite** (§4). |
-| **ABI** | `abi_{sysv64,aapcs64,win64,riscv64}.tks` | classification tables present, tested — **no varargs** rule set yet. |
+| **isel** | `` | mature for **integer/control/memory**; 32 honest-stops in x86 dominated by the **`B1-fp` FLOAT family** + **i128** materialization. |
+| **encode** | `` | mature, tested (~80 KB each); full integer/mem/control instruction set. |
+| **regalloc** | `` | present, tested. |
+| **objfile** | `objfile_{elf,macho,coff}.tks`, um backend ELF writer | emit **relocatable objects** with undef symbols + relocations; needs completion to the **whole-program** section/symbol/reloc set + **`.a` archive** emission. Final link is the **system `ld`**; the own **E1 linker** (`objfile_elf.tks:383`) is a LATER *link-independence* epic, **NOT a kill-C prerequisite** (§4). |
 | **oracle** | `lir_interp.tks`, `minst_interp.tks` | interpret the covered subset, **mirroring the C backend's honest-stops** — how the native path is validated **without producing binaries** today. |
 
 **The 60 `lower.tks` honest-stops, categorized:**
@@ -89,7 +87,7 @@ float/i128 isel** (own-native, no external dep). Objfile emission must complete 
 | item | verdict | detail |
 |---|---|---|
 | complete whole-program `.o` emission | **PODE .30** | extend `objfile_{elf,macho,coff}` to the whole program |
-| `.a` static-archive emission | **PODE .30** | add the archive writer |
+| `.a` static-archive emission | **DONE (.30)** | GNU-format ELF writer (KP16) + the BSD `__.SYMDEF SORTED` Mach-O and MS two-linker-member COFF `.lib` writers, ported from the `theory/kp16-ar-macho-coff` real-toolchain validation branch (run d44f63c9: SUCCESS on a real macOS runner — `ar`/`nm`/`ld64` accepted and linked the archive — and a real Windows runner — `lld-link` accepted and linked it). KP16's own Mach-O/COFF honest-stop ("no host toolchain to cross-validate here") is CLOSED; `src/build/project.tks::emit_static_lib` dispatches all three formats (`ArchiveFormat::Gnu`/`Bsd`/`Coff`) |
 | build-step swap ("emit `.o`/`.a` + system `ld`", behind a flag) | **PODE .30 (prep)** | default flips when lowering=100% |
 | runnable native binary / full self-host | **ACHIEVABLE with system `ld`** (NOT E1) | gated only on lowering=100% (float+i128) + `.o`/`.a` emission |
 
@@ -292,9 +290,8 @@ preserves internal mangle if the owner prefers.
 
 | lane host | arch | notes |
 |---|---|---|
-| Linux | **x86_64**, **arm64**, **riscv64** | full matrix; riscv via the riscv objfile/encode/abi |
 | macOS | **arm64** | AAPCS64 (darwin vararg-on-stack variant) |
-| Windows | **x86_64**, **arm64** | COFF; Win64 vararg (float-dup-into-GPR); `#cconv("stdcall")` |
+| Windows | **x86_64** | COFF; Win64 vararg (float-dup-into-GPR); `#cconv("stdcall")`
 
 Own-backend-coupled fixtures (`variadic_*` → KC1) are **"green when the crumb lands"** via `Given
 pending`. **No fixture is gated on E1** — the link is the system `ld` throughout; when E1 lands the same
@@ -393,7 +390,7 @@ calls through the fn-pointer table) · `revffi_export_variant_tagged`.
 ## 6. Summary (counts + the re-mapped picture)
 
 - **Own-backend honest-stops:** **~60 in `lir/lower.tks`** (the TAST→LIR "N1 subset" gap) + **~32 in
-  `isel_x86_64.tks`** (`B1-fp` FLOAT family + i128), mirrored in isel-arm64/riscv + the interp oracle.
+  `isel_x86_64.tks`** (`B1-fp`
 - **Closeable in .30 (KP1–KP17):** **~40 of the 60** lowering honest-stops **PLUS the kill-C substrate**
   (whole-program `.o`/`.a` emission KP16 + the system-`ld` build-step swap prep KP17) + the FFI
   own-native codegen (raw-ptr ops, `#repr("c")`/union, `cabi`/`exp`-C-ABI export, the `.h` emitter,

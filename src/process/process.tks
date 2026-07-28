@@ -10,16 +10,41 @@
 // `process::run` at test time must compile with `teko build` rather than
 // interpreting with `teko run` (C7.1a contract).
 
-// teko::process::run(args: []str) -> i32
-//   Fork/exec args[0] with the given argument vector and wait for it to exit.
-//   Returns the child's exit status (0–127). Returns 127 when args is empty or
-//   when exec fails (POSIX convention). The codegen CG_FFI_RUN path splits the
-//   []str slice into (ptr, len) before calling tk_rt_run.
+/**
+ * run — fork/exec `args[0]` with the given argument vector and wait for it to exit.
+ *
+ * The returned status is the CHILD's: 0–255 for a child that exited, 128+signo for one killed by a
+ * signal (so an aborting child reports 134, the same number `sh` would report for it).
+ *
+ * That 128+signo shape is POSIX's, and this call reports whatever the HOST reports — on Windows
+ * there are no signals and `_spawnvp` hands back the process exit code, so an aborting child is
+ * NOT 134 there. Do not treat any particular number as "the program panicked": a panic identifies
+ * itself on stderr, with the `TK_PANIC_MARKER` line (src/runtime/teko_rt.h). PR #94 cost a lane
+ * learning this — a Windows run that panicked exactly as intended reported 127.
+ *
+ * `TK_RT_SPAWN_FAILED` (-1, src/runtime/teko_rt.h) means something else entirely — the runtime never
+ * got a child running (`args` empty, or the spawn/fork/wait failed). It is NEGATIVE on purpose: no
+ * child status can be, so "I could not run it" is distinguishable from every code a child could
+ * produce. It used to be 127, which is simultaneously `sh`'s command-not-found, the POSIX
+ * exec-failed convention, and a legal choice for a child — three diagnoses wearing one number, and
+ * a CI failure reading `exit 127` was therefore unanswerable.
+ *
+ * The codegen CG_FFI_RUN path splits the `[]str` slice into (ptr, len) before calling `tk_rt_run`.
+ *
+ * @param args  the argument vector; `args[0]` is the executable
+ * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
+ */
 pub extern fn run(args: []str) -> i32 = "tk_rt_run" from "teko_rt"
 
-// teko::process::run_quiet(args: []str) -> i32
-//   Same contract as run(), but the child's stdout/stderr are redirected to the null device.
-//   (issue #73) Used by the build backend's cc flag-family probe — compiling a throwaway empty
-//   translation unit to test whether the host cc accepts clang-only flags — so a deliberately-
-//   rejected flag doesn't leak an "unrecognized option" diagnostic into the user's build output.
+/**
+ * run_quiet — the same contract as `run`, with the child's stdout/stderr redirected to the null
+ * device.
+ *
+ * (issue #73) Used by the build backend's cc flag-family probe — compiling a throwaway empty
+ * translation unit to test whether the host cc accepts clang-only flags — so a deliberately-rejected
+ * flag does not leak an "unrecognized option" diagnostic into the user's build output.
+ *
+ * @param args  the argument vector; `args[0]` is the executable
+ * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
+ */
 pub extern fn run_quiet(args: []str) -> i32 = "tk_rt_run_quiet" from "teko_rt"
