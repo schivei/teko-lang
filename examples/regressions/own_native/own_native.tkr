@@ -269,3 +269,39 @@ Feature: fat match-value — a `str`/`[]T`-valued match is a fat-pointer produce
   Scenario: fat_match_value (own-native — the match-expression fat producer)
     When built and run
     Then exit = 42
+
+
+Feature: variant fat member — a `str`/`[]T` case keeps its LENGTH across the wrapper
+
+  # (0.3.1.0 degrau 6) The own backend's variant/optional wrapper was `{ i32 tag; ONE payload word }`
+  # sized per CONSTRUCTION, so a `str`/`[]T` member's LENGTH was dropped where it was built. The stop
+  # that surfaced it — `slice match pattern not yet lowered` — was in the PATTERN, and giving that
+  # pattern its arm alone would have bound an `xs` whose `.len` reads whatever sits past the pointer:
+  # it would have compiled and miscompiled in silence, degrau 3's trap wearing degrau 1's clothes.
+  #
+  # The owner's ruling of 2026-07-28: a UNIFORM 24-byte `{ tag@0; ptr@8; len@16 }` for every variant
+  # and every case — one shape, one set of offsets, 8 bytes wasted on every case that has no fat
+  # member, and no case whose offsets differ from its siblings'.
+  #
+  # The row asserts LENGTHS, per call and per case, because a length is the half a lossy construction
+  # cannot supply by luck; the contents are walked through those lengths so a plausible length with
+  # the wrong pointer is caught too.
+  Scenario: variant_fat_member (own-native — the uniform 24-byte wrapper keeps a fat member's length)
+    When built and run
+    Then exit = 42
+
+
+Feature: str equality — `str == str` has a native lowering
+
+  # (0.3.1.0 degrau 7) `lower_compare` asked `prim_kind_of` for its operands' ONE machine kind, and a
+  # `str` has none: it is two words. Every string comparison in the compiler's own source therefore
+  # honest-stopped ("`str` has no single PrimKind, asked by the comparison chain"), starting with
+  # `teko::backend::name_in_symbols`'s `syms[i].name == name`.
+  #
+  # The arm calls the runtime's OWN `tk_str_eq` with the two ABI-flattened (ptr, len) pairs — the
+  # same flattening every fat argument already gets — and normalizes the C `bool` return through its
+  # LOW BYTE, because the bits above it are undefined and testing the whole register answered "equal"
+  # for two strings that differ.
+  Scenario: str_equality (own-native — string equality through the runtime's tk_str_eq)
+    When built and run
+    Then exit = 42

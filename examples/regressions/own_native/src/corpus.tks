@@ -645,3 +645,185 @@ fn f_fat_match_value() -> i64 {
     if fat_match_with_reassign(4) != 22 { return 10 }
     0
 }
+
+/**
+ * fat_variant_digits — a variant whose ACTIVE member is a `[]T` of a caller-chosen length. The
+ * construction is what degrau 6 is about: the wrapper must keep the slice's LENGTH beside its
+ * pointer, or nothing downstream can recover it.
+ *
+ * @param n  the element count to build
+ * @return   the `n` first triples
+ * @throws   when `n` is zero
+ */
+fn fat_variant_digits(n: i64) -> []i64 | error {
+    if n == 0 { return error { message = "empty" } }
+    mut xs: []i64 = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        xs = teko::list::push(xs, i * 3)
+        i++
+    }
+    return xs
+}
+
+/**
+ * fat_variant_digits_len — the LENGTH a slice member reports once bound out of the variant by a
+ * `[]T` pattern. THE CHECK THAT PROVES THE FIX: a wrapper that stored only the pointer binds an
+ * `xs` whose `.len` is whatever sat past it, so a per-call length is the assertion a lossy
+ * construction cannot satisfy by luck.
+ *
+ * @param n  the element count to ask for
+ * @return   the bound slice's length, or -1 for the error case
+ */
+fn fat_variant_digits_len(n: i64) -> i64 {
+    match fat_variant_digits(n) {
+        []i64 as xs => xs.len to i64
+        error => 0 - 1
+    }
+}
+
+/**
+ * fat_variant_digits_sum — the sum of a bound slice member's own elements, walked through the
+ * bound LENGTH. Pins the CONTENTS beside the length: a binding that recovered a plausible length
+ * but the wrong pointer would still read the wrong elements.
+ *
+ * @param n  the element count to ask for
+ * @return   the sum of the bound slice's elements, or -1 for the error case
+ */
+fn fat_variant_digits_sum(n: i64) -> i64 {
+    match fat_variant_digits(n) {
+        []i64 as xs => {
+            mut acc: i64 = 0
+            mut i: u64 = 0
+            loop {
+                if i >= xs.len { break }
+                acc = acc + xs[i]
+                i++
+            }
+            acc
+        }
+        error => 0 - 1
+    }
+}
+
+/**
+ * fat_variant_word — a variant whose active member is a `str`, the case a pattern selects BY NAME
+ * (`str as s`) rather than by the slice shape. Same wrapper, other half of the same hole.
+ *
+ * @param n  the switch selecting the word
+ * @return   a word whose length depends on `n`
+ * @throws   when `n` is zero
+ */
+fn fat_variant_word(n: i64) -> str | error {
+    if n == 0 { return error { message = "empty" } }
+    if n == 1 { return "a" }
+    return "abcde"
+}
+
+/**
+ * fat_variant_word_len — the LENGTH a `str` member reports once bound out of the variant.
+ *
+ * @param n  the switch selecting the word
+ * @return   the bound string's length, or -1 for the error case
+ */
+fn fat_variant_word_len(n: i64) -> i64 {
+    match fat_variant_word(n) {
+        str as s => s.len to i64
+        error => 0 - 1
+    }
+}
+
+/**
+ * fat_null_union_word — a null-BEARING union whose present member is a `str`: the third
+ * construction path into the same wrapper (a fixed tag 0/1, no case name at all).
+ *
+ * @param n  the switch selecting presence
+ * @return   a three-byte word, or `null`
+ */
+fn fat_null_union_word(n: i64) -> str | null {
+    if n == 0 { return null }
+    return "xyz"
+}
+
+/**
+ * f_variant_fat_member — a variant member that is FAT (`str`/`[]T`) keeps its LENGTH across the
+ * wrapper (0.3.1.0 degrau 6, the uniform 24-byte `{tag; ptr; len}`).
+ *
+ * Every check reads a length or a byte that only a wrapper carrying BOTH halves can answer: the
+ * per-call slice lengths, the sum walked through one of them, the two `str` lengths, a byte behind
+ * the bound pointer, and the null union's present case. The error/`null` arms are asserted too, so
+ * a tag test that drifted when the wrapper widened is visible as a wrong arm rather than as a wrong
+ * length.
+ *
+ * The strings are compared through `.len` and a BYTE, never with `!=` on two strings: the native
+ * backend has no `str` comparison yet, and a corpus member must claim its own subject only.
+ *
+ * @return 0 when every shape recovers its own length and contents, else the number of the failing
+ *         check
+ */
+fn f_variant_fat_member() -> i64 {
+    if fat_variant_digits_len(3) != 3 { return 1 }
+    if fat_variant_digits_len(7) != 7 { return 2 }
+    if fat_variant_digits_len(0) != 0 - 1 { return 3 }
+    if fat_variant_digits_sum(4) != 18 { return 4 }
+    if fat_variant_word_len(1) != 1 { return 5 }
+    if fat_variant_word_len(2) != 5 { return 6 }
+    if fat_variant_word_len(0) != 0 - 1 { return 7 }
+    match fat_null_union_word(1) {
+        str as s => {
+            if s.len != 3 { return 8 }
+            if s[2] != b'z' { return 9 }
+        }
+        null => { return 10 }
+    }
+    match fat_variant_word(2) {
+        str as s => { if s[4] != b'e' { return 11 } }
+        error => { return 12 }
+    }
+    0
+}
+
+/**
+ * str_eq_word — a `str` produced by a CALL, so the equality's operands are not both literals the
+ * folder could have collapsed before the backend ever saw them.
+ *
+ * @param n  the switch selecting the word
+ * @return   the word naming `n`
+ */
+fn str_eq_word(n: i64) -> str {
+    if n == 0 { return "alpha" }
+    if n == 1 { return "alphb" }
+    ""
+}
+
+/**
+ * f_str_equality — `str == str` and `str != str` lowered natively (0.3.1.0 degrau 7).
+ *
+ * The native backend had NO string comparison: `lower_compare` asked `prim_kind_of` for the
+ * operand's single machine kind and a `str` has none (it is two words), so every `==` between
+ * strings honest-stopped. The lowering now calls the runtime's own `tk_str_eq` with the two
+ * ABI-flattened pairs.
+ *
+ * The rows that matter beyond "equal is equal": two DIFFERENT strings of the SAME length (a
+ * length-only comparison would call them equal), two strings that differ in the LAST byte only (a
+ * prefix comparison would call them equal), two equal strings held in different buffers (a pointer
+ * comparison would call them different), and the empty pair (whose pointer is null).
+ *
+ * @return 0 when every comparison answers correctly, else the number of the failing check
+ */
+fn f_str_equality() -> i64 {
+    let a = "alpha"
+    let b = str_eq_word(0)
+    let c = str_eq_word(1)
+    if !(a == b) { return 1 }
+    if a != b { return 2 }
+    if a == c { return 3 }
+    if !(a != c) { return 4 }
+    if a == "alph" { return 5 }
+    if a == "alphaa" { return 6 }
+    if !("" == str_eq_word(9)) { return 7 }
+    if "" != str_eq_word(9) { return 8 }
+    if "" == a { return 9 }
+    0
+}
