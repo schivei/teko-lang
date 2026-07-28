@@ -334,6 +334,20 @@ fi
 # emitted-c flags exist only to reach the verdict above and are worthless once it is printed. The
 # `.c` files are the product — `gen3.c` is the next `bootstrap/teko.c`. So the sweep is enumerated
 # rather than blanket, and `*.c` is simply not in it.
+#
+# THE GENERATION BINARIES SURVIVE TOO, and that is a second reversal. They were scratch while the
+# only question was the verdict; they became the INSTRUMENT the moment the question turned into
+# "does a DIFFERENT generation behave differently?". Owner ruling 2026-07-28: *"o que é a compilação
+# do que um binário executando em runtime a identidade de um código? Entende o paradoxo? Se o erro é
+# em runtime, ele pode não morar onde estamos olhando."*
+#
+# The compiler is a binary executing, so a stop while compiling some project is that binary's OWN
+# run time — and gen1's checker was lowered by an older compiler than the one whose source anyone
+# reads. Running the same probe under gen1 and under gen2 is what tells a defect in the SOURCE apart
+# from a defect in the LINEAGE, and it cannot be done if the gate deletes the generations.
+#
+# ~2.5 MB apiece, on a runner that is discarded minutes later. The logs and the emitted-c marks stay
+# in the sweep: those really are spent once the verdict is printed.
 rm -rf "$W/out"
-rm -f "$W/gen1" "$W/gen2" "$W/gen3" "$W"/*.log "$W"/*.emitted-c
+rm -f "$W"/*.log "$W"/*.emitted-c
 exit 0

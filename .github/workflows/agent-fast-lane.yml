@@ -136,15 +136,6 @@ jobs:
           sh scripts/build_with_seed_fallback.sh out
           ls -la out/
 
-      # THE PROBE MATRIX — TEMPORARY, and it runs BEFORE the fixpoint on purpose: it costs seconds,
-      # it never fails, and when the fixpoint stops for a lowering reason this table is what says
-      # WHICH shape did it. Owner ruling 2026-07-28: *"monte um projeto de teste com diversas
-      # variações e possibilidade com match e aplique a teoria."* Delete with the probe directory.
-      - name: Probe — which `match` shapes does the native backend lower? (temporary, never fails)
-        continue-on-error: true
-        shell: bash
-        run: sh examples/probes/match_shapes/run.sh out/teko
-
       # THE QUESTION. Everything above is setup; this is the dispatch's actual payload. On failure
       # it prints the named N2 address of whatever the native backend cannot lower yet — which is
       # the ONE fact a dispatch exists to retrieve.
@@ -166,6 +157,37 @@ jobs:
       #
       # Both generations go up, not just the candidate: when they are byte-identical that is evidence
       # the C emission has reached its own fixpoint, and when they are not, the pair IS the bug report.
+      # THE PROBE MATRIX — TEMPORARY, and it runs TWICE, under two different compiler generations.
+      #
+      # Owner ruling 2026-07-28: *"o que é a compilação do que um binário executando em runtime a
+      # identidade de um código? Entende o paradoxo? Se o erro é em runtime, ele pode não morar onde
+      # estamos olhando."*
+      #
+      # THE PARADOX, and why one run of the matrix would have been worthless. The compiler is a
+      # binary executing: compiling a project IS `teko`'s own run time. The binary doing it is not
+      # the checker source anyone reads — gen1 came out of `cc` over wagon 15's committed `teko.c`,
+      # so its checker was lowered by an OLDER compiler. Reading `check_pattern` and `type_join` and
+      # concluding "the source is correct" says nothing about what the RUNNING binary does, and this
+      # wagon has already caught two defects of that exact family (the `byte` carrier width, `push`
+      # returning the wrong length).
+      #
+      # So the same ten shapes are compiled by gen1 AND by gen2. Identical tables mean the behaviour
+      # is in the source and the hunt belongs in the checker. DIFFERENT tables mean the defect lives
+      # in the LINEAGE — one generation mislowered something the next one got right — and no amount
+      # of reading the checker would ever have shown it.
+      #
+      # It runs AFTER the fixpoint because gen2 only exists once the fixpoint has built it, and it
+      # never fails: an instrument, not a gate. Delete with the probe directory.
+      - name: Probe — the ten `match` shapes under gen1 (temporary, never fails)
+        continue-on-error: true
+        shell: bash
+        run: sh examples/probes/match_shapes/run.sh out/teko gen1
+
+      - name: Probe — the SAME ten shapes under gen2 (the paradox test, temporary, never fails)
+        continue-on-error: true
+        shell: bash
+        run: sh examples/probes/match_shapes/run.sh .fixpoint/gen2 gen2
+
       # STAGED OUT OF `.fixpoint/` FIRST, and the copy is not ceremony — it is the fix for a silent
       # miss. `actions/upload-artifact` excludes hidden files and anything under a dot-directory by
       # default (v4.4+), and the fixpoint's work dir is `.fixpoint`. The first attempt therefore
