@@ -41,6 +41,28 @@ axes that could trigger that demand:
 | `m09_match_nested`           | a match whose arm body is another match |
 | `m10_null_only_compare`      | no match at all — only `x == null` |
 
+### The `nNN` axis — ALIASES and NESTING (owner, 2026-07-28)
+
+*"tem outro caso que precisa de atenção e acredito que falhe hoje: `type a = i32 | null` / `let b:
+u64 | a | null`. São formas válidas que acredito que o lowering falhe ou em outro ponto."*
+
+Neither axis was covered by the first 29 cases, and the `bulk` hunt proved one of them the hard way:
+`q004` stops with *"a `null` in this position needs the null-union wrapper the placement does not
+declare a type for"*, and that shape — a union inside a struct field inside another union — appears
+nowhere in `mNN`/`tNN`.
+
+| case | axis |
+|---|---|
+| `n01_alias_of_union`        | a NAMED alias that IS a union (`type A = i32 \| null`), used alone |
+| `n02_union_of_alias`        | that alias as a MEMBER of another union (`u64 \| A \| null`) — present |
+| `n03_union_of_alias_absent` | same, absent — and it asks whether the DUPLICATE null collapses to one |
+| `n04_nested_field_union`    | the `q004` shape: union field inside a struct that is itself a union member |
+| `n05_nested_field_inner_null` | same nesting, but the INNER union is the one holding null |
+
+`n02`/`n03` are the interesting pair: `u64 | A | null` expands to `u64 | (i32 | null) | null`, so it
+tests BOTH whether a named union member is flattened and whether two nulls collapse. If the answer
+differs between them, the flattening is position-dependent.
+
 ### The divergence axis (owner, 2026-07-28)
 
 *"Faltou um m11, onde uma das pernas faz exit() panic() sem saída, e um m12 onde faz return de uma
