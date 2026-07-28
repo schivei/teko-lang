@@ -80,16 +80,27 @@ run_flag
 # moment the second landed — correctly: it was pinning a message that names a thing that must no
 # longer exist.
 #
-# So the assertion is rewritten to guard the RULING instead of echoing the prose:
+# AND THEN A THIRD RULING LANDED, which is why this block reads the way it does now. The C backend
+# came BACK (`theory/volta-o-backend-c`), and with it the plan the fixpoint gate records: *".31 com
+# as duas rotas, .32 ensina o nativo, .33 remove"*. So on 0.3.1 there are TWO backends and
+# `TEKO_BACKEND` is the live way to choose between them — `scripts/fixpoint_gate.sh` pins it to `c`
+# to get a gen2 at all. The 2026-07-27 ruling is not cancelled, it is DEFERRED to .33.
+#
+# KNOWN-STOP (.33), by owner ruling 2026-07-28: *"Converter em KNOWN-STOP explícito."* The lane
+# stops demanding the end state and starts ASSERTING TODAY'S, which is the same discipline the
+# three native-backend fixtures use — a scenario that keeps asking its question every run, and
+# whose answer changing is the event we want to be told about:
 #
 #   1. exit 2 — rejected at CLI dispatch, never silently ignored nor mistaken for the project
-#      positional (the original point of this block, unchanged);
-#   2. the message says the flag is gone AND why (`only one backend`) — a user who typed
-#      `--backend` gets told the concept died, not just that the spelling is wrong;
-#   3. the message MUST NOT mention `TEKO_BACKEND`. This is the part that earns its keep: it
-#      turns the lane into an active guard that the env var stays dead. Pointing a user at an
-#      env var the compiler no longer reads is worse than saying nothing — it is an honest-looking
-#      instruction that cannot work (M.3).
+#      positional (the original point of this block, and the one part no ruling has touched);
+#   2. the message names the flag as REMOVED, so a user who typed `--backend` is told the flag
+#      died rather than that the spelling is wrong;
+#   3. the message DOES point at `TEKO_BACKEND`, because on .31 that is true and a lane that
+#      forbade it would be forbidding the only working instruction there is.
+#
+# THE DAY .33 REMOVES THE ENV VAR, ASSERTION 3 GOES RED. That failure is the SIGNAL to restore the
+# end-state form this replaced — `grep -q "only one backend"` plus the negative assertion that the
+# message must NOT mention `TEKO_BACKEND` — and to delete this note with it.
 #
 # The rejection fires BEFORE any project directory is resolved, so the positional need not be a
 # real buildable project — the repo root itself (always present) is enough.
@@ -104,11 +115,10 @@ BACKEND_FIXTURE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 assert_backend_rejected() {
     shape="$1"
     [ "$RC" -eq 2 ] || fail "'$shape' exit $RC (want 2)"
-    printf '%s\n' "$ERR" | grep -q "only one backend" \
-        || fail "'$shape' stderr does not say the backend concept is gone: $ERR"
-    if printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND"; then
-        fail "'$shape' stderr still points at TEKO_BACKEND, which was removed: $ERR"
-    fi
+    printf '%s\n' "$ERR" | grep -q -- "--backend was removed" \
+        || fail "'$shape' stderr does not say the FLAG is gone: $ERR"
+    printf '%s\n' "$ERR" | grep -q "TEKO_BACKEND" \
+        || fail "'$shape' stderr does not point at TEKO_BACKEND — if .33 removed the env var, PROMOTE this lane back to the end-state form documented above: $ERR"
 }
 
 run_flag build --backend=native "$BACKEND_FIXTURE_DIR"

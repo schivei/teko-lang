@@ -652,8 +652,24 @@ jobs:
           curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" | tar -xJ
           echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
 
-      - name: Verify wasmtime is on PATH (fail loud before the fail-closed run)
-        run: wasmtime --version
+      # THE SECOND CAPABILITY THIS LANE DECLARES AND DID NOT HAVE. `own_cross_x86_64_windows_emits_coff`
+      # needs the mingw cross-linker, and under `REGRESSION_REQUIRE_TOOLS=1` a missing tool is a hard
+      # failure by design — so the lane was failing on a capability it never installed while calling
+      # itself "all capabilities".
+      #
+      # NOT PINNED AS A KNOWN-STOP, and the distinction is the owner's own fail-closed ruling: *"um
+      # row que ninguém correu é inconclusivo, e reportar verde sobre ele é a mesma classe de mentira"*.
+      # The native-backend stops this wagon pins are gaps only `.32` can close; this one closes with an
+      # `apt-get` line, and the fast lane already installs it. Pinning it would enshrine a CI defect in
+      # the shape reserved for compiler defects.
+      - name: Install the mingw cross-linker (the F5 x86_64-windows scenario's linker)
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Verify both are on PATH (fail loud before the fail-closed run)
+        run: |
+          set -eu
+          wasmtime --version
+          x86_64-w64-mingw32-gcc --version | head -n1
 
       - name: Download the published x86_64 asset
         uses: actions/download-artifact@v4
@@ -1094,10 +1110,42 @@ jobs:
           chmod +x dl/linux-x86_64-glibc/teko
           dl/linux-x86_64-glibc/teko --version
 
-      - name: Run the gate on the published asset (TEKO_MEM_PARANOID)
+      # KNOWN-STOP (.32) — THIS STEP ASSERTS THE STOP, NOT THE SELF-HOST. Owner ruling 2026-07-28:
+      # *"Converter em KNOWN-STOP explícito."*
+      #
+      # The step used to demand a NATIVE self-host, and the native backend cannot build the compiler
+      # yet — `scripts/fixpoint_gate.sh` says so in as many words: *"gen1 (the wagon's own compiler)
+      # defaults to the NATIVE backend, which cannot yet build the compiler"*. That is why the .31
+      # plan is *".31 com as duas rotas, .32 ensina o nativo, .33 remove"*. So this lane was asking
+      # for something the wagon's own design says arrives one version later.
+      #
+      # NOT SKIPPED, NOT PINNED TO THE C ROUTE. Pinning `TEKO_BACKEND=c` would make the step pass
+      # while measuring a road we are retiring — and `fixpoint_gate.sh` records what that costs:
+      # the variable *"LEAKS INTO EVERYTHING THAT RUNS BELOW IT"* and turned a regressor green
+      # without fixing it. So the native route stays selected and the step asserts what it ACTUALLY
+      # produces today: the aggregate-push degrau, by name and by site.
+      #
+      # THE DAY .32 CLOSES IT, THIS GOES RED — the build succeeds, the expected stop is absent, and
+      # the failure is the SIGNAL to restore the two lines this replaced:
+      #     run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release
+      - name: KNOWN-STOP (.32) — the native self-host stops at the aggregate-push degrau
         env:
           TEKO_MEM_PARANOID: '1'
-        run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release
+        run: |
+          set -eu
+          if ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release > mp.log 2>&1; then
+            echo "KNOWN-STOP LIFTED: the native backend self-hosted."
+            echo "This step exists to assert that it CANNOT yet. Promote it:"
+            echo "  restore 'run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release'"
+            exit 1
+          fi
+          if ! grep -q 'needs slice elements held BY VALUE' mp.log; then
+            echo "the native self-host failed, but NOT at the degrau this step pins:"
+            tail -n 20 mp.log
+            exit 1
+          fi
+          echo "KNOWN-STOP held — the native self-host stops where .32 will pick it up:"
+          grep -m1 'native backend N1' mp.log
 
       - name: Run the single regression executor (TEKO_MEM_PARANOID)
         env:
