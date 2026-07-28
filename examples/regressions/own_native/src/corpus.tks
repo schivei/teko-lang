@@ -827,3 +827,198 @@ fn f_str_equality() -> i64 {
     if "" == a { return 9 }
     0
 }
+
+/**
+ * DvCircle — a nominal case of the declared variant `DvShape`, carrying one integer field.
+ */
+type DvCircle = struct {
+    /** r — the circle's radius, the value a `DvCircle` arm must read back. */
+    r: i64
+}
+
+/**
+ * DvSquare — the second nominal case of `DvShape`, with a DIFFERENT field name from `DvCircle` so
+ * an arm that read the wrong case's payload cannot compile by accident.
+ */
+type DvSquare = struct {
+    /** s — the square's side, the value a `DvSquare` arm must read back. */
+    s: i64
+}
+
+/**
+ * DvTri — the third nominal case, present so the corpus can enter a LAST arm that is neither the
+ * first-arm-wins degenerate nor a two-case coin flip.
+ */
+type DvTri = struct {
+    /** t — the triangle's base, the value a `DvTri` arm must read back. */
+    t: i64
+}
+
+/**
+ * DvShape — a DECLARED variant (`type X = variant …`) over three nominal cases.
+ *
+ * This is the shape the native backend miscompiled in silence: a declared variant reaches the
+ * lowering as a nominal `Named`, not as the `checker::Variant` an inline `A | B` arrives as, so
+ * no tag+payload wrapper was built and every bind pattern answered "always matches" — handing every
+ * value to the FIRST arm with no diagnostic at all.
+ */
+type DvShape = variant DvCircle | DvSquare | DvTri
+
+/**
+ * dv_pick — a `DvShape` chosen by ordinal, so the case is decided at RUN time and no arm can be
+ * folded away before the backend sees it.
+ *
+ * @param n  0 for a circle, 1 for a square, anything else for a triangle
+ * @return   the constructed shape
+ */
+fn dv_pick(n: i64) -> DvShape {
+    if n == 0 { return DvCircle { r = 7 } }
+    if n == 1 { return DvSquare { s = 9 } }
+    DvTri { t = 11 }
+}
+
+/**
+ * f_declared_variant_arms — every arm of a declared-variant `match` is entered by the case that
+ * belongs to it, and the value each arm BINDS is that case's own payload.
+ *
+ * THE BOUND VALUE IS PART OF THE CLAIM. An arm test that always answers true sends every subject to
+ * the first arm, and the whole-value bind it pairs with reads the unwrapped payload at offset 0 —
+ * so a check that only counted which arm ran would pass for the first case and lie about the rest.
+ * Each arm therefore asserts the payload it must see, and every arm — first, middle and LAST — is
+ * entered by its own case.
+ *
+ * @return 0 when every case runs its own arm with its own payload, else the number of the failing
+ *         check
+ */
+fn f_declared_variant_arms() -> i64 {
+    match dv_pick(0) {
+        DvCircle as c => { if c.r != 7 { return 1 } }
+        DvSquare as s => { return 2 }
+        DvTri as t => { return 3 }
+    }
+    match dv_pick(1) {
+        DvCircle as c => { return 4 }
+        DvSquare as s => { if s.s != 9 { return 5 } }
+        DvTri as t => { return 6 }
+    }
+    match dv_pick(2) {
+        DvCircle as c => { return 7 }
+        DvSquare as s => { return 8 }
+        DvTri as t => { if t.t != 11 { return 9 } }
+    }
+    0
+}
+
+/**
+ * dv_arm_code — the arm a declared-variant subject selects, as a match-VALUE rather than as a
+ * statement: the value shape merges its arms through a block argument, a different lowering from
+ * the statement shape, and it reads the SAME tag.
+ *
+ * @param n  the ordinal `dv_pick` switches on
+ * @return   1 for a circle, 2 for a square, 3 for a triangle
+ */
+fn dv_arm_code(n: i64) -> i64 {
+    match dv_pick(n) {
+        DvCircle as c => 1
+        DvSquare as s => 2
+        DvTri as t => 3
+    }
+}
+
+/**
+ * f_declared_variant_match_value — the match-VALUE and the BINDINGLESS/field-pattern spellings of a
+ * declared-variant arm select the same case the bind-pattern spelling does.
+ *
+ * A bindingless case (`DvSquare =>`) and a field destructure (`DvCircle { r }`) resolve their case
+ * through paths of their own, so each is claimed here: the first used to inherit the same
+ * always-matches degeneration, and the second used to honest-stop outright ("field match pattern
+ * over a non-variant subject") because a declared variant never looked like a variant at all.
+ *
+ * @return 0 when every spelling picks its own case, else the number of the failing check
+ */
+fn f_declared_variant_match_value() -> i64 {
+    if dv_arm_code(0) != 1 { return 1 }
+    if dv_arm_code(1) != 2 { return 2 }
+    if dv_arm_code(2) != 3 { return 3 }
+    match dv_pick(2) {
+        DvCircle => { return 4 }
+        DvSquare => { return 5 }
+        DvTri => { }
+    }
+    match dv_pick(0) {
+        DvCircle { r } => { if r != 7 { return 6 } }
+        DvSquare { s } => { return 7 }
+        DvTri { t } => { return 8 }
+    }
+    match dv_pick(1) {
+        DvCircle { r } => { return 9 }
+        DvSquare { s } => { if s != 9 { return 10 } }
+        DvTri { t } => { return 11 }
+    }
+    0
+}
+
+/**
+ * DvBoxOrErr — a declared variant mixing NOMINAL cases with the built-in `error` case: the two
+ * families resolve a case by different rules (a nominal by name, `error` by keyword), and a table
+ * that dropped the non-nominal member would mis-tag every case declared after it.
+ */
+type DvBoxOrErr = variant DvCircle | DvSquare | error
+
+/**
+ * dv_or_err — a `DvBoxOrErr` chosen by ordinal.
+ *
+ * @param n  0 for the error case, 1 for a circle, anything else for a square
+ * @return   the constructed value, or its `error` case
+ */
+fn dv_or_err(n: i64) -> DvBoxOrErr {
+    if n == 0 { return error { message = "dv" } }
+    if n == 1 { return DvCircle { r = 7 } }
+    DvSquare { s = 9 }
+}
+
+/**
+ * dv_maybe_circle — the INLINE `T | null` union next to the declared family, so the corpus claims a
+ * `null` case mixed with a nominal one as well as an `error` case.
+ *
+ * @param n  0 for the absent case, anything else for a circle
+ * @return   the circle, or `null`
+ */
+fn dv_maybe_circle(n: i64) -> DvCircle | null {
+    if n == 0 { return null }
+    DvCircle { r = 7 }
+}
+
+/**
+ * f_declared_variant_error_and_null — the `error` case of a declared variant, and the `null` case of
+ * a union, each entered by its own value while the nominal cases beside them keep their own arms.
+ *
+ * @return 0 when every case runs its own arm with its own payload, else the number of the failing
+ *         check
+ */
+fn f_declared_variant_error_and_null() -> i64 {
+    match dv_or_err(0) {
+        error as e => { }
+        DvCircle as c => { return 1 }
+        DvSquare as s => { return 2 }
+    }
+    match dv_or_err(1) {
+        error as e => { return 3 }
+        DvCircle as c => { if c.r != 7 { return 4 } }
+        DvSquare as s => { return 5 }
+    }
+    match dv_or_err(2) {
+        error as e => { return 6 }
+        DvCircle as c => { return 7 }
+        DvSquare as s => { if s.s != 9 { return 8 } }
+    }
+    match dv_maybe_circle(0) {
+        null => { }
+        DvCircle as c => { return 9 }
+    }
+    match dv_maybe_circle(1) {
+        null => { return 10 }
+        DvCircle as c => { if c.r != 7 { return 11 } }
+    }
+    0
+}

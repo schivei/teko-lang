@@ -305,3 +305,39 @@ Feature: str equality — `str == str` has a native lowering
   Scenario: str_equality (own-native — string equality through the runtime's tk_str_eq)
     When built and run
     Then exit = 42
+
+
+Feature: declared variant match arms — a `type X = variant …` subject selects the arm its own case names
+
+  # THE SILENT ONE. A declared variant reaches the native lowering as a nominal `Named` (the checker
+  # keeps user types nominal), while every union-shaped decision in that lowering matched on
+  # `checker::Variant` — the shape an INLINE `A | B` arrives as. Both halves of the union protocol
+  # degenerated at once: the value was constructed with NO tag+payload wrapper, and every bind
+  # pattern answered "always matches", so the FIRST arm swallowed every subject. The two wrongs
+  # cancel on arm one (the whole-value bind reads the unwrapped payload at offset 0) and produce a
+  # WRONG ANSWER on every other arm — no stop, no diagnostic, a `Square` running the `Circle` arm.
+  #
+  # It is the one defect class a green fixpoint cannot catch: two equally wrong compilers emit
+  # identical bytes and the gate approves. The corpus is the only guard there is, so these rows
+  # assert the BOUND VALUE and not merely which arm ran — an always-true test would pass a
+  # which-arm check for the first case and lie about the rest — and they enter the FIRST, a MIDDLE
+  # and the LAST arm of a three-case variant.
+  Scenario: declared_variant_arms (own-native — each case runs its own arm, with its own payload)
+    When built and run
+    Then exit = 42
+
+  # The spellings that resolve a case through their OWN path: the match-VALUE (which merges its arms
+  # through a block argument), the BINDINGLESS case, and the FIELD destructure — the last of which
+  # did not even compile ("field match pattern over a non-variant subject") before a declared variant
+  # looked like a variant.
+  Scenario: declared_variant_match_value (own-native — value, bindingless and field spellings pick the same case)
+    When built and run
+    Then exit = 42
+
+  # The NON-NOMINAL cases beside the nominal ones: the built-in `error` member of a declared variant
+  # (resolved by keyword, not by name — a table that dropped it would mis-tag every case after it)
+  # and the `null` case of a union. Both are entered by their own value while the nominal cases keep
+  # their own arms.
+  Scenario: declared_variant_error_and_null (own-native — the error case and the null case, mixed with nominals)
+    When built and run
+    Then exit = 42

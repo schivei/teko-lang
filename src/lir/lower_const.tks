@@ -555,17 +555,20 @@ fn zero_pad_to(bytes: []byte, width: u32) -> []byte {
 }
 
 /**
- * find_variant_info — the registered variant whose name's last segment matches `name`'s (#594 crumb
- * 9b), or null when `name` is not a declared variant. A const's declared type resolves to a QUALIFIED
- * `Named` (`ns::Op`) while `collect_variants` stores the DECLARED spelling (`Op`), so the match is by
- * last segment — the same bare-vs-qualified reconciliation `lower_variant_case_test` uses on case
- * names.
+ * find_variant_def — the registered variant whose name's last segment matches `name`'s (#594 crumb
+ * 9b), or null when `name` is not a declared variant. A declared type resolves to a QUALIFIED
+ * `Named` (`ns::Op`) while `collect_variant_defs` stores the DECLARED spelling (`Op`), so the match
+ * is by last segment — the same bare-vs-qualified reconciliation `find_enum_info` uses.
+ *
+ * ONE probe serves EVERY consumer — the const serializer's tag image (`const_named_bytes`) and the
+ * construction/match expansion (`expand_named_variant`) — so the tag a rodata image carries and the
+ * tag a `match` arm compares against can never come from two different lookups.
  *
  * @param variants  the program's variant table
- * @param name      the const's declared type name (possibly qualified)
- * @return          the matching variant info, or null
+ * @param name      the declared type name to look up (possibly qualified)
+ * @return          the matching variant definition, or null
  */
-fn find_variant_info(variants: []LEnumInfo, name: str) -> LEnumInfo | null {
+fn find_variant_def(variants: []LVariantDef, name: str) -> LVariantDef | null {
     let bare = checker::name_last_segment(name)
     mut i: u64 = 0
     loop {
@@ -577,28 +580,6 @@ fn find_variant_info(variants: []LEnumInfo, name: str) -> LEnumInfo | null {
 }
 
 /**
- * variant_member_index — the declared index (runtime tag) of the case `case_name` among `members`
- * (#594 crumb 9b): a last-segment match, so a qualified initializer type (`ns::RetC`) resolves against
- * the declared member spelling (`RetC`). The index equals the ordinal `lower_variant_case_test`
- * compares the loaded `tag@0` against, so the interned image and the match agree.
- *
- * @param members    the variant's declared member case names, in tag order
- * @param case_name  the constructed member's name (possibly qualified)
- * @return           the member's declared index (its tag)
- * @throws           when `case_name` is not a member of `members` (an internal invariant break)
- */
-fn variant_member_index(members: []str, case_name: str) -> u32 | error {
-    let bare = checker::name_last_segment(case_name)
-    mut i: u64 = 0
-    loop {
-        if i >= members.len { break }
-        if checker::name_last_segment(members[i]) == bare { return i to u32 }
-        i++
-    }
-    error { message = teko::str::concat("const variant: case `", case_name, "` is not a declared member (internal) (#594)") }
-}
-
-/**
  * const_variant_bytes — the rodata image of an EMPTY-CASE variant aggregate const (#594 crumb 9b):
  * the constructed member's declared tag as a little-endian I32 at offset 0 (the `tag@0` half of the
  * variant runtime image, §5.3), with no payload. The initializer's own type names the member being
@@ -607,14 +588,15 @@ fn variant_member_index(members: []str, case_name: str) -> u32 | error {
  * member carrying payload fields honest-stops (payload materialization is a further follow-up beyond
  * the payload-free `MRet {}` §6.4 targets).
  *
- * @param info  the const's declared variant (its member case names, in tag order)
+ * @param info  the const's declared variant (its expanded members, in tag order)
  * @param init  the const's checked initializer (an empty-case member construction)
  * @return      the 4-byte little-endian tag image
  * @throws      when the initializer is not an empty member construction, or names no member
  */
-fn const_variant_bytes(info: LEnumInfo, init: checker::TExpr) -> []byte | error {
+fn const_variant_bytes(info: LVariantDef, init: checker::TExpr) -> []byte | error {
     let case_name = match named_type_name(init.type) { str as s => s; error as e => return e }
-    let index = match variant_member_index(info.members, case_name) { u32 as x => x; error as e => return e }
+    let vm = match find_variant_member(info.ty.members, checker::name_last_segment(case_name)) { VariantMember as x => x; error as e => return e }
+    let index = vm.index
     match init.kind {
         checker::TStructInit as si => const_variant_tag_bytes(si, index)
         _ => error { message = "const variant: initializer is not a member construction (Tier-A follow-up) (#594)" }
@@ -652,9 +634,9 @@ fn const_image_flat(bytes: []byte) -> ConstImage {
  * @throws            a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  * @since #594 crumb 6/9b + T-B6
  */
-fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
-    match find_variant_info(variants, name) {
-        LEnumInfo as info => match const_variant_bytes(info, init) { []byte as b => const_image_flat(b); error as e => return e }
+fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> ConstImage | error {
+    match find_variant_def(variants, name) {
+        LVariantDef as info => match const_variant_bytes(info, init) { []byte as b => const_image_flat(b); error as e => return e }
         null => const_struct_bytes(const_name, name, init, layouts, enums)
     }
 }
@@ -676,7 +658,7 @@ fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: 
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate form
  * @since #594 crumb 6 (bytes) + T-B6 (relocs + leaves)
  */
-fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
+fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> ConstImage | error {
     match cd.ty {
         checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
         checker::Slice as s => match const_slice_bytes(s.element, cd.init, enums) { []byte as b => const_image_flat(b); error as e => return e }
@@ -702,7 +684,7 @@ fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: 
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  * @since #594 crumb 6 + T-B6
  */
-fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> LModule | error {
     if const_decl_is_scalar(cd.ty) { return m }
     let img = match serialize_const(cd, layouts, variants, enums) { ConstImage as x => x; error as e => return e }
     mut cur = m
@@ -727,7 +709,7 @@ fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []L
  * @return         the module with `it`'s rodata contribution (unchanged for a non-const item)
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  */
-fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> LModule | error {
     match it {
         checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants, enums)
         _ => m
@@ -749,7 +731,7 @@ fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStruc
  * @return         the module with one rodata entry per Tier-A aggregate const
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  */
-fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> LModule | error {
     mut cur = m
     mut i: u64 = 0
     loop {
@@ -761,95 +743,186 @@ fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStru
 }
 
 /**
- * collect_variants — the name + declared member spellings of every `variant` type declaration in
- * `prog`, in program order (#594 crumb 9b). A `variant`-typed const's declared type resolves to a
- * NOMINAL `Named` (resolve_named keeps user types nominal), never an expanded `Variant`, so the
- * empty-case aggregate-const serializer needs the member ORDERING recovered here: the constructed
- * case's INDEX in this list is the runtime tag a later `match` compares against
- * (`lower_variant_case_test`). Reuses the `LEnumInfo {name, members}` shape — for the tag's purpose a
- * variant is a named family whose member ordinals are their declared indices. A non-variant type
- * declaration contributes no entry.
+ * collect_variant_defs — the name + EXPANDED union type of every `variant` type declaration in
+ * `prog`, in program order (#594 crumb 9b; expanded since the declared-variant match-arm fix).
+ *
+ * A `variant`-typed value's declared type resolves to a NOMINAL `Named` (`resolve_named` keeps user
+ * types nominal), never to the `checker::Variant` an inline `A | B` arrives as — so every
+ * union-shaped decision in this backend needs the members recovered here: the tag a const's rodata
+ * image carries (`const_variant_bytes`), the wrapper a value is constructed into
+ * (`lower_value_into_type`) and the tag a `match` arm tests (`lower_bind_pattern_test`) all read
+ * THIS table, through `expand_named_variant`.
+ *
+ * The body is expanded by the checker's OWN resolver (`checker::resolve_type`, the same call
+ * `checker::expand_variant` makes), over a table keyed the way that resolver reads names
+ * (`declared_type_table`) — so a member's resolved type here is the CANONICAL member type the
+ * checker itself would name (`ns::Circle`, not a bare `Circle`), including its canonical ordering (a
+ * `null`-bearing union is null-first). A non-variant type declaration contributes no entry.
  *
  * @param prog  the whole typed program to scan
- * @return      every declared variant's name + member spellings, in program order
+ * @return      every declared variant's name + expanded union type, in program order
  */
-fn collect_variants(prog: checker::TProgram) -> []LEnumInfo {
-    mut out: []LEnumInfo = teko::list::empty()
+fn collect_variant_defs(prog: checker::TProgram) -> []LVariantDef {
+    let table = declared_type_table(prog)
+    mut out: []LVariantDef = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = collect_variant_item(out, prog.items[i])
+        out = collect_variant_def_item(out, prog.items[i], table)
         i++
     }
     out
 }
 
 /**
- * collect_variant_item — accumulate `it`'s variant info onto `acc`, unchanged for every other item
- * kind (#594 crumb 9b).
+ * declared_type_table — the program's type declarations as a `checker::TypeTable` keyed the way
+ * `checker::resolve_type` reads it: each entry's `name` is the declaration's BARE name and its
+ * `namespace` is that name's qualifier.
  *
- * @param acc  the variant table accumulated so far
+ * WHY NOT `checker::type_table_of`. That helper keys every entry by the declaration's name AS IT
+ * STANDS in the typed program — which is the CANONICAL `ns::Name` — with an empty namespace. The
+ * resolver's own R3 rule matches a bare reference as `entry.name == last && entry.namespace ==
+ * ref_ns`, so against such a table a member written `Circle` resolves to nothing and the whole
+ * variant body silently falls back to unqualified nominal members. Splitting the canonical name
+ * back into (namespace, bare) is what makes the resolver answer with canonical member names.
+ *
+ * @param prog  the whole typed program
+ * @return      the program's declarations, keyed (bare name, namespace)
+ * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
+ */
+fn declared_type_table(prog: checker::TProgram) -> checker::TypeTable {
+    mut out: checker::TypeTable = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = push_declared_type_reg(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * push_declared_type_reg — `acc` extended with `it`'s registration when it is a type declaration,
+ * unchanged otherwise.
+ *
+ * @param acc  the table accumulated so far
  * @param it   the program item to fold
- * @return     `acc`, with `it`'s variant info appended when applicable
+ * @return     `acc`, with `it`'s registration appended when applicable
  */
-fn collect_variant_item(acc: []LEnumInfo, it: checker::TItem) -> []LEnumInfo {
+fn push_declared_type_reg(acc: checker::TypeTable, it: checker::TItem) -> checker::TypeTable {
     match it {
-        parser::TypeDecl as td => collect_variant_decl(acc, td)
+        parser::TypeDecl as td => teko::list::push(acc, checker::TypeReg {
+            name = checker::name_last_segment(td.name); namespace = checker::name_qualifier(td.name)
+            file = ""; vis = td.vis; decl = td
+        })
         _ => acc
     }
 }
 
 /**
- * collect_variant_decl — accumulate `td`'s member list onto `acc` when its body is a `VariantBody`;
- * unchanged for any other type-declaration shape (struct/class/enum/…) (#594 crumb 9b). The member
- * spellings come from the variant body's union type-expr, in source order.
+ * collect_variant_def_item — accumulate `it`'s variant definition onto `acc`, unchanged for every
+ * other item kind (#594 crumb 9b).
  *
- * @param acc  the variant table accumulated so far
- * @param td   the type declaration to fold
- * @return     `acc`, with `td`'s variant info appended when applicable
+ * @param acc    the variant table accumulated so far
+ * @param it     the program item to fold
+ * @param table  the program's type table, for the body's expansion
+ * @return       `acc`, with `it`'s variant definition appended when applicable
  */
-fn collect_variant_decl(acc: []LEnumInfo, td: parser::TypeDecl) -> []LEnumInfo {
-    match td.body {
-        parser::VariantBody as vb => teko::list::push(acc, LEnumInfo { name = td.name; members = variant_member_names(vb.type_expr) })
+fn collect_variant_def_item(acc: []LVariantDef, it: checker::TItem, table: checker::TypeTable) -> []LVariantDef {
+    match it {
+        parser::TypeDecl as td => collect_variant_def_decl(acc, td, table)
         _ => acc
     }
 }
 
 /**
- * variant_member_names — the member spellings of a variant body's union type-expr, in source order
- * (#594 crumb 9b): each member is a `NamedType` whose path's last segment names the case. A
- * non-union body (a variant always parses as a two-or-more union) yields no members.
+ * collect_variant_def_decl — accumulate `td`'s expanded union onto `acc` when its body is a
+ * `VariantBody`; unchanged for any other type-declaration shape (struct/class/enum/…).
+ *
+ * @param acc    the variant table accumulated so far
+ * @param td     the type declaration to fold
+ * @param table  the program's type table, for the body's expansion
+ * @return       `acc`, with `td`'s variant definition appended when applicable
+ */
+fn collect_variant_def_decl(acc: []LVariantDef, td: parser::TypeDecl, table: checker::TypeTable) -> []LVariantDef {
+    match td.body {
+        parser::VariantBody as vb => teko::list::push(acc, LVariantDef { name = td.name; ty = variant_body_expanded(vb, checker::name_qualifier(td.name), table) })
+        _ => acc
+    }
+}
+
+/**
+ * variant_body_expanded — a variant body's union type-expr as a resolved `checker::Variant`: the
+ * checker's own `resolve_type` over the program's type table, with a NOMINAL fallback
+ * (`nominal_member_types`) when the body does not resolve — a synthesized fixture whose case names
+ * are not themselves declared types is the shape that reaches it.
+ *
+ * The fallback preserves the member COUNT and ORDER, which is the load-bearing property: an index
+ * is a runtime tag, so a member silently dropped here would mis-tag every case after it.
+ *
+ * @param vb     the variant declaration's body
+ * @param ns     the namespace the variant was declared in (its members are written there)
+ * @param table  the program's type table
+ * @return       the expanded union (members in declared tag order)
+ */
+fn variant_body_expanded(vb: parser::VariantBody, ns: str, table: checker::TypeTable) -> checker::Variant {
+    let resolved = match checker::resolve_type(vb.type_expr, table, ns) {
+        checker::Type as t => t
+        error => return checker::Variant { members = nominal_member_types(vb.type_expr) }
+    }
+    match resolved {
+        checker::Variant as v => v
+        _ => checker::Variant { members = nominal_member_types(vb.type_expr) }
+    }
+}
+
+/**
+ * nominal_member_types — each member of a union type-expr as a bare nominal `checker::Named`, in
+ * source order: the resolution-free fallback of `variant_body_expanded`. A member that is not a
+ * `NamedType` still contributes an (empty-named, unnameable) entry, so the member COUNT — and with
+ * it every later member's tag — survives.
  *
  * @param te  the variant body's type-expr (a union of member types)
- * @return    the member case names, in declared order
+ * @return    one nominal member type per declared member, in order
  */
-fn variant_member_names(te: parser::TypeExpr) -> []str {
+fn nominal_member_types(te: parser::TypeExpr) -> []checker::Type {
     match te {
-        parser::UnionType as ut => union_member_names(ut.members)
+        parser::UnionType as ut => union_member_types(ut.members)
         _ => teko::list::empty()
     }
 }
 
 /**
- * union_member_names — the last-segment name of each `NamedType` member of a union type-expr, in
- * order (#594 crumb 9b); a non-named member (unreachable for a well-formed variant of nominal cases)
- * contributes nothing.
+ * union_member_types — one bare `checker::Named` per member of a union type-expr, in order, named by
+ * the member path's last segment (the empty string for a non-named member — a name no pattern can
+ * spell, so it is never selected by accident).
  *
  * @param members  the union's member type-exprs
- * @return         each named member's case name, in order
+ * @return         one nominal member type per member, in order
  */
-fn union_member_names(members: []parser::TypeExpr) -> []str {
-    mut out: []str = teko::list::empty()
+fn union_member_types(members: []parser::TypeExpr) -> []checker::Type {
+    mut out: []checker::Type = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= members.len { break }
-        match members[i] {
-            parser::NamedType as nt => out = teko::list::push(out, type_path_last_name(nt.path))
-            _ => { }
-        }
+        out = teko::list::push(out, checker::Named { name = union_member_name(members[i]) })
         i++
     }
     out
+}
+
+/**
+ * union_member_name — a union member type-expr's case name: a `NamedType`'s path last segment, or
+ * the empty string for any other shape.
+ *
+ * @param te  the member type-expr
+ * @return    the member's case name, or `""`
+ */
+fn union_member_name(te: parser::TypeExpr) -> str {
+    match te {
+        parser::NamedType as nt => type_path_last_name(nt.path)
+        _ => ""
+    }
 }
 
 /**
