@@ -6751,9 +6751,33 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
     }
-    let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return err }
-    let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return err }
+    let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
+    let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
     LoweredFunction { func = closed.func; rodata = closed.rodata; lifted = closed.lifted }
+}
+
+/**
+ * stop_in_function — re-emit a lowering honest-stop naming the FUNCTION it fired in.
+ *
+ * WHY THIS EXISTS. A backend stop reaches the user through the project build, which prints one
+ * line and stops — with no file, no line, and no function. On a single-file fixture that is
+ * survivable; on `examples/regressions/bulk`, which compiles 217 fixtures in ONE build, it is not.
+ * `arithmetic operand of type `null | u64`` names the TYPE and leaves the SITE to be guessed, and
+ * guessing cost two wrong candidates: `q001` (whose `match` narrowing reading of `check_pattern` +
+ * `type_join` proves correct) and `q046` (instantiated at `i64`/`str`, never `u64`). Each fixture is
+ * its own namespace, so naming the namespace points straight at the directory.
+ *
+ * WRAPPED AT THE FUNCTION BOUNDARY, not threaded through every stop: `lower_function` is the one
+ * place that both knows the function and sees every error its body produces, so a single site buys
+ * the context for all of them. Same shape `codegen/ffi_export.tks` already uses to name an exported
+ * function on the way out.
+ *
+ * @param err  the honest-stop raised somewhere inside this function's body
+ * @param f    the function being lowered
+ * @return     the same stop, with `[in `ns::name`]` appended
+ */
+fn stop_in_function(err: error, f: checker::TFunction) -> error {
+    error { message = err.message ~ " [in `" ~ f.namespace ~ "::" ~ f.name ~ "`]" }
 }
 
 /** LoweredFunction — an `LFunc` + the interned-rodata table (A1-4, #382) and
