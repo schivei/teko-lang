@@ -405,8 +405,10 @@ jobs:
       # musl is exactly the kind of divergence a single shared check would average away.
       #
       # WHAT IT ASSERTS: gen2 == gen3 byte for byte over the SAME source, plus zero emitted C.
-      # gen1 is not compared — it comes from a DIFFERENT compiler (today the versioned
-      # `bootstrap/teko.c` from wagon 15), so gen1 != gen2 is the healthy, expected shape.
+      # gen1 is not compared — under the 0.3.1.0 chain (release → gen0 → gen1 down the C route,
+      # then gen2/gen3) it comes from a DIFFERENT code generator, so gen1 != gen2 is the healthy,
+      # expected shape. Owner ruling 2026-07-28: *"gen1 nunca será igual a gen2 … o veredito do
+      # fixpoint não muda: continua gen2 == gen3."*
       #
       # IT FAILS THE LANE. There is no soft mode here, and the reason is a correction: this step
       # shipped once with `TEKO_FIXPOINT_SOFT=1`, on the argument that a red `artifact` job would
@@ -418,6 +420,43 @@ jobs:
       - name: Fixpoint — gen2 == gen3 over the same source, and no emitted C
         shell: bash
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+
+      # ── THE HARVEST: gen1's C, ONE FILE PER PRODUCER, AND ONLY OVER A GREEN FIXPOINT ─────────
+      # Owner ruling 2026-07-28: the `teko.c` *"deixa de ser ENTRADA e passa a ser SAÍDA:
+      # versionado depois do verde, colhido do gen1 (a última geração que emite C)"*.
+      #
+      # `out/teko.c` IS that file — gen0 emitted it while producing gen1, so it is the C that `cc`
+      # turns back into gen1 — and it is the same C every Linux asset on this leg was built from.
+      # Until now it never left the runner: the wagon proved a fixpoint and then discarded the one
+      # deliverable the proof was about, so versioning it meant re-running a lane by hand.
+      #
+      # `if: success()` PUTS THE PROOF BEFORE THE PAYLOAD. The step is placed after the fixpoint on
+      # purpose: a C from a chain that did not prove gen2 == gen3 is a guess, and committing a guess
+      # as the next bootstrap is the exact move that costs a week. One artifact per producer, so a
+      # harvester can tell WHICH environment emitted the C it is about to version — they are not
+      # interchangeable across libc or host.
+      - name: Harvest gen1's emitted C (only over a fixpoint that HELD)
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p harvest
+          if [ -f out/teko.c ]; then
+              cp out/teko.c harvest/teko.c
+              ls -la harvest/
+          else
+              echo "NOTE: no out/teko.c — this leg's gen1 emitted no C (the native route, or a"
+              echo "      ladder change). Nothing to harvest; the fixpoint above still stands."
+          fi
+
+      - name: Upload the harvested C
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: teko-c-${{ matrix.producer }}
+          path: harvest
+          if-no-files-found: warn
+          retention-days: 7
 
       # RETENTION IS 7 DAYS, NOT 1, AND IT IS A DEPENDENCY NOW. `nightly.yml` reaches BACK into
       # this run — resolved through scripts/originating_pr_run.sh, never guessed — and asserts that
@@ -1244,6 +1283,14 @@ jobs:
       # or scripts. See scripts/ci_lane_purity.sh.
       - name: Structural — only the root builds, and the cross toolchain is gone
         run: sh scripts/ci_lane_purity.sh .github/workflows/pr.yml artifact
+
+      # THE ONE SWITCH IN THE BOOTSTRAP CHAIN THAT CAN FAIL SILENTLY. Every other break in the
+      # chain is loud — a build stops, a comparison disagrees. A criterion that says "declared"
+      # when nothing is declared re-routes gen0 through `cc` and the run still goes GREEN, having
+      # proven a compiler nobody asked for. It runs here because it needs no compiler and no
+      # network: fixtures in a temp dir, under a second.
+      - name: Structural — `bootstrap/teko.c` is a rung only when a degrau declares it
+        run: sh scripts/degrau_test.sh
 
       - name: Cross-check the mode against an independent derivation
         if: needs.plan.result == 'success'
