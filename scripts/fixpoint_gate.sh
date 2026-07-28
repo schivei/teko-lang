@@ -322,5 +322,18 @@ if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
 else
     log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte. (Both still emit C: the .33 goal, reported above.)"
 fi
-rm -rf "$W"
+# CLEAN THE SCRATCH, NEVER THE HARVEST. This used to be a flat `rm -rf "$W"`, which deleted the
+# emitted C two lines after the script had just printed
+#
+#     fixpoint: harvest: …/.fixpoint/gen3.c is this run's candidate for bootstrap/teko.c
+#
+# — it named the one file worth keeping and then destroyed it, so every downstream step saw an empty
+# directory and `upload-artifact` reported "No files were found" over a fixpoint that had PASSED.
+#
+# What is scratch and what is product: the generation BINARIES (~2.5 MB each), the build LOGS and the
+# emitted-c flags exist only to reach the verdict above and are worthless once it is printed. The
+# `.c` files are the product — `gen3.c` is the next `bootstrap/teko.c`. So the sweep is enumerated
+# rather than blanket, and `*.c` is simply not in it.
+rm -rf "$W/out"
+rm -f "$W/gen1" "$W/gen2" "$W/gen3" "$W"/*.log "$W"/*.emitted-c
 exit 0
