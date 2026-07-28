@@ -67,9 +67,29 @@ under you, with no error anywhere.
 `m16` is the boundary the loop's own comment names (*"If ALL arms diverge the match type is void"*),
 so it is the case where a wrong `have_type` shows up as a type out of nowhere.
 
+## Three generations, and why the third is the one that matters
+
+Owner ruling 2026-07-28: *"testar o mesmo conjunto com o 0.3.0.30-beta (a última lançada), se o
+comportamento for o mesmo, dará trabalho encontrar, se não, então o erro está no trem."*
+
+gen1 and gen2 are BOTH this train — gen1 is `cc` over wagon 15's committed C, gen2 is what gen1
+builds from the tip. Comparing only those two can show that they disagree; it can never say WHEN the
+behaviour started, because both live inside the window under suspicion.
+
+`0.3.0.30-beta` is the last PUBLISHED binary, cut before this train existed. It is a fixed point
+OUTSIDE the window, and it halves the search:
+
+| reading | what it means |
+|---|---|
+| seed table **==** gen1/gen2 | the behaviour PREDATES the train — old, and the bisect runs back through released history |
+| seed table **!=** gen1/gen2 | the train introduced it — the bisect is bounded by commits still in front of us |
+
 ## Running
 
-    sh examples/probes/match_shapes/run.sh <path-to-teko>
+    sh examples/probes/match_shapes/run.sh <path-to-teko> [label]
+
+The label names which compiler produced the table (`gen1`, `gen2`, `seed-0.3.0.30`) and keeps the
+per-case logs from overwriting each other between generations.
 
 Each case is built with `TEKO_BACKEND=native`; the script prints one row per case with the verdict
 and, on a stop, the site the compiler names. It never fails — it REPORTS. Reading the table is the
