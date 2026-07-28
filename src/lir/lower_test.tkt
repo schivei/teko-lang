@@ -2620,3 +2620,49 @@ fn lwt_serialize_le_of_a_positive_value_is_little_endian_and_truncates() {
     teko::assert::is_true(narrow.len == 1)
     teko::assert::is_true(narrow[0] == (0x02 to byte))
 }
+
+/**
+ * lwt_match_value_typed — a VALUE-producing `TMatchExpr` of an ARBITRARY resolved type, the fat
+ * counterpart of `lwt_match_value` (which only covers a `PrimKind` result) (0.3.1.0 degrau 5).
+ *
+ * @param subject  the match's subject expression
+ * @param arms     the match's arms, in order
+ * @param ty       the match expression's own resolved type
+ * @return         the typed `TMatchExpr` node
+ */
+fn lwt_match_value_typed(subject: checker::TExpr, arms: []checker::TArm, ty: checker::Type) -> checker::TExpr {
+    checker::TExpr { kind = checker::TMatchExpr { subject = subject; arms = arms }; type = ty; line = 0; col = 0 }
+}
+
+/**
+ * lwt_lowers_str_match_value_merges_both_ptr_and_len_at_the_fat_merge — the degrau-5 proof at the
+ * LIR level: `let s = match n { 1 => "a"; _ => "bb" }; return s.len` used to HONEST-STOP with
+ * "fat-pointer receiver `match-expression` not yet lowered (N2)", because `lower_fat_expr`'s closed
+ * producer set had no match-value arm — the shape every `str`-returning function whose body is a
+ * match takes. `lower_match_fat` now merges BOTH halves through a two-block-param merge, ptr FIRST
+ * then len, exactly as the `if`-expression producer does.
+ *
+ * A merge that carried only the ptr would still COMPILE and read a garbage length past the binding,
+ * so the fixture asserts each arm's OWN literal length ("a" -> 1, "bb" -> 2) reaches the merge's
+ * SECOND param, and that `s.len` reads that param with no memory traffic.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_match_value_merges_both_ptr_and_len_at_the_fat_merge() {
+    let arm1 = lwt_arm(lwt_int_pattern(1), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_strlit("a"))))
+    let arm2 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_strlit("bb"))))
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm1), arm2)
+    let mx = lwt_match_value_typed(lwt_num_i64(1), arms, checker::Str { })
+    let s_bind = lwt_bind_typed("s", mx, checker::Str { })
+    let len_access = lwt_len_field(lwt_typed_var("s", checker::Str { }))
+    let body = teko::list::push(teko::list::push(teko::list::empty(), s_bind), lwt_ret(len_access))
+    let f = lwt_fn("str_match_value", "teko::demo", teko::list::empty(), lwt_prim(checker::PrimKind::U64), body)
+    let lfo = match lower_function(f) { LoweredFunction as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(with_rodata(add_func(empty_module(), lfo.func), lfo.rodata))
+    teko::assert::str_contains(text, "rodata .Lstr0: [97]")
+    teko::assert::str_contains(text, "rodata .Lstr1: [98, 98]")
+    teko::assert::str_contains(text, "global_addr @.Lstr0")
+    teko::assert::str_contains(text, "global_addr @.Lstr1")
+    teko::assert::str_contains(text, "#B1(%1, %2):\n    ret %2")
+}
