@@ -99,12 +99,35 @@ trap cleanup EXIT
 # tk_rt_datetime_* symbols the time-redesign wagon removed), and an intermediate compiler
 # lives inside the probe worktree, so the tip build would symmetrically pick the ANCESTOR's
 # runtime. Each stage passes the runtime dir of the tree it is actually compiling.
+#
+# THE BACKEND IS PINNED HERE, AND HERE IS EVERY COMPILER SELF-BUILD THERE IS. Rung -1, the seed's
+# own attempt, rung 0 and every pinned ladder stage all funnel through this one function, so one
+# pin covers the whole ladder and cannot miss a stage.
+#
+# THE DEFECT IT CLOSES, measured on run 30376861988 (owner: *"tem erros e ainda finalizou verde"*).
+# The committed `bootstrap/teko.c` used to be wagon 15's compiler, whose default backend was C. It
+# is now THIS wagon's compiler, whose default is NATIVE — and the native backend cannot yet build
+# the compiler (`fixpoint_gate.sh`: *"gen1 defaults to the NATIVE backend, which cannot yet build
+# the compiler"*). So the moment the seed was replaced, rung -1 began failing on the aggregate-push
+# degrau, the ladder absorbed it, and the leg reported SUCCESS having walked two pinned rungs
+# instead of using the seed at all. Green by detour, and the seed unproven.
+#
+# NARROW ON PURPOSE. `fixpoint_gate.sh` records what a wide pin costs: `TEKO_BACKEND=c` *"LEAKS
+# INTO EVERYTHING THAT RUNS BELOW IT"* — it turned `diagnostics.tkr` green by compiling the suite
+# down the road we are retiring. This function builds THE COMPILER and nothing else; the suite, the
+# regressors and every user project keep the native default, which is what they exist to test.
+#
+# TEKO_SELFHOST_BACKEND IS THE PER-PLATFORM HOOK the staged plan needs (owner, 2026-07-28): a leg
+# whose native route is ready sets it to `native` and proves itself, while every other leg inherits
+# `c` and keeps behaving exactly as it does today. It defaults to `c` because that is the only
+# route that self-hosts right now.
 build_project() {
   bin="$1"; proj_dir="$2"; out="$3"; logfile="$4"; rt_dir="${5:-}"
+  bp_backend="${TEKO_SELFHOST_BACKEND:-c}"
   if [ -n "$rt_dir" ]; then
-    ( cd "$proj_dir" && TK_RT_DIR="$rt_dir" "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
+    ( cd "$proj_dir" && TK_RT_DIR="$rt_dir" TEKO_BACKEND="$bp_backend" "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
   else
-    ( cd "$proj_dir" && "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
+    ( cd "$proj_dir" && TEKO_BACKEND="$bp_backend" "$bin" . -o "$out" --no-verify --release ) >"$logfile" 2>&1
   fi
 }
 
