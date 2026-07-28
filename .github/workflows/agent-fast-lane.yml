@@ -1,0 +1,183 @@
+# .github/workflows/agent-fast-lane.yml — THE AGENT'S FAST LANE: one runner, one question,
+# answered faster than any agent can answer it locally.
+#
+# Owner ruling 2026-07-27: *"recomendo fazer a mesma técnica de degrau do 15, mas partindo do
+# teko.c do 15, assim consegue chegar em uma gen2 e gen3 realmente nativa, pode usar uma theory
+# para validar e encontrar ao invés de queimar muitos runners, algo simples, finalizar a escada e
+# passar fixpoint + testes, nada mais, validado isso, reaplica no vagão 20."*
+#
+# WHAT MAKES THIS A THEORY AND NOT A LANE. It gates NOTHING and publishes NOTHING. Its whole job is
+# to answer one question per push — "what stops the compiler from building itself today?" — and
+# print the address. The wagon's own six sublanes answer the same question, but they cost six
+# runners plus every downstream lane to say it once. This costs ONE.
+#
+# WHY IT IS SO SHORT, and the shortness is the design rather than a corner cut. Three steps:
+#
+#   1. cc the committed `bootstrap/teko.c`          -> gen1     (~60s)
+#   2. fixpoint: gen2 = gen1(src), gen3 = gen2(src) -> the verdict, with the degrau's address
+#   3. `teko test .`                                -> the suite, only if the fixpoint held
+#
+# No assets, no staging, no matrix, no artifact upload, no downstream anything. Every one of those
+# exists to SHIP a compiler; none of them helps answer whether the compiler can rebuild itself. A
+# theory that reproduces the production pipeline is just a slower copy of it.
+#
+# ONE LEG, macos-arm64, ON PURPOSE — and the arch is chosen for SPEED, not coverage.
+#
+# The degraus this hunts (`ltype_of(Named) = Ptr`, aggregate value semantics, the per-instruction
+# frame slot) live in the SHARED front half of lowering, not in an arch backend — they reproduce
+# identically everywhere, as the wagon's own six lanes have shown all day by failing with the same
+# sentence on every one. So the leg is free to be picked on wall-clock alone, and the macOS runner
+# wins by a wide margin. Measured on the SAME tree and the SAME phase, from this wagon's own logs:
+#
+#     macos-arm64     checker 5940/5940 items     2.2s
+#     linux-x86_64    checker 5940/5940 items    14.6s
+#
+# 6.6x on the checker. Owner, 2026-07-27: *"usa o macOS, que é comprovadamente o mais rápido."*
+# A theory is a loop a human waits inside — the runner that shortens the wait is the right runner.
+#
+# WHEN A DEGRAU TURNS OUT TO BE PLATFORM-SPECIFIC, SWAP THE HOST — DO NOT ADD A LEG. Owner ruling
+# 2026-07-27: *"vamos escalar pelos mais rápidos, logo, se passar verde e o vagão apontar vermelho,
+# foca no vermelho mais rápido, e o anterior basta trocar o host do CI da theory."* The `runner`
+# dispatch input exists for exactly that, so the swap costs no commit.
+#
+# The working order that follows from it:
+#
+#   1. iterate on the FASTEST host until the theory is green there;
+#   2. reapply to the wagon; if a sublane still reds, pick the FASTEST of the red ones;
+#   3. dispatch this theory with `runner` set to THAT host and iterate there, still one lane;
+#   4. repeat until no sublane reds.
+#
+# What this buys is that a platform-specific defect is hunted at ONE runner's cost instead of the
+# wagon's six-plus-downstream, and the hunt always runs on the quickest host that can still SEE the
+# defect. A second permanent leg would pay for coverage on every push to answer a question that is
+# only ever asked after a specific red — the wagon already provides that coverage.
+#
+# HOW IT IS MEANT TO BE USED: push, read the address, close that degrau on a cargo branch, push
+# again. When step 2 finally reports PASSED and step 3 is green, the theory has done its job — and
+# the fix, already proven, is reapplied to the wagon (owner: *"validado isso, reaplica no vagão
+# 20"*). At that moment the `out/teko.c` this very run produced is ALREADY the `bootstrap/teko.c`
+# the wagon wants: harvest it before moving on, because the next state may regress.
+#
+# DELETE THIS FILE when the wagon self-hosts. It has no reason to outlive that day.
+name: agent fast lane · self-host (one runner, one question)
+
+# FIRES ON PUSH TO `cargo/**` AND `theory/**`. Owner ruling 2026-07-28: *"já vimos que macOS no CI é
+# muito rápido, os agentes não são capazes de serem melhores que isso, sugiro que, se eles querem
+# testar, criem CI de push para Mac e executem o que querem lá, mais rápido que tentarem rodar toda
+# a cadeia por eles mesmos."*
+#
+# THIS REVERSES MY OWN EARLIER SCOPING, and the reversal is worth recording because the first
+# reasoning was wrong in a specific way. I had excluded `cargo/**` to avoid "burning dozens of
+# runners" on intermediate commits — comparing a runner against NOTHING. The real alternative is not
+# nothing: it is an AGENT BLOCKED FOR ~6 MINUTES per build, in a container slower than the runner.
+# Measured, same tree, same phase: macOS does the checker in 2.2s where linux-x86_64 takes 14.6s.
+# The agent cannot win that race. A runner spent here BUYS agent time; a runner not spent costs it.
+#
+# So agents are told to push and read the lane instead of building locally. The intermediate commits
+# they were already ordered to make (push early, push often, so a dropped session costs nothing) now
+# double as measurement requests.
+on:
+  push:
+    branches:
+      - 'cargo/**'
+      - 'theory/**'
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'run `teko test .` after the fixpoint (off = fixpoint only, ~2 min faster)'
+        required: false
+        default: 'true'
+      runner:
+        description: 'the host to reproduce on — SWAP this, never add a second leg (see header)'
+        required: false
+        default: 'macos-latest'
+        type: choice
+        options:
+          - macos-latest
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
+
+jobs:
+  self-host:
+    name: fast-lane / self-host
+    runs-on: ${{ github.event.inputs.runner || 'macos-latest' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `|| true` ON EVERY LINE, and `continue-on-error` on top, because the step is named
+      # "never fails the job" and MUST actually not. It did: this ran `nproc`, which does not exist
+      # on macOS, and the Actions bash shell runs with `-e` — so the diagnostic killed the run in
+      # 15 seconds, before the question was ever asked. A step that reports facts must not be able
+      # to invent one.
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        continue-on-error: true
+        shell: bash
+        run: |
+          cc --version | head -n1 || true
+          # nproc is GNU coreutils (Linux); sysctl is the macOS equivalent. Try both, care about
+          # neither.
+          (nproc || sysctl -n hw.ncpu) 2>/dev/null || true
+          (free -m || vm_stat | head -n4) 2>/dev/null || true
+          uname -srm || true
+
+      # BOTH CAPABILITIES ARE PROVISIONED, or the suite would SKIP two rows and `no_skips_gate.sh`
+      # would fail this run for a reason that has nothing to do with the question being asked. A
+      # theory that reds on its own missing toolchain teaches nothing.
+      #
+      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
+      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
+      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
+      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
+      # cross capabilities need installing.
+      - name: Provision the two capabilities the suite needs (mingw cross-linker, wasmtime)
+        shell: bash
+        run: |
+          set -eu
+          brew install mingw-w64 wasmtime
+
+      - name: Verify both are on PATH (fail loud before the run, not inside it)
+        shell: bash
+        run: |
+          set -eu
+          x86_64-w64-mingw32-gcc --version | head -n1
+          wasmtime --version
+
+      # NO SEED IS PROVISIONED AND NONE IS NEEDED. `build_with_seed_fallback.sh` enters through
+      # rung -1, which compiles the committed `bootstrap/teko.c` with the runner's own cc and
+      # builds the tip in ONE generation. No download, no ladder, no git history — the whole reason
+      # the committed C exists.
+      - name: gen1 — cc the committed C, then build the tip with it
+        shell: bash
+        run: |
+          set -eu
+          sh scripts/build_with_seed_fallback.sh out
+          ls -la out/
+
+      # THE QUESTION. Everything above is setup; this is the dispatch's actual payload. On failure
+      # it prints the named N2 address of whatever the native backend cannot lower yet — which is
+      # the ONE fact a dispatch exists to retrieve.
+      - name: THE QUESTION — does the compiler rebuild itself, and does gen2 == gen3?
+        shell: bash
+        run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+
+      # Only reached when the fixpoint HELD. A suite run before that point would be testing a
+      # compiler already known not to reproduce itself — the owner's own words: *"se nem consegue
+      # gerar gen2, nem tem que perder tempo com testes"*.
+      - name: The suite (only reachable once the fixpoint holds)
+        if: ${{ github.event.inputs.run_tests != 'false' }}   # vazio num push => roda
+        shell: bash
+        env:
+          REGRESSION_REQUIRE_TOOLS: "1"
+        run: |
+          set -eu
+          ./out/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
+
+      - name: No skips — every declared row must have run
+        if: ${{ always() && github.event.inputs.run_tests != 'false' && hashFiles('teko-test.log') != '' }}
+        shell: bash
+        run: sh scripts/no_skips_gate.sh teko-test.log
