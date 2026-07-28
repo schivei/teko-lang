@@ -14,10 +14,12 @@
     (Ptr), or the no-value marker (Void). Signedness is a property of the OPCODE
     (IDivS vs IDivU), never of the type — exactly like x86. str/slice/Ref/ptr/
     Named all collapse to Ptr; those are only EXERCISED from N2 (fat-pointers),
-    but the enum closes now so N2 does not re-version it. */
+    but the enum closes now so N2 does not re-version it. `I128`/`F16` are REMOVED
+    (drop-128, 2026-07-24) — the language's widest integer is 64-bit and its floats
+    are f32/f64, so no carrier ever needs a 128-bit or half-precision machine class. */
 pub type LType = enum {
-    I8; I16; I32; I64; I128
-    F16; F32; F64
+    I8; I16; I32; I64
+    F32; F64
     Ptr
     Void
 }
@@ -40,9 +42,10 @@ pub type LBinOp = enum {
     declared for N2. */
 pub type LUnOp = enum { INeg; INot; FNeg; ZExt; SExt; Trunc; IToF; FToI; FToF }
 
-/** LConstInt — materialize an integer literal into a VReg. `val` is the widest
-    integer carrier (i128) so no literal loses bits before machine lowering. */
-pub type LConstInt = struct { val: i128 }
+/** LConstInt — materialize an integer literal into a VReg. `val` is the raw i64
+    two's-complement register carrier (drop-128, 2026-07-24 — was i128) so no literal in the
+    language's post-drop range loses bits before machine lowering. */
+pub type LConstInt = struct { val: i64 }
 
 /** LConstFloat — materialize a float literal into a VReg. Carried as the IEEE bit
     pattern (u64) so the printer/diff is bit-exact (no rounding drift). */
@@ -253,7 +256,7 @@ pub fn new_func(symbol: str, n_params: u32, param_types: []LType, ret_type: LTyp
 }
 
 /** const_int_inst — a `%r = const.<t> val` instruction. */
-pub fn const_int_inst(result: u32, val: i128, line: u32, col: u32) -> LInst {
+pub fn const_int_inst(result: u32, val: i64, line: u32, col: u32) -> LInst {
     LInst { result = result; has_result = true; op = LConstInt { val = val }; line = line; col = col }
 }
 
@@ -524,8 +527,8 @@ fn set_block_param(f: LFunc, block_id: u32, vreg: u32) -> LFunc {
 pub type LStructLayout = struct { name: str; size: u32; align: u32; field_names: []str; field_offsets: []u32; field_types: []LType }
 
 /**
- * ltype_size — the byte size of one machine class: 1/2/4/8/16 for I8..I128 and F16/F32/F64
- * by width, 8 for a Ptr (a 64-bit address), 0 for the value-less Void marker.
+ * ltype_size — the byte size of one machine class: 1/2/4/8 for I8..I64 and F32/F64 by width,
+ * 8 for a Ptr (a 64-bit address), 0 for the value-less Void marker.
  *
  * @param LType t  the machine class
  * @return u32  its size in bytes
@@ -536,8 +539,6 @@ pub fn ltype_size(t: LType) -> u32 {
         I16 => 2
         I32 => 4
         I64 => 8
-        I128 => 16
-        F16 => 2
         F32 => 4
         F64 => 8
         Ptr => 8

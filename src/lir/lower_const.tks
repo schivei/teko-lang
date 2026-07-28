@@ -53,7 +53,7 @@ fn ltype_is_ptr(t: LType) -> bool {
 }
 
 /**
- * ltype_is_float — true iff a machine class is an IEEE float class (`F16`/`F32`/`F64`) (#594 crumb
+ * ltype_is_float — true iff a machine class is an IEEE float class (`F32`/`F64`) (#594 crumb
  * 6). The Tier-A serializer materializes integer/bool/byte fields only; a float field is a documented
  * Tier-A follow-up and honest-stops.
  *
@@ -61,37 +61,57 @@ fn ltype_is_ptr(t: LType) -> bool {
  * @return   whether it is a float class
  */
 fn ltype_is_float(t: LType) -> bool {
-    match t { F16 => true; F32 => true; F64 => true; _ => false }
+    match t { F32 => true; F64 => true; _ => false }
 }
 
 /**
  * lo_byte — the little-endian byte of `v` at bit offset `shift` (a multiple of 8): shift right, take
- * the low 8 bits (#594 crumb 6). Truncating through `u64` yields the correct two's-complement byte
- * for a negative `v` (e.g. `~0` serializes to `0xFF`), matching how the backend stores a scalar.
+ * the low 8 bits (#594 crumb 6). `v` is the value's raw i64 two's-complement register bits (drop-128,
+ * 2026-07-24 — the fold carrier is i64; no machine class is ever wider than i64/8 bytes now that
+ * `u128`/`i128` are removed from the surface).
  *
- * @param v      the i128 value being serialized
+ * THE MASK HAPPENS IN i64 SPACE, BEFORE ANY CONVERSION, and that ordering is the whole point. This
+ * line used to read `(((v >> shift) to u64) & 0xFF) to byte`, whose doc-comment claimed that
+ * "truncating through `u64` yields the correct two's-complement byte for a negative `v`". That is
+ * true in C, where a conversion REINTERPRETS the bits. Teko's cast is CHECKED: `to u64` on a
+ * negative `i64` is not a reinterpretation, it is an impossible conversion, and it panicked —
+ * `84:7: teko: deliberate panic: impossible conversion`, reached the moment enough consts
+ * serialized to hit a negative one. The comment described a language this is not.
+ *
+ * Masking first is correct for EVERY `i64` including `i64::MIN`: `>>` on a signed value is
+ * arithmetic, so the sign fill is already in place, and `& 0xFF` then yields 0..255 — a value every
+ * later conversion accepts. `~0` still serializes to `0xFF`, and `i64::MIN >> 56` still yields
+ * `0x80`, which is what a machine store of that width writes.
+ *
+ * The `shift >= 64` arm is a defensive invariant (unreachable today, since no field's
+ * `ltype_size` exceeds 8 bytes) rather than a live path — kept in case a wider machine class is ever
+ * reintroduced, in which case its byte would be the sign-extension fill (all-ones for a negative `v`,
+ * all-zeros otherwise), exactly what storing a narrower register into a wider slot does.
+ *
+ * @param v      the i64 value being serialized
  * @param shift  the bit offset of the wanted byte (0, 8, 16, …)
  * @return       the extracted byte
  */
-fn lo_byte(v: i128, shift: i128) -> byte {
-    (((v >> shift) to u64) & (0xFF to u64)) to byte
+fn lo_byte(v: i64, shift: u32) -> byte {
+    if shift >= 64 { return if v < 0 { 0xFF to byte } else { 0 to byte } }
+    ((v >> shift) & 0xFF) to byte
 }
 
 /**
- * serialize_le — the little-endian byte image of the i128 value `v` in `nbytes` bytes (#594 crumb
+ * serialize_le — the little-endian byte image of the i64 value `v` in `nbytes` bytes (#594 crumb
  * 6). A field/element wider than its value truncates to its declared width, exactly as a machine
- * store of that width would.
+ * store of that width would; a field WIDER than i64 sign-extends (`lo_byte`'s `shift >= 64` case).
  *
  * @param v       the folded scalar value
  * @param nbytes  the target width in bytes (the machine class's size)
  * @return        the little-endian byte image
  */
-fn serialize_le(v: i128, nbytes: u32) -> []byte {
+fn serialize_le(v: i64, nbytes: u32) -> []byte {
     mut out: []byte = teko::list::empty()
     mut k: u32 = 0
     loop {
         if k >= nbytes { break }
-        out = teko::list::push(out, lo_byte(v, (k * 8) to i128))
+        out = teko::list::push(out, lo_byte(v, k * 8))
         k++
     }
     out
@@ -100,31 +120,31 @@ fn serialize_le(v: i128, nbytes: u32) -> []byte {
 /**
  * const_fold_unary — fold a const unary operator over an already-folded operand (#594 crumb 6): unary
  * `-` (negation) or `~` (bitwise complement, computed as the two's-complement identity `-v - 1` so the
- * fold uses ONLY i128 `+`/`-`, the sole i128 arithmetic the native backend lowers today — `*`/`/` are
- * deferred to an i128 helper, see `isel_arm64.tks` §6.3). The result is the widest integer carrier and
- * truncates to the field's width at serialization.
+ * fold uses ONLY i64 `+`/`-`, the sole arithmetic the native backend lowers today — `*`/`/` are
+ * deferred to a helper, see `isel_arm64.tks` §6.3). The result is the fold's i64 register carrier
+ * (drop-128, 2026-07-24) and truncates/sign-extends to the field's width at serialization.
  *
  * @param op  the unary operator token kind
  * @param v   the folded operand value
  * @return    the folded result
  * @throws    when `op` is not a const-admissible unary operator
  */
-fn const_fold_unary(op: lexer::TokenKind, v: i128) -> i128 | error {
+fn const_fold_unary(op: lexer::TokenKind, v: i64) -> i64 | error {
     match op {
-        lexer::TokenKind::Tilde => ((0 to i128) - v) - (1 to i128)
-        lexer::TokenKind::Minus => (0 to i128) - v
+        lexer::TokenKind::Tilde => ((0) - v) - (1)
+        lexer::TokenKind::Minus => (0) - v
         _ => error { message = "const aggregate: non-const unary operator in initializer (#594)" }
     }
 }
 
 /**
  * const_fold_binary — fold a const binary operator over two already-folded operands (#594 crumb 6).
- * Only `+` and `-` fold here: they are the i128 arithmetic the native self-build definitely lowers
- * (`lir_print.tks` performs `*`/`/`/`%` on a u128 magnitude precisely because signed i128
- * multiply/divide/shift are deferred to a helper-call, `isel_arm64.tks` §6.3). The remaining
- * const-grammar operators (`* / % & | ^ << >>`) are a documented Tier-A follow-up — they honest-stop
- * rather than emit an i128 op the backend cannot yet materialize (the required Tier-A shapes use
- * literal/cast fields, no arithmetic).
+ * Only `+` and `-` fold here: they are the i64 arithmetic the native self-build definitely lowers
+ * (`lir_print.tks` performs `*`/`/`/`%` on a u64 magnitude precisely because signed multiply/divide/
+ * shift are deferred to a helper-call, `isel_arm64.tks` §6.3). The remaining const-grammar operators
+ * (`* / % & | ^ << >>`) are a documented Tier-A follow-up — they honest-stop rather than emit an op
+ * the backend cannot yet materialize (the required Tier-A shapes use literal/cast fields, no
+ * arithmetic).
  *
  * @param op  the binary operator token kind
  * @param a   the folded left operand
@@ -132,7 +152,7 @@ fn const_fold_unary(op: lexer::TokenKind, v: i128) -> i128 | error {
  * @return    the folded result
  * @throws    for any operator beyond `+`/`-` (a Tier-A const-fold follow-up)
  */
-fn const_fold_binary(op: lexer::TokenKind, a: i128, b: i128) -> i128 | error {
+fn const_fold_binary(op: lexer::TokenKind, a: i64, b: i64) -> i64 | error {
     match op {
         lexer::TokenKind::Plus => a + b
         lexer::TokenKind::Minus => a - b
@@ -141,22 +161,29 @@ fn const_fold_binary(op: lexer::TokenKind, a: i128, b: i128) -> i128 | error {
 }
 
 /**
- * const_fold_int — fold a scalar (integer/bool/byte) const initializer expression to its i128 value
- * (#594 crumb 6): a numeric/byte/bool literal, a cast (representation-preserving here — the target
- * width truncates only at serialization), or a unary/binary arithmetic tree over such leaves. A
- * FLOAT value, a `char` (fat runtime image), an enum-member path, or a nested const reference is a
- * documented Tier-A follow-up and honest-stops (the required Tier-A shapes use integer/bool/byte
- * literal fields directly).
+ * const_fold_int — fold a scalar (integer/bool/byte/enum-member) const initializer expression to its
+ * raw i64 register value (#594 crumb 6; drop-128, 2026-07-24): a numeric/byte/bool literal, an
+ * `Enum::Member` path, a cast (representation-preserving here — the target width truncates/
+ * sign-extends only at serialization), or a unary/binary arithmetic tree over such leaves. A FLOAT
+ * value, a `char` (fat runtime image), or a nested const reference is a documented Tier-A follow-up
+ * and honest-stops.
+ *
+ * An `Enum::Member` folds to the checker's ALREADY-RESOLVED `TPathExpr.value` — the ordinal for a
+ * plain enum, `1 << ordinal` for a `flags` one. That is the exact same source `lower_path_expr` reads
+ * when it materializes the member into a register, so a member written into a const's rodata image
+ * and the same member computed at runtime are bit-for-bit the same value. Folding it here (rather
+ * than re-deriving an ordinal from the enum table) is what keeps the two from drifting.
  *
  * @param e  the field/element initializer expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when `e` is a float, a char, or a form beyond the integer const-fold subset
  */
-fn const_fold_int(e: checker::TExpr) -> i128 | error {
+fn const_fold_int(e: checker::TExpr) -> i64 | error {
     match e.kind {
-        checker::TNumber as n => if n.is_float { error { message = "const aggregate: float value materialization is a Tier-A follow-up (#594)" } } else { n.value }
-        checker::TByteLit as b => b.value to i128
-        checker::TBoolLit as bo => if bo.value { 1 to i128 } else { 0 to i128 }
+        checker::TNumber as n => if n.is_float { error { message = "const aggregate: float value materialization is a Tier-A follow-up (#594)" } } else { parser::numint_to_i64(n.value) }
+        checker::TByteLit as b => b.value to i64
+        checker::TBoolLit as bo => if bo.value { 1 } else { 0 }
+        checker::TPathExpr as p => p.value to i64
         checker::TCharLit => error { message = "const aggregate: char value is fat (Tier-B, T-B) (#594)" }
         checker::TCast as c => const_fold_int(c.expr)
         checker::TUnary as u => const_fold_unary_expr(u)
@@ -170,11 +197,11 @@ fn const_fold_int(e: checker::TExpr) -> i128 | error {
  * operator (#594 crumb 6).
  *
  * @param u  the typed unary expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when the operand or the operator is outside the integer const-fold subset
  */
-fn const_fold_unary_expr(u: checker::TUnary) -> i128 | error {
-    let v = match const_fold_int(u.operand) { i128 as x => x; error as e => return e }
+fn const_fold_unary_expr(u: checker::TUnary) -> i64 | error {
+    let v = match const_fold_int(u.operand) { i64 as x => x; error as e => return e }
     const_fold_unary(u.op, v)
 }
 
@@ -183,12 +210,12 @@ fn const_fold_unary_expr(u: checker::TUnary) -> i128 | error {
  * the operator (#594 crumb 6).
  *
  * @param b  the typed binary expression
- * @return   the folded i128 value
+ * @return   the folded i64 value
  * @throws   when an operand or the operator is outside the integer const-fold subset
  */
-fn const_fold_binary_expr(b: checker::TBinary) -> i128 | error {
-    let a = match const_fold_int(b.left) { i128 as x => x; error as e => return e }
-    let c = match const_fold_int(b.right) { i128 as x => x; error as e => return e }
+fn const_fold_binary_expr(b: checker::TBinary) -> i64 | error {
+    let a = match const_fold_int(b.left) { i64 as x => x; error as e => return e }
+    let c = match const_fold_int(b.right) { i64 as x => x; error as e => return e }
     const_fold_binary(b.op, a, c)
 }
 
@@ -286,23 +313,24 @@ fn const_str_bytes(init: checker::TExpr) -> []byte | error {
 
 /**
  * const_array_bytes — the rodata image of a `[]T` flat-scalar array literal: each element folded to
- * its i128 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
+ * its i64 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
  * a later `[i]`/`.len` read agrees byte-for-byte on both engines (#594 crumb 6). A spread element is
  * not statically materializable and honest-stops.
  *
  * @param element  the slice's element type
  * @param a        the typed array literal
+ * @param enums    the program's declared-enum table (an enum element strides at its integer width)
  * @return         the concatenated element images
  * @throws         when an element is a spread or is not a foldable flat scalar
  */
-fn const_array_bytes(element: checker::Type, a: checker::TArrayLit) -> []byte | error {
-    let stride = ltype_size(ltype_of(element))
+fn const_array_bytes(element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo) -> []byte | error {
+    let stride = ltype_size(ltype_of(element, enums))
     mut out: []byte = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= a.elements.len { break }
         if a.elements[i].is_spread { return error { message = "const slice: spread element not statically materializable (#594)" } }
-        let v = match const_fold_int(a.elements[i].expr) { i128 as x => x; error as e => return e }
+        let v = match const_fold_int(a.elements[i].expr) { i64 as x => x; error as e => return e }
         out = append_bytes(out, serialize_le(v, stride))
         i++
     }
@@ -315,13 +343,14 @@ fn const_array_bytes(element: checker::Type, a: checker::TArrayLit) -> []byte | 
  *
  * @param element  the slice's element type
  * @param init     the const's checked initializer
+ * @param enums    the program's declared-enum table (an enum element strides at its integer width)
  * @return         the slice's byte image
  * @throws         when the element is pointer-bearing (Tier-B) or the initializer is not an array literal
  */
-fn const_slice_bytes(element: checker::Type, init: checker::TExpr) -> []byte | error {
+fn const_slice_bytes(element: checker::Type, init: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
     if !const_is_flat_scalar(element) { return error { message = "const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)" } }
     match init.kind {
-        checker::TArrayLit as a => const_array_bytes(element, a)
+        checker::TArrayLit as a => const_array_bytes(element, a, enums)
         _ => error { message = "const slice: initializer is not an array literal (Tier-A follow-up) (#594)" }
     }
 }
@@ -362,7 +391,7 @@ fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: 
     if ltype_is_ptr(lt) { return error { message = teko::str::concat("const aggregate: field `", layout.field_names[j], "` is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)") } }
     if ltype_is_float(lt) { return error { message = teko::str::concat("const aggregate: float field `", layout.field_names[j], "` materialization is a Tier-A follow-up (#594)") } }
     let vexpr = match struct_init_value(si, layout.field_names[j]) { checker::TExpr as x => x; error as e => return e }
-    let v = match const_fold_int(vexpr) { i128 as x => x; error as e => return e }
+    let v = match const_fold_int(vexpr) { i64 as x => x; error as e => return e }
     serialize_le(v, ltype_size(lt))
 }
 
@@ -374,14 +403,15 @@ fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: 
  *
  * @param field_ty  the field's checked type (`Str`/`Slice`)
  * @param vexpr     the field's initializer (a string/array literal)
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
  * @return          the target array's flat-scalar byte image
  * @throws          when the field is not a str/slice (internal), or the initializer is not materializable
  * @since #594 T-B6
  */
-fn const_fat_array_bytes(field_ty: checker::Type, vexpr: checker::TExpr) -> []byte | error {
+fn const_fat_array_bytes(field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
     match field_ty {
         checker::Str => const_str_bytes(vexpr)
-        checker::Slice as s => const_slice_bytes(s.element, vexpr)
+        checker::Slice as s => const_slice_bytes(s.element, vexpr, enums)
         _ => error { message = "const aggregate: fat field is neither str nor slice (internal) (#594)" }
     }
 }
@@ -400,16 +430,17 @@ fn const_fat_array_bytes(field_ty: checker::Type, vexpr: checker::TExpr) -> []by
  * @param fieldoff    the field's byte offset in the struct blob (the pointer slot's offset)
  * @param field_ty    the field's checked type (`Slice`/`Str`)
  * @param vexpr       the field's initializer (a string/array literal)
+ * @param enums       the program's declared-enum table (an enum element strides at its integer width)
  * @return            the 16-byte slot image, the relocation, and the leaf
  * @throws            when the initializer is not materializable (non-literal, spread, or ptr element)
  * @since #594 T-B6
  */
-fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr) -> FatFieldImage | error {
-    let array_bytes = match const_fat_array_bytes(field_ty, vexpr) { []byte as x => x; error as e => return e }
-    let count = match const_fat_len(field_ty, array_bytes.len to u32) { u32 as c => c; error as e => return e }
+fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> FatFieldImage | error {
+    let array_bytes = match const_fat_array_bytes(field_ty, vexpr, enums) { []byte as x => x; error as e => return e }
+    let count = match const_fat_len(field_ty, array_bytes.len to u32, enums) { u32 as c => c; error as e => return e }
     let leaf_sym = const_leaf_symbol(const_name, field_name)
     let ptr_size = ltype_size(LType::Ptr)
-    let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i128, ptr_size))
+    let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i64, ptr_size))
     FatFieldImage {
         slot_bytes = slot
         reloc = data_reloc(fieldoff, leaf_sym)
@@ -429,11 +460,12 @@ fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: ch
  * @param const_name  the owning const's name (for each fat field's deterministic leaf symbol)
  * @param layout      the struct's resolved layout (size + per-field offset/class)
  * @param si          the typed struct-literal initializer
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
  * @return            the struct blob + its internal relocations + its leaf entries
  * @throws            when a non-fat pointer field (Tier-B), a float field, or a non-foldable value occurs
  * @since #594 crumb 6 + T-B6
  */
-fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStructInit) -> ConstImage | error {
+fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStructInit, enums: []LEnumInfo) -> ConstImage | error {
     mut buf = zeros_bytes(layout.size to u64)
     mut relocs: []LDataReloc = teko::list::empty()
     mut leaves: []LRodata = teko::list::empty()
@@ -444,7 +476,7 @@ fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStruc
         let fieldoff = layout.field_offsets[j]
         let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error as e => return e }
         if is_fat_type(vexpr.type) {
-            let ffi = match const_fat_field(const_name, field_name, fieldoff, vexpr.type, vexpr) { FatFieldImage as x => x; error as e => return e }
+            let ffi = match const_fat_field(const_name, field_name, fieldoff, vexpr.type, vexpr, enums) { FatFieldImage as x => x; error as e => return e }
             buf = write_bytes_at(buf, fieldoff to u64, ffi.slot_bytes)
             relocs = teko::list::push(relocs, ffi.reloc)
             leaves = teko::list::push(leaves, ffi.leaf)
@@ -468,15 +500,17 @@ fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStruc
  * @param name        the struct type's canonical name
  * @param init        the const's checked initializer
  * @param layouts     the program's struct-layout table
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
  * @return            the struct blob + its relocations + its leaves
- * @throws            when the layout is unknown, the initializer is not a struct literal, or a field is Tier-B
+ * @throws            when the layout is unknown, the initializer is not a struct literal (the message
+ *                    names the const, its type and its source position), or a field is Tier-B
  * @since #594 crumb 6 + T-B6
  */
-fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout) -> ConstImage | error {
+fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, enums: []LEnumInfo) -> ConstImage | error {
     let layout = match find_struct_layout(layouts, name) { LStructLayout as l => l; error as e => return e }
     match init.kind {
-        checker::TStructInit as si => const_struct_blob(const_name, layout, si)
-        _ => error { message = "const struct: initializer is not a struct literal (Tier-A follow-up) (#594)" }
+        checker::TStructInit as si => const_struct_blob(const_name, layout, si, enums)
+        _ => error { message = $"const struct: the initializer of '{const_name}' (type '{name}') at {init.line}:{init.col} is not a struct literal — the checker's const-constructor canonicalization (`canonicalize_const_ctors`) did not reduce it (Tier-A follow-up) (#594)" }
     }
 }
 
@@ -484,7 +518,7 @@ fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts:
  * const_variant_tag_bytes — the little-endian I32 tag image of an EMPTY-CASE variant member (#594
  * crumb 9b): the case's declared index serialized at the variant runtime image's `tag@0` slot (§5.3),
  * with no payload. An initializer that binds payload fields is a non-empty case whose payload
- * serialization is a further follow-up and honest-stops (the `MRet {}`/`MRetRiscv {}` targets §6.4
+ * serialization is a further follow-up and honest-stops (the `MRet {}` targets §6.4
  * requires are all payload-free empty cases).
  *
  * @param si     the member's struct-literal initializer (must bind no field for an empty case)
@@ -494,7 +528,7 @@ fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts:
  */
 fn const_variant_tag_bytes(si: checker::TStructInit, index: u32) -> []byte | error {
     if si.field_names.len > 0 { return error { message = "const variant: non-empty payload case materialization is a Tier-A follow-up (#594)" } }
-    serialize_le(index to i128, ltype_size(LType::I32))
+    serialize_le(index to i64, ltype_size(LType::I32))
 }
 
 /**
@@ -508,7 +542,7 @@ fn const_variant_tag_bytes(si: checker::TStructInit, index: u32) -> []byte | err
  * @param name      the const's declared type name (possibly qualified)
  * @return          the matching variant info, or null
  */
-fn find_variant_info(variants: []LEnumInfo, name: str) -> LEnumInfo? {
+fn find_variant_info(variants: []LEnumInfo, name: str) -> LEnumInfo | null {
     let bare = checker::name_last_segment(name)
     mut i: u64 = 0
     loop {
@@ -548,7 +582,7 @@ fn variant_member_index(members: []str, case_name: str) -> u32 | error {
  * constructed; its index among the variant's declared members (`variants`) is the tag a later `match`
  * compares against (`lower_variant_case_test`), so both engines agree on the case byte-for-byte. A
  * member carrying payload fields honest-stops (payload materialization is a further follow-up beyond
- * the payload-free `MRet {}`/`MRetRiscv {}` §6.4 targets).
+ * the payload-free `MRet {}` §6.4 targets).
  *
  * @param info  the const's declared variant (its member case names, in tag order)
  * @param init  the const's checked initializer (an empty-case member construction)
@@ -590,14 +624,15 @@ fn const_image_flat(bytes: []byte) -> ConstImage {
  * @param init        the const's checked initializer
  * @param layouts     the program's struct-layout table
  * @param variants    the program's variant table
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
  * @return            the const's complete rodata image
  * @throws            a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  * @since #594 crumb 6/9b + T-B6
  */
-fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LEnumInfo) -> ConstImage | error {
+fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
     match find_variant_info(variants, name) {
         LEnumInfo as info => match const_variant_bytes(info, init) { []byte as b => const_image_flat(b); error as e => return e }
-        null => const_struct_bytes(const_name, name, init, layouts)
+        null => const_struct_bytes(const_name, name, init, layouts, enums)
     }
 }
 
@@ -613,15 +648,16 @@ fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: 
  * @param cd       the residual typed const declaration (its name, type + checked initializer)
  * @param layouts  the program's struct-layout table
  * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
  * @return         the const's complete rodata image (bytes + internal relocs + leaves)
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate form
  * @since #594 crumb 6 (bytes) + T-B6 (relocs + leaves)
  */
-fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo) -> ConstImage | error {
+fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
     match cd.ty {
         checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
-        checker::Slice as s => match const_slice_bytes(s.element, cd.init) { []byte as b => const_image_flat(b); error as e => return e }
-        checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants)
+        checker::Slice as s => match const_slice_bytes(s.element, cd.init, enums) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants, enums)
         _ => error { message = "const aggregate: pointer/slice-bearing value is Tier-B (T-B), not crumb 6 (#594)" }
     }
 }
@@ -638,13 +674,14 @@ fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: 
  * @param cd       the residual typed const declaration
  * @param layouts  the program's struct-layout table
  * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
  * @return         the module with the const's leaves + blob appended (unchanged for a scalar const)
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  * @since #594 crumb 6 + T-B6
  */
-fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
     if const_decl_is_scalar(cd.ty) { return m }
-    let img = match serialize_const(cd, layouts, variants) { ConstImage as x => x; error as e => return e }
+    let img = match serialize_const(cd, layouts, variants, enums) { ConstImage as x => x; error as e => return e }
     mut cur = m
     mut i: u64 = 0
     loop {
@@ -663,12 +700,13 @@ fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []L
  * @param it       the program item to fold
  * @param layouts  the program's struct-layout table
  * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
  * @return         the module with `it`'s rodata contribution (unchanged for a non-const item)
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  */
-fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
     match it {
-        checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants)
+        checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants, enums)
         _ => m
     }
 }
@@ -684,15 +722,16 @@ fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStruc
  * @param items    the typed program's top-level items
  * @param layouts  the program's struct-layout table
  * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
  * @return         the module with one rodata entry per Tier-A aggregate const
  * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
  */
-fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo) -> LModule | error {
+fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
     mut cur = m
     mut i: u64 = 0
     loop {
         if i >= items.len { break }
-        cur = match intern_aggregate_const_item(cur, items[i], layouts, variants) { LModule as x => x; error as e => return e }
+        cur = match intern_aggregate_const_item(cur, items[i], layouts, variants, enums) { LModule as x => x; error as e => return e }
         i++
     }
     cur

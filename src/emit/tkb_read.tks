@@ -19,6 +19,22 @@ type RType = struct { r: Reader; value: checker::Type }
 type RTypes = struct { r: Reader; value: []checker::Type }
 type RTable = struct { r: Reader; value: []str }
 
+/**
+ * numint_of_hilo — reconstruct a `parser::NumInt` from the frozen `hi:lo` u64-pair wire
+ * encoding (drop-128, 2026-07-24; see `tkb_write.tks::write_numint`) — the exact inverse of
+ * the writer's derivation: `hi` all-ones marks a negative value (sign-extension), any other
+ * `hi` (always 0 for a value this codec ever writes) marks non-negative; the magnitude is
+ * `lo` directly when non-negative, else `lo`'s own two's-complement negation (`0 - lo`).
+ *
+ * @param hi  the high wire half
+ * @param lo  the low wire half
+ * @return    the reconstructed literal carrier
+ */
+fn numint_of_hilo(hi: u64, lo: u64) -> parser::NumInt {
+    if hi == 0xFFFFFFFFFFFFFFFF { return parser::NumInt { neg = true; mag = 0 - lo } }
+    parser::numint_of_u64(lo)
+}
+
 fn read_u8(r: Reader) -> RByte | error {
     if r.pos >= r.data.len { return error { message = "truncated .tkb" } }
     RByte { r = Reader { data = r.data; pos = r.pos + 1 }; value = r.data[r.pos] }
@@ -35,13 +51,13 @@ fn read_u32(r: Reader) -> RU32 | error {
 fn read_u64(r: Reader) -> RU64 | error {
     let lo = match read_u32(r) { RU32 as x => x; error as e => return e }
     let hi = match read_u32(lo.r) { RU32 as x => x; error as e => return e }
-    RU64 { r = hi.r; value = (lo.value to u64) | ((hi.value to u64) << 32) }
+    RU64 { r = hi.r; value = lo.value | ((hi.value to u64) << 32) }
 }
 
 // a string reference = a u32 index into the (already-read) table.
 pub fn tkb_read_str(r: Reader, table: []str) -> RStr | error {
     let idx = match read_u32(r) { RU32 as x => x; error as e => return e }
-    if (idx.value to u64) >= table.len { return error { message = "bad string index in .tkb" } }
+    if idx.value >= table.len { return error { message = "bad string index in .tkb" } }
     RStr { r = idx.r; value = table[idx.value] }
 }
 
@@ -52,13 +68,13 @@ fn read_strtable(r: Reader) -> RTable | error {
     mut table: []str = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let len = match read_u32(rr) { RU32 as x => x; error as e => return e }
         mut bytes: []byte = teko::list::empty()
         mut br = len.r
         mut j = 0
         loop {
-            if j >= (len.value to u64) { break }
+            if j >= len.value { break }
             let by = match read_u8(br) { RByte as x => x; error as e => return e }
             bytes = teko::list::push(bytes, by.value)
             br = by.r
@@ -71,23 +87,28 @@ fn read_strtable(r: Reader) -> RTable | error {
     RTable { r = rr; value = table }
 }
 
-// inverse of prim_byte (PrimKind ↔ byte = the prim's ENUM ORDINAL). Tier-1 (plan §5
-// [N1/N2]): ordinals match PrimKind exactly — U8..U128 (0..4), I8..I128 (5..9),
-// F16/F32/F64 (10..12), Bool (13). New tags APPENDED within their family (old tags stable).
+/**
+ * prim_of — the inverse of `prim_byte` (`PrimKind` ↔ byte = the prim's ENUM ORDINAL). Ordinals
+ * match `PrimKind` exactly (drop-128, 2026-07-24 — `U128`/`I128`/`F16` are gone, so the family
+ * renumbers): `U8..U64` (0..3), `I8..I64` (4..7), `F32`/`F64` (8..9), `Bool` (10). New tags
+ * APPEND within their family (old tags stable going forward, but this renumbering itself is a
+ * one-time break from the pre-drop wire — see the drop-128 design doc §7 for the scope of the
+ * `.tkb` compat proof, which covers `Number.value` only, not this ordinal).
+ *
+ * @param b  the serialized ordinal byte
+ * @return   the `PrimKind` it names
+ */
 fn prim_of(b: byte) -> checker::PrimKind {
     if b == 0 { return checker::PrimKind::U8 }
     if b == 1 { return checker::PrimKind::U16 }
     if b == 2 { return checker::PrimKind::U32 }
     if b == 3 { return checker::PrimKind::U64 }
-    if b == 4 { return checker::PrimKind::U128 }
-    if b == 5 { return checker::PrimKind::I8 }
-    if b == 6 { return checker::PrimKind::I16 }
-    if b == 7 { return checker::PrimKind::I32 }
-    if b == 8 { return checker::PrimKind::I64 }
-    if b == 9 { return checker::PrimKind::I128 }
-    if b == 10 { return checker::PrimKind::F16 }
-    if b == 11 { return checker::PrimKind::F32 }
-    if b == 12 { return checker::PrimKind::F64 }
+    if b == 4 { return checker::PrimKind::I8 }
+    if b == 5 { return checker::PrimKind::I16 }
+    if b == 6 { return checker::PrimKind::I32 }
+    if b == 7 { return checker::PrimKind::I64 }
+    if b == 8 { return checker::PrimKind::F32 }
+    if b == 9 { return checker::PrimKind::F64 }
     checker::PrimKind::Bool
 }
 
@@ -97,7 +118,7 @@ fn read_types(r: Reader, table: []str) -> RTypes | error {
     mut xs: []checker::Type = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let t = match read_type(rr, table) { RType as x => x; error as e => return e }
         xs = teko::list::push(xs, t.value)
         rr = t.r
@@ -197,7 +218,7 @@ fn read_path(r: Reader, table: []str) -> RPath | error {
     mut segs: []parser::Segment = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
         segs = teko::list::push(segs, parser::Segment { name = nm.value })
         rr = nm.r
@@ -212,7 +233,7 @@ fn read_texprs(r: Reader, table: []str) -> RTExprs | error {
     mut xs: []checker::TExpr = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let e = match read_texpr(rr, table) { RTExpr as x => x; error as e => return e }
         xs = teko::list::push(xs, e.value)
         rr = e.r
@@ -227,7 +248,7 @@ fn read_terms(r: Reader, table: []str) -> RTerms | error {
     mut ts: []checker::TCmpTerm = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let op = match read_u8(rr) { RByte as x => x; error as e => return e }
         let o = match read_texpr(op.r, table) { RTExpr as x => x; error as e => return e }
         ts = teko::list::push(ts, checker::TCmpTerm { op = kind_of(op.value); operand = o.value })
@@ -242,15 +263,12 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
     let ty = match read_type(r, table) { RType as x => x; error as e => return e }
     let tag = match read_u8(ty.r) { RByte as x => x; error as e => return e }
     if tag.value == 0 {
-        // N1/N2 inverse of write_texpr's TNumber: is_float (u8), the 128-bit value as two
-        // u64 (hi then lo), then the f64's IEEE-754 bits as a u64.
         let isf = match read_u8(tag.r) { RByte as x => x; error as e => return e }
         let hi = match read_u64(isf.r) { RU64 as x => x; error as e => return e }
         let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
         let fb = match read_u64(lo.r) { RU64 as x => x; error as e => return e }
-        let v128 = (((hi.value to u128) << 64) | (lo.value to u128)) to i128
         return RTExpr { r = fb.r; value = checker::TExpr {
-                kind = checker::TNumber { is_float = isf.value != 0; value = v128; fval = teko::f64_from_bits(fb.value) }
+                kind = checker::TNumber { is_float = isf.value != 0; value = numint_of_hilo(hi.value, lo.value); fval = teko::f64_from_bits(fb.value) }
                 type = ty.value
                 line = 0
                 col = 0
@@ -348,7 +366,7 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         mut vals: []checker::TExpr = teko::list::empty()
         mut i = 0
         loop {
-            if i >= (nf.value to u64) { break }
+            if i >= nf.value { break }
             let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
             let vl = match read_texpr(nm.r, table) { RTExpr as x => x; error as e => return e }
             names = teko::list::push(names, nm.value)
@@ -371,7 +389,7 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         mut pieces: []str = teko::list::empty()
         mut i = 0
         loop {
-            if i >= (np.value to u64) { break }
+            if i >= np.value { break }
             let pc = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
             pieces = teko::list::push(pieces, pc.value)
             rr = pc.r
@@ -382,7 +400,7 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         mut holes: []checker::TExpr = teko::list::empty()
         mut j = 0
         loop {
-            if j >= (nh.value to u64) { break }
+            if j >= nh.value { break }
             let hl = match read_texpr(rr, table) { RTExpr as x => x; error as e => return e }
             holes = teko::list::push(holes, hl.value)
             rr = hl.r
@@ -392,15 +410,12 @@ fn read_texpr(r: Reader, table: []str) -> RTExpr | error {
         return RTExpr { r = rr; value = checker::TExpr { kind = checker::TInterp { pieces = pieces; holes = holes; specs = empty_specs }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 19 {
-        // Enum::Member — PathExpr: inverse of write tag 19 — enum name, member, ordinal (u64),
-        // (#50) the resolved member value (u128 as hi then lo u64).
         let en = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
         let mb = match tkb_read_str(en.r, table) { RStr as x => x; error as e => return e }
         let od = match read_u64(mb.r) { RU64 as x => x; error as e => return e }
         let vh = match read_u64(od.r) { RU64 as x => x; error as e => return e }
         let vl = match read_u64(vh.r) { RU64 as x => x; error as e => return e }
-        let v = ((vh.value to u128) << 64) | (vl.value to u128)
-        return RTExpr { r = vl.r; value = checker::TExpr { kind = checker::TPathExpr { enum_name = en.value; member = mb.value; ordinal = od.value; value = v }; type = ty.value; line = 0; col = 0 } }
+        return RTExpr { r = vl.r; value = checker::TExpr { kind = checker::TPathExpr { enum_name = en.value; member = mb.value; ordinal = od.value; value = vl.value }; type = ty.value; line = 0; col = 0 } }
     }
     if tag.value == 20 {
         // Phase 2 — InExpr (<expr> in [ … ]): inverse of write tag 20 — lhs texpr, nelems (u64), then each elem texpr.
@@ -463,7 +478,7 @@ fn read_bindtarget(r: Reader, table: []str) -> RBindTarget | error {
     mut names: []str = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
         names = teko::list::push(names, nm.value)
         rr = nm.r
@@ -675,7 +690,11 @@ fn read_constraints(r: Reader, table: []str) -> RConstraints | error {
 /** (#165 C4) a parser::Function (type-body method): inverse of write_function. has_body is always 0
     (the honest signature-only stub — R2); a nonzero has_body would need a parser-statement codec that
     does not exist, so reject it loudly rather than mis-read. is_unsafe (U1) rides last — always false
-    for a method (the enclosing TypeDecl.is_unsafe is the source of truth per the remodel design). */
+    for a method (the enclosing TypeDecl.is_unsafe is the source of truth per the remodel design).
+    `has_arena_size`/`arena_size` (#453) are NOT round-tripped — a method never carries the
+    directive in this crumb (`parse_decl_attributes` only runs at the top-level `fn` position), so
+    a `.tkb`-read method always reads back `has_arena_size = false`, the same precedent as
+    `TypeDecl.di_kind`/`must_free` above. */
 fn read_function(r: Reader, table: []str) -> RFunction | error {
     let nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     let tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -708,6 +727,7 @@ fn read_function(r: Reader, table: []str) -> RFunction | error {
             c_symbol = cs.value; from_lib = fr.value; os_guard = og.value
             is_intern = ii.value != 0; is_abstract = ia.value != 0; is_virtual = iv.value != 0; is_override = io.value != 0
             has_inject = false; injects = teko::list::empty(); is_unsafe = iu.value != 0
+            has_arena_size = false; arena_size = 0 to u64
     } }
 }
 /** (#165 C4/C5) a []parser::Function: inverse of write_functions (declaration = vtable order). */
@@ -736,20 +756,18 @@ fn read_typebody(r: Reader, table: []str) -> RTypeBody | error {
     if tag.value == 3 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::AliasBody { alias = te.value } } }
     if tag.value == 4 { return RTypeBody { r = tag.r; value = parser::ExternBody { } } }
     if tag.value == 5 {
-        // (C8.6) names + power-of-2 values: n(u64), then for each name_idx(u32)+hi(u64)+lo(u64)
         let n = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
         mut rr = n.r
         mut names: []str = teko::list::empty()
-        mut vals: []u128 = teko::list::empty()
+        mut vals: []u64 = teko::list::empty()
         mut i = 0
         loop {
             if i >= n.value { break }
             let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
             let hi = match read_u64(nm.r) { RU64 as x => x; error as e => return e }
             let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
-            let v = ((hi.value to u128) << 64) | (lo.value to u128)
             names = teko::list::push(names, nm.value)
-            vals = teko::list::push(vals, v)
+            vals = teko::list::push(vals, lo.value)
             rr = lo.r
             i++
         }
@@ -825,6 +843,18 @@ fn read_usedecl(r: Reader, table: []str) -> RUseDecl | error {
     let nl = match read_strs(al.r, table) { RStrs as x => x; error as e => return e }
     RUseDecl { r = nl.r; value = parser::UseDecl { path = p.value; has_alias = ha.value != 0; alias = al.value; names = nl.value } }
 }
+/**
+ * Read a typed `TFunction` item: inverse of `write_tfunction`.
+ *
+ * `has_arena_size`/`arena_size` (#453) are NOT round-tripped — following the same precedent as
+ * `TypeDecl.di_kind`/`must_free` (`read_typedecl` above) and `parser::Function`'s own method
+ * codec (`read_function` above): a `.tkb`-read `TFunction` always carries `has_arena_size =
+ * false`, a pre-existing gap this pass does not close.
+ *
+ * @param Reader r  the reader cursor, positioned at the TFunction's first field
+ * @param []str table  the program's deduplicated string table
+ * @return RTFunction | error  the decoded TFunction plus the reader's advanced position
+ */
 fn read_tfunction(r: Reader, table: []str) -> RTFunction | error {
     let nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
     let tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
@@ -843,7 +873,7 @@ fn read_tfunction(r: Reader, table: []str) -> RTFunction | error {
     let ie = match read_u8(it.r) { RByte as x => x; error as e => return e }
     let cs = match tkb_read_str(ie.r, table) { RStr as x => x; error as e => return e }
     let fr = match tkb_read_str(cs.r, table) { RStr as x => x; error as e => return e }
-    RTFunction { r = fr.r; value = checker::TFunction { name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value } }
+    RTFunction { r = fr.r; value = checker::TFunction { name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value; return_type = rt.value; body = bd.value; vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value; namespace = ns.value; file = fl.value; line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0; c_symbol = cs.value; from_lib = fr.value; has_arena_size = false; arena_size = 0 to u64 } }
 }
 /**
  * Read a module-level `TConstDecl` TItem: inverse of `write_tconstdecl` (#594 crumb 8) — name +
@@ -894,8 +924,7 @@ fn read_pexpr(r: Reader, table: []str) -> RPExpr | error {
         let hi = match read_u64(isf.r) { RU64 as x => x; error as e => return e }
         let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
         let fb = match read_u64(lo.r) { RU64 as x => x; error as e => return e }
-        let v128 = (((hi.value to u128) << 64) | (lo.value to u128)) to i128
-        return RPExpr { r = fb.r; value = parser::Expr { kind = parser::Number { is_float = isf.value != 0; value = v128; fval = teko::f64_from_bits(fb.value) }; line = 0; col = 0 } }
+        return RPExpr { r = fb.r; value = parser::Expr { kind = parser::Number { is_float = isf.value != 0; value = numint_of_hilo(hi.value, lo.value); fval = teko::f64_from_bits(fb.value) }; line = 0; col = 0 } }
     }
     if tag.value == 1 {
         let s = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
@@ -978,7 +1007,9 @@ fn deserialize(data: []byte) -> checker::TExpr | error {
         return error { message = "not a .tkb (bad magic)" }
     }
     let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
-    if ver.value != 1 { return error { message = "unsupported .tkb version" } }
+    if ver.value != TKB_EXPR_VERSION {
+        return error { message = "unsupported .tkb version (this compiler reads version 2; pre-0.3.1 artifacts use retired PrimKind ordinals and must be rebuilt with the current compiler)" }
+    }
     let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
     if data.len < 16 { return error { message = "truncated .tkb header" } }
     if fnv1a(data, 16) != stored.value {
@@ -1001,7 +1032,9 @@ pub fn deserialize_program(data: []byte) -> checker::TProgram | error {
         return error { message = "not a .tkb (bad magic)" }
     }
     let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
-    if ver.value != 3 { return error { message = "unsupported .tkb program version" } }
+    if ver.value != TKB_PROGRAM_VERSION {
+        return error { message = "unsupported .tkb program version (this compiler reads version 4; pre-0.3.1 artifacts use retired PrimKind ordinals and must be rebuilt with the current compiler)" }
+    }
     let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
     if data.len < 16 { return error { message = "truncated .tkb header" } }
     if fnv1a(data, 16) != stored.value {

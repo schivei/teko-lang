@@ -137,13 +137,12 @@ regression in this opcode's encoding?* Two live checks exist:
 
 | Family | Files | Tests | Role | T2-eligible? |
 | --- | --- | --- | --- | --- |
-| encode | `encode_{arm64,riscv,x86_64}_test.tkt` | 186 | hex golden per opcode | yes (surface) |
-| isel | `isel_{arm64,riscv,x86_64}_test.tkt` | 157 | instruction selection | yes (surface) |
-| regalloc | `regalloc_test.tkt` + `_x86`/`_riscv`/`_match` | 108 | spill/allocation | yes (surface) |
+| encode | `` | 186 | hex golden per opcode | yes (surface) |
+| isel | `` | 157 | instruction selection | yes (surface) |
+| regalloc | `regalloc_test.tkt` + `_x86`/``/`_match` | 108 | spill/allocation | yes (surface) |
 | stackify | `stackify_test.tkt` | 168 | wasm stackification/valtype/mem-op | yes (surface) |
-| objfile | `objfile_{coff,elf,elf_riscv,macho,wasm}_test.tkt` | 71 | object-file bytes per format | yes (surface) |
-| abi | `abi_{sysv64,win64,riscv64}_test.tkt` | 32 | ABI lowering | yes (surface) |
-| minst (structural) | `minst_test.tkt` + `_x86`/`_riscv` | 32 | MInst shape/builders | yes (surface) |
+| objfile | `` | 71 | object-file bytes per format | yes (surface) |
+| minst (structural) | `minst_test.tkt` + `_x86`/`` | 32 | MInst shape/builders | yes (surface) |
 | **T2-eligible subtotal** | | **754** | | |
 | minst_interp (ORACLE) | `minst_interp_test.tkt` | 35 | differential oracle | **NO → T3** |
 
@@ -266,8 +265,8 @@ means "did we test the new branch?".
 
 | Frozen family (source) | ~Lines | Superior gate that proves it (in lieu of unit coverage) |
 | --- | --- | --- |
-| `encode_{arm64,riscv,x86_64}.tks` (+`_consts`) | ~6,700 | fixpoint (self-emitted opcode bytes) + own==C differential (executes) + host object check |
-| `isel_{arm64,riscv,x86_64}.tks` | ~4,300 | fixpoint + own==C differential |
+| `` (+`_consts`) | ~6,700 | fixpoint (self-emitted opcode bytes) + own==C differential (executes) + host object check |
+| `` | ~4,300 | fixpoint + own==C differential |
 | `regalloc*.tks` | ~3,800 | fixpoint + own==C differential |
 | `stackify.tks` | ~5,480 | wasm-validate (WABT) + wasmtime differential |
 | `objfile_*.tks` | ~3,650 | host toolchain (`readelf`/`otool`/`llvm-readobj`/`ld -r`) + differential |

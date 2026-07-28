@@ -16,7 +16,7 @@
 >   `ltype_of_prim_name` (`:224`).
 > - `src/codegen/codegen.tks` — prim→C type (`:330`), prim spelling (`:1122`,`:1160`,`:1857`),
 >   `cg_prim_is_float` (`:2009`), `prim_float_tag` (`:2101`), float `/` and `%` rulings (`:2144`).
-> - `src/backend/isel_x86_64.tks` (and `isel_arm64.tks`, `isel_riscv.tks`) — the **`B1-fp`
+> - `src/backend/isel_x86_64.tks` (and `isel_arm64.tks`, um isel de backend) — the **`B1-fp`
 >   float honest-stop family**, uniformly deferred to **0.3.1** (`:197`,`:325`,`:492`,`:522`,…).
 > - `src/runtime/teko_rt.{c,h}` — maintained-C runtime seed: `tk_alloc`/arena (`teko_rt.h:124`,
 >   `:155`), `__int128` alignment discipline (`:113`), `tk_str`/`tk_slice_*` immutable-buffer

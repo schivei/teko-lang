@@ -1,7 +1,6 @@
 # Native test-gate keystone — #265 (line/branch cov) + #168 (compile-once partition)
 
 Status: DESIGN (architect). Implementation crumbs. Companion to
-`docs/design/compile-time-architecture.md` §2.1/Lever-B and memory
 `teko-native-test-gate` (owner standing ruling 2026-07-06: the `#test` gate NEVER runs on
 the VM — it compiles to a NATIVE binary that knows the product-under-test + its access
 points; VM stays dev/debug/WASM only). This is THE shared-villain kill: it drops the

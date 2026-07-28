@@ -85,6 +85,25 @@ fn asm_parse(path: str, tokens: []lexer::Token) -> []parser::Item | error {
 }
 
 /**
+ * asm_lex_and_parse — lex `src` and parse it into ONE file's item list, freeing the token buffer on
+ * the success path. Extracted so `assemble_sel`'s per-file loop matches on a single result instead
+ * of holding a `tokens` binding across two fallible steps: the collector needs the failure arms to
+ * fall through to the next file, and a `tokens` alive across them is a second live handle that
+ * `mem::free` (rightly) refuses.
+ *
+ * @param path  the source file's path (selects the entry-file vs module grammar)
+ * @param src   the file's contents
+ * @return      the file's parsed items, or the lex/parse error (already located, un-prefixed)
+ * @since 0.3.1
+ */
+fn asm_lex_and_parse(path: str, src: str) -> []parser::Item | error {
+    mut tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
+    let one = match asm_parse(path, tokens) { []parser::Item as items => items; error as e => return e }
+    teko::mem::free(tokens)
+    one
+}
+
+/**
  * How many of `files` are ELIGIBLE for lex/parse under `include_tests` — every file
  * except a `.tkt` test excluded from a production build/run. `assemble_sel`'s
  * `lexer`/`parser` observability phases use this as their known-upfront total (a
@@ -111,10 +130,55 @@ fn eligible_file_count(files: []SourceFile, include_tests: bool) -> u64 {
  * phase reporting.
  *
  * @param files  the discovered project file set
- * @return       the merged program, or the first lex/parse error
+ * @return       the merged program, or every collected lex/parse diagnostic as one error
  */
 fn assemble(files: []SourceFile) -> parser::Program | error {
-    assemble_sel(files, false, false, false)
+    let a = match assemble_sel(files, false, false, false) { Assembled as x => x; error as e => return e }
+    if a.diags.len > 0 { return error { message = join_diags(a.diags) } }
+    a.program
+}
+
+/**
+ * Assembled — the output of `assemble_sel`: the merged program built from every file that lexed
+ * and parsed CLEANLY, plus one diagnostic per file that did not (`diags`, in file order).
+ *
+ * The two travel together because a lex/parse failure is isolated at the FILE boundary (owner
+ * ruling 2026-07-26 — "checa o arquivo, registra o diagnóstico, segue para o próximo"): a bad file
+ * contributes no items and does not stop the walk, so the files after it are still read, and the
+ * CHECKER still runs over everything that parsed. One build therefore reports every file's
+ * diagnostic, the same way `teko test` reports every test rather than stopping at the first
+ * failure. `diags` empty ⇒ the assembly was clean and `program` is exactly what the
+ * stop-at-the-first-error assembler produced (the success path is unchanged — the fixpoint is
+ * untouched).
+ *
+ * @since 0.3.1
+ */
+pub type Assembled = struct {
+    /** the merged program: every item of every file that lexed and parsed cleanly, in file order. */
+    program: parser::Program
+    /** one `path:line:col: text` diagnostic per file that failed to lex or parse, in file order. */
+    diags: []str
+}
+
+/**
+ * join_diags — render a collected diagnostic list as the newline-separated block the driver prints
+ * (and a `.tkr` compile-fail scenario substring-matches against). One diagnostic per line, in the
+ * order they were collected, with no trailing newline — `fail` supplies the framing.
+ *
+ * @param diags  the collected diagnostics
+ * @return       the diagnostics joined by newlines ("" for an empty list)
+ * @since 0.3.1
+ */
+pub fn join_diags(diags: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= diags.len { break }
+        if i > 0 { out = out ~ "\n" }
+        out = out ~ diags[i]
+        i = i + 1
+    }
+    out
 }
 
 /**
@@ -140,10 +204,13 @@ fn assemble(files: []SourceFile) -> parser::Program | error {
  *                       already-reported retry pass, or a silent caller)
  * @param tty            render the phases' in-place `\r` updates (irrelevant when
  *                       `report` is `false`)
- * @return               the merged program, or the first lex/parse error
+ * @return               the merged program plus one diagnostic per file that failed to lex or
+ *                       parse (`Assembled`), or an `error` when a file cannot be READ at all
+ *                       (an I/O fault, not a source defect — nothing to report per-file)
  */
-fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: bool) -> parser::Program | error {
+fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: bool) -> Assembled | error {
     mut merged: []parser::Item = teko::list::empty()
+    mut diags: []str = teko::list::empty()
     let total = eligible_file_count(files, include_tests)
     let mode = report_mode(!report, tty)
     let lex_phase = phase_begin("lexer", count_unit_text(0, total, "files"), mode)
@@ -159,27 +226,27 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
             continue
         }
         let src = match teko::io::read_file(sf.path) { str as s => s; error as e => return e }
-        mut tokens = match lexer::tokenize(src) {
-            []lexer::Token as t => t
+        // FILE-boundary isolation: a file that fails to lex or parse records its diagnostic,
+        // contributes no items, and does NOT stop the walk — the files after it are still read and
+        // the checker still runs over everything that parsed. The `ok` flag carries the verdict out
+        // of the value-position match, since a `continue` may not live inside one.
+        mut one: []parser::Item = teko::list::empty()
+        mut ok = true
+        match asm_lex_and_parse(sf.path, src) {
+            []parser::Item as items => { one = items }
             error as e => {
-                let msg = teko::str::concat(sf.path, ":", e.message)
-                phase_end_fail(lex_phase, count_unit_text(lexed, total, "files"), msg)
-                return error { message = msg }
+                diags = teko::list::push(diags, teko::str::concat(sf.path, ":", e.message))
+                ok = false
             }
+        }
+        if !ok {
+            i = i + 1
+            continue
         }
         lexed = lexed + 1
-        phase_tick(lex_phase, count_unit_text(lexed, total, "files"))
-        let one = match asm_parse(sf.path, tokens) {
-            []parser::Item as items => items
-            error as e => {
-                let msg = teko::str::concat(sf.path, ":", e.message)
-                phase_end_fail(parse_phase, count_unit_text(parsed, total, "files"), msg)
-                return error { message = msg }
-            }
-        }
         parsed = parsed + 1
+        phase_tick(lex_phase, count_unit_text(lexed, total, "files"))
         phase_tick(parse_phase, count_unit_text(parsed, total, "files"))
-        teko::mem::free(tokens)
         mut k: u64 = 0
         loop {
             if k >= one.len { break }
@@ -188,7 +255,12 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         }
         i = i + 1
     }
+    if diags.len > 0 {
+        phase_end_fail(lex_phase, count_unit_text(lexed, total, "files"), diags[0])
+        phase_end_fail(parse_phase, count_unit_text(parsed, total, "files"), diags[0])
+        return Assembled { program = parser::Program { items = merged }; diags = diags }
+    }
     phase_end_ok(lex_phase, count_unit_text(lexed, total, "files"))
     phase_end_ok(parse_phase, count_unit_text(parsed, total, "files"))
-    parser::Program { items = merged }
+    Assembled { program = parser::Program { items = merged }; diags = diags }
 }

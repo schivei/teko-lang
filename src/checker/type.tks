@@ -1,54 +1,70 @@
 // src/checker/type.tks  (namespace 'teko::checker')
 
-// the injected scalar primitives (B.19) — distinct real types.
-// Native numeric set, Tier 1 (B.38 / TEKO_CORRECTION_PLAN §5): the unsigned and
-// signed integers now include the 128-bit widths, and the three IEEE floats are
-// native (no longer deferred). `dec`/`bigint` remain deferred (runtime-backed).
-// Placement note: the new prims are APPENDED within their family (U128 after U64,
-// I128 after I64, the floats F16/F32/F64 as a new contiguous block) and Bool stays
-// LAST — this perturbs no existing ordinal (U8..I64, then floats, then Bool); the
-// .tkb prim serialization (emit) is updated in the cascade, not here.
+/**
+ * PrimKind — the injected scalar primitives (B.19), distinct real types. Native numeric set
+ * (B.38 / TEKO_CORRECTION_PLAN §5): unsigned/signed integers 8–64 bit and the two IEEE floats
+ * f32/f64. `dec`/`bigint` remain deferred (runtime-backed). The 128-bit widths (`U128`/`I128`)
+ * and the half-precision float (`F16`) are REMOVED (drop-128, 2026-07-24) — the surface no
+ * longer accepts them (`scope.tks::builtin_type` honest-stops on `i128`/`u128`/`f16`), so no
+ * member for them exists here; `Bool` stays LAST.
+ */
 pub type PrimKind = enum {
-    U8; U16; U32; U64; U128
-    I8; I16; I32; I64; I128
-    F16; F32; F64
+    U8; U16; U32; U64
+    I8; I16; I32; I64
+    F32; F64
     Bool
 }
 
-// --- PrimKind predicates / helpers (B.38) -----------------------------------
-// The cascade (checker / codegen / VM) depends on these; defined here so the
-// model is the single source of truth (kept aligned with type.h).
-
-// true for the IEEE float prims (F16/F32/F64).
+/**
+ * prim_is_float — true for the IEEE float prims (F32/F64).
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a float
+ */
 fn prim_is_float(k: PrimKind) -> bool {
-    match k { F16 => true; F32 => true; F64 => true; _ => false }
+    match k { F32 => true; F64 => true; _ => false }
 }
 
-// true for the integer prims (U8..U128, I8..I128). NOT bool, NOT float.
+/**
+ * prim_is_int — true for the integer prims (U8..U64, I8..I64). NOT bool, NOT float.
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is an integer
+ */
 fn prim_is_int(k: PrimKind) -> bool {
     match k {
-        U8 => true; U16 => true; U32 => true; U64 => true; U128 => true
-        I8 => true; I16 => true; I32 => true; I64 => true; I128 => true
+        U8 => true; U16 => true; U32 => true; U64 => true
+        I8 => true; I16 => true; I32 => true; I64 => true
         _ => false
     }
 }
 
-// true for the SIGNED integer prims (I8..I128). Floats are signed by nature, but
-// this predicate is about INTEGER signedness — call it only for ints (it returns
-// false for floats and bool, which carry no integer-signedness concept).
+/**
+ * prim_is_signed — true for the SIGNED integer prims (I8..I64). Floats are signed by nature, but
+ * this predicate is about INTEGER signedness — call it only for ints (it returns false for
+ * floats and bool, which carry no integer-signedness concept).
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a signed integer
+ */
 fn prim_is_signed(k: PrimKind) -> bool {
     match k {
-        I8 => true; I16 => true; I32 => true; I64 => true; I128 => true
+        I8 => true; I16 => true; I32 => true; I64 => true
         _ => false
     }
 }
 
-// bit width of a prim: ints 8/16/32/64/128, floats 16/32/64, bool 1.
+/**
+ * prim_width — the bit width of a prim: ints 8/16/32/64, floats 32/64, bool 1.
+ *
+ * @param k  the prim kind to measure
+ * @return   its bit width
+ */
 pub fn prim_width(k: PrimKind) -> u32 {
     match k {
-        U8 => 8; U16 => 16; U32 => 32; U64 => 64; U128 => 128
-        I8 => 8; I16 => 16; I32 => 32; I64 => 64; I128 => 128
-        F16 => 16; F32 => 32; F64 => 64
+        U8 => 8; U16 => 16; U32 => 32; U64 => 64
+        I8 => 8; I16 => 16; I32 => 32; I64 => 64
+        F32 => 32; F64 => 64
         Bool => 1
     }
 }
@@ -77,7 +93,15 @@ pub type Char = struct { }   // a UTF-8 codepoint (1–4 bytes); distinct by tag
 pub type Str = struct { }   // validated UTF-8
 pub type Error = struct { }   // the native `error` (lowercase; supersedes `Error`)
 pub type Void = struct { }   // return-only marker; legal ONLY as Func.ret
-pub type Ptr = struct { inner: Type? }   // `ptr<T>` — a TYPED address; `inner = null` = the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only; NOT the value-`void`). The primitive inside Ref<T>.
+/**
+ * Ptr — the checker representation of `ptr<T>`, a TYPED machine address. The internal meta-name
+ * differs from the surface `ptr<T>` exactly as `Optional`↔`T?` and `Slice`↔`[]T`; it is the primitive
+ * inside `Ref<T>`.
+ */
+pub type Ptr = struct {
+    /** the pointed-to type, or `null` for the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only, NOT the value-`void`). */
+    inner: Type | null
+}
 pub type Uptr = struct { }   // (C7.1a) opaque word-size unsigned — transport-only at the FFI boundary
 // (MEM-1b) `Reference` — the META-level representation of the SAFE reference (user surface `Ref<T>`,
 // a compiler-known "C pointer WITHOUT `*`/`&`"). The meta-name differs from the surface name exactly
@@ -108,7 +132,7 @@ fn type_is_void(t: Type) -> bool {
 }
 
 // (S-mem) two ptr inners equal: both null (opaque ptr) → equal; one null → not; else by type.
-fn ptr_inner_eq(a: Type?, b: Type?) -> bool {
+fn ptr_inner_eq(a: Type | null, b: Type | null) -> bool {
     match a {
         null => match b { null => true; Type => false }
         Type as ta => match b { null => false; Type as tb => type_eq(ta, tb) }

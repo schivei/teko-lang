@@ -9,13 +9,9 @@ use teko::lir
  * access takes a native i32 address, §6's checked narrow applies at every
  * `Ptr`-typed memory op) or `i64` on wasm64 (`ptr64 = true` — the uniform
  * 64-bit `ptr<>` model needs no narrowing at all, `ltype_size(Ptr) = 8`
- * already matches). `I128` and `F16` have no wasm value type at all — the
- * two NAMED honest-stops `C1-i128` (shared with A2's own i128 route) and
- * `C1-f16` (matching the register targets' own f16 gap). `Void` is a
- * valueless machine class (never a real operand), so it also has no valtype
- * byte — an internal-error arm, distinct from the two design-named stops,
- * exercised directly by a unit test rather than reachable through valid
- * lowering.
+ * already matches). `Void` is a valueless machine class (never a real
+ * operand), so it has no valtype byte — an internal-error arm, exercised
+ * directly by a unit test rather than reachable through valid lowering.
  *
  * @param LType t  the machine class to map
  * @param bool ptr64  the target pointer width (`false` = wasm32, the
@@ -29,8 +25,6 @@ pub fn wasm_valtype(t: lir::LType, ptr64: bool) -> u8 | error {
         lir::LType::I16 => wasm_vtype_wire(WasmVType::I32)
         lir::LType::I32 => wasm_vtype_wire(WasmVType::I32)
         lir::LType::I64 => wasm_vtype_wire(WasmVType::I64)
-        lir::LType::I128 => error { message = "stackify: C1-i128 — wasm has no native i128 valtype, deferred (shared with A2's i128 route, backend-a4-encoder.md §6.3)" }
-        lir::LType::F16 => error { message = "stackify: C1-f16 — wasm has no native f16 valtype, deferred (matches the register targets' f16 gap)" }
         lir::LType::F32 => wasm_vtype_wire(WasmVType::F32)
         lir::LType::F64 => wasm_vtype_wire(WasmVType::F64)
         lir::LType::Ptr => if ptr64 { wasm_vtype_wire(WasmVType::I64) } else { wasm_vtype_wire(WasmVType::I32) }
@@ -597,7 +591,7 @@ fn et_get(t: ElideTable, id: u32) -> ElideKind {
 
 /**
  * u32_stack_top — the last element of `xs` (§5's own live `ctx.pending`
- * mirror, LIFO top), or `u32_unset()` when `xs` is empty (mirrors `u32_pos`'
+ * mirror, LIFO top), or `u32_unset()` when `xs` is empty (mirrors `block_rpo_pos`'
  * own defensive sentinel default — no real VReg id collides with it in any
  * function small enough to compile).
  *
@@ -1290,24 +1284,23 @@ fn emit_edge_copies(ctx0: StackifyCtx, params: []u32, args: []u32) -> StackifyCt
 }
 
 /**
- * stackify_max_i32 — `i32::MAX` (`2147483647`) as an i128, the upper bound
+ * stackify_max_i32 — `i32::MAX` (`2147483647`) as an i64, the upper bound
  * of the "does this constant fit i32" test (`stackify_fits_i32`).
  *
- * @return i128  i32::MAX
+ * @return i64  i32::MAX
  */
-fn stackify_max_i32() -> i128 {
-    2147483647 to i128
+fn stackify_max_i32() -> i64 {
+    2147483647
 }
 
 /**
  * stackify_min_i32 — `i32::MIN`, computed as `-(i32::MAX) - 1` so no literal
- * names the boundary value directly (mirrors `isel_arm64.tks`'s
- * `min_i64_i128` pattern).
+ * names the boundary value directly.
  *
- * @return i128  i32::MIN
+ * @return i64  i32::MIN
  */
-fn stackify_min_i32() -> i128 {
-    -(stackify_max_i32()) - (1 to i128)
+fn stackify_min_i32() -> i64 {
+    -(stackify_max_i32()) - (1)
 }
 
 /**
@@ -1320,10 +1313,10 @@ fn stackify_min_i32() -> i128 {
  * later: choosing `i32` whenever the value fits keeps every ordinary
  * literal (the `exit`/arith corpus) in the natural wasm32 family.
  *
- * @param i128 v  the value to check
+ * @param i64 v  the value to check
  * @return bool  whether `v` fits an i32
  */
-fn stackify_fits_i32(v: i128) -> bool {
+fn stackify_fits_i32(v: i64) -> bool {
     v >= stackify_min_i32() && v <= stackify_max_i32()
 }
 
@@ -1368,8 +1361,7 @@ type WasmMemOp = struct {
  * value at the REGISTER boundary (the checked narrow / plain widen
  * `stackify_load`/`stackify_store` apply on wasm32, vs the identity on
  * wasm64) — a target-independent decision this table does not need to make.
- * `I128`/`F16` are the same two named honest-stops `wasm_valtype` names;
- * `Void` is the same internal-error arm.
+ * `Void` is the same internal-error arm `wasm_valtype` names.
  *
  * @param LType t  the accessed machine class
  * @return WasmMemOp | error  the resolved memory-access shape, or a named
@@ -1384,8 +1376,6 @@ fn wasm_mem_op(t: lir::LType) -> WasmMemOp | error {
         lir::LType::Ptr => WasmMemOp { load_op = WASM_OP_I64_LOAD; store_op = WASM_OP_I64_STORE; align = 3 to u32; valtype = wasm_vtype_wire(WasmVType::I64) }
         lir::LType::F32 => WasmMemOp { load_op = WASM_OP_F32_LOAD; store_op = WASM_OP_F32_STORE; align = 2 to u32; valtype = wasm_vtype_wire(WasmVType::F32) }
         lir::LType::F64 => WasmMemOp { load_op = WASM_OP_F64_LOAD; store_op = WASM_OP_F64_STORE; align = 3 to u32; valtype = wasm_vtype_wire(WasmVType::F64) }
-        lir::LType::I128 => error { message = "stackify: C1-i128 — an i128 memory access has no wasm valtype, deferred (shared with A2's i128 route)" }
-        lir::LType::F16 => error { message = "stackify: C1-f16 — an f16 memory access has no wasm valtype, deferred (matches the register targets' f16 gap)" }
         lir::LType::Void => error { message = "stackify: a void-typed memory access is malformed (internal)" }
     }
 }
@@ -1401,7 +1391,7 @@ fn wasm_mem_op(t: lir::LType) -> WasmMemOp | error {
  * @return i64  `4294967296` (`2^32`)
  */
 fn wasm_narrow_threshold() -> i64 {
-    let half = 65536 to i64
+    let half = 65536
     half * half
 }
 
@@ -1444,23 +1434,19 @@ fn stackify_narrow_ptr_load(ctx0: StackifyCtx, panic_ix: u32) -> StackifyCtx {
 /**
  * stackify_const_int — the `LConstInt` lowering: `i32.const`/`i64.const`
  * (`stackify_fits_i32` picks the narrowest lossless wasm width, §4.1),
- * `local.set` into the result's own VReg-numbered local. A value beyond the
- * i64 range is the `C1-i128` honest-stop (`fits_i64`, shared with A2's own
- * i128-constant materialization gate).
+ * `local.set` into the result's own VReg-numbered local. `c.val` is the i64
+ * carrier itself (drop-128, 2026-07-24), so no width guard is ever needed.
  *
  * @param StackifyCtx ctx0  the context to extend
  * @param LInst inst  the enclosing instruction (its result VReg)
  * @param LConstInt c  the constant op
- * @return StackifyCtx | error  the advanced context, or the `C1-i128` stop
+ * @return StackifyCtx  the advanced context
  */
-fn stackify_const_int(ctx0: StackifyCtx, inst: lir::LInst, c: lir::LConstInt) -> StackifyCtx | error {
-    if !fits_i64(c.val) {
-        return error { message = "stackify: C1-i128 — an integer constant beyond 64 bits needs register-pair materialization, deferred (shared with A2's i128 route, backend-a4-encoder.md §6.3)" }
-    }
+fn stackify_const_int(ctx0: StackifyCtx, inst: lir::LInst, c: lir::LConstInt) -> StackifyCtx {
     let narrow = stackify_fits_i32(c.val)
     let op = if narrow { WASM_OP_I32_CONST } else { WASM_OP_I64_CONST }
     let vt = if narrow { wasm_vtype_wire(WasmVType::I32) } else { wasm_vtype_wire(WasmVType::I64) }
-    let ctx1 = sc_sleb(sc_byte(ctx0, op), c.val to i64)
+    let ctx1 = sc_sleb(sc_byte(ctx0, op), c.val)
     sc_def_result(ctx1, inst.result, vt)
 }
 
@@ -1593,7 +1579,7 @@ fn stackify_ineg(ctx0: StackifyCtx, inst: lir::LInst, a: u32, a_vt: u8) -> Stack
     let wide = a_vt == wasm_vtype_wire(WasmVType::I64)
     let const_op = if wide { WASM_OP_I64_CONST } else { WASM_OP_I32_CONST }
     let sub_op = if wide { WASM_OP_I64_SUB } else { WASM_OP_I32_SUB }
-    let ctx1 = sc_sleb(sc_byte(ctx0, const_op), 0 to i64)
+    let ctx1 = sc_sleb(sc_byte(ctx0, const_op), 0)
     let ctx2 = sc_use_operand(ctx1, a)
     let ctx3 = sc_byte(ctx2, sub_op)
     sc_def_result(ctx3, inst.result, a_vt)
@@ -1614,7 +1600,7 @@ fn stackify_inot(ctx0: StackifyCtx, inst: lir::LInst, a: u32, a_vt: u8) -> Stack
     let wide = a_vt == wasm_vtype_wire(WasmVType::I64)
     let const_op = if wide { WASM_OP_I64_CONST } else { WASM_OP_I32_CONST }
     let xor_op = if wide { WASM_OP_I64_XOR } else { WASM_OP_I32_XOR }
-    let ctx1 = sc_sleb(sc_byte(ctx0, const_op), -1 to i64)
+    let ctx1 = sc_sleb(sc_byte(ctx0, const_op), -1)
     let ctx2 = sc_use_operand(ctx1, a)
     let ctx3 = sc_byte(ctx2, xor_op)
     sc_def_result(ctx3, inst.result, a_vt)
@@ -1778,7 +1764,7 @@ fn stackify_un(ctx0: StackifyCtx, inst: lir::LInst, u: lir::LUn) -> StackifyCtx 
  *                              `wasm_valtype`'s propagated honest-stop
  */
 fn stackify_param(ctx0: StackifyCtx, f: lir::LFunc, inst: lir::LInst, p: lir::LParam, ptr64: bool) -> StackifyCtx | error {
-    if (p.index to u64) >= f.param_types.len {
+    if p.index >= f.param_types.len {
         return error { message = "stackify: param index out of range (internal)" }
     }
     let vt = match wasm_valtype(f.param_types[p.index to u64], ptr64) { u8 as v => v; error as e => return e }
@@ -2069,8 +2055,7 @@ fn wasm_resolve_data(t: WasmSymbolTable, symbol: str) -> u32 | error {
  * @param bool ptr64  the target pointer width (`wasm_valtype`'s own switch,
  *                    #389 C1-7)
  * @return StackifyCtx | error  the advanced context, or a propagated
- *                              honest-stop (an unresolved symbol, or the
- *                              callee's own `C1-i128`/`C1-f16` return type)
+ *                              honest-stop (an unresolved symbol)
  */
 fn stackify_call(ctx0: StackifyCtx, symbols: WasmSymbolTable, inst: lir::LInst, c: lir::LCall, ptr64: bool) -> StackifyCtx | error {
     let target = match wasm_resolve_call(symbols, c.symbol) { WasmCallTarget as t => t; error as e => return e }
@@ -2230,22 +2215,22 @@ fn u32_list_reverse(xs: []u32) -> []u32 {
 }
 
 /**
- * u32_pos — the 0-based position of `id` in `order`, or `order.len` if
+ * block_rpo_pos — the 0-based position of `id` in `order`, or `order.len` if
  * absent (a defensive default: an absent target sorts last, never a
  * spurious back-edge).
  *
  * @param []u32 order  the RPO block-id order
  * @param u32 id  the block id to rank
- * @return u32  its position, or `order.len`
+ * @return u64  its position, or `order.len`
  */
-fn u32_pos(order: []u32, id: u32) -> u32 {
+fn block_rpo_pos(order: []u32, id: u32) -> u64 {
     mut i: u64 = 0
     loop {
         if i >= order.len { break }
-        if order[i] == id { return i to u32 }
+        if order[i] == id { return i }
         i++
     }
-    order.len to u32
+    order.len
 }
 
 /**
@@ -3080,9 +3065,9 @@ fn term_targets_of(op: lir::LOp) -> TermTargets {
  */
 fn blocks_by_id(f: lir::LFunc) -> []lir::LBlock {
     mut out: []lir::LBlock = teko::list::empty()
-    mut id: u32 = 0 to u32
+    mut id: u32 = 0
     loop {
-        if (id to u64) >= f.blocks.len { break }
+        if id >= f.blocks.len { break }
         out = teko::list::push(out, lir_block_search(f, id))
         id++
     }
@@ -3293,7 +3278,7 @@ fn preds_of(t: []PredEntry, id: u32) -> []u32 {
  * rpo_pos_table — a positional `[]u32` giving each block id's own RPO
  * position (`u32_unset()` for a block absent from `order`, i.e.
  * unreachable) — the fast O(1) lookup `compute_idom`'s intersect loop reads
- * instead of repeatedly re-scanning `order` (`u32_pos`).
+ * instead of repeatedly re-scanning `order` (`block_rpo_pos`).
  *
  * @param u64 n  the block count to size for
  * @param []u32 order  the RPO block-id order
@@ -3568,7 +3553,7 @@ fn is_cfg_irreducible(cfg: CfgInfo) -> bool {
         loop {
             if j >= ss.len { break }
             let s = ss[j]
-            if u32_pos(cfg.order, s) <= u32_pos(cfg.order, b) && !dominates(cfg, s, b) {
+            if block_rpo_pos(cfg.order, s) <= block_rpo_pos(cfg.order, b) && !dominates(cfg, s, b) {
                 return true
             }
             j++
@@ -3597,7 +3582,7 @@ fn is_loop_header(cfg: CfgInfo, h: u32) -> bool {
         mut j: u64 = 0
         loop {
             if j >= ss.len { break }
-            if ss[j] == h && u32_pos(cfg.order, h) <= u32_pos(cfg.order, x) && dominates(cfg, h, x) { return true }
+            if ss[j] == h && block_rpo_pos(cfg.order, h) <= block_rpo_pos(cfg.order, x) && dominates(cfg, h, x) { return true }
             j++
         }
         i++
@@ -3659,7 +3644,7 @@ fn loop_body_of(cfg: CfgInfo, h: u32) -> []u32 {
         mut j: u64 = 0
         loop {
             if j >= ss.len { break }
-            if ss[j] == h && u32_pos(cfg.order, h) <= u32_pos(cfg.order, x) && dominates(cfg, h, x) {
+            if ss[j] == h && block_rpo_pos(cfg.order, h) <= block_rpo_pos(cfg.order, x) && dominates(cfg, h, x) {
                 let contrib = natural_loop_body_from(cfg, h, x)
                 mut k: u64 = 0
                 loop {
@@ -4653,7 +4638,7 @@ fn wasm_register_program_symbols(wasi: WasmWasiImportSet, funcs: []lir::LFunc) -
  * `LFunc`'s own signature maps to: every `param_types` entry through
  * `wasm_valtype` (in order), and a single result whenever `ret_type` is not
  * `Void` (the MVP's no-multi-value shape, §4.3). Propagates `wasm_valtype`'s
- * own honest-stops (`C1-i128`/`C1-f16`) on either side.
+ * own internal-error arm on either side (a malformed `Void`-typed param).
  *
  * @param LFunc f  the function whose signature to translate
  * @return WasmFuncType | error  the translated signature, or a propagated
@@ -4822,7 +4807,7 @@ fn wasm_synth_start(type_index: u32, main_index: u32, proc_exit_index: u32, main
     body = emit_uleb128(body, main_index to u64)
     if main_ret == lir::LType::Void {
         body = teko::list::push(body, WASM_OP_I32_CONST)
-        body = emit_sleb128(body, 0 to i64)
+        body = emit_sleb128(body, 0)
     }
     body = teko::list::push(body, WASM_OP_CALL)
     body = emit_uleb128(body, proc_exit_index to u64)
@@ -4920,7 +4905,7 @@ fn wasm_op_drop(buf: []byte) -> []byte {
 fn wasm_emit_fd_write_call(buf: []byte, fd: u32, fd_write_index: u32) -> []byte {
     let b0 = wasm_op_i32_const(buf, fd to i64)
     let b1 = wasm_op_i32_const(b0, wasm_io_iov_base_addr() to i64)
-    let b2 = wasm_op_i32_const(b1, 1 to i64)
+    let b2 = wasm_op_i32_const(b1, 1)
     let b3 = wasm_op_i32_const(b2, wasm_io_nwritten_addr() to i64)
     let b4 = wasm_op_call(b3, fd_write_index)
     wasm_op_drop(b4)
@@ -4940,13 +4925,13 @@ fn wasm_emit_fd_write_call(buf: []byte, fd: u32, fd_write_index: u32) -> []byte 
  */
 fn wasm_io_write_newline(buf: []byte, fd: u32, fd_write_index: u32) -> []byte {
     let b0 = wasm_op_i32_const(buf, wasm_io_nl_byte_addr() to i64)
-    let b1 = wasm_op_i32_const(b0, 10 to i64)
+    let b1 = wasm_op_i32_const(b0, 10)
     let b2 = wasm_op_store8(b1)
     let b3 = wasm_op_i32_const(b2, wasm_io_iov_base_addr() to i64)
     let b4 = wasm_op_i32_const(b3, wasm_io_nl_byte_addr() to i64)
     let b5 = wasm_op_store32(b4)
     let b6 = wasm_op_i32_const(b5, wasm_io_iov_len_addr() to i64)
-    let b7 = wasm_op_i32_const(b6, 1 to i64)
+    let b7 = wasm_op_i32_const(b6, 1)
     let b8 = wasm_op_store32(b7)
     wasm_emit_fd_write_call(b8, fd, fd_write_index)
 }
@@ -5407,8 +5392,8 @@ fn wasm_scope_stop_wasm64() -> error {
  * (`wasm_program_memory_plan`). Returns the NAMED `C1-globals` honest-stop
  * when `lmod.globals` is non-empty (mirrors A4-4's own guard,
  * `wasm_honest_globals`) before touching anything else, and propagates
- * any per-function honest-stop unchanged (`C1-i128`/`C1-f16`/
- * `C1-irreducible`/an unresolved call/data symbol).
+ * any per-function honest-stop unchanged (`C1-irreducible`/an unresolved
+ * call/data symbol).
  *
  * **The checked-narrow panic message (#389 C1-7 review finding #1,
  * `backend-wasm.md` §6/§8).** The module's own data section is the

@@ -443,7 +443,10 @@ pub fn is_zero(x: BigInt) -> bool {
 
 /**
  * Convert a machine `i64` to a `BigInt`. Handles `i64::MIN` (whose magnitude has no `i64`
- * counterpart) by taking the magnitude in `i128`.
+ * counterpart) via the two's-complement identity in `u64` (drop-128, 2026-07-24 — replaces
+ * the old widen-to-i128 technique, which needed a wider carrier this crumb removes):
+ * `-(n+1)` never overflows (`n+1` stays in range even at `i64::MIN`), and the `to u64` cast
+ * on it is safe (always non-negative); `+1` then recovers the true magnitude.
  *
  * @param n  the machine integer
  * @return   `n` as a `BigInt`
@@ -451,8 +454,8 @@ pub fn is_zero(x: BigInt) -> bool {
 pub fn of(n: i64) -> BigInt {
     if n == 0 { return zero() }
     let neg = n < 0
-    let mag128: i128 = if neg { 0 - (n to i128) } else { n to i128 }
-    mk(neg, one_limb(mag128 to u64))
+    let mag: u64 = if neg { ((0 - (n + 1)) to u64) + 1 } else { n to u64 }
+    mk(neg, one_limb(mag))
 }
 
 /**

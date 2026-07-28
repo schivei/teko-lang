@@ -8,6 +8,28 @@
 // (`{m,n}`), non-greedy quantifiers, capture groups, backreferences, lookaround.
 // A bare `\` in a pattern is a compile error (M.3 — honest, not silently wrong).
 //
+// ⚠ THIS MODULE IS LOAD-BEARING FOR THE TEST GATE. Since 0.3.1 the regression runner's
+// `Then <stream> pattern = "…"` step (TkrMatchMode::Pattern — src/build/tkr.tks,
+// src/build/regression.tks::match_stream) judges scenario output by calling `is_match`
+// here. That makes this engine part of the ORACLE, not just a library: it decides whether
+// other tests passed.
+//
+// The failure that matters is ASYMMETRIC. An engine bug that matches too LITTLE turns a
+// good scenario red — loud, and someone fixes it within the hour. An engine bug that
+// matches too MUCH turns a BROKEN scenario green, silently, and nothing anywhere will ever
+// say so; the gate simply stops being a gate. Over-matching is therefore the direction that
+// must be pinned down, and the only instrument that pins it is coverage: for every operator
+// a `.tkr` pattern is allowed to use, `regex_test.tkt` must assert the NON-matching case as
+// well as the matching one — that `^` really refuses a mid-string hit, that `[0-9]+`
+// really refuses `47a`, that a quantifier does not quietly become `.*`. Adding an operator
+// (or a new `.tkr` pattern shape) without its negative test widens the oracle's blind spot.
+//
+// It was a considered choice NOT to defend this with machinery. Anchoring `Pattern` matches
+// implicitly at both ends was proposed and REFUSED (owner ruling, 2026-07-26): it would have
+// forced every scenario to write `.*<it>.*` while stopping nobody from doing precisely that,
+// so it would have bought no safety and cost every pattern its readability. The defence is
+// tests, deliberately, and it has to be maintained as one.
+//
 // ALGORITHM — a deliberate DEVIATION from Thompson's construction (a genuine design
 // tension, resolved here rather than guessed around; see the task's "STOP and report"
 // clause). Thompson's construction needs a MUTABLE transition table: each

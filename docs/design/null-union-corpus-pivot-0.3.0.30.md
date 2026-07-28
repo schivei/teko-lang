@@ -3,6 +3,23 @@
 Owner-directed, decisive. Umbrella `remodel/emit-throughput` (base 62d59a1; null-union C3+C4+C5 merged).
 **DESIGN ONLY** — this document is the executable plan. No product code is written here.
 
+## STATUS (0.3.1, first wave)
+
+- **C6 — corpus pivot: DONE.** The whole tree is off the sugar (`T?`/`?.`/`??` = 0 uses outside
+  strings/comments; 217 `T?`→`T | null`, 26 `?.`→match, 32 `??`→match, 71 files).
+- **C7 — sugar surface removed: DONE.** The parser rejects `T?`, `?.`, `??` with honest diagnostics
+  naming the replacement (`'T | null'` / an explicit `match`); negative fixtures pin the messages
+  (`sugar_qmark_type_rejected`, `sugar_slice_opt_rejected`, `sugar_coalesce_rejected`,
+  `sugar_qmark_field_rejected`). The dead internal machinery (the `checker::Optional` former, the
+  `OptionalType`/`Coalesce`/`SafeFieldAccess`/`SafeMethodCall` AST + checker/codegen arms + the tkb
+  tags) is now unreachable from source; its physical deletion + tkb-tag reclaim is a separate,
+  bisectable follow-up kept out of this wave to protect the fixpoint (tkb wire renumbering, RISK-2).
+- **Codegen prerequisite (this wave):** two codegen gaps the pivot exposed were fixed in-band —
+  (1) a `variant | null` struct field whose payload variant recurses (`checker::Ptr.inner:
+  Type | null`) now boxes into an arena handle (`cg_union_inline_recursive` walks variant members,
+  not only struct fields); (2) the FFI unit-result (`ures`) arms now emit through the `error | null`
+  union representation instead of the pre-pivot `error?` optional shape.
+
 Directive, verbatim intent:
 1. Move EVERY nullable-sugar `T?` in the whole codebase to explicit `T | null`.
 2. Remove ALL sugar entirely — DELETE `T?`, `?.`, `??` from parser/checker/codegen. Eradicate, do not re-target.
@@ -404,12 +421,18 @@ Also KEEP (do not delete) the positive repr fixtures `repr_niche` (44), `repr_bo
 
 ## 5. RISKS + LAW TENSIONS + HALT flags
 
-**Seed-safety (verified — NO intermediate seed needed for the pivot).** The one construct the
-0.3.0.29 seed cannot build is `Ref<T> | null` LOCAL narrowing (C5, `ref_null_local`). The corpus
-pivot introduces ZERO such sites: `Ref<T>?` is and always was ILLEGAL (`resolve_type` rejects a
-nullable reference, resolve.tks 1616-1619), so no existing `T?` is a ref-optional, so R1 never yields
-a `Ref<T> | null` local. Confirmed by grep: no `Ref<…>?`/`Reference?` anywhere in `src/`. **The entire
-pivot (C1-C7) stays 0.3.0.29-seed-safe.** No HALT.
+**Seed-safety (CORRECTED — the pivot is NOT 0.3.0.29-seed-safe; it needs the .30 nullfield capability
+plus a .31 codegen fix).** The original claim here was wrong. Two `variant | null` STRUCT FIELDS the
+pivot introduces — `checker::Ptr.inner: Type | null` and `parser::BindPattern.slice_type: TypeExpr |
+null` — the 0.3.0.29 seed cannot build (the design's §0 seed-safety check only covered locals/params/
+returns, not struct fields). The 0.3.0.30 `feat(codegen): support variant | null in struct fields`
+capability (`cg_union_box_member` / `cg_texpr_union_ready` / `cg_emit_inline_null`, merged to main via
+the backend remodel #653) is what makes the NON-recursive and struct-recursive cases build — so the
+pivot is built from a **.30 seed, not .29**. One case that capability still MISSED and this wave fixed:
+a `variant | null` field whose payload is itself a VARIANT that carries the union back
+(`Ptr.inner: Type | null`, `Type` a variant with a `Ptr` member) was Inline-tagged into an infinite C
+value type; `cg_union_inline_recursive` now walks variant members so it boxes. The `Ref<T> | null`
+note stands: `Ref<T>?` was always illegal, so the pivot introduces zero ref-optional locals.
 
 **RISK-1 (batch boundary, MITIGATED by design).** `type_eq`/`widens_into` do not bridge `Optional{T}`↔
 `Variant{[Null,T]}` (§0). Mitigation: the flow-closure rule §3 + the decisive atomic-`src` default

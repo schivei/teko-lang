@@ -1,0 +1,49 @@
+# .github/workflows/branch-policy.yml — a cancela de ORIGEM.
+#
+# O GitHub não sabe dizer "esta branch não pode ter como alvo aquela": rulesets protegem o ALVO e
+# não filtram a ORIGEM. Este job é a única forma de expressar isso — ele roda em todo PR, é barato
+# (segundos, sem checkout) e, marcado como *required status check* no ruleset da `main`, torna o
+# merge impossível em vez de meramente desaconselhado.
+#
+# QUE NAMESPACES: `theory/**` e `cargo/**` são, por desenho, ramos SEM PORTÃO — `theory/**` é
+# exploração, `cargo/**` é carga de vagão que nunca passou por gate próprio (a esteira paga o portão
+# uma vez, no vagão). Nenhum dos dois pode desaguar direto num ramo protegido.
+#
+# NOTA DE SEGURANÇA: `github.head_ref` é texto CONTROLADO POR QUEM ABRE O PR (nome de branch de um
+# fork aceita metacaracteres de shell). Interpolar `${{ github.head_ref }}` DENTRO do `run:` seria
+# injeção de comando — o valor entra pelo `env:` e é lido como variável citada, nunca expandido pelo
+# gerador do script.
+name: Branch policy
+
+on:
+  pull_request:
+    branches: ['**']   # '**' cruza '/' — casa base com barra (remodel/...); '*' simples nao
+
+permissions:
+  contents: read
+
+jobs:
+  source-namespace:
+    name: Branch policy gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recusar namespace sem portão contra base protegida
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          case "$BASE_REF" in
+            main|remodel/*) ;;
+            *) echo "base '$BASE_REF' nao e protegida — nada a impor"; exit 0 ;;
+          esac
+          case "$HEAD_REF" in
+            theory/*|cargo/*)
+              echo "RECUSADO: '$HEAD_REF' e um namespace SEM PORTAO e nao pode ter como alvo '$BASE_REF'." >&2
+              echo "Estes ramos carregam trabalho que nunca passou por gate proprio:" >&2
+              echo "  theory/** — exploracao;  cargo/** — carga de vagao (o vagao paga o portao)." >&2
+              echo "Faca a carga desaguar num ramo de vagao e leve o VAGAO ao ramo protegido." >&2
+              exit 1
+              ;;
+          esac
+          echo "head '$HEAD_REF' -> base '$BASE_REF': permitido"

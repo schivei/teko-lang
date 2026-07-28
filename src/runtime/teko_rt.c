@@ -548,10 +548,17 @@ tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec) {
 // --- Phase 3 str query/slice builtins (query helpers allocate nothing; slice helpers follow
 // tk_str_concat's ownership — a fresh malloc'd buffer the result OWNS, tk_panic on OOM) ---
 
-// tk_str_eq — same length AND same bytes. memcmp (NOT strcmp — strings may hold embedded NUL);
-// a zero-length pair compares equal without touching ptr (memcmp of 0 bytes is well-defined).
+// tk_str_eq — same length AND same bytes. memcmp (NOT strcmp — strings may hold embedded NUL).
+//
+// The empty pair returns BEFORE memcmp, and the reason is not that the comparison would be wrong.
+// An earlier version of this comment argued the call was safe "because memcmp of 0 bytes is
+// well-defined" — true about the READ, false about the CALL. memcmp's parameters carry `nonnull`,
+// so passing a null pointer is undefined regardless of n, and an empty tk_str legitimately carries
+// ptr == NULL. UBSan caught it live: teko_rt.c:555 "null pointer passed as argument 1, which is
+// declared to never be null", on the first run of the ASan+UBSan lane.
 bool tk_str_eq(tk_str a, tk_str b) {
     if (a.len != b.len) return false;
+    if (a.len == 0) return true;
     return memcmp(a.ptr, b.ptr, a.len) == 0;
 }
 
@@ -690,9 +697,13 @@ uint64_t tk_str_len(tk_str s) {
 }
 
 // tk_str_ends_with — the tail of s equals suffix. A suffix longer than s can't match; otherwise
-// memcmp the last suffix.len bytes. An empty suffix matches (memcmp of 0 bytes is equal).
+// memcmp the last suffix.len bytes. An empty suffix matches every string, and returns EARLY for
+// the same reason tk_str_eq does: memcmp's `nonnull` contract is violated by a null argument
+// whatever n is, and an empty suffix legitimately carries ptr == NULL. The early return also
+// avoids forming `s.ptr + s.len` when s itself is the empty str with a null ptr.
 bool tk_str_ends_with(tk_str s, tk_str suffix) {
     if (suffix.len > s.len) return false;
+    if (suffix.len == 0) return true;
     return memcmp(s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
 }
 
@@ -1383,6 +1394,23 @@ void tk_println(tk_str s) {
     fputc('\n', stdout);   // single 0x0A
 }
 
+// tk_flush_out — push stdout to the OS now.
+//
+// Exists for ONE reason, and it is a diagnosis reason. stdout is block-buffered whenever it is not
+// a tty — which is every CI run and every `> log` — while a panic, an assert() abort and a segfault
+// all reach the terminal through stderr, unbuffered. So a crash prints its message while the test
+// NAMES that led up to it are still sitting in stdout's buffer, and the reader attributes the crash
+// to whichever test was last flushed: an offset of up to a whole buffer.
+//
+// That is not hypothetical. It cost a full investigation on this train: an abort was attributed to
+// a spine test ~66 tests before the real one, and the misattribution was reported up as a probable
+// compiler defect ("adding a field to a struct breaks an unrelated test") before `stdbuf -o0`
+// showed the true failure. The test harness calls this after printing each test's name and BEFORE
+// running its body, so the name is on the wire before anything can kill the process.
+void tk_flush_out(void) {
+    fflush(stdout);
+}
+
 // Host output FFI bottoms (scope.c: write/ewrite/eprint/eprintln) — exactly s.len bytes, tolerate
 // embedded NUL. write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
 void tk_write(tk_str s)    { fwrite(s.ptr, 1, s.len, stdout); }
@@ -1401,8 +1429,8 @@ double tk_float_parse(tk_str s) {
 }
 
 _Noreturn void tk_panic(const char *msg) {
-    // Loud + non-zero (M.1): SIGABRT via abort() (conventional 134).
-    fputs("teko: panic: ", stderr);
+    // Loud + non-zero (M.1): the TK_PANIC_MARKER line first, then SIGABRT via abort().
+    fputs(TK_PANIC_MARKER, stderr);
     fputs(msg, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
@@ -1417,7 +1445,7 @@ _Noreturn void tk_panic(const char *msg) {
 // tolerating embedded NUL (exactly msg.len bytes to stderr). The error case `panic(error)` lowers
 // to its `.message` str at the call site.
 _Noreturn void tk_panic_str(tk_str msg) {
-    fputs("teko: panic: ", stderr);
+    fputs(TK_PANIC_MARKER, stderr);
     fwrite(msg.ptr, 1, msg.len, stderr);
     fputc('\n', stderr);
     tk_backtrace();   // (C1.9) show the call stack
@@ -1446,7 +1474,9 @@ _Noreturn void tk_panic_cast(void) {
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
 
 // (C1.7) positioned OOB — print "line:col: " (same shape as the VM's vm_panic_pos), then the
-// canonical "teko: panic: index out of bounds\n", so VM and native locate identically.
+// canonical TK_PANIC_MARKER line for "index out of bounds", so VM and native locate identically.
+// The position goes BEFORE the marker on purpose: the marker and the reason stay adjacent, so a
+// regressor pattern can assert them together without ever naming a line or column.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
     char buf[32];
     snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
@@ -1628,6 +1658,45 @@ tk_ffi_ures tk_rt_setenv(tk_str name, tk_str value) {
     return (tk_ffi_ures){ .ok = true };
 }
 
+// tk_sort_names — byte-lexicographic insertion sort over an owned tk_str array.
+//
+// EXISTS TO MAKE THE COMPILER DETERMINISTIC, not for tidiness. `readdir` returns entries in an
+// order the filesystem chooses; ext4, overlayfs, APFS and tmpfs all disagree. `discover.tks`
+// walks exactly that order and never sorts, so the order in which a project's sources are
+// discovered — and therefore the order declarations are collected and types resolved — was a
+// property of the machine, not of the tree.
+//
+// It stayed invisible while a regression project held one or two files. Folding the corpus into
+// nine projects took `qualified_optional` to 43, and it surfaced immediately: the musl lane
+// failed with `q089_iface_value_hetero_slice/body.tks:57:8: array element type mismatch` on a
+// tree that compiled clean on every other lane and locally.
+//
+// The stake is larger than that red. gen2 == gen3 and the `nightly === gen1` reproducibility gate
+// both assert that the same tree yields the same bytes; a machine-dependent discovery order makes
+// that false by construction, and it would have failed as "non-reproducible build" with no
+// visible cause. Sorting at this boundary fixes it for EVERY caller of list_dir at once, which is
+// why it lives here and not in the one walker that happened to expose it.
+//
+// Insertion sort: directory sizes here are tens of entries, and a simple algorithm with no
+// allocation is worth more than an asymptotic win nothing will ever notice.
+static void tk_sort_names(tk_str *a, size_t n) {
+    for (size_t i = 1; i < n; i += 1) {
+        tk_str key = a[i];
+        size_t j = i;
+        while (j > 0) {
+            tk_str prev = a[j - 1];
+            size_t m = prev.len < key.len ? prev.len : key.len;
+            int c = 0;
+            if (m > 0) c = memcmp(prev.ptr, key.ptr, m);
+            if (c == 0) c = prev.len < key.len ? -1 : (prev.len > key.len ? 1 : 0);
+            if (c <= 0) break;
+            a[j] = prev;
+            j -= 1;
+        }
+        a[j] = key;
+    }
+}
+
 tk_ffi_slres tk_rt_list_dir(tk_str path) {
     char *p = tk_cstr(path);
     DIR *d = opendir(p);
@@ -1648,6 +1717,7 @@ tk_ffi_slres tk_rt_list_dir(tk_str path) {
         n += 1;
     }
     closedir(d);
+    tk_sort_names(out, n);
     return (tk_ffi_slres){ .ok = true, .ptr = out, .len = (uint64_t)n };
 }
 
@@ -1663,8 +1733,45 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle) {
     return (tk_ffi_u64res){ .ok = false };
 }
 
+// (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
+// A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
+// child, so an expected exit code is the same whether the program is run directly through
+// teko::process::run or behind a shell.
+#define TK_RT_SIGNAL_EXIT_BASE 128
+
+// (romaneio .31) tk_rt_wait_status_code — the exit code a waited-for POSIX child reports.
+//
+// M.3 FIX: this used to be `WIFEXITED ? WEXITSTATUS : 127`, so EVERY death by signal collapsed onto
+// 127 — the same value execvp-failed (`_exit(127)`) and fork-failed already return. teko::process::run
+// could not distinguish "the child aborted" from "I could not start the child", and a panicking
+// child (SIGABRT) surfaced as a spawn failure. A signalled child now reports 128 + signal.
+//
+// What stays ambiguous, honestly: a child that CHOSE to exit 127 is indistinguishable from a failed
+// execvp, because POSIX gives the exec'd-image failure no other channel. That is the convention's
+// own limit, not a lost distinction.
+//
+// SECOND M.3 FIX (vagão 20): every remaining PARENT-side "I could not run it" now reports
+// TK_RT_SPAWN_FAILED (teko_rt.h) instead of 127. The `test / windows` lane of PR #94 failed with
+// `exit 127, expected 134` on a scenario whose captured stderr held a real panic — i.e. the child
+// demonstrably ran — and 127 could not say whether that came from a failed `_spawnvp`, from `sh`
+// reporting command-not-found, or from a child exiting 127 itself. A sentinel that cannot be
+// confused with a child's own status is what makes the next run answerable.
+//
+// NOT YET NORMALIZED — the Windows half. `tk_win32_spawnvp` returns `_spawnvp`'s value, which for a
+// child killed by an abort/exception is a CRT/NTSTATUS-shaped code, not 128+signal; what it actually
+// is can only be OBSERVED on a Windows runner, and this file will not guess it.
+#ifndef _WIN32
+static int32_t tk_rt_wait_status_code(int status) {
+    if (WIFEXITED(status)) return (int32_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int32_t)(TK_RT_SIGNAL_EXIT_BASE + WTERMSIG(status));
+    // Neither exited nor signalled: waitpid returned a status this code cannot interpret, which is
+    // a failure to OBSERVE the child, not an exit status the child produced.
+    return TK_RT_SPAWN_FAILED;
+}
+#endif
+
 int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
-    if (n == 0) return 127;
+    if (n == 0) return TK_RT_SPAWN_FAILED;
     // Build a NUL-terminated argv (each arg NUL-terminated; the vector NULL-terminated).
     char **cargv = (char **)tk_alloc((n + 1) * sizeof *cargv);
     for (uint64_t i = 0; i < n; i += 1) cargv[i] = tk_cstr(argv[i]);
@@ -1672,18 +1779,17 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
 #ifdef _WIN32
     // _spawnvp(_P_WAIT) is synchronous: blocks until the child exits, returns its exit code.
     int w = tk_win32_spawnvp(cargv[0], cargv);
-    return (w == -1) ? 127 : (int32_t)(int8_t)w;
+    return (w == -1) ? TK_RT_SPAWN_FAILED : (int32_t)w;
 #else
     pid_t pid = fork();
-    if (pid < 0) return 127;
-    if (pid == 0) {                      // child: exec; on failure exit 127 (POSIX convention)
-        execvp(cargv[0], cargv);
+    if (pid < 0) return TK_RT_SPAWN_FAILED;
+    if (pid == 0) {                      // child: exec; on failure exit 127 (POSIX convention —
+        execvp(cargv[0], cargv);         // the exec'd image has no other channel to report through)
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)(int8_t)WEXITSTATUS(status);
-    return 127;
+    if (waitpid(pid, &status, 0) < 0) return TK_RT_SPAWN_FAILED;
+    return tk_rt_wait_status_code(status);
 #endif
 }
 
@@ -1693,7 +1799,7 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n) {
 // clang-only flags) so a deliberately-rejected flag doesn't leak an "unrecognized option" line
 // into the user's build output. [teko::process]
 int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
-    if (n == 0) return 127;
+    if (n == 0) return TK_RT_SPAWN_FAILED;
     char **cargv = (char **)tk_alloc((n + 1) * sizeof *cargv);
     for (uint64_t i = 0; i < n; i += 1) cargv[i] = tk_cstr(argv[i]);
     cargv[n] = NULL;
@@ -1712,10 +1818,10 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
     _dup2(saved_err, _fileno(stderr));
     _close(saved_out);
     _close(saved_err);
-    return (w == -1) ? 127 : (int32_t)(int8_t)w;
+    return (w == -1) ? TK_RT_SPAWN_FAILED : (int32_t)w;
 #else
     pid_t pid = fork();
-    if (pid < 0) return 127;
+    if (pid < 0) return TK_RT_SPAWN_FAILED;
     if (pid == 0) {                      // child: redirect std{out,err} to /dev/null, then exec
         int null_fd = open("/dev/null", O_WRONLY);
         if (null_fd >= 0) {
@@ -1727,9 +1833,8 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 127;
-    if (WIFEXITED(status)) return (int32_t)(int8_t)WEXITSTATUS(status);
-    return 127;
+    if (waitpid(pid, &status, 0) < 0) return TK_RT_SPAWN_FAILED;
+    return tk_rt_wait_status_code(status);
 #endif
 }
 
@@ -1758,6 +1863,24 @@ tk_str tk_rt_os(void) {
     static const char *s = "windows";
 #elif defined(__linux__)
     static const char *s = "linux";
+#else
+    static const char *s = "unknown";
+#endif
+    return (tk_str){ (const tk_byte *)s, strlen(s) };
+}
+
+// (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64"
+// (else "unknown"), selected from the compiler's own target predefines. Mirrors
+// tk_rt_os's already-working plain-str shape (no {ok,value,err} lift), so the released seed's
+// frozen codegen.c can lower it. The canonical spellings are "arm64" (not "aarch64") and
+// "x86_64" (not "amd64") so the token concatenates directly with tk_rt_os() into the
+// "<arch>-<os>" NativeTarget key (teko-target-crosslink-0.3.1.md §2.2). A compile-time
+// constant, exactly like tk_rt_os. [teko::arch]
+tk_str tk_rt_arch(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    static const char *s = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    static const char *s = "x86_64";
 #else
     static const char *s = "unknown";
 #endif
@@ -2343,35 +2466,37 @@ uint64_t tk_f64_bits(double x)      { uint64_t b; memcpy(&b, &x, sizeof b); retu
 double   tk_f64_from_bits(uint64_t bits) { double x; memcpy(&x, &bits, sizeof x); return x; }
 
 // ============================================================================
-// teko::time  ROUND 0 — Date/Time placeholder types
-// Five value structs:  DateTime / TimeSpan / Time / Date / DateTimeOffset.
-// All ticks in nanoseconds; Date in days since 1970-01-01 (= day 0).
-// DateTime.ticks is signed (__int128) so (dt_a - dt_b) always fits in TimeSpan.
+// teko::time  (drop-128 A6 redesign, owner-ratified table 2026-07-24)
+// Every host-dependent read below returns a bare SCALAR (int32_t/uint64_t/int16_t/int64_t),
+// never one of the carrier structs — see teko_rt.h's block comment for why. The
+// `tk_rt_date_from_days`/`tk_rt_date_year`/`tk_rt_date_month`/`tk_rt_date_day_of_month`
+// struct-taking quartet is the ONE exception, kept only for the pre-existing
+// examples/regressions/time_types fixture's own direct extern re-declaration.
 // ============================================================================
 
 // --- helpers ---
 
-// POSIX-only: return nanoseconds since Unix epoch as a signed i128.
-// Windows branch uses FILETIME (100-ns ticks since 1601-01-01).
-static __int128 tk_time_now_ns(void) {
+// POSIX-only: return nanoseconds since Unix epoch as a signed i64 (fits: +-292 years,
+// comfortably spanning any real wall-clock read). Windows branch uses FILETIME (100-ns
+// ticks since 1601-01-01).
+static int64_t tk_wall_now_ns(void) {
 #if defined(_WIN32)
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     uint64_t w = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
     // Subtract Windows epoch offset (1601-01-01 → 1970-01-01 = 116444736000000000 × 100ns ticks).
     w -= (uint64_t)116444736000000000ULL;
-    return (__int128)w * 100;  // 100-ns ticks → nanoseconds
+    return (int64_t)(w * 100);  // 100-ns ticks → nanoseconds
 #else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    return (__int128)(int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 #endif
 }
 
-#define TK_NS_PER_DAY   ((uint64_t)86400ULL * 1000000000ULL)
-
 // Gregorian calendar from a days-since-epoch value (Julian Day Number algorithm).
-// Based on the Richards (2013) algorithm; handles negative days (pre-1970 dates).
+// Based on the Richards (2013) algorithm; handles negative days (pre-1970 dates). Mirrored
+// (by design, not shared — see teko_rt.h) by src/time/time.tks::civil_from_days.
 static void tk_jdn_to_ymd(int32_t days, int32_t *y, int32_t *m, int32_t *d_out) {
     int64_t jdn = (int64_t)days + 2440588LL;  // JDN of 1970-01-01 = 2440588
     int64_t f = jdn + 1401LL + (((4LL * jdn + 274277LL) / 146097LL) * 3LL / 4LL) - 38LL;
@@ -2383,67 +2508,10 @@ static void tk_jdn_to_ymd(int32_t days, int32_t *y, int32_t *m, int32_t *d_out) 
     *y     = (int32_t)(e / 1461LL - 4716LL + (14LL - (int64_t)*m) / 12LL);
 }
 
-// --- constructors ---
-
-tk_datetime tk_rt_datetime_now(void) {
-    return (tk_datetime){ .ticks = tk_time_now_ns() };
-}
-
-tk_datetimeoffset tk_rt_datetime_local_now(void) {
-    __int128 ns = tk_time_now_ns();
-    int16_t offset_min = 0;
-#if defined(_WIN32)
-    TIME_ZONE_INFORMATION tzi;
-    GetTimeZoneInformation(&tzi);
-    // Windows Bias is minutes west of UTC; negate to get east (positive = ahead of UTC).
-    offset_min = -(int16_t)tzi.Bias;
-#else
-    time_t now = (time_t)(ns / 1000000000LL);
-    struct tm loc;
-    localtime_r(&now, &loc);
-    offset_min = (int16_t)(loc.tm_gmtoff / 60);
-#endif
-    return (tk_datetimeoffset){ .ticks = ns, .offset_minutes = offset_min };
-}
-
-tk_date tk_rt_date_today(void) {
-    __int128 ns = tk_time_now_ns();
-    // Days since epoch: divide signed ns by ns-per-day.
-    // Use floor division (towards -inf) so negative ns (pre-1970) maps correctly.
-    int64_t ns64 = (int64_t)(ns / 1000000000LL);  // seconds
-    int32_t days;
-    if (ns64 >= 0) {
-        days = (int32_t)((uint64_t)ns64 / 86400ULL);
-    } else {
-        // floor division for negative seconds
-        days = (int32_t)(((int64_t)ns64 - 86399LL) / 86400LL);
-    }
-    return (tk_date){ .days = days };
-}
-
-tk_time tk_rt_time_now_utc(void) {
-    __int128 ns = tk_time_now_ns();
-    // Time-of-day: ns modulo one day, always non-negative.
-    uint64_t day_ns = TK_NS_PER_DAY;
-    // For positive ns: straightforward modulo.
-    // For negative ns (pre-1970): C % is truncated, adjust to positive.
-    int64_t ns64 = (int64_t)(ns % (__int128)day_ns);
-    if (ns64 < 0) ns64 += (int64_t)day_ns;
-    return (tk_time){ .ticks = (uint64_t)ns64 };
-}
-
-tk_timespan tk_rt_timespan_from_ns(int64_t ns) {
-    return (tk_timespan){ .ticks = (__int128)ns };
-}
+// --- the time_types-fixture-only quartet (unchanged signatures/behavior) ---
 
 tk_date tk_rt_date_from_days(int32_t days) {
     return (tk_date){ .days = days };
-}
-
-// --- accessors ---
-
-__int128 tk_rt_datetime_to_unix_ns(tk_datetime dt) {
-    return dt.ticks;
 }
 
 int32_t tk_rt_date_year(tk_date d) {
@@ -2464,52 +2532,47 @@ int32_t tk_rt_date_day_of_month(tk_date d) {
     return dd;
 }
 
-int32_t tk_rt_time_hour(tk_time t) {
-    return (int32_t)(t.ticks / 3600000000000ULL);
+// --- host clock reads (SCALAR-only) ---
+
+int32_t tk_rt_wall_days(void) {
+    int64_t secs = tk_wall_now_ns() / 1000000000LL;
+    // Floor division (towards -inf) so a pre-1970 read maps to the correct earlier day.
+    if (secs >= 0) { return (int32_t)(secs / 86400LL); }
+    return (int32_t)((secs - 86399LL) / 86400LL);
 }
 
-int32_t tk_rt_time_minute(tk_time t) {
-    return (int32_t)((t.ticks % 3600000000000ULL) / 60000000000ULL);
+uint64_t tk_rt_wall_ns_of_day(void) {
+    int64_t ns = tk_wall_now_ns();
+    int64_t day_ns = (int64_t)86400LL * 1000000000LL;
+    int64_t rem = ns % day_ns;
+    if (rem < 0) { rem += day_ns; }   // C `%` truncates; adjust a pre-1970 negative remainder up
+    return (uint64_t)rem;
 }
 
-int32_t tk_rt_time_second(tk_time t) {
-    return (int32_t)((t.ticks % 60000000000ULL) / 1000000000ULL);
+int16_t tk_rt_wall_offset_minutes(void) {
+#if defined(_WIN32)
+    TIME_ZONE_INFORMATION tzi;
+    GetTimeZoneInformation(&tzi);
+    // Windows Bias is minutes WEST of UTC; negate to get east (positive = ahead of UTC).
+    return -(int16_t)tzi.Bias;
+#else
+    time_t now = (time_t)(tk_wall_now_ns() / 1000000000LL);
+    struct tm loc;
+    localtime_r(&now, &loc);
+    return (int16_t)(loc.tm_gmtoff / 60);
+#endif
 }
 
-int16_t tk_rt_dto_offset_minutes(tk_datetimeoffset dto) {
-    return dto.offset_minutes;
-}
-
-// --- arithmetic ---
-
-tk_datetime tk_rt_datetime_add(tk_datetime dt, tk_timespan span) {
-    return (tk_datetime){ .ticks = dt.ticks + span.ticks };
-}
-
-tk_datetime tk_rt_datetime_sub(tk_datetime dt, tk_timespan span) {
-    return (tk_datetime){ .ticks = dt.ticks - span.ticks };
-}
-
-tk_timespan tk_rt_datetime_diff(tk_datetime a, tk_datetime b) {
-    return (tk_timespan){ .ticks = a.ticks - b.ticks };
-}
-
-tk_timespan tk_rt_timespan_add(tk_timespan a, tk_timespan b) {
-    return (tk_timespan){ .ticks = a.ticks + b.ticks };
-}
-
-tk_timespan tk_rt_timespan_sub(tk_timespan a, tk_timespan b) {
-    return (tk_timespan){ .ticks = a.ticks - b.ticks };
-}
-
-__int128 tk_rt_timespan_to_ns(tk_timespan span) {
-    return span.ticks;
-}
-
-tk_date tk_rt_date_add_days(tk_date d, int32_t days) {
-    return (tk_date){ .days = d.days + days };
-}
-
-int32_t tk_rt_date_diff_days(tk_date a, tk_date b) {
-    return a.days - b.days;
+int64_t tk_rt_monotonic_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    double secs = (double)counter.QuadPart / (double)freq.QuadPart;
+    return (int64_t)(secs * 1000000000.0);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }

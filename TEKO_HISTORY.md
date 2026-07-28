@@ -6761,6 +6761,48 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   anchor — M.1). Do not delete the C path. The Constitution's three materialization stages are unchanged (only
   stage-2's *shipping implementation* moves from C-transpile to a native codegen; C-transpile lives on as fallback).
 
+### B.40 — Drop the 128-bit family (`i128`/`u128`) + `f16`: the native numeric set narrows back to `u8…u64`/`i8…i64` + `f32`/`f64`
+
+- **Was (§B.38):** the native numeric set was **`u8…u128`/`i8…i128`** + **`f16`/`f32`/`f64`** + `dec` +
+  `bigint`, staged as **Tier 1** (`u128`/`i128` + the three floats) implemented now, `dec`/`bigint`
+  named-but-deferred. The ~11 internal carrier subsystems (the parser's `Number.value`, the const-fold
+  value, the two differential interpreters, the LIR constant, codegen's digit printer, `bigint`'s own
+  internal magnitude, `FlagsBody`'s bit-values, and the `teko::time`/`teko_rt` timestamp chain) were all
+  typed `i128`/`u128` to carry a *user's* potential 128-bit value losslessly through the pipeline.
+
+- **Is (owner, 2026-07-23/24):** `i128`/`u128`/`f16` are **REMOVED from the language** — never spelled
+  again in Teko source. The native numeric set narrows to **`u8 u16 u32 u64` / `i8 i16 i32 i64` + `f32
+  f64`**, plus the existing `bool`/`byte`, and `dec`/`bigint` (still named-but-deferred, unaffected). A
+  caller needing more than 64 bits of integer range reaches for `teko::numeric::bigint::BigInt` (the
+  `123bi` literal) or `Decimal`; a caller wanting half-precision floats has no replacement (none existed
+  in practice — f16 was nominal-only, zero corpus use, per §B.38's own Tier-1 label). The checker's
+  `scope.tks::builtin_type` honestly rejects the three names with a diagnostic naming the escape hatch,
+  rather than falling through to a generic "unknown type" error (M.3). Every internal carrier the ~11
+  subsystems used is narrowed to a plain `i64`/`u64` (a sign+64-bit-magnitude pair for the literal/
+  const-fold carriers, a raw 64-bit two's-complement register for the two interpreters), and the whole
+  128-bit backend topology (register-pair isel routes on multiple targets, the wasm `C1-i128`/`C1-f16`
+  honest-stops, the `PrimKind`/`LType` enum members and their match cascades) is deleted as dead code —
+  no producer can ever construct a value needing it again.
+
+- **Why:** **M.0 reframed** — the owner's insight is that 128-bit support was never an *intrinsic*
+  compiler use; it existed only to carry a *user's* potential 128-bit value through the pipeline. Once
+  the surface is removed, no value above 64 bits ever flows through any carrier, so the narrowing is
+  mechanical and empirically provable by the gate (self-hosting fixpoint + full suite + own==C
+  differential) rather than needing a site-by-site analytic proof. **M.1** (fail loud) — the literal-limit
+  guard (a decimal magnitude `> u64::MAX`) is a hard compile error naming the BigInt escape hatch, never
+  a silent truncation ("compilar em falso" was explicitly considered and rejected — the reframe makes
+  honest rejection affordable instead). **M.3** (name the barrier) — the three honest-stop diagnostics
+  name exactly what was removed and where to go instead. **M.5** (austerity) — deleting ~11 carrier
+  subsystems' 128-bit special-casing plus the register-pair backend topology (isel/ABI/interp arms with
+  no remaining producer) is pure weight reduction; nothing shipped ever depended on a value actually
+  exceeding 64 bits (the only producers were the 128-bit tests/fixtures themselves, swept first).
+
+- **Agent rule:** treat `u8…u64`/`i8…i64` + `f32`/`f64` (+ `bool`/`byte`, + `dec`/`bigint` deferred) as
+  the FULL native numeric set — `i128`/`u128`/`f16` are not valid Teko types and never will be reintroduced
+  under this name; a caller needing wider integers writes a `123bi` BigInt literal. Do not reference
+  `PrimKind::{U128,I128,F16}` or `LType::{I128,F16}` in new code (the enum members do not exist). A
+  decimal integer literal whose magnitude exceeds `u64::MAX` is a hard parse-time error, not a wider type.
+
 ---
 
 ## Consolidated examples — the language in use (seed + evolution)

@@ -241,6 +241,27 @@ fn collect_header(t: StrTable, h: Header) -> StrTable {
 
 // --- the frame: collect → table → body → FNV-1a → header ("TKH\0" + ver + hash) ----
 
+/**
+ * TKH_VERSION — wire format version of a `.tkh` exported-interface artifact. Bumped 1 → 2 in
+ * 0.3.1 for exactly the reason `TKB_EXPR_VERSION`/`TKB_PROGRAM_VERSION` were: this unit reuses
+ * the `.tkb` codec WHOLESALE (`write_type`/`read_type`, the string table, the FNV-1a frame — see
+ * this file's header), so the drop-128 `PrimKind` ordinal renumbering moved every primitive's
+ * on-wire number here too. A pre-0.3.1 `.tkh` passes the `"TKH\0"` magic AND its own FNV-1a (its
+ * bytes are internally consistent), so nothing but the version field can catch it — without the
+ * bump each primitive would decode into the WRONG type, silently. Owner ruling 2026-07-24: an old
+ * artifact FAILS LOUD (M.3); no retroactive support for pre-STS/LTS formats.
+ *
+ * @since 0.3.1 (drop-128 R2)
+ */
+const TKH_VERSION: u32 = 2
+
+/**
+ * emit_tkh — serialize a whole exported interface `h` into the `.tkh` frame: the `"TKH\0"` magic,
+ * `TKH_VERSION`, the FNV-1a of the body, then the string table and the body itself.
+ *
+ * @param h  the exported interface (its types, then its functions)
+ * @return   the complete `.tkh` bytes
+ */
 fn emit_tkh(h: Header) -> []byte {
     let table = collect_header(st_empty(), h)
     let body = write_header(write_strtable(teko::list::empty(), table), table, h)
@@ -250,8 +271,8 @@ fn emit_tkh(h: Header) -> []byte {
     out = write_u8(out, b'K')
     out = write_u8(out, b'H')
     out = write_u8(out, 0)
-    out = write_u32(out, 1)   // version 1
-    out = write_u64(out, hash)   // FNV-1a of the body
+    out = write_u32(out, TKH_VERSION)
+    out = write_u64(out, hash)
     append_bytes(out, body)
 }
 
@@ -288,7 +309,7 @@ fn read_sigparams(r: Reader, table: []str) -> RSigParams | error {
     mut xs: []SigParam = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let p = match read_sigparam(rr, table) { RSigParam as x => x; error as e => return e }
         xs = teko::list::push(xs, p.value)
         rr = p.r
@@ -314,7 +335,7 @@ fn read_fnsigs(r: Reader, table: []str) -> RFnSigs | error {
     mut xs: []FnSig = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let f = match read_fnsig(rr, table) { RFnSig as x => x; error as e => return e }
         xs = teko::list::push(xs, f.value)
         rr = f.r
@@ -335,7 +356,7 @@ fn read_sigfields(r: Reader, table: []str) -> RSigFields | error {
     mut xs: []SigField = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let f = match read_sigfield(rr, table) { RSigField as x => x; error as e => return e }
         xs = teko::list::push(xs, f.value)
         rr = f.r
@@ -350,7 +371,7 @@ fn read_members(r: Reader, table: []str) -> RMembers | error {
     mut xs: []str = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let s = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
         xs = teko::list::push(xs, s.value)
         rr = s.r
@@ -386,7 +407,7 @@ fn read_tyexports(r: Reader, table: []str) -> RTyExports | error {
     mut xs: []TyExport = teko::list::empty()
     mut i = 0
     loop {
-        if i >= (n.value to u64) { break }
+        if i >= n.value { break }
         let e = match read_tyexport(rr, table) { RTyExport as x => x; error as e => return e }
         xs = teko::list::push(xs, e.value)
         rr = e.r
@@ -401,7 +422,17 @@ fn read_header(r: Reader, table: []str) -> RHeader | error {
     RHeader { r = fs.r; value = Header { types = ts.value; fns = fs.value } }
 }
 
-// THE ENTRY: verify magic "TKH\0" + version, recompute the FNV-1a, then read.
+/**
+ * read_tkh — THE ENTRY: verify the `"TKH\0"` magic and `TKH_VERSION`, recompute the FNV-1a over
+ * the body, then read the string table and the exported interface. The version check is the ONLY
+ * barrier a pre-0.3.1 artifact hits (its magic and its own hash both still verify), so its
+ * rejection names the cause the way the `.tkb` reader does: the retired `PrimKind` ordinals.
+ *
+ * @param data  the whole `.tkh` bytes
+ * @return      the decoded exported interface
+ * @throws      on a bad magic, an unsupported version, a truncated header, a hash mismatch, or a
+ *              malformed body
+ */
 fn read_tkh(data: []byte) -> Header | error {
     let r0 = Reader { data = data; pos = 0 }
     let m0 = match read_u8(r0) { RByte as x => x; error as e => return e }
@@ -412,7 +443,9 @@ fn read_tkh(data: []byte) -> Header | error {
         return error { message = "not a .tkh (bad magic)" }
     }
     let ver = match read_u32(m3.r) { RU32 as x => x; error as e => return e }
-    if ver.value != 1 { return error { message = "unsupported .tkh version" } }
+    if ver.value != TKH_VERSION {
+        return error { message = "unsupported .tkh version (this compiler reads version 2; pre-0.3.1 artifacts use retired PrimKind ordinals and must be rebuilt with the current compiler)" }
+    }
     let stored = match read_u64(ver.r) { RU64 as x => x; error as e => return e }
     if data.len < 16 { return error { message = "truncated .tkh header" } }
     if fnv1a(data, 16) != stored.value {

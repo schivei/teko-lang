@@ -18,7 +18,13 @@ use teko::parser
 // ---------------------------------------------------------------------------
 
 fn cgt_empty() -> []byte { teko::list::empty() }
-fn cgt_prog() -> checker::TProgram { checker::TProgram { items = teko::list::empty() } }
+/**
+ * cgt_prog — the empty program in codegen's threaded view, indexed exactly as an emission builds it,
+ * so every query helper under test takes the same index path the emitter takes.
+ *
+ * @return the empty `CgProg`
+ */
+fn cgt_prog() -> CgProg { cg_prog_of(checker::TProgram { items = teko::list::empty() }) }
 
 fn cgt_seg(s: str) -> parser::Segment { parser::Segment { name = s } }
 fn cgt_path1(s: str) -> parser::Path {
@@ -28,16 +34,16 @@ fn cgt_named_te(s: str) -> parser::TypeExpr {
     parser::NamedType { path = cgt_path1(s); args = teko::list::empty() }
 }
 
-fn cgt_num(v: i128, k: checker::PrimKind) -> checker::TExpr {
+fn cgt_num(v: i64, k: checker::PrimKind) -> checker::TExpr {
     checker::TExpr {
-        kind = checker::TNumber { is_float = false; value = v; fval = 0.0 }
+        kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }
         type = checker::Prim { kind = k }
         line = 0; col = 0
     }
 }
-fn cgt_num_i64(v: i128) -> checker::TExpr { cgt_num(v, checker::PrimKind::I64) }
-fn cgt_num_i8(v: i64) -> checker::TExpr { cgt_num(v to i128, checker::PrimKind::I8) }
-fn cgt_num_i32(v: i128) -> checker::TExpr { cgt_num(v, checker::PrimKind::I32) }
+fn cgt_num_i64(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I64) }
+fn cgt_num_i8(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I8) }
+fn cgt_num_i32(v: i64) -> checker::TExpr { cgt_num(v, checker::PrimKind::I32) }
 
 fn cgt_e_bool_t() -> checker::TExpr {
     checker::TExpr {
@@ -77,6 +83,7 @@ fn cgt_fn0(name: str, ns: str, ret: checker::Type, body: []checker::TStatement) 
         line = 0; col = 0
         is_test = false
         is_extern = false; c_symbol = ""; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
     }
 }
 
@@ -107,53 +114,47 @@ fn cgt_buffer_basics() {
     teko::assert::is_true(s7 == "foobar")
 }
 
-// ---------------------------------------------------------------------------
-// Group B: Large integers and C-string escaping
-//   cb_u128_digits, cb_u128_c_expr, cb_i128, cb_f64_literal, cb_cstr_escaped
-// ---------------------------------------------------------------------------
+/**
+ * cgt_large_int_and_escape — Group B: large-integer printing and C-string escaping
+ * (`cb_u64_digits`, `cb_u64_c_expr`, `cb_numint`, `cb_f64_literal`, `cb_cstr_escaped`).
+ *
+ * `cb_numint`'s negative case (drop-128, 2026-07-24) used to PANIC in the VM (the old `v to
+ * u128` reinterpretation of a negative source); `NumInt`'s explicit sign flag needs no such
+ * reinterpretation, so both a `-(` prefix and the correct magnitude are now directly coverable
+ * on both engines (#299).
+ */
 #test
 fn cgt_large_int_and_escape() {
-    // cb_u128_digits
-    let d0 = str(cb_u128_digits(cgt_empty(), 0 to u128))
+    let d0 = str(cb_u64_digits(cgt_empty(), 0 to u64))
     teko::assert::is_true(d0 == "0")
-    let d255 = str(cb_u128_digits(cgt_empty(), 255 to u128))
+    let d255 = str(cb_u64_digits(cgt_empty(), 255 to u64))
     teko::assert::is_true(d255 == "255")
 
-    // cb_u128_c_expr — small value (hi == 0 path); also exercises cb_u128_digits internally
-    let uc = str(cb_u128_c_expr(cgt_empty(), 0 to u128))
+    let uc = str(cb_u64_c_expr(cgt_empty(), 0 to u64))
     teko::assert::is_true(teko::str::contains(uc, "0"))
-    let uc1 = str(cb_u128_c_expr(cgt_empty(), 1 to u128))
+    let uc1 = str(cb_u64_c_expr(cgt_empty(), 1 to u64))
     teko::assert::is_true(uc1.len > 0)
 
-    // cb_i128 — zero, positive, AND negative. The negative branch used to PANIC in the VM
-    // (the old `v to u128` on a negative source); #299 reinterprets the bits non-trapping, so
-    // it is now coverable directly from tests on both engines.
-    let i0 = str(cb_i128(cgt_empty(), 0 to i128))
+    let i0 = str(cb_numint(cgt_empty(), parser::numint_of_u64(0)))
     teko::assert::is_true(teko::str::contains(i0, "0"))
-    let ipos = str(cb_i128(cgt_empty(), 42 to i128))
+    let ipos = str(cb_numint(cgt_empty(), parser::numint_of_u64(42)))
     teko::assert::is_true(teko::str::contains(ipos, "42"))
-    // negative (#299): sign `-(` is emitted and the magnitude is correct — no panic
-    let ineg = str(cb_i128(cgt_empty(), (0 to i128) - (1 to i128)))
+    let ineg = str(cb_numint(cgt_empty(), parser::numint_negate(parser::numint_of_u64(1))))
     teko::assert::is_true(teko::str::contains(ineg, "-("))
     teko::assert::is_true(teko::str::contains(ineg, "1"))
-    let ineg42 = str(cb_i128(cgt_empty(), (0 to i128) - (42 to i128)))
+    let ineg42 = str(cb_numint(cgt_empty(), parser::numint_negate(parser::numint_of_u64(42))))
     teko::assert::is_true(teko::str::contains(ineg42, "-("))
     teko::assert::is_true(teko::str::contains(ineg42, "42"))
 
-    // cb_f64_literal — just verify non-empty (delegates to teko::ftoa)
     let flit = str(cb_f64_literal(cgt_empty(), 1.5))
     teko::assert::is_true(flit.len > 0)
 
-    // cb_cstr_escaped — plain ASCII unchanged
     let e1 = str(cb_cstr_escaped(cgt_empty(), "hi"))
     teko::assert::is_true(e1 == "hi")
-    // backslash (one char → two chars \\)
     let e2 = cb_cstr_escaped(cgt_empty(), "\\")
     teko::assert::is_true(e2.len == 2)
-    // tab → \t  (two chars)
     let e3 = cb_cstr_escaped(cgt_empty(), "\t")
     teko::assert::is_true(e3.len == 2)
-    // newline → \n (two chars)
     let e4 = cb_cstr_escaped(cgt_empty(), "\n")
     teko::assert::is_true(e4.len == 2)
 }
@@ -288,7 +289,6 @@ fn cgt_prim_predicates() {
     // cg_prim_is_int — integer prims; not float, not bool
     teko::assert::is_true(cg_prim_is_int(checker::PrimKind::U8))
     teko::assert::is_true(cg_prim_is_int(checker::PrimKind::I64))
-    teko::assert::is_true(cg_prim_is_int(checker::PrimKind::U128))
     teko::assert::is_false(cg_prim_is_int(checker::PrimKind::F64))
     teko::assert::is_false(cg_prim_is_int(checker::PrimKind::Bool))
 
@@ -303,7 +303,6 @@ fn cgt_prim_predicates() {
     teko::assert::is_true(cg_int_width(checker::PrimKind::I16) == 16)
     teko::assert::is_true(cg_int_width(checker::PrimKind::U32) == 32)
     teko::assert::is_true(cg_int_width(checker::PrimKind::I64) == 64)
-    teko::assert::is_true(cg_int_width(checker::PrimKind::U128) == 128)
 
     // prim_div_tag — integer and float tags
     let t1 = match prim_div_tag(checker::PrimKind::U8) { str as s => s; error => "" }
@@ -354,8 +353,6 @@ fn cgt_type_emission() {
     teko::assert::is_true(p3 == "double")
     let p4 = match emit_prim(cgt_empty(), checker::PrimKind::Bool) { []byte as o => str(o); error => "" }
     teko::assert::is_true(p4 == "bool")
-    let p5 = match emit_prim(cgt_empty(), checker::PrimKind::U128) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(p5 == "unsigned __int128")
 
     // emit_type — wrapping emit_prim plus non-prim cases
     let t1 = match emit_type(cgt_empty(), cgt_prog(), checker::Prim { kind = checker::PrimKind::I32 }) { []byte as o => str(o); error => "" }
@@ -445,11 +442,12 @@ fn cgt_prog_queries() {
     teko::assert::is_false(cg_is_prim_name("MyType"))
 
     // cg_is_builtin_scalar
-    teko::assert::is_true(cg_is_builtin_scalar("i128"))
+    teko::assert::is_true(cg_is_builtin_scalar("i64"))
     teko::assert::is_true(cg_is_builtin_scalar("bool"))
     teko::assert::is_true(cg_is_builtin_scalar("byte"))
     teko::assert::is_true(cg_is_builtin_scalar("error"))
     teko::assert::is_false(cg_is_builtin_scalar("Foo"))
+    teko::assert::is_false(cg_is_builtin_scalar("i128"))
 
     // cg_find_decl — empty program → error (but function is covered)
     let fd = match cg_find_decl(prog, "Foo") { parser::TypeDecl => "found"; error => "not-found" }
@@ -714,7 +712,7 @@ fn cgt_emit_value_match_arm_commits_tail() {
         value = cgt_num_i64(7)
     }
     let arm_lit: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { is_float = false; value = 1 to i128; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(1); fval = 0.0 }; line = 0; col = 0 }
     }
     mut arm_body: []checker::TStatement = teko::list::push(teko::list::empty(), bind_tmp)
     arm_body = teko::list::push(arm_body, cgt_stmt(cgt_e_var("tmp")))
@@ -866,6 +864,7 @@ fn cgt_emit_function_comprehensive() {
         line = 0; col = 0
         is_test = false
         is_extern = false; c_symbol = ""; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
     }
     let r4 = match emit_function(cgt_empty(), prog, f4) { []byte as o => str(o); error => "" }
     teko::assert::is_true(r4.len > 0)
@@ -882,16 +881,16 @@ fn cgt_emit_function_comprehensive() {
 //   makes EXACTLY ONE arm run, matching the VM and the value-form match. This test asserts the
 //   emitted C carries the commit `goto …_done` chain (the structural guarantee).
 // ---------------------------------------------------------------------------
-fn cgt_lit_arm(v: i128, body_name: str) -> checker::TArm {
+fn cgt_lit_arm(v: u64, body_name: str) -> checker::TArm {
     // arm: `v => { let <body_name> = <v> }` — a NON-diverging effect body (the bug trigger).
     let lit: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { is_float = false; value = v; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; line = 0; col = 0 }
     }
     let eff: checker::TStatement = checker::TBinding {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = body_name }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(v)
+        value = cgt_num_i64(v to i64)
     }
     checker::TArm { pattern = lit; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
 }
@@ -1302,7 +1301,7 @@ fn cgt_emit_index_in_array_interp() {
 fn cgt_emit_lit_pattern_str_vs_int() {
     // int literal pattern: (_s == 42)
     let int_pat: parser::Pattern = parser::LiteralPattern {
-        value = parser::Expr { kind = parser::Number { value = 42; is_float = false; fval = 0.0 }; line = 0; col = 0 }
+        value = parser::Expr { kind = parser::Number { value = parser::numint_of_u64(42); is_float = false; fval = 0.0 }; line = 0; col = 0 }
     }
     let int_out = match emit_pat_test(cgt_empty(), cgt_prog(), int_pat, "_s", checker::Prim { kind = checker::PrimKind::I64 }) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(int_out, "(_s == "))   // bare C `==` (cb_i128 spells the constant)
@@ -1414,15 +1413,18 @@ fn cgt_region_handle_decl(name: str) -> parser::TypeDecl {
 }
 
 /**
- * A `TProgram` whose sole item is the region-handle TypeDecl `name` — so `type_table_of` /
- * `is_region_handle_name` resolve it when the emit path probes for the Arena structure.
+ * An INDEXED emitter program whose sole item is the region-handle TypeDecl `name` — so
+ * `type_table_of` / `is_region_handle_name` resolve it when the emit path probes for the Arena
+ * structure. It hands back the emitter's own `CgProg` (via `cg_prog_of`), not the bare checked
+ * `TProgram`, because the indexed program is what every emit entry point takes since the
+ * emitter's name resolution was indexed.
  *
- * @param str name  the region-handle type's name
- * @return checker::TProgram  a program carrying exactly that TypeDecl
+ * @param name  the region-handle type's name
+ * @return      an indexed emitter program carrying exactly that TypeDecl
  */
-fn cgt_prog_with_region_handle(name: str) -> checker::TProgram {
+fn cgt_prog_with_region_handle(name: str) -> CgProg {
     let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_region_handle_decl(name))
-    checker::TProgram { items = items }
+    cg_prog_of(checker::TProgram { items = items })
 }
 
 /**
@@ -1438,7 +1440,7 @@ fn cgt_region_ops() {
         type = checker::Uptr { }
         line = 0; col = 0
     }
-    let alloc_args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), region_var), cgt_num(42 to i128, checker::PrimKind::U64))
+    let alloc_args: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), region_var), cgt_num(42, checker::PrimKind::U64))
     let alloc_e = checker::TExpr {
         kind = checker::TCall { callee = cgt_path3("teko", "mem", "region_alloc"); args = alloc_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
         type = checker::Ptr { inner = checker::Prim { kind = checker::PrimKind::U64 } }
@@ -1530,7 +1532,7 @@ fn cgt_vtable_pair_gate_excludes_abstract_self() {
     items = teko::list::push(items, base)
     items = teko::list::push(items, sub)
     items = teko::list::push(items, vbase)
-    let prog = checker::TProgram { items = items }
+    let prog = cg_prog_of(checker::TProgram { items = items })
 
     teko::assert::is_true(cg_class_is_abstract(base))
     teko::assert::is_true(!cg_class_is_abstract(sub))
@@ -1659,12 +1661,43 @@ fn cgt_var2(a: checker::Type, b: checker::Type) -> checker::Variant {
 }
 
 /**
- * The `u128 | null` union — no niche, a saturating 16-byte payload (the box-in-arena class).
+ * cgt_pair16_decl — a two-`i64`-field struct TypeDecl (`Pair16`), a real by-value 16-byte
+ * aggregate — the ≥16-byte no-niche test vehicle standing in for the removed scalar `u128`
+ * (drop-128, 2026-07-24). Unlike `Func` (unsupported by `cg_opt_mangle`, so `cg_mangle_eq`
+ * would spuriously treat it as "equal" to the enclosing union in `cg_union_inline_recursive`'s
+ * both-error fallback), a real struct mangles cleanly, matching the `repr_box` regression
+ * fixture's own `Vec2` vehicle for the identical box-in-arena scenario.
  *
- * @return  the resolved `u128 | null` variant
+ * @return  the `Pair16` struct TypeDecl (two `i64` fields, `x`/`y`)
  */
-fn cgt_u128_null() -> checker::Variant {
-    cgt_var2(checker::Null { }, checker::Prim { kind = checker::PrimKind::U128 })
+fn cgt_pair16_decl() -> parser::TypeDecl {
+    let fx = parser::Field { name = "x"; type_ann = cgt_named_te("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fy = parser::Field { name = "y"; type_ann = cgt_named_te("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields: []parser::Field = teko::list::push(teko::list::push(teko::list::empty(), fx), fy)
+    let body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }
+    parser::TypeDecl { name = "Pair16"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+}
+
+/**
+ * cgt_prog_with_pair16 — an INDEXED emitter program whose sole item is the `Pair16` struct
+ * TypeDecl, so `cg_find_decl`/`cg_named_min_bytes` resolve it when the union classifiers probe
+ * its size. It hands back the emitter's own `CgProg` (via `cg_prog_of`) because that is the
+ * shape those classifiers take.
+ *
+ * @return  an indexed emitter program carrying exactly the `Pair16` TypeDecl
+ */
+fn cgt_prog_with_pair16() -> CgProg {
+    let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_pair16_decl())
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * The `Pair16 | null` union — no niche, a saturating 16-byte payload (the box-in-arena class).
+ *
+ * @return  the resolved `Pair16 | null` variant
+ */
+fn cgt_pair16_null() -> checker::Variant {
+    cgt_var2(checker::Null { }, checker::Named { name = "Pair16" })
 }
 
 /**
@@ -1687,31 +1720,176 @@ fn cgt_ptr_null() -> checker::Variant {
 
 /**
  * Assert `union_repr_class` picks the right physical representation per member class and the
- * `#inline` force flag: `u128|null` boxes by default and forces to inline-tag; `i32|null` is
+ * `#inline` force flag: `Pair16|null` boxes by default and forces to inline-tag; `i32|null` is
  * inline-tag; a niche-able `ptr|null` is niche regardless of the force flag.
  */
 #test
 fn cgt_union_repr_class_dial() {
-    let p = cgt_prog()
-    teko::assert::is_true(match union_repr_class(p, cgt_u128_null(), false) { UnionRepr::BoxInArena => true; _ => false })
-    teko::assert::is_true(match union_repr_class(p, cgt_u128_null(), true) { UnionRepr::InlineTag => true; _ => false })
+    let p = cgt_prog_with_pair16()
+    teko::assert::is_true(match union_repr_class(p, cgt_pair16_null(), false) { UnionRepr::BoxInArena => true; _ => false })
+    teko::assert::is_true(match union_repr_class(p, cgt_pair16_null(), true) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_i32_null(), false) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), false) { UnionRepr::Niche => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), true) { UnionRepr::Niche => true; _ => false })
 }
 
 /**
- * Assert `inline_attr_eligible` accepts a boxed `u128|null` and rejects each ineligible class with an
- * error: a non-sum (`i32`), an already-inline sum (`i32|null`), and a niche-able sum (`ptr|null`).
+ * Assert `inline_attr_eligible` accepts a boxed `Pair16|null` and rejects each ineligible class
+ * with an error: a non-sum (`i32`), an already-inline sum (`i32|null`), and a niche-able sum
+ * (`ptr|null`).
  */
 #test
 fn cgt_inline_attr_eligible_classes() {
-    let p = cgt_prog()
-    let u128box: checker::Type = cgt_u128_null()
-    teko::assert::is_true(match inline_attr_eligible(p, u128box) { error => false; null => true })
+    let p = cgt_prog_with_pair16()
+    let pairbox: checker::Type = cgt_pair16_null()
+    teko::assert::is_true(match inline_attr_eligible(p, pairbox) { error => false; null => true })
     teko::assert::is_true(match inline_attr_eligible(p, checker::Prim { kind = checker::PrimKind::I32 }) { error => true; null => false })
     let i32inline: checker::Type = cgt_i32_null()
     teko::assert::is_true(match inline_attr_eligible(p, i32inline) { error => true; null => false })
     let ptrniche: checker::Type = cgt_ptr_null()
     teko::assert::is_true(match inline_attr_eligible(p, ptrniche) { error => true; null => false })
+}
+
+/**
+ * One (namespace, name) pair the C and native manglers must spell identically.
+ */
+type CgtManglePair = struct {
+    /** The declaring namespace, "" for a lifted lambda. */
+    ns: str
+    /** The bare function name. */
+    name: str
+}
+
+/**
+ * The pairs `cgt_mangle_parity_c_and_native` compares: a deep namespace, a bare-root namespace,
+ * the empty namespace, and a name that collides with a C keyword (so the escape is compared too).
+ *
+ * @return  the parity cases, in a fixed order
+ */
+fn cgt_mangle_parity_pairs() -> []CgtManglePair {
+    mut xs: []CgtManglePair = teko::list::empty()
+    xs = teko::list::push(xs, CgtManglePair { ns = "teko::checker"; name = "type_eq" })
+    xs = teko::list::push(xs, CgtManglePair { ns = "demo"; name = "add" })
+    xs = teko::list::push(xs, CgtManglePair { ns = ""; name = "lifted" })
+    xs = teko::list::push(xs, CgtManglePair { ns = "teko::math"; name = "div" })
+    xs
+}
+
+/**
+ * Assert the C backend's `cb_fn_name` and the native backend's `teko::lir::mangle_fn_symbol` emit
+ * the SAME symbol for the same (namespace, name), and that each one carries the `teko_` user
+ * prefix — the invariant that keeps a program's C-emitted and natively-emitted symbols
+ * interchangeable, and keeps every user symbol out of the runtime's `tk_` family.
+ */
+#test
+fn cgt_mangle_parity_c_and_native() {
+    let pairs = cgt_mangle_parity_pairs()
+    mut i: u64 = 0
+    loop {
+        if i >= pairs.len { break }
+        let c_side = str(cb_fn_name(cgt_empty(), pairs[i].ns, pairs[i].name))
+        let native_side = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name)
+        teko::assert::is_true(c_side == native_side)
+        teko::assert::is_true(teko::str::slice_to(c_side, TEKO_USER_PREFIX.len) == TEKO_USER_PREFIX)
+        i++
+    }
+}
+
+/**
+ * The native mangler's `abi=c`-adjacent static/shared-archive carve-out (`mangle_fn_symbol`'s
+ * `flat` argument, `emit_static_lib`'s `flat_symbols = true`): `flat` strips EXACTLY
+ * `TEKO_USER_PREFIX`, changing nothing else about the mangle — every pair's `flat` spelling is
+ * the SAME prefixed spelling with that one prefix removed.
+ *
+ * There is no `cb_fn_name` counterpart to compare against here (unlike
+ * `cgt_mangle_parity_c_and_native` above): a static/shared archive is an own-native-ONLY
+ * artifact kind (`emit_static_lib` — the C backend never builds one), and the C backend's OWN
+ * externally-published name for its `abi = "c"` reverse-FFI export is the SEPARATE
+ * `cg_c_export_symbol`/`flatten_canonical` (a single-underscore join with no `TEKO_USER_PREFIX`
+ * to begin with, and no `cb_fn_name` involvement at all — the wrapper's forward call keeps using
+ * `cb_fn_name` UN-carved, see `ffx_wrappers_forward_to_internal`). `cb_fn_name` itself carries no
+ * `flat` mode, and needs none.
+ *
+ * The concrete regression this guards: `examples/toolchain/ar_link_run` (KP16's static archive)
+ * failed its real host `ar`/`nm`/`ld` link+run before this fix — the archive published
+ * `teko_ar_link_run__add`, but the consumer's `extern long long ar_link_run__add(...)` needed
+ * exactly `ar_link_run__add`.
+ */
+#test
+fn cgt_mangle_native_flat_strips_prefix_only() {
+    let pairs = cgt_mangle_parity_pairs()
+    mut i: u64 = 0
+    loop {
+        if i >= pairs.len { break }
+        let prefixed = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name)
+        let flat = teko::lir::mangle_fn_symbol(pairs[i].ns, pairs[i].name, true)
+        teko::assert::is_true(prefixed == teko::str::concat(TEKO_USER_PREFIX, flat))
+        i++
+    }
+    teko::assert::is_true(teko::lir::mangle_fn_symbol("ar_link_run", "add", true) == "ar_link_run__add")
+}
+
+/**
+ * Assert the mangle spells the whole symbol, not just its prefix: a namespaced function keeps its
+ * `::`-to-`__` namespace mangle behind the user prefix, and an un-namespaced (lifted) one is the
+ * prefix plus the bare name.
+ */
+#test
+fn cgt_mangle_spells_prefix_namespace_and_name() {
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "teko::checker", "type_eq")) == "teko_teko__checker__type_eq")
+    teko::assert::is_true(str(cb_fn_name(cgt_empty(), "", "lifted")) == "teko_lifted")
+}
+
+/**
+ * A call node with a resolved namespace and a bare callee name, for the origin-namespace tests.
+ *
+ * @param ns    the resolved namespace ("" when the checker resolved no declaration)
+ * @param name  the callee's bare name
+ * @return      the call node
+ */
+fn cgt_call_ns(ns: str, name: str) -> checker::TCall {
+    checker::TCall {
+        callee = cgt_path1(name); args = teko::list::empty(); call_ns = ns
+        is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0
+    }
+}
+
+/**
+ * A program declaring `probe::mine::arena_push` (a real body) and `probe::sys::getpid` (an
+ * `extern fn`) — the two shapes `cg_call_is_user_declared` has to tell apart.
+ *
+ * @return  the indexed emitter program
+ */
+fn cgt_prog_with_colliding_names() -> CgProg {
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, cgt_fn0("arena_push", "probe::mine", checker::Void { }, cgt_empty_stmts()))
+    let ext = cgt_fn0("getpid", "probe::sys", checker::Void { }, cgt_empty_stmts())
+    items = teko::list::push(items, checker::TFunction {
+        name = ext.name; type_params = ext.type_params; type_constraints = ext.type_constraints
+        namespace = ext.namespace; params = ext.params; return_type = ext.return_type; body = ext.body
+        vis = ext.vis; has_doc = ext.has_doc; doc = ext.doc; file = ext.file; line = ext.line; col = ext.col
+        is_test = ext.is_test; is_extern = true; c_symbol = "getpid"; from_lib = "c"
+        has_arena_size = ext.has_arena_size; arena_size = ext.arena_size
+    })
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * Assert a call the checker RESOLVED to a DECLARED body is never mistaken for a builtin, even when
+ * its bare name IS one: `cg_call_is_user_declared` answers `true` for the user's `arena_push` (user
+ * code owns the symbol) and `false` for the unresolved builtin call. This is the predicate that
+ * stopped the emitter from silently swapping a user body for the runtime's `tk_arena_push`.
+ *
+ * The two callees that carry a namespace and are still NOT declarations answer `false` as well: an
+ * `extern fn` (which must reach its foreign symbol and the host-FFI lifters) and a `teko::mem`
+ * builtin (whose `call_ns` the checker stamps synthetically, with no declaration behind it).
+ */
+#test
+fn cgt_user_declared_beats_a_bare_builtin_name() {
+    let prog = cgt_prog_with_colliding_names()
+    teko::assert::is_true(cg_call_is_user_declared(prog, cgt_call_ns("probe::mine", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "arena_push")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("probe::sys", "getpid")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("teko::mem", "free")))
+    teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "println")))
 }

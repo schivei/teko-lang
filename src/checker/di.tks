@@ -50,20 +50,46 @@ fn program_uses_di(prog: parser::Program) -> bool {
     false
 }
 
+/**
+ * The DI registry pass's product: the providers that registered, plus the diagnostics of the
+ * `#lifetime` declarations that could not.
+ *
+ * A HARD boundary in the all-diagnostics ruling (docs/design/all-diagnostics-pre-walk-0.3.1.md
+ * §3): a rejected registration leaves a provider slot empty, so every `#inject` of that interface
+ * would be reported as unprovided — blaming the use for the declaration's defect. The pass
+ * therefore names every bad registration in one build, and the build cuts here.
+ */
+type DiRegistryOutcome = struct {
+    /** the registry, carrying every provider that DID register */
+    registry: DiRegistry
+    /** one located diagnostic per registration that failed, in program order */
+    diags: []str
+}
+
 /** Build the DI registry from every `#singleton`/`#scoped`/`#transient` type in the program.
  *  Each `#lifetime` class registers one provider per interface it implements (the annotation IS
  *  the registration). A duplicate unkeyed registration for one interface is an honest error, and
- *  a `#lifetime` on a non-class type (only classes are injectable objects) is rejected. (Crumb 2.) */
-pub fn build_di_registry(prog: parser::Program, table: TypeTable) -> DiRegistry | error {
+ *  a `#lifetime` on a non-class type (only classes are injectable objects) is rejected. (Crumb 2.)
+ *  Registrations are independent, so a rejected one contributes its diagnostic and the walk
+ *  continues — one build names every bad `#lifetime` declaration.
+ *
+ *  @param prog   the flattened program
+ *  @param table  the collected type table
+ *  @return       the registry plus every registration diagnostic, in program order */
+pub fn build_di_registry(prog: parser::Program, table: TypeTable) -> DiRegistryOutcome {
     mut reg = di_registry_empty()
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let out = match register_item_providers(reg, prog.items[i], table) { DiRegistry as r => r; error as e => return e }
-        reg = out
+        let it = prog.items[i]
+        match register_item_providers(reg, it, table) {
+            DiRegistry as r => { reg = r }
+            error as e => { diags = teko::list::push(diags, located_diag(it.file, item_decl_line(it), item_decl_col(it), e)) }
+        }
         i++
     }
-    reg
+    DiRegistryOutcome { registry = reg; diags = diags }
 }
 
 /** Register every provider a single item contributes (none unless it is a `#lifetime` class). The
@@ -146,36 +172,57 @@ pub fn resolve_provider(reg: DiRegistry, iface: str) -> DiProvider | error {
 }
 
 /** Validate every `#inject` overlay against the registry: each binding's type must have a
- *  registered provider (the never-null guarantee) and may not carry a key (core boundary, #173). */
-pub fn check_inject_overlays(prog: parser::Program, reg: DiRegistry, table: TypeTable) -> error? {
+ *  registered provider (the never-null guarantee) and may not carry a key (core boundary, #173).
+ *
+ *  A SOFT boundary in the all-diagnostics ruling (docs/design/all-diagnostics-pre-walk-0.3.1.md
+ *  §3): this check produces nothing — it only reads the registry — so it names every bad overlay
+ *  binding and the build carries on into the item walk.
+ *
+ *  @param prog   the flattened program
+ *  @param reg    the built DI registry
+ *  @param table  the collected type table
+ *  @return       every overlay diagnostic, in program order */
+pub fn check_inject_overlays(prog: parser::Program, reg: DiRegistry, table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        match prog.items[i].content {
-            parser::Function as f => match check_fn_overlay(f, prog.items[i].namespace, reg, table) { error as e => return e; null => { } }
+        let it = prog.items[i]
+        match it.content {
+            parser::Function as f => { diags = concat_diags(diags, check_fn_overlay(it, f, reg, table)) }
             _ => { }
         }
         i++
     }
-    null
+    diags
 }
 
-/** Validate one function's `#inject` overlay bindings (each resolved in the fn's namespace). */
-fn check_fn_overlay(f: parser::Function, fn_ns: str, reg: DiRegistry, table: TypeTable) -> error? {
-    if !f.has_inject { return null }
+/** Validate one function's `#inject` overlay bindings (each resolved in the fn's namespace).
+ *
+ *  @param it     the function's item (its source file and namespace)
+ *  @param f      the parsed function
+ *  @param reg    the built DI registry
+ *  @param table  the collected type table
+ *  @return       one diagnostic per rejected binding, in binding order */
+fn check_fn_overlay(it: parser::Item, f: parser::Function, reg: DiRegistry, table: TypeTable) -> []str {
+    if !f.has_inject { return teko::list::empty() }
+    mut diags: []str = teko::list::empty()
     mut j: u64 = 0
     loop {
         if j >= f.injects.len { break }
-        match check_binding(f.injects[j], fn_ns, reg, table) { error as e => return e; null => { } }
+        match check_binding(f.injects[j], it.namespace, reg, table) {
+            error as e => { diags = teko::list::push(diags, located_diag(it.file, f.line, f.col, e)) }
+            null => { }
+        }
         j++
     }
-    null
+    diags
 }
 
 /** Validate one `#inject` binding: no key (core), and a registered provider must exist. The binding
  *  type is resolved to its FULL canonical interface name (issue #284) so the lookup keys the same
  *  slot the provider registered under. */
-fn check_binding(b: parser::InjectBinding, fn_ns: str, reg: DiRegistry, table: TypeTable) -> error? {
+fn check_binding(b: parser::InjectBinding, fn_ns: str, reg: DiRegistry, table: TypeTable) -> error | null {
     if b.has_key { return err_di(b.line, b.col, $"DI keys (`@`) are not in core DI (issue #173); remove the key on `{b.name}`") }
     let iface = binding_iface_name(b.type_ann, fn_ns, table)
     match resolve_provider(reg, iface) {
@@ -217,12 +264,33 @@ fn err_di(line: u32, col: u32, message: str) -> error {
     teko::error::err_loc(error { message = message }, line, col)
 }
 
-/** The DI pass entry point: build the registry, then check every overlay. A no-op (returns
- *  null) on a program with no DI annotation, so the corpus is byte-identical until DI is used. */
-pub fn check_di(prog: parser::Program, table: TypeTable) -> error? {
-    if !program_uses_di(prog) { return null }
-    let reg = match build_di_registry(prog, table) { DiRegistry as r => r; error as e => return e }
+/** The DI pass entry point over an ALREADY-BUILT registry: check every overlay. A no-op (returns
+ *  no diagnostics) on a program with no DI annotation, so the corpus is byte-identical until DI is
+ *  used. The registry is passed in rather than rebuilt because the checker's pre-walk already
+ *  builds it once — its own HARD boundary — and a second build would report every registration
+ *  defect twice.
+ *
+ *  @param prog   the flattened program
+ *  @param reg    the registry `build_di_registry` produced for this program
+ *  @param table  the collected type table
+ *  @return       every DI overlay diagnostic, in program order */
+pub fn check_di(prog: parser::Program, reg: DiRegistry, table: TypeTable) -> []str {
+    if !program_uses_di(prog) { return teko::list::empty() }
     check_inject_overlays(prog, reg, table)
+}
+
+/** The overlay diagnostics for a registry that BUILT CLEANLY, and none for one that did not.
+ *  An incomplete registry has empty provider slots, so checking overlays against it would report
+ *  every `#inject` of a rejected registration as unprovided — blaming the use for the
+ *  declaration's defect (M.3). The registration diagnostics already name the real cause.
+ *
+ *  @param prog   the flattened program
+ *  @param di     the DI registry pass's outcome
+ *  @param table  the collected type table
+ *  @return       every overlay diagnostic, or an empty list when the registry itself failed */
+pub fn di_overlay_diags(prog: parser::Program, di: DiRegistryOutcome, table: TypeTable) -> []str {
+    if di.diags.len > 0 { return teko::list::empty() }
+    check_di(prog, di.registry, table)
 }
 
 /** Seed a fn body's environment with its `#inject` overlay (Crumb 4): each binding becomes a local

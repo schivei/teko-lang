@@ -8,6 +8,21 @@ use teko::lexer
 // `(tk_byte)k`. The .tkb reader's prim_of / kind_of are the inverses (byte → enum ordinal).
 fn prim_byte(k: checker::PrimKind) -> byte { k to byte }
 fn kind_byte(k: lexer::TokenKind) -> byte { k to byte }
+
+/**
+ * numint_hi / numint_lo — the frozen `hi:lo` u64-pair wire encoding of a `parser::NumInt`
+ * (drop-128, 2026-07-24; replaces the old `(value >> 64)`/`(value & 0xFFFF…FFFF)` i128
+ * split — §7's wire-compat proof): `lo` is the value's own 64-bit two's-complement bits
+ * (the magnitude when non-negative, else its two's-complement negation, `0 - mag`); `hi` is
+ * the sign-extension of that pattern — all-ones when negative, else 0. Byte-identical to
+ * what the old i128 carrier produced for every value in `[i64::MIN, u64::MAX]` (the only
+ * range a `NumInt` can hold).
+ *
+ * @param v  the literal value to encode
+ * @return   the wire `hi`/`lo` half
+ */
+fn numint_hi(v: parser::NumInt) -> u64 { if v.neg { 0xFFFFFFFFFFFFFFFF } else { 0 } }
+fn numint_lo(v: parser::NumInt) -> u64 { if v.neg { 0 - v.mag } else { v.mag } }
 fn bindkind_byte(k: parser::BindKind) -> byte { k to byte }   // (C7.16) Let/Mut/Const → ordinal byte
 fn assign_kind_byte(k: parser::AssignKind) -> byte { k to byte }   // (#88) Simple/RefDeref/Field → ordinal byte
 fn vis_byte(v: parser::Visibility) -> byte { v to byte }   // (C7.16) Private/Pub/Exp → ordinal byte
@@ -90,16 +105,13 @@ fn write_call_tail(buf: []byte, t: StrTable, cl: checker::TCall) -> []byte {
 fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
     let b = write_type(buf, t, te.type)   // every node carries its type
     match te.kind {
-        // N1/N2: the number node carries { is_float, value: i128, fval: f64 }. Serialize:
-        // tag, is_float (u8), the 128-bit value as two u64 (hi then lo), then the f64's
-        // IEEE-754 bits as a u64. read_texpr reads the exact inverse.
         checker::TNumber as n => write_u64(
             write_u64(
                 write_u64(
                     write_u8(write_u8(b, 0), (if n.is_float { 1 } else { 0 }) to byte),
-                    (n.value >> 64) to u64),   // hi
-                (n.value & 0xFFFFFFFFFFFFFFFF) to u64),   // lo
-            teko::f64_bits(n.fval))   // f64 -> u64 bit pattern
+                    numint_hi(n.value)),
+                numint_lo(n.value)),
+            teko::f64_bits(n.fval))
         checker::TVar as v => write_u32(write_u8(write_u32(write_u8(b, 1), st_find(t, v.name)), (if v.is_func { 1 } else { 0 }) to byte), st_find(t, v.func_ns))   // (W10a) name, is_func, func_ns
         checker::TStrLit as s => write_u32(write_u8(b, 2), st_find(t, s.text))
         checker::TByteLit as bl => write_u8(write_u8(b, 3), bl.value)
@@ -175,11 +187,11 @@ fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
             sb
         }
         // Enum::Member — PathExpr: tag 19, enum name (interned u32), member (interned u32), ordinal (u64), (#50) value (u128 as hi then lo u64).
-        checker::TPathExpr as pe => write_u64(write_u64(write_u64(write_u32(write_u32(write_u8(b, 19), st_find(t, pe.enum_name)), st_find(t, pe.member)), pe.ordinal), (pe.value >> 64) to u64), (pe.value & 0xFFFFFFFFFFFFFFFF) to u64)
+        checker::TPathExpr as pe => write_u64(write_u64(write_u64(write_u32(write_u32(write_u8(b, 19), st_find(t, pe.enum_name)), st_find(t, pe.member)), pe.ordinal), 0), pe.value)
         // Phase 2 — InExpr (<expr> in [ … ]): tag 20, lhs texpr, nelems (u64), then each elem texpr (write order = read order).
         checker::TInExpr as ie => {
             mut sb = write_texpr(write_u8(b, 20), t, ie.lhs)
-            sb = write_u64(sb, ie.elems.len to u64)
+            sb = write_u64(sb, ie.elems.len)
             mut i = 0
             loop {
                 if i >= ie.elems.len { break }
@@ -191,7 +203,7 @@ fn write_texpr(buf: []byte, t: StrTable, te: checker::TExpr) -> []byte {
         // C6.7 — ArrayLit ([ e0, e1, … ]): tag 21, nelements (u64), then for each element:
         // is_spread (u8: 0=plain 1=spread) followed by the element TExpr.
         checker::TArrayLit as a => {
-            mut sb = write_u64(write_u8(b, 21), a.elements.len to u64)
+            mut sb = write_u64(write_u8(b, 21), a.elements.len)
             mut i = 0
             loop {
                 if i >= a.elements.len { break }
@@ -229,7 +241,7 @@ fn write_bindtarget(buf: []byte, t: StrTable, bt: parser::BindTarget) -> []byte 
 
 // (C7.16) a []TStatement: u64 count, then each statement. The inverse of read_tstatements.
 fn write_tstatements(buf: []byte, t: StrTable, xs: []checker::TStatement) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -284,7 +296,7 @@ fn write_tstatement(buf: []byte, t: StrTable, s: checker::TStatement) -> []byte 
 
 // a []TypeExpr (UnionType members): u64 count + each.
 fn write_typeexprs(buf: []byte, t: StrTable, xs: []parser::TypeExpr) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_typeexpr(b, t, xs[i]); i++ }
     b
@@ -313,7 +325,7 @@ fn write_constraint(buf: []byte, t: StrTable, c: parser::ConstraintExpr) -> []by
 
 /** (#165 C2) a []ConstraintExpr (PARALLEL to type_params): u64 count + each. */
 fn write_constraints(buf: []byte, t: StrTable, xs: []parser::ConstraintExpr) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_constraint(b, t, xs[i]); i++ }
     b
@@ -321,7 +333,7 @@ fn write_constraints(buf: []byte, t: StrTable, xs: []parser::ConstraintExpr) -> 
 
 // a []str (interned indices): u64 count + each.
 fn write_strs(buf: []byte, t: StrTable, xs: []str) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_u32(b, st_find(t, xs[i])); i++ }
     b
@@ -331,7 +343,7 @@ fn write_strs(buf: []byte, t: StrTable, xs: []str) -> []byte {
     has_type rides so a method RECEIVER (the untyped 1st param, has_type=false — the instance-method
     marker) survives; the type_ann is still always written (the no_type() sentinel when has_type=false). */
 fn write_params(buf: []byte, t: StrTable, xs: []parser::Param) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -349,7 +361,7 @@ fn write_params(buf: []byte, t: StrTable, xs: []parser::Param) -> []byte {
     but pays the two bytes for one uniform shape. (issue #285) has_doc/doc mirror TypeDecl/Function's
     own doc-comment fields, so a field's Javadoc round-trips through the .tkb codec. */
 fn write_fields(buf: []byte, t: StrTable, xs: []parser::Field) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop {
         if i >= xs.len { break }
@@ -383,13 +395,13 @@ fn write_constdecl(buf: []byte, t: StrTable, cd: parser::ConstDecl) -> []byte {
     b = write_u8(b, vis_byte(cd.vis))
     b = write_u8(b, (if cd.has_doc { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, cd.doc))
-    b = write_u32(b, cd.line to u32)
-    write_u32(b, cd.col to u32)
+    b = write_u32(b, cd.line)
+    write_u32(b, cd.col)
 }
 
 /** a type body's `consts` list (#594 crumb 8): u64 count + each member const signature. */
 fn write_constdecls(buf: []byte, t: StrTable, xs: []parser::ConstDecl) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_constdecl(b, t, xs[i]); i++ }
     b
@@ -415,7 +427,8 @@ fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody) -> []byte {
 
 /** a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4)/
     FlagsBody(5)/ClassBody(6)/InterfaceBody(7)/TraitBody(8). (#165 C5) Interface/Trait ride their
-    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u128 value. */
+    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u64 value
+    (drop-128, 2026-07-24), still wire-shaped as a hi:lo pair (`hi` always 0) for byte compat. */
 fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
     match tb {
         parser::StructBody as s => write_struct_body(buf, t, s)
@@ -430,16 +443,19 @@ fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
     }
 }
 
-/** (C8.6) a FlagsBody: n(u64), then for each member name_idx(u32) + value hi(u64) + lo(u64). */
+/**
+ * (C8.6) a FlagsBody: n(u64), then for each member name_idx(u32) + value hi(u64) + lo(u64). A
+ * flags member's value is a non-negative u64 magnitude (drop-128, 2026-07-24 — `hi` is always 0,
+ * keeping the wire pair shape byte-compat with the pre-drop codec, §7's wire-compat proof).
+ */
 fn write_flags_body(buf: []byte, t: StrTable, f: parser::FlagsBody) -> []byte {
-    mut sb = write_u64(write_u8(buf, 5), f.members.len to u64)
+    mut sb = write_u64(write_u8(buf, 5), f.members.len)
     mut i = 0
     loop {
         if i >= f.members.len { break }
         sb = write_u32(sb, st_find(t, f.members[i]))
-        let v = f.values[i]
-        sb = write_u64(sb, (v >> 64) to u64)
-        sb = write_u64(sb, (v & 0xFFFFFFFFFFFFFFFF) to u64)
+        sb = write_u64(sb, 0)
+        sb = write_u64(sb, f.values[i])
         i++
     }
     sb
@@ -455,8 +471,8 @@ fn write_typedecl(buf: []byte, t: StrTable, d: parser::TypeDecl) -> []byte {
     b = write_u8(b, vis_byte(d.vis))
     b = write_u8(b, (if d.has_doc { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, d.doc))
-    b = write_u32(b, d.line to u32)
-    b = write_u32(b, d.col to u32)
+    b = write_u32(b, d.line)
+    b = write_u32(b, d.col)
     write_u8(b, (if d.is_unsafe { 1 } else { 0 }) to byte)
 }
 
@@ -496,8 +512,8 @@ fn write_function(buf: []byte, t: StrTable, f: parser::Function) -> []byte {
     b = write_u8(b, vis_byte(f.vis))
     b = write_u8(b, (if f.has_doc { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, f.doc))
-    b = write_u32(b, f.line to u32)
-    b = write_u32(b, f.col to u32)
+    b = write_u32(b, f.line)
+    b = write_u32(b, f.col)
     b = write_u8(b, (if f.is_test { 1 } else { 0 }) to byte)
     b = write_u8(b, (if f.is_extern { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, f.c_symbol))
@@ -513,7 +529,7 @@ fn write_function(buf: []byte, t: StrTable, f: parser::Function) -> []byte {
 /** (#165 C4/C5) a []parser::Function (a type body's methods, in DECLARATION order = vtable order):
     u64 count + each. */
 fn write_functions(buf: []byte, t: StrTable, xs: []parser::Function) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_function(b, t, xs[i]); i++ }
     b
@@ -532,8 +548,8 @@ fn write_tfunction(buf: []byte, t: StrTable, f: checker::TFunction) -> []byte {
     b = write_u32(b, st_find(t, f.doc))
     b = write_u32(b, st_find(t, f.namespace))
     b = write_u32(b, st_find(t, f.file))
-    b = write_u32(b, f.line to u32)
-    b = write_u32(b, f.col to u32)
+    b = write_u32(b, f.line)
+    b = write_u32(b, f.col)
     b = write_u8(b, (if f.is_test { 1 } else { 0 }) to byte)
     b = write_u8(b, (if f.is_extern { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, f.c_symbol))
@@ -558,8 +574,8 @@ fn write_tconstdecl(buf: []byte, t: StrTable, c: checker::TConstDecl) -> []byte 
     b = write_u8(b, vis_byte(c.vis))
     b = write_u8(b, (if c.has_doc { 1 } else { 0 }) to byte)
     b = write_u32(b, st_find(t, c.doc))
-    b = write_u32(b, c.line to u32)
-    write_u32(b, c.col to u32)
+    b = write_u32(b, c.line)
+    write_u32(b, c.col)
 }
 
 /**
@@ -583,7 +599,7 @@ fn write_titem(buf: []byte, t: StrTable, it: checker::TItem) -> []byte {
 
 // a TProgram: u64 count + each item.
 fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram) -> []byte {
-    mut b = write_u64(buf, prog.items.len to u64)
+    mut b = write_u64(buf, prog.items.len)
     mut i = 0
     loop { if i >= prog.items.len { break }; b = write_titem(b, t, prog.items[i]); i++ }
     b
@@ -598,7 +614,7 @@ fn write_program(buf: []byte, t: StrTable, prog: checker::TProgram) -> []byte {
 // a parser::Expr in a pattern (Number/StrLit/ByteLit only): u8 tag + payload.
 fn write_pexpr(buf: []byte, t: StrTable, e: parser::Expr) -> []byte {
     match e.kind {
-        parser::Number as n => write_u64(write_u64(write_u64(write_u8(write_u8(buf, 0), (if n.is_float { 1 } else { 0 }) to byte), (n.value >> 64) to u64), (n.value & 0xFFFFFFFFFFFFFFFF) to u64), teko::f64_bits(n.fval))
+        parser::Number as n => write_u64(write_u64(write_u64(write_u8(write_u8(buf, 0), (if n.is_float { 1 } else { 0 }) to byte), numint_hi(n.value)), numint_lo(n.value)), teko::f64_bits(n.fval))
         parser::StrLit as s => write_u32(write_u8(buf, 1), st_find(t, s.text))
         parser::ByteLit as bl => write_u8(write_u8(buf, 2), bl.value)
         _ => write_u8(buf, 255)   // a non-literal pattern expr (does not occur — patterns hold only Number/Str/Byte); read rejects 255
@@ -606,7 +622,7 @@ fn write_pexpr(buf: []byte, t: StrTable, e: parser::Expr) -> []byte {
 }
 
 fn write_patterns(buf: []byte, t: StrTable, xs: []parser::Pattern) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_pattern(b, t, xs[i]); i++ }
     b
@@ -635,7 +651,7 @@ fn write_pattern(buf: []byte, t: StrTable, p: parser::Pattern) -> []byte {
 }
 
 fn write_tarms(buf: []byte, t: StrTable, xs: []checker::TArm) -> []byte {
-    mut b = write_u64(buf, xs.len to u64)
+    mut b = write_u64(buf, xs.len)
     mut i = 0
     loop { if i >= xs.len { break }; b = write_tarm(b, t, xs[i]); i++ }
     b

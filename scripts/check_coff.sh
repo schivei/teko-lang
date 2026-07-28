@@ -59,7 +59,7 @@ if command -v "$LLD_LINK" >/dev/null 2>&1; then
     tmp_exe="$(mktemp -u "${TMPDIR:-/tmp}/check-coff.XXXXXX").exe"
     # lld-link is a NATIVE Windows tool using single-leading-slash switches
     # (/nologo, /entry:, /subsystem:, /force:). Invoked from a Git-Bash/MSYS shell
-    # (the windows-selfhost CI lane), MSYS's automatic POSIX-to-Windows path
+    # (the Windows CI lanes), MSYS's automatic POSIX-to-Windows path
     # conversion mangles any argument that LOOKS like a POSIX absolute path — which
     # every one of these switches does (a bare leading `/`) — before lld-link ever
     # sees it, turning `/nologo` into a bogus filesystem path and making a

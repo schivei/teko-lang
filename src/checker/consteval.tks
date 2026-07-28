@@ -58,7 +58,7 @@ type ScalarConstMap = struct { names: []str; nss: []str; inits: []TExpr }
  * @return      the matching const's collapsed initializer, or null
  * @since #594
  */
-fn scalar_const_init(map: ScalarConstMap, name: str, ns: str) -> TExpr? {
+fn scalar_const_init(map: ScalarConstMap, name: str, ns: str) -> TExpr | null {
     mut i: u64 = 0
     loop {
         if i >= map.names.len { break }
@@ -428,7 +428,7 @@ fn inline_rw_assign(a: TAssign, map: ScalarConstMap) -> TStatement {
  * @since #594
  */
 fn rewrite_function(f: TFunction, map: ScalarConstMap) -> TFunction {
-    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = inline_rw_block(f.body, map); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib }
+    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = inline_rw_block(f.body, map); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
 }
 
 /**
@@ -533,6 +533,377 @@ pub fn inline_consts(prog: TProgram) -> TProgram | error {
     let substituted = match substitute_module_consts(prog) { error as e => return e; TProgram as sp => sp }
     let agg = match build_module_agg_map(substituted) { error as e => return e; ScalarConstMap as m => m }
     fold_program(propagate_locals(substituted), agg)
+}
+
+/**
+ * const_ctor_return_value — the value a `return` statement yields, or null for a value-less `return`
+ * (whose `value` field is a placeholder the const-constructor canonicalizer must never splice).
+ *
+ * @param r  the typed return statement
+ * @return   the returned value expression, or null when the return carries no value
+ * @since #degrau-1
+ */
+fn const_ctor_return_value(r: TReturn) -> TExpr | null {
+    if !r.has_value { return null }
+    r.value
+}
+
+/**
+ * const_ctor_tail_expr — the single value expression a one-statement function body yields: the value
+ * of a `return <expr>` or the expression of a tail `<expr>` statement. Any other statement shape (a
+ * binding, a loop, an assignment) yields null, so a constructor carrying real control flow is never
+ * mistaken for one that simply builds a literal.
+ *
+ * @param st  the function body's only statement
+ * @return    the yielded value expression, or null when the statement yields no single value
+ * @since #degrau-1
+ */
+fn const_ctor_tail_expr(st: TStatement) -> TExpr | null {
+    match st {
+        TReturn as r => const_ctor_return_value(r)
+        TExprStmt as es => es.expr
+        _ => null
+    }
+}
+
+/**
+ * struct_literal_or_null — `e` itself when it is a struct literal, else null. The single place the
+ * canonicalizer decides that a constructor's body is a shape it may splice.
+ *
+ * @param e  the candidate expression
+ * @return   `e` when its kind is `TStructInit`, else null
+ * @since #degrau-1
+ */
+fn struct_literal_or_null(e: TExpr) -> TExpr | null {
+    match e.kind {
+        TStructInit => e
+        _ => null
+    }
+}
+
+/**
+ * const_ctor_literal — the struct literal a STRUCT-CONSTRUCTOR function returns, or null when `f` is
+ * not one. A struct constructor is a non-`extern` function whose whole body is ONE statement yielding
+ * a struct literal (`preg`'s `MReg { id = id; reg_class = reg_class; is_phys = true }`); any longer or
+ * differently shaped body disqualifies it, so the canonicalizer only ever reproduces a value the
+ * function itself would have returned.
+ *
+ * @param f  the typed function to classify
+ * @return   the struct literal its body yields, or null when `f` is not a struct constructor
+ * @since #degrau-1
+ */
+fn const_ctor_literal(f: TFunction) -> TExpr | null {
+    if f.is_extern { return null }
+    if f.body.len != 1 { return null }
+    match const_ctor_tail_expr(f.body[0]) {
+        TExpr as e => struct_literal_or_null(e)
+        null => null
+    }
+}
+
+/**
+ * push_when_const_ctor — accumulate `f` onto `acc` when it is a struct constructor, unchanged
+ * otherwise (the fold step of `collect_const_ctors`).
+ *
+ * @param acc  the constructors collected so far
+ * @param f    the typed function to classify
+ * @return     `acc`, grown with `f` when `f` is a struct constructor
+ * @since #degrau-1
+ */
+fn push_when_const_ctor(acc: []TFunction, f: TFunction) -> []TFunction {
+    match const_ctor_literal(f) {
+        TExpr => teko::list::push(acc, f)
+        null => acc
+    }
+}
+
+/**
+ * collect_const_ctor_item — accumulate one program item's struct constructor onto `acc`; every
+ * non-function item passes through unchanged.
+ *
+ * @param acc  the constructors collected so far
+ * @param it   the program item to fold
+ * @return     `acc`, grown when `it` is a struct-constructor function
+ * @since #degrau-1
+ */
+fn collect_const_ctor_item(acc: []TFunction, it: TItem) -> []TFunction {
+    match it {
+        TFunction as f => push_when_const_ctor(acc, f)
+        _ => acc
+    }
+}
+
+/**
+ * collect_const_ctors — every STRUCT-CONSTRUCTOR function the program declares, in declaration order:
+ * the table `canonicalize_const_ctors` resolves a const initializer's allowlisted call against. Built
+ * ONCE per program by the fold, so canonicalization costs one linear scan plus a lookup per const.
+ *
+ * @param items  the typed program's top-level items
+ * @return       the struct-constructor functions, in declaration order
+ * @since #degrau-1
+ */
+pub fn collect_const_ctors(items: []TItem) -> []TFunction {
+    mut out: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = collect_const_ctor_item(out, items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * callee_bare_name — the LAST segment of a resolved callee path (`backend::preg` → `preg`), the name a
+ * declared function is matched by; the empty string for an empty path.
+ *
+ * @param p  the resolved callee path
+ * @return   the path's last segment name, or "" when the path has no segment
+ * @since #degrau-1
+ */
+fn callee_bare_name(p: parser::Path) -> str {
+    if p.segments.len == 0 { return "" }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * const_ctor_matches — whether the constructor `f` is the target of a call named `bare` resolved to
+ * namespace `call_ns`. An empty `call_ns` (a builtin/local call the checker did not namespace) matches
+ * on the bare name alone; the caller then demands UNIQUENESS, so an ambiguous bare name canonicalizes
+ * nothing rather than guessing.
+ *
+ * @param f        the candidate struct constructor
+ * @param bare     the callee path's last segment
+ * @param call_ns  the namespace the checker resolved the call to ("" when it namespaced none)
+ * @return         whether `f` is a candidate target of that call
+ * @since #degrau-1
+ */
+fn const_ctor_matches(f: TFunction, bare: str, call_ns: str) -> bool {
+    if f.name != bare { return false }
+    if call_ns == "" { return true }
+    f.namespace == call_ns
+}
+
+/**
+ * find_const_ctor — the UNIQUE struct constructor a const initializer's call targets, or null when
+ * none matches or more than one does. Ambiguity yields null on purpose: splicing the body of a
+ * same-named constructor from another namespace would silently change the const's value, which in the
+ * register allocator is a miscompilation, so an ambiguous name is left as a call for the lowering's
+ * located honest-stop to report.
+ *
+ * @param ctors    the program's struct-constructor table (`collect_const_ctors`)
+ * @param callee   the call's resolved callee path
+ * @param call_ns  the namespace the checker resolved the call to
+ * @return         the single matching constructor, or null when the match is absent or ambiguous
+ * @since #degrau-1
+ */
+fn find_const_ctor(ctors: []TFunction, callee: parser::Path, call_ns: str) -> TFunction | null {
+    let bare = callee_bare_name(callee)
+    if bare == "" { return null }
+    mut found: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= ctors.len { break }
+        if const_ctor_matches(ctors[i], bare, call_ns) { found = teko::list::push(found, ctors[i]) }
+        i++
+    }
+    if found.len != 1 { return null }
+    found[0]
+}
+
+/**
+ * const_ctor_arg_for_param — the argument bound to the parameter named `name`, or null when no
+ * parameter carries that name. The caller has already proven `params.len == args.len`, so the index
+ * that matches a parameter also indexes its argument.
+ *
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @param name    the parameter name a body reference spells
+ * @return        the bound argument expression, or null when `name` is not a parameter
+ * @since #degrau-1
+ */
+fn const_ctor_arg_for_param(params: []parser::Param, args: []TExpr, name: str) -> TExpr | null {
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        if params[i].name == name { return args[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * const_ctor_var_value — the value a bare-name reference inside a constructor body stands for: the
+ * argument bound to the parameter of that name. A reference to a function VALUE, or to any name that
+ * is not a parameter, yields null and aborts the canonicalization — the value would not be reproduced
+ * faithfully.
+ *
+ * @param tv      the reference node inside the constructor's struct literal
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the bound argument expression, or null when the reference is not a parameter
+ * @since #degrau-1
+ */
+fn const_ctor_var_value(tv: TVar, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    if tv.is_func { return null }
+    const_ctor_arg_for_param(params, args, tv.name)
+}
+
+/**
+ * const_ctor_field_value — one field value of the constructor's struct literal, rewritten for the call
+ * site: a parameter reference becomes the ALREADY-FOLDED argument the call passes, a literal stands for
+ * itself, and every other form yields null so the whole canonicalization is abandoned rather than
+ * producing a value the function would not have returned.
+ *
+ * @param v       the field value as the constructor's body spells it
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the field value at the call site, or null when it is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_field_value(v: TExpr, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    match v.kind {
+        TVar as tv => const_ctor_var_value(tv, params, args)
+        TNumber => v
+        TStrLit => v
+        TByteLit => v
+        TCharLit => v
+        TBoolLit => v
+        TPathExpr => v
+        _ => null
+    }
+}
+
+/**
+ * const_ctor_substituted — the constructor's struct literal with every field value rewritten for the
+ * call site, carried at the CALL's own type and source position (so the canonical node reports where
+ * the const initializer is written, not where the constructor is declared). Null when any field value
+ * is not reproducible.
+ *
+ * @param call    the (argument-canonicalized) call expression being replaced
+ * @param si      the constructor body's struct literal
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the canonical struct literal, or null when a field value is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_substituted(call: TExpr, si: TStructInit, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    mut vals: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_vals.len { break }
+        let fv = match const_ctor_field_value(si.field_vals[i], params, args) { TExpr as x => x; null => return null }
+        vals = teko::list::push(vals, fv)
+        i++
+    }
+    TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = call.type; line = call.line; col = call.col }
+}
+
+/**
+ * canon_ctor_call — replace an allowlisted pure-constructor call by the struct literal its callee
+ * returns, or leave the call untouched when the callee is not a uniquely resolvable struct constructor
+ * (`teko::f64_from_bits` returns a float, not a struct, and stays a call). The spliced literal is the
+ * constructor's OWN body with its parameters bound to the call's already-folded arguments, so the
+ * const's value is preserved exactly.
+ *
+ * @param cl     the typed call, as the const initializer spells it
+ * @param args   the call's arguments, already canonicalized
+ * @param call   the call expression rebuilt over `args` (the value returned when no rewrite applies)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or `call` unchanged
+ * @since #degrau-1
+ */
+fn canon_ctor_call(cl: TCall, args: []TExpr, call: TExpr, ctors: []TFunction) -> TExpr {
+    let f = match find_const_ctor(ctors, cl.callee, cl.call_ns) { TFunction as x => x; null => return call }
+    if f.params.len != args.len { return call }
+    let lit = match const_ctor_literal(f) { TExpr as x => x; null => return call }
+    let si = match lit.kind { TStructInit as s => s; _ => return call }
+    match const_ctor_substituted(call, si, f.params, args) { TExpr as x => x; null => call }
+}
+
+/**
+ * canon_call — canonicalize a call inside a const initializer: its arguments first, then the call
+ * itself when its callee is a struct constructor.
+ *
+ * @param cl     the typed call expression
+ * @param e      the enclosing typed expression (for its type/position)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or the call rebuilt over canonical arguments
+ * @since #degrau-1
+ */
+fn canon_call(cl: TCall, e: TExpr, ctors: []TFunction) -> TExpr {
+    let args = canon_exprs(cl.args, ctors)
+    let call = TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }
+    canon_ctor_call(cl, args, call, ctors)
+}
+
+/**
+ * canon_exprs — canonicalize every expression in `xs`, in order.
+ *
+ * @param xs     the expressions to canonicalize
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonicalized expressions, in order
+ * @since #degrau-1
+ */
+fn canon_exprs(xs: []TExpr, ctors: []TFunction) -> []TExpr {
+    mut out: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, canonicalize_const_ctors(xs[i], ctors))
+        i++
+    }
+    out
+}
+
+/**
+ * canon_array — canonicalize an array/slice literal's elements (a spread's sub-slice included).
+ *
+ * @param a      the typed array literal
+ * @param e      the enclosing typed expression (for its type/position)
+ * @param ctors  the program's struct-constructor table
+ * @return       the array literal with canonicalized elements
+ * @since #degrau-1
+ */
+fn canon_array(a: TArrayLit, e: TExpr, ctors: []TFunction) -> TExpr {
+    mut elems: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = canonicalize_const_ctors(a.elements[i].expr, ctors) })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * canonicalize_const_ctors — rewrite a FOLDED const initializer so that every allowlisted
+ * pure-constructor call (Tier 5 of the const grammar, `is_const_allowlisted_callee`) that returns a
+ * STRUCT becomes the canonical struct literal the constructor's own body builds.
+ *
+ * The const grammar admits `const RAX_X86: MReg = preg(0, MRegClass::GPR)`, but the LIR's rodata
+ * materializer only knows how to serialize a struct LITERAL — a surviving `TCall` reaches it as
+ * "const struct: initializer is not a struct literal". Canonicalizing the fold's OUTPUT here keeps that
+ * knowledge in ONE place: lowering gains no new concept, and the value is preserved exactly because the
+ * literal spliced in IS the callee's body with its parameters bound to the call's already-folded
+ * arguments. Recurses through the const-expr grammar (cast / unary / binary / aggregate / call); any
+ * other form is returned unchanged.
+ *
+ * @param e      the folded const initializer expression
+ * @param ctors  the program's struct-constructor table (`collect_const_ctors`)
+ * @return       the initializer with every struct-returning constructor call replaced by its literal
+ * @since #degrau-1
+ */
+pub fn canonicalize_const_ctors(e: TExpr, ctors: []TFunction) -> TExpr {
+    match e.kind {
+        TCall as cl => canon_call(cl, e, ctors)
+        TCast as c => TExpr { kind = TCast { expr = canonicalize_const_ctors(c.expr, ctors) }; type = e.type; line = e.line; col = e.col }
+        TUnary as u => TExpr { kind = TUnary { op = u.op; operand = canonicalize_const_ctors(u.operand, ctors) }; type = e.type; line = e.line; col = e.col }
+        TBinary as b => TExpr { kind = TBinary { op = b.op; left = canonicalize_const_ctors(b.left, ctors); right = canonicalize_const_ctors(b.right, ctors) }; type = e.type; line = e.line; col = e.col }
+        TStructInit as si => TExpr { kind = TStructInit { field_names = si.field_names; field_vals = canon_exprs(si.field_vals, ctors) }; type = e.type; line = e.line; col = e.col }
+        TArrayLit as a => canon_array(a, e, ctors)
+        _ => e
+    }
 }
 
 /**

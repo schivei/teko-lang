@@ -43,6 +43,19 @@ A célula proibida (`let x: ref T`) diz: **não existe referência imutável.** 
 
 ## 3. Sintaxe: o modificador `ref` e a grafia `ref` — forma PRIMÁRIA e EXCLUSIVA (dono 2026-07-13)
 
+**SUPERSEDED (dono 2026-07-24 — ref-adoption vagão, #498 slice .31):** o parágrafo abaixo e a seção
+"Aninhamento" que o segue ratificavam `ref` como grafia legal em TODA posição-de-tipo (campos,
+generics, slices, retornos, aninhamento). O dono corrigiu isso: **`ref` É BINDER, EXCLUSIVAMENTE**
+— a única forma é `ref nome: T = expr` (um local) ou `fn f(ref nome: T)` (um parâmetro); o tipo
+anotado é sempre o **tipo do REFERENTE** (nunca `ref T` escrito por dentro de outra posição de
+tipo), e `ref` nunca é um operador de expressão (`ref x` como RHS/argumento também morre — só o
+valor puro `x`, com auto-ref no call site quando o parâmetro já é `ref`). Consequência: `-> ref T`
+(retorno), `campo: ref T` (struct), `[]ref T`/`Map<K, ref V>` (generics/slices), e o aninhamento
+`ref ref T` descritos abaixo **não são mais spellable** — a implementação em
+`src/parser/parse_type.tks` (`is_bare_ref_keyword_at`/`parse_type_primary`) rejeita um `ref` bare
+fora das duas posições de binder com um diagnóstico honesto. O texto original abaixo fica como
+registro histórico da draft .30/.31 anterior — não apagado, apenas superseded.
+
 `ref` é o **3º modificador de binding**, **forma PRIMÁRIA e EXCLUSIVA** de declarar uma referência. O modificador `ref` aplica-se no binding (e.g., `ref x: T`); a grafia `ref` (minúscula) também é legal em **TODA posição-de-tipo** — campos de struct, args genéricos, slices, retornos, e aninhamento — **onde `Ref<>` não é mais user-spellable.** O `Ref<>` torna-se o nome **compiler-interno** (o tipo `Reference{T}` no checker); a superfície **singular** é `ref`.
 
 | binding      | é                      | tipo subjacente |
@@ -53,9 +66,9 @@ A célula proibida (`let x: ref T`) diz: **não existe referência imutável.** 
 
 - `ref` é **inerentemente** alias-mutável — não há `let ref`/`mut ref`. A regra "sem referência imutável" cai estruturalmente.
 - Param-borrow: `fn accumulate(ref acc: []int, x: int)`.
-- **A grafia `ref` é legal em toda posição-de-tipo:** campos de struct (`r: ref T`), args genéricos (`[]ref T`, `Map<K, ref V>`), retornos (`-> ref T`), slices (`[]ref T`), e aninhamento até o cap de profundidade. Binding **sempre** usa o modificador `ref` na declaração; posições fora de binding usam a grafia `ref` no tipo.
+- **A grafia `ref` é legal em toda posição-de-tipo:** campos de struct (`r: ref T`), args genéricos (`[]ref T`, `Map<K, ref V>`), retornos (`-> ref T`), slices (`[]ref T`), e aninhamento até o cap de profundidade. Binding **sempre** usa o modificador `ref` na declaração; posições fora de binding usam a grafia `ref` no tipo. *(SUPERSEDED 2026-07-24 — ver nota acima; apenas as duas posições de binder sobrevivem.)*
 
-### Aninhamento — `ref ref T` / `**T` e o cap de profundidade 2 (dono 2026-07-13)
+### Aninhamento — `ref ref T` / `**T` e o cap de profundidade 2 (dono 2026-07-13) — SUPERSEDED (dono 2026-07-24, ver nota acima: `ref` não aninha mais, pois não há grafia-de-tipo para o nível interno)
 O modificador `ref` dá o nível **mais externo**; a grafia `ref` no tipo dá os internos. **A profundidade de ref consecutivas é capped em 2** — `ref ref T` (`**T`) é o máximo; `ref ref ref T` é erro de compilação.
 
 ```
