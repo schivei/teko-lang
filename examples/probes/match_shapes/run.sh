@@ -35,6 +35,12 @@ set -u
 TEKO="${1:?usage: run.sh <path-to-teko> [label]}"
 LABEL="${2:-$(basename "$TEKO")}"
 [ -x "$TEKO" ] || { printf '%s\n' "match_shapes: '$TEKO' is not executable" >&2; exit 0; }
+# ABSOLUTIZE BEFORE ANY `cd`. Every caller passes a RELATIVE path (`out/teko`, `.rung-c/teko`,
+# `.seed/teko`) and the loop below `cd`s into each case directory — after which that path resolves
+# to nothing. The first run of this matrix produced 64 rows of "STOPPED  …: No such file or
+# directory", i.e. a SHELL failure wearing a compiler verdict. `fixpoint_gate.sh` absolutizes its
+# gen1 argument for exactly this reason; this script now does the same.
+TEKO="$(cd "$(dirname "$TEKO")" && pwd)/$(basename "$TEKO")"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 printf '\n===== match_shapes [%s]: which shapes can the NATIVE backend lower? =====\n' "$LABEL"
@@ -56,7 +62,20 @@ for dir in "$HERE"/m*/; do
     # not be silently reported as a lowering stop.
     said="$(grep -m1 'has no single PrimKind' "$log" 2>/dev/null || true)"
     [ -n "$said" ] || said="$(grep -m1 'native backend N1' "$log" 2>/dev/null || true)"
-    [ -n "$said" ] || said="$(tail -n1 "$log" 2>/dev/null || true)"
+
+    # A THIRD VERDICT, because two were not enough. A row that never reached the compiler — no such
+    # file, not executable, a shell error — is NOT the backend refusing to lower something, and
+    # printing it as STOPPED is how this matrix's first run reported 64 confident verdicts about
+    # nothing. NORAN says the case was never measured, which is the honest thing to say.
+    if [ -z "$said" ]; then
+        tail_line="$(tail -n1 "$log" 2>/dev/null || true)"
+        case "$tail_line" in
+            *"No such file"*|*"not found"*|*"Permission denied"*|*"cannot execute"*)
+                printf '%-26s %-8s %s\n' "$case_name" "NORAN" "$tail_line"
+                continue ;;
+        esac
+        said="$tail_line"
+    fi
     printf '%-26s %-8s %s\n' "$case_name" "STOPPED" "$(printf '%s' "$said" | sed 's/^teko: *//')"
 done
 
