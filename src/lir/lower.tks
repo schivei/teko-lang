@@ -938,7 +938,7 @@ fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata | null {
 fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
     let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
     let ro = match lower_expr(lo.ctx, b.right) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(e.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(e.type, ctx.enums, "binary result") { checker::PrimKind as p => p; error as err => return err }
     let op = match lbinop_of(b.op, k) { LBinOp as o => o; error as err => return err }
     let r = ctx_alloc(ro.ctx)
     let inst = bin_inst(r.vreg, op, lo.vreg, ro.vreg, e.line, e.col)
@@ -960,7 +960,7 @@ fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowere
 fn lower_unary(ctx: LowerCtx, e: checker::TExpr, u: checker::TUnary) -> Lowered | error {
     let ao = match lower_expr(ctx, u.operand) { Lowered as x => x; error as err => return err }
     if is_logical_not(u.op) { return lower_logical_not(ao, e.line, e.col) }
-    let k = match prim_kind_of(u.operand.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(u.operand.type, ctx.enums, "unary operand") { checker::PrimKind as p => p; error as err => return err }
     let op = match lunop_of(u.op, k) { LUnOp as o => o; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
@@ -1004,8 +1004,8 @@ fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
     to/from a non-primitive honest-stops. */
 fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | error {
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
-    let src = match prim_kind_of(c.expr.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
-    let dst = match prim_kind_of(e.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
+    let dst = match prim_kind_of(e.type, ctx.enums, "cast target") { checker::PrimKind as p => p; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, cast_unop_of(src, dst), ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
@@ -1039,31 +1039,43 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | 
  *          from `enum_ordinal_kind_of` for a non-enum Named, or the catch-all for str/slice/
  *          func/ptr/… )
  */
-fn prim_kind_of(t: checker::Type, enums: []LEnumInfo) -> checker::PrimKind | error {
+fn prim_kind_of(t: checker::Type, enums: []LEnumInfo, site: str = "expression") -> checker::PrimKind | error {
     match t {
         checker::Prim as p => p.kind
         checker::Byte => checker::PrimKind::U8
         checker::Named as n => enum_ordinal_kind_of(n, enums)
-        _ => error { message = non_prim_arith_stop(t) }
+        _ => error { message = non_prim_stop(t, site) }
     }
 }
 
 /**
- * non_prim_arith_stop — the catch-all arithmetic honest-stop, WITH THE OPERAND'S TYPE SPELLED OUT.
+ * non_prim_stop — the honest-stop for a type this backend cannot resolve to ONE `PrimKind`, naming
+ * both the TYPE and the SITE that asked.
  *
- * A stop that says only "non-primitive" hands the next reader a search instead of an address: the
- * `bulk` regressor is 220 files and 205 scenarios, and "some operand somewhere is not a primitive"
- * does not narrow that at all. `type_render` is the renderer the checker already uses for
- * user-facing diagnostics, so the name printed here is the name the programmer wrote.
+ * WHY THE SITE MATTERS, and why its absence cost hours. `prim_kind_of` is asked the question
+ * "which single PrimKind is this?" from NINE places — binary result, unary operand, cast source,
+ * cast target, comparison chain, in-expression, and range bounds. The old text said "arithmetic
+ * operand" for all of them, so a stop coming out of a COMPARISON read as a stop in a SUM, and both
+ * the owner and I went hunting a `+` that was never the problem.
  *
- * @param t  the operand type this backend cannot resolve to a PrimKind
- * @return   the N1/N2 honest-stop message, naming `t`
+ * AND THE QUESTION ITSELF IS THE SUSPECT. Owner, 2026-07-28: *"não estaria forçando algo que tem
+ * atribuição dinâmica a se comportar como fixa?"* A `u64 | null` has no single PrimKind — it
+ * carries a TAG resolved at run time. Any site that answers this question for a union is treating
+ * a dynamic value as a fixed scalar, so the site name is not decoration: it says which construct
+ * made that category error.
+ *
+ * TEMPORARY TRACE (remove with the probe): the stop also writes itself to stderr, because a project
+ * build prints ONE line and stops, and with 217 fixtures in one build that line is all a reader
+ * gets. The trace makes every stop visible even when a later one wins the race to the exit.
+ *
+ * @param t     the type that has no single PrimKind
+ * @param site  which lowering construct asked (see the labels at the call sites)
+ * @return      the N1/N2 honest-stop message, naming both
  */
-fn non_prim_arith_stop(t: checker::Type) -> str {
-    teko::str::concat(
-        teko::str::concat("native backend N1: arithmetic operand of type `", checker::type_render(t)),
-        "` is not a primitive and is not yet lowered (N2)"
-    )
+fn non_prim_stop(t: checker::Type, site: str) -> str {
+    let msg = "native backend N1: `" ~ checker::type_render(t) ~ "` has no single PrimKind, asked by the " ~ site ~ " (N2)"
+    teko::io::eprintln("teko: TRACE prim_kind_of stop: " ~ msg)
+    msg
 }
 
 /**
@@ -1142,7 +1154,7 @@ fn lower_compare_terms(ctx: LowerCtx, e: checker::TExpr, prev_type: checker::Typ
         if i >= rest.len { break }
         let term = rest[i]
         let ro = match lower_expr(cur, term.operand) { Lowered as x => x; error as err => return err }
-        let k = match prim_kind_of(pt, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+        let k = match prim_kind_of(pt, ctx.enums, "comparison chain") { checker::PrimKind as p => p; error as err => return err }
         let op = match cmp_lbinop_of(term.op, k) { LBinOp as o => o; error as err => return err }
         let r = ctx_alloc(ro.ctx)
         cur = ctx_append(r.ctx, bin_inst(r.vreg, op, pv, ro.vreg, e.line, e.col))
@@ -5910,7 +5922,7 @@ fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lower
 fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr) -> Lowered | error {
     if ine.elems.len == 0 { return error { message = "native backend N1: empty `in`-expression not yet lowered (N2)" } }
     let lo = match lower_expr(ctx, ine.lhs) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(ine.lhs.type, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(ine.lhs.type, ctx.enums, "in-expression lhs") { checker::PrimKind as p => p; error as err => return err }
     let eq = if prim_is_float_kind(k) { LBinOp::FCmpEq } else { LBinOp::ICmpEq }
     mut cur = lo.ctx
     mut acc: u32 = 0
@@ -6356,7 +6368,7 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     let cur = lenv_lookup(ctx.env, a.name)
     if !cur.found { return error { message = teko::str::concat("native backend N1: unbound local `", a.name, "` (internal)") } }
     let vo = match lower_expr(ctx, a.value) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(a.bound, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
     let r = ctx_alloc(vo.ctx)
@@ -6428,7 +6440,7 @@ fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAs
     let cr = ctx_alloc(ctx)
     let with_load = ctx_append(cr.ctx, load_inst(cr.vreg, addr, field_ty, a.value.line, a.value.col))
     let vo = match lower_expr(with_load, a.value) { Lowered as x => x; error as err => return err }
-    let k = match prim_kind_of(a.bound, ctx.enums) { checker::PrimKind as p => p; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
     let rr = ctx_alloc(vo.ctx)
