@@ -79,10 +79,25 @@ behaviour started, because both live inside the window under suspicion.
 `0.3.0.30-beta` is the last PUBLISHED binary, cut before this train existed. It is a fixed point
 OUTSIDE the window, and it halves the search:
 
-| reading | what it means |
+### Four points, read as three adjacent pairs
+
+Owner ruling 2026-07-28: *"comparar a versão .30, a versão do teko.c do vagão 15 e a gen2 … vejamos
+onde há erro, entre .30 e vagão 15 ou vagão 15 e nativo."*
+
+`gen1` is NOT wagon 15. `build_with_seed_fallback.sh` cc's the committed `bootstrap/teko.c` into
+wagon 15's compiler at `.rung-c/teko`, and THAT binary then builds the tip — so `gen1` and `gen2`
+are both today's source, one generation apart. Wagon 15's own compiler is an intermediate the
+pipeline discards, and it is exactly the point the bisection needs: the last compiler proven to walk
+the whole ladder green.
+
+| pair | question it answers |
 |---|---|
-| seed table **==** gen1/gen2 | the behaviour PREDATES the train — old, and the bisect runs back through released history |
-| seed table **!=** gen1/gen2 | the train introduced it — the bisect is bounded by commits still in front of us |
+| `.30` → `wagon15` | released binary vs the last green ladder — did the train's own history break it? |
+| `wagon15` → `gen1` | wagon 15's compiler vs the tip it builds — did TODAY's source break it? |
+| `gen1` → `gen2` | one self-host generation apart — does the compiler disagree with itself? |
+
+Whichever pair flips a case is the half the defect lives in. A row identical across all four is a
+gap that was always there, and belongs on the `.32` list rather than in a bisect.
 
 ## Running
 
