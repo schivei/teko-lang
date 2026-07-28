@@ -396,3 +396,57 @@ fn f_list_empty_has_no_elements() -> i64 {
     if one[0] != 7 { return 3 }
     0
 }
+
+/**
+ * sc_yes — an opaque `true` the const-folder cannot see through, so the short-circuit rows below
+ * measure the LOWERING and not the folder.
+ *
+ * @param n  a seed the caller varies so the call is never folded to a literal
+ * @return   true whenever `n` is zero or positive
+ */
+fn sc_yes(n: i64) -> bool { n >= 0 }
+
+/**
+ * sc_no — the opaque `false` twin of `sc_yes`, opaque for the same reason.
+ *
+ * @param n  a seed the caller varies so the call is never folded to a literal
+ * @return   false whenever `n` is zero or positive
+ */
+fn sc_no(n: i64) -> bool { n < 0 }
+
+/**
+ * sc_trap — a division by `d` that TRAPS when `d` is zero. It is the right operand of the two
+ * short-circuit rows that must never evaluate their right side: a lowering that evaluates both
+ * operands kills the process instead of returning a wrong number, which is the loudest possible
+ * failure for exactly the miscompile a bitwise `IAnd` would have introduced.
+ *
+ * @param d  the divisor
+ * @return   true when 10/d is positive
+ */
+fn sc_trap(d: i64) -> bool { (10 / d) > 0 }
+
+/**
+ * f_short_circuit_and_or — the truth table of `&&` and `||` plus their SHORT-CIRCUIT guarantee.
+ * The native lowering routed both operators into the integer opcode table (`bool` rides the
+ * integer family of `lbinop_of`'s float/int split) and honest-stopped there, so no program using
+ * a logical operator could be built natively at all — the compiler's own source first among them.
+ * They now lower to a branch whose right-operand block is entered only when the left operand did
+ * not already decide the result.
+ *
+ * @return 0 when every row of the table holds and neither trap row evaluated its right operand,
+ *         else the number of the first failing row
+ */
+fn f_short_circuit_and_or() -> i64 {
+    if !(sc_yes(1) && sc_yes(2)) { return 1 }
+    if sc_yes(1) && sc_no(2) { return 2 }
+    if sc_no(1) && sc_yes(2) { return 3 }
+    if sc_no(1) && sc_no(2) { return 4 }
+    if !(sc_yes(1) || sc_no(2)) { return 5 }
+    if !(sc_no(1) || sc_yes(2)) { return 6 }
+    if sc_no(1) || sc_no(2) { return 7 }
+    if !(sc_yes(1) && sc_yes(2) && sc_yes(3)) { return 8 }
+    if sc_no(1) && sc_trap(0) { return 9 }
+    if !(sc_yes(1) || sc_trap(0)) { return 10 }
+    if !(sc_yes(1) && sc_no(2) || sc_yes(3)) { return 11 }
+    0
+}

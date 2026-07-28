@@ -205,3 +205,21 @@ Feature: list growth builtin — the native backend grows a list through the run
   Scenario: list_empty_has_no_elements (own-native — the (null, 0) pair needs no runtime call)
     When built and run
     Then exit = 42
+
+
+Feature: short-circuit logical operators — the native backend branches instead of computing both operands
+
+  # `&&`/`||` had NO lowering in the native backend: `lower_binary` sent every binary node to
+  # `lbinop_of`, whose two-way float/integer split routed a `bool`-typed logical operator into the
+  # INTEGER opcode table, where it died in the `_ =>` arm as "integer operator not yet lowered". The
+  # message named the wrong family and the wrong kind of gap — what was missing is a control-flow
+  # shape, not an opcode. Every program with a logical operator in it was unbuildable natively, the
+  # compiler's own source included (`needs_lr_save`, two lines long, was the stop).
+  #
+  # The row is a MEMBER of this channel (one build, no extra cost). It asserts the full truth table
+  # AND the short-circuit guarantee: two of its cases have a divide-by-zero as their RIGHT operand,
+  # so a lowering that evaluates both sides — which a bitwise `IAnd`/`IOr` stand-in would have done —
+  # traps and kills the process instead of returning a wrong exit code.
+  Scenario: short_circuit_and_or (own-native — the right operand runs only when the left did not decide)
+    When built and run
+    Then exit = 42
