@@ -1,0 +1,546 @@
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# theory-all-legs-native.yml — A DISPOSABLE MEASURING INSTRUMENT. IT IS NOT A GATE.
+#
+# Owner ruling 2026-07-28: *"Pode fazer o que bem entender em theory/**, criar um ci diferente,
+# testar coisas para validar teorias, etc"* and *"estas nunca devem ser mergeadas e nem gerado PR,
+# é para validação"*. This file exists on `theory/all-legs-native-map` and nowhere else; it is
+# never merged, it publishes nothing, and its verdict is a REPORT, not a colour.
+#
+# ── THE QUESTION IT ANSWERS ────────────────────────────────────────────────────────────────────
+# LIR lowering (`src/lir/lower.tks`) is SHARED by every platform; only the byte emission is
+# per-platform. Owner: *"Tirando a emissão nativa (bytes gerados), o código é o mesmo para todos,
+# Windows, Mac e wasm também."* Today all four Linux legs stop at the SAME shared address with
+# `TEKO_FIXPOINT_BACKEND=native`. If macOS/Windows/wasm stop at the same addresses, the shared
+# lowering is the only thing blocking and the rest arrives by tow. If they stop SOMEWHERE ELSE,
+# that is the EMISSION half showing itself, and that difference is the number the 0.3.1.1–0.3.1.4
+# plan is missing.
+#
+# ── WHY IT IS A WIDE PROBE AND NOT THE FIXPOINT ────────────────────────────────────────────────
+# Owner adendum, 2026-07-28: *"deixar o build na theory passar sem fixpoint, para que rode testes"*.
+#
+# The fixpoint asks ONE enormous program (the compiler) to build itself, so it reports ONE address
+# per run and each address hides the next — one step per day. This instrument instead builds the
+# compiler down the WORKING C route (only to OBTAIN a binary; that build is not the measurement)
+# and then points that binary, on the NATIVE backend, at DOZENS of small programs. Every failure is
+# a candidate step, and they are all collected in one run. The product is the list of DISTINCT
+# stop messages with their counts — the map of the steps that remain.
+#
+# `scripts/fixpoint_gate.sh` IS DELIBERATELY NOT CALLED. The requirement that gen2 == gen3 is what
+# kills every leg at the shared-lowering address and blinds the run to everything behind it. The
+# `remodel/0.3.1.0-linux-native-2` wagon already measures the fixpoint; measuring it twice buys
+# nothing. The one thing worth keeping from it — WHERE the compiler itself stops — is kept as a
+# single cheap probe (`probe-compiler`) that compiles the compiler with the native backend once and
+# reports the address, without the ladder-doubling a fixpoint chain costs.
+#
+# ── WHAT IT NEVER DOES ─────────────────────────────────────────────────────────────────────────
+# No release, no tag, no asset upload, no artifact a reader could mistake for a real one. The
+# producing steps of `pr.yml`/`nightly.yml` (native_linux_asset.sh, staging, upload-artifact,
+# package_release.sh) are NOT reused here — this is a thermometer, not a factory. It downloads a
+# published SEED, which is the one thing it must consume to have a compiler at all.
+#
+# ── HOW TO READ A RUN ──────────────────────────────────────────────────────────────────────────
+# Every finding is a grep anchor, one per line:
+#   MAP-LEG:              the leg's identity (label, arch, libc/object format, host target)
+#   MAP-OK:               a probe project the native backend built
+#   MAP-FAIL:             a probe project it did not, with the FULL stop message
+#   MAP-DISTINCT:         the histogram — THE PRODUCT: distinct stop messages and their counts
+#   MAP-SUMMARY:          per-probe tallies (passed / failed)
+#   MAP-COMPILER-STOP:    where the compiler itself stops under the native backend
+#   MAP-SUITE:            what `teko test .` reported under the native backend
+#   MAP-PASS:             a probe set with zero failures
+#   MAP-NOSEED:           no published seed exists for this leg's seed label
+#   MAP-NOTE:             something a reader must know to interpret the numbers
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+name: theory / all legs native map
+
+on:
+  push:
+    branches:
+      - 'theory/all-legs-native-map'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: theory-all-legs-native-map-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ══ plan — THE LEG TABLE, DERIVED, THEN FORCED TO NATIVE ══════════════════════════════════════
+  # The legs are NOT written out here. `scripts/ci_producer_matrix.sh full` is the one place the
+  # producer table lives (pr.yml and nightly.yml both read it), so taking it verbatim is the only
+  # way this instrument cannot invent a label that does not exist or miss one that does. The single
+  # edit applied to it is `fixpoint_backend = "native"` on EVERY leg — including macOS and Windows,
+  # which the shared table still carries as `c`. That forcing is the whole point of the exercise.
+  plan:
+    name: plan / derive every producer leg, force native
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.derive.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive the matrix from the shared producer table
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(sh scripts/ci_producer_matrix.sh full)"
+          echo "--- the shared table, verbatim (scripts/ci_producer_matrix.sh full) ---"
+          printf '%s\n' "$base" | jq .
+          forced="$(printf '%s\n' "$base" | jq -c '{include: [.include[] | .fixpoint_backend = "native"]}')"
+          stragglers="$(printf '%s\n' "$forced" | jq -r '[.include[] | select(.fixpoint_backend != "native")] | length')"
+          if [ "$stragglers" != "0" ]; then
+            echo "MAP-BUG: $stragglers leg(s) survived the force with fixpoint_backend != native" >&2
+            exit 1
+          fi
+          echo "matrix=$forced" >> "$GITHUB_OUTPUT"
+          {
+            echo "## the legs this instrument caught"
+            echo
+            printf '%s\n' "$forced" | jq -r '.include[] | "- `\(.producer)` — os=\(.os) kind=\(.kind) seed=\(.seed) forced backend=\(.fixpoint_backend)"'
+            echo
+            echo "wasm has NO producer leg in the shared table — no runner hosts a wasm compiler."
+            echo "It is measured as a TARGET instead, by \`probe-targets\` on every leg."
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$forced" | jq -r '.include[] | "MAP-LEG-PLANNED: \(.producer)  os=\(.os) kind=\(.kind) seed=\(.seed) produces=\(.produces) fixpoint_backend=\(.fixpoint_backend)"'
+          echo "MAP-NOTE: wasm is not a producer leg in scripts/ci_producer_matrix.sh — there is no"
+          echo "MAP-NOTE: runner that HOSTS a wasm compiler, so it cannot be a leg without inventing"
+          echo "MAP-NOTE: a label. It is measured as a TEKO_TARGET on every leg instead (probe-targets)."
+
+  # ══ leg — ONE PER PRODUCER LABEL. THE WHOLE MEASUREMENT, IN ONE LOG. ══════════════════════════
+  #
+  # `fail-fast: false` because the point is to see EVERY leg stop, not the first one.
+  #
+  # THE LEG MAY FINISH GREEN WITH FAILURES IN IT, by owner adendum: *"A perna pode terminar verde
+  # mesmo com falhas de teste — o que interessa é o RELATÓRIO ser legível... não preciso que a cor
+  # do job seja o veredito, isto não é um portão."* A red leg here means the INSTRUMENT broke (no
+  # seed, no ladder, no compiler to measure with) — never that the measurement found something.
+  leg:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: map / ${{ matrix.producer }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+    env:
+      PRODUCER: ${{ matrix.producer }}
+      SEED_LABEL: ${{ matrix.seed }}
+      MAP_OUT: map-out
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report the host toolchain (diagnostic — never fails the leg)
+        shell: bash
+        run: |
+          for t in cc clang gcc file xz unzip tar curl python3 jq; do
+            printf '%-8s ' "$t"
+            command -v "$t" || echo '(absent)'
+          done
+          uname -srm || true
+
+      # ── the shared shell library, WRITTEN AT RUN TIME AND NEVER COMMITTED ──────────────────────
+      # Every probe below classifies a stop the same way, and a classifier that drifted between two
+      # steps would make two probes' numbers incomparable — which is the only thing this instrument
+      # produces. It is written into the workspace root at run time and NOT added to scripts/: this
+      # branch must not grow the maintained script surface for an experiment that is never merged.
+      # (Workspace root and not $RUNNER_TEMP because $RUNNER_TEMP is a native Windows path, and the
+      # Windows leg's bash would have to survive it for the leg to measure anything at all.)
+      #
+      # THE FOUR CLASSES, and the difference between the first two IS THE QUESTION THIS RUN ASKS:
+      #   LOWERING  `native backend N1: …` — src/lir/lower.tks, SHARED by every platform.
+      #   EMISSION  isel / stackify / regalloc / objfile / A4- / B1- / B3- — src/backend/**,
+      #             PER-PLATFORM. A stop here is the emission half appearing.
+      #   LINK      the object was emitted and the host's `cc` could not link it. On a CROSS target
+      #             that is expected (no cross-linker on the runner) and it PROVES emission got all
+      #             the way through — it is not a step, and it must not pollute the step map.
+      #   OTHER     a front-end/checker stop or a missing dependency — the same on every backend,
+      #             counted apart so it cannot inflate the step list. Several probe projects are
+      #             NEGATIVE corpora (diagnostics, parse_diagnostics) and are EXPECTED to land here.
+      - name: Write the shared classifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$PWD/.map-lib.sh" <<'MAPLIB'
+          STOP_RE='native backend N1:|isel x86-64:|isel arm64:|stackify:|regalloc[^:]*:|objfile[_a-z]*:|A4-[a-z]+:|B1-[a-z-]+:|B3-[a-z-]+:|failed to link the own-backend object'
+
+          stop_message() {
+              sm_msg="$(grep -m1 -E "$STOP_RE" "$1" 2>/dev/null | sed -E 's/^teko: [^:]*: //; s/^teko: //; s/^[[:space:]]+//')"
+              if [ -n "$sm_msg" ]; then printf '%s' "$sm_msg"; return 0; fi
+              sm_msg="$(grep -m1 -E '^teko: ' "$1" 2>/dev/null | sed -E 's/^teko: [^:]*: //; s/^teko: //')"
+              if [ -n "$sm_msg" ]; then printf '%s' "$sm_msg"; return 0; fi
+              sm_msg="$(grep -m1 -E '[a-z]+\.tks:[0-9]+:[0-9]+:' "$1" 2>/dev/null | sed -E 's/^[[:space:]]+//')"
+              if [ -n "$sm_msg" ]; then printf '%s' "$sm_msg"; return 0; fi
+              sm_msg="$(tail -n 1 "$1" 2>/dev/null | tr -d '\r')"
+              [ -n "$sm_msg" ] || sm_msg="(the build failed and wrote nothing legible)"
+              printf '%s' "$sm_msg"
+          }
+
+          normalize_message() {
+              printf '%s' "$1" | sed -E 's/ *\[in `[^`]*`\] *$//; s/^[^ ]*\.tks:[0-9]+:[0-9]+: /<source>: /'
+          }
+
+          classify_message() {
+              case "$1" in
+                  *"native backend N1:"*)                          printf '%s' "LOWERING" ;;
+                  *"failed to link the own-backend object"*)       printf '%s' "LINK" ;;
+                  *"isel "*|*"stackify:"*|*"regalloc"*|*"objfile"*) printf '%s' "EMISSION" ;;
+                  *A4-*|*B1-*|*B3-*)                               printf '%s' "EMISSION" ;;
+                  # Two per-target SCOPE stops that carry no isel/stackify prefix and would otherwise
+                  # be counted as front-end noise. The dress rehearsal found both: they are
+                  # emission-half limits by address (backend-c1-wasm.md §9, and the wasm artifact
+                  # shape), so they belong in the step map and not beside a checker diagnostic.
+                  *"wasm32-browser:"*|*"no wasm convention to wrap into"*) printf '%s' "EMISSION" ;;
+                  *)                                               printf '%s' "OTHER" ;;
+              esac
+          }
+
+          teko_binary() {
+              [ -f out/teko.exe ] && { printf '%s' "out/teko.exe"; return 0; }
+              printf '%s' "out/teko"
+          }
+
+          # require_teko PROBE — every probe runs under `if: always()` so the REPORT is reached even
+          # when an earlier step died, and that means a probe can be entered with no gen1 on disk. A
+          # guard is the difference between one legible MAP-SKIP line and fifty-three invocations of
+          # a binary that is not there.
+          require_teko() {
+              [ -x "$(teko_binary)" ] && return 0
+              printf 'MAP-SKIP: %s: %s: there is no gen1 to measure with (the seed or the C route failed above)\n' "$PRODUCER" "$1"
+              return 1
+          }
+
+          collapse_progress() {
+              sed -E 's/[a-z]+ +[0-9]+\/[0-9]+ (files|items|instances|consts) +/ /g' | tr -d '\r'
+          }
+
+          # probe_project TEKO TARGET DIR TSV — build DIR with the native backend and record the
+          # verdict as one MAP-OK/MAP-FAIL line plus one `class<TAB>message` row in TSV.
+          # TARGET may be empty, which means "let the host default decide" — the case a real user on
+          # that platform gets.
+          probe_project() {
+              pp_teko="$1"; pp_target="$2"; pp_dir="$3"; pp_tsv="$4"
+              pp_tag="$(printf '%s' "$pp_dir" | tr '/.' '__')"
+              pp_log="$MAP_OUT/logs/${pp_target:-host}-$pp_tag.log"
+              # ABSOLUTE, and the rehearsal that found this is why it is commented: the front end
+              # CHDIRS INTO THE PROJECT before creating `-o`, so a relative output path is created
+              # relative to `examples/<probe>/` and every single project died with "cannot create
+              # the output directory" — 53 identical OTHER rows and not one real measurement.
+              pp_out="$PWD/$MAP_OUT/probe-out"
+              rm -rf "$pp_out"
+              pp_rc=0
+              if [ -n "$pp_target" ]; then
+                  TK_RT_DIR="$PWD/src/runtime" TEKO_BACKEND=native TEKO_TARGET="$pp_target" \
+                      "$pp_teko" "$pp_dir" -o "$pp_out" --no-verify --release > "$pp_log" 2>&1 || pp_rc=$?
+              else
+                  TK_RT_DIR="$PWD/src/runtime" TEKO_BACKEND=native \
+                      "$pp_teko" "$pp_dir" -o "$pp_out" --no-verify --release > "$pp_log" 2>&1 || pp_rc=$?
+              fi
+              rm -rf "$pp_out"
+              if [ "$pp_rc" = "0" ]; then
+                  printf 'MAP-OK:   %s: %s: %s\n' "$PRODUCER" "${pp_target:-<host default>}" "$pp_dir"
+                  rm -f "$pp_log"
+                  return 0
+              fi
+              pp_msg="$(stop_message "$pp_log")"
+              pp_class="$(classify_message "$pp_msg")"
+              printf 'MAP-FAIL: %s: %s: %s: [%s] %s\n' "$PRODUCER" "${pp_target:-<host default>}" "$pp_dir" "$pp_class" "$pp_msg"
+              printf '%s\t%s\n' "$pp_class" "$(normalize_message "$pp_msg")" >> "$pp_tsv"
+              return 1
+          }
+
+          # probe_set TEKO TARGET NAME — every probe project under examples/, one at a time, with
+          # the tallies and the DISTINCT histogram at the end. One at a time and never fail-fast:
+          # owner adendum, *"Recolha TODAS as falhas, não a primeira… O valor deste exercício é a
+          # lista completa."*
+          probe_set() {
+              ps_teko="$1"; ps_target="$2"; ps_name="$3"
+              ps_tsv="$MAP_OUT/$ps_name.tsv"
+              : > "$ps_tsv"
+              ps_pass=0
+              ps_fail=0
+              for ps_dir in $(find examples -name '*.tkp' | sed 's|/[^/]*$||' | LC_ALL=C sort -u); do
+                  if probe_project "$ps_teko" "$ps_target" "$ps_dir" "$ps_tsv"; then
+                      ps_pass=$((ps_pass + 1))
+                  else
+                      ps_fail=$((ps_fail + 1))
+                  fi
+              done
+              printf 'MAP-SUMMARY: %s: %s: %s built, %s stopped\n' "$PRODUCER" "$ps_name" "$ps_pass" "$ps_fail"
+              if [ "$ps_fail" = "0" ]; then
+                  printf 'MAP-PASS: %s: %s: every probe project built (%s)\n' "$PRODUCER" "$ps_name" "$ps_pass"
+              fi
+              report_distinct "$ps_tsv" "$ps_name"
+          }
+
+          # report_distinct TSV NAME — THE PRODUCT. The distinct stop messages and how many probe
+          # projects each one accounts for, steps first (LOWERING/EMISSION), noise last.
+          report_distinct() {
+              rd_tsv="$1"; rd_name="$2"
+              if [ ! -s "$rd_tsv" ]; then
+                  printf 'MAP-DISTINCT-COUNT: %s: %s: 0 distinct stops\n' "$PRODUCER" "$rd_name"
+                  return 0
+              fi
+              rd_steps="$(grep -cE '^(LOWERING|EMISSION)	' "$rd_tsv" || true)"
+              rd_uniq="$(LC_ALL=C sort -u "$rd_tsv" | wc -l | tr -d ' ')"
+              rd_uniq_steps="$(grep -E '^(LOWERING|EMISSION)	' "$rd_tsv" | LC_ALL=C sort -u | wc -l | tr -d ' ')"
+              printf 'MAP-DISTINCT-COUNT: %s: %s: %s distinct stops (%s of them are STEPS: LOWERING/EMISSION), over %s failing projects (%s of them at a step)\n' \
+                  "$PRODUCER" "$rd_name" "$rd_uniq" "$rd_uniq_steps" "$(wc -l < "$rd_tsv" | tr -d ' ')" "$rd_steps"
+              LC_ALL=C sort "$rd_tsv" | uniq -c | LC_ALL=C sort -rn | while IFS= read -r rd_line; do
+                  printf 'MAP-DISTINCT: %s: %s: %s\n' "$PRODUCER" "$rd_name" "$rd_line"
+              done
+          }
+          MAPLIB
+          echo "classifier written to $PWD/.map-lib.sh"
+
+      # ── THE SEED. The one published thing this instrument consumes. ────────────────────────────
+      # A leg whose seed label has no published asset reports MAP-NOSEED and stops: owner
+      # requirement, so a provisioning gap reads as a named condition instead of an illegible death
+      # inside a download. The leg still ends RED, because a leg that measured nothing must not be
+      # confused with one that measured and found nothing.
+      - name: Provision the seed this runner can execute
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rc=0
+          sh scripts/ci_provision_teko.sh "$SEED_LABEL" || rc=$?
+          if [ "$rc" != "0" ]; then
+            echo "MAP-NOSEED: $PRODUCER: no usable seed for seed label '$SEED_LABEL' (provisioning exited $rc)"
+            echo "MAP-NOSEED: $PRODUCER: this leg measured NOTHING — there is no compiler to measure with." >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
+          echo "MAP-SEED: $PRODUCER: seed label '$SEED_LABEL' provisioned"
+
+      # ── THE COMPILER UNDER TEST, BUILT DOWN THE ROUTE THAT WORKS ───────────────────────────────
+      # release -> gen0 -> gen1, TEKO_BACKEND=c, exactly as every producer does it. This build is
+      # NOT the measurement: it only OBTAINS a binary whose native backend the probes then exercise.
+      # Owner adendum: *"Construa o compilador pela rota C… Isto é só para OBTER um binário; não é o
+      # objeto da medição."*
+      - name: Build gen1 down the C route (this is NOT the measurement)
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          sh scripts/build_with_seed_fallback.sh out || rc=$?
+          if [ "$rc" != "0" ]; then
+            echo "MAP-NOLADDER: $PRODUCER: the C route did not produce a gen1 (exit $rc) — this leg"
+            echo "MAP-NOLADDER: $PRODUCER: has no compiler to measure with, so it measured nothing."
+            exit "$rc"
+          fi
+          mkdir -p "$MAP_OUT/logs"
+          . "$PWD/.map-lib.sh"
+          teko_bin="$(teko_binary)"
+          "$teko_bin" --version
+          echo "MAP-GEN1: $PRODUCER: $teko_bin ($(wc -c < "$teko_bin" | tr -d ' ') bytes)"
+
+      # ── PROBE A — the wide map on the leg's OWN default target ─────────────────────────────────
+      # No TEKO_TARGET: the host default is what a real user on this platform gets, and it is the
+      # per-platform emission path this leg exists to exercise (ELF on Linux, Mach-O on macOS,
+      # PE-COFF on Windows). Dozens of small programs, one at a time, all failures collected.
+      - name: Probe A — every example project, native backend, host default target
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$PWD/.map-lib.sh"
+          mkdir -p "$MAP_OUT/logs"
+          require_teko "probe A" || exit 0
+          echo "MAP-LEG: $PRODUCER: $(uname -srm 2>/dev/null || echo 'unknown host')"
+          probe_set "$(teko_binary)" "" "host-default"
+
+      # ── PROBE B — the SAME wide map, once per canonical TARGET ─────────────────────────────────
+      # THIS IS WHERE wasm IS MEASURED, and it is why wasm needing no producer leg costs the run
+      # nothing. The target list is read out of the compiler's own canonical table
+      # (`target_name` in src/build/project.tks) rather than typed here, for the same reason the
+      # leg matrix is derived: a hand-written list is a list that invents or forgets a name.
+      #
+      # A CROSS TARGET CANNOT LINK on a runner with no cross-linker, and that is not a step — the
+      # classifier calls it LINK, which means the emission got all the way to the linker. That
+      # distinction is the whole reason LINK is its own class.
+      - name: Probe B — every example project, once per canonical TEKO_TARGET (wasm included)
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$PWD/.map-lib.sh"
+          mkdir -p "$MAP_OUT/logs"
+          require_teko "probe B" || exit 0
+          targets="$(sed -n '/^fn target_name/,/^}/p' src/build/project.tks \
+                     | grep -oE '=> "[a-z0-9_]+-[a-z0-9]+"' | sed -E 's/.*"(.*)"/\1/')"
+          echo "MAP-TARGETS: $PRODUCER: $(printf '%s ' $targets)"
+          for t in $targets; do
+            echo "── target $t ──────────────────────────────────────────────"
+            probe_set "$(teko_binary)" "$t" "target-$t"
+          done
+
+      # ── PROBE C — the compiler itself, on the native backend ───────────────────────────────────
+      # The fixpoint's question without the fixpoint's price: ONE native build of the compiler, and
+      # the address it stops at. That address is the "degrau 6" the four Linux legs report today;
+      # having it beside the wide map is what makes the two comparable on the same leg.
+      - name: Probe C — the compiler itself under the native backend
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$PWD/.map-lib.sh"
+          mkdir -p "$MAP_OUT/logs"
+          require_teko "probe C" || exit 0
+          log="$MAP_OUT/logs/compiler-native.log"
+          rc=0
+          TK_RT_DIR="$PWD/src/runtime" TEKO_BACKEND=native \
+            "$(teko_binary)" . -o "$PWD/$MAP_OUT/compiler-native-out" --no-verify --release > "$log" 2>&1 || rc=$?
+          rm -rf "$PWD/$MAP_OUT/compiler-native-out"
+          if [ "$rc" = "0" ]; then
+            echo "MAP-COMPILER-PASS: $PRODUCER: the native backend BUILT the compiler"
+            echo "MAP-COMPILER-PASS: $PRODUCER" > "$MAP_OUT/compiler.txt"
+            exit 0
+          fi
+          msg="$(stop_message "$log")"
+          echo "MAP-COMPILER-STOP: $PRODUCER: [$(classify_message "$msg")] $msg"
+          printf 'MAP-COMPILER-STOP: %s: [%s] %s\n' "$PRODUCER" "$(classify_message "$msg")" "$msg" > "$MAP_OUT/compiler.txt"
+          # BYTE-BOUNDED BEFORE LINE-BOUNDED. The progress meter writes ONE enormous line when there
+          # is no tty, so `tail -n 40` alone can print tens of megabytes of it into the run log.
+          echo "--- the tail of the compiler's own native build ---"
+          tail -c 200000 "$log" | collapse_progress | tail -n 40
+
+      # ── PROBE D — the real suite, with the native backend asked for explicitly ─────────────────
+      # Owner adendum: *"Corra a suite com o backend NATIVO — teko test ."*.
+      #
+      # WHAT A READER MUST KNOW TO BELIEVE THIS NUMBER, and it is the single most misleading thing
+      # in the run if it goes unsaid: `run_native_gate` (src/build/project.tks) emits the `#test`
+      # corpus AS C and compiles it with `cc` UNCONDITIONALLY — the unit half of `teko test .` does
+      # not consult TEKO_BACKEND at all. So what this probe actually moves is the REGRESSION tier,
+      # whose rows build real sub-projects and do inherit the backend. Probe A/B are the wide
+      # native measurement; this one is the suite's own verdict beside it.
+      - name: Probe D — teko test . with TEKO_BACKEND=native
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -uo pipefail
+          . "$PWD/.map-lib.sh"
+          mkdir -p "$MAP_OUT/logs"
+          require_teko "probe D" || exit 0
+          log="$MAP_OUT/logs/suite-native.log"
+          rc=0
+          TK_RT_DIR="$PWD/src/runtime" TEKO_BACKEND=native "$(teko_binary)" test . > "$log" 2>&1 || rc=$?
+          echo "MAP-SUITE: $PRODUCER: teko test . exited $rc"
+          printf 'MAP-SUITE: %s: exit %s\n' "$PRODUCER" "$rc" > "$MAP_OUT/suite.txt"
+          # `cut -c` BOUNDS EVERY LINE, for the same reason the tails are byte-bounded: the progress
+          # meter is one line of unbounded length, and it only takes one `failed` inside it to dump
+          # megabytes into the run log where a reader is looking for a tally.
+          grep -aE 'regressions [0-9]+ run|\.\.\. FAILED|FAILED|failed' "$log" | collapse_progress \
+            | cut -c 1-400 | head -n 200 | sed -E "s/^/MAP-SUITE-LINE: $PRODUCER: /" || true
+          grep -aoE "($STOP_RE).*" "$log" | sed -E 's/ *\[in `[^`]*`\] *$//' | cut -c 1-300 \
+            | LC_ALL=C sort | uniq -c | LC_ALL=C sort -rn \
+            | sed -E "s/^/MAP-SUITE-DISTINCT: $PRODUCER: /" || true
+          echo "--- the tail of the suite (byte-bounded first: see probe C) ---"
+          tail -c 200000 "$log" | collapse_progress | tail -n 60
+
+      # ── THE REPORT. It runs even when a probe died, and it is the last thing in the log. ───────
+      - name: MAP report
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          describe_leg() {
+            case "$1" in
+              linux-x86_64-glibc) printf '%s' "x86_64 / linux-glibc / ELF" ;;
+              linux-x86_64-musl)  printf '%s' "x86_64 / linux-musl / ELF" ;;
+              linux-arm64-glibc)  printf '%s' "arm64 / linux-glibc / ELF" ;;
+              linux-arm64-musl)   printf '%s' "arm64 / linux-musl / ELF" ;;
+              macos-arm64)        printf '%s' "arm64 / macOS / Mach-O" ;;
+              windows-x86_64)     printf '%s' "x86_64 / Windows / PE-COFF" ;;
+              *)                  printf '%s' "UNKNOWN LABEL — this instrument has no descriptor for it" ;;
+            esac
+          }
+          echo "══════════════════════════════════════════════════════════════════════════"
+          echo "MAP-LEG: $PRODUCER: $(describe_leg "$PRODUCER"), seed=$SEED_LABEL, backend forced to native"
+          echo "══════════════════════════════════════════════════════════════════════════"
+          if [ ! -d "$MAP_OUT" ]; then
+            echo "MAP-NOTHING: $PRODUCER: no probe produced any data — the leg died before measuring."
+            echo "MAP-NOTHING: $PRODUCER: read the failing step above (seed, or the C-route ladder)."
+            exit 0
+          fi
+          cat "$MAP_OUT/compiler.txt" 2>/dev/null || echo "MAP-COMPILER-STOP: $PRODUCER: (probe C produced nothing)"
+          cat "$MAP_OUT/suite.txt" 2>/dev/null || echo "MAP-SUITE: $PRODUCER: (probe D produced nothing)"
+          {
+            echo "### $PRODUCER — $(describe_leg "$PRODUCER")"
+            echo
+            echo '```'
+            cat "$MAP_OUT/compiler.txt" 2>/dev/null || true
+            cat "$MAP_OUT/suite.txt" 2>/dev/null || true
+            echo '```'
+            echo
+            echo "| probe set | failing projects | distinct stops | distinct STEPS |"
+            echo "| --- | ---: | ---: | ---: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for tsv in "$MAP_OUT"/*.tsv; do
+            [ -f "$tsv" ] || continue
+            name="$(basename "$tsv" .tsv)"
+            fails="$(wc -l < "$tsv" | tr -d ' ')"
+            uniq_all="$(LC_ALL=C sort -u "$tsv" | wc -l | tr -d ' ')"
+            uniq_step="$(grep -E '^(LOWERING|EMISSION)	' "$tsv" | LC_ALL=C sort -u | wc -l | tr -d ' ')"
+            printf 'MAP-ROLLUP: %s: %-28s failing=%s distinct=%s distinct-steps=%s\n' \
+              "$PRODUCER" "$name" "$fails" "$uniq_all" "$uniq_step"
+            printf '| %s | %s | %s | %s |\n' "$name" "$fails" "$uniq_all" "$uniq_step" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo
+          echo "MAP-DISTINCT-ALL: $PRODUCER: every distinct STEP this leg saw, across every target:"
+          cat "$MAP_OUT"/*.tsv 2>/dev/null | grep -E '^(LOWERING|EMISSION)	' | LC_ALL=C sort | uniq -c \
+            | LC_ALL=C sort -rn | sed -E "s/^/MAP-DISTINCT-ALL: $PRODUCER: /" || true
+          echo
+          echo "MAP-NOTE: $PRODUCER: LINK-class stops on a cross target mean the object WAS emitted"
+          echo "MAP-NOTE: $PRODUCER: and the runner has no cross-linker — not a step."
+          echo "MAP-NOTE: $PRODUCER: OTHER-class stops are front-end/checker stops (several probe"
+          echo "MAP-NOTE: $PRODUCER: projects are negative corpora) — identical on every backend."
+
+  # ══ verdict — THE ONE PLACE THAT READS THE WHOLE RUN ═══════════════════════════════════════════
+  # It asserts NOTHING. `if: always()` and a green exit whatever the legs did: this is a
+  # thermometer, and a thermometer that refuses to report a temperature it dislikes is broken.
+  verdict:
+    needs: [plan, leg]
+    if: ${{ always() }}
+    name: map / roll-up
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: What the run measured
+        shell: bash
+        env:
+          LEG_RESULT: ${{ needs.leg.result }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          set -uo pipefail
+          echo "legs (aggregate github result): $LEG_RESULT"
+          echo "the legs this run planned:"
+          printf '%s\n' "$MATRIX" | jq -r '.include[] | "  - \(.producer) on \(.os)"' 2>/dev/null || printf '%s\n' "$MATRIX"
+          {
+            echo "## how to read this run"
+            echo
+            echo "Each leg's log carries the findings, one grep anchor per line:"
+            echo '- `MAP-DISTINCT` / `MAP-DISTINCT-ALL` — THE PRODUCT: the distinct stop messages and their counts.'
+            echo '- `MAP-FAIL` — one line per probe project that did not build, with the full message.'
+            echo '- `MAP-COMPILER-STOP` — where the compiler itself stops under the native backend.'
+            echo '- `MAP-SUITE` — what `teko test .` reported with `TEKO_BACKEND=native`.'
+            echo '- `MAP-NOSEED` / `MAP-NOLADDER` — the leg measured nothing, and why.'
+            echo
+            echo 'A red leg means the INSTRUMENT broke, never that the measurement found something.'
+            echo 'This workflow publishes nothing: no release, no tag, no asset.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "this instrument asserts nothing and publishes nothing — read the legs."
