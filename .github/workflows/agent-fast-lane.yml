@@ -157,14 +157,33 @@ jobs:
       #
       # Both generations go up, not just the candidate: when they are byte-identical that is evidence
       # the C emission has reached its own fixpoint, and when they are not, the pair IS the bug report.
+      # STAGED OUT OF `.fixpoint/` FIRST, and the copy is not ceremony — it is the fix for a silent
+      # miss. `actions/upload-artifact` excludes hidden files and anything under a dot-directory by
+      # default (v4.4+), and the fixpoint's work dir is `.fixpoint`. The first attempt therefore
+      # uploaded NOTHING while reporting success in 0s: the gate had written both files, the action
+      # simply refused to look at them. `include-hidden-files: true` would also work, but staging to
+      # a plain directory does not depend on the action's version, and it gives the log the sizes —
+      # which is the evidence a reader needs to trust the seed before committing it.
+      - name: Stage the emitted C for harvest (only from a fixpoint that HELD)
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p harvest
+          # `if`, never `[ -f … ] && cp` — under `set -e` the && chain returns 1 for a missing file
+          # and kills the step. That exact shape already cost this workflow two runs (the `nproc`
+          # diagnostic that was named "never fails the job" and did).
+          for g in gen2 gen3; do
+              if [ -f ".fixpoint/$g.c" ]; then cp ".fixpoint/$g.c" "harvest/$g.c"; fi
+          done
+          ls -la harvest/ || true
+
       - name: Harvest the emitted C (only from a fixpoint that HELD)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: teko-c-${{ github.sha }}
-          path: |
-            .fixpoint/gen2.c
-            .fixpoint/gen3.c
+          path: harvest/
           if-no-files-found: warn
           retention-days: 30
 
