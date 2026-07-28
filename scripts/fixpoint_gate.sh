@@ -168,12 +168,24 @@ build_gen() {
     fi
 }
 
-# take_gen NAME — moves the just-built compiler out of $W/out to $W/NAME, and records whether the
-# build emitted a teko.c. Frees $W/out so the NEXT generation can be built at the identical path.
+# take_gen NAME — moves the just-built compiler out of $W/out to $W/NAME, PRESERVES the teko.c that
+# build emitted (as $W/NAME.c), and records whether there was one. Frees $W/out so the NEXT
+# generation can be built at the identical path.
+#
+# THE EMITTED C IS KEPT, NOT JUST COUNTED, and that is the point of this function beyond moving a
+# binary. Owner ruling 2026-07-28: *"fechando tudo verde, coletou o teko.c emitido no vagão 20?
+# Acredito que seja importante a coleta, enviar o último teko.c estável da escada."*
+#
+# That C is the NEXT `bootstrap/teko.c`. Today's committed one came from wagon 15 and is old enough
+# that the tree has moved under it; the one emitted by a generation that just PROVED gen2 == gen3 is
+# the freshest C known to rebuild this exact tree. It used to be deleted three lines below, so the
+# only artifact of a passing fixpoint was the word "PASSED" — the run threw away the one file worth
+# keeping. `rm -rf "$W/out"` still runs; it just no longer takes the C with it.
 take_gen() {
     tg_name="$1"
     if [ -f "$W/out/teko.c" ]; then
         printf '1' > "$W/$tg_name.emitted-c"
+        cp "$W/out/teko.c" "$W/$tg_name.c"
     else
         printf '0' > "$W/$tg_name.emitted-c"
     fi
@@ -245,6 +257,33 @@ else
     log "byte-identity: $LEFT != $RIGHT  ✗"
     log "  $LEFT $(wc -c < "$W/$LEFT") bytes, $RIGHT $(wc -c < "$W/$RIGHT") bytes"
     cmp "$W/$LEFT" "$W/$RIGHT" >&2 2>&1 || true
+fi
+
+# ── the harvest, and why it is REPORTED here rather than left to the caller ────────────────────
+#
+# A passing fixpoint leaves behind the freshest C known to rebuild this exact tree, and that file is
+# the next `bootstrap/teko.c`. Naming it in the log — with its size and its agreement — is what lets
+# a reader of the run decide to harvest WITHOUT re-deriving which of the two files to take.
+#
+# WHY $RIGHT.c AND NOT $LEFT.c, when the two are almost always identical: $RIGHT is the generation
+# emitted by a compiler this script watched build successfully from source, and in bootstrap mode
+# that is gen2 — the generation just proven byte-equal to its own successor. $LEFT.c in bootstrap
+# mode came out of gen1, which the LANE built, not this script.
+#
+# THE AGREEMENT LINE IS THE INTERESTING ONE. `$LEFT.c == $RIGHT.c` means two different compiler
+# BINARIES emitted byte-identical C for the same source — the C emission has reached its own
+# fixpoint, one layer below the binary fixpoint. A disagreement there would be a real finding even
+# with `$LEFT == $RIGHT` green, since it would mean the binaries agree while their C does not.
+if [ -f "$W/$LEFT.c" ] && [ -f "$W/$RIGHT.c" ]; then
+    if cmp -s "$W/$LEFT.c" "$W/$RIGHT.c"; then
+        log "emitted-C identity: $LEFT.c == $RIGHT.c  ✓ ($(wc -c < "$W/$RIGHT.c") bytes)"
+    else
+        log "emitted-C identity: $LEFT.c != $RIGHT.c  — the binaries agree but their C does not"
+        log "  $LEFT.c $(wc -c < "$W/$LEFT.c") bytes, $RIGHT.c $(wc -c < "$W/$RIGHT.c") bytes"
+    fi
+fi
+if [ -f "$W/$RIGHT.c" ]; then
+    log "harvest: $W/$RIGHT.c is this run's candidate for bootstrap/teko.c"
 fi
 
 # ZERO-C IS REPORTED, NOT ENFORCED — a DATED window, not a permanent softening. Owner ruling

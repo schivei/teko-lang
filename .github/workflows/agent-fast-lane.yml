@@ -143,6 +143,31 @@ jobs:
         shell: bash
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
 
+      # THE HARVEST. A passing fixpoint produces the freshest C known to rebuild this exact tree, and
+      # that file is the next `bootstrap/teko.c`. Until now the run DELETED it and kept only the word
+      # "PASSED" — the one artifact worth having was thrown away every time.
+      #
+      # Owner ruling 2026-07-28: *"fechando tudo verde, coletou o teko.c emitido no vagão 20? Acredito
+      # que seja importante a coleta, enviar o último teko.c estável da escada."*
+      #
+      # `if: success()` ON PURPOSE — a C emitted by a chain that did NOT prove gen2 == gen3 is not a
+      # seed, it is a guess. The committed C is old (wagon 15) but PROVEN; replacing it with a fresher
+      # unproven one would trade a known-good rung for an unknown one, which is the exact move that
+      # cost this wagon a week. Only a green fixpoint earns the upload.
+      #
+      # Both generations go up, not just the candidate: when they are byte-identical that is evidence
+      # the C emission has reached its own fixpoint, and when they are not, the pair IS the bug report.
+      - name: Harvest the emitted C (only from a fixpoint that HELD)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: teko-c-${{ github.sha }}
+          path: |
+            .fixpoint/gen2.c
+            .fixpoint/gen3.c
+          if-no-files-found: warn
+          retention-days: 30
+
       # PROVISIONED HERE, AFTER THE FIXPOINT, AND THE ORDER IS THE WHOLE POINT. These two capabilities
       # serve the SUITE and nothing else — the fixpoint needs only `cc`, which every runner already
       # has. Installing them first meant every RED run paid for a toolchain it would never reach:
