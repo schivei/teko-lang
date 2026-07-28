@@ -926,8 +926,55 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
     argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, keys.emit_os)
+    argv = append_windows_reproducible_flag(argv, keys.emit_os)
     argv = teko::list::push(argv, "-o")
     teko::list::push(argv, binary)
+}
+
+/**
+ * WINDOWS_NO_TIMESTAMP_FLAG — the GNU `ld` PE option that zeroes the COFF `TimeDateStamp` instead
+ * of writing the wall clock into it. `-Wl,` because it reaches `ld` through the `cc` driver.
+ */
+const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,--no-insert-timestamp"
+
+/**
+ * append_windows_reproducible_flag — on a Windows/COFF target, stop the linker from stamping the
+ * BUILD TIME into the executable, so two links of the same program produce the same bytes.
+ *
+ * THE MEASUREMENT THIS CLOSES, from the wagon's own `windows-x86_64` leg at `d74df08` — the first
+ * run in which that leg ever got far enough to compare two generations at all:
+ *
+ *     gen2 ready (4296372 bytes)
+ *     gen3 ready (4296372 bytes)
+ *     byte-identity: gen2 != gen3  ✗
+ *     .fixpoint/gen2 .fixpoint/gen3 differ: char 137, line 2
+ *     emitted-C identity: gen2.c == gen3.c  ✓ (10114862 bytes)
+ *
+ * Same SIZE, byte-identical emitted C, and the first difference at `cmp`'s 1-based char 137 —
+ * offset 136. In a PE image `e_lfanew` points at 128, the `PE\0\0` signature occupies 128..131, and
+ * the COFF header follows: `Machine` 132..133, `NumberOfSections` 134..135, `TimeDateStamp`
+ * 136..139. The first differing byte IS the first byte of the timestamp, and the two generations
+ * were linked ~85 s apart.
+ *
+ * SO THE COMPILER WAS NEVER WRONG HERE. It emitted the same C and produced the same program; the
+ * LINKER broke reproducibility by recording when it ran. The fixpoint is a claim about the
+ * compiler, and a clock embedded by the output format is not the compiler disagreeing with itself.
+ *
+ * NOT A FIXPOINT SOFTENING, and the distinction matters on this wagon: nothing is excluded from the
+ * comparison and no byte is forgiven. The build stops WRITING a value that was never about the
+ * program, so the two images become equal on their own — the gate goes on comparing every byte.
+ *
+ * IF A DIFFERENCE REMAINS AFTER THIS, expect the optional header's `CheckSum` (computed over the
+ * image, so it moves with the timestamp) or a debug-directory stamp. `cmp` reports only the FIRST
+ * difference, so a clean run is what proves the set was just this one.
+ *
+ * @param argv     the link argument vector so far
+ * @param emit_os  the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`) — "windows" enables it
+ * @return         `argv` with the flag appended on a Windows target, else unchanged
+ */
+fn append_windows_reproducible_flag(argv: []str, emit_os: str) -> []str {
+    if emit_os != "windows" { return argv }
+    teko::list::push(argv, WINDOWS_NO_TIMESTAMP_FLAG)
 }
 
 /**
