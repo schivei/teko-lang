@@ -723,10 +723,14 @@ fn lwt_variant_decl(name: str, members: []str) -> checker::TItem {
  * lwt_agg_empty_variant_const_interns_its_tag_image — the crumb-9b Tier-A empty-case variant keystone
  * (#594): a `const R: Op = RetC { }` over `variant Op = RetA | RetB | RetC` interns EXACTLY ONE rodata
  * entry (`.Lconst_R`) whose bytes are the constructed member's declared tag — `RetC` is the third
- * member, so the 4-byte little-endian I32 image is `[2, 0, 0, 0]` (the `tag@0` half of the variant
- * runtime image, no payload). `m.globals.len == 0` still holds. Directly validates `serialize_const`'s
- * variant arm (the tag `lower_variant_case_test` later compares against), independent of the own
- * backend's downstream match dispatch.
+ * member, so the little-endian I32 image starts `[2, 0, 0, 0]`. `m.globals.len == 0` still holds.
+ * Directly validates `serialize_const`'s variant arm (the tag `lower_variant_case_test` later
+ * compares against), independent of the own backend's downstream match dispatch.
+ *
+ * THE WIDTH IS PART OF THE CLAIM (0.3.1.0 degrau 6). The image is the FULL uniform wrapper — 24
+ * bytes, `{tag@0; ptr@8; len@16}` — with the tag written and the rest zero, not the four tag bytes
+ * alone: a const variant at rest in rodata has the same shape a variant on a frame has, so no reader
+ * needs to know which of the two it is looking at.
  *
  * @return void
  */
@@ -741,11 +745,29 @@ fn lwt_agg_empty_variant_const_interns_its_tag_image() {
     teko::assert::is_true(m.globals.len == 0)
     teko::assert::is_true(m.rodata.len == 1)
     teko::assert::is_true(m.rodata[0].symbol == ".Lconst_R")
-    teko::assert::is_true(m.rodata[0].bytes.len == 4)
+    teko::assert::is_true(m.rodata[0].bytes.len == 24)
     teko::assert::is_true(m.rodata[0].bytes[0] == (2 to byte))
     teko::assert::is_true(m.rodata[0].bytes[1] == (0 to byte))
     teko::assert::is_true(m.rodata[0].bytes[2] == (0 to byte))
     teko::assert::is_true(m.rodata[0].bytes[3] == (0 to byte))
+    teko::assert::is_true(lwt_all_zero_from(m.rodata[0].bytes, 4))
+}
+
+/**
+ * lwt_all_zero_from — are every one of `bytes`'s octets from index `start` onward zero?
+ *
+ * @param bytes  the image to inspect
+ * @param start  the first index to require zero
+ * @return       true when the whole tail is zero
+ */
+fn lwt_all_zero_from(bytes: []byte, start: u64) -> bool {
+    mut i = start
+    loop {
+        if i >= bytes.len { break }
+        if bytes[i] != (0 to byte) { return false }
+        i++
+    }
+    true
 }
 
 /**
@@ -2665,4 +2687,85 @@ fn lwt_lowers_str_match_value_merges_both_ptr_and_len_at_the_fat_merge() {
     teko::assert::str_contains(text, "global_addr @.Lstr0")
     teko::assert::str_contains(text, "global_addr @.Lstr1")
     teko::assert::str_contains(text, "#B1(%1, %2):\n    ret %2")
+}
+
+/**
+ * lwt_slice_variant — an inline `checker::Variant` of a `[]T` case and the `error` case: the
+ * `T | error` shape the compiler's own source is written in, with a FAT member (0.3.1.0 degrau 6).
+ *
+ * @param checker::Type elem  the slice member's element type
+ * @return checker::Type  the inline `Variant` type
+ */
+fn lwt_slice_variant(elem: checker::Type) -> checker::Type {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, checker::Slice { element = elem })
+    members = teko::list::push(members, checker::Error { })
+    checker::Variant { members = members }
+}
+
+/**
+ * lwt_slice_bind_pattern — a `[]T as x` slice pattern: no type path at all, `is_slice` set — the
+ * one pattern shape that carries no case NAME to resolve a variant member by.
+ *
+ * @param str binding  the name to bind the slice case to
+ * @return parser::Pattern  the slice bind pattern
+ */
+fn lwt_slice_bind_pattern(binding: str) -> parser::Pattern {
+    parser::BindPattern { type_name = parser::Path { segments = teko::list::empty() }; has_binding = true; binding = binding; is_slice = true; slice_type = null; type_args = teko::list::empty() }
+}
+
+/**
+ * lwt_variant_construct_of_a_slice_reserves_the_uniform_wrapper — the CONSTRUCTION half of degrau 6:
+ * `fn mk() -> []i64 | error { return [10, 20] }` allocates the uniform 24-byte wrapper and writes
+ * BOTH halves of the fat member — the pointer at offset 8 and the LENGTH at offset 16.
+ *
+ * The length store is the whole claim. The wrapper used to be `8 + one payload word` = 16 bytes, so
+ * the slice's length had nowhere to go and was dropped where the value was built; every reader
+ * downstream then had a pointer and a guess.
+ *
+ * @return void
+ */
+#test
+fn lwt_variant_construct_of_a_slice_reserves_the_uniform_wrapper() {
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(lwt_array_lit(elems, checker::PrimKind::I64)))
+    let f = lwt_fn("mk", "teko::demo", teko::list::empty(), lwt_slice_variant(lwt_prim(checker::PrimKind::I64)), body)
+    let lfo = match lower_function(f) { LoweredFunction as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(with_rodata(add_func(empty_module(), lfo.func), lfo.rodata))
+    teko::assert::str_contains(text, "alloca 24, align 8")
+    teko::assert::str_contains(text, "store.i32")
+    teko::assert::str_contains(text, "field_addr %0, 8")
+    teko::assert::str_contains(text, "store.ptr")
+    teko::assert::str_contains(text, "field_addr %0, 16")
+    teko::assert::str_contains(text, "store.i64")
+}
+
+/**
+ * lwt_slice_pattern_binds_both_halves_of_the_fat_member — the PATTERN half of degrau 6: a `[]T as xs`
+ * arm over a `[]i64 | error` subject selects the slice member's tag (index 0, resolved by KIND since
+ * the pattern carries no path) and binds `xs` as a FAT local — the pointer from offset 8 and the
+ * length from offset 16 — so `xs.len` reads the wrapper's own length instead of a register that was
+ * never written.
+ *
+ * @return void
+ */
+#test
+fn lwt_slice_pattern_binds_both_halves_of_the_fat_member() {
+    let subject = lwt_typed_var("r", lwt_slice_variant(lwt_prim(checker::PrimKind::I64)))
+    let len_access = lwt_len_field(lwt_typed_var("xs", checker::Slice { element = lwt_prim(checker::PrimKind::I64) }))
+    let arm0 = lwt_arm(lwt_slice_bind_pattern("xs"), teko::list::push(teko::list::empty(), lwt_exprstmt(len_access)))
+    let arms = teko::list::push(teko::list::empty(), arm0)
+    let mx = lwt_match_value(subject, arms, checker::PrimKind::U64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("r", "Res"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(mx))
+    let f = lwt_fn("read_slice_case", "teko::demo", params, lwt_prim(checker::PrimKind::U64), body)
+    let lfo = match lower_function(f) { LoweredFunction as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), lfo.func))
+    teko::assert::str_contains(text, "field_addr %0, 0")
+    teko::assert::str_contains(text, "load.i32")
+    teko::assert::str_contains(text, "icmpeq")
+    teko::assert::str_contains(text, "field_addr %0, 8")
+    teko::assert::str_contains(text, "load.ptr")
+    teko::assert::str_contains(text, "field_addr %0, 16")
+    teko::assert::str_contains(text, "load.i64")
 }

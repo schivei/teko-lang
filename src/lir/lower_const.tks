@@ -515,20 +515,43 @@ fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts:
 }
 
 /**
- * const_variant_tag_bytes — the little-endian I32 tag image of an EMPTY-CASE variant member (#594
- * crumb 9b): the case's declared index serialized at the variant runtime image's `tag@0` slot (§5.3),
- * with no payload. An initializer that binds payload fields is a non-empty case whose payload
- * serialization is a further follow-up and honest-stops (the `MRet {}` targets §6.4
- * requires are all payload-free empty cases).
+ * const_variant_tag_bytes — the FULL-WIDTH image of an EMPTY-CASE variant member (#594 crumb 9b):
+ * the case's declared index serialized little-endian at the variant runtime image's `tag@0` slot,
+ * zero-padded out to `variant_wrapper_bytes()`. An initializer that binds payload fields is a
+ * non-empty case whose payload serialization is a further follow-up and honest-stops (the
+ * `MRet {}` targets §6.4 requires are all payload-free empty cases).
+ *
+ * THE PADDING IS THE POINT (0.3.1.0 degrau 6). The image used to be the four tag bytes alone,
+ * which serves every READ a tag-only case gets today — and it made the const the ONE variant image
+ * in the program narrower than the wrapper every other variant value has. One shape, one width, at
+ * rest in rodata exactly as on the frame.
  *
  * @param si     the member's struct-literal initializer (must bind no field for an empty case)
  * @param index  the member's declared index (its runtime tag)
- * @return       the 4-byte little-endian tag image
+ * @return       the wrapper-width image: the little-endian tag, then zeroes
  * @throws       when the initializer binds any payload field (a non-empty case)
  */
 fn const_variant_tag_bytes(si: checker::TStructInit, index: u32) -> []byte | error {
     if si.field_names.len > 0 { return error { message = "const variant: non-empty payload case materialization is a Tier-A follow-up (#594)" } }
-    serialize_le(index to i64, ltype_size(LType::I32))
+    zero_pad_to(serialize_le(index to i64, ltype_size(LType::I32)), variant_wrapper_bytes())
+}
+
+/**
+ * zero_pad_to — `bytes` extended with zeroes until it is `width` bytes long (returned unchanged
+ * when it is already that wide or wider).
+ *
+ * @param bytes  the image to pad
+ * @param width  the target byte width
+ * @return       the padded image
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
+ */
+fn zero_pad_to(bytes: []byte, width: u32) -> []byte {
+    mut out = bytes
+    loop {
+        if out.len >= width to u64 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    out
 }
 
 /**
