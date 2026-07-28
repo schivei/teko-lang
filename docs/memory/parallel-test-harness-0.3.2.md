@@ -49,3 +49,44 @@ This lands BEFORE the per-row file-sourced regression builds
 (`docs/memory/bulk-native-verdicts-0.3.1.md`): 203 independent builds inside one channel are only
 affordable once the launcher is cheap, and only trustworthy once a crashing row cannot take the run
 down with it.
+
+## The verdict channel, named — a THIRD stream the caller points somewhere
+
+Owner ruling 2026-07-28: *"podemos criar um canal de saída próprio, faz sentido: stdout, stderr e um
+terceiro, que quando roda direto, usa o stderr, mas que quando dizemos o canal, ele escreve em outro
+local. Elegante, e se não me engano o Windows tem isso (ou ao menos o .NET)."*
+
+THE PRECEDENT IS REAL and the closest one is GnuPG's `--status-fd`: a machine-readable status channel
+on a descriptor THE CALLER CHOOSES, kept apart from stdout and stderr so a verdict never mixes with
+the program's own output.
+
+ONE CORRECTION ON THE MECHANISM, because it decides the portable shape. There is no fourth standard
+stream on either platform. Windows' `STARTUPINFO` carries exactly three slots — `hStdInput`,
+`hStdOutput`, `hStdError`. What .NET does is different and is the right memory: an
+`AnonymousPipeServerStream` creates the pipe and `GetClientHandleAsString()` hands the inherited
+handle to the child AS TEXT, normally on the command line. POSIX's fd 3 is the same design in other
+clothes — a convention, not a standard: the parent opens it and the child must be TOLD.
+
+So the portable shape is always: **the parent names the destination, the child writes there.** Only
+the token changes — an fd number, a handle string, or a path.
+
+### Why a PATH, for this harness specifically
+
+**This language has no threads.** With N children writing into N pipes, the parent would have to
+drain them concurrently, and a pipe whose buffer fills (64 KiB on Linux) BLOCKS its writer until
+someone reads. Without threads the parent could only do that with `select`/`poll` — new platform code
+standing on a problem we do not have yet. With one file per child nobody blocks and the parent reads
+everything at the end.
+
+Two more properties matter more here than elegance does:
+
+- **it survives the child dying mid-write** — what reached the file stays on disk, while an undrained
+  pipe is simply lost, and this harness exists precisely to watch processes that die;
+- **it is still there afterwards**, which is what turned today's 203-fixture map from a guess into a
+  table.
+
+### What is kept whole from the ruling
+
+The FALLBACK, which is the part that was missing: with no channel named, the verdict goes to stderr.
+Run a test binary by hand and you see its verdict with no flag at all. That costs nothing and it is
+what keeps the harness's own protocol from becoming a thing you must configure to use.
