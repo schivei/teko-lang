@@ -3882,9 +3882,11 @@ type VariantMember = struct { index: u32; ty: checker::Type }
 
 /**
  * find_variant_member — the member of `members` whose CASE NAME is
- * `case_name`, or a NAMED internal error (every other non-nominal member —
- * prim/str/byte/slice/... — is not a case A1-5 selects by name; A1-6+ widens
- * this) (A1-5, #382). A `Named` member's case name is its CANONICAL name's
+ * `case_name`, or a NAMED internal error. A member is nameable when it is
+ * `Named`, the built-in `error`, or any type with a bare keyword spelling
+ * (`u32`, `byte`, `str`, … — degrau 2 of 0.3.1.0 widened this from the
+ * Named+error pair the A1-5 subset shipped with) (A1-5, #382). A `Named`
+ * member's case name is its CANONICAL name's
  * last path segment (`checker::resolve`'s "ns::Name" convention, #109 W3 —
  * mirrors the checker's OWN `variant_member_by_name`), while `error`'s is the
  * literal keyword — the ONLY spelling `error` ever reaches a match pattern
@@ -3918,8 +3920,19 @@ fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMembe
  * `case_name`? A `Named` member matches by its CANONICAL name's last path
  * segment (`checker::name_last_segment`, #109 W3); the built-in `error`
  * member matches the literal keyword `"error"` (its ONE surface spelling —
- * `error_struct_name`'s doc); every other non-nominal member (a primitive,
- * `str`, `byte`, a slice) is not a case A1-5 selects by name (degrau N2).
+ * `error_struct_name`'s doc); every OTHER non-nominal member matches by its
+ * own bare keyword spelling (`checker::builtin_case_name`), which is the
+ * inverse of the very table the checker resolved the pattern through.
+ *
+ * That last arm is degrau 2 of 0.3.1.0. It used to be `_ => false`, on the
+ * reading that "a primitive is not a case A1-5 selects by name" — but the
+ * checker had always let a pattern NAME one, because a pattern that is not a
+ * member name falls through to `builtin_type`. The compiler's own
+ * `backend::encode_alu_imm` writes `match add_sub_imm_base(i.op, neg) { u32
+ * as b => b; error as e => return e }`, and the native self-build stopped
+ * there with "unknown variant case `u32` (internal)". A member whose type has
+ * NO keyword spelling (a slice, an optional) yields `""`, which can never
+ * equal a pattern's case name — so those stay unnameable, as they were.
  *
  * @param checker::Type member  one of the variant's declared members
  * @param str case_name  the pattern's case name to test against
@@ -3929,7 +3942,10 @@ fn variant_member_named(member: checker::Type, case_name: str) -> bool {
     match member {
         checker::Named as n => checker::name_last_segment(n.name) == case_name
         checker::Error => case_name == error_struct_name()
-        _ => false
+        _ => {
+            let spelling = checker::builtin_case_name(member)
+            spelling != "" && spelling == case_name
+        }
     }
 }
 
