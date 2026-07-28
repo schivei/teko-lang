@@ -278,3 +278,30 @@ silently dropped: every one of the 203 is listed with the verdict it produces to
 | `q191_c_extern_unsafe_accepted` | PASS | exit 42 |
 | `q192_c_types_alias_identity` | PASS | exit 7 |
 | `q200_arena_size_directive_ok` | PASS | exit 28 |
+
+## The `.32` correction — and why "one project per fixture" is NOT it
+
+Owner ruling 2026-07-28: *"Colocar cada um em um projeto separado afeta a quantidade de regressões
+(<=10; 1 do próprio compilador + 9 outros). E tudo bem agora, mas precisa corrigir no .32."*
+
+A REGRESSION CHANNEL IS A SCARCE RESOURCE, capped at ten — the same ruling that created `bulk` in the
+first place (`src/build/regr_group.tks`): *"cada regressão deve pertencer a um único tkp, mas um tkp
+pode ter vários tkr. Logo, se tenho 10 tkr em um único tkp, somente um build é necessário."* So
+dissolving 203 fixtures into 203 projects is ten times over budget and is NOT the plan. It is
+recorded here only because it was proposed and rejected, and a rejected plan that leaves no trace
+gets proposed again.
+
+THE BUDGET TODAY IS EXACTLY FULL — ten registered, and three of the nine non-compiler channels are
+spent pinning three gaps. That is expensive, and temporary by construction: the day `.32` closes one,
+its scenario goes RED, gets promoted back to `When built and run`, its source returns to a shared
+project, and the channel comes back.
+
+WITH NINE CHANNELS, ISOLATION CANNOT COME FROM PROJECTS — IT HAS TO COME FROM INSIDE ONE. The
+mechanism already exists: GROUPS, one build per group, each in its own `.groupN` directory. It only
+groups `Given source inline` scenarios today, and inline code in a `.tkr` is itself ruled out — while
+`bulk`'s rows are member namespaces of ONE project sharing ONE build, which is no isolation at all.
+
+So the correction has a precise name: **per-row builds, file-sourced, inside a single project** — the
+same group machinery fed from `src/<ns>/body.tks` instead of a synthesized snippet. That yields 203
+independent verdicts inside ONE channel. The parallel batch runner landed for exactly this: 203
+isolated builds are only affordable when they run as one concurrent batch rather than 203 waits.
