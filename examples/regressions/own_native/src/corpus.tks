@@ -450,3 +450,198 @@ fn f_short_circuit_and_or() -> i64 {
     if !(sc_yes(1) && sc_no(2) || sc_yes(3)) { return 11 }
     0
 }
+
+/**
+ * BoxPt — the pushed AGGREGATE element. Two 8-byte fields, so a mistaken 8-byte-wide copy of the
+ * instance would carry `x` and lose `y`.
+ */
+type BoxPt = struct {
+    /** x — the iteration counter, straight. */
+    x: i64
+
+    /** y — the iteration counter times ten, so a stale copy is visible in two independent fields. */
+    y: i64
+}
+
+/**
+ * BoxCounter — the CLASS arm of the same claim: a class instance is laid out by the same collector
+ * a struct is, so a push must box it with the same width.
+ */
+type BoxCounter = class {
+    /** seen — the value this instance was constructed with. */
+    pub seen: i64
+
+    /**
+     * make — the static factory (a class literal reads better through one named producer).
+     *
+     * @param v  the value to record
+     * @return   a fresh BoxCounter holding `v`
+     */
+    pub fn make(v: i64) -> BoxCounter { BoxCounter { seen = v } }
+}
+
+/**
+ * push_pts — accumulate `n` distinct `BoxPt` instances through `teko::list::push`, ONE PER LOOP
+ * ITERATION. This is the shape degrau 4 closed: the native backend's value for a struct is the
+ * address of an `alloca`, and an `alloca` is one frame slot per INSTRUCTION, so a push that stored
+ * that address directly would store the SAME address `n` times.
+ *
+ * @param n  how many elements to accumulate
+ * @return   the accumulated list
+ */
+fn push_pts(n: i64) -> []BoxPt {
+    mut ps: []BoxPt = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        ps = teko::list::push(ps, BoxPt { x = i; y = i * 10 })
+        i++
+    }
+    ps
+}
+
+/**
+ * f_push_aggregate_in_loop — a push of a STRUCT inside a loop must yield `n` DISTINCT elements.
+ * Without degrau 4's fresh per-execution box the program did not compile at all (the native backend
+ * honest-stopped on the aggregate element), and the naive stand-in it refused — pushing the
+ * `alloca`'s address as-is — makes every element read back as a copy of the LAST one, which is
+ * exactly what the element-by-element check below catches.
+ *
+ * @return 0 when every element carries its own iteration's values, else the number of the failing
+ *         check
+ */
+fn f_push_aggregate_in_loop() -> i64 {
+    let ps = push_pts(4)
+    if ps.len != 4 { return 1 }
+    mut i: i64 = 0
+    loop {
+        if i >= 4 { break }
+        if ps[i].x != i { return 2 }
+        if ps[i].y != i * 10 { return 3 }
+        i++
+    }
+    if ps[0].x == ps[3].x { return 4 }
+    if ps[0].y == ps[3].y { return 5 }
+    0
+}
+
+/**
+ * f_push_aggregate_copies_the_item — a pushed aggregate is a COPY: mutating the source binding
+ * after the push must not reach the element the list holds. The address model without a box shares
+ * one frame slot between the binding and the list, so the mutation would be visible through the
+ * list too.
+ *
+ * @return 0 when the pushed element kept the values it was pushed with, else the failing check
+ */
+fn f_push_aggregate_copies_the_item() -> i64 {
+    mut p = BoxPt { x = 1; y = 2 }
+    mut ps: []BoxPt = teko::list::empty()
+    ps = teko::list::push(ps, p)
+    p.x = 99
+    p.y = 98
+    if ps.len != 1 { return 1 }
+    if ps[0].x != 1 { return 2 }
+    if ps[0].y != 2 { return 3 }
+    0
+}
+
+/**
+ * f_push_class_in_loop — the CLASS arm of `f_push_aggregate_in_loop`: a class instance pushed once
+ * per iteration must read back as its own iteration's value, through a method as well as a field.
+ *
+ * @return 0 when every element carries its own iteration's value, else the number of the failing
+ *         check
+ */
+fn f_push_class_in_loop() -> i64 {
+    mut cs: []BoxCounter = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 3 { break }
+        cs = teko::list::push(cs, BoxCounter::make(i * 7))
+        i++
+    }
+    if cs.len != 3 { return 1 }
+    if cs[0].seen != 0 { return 2 }
+    if cs[1].seen != 7 { return 3 }
+    if cs[2].seen != 14 { return 4 }
+    0
+}
+
+/**
+ * fat_match_word — a `str`-valued `match` in TAIL position, the exact producer the native backend
+ * had no arm for: `lower_fat_expr`'s closed producer set accepted a literal, an array literal, a
+ * bound local, a struct field, an `if`-expression and a direct call, and a match-value was none of
+ * them.
+ *
+ * @param n  the subject
+ * @return   the word naming `n`, `"many"` past the named ones
+ */
+fn fat_match_word(n: i64) -> str {
+    match n {
+        0 => "zero"
+        1 => "one"
+        2 => "two"
+        _ => "many"
+    }
+}
+
+/**
+ * fat_match_digits — a `[]T`-valued `match`, the SLICE half of the same producer: the merge carries
+ * a (ptr, len) pair, so an arm whose slice has a different length must not reach the merge with the
+ * length of a sibling arm.
+ *
+ * @param n  the subject
+ * @return   a slice whose length and contents both depend on the arm taken
+ */
+fn fat_match_digits(n: i64) -> []i64 {
+    match n {
+        1 => [7]
+        2 => [7, 8]
+        _ => [7, 8, 9]
+    }
+}
+
+/**
+ * fat_match_with_reassign — a `str`-valued `match` whose arms also RE-ASSIGN an enclosing scalar.
+ * The reassigned scalar rides the merge as a block-param AFTER the ptr/len pair, so a merge that
+ * mis-ordered its params would return the wrong string, the wrong count, or both.
+ *
+ * @param n  the subject
+ * @return   the count the arm assigned plus the LENGTH of the string it produced, so a merge that
+ *           dropped either half is visible in the sum
+ */
+fn fat_match_with_reassign(n: i64) -> i64 {
+    mut count: i64 = 0
+    let word = match n {
+        1 => { count = 10; "a" }
+        _ => { count = 20; "bb" }
+    }
+    count + (word.len to i64)
+}
+
+/**
+ * f_fat_match_value — the fat `match`-value producer, in both its `str` and its `[]T` shape and
+ * with a scalar threaded through the merge beside the pair (0.3.1.0 degrau 5).
+ *
+ * The `str` shapes are checked through `.len` and a BYTE, not through `!=` on two strings: the
+ * native backend has no `str` comparison yet (`"`str` has no single PrimKind"`), and a corpus
+ * member must claim its own subject only.
+ *
+ * @return 0 when every shape returns its own arm's value, else the number of the failing check
+ */
+fn f_fat_match_value() -> i64 {
+    if fat_match_word(0).len != 4 { return 1 }
+    if fat_match_word(0)[0] != b'z' { return 2 }
+    if fat_match_word(2).len != 3 { return 3 }
+    if fat_match_word(2)[0] != b't' { return 4 }
+    if fat_match_word(9).len != 4 { return 11 }
+    if fat_match_word(9)[0] != b'm' { return 12 }
+    if fat_match_word(1)[2] != b'e' { return 13 }
+    if fat_match_digits(1).len != 1 { return 5 }
+    if fat_match_digits(2).len != 2 { return 6 }
+    if fat_match_digits(5).len != 3 { return 7 }
+    if fat_match_digits(2)[1] != 8 { return 8 }
+    if fat_match_with_reassign(1) != 11 { return 9 }
+    if fat_match_with_reassign(4) != 22 { return 10 }
+    0
+}

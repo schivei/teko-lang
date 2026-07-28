@@ -560,6 +560,18 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
 // (the `teko::mem::free` []T-arm lowering: `tk_free_block(s.ptr, s.len * sizeof(elem))`).
 void tk_free_block(void *p, uint64_t bytes);
 
+// (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) tk_slice_elem_box — per-EXECUTION storage for one
+// AGGREGATE element pushed into a slice. The native backend holds a `[]struct` as a slice of
+// ADDRESSES, and its value for a struct/class instance is the address of an `alloca` — ONE frame slot
+// per INSTRUCTION, so `loop { xs = push(xs, T { … }) }` would store the SAME address every iteration.
+// The lowering copies the aggregate here first and pushes the address this returns instead.
+// LIFETIME: the copy is bump-allocated in the ROOT arena, through tk_alloc — exactly where
+// tk_slice_push allocates the buffer that will hold the address. An element copy therefore lives at
+// least as long as every buffer that can name it, and both are reclaimed by the same tk_arena_pop /
+// tk_regions_free_all. Should a region-scoped push (tk_slice_push_r) ever become emittable, its
+// elements must be boxed in the SAME region, not here.
+void *tk_slice_elem_box(const void *elem, uint64_t esz);
+
 // --- arithmetic FFI over the i128 carrier (sign-aware) + float bit-patterns ---
 // div/rem: truncated division/remainder; sgn selects signed vs unsigned interpretation.
 __int128 tk_div(__int128 a, __int128 b, bool sgn);

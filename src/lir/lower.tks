@@ -5209,12 +5209,13 @@ pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
  * fat-pointer PRODUCERS: a string literal (fresh rodata), an array literal (fresh alloca + a
  * compile-time-known element count), a local bound via `lenv_bind_fat` (a `let` of str/slice
  * type), a struct field of fat type (`lower_fat_field`), an `if`-expression whose result is fat
- * (`lower_if_fat`, degrau 5), and — closed at the `call` degrau — a DIRECT call whose own result
- * is fat (`lower_call_fat`; measured via a corpus probe to be the shape that actually reaches
- * this site — a closure-call/interface-dispatch receiver is `lower_call_fat`'s OWN narrower named
- * stop, not this one). Any other producer (a deeper index chain, a `match`-value, …) honest-stops
- * — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382; if-expression
- * producer: degrau 5, cargo/20-degrau5-if-gordo; call producer: call-gordo degrau, #382 N2).
+ * (`lower_if_fat`, degrau 5), a `match`-VALUE whose result is fat (`lower_match_fat`, 0.3.1.0
+ * degrau 5), and — closed at the `call` degrau — a DIRECT call whose own result is fat
+ * (`lower_call_fat`; measured via a corpus probe to be the shape that actually reaches this site —
+ * a closure-call/interface-dispatch receiver is `lower_call_fat`'s OWN narrower named stop, not
+ * this one). Any other producer (a deeper index chain, …) honest-stops — those arrive with a wider
+ * fat-pointer ABI in a later phase (A1-4, #382; if-expression producer: degrau 5,
+ * cargo/20-degrau5-if-gordo; call producer: call-gordo degrau, #382 N2).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed (`str`/`[]T`) expression to lower
@@ -5228,6 +5229,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
+        checker::TMatchExpr as mx => lower_match_fat(ctx, e, mx)
         checker::TCall as cl => lower_call_fat(ctx, e, cl)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
@@ -5347,30 +5349,31 @@ fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat {
  *
  *   `<sym>(base.ptr, base.len, &item, sizeof(elem), &out_len)` -> the grown buffer's pointer
  *
- * The element is restricted to a REGISTER VALUE (`is_register_value_type`): a primitive or an
- * enum's carrier. The coercion `lower_value_into_type` performs for a declared-type placement (the
- * union wrapper a bare case needs when it flows into a `[]Variant`) is therefore not reachable
- * here — a variant element is an aggregate and stops first (`aggregate_element_push_stop`) — so the
- * item lowers plainly.
+ * A REGISTER-VALUE element (`is_register_value_type`: a primitive or an enum's carrier) is stored
+ * into the item slot as it lowers. An AGGREGATE element is BOXED first (`push_box_bytes` /
+ * `box_push_item`): what the slice holds for it is an ADDRESS, and the address this backend lowers
+ * an aggregate to is a per-INSTRUCTION frame slot, so the aggregate is copied into fresh
+ * per-EXECUTION runtime storage and THAT address is pushed (NATIVE-AGG-SLICE-BY-ADDRESS).
  *
  * @param ctx  the lowering context
  * @param e    the push call expression (its type is the result `[]T`)
  * @param cl   the call node (`args[0]` the base slice, `args[1]` the item)
  * @param sym  the runtime grow symbol (`slice_push_symbol`)
  * @return     the grown slice's (ptr, len) pair
- * @throws     on a malformed call, on a FAT element type (`fat_element_push_stop`), on an
- *             AGGREGATE element type (`aggregate_element_push_stop`), or propagated from lowering
- *             the base/item
+ * @throws     on a malformed call, on a FAT element type (`fat_element_push_stop`), on an aggregate
+ *             element whose byte width this backend cannot pin (`push_box_bytes`), or propagated
+ *             from lowering the base/item
  */
 fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str) -> LoweredFat | error {
     if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
     let elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
     if is_fat_type(elem) { return fat_element_push_stop() }
-    if !is_register_value_type(elem, ctx.enums) { return aggregate_element_push_stop() }
+    let box_bytes = match push_box_bytes(elem, ctx) { u32 as n => n; error as err => return err }
     let elem_lt = ltype_of(elem, ctx.enums)
     if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
     let base = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
-    let item = match lower_expr(base.ctx, cl.args[1]) { Lowered as x => x; error as err => return err }
+    let lowered = match lower_expr(base.ctx, cl.args[1]) { Lowered as x => x; error as err => return err }
+    let item = box_push_item(lowered, box_bytes, e)
     let slots = reserve_push_slots(item.ctx, item.vreg, elem_lt, e)
     let args = push_call_args(base.ptr, base.len, slots.item_slot, slots.esz, slots.len_slot)
     let called = ctx_alloc(slots.ctx)
@@ -5396,19 +5399,96 @@ fn fat_element_push_stop() -> error {
 }
 
 /**
- * aggregate_element_push_stop — the NAMED honest stop for pushing an AGGREGATE element (a
- * `struct`/`class` instance, a variant wrapper, an `Optional`, a closure). This backend's value for
- * such a type is the ADDRESS of an alloca, and an alloca is ONE frame slot reserved per
- * INSTRUCTION, not per execution: the canonical `loop { out = push(out, T { … }) }` would push the
- * SAME address every iteration, so the finished list would read back as N copies of the last item.
- * Storing the element BY VALUE instead (a layout-sized stride the array-literal store and the index
- * load would have to adopt too, and a deep copy for the aggregate FIELDS that are themselves
- * addresses) is the next degrau; a silently aliasing push is not an acceptable stand-in for it.
+ * push_box_bytes — how many bytes of the pushed item this backend must copy into fresh
+ * per-EXECUTION storage before the push stores its address (0 = none, the item IS its own value).
  *
- * @return  the honest stop, always
+ * A register value (`is_register_value_type`) needs no box: the item stored into the push slot is
+ * the datum itself. Every other element type is held in a `[]T` as an ADDRESS
+ * (NATIVE-AGG-SLICE-BY-ADDRESS), and the address the item lowers to belongs to an `alloca` — ONE
+ * frame slot per INSTRUCTION — so it must be boxed or a push in a loop would store one address N
+ * times.
+ *
+ * @param t    the concrete element type the pushed buffer holds
+ * @param ctx  the lowering context (its registered struct/class layouts pin the box width)
+ * @return     the aggregate's byte width, or 0 for a register value
+ * @throws     for an aggregate whose width is not a whole-type fact in this backend
+ *             (`unsized_aggregate_push_stop`)
  */
-fn aggregate_element_push_stop() -> error {
-    error { message = "native backend N1: a push whose element is an AGGREGATE (`struct`/`class`/variant/optional/closure) needs slice elements held BY VALUE — this backend's aggregate value is the address of a per-INSTRUCTION frame slot, so a push in a loop would store the same address every iteration (N2)" }
+fn push_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 | error {
+    if is_register_value_type(t, ctx.enums) { return 0 to u32 }
+    match t {
+        checker::Named as n => named_box_bytes(n, ctx)
+        _ => unsized_aggregate_push_stop(aggregate_form_name(t))
+    }
+}
+
+/**
+ * named_box_bytes — a nominal aggregate's box width: the size of the `struct`/`class` layout
+ * registered under its name, which is the whole instance (a class's inherited fields are the PREFIX
+ * of that same layout, so one size covers the effective object).
+ *
+ * @param n    the resolved nominal element type
+ * @param ctx  the lowering context (its registered layouts)
+ * @return     the instance's byte size
+ * @throws     when no layout is registered under `n.name` — an interface, or a nominal this backend
+ *             never laid out (`unsized_aggregate_push_stop`)
+ */
+fn named_box_bytes(n: checker::Named, ctx: LowerCtx) -> u32 | error {
+    match find_struct_layout(ctx.layouts, n.name) {
+        LStructLayout as l => l.size
+        error => unsized_aggregate_push_stop(teko::str::concat("the nominal type `", teko::str::concat(n.name, "`, which has no registered layout")))
+    }
+}
+
+/**
+ * aggregate_form_name — the human name of the aggregate FORM an element type takes, for the honest
+ * stop's message. Naming the form is what keeps a narrowed stop narrow: the reader learns which
+ * shape is still open, not merely that "an aggregate" is.
+ *
+ * @param t  the element type that is not a register value
+ * @return   the form's name, as the stop's message spells it
+ */
+fn aggregate_form_name(t: checker::Type) -> str {
+    match t {
+        checker::Optional => "an OPTIONAL (`T | null`), whose tag+payload wrapper is sized per CONSTRUCTION, not per type"
+        checker::Variant => "a VARIANT, whose tag+payload wrapper is sized per CONSTRUCTION, not per type"
+        checker::Func => "a CLOSURE, whose captured environment is a second allocation this copy would alias"
+        _ => "an aggregate this backend assigns no whole-type byte width"
+    }
+}
+
+/**
+ * unsized_aggregate_push_stop — the NAMED honest stop that survives degrau 4: a push whose element
+ * is an aggregate this backend cannot pin a WHOLE-TYPE byte width for. The struct/class case is
+ * closed (its registered layout is that width, and `tk_slice_elem_box` copies exactly it); a variant
+ * or optional wrapper is allocated to the ACTIVE case's payload width, so a copy sized from the
+ * static type would over-read the narrow constructions, and a closure's value is one address whose
+ * environment is a second allocation a flat copy would alias rather than clone.
+ *
+ * @param form  the aggregate form's name (`aggregate_form_name`)
+ * @return      the honest stop, always
+ */
+fn unsized_aggregate_push_stop(form: str) -> error {
+    error { message = teko::str::concat("native backend N1: a push whose element is ", teko::str::concat(form, " — this backend holds aggregate slice elements BY ADDRESS and boxes each pushed item into fresh storage, which needs a byte width the element type alone fixes (N2)")) }
+}
+
+/**
+ * box_push_item — the pushed item as the value the push slot must hold: the item itself for a
+ * register value (`box_bytes` = 0), else the address of a FRESH runtime copy of the aggregate.
+ *
+ * @param item        the already-lowered item (for an aggregate, the address of its frame slot)
+ * @param box_bytes   the aggregate's byte width, or 0 for a register value
+ * @param e           the push call expression (its source position)
+ * @return            the value to store into the push's item slot
+ */
+fn box_push_item(item: Lowered, box_bytes: u32, e: checker::TExpr) -> Lowered {
+    if box_bytes == 0 { return item }
+    let size = ctx_alloc(item.ctx)
+    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, box_bytes to i64, e.line, e.col))
+    mut args: []u32 = teko::list::push(teko::list::empty(), item.vreg)
+    args = teko::list::push(args, size.vreg)
+    let boxed = ctx_alloc(with_size)
+    Lowered { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", args, false, e.line, e.col)); vreg = boxed.vreg }
 }
 
 /**
@@ -5683,6 +5763,110 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lowere
     let else_fat = match lower_block_value_fat(else_ctx, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
     let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
+}
+
+/**
+ * lower_match_fat — a `match` used as a FAT VALUE (`str`/`[]T`): the SAME linear test chain
+ * `lower_match_value` builds, merging TWO block-args (ptr, len) instead of one. It is
+ * `lower_match_value` and `lower_if_fat` composed — the arm chain of the first, the two-param merge
+ * of the second — so a `str`-valued `match` in tail position lowers with no new machinery
+ * (0.3.1.0 degrau 5).
+ *
+ * The subject is lowered ONCE, before the merge block exists, exactly as `lower_match` does; the
+ * reassigned-scalar merge params follow the ptr/len pair, where every other fat merge puts them.
+ *
+ * @param ctx  the lowering context positioned right before the subject
+ * @param e    the match expression node (its `.type` is `str`/`[]T`)
+ * @param m    the typed match (subject + arms)
+ * @return     the advanced context (positioned at the merge block) + its (ptr, len) pair
+ * @throws     when the subject, any pattern test, or any arm's tail fails to lower
+ * @since 0.3.1.0 (native backend N2 — the match-expression fat producer, degrau 5)
+ */
+fn lower_match_fat(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr) -> LoweredFat | error {
+    let so = match lower_match_subject(ctx, m.subject) { MatchSubjOut as x => x; error as err => return err }
+    let names = reassigned_scalars_for_match(m.arms, so.ctx.env)
+    let indices = merge_scalar_indices(so.ctx.env, names)
+    let mergeb = alloc_block(so.ctx.func)
+    let mpp = add_block_param(mergeb.func, mergeb.block_id)
+    let mpl = add_block_param(mpp.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, so.ctx.env, names)
+    let base_ctx = ctx_with(so.ctx, merged.func, so.ctx.block_id, so.ctx.env)
+    let chain = match lower_match_arms_fat(base_ctx, e, m.arms, so.subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
+    let closed = close_dead_fat_fallthrough(chain, mergeb.block_id, indices, e)
+    LoweredFat { ctx = ctx_with(closed, closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
+}
+
+/**
+ * close_dead_fat_fallthrough — the DEAD-CODE edge past a fat match's last arm test: a defensive
+ * (ptr, len) pair jumping to the merge, mirroring `lower_match_value`'s defensive zero. The
+ * checker's exhaustiveness makes the edge unreachable, so the VALUES are never observed — only
+ * their machine class is, which is why each half takes `lfallback_const` of its OWN class (a bare
+ * `0` for the length would encode i32-narrow and collide with the real edges at the wasm
+ * validator's per-param type check).
+ *
+ * @param ctx       the lowering context positioned past the last arm's test
+ * @param merge_id  the merge block this edge jumps to
+ * @param indices   the reassigned scalars' env indices, in merge-param order
+ * @param e         the match expression (its source position)
+ * @return          the context with the edge appended
+ */
+fn close_dead_fat_fallthrough(ctx: LowerCtx, merge_id: u32, indices: []u64, e: checker::TExpr) -> LowerCtx {
+    let zp = ctx_alloc(ctx)
+    let with_zp = ctx_append(zp.ctx, const_int_inst(zp.vreg, lfallback_const(LType::Ptr), e.line, e.col))
+    let zl = ctx_alloc(with_zp)
+    let with_zl = ctx_append(zl.ctx, const_int_inst(zl.vreg, lfallback_const(LType::I64), e.line, e.col))
+    let args = append_all_u32(merge_fat_value_args(zp.vreg, zl.vreg), arm_scalar_args(with_zl.env, indices))
+    let jumped = append_inst(with_zl.func, with_zl.block_id, jump_inst(merge_id, args, e.line, e.col))
+    ctx_with(with_zl, jumped, with_zl.block_id, with_zl.env)
+}
+
+/**
+ * lower_match_arms_fat — fold `lower_match_arm_fat` over every arm in order, threading the
+ * "next test" position from arm to arm; the returned context sits on the dead fall-through past the
+ * last arm's test. `lower_match_arms_value`'s fold, one axis over (scalar -> fat).
+ *
+ * @param ctx       the lowering context positioned at the first arm's test site
+ * @param e         the enclosing match expression
+ * @param arms      the match's arms, in order
+ * @param subj      the match's already-lowered subject
+ * @param merge_id  the merge block id every arm's tail pair jumps to
+ * @param names     the reassigned scalars the merge threads, in param order
+ * @return          the context positioned past the last arm's test
+ * @throws          when any arm fails to lower
+ */
+fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        cur = match lower_match_arm_fat(cur, e, arms[i], subj, merge_id, names) { LowerCtx as c => c; error as err => return err }
+        i++
+    }
+    cur
+}
+
+/**
+ * lower_match_arm_fat — one FAT-value arm: its entry (test/binds/guard), its body as a fat tail-value
+ * block, then a jump to the merge carrying the (ptr, len) pair. `lower_match_arm_value`'s shape with
+ * `lower_block_value_fat` in place of `lower_block_value`, closed through
+ * `close_arm_replaying_defers` so an arm's own `defer` fires on ITS branch only and a scalar it
+ * re-assigns still reaches the merge params that follow the pair.
+ *
+ * @param ctx       the lowering context positioned at the arm's test site
+ * @param e         the enclosing match expression
+ * @param arm       the arm to lower
+ * @param subj      the match's already-lowered subject
+ * @param merge_id  the merge block id the arm's tail pair jumps to
+ * @param names     the reassigned scalars the merge threads, in param order
+ * @return          the context positioned at the next-arm test block
+ * @throws          when the arm's entry or body fails to lower
+ */
+fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    let indices = merge_scalar_indices(ctx.env, names)
+    let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
+    let bv = match lower_block_value_fat(step.ctx, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
 /**
