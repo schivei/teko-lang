@@ -34,17 +34,23 @@ generates SILENTLY WRONG CODE, and only on Windows. That is the exact failure cl
 been fighting all day (owner: *"se o erro é em runtime, ele pode não morar onde estamos olhando"*).
 It needs a session with room to verify, not the tail of one.
 
-## The `.s` idea — for `.32`, and for a DIFFERENT problem
+## The `.s` idea — RAISED AND DROPPED, 2026-07-28
 
-Owner, 2026-07-28: *"aqui entra uma possibilidade para .32, ensinar agora a usar arquivos asm '.s',
-ai na .32 basta usar o .s correto para cada caso, como em GO."*
+Recorded so nobody picks it up later mistaking it for live `.32` curriculum. The owner proposed
+teaching the compiler to consume per-target `.s` files the way Go selects them by filename suffix
+(`foo_amd64.s`, `foo_linux_amd64.s`), then dropped it the same day: *"Entendi, deixa pra lá o .s
+então."*
 
-Go selects assembly by filename suffix — `foo_amd64.s`, `foo_linux_amd64.s` — so a package can ship
-a hand-written routine per target and the toolchain picks it. It is a real escape hatch, and worth
-having: ABI shims, intrinsics, hot paths, anything the code generator should not have to learn.
+It would not have helped here in any case, and that is worth keeping even though the idea is gone:
+`B1-args` is not a routine anyone wants to hand-write — it is the lowering of an ORDINARY Teko call
+that carries more arguments than the register window. No hand-written assembly teaches the
+instruction selector to emit that call.
 
-**It does not replace this fix, and the distinction matters.** `B1-args` is not a routine anyone
-wants to hand-write — it is the lowering of an ORDINARY Teko call that happens to carry more
-arguments than the register window. No hand-written `.s` teaches the instruction selector to emit
-that call. The two are complementary: `.s` is for code we choose to write by hand, the stack-arg
-slot is for code the compiler must be able to write by itself.
+## The Windows lane pins it meanwhile
+
+`.github/workflows/pr.yml`'s Windows self-test step holds a KNOWN-STOP envelope (owner ruling
+2026-07-28: *"Ok KNOWN-STOP para os testes de WINDOWS"*). It lives in the LANE and not in
+`own_native.tkr` because that fixture passes on every System V leg — a fixture cannot hold two
+truths, but a lane can hold the one true of its own ABI. The envelope demands the suite fail, that
+the failure name `B1-args`, that exactly one regression row failed, and that no unit test did. When
+this fix lands, that first condition goes red and the envelope comes out.

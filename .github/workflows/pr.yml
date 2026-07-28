@@ -523,8 +523,57 @@ jobs:
           }
           & $art --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $art test .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # KNOWN-STOP (.32) — WINDOWS ONLY, and the asymmetry IS the finding. Owner ruling
+          # 2026-07-28: *"Ok KNOWN-STOP para os testes de WINDOWS."*
+          #
+          #     isel x86-64: B1-args — an integer call argument past the ABI's
+          #     argument-register window needs the stack-arg slot (0.3.1)
+          #
+          # Win64 has FOUR integer argument registers (RCX/RDX/R8/R9); System V has SIX
+          # (RDI/RSI/RDX/RCX/R8/R9). The same call fits in registers on Linux and macOS and
+          # overflows here, so `own_arith_exit`'s project cannot finish its build on this leg alone.
+          #
+          # WHY THE PIN LIVES IN THE LANE AND NOT IN own_native.tkr: that fixture PASSES on every
+          # System V leg. A KNOWN-STOP written into the `.tkr` would assert a failure that does not
+          # happen there and would take four green lanes down with it. A fixture cannot hold two
+          # truths; a lane can hold the one that is true of its own ABI.
+          #
+          # NOT A SKIP — three things must ALL hold, or the leg is red:
+          #   1. the suite must FAIL (if it passes, .32 landed and this pin must be promoted);
+          #   2. the failure must NAME B1-args (any other stop is a real regression);
+          #   3. exactly ONE regression row failed and NO unit test did (so this pin can never
+          #      swallow a second, unrelated breakage hiding behind it).
+          #
+          # THE DAY .32 IMPLEMENTS THE STACK-ARG SLOT, CONDITION 1 GOES RED. Restore the two lines
+          # this replaced: `& $art test .` / `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`.
+          # The plan is in docs/memory/b1-args-stack-slot.md.
+          & $art test . 2>&1 | Tee-Object -FilePath teko-test.log
+          $rc = $LASTEXITCODE
+          $log = Get-Content -Raw teko-test.log
+          if ($rc -eq 0) {
+            Write-Host "KNOWN-STOP LIFTED: the suite passed on Windows."
+            Write-Host "This envelope exists to assert that B1-args still stops it. Promote it:"
+            Write-Host "  restore '& `$art test .' + the `$LASTEXITCODE propagation."
+            exit 1
+          }
+          if ($log -notmatch 'B1-args') {
+            Write-Host "the Windows suite failed, but NOT at the stop this envelope pins:"
+            Write-Host $log
+            exit 1
+          }
+          if ($log -notmatch 'regressions \d+ run, \d+ skipped, 1 failed') {
+            Write-Host "more than the pinned row failed — this envelope must not cover a second break:"
+            Write-Host $log
+            exit 1
+          }
+          if ($log -match '\.\.\. FAILED') {
+            Write-Host "a UNIT test failed on Windows; the B1-args pin covers regressions only:"
+            Write-Host $log
+            exit 1
+          }
+          Write-Host "KNOWN-STOP held — the Windows suite stops only where .32 will pick it up:"
+          Write-Host ($log -split "`n" | Select-String -Pattern 'isel x86-64: B1-args' | Select-Object -First 1)
           New-Item -ItemType File -Force .lane-ran | Out-Null
 
       # J3 AT THE LEG LEVEL. The two steps above are each guarded by an `if:`, so an asset whose
