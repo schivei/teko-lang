@@ -1,0 +1,152 @@
+name: seed parity (canonical vs fork)
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# TWO SEEDS, TWO QUESTIONS, AND THEY ARE NOT THE SAME QUESTION.
+#
+# Owner ruling 2026-07-28: *"o fork produz, por isso quero o teste, e, sendo ou não, se ambos
+# conseguem fazer build da main (já sincronizei)."*
+#
+#   1. ARE THE BYTES EQUAL?      -> REPORTED, never fatal.
+#   2. CAN EACH ONE BUILD main?  -> FATAL. This is the acceptance criterion.
+#
+# The split is the whole design. `teko-org` publishes through `scripts/produce_assets.sh`; the fork
+# publishes through `seed-linux-fork.yml`, which runs a bare `teko build . --no-verify --release`
+# with no ladder and no fixpoint. Two recipes, same source. If the bytes match, that is a STRONG
+# claim — two independent productions on two machines agreeing exactly, which is the property that
+# would have caught the PE `TimeDateStamp` defect (the .31 Windows fixpoint died at byte 137) before
+# it ever reached a release. If they differ, we have learned that the recipes differ, which we
+# already knew — so a difference must not fail a gate that was never measuring recipe equality.
+#
+# WHAT WOULD BE A LIE: failing on a byte difference and calling it "reproducibility broken", or
+# passing on byte equality while neither seed can actually compile anything. Hence one reported and
+# one enforced.
+#
+# THE BACKEND IS PINNED FOR THE BUILD, and this is the lesson the .31 wagon paid for: both seeds are
+# TODAY's compiler, whose default backend is NATIVE, and the native backend cannot yet build the
+# compiler. Without the pin this lane would report "seed cannot build main" for a reason that has
+# nothing to do with the seed — exactly how rung -1 started failing the moment `bootstrap/teko.c`
+# was replaced, and how a green macOS leg turned out to have bypassed the seed entirely.
+#
+# PUSH-TRIGGERED ON ITS OWN BRANCH, on purpose: it downloads published releases, so it measures what
+# was SHIPPED, not what a PR happens to contain. Re-push to re-measure after a new release.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: ["ci/seed-parity"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag to compare (default: the manifest's own version)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CANONICAL_REPO: teko-org/teko-lang
+  FORK_REPO: schivei/teko-lang
+  LABEL: linux-x86_64-glibc
+  # The only route that self-hosts today. See scripts/build_with_seed_fallback.sh's build_project().
+  TEKO_SELFHOST_BACKEND: c
+
+jobs:
+  parity:
+    name: seed parity / linux-x86_64-glibc
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout main (the tree BOTH seeds must be able to build)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Resolve the tag under test
+        id: ver
+        shell: bash
+        run: |
+          set -eu
+          V="${{ github.event.inputs.tag }}"
+          [ -n "$V" ] || V="v$(sh scripts/derive_version.sh)"
+          echo "tag=$V" >> "$GITHUB_OUTPUT"
+          echo "comparing release $V"
+
+      # DOWNLOADED, NOT BUILT. The point is to measure the bytes that were PUBLISHED — a locally
+      # rebuilt binary would be a sibling of the asset, not the asset, which is the same defect
+      # `release.yml` exists to avoid ("recompiling publishes bytes no gate ever saw").
+      - name: Fetch both published seeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.tag }}
+        shell: bash
+        run: |
+          set -eu
+          fetch_one() {  # fetch_one REPO DEST
+            repo="$1"; dest="$2"
+            mkdir -p "$dest"
+            if ! gh release download "$V" --repo "$repo" --pattern "*${LABEL}*" --dir "$dest" 2>/dev/null; then
+              echo "MISSING: $repo has no asset matching '*${LABEL}*' at $V" >&2
+              return 1
+            fi
+            asset="$(find "$dest" -type f | head -n1)"
+            case "$asset" in
+              *.tar.gz|*.tgz) tar -C "$dest" -xzf "$asset" ;;
+              *.zip)          unzip -q -o "$asset" -d "$dest" ;;
+            esac
+            bin="$(find "$dest" -type f -name teko | head -n1)"
+            [ -n "$bin" ] || { echo "no 'teko' binary inside $repo's asset" >&2; return 1; }
+            chmod +x "$bin"
+            echo "$bin"
+          }
+          CANON_BIN="$(fetch_one "$CANONICAL_REPO" canon)"
+          FORK_BIN="$(fetch_one "$FORK_REPO" fork)"
+          echo "CANON_BIN=$CANON_BIN" >> "$GITHUB_ENV"
+          echo "FORK_BIN=$FORK_BIN" >> "$GITHUB_ENV"
+          "$CANON_BIN" --version
+          "$FORK_BIN" --version
+
+      # QUESTION 1 — REPORTED. And it names the OFFSET when it differs, because "the files differ"
+      # teaches nothing: it was the first differing offset that identified the PE TimeDateStamp.
+      - name: Byte parity (REPORTED, never fatal)
+        shell: bash
+        run: |
+          set -eu
+          a="$CANON_BIN"; b="$FORK_BIN"
+          printf 'canonical %s bytes  sha256 %s\n' "$(stat -c%s "$a")" "$(sha256sum "$a" | cut -d' ' -f1)"
+          printf 'fork      %s bytes  sha256 %s\n' "$(stat -c%s "$b")" "$(sha256sum "$b" | cut -d' ' -f1)"
+          if cmp -s "$a" "$b"; then
+            echo "PARITY: byte-identical — two independent productions agree exactly."
+          else
+            echo "PARITY: DIFFER — reported, not fatal (the two publish through different recipes)."
+            cmp "$a" "$b" || true
+            echo "--- first differing region ---"
+            off="$(cmp "$a" "$b" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p' | head -n1)"
+            if [ -n "$off" ]; then
+              start=$(( off > 32 ? off - 32 : 0 ))
+              echo "canonical:"; xxd -s "$start" -l 96 "$a" || true
+              echo "fork:";      xxd -s "$start" -l 96 "$b" || true
+            fi
+          fi
+
+      # QUESTION 2 — FATAL. A seed that cannot compile the tree is not a seed, whatever its bytes.
+      # Each build runs in its OWN output dir so neither can serve the other's artefacts.
+      - name: Both seeds must build main
+        shell: bash
+        run: |
+          set -eu
+          bad=0
+          for pair in "canonical:$CANON_BIN" "fork:$FORK_BIN"; do
+            who="${pair%%:*}"; bin="${pair#*:}"
+            echo "::group::$who builds main"
+            if TEKO_BACKEND="$TEKO_SELFHOST_BACKEND" "$bin" . -o "out-$who" --no-verify --release; then
+              test -x "out-$who/teko" || { echo "$who: build reported success but produced no binary" >&2; bad=1; }
+              echo "$who: OK — $("out-$who/teko" --version)"
+            else
+              echo "$who: FAILED to build main" >&2
+              bad=1
+            fi
+            echo "::endgroup::"
+          done
+          [ "$bad" -eq 0 ] || { echo "at least one published seed cannot build main" >&2; exit 1; }
+          echo "BOTH seeds build main."
