@@ -65,13 +65,27 @@
 # the bytes match — so both are asserted, and the C check is reported separately from the byte
 # check so a log reader can tell WHICH half is outstanding.
 #
+# THE EMISSION CHECK IS ARMED AGAIN, ON THE LEGS THAT GENERATE NATIVE. Owner ruling 2026-07-28:
+# *"Só tem uma falha, gen2 e gen3 estão emitindo C e não deveriam, reabilite o check de emissão
+# (somente nas pernas Linux), verá que não passará nada."* It was disarmed on 2026-07-27 (*"pode
+# remover por hora a validação de no-c para este caso"*) for a state of the world in which every
+# leg ran gen2/gen3 down the C route ON PURPOSE — enforcing it then would have red every run for
+# doing what the version asked. That is no longer the state of the world on Linux: those four legs
+# now pass `TEKO_FIXPOINT_BACKEND=native`, and a NATIVE generation emitting C is a defect in every
+# version. So the arming is DERIVED FROM THE BACKEND rather than configured beside it (see
+# `zero_c_enforced_default`) — the legs that still run `c` are untouched, and no future leg can
+# flip to native while quietly keeping the emission check off.
+#
 # It is scoped to gen2 and gen3 ONLY — never the ladder, never gen1. Owner ruling 2026-07-27: *"ele
 # tem que saber quem está testando, logo, ele não pode nem deve avaliar a escada e nem a gen1,
 # apenas gen2 e 3"*. gen1 emits C BY CONSTRUCTION (it is the last generation built down the C
 # route — that emission IS the teko.c this train harvests), so judging it would fail the gate for
 # doing exactly what it must do. That ruling is also why the degrau declaration read below changes
 # no operand: the ladder's business is the ladder's. This is also why `scripts/no_emitted_c.sh` is
-# NOT wired: it sweeps the whole worktree and cannot tell whose emission it found.
+# NOT wired: it sweeps the whole worktree and cannot tell whose emission it found. THIS gate can
+# attribute, and that is the whole difference — it sweeps the output directory it just handed a
+# named generation, and it BRACKETS each build with a before/after scan of the project tree, so
+# every `.c` it names was written by the generation under test and by nothing else.
 #
 # Usage:  sh scripts/fixpoint_gate.sh <gen1-binary> [PROJECT_DIR] [WORK_DIR]
 #
@@ -81,12 +95,18 @@
 #                          teko_rt.{h,c} relative to ITS OWN argv[0], so a generation living
 #                          outside the tree would otherwise compile against the wrong runtime.
 #   TEKO_FIXPOINT_BACKEND  which backend gen2 and gen3 are built with (default `c` — see
-#                          `build_gen`, which is the ONLY place it is read). THE LEVER: the
-#                          0.3.1.0 chain wants `native` here, and the day a platform's native
-#                          self-build passes, that leg sets it and proves the chain the owner
-#                          drew. It is still `c` today because the native backend does not build
-#                          the compiler yet, and a leg that flipped early would red for a stop
-#                          that is already named elsewhere.
+#                          `build_gen`, which is the ONLY place it is read). THE LEVER, and it is
+#                          PULLED on the four Linux legs as of 2026-07-28: they pass `native`,
+#                          from `scripts/ci_producer_matrix.sh`'s `fixpoint_backend` field. macOS
+#                          and Windows keep `c` until the platform-sequenced plan reaches them.
+#                          The default stays `c` so that a caller which names no backend gets the
+#                          route that has always worked.
+#   TEKO_FIXPOINT_ZERO_C   `1` to make the emission check BITE, `0` to report it. UNSET IS THE
+#                          NORMAL CASE and it is DERIVED from the backend: a `native` generation
+#                          that emits C is a defect on any leg, in any version, so native arms it
+#                          and `c` does not. Setting it explicitly overrides the derivation in
+#                          both directions — that is for the 0.3.1.4 wagon, which arms it on the
+#                          C legs too as it retires the route.
 #   TEKO_FIXPOINT_GEN1_C   the C emitted ALONGSIDE gen1 (default: <dirname gen1>/teko.c) — the
 #                          harvest candidate this run stages as <WORK_DIR>/gen1.c.
 #   TEKO_FIXPOINT_MODE     `degrau` | `normal` — force the PROVENANCE LABEL instead of observing
@@ -173,22 +193,36 @@ W="$(cd "$W" && pwd)"
 # keeps running on the native default, which is what it is for.
 #
 # ── THE LEVER, AND IT IS THIS LINE ────────────────────────────────────────────────────────────
-# `bg_backend="${TEKO_FIXPOINT_BACKEND:-c}"`, the third line of `build_gen` below, is where the
-# 0.3.1.0 chain is switched on. The owner's chain builds gen2 and gen3 NATIVE; they run `c` only
-# because the native backend does not build the compiler yet, and a leg that flipped before its
-# native self-build passes would go red for a stop that is already named, by address, elsewhere.
+# `bg_backend="$FIXPOINT_BACKEND"` below is where the 0.3.1.0 chain is switched on, and the value
+# arrives from `scripts/ci_producer_matrix.sh`'s `fixpoint_backend` field — `native` on the four
+# Linux legs since 2026-07-28, `c` on macOS and Windows until the platform-sequenced plan reaches
+# them. The default when nobody names one stays `c`.
 #
-# HOW TO FLIP IT, per platform, when that leg's native self-build passes: set
-# `TEKO_FIXPOINT_BACKEND: native` on that leg's fixpoint STEP (never on the job or the workflow).
-# The scope argument above is the whole reason the variable is read HERE and nowhere else — a
-# global pin leaks into the suite and turns regressors green by compiling them down another road.
+# HOW TO FLIP A LEG, in either direction: change that ONE word in the leg's row in
+# `scripts/ci_producer_matrix.sh`. pr.yml passes it as `TEKO_FIXPOINT_BACKEND` on the fixpoint
+# STEP (never on the job or the workflow) and nightly.yml reads the same table, so a leg cannot be
+# migrated in one workflow and forgotten in the other. The scope argument above is the whole reason
+# the variable is read HERE and nowhere else — a global pin leaks into the suite and turns
+# regressors green by compiling them down another road.
+#
+# THE FOUR LINUX LEGS ARE EXPECTED TO BE RED WHILE THIS STANDS, and the red is the deliverable.
+# Owner ruling 2026-07-28: *"verá que não passará nada."* The native backend does not build the
+# compiler yet; `docs/memory/0.3.1.0-linux-native-first-stop.md` names the stop it reaches today,
+# by address. The gate's job here is to report that address every run — softening it (a warning, a
+# `continue-on-error`, a narrowed criterion) would delete the only number this lane exists to
+# produce.
 #
 # The pin disappears entirely — not flipped, deleted — when the C route is retired (0.3.1.4 on the
 # platform-sequenced plan), because then there is only one backend to pin it to.
+FIXPOINT_BACKEND="${TEKO_FIXPOINT_BACKEND:-c}"
+
+# build_gen COMPILER LOGFILE — see the block above. Brackets the build with `scan_project_c` so a
+# `.c` written ANYWHERE in the project tree is attributable to the generation that wrote it.
 build_gen() {
     bg_bin="$1"; bg_log="$2"
     rm -rf "$W/out"
-    bg_backend="${TEKO_FIXPOINT_BACKEND:-c}"
+    bg_backend="$FIXPOINT_BACKEND"
+    scan_project_c "$W/project-c.before"
     if [ -n "$RT_DIR" ]; then
         ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
     else
@@ -196,9 +230,55 @@ build_gen() {
     fi
 }
 
+# scan_project_c OUTFILE — the sorted list of every `.c` in the project tree, EXCLUDING `.git` and
+# this gate's own work directory. Two of these, one before a build and one after, name exactly the
+# `.c` files that build created, which is the attribution `scripts/no_emitted_c.sh` cannot do (it
+# sweeps a worktree and cannot say whose emission it found).
+#
+# WHY THE PROJECT TREE AND NOT JUST `$W/out`: "gen2 and gen3 emit no C" is a claim about the
+# generation, not about one directory. `-o` is where the compiler is ASKED to put its output; a
+# check that looked only there would pass a generation that wrote its C beside the sources. The
+# scan costs a `find` over a few thousand paths, twice per generation.
+#
+# PATHS ARE ABSOLUTE on purpose: the two scans and the `$W/out` sweep all feed the same failure
+# report, and a reader chasing a named file should not have to work out which directory the name
+# was relative to.
+scan_project_c() {
+    find "$PROJ" -name '*.c' -not -path "$PROJ/.git/*" -not -path "$W/*" \
+        | LC_ALL=C sort > "$1"
+}
+
+# record_emission NAME — the EMISSION CHECK's evidence for one generation: the sorted list of
+# every `.c` that generation wrote, at $W/NAME.emitted-c-list, and its count at $W/NAME.emitted-c.
+#
+# TWO SOURCES, ONE LIST, and both are needed to make the claim honestly. `$W/out` is where the
+# generation was told to put its output; the before/after delta over the project tree catches a `.c`
+# written anywhere ELSE. A check that watched only the output directory would pass a generation that
+# emitted C beside the sources, which is not the claim the owner asked to be proven.
+#
+# IT NAMES THE FILES rather than counting them, because "emitted-c=1" sends a reader hunting and a
+# path does not. Owner ruling 2026-07-28: the check must *"falhar alto e nomear o(s) ficheiro(s)"*.
+#
+# NOTHING IS EXCLUDED. The C route's own `teko.c` lands in this list and that is correct: on a leg
+# still running `c` the check is not armed, and on a leg running `native` that file is precisely the
+# defect. An allow-list here is how an armed check rots back into a rubber stamp.
+record_emission() {
+    re_name="$1"
+    [ -f "$W/project-c.before" ] || {
+        log "internal: no pre-build .c scan for $re_name — the emission check cannot attribute"
+        exit 1
+    }
+    scan_project_c "$W/project-c.after"
+    {
+        find "$W/out" -name '*.c' 2>/dev/null || true
+        comm -13 "$W/project-c.before" "$W/project-c.after"
+    } | LC_ALL=C sort -u > "$W/$re_name.emitted-c-list"
+    wc -l < "$W/$re_name.emitted-c-list" | tr -d ' \t' > "$W/$re_name.emitted-c"
+}
+
 # take_gen NAME — moves the just-built compiler out of $W/out to $W/NAME, PRESERVES the teko.c that
-# build emitted (as $W/NAME.c), and records whether there was one. Frees $W/out so the NEXT
-# generation can be built at the identical path.
+# build emitted (as $W/NAME.c), and records what it emitted. Frees $W/out so the NEXT generation can
+# be built at the identical path.
 #
 # THE EMITTED C IS KEPT, NOT JUST COUNTED, and that is the point of this function beyond moving a
 # binary. Owner ruling 2026-07-28: *"fechando tudo verde, coletou o teko.c emitido no vagão 20?
@@ -212,11 +292,9 @@ build_gen() {
 # `rm -rf "$W/out"` still runs; it just no longer takes the C with it.
 take_gen() {
     tg_name="$1"
+    record_emission "$tg_name"
     if [ -f "$W/out/teko.c" ]; then
-        printf '1' > "$W/$tg_name.emitted-c"
         cp "$W/out/teko.c" "$W/$tg_name.c"
-    else
-        printf '0' > "$W/$tg_name.emitted-c"
     fi
     if [ -x "$W/out/teko" ]; then
         mv "$W/out/teko" "$W/$tg_name"
@@ -240,14 +318,25 @@ take_gen() {
 # THE PROOF DID NOT WEAKEN, IT MOVED WITH IT: the C is not trusted because it came from the last
 # generation, but because gen2 and gen3 DESCEND from the binary it encodes and proved the fixpoint.
 # A run whose gen2 != gen3 harvests nothing — the callers gate the upload on this script's exit.
+#
+# IT ALSO RECORDS gen1's EMISSION IN THE EMISSION CHECK'S OWN FORMAT ($W/gen1.emitted-c{,-list}),
+# though nothing reads it yet. Owner ruling 2026-07-28: *"a ideia é que gen1 aprenda a compilar
+# native sem emitir C"*. The day that lands, adding `gen1` to `ZERO_C_GENERATIONS` is the whole
+# change; the observation it needs is already being taken. gen1's emission cannot be measured by
+# the before/after bracket `build_gen` uses — it happened before this script was invoked — so what
+# is recorded is the file found BESIDE the gen1 binary, which is where the ladder leaves it.
 stage_gen1_c() {
     sg_src="${TEKO_FIXPOINT_GEN1_C:-$(dirname "$GEN1")/teko.c}"
     if [ ! -f "$sg_src" ]; then
+        : > "$W/gen1.emitted-c-list"
+        printf '0' > "$W/gen1.emitted-c"
         log "gen1 emitted no C beside it ($sg_src is absent) — nothing to harvest from this run."
         log "  That is expected only once gen1 itself is built by the native route; while the"
         log "  chain's first links run with TEKO_BACKEND=c, a missing C means the ladder changed."
         return 0
     fi
+    printf '%s\n' "$sg_src" > "$W/gen1.emitted-c-list"
+    printf '1' > "$W/gen1.emitted-c"
     cp "$sg_src" "$W/gen1.c"
     log "gen1's emitted C staged: $W/gen1.c ($(wc -c < "$W/gen1.c") bytes, from $sg_src)"
     return 0
@@ -347,43 +436,115 @@ if [ -f "$W/gen1.c" ]; then
     log "         generation that emits any, vouched for by the gen2/gen3 that descend from it"
 fi
 
-# ZERO-C IS REPORTED, NOT ENFORCED — a DATED window, not a permanent softening. Owner ruling
-# 2026-07-27: *"pode remover por hora a validação de no-c para este caso"*, inside the release plan
-# he set out the same night — **both routes alive, then the native backend taught, then C removed**
-# — which the 0.3.1 lane RESEQUENCED BY PLATFORM: the Linux leg goes native first, macOS/Windows/
-# wasm keep the C route, and **the C lives until 0.3.1.4**. Under that plan a generation emitting C
-# before 0.3.1.4 is the DESIGNED state, so failing on it would red every run for doing precisely
-# what the version asks of it.
+# ── THE EMISSION CHECK, RE-ARMED — AND ARMED BY THE BACKEND, NOT BESIDE IT ────────────────────
 #
-# WHAT STILL FAILS, and it is the half that carries the meaning: `gen2 == gen3` byte for byte —
-# THIS COMPILER REBUILDS ITSELF. That claim is enforced above and never relaxed.
+# Owner ruling 2026-07-28: *"Só tem uma falha, gen2 e gen3 estão emitindo C e não deveriam,
+# reabilite o check de emissão (somente nas pernas Linux), verá que não passará nada."*
 #
-# THIS IS NOT THE SOFT MODE RETURNING. That one printed `FAILED` and exited 0 — a lane green over a
-# stated defect. Here the verdict tells the truth about the version it is running in: the byte
-# fixpoint is REQUIRED and reported as such; the zero-C is an ANNOUNCED goal with a version
-# attached, reported every run so its arrival is never a surprise.
+# WHY IT WAS DISARMED, RECORDED RATHER THAN DELETED. Owner ruling 2026-07-27: *"pode remover por
+# hora a validação de no-c para este caso"*, inside the release plan of the same night — both
+# routes alive, then the native backend taught, then C removed — which the 0.3.1 lane RESEQUENCED
+# BY PLATFORM. While EVERY leg built gen2/gen3 down the C route, a generation emitting C was the
+# DESIGNED state, and enforcing zero-C would have red every run for doing exactly what the version
+# asked of it.
 #
-# TO RE-ARM IT (the wagon that retires the C, 0.3.1.4): set ZERO_C_ENFORCED=1 below. One line.
-ZERO_C_ENFORCED="${TEKO_FIXPOINT_ZERO_C:-0}"
-CL="$(cat "$W/$LEFT.emitted-c" 2>/dev/null || echo '?')"
-CR="$(cat "$W/$RIGHT.emitted-c" 2>/dev/null || echo '?')"
-if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
-    log "zero-C: neither generation emitted a teko.c  ✓"
+# WHAT CHANGED, AND WHY THE SOFTENING IS OVER FOR LINUX: the four Linux legs now build gen2 and
+# gen3 with `TEKO_FIXPOINT_BACKEND=native`. A NATIVE generation emitting C is not a designed state
+# in any version — it is a defect. So the arming is DERIVED from the backend rather than configured
+# next to it: `native` arms, `c` does not. There is no second knob to set, and therefore no way for
+# a future leg to migrate to native while its emission check stays quietly off.
+#
+# `TEKO_FIXPOINT_ZERO_C` still overrides, in BOTH directions, and it is for one caller: the 0.3.1.4
+# wagon that retires the C route arms it on the remaining `c` legs as it goes.
+#
+# IT IS EXPECTED TO BE RED ON LINUX TODAY, and that red is the measurement the owner asked for
+# (*"verá que não passará nada"*). Nothing here may be narrowed to reach green — not the file set
+# it sweeps, not the severity, not the legs it covers.
+#
+# WHAT STILL FAILS INDEPENDENTLY, and it is the half that carries the meaning: `gen2 == gen3` byte
+# for byte — THIS COMPILER REBUILDS ITSELF. That claim is enforced above and was never relaxed.
+#
+# THE GENERATION SET IS A VARIABLE, NOT A HARDCODED PAIR, AND THAT IS DELIBERATE. Owner ruling
+# 2026-07-28: *"como estamos trabalhando com foco em native, não devem existir novas emissões em C,
+# a ideia é que gen1 aprenda a compilar native sem emitir C."* The destination has gen1 emitting no
+# C either, at which point `bootstrap/teko.c` has no producer left and the DEGRAU path (the only
+# path that consumes it) is the only place C ever appears. Extending this check to that world must
+# be a one-token edit — `ZERO_C_GENERATIONS="gen1 $LEFT $RIGHT"` — and not a rewrite, so every
+# piece below (`record_emission`, `report_emission`, the loop) takes a generation NAME.
+#
+# IT IS NOT EXTENDED TODAY, and that is not an oversight: owner ruling 2026-07-27, *"ele não pode
+# nem deve avaliar a escada e nem a gen1, apenas gen2 e 3"*. gen1 emits C by construction on the
+# current chain; judging it now would fail the gate for doing what this version asks. The hook is
+# built, the trigger is the owner's.
+
+# zero_c_enforced_default — 1 when the generations under test were built NATIVE, 0 when they were
+# built down the C route. The derivation IS the scoping the owner asked for: only the legs that
+# generate native are the legs whose emission is a defect, and `scripts/ci_producer_matrix.sh` says
+# which those are.
+zero_c_enforced_default() {
+    [ "$FIXPOINT_BACKEND" = "native" ] && printf '1' || printf '0'
+}
+
+# emission_count NAME — how many `.c` files that generation wrote, or `?` if it was never recorded.
+emission_count() {
+    cat "$W/$1.emitted-c" 2>/dev/null || printf '?'
+}
+
+# report_emission NAME — prints the `.c` files that generation wrote, one per line, so a failure
+# names its evidence instead of pointing at a count.
+report_emission() {
+    re_list="$W/$1.emitted-c-list"
+    [ -s "$re_list" ] || return 0
+    while IFS= read -r re_path; do
+        log "        $1 emitted: $re_path"
+    done < "$re_list"
+}
+
+# ZERO_C_GENERATIONS — the generations this check judges. See the block above for why gen1 is not
+# in it yet and what adding it costs.
+ZERO_C_GENERATIONS="$LEFT $RIGHT"
+ZERO_C_ENFORCED="${TEKO_FIXPOINT_ZERO_C:-$(zero_c_enforced_default)}"
+
+ZERO_C_OK=1
+ZERO_C_TALLY=""
+for zc_gen in $ZERO_C_GENERATIONS; do
+    zc_n="$(emission_count "$zc_gen")"
+    ZERO_C_TALLY="$ZERO_C_TALLY $zc_gen=$zc_n"
+    [ "$zc_n" = "0" ] || ZERO_C_OK=0
+done
+ZERO_C_TALLY="${ZERO_C_TALLY# }"
+
+# zero_c_reason — WHY the check bit, which is not the same sentence in both cases. Derived from the
+# backend it is a native generation breaking a rule of its own route; forced by
+# TEKO_FIXPOINT_ZERO_C it is the C route being retired on a leg that has not migrated yet. A
+# failure that names the wrong reason sends the reader to the wrong file.
+zero_c_reason() {
+    if [ "$FIXPOINT_BACKEND" = "native" ]; then
+        printf '%s' "these generations were built with TEKO_BACKEND=native, and a native generation must emit no C at all"
+        return 0
+    fi
+    printf '%s' "these generations were built with TEKO_BACKEND=$FIXPOINT_BACKEND and zero-C was armed by hand (TEKO_FIXPOINT_ZERO_C=1)"
+}
+
+if [ "$ZERO_C_OK" = "1" ]; then
+    log "zero-C: no generation under test emitted any .c  ✓ ($ZERO_C_TALLY)"
 elif [ "$ZERO_C_ENFORCED" = "1" ]; then
-    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  ✗ (enforced — TEKO_FIXPOINT_ZERO_C=1)"
+    log "zero-C: $ZERO_C_TALLY  ✗ (ENFORCED — $(zero_c_reason))"
+    for zc_gen in $ZERO_C_GENERATIONS; do report_emission "$zc_gen"; done
     FIX_OK=0
 else
-    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  — REPORTED, not enforced (the 0.3.1.4"
-    log "        goal; this lane ships both routes on purpose). TEKO_FIXPOINT_ZERO_C=1 makes it bite."
+    log "zero-C: $ZERO_C_TALLY  — REPORTED, not enforced (this leg still builds these"
+    log "        generations down the C route; it migrates by 0.3.1.4)."
+    for zc_gen in $ZERO_C_GENERATIONS; do report_emission "$zc_gen"; done
 fi
 
 [ "$FIX_OK" = "1" ] || verdict_fail "the fixpoint has not arrived — see the two lines above for which half is outstanding"
 
-if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
+if [ "$ZERO_C_OK" = "1" ]; then
     log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte, and neither emitted C"
 else
-    log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte. (Both still emit C: the 0.3.1.4 goal,"
-    log "         reported above.)"
+    log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte. (They still emit C on the C route: the"
+    log "         0.3.1.4 goal, reported above.)"
 fi
 # CLEAN THE SCRATCH, NEVER THE HARVEST. This used to be a flat `rm -rf "$W"`, which deleted the
 # emitted C two lines after the script had just printed
@@ -409,8 +570,13 @@ fi
 # reads. Running the same probe under gen1 and under gen2 is what tells a defect in the SOURCE apart
 # from a defect in the LINEAGE, and it cannot be done if the gate deletes the generations.
 #
-# ~2.5 MB apiece, on a runner that is discarded minutes later. The logs and the emitted-c marks stay
-# in the sweep: those really are spent once the verdict is printed.
+# ~2.5 MB apiece, on a runner that is discarded minutes later. The logs, the emitted-c marks and the
+# emission check's scans stay in the sweep: those really are spent once the verdict is printed — and
+# on a run that FAILS the check they are never reached, so the evidence survives for the reader.
+#
+# The enumerated glob is why `*.emitted-c-list` and `project-c.*` had to be named here explicitly.
+# A `rm -f "$W"/*` would have been shorter and would have taken `gen1.c` with it, which is the exact
+# defect this block exists to record.
 rm -rf "$W/out"
-rm -f "$W"/*.log "$W"/*.emitted-c
+rm -f "$W"/*.log "$W"/*.emitted-c "$W"/*.emitted-c-list "$W"/project-c.before "$W"/project-c.after
 exit 0
