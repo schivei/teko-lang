@@ -69,8 +69,13 @@ jobs:
         shell: bash
         run: |
           set -eu
+          # derive_version.sh ALREADY prints the `v` prefix — its own header says so:
+          # "this derived TAG is `v<version>[-<suffix>]`". Prepending another produced
+          # `vv0.3.0.31-beta` and the download missed by one character.
           V="${{ github.event.inputs.tag }}"
-          [ -n "$V" ] || V="v$(sh scripts/derive_version.sh)"
+          [ -n "$V" ] || V="$(sh scripts/derive_version.sh)"
+          # A hand-typed input may or may not carry the `v`; normalize to exactly one.
+          V="v${V#v}"
           echo "tag=$V" >> "$GITHUB_OUTPUT"
           echo "comparing release $V"
 
@@ -101,12 +106,23 @@ jobs:
             chmod +x "$bin"
             echo "$bin"
           }
-          CANON_BIN="$(fetch_one "$CANONICAL_REPO" canon)"
-          FORK_BIN="$(fetch_one "$FORK_REPO" fork)"
+          # A MISSING SEED MUST NOT BLIND THE LANE TO THE OTHER ONE. If one side simply has not
+          # been cut yet, that is a publishing gap, not a compiler fact — but it must not stop us
+          # from learning whether the side that DOES exist can still build the tree. So the fetch
+          # is non-fatal per seed; the run still fails at the end (see the last step), because a
+          # parity question cannot be answered with one seed.
+          CANON_BIN="$(fetch_one "$CANONICAL_REPO" canon || true)"
+          FORK_BIN="$(fetch_one "$FORK_REPO" fork || true)"
           echo "CANON_BIN=$CANON_BIN" >> "$GITHUB_ENV"
           echo "FORK_BIN=$FORK_BIN" >> "$GITHUB_ENV"
-          "$CANON_BIN" --version
-          "$FORK_BIN" --version
+          if [ -n "$CANON_BIN" ]; then "$CANON_BIN" --version; fi
+          if [ -n "$FORK_BIN" ];  then "$FORK_BIN"  --version; fi
+          if [ -z "$FORK_BIN" ]; then
+            echo "HOW TO CUT THE MISSING FORK SEED: dispatch 'Fork Seed (Linux x86-64)'" >&2
+            echo "  (.github/workflows/seed-linux-fork.yml) on $FORK_REPO@main — it is" >&2
+            echo "  workflow_dispatch-only and idempotent, then re-push this branch." >&2
+          fi
+          exit 0
 
       # QUESTION 1 — REPORTED. And it names the OFFSET when it differs, because "the files differ"
       # teaches nothing: it was the first differing offset that identified the PE TimeDateStamp.
@@ -115,8 +131,18 @@ jobs:
         run: |
           set -eu
           a="$CANON_BIN"; b="$FORK_BIN"
-          printf 'canonical %s bytes  sha256 %s\n' "$(stat -c%s "$a")" "$(sha256sum "$a" | cut -d' ' -f1)"
-          printf 'fork      %s bytes  sha256 %s\n' "$(stat -c%s "$b")" "$(sha256sum "$b" | cut -d' ' -f1)"
+          for pair in "canonical:$a" "fork:$b"; do
+            who="${pair%%:*}"; p="${pair#*:}"
+            if [ -n "$p" ]; then
+              printf '%-9s %s bytes  sha256 %s\n' "$who" "$(stat -c%s "$p")" "$(sha256sum "$p" | cut -d' ' -f1)"
+            else
+              printf '%-9s NOT PUBLISHED at this tag\n' "$who"
+            fi
+          done
+          if [ -z "$a" ] || [ -z "$b" ]; then
+            echo "PARITY: UNANSWERABLE — only one seed exists at this tag."
+            exit 0
+          fi
           if cmp -s "$a" "$b"; then
             echo "PARITY: byte-identical — two independent productions agree exactly."
           else
@@ -140,6 +166,13 @@ jobs:
           bad=0
           for pair in "canonical:$CANON_BIN" "fork:$FORK_BIN"; do
             who="${pair%%:*}"; bin="${pair#*:}"
+            # An UNCUT seed is still a failure of this lane — we cannot answer the question with
+            # one seed — but it is named for what it is, so the log never reads as a compiler bug.
+            if [ -z "$bin" ]; then
+              echo "$who: NOT PUBLISHED at this tag — nothing to measure" >&2
+              bad=1
+              continue
+            fi
             echo "::group::$who builds main"
             if TEKO_BACKEND="$TEKO_SELFHOST_BACKEND" "$bin" . -o "out-$who" --no-verify --release; then
               test -x "out-$who/teko" || { echo "$who: build reported success but produced no binary" >&2; bad=1; }
@@ -159,5 +192,5 @@ jobs:
             fi
             echo "::endgroup::"
           done
-          [ "$bad" -eq 0 ] || { echo "at least one published seed cannot build main" >&2; exit 1; }
+          [ "$bad" -eq 0 ] || { echo "at least one published seed is missing, cannot build main, or fails its own suite" >&2; exit 1; }
           echo "BOTH seeds build main AND pass their own suite."
