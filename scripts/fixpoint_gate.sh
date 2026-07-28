@@ -199,11 +199,17 @@ W="$(cd "$W" && pwd)"
 # them. The default when nobody names one stays `c`.
 #
 # HOW TO FLIP A LEG, in either direction: change that ONE word in the leg's row in
-# `scripts/ci_producer_matrix.sh`. pr.yml passes it as `TEKO_FIXPOINT_BACKEND` on the fixpoint
-# STEP (never on the job or the workflow) and nightly.yml reads the same table, so a leg cannot be
-# migrated in one workflow and forgotten in the other. The scope argument above is the whole reason
-# the variable is read HERE and nowhere else — a global pin leaks into the suite and turns
-# regressors green by compiling them down another road.
+# `scripts/ci_producer_matrix.sh`. `pr.yml` passes it as `TEKO_FIXPOINT_BACKEND` on the fixpoint
+# STEP — never on the job or the workflow. The scope argument above is the whole reason the
+# variable is read HERE and nowhere else: a global pin leaks into the suite and turns regressors
+# green by compiling them down another road.
+#
+# `pr.yml` IS THE ONLY CALLER THAT MATTERS, and that is by design. `nightly.yml` reads the same leg
+# table but does NOT run this gate, and must not start. Owner ruling 2026-07-28: *"Nightly não tem
+# que correr fixpoint mesmo, não é pra isso"* — the nightly proves the BETWEEN-runs property (same
+# tree + same seed + same toolchain ⇒ same bytes, against the gated PR run's assets); this gate
+# proves `gen2 == gen3` WITHIN one run. Two questions, two workflows. The `fixpoint_backend` field
+# simply travels with the table it lives in.
 #
 # THE FOUR LINUX LEGS ARE EXPECTED TO BE RED WHILE THIS STANDS, and the red is the deliverable.
 # Owner ruling 2026-07-28: *"verá que não passará nada."* The native backend does not build the
