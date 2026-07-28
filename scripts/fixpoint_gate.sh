@@ -74,6 +74,9 @@
 #                          Same reason build_with_seed_fallback.sh pins it: a compiler resolves
 #                          teko_rt.{h,c} relative to ITS OWN argv[0], so a generation living
 #                          outside the tree would otherwise compile against the wrong runtime.
+#   TEKO_FIXPOINT_BACKEND  which backend the two generations are built with (default `c` — see
+#                          `build_gen`). Set to `native` once the native route self-hosts; that is
+#                          the .32/.33 switch, not a knob for day-to-day use.
 #   TEKO_FIXPOINT_MODE     `bootstrap` | `native` — force the mode instead of observing it. Only
 #                          for testing the gate itself; CI must let it observe, or the automatic
 #                          migration above stops being automatic.
@@ -134,13 +137,34 @@ W="$(cd "$W" && pwd)"
 # build_gen COMPILER LOGFILE — builds $PROJ at the FIXED path $W/out with COMPILER, dry
 # (`--no-verify --release` — the test gate belongs to the test lanes, owner ruling 2026-07-27).
 # Echoes nothing; the caller inspects $W/out.
+# THE BACKEND IS PINNED HERE, INSIDE THE SUBSHELL, AND THAT SCOPE IS THE WHOLE POINT.
+#
+# `gen1` (the wagon's own compiler) defaults to the NATIVE backend, which cannot yet build the
+# compiler — so without asking for the C route there is no gen2 and no fixpoint. `TEKO_BACKEND=c`
+# is what the .31 plan restores it for (owner, 2026-07-27: *".31 com as duas rotas, .32 ensina o
+# nativo, .33 remove"*).
+#
+# WHY NOT EXPORT IT IN THE WORKFLOW STEP, which is the obvious place: because a global
+# `TEKO_BACKEND=c` LEAKS INTO EVERYTHING THAT RUNS BELOW IT, and that is not a hypothetical — it
+# was measured. Running the suite with it set turned `diagnostics.tkr` red: the scenario
+# *"an unsupported TEKO_TARGET is an honest compile error"* got exit 0, because `TEKO_TARGET` is
+# only consulted while the NATIVE backend is active. The regressors exist to exercise the native
+# route; handing them the C one makes them assert something else entirely, and `cwd_build` went
+# "green" the same way — not fixed, just compiled by another road.
+#
+# So the variable lives in THIS subshell, around THESE two builds, and nowhere else. The suite
+# keeps running on the native default, which is what it is for.
+#
+# REMOVE IT when the native backend self-hosts (.32/.33): at that point gen2 comes from the native
+# route and pinning C here would be measuring the road we are retiring.
 build_gen() {
     bg_bin="$1"; bg_log="$2"
     rm -rf "$W/out"
+    bg_backend="${TEKO_FIXPOINT_BACKEND:-c}"
     if [ -n "$RT_DIR" ]; then
-        ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
     else
-        ( cd "$PROJ" && "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        ( cd "$PROJ" && TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
     fi
 }
 
@@ -223,20 +247,41 @@ else
     cmp "$W/$LEFT" "$W/$RIGHT" >&2 2>&1 || true
 fi
 
+# ZERO-C IS REPORTED, NOT ENFORCED — a DATED window, not a permanent softening. Owner ruling
+# 2026-07-27: *"pode remover por hora a validação de no-c para este caso"*, inside the release plan
+# he set out the same night: **.31 ships with BOTH routes alive** (the C emitter restored, the
+# native backend still exercised by default), **.32 teaches the native backend**, **.33 removes C
+# for good**. Under that plan a generation emitting C in .31/.32 is the DESIGNED state, so failing
+# on it would red every run for doing precisely what the version asks of it.
+#
+# WHAT STILL FAILS, and it is the half that carries the meaning: `gen2 == gen3` byte for byte —
+# THIS COMPILER REBUILDS ITSELF. That claim is enforced above and never relaxed.
+#
+# THIS IS NOT THE SOFT MODE RETURNING. That one printed `FAILED` and exited 0 — a lane green over a
+# stated defect. Here the verdict tells the truth about the version it is running in: the byte
+# fixpoint is REQUIRED and reported as such; the zero-C is an ANNOUNCED goal with a version
+# attached, reported every run so its arrival is never a surprise.
+#
+# TO RE-ARM IT (the .33 wagon): set ZERO_C_ENFORCED=1 below. One line.
+ZERO_C_ENFORCED="${TEKO_FIXPOINT_ZERO_C:-0}"
 CL="$(cat "$W/$LEFT.emitted-c" 2>/dev/null || echo '?')"
 CR="$(cat "$W/$RIGHT.emitted-c" 2>/dev/null || echo '?')"
 if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
     log "zero-C: neither generation emitted a teko.c  ✓"
-else
-    # NOT a failure of the byte check, and deliberately not folded into it. Emitting C is the
-    # EXPECTED state until the native backend can build the compiler; what this line does is make
-    # the outstanding half visible on every run instead of only when someone reads a build log.
-    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  ✗ (the native backend does not yet build the compiler)"
+elif [ "$ZERO_C_ENFORCED" = "1" ]; then
+    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  ✗ (enforced — TEKO_FIXPOINT_ZERO_C=1)"
     FIX_OK=0
+else
+    log "zero-C: $LEFT emitted-c=$CL, $RIGHT emitted-c=$CR  — REPORTED, not enforced (the .33 goal;"
+    log "        .31 ships both routes on purpose). Set TEKO_FIXPOINT_ZERO_C=1 to make it bite."
 fi
 
 [ "$FIX_OK" = "1" ] || verdict_fail "the fixpoint has not arrived — see the two lines above for which half is outstanding"
 
-log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte, and neither emitted C"
+if [ "$CL" = "0" ] && [ "$CR" = "0" ]; then
+    log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte, and neither emitted C"
+else
+    log "VERDICT: PASSED — $LEFT == $RIGHT byte for byte. (Both still emit C: the .33 goal, reported above.)"
+fi
 rm -rf "$W"
 exit 0
