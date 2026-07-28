@@ -144,3 +144,81 @@ fn lvt_named_type_name_still_honest_stops_on_non_struct_receiver() {
     let fa = checker::TExpr { kind = checker::TFieldAccess { receiver = recv; field = "bogus" }; type = lwt_prim(checker::PrimKind::I64); line = 0; col = 0 }
     teko::assert::str_contains(lwt_lower_expr_text(fa), "native backend N1: field/index access on a non-struct receiver not yet lowered (N2)")
 }
+
+/**
+ * lvt_declared_shape_items — the program items of a DECLARED variant fixture: `struct Box { v: i64 }`,
+ * `struct Cup { w: i64 }` and `type Shape = variant Box | Cup`, in that order.
+ *
+ * The struct declarations are what makes this a REAL declared variant and not a name list: the
+ * variant body is expanded through the checker's own resolver over the program's own type table, so
+ * a member that is not itself a declaration would never resolve to its canonical type.
+ *
+ * @return the three type declarations, as program items
+ */
+fn lvt_declared_shape_items() -> []checker::TItem {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_struct_decl("Box", teko::list::push(teko::list::empty(), lwt_field("v", "i64"))))
+    items = teko::list::push(items, lwt_struct_decl("Cup", teko::list::push(teko::list::empty(), lwt_field("w", "i64"))))
+    let members = teko::list::push(teko::list::push(teko::list::empty(), "Box"), "Cup")
+    teko::list::push(items, lwt_variant_decl("Shape", members))
+}
+
+/**
+ * lvt_program_text — the printed LIR of a whole program, or `"ERR: <message>"` when it fails to
+ * lower. Goes through `lower_program` and not `lower_function` on purpose: the declared-variant
+ * table is a WHOLE-PROGRAM fact, so a fixture that lowered one function in isolation would assert
+ * against an empty table and prove nothing.
+ *
+ * @param items  the program's items, in order
+ * @return       the printed module, or the honest stop's message
+ */
+fn lvt_program_text(items: []checker::TItem) -> str {
+    match lower_program(checker::TProgram { items = items }) {
+        LModule as m => print_lmodule(m)
+        error as e => teko::str::concat("ERR: ", e.message)
+    }
+}
+
+#test
+/**
+ * lvt_declared_variant_match_tests_the_tag_of_every_arm — THE SILENT-MISCOMPILATION GUARD: a `match`
+ * over a subject whose declared type is a DECLARED variant (`Named{"Shape"}`, the nominal shape
+ * `checker::resolve_named` keeps a user type in) tests each arm's TAG.
+ *
+ * It used to emit NO test at all: `lower_bind_pattern_test` matched `checker::Variant` — the shape an
+ * INLINE `A | B` arrives as — and a `Named` that is not a registered enum fell through to "always
+ * matches", so the first arm's jump was unconditional and every subject ran the FIRST arm. That is a
+ * wrong ANSWER, not a stop, and the assertion below is the one shape that separates the two: a
+ * comparison per arm, against a DIFFERENT constant per arm.
+ */
+fn lvt_declared_variant_match_tests_the_tag_of_every_arm() {
+    let subject = checker::TExpr { kind = checker::TVar { name = "s"; is_func = false; func_ns = "" }; type = checker::Named { name = "Shape" }; line = 0; col = 0 }
+    mut arms = teko::list::push(teko::list::empty(), lwt_arm(lwt_bind_pattern("Box", "b"), teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(1)))))
+    arms = teko::list::push(arms, lwt_arm(lwt_bind_pattern("Cup", "c"), teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(2)))))
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_match_value(subject, arms, checker::PrimKind::I64)))
+    let params = teko::list::push(teko::list::empty(), lwt_param("s", "Shape"))
+    let items = teko::list::push(lvt_declared_shape_items(), lwt_fn_item("arm_of", "teko::demo", params, lwt_prim(checker::PrimKind::I64), body))
+    let text = lvt_program_text(items)
+    teko::assert::str_contains(text, "icmpeq")
+    teko::assert::str_contains(text, "= const 0")
+    teko::assert::str_contains(text, "= const 1")
+    teko::assert::str_contains(text, "load.i32")
+}
+
+#test
+/**
+ * lvt_declared_variant_return_wraps_the_case_into_the_uniform_wrapper — the CONSTRUCTION half of the
+ * same defect: `return Box { v = 7 }` out of a function declared `-> Shape` (a DECLARED variant)
+ * builds the uniform 24-byte tag+payload wrapper, exactly as it does for an inline `Box | error`.
+ *
+ * Before the fix `lower_value_into_type` saw a `Named` and lowered the value PLAINLY: no wrapper, no
+ * tag — which is why the always-matching first arm read a payload at offset 0 and "worked". Both
+ * halves have to be asserted, because either one alone still produces a wrong answer.
+ */
+fn lvt_declared_variant_return_wraps_the_case_into_the_uniform_wrapper() {
+    let body = teko::list::push(teko::list::empty(), lwt_ret(lvt_box_init(7)))
+    let items = teko::list::push(lvt_declared_shape_items(), lwt_fn_item("mk", "teko::demo", teko::list::empty(), checker::Named { name = "Shape" }, body))
+    let text = lvt_program_text(items)
+    teko::assert::str_contains(text, "alloca 24, align 8")
+    teko::assert::str_contains(text, "store.i32")
+    teko::assert::str_contains(text, "store.ptr")
+}
