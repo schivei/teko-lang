@@ -89,6 +89,31 @@ under you, with no error anywhere.
 `m16` is the boundary the loop's own comment names (*"If ALL arms diverge the match type is void"*),
 so it is the case where a wrong `have_type` shows up as a type out of nowhere.
 
+### The FAT-RESULT axis — what the match PRODUCES, not what it consumes
+
+Every case above varies the match's SUBJECT and leaves its result a scalar. `bulk`'s `q005` showed
+that the other end matters just as much, and stops somewhere else entirely:
+
+    native backend N1: fat-pointer receiver `match-expression` not yet lowered (N2)
+    [in `bulk::q005_base_widened_from_a_derived_class_null::speak_or`]
+
+That is not `prim_kind_of`. `lower_fat_expr` accepts a CLOSED set of ptr+len producers — string
+literal, array literal, bound local, struct field, `if`-expression (degrau 5), direct call (degrau
+call-gordo) — and a `match`-value is not among them. Its own doc-comment already names the gap:
+*"Any other producer (a deeper index chain, a `match`-value, …) honest-stops."*
+
+`q005` reaches it through a virtual class, a null-union AND a `str` return at once, so these cases
+strip the first two away to find which one is actually load-bearing:
+
+| case | axis |
+|---|---|
+| `m17_match_value_str`    | a `str`-valued match bound to a `let` — no class, no dispatch |
+| `m18_match_return_str`   | the `q005` shape minus the class: `fn … -> str { match … }`, a `u64 \| null` subject |
+| `m19_match_value_slice`  | the same producer with `[]u64` instead of `str` — is it `str`, or fat in general? |
+
+If all three STOP, the union and the class are both innocent and the missing degrau is the whole
+story. If `m19` lowers and `m17`/`m18` do not, the gap is narrower than `lower_fat_expr` suggests.
+
 ## The `tNN` control group — the same shapes with the binding ANNOTATED
 
 Owner ruling 2026-07-28: *"precisa de uma duplicata do mesmo teste, mas nesta, fixe os tipos (sem
