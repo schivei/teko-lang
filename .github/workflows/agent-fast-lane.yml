@@ -223,47 +223,6 @@ jobs:
       # simply refused to look at them. `include-hidden-files: true` would also work, but staging to
       # a plain directory does not depend on the action's version, and it gives the log the sizes —
       # which is the evidence a reader needs to trust the seed before committing it.
-      # THE THIRD GENERATION — THE PUBLISHED SEED, and it is what turns this from a comparison into
-      # a BISECTION. Owner ruling 2026-07-28: *"testar o mesmo conjunto com o 0.3.0.30-beta (a última
-      # lançada), se o comportamento for o mesmo, dará trabalho encontrar, se não, então o erro está
-      # no trem."*
-      #
-      # gen1 and gen2 are both THIS train: gen1 is `cc` over wagon 15's committed C, gen2 is what
-      # gen1 builds from the tip. Comparing only those two can say "the two disagree" but never
-      # "when did this start" — both live inside the window under suspicion.
-      #
-      # 0.3.0.30-beta is the last PUBLISHED binary, cut before this train existed. So the table it
-      # produces is a fixed point outside the window, and it splits the search in half:
-      #
-      #   seed table == gen1/gen2  ->  the behaviour PREDATES the train. Old, and hard: the bisect
-      #                               runs back through released history, not through this wagon.
-      #   seed table != gen1/gen2  ->  the train introduced it, and the bisect is bounded by commits
-      #                               we still have in front of us.
-      #
-      # `continue-on-error` on the provision step as well: no network, no release, no problem — the
-      # other two tables still print. An instrument that can fail the run is a worse instrument.
-      - name: Provision the published 0.3.0.30-beta seed (the bisection anchor, never fails)
-        id: seed_anchor
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -eu
-          sh scripts/ci_provision_teko.sh macos-arm64
-          ls -la .seed/ || true
-
-      - name: Probe — the SAME shapes under the PUBLISHED seed (temporary, never fails)
-        if: ${{ always() }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -u
-          if [ -x .seed/teko ]; then
-              .seed/teko --version || true
-              sh examples/probes/match_shapes/run.sh .seed/teko seed-0.3.0.30
-          else
-              echo "match_shapes: no published seed available on this runner — anchor skipped"
-          fi
-
       - name: Stage the emitted C for harvest (only from a fixpoint that HELD)
         if: ${{ success() }}
         shell: bash
@@ -337,3 +296,52 @@ jobs:
         if: ${{ always() && github.event.inputs.run_tests != 'false' && hashFiles('teko-test.log') != '' }}
         shell: bash
         run: sh scripts/no_skips_gate.sh teko-test.log
+
+  # THE .30 ANCHOR RUNS ON ITS OWN LEG, ON LINUX, and the split is forced by the artifact rather
+  # than chosen. Owner, 2026-07-28: *".30 está como release na fork"* — and it is, but the fork's
+  # release says what it is: *"Dry fork-scoped **linux-x86_64-glibc** seed … Canonical
+  # multi-platform release lives on the org."* One binary, one platform, and not the platform the
+  # fast lane runs on. Asking a macOS runner for a `macos-arm64` asset of that release is what
+  # produced "no usable seed" — the asset does not exist, and no retry was going to conjure it.
+  #
+  # A DIFFERENT HOST IS ACCEPTABLE HERE, and this workflow already argues why: the shapes under test
+  # live in the SHARED front half of lowering, not in an arch backend, which is the same reasoning
+  # that lets the fast lane pick its runner on wall-clock alone. A lowering stop reproduces
+  # identically across hosts — the wagon's six legs spent all day proving exactly that by failing
+  # with one sentence everywhere.
+  #
+  # It needs no gen1 and no fixpoint: it downloads a published compiler and asks it the same 29
+  # questions. Under a minute, and it never fails.
+  anchor:
+    name: theory / .30 anchor (the published seed, Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision the published 0.3.0.30-beta seed FROM THE FORK
+        id: seed
+        continue-on-error: true
+        shell: bash
+        env:
+          TEKO_SEED_REPO: schivei/teko-lang
+        run: |
+          set -eu
+          sh scripts/ci_provision_teko.sh linux-x86_64-glibc
+          ls -la .seed/ || true
+
+      - name: Probe — the 29 shapes under the PUBLISHED .30 (temporary, never fails)
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -u
+          if [ -x .seed/teko ]; then
+              .seed/teko --version || true
+              sh examples/probes/match_shapes/run.sh .seed/teko seed-0.3.0.30
+          else
+              echo "match_shapes: the fork's .30 seed did not provision — anchor has no data this run"
+          fi
