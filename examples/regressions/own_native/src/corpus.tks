@@ -450,3 +450,119 @@ fn f_short_circuit_and_or() -> i64 {
     if !(sc_yes(1) && sc_no(2) || sc_yes(3)) { return 11 }
     0
 }
+
+/**
+ * BoxPt — the pushed AGGREGATE element. Two 8-byte fields, so a mistaken 8-byte-wide copy of the
+ * instance would carry `x` and lose `y`.
+ */
+type BoxPt = struct {
+    /** x — the iteration counter, straight. */
+    x: i64
+
+    /** y — the iteration counter times ten, so a stale copy is visible in two independent fields. */
+    y: i64
+}
+
+/**
+ * BoxCounter — the CLASS arm of the same claim: a class instance is laid out by the same collector
+ * a struct is, so a push must box it with the same width.
+ */
+type BoxCounter = class {
+    /** seen — the value this instance was constructed with. */
+    pub seen: i64
+
+    /**
+     * make — the static factory (a class literal reads better through one named producer).
+     *
+     * @param v  the value to record
+     * @return   a fresh BoxCounter holding `v`
+     */
+    pub fn make(v: i64) -> BoxCounter { BoxCounter { seen = v } }
+}
+
+/**
+ * push_pts — accumulate `n` distinct `BoxPt` instances through `teko::list::push`, ONE PER LOOP
+ * ITERATION. This is the shape degrau 4 closed: the native backend's value for a struct is the
+ * address of an `alloca`, and an `alloca` is one frame slot per INSTRUCTION, so a push that stored
+ * that address directly would store the SAME address `n` times.
+ *
+ * @param n  how many elements to accumulate
+ * @return   the accumulated list
+ */
+fn push_pts(n: i64) -> []BoxPt {
+    mut ps: []BoxPt = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        ps = teko::list::push(ps, BoxPt { x = i; y = i * 10 })
+        i++
+    }
+    ps
+}
+
+/**
+ * f_push_aggregate_in_loop — a push of a STRUCT inside a loop must yield `n` DISTINCT elements.
+ * Without degrau 4's fresh per-execution box the program did not compile at all (the native backend
+ * honest-stopped on the aggregate element), and the naive stand-in it refused — pushing the
+ * `alloca`'s address as-is — makes every element read back as a copy of the LAST one, which is
+ * exactly what the element-by-element check below catches.
+ *
+ * @return 0 when every element carries its own iteration's values, else the number of the failing
+ *         check
+ */
+fn f_push_aggregate_in_loop() -> i64 {
+    let ps = push_pts(4)
+    if ps.len != 4 { return 1 }
+    mut i: i64 = 0
+    loop {
+        if i >= 4 { break }
+        if ps[i].x != i { return 2 }
+        if ps[i].y != i * 10 { return 3 }
+        i++
+    }
+    if ps[0].x == ps[3].x { return 4 }
+    if ps[0].y == ps[3].y { return 5 }
+    0
+}
+
+/**
+ * f_push_aggregate_copies_the_item — a pushed aggregate is a COPY: mutating the source binding
+ * after the push must not reach the element the list holds. The address model without a box shares
+ * one frame slot between the binding and the list, so the mutation would be visible through the
+ * list too.
+ *
+ * @return 0 when the pushed element kept the values it was pushed with, else the failing check
+ */
+fn f_push_aggregate_copies_the_item() -> i64 {
+    mut p = BoxPt { x = 1; y = 2 }
+    mut ps: []BoxPt = teko::list::empty()
+    ps = teko::list::push(ps, p)
+    p.x = 99
+    p.y = 98
+    if ps.len != 1 { return 1 }
+    if ps[0].x != 1 { return 2 }
+    if ps[0].y != 2 { return 3 }
+    0
+}
+
+/**
+ * f_push_class_in_loop — the CLASS arm of `f_push_aggregate_in_loop`: a class instance pushed once
+ * per iteration must read back as its own iteration's value, through a method as well as a field.
+ *
+ * @return 0 when every element carries its own iteration's value, else the number of the failing
+ *         check
+ */
+fn f_push_class_in_loop() -> i64 {
+    mut cs: []BoxCounter = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 3 { break }
+        cs = teko::list::push(cs, BoxCounter::make(i * 7))
+        i++
+    }
+    if cs.len != 3 { return 1 }
+    if cs[0].seen != 0 { return 2 }
+    if cs[1].seen != 7 { return 3 }
+    if cs[2].seen != 14 { return 4 }
+    0
+}
