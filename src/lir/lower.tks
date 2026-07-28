@@ -934,9 +934,94 @@ fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata | null {
     null
 }
 
-/** lower_binary — lower left then right, then emit the LBin chosen by the RESULT's
-    PrimKind (S/U/F picked in lbinop_of). Out-of-subset operators honest-stop. */
+/**
+ * is_short_circuit_op — is this token one of the two SHORT-CIRCUITING logical operators
+ * (`&&`, `||`)? They are the only binary operators whose right operand is conditionally
+ * evaluated, so they are lowered as control flow (`lower_logical`) and never reach
+ * `lbinop_of`'s opcode table.
+ *
+ * @param op  the binary operator token
+ * @return    true for `&&` and `||`, false for every other binary operator
+ */
+fn is_short_circuit_op(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::AndAnd || op == lexer::TokenKind::OrOr
+}
+
+/**
+ * short_circuit_value — the constant a short-circuiting operator merges when the LEFT operand
+ * already decides the result: 0 (false) for `&&`, 1 (true) for `||`.
+ *
+ * @param op  the short-circuiting operator token (`&&` or `||`)
+ * @return    the i64 constant the deciding arm carries to the merge block
+ */
+fn short_circuit_value(op: lexer::TokenKind) -> i64 {
+    if op == lexer::TokenKind::AndAnd { return 0 }
+    1
+}
+
+/**
+ * lower_logical — lower `a && b` / `a || b` with SHORT-CIRCUIT semantics: branch on `a`, and
+ * evaluate `b` only on the arm where `a` did not already decide the result. Three blocks, in
+ * `lower_coalesce`'s shape: a `rhs` block that lowers the right operand, a `short` block that
+ * materializes the deciding constant (`short_circuit_value`), and a merge block whose single
+ * block-arg IS the expression's value. `&&` sends true to `rhs` and false to `short`; `||` sends
+ * true to `short` and false to `rhs`.
+ *
+ * The right operand must NOT be lowered eagerly (which is what `lower_binary` does for every
+ * other operator, and why this interception happens before it): the compiler's own source is
+ * full of `p != null && p.field` guards whose right side is only well-defined when the left
+ * side held. Lowering `&&` to a bitwise `IAnd` would evaluate both sides and miscompile them.
+ *
+ * The final context is built from the RIGHT operand's OWN post-lowering context, never from the
+ * pre-branch one — `ctx_with` copies every non-`func`/`block_id`/`env` field (rodata, lifted
+ * closures, …) from its FIRST argument, so sourcing it from the pre-branch context would
+ * silently drop whatever the right operand interned (the C1-6 miscompile class `lower_coalesce`
+ * documents). Each arm closes through `close_arm_to`, so an operand that already terminated its
+ * block (a diverging call) does not get a dead second terminator.
+ *
+ * @param ctx  the lowering context to append the expression's instructions into
+ * @param e    the logical expression (carries its source line/column)
+ * @param b    the typed binary node — its `op` is `&&` or `||`, both operands typed `bool`
+ * @return     the appended context (now emitting into the merge block) plus the merge
+ *             block-param VReg holding the 0/1 result
+ * @throws     when either operand is itself out of the lowered subset
+ */
+fn lower_logical(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
+    let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
+    let rhsb = alloc_block(lo.ctx.func)
+    let shortb = alloc_block(rhsb.func)
+    let mergeb = alloc_block(shortb.func)
+    let mp = add_block_param(mergeb.func, mergeb.block_id)
+    let is_and = b.op == lexer::TokenKind::AndAnd
+    let t_target = if is_and { rhsb.block_id } else { shortb.block_id }
+    let f_target = if is_and { shortb.block_id } else { rhsb.block_id }
+    let br = branch_inst(lo.vreg, t_target, teko::list::empty(), f_target, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(lo.ctx, mp.func, lo.ctx.block_id, lo.ctx.env), br)
+    let shortr = ctx_alloc(ctx_goto(ctx1, shortb.block_id))
+    let with_const = ctx_append(shortr.ctx, const_int_inst(shortr.vreg, short_circuit_value(b.op), e.line, e.col))
+    let short_args = teko::list::push(teko::list::empty(), shortr.vreg)
+    let short_func = close_arm_to(with_const, mergeb.block_id, short_args, e.line, e.col)
+    let rhs_ctx = ctx_with(with_const, short_func, rhsb.block_id, ctx1.env)
+    let ro = match lower_expr(rhs_ctx, b.right) { Lowered as x => x; error as err => return err }
+    let rhs_args = teko::list::push(teko::list::empty(), ro.vreg)
+    let rhs_func = close_arm_to(ro.ctx, mergeb.block_id, rhs_args, e.line, e.col)
+    Lowered { ctx = ctx_with(ro.ctx, rhs_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
+}
+
+/**
+ * lower_binary — lower a binary expression. `&&`/`||` are intercepted FIRST and lowered as
+ * short-circuiting control flow (`lower_logical`); every other operator lowers left then right
+ * and emits the LBin chosen by the RESULT's PrimKind (the S/U/F variant picked in `lbinop_of`).
+ *
+ * @param ctx  the lowering context to append the expression's instructions into
+ * @param e    the binary expression (carries its result type and source position)
+ * @param b    the typed binary node (the operator token and both operands)
+ * @return     the appended context plus the VReg holding the expression's value
+ * @throws     when either operand is out of the lowered subset, or the operator has no LBinOp
+ *             in the lowered subset
+ */
 fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
+    if is_short_circuit_op(b.op) { return lower_logical(ctx, e, b) }
     let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
     let ro = match lower_expr(lo.ctx, b.right) { Lowered as x => x; error as err => return err }
     let k = match prim_kind_of(e.type, ctx.enums, "binary result") { checker::PrimKind as p => p; error as err => return err }
