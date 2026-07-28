@@ -593,6 +593,24 @@ fn is_c_keyword(s: str) -> bool {
 pub type LEnumInfo = struct { name: str; members: []str }
 
 /**
+ * LVariantDef — one declared `type X = variant A | B | …` declaration's name + the EXPANDED union
+ * type its body denotes (its members, in declared tag order, as resolved `checker::Type`s).
+ *
+ * WHY THE TABLE EXISTS AT ALL. `checker::resolve_named` keeps a user type NOMINAL: a value of a
+ * DECLARED variant reaches this backend typed `Named{"ns::X"}`, never as the `checker::Variant`
+ * an INLINE `A | B` union arrives as. Every union-shaped decision here — the wrapper a value is
+ * constructed into (`lower_value_into_type`) and the tag a `match` arm tests
+ * (`lower_bind_pattern_test`) — matched on `checker::Variant` alone, so BOTH halves silently
+ * degenerated for a declared variant: no wrapper was built, and every bind pattern answered "always
+ * matches", which handed every subject to the FIRST arm. Two wrongs that cancel on arm one and
+ * produce a WRONG ANSWER, with no diagnostic, on every other arm. This table is what
+ * `expand_named_variant` turns that `Named` back into.
+ *
+ * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
+ */
+pub type LVariantDef = struct { name: str; ty: checker::Variant }
+
+/**
  * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
  * FOREIGN symbol it binds to (C7.1a: `extern fn f(…) -> T = "sym"`). A call to
  * an `extern` must target that raw symbol, NOT the Teko namespace mangling —
@@ -668,6 +686,12 @@ pub type LowerCtx = struct {
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
     flat_symbols: bool; ret_type: checker::Type
     has_ret_len_slot: bool; ret_len_slot: u32
+    /**
+     * variants — the program's declared-`variant` table, threaded read-only exactly like `enums`:
+     * the ONE place `expand_named_variant` turns a nominal `Named` back into the union it declares,
+     * so a value's wrapper and a `match` arm's tag test agree on the member list.
+     */
+    variants: []LVariantDef
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -698,6 +722,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
     LowerCtx {
         func = func; block_id = block_id; env = env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
@@ -717,6 +742,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
@@ -736,6 +762,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
+        variants = ctx.variants
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
@@ -755,6 +782,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
@@ -774,6 +802,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
     LowerCtx {
         func = ctx.func; block_id = ctx.block_id; env = ctx.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
@@ -2677,6 +2706,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
     let ctx0 = LowerCtx {
         func = seed.func; block_id = 0; env = seed.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = false; ret_len_slot = 0
@@ -2803,7 +2833,7 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
-    match bound {
+    match expand_named_variant(bound, ctx.variants) {
         checker::Variant as v => match null_union_payload(v) {
             checker::Type as payload => lower_value_into_null_union(ctx, payload, value)
             null => lower_value_into_variant(ctx, v, value)
@@ -2825,7 +2855,7 @@ fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TE
  * @throws  propagated from lowering the value or the wrapper's payload
  */
 fn lower_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: checker::TExpr) -> Lowered | error {
-    match value.type {
+    match expand_named_variant(value.type, ctx.variants) {
         checker::Variant => lower_expr(ctx, value)
         _ => lower_null_union_construct(ctx, payload, value)
     }
@@ -2847,7 +2877,7 @@ fn lower_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: che
  * @since 0.3.1 (own-backend general variant construction, degrau N2)
  */
 fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
-    match value.type {
+    match expand_named_variant(value.type, ctx.variants) {
         checker::Variant => lower_expr(ctx, value)
         _ => lower_variant_construct(ctx, v, value)
     }
@@ -3634,6 +3664,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
     LowerCtx {
         func = body_done.func; block_id = exit_block; env = exit_env
         layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
+        variants = body_done.variants
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
@@ -4056,12 +4087,13 @@ type MatchSubjOut = struct { ctx: LowerCtx; subj: MatchSubj }
  * @throws  when the subject expression itself fails to lower (propagated)
  */
 fn lower_match_subject(ctx: LowerCtx, subject: checker::TExpr) -> MatchSubjOut | error {
-    if is_fat_type(subject.type) {
+    let sty = expand_named_variant(subject.type, ctx.variants)
+    if is_fat_type(sty) {
         let fo = match lower_fat_expr(ctx, subject) { LoweredFat as x => x; error as err => return err }
-        return MatchSubjOut { ctx = fo.ctx; subj = MatchSubj { ty = subject.type; vreg = fo.ptr; is_fat = true; len = fo.len } }
+        return MatchSubjOut { ctx = fo.ctx; subj = MatchSubj { ty = sty; vreg = fo.ptr; is_fat = true; len = fo.len } }
     }
     let lo = match lower_expr(ctx, subject) { Lowered as x => x; error as err => return err }
-    MatchSubjOut { ctx = lo.ctx; subj = MatchSubj { ty = subject.type; vreg = lo.vreg; is_fat = false; len = 0 } }
+    MatchSubjOut { ctx = lo.ctx; subj = MatchSubj { ty = sty; vreg = lo.vreg; is_fat = false; len = 0 } }
 }
 
 /**
@@ -4168,10 +4200,16 @@ fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type) ->
 
 /**
  * variant_member_type_matches — does variant member `member` match a value of type `value_ty`?
- * A `Named` member matches by canonical NAME (two structurally-equal-but-differently-named
- * types are DIFFERENT cases); every other member kind matches by its own KIND alone — the non-
+ * A `Named` member matches by canonical NAME (two structurally-equal-but-differently-named types are
+ * DIFFERENT cases); every other member kind matches by its own KIND alone — the non-
  * nominal cases this backend's A1-5+ subset constructs (`error`, a primitive/`byte`/`str`/slice)
  * carry no further per-case identity beyond their kind (#382, degrau N2).
+ *
+ * THE NOMINAL MATCH STAYS EXACT (canonical name against canonical name) — a DECLARED variant's
+ * members are expanded into their CANONICAL names (`collect_variant_defs` resolves the body through
+ * `declared_type_table`, whose keys the checker's own resolver reads), so two same-bare-named types
+ * in different namespaces remain DISTINCT cases here. A member spelled bare would fail this compare
+ * with a NAMED stop, never with a wrong case.
  *
  * @param checker::Type member  one of the variant's declared members
  * @param checker::Type value_ty  the value's own resolved type
@@ -4579,6 +4617,40 @@ fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo | null {
         i++
     }
     null
+}
+
+/**
+ * expand_named_variant — a DECLARED variant's nominal type (`Named{"ns::Shape"}`) replaced by the
+ * expanded `checker::Variant` its declaration denotes; every other type unchanged.
+ *
+ * THIS IS THE WHOLE FIX for the declared-variant miscompilation, and it is ONE function on purpose.
+ * `checker::resolve_named` keeps a user type nominal, so `type Shape = variant Circle | Square`
+ * reaches this backend as a `Named` — while every union-shaped decision here matches on
+ * `checker::Variant`. Both halves of the union protocol therefore degenerated at once:
+ * `lower_value_into_type` built NO tag+payload wrapper, and `lower_bind_pattern_test` answered
+ * "always matches" for every arm, so the FIRST arm swallowed every subject. The two wrongs cancel
+ * on arm one (the whole-value bind reads the unwrapped payload at offset 0) and produce a SILENT
+ * WRONG ANSWER on every other — no stop, no diagnostic, a `Square` running the `Circle` arm.
+ *
+ * Expanding at the ONE place a type enters a union-shaped decision — the match subject
+ * (`lower_match_subject`) and the placement's declared type + the placed value's own type
+ * (`lower_value_into_type`) — is what keeps the two halves in agreement: construction and test read
+ * the SAME member list, in the same order, out of the same table.
+ *
+ * @param checker::Type t  the type as the checker resolved it
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return checker::Type  `t`'s expanded union when it names a declared variant, else `t` itself
+ * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
+ */
+fn expand_named_variant(t: checker::Type, variants: []LVariantDef) -> checker::Type {
+    let name = match t {
+        checker::Named as n => n.name
+        _ => return t
+    }
+    match find_variant_def(variants, name) {
+        LVariantDef as def => def.ty
+        null => t
+    }
 }
 
 /**
@@ -7324,7 +7396,7 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
  *           degrau, #382 N2).
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let fat_ret = is_fat_type(f.return_type)
@@ -7337,6 +7409,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
     let ctx0 = LowerCtx {
         func = with_slot.func; block_id = 0; env = with_slot.env
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
+        variants = variants
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
@@ -7501,20 +7574,20 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     let enums = collect_enums(prog)
     let layouts = match collect_struct_layouts(prog, enums) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
-    let variants = collect_variants(prog)
+    let variants = collect_variant_defs(prog)
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
     mut lifted: []LFunc = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols) { LoweredFunction as x => x; error as err => return err }
+    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
 }
 
@@ -8032,9 +8105,9 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -8109,10 +8182,10 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
@@ -8142,11 +8215,12 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  *                                  rodata/lifted tables; the `error` arm when
  *                                  any loose statement fails to lower
  */
-fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool) -> LoweredFunction | error {
+fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LoweredFunction | error {
     let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
         layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
+        variants = variants
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
