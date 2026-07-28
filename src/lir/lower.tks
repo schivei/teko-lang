@@ -1272,10 +1272,117 @@ fn lower_bool_and(ctx: LowerCtx, a_vreg: u32, b_vreg: u32, line: u32, col: u32) 
     Lowered { ctx = ctx_with(ctx, after_else, mergeb.block_id, ctx.env); vreg = mp.vreg }
 }
 
+/**
+ * is_str_type — is `t` exactly `str`? The narrower sibling of `is_fat_type`: a `[]T` is fat too,
+ * but only a `str` has a runtime equality entry to compare with.
+ *
+ * @param checker::Type t  the operand's own resolved type
+ * @return bool  whether `t` is `str`
+ * @since 0.3.1.0 (degrau 7 — string equality)
+ */
+fn is_str_type(t: checker::Type) -> bool {
+    match t {
+        checker::Str => true
+        _ => false
+    }
+}
+
+/**
+ * lower_str_compare — `a == b` / `a != b` over two `str` operands, lowered to the runtime's own
+ * `tk_str_eq`. A string is TWO words, so it has no single `PrimKind` and no single machine
+ * comparison: `lower_compare`'s ICmp chain would have compared the POINTERS, answering "equal" only
+ * for two operands that are literally the same buffer.
+ *
+ * The call passes the ABI-FLATTENED pair of each side — `(a.ptr, a.len, b.ptr, b.len)` — which is
+ * exactly how a `tk_str` travels by value in the C ABI this backend's calls already follow (the same
+ * flattening `bind_fat_param` performs on the callee side). The runtime is not being EXTENDED: this
+ * is the existing `tk_str_eq` entry, called by symbol like `tk_slice_push` and `tk_alloc` are.
+ *
+ * The result is normalized through a compare against zero rather than used raw: a C `bool` return
+ * only defines its low byte, and `!=` is then the SAME instruction with the opposite predicate.
+ * Ordered comparisons (`<`, `>=`, …) on strings honest-stop by name — they would need `tk_str_cmp`
+ * and a lexicographic contract this backend has never claimed.
+ *
+ * @param LowerCtx ctx  the lowering context to append the call's instructions into
+ * @param checker::TExpr e  the comparison expression (its source position)
+ * @param checker::TCompare cmp  the comparison node (its `first` operand is a `str`)
+ * @return Lowered  the advanced context + the bool VReg of the equality
+ * @throws  for a CHAINED string comparison (`a == b == c`), for an ordered operator, or propagated
+ *          from lowering either operand as a fat-pointer producer
+ * @since 0.3.1.0 (degrau 7 — string equality)
+ */
+fn lower_str_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lowered | error {
+    if cmp.rest.len != 1 { return error { message = "native backend N1: a CHAINED `str` comparison (`a == b == c`) is not lowered (N2)" } }
+    let pred = match str_eq_predicate(cmp.rest[0].op) { LBinOp as p => p; error as err => return err }
+    let a = match lower_fat_expr(ctx, cmp.first) { LoweredFat as x => x; error as err => return err }
+    let b = match lower_fat_expr(a.ctx, cmp.rest[0].operand) { LoweredFat as x => x; error as err => return err }
+    let args = str_eq_call_args(a, b)
+    let called = ctx_alloc(b.ctx)
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, "tk_str_eq", args, false, e.line, e.col))
+    let clean = narrow_extern_return(Lowered { ctx = with_call; vreg = called.vreg }, str_eq_return_narrow(), e.line, e.col)
+    let zero = ctx_alloc(clean.ctx)
+    let with_zero = ctx_append(zero.ctx, const_int_inst(zero.vreg, 0, e.line, e.col))
+    let r = ctx_alloc(with_zero)
+    Lowered { ctx = ctx_append(r.ctx, bin_inst(r.vreg, pred, clean.vreg, zero.vreg, e.line, e.col)); vreg = r.vreg }
+}
+
+/**
+ * str_eq_return_narrow — the cleanup `tk_str_eq`'s C `bool` return needs: zero-extend the LOW BYTE
+ * and discard everything above it.
+ *
+ * NOT decoration — it is the difference between an answer and a coin flip. A C `bool` return only
+ * defines the low byte of the result register; `tk_str_eq`'s own body returns `memcmp(...) == 0`,
+ * so the bits above that byte carry whatever the comparison left behind. Testing the WHOLE register
+ * against zero therefore answered "equal" for two strings that differ — measured exactly that way
+ * before this narrowing was added. `extern_return_narrow` documents the same hole for a declared
+ * `extern fn` returning `bool` and leaves it open there; this call site closes it for itself.
+ *
+ * @return ExternNarrow  the 8-bit unsigned narrowing shape
+ * @since 0.3.1.0 (degrau 7 — string equality)
+ */
+fn str_eq_return_narrow() -> ExternNarrow { ExternNarrow { width = 8; is_signed = false } }
+
+/**
+ * str_eq_predicate — how the runtime's `tk_str_eq` answer is turned into the operator's own bool:
+ * `==` is "the answer is not zero", `!=` is "the answer is zero".
+ *
+ * @param lexer::TokenKind op  the comparison operator token
+ * @return LBinOp  the predicate to compare the call's result against zero with
+ * @throws  for an ORDERED operator on strings (`<`, `<=`, `>`, `>=`)
+ * @since 0.3.1.0 (degrau 7 — string equality)
+ */
+fn str_eq_predicate(op: lexer::TokenKind) -> LBinOp | error {
+    match op {
+        lexer::TokenKind::EqEq => LBinOp::ICmpNe
+        lexer::TokenKind::Ne => LBinOp::ICmpEq
+        _ => error { message = "native backend N1: an ORDERED `str` comparison (`<`/`<=`/`>`/`>=`) is not lowered (N2)" }
+    }
+}
+
+/**
+ * str_eq_call_args — the four ABI-flattened arguments of `tk_str_eq(a, b)`, in the order two
+ * by-value `tk_str` structs occupy: `a.ptr, a.len, b.ptr, b.len`.
+ *
+ * @param LoweredFat a  the left operand's (ptr, len) pair
+ * @param LoweredFat b  the right operand's (ptr, len) pair
+ * @return []u32  the call's argument VRegs, in ABI order
+ * @since 0.3.1.0 (degrau 7 — string equality)
+ */
+fn str_eq_call_args(a: LoweredFat, b: LoweredFat) -> []u32 {
+    mut args: []u32 = teko::list::empty()
+    args = teko::list::push(args, a.ptr)
+    args = teko::list::push(args, a.len)
+    args = teko::list::push(args, b.ptr)
+    args = teko::list::push(args, b.len)
+    args
+}
+
 /** lower_compare — a TCompare (`first` + `rest` chain) -> the chain of ICmp/FCmp opcodes,
-    ANDed together. A lone subject (no `rest`) is degenerate: its own value is already the
+    ANDed together. A `str` subject goes to `lower_str_compare` (two words, no single machine
+    comparison). A lone subject (no `rest`) is degenerate: its own value is already the
     bool result (mirrors emit_compare's C twin). */
 fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lowered | error {
+    if cmp.rest.len > 0 && is_str_type(cmp.first.type) { return lower_str_compare(ctx, e, cmp) }
     let lo = match lower_expr(ctx, cmp.first) { Lowered as x => x; error as err => return err }
     if cmp.rest.len == 0 { return Lowered { ctx = lo.ctx; vreg = lo.vreg } }
     let chain = match lower_compare_terms(lo.ctx, e, cmp.first.type, lo.vreg, cmp.rest) { CmpChain as c => c; error as err => return err }
