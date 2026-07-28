@@ -14,7 +14,7 @@
  *
  * @since 0.3.0.29
  */
-pub type TkrKind = enum { Exit; Print; Trap; CompileFail }
+pub type TkrKind = enum { Exit; Print; Trap; CompileFail; EmitOnly }
 
 /**
  * TkrMatchMode — how one output stream is checked: `Ignore` (no expectation), `Literal` (exact
@@ -976,8 +976,25 @@ fn tkr_step_subst(step: TkrStep, headers: []str, row: []str) -> TkrStep {
 /**
  * tkr_kind_for_verb — the `TkrKind` an entry verb / `it traps` selects: `compilation fails` ⇒
  * CompileFail, `it traps` ⇒ Trap, `built and run`/`compiled` ⇒ Print (both run and check the
- * declared streams; check_run treats Print and Exit alike bar the trap case). An unknown verb is an
- * honest error (M.3).
+ * declared streams; check_run treats Print and Exit alike bar the trap case), `built` ⇒ EmitOnly.
+ * An unknown verb is an honest error (M.3).
+ *
+ * `WHEN BUILT` — BUILD AND ASSERT THE ARTEFACT, NEVER RUN IT. Owner ruling 2026-07-28: *"vale
+ * incrementar o que o regressor faz (ensinar), é necessidade real."*
+ *
+ * The need is a CROSS row. `own_cross_x86_64_windows_emits_coff_and_skips_the_run` declares
+ * `When built and run` + `Then exit = 42`, and on any host that cannot exec a foreign-format binary
+ * the exit is never checked — so the runner honestly SKIPS it, and `no_skips_gate.sh` fails the
+ * lane. That skip was correct: the row really did leave a claim unverified.
+ *
+ * The old grammar had no way out. `Tkr.exit` is a bare `i32` with no "was it declared" bit, so a
+ * scenario omitting `Then exit` is indistinguishable from one asserting `exit = 0` — a row could
+ * not say *"I claim the OBJECT, not the RUN"*. `When built` is that sentence. Nothing is left
+ * unverified, so the row PASSES rather than skipping, and the gate keeps its teeth everywhere else.
+ *
+ * SAFE FOR THE BOOTSTRAP, and the owner named the reason: *"os testes só executam na gen2 nunca no
+ * seed."* The ladder builds dry (`--no-verify`) and never reads a `.tkr`, so only the tip needs to
+ * know this verb — a new entry keyword cannot break a seed that never parses one.
  *
  * @param verb  the entry verb text
  * @return      the selected kind, or an `error` for an unknown verb
@@ -987,6 +1004,7 @@ fn tkr_step_subst(step: TkrStep, headers: []str, row: []str) -> TkrStep {
 fn tkr_kind_for_verb(verb: str) -> TkrKind | error {
     if verb == "compilation fails" { return TkrKind::CompileFail }
     if verb == "it traps" { return TkrKind::Trap }
+    if verb == "built" { return TkrKind::EmitOnly }
     if verb == "built and run" || verb == "compiled" { return TkrKind::Print }
     error { message = teko::str::concat("tkr: unknown When entry verb: ", verb) }
 }
