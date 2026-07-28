@@ -223,3 +223,49 @@ Feature: short-circuit logical operators — the native backend branches instead
   Scenario: short_circuit_and_or (own-native — the right operand runs only when the left did not decide)
     When built and run
     Then exit = 42
+
+
+Feature: aggregate slice elements — the native backend boxes a pushed aggregate into fresh per-execution storage
+
+  # (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) The native backend holds a `[]struct` as a slice
+  # of ADDRESSES, and its value for a struct/class instance is the address of an `alloca` — ONE frame
+  # slot per INSTRUCTION. A push that stored that address as-is would store the SAME address every
+  # iteration of a loop, so the whole list would read back as N copies of the last item; the backend
+  # honest-stopped on it instead, which made every aggregate accumulation unbuildable — the compiler's
+  # own source (`[]EncWord`, `[]LInst`, `[]MInst`, …) first among them.
+  #
+  # The push now copies the aggregate into fresh root-arena storage (`tk_slice_elem_box`) and pushes
+  # THAT address. The rows are MEMBERS of this channel (one build, no extra cost) and each asserts its
+  # own exit: the loop row fails with the aliasing bug because its elements read back equal, and the
+  # copy row fails because a mutation of the source binding after the push reaches the element.
+  #
+  # STILL OPEN BY DECISION (owner 2026-07-28): assignment out of such a slice (`let a = ps[0]`) is an
+  # ALIAS, not a copy — the by-value element model is its own lane. Do not let a scenario here claim it.
+  Scenario: push_aggregate_in_loop (own-native — one distinct element per iteration)
+    When built and run
+    Then exit = 42
+
+  Scenario: push_aggregate_copies_the_item (own-native — the pushed element is a copy, not the binding)
+    When built and run
+    Then exit = 42
+
+  Scenario: push_class_in_loop (own-native — a class instance is boxed by the same layout width)
+    When built and run
+    Then exit = 42
+
+
+Feature: fat match-value — a `str`/`[]T`-valued match is a fat-pointer producer
+
+  # (0.3.1.0 degrau 5) `lower_fat_expr` accepted a CLOSED set of fat producers — string literal,
+  # array literal, bound local, struct field, `if`-expression, direct call — and a `match`-VALUE was
+  # not in it, so every `str`-returning function whose body is a match honest-stopped. The arm now
+  # exists (`lower_match_fat`): the same linear test chain the scalar match-value builds, merging TWO
+  # block-args (ptr, len) instead of one, with the reassigned scalars following the pair.
+  #
+  # The row is a MEMBER of this channel (one build, no extra cost) and covers all three halves the
+  # merge can get wrong: the `str` shape, the `[]T` shape (whose LENGTH differs per arm, so a merge
+  # that carried a sibling's length is visible), and an arm that also re-assigns an enclosing scalar
+  # (which rides the merge AFTER the pair).
+  Scenario: fat_match_value (own-native — the match-expression fat producer)
+    When built and run
+    Then exit = 42

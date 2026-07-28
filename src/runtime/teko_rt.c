@@ -2343,6 +2343,17 @@ void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t es
     return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
 }
 
+// (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) tk_slice_elem_box — copy one aggregate element
+// into FRESH root-arena storage and hand back its address, so a push inside a loop stores a distinct
+// address per ITERATION instead of the one frame slot the native backend allocates per instruction.
+// tk_alloc already maps n == 0 to a unique block, so a zero-sized aggregate still yields a distinct
+// address; the copy's lifetime is the root region's, matching the buffer tk_slice_push grows.
+void *tk_slice_elem_box(const void *elem, uint64_t esz) {
+    void *p = tk_alloc((size_t)esz);
+    if (esz != 0) memcpy(p, elem, (size_t)esz);
+    return p;
+}
+
 // (#148 S2 Level-2) tk_slice_push_fo — FREE-OLD-on-grow, for a self-append whose chain the checker
 // PROVED linear (born from list::empty(), self-append-only writes, no capture before the fn's final
 // statement — see escape.tks::assign_frees_old). On a copy-grow the OLD buffer is dead by that proof,
