@@ -1782,6 +1782,43 @@ fn prim_name(k: PrimKind) -> str {
     }
 }
 
+/**
+ * builtin_case_name — the BARE surface spelling a non-nominal type is written under in a match
+ * arm, or `""` when the type has no such spelling. The exact INVERSE of `scope.builtin_type`'s
+ * keyword table, and it must stay that way: a match-arm pattern that is not a member name
+ * resolves through `builtin_type`, so a case a pattern can NAME is precisely a case this
+ * function can SPELL. Kept beside `prim_name` because it is the same question one level up —
+ * "how does the user write this type" — and it delegates the prim family to it rather than
+ * carrying a second copy of eleven spellings that could drift.
+ *
+ * A `Named` type deliberately returns `""`: a nominal case is selected by its canonical name's
+ * last segment (`name_last_segment`), never by a keyword, and answering here would give callers
+ * two different ways to identify the same case. So do `Slice`/`Optional`/`Variant`/`Func`/
+ * `Reference`/`Null`, which no bare keyword names.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 2): the native backend resolved a variant case BY NAME and knew
+ * only `Named` + `error`, so `match add_sub_imm_base(…) { u32 as b => b; error as e => … }` — the
+ * compiler's OWN `backend::encode_alu_imm` — stopped with "unknown variant case `u32` (internal)".
+ * The checker had always accepted it (the pattern resolves through `builtin_type`); only the
+ * lowering could not name what the checker had already typed.
+ *
+ * @param t  the type to spell
+ * @return   its bare keyword spelling, or `""` when it has none
+ */
+pub fn builtin_case_name(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Ptr => "ptr"
+        Uptr => "uptr"
+        _ => ""
+    }
+}
+
 // (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Prim → its
 // surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → the name, Slice →
 // "slice_"+elem, Optional → "opt_"+inner. Total — always yields a symbol-safe fragment. Shared by
