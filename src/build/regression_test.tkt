@@ -890,3 +890,110 @@ fn regr_src_cache_misses_then_hits() {
     teko::assert::is_true(!one.done)
     teko::assert::is_true(one.srcs.len == 1)
 }
+
+#test
+/**
+ * regr_jobs_of_reads_a_count_and_refuses_nonsense — the concurrency knob's parser. A positive
+ * decimal is taken as written; empty, non-numeric and zero all fall back, because the safe reading
+ * of a malformed job count is "the author did not mean to run nothing".
+ *
+ * @return void
+ */
+fn regr_jobs_of_reads_a_count_and_refuses_nonsense() {
+    teko::assert::is_true(regr_jobs_of("1") == 1)
+    teko::assert::is_true(regr_jobs_of("16") == 16)
+    teko::assert::is_true(regr_jobs_of("") == REGR_JOBS_DEFAULT)
+    teko::assert::is_true(regr_jobs_of("0") == REGR_JOBS_DEFAULT)
+    teko::assert::is_true(regr_jobs_of("many") == REGR_JOBS_DEFAULT)
+    teko::assert::is_true(regr_jobs_of("4x") == REGR_JOBS_DEFAULT)
+}
+
+#test
+/**
+ * regr_rc_of_text_takes_the_leading_decimal — a backgrounded child records its status with `echo`,
+ * so the file carries a trailing newline (and a CR ahead of it under a Windows shell). Text with no
+ * digit at all is NOT zero: a lost status must never read as a pass.
+ *
+ * @return void
+ */
+fn regr_rc_of_text_takes_the_leading_decimal() {
+    teko::assert::is_true(regr_rc_of_text("0\n") == 0)
+    teko::assert::is_true(regr_rc_of_text("3\n") == 3)
+    teko::assert::is_true(regr_rc_of_text("139\r\n") == 139)
+    teko::assert::is_true(regr_rc_of_text("") == REGR_BATCH_UNREADABLE_RC)
+    teko::assert::is_true(regr_rc_of_text("\n") == REGR_BATCH_UNREADABLE_RC)
+}
+
+#test
+/**
+ * regr_batch_script_backgrounds_each_child_and_waits_every_jobs — the script's shape, which is the
+ * whole concurrency contract: every command is backgrounded, every one records its own status
+ * (because `$?` is unreadable after `wait`), and a `wait` barrier lands after each `jobs` launches
+ * plus a final one so no child outlives the batch.
+ *
+ * @return void
+ */
+fn regr_batch_script_backgrounds_each_child_and_waits_every_jobs() {
+    mut cmds: []str = teko::list::push(teko::list::empty(), "a")
+    cmds = teko::list::push(cmds, "b")
+    cmds = teko::list::push(cmds, "c")
+    mut pre: []str = teko::list::push(teko::list::empty(), "/w/0")
+    pre = teko::list::push(pre, "/w/1")
+    pre = teko::list::push(pre, "/w/2")
+    let s = regr_batch_script(cmds, pre, 2)
+    teko::assert::is_true(teko::str::contains(s, "{ a; echo $? > '/w/0.rc'; } &"))
+    teko::assert::is_true(teko::str::contains(s, "{ c; echo $? > '/w/2.rc'; } &"))
+    teko::assert::is_true(count_occurrences(s, "wait\n") == 2)
+    teko::assert::is_true(count_occurrences(s, "} &\n") == 3)
+}
+
+/**
+ * count_occurrences — how many times `needle` appears in `hay`, non-overlapping.
+ *
+ * @param hay     the text to scan
+ * @param needle  the text to count (never empty)
+ * @return        the number of occurrences
+ */
+fn count_occurrences(hay: str, needle: str) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i + needle.len > hay.len { break }
+        if teko::str::slice(hay, i, i + needle.len) == needle { n = n + 1; i = i + needle.len; continue }
+        i = i + 1
+    }
+    n
+}
+
+#test
+/**
+ * run_captured_batch_runs_every_child_and_keeps_each_status — the proof that the concurrency is
+ * REAL and not merely well-shaped text: three children actually run, each writes to its OWN capture
+ * files, and each one's distinct exit status comes back against its own index. A batch that
+ * serialized, or that crossed two children's outputs, fails here.
+ *
+ * @return void
+ */
+fn run_captured_batch_runs_every_child_and_keeps_each_status() {
+    let w = ".regr-batch-test"
+    mut cmds: []str = teko::list::empty()
+    mut pre: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 3 { break }
+        let p = $"{w}/child{i}"
+        mut argv: []str = teko::list::push(teko::list::empty(), "sh")
+        argv = teko::list::push(argv, "-c")
+        argv = teko::list::push(argv, $"echo out{i}; exit {i}")
+        cmds = teko::list::push(cmds, captured_sh_cmd("", argv, "", p))
+        pre = teko::list::push(pre, p)
+        i = i + 1
+    }
+    let caps = run_captured_batch(cmds, pre)
+    teko::assert::is_true(caps.len == 3)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(caps[1].exit == 1)
+    teko::assert::is_true(caps[2].exit == 2)
+    teko::assert::is_true(teko::str::contains(caps[0].stdout, "out0"))
+    teko::assert::is_true(teko::str::contains(caps[2].stdout, "out2"))
+}

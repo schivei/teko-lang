@@ -1003,41 +1003,69 @@ fn regr_group_skipped(members: u64, times: PhaseTimes) -> RegrGroupBuild {
     RegrGroupBuild { ok = false; binp = ""; members = members; times = times }
 }
 
+/** regr_group_dir — where group `g` generates and builds. One directory per group, and that
+    one-to-one is what makes the builds safe to run at the same time. */
+fn regr_group_dir(work: str, g: u64) -> str { $"{work}/.group{g}" }
+
 /**
- * regr_group_build_one — generate and build ONE group, reporting the outcome on stdout BEFORE any
- * scenario runs (the ruling's *"executar estes builds ANTES de qualquer teste começar, mostrando a
- * saída deles no início"*). The build is dry (`--no-verify`, via `compile_regressive`) like every
- * other regression build.
+ * regr_group_generate — write group `g`'s project to its OWN directory and return what generating it
+ * cost. Isolation lives here and nowhere else: `.group0`, `.group1`, … never share a path, which is
+ * precisely what licenses their builds to run at the same time.
  *
- * A group below `REGR_GROUP_MIN_MEMBERS` is not generated at all. A group whose build FAILS reports
- * the compiler's own diagnostic tail and is marked un-built: its members then take the ordinary
- * per-scenario path, so the failure costs speed and never correctness.
- *
- * @param exe      the absolute path to this compiler binary
- * @param plan     the whole plan (its members select this group's)
- * @param g        the group index
- * @param work     the regression scratch work tree
- * @param n        how many groups there are (the report's `g/n`)
- * @return         the group's build outcome
+ * @param plan  the whole plan (its members select this group's)
+ * @param g     the group index
+ * @param work  the regression scratch work tree
+ * @return      the nanoseconds spent generating
  */
-fn regr_group_build_one(exe: str, plan: RegrGroupPlan, g: u64, work: str, n: u64) -> RegrGroupBuild {
-    let count = regr_group_member_count(plan.members, g)
-    if count < REGR_GROUP_MIN_MEMBERS { return regr_group_skipped(count, phase_zero()) }
-    let spec = plan.specs[g]
-    let dir = $"{work}/.group{g}"
+fn regr_group_generate(plan: RegrGroupPlan, g: u64, work: str) -> i64 {
     let t_start = regr_now_ns()
-    regr_group_write_project(plan.members, g, dir)
-    let gen_ns = regr_now_ns() - t_start
-    let comp = cap_with_extra_harness(compile_regressive(exe, dir, with_regr_cov_env(spec.env, dir ~ ".compile"), dir ~ ".compile"), gen_ns)
-    let times = PhaseTimes { harness_ns = comp.harness_ns; compile_ns = comp.child_ns; run_ns = 0; builds = 1 }
+    regr_group_write_project(plan.members, g, regr_group_dir(work, g))
+    regr_now_ns() - t_start
+}
+
+/**
+ * regr_group_buildable — is group `g` worth generating at all? A group below
+ * `REGR_GROUP_MIN_MEMBERS` is not: its rows are cheaper on the ordinary per-scenario path.
+ *
+ * @param plan  the whole plan
+ * @param g     the group index
+ * @return      true when this group earns a build
+ */
+fn regr_group_buildable(plan: RegrGroupPlan, g: u64) -> bool {
+    regr_group_member_count(plan.members, g) >= REGR_GROUP_MIN_MEMBERS
+}
+
+/**
+ * regr_group_verdict — fold ONE group's captured build into its `RegrGroupBuild`, reporting the
+ * outcome on stdout BEFORE any scenario runs (the ruling's *"executar estes builds ANTES de qualquer
+ * teste começar, mostrando a saída deles no início"*).
+ *
+ * A group whose build FAILED reports the compiler's own diagnostic tail and is marked un-built: its
+ * members then take the ordinary per-scenario path, so the failure costs speed and never
+ * correctness. And because every group in the batch is folded — not just up to the first failure —
+ * one broken group no longer hides the verdict of the ones beside it.
+ *
+ * @param plan    the whole plan
+ * @param g       the group index
+ * @param work    the regression scratch work tree
+ * @param n       how many groups there are (the report's `g/n`)
+ * @param comp    this group's captured build
+ * @param gen_ns  what generating its project cost
+ * @return        the group's build outcome
+ */
+fn regr_group_verdict(plan: RegrGroupPlan, g: u64, work: str, n: u64, comp: CapResult, gen_ns: i64) -> RegrGroupBuild {
+    let count = regr_group_member_count(plan.members, g)
+    let spec = plan.specs[g]
+    let capped = cap_with_extra_harness(comp, gen_ns)
+    let times = PhaseTimes { harness_ns = capped.harness_ns; compile_ns = capped.child_ns; run_ns = 0; builds = 1 }
     let cfg = regr_group_config_text(spec)
-    if comp.exit != 0 {
+    if capped.exit != 0 {
         teko::io::println($"teko: regression group {g + 1}/{n} FAILED to build ({count} scenario(s), {cfg}) — each falls back to its own build")
-        teko::io::println(compile_failure_message(comp))
+        teko::io::println(compile_failure_message(capped))
         return regr_group_skipped(count, times)
     }
     teko::io::println($"teko: regression group {g + 1}/{n} built in {regr_ms_text(phase_total_ns(times))} — {count} scenario(s), {cfg}")
-    RegrGroupBuild { ok = true; binp = artifact_path_for_target($"{dir}/bin/{REGR_GROUP_PROJECT_NAME}", spec.target); members = count; times = times }
+    RegrGroupBuild { ok = true; binp = artifact_path_for_target($"{regr_group_dir(work, g)}/bin/{REGR_GROUP_PROJECT_NAME}", spec.target); members = count; times = times }
 }
 
 /**
@@ -1073,14 +1101,84 @@ fn regr_group_config_text(spec: RegrGroupSpec) -> str {
  */
 pub fn regr_build_groups(exe: str, plan: RegrGroupPlan, work: str) -> RegrGroups {
     if plan.members.len == 0 { return regr_groups_empty() }
-    mut builds: []RegrGroupBuild = teko::list::empty()
+    let prep = regr_groups_prepare(exe, plan, work)
+    let caps = run_captured_batch(prep.cmds, prep.prefixes)
+    RegrGroups { members = plan.members; builds = regr_groups_fold(plan, work, prep, caps) }
+}
+
+/**
+ * RegrBatchPrep — everything `regr_build_groups` must know AFTER generating the projects and BEFORE
+ * launching them: the command per buildable group, where its capture files land, and what generating
+ * each one cost. `gen_ns` is indexed by GROUP, `cmds`/`prefixes` by position in the batch — the two
+ * are not the same list, because a group below the member floor is generated by nobody and appears
+ * in neither.
+ */
+type RegrBatchPrep = struct {
+    /** the redirected build command of each buildable group, in group order. */
+    cmds: []str
+    /** each command's scratch prefix, parallel to `cmds`. */
+    prefixes: []str
+    /** what generating each GROUP's project cost, indexed by group (0 for one never generated). */
+    gen_ns: []i64
+}
+
+/**
+ * regr_groups_prepare — generate every buildable group's project and collect the command that builds
+ * it, WITHOUT building anything yet.
+ *
+ * The separation is the design. Generation writes to disk and must finish before any build reads
+ * from disk; building is what benefits from running many at once. Doing them in one pass would
+ * serialize the second on the first.
+ *
+ * @param exe   the absolute path to this compiler binary
+ * @param plan  the whole plan
+ * @param work  the regression scratch work tree
+ * @return      the batch's commands, prefixes and per-group generation cost
+ */
+fn regr_groups_prepare(exe: str, plan: RegrGroupPlan, work: str) -> RegrBatchPrep {
+    mut cmds: []str = teko::list::empty()
+    mut prefixes: []str = teko::list::empty()
+    mut gen_ns: []i64 = teko::list::empty()
     mut g: u64 = 0
     loop {
         if g >= plan.specs.len { break }
-        builds = teko::list::push(builds, regr_group_build_one(exe, plan, g, work, plan.specs.len))
+        if !regr_group_buildable(plan, g) { gen_ns = teko::list::push(gen_ns, 0); g = g + 1; continue }
+        gen_ns = teko::list::push(gen_ns, regr_group_generate(plan, g, work))
+        let dir = regr_group_dir(work, g)
+        let prefix = dir ~ ".compile"
+        prefixes = teko::list::push(prefixes, prefix)
+        cmds = teko::list::push(cmds, compile_regressive_cmd(exe, dir, with_regr_cov_env(plan.specs[g].env, prefix), prefix))
         g = g + 1
     }
-    RegrGroups { members = plan.members; builds = builds }
+    RegrBatchPrep { cmds = cmds; prefixes = prefixes; gen_ns = gen_ns }
+}
+
+/**
+ * regr_groups_fold — turn the batch's captures back into one `RegrGroupBuild` per group, in group
+ * order, re-inserting the un-generated groups the batch never carried.
+ *
+ * @param plan  the whole plan
+ * @param work  the regression scratch work tree
+ * @param prep  what `regr_groups_prepare` produced
+ * @param caps  the batch's captures, parallel to `prep.cmds`
+ * @return      one build outcome per group
+ */
+fn regr_groups_fold(plan: RegrGroupPlan, work: str, prep: RegrBatchPrep, caps: []CapResult) -> []RegrGroupBuild {
+    mut builds: []RegrGroupBuild = teko::list::empty()
+    mut g: u64 = 0
+    mut at: u64 = 0
+    loop {
+        if g >= plan.specs.len { break }
+        if !regr_group_buildable(plan, g) {
+            builds = teko::list::push(builds, regr_group_skipped(regr_group_member_count(plan.members, g), phase_zero()))
+            g = g + 1
+            continue
+        }
+        builds = teko::list::push(builds, regr_group_verdict(plan, g, work, plan.specs.len, caps[at], prep.gen_ns[g]))
+        at = at + 1
+        g = g + 1
+    }
+    builds
 }
 
 /**
