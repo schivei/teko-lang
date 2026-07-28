@@ -67,6 +67,29 @@ under you, with no error anywhere.
 `m16` is the boundary the loop's own comment names (*"If ALL arms diverge the match type is void"*),
 so it is the case where a wrong `have_type` shows up as a type out of nowhere.
 
+## The `tNN` control group — the same shapes with the binding ANNOTATED
+
+Owner ruling 2026-07-28: *"precisa de uma duplicata do mesmo teste, mas nesta, fixe os tipos (sem
+auto tipos), logo os lets precisam declarar o tipo que esperam do match. Sei que vai dizer que isso
+funciona já, mas tem fundamento de grupo de controle se já funciona (é o que esperamos)."*
+
+Each `tNN` is its `mNN` twin with one character-level difference: `let r = match …` becomes
+`let r: u64 = match …`. Nothing else moves.
+
+That is the whole point of a control. The expectation IS that the annotated form works, and the
+expectation being MET is the signal — a control that surprises you invalidates the experiment, and a
+control that behaves as predicted is what licenses reading the treatment group at all.
+
+| reading | what it isolates |
+|---|---|
+| `tNN` LOWERED, `mNN` STOPPED | INFERENCE is the variable — the annotation supplies what the match's own type does not |
+| both STOPPED | inference is NOT the variable — drop it and look at the representation |
+| `tNN` STOPPED, `mNN` LOWERED | the annotation itself introduces the stop; unexpected, and would be the finding |
+
+Three `mNN` have no counterpart, and their absence is deliberate rather than an oversight: `m02`
+(match as a statement), `m10` (no match at all) and `m16` (both arms `return`) bind nothing from the
+match, so there is no type to annotate — a `tNN` twin would be a byte-identical copy.
+
 ## Three generations, and why the third is the one that matters
 
 Owner ruling 2026-07-28: *"testar o mesmo conjunto com o 0.3.0.30-beta (a última lançada), se o

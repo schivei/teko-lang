@@ -47,7 +47,7 @@ printf '\n===== match_shapes [%s]: which shapes can the NATIVE backend lower? ==
 printf '%-26s %-8s %s\n' "CASE" "VERDICT" "WHAT THE COMPILER SAID"
 printf '%s\n' "----------------------------------------------------------------------"
 
-for dir in "$HERE"/m*/; do
+for dir in "$HERE"/[mt]*/; do
     case_name="$(basename "$dir")"
     log="$dir/.probe-$LABEL.log"
     ( cd "$dir" && TEKO_BACKEND=native "$TEKO" . -o out --no-verify ) >"$log" 2>&1
@@ -80,11 +80,12 @@ for dir in "$HERE"/m*/; do
 done
 
 printf '%s\n' "----------------------------------------------------------------------"
-printf 'Read the table by AXIS, not by case: the pair that differs by exactly one\n'
-printf 'property (value vs statement, cast vs literal, scalar vs struct) is the finding.\n\n'
+printf 'Read the table by AXIS, not by case. The mNN/tNN pair differs ONLY by whether the\n'
+printf 'binding is inferred (mNN) or ANNOTATED (tNN) — the control group. Any other pair\n'
+printf 'differs by exactly one property (value vs statement, cast vs literal, scalar vs struct).\n\n'
 
 # The traces, in full, after the table — every stop the run produced, not just the first per case.
 printf '===== every prim_kind_of stop trace, all cases =====\n'
-grep -h 'TRACE prim_kind_of stop' "$HERE"/m*/.probe-"$LABEL".log 2>/dev/null | sort | uniq -c | sort -rn || true
+grep -h 'TRACE prim_kind_of stop' "$HERE"/[mt]*/.probe-"$LABEL".log 2>/dev/null | sort | uniq -c | sort -rn || true
 printf '\n'
 exit 0
