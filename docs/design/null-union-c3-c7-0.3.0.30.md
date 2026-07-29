@@ -455,7 +455,7 @@ fn require_narrowed(use_site: checker::TExpr, val_type: checker::Type, narrowed:
   BYTE-IDENTICAL C (the precondition for C6).
 - `examples/regressions/error_union_pivot/` — **[size probe]** a former `error?`
   site now `sizeof == 16` (niche), round-trips success (`null`) and failure
-  (`error`) on both engines. Exit 0.
+  (`error`) natively. Exit 0.
 
 ### Ritual gate
 

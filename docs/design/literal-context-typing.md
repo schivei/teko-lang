@@ -162,7 +162,7 @@ Concretely, `type_value_expected` gains arms so that it, not the caller, threads
 Backends are UNTOUCHED. The typed-tree *shape* is unchanged; (A) only causes more literals to be
 born at their narrow width — exactly the shape codegen already receives today from the adopt-after
 sites (empirically: narrow-typed literal leaves at args/fields/returns compile and run correctly on
-both backends now). So this is a checker-local change, primarily one file (`src/checker/typer.tks`).
+both backends (C and native) now). So this is a checker-local change, primarily one file (`src/checker/typer.tks`).
 
 ---
 

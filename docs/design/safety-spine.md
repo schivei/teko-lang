@@ -248,7 +248,7 @@ dataflow). At a `TBinding` whose declared/inferred type is a `Reference` and who
 fn ref_binding_missing_init(b: parser::Binding) -> bool { /* is-ref-typed ∧ no init */ }
 ```
 
-**Fixtures:** `ref_uninit_rejected` (COMPILE-REJECT, both engines, non-zero) · `ref_init_ok`
+**Fixtures:** `ref_uninit_rejected` (COMPILE-REJECT, native, non-zero) · `ref_init_ok`
 (RUN, native, sentinel 0).
 
 **Honest-stop:** none — this is total and local. **Dogfooding exposure:** ZERO (the compiler declares
@@ -378,7 +378,7 @@ fn borrowed_result_escapes(call: TCall, s: Spine, sum: BorrowSummary) -> bool { 
   closure, caller drives it within the frame; native, sentinel = sum of yielded elements. Proves the
   stdlib idiom COMPILES.
 - `iter_over_local_escapes_rejected` (COMPILE-REJECT) — the `make()` UAF: feed a LOCAL cursor, return the
-  closure; both engines non-zero with the A1-interproc diagnostic. Proves soundness for users.
+  closure; native validation, non-zero with the A1-interproc diagnostic. Proves soundness for users.
 - `iter_combinator_chain_ok` (RUN) — `take(skip(over_array(xs, c1), c2), c3)`-shaped nesting, exercising
   the ACYCLIC bottom-up summary composition; native. Proves the summary composes without widening.
 
