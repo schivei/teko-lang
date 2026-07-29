@@ -79,11 +79,8 @@ fn constraint_atom_satisfied(atom_name: str, concrete: Type, table: TypeTable) -
 }
 // The full boolean tree over atoms: `&` = both must hold, `|` = either must hold (matches the
 // parser's precedence — this just walks the already-built AND/OR tree, no precedence here).
-// (VM match-arm ordering, 2026-07-01) the MULTI-field cases (ConstraintAnd/ConstraintOr) are
-// matched BEFORE the single-/zero-field cases (ConstraintAtom/NoConstraint) — see
-// teko-vm-wrapper-descent-bug: the VM's match unreliably picks a single-/zero-field case over
-// the ACTUAL multi-field tag when the single-/zero-field arm is tried first. Native codegen is
-// unaffected (this ordering is a no-op there); reordering is the cheap, correct workaround.
+// The MULTI-field cases (ConstraintAnd/ConstraintOr) are matched BEFORE the single-/zero-field
+// cases (ConstraintAtom/NoConstraint) for correctness.
 fn constraint_satisfied(c: parser::ConstraintExpr, concrete: Type, table: TypeTable) -> bool {
     match c {
         parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
@@ -363,10 +360,9 @@ fn iface_method_slot(iface: str, method: str, table: TypeTable) -> u32 | null {
  * interfaces owning that method — the correct (S6) Or-constraint vtable key at a concrete
  * instantiation. Under `<T: A | B>` where both A and B own `method`, the static dispatch key is
  * A (the first constraint atom, method_owner_interface); a concrete arg conforming to ONLY B
- * needs its call re-keyed to B, or native codegen emits an upcast to a never-generated
- * `tk_vt_<class>_A` vtable (a VM==native divergence — the VM name-dispatches, cc rejects the
- * undeclared symbol). Scans the type table for an interface that BOTH owns `method` AND that
- * `class_name` NOMINALLY conforms to (type_conforms_to — the same gate as the D3 upcast).
+ * needs its call re-keyed to B to avoid emitting an upcast to a never-generated vtable symbol.
+ * Scans the type table for an interface that BOTH owns `method` AND that `class_name` NOMINALLY
+ * conforms to (type_conforms_to — the same gate as the D3 upcast).
  *
  * @param class_name  the concrete class the type-param bound to at this instantiation
  * @param method      the dispatched method's bare name
@@ -487,10 +483,10 @@ fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable) 
  * currently-keyed interface is not one the receiver conforms to. This is the S6 Or-constraint fix,
  * applied at monomorphization: once `T` is bound to a concrete class, the dispatch key baked at
  * typing (the first constraint atom — method_owner_interface) may name an interface the class does
- * not implement, so native codegen would emit an upcast to a never-generated `tk_vt_<class>_<iface>`
- * vtable (a VM==native divergence). When the receiver already conforms to the keyed interface (the
- * And-constraint path, and the first-branch Or case) the call passes through UNCHANGED, so no
- * non-Or dispatch is perturbed; when no conforming owner is found the call is likewise left as-is.
+ * not implement, so we must re-key to an interface the receiver actually conforms to. When the
+ * receiver already conforms to the keyed interface (the And-constraint path, and the first-branch
+ * Or case) the call passes through UNCHANGED, so no non-Or dispatch is perturbed; when no
+ * conforming owner is found the call is likewise left as-is.
  * An interface-value receiver (which passes through the fat pointer with no upcast) conforms to no
  * interface as a class/struct would (type_conforms_to's class/struct-body gate), so it never finds
  * a conformed owner here and is left untouched by construction. A constraint-bound STRUCT receiver
