@@ -23,14 +23,21 @@ use teko::parser
     resolves with no memory traffic — mirrors §2.3's "no memory traffic for a length read".
     `is_slot` is the third binding shape (list-builtin degrau): a MUTABLE fat local lives in a
     16-byte FRAME SLOT (`vregs[i]` is the slot's address) instead of a VReg pair, because a
-    reassignment must be visible across a merge — see `lenv_bind_fat_slot`. */
-pub type LEnv = struct { names: []str; vregs: []u32; len_vregs: []u32; has_len: []bool; is_slot: []bool }
+    reassignment must be visible across a merge — see `lenv_bind_fat_slot`. `is_scalar_slot` is
+    the FOURTH (0.3.1.0 degrau 18): a `mut` SCALAR local whose ADDRESS escapes into a `ref<T>`
+    call argument (`lenv_bind_scalar_slot`) — same reason as a mutable fat local (its address
+    must be loop/merge-invariant AND its current value must survive a write made through the
+    escaped handle), one register instead of a pair. `slot_ltype` is `is_scalar_slot`'s OWN
+    parallel side-table: the load/store WIDTH+KIND a scalar slot's memory holds (meaningless —
+    left `LType::Void` — for every other binding shape). */
+pub type LEnv = struct { names: []str; vregs: []u32; len_vregs: []u32; has_len: []bool; is_slot: []bool; is_scalar_slot: []bool; slot_ltype: []LType }
 
 /** empty_lenv — an LEnv with no bindings (a function body's seed). */
 pub fn empty_lenv() -> LEnv {
     LEnv {
         names = teko::list::empty(); vregs = teko::list::empty(); len_vregs = teko::list::empty()
         has_len = teko::list::empty(); is_slot = teko::list::empty()
+        is_scalar_slot = teko::list::empty(); slot_ltype = teko::list::empty()
     }
 }
 
@@ -41,6 +48,7 @@ pub fn lenv_bind(env: LEnv, name: str, vreg: u32) -> LEnv {
         names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, vreg)
         len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
         is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
     }
 }
 
@@ -52,6 +60,7 @@ pub fn lenv_bind_fat(env: LEnv, name: str, ptr: u32, len: u32) -> LEnv {
         names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, ptr)
         len_vregs = teko::list::push(env.len_vregs, len); has_len = teko::list::push(env.has_len, true)
         is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
     }
 }
 
@@ -78,6 +87,35 @@ pub fn lenv_bind_fat_slot(env: LEnv, name: str, slot: u32) -> LEnv {
         names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, slot)
         len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
         is_slot = teko::list::push(env.is_slot, true)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
+    }
+}
+
+/**
+ * lenv_bind_scalar_slot — extend `env` with (name -> the address of a one-word frame slot
+ * holding a `mut` SCALAR local's CURRENT value), the binding shape a local takes on the moment
+ * its address escapes into a `ref<T>` call argument (0.3.1.0 degrau 18).
+ *
+ * WHY MEMORY AND NOT A PLAIN VREG. The escaped `Ref<T>` handle may be WRITTEN THROUGH by code
+ * this function does not control (a callee, or a closure it returns) between the escape and a
+ * later plain read of the name — an SSA VReg has no memory a write through a DIFFERENT handle
+ * could ever reach, so the local must live in addressable memory for its WHOLE lifetime once any
+ * one call site takes its address (`collect_addr_taken_locals` decides this up front, from the
+ * function's own source, before any of its statements lower). Same shape `lenv_bind_fat_slot`
+ * already established for a mutable fat local, ONE word instead of a pair.
+ *
+ * @param env     the env to extend
+ * @param name    the local's name
+ * @param slot    the VReg holding the one-word slot's address
+ * @param ty      the slot's load/store machine class (the local's own `ltype_of`)
+ * @return        the extended env
+ */
+pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType) -> LEnv {
+    LEnv {
+        names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, slot)
+        len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
+        is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, true); slot_ltype = teko::list::push(env.slot_ltype, ty)
     }
 }
 
@@ -99,6 +137,27 @@ pub fn lenv_lookup_fat_slot(env: LEnv, name: str) -> LSlotLookup {
     if idx == env.names.len { return LSlotLookup { found = false; slot = 0 } }
     if !env.is_slot[idx] { return LSlotLookup { found = false; slot = 0 } }
     LSlotLookup { found = true; slot = env.vregs[idx] }
+}
+
+/** LScalarSlotLookup — the result of a scalar-SLOT env lookup: whether the name's NEWEST
+    binding is an address-taken `mut` scalar local, the VReg holding its one-word slot's
+    address, and the slot's own load/store machine class (0.3.1.0 degrau 18). */
+pub type LScalarSlotLookup = struct { found: bool; slot: u32; ty: LType }
+
+/**
+ * lenv_lookup_scalar_slot — is `name`'s NEWEST binding an address-taken `mut` scalar local
+ * (`lenv_bind_scalar_slot`)? Resolving through the newest index is what makes a shadow win,
+ * exactly like `lenv_lookup_fat_slot`.
+ *
+ * @param env   the env to scan
+ * @param name  the local name to resolve
+ * @return      whether the newest binding is a scalar slot + its address VReg + its LType
+ */
+pub fn lenv_lookup_scalar_slot(env: LEnv, name: str) -> LScalarSlotLookup {
+    let idx = lenv_newest_index(env, name)
+    if idx == env.names.len { return LScalarSlotLookup { found = false; slot = 0; ty = LType::Void } }
+    if !env.is_scalar_slot[idx] { return LScalarSlotLookup { found = false; slot = 0; ty = LType::Void } }
+    LScalarSlotLookup { found = true; slot = env.vregs[idx]; ty = env.slot_ltype[idx] }
 }
 
 /**
@@ -185,6 +244,7 @@ pub fn lenv_reassign(env: LEnv, name: str, vreg: u32) -> LEnv {
     LEnv {
         names = env.names; vregs = list_set_u32(env.vregs, idx, vreg)
         len_vregs = env.len_vregs; has_len = env.has_len; is_slot = env.is_slot
+        is_scalar_slot = env.is_scalar_slot; slot_ltype = env.slot_ltype
     }
 }
 
@@ -692,6 +752,21 @@ pub type LowerCtx = struct {
      * so a value's wrapper and a `match` arm's tag test agree on the member list.
      */
     variants: []LVariantDef
+    /**
+     * ref_fns — the whole program's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18),
+     * threaded read-only exactly like `enums`/`variants`: `lower_call`'s ONE place to ask "does
+     * THIS callee auto-ref one of its arguments?" (`find_ref_flags`), built ONCE
+     * (`collect_ref_fns`) rather than re-scanning the program per call site.
+     */
+    ref_fns: []LRefFnInfo
+    /**
+     * addr_taken — the CURRENT function's own address-taken `mut` scalar local names (0.3.1.0
+     * degrau 18): every name `collect_addr_taken_locals` found passed as a `ref<T>` call
+     * argument anywhere in this function's body, computed ONCE before the body lowers. A name in
+     * this set binds through a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg —
+     * see `lower_binding`.
+     */
+    addr_taken: []str
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -726,6 +801,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
     }
 }
 
@@ -746,6 +822,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
     }
 }
 
@@ -766,6 +843,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
     }
 }
 
@@ -786,6 +864,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
     }
 }
 
@@ -806,6 +885,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
     }
 }
 
@@ -830,6 +910,12 @@ fn ctx_bind(ctx: LowerCtx, name: str, vreg: u32) -> LowerCtx {
     binding (A1-4, #382). */
 fn ctx_bind_fat(ctx: LowerCtx, name: str, ptr: u32, len: u32) -> LowerCtx {
     ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind_fat(ctx.env, name, ptr, len))
+}
+
+/** ctx_bind_scalar_slot — extend the context's local env with (name -> the address of a
+    one-word slot), an address-taken `mut` scalar local's binding (0.3.1.0 degrau 18). */
+fn ctx_bind_scalar_slot(ctx: LowerCtx, name: str, slot: u32, ty: LType) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind_scalar_slot(ctx.env, name, slot, ty))
 }
 
 /**
@@ -904,7 +990,11 @@ fn lower_number(ctx: LowerCtx, e: checker::TExpr, n: checker::TNumber) -> Lowere
  * A MUTABLE fat local (`lenv_bind_fat_slot`) keeps its `{ptr, len}` pair in a frame slot, so its
  * scalar view is a LOAD of the pointer half rather than the binding's own VReg (which holds the
  * slot's address) — the same "a fat value in scalar position IS its ptr" convention
- * `lower_call_fat_as_scalar` follows, one indirection later (list-builtin degrau).
+ * `lower_call_fat_as_scalar` follows, one indirection later (list-builtin degrau). An
+ * address-taken `mut` SCALAR local (`lenv_bind_scalar_slot`, 0.3.1.0 degrau 18) is the same
+ * shape one word narrower: its binding's own VReg holds the slot's ADDRESS, so a read LOADS the
+ * current value rather than reusing that VReg directly — a write made through the escaped
+ * `Ref<T>` handle must be visible here.
  *
  * @param ctx  the lowering context to append the reference's instructions into
  * @param e    the variable-reference expression (carries its source position)
@@ -916,6 +1006,11 @@ fn lower_var(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered | er
     if v.is_func { return lower_fn_value(ctx, e, v) }
     let slot = lenv_lookup_fat_slot(ctx.env, v.name)
     if slot.found { return load_fat_slot_ptr(ctx, slot.slot, e.line, e.col) }
+    let sslot = lenv_lookup_scalar_slot(ctx.env, v.name)
+    if sslot.found {
+        let r = ctx_alloc(ctx)
+        return Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, sslot.slot, sslot.ty, e.line, e.col)); vreg = r.vreg }
+    }
     let hit = lenv_lookup(ctx.env, v.name)
     if hit.found { return Lowered { ctx = ctx; vreg = hit.vreg } }
     match find_const_rodata(ctx.rodata, v.name) {
@@ -1476,9 +1571,218 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
-    let lo = match lower_args(ctx, c.args) { LoweredArgs as x => x; error as err => return err }
+    let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
     let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
     apply_native_c_return_narrow(called, ctx.externs, c, e)
+}
+
+/**
+ * LRefFnInfo — one top-level function's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18):
+ * `ref_flags[i]` is true iff the function's `i`-th declared parameter is written `ref name: T`.
+ * Built ONCE for the whole program (`collect_ref_fns`) and consulted by EVERY call site
+ * (`find_ref_flags`), so a caller and a `ref` parameter's own binder never disagree about which
+ * positions auto-ref.
+ */
+pub type LRefFnInfo = struct { ns: str; name: str; ref_flags: []bool }
+
+/**
+ * is_ref_param_ann — is a parameter's syntactic annotation the internal `Ref<T>` wrapper
+ * (`wrap_ref_type`'s own output, `src/parser/parse_type.tks`) a surface `ref name: T` parameter
+ * desugars to? The SAME syntactic test the C backend's own call-site auto-ref
+ * (`codegen.tks::emit_call`, `pn == "Ref"`) already runs — this backend agrees with it rather
+ * than re-deriving a second answer from the (unavailable, at lowering time) resolved type.
+ *
+ * @param te  the parameter's syntactic type annotation
+ * @return    whether `te` is `Ref<...>`
+ */
+fn is_ref_param_ann(te: parser::TypeExpr) -> bool {
+    match named_type_name_of(te) { str as n => n == "Ref"; null => false }
+}
+
+/**
+ * fn_ref_flags — one function's `ref_flags`: `is_ref_param_ann` applied to each declared
+ * parameter's annotation, in order.
+ *
+ * @param params  the function's declared parameter list
+ * @return        one flag per parameter, true where it is a `ref` parameter
+ */
+fn fn_ref_flags(params: []parser::Param) -> []bool {
+    mut out: []bool = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        out = teko::list::push(out, is_ref_param_ann(params[i].type_ann))
+        i++
+    }
+    out
+}
+
+/**
+ * fn_has_ref_param — does ANY of `rf` say true? `collect_ref_fns`'s own filter: a function
+ * with no `ref` parameter at all contributes no entry, keeping the whole-program table sized to
+ * the functions a call site actually needs to ask about.
+ *
+ * @param rf  one function's `ref_flags`
+ * @return    whether any position is a `ref` parameter
+ */
+fn fn_has_ref_param(rf: []bool) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= rf.len { break }
+        if rf[i] { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * collect_ref_fns — the whole program's `ref<T>` parameter-position table (0.3.1.0 degrau 18):
+ * one `LRefFnInfo` per top-level FUNCTION that declares at least one `ref` parameter. Built ONCE,
+ * before any function body lowers, exactly like `collect_enums`/`collect_variant_defs`.
+ *
+ * @param prog  the whole typed program
+ * @return      one entry per `ref`-parameter-bearing function
+ */
+fn collect_ref_fns(prog: checker::TProgram) -> []LRefFnInfo {
+    mut out: []LRefFnInfo = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                let rf = fn_ref_flags(f.params)
+                if fn_has_ref_param(rf) { out = teko::list::push(out, LRefFnInfo { ns = f.namespace; name = f.name; ref_flags = rf }) }
+            }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * find_ref_flags — `ref_fns`' entry for (`ns`, `name`), or `null` when that function declares no
+ * `ref` parameter at all (the common case — most calls need no auto-ref handling whatsoever).
+ *
+ * @param ref_fns  the whole-program table (`collect_ref_fns`)
+ * @param ns       the callee's resolved namespace (`checker::TCall.call_ns`)
+ * @param name     the callee's bare name (the call path's last segment)
+ * @return         the matching entry's `ref_flags`, or `null`
+ */
+fn find_ref_flags(ref_fns: []LRefFnInfo, ns: str, name: str) -> []bool | null {
+    mut i: u64 = 0
+    loop {
+        if i >= ref_fns.len { break }
+        if ref_fns[i].ns == ns && ref_fns[i].name == name { return ref_fns[i].ref_flags }
+        i++
+    }
+    null
+}
+
+/**
+ * arg_needs_auto_ref — does call argument `arg`, at a `ref<T>` parameter position, need this
+ * backend to take ITS ADDRESS (rather than lower it plainly)? False when `arg` is ALREADY
+ * `Reference`-typed — a `ref` parameter FORWARDED to another `ref<T>` parameter carries the
+ * pointer as its own plain value already (`checker::typer.tks`'s own auto-ref gate: `assignable_to`
+ * already holds for that case, so the checker never marks it `auto_reffed` either) — passing it
+ * along needs no address-of, only the ordinary scalar arg path.
+ *
+ * @param arg  the call argument (already checker-typed)
+ * @return     whether this argument is the auto-ref shape
+ */
+fn arg_needs_auto_ref(arg: checker::TExpr) -> bool {
+    match arg.type { checker::Reference => false; _ => true }
+}
+
+/**
+ * lower_call_args — lower a call's whole argument list, taking the ADDRESS of any argument at a
+ * `ref<T>` parameter position instead of its value (0.3.1.0 degrau 18: `checker::typer.tks`'s own
+ * call-site AUTO-REF, `f(x)` into a `ref<T>` param — the checker keeps the argument's bare type
+ * and leaves the address-of to codegen; the C route's `emit_call` emits `&x`, this is this
+ * backend's OWN emission of that same contract). A callee with NO `ref` parameter (`find_ref_flags`
+ * returns `null` — the overwhelming majority of calls) falls straight through to the plain
+ * `lower_args`, unchanged.
+ *
+ * @param ctx  the lowering context
+ * @param c    the call node
+ * @return     the advanced context + the ABI-flattened argument VRegs, in order
+ * @throws     propagated from lowering any argument, or from `lower_addr_of_arg`
+ */
+fn lower_call_args(ctx: LowerCtx, c: checker::TCall) -> LoweredArgs | error {
+    if c.callee.segments.len == 0 { return lower_args(ctx, c.args) }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    match find_ref_flags(ctx.ref_fns, c.call_ns, last) {
+        []bool as rf => lower_args_ref_aware(ctx, c.args, rf, 0)
+        null => lower_args(ctx, c.args)
+    }
+}
+
+/**
+ * lower_args_ref_aware — `lower_args_from`'s ref-aware twin: at index `i`, when `rf[i]` is
+ * true and `args[i]` needs auto-ref (`arg_needs_auto_ref`), lower the argument's ADDRESS
+ * (`lower_addr_of_arg`) instead of its value; every other position lowers exactly as
+ * `lower_arg_vregs` already does. `i >= rf.len` (a callee param this call's own arity check
+ * already fixed the count of) is never a `ref` position, so it always takes the plain path.
+ *
+ * @param ctx   the lowering context
+ * @param args  the full argument list
+ * @param rf    the callee's `ref_flags` (`find_ref_flags`'s hit)
+ * @param i     the next argument index to lower
+ * @return      the advanced context + the ABI-flattened argument VRegs, in order
+ * @throws      propagated from lowering any argument, or from `lower_addr_of_arg`
+ */
+fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, i: u64) -> LoweredArgs | error {
+    if i >= args.len { return LoweredArgs { ctx = ctx; vregs = teko::list::empty() } }
+    let is_ref_pos = i < rf.len && rf[i] && arg_needs_auto_ref(args[i])
+    let one = match if is_ref_pos { lower_addr_of_arg(ctx, args[i]) } else { lower_arg_vregs(ctx, args[i]) } { LoweredArgs as x => x; error as err => return err }
+    let rest = match lower_args_ref_aware(one.ctx, args, rf, i + 1) { LoweredArgs as x => x; error as err => return err }
+    LoweredArgs { ctx = rest.ctx; vregs = append_vregs(one.vregs, rest.vregs) }
+}
+
+/**
+ * lower_addr_of_arg — the ADDRESS of an auto-ref call argument. The checker admits exactly ONE
+ * shape here (`checker::typer.tks`'s own auto-ref gate): a bare reference to a `mut` LOCAL
+ * variable — never a field, an index, or a nested expression, since only a named lvalue can be
+ * referenced. Splits three ways, one per memory model this backend already gives a `mut` local:
+ *
+ * - a FAT (`str`/`[]T`) local is UNCONDITIONALLY frame-slot-bound the moment it is declared
+ *   `mut` (`bind_mutable_fat`, the list-builtin degrau — no `ref` involvement needed to earn
+ *   that shape), so its address already exists: `lenv_lookup_fat_slot`'s hit IS it. Lowering the
+ *   argument plainly (`lower_expr`/`lower_var`) would instead give the STRING'S OWN ptr VALUE —
+ *   the content pointer, not the address of the `{ptr,len}` pair holding it — which is exactly
+ *   the "passed a value where an address was needed" shape this whole degrau exists to fix, one
+ *   level removed;
+ * - an AGGREGATE-typed local (`struct`/`class`/`Optional`/a declared `Variant` —
+ *   `!is_register_value_type`) is, in this backend's own memory model, ALREADY represented BY
+ *   its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the local's own VReg IS the address to pass,
+ *   no different from any other read of it;
+ * - a REGISTER-value local (every primitive, `byte`, an `enum`) has no address of its own UNLESS
+ *   `collect_addr_taken_locals` already reified it into a memory slot at its binding site — which
+ *   it always has, for every name this exact function reaches, because that pre-pass finds this
+ *   SAME call site before any statement of the enclosing function lowers.
+ *
+ * @param ctx  the lowering context
+ * @param arg  the argument expression (checker-proved: a bare `TVar` naming a `mut` local)
+ * @return     the advanced context + the argument's address, as a single-VReg `LoweredArgs`
+ * @throws     when `arg` is not a bound local `TVar` (an internal invariant break — the checker
+ *             never admits any other shape here), or when a fat/register-value local is not
+ *             found in its expected memory shape (an internal invariant break, never in
+ *             well-typed source)
+ */
+fn lower_addr_of_arg(ctx: LowerCtx, arg: checker::TExpr) -> LoweredArgs | error {
+    let v = match arg.kind { checker::TVar as vv => vv; _ => return error { message = "native backend N1: an auto-ref call argument must be a bound local (internal)" } }
+    if is_fat_type(arg.type) {
+        let fslot = lenv_lookup_fat_slot(ctx.env, v.name)
+        if !fslot.found { return error { message = teko::str::concat("native backend N1: `", teko::str::concat(v.name, "` is a fat `ref` argument but is not a mutable fat local (internal)")) } }
+        return LoweredArgs { ctx = ctx; vregs = single_arg(fslot.slot) }
+    }
+    if !is_register_value_type(arg.type, ctx.enums) {
+        let lo = match lower_expr(ctx, arg) { Lowered as x => x; error as err => return err }
+        return LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
+    }
+    let slot = lenv_lookup_scalar_slot(ctx.env, v.name)
+    if !slot.found { return error { message = teko::str::concat("native backend N1: `", teko::str::concat(v.name, "` is address-taken but was not reified to a slot (internal)")) } }
+    LoweredArgs { ctx = ctx; vregs = single_arg(slot.slot) }
 }
 
 /**
@@ -3055,6 +3359,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = false; ret_len_slot = 0
+        ref_fns = ctx.ref_fns; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums)
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -3114,7 +3419,10 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  *
  * A MUTABLE fat binding (`mut xs: []T = …`) binds a 16-byte FRAME SLOT instead of the VReg pair
  * (`lenv_bind_fat_slot`): only memory survives the merge a later reassignment sits behind
- * (list-builtin degrau).
+ * (list-builtin degrau). A `mut` SCALAR binding whose ADDRESS escapes into a `ref<T>` call
+ * argument SOMEWHERE in this function (`ctx.addr_taken`, `collect_addr_taken_locals` — 0.3.1.0
+ * degrau 18) binds a one-word FRAME SLOT the same way, for the same reason: only memory survives
+ * a write made through the escaped handle.
  *
  * @param LowerCtx ctx  the lowering context to append the binding's instructions into
  * @param checker::TBinding b  the typed binding statement
@@ -3130,7 +3438,29 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
         return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
     }
     let lo = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
+    if contains_str(lo.ctx.addr_taken, name) { return bind_addr_taken_scalar(lo, name, b.bound, b.value.line, b.value.col) }
     LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
+}
+
+/**
+ * bind_addr_taken_scalar — bind a `mut` scalar local, already known address-taken
+ * (`ctx.addr_taken`), to a fresh one-word frame slot seeded with its initial value: `alloca` the
+ * slot at the local's OWN machine class, store the just-lowered value into it, then bind the
+ * NAME to the slot's address (`lenv_bind_scalar_slot`) rather than to the value directly.
+ *
+ * @param lo    the initial value, already lowered (its context is the one extended)
+ * @param name  the local's name
+ * @param ty    the local's declared/inferred type (`ltype_of` gives the slot's width)
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the context with the slot allocated, seeded, and bound
+ */
+fn bind_addr_taken_scalar(lo: Lowered, name: str, ty: checker::Type, line: u32, col: u32) -> LowerStmtOut {
+    let lt = ltype_of(ty, lo.ctx.enums)
+    let slot = ctx_alloc(lo.ctx)
+    let with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(lt), ltype_align(lt), line, col))
+    let with_store = ctx_append(with_alloca, store_inst(slot.vreg, lo.vreg, lt, line, col))
+    LowerStmtOut { ctx = ctx_bind_scalar_slot(with_store, name, slot.vreg, lt); terminated = false }
 }
 
 /**
@@ -3460,7 +3790,10 @@ fn promote_env(f: LFunc, block_id: u32, env: LEnv) -> PromotedEnv {
  * block/merge param), PRESERVING its binding SHAPE. A mutable fat local (`is_slot`) threads its
  * 16-byte slot's ADDRESS through the merge like any other scalar, but it must arrive on the other
  * side still known as a slot — rebinding it plainly would leave a later read treating the address
- * as the pointer half (list-builtin degrau).
+ * as the pointer half (list-builtin degrau). An address-taken `mut` scalar local
+ * (`is_scalar_slot`, 0.3.1.0 degrau 18) threads its OWN one-word slot's address the same way, and
+ * must arrive still known as THAT slot (with its `LType` intact) so a read past the merge still
+ * loads rather than reusing the address as the value.
  *
  * @param out   the env being rebuilt
  * @param env   the source env
@@ -3470,6 +3803,7 @@ fn promote_env(f: LFunc, block_id: u32, env: LEnv) -> PromotedEnv {
  */
 fn rebind_promoted(out: LEnv, env: LEnv, i: u64, vreg: u32) -> LEnv {
     if env.is_slot[i] { return lenv_bind_fat_slot(out, env.names[i], vreg) }
+    if env.is_scalar_slot[i] { return lenv_bind_scalar_slot(out, env.names[i], vreg, env.slot_ltype[i]) }
     lenv_bind(out, env.names[i], vreg)
 }
 
@@ -3712,6 +4046,306 @@ fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str) -> []str {
     loop {
         if i >= m.arms.len { break }
         out = collect_reassigned_stmts(m.arms[i].body, out)
+        i++
+    }
+    out
+}
+
+/**
+ * collect_addr_taken_locals — every `mut` scalar local name, ANYWHERE in `body`, that is passed
+ * as a `ref<T>` call argument (0.3.1.0 degrau 18) — the set `lower_binding` consults to decide
+ * whether a binding needs a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg. Run
+ * ONCE, over the WHOLE function body, BEFORE any of its statements lower: the escape can occur
+ * anywhere after the local's own binding, so the binding site must already know its fate. An
+ * AGGREGATE-typed argument is never collected (`arg_needs_addr_slot`): its own VReg already IS
+ * its address (§ NATIVE-AGG-SLICE-BY-ADDRESS), so no reification is needed for it.
+ *
+ * Over-approximates on purpose rather than resolving scope precisely (e.g. a name that is
+ * actually a NESTED lambda's own local, shadowing an outer one of the same name, may be added to
+ * an outer scope that never needed it): the cost of a false positive is one harmless memory
+ * indirection on a local nothing ever addresses; the cost of a false negative would be a
+ * dangling-address miscompile. `ref_fns` being EMPTY (no function in the program declares a
+ * `ref` parameter) makes this a guaranteed-empty, zero-cost no-op.
+ *
+ * @param body     the function body (or lambda body) to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @return         the distinct address-taken local names found
+ */
+fn collect_addr_taken_locals(body: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo) -> []str {
+    if ref_fns.len == 0 { return teko::list::empty() }
+    addr_taken_stmts(body, ref_fns, enums, teko::list::empty())
+}
+
+/**
+ * arg_needs_addr_slot — does `arg`, at a `ref<T>` parameter position, need its OWN binding
+ * reified into a scalar memory slot? True only for a bare local reference to a REGISTER-value
+ * type (`is_register_value_type`) that is not already `Reference`-typed (a forwarded `ref`
+ * carries its OWN address as a plain value already) — the same two guards
+ * `arg_needs_auto_ref`/`lower_addr_of_arg` apply at the actual lowering site, asked here with the
+ * SAME program-wide enum table `LowerCtx.enums` carries (this walk runs BEFORE a `LowerCtx`
+ * exists for the function, so it is threaded in directly rather than through one).
+ *
+ * @param arg    the call argument to classify
+ * @param enums  the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @return       whether `arg` names a local this pre-pass must reify
+ */
+fn arg_needs_addr_slot(arg: checker::TExpr, enums: []LEnumInfo) -> bool {
+    if !arg_needs_auto_ref(arg) { return false }
+    let is_var = match arg.kind { checker::TVar => true; _ => false }
+    is_var && is_register_value_type(arg.type, enums)
+}
+
+/**
+ * addr_taken_stmts — `collect_addr_taken_locals`'s per-statement-list step: fold
+ * `addr_taken_stmt` over every statement, threading the accumulator.
+ *
+ * @param stmts    the statement list to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name `stmts` contains
+ */
+fn addr_taken_stmts(stmts: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        out = addr_taken_stmt(stmts[i], ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_stmt — one statement's contribution to the address-taken scan: every statement
+ * shape that carries a sub-EXPRESSION or a nested statement BLOCK is descended.
+ *
+ * @param s        the statement to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with this statement's address-taken names
+ */
+fn addr_taken_stmt(s: checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    match s {
+        checker::TBinding as b => addr_taken_expr(b.value, ref_fns, enums, acc)
+        checker::TAssign as a => addr_taken_expr(a.value, ref_fns, enums, acc)
+        checker::TReturn as r => if r.has_value { addr_taken_expr(r.value, ref_fns, enums, acc) } else { acc }
+        checker::TExprStmt as es => addr_taken_expr(es.expr, ref_fns, enums, acc)
+        checker::TLoopStmt as l => addr_taken_stmts(l.body, ref_fns, enums, addr_taken_stmts(l.init, ref_fns, enums, acc))
+        checker::TDeferStmt as d => addr_taken_stmts(d.body, ref_fns, enums, acc)
+        checker::TAdoptStmt as ad => addr_taken_stmts(ad.body, ref_fns, enums, acc)
+        _ => acc
+    }
+}
+
+/**
+ * addr_taken_expr — one expression's contribution to the address-taken scan, recursing into
+ * every sub-expression and nested statement block the `TExprKind` union can carry. A `TCall`
+ * additionally contributes its OWN ref-argument names (`addr_taken_call`) before its arguments
+ * are walked as ordinary sub-expressions (an argument may itself be, or contain, another call).
+ *
+ * @param e        the expression to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name `e` contains
+ */
+fn addr_taken_expr(e: checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    match e.kind {
+        checker::TBinary as b => addr_taken_expr(b.right, ref_fns, enums, addr_taken_expr(b.left, ref_fns, enums, acc))
+        checker::TUnary as u => addr_taken_expr(u.operand, ref_fns, enums, acc)
+        checker::TCompare as c => addr_taken_compare(c, ref_fns, enums, addr_taken_expr(c.first, ref_fns, enums, acc))
+        checker::TCall as c => addr_taken_call_args(c.args, ref_fns, enums, addr_taken_call(c, ref_fns, enums, acc))
+        checker::TIfExpr as f => addr_taken_if(f, ref_fns, enums, addr_taken_expr(f.cond, ref_fns, enums, acc))
+        checker::TMatchExpr as m => addr_taken_match(m, ref_fns, enums, addr_taken_expr(m.subject, ref_fns, enums, acc))
+        checker::TCast as c => addr_taken_expr(c.expr, ref_fns, enums, acc)
+        checker::TFieldAccess as fa => addr_taken_expr(fa.receiver, ref_fns, enums, acc)
+        checker::TSafeFieldAccess as sfa => addr_taken_expr(sfa.receiver, ref_fns, enums, acc)
+        checker::TCoalesce as co => addr_taken_expr(co.right, ref_fns, enums, addr_taken_expr(co.left, ref_fns, enums, acc))
+        checker::TStructInit as si => addr_taken_expr_list(si.field_vals, ref_fns, enums, acc)
+        checker::TIndex as ix => addr_taken_expr(ix.index, ref_fns, enums, addr_taken_expr(ix.receiver, ref_fns, enums, acc))
+        checker::TInterp as ip => addr_taken_interp(ip, ref_fns, enums, addr_taken_expr_list(ip.holes, ref_fns, enums, acc))
+        checker::TInExpr as ine => addr_taken_expr_list(ine.elems, ref_fns, enums, addr_taken_expr(ine.lhs, ref_fns, enums, acc))
+        checker::TArrayLit as al => addr_taken_array_elems(al.elements, ref_fns, enums, acc)
+        checker::TLambda as lam => addr_taken_stmts(lam.body, ref_fns, enums, acc)
+        _ => acc
+    }
+}
+
+/**
+ * addr_taken_expr_list — `addr_taken_expr` folded over a plain expression list.
+ *
+ * @param es       the expressions to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name any element contains
+ */
+fn addr_taken_expr_list(es: []checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= es.len { break }
+        out = addr_taken_expr(es[i], ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_call — a `TCall` node's OWN ref-argument contribution: resolve its callee's
+ * `ref_flags` (`find_ref_flags`) and collect every argument position the flags mark, that
+ * ALSO needs reification (`arg_needs_addr_slot`).
+ *
+ * @param c        the call node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with this call's own address-taken argument names
+ */
+fn addr_taken_call(c: checker::TCall, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    if c.callee.segments.len == 0 { return acc }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    match find_ref_flags(ref_fns, c.call_ns, last) {
+        []bool as rf => addr_taken_call_ref_args(c.args, rf, enums, 0, acc)
+        null => acc
+    }
+}
+
+/**
+ * addr_taken_call_ref_args — `addr_taken_call`'s own per-position fold: for every index whose
+ * flag is set and whose argument needs reification, append that argument's local NAME
+ * (de-duplicated).
+ *
+ * @param args   the call's argument list
+ * @param rf     the callee's `ref_flags`
+ * @param enums  the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param i      the next index to check
+ * @param acc    the names gathered so far
+ * @return       `acc` extended with this call's own address-taken argument names
+ */
+fn addr_taken_call_ref_args(args: []checker::TExpr, rf: []bool, enums: []LEnumInfo, i: u64, acc: []str) -> []str {
+    if i >= args.len || i >= rf.len { return acc }
+    if !rf[i] || !arg_needs_addr_slot(args[i], enums) { return addr_taken_call_ref_args(args, rf, enums, i + 1, acc) }
+    let name = match args[i].kind { checker::TVar as v => v.name; _ => "" }
+    let out = if name.len > 0 && !contains_str(acc, name) { teko::list::push(acc, name) } else { acc }
+    addr_taken_call_ref_args(args, rf, enums, i + 1, out)
+}
+
+/**
+ * addr_taken_call_args — descend into a call's OWN argument expressions as ordinary
+ * sub-expressions (an argument may itself contain another `TCall`), after `addr_taken_call`
+ * already recorded this call's own ref-argument names.
+ *
+ * @param args     the call's argument list
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name any argument contains
+ */
+fn addr_taken_call_args(args: []checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    addr_taken_expr_list(args, ref_fns, enums, acc)
+}
+
+/**
+ * addr_taken_compare — descend into a `TCompare` chain's own operand expressions.
+ *
+ * @param c        the comparison chain
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name the chain's operands contain
+ */
+fn addr_taken_compare(c: checker::TCompare, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        out = addr_taken_expr(c.rest[i].operand, ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_if — descend into a nested `if`-expression's condition already having been scanned
+ * by the caller; here just its two statement blocks (the `else` block only when present).
+ *
+ * @param f        the nested if node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with both arms' address-taken names
+ */
+fn addr_taken_if(f: checker::TIfExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    let after_then = addr_taken_stmts(f.then_blk, ref_fns, enums, acc)
+    if f.has_else { return addr_taken_stmts(f.else_blk, ref_fns, enums, after_then) }
+    after_then
+}
+
+/**
+ * addr_taken_match — descend into every arm's guard (when present) and body of a nested `match`.
+ *
+ * @param m        the nested match node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every arm's address-taken names
+ */
+fn addr_taken_match(m: checker::TMatchExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        let arm = m.arms[i]
+        if arm.has_when { out = addr_taken_expr(arm.guard, ref_fns, enums, out) }
+        out = addr_taken_stmts(arm.body, ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_array_elems — descend into every array-literal element's own expression.
+ *
+ * @param elems    the array literal's elements
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every element's address-taken names
+ */
+fn addr_taken_array_elems(elems: []checker::TArrayElem, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= elems.len { break }
+        out = addr_taken_expr(elems[i].expr, ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_interp — descend into a string interpolation's DYNAMIC format-spec arguments (the
+ * hole expressions themselves are already scanned by `addr_taken_expr`'s own caller).
+ *
+ * @param ip       the interpolation node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every dynamic spec's address-taken names
+ */
+fn addr_taken_interp(ip: checker::TInterp, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= ip.specs.len { break }
+        match ip.specs[i].kind {
+            checker::TFSpecDynamic as d => out = addr_taken_expr_list(d.args, ref_fns, enums, out)
+            _ => { }
+        }
         i++
     }
     out
@@ -4063,6 +4697,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
+        ref_fns = body_done.ref_fns; addr_taken = body_done.addr_taken
     }
 }
 
@@ -6897,6 +7532,7 @@ fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, sub
  * @since #594 T-B6
  */
 fn lower_fat_field(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | error {
+    if is_ref_deref(fa) { return lower_ref_deref_read_fat(ctx, fa) }
     let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
     let name = match named_type_name(fa.receiver.type) { str as s => s; error as e => return e }
     let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as e => return e }
@@ -6909,6 +7545,22 @@ fn lower_fat_field(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | err
     let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, ro.vreg, off + ltype_size(LType::Ptr), fa.receiver.line, fa.receiver.col))
     let lr = ctx_alloc(with_la)
     LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, fa.receiver.line, fa.receiver.col)); ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * lower_ref_deref_read_fat — `recv.value` on a `Reference` receiver, `T` FAT (`str`/`[]T`): the
+ * handle's own value already IS the address of the `{ptr, len}` pair (the SAME memory shape a
+ * mutable fat local's own frame slot holds, `load_fat_slot`) — reused directly rather than
+ * re-deriving the two loads.
+ *
+ * @param ctx  the lowering context
+ * @param fa   the field access (`fa.receiver` is `Reference`-typed, `fa.field` is `"value"`)
+ * @return     the dereferenced (ptr, len) pair
+ * @throws     propagated from lowering the receiver
+ */
+fn lower_ref_deref_read_fat(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | error {
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
+    load_fat_slot(ro.ctx, ro.vreg, fa.receiver.line, fa.receiver.col)
 }
 
 /**
@@ -7458,10 +8110,12 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, value: checker::TEx
 /** lower_field_access — `recv.field` on a struct receiver: lower the receiver to its base
     address, compute the field's address via its registered layout offset, then load its
     value. `.len` on a str/slice receiver (A1-4, #382) reads the receiver's ALREADY-CARRIED
-    length VReg instead — no memory traffic. An error's diagnostic fields / `Ref<T>.value`
-    remain out of the A1-3/A1-4 subset. */
+    length VReg instead — no memory traffic. `Ref<T>.value` on a NON-fat `T` (`is_ref_deref`)
+    dereferences the handle directly (`lower_ref_deref_read`) — a FAT `T` reaches this backend
+    through `lower_fat_field`'s OWN `Ref<T>.value` arm instead, never this one. */
 fn lower_field_access(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAccess) -> Lowered | error {
     if fa.field == "len" && is_fat_type(fa.receiver.type) { return lower_len_field(ctx, fa) }
+    if is_ref_deref(fa) { return lower_ref_deref_read(ctx, e, fa) }
     let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
     let name = match named_type_name(fa.receiver.type) { str as s => s; error as err => return err }
     let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
@@ -7470,6 +8124,43 @@ fn lower_field_access(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAcces
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, e.line, e.col))
     let r = ctx_alloc(with_addr)
     Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ltype_of(e.type, r.ctx.enums), e.line, e.col)); vreg = r.vreg }
+}
+
+/**
+ * is_ref_deref — is `fa` a `Ref<T>.value` dereference (the ONE field a `Reference` receiver
+ * exposes, `checker::type_field_access`'s own gate)? Shared by `lower_field_access` (a scalar
+ * or aggregate `T`) and `lower_fat_field` (a fat `T`) so the two agree on which receiver shape
+ * this is, rather than each re-deriving it.
+ *
+ * @param fa  the field access to classify
+ * @return    whether `fa.receiver` is `Reference`-typed and `fa.field` is `"value"`
+ */
+fn is_ref_deref(fa: checker::TFieldAccess) -> bool {
+    fa.field == "value" && match fa.receiver.type { checker::Reference => true; _ => false }
+}
+
+/**
+ * lower_ref_deref_read — `recv.value` on a `Reference` receiver, `T` NOT fat: the handle's own
+ * value already IS the address to read (no `field_addr` computation, unlike a struct field —
+ * the handle is not itself a struct). A REGISTER-value `T` (`is_register_value_type` — every
+ * primitive, `byte`, an `enum`) is genuinely stored AT that address and must be LOADED; an
+ * AGGREGATE `T` (`struct`/`class`/`Optional`/a declared `Variant`) is, in this backend's own
+ * memory model, already represented BY its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the SAME
+ * address `Ref<T>` itself carries — so the deref is a passthrough of the handle's own VReg, not
+ * a load: loading eight bytes FROM that address would read whatever the pointee's OWN first
+ * field holds, not the pointee's address.
+ *
+ * @param ctx  the lowering context
+ * @param e    the field-access expression (its type is `T`, the referenced type)
+ * @param fa   the field access (`fa.receiver` is `Reference`-typed, `fa.field` is `"value"`)
+ * @return     the dereferenced value
+ * @throws     propagated from lowering the receiver
+ */
+fn lower_ref_deref_read(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAccess) -> Lowered | error {
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
+    if !is_register_value_type(e.type, ro.ctx.enums) { return Lowered { ctx = ro.ctx; vreg = ro.vreg } }
+    let r = ctx_alloc(ro.ctx)
+    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, ro.vreg, ltype_of(e.type, r.ctx.enums), e.line, e.col)); vreg = r.vreg }
 }
 
 /** lower_len_field — `recv.len` on a str/slice receiver: the length half of the receiver's
@@ -7770,16 +8461,110 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
     }
 }
 
-/** lower_assign — a TAssign: Simple (a local rebind) or Field (a struct-field write via
-    memory); a Ref-deref (`.value op= …`) is out of the A1-3 subset (Ref<T> is not yet a
-    memory-modeled type here). */
+/** lower_assign — a TAssign: Simple (a local rebind), Field (a struct-field write via memory),
+    or RefDeref (write THROUGH a `Ref<T>` handle, `lower_assign_ref_deref`). */
 fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     match a.kind {
         parser::AssignKind::Simple => lower_assign_simple(ctx, a)
         parser::AssignKind::Field => lower_assign_field(ctx, a)
-        parser::AssignKind::RefDeref => error { message = "native backend N1: reference deref-assignment not yet lowered (N2)" }
+        parser::AssignKind::RefDeref => lower_assign_ref_deref(ctx, a)
         parser::AssignKind::Index => error { message = "native backend N1: slice element index-assignment not yet lowered (N2)" }
     }
+}
+
+/**
+ * lower_assign_ref_deref — `name.value op= e`: write THROUGH a `Ref<T>` handle. The handle's own
+ * value already IS the address to write through — a `ref` parameter/binding binds the pointer
+ * itself (`ltype_of(checker::Reference) == LType::Ptr`, a plain scalar VReg) — unlike a struct
+ * FIELD write, no `field_addr` computation is needed to reach it. Splits three ways, exactly like
+ * a struct field's OWN write does not need to (a field's aggregate half is a BOXED pointer slot;
+ * a reference's is not):
+ *
+ * - a FAT (`str`/`[]T`) target writes both halves of its pair through `store_fat_slot`
+ *   (`store_assign_fat_ref`);
+ * - a REGISTER-value `T` (`is_register_value_type` — every primitive, `byte`, an `enum`)
+ *   delegates to the SAME `store_assign_value` a struct field write already uses;
+ * - an AGGREGATE `T` (`struct`/`class`/a declared `Variant`) copies the new value's OWN bytes
+ *   directly into the handle's pointee storage (`store_assign_aggregate_ref`) — `Ref<T>` names
+ *   `T`'s memory DIRECTLY (the C route's bare `<T> *`), unlike a container field's BOXED pointer
+ *   slot, so storing the new value's ADDRESS here (what the register/field path does) would
+ *   overwrite the pointee's own first bytes with a pointer instead of the pointee's data.
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment (kind `RefDeref`; `a.name` names the bound `Ref<T>` handle)
+ * @return     the context with the store appended, or an honest stop
+ * @throws     when `a.name` is not a bound local, or propagated from lowering the value
+ */
+fn lower_assign_ref_deref(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    let cur = lenv_lookup(ctx.env, a.name)
+    if !cur.found { return error { message = teko::str::concat("native backend N1: unbound reference `", a.name, "` (internal)") } }
+    if is_fat_type(a.bound) { return store_assign_fat_ref(ctx, cur.vreg, a) }
+    if is_register_value_type(a.bound, ctx.enums) { return store_assign_value(ctx, cur.vreg, ltype_of(a.bound, ctx.enums), a) }
+    store_assign_aggregate_ref(ctx, cur.vreg, a)
+}
+
+/**
+ * store_assign_aggregate_ref — the AGGREGATE arm of `lower_assign_ref_deref`: `memcpy` the new
+ * value's OWN bytes (its already-lowered address, `lower_value_into_type`) into the handle's
+ * pointee storage, sized to the WHOLE-TYPE byte width `aggregate_box_bytes` already computes for
+ * degrau 4's push-boxing (the same question — "how many bytes IS a value of this type, so a
+ * container that holds it BY ADDRESS can own a copy" — asked of a REFERENCE'S pointee instead of
+ * a slice's pushed element). No LIR memcpy op exists (degrau 4's own reasoning for the runtime
+ * touch applies unchanged): `tk_mem_copy` is the one-line runtime entry. A compound `op=` is
+ * refused — no arithmetic operator applies to an aggregate, mirroring `store_assign_fat_ref`'s
+ * SAME refusal for a fat target.
+ *
+ * @param ctx   the lowering context
+ * @param addr  the `Ref<T>` handle's own value (the address to write through)
+ * @param a     the typed assignment (kind `RefDeref`, an aggregate `bound`)
+ * @return      the context with the copy appended, or an honest stop
+ * @throws      for a compound `op=`, for an aggregate this backend pins no whole-type byte width
+ *              for (`unsized_aggregate_ref_stop`), or propagated from lowering the value
+ */
+fn store_assign_aggregate_ref(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = "native backend N1: compound assignment to an aggregate reference has no arithmetic form (internal)" }
+    }
+    let width = match aggregate_box_bytes(a.bound, ctx) { u32 as n => n; null => return unsized_aggregate_ref_stop(a.bound) }
+    let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+    let wr = ctx_alloc(vo.ctx)
+    let with_width = ctx_append(wr.ctx, const_int_inst(wr.vreg, width to i64, a.value.line, a.value.col))
+    let args = teko::list::push(two_args(addr, vo.vreg), wr.vreg)
+    let inst = void_call_inst("tk_mem_copy", args, false, a.value.line, a.value.col)
+    LowerStmtOut { ctx = ctx_append(with_width, inst); terminated = false }
+}
+
+/**
+ * unsized_aggregate_ref_stop — the NAMED honest stop for `store_assign_aggregate_ref`: a
+ * reference deref-assignment whose target is an aggregate this backend cannot pin a WHOLE-TYPE
+ * byte width for (`aggregate_form_name`'s two still-open forms — an optional, a closure).
+ *
+ * @param t  the aggregate type this backend assigns no whole-type byte width
+ * @return   the honest stop, always
+ */
+fn unsized_aggregate_ref_stop(t: checker::Type) -> error {
+    error { message = teko::str::concat("native backend N1: a reference deref-assignment whose target is ", teko::str::concat(aggregate_form_name(t), " — this copies the new value's bytes directly into the handle's pointee storage, which needs a byte width the type alone fixes (N2)")) }
+}
+
+/**
+ * store_assign_fat_ref — the FAT arm of `lower_assign_ref_deref`: a plain `=` writes the RHS's
+ * `{ptr, len}` pair through the handle's own address (`store_fat_slot`, the SAME memory shape a
+ * mutable fat local's own frame slot holds); a compound `op=` is refused, mirroring
+ * `store_assign_fat_field`'s SAME refusal for a fat struct FIELD (no arithmetic operator applies
+ * to a `str`/`[]T`).
+ *
+ * @param ctx   the lowering context
+ * @param addr  the `Ref<T>` handle's own value (the address to write through)
+ * @param a     the typed assignment (kind `RefDeref`, a str/slice `bound`)
+ * @return      the context with both halves stored
+ * @throws      for a compound `op=` on a fat reference, or propagated from lowering the value
+ */
+fn store_assign_fat_ref(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = "native backend N1: compound assignment to a str/slice reference has no arithmetic form (internal)" }
+    }
+    let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
+    LowerStmtOut { ctx = store_fat_slot(fo.ctx, addr, fo, a.value.line, a.value.col); terminated = false }
 }
 
 /**
@@ -7797,6 +8582,14 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
  * `loop { xs = teko::list::push(xs, …) }` read back its original length forever (list-builtin
  * degrau).
  *
+ * An address-taken `mut` scalar target (`lenv_lookup_scalar_slot`, 0.3.1.0 degrau 18) is ALSO
+ * written THROUGH ITS FRAME SLOT rather than by rebinding the env: a plain SSA rebind
+ * (`ctx_reassign`) would be invisible to a read made through the escaped `Ref<T>` handle, and — the
+ * other direction — a write made through that SAME handle must be visible to a later PLAIN read of
+ * the name. `store_assign_value` (a struct-field write's own tail) already implements exactly
+ * this shape (a plain `=` through `lower_value_into_type`, a compound `op=` via load-compute-store)
+ * against an arbitrary address, reused verbatim.
+ *
  * @param LowerCtx ctx  the lowering context to append the assignment's instructions into
  * @param checker::TAssign a  the typed assignment (kind `Simple`)
  * @return LowerStmtOut | error  the context with the name re-bound, or an honest stop
@@ -7805,6 +8598,8 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
  */
 fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     if is_fat_type(a.bound) { return lower_assign_fat(ctx, a) }
+    let slot = lenv_lookup_scalar_slot(ctx.env, a.name)
+    if slot.found { return store_assign_value(ctx, slot.slot, slot.ty, a) }
     if a.op == lexer::TokenKind::Assign {
         let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
         return LowerStmtOut { ctx = ctx_reassign(vo.ctx, a.name, vo.vreg); terminated = false }
@@ -8225,7 +9020,7 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
  *           degrau, #382 N2).
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty()) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty(), ref_fns: []LRefFnInfo = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let fat_ret = is_fat_type(f.return_type)
@@ -8242,6 +9037,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
+        ref_fns = ref_fns; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums)
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -8408,19 +9204,20 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
     let variants = collect_variant_defs(prog)
+    let ref_fns = collect_ref_fns(prog)
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
     mut lifted: []LFunc = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants) { LoweredFunction as x => x; error as err => return err }
+    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
 }
 
@@ -9046,9 +9843,9 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -9124,10 +9921,10 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
@@ -9157,7 +9954,7 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  *                                  rodata/lifted tables; the `error` arm when
  *                                  any loose statement fails to lower
  */
-fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LoweredFunction | error {
+fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty()) -> LoweredFunction | error {
     let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
@@ -9166,6 +9963,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
+        ref_fns = ref_fns; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums)
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
