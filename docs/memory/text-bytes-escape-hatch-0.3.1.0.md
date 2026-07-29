@@ -311,3 +311,42 @@ NESTA árvore/binário (reproduzido idêntico em runs repetidos), mas não neces
 binário `gen1b` diferente (outra cadeia de bootstrap, outra CI). Os dois gaps são REAIS e
 INDEPENDENTES; qual aparece primeiro num run de auto-construção completa é um detalhe de qual
 binário/ordem, não um sinal de qual foi corrigido quando.
+
+## `teko::str::slice` produz `str` INVÁLIDA — 104 sítios (medido 2026-07-29)
+
+Achado pelo desenho de ranges e corte (`cargo/0.3.1-ranges-e-corte-desenho`, `5576a4c`), reportado e
+não corrigido nessa lane. **Pertence à lane do `.len`-conta-caracteres**, que já vira a superfície de
+`str` e já paga o ciclo de semente.
+
+Medido na rota C, com a sonda canónica desta esteira:
+
+```
+teko::str::slice(s, 0, 4)      → caf\xc3     ← mojibake, meio codepoint
+teko::str::str_slice_chars(s, 0, 4)  → café
+```
+
+`TEKO_LEGISLATION.md` diz que uma `str` **significa** UTF-8 válido — *"a `str` means valid UTF-8, so
+it is (M.3 + M.1)"*. Logo isto não é escolha de desenho a debater: é violação de uma lei já escrita.
+
+| forma | sítios | corta |
+|---|---|---|
+| `teko::str::slice` | 54 | **bytes** |
+| `teko::str::slice_to` | 27 | **bytes** |
+| `teko::str::slice_from` | 23 | **bytes** |
+| `teko::str::str_slice_chars` | 10 | caracteres |
+
+**104 contra 10.** A maioria esmagadora do compilador corta `str` por bytes, e está acidentalmente
+correcta porque quase todo o texto que manipula é ASCII. O primeiro identificador acentuado, o
+primeiro literal com emoji, ou a primeira mensagem de diagnóstico com um nome não-ASCII produz
+`str` inválida — silenciosamente.
+
+### Consequência para o sequenciamento, provada
+
+`str_slice_chars(s, 0, s.len)` sobre `café🐝` **rebenta** com `codepoint index out of range`:
+o `.len` de hoje devolve BYTES (9) e o corte por caracteres só tem 5. Ou seja, as duas metades da
+lane do `.len` estão acopladas — não se pode migrar os 104 sítios para corte por caracteres antes de
+`.len` contar caracteres, nem o contrário.
+
+É também por isso que o desenho de ranges propõe um `str_cut_from` cujo fim é contado DENTRO do
+runtime: `s[a..]` e `s[..]` passam a funcionar sem o programa mencionar `.len`, o que corta a
+dependência circular e deixa a lane 1 dos ranges entrar ANTES da lane do `.len`.
