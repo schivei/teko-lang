@@ -638,3 +638,39 @@ criado pelo mecanismo que existe para os impedir.
 
 **Protocolo**: nenhum pino se promove sem determinar POR QUE ficou vermelho. A pergunta não é *"ficou
 vermelho?"* mas ***"passou a compilar, ou só mudou de queixa?"***.
+
+## O linker é NOSSO, e o `cc` não é um linker — ruling do dono (2026-07-29)
+
+Literal, e generaliza a proibição do mingw: *"a partir do momento que conseguirmos passar um binário
+do início ao fim, não devemos usar nem mesmo o gcc para link, como iremos criar nosso próprio linker
+em outra versão mais adiante, usar linker nativo ao invés de cc/gcc para passar por ele um objeto já
+pronto, passar pelo linker nativo."*
+
+**O princípio**: o `cc`/`gcc` é um **driver**, não um linker. Passar um objecto nosso por ele entrega
+ao gcc decisões que são nossas — ficheiros de arranque, bibliotecas por omissão, convenções de
+ligação. E como o linker próprio está no plano de uma versão futura, **temos de já possuir o passo de
+ligação hoje**, para que a substituição seja uma troca e não um redesenho.
+
+| formato | linker nativo |
+|---|---|
+| ELF | `ld` |
+| PE | **`link`** (MSVC) — nunca o `ld` do mingw |
+| Mach-O | `ld` (ld64) |
+
+**Já implementado no caminho nativo**, medido: `src/build/linker.tks`, `linker_candidates` (`:121`)
+devolve exactamente esses; `resolve_linker` (`:292`) **nunca** devolve `"cc"` em silêncio — sem
+linker, dá `no_linker_error`. O doc-comment em `:109` registou a transição: *"`resolve_cc` used to
+return the bare token `cc`"*.
+
+E não basta **encontrar** um linker: `linker_targets_arch` (`:227`) e `pe_linker_targets_arch` (`:253`)
+verificam que o linker resolvido **tem como alvo a arquitectura pedida**. É essa asserção que fecha a
+porta à emulação, e é por isso que o mingw é recusado por nome E por caminho (`linker_is_mingw`,
+`:47`, apanha `x86_64-w64-mingw32-ld` e instalações MSYS2, verificando a grafia inteira).
+
+**O que continua legitimamente pelo `cc`**: a rota C. Ali o `cc` compila C, que é o trabalho dele —
+não está a ligar objectos nossos. A diretiva rege o caminho NATIVO.
+
+**Consequência para o harness de testes, ainda em aberto**: uma linha de regressão que queira alvo
+Windows a partir de um host Linux não tem saída limpa — o MSVC não corre em Linux, e o mingw está
+proibido. As saídas reais são correr essa linha **só no runner Windows**, removê-la, ou aceitar um
+skip, que a lei da barra do tronco proíbe. Decisão do dono, registada como pendente.
