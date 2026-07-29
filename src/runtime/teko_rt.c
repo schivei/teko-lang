@@ -657,6 +657,56 @@ bool tk_str_eq(tk_str a, tk_str b) {
     return memcmp(a.ptr, b.ptr, a.len) == 0;
 }
 
+// tk_char_eq — same length AND same bytes (memcmp). The lexer only ever emits the ONE valid
+// UTF-8 encoding of a codepoint, so byte-equality already IS codepoint-equality; no decode
+// needed. The empty-length early return mirrors tk_str_eq's own (a null `.ptr` would violate
+// memcmp's `nonnull` contract) even though a real `tk_char` is never zero-length in practice —
+// keeping the two functions' shape identical is cheaper to audit than arguing the case is dead.
+bool tk_char_eq(tk_char a, tk_char b) {
+    if (a.len != b.len) return false;
+    if (a.len == 0) return true;
+    return memcmp(a.ptr, b.ptr, a.len) == 0;
+}
+
+// tk_slice_eq_bytes — `[]T == []T` for a POD element (integer/bool/byte prim, no interior
+// pointer): same length AND memcmp of the packed backing array. See the header doc for why this
+// is NOT reused for float/char/str elements.
+bool tk_slice_eq_bytes(const void *a_ptr, uint64_t a_len, const void *b_ptr, uint64_t b_len, uint64_t elem_size) {
+    if (a_len != b_len) return false;
+    if (a_len == 0) return true;
+    return memcmp(a_ptr, b_ptr, (size_t)(a_len * elem_size)) == 0;
+}
+
+// tk_slice_f32_eq / tk_slice_f64_eq — same length AND every element equal by IEEE `==` (NOT
+// memcmp — see the header doc for why a float's bits are not its value equality).
+bool tk_slice_f32_eq(const float *a_ptr, uint64_t a_len, const float *b_ptr, uint64_t b_len) {
+    if (a_len != b_len) return false;
+    for (uint64_t i = 0; i < a_len; i += 1) { if (a_ptr[i] != b_ptr[i]) return false; }
+    return true;
+}
+bool tk_slice_f64_eq(const double *a_ptr, uint64_t a_len, const double *b_ptr, uint64_t b_len) {
+    if (a_len != b_len) return false;
+    for (uint64_t i = 0; i < a_len; i += 1) { if (a_ptr[i] != b_ptr[i]) return false; }
+    return true;
+}
+
+// tk_slice_char_eq — same length AND every element `tk_char_eq`. A `[]char` element is
+// byte-for-byte a `tk_char` (both the `{uint8_t*,uint64_t}` shape), so the caller's backing array
+// IS an array of `tk_char` already, with no bridging needed.
+bool tk_slice_char_eq(const tk_char *a_ptr, uint64_t a_len, const tk_char *b_ptr, uint64_t b_len) {
+    if (a_len != b_len) return false;
+    for (uint64_t i = 0; i < a_len; i += 1) { if (!tk_char_eq(a_ptr[i], b_ptr[i])) return false; }
+    return true;
+}
+
+// tk_slice_str_eq — same length AND every element `tk_str_eq`. A `[]str` element is
+// byte-for-byte a `tk_str`, for the same reason `tk_slice_char_eq` needs no bridging.
+bool tk_slice_str_eq(const tk_str *a_ptr, uint64_t a_len, const tk_str *b_ptr, uint64_t b_len) {
+    if (a_len != b_len) return false;
+    for (uint64_t i = 0; i < a_len; i += 1) { if (!tk_str_eq(a_ptr[i], b_ptr[i])) return false; }
+    return true;
+}
+
 // (TR3) tk_str_hash — FNV-1a over the str's bytes (offset basis 14695981039346656037, prime
 // 1099511628211, u64 wraparound). Mirrors di_type_id's derivation so a str-field structural
 // `Hash` folds bytes identically on both engines; an empty str hashes to the offset basis.
