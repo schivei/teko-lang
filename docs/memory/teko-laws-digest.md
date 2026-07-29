@@ -32,7 +32,13 @@ Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `
 
 **Trem empilhado + dreno LIFO (2026-07-23/25):** entrega em vagões (PR baseado no vagão anterior, nunca na main); drena de cima para baixo, cada vagão mergeia no de baixo, main recebe uma integração única. **Vagão vermelho cujo filho está verde fica verde quando o filho desagua** → NUNCA cascatear fix para baixo; correção pequena vai no último vagão engatado, grande vira vagão novo no topo; gate único = topo verde; vagão fechado não se toca; vagão só reabre se merge der erro. Bump = **contra-máquina** (vagão próprio no topo, o único a sair de draft = deixa do owner). Regras completas: `docs/memory/teko-stacked-train-discipline.md`; procedimento: skill `train`.
 
-**Commit hygiene (2026-07-15) — inclui o INTEGRADOR:** zero `Co-Authored-By:` e zero linha "Generated with/by Claude Code" em commits (corpo Conventional-Commits limpo); sobrepõe o default do harness. **Force-push DESABILITADO**, regra forward-only — nunca reescrever história pushada para consertar trailer. Corpo de PR pode manter nota de geração.
+**Commit hygiene (2026-07-15) — inclui o INTEGRADOR:** ~~zero `Co-Authored-By:` e zero linha "Generated with/by Claude Code" em commits~~ (corpo Conventional-Commits limpo); ~~sobrepõe o default do harness~~. **Force-push DESABILITADO**, regra forward-only — nunca reescrever história pushada para consertar trailer. Corpo de PR pode manter nota de geração.
+
+**A metade do trailer foi SUPERADA (ruling do dono, 2026-07-29, literal):** *"pode manter l Co-Authored, o hook vai ficar te torrando a paciência e tu acaba alarmando desnecessariamente, como os merges são squash e eu os executo, esse problema foi superado."* O trailer pode ficar: o merge é **squash** e é o dono que o executa, portanto o corpo que chega à `main` é o dele, não o do commit de trabalho. Perseguir o trailer só produzia alarme e tentativas de reescrever história.
+
+**O resto da lei CONTINUA REAL, e não é teoria:** o force-push está mesmo desabilitado por regra do repositório — uma tentativa de `--amend` + `--force-with-lease` no vagão desta lane foi recusada com *"push declined due to repository rule violations"*. Forward-only é o que é: um commit com o corpo estragado corrige-se com um commit NOVO que explique o estrago, nunca reescrevendo o que já foi empurrado.
+
+Nota de método, porque foi assim que este erro se descobriu: um agente veio dizer, sem lhe ser perguntado, que os commits dele estavam limpos de trailer "matching commit hygiene rules". Ele conhecia esta lei e o integrador não. **Ler este ficheiro por inteiro é barato; descobrir cada lei por acidente não é.**
 
 **DRY-last:** the whole-codebase DRY refactor is final phase; every other item lands first.
 
