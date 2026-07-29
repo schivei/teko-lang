@@ -253,6 +253,14 @@ tk_slice_byte tk_bytes_of_str(tk_str s) {
     return (tk_slice_byte){ (tk_byte *)s.ptr, s.len };
 }
 
+// tk_bytes_of_str_len — the out-parameter-length twin of `tk_bytes_of_str` (0.3.1.0 degrau 21):
+// the view IS s's own (ptr, len), unchanged — no allocation, no copy, so the twin needs no logic
+// beyond handing the SAME pair back through this backend's out-parameter convention.
+const tk_byte *tk_bytes_of_str_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len) {
+    *out_len = len;
+    return ptr;
+}
+
 // rt_valid_utf8 — strict RFC 3629 well-formedness check (reject overlong encodings, UTF-16
 // surrogates U+D800..U+DFFF, and codepoints > U+10FFFF). Mirrors src/text/text.c's static
 // valid_utf8 byte-for-byte; duplicated here (not shared) because teko_rt.c is a SEPARATE link
@@ -300,6 +308,23 @@ tk_ffi_sres tk_rt_str_from_utf8(const tk_byte *ptr, uint64_t len) {
     if (buf == NULL) tk_panic("out of memory (str_from_utf8)");
     if (len) memcpy(buf, ptr, (size_t)len);
     return (tk_ffi_sres){ .ok = true, .value = (tk_str){ buf, len } };
+}
+
+// tk_rt_str_from_utf8_ok — the native backend's own-register twin of `tk_rt_str_from_utf8`
+// (0.3.1.0 degrau 21, mirrors `tk_rt_last_index_of_ok`'s own shape): the bool return IS the
+// found/failed flag, and the SAME two out-parameters carry EITHER outcome's (ptr, len) pair — the
+// decoded str's on success, the "invalid UTF-8" message's on failure — so the native lowering's
+// bool-branch decides which meaning to read without this twin owing it a THIRD out-parameter.
+bool tk_rt_str_from_utf8_ok(const tk_byte *ptr, uint64_t len, const tk_byte **out_ptr, uint64_t *out_len) {
+    tk_ffi_sres r = tk_rt_str_from_utf8(ptr, len);
+    if (r.ok) {
+        *out_ptr = (const tk_byte *)r.value.ptr;
+        *out_len = r.value.len;
+        return true;
+    }
+    *out_ptr = (const tk_byte *)r.err.ptr;
+    *out_len = r.err.len;
+    return false;
 }
 
 // tk_one_byte — a fresh 1-byte str holding c.

@@ -1869,3 +1869,67 @@ fn f_char_and_slice_equality() -> i64 {
     if !(chars_a != chars_c) { return 22 }
     0
 }
+
+/**
+ * f_bytes_of_str — `teko::text::bytes_of_str(str) -> []byte` (fat, zero-copy) (0.3.1.0 degrau 21 /
+ * raiz-comum §R5): `native_builtin_symbol` had no entry for this bare name at all, so a reached
+ * call honest-stopped ("builtin `bytes_of_str` not yet lowered") — first surfaced through this
+ * project's own standalone probe (`docs/memory/text-bytes-escape-hatch-0.3.1.0.md`), not through
+ * the compiler's own self-build. Fits the ESTABLISHED out-parameter-length molde exactly
+ * (`tk_bytes_of_str_len`, the SAME `lower_len_out_call` shape `builtin_str_of_bytes_symbol`
+ * already uses for its own reverse direction) — a resolver-table entry alone, no new lowering arm.
+ *
+ * Checked by VALUE with `café🐝` (an accented letter, 2 UTF-8 bytes, plus an emoji, 4 bytes,
+ * beside two 1-byte ASCII letters) — the sonda this whole lane's docs measure by, so a
+ * length/boundary bug cannot hide behind an all-ASCII fixture — plus the empty-string edge (a
+ * zero-length view, not a null/garbage pointer).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_bytes_of_str() -> i64 {
+    let s = "café🐝"
+    let bs = teko::text::bytes_of_str(s)
+    if bs.len != 9 { return 1 }
+    if str_of_bytes(bs) != s { return 2 }
+    let empty = ""
+    let ebs = teko::text::bytes_of_str(empty)
+    if ebs.len != 0 { return 3 }
+    0
+}
+
+/**
+ * f_str_from_utf8 — `teko::text::str_from_utf8([]byte) -> str | error` (0.3.1.0 degrau 21 /
+ * raiz-comum §R5): the fat-payload sibling of degrau 15's `last_index_of` (`u64 | error`) — its
+ * runtime ABI (`tk_ffi_sres`, three eightbytes) does not fit this backend's single-result-register
+ * `LCall` either, so it needed its own bool-branch + variant-wrapper construction
+ * (`lower_str_from_utf8_call`), not a resolver-table entry alone; the ok arm writes a FAT member
+ * straight into the wrapper (no boxing — `store_fat_variant_payload_pair`), the error arm boxes an
+ * `error { message = … }` the SAME way `last_index_of`'s own not-found arm does.
+ *
+ * Checked by VALUE across the round-trip (`café🐝`, matching `f_bytes_of_str`'s own sonda so the
+ * two fixtures reconcile: `bytes_of_str(s).len == 9` and this round-trip's own decoded `str` equals
+ * `s` byte for byte) and the invalid-UTF-8 arm (a lone continuation byte with no lead byte, and a
+ * lead byte missing its continuation) — each asserting the EXACT "invalid UTF-8" message the
+ * runtime's own `tk_rt_str_from_utf8` constant carries, not merely that the call failed.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_str_from_utf8() -> i64 {
+    let s = "café🐝"
+    let bs = teko::text::bytes_of_str(s)
+    match teko::text::str_from_utf8(bs) {
+        str as r => { if r != s { return 1 } }
+        error => return 2
+    }
+    let lone_continuation: []byte = [0x80 to byte, 0x41 to byte]
+    match teko::text::str_from_utf8(lone_continuation) {
+        str => return 3
+        error as e => { if e.message != "invalid UTF-8" { return 4 } }
+    }
+    let truncated_lead: []byte = [0x41 to byte, 0xE2 to byte, 0x82 to byte]
+    match teko::text::str_from_utf8(truncated_lead) {
+        str => return 5
+        error as e => { if e.message != "invalid UTF-8" { return 6 } }
+    }
+    0
+}

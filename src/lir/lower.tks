@@ -1777,7 +1777,10 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * `teko::str::last_index_of` (`is_last_index_of_call`) is intercepted BEFORE the plain resolver
  * table too — its `u64 | error` result is neither fat nor an ordinary single-register scalar, so
  * it routes to `lower_last_index_of_call`'s own bool-branch + variant-wrapper construction
- * (0.3.1.0 degrau 15).
+ * (0.3.1.0 degrau 15). `teko::text::str_from_utf8` (`is_str_from_utf8_call`) is intercepted the
+ * SAME way — its `str | error` result is a fat PAYLOAD wrapped in a variant, neither the bare
+ * `is_fat_type` shape above nor `last_index_of`'s scalar payload, so it routes to its own
+ * `lower_str_from_utf8_call` (0.3.1.0 degrau 21).
  *
  * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
  * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
@@ -1801,6 +1804,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
     if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
     if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_str_from_utf8_call(c.callee) { return lower_str_from_utf8_call(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
@@ -2177,6 +2181,173 @@ fn lower_last_index_of_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     let err_base = ctx_alloc(else_ctx)
     let err_alloca = ctx_append(err_base.ctx, alloca_inst(err_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     let else_built = match lower_last_index_of_error_arm(err_alloca, err_base.vreg, err_index to i64, e) { LowerCtx as x => x; error as err2 => return err2 }
+    let else_func = close_arm_to(else_built, mergeb.block_id, teko::list::push(teko::list::empty(), err_base.vreg), e.line, e.col)
+    Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
+}
+
+/**
+ * is_str_from_utf8_call — recognizes `teko::text::str_from_utf8`'s bare last segment: the SECOND
+ * host-FFI VARIANT-result builtin this N1 subset lowers directly (0.3.1.0 degrau 21), the fat-
+ * payload sibling of degrau 15's `last_index_of` (`is_last_index_of_call`) — its `str | error`
+ * return is neither fat (`is_fat_type` only accepts a BARE `str`/`[]T` result, never one wrapped
+ * in a variant) nor an ordinary single-register scalar, so `lower_call` intercepts it BEFORE
+ * `call_symbol`'s plain resolver table, the same early-interception shape `last_index_of` uses.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `str_from_utf8`
+ */
+fn is_str_from_utf8_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "str_from_utf8"
+}
+
+/**
+ * str_from_utf8_variant_members — `str_from_utf8`'s declared `str | error` return type's own
+ * members, read straight off the call expression's resolved type (the checker's own builtin
+ * table, `checker/scope.tks:623-627`, is the SOLE producer of this shape — a different shape
+ * reaching here would be an invariant the checker breaks, not this backend).
+ *
+ * @param e  the call expression (its type is `str_from_utf8`'s declared return type)
+ * @return   the variant's own two members, in declared order
+ * @throws   when `e.type` is not a `Variant` (an internal invariant break)
+ */
+fn str_from_utf8_variant_members(e: checker::TExpr) -> []checker::Type | error {
+    match e.type {
+        checker::Variant as v => v.members
+        _ => error { message = "native backend N1: `str_from_utf8`'s result is not a variant (internal)" }
+    }
+}
+
+/**
+ * load_ptr_len_out_slots — read the `(ptr, len)` pair a runtime call wrote into two SEPARATE
+ * out-parameter slots, as opposed to `load_fat_slot`'s single contiguous 16-byte frame slot: the
+ * shape `lower_str_from_utf8_call`'s bool-branch construction reads back in EITHER arm, since the
+ * runtime twin (`tk_rt_str_from_utf8_ok`) writes the ACTIVE case's `(ptr, len)` into the SAME two
+ * slots regardless of which one it turned out to be — the ok value on success, the "invalid
+ * UTF-8" message on failure.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param u32 ptr_slot  the pointer half's alloca'd slot address
+ * @param u32 len_slot  the length half's alloca'd slot address
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return LoweredFat  the advanced context + the loaded `(ptr, len)` pair
+ */
+fn load_ptr_len_out_slots(ctx: LowerCtx, ptr_slot: u32, len_slot: u32, line: u32, col: u32) -> LoweredFat {
+    let pr = ctx_alloc(ctx)
+    let with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, ptr_slot, LType::Ptr, line, col))
+    let lr = ctx_alloc(with_pr)
+    let with_lr = ctx_append(lr.ctx, load_inst(lr.vreg, len_slot, LType::I64, line, col))
+    LoweredFat { ctx = with_lr; ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * lower_str_from_utf8_ok_arm — the VALID-UTF8 arm's wrapper build: tag = the `str` member's
+ * declared index, payload = the loaded `(ptr, len)` pair written straight into the wrapper's own
+ * fat payload slot (`store_fat_variant_payload_pair`) — no boxing, `str` being a fat member the
+ * uniform 24-byte wrapper already reserves both halves for (degrau 6).
+ *
+ * @param ctx      the lowering context, positioned in the ok arm's own block, past its own load
+ * @param wrapper  the wrapper's alloca'd base address (already reserved, 24 bytes)
+ * @param index    the `str` member's declared tag index
+ * @param ptr      the decoded str's pointer half, already loaded out of the runtime's out-slot
+ * @param len      the decoded str's length half, already loaded out of the runtime's out-slot
+ * @param line     the source line to stamp the emitted instructions with
+ * @param col      the source column to stamp the emitted instructions with
+ * @return         the advanced context; `wrapper` is the arm's own result
+ */
+fn lower_str_from_utf8_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+    let tagged = store_variant_tag(ctx, wrapper, index, line, col)
+    store_fat_variant_payload_pair(tagged.ctx, wrapper, ptr, len, line, col)
+}
+
+/**
+ * lower_str_from_utf8_error_arm — the INVALID-UTF8 arm's wrapper build: tag = the `error` member's
+ * declared index, payload = a boxed `error { message = … }` carrying the runtime's own "invalid
+ * UTF-8" text, already loaded out of the SAME two out-slots the ok arm reads (`tk_rt_str_from_utf8`
+ * writes its failure message there instead of a decoded value) — built by hand through the SAME
+ * `error_struct_layout`/`store_fat_slot`/`box_aggregate_value` primitives `lower_last_index_of_error_arm`
+ * already uses, differing only in WHERE the message's `(ptr, len)` pair comes from (a real load
+ * here, a hardcoded empty pair there — `last_index_of`'s own "not-found is the only failure").
+ *
+ * @param ctx      the lowering context, positioned in the error arm's own block, past its own load
+ * @param wrapper  the wrapper's alloca'd base address (already reserved, 24 bytes)
+ * @param index    the `error` member's declared tag index
+ * @param msg_ptr  the failure message's pointer half, already loaded out of the runtime's out-slot
+ * @param msg_len  the failure message's length half, already loaded out of the runtime's out-slot
+ * @param e        the call expression (source position only, threaded to `box_aggregate_value`)
+ * @return         the advanced context; `wrapper` is the arm's own result
+ * @throws         propagated from `variant_payload_box_bytes` (never actually thrown for `error`
+ *                 — its layout is always registered — kept honest rather than assumed)
+ */
+fn lower_str_from_utf8_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, msg_ptr: u32, msg_len: u32, e: checker::TExpr) -> LowerCtx | error {
+    let tagged = store_variant_tag(ctx, wrapper, index, e.line, e.col)
+    let layout = error_struct_layout()
+    let base = ctx_alloc(tagged.ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
+    let msg = LoweredFat { ctx = with_alloca; ptr = msg_ptr; len = msg_len }
+    let with_msg = store_fat_slot(with_alloca, base.vreg, msg, e.line, e.col)
+    let box_bytes = match variant_payload_box_bytes(checker::Error { }, with_msg) { u32 as n => n; error as err => return err }
+    let owned = box_aggregate_value(Lowered { ctx = with_msg; vreg = base.vreg }, box_bytes, e)
+    let paddr = ctx_alloc(owned.ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, wrapper, variant_payload_offset(), e.line, e.col))
+    ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, LType::Ptr, e.line, e.col))
+}
+
+/**
+ * lower_str_from_utf8_call — `teko::text::str_from_utf8(bytes) -> str | error` (0.3.1.0 degrau
+ * 21): the runtime's real ABI (`tk_ffi_sres`, three eightbytes — `{bool ok; tk_str value; tk_str
+ * err}`) is wider than this backend's `LCall` can capture (it reads ONE result register,
+ * `select_call_result_x86`/`select_call_result_arm64`) — so a dedicated runtime twin
+ * (`tk_rt_str_from_utf8_ok`, `teko_rt.c`/`.h`) carries the found/failed flag as its OWN
+ * single-register `bool` return and the ACTIVE case's `(ptr, len)` pair through two hidden `*`
+ * out-parameters shared by both outcomes (mirrors the SAME out-slot convention
+ * `lower_last_index_of_call` already uses for its own scalar found-index). The narrowed `bool`
+ * then branches into the ok/error arm, each building the SAME uniform 24-byte variant wrapper
+ * (`variant_wrapper_bytes`) every OTHER variant construction in this backend builds, merged
+ * through ONE block-arg: the wrapper's base address, this call's own result.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `str | error`)
+ * @param c    the call node (its one `[]byte` argument)
+ * @return     the advanced context + the wrapper's base-address VReg
+ * @throws     when the call's own arity is not one, when `e.type` is not the expected variant, or
+ *             propagated from lowering the argument
+ * @since 0.3.1.0 degrau 21
+ */
+fn lower_str_from_utf8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `str_from_utf8` expects exactly one []byte argument (internal)" }
+    }
+    let members = match str_from_utf8_variant_members(e) { []checker::Type as m => m; error as err => return err }
+    let ok_index = match variant_member_index_of(members, checker::Str { }) { u32 as x => x; error as err => return err }
+    let err_index = match variant_member_index_of(members, checker::Error { }) { u32 as x => x; error as err => return err }
+    let bytes = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    let out_ptr = ctx_alloc(bytes.ctx)
+    let with_out_ptr = ctx_append(out_ptr.ctx, alloca_inst(out_ptr.vreg, ltype_size(LType::Ptr), ltype_align(LType::Ptr), e.line, e.col))
+    let out_len = ctx_alloc(with_out_ptr)
+    let with_out_len = ctx_append(out_len.ctx, alloca_inst(out_len.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    let call_args = four_args(bytes.ptr, bytes.len, out_ptr.vreg, out_len.vreg)
+    let called = ctx_alloc(with_out_len)
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, "tk_rt_str_from_utf8_ok", call_args, false, e.line, e.col))
+    let ok = narrow_extern_return(Lowered { ctx = with_call; vreg = called.vreg }, ExternNarrow { width = 8; is_signed = false }, e.line, e.col)
+    let thenb = alloc_block(ok.ctx.func)
+    let elseb = alloc_block(thenb.func)
+    let mergeb = alloc_block(elseb.func)
+    let mp = add_block_param(mergeb.func, mergeb.block_id)
+    let br = branch_inst(ok.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(ok.ctx, mp.func, ok.ctx.block_id, ok.ctx.env), br)
+    let then_ctx = ctx_goto(ctx1, thenb.block_id)
+    let then_loaded = load_ptr_len_out_slots(then_ctx, out_ptr.vreg, out_len.vreg, e.line, e.col)
+    let then_base = ctx_alloc(then_loaded.ctx)
+    let then_alloca = ctx_append(then_base.ctx, alloca_inst(then_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    let then_built = lower_str_from_utf8_ok_arm(then_alloca, then_base.vreg, ok_index to i64, then_loaded.ptr, then_loaded.len, e.line, e.col)
+    let then_func = close_arm_to(then_built, mergeb.block_id, teko::list::push(teko::list::empty(), then_base.vreg), e.line, e.col)
+    let else_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
+    let else_loaded = load_ptr_len_out_slots(else_ctx, out_ptr.vreg, out_len.vreg, e.line, e.col)
+    let err_base = ctx_alloc(else_loaded.ctx)
+    let err_alloca = ctx_append(err_base.ctx, alloca_inst(err_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    let else_built = match lower_str_from_utf8_error_arm(err_alloca, err_base.vreg, err_index to i64, else_loaded.ptr, else_loaded.len, e) { LowerCtx as x => x; error as err2 => return err2 }
     let else_func = close_arm_to(else_built, mergeb.block_id, teko::list::push(teko::list::empty(), err_base.vreg), e.line, e.col)
     Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
 }
@@ -2661,6 +2832,26 @@ fn builtin_str_of_bytes_symbol(last: str) -> str | null {
 }
 
 /**
+ * builtin_bytes_of_str_symbol — the runtime twin of the ONE STRING-TO-BYTES VIEW builtin this N1
+ * subset lowers directly: `bytes_of_str` (`teko::text::bytes_of_str`, `checker/scope.tks`), a
+ * `(str) -> []byte` (fat) ZERO-COPY view of a `str`'s own bytes — resolves to the out-parameter-
+ * length twin (`tk_bytes_of_str_len`, `teko_rt.h`), the SAME `lower_len_out_call` shape
+ * `builtin_str_of_bytes_symbol` already uses for its own reverse direction (`[]byte -> str`). No
+ * new lowering ARM is needed: `s`'s fat (ptr, len) pair already flattens through `lower_args`
+ * exactly like every other `str` argument, and the runtime twin hands the SAME pair straight back
+ * — `bytes_of_str` copies nothing, so its own `_len` twin needs no allocation either (0.3.1.0
+ * degrau 21, closing a sibling `native_builtin_symbol` left open since degrau 17's own sibling
+ * search, `docs/memory/0.3.1.0-linux-native-first-stop.md`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_bytes_of_str_len"`, or `null` when `last` names something else
+ */
+fn builtin_bytes_of_str_symbol(last: str) -> str | null {
+    if last == "bytes_of_str" { return "tk_bytes_of_str_len" }
+    null
+}
+
+/**
  * builtin_host_info_symbol — the runtime twin of the three ZERO-ARGUMENT, COMPILE-TIME-CONSTANT
  * host-info strings this N1 subset lowers directly: `os`/`arch`/`version` (`checker/scope.tks`),
  * each `() -> str` (fat), resolving to the out-parameter-length twin (`tk_rt_os_len`/
@@ -2695,12 +2886,12 @@ fn builtin_peak_rss_symbol(last: str) -> str | null {
 
 /**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
- * ten families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * ELEVEN families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
  * checkpoints, the `str` predicate pair, the `str` slice trio, the integer-to-string pair, the
- * `str`/`str_of_bytes` alias, the `os`/`arch`/`version` host-info trio, the plain-scalar
- * `peak_rss`, and the one `teko::env` host-surface primitive with a native lowering
- * (`builtin_env_symbol`). Split into one predicate per family so a family grows without
- * lengthening the others.
+ * `str`/`str_of_bytes` alias, `bytes_of_str` (its reverse direction), the `os`/`arch`/`version`
+ * host-info trio, the plain-scalar `peak_rss`, and the one `teko::env` host-surface primitive with
+ * a native lowering (`builtin_env_symbol`). Split into one predicate per family so a family grows
+ * without lengthening the others.
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
@@ -2713,6 +2904,7 @@ fn native_builtin_symbol(last: str) -> str | null {
     match builtin_str_slice_symbol(last) { str as s => return s; null => { } }
     match builtin_int_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_str_of_bytes_symbol(last) { str as s => return s; null => { } }
+    match builtin_bytes_of_str_symbol(last) { str as s => return s; null => { } }
     match builtin_host_info_symbol(last) { str as s => return s; null => { } }
     match builtin_peak_rss_symbol(last) { str as s => return s; null => { } }
     builtin_env_symbol(last)
@@ -5976,13 +6168,33 @@ fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e:
  */
 fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr) -> Lowered | error {
     let fo = match lower_fat_expr(ctx, e) { LoweredFat as x => x; error as err => return err }
-    let paddr = ctx_alloc(fo.ctx)
-    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), e.line, e.col))
-    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, fo.ptr, LType::Ptr, e.line, e.col))
+    Lowered { ctx = store_fat_variant_payload_pair(fo.ctx, base, fo.ptr, fo.len, e.line, e.col); vreg = base }
+}
+
+/**
+ * store_fat_variant_payload_pair — write an ALREADY-LOWERED `(ptr, len)` pair into a variant
+ * wrapper's payload word and length half (`variant_payload_offset`/`variant_payload_len_offset`):
+ * the store tail `store_fat_variant_payload` factors out after lowering its own `TExpr` payload,
+ * reused as-is by a payload that never lowers a source expression at all — a runtime call's own
+ * out-parameter pair (`lower_str_from_utf8_call`'s two arms, 0.3.1.0 degrau 21).
+ *
+ * @param LowerCtx ctx  the lowering context to append the stores' instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param u32 ptr  the payload's pointer half
+ * @param u32 len  the payload's length half
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 21 — factored out of
+ *        `store_fat_variant_payload`)
+ */
+fn store_fat_variant_payload_pair(ctx: LowerCtx, base: u32, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+    let paddr = ctx_alloc(ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), line, col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, ptr, LType::Ptr, line, col))
     let laddr = ctx_alloc(with_pstore)
-    let with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, variant_payload_len_offset(), e.line, e.col))
-    let with_lstore = ctx_append(with_laddr, store_inst(laddr.vreg, fo.len, LType::I64, e.line, e.col))
-    Lowered { ctx = with_lstore; vreg = base }
+    let with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, variant_payload_len_offset(), line, col))
+    ctx_append(with_laddr, store_inst(laddr.vreg, len, LType::I64, line, col))
 }
 
 /**
