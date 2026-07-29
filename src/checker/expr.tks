@@ -41,8 +41,37 @@ fn is_float(t: Type) -> bool {
 fn is_numeric(t: Type) -> bool { is_integer(t) || is_float(t) }
 
 /**
+ * variant_has_member — does `v`'s union list a member EXACTLY `t` (order-independent)? The
+ * comparability twin of `adopt_binop_operands`'s literal retyping: once a bare `null`/numeric
+ * literal on a union's opposite side has been retyped down to the union member it fits
+ * (`retype_literal`), the union and that narrow member ARE the same runtime value's two views —
+ * `is_comparable` below asks THIS to accept the pair rather than falling through to plain
+ * `type_eq`, which would reject "the whole union" against "one of its own members".
+ *
+ * @param v  the candidate union type (any other `Type` answers false)
+ * @param t  the member type to look for
+ * @return   true iff `v` is a `Variant` and one of its members is exactly `t`
+ */
+fn variant_has_member(v: Type, t: Type) -> bool {
+    match v {
+        Variant as vv => {
+            mut i = 0
+            loop {
+                if i >= vv.members.len { break }
+                if type_eq(vv.members[i], t) { return true }
+                i++
+            }
+            false
+        }
+        _ => false
+    }
+}
+
+/**
  * is_comparable — sign-check (B.22): two integers compare regardless of sign/width; two floats
- * compare only at the same width; else same type. Mixed int/float is not comparable (needs `to`).
+ * compare only at the same width; a union is comparable against one of its own retyped members
+ * (`a != null` / `a != 5` over `a: i32 | null` — `variant_has_member`); else same type. Mixed
+ * int/float is not comparable (needs `to`).
  *
  * @param a  the left-hand type
  * @param b  the right-hand type
@@ -51,6 +80,7 @@ fn is_numeric(t: Type) -> bool { is_integer(t) || is_float(t) }
 fn is_comparable(a: Type, b: Type) -> bool {
     if is_integer(a) && is_integer(b) { return true }
     if is_float(a) && is_float(b) { return type_eq(a, b) }
+    if variant_has_member(a, b) || variant_has_member(b, a) { return true }
     type_eq(a, b)
 }
 
@@ -293,6 +323,19 @@ fn operand_may_flag_partner(e: TExpr) -> bool {
  */
 fn op_is_shift(op: lexer::TokenKind) -> bool {
     op == lexer::TokenKind::Shl || op == lexer::TokenKind::Shr
+}
+
+/**
+ * op_is_eq_ne — is `op` one of the two equality operators (`== !=`)? A union's comparability
+ * against one of its own members (`variant_has_member`) is an EQUALITY-only relation — a union
+ * has no defined ORDER against a bare member (`a < 5` over `a: i32 | null` needs an explicit `to`)
+ * — so `type_compare` gates that relaxation on this predicate before accepting the term.
+ *
+ * @param op  the comparison operator token
+ * @return    true for `==`/`!=`
+ */
+fn op_is_eq_ne(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::EqEq || op == lexer::TokenKind::Ne
 }
 
 /**
