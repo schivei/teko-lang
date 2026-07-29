@@ -2017,7 +2017,19 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * (`is_err_loc_call`/`is_err_typed_call`) are intercepted the SAME way too — the `tk_error_loc`/
  * `tk_error_types` twins they mirror are `static inline` in `teko_rt.h` with no linkable symbol,
  * so `native_builtin_symbol` has no entry to resolve either one; they route to
- * `lower_err_loc_call`/`lower_err_typed_call` (0.3.1.0 degrau 22).
+ * `lower_err_loc_call`/`lower_err_typed_call` (0.3.1.0 degrau 22). `f64_bits`/`f64_from_bits`
+ * (`is_f64_bitcast_call`) are intercepted BEFORE `call_symbol` too, but for the OPPOSITE reason
+ * every sibling above is: not because their runtime twin needs a shape this backend cannot build
+ * yet, but because they need no CALL at all — a bit reinterpretation is the identity on the VReg's
+ * OWN storage, so `lower_f64_bitcast_call` returns the operand's VReg unchanged (0.3.1.0 degrau
+ * 24). This also SIDESTEPS the float-register-class gap the SSE isel family is still closing
+ * (`isel_x86_64.tks`'s `B1-fp` honest-stops): a real `LCall` to `tk_f64_bits`/`tk_f64_from_bits`
+ * would need its f64-class argument/result carried through XMM per the SysV/Win64 ABI, which
+ * `pin_args_x86`/`select_call_result_x86` do not do yet (the latter's own doc names the gap) — a
+ * measured scratch repro of a real call built exactly that way ROUND-TRIPPED THE WRONG VALUE
+ * whenever two `f64_bits`/`f64_from_bits` results were live at once (both silently read back
+ * whichever bit pattern happened to still sit in the single physical XMM0, not their own), so THAT
+ * shape is a stop, not a fix, until `B1-fp` lands.
  *
  * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
  * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
@@ -2044,6 +2056,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_str_from_utf8_call(c.callee) { return lower_str_from_utf8_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_err_loc_call(c.callee) { return lower_err_loc_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_err_typed_call(c.callee) { return lower_err_typed_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
@@ -2726,6 +2739,47 @@ fn lower_err_typed_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> 
 }
 
 /**
+ * is_f64_bitcast_call — recognizes `teko::f64_bits`/`teko::f64_from_bits`'s bare last segment:
+ * the ONE pair of IEEE-754 bit-reinterpretation builtins this N1 subset lowers as a bare VReg
+ * alias rather than a runtime `LCall` (0.3.1.0 degrau 24 — `lower_call`'s own doc says why).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `f64_bits` or `f64_from_bits`
+ */
+fn is_f64_bitcast_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    if segs.len == 0 { return false }
+    let last = segs[segs.len - 1].name
+    last == "f64_bits" || last == "f64_from_bits"
+}
+
+/**
+ * lower_f64_bitcast_call — `f64_bits(x)`/`f64_from_bits(x)`: the operand's OWN VReg, unchanged.
+ *
+ * PORQUE NAO EMITE CHAMADA. Both builtins reinterpret an 8-byte IEEE-754 bit pattern between
+ * `f64` and `u64` with no arithmetic at all, and this backend's VRegs carry no run-time type tag
+ * of their own (a value's machine class lives only in the ONE instruction that defines it, and in
+ * whatever type each CONSUMING instruction independently declares) — so the identity bit pattern
+ * needs no instruction to cross that boundary, only a re-labeling of which LIR expression owns the
+ * VReg going forward. Emitting a real `LCall` to `tk_f64_bits`/`tk_f64_from_bits` instead would
+ * additionally require the f64-class argument/result to travel through XMM per the SysV/Win64 ABI
+ * (`pin_args_x86`/`select_call_result_x86` do not carry that class yet — 0.3.1.0's own `B1-fp`
+ * honest-stop family, `isel_x86_64.tks`), so that route is left to whichever degrau closes it.
+ *
+ * @param ctx  the lowering context
+ * @param c    the call node (its one argument)
+ * @return Lowered | error  the argument's own advanced context and VReg, or a NAMED internal
+ *                          error when the call's arity is not 1 (`checker::scope.tks`'s own
+ *                          one-argument signature for both names already fixed it)
+ */
+fn lower_f64_bitcast_call(ctx: LowerCtx, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `f64_bits`/`f64_from_bits` expects exactly one argument (internal)" }
+    }
+    lower_expr(ctx, c.args[0])
+}
+
+/**
  * is_str_arg_builtin — does the resolved runtime symbol `sym` take its LONE
  * argument as a `tk_str` (a 2-eightbyte `{ptr; len}` struct passed BY VALUE,
  * `teko_rt.h:45-48`)? These seven — the io group (`tk_print`/`tk_println`/
@@ -3265,6 +3319,11 @@ fn builtin_peak_rss_symbol(last: str) -> str | null {
  * host-info trio, the plain-scalar `peak_rss`, and the one `teko::env` host-surface primitive with
  * a native lowering (`builtin_env_symbol`). Split into one predicate per family so a family grows
  * without lengthening the others.
+ *
+ * `f64_bits`/`f64_from_bits` are NOT in this table — they never reach it: `lower_call` intercepts
+ * both directly (`is_f64_bitcast_call`/`lower_f64_bitcast_call`) as a zero-instruction bit
+ * reinterpretation, never as a runtime CALL, so this resolver never sees either name (0.3.1.0
+ * degrau 24).
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin

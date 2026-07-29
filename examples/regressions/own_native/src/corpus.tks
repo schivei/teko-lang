@@ -2756,3 +2756,51 @@ fn f_array_lit_return_escape() -> i64 {
     if e.len != 0 { return 17 }
     0
 }
+
+/**
+ * f64_bits_of — the raw IEEE-754 bit pattern (as `u64`) of one of THREE runtime-selected `f64`
+ * magnitudes, including a NEGATIVE one (the sign bit set) — built from a plain integer `tag`
+ * rather than an `f64` literal/ALU op/compare, since every other path onto an `f64` value is the
+ * SEPARATE `B1-fp` honest-stop family (`isel_x86_64.tks`) this fixture does not exercise; only
+ * `f64_bits`/`f64_from_bits` (0.3.1.0 degrau 24) themselves are under test here.
+ *
+ * @param tag  0 selects 3.0's bits, 1 selects 2.0's, anything else selects -2.0's
+ * @return     the selected magnitude's bit pattern
+ */
+fn f64_bits_of(tag: i64) -> u64 {
+    if tag == 0 { return 4613937818241073152 }
+    if tag == 1 { return 4611686018427387904 }
+    13835058055282163712
+}
+
+/**
+ * f_f64_bits_roundtrip — 0.3.1.0 degrau 24: `teko::f64_bits`/`teko::f64_from_bits` round-trip
+ * THREE runtime bit patterns through `f64` and back, with every producer VALUE kept LIVE AT THE
+ * SAME TIME as its siblings (`a`/`b`/`c` are all still needed when the LAST `f64_bits` reads its
+ * own value back) — the exact shape that would have SILENTLY read the WRONG value back had either
+ * builtin lowered to a real call to its `tk_f64_bits`/`tk_f64_from_bits` runtime twin instead: with
+ * no `f64`-class argument/return handling yet (`pin_args_x86`/`select_call_result_x86`, both still
+ * GPR-only pending `B1-fp`), a real call would have carried the value through the single physical
+ * XMM0 register, so a SECOND live `f64` would silently clobber the first the moment it was
+ * produced — a measured scratch repro confirmed exactly that corruption. The fix instead lowers
+ * both builtins as a bare VReg alias (no call at all), so ordinary register allocation — which
+ * already keeps any number of plain integer values alive correctly — carries every one of
+ * `a`/`b`/`c` to its own read-back untouched.
+ *
+ * @return 0 when every one of the three round-trips (and the negative sign bit) reads back
+ *         correctly, else the number of the failing check
+ */
+fn f_f64_bits_roundtrip() -> i64 {
+    let a = teko::f64_from_bits(f64_bits_of(0))
+    let b = teko::f64_from_bits(f64_bits_of(1))
+    let c = teko::f64_from_bits(f64_bits_of(2))
+    let ba = teko::f64_bits(a)
+    let bb = teko::f64_bits(b)
+    let bc = teko::f64_bits(c)
+    if ba != f64_bits_of(0) { return 1 }
+    if bb != f64_bits_of(1) { return 2 }
+    if bc != f64_bits_of(2) { return 3 }
+    if (bc & 0x8000000000000000) == 0 { return 4 }
+    if (ba & 0x8000000000000000) != 0 { return 5 }
+    0
+}
