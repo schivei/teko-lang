@@ -2,8 +2,8 @@
 
 **ONE LINE:** **LANE, not wagon** — ~20 edited lines + 7 new declarations, **zero new codegen** (the
 ELF writer is already ISA-agnostic and takes `e_machine` + numeric reloc types as parameters), and
-**78 of the 80 skips unlock from it** (the other 2 are `wasmtime`/`mingw` provisioning, identical on
-the x86_64 lane).
+**78 of the 80 skips unlock from it** — measured as a differential (80 skips on a simulated arm64
+host, 2 on the real x86-64 host, and those same 2 are `wasmtime`/`mingw` provisioning in both).
 
 **Status:** DESIGN (doc-only). Branch `cargo/0.3.1-aarch64-elf-desenho`, base
 `origin/remodel/0.3.1.0-linux-native-2` (`fab2a759`; `adccc12f` — `teko::arch()` — already drained).
@@ -467,6 +467,19 @@ Cause distribution over all 80:
 
 Per-file: `own_native.tkr` **60**, `regressor.tkr` **16**, and 1 each in
 `native_union_known_stop`, `const_struct_ctor`, `crossmodule`, `builtin_name_not_hijacked`.
+
+**The control, which makes 78 a differential rather than an inference.** The same corpus, same
+`.gen1b`, same command, on the **unmodified** tree and the real x86-64 host:
+
+```
+teko: regressions 10 run, 2 skipped, 0 failed (30 builds, 479.0s)
+  1  wasmtime not found on PATH for target wasm32-wasi
+  1  x86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH
+```
+
+**2 skips on x86-64, 80 on arm64, and the 2 are byte-identical in both runs.** The
+arch-attributable delta is therefore **exactly 78**, measured from both sides rather than inferred
+from one.
 
 The 78 all come from one predicate chain:
 `host_cc_cannot_link_host_default_reason` → `own_backend_target_of_row("")` →
