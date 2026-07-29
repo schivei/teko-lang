@@ -1881,3 +1881,39 @@ a seguir a P2; e P10 — se alguém der a `prim_kind_of` um braço para `char` s
 seguinte há respostas erradas e caladas com `char`, nas mesmas três formas de §5. Se P3 não se
 verificar — se o gen2 nativo compilar um `struct` normalmente — o modelo deste documento está errado,
 e isso é a coisa mais útil que ele pode produzir.
+
+## Padrão transversal: GÉMEOS QUE DIVERGIRAM (observado 2026-07-29)
+
+Três achados independentes do mesmo dia têm a **mesma forma**, e nenhum deles é um erro que alguém
+cometeu. São **assimetrias entre caminhos que deviam ser gémeos**, criadas quando um lado evoluiu e o
+outro ficou parado.
+
+| gémeos | o lado protegido | o lado esquecido | como foi achado |
+|---|---|---|---|
+| layout do `error` | rota C: **6 campos** (`tk_error`, 72 bytes) | rota nativa: **1 campo** (16 bytes) | degrau 22, ao parar em `e.line` |
+| adopção de literal antes do `type_join` | `type_if`: **tem** (`trailing_number`/`literal_adopts`) | `type_match` e `type_array_lit`: **não têm** | agente a medir outra coisa |
+| corte de `str` | `str_slice_chars`: caracteres, **10 usos** | `slice`/`slice_to`/`slice_from`: bytes, **104 usos** | desenho de ranges |
+| `texpr_diverges` / `cg_expr_diverges` (D2) | — | **cópia duplicada** com o mesmo defeito | auditoria de fluxo |
+| `lower_tail_non_expr` / `..._fat` (degrau 20) | escalar: fechado no degrau 13 | fat: **nunca recebeu o mesmo fallback** | CI, degrau 20 |
+
+**Cinco instâncias, não três.** E o `lower_tail_non_expr_fat` tinha o buraco **escrito no próprio
+doc-comment** ("no fixture in this closure needs a diverging fat tail") — estava assumido, não
+esquecido, e mesmo assim ninguém voltou lá.
+
+### Porque isto importa mais do que cada caso
+
+Todos foram achados **por tropeço**: um agente a medir outra coisa, ou o CI a bater na paragem
+seguinte. Nenhum foi achado por alguém a procurá-lo. E dois deles (`error` e corte de `str`) são
+divergências **silenciosas** — não param, produzem valores diferentes conforme o caminho.
+
+### A varredura que ainda não fizemos
+
+Procurar deliberadamente **pares que deviam concordar e não concordam**:
+
+- checker contra codegen (mesma decisão implementada duas vezes — o D2 provou que existe);
+- rota C contra rota nativa (o `error` provou que existe);
+- `_fat` contra escalar (o degrau 20 provou que existe);
+- builtin registado contra função Teko real com o mesmo nome (`text.tks` já mostrou o caso).
+
+Cada par que divergir é um bug já presente, não um por vir. **Provavelmente rende mais que subir
+degraus às cegas** — mas não cabe na esteira a fechar; fica proposto para depois da promoção.
