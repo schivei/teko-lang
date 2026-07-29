@@ -1517,6 +1517,43 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
 }
 
 /**
+ * Does a call's callee carry a QUALIFIER the injected-builtin dispatch (`builtin_fn`) is entitled to
+ * resolve through (0.3.1.0 qualifier validation, `docs/memory/colisao-use-str-0.3.1.md`)? `builtin_fn`
+ * itself matches by LAST segment only, discarding everything before it; this predicate is the gate a
+ * caller applies AFTER a `builtin_fn` match succeeds, so the qualifier the user actually wrote gets a
+ * say. It mirrors the ONLY two forms `emit_call`/`emit_host_ffi` (`src/codegen/codegen.tks`) know how
+ * to lower a builtin call from — a BARE name (`concat(...)`, one segment) or a path literally ROOTED
+ * at `teko` (`teko::str::concat(...)`, `teko::env::var(...)`, any depth) — so the checker never signs
+ * off on a spelling the codegen cannot honour. Any OTHER qualifier is rejected by the caller: a real
+ * namespace missing its `teko::` root (`str::concat`, `env::var`), an invented one
+ * (`bogus_namespace::str`), or a `use`-declared alias (`tstr::concat` via `use teko::str as tstr` —
+ * `use` is a checker no-op for value-level references today, so an alias can never be a legal builtin
+ * qualifier; teaching it to resolve is a separate, larger increment, deliberately out of scope here).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee` is bare or `teko`-rooted — the two forms codegen can lower
+ */
+fn builtin_qualifier_ok(callee: parser::Path) -> bool {
+    callee.segments.len == 1 || callee.segments[0].name == "teko"
+}
+
+/**
+ * Builds the diagnostic for a call whose LAST segment names an injected builtin (`builtin_fn`
+ * matched) but whose qualifier `builtin_qualifier_ok` rejected. Names both what was written and what
+ * the two legal forms are, so a typo'd or invented namespace — or a `use`-declared alias, which does
+ * NOT make a builtin callable under its short name today — reads as a namespace problem rather than a
+ * mysterious "unknown function".
+ *
+ * @param callee  the offending call's callee path
+ * @param name    the callee's last segment (the builtin name that WOULD have matched)
+ * @return        the positioned diagnostic
+ */
+fn unresolved_builtin_qualifier_error(callee: parser::Path, name: str) -> error {
+    let qualifier = path_qualifier(callee, callee.segments.len - 1)
+    error { message = $"unknown function: {path_str(callee)} — `{qualifier}` is not a recognized namespace; the built-in `{name}` is called bare (`{name}(...)`) or fully qualified rooted at `teko::` (`teko::...::{name}(...)`)" }
+}
+
+/**
  * Types a call expression: resolves the callee (a builtin, a same/qualified-namespace function, or
  * a local closure value), types every argument against the resolved signature — widening (B.14),
  * literal-adoption (C6), generic type-param inference (S4), AUTO-REF (a `mut` lvalue passed where a
@@ -1584,12 +1621,16 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
         }
     }
-    // (#49) the resolved target's namespace drives the mangled C name. Only a USER function (found
-    // in the env) carries one; a builtin (fallback below) leaves it empty → codegen's call-map path.
     let resolved_ns = match lookup_call(env, c.callee) { Type => call_ns(env, c.callee); error => "" }
-    let ft = match lookup_call(env, c.callee) {   // (#41) namespace-aware: a local or
-        Type as t => t   // a same-namespace fn (unqualified) / the qualified ns;
-        error => match builtin_fn(name) { Type as t => t; error => return error { message = $"unknown function: {name}" } }   // …then the injected builtins; else name the symbol (M.3)
+    let ft = match lookup_call(env, c.callee) {
+        Type as t => t
+        error => match builtin_fn(name) {
+            Type as t => {
+                if !builtin_qualifier_ok(c.callee) { return unresolved_builtin_qualifier_error(c.callee, name) }
+                t
+            }
+            error => return error { message = $"unknown function: {name}" }
+        }
     }
     // (W10b.CLASS residual — intern visibility) a STATIC call (`ClassName::method(…)`) is
     // reachable under the SAME rule as an instance dot-call — check it here too, routed through
