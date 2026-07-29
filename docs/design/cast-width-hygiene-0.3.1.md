@@ -426,17 +426,17 @@ internal confirm, not a ritual.
 
 ---
 
-## 7. Regression fixtures (inputs → expected exit, both paths)
+## 7. Regression fixtures (inputs → expected exit, rota C e backend nativo)
 
 Add under `examples/regressions/` (or the .tkt suite per `tkb-regression-format.md`). Each runs on
-**both** execution paths (C rota and native backend); exit codes must match.
+rota C e backend nativo; exit codes must match.
 
 | fixture | source shape | C rota exit | native exit | proves |
 |---------|-------------|---------|-------------|--------|
 | `width_same_sign_widen` | `let a: u32 = 300; let b: u64 = 7; return (a + b) to i64 … ` (result u64, value 307) | 307 | 307 | W-RULE §2.1 (u32+u64→u64, no cast) |
 | `width_mixed_sign_ok` | `let a: u32 = 5; let b: i64 = -2; return a + b` (→ i64, value 3) | 3 | 3 | W-RULE §2.2 lossless (unsigned into wider signed) |
-| `width_mixed_sign_reject` | `let a: u32 = 5; let b: i32 = -2; return a + b` (equal-width mixed sign) | **compile error (exit 1)** | compile error | W-RULE §2.2 honest-stop (no lossless common type) |
-| `width_int_float_reject` | `let a: i32 = 5; let b: f64 = 1.0; return a + b` | **compile error** | compile error | §2.4 unchanged (B.38 int×float) |
+| `width_mixed_sign_reject` | `let a: u32 = 5; let b: i32 = -2; return a + b` (equal-width mixed sign) | **compile error (exit 1)** | compile error | W-RULE §2.2 honest-stop (no lossless common type); rota C e backend nativo identical |
+| `width_int_float_reject` | `let a: i32 = 5; let b: f64 = 1.0; return a + b` | **compile error** | compile error | §2.4 unchanged (B.38 int×float); rota C e backend nativo identical |
 | `width_float_widen` | `let a: f32 = 1.5; let b: f64 = 2.0; return (a + b) …` | ok | ok | §2.3 float widen |
 | `width_literal_adopt` | `let n: u32 = 10; return n % 3` (no cast) | 1 | 1 | §2.5 literal sits below the rule (regression of .29) |
 | `len_is_u64_nocast` | `let s = "abc"; let n: u64 = s.len; return n to i64 …` (no cast on .len) | 3 | 3 | `.len` u64 policy — no widen needed |
@@ -592,7 +592,7 @@ Both rows 1–2 are **raríssima by mandate** and **both count against the D4 �
 `casting::*` to dodge the panic does not dodge the metric. The choice is *panic-vs-recover*, never
 *count-vs-not-count*.
 
-### 10.3 Fixtures (add to §7, both paths)
+### 10.3 Fixtures (add to §7, rota C e backend nativo)
 
 | fixture | shape | C rota | native | proves |
 |---------|-------|----|--------|--------|
