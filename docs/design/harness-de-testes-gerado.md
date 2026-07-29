@@ -53,6 +53,14 @@ reconcilia: docs/memory/parallel-test-harness-0.3.2.md, docs/design/concorrencia
 > primitivas novas mas que devem ser mantidas apenas para rodar os testes e conhecidas somente pelo
 > compilador."*
 
+**R9 (2026-07-29) — a grafia, e a hipótese de recovery:**
+
+> *"1. Grafia, prefira `chan<T>` e combina com os outros tipos que são curtos. 2. precisa corrigir,
+> ensinar o native"*
+
+> *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* (HIPÓTESE,
+> não ruling — avaliada e respondida em §6.11)
+
 **R8 (2026-07-28), a solução já nomeada para o gate sem C, e que R1/R5/R7 confirmam um ano depois**
 (`docs/design/concorrencia-adiantada-s8.md`, §introdução):
 
@@ -246,10 +254,19 @@ antigo, e são só duas:
 1. *"This language has no threads"* (§ "Why a PATH") deixa de ser premissa: R1 manda criá-las. O
    argumento do PATH continua a valer na via 1 pelos OUTROS dois motivos que ele próprio dá —
    sobrevive ao filho morrer a meio, e continua lá depois.
-2. A auto-reexecução (`argv[1]` como selector) **está morta e não por escolha**: o `main` nativo é
-   `new_func("main", 0, …)` (`lower.tks`:8219) e `tk_set_args` não é chamado em lugar nenhum de
-   `src/lir` nem de `src/backend` — **um binário do backend próprio vê `teko::env::args()` VAZIO**.
-   O desenho aqui não precisa de argv em sítio nenhum, e isso é deliberado.
+2. A auto-reexecução (`argv[1]` como selector) **está fora, e a exclusão é CONDICIONAL — não
+   definitiva.** Hoje ela é impossível: um binário do backend próprio que leia a linha de comando
+   **nem sequer linka** (§17, medido — `undefined reference to 'teko_args'`). O dono aceitou o achado
+   e mandou corrigir (*"precisa corrigir, ensinar o native"*); a correcção está a ser feita noutra
+   carga (`cargo/0.3.1.0-args-native`) e **não é desta**.
+
+   **A porta fica identificada:** no dia em que o `args()` nativo funcionar, a auto-reexecução volta a
+   estar em cima da mesa, e é uma alternativa REAL à forma escolhida — um binário que se relança a si
+   próprio com um selector dá isolamento por PROCESSO por teste, sem `cabi fn`, sem chão de thread e
+   sem `chan<T>`. **Não a ressuscito agora** por duas razões: R1 manda threads para os unitários, e o
+   desenho não deve depender de uma correcção que está a ser feita ao lado. Mas quem reabrir isto tem
+   de saber que a única coisa que a matou foi um defeito em vias de ser corrigido, e não um argumento.
+   Nada em §5 ou §6 muda se ela voltar; o que muda é a lista de primitivas bloqueadas, que encolhe.
 
 ---
 
@@ -917,9 +934,13 @@ Aviso de forma, medido: **não usar uma interface para abstrair o sumidouro.** O
 paragem conhecida e por fechar em `fat-pointer interface-dispatch result not yet lowered`. O
 sintetizador escolhe a forma; não há despacho dinâmico nenhum.
 
-### 6.10 A OBJECÇÃO ANTERIOR A `channel<T>` — citada, e respondida
+### 6.10 A OBJECÇÃO ANTERIOR AO CANAL — citada, e respondida
 
-`concorrencia-adiantada-s8.md` §3.3 deixou `channel<T>` deliberadamente DE FORA, e o argumento é
+*(A citação abaixo está VERBATIM, com a grafia `channel<T>` que o documento original usava. A grafia
+foi decidida depois — é `chan<T>`, §6.12 — e citar o original com o token de hoje seria falsificar a
+citação. É a mesma disciplina com que §17 cola a saída do linker sem a limpar.)*
+
+`concorrencia-adiantada-s8.md` §3.3 deixou o canal deliberadamente DE FORA, e o argumento é
 concreto. Literal:
 
 > *"**`channel<T>` merece nota própria, porque a análise mudou o desenho.** Nenhum dos três ganhos que
@@ -959,18 +980,170 @@ usada para QUALQUER decisão — ordenar saída, atribuir cobertura, escolher o 
 **a ordem de chegada ao `recv` não pode influenciar nenhum byte de saída.** É afirmada por
 `gate_lanes_output_identical` e por `gate_coverage_lanes_identical`.
 
-### 6.11 O NOME — `channel<T>` × `chan<T>`. NÃO escolho.
+### 6.11 A HIPÓTESE DO DONO — "a mesma táctica de recovery do Go". MEDIDA, e a recomendação é NÃO.
 
-O desenho anterior escreve **`channel<T>`** (`concorrencia-adiantada-s8.md` §3.3, e o
-`TEKO_MASTER_PLAN.md`:262 reserva-o com essa grafia). O dono escreveu hoje **`chan<T>`** (R4).
+> *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* — dono,
+> 2026-07-29. É hipótese, não ruling, e é avaliada aqui como tal.
 
-Este documento usa `chan<T>` por ser a grafia do ruling mais recente, **e regista que a divergência
-existe e é do dono para o dono**. As duas grafias não podem coexistir: uma palavra-chave com dois
-nomes é a próxima linha de `_ =>` à espera de acontecer.
+**A ideia é boa e o encaixe aparente é melhor do que parece.** Em Go, `recover()` só funciona dentro
+de uma função DIFERIDA, e o Teko **já tem `defer`** — é o único bloco com escopo que a linguagem tem
+(não há `try`, não há `catch`, não há `scope`). Logo a táctica não pediria palavra-chave nova: o bloco
+que trata já existe e o `recover` seria uma função, o que casa com R7 ("conhecidas somente pelo
+compilador"). E casa com o modelo de teste do próprio Go — cada teste corre na sua goroutine e o
+framework faz `recover`, que é literalmente o problema deste documento.
 
-**PERGUNTA AO DONO, e é a única deste documento:** `chan<T>` substitui `channel<T>` no
-`TEKO_MASTER_PLAN.md`, ou `chan` é abreviatura de conversa e a palavra congelada é `channel`? Uma
-palavra ou a outra — o desenho não muda em nada além do token.
+Por isso a hipótese merecia medição em vez de opinião. Foi medida.
+
+#### 6.11.1 Os `defer` correm hoje quando há panic? **NÃO. E nem o `stdout` de antes sobrevive.**
+
+Sonda `deferprobe`, `.gen1` construído de `bootstrap/teko.c`, as duas rotas:
+
+```teko
+pub fn body(fail: bool) -> i32 {
+    defer { println("DEFER RAN") }
+    println("BEFORE")
+    if fail { panic("probe") }
+    7
+}
+```
+
+| caso | rota C | nativo |
+|---|---|---|
+| `fail = false` (controlo) | `BEFORE` · `DEFER RAN` · exit **7** | `BEFORE` · `DEFER RAN` · exit **7** |
+| `fail = true` | `teko: deliberate panic: probe` · exit **134** — **nem `BEFORE` nem `DEFER RAN`** | idêntico, exit **134** |
+
+Duas leituras, e a segunda é um bónus que não se procurava:
+
+1. **O `defer` NÃO corre sob panic, nas duas rotas.** Não há desenrolamento nenhum.
+2. **O `BEFORE`, que foi executado, também não aparece.** `tk_print` escreve num `FILE*` com buffer e
+   `abort()` não faz flush. Isto **mede** a necessidade do builtin `flush_out` (migalha 3), que até
+   aqui era só uma nota herdada de `gate-sem-c-0.3.0.31.md` §2.2(d): sem ele, o rótulo de um teste que
+   entra em panic perde-se, e o diagnóstico morre com o veredicto.
+
+#### 6.11.2 Porque não corre — o `defer` do Teko é ESTÁTICO, por desenho
+
+`replay_defers` (`src/lir/lower.tks`) di-lo no próprio doc-comment:
+
+> *"fire every deferred body … by lowering each body's statements straight-line into the CURRENT
+> block … its OWN `.defers` stack is READ (**not shrunk — firing is a symbolic replay over
+> already-lowered source structure, not a runtime pop**)"*
+
+Ou seja: **os corpos de `defer` são INLINE em cada saída LÉXICA de escopo, em tempo de compilação.**
+O backend C faz o mesmo (`emit_defers`, `codegen.tks`). E há três confirmações independentes de que o
+modelo é deliberadamente estático:
+
+- **não existe registo de `defer` no runtime** — `grep -in defer src/runtime/teko_rt.{c,h}` devolve
+  três ocorrências e as três são a palavra inglesa "deferred" em comentários sobre outras coisas;
+- **o checker PROÍBE `return`/`break`/`continue`/`defer` dentro de um corpo de `defer`**
+  (`typer.tks`), precisamente para que o replay simbólico nunca reentre;
+- `panic` é hoje uma função **Teko** (`src/runtime/teko_rt.tks`) cujo corpo é
+  `ewrite(marcador ~ msg)` seguido de `rt_abort()` — `extern fn ... = "abort" from "c"`. Escreve e
+  aborta. Não há sítio por onde um desenrolamento pudesse acontecer.
+
+#### 6.11.3 As duas vias, lado a lado
+
+| | **recovery à Go** | **guarda por thread (§6.5)** |
+|---|---|---|
+| **o que é preciso construir** | (1) **pilha de `defer` em TEMPO DE EXECUÇÃO** — cada `defer` passa a EMPILHAR um registo chamável em vez de ser inline, o que obriga o corpo do `defer` a virar um valor chamável com ambiente capturado (isto é, depende de `cabi fn`/thunks, que também não existem); (2) **um desenrolador** — ou DWARF/`.eh_frame` + CFI emitidos pelo backend, ou `setjmp`/`longjmp` com um buffer por frame guardado; (3) **um protocolo de retoma** — o frame que faz `recover` tem de RETORNAR normalmente a partir de um ponto de desenrolamento arbitrário, o que o backend tem de saber sintetizar | (1) o par `gate_guard_begin`/`gate_guard_end`; (2) a tabela de guardas na região do pai; (3) uma bifurcação em `panic`/`exit`. O "desenrolamento" é `sys_thread_exit` — **fornecido pela plataforma** |
+| **o backend emite CFI hoje?** | **NÃO.** O próprio linker o diz na sonda de §17: `binn/argvprobe.o: missing .note.GNU-stack section implies executable stack`. Um backend que ainda não emite `.note.GNU-stack` está longe de emitir `.eh_frame` correcto | irrelevante — não precisa |
+| **muda a superfície visível ao utilizador?** | **MUITO.** `defer` deixa de ser gratuito (passa a custar um push por execução); a semântica de `defer` sob panic muda para toda a gente; `recover()` passa a ser capacidade da linguagem, usável por qualquer `.tks`; um programa passa a poder ser observado parcialmente desenrolado | **NADA.** Fora de uma guarda, `panic` e `exit` são byte a byte o que são hoje. O par está num namespace que fonte nenhuma alcança (§6.5.4) |
+| **emite C?** | **nenhuma das duas emite C** — mas a via Go quase de certeza acrescenta C ou uma dependência externa: `setjmp`/`longjmp` são C de runtime, e a alternativa DWARF traz `libunwind` para a linha de link | zero C novo (`call_symbol` → funções Teko, `concorrencia-adiantada-s8.md` §4.2) |
+| **determinismo / fixpoint** | **o pior dos dois, e por larga margem.** Passar os `defer` a runtime muda os bytes emitidos de **toda a função com `defer` no fonte do compilador** — e o compilador é escrito em `defer`. Mais: tabelas `.eh_frame` são superfície NOVA de fixpoint, com ordenação e endereços próprios. Um `gen2 != gen3` daí sairia com um diff que aponta uma tabela de unwind | não toca em código de produção nenhum: só a `main` sintetizada e as duas funções de guarda existem no binário de gate |
+| **fica capacidade permanente?** | **SIM** — e é o único argumento genuinamente forte a favor | **NÃO.** Serve os testes e mais nada |
+
+#### 6.11.4 O `exit` continua a ser primitiva SEPARADA, mesmo adoptando o Go inteiro
+
+É fácil assumir que o recovery resolve os dois e ele resolve **um**. Em Go, `os.Exit` **termina o
+processo imediatamente e nenhum `defer` corre** — está na documentação da própria função, e é por isso
+que o `testing` de Go não consegue reportar um teste que chame `os.Exit`. Portanto:
+
+> Mesmo com recovery à Go implementado por inteiro, **P-B (captura de `exit`) continua a ter de ser
+> construída à parte**, exactamente como está desenhada em §6.5.2. A hipótese do dono cobre P-A e não
+> cobre P-B.
+
+#### 6.11.5 O que a via da guarda já dá do Go, sem construir o Go
+
+Esta é a razão que decide, e é uma observação sobre a TOPOLOGIA, não sobre esforço.
+
+O que o `testing` do Go **observa** — *um teste que entra em panic não mata a suíte; o framework
+apanha-o, atribui-lhe o veredicto, e os outros continuam* — vem de DUAS peças: o `recover` **e** o
+facto de cada teste correr na sua própria goroutine. R1 manda exactamente a segunda: **uma thread por
+`#test`**. E com uma thread por teste, **a fronteira de desenrolamento de que o harness precisa é de
+UM frame: a própria thread.** Terminar a thread já é um desenrolamento, e quem o implementa é a
+plataforma (`pthread_exit` corre os cleanup handlers; `ExitThread` o equivalente).
+
+Ou seja: **o harness fica com a propriedade observável do modelo de teste do Go sem construir a
+maquinaria geral do Go**, porque a granularidade de isolamento que o dono já escolheu (thread por
+teste) coincide com a granularidade de recuperação de que o harness precisa. O `recover` do Go existe
+para recuperar NO MEIO de uma pilha e continuar; o harness nunca quer continuar — quer terminar o
+teste e reportá-lo.
+
+#### 6.11.6 A TENSÃO, em texto claro — e é decisão do dono
+
+R7 diz que estas primitivas ficam *"apenas para rodar os testes e conhecidas somente pelo
+compilador"*. **Recovery à Go contradiz essa frase, e não por descuido de desenho: contradi-la é o
+que ela É.**
+
+- Desenrolamento **não se esconde do utilizador**: muda a semântica de `defer`, que é palavra da
+  linguagem que qualquer `.tks` já escreve hoje.
+- `recover()` escondido do utilizador seria pior do que inútil — seria pagar o preço inteiro (pilha
+  de defers em runtime, CFI, protocolo de retoma) e não colher o único ganho que o justifica, que é o
+  utilizador poder recuperar.
+
+Portanto as duas leituras são coerentes e **excluem-se**:
+
+| leitura | consequência |
+|---|---|
+| **R7 vale como está** ("só para testes, só o compilador conhece") | a via da guarda é a única compatível; recovery à Go fica FORA |
+| **R7 cede à hipótese** (o dono quer a capacidade permanente) | então isto deixa de ser carga de harness e passa a ser um **vagão de linguagem**: defers em runtime + desenrolador + `recover` + a re-especificação de `defer`, com o harness como primeiro consumidor e não como motivo |
+
+#### 6.11.7 RECOMENDAÇÃO
+
+**Guarda por thread agora; recovery à Go NÃO agora — e não por ser má ideia.**
+
+Três razões, por ordem de força:
+
+1. **O custo não é comparável, e a medição diz porquê.** A via Go exige inverter o modelo de `defer`
+   de estático para dinâmico, num compilador que é ele próprio escrito em `defer`, com um backend que
+   ainda não emite `.note.GNU-stack` — quanto mais `.eh_frame` — e que ainda não se auto-compila
+   (para no degrau 8). A via da guarda não toca em código de produção nenhum.
+2. **Ela não fecha o problema.** Não apanha `exit` (§6.11.4). Adoptá-la deixaria P-B por construir na
+   mesma: pagaria o vagão e ainda assim precisaria da via da guarda ao lado.
+3. **A propriedade que se quer já é alcançada** pela granularidade que o dono já escolheu (§6.11.5).
+
+**O gatilho que deve fazer reabrir isto, escrito para não se perder:** no dia em que a linguagem
+quiser recuperação de erro VISÍVEL AO UTILIZADOR — e não meramente testes que não se matam uns aos
+outros — o desenrolador passa a ser necessário por mérito próprio. Nesse dia, **o harness deve ser
+RE-ASSENTE sobre ele, não duplicado**: `gate_guard_begin`/`gate_guard_end` viram um `defer` +
+`recover` sintetizados pelo mesmo `src/build/gate.tks`, e a tabela de guardas desaparece. O desenho
+de §6.5 é deliberadamente pequeno o suficiente para ser deitado fora nesse dia sem lamentar.
+
+### 6.12 O NOME — RESOLVIDO. É `chan<T>`, por ruling e por coerência.
+
+A pergunta que este documento devolveu ao dono foi respondida no mesmo dia.
+
+**R9 (2026-07-29), literal:** *"Grafia, prefira `chan<T>` e combina com os outros tipos que são
+curtos."*
+
+A razão dele é de COERÊNCIA, e vale registá-la porque generaliza para além deste caso: a linguagem
+nomeia os seus tipos curtos (`str`, `i32`, `u64`, `ptr`, `uptr`) e `channel<T>` seria o membro
+comprido de uma família curta. `chan<T>` fica.
+
+**As três fontes divergentes foram CORRIGIDAS nesta carga** — porque o argumento que levantou a
+pergunta era exactamente este, e deixá-las vivas depois do ruling seria cometer o defeito que apontei:
+
+| ficheiro | o que mudou |
+|---|---|
+| `TEKO_MASTER_PLAN.md`:260 e :560 | `channel<T>` → `chan<T>`, e a linha de RESERVA ganhou a nota datada de que só a GRAFIA ficou decidida — a palavra continua reservada |
+| `docs/design/concorrencia-adiantada-s8.md` §3.3 (e §3 introdutório) | token actualizado, com um bloco de citação a dizer que a SUBSTÂNCIA não mudou |
+| `docs/memory/teko-laws-digest.md` (regra 3 do modelo de corrotina) | **não estava na lista que me foi dada — encontrei-a a varrer, e corrigi-a pelo mesmo critério** |
+
+**O que NÃO foi tocado, e é deliberado:** a objecção de `concorrencia-adiantada-s8.md` §3.3 — *"a
+única que ameaça o determinismo"* — fica intacta, palavra por palavra. Ela é anterior, continua
+correcta como argumento, e o dono ter escolhido o contrário para o harness não a invalida: invalida-a
+só se o perigo que ela nomeia não for contido, e §6.10 mostra como é. **As duas coexistem: a objecção
+e a resposta.** Suavizá-la porque o ruling foi noutro sentido seria reescrever a história para que ela
+concordasse com o presente — que é a forma mais silenciosa de perder um argumento válido.
 
 ---
 
@@ -1233,7 +1406,7 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | 5 | **captura de `panic` (P-A) e captura de `exit` (P-B)** | `tk_panic_str`/`tk_exit` são `_Noreturn` e matam o processo; o único "catch" que existe (`tk_rt_crash_handler`) trata sem interromper. **DUAS primitivas novas (R7), sem antecedente para P-B** | 14, 16 |
 | 5b | **`panic`/`exit` em Teko** (pré-condição de 5) | `call_symbol` aponta hoje a `tk_panic_str`/`tk_exit`; o fundo `write`/`abort` por `extern fn` está desenhado e não escrito | 13b, 14 |
 | 5c | **namespace reservado + regra de prefixo `__`** | não existe; `builtin_fn` resolve por ÚLTIMO SEGMENTO, o que torna todo builtin injectado publicamente chamável — o oposto do que R7 exige | 3b, 14 |
-| 6 | **`chan<T>`** e as quatro funções | palavra não reservada no lexer; superfície de linguagem nova; `channel<T>` é a grafia reservada no `TEKO_MASTER_PLAN` (§6.11) | 15-16 |
+| 6 | **`chan<T>`** e as quatro funções | palavra não reservada no lexer; superfície de linguagem nova. Grafia RESOLVIDA por ruling (§6.12) e as três fontes divergentes corrigidas | 15-16 |
 | 7 | **`spawn`/`wait` separados + redirecção por caminho** | `teko::process` só tem `run`/`run_quiet`, síncronos, sem redirecção escolhida pelo chamador | 7-10 |
 | 8 | **builtin `flush_out`** | `tk_flush_out` existe no runtime, não é builtin do checker | 3-4 |
 | 9 | **`extern fn` com dois parâmetros `[]str`** baixado nativamente | por MEDIR (migalha 0b). Se não baixar, a saída é uma assinatura por caminho em vez de um vector | 7 |
@@ -1252,9 +1425,10 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
    que não precisa de ser congelado. Fica NOMEADA para não ser reinventada com outro nome.
 2. **`scope { }` e `spawn` como palavras-chave.** Continuam reservadas. R4 nomeou `chan<T>` e só
    `chan<T>`; adiantar as outras duas seria congelar superfície que nenhum ruling pediu.
-2b. **A GRAFIA: `chan<T>` ou `channel<T>`** (§6.11). É a ÚNICA pergunta que este documento devolve ao
-   dono, porque a palavra congelada é dele e as duas grafias não podem coexistir. O desenho não muda
-   com a resposta — só o token.
+2b. ~~A GRAFIA~~ — **FECHADA (R9, 2026-07-29): é `chan<T>`**, e as três fontes divergentes foram
+   corrigidas nesta carga (§6.12). Deixada aqui riscada, e não apagada, porque era a única pergunta
+   que este documento devolveu ao dono e o registo de que foi respondida vale mais do que a linha
+   limpa.
 2c. **Se as duas primitivas se armam com UM par ou com DOIS** (§6.5.2). R7 diz "duas primitivas";
    o desenho entrega duas CAPACIDADES armadas por um par, com o argumento de que dois pares dobram as
    maneiras de deixar um por desarmar. Se o dono quis dois pontos de armar, é uma linha.
@@ -1314,6 +1488,125 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
 4. **`REGR_GROUP_MIN_MEMBERS` e o colapso em canais** (`regr_group.tks`) reduzem o DENOMINADOR de
    linhas de regressão. `concorrencia-adiantada-s8.md` §7 argumenta que reduzir o denominador vale
    mais do que dividir o numerador. Continua verdade, e é ortogonal a esta carga.
+
+---
+
+## 17. DEGRAU DESCOBERTO — um binário nativo NÃO LÊ a sua linha de comando. E é pior do que "vazio".
+
+Isto começou como nota de rodapé deste desenho (§4: *"o `main` nativo é `new_func("main", 0, …)`"*) e
+foi medido a pedido do coordenador. **A medição é pior do que a leitura estática dizia, e isto é um
+degrau da lane, não um rodapé.**
+
+### 17.1 O método
+
+`.gen1` construído de `bootstrap/teko.c` (20 s). Projecto de sonda `argvprobe` com `main` virtual
+(`exit(probe())`), compilado nas DUAS rotas, corrido com três argumentos.
+
+```teko
+pub fn probe() -> i32 {
+    let a = teko::env::args()
+    if a.len == 0 { return 0 }
+    if a.len == 1 { return 1 }
+    if a.len == 4 { return 4 }
+    9
+}
+```
+
+### 17.2 A saída, colada
+
+```
+=== C ROUTE ===
+teko: .: built binc/argvprobe
+$ ./binc/argvprobe one two three
+  C   exit=4 (esperado 4: argv0 + 3)
+
+=== NATIVE ROUTE ===
+teko: .: cc failed to link the own-backend object
+  NAT exit=127
+```
+
+E a causa, com a linha do linker:
+
+```
+/usr/bin/ld: warning: binn/argvprobe.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: binn/argvprobe.o: in function `teko_argvprobe__probe':
+(.text+0x12): undefined reference to `teko_args'
+collect2: error: ld returned 1 exit status
+```
+
+**Resposta directa à pergunta: NÃO.** Um binário construído com o backend nativo não lê argumentos —
+e não é que os leia vazios: **ele nem chega a existir**. O programa não LINKA. Um `teko` construído
+nativamente não pode receber `. -o out --release` porque não é produzível de todo.
+
+### 17.3 O achado a mais — a paragem honesta é CONTORNADA pela grafia qualificada
+
+A mesma sonda, com o nome escrito NU em vez de qualificado:
+
+```
+=== BARE args() — NATIVE ===
+teko: .: native backend N1: builtin `args` not yet lowered (N2) [in `argvprobe::probe`]
+=== BARE args() — C ===
+teko: .: built binbc/argvprobe   ->   exit=4
+```
+
+| grafia | nativo | rota C |
+|---|---|---|
+| `args()` — **1 segmento** | **paragem honesta** `builtin 'args' not yet lowered (N2)` | funciona, exit 4 |
+| `teko::env::args()` — **3 segmentos** | **`undefined reference to 'teko_args'`, no LINKER** | funciona, exit 4 |
+
+A causa é uma linha de `call_symbol` (`src/lir/lower.tks`):
+
+```teko
+if segs.len == 1 {
+    return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
+}
+```
+
+**A guarda só cobre a grafia NUA.** Um builtin de host escrito qualificado atravessa-a, não é achado
+por `find_extern_symbol` (num projecto de utilizador `args` é builtin INJECTADO, não `extern fn`
+declarado — a declaração `pub extern fn args() -> []str = "tk_rt_args"` vive em `src/env/env.tks`, que
+é fonte do COMPILADOR e não do projecto), e cai em `mangle_fn_symbol("", "args")` → `teko_args`, que
+símbolo nenhum define.
+
+**A família é maior do que `args`.** Todo o `host_surface_fn` (`src/checker/scope.tks`) tem a mesma
+exposição: `read_file`, `write_file`, `list_dir`, `run`, `run_quiet`, `cwd`, `chdir`, `var`,
+`set_var`, … Cada um escrito qualificado e não baixado pelo nativo é um símbolo indefinido em vez de
+uma paragem com endereço. É exactamente a doença que o doc-comment de `call_symbol` já descreve para
+o caso simétrico — *"it would silently fall through to `mangle_fn_symbol(...)` and target a symbol no
+function ever defines (a link-time failure at best)"* — e que ali foi fechada só para a família
+`teko::list::*`.
+
+### 17.4 Porque é que isto é um DEGRAU da lane e não uma nota deste desenho
+
+- **O compilador é um CLI.** O objectivo declarado da lane é *"as 4 pernas Linux geram NATIVE"* e o
+  critério do dono é o gen2 sozinho compilar e correr um hello world. Um gen2 que não lê a sua própria
+  linha de comando não recebe `.`, nem `-o`, nem `--release`: não há invocação possível.
+- **Não é o degrau 8.** O degrau 8 (`MInst` em `push_box_bytes`) é uma paragem de LOWERING; esta é uma
+  falha de LINK e vem depois. As duas são independentes e ambas estão no caminho do gen2.
+- **Não bloqueia este desenho** e continua a não bloquear: nenhuma peça do harness usa argv — é por
+  isso que a auto-reexecução por `argv[1]` do desenho de memória foi descartada (§4) e que os graus de
+  paralelismo vêm do AMBIENTE (§9). O harness está desenhado à volta deste buraco de propósito.
+
+### 17.5 O que fecha o degrau, em duas metades separáveis
+
+1. **`main` com `argc`/`argv` + `tk_set_args`.** `lower_virtual_main` cria `new_func("main", 0, [],
+   I32)`; tem de criar a assinatura de duas entradas e chamar `tk_set_args(argc, argv)` antes do corpo
+   — que é literalmente o que `codegen.tks` já faz na rota C (`b = cb(b, "    tk_set_args(argc,
+   argv);\n")`). O símbolo `tk_rt_args` já existe no runtime e já é alcançável por `extern fn`.
+2. **A guarda da paragem honesta deixa de olhar para `segs.len`.** Um callee com `call_ns` vazio que
+   não é builtin conhecido, não é `assert`-seed e não é família de lista **é uma paragem honesta,
+   qualificado ou nu**. Vale por si, independentemente de (1): converte uma classe inteira de
+   símbolos indefinidos em diagnósticos com endereço.
+
+**REPORTADO E ACEITE PELO DONO** (2026-07-29: *"precisa corrigir, ensinar o native"*). **A correcção
+NÃO é desta carga** — corre em `cargo/0.3.1.0-args-native`, com esta medição como prova. Nada em
+`src/lir` nem em `src/backend` é tocado aqui, para as duas cargas não colidirem. As fixtures que o
+afirmariam, deixadas para essa carga: `native_main_reads_argv` (exit 4 com três argumentos, nas duas
+rotas) e `qualified_host_builtin_stops_honestly` (a forma qualificada pára com a mesma mensagem que a
+nua, em vez de falhar no linker).
+
+**Consequência para ESTE desenho, e é só uma:** a exclusão da auto-reexecução por `argv[1]` (§4) passa
+a ser CONDICIONAL. Ver a nota lá — a porta está identificada e fechada por agora.
 
 ---
 

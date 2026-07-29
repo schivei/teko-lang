@@ -136,8 +136,13 @@ Tres invariantes, nesta ordem, e a ordem e a decisao:
      compartilhada, e raiz de arvore: `tk_region_new(NULL)` no nascimento, `tk_region_drop` na
      morte.
   3. **sincronizacao e compartilhamento vem DEPOIS** (canais). Nao antecipe: o desenho S8 ja
-     reservou `channel<T>` deliberadamente porque nenhum dos tres ganhos (gate, codegen,
+     reservou `chan<T>` deliberadamente porque nenhum dos tres ganhos (gate, codegen,
      regressor) usa canal — todos sao fork-join com escrita disjunta e leitura apos barreira.
+     *(GRAFIA: `chan<T>`, ruling do dono 2026-07-29 — a forma curta, por coerencia com os outros
+     tipos curtos. E a RESERVA acima foi levantada no mesmo dia, e so para o harness de testes:
+     o dono nomeou `chan<T>` como a via do veredicto entre threads unitarias. O perigo que a
+     reserva nomeava — ordem dependente de tempo — nao desapareceu; e contido pela regra "o canal
+     transporta, nao ordena", `docs/design/harness-de-testes-gerado.md` §6.10.)*
 
 **A CONSEQUENCIA QUE VALE MAIS QUE A REGRA:** com raiz por corrotina, `tk_arena_push`/`tk_arena_pop`
 deixam de ser NECESSARIOS nesse caminho. Eles existem porque os testes compartilham
@@ -187,8 +192,11 @@ como backing posterior SOB A MESMA SUPERFICIE).
 
 A superficie e `teko::isolate` com `Isolate`, `spawn`, `join`, `fork_join`,
 `hardware_parallelism()` — os VERBOS ja estavam certos no desenho, mudou o substantivo. Zero
-`yield`, zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`) seguem
-RESERVADAS e nao congeladas, conforme MASTER_PLAN:262.
+`yield`, zero `await`. As cinco palavras-chave (`scope{}`/`spawn`/`chan<T>`/`send`/`recv`) seguem
+RESERVADAS e nao congeladas, conforme MASTER_PLAN:262 — com UMA excecao datada: `chan<T>` foi
+NOMEADA pelo dono em 2026-07-29 como a via do veredicto entre threads unitarias, e a sua GRAFIA
+ficou decidida no mesmo dia (a forma curta, por coerencia com os outros tipos curtos). As outras
+quatro continuam intactas.
 
 **AGRUPAMENTO DE ISOLAMENTO — DESCARTADO por YAGNI, com gatilho escrito (dono, 2026-07-27).** A
 pergunta era como isolar um CONJUNTO sob um mesmo dominio de arena, e a proposta na mesa era

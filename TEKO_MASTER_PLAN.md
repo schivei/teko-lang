@@ -257,9 +257,9 @@ compile+link gate which is now the milestone reached.
 - **S4** generics (unconstrained, monomorphization).  **S5** DI lifetimes → arenas.
 - **S6** constraints (positive; exclusion `!` only prims/sealed; forced by `Map<K,V>`).
 - **S7** real dynamic collections (amortized append, Map, Set; out-region param).
-- **S8** concurrency CAPSTONE (`scope{}`/`spawn`/`channel<T>`/`send`/`recv`→`T|error`; 1:1 OS threads first).
+- **S8** concurrency CAPSTONE (`scope{}`/`spawn`/`chan<T>`/`send`/`recv`→`T|error`; 1:1 OS threads first).
 - **S9** LTS cleanup (collapse `Parsed<T> ×14` → `Result<T>`; unify per-type `parse`/`to_string`).
-**Reserved (don't freeze syntax until parser + real duplication data exist):** arena/scope surface, the three `ref` positions, the five concurrency primitives.
+**Reserved (don't freeze syntax until parser + real duplication data exist):** arena/scope surface, the three `ref` positions, the five concurrency primitives. *(SPELLING RULED 2026-07-29 — the channel primitive is **`chan<T>`**, not `channel<T>`: the owner chose the short form for consistency with the language's other short type names. The word itself stays RESERVED here; only its spelling is settled. `docs/design/harness-de-testes-gerado.md` §6.12.)*
 **Deferred ceilings (keep deferred):** borrow-solver / lifetime-variable system; region-polymorphism. **Tribunal micro-decision:** implicit copy-out of a very small escaping value (default lean: NO implicit copy). *(async/await + concurrency → unified in **S8/ASYNC**, DESIGNED 2026-06-30, no longer deferred; old separate S10/W14 + S8/W13 rows superseded; M:N scheduler is a later backing under the same surface, 1:1 threads first.)*
 
 ### Phase 11 — Code quality sweep  *(§A.5 — LAST)*  ⬜ TODO (W15)
@@ -557,7 +557,7 @@ Stage-level dependency waves (the hard-ordering invariant). Generics (S4) runs p
 | ⬜ | **C10.S5** DI lifetimes → arenas (`#singleton`/`#scoped`/`#transient`) | S2 (+S3) | W10 |
 | ⬜ | **C10.S6** constraints (positive; `!` only prims/sealed) | S4 + real Map need | W11 |
 | ⬜ | **C10.S7** dynamic collections (append, Map, Set; out-region param) | S4, S6, S2/S3 | W12 |
-| ⬜ | **C10.S8** concurrency capstone — `scope{}`/`spawn` (routine launch); `channel<T>`/`send`/`recv`; **`Mutex<T>`** (lock/unlock, poisoning on panic); **`Semaphore`** (acquire/release, counting); **`RWMutex`** (concurrent reads, exclusive write); **`WaitGroup`** (add/done/wait); **thread-control** (`thread::spawn` → `JoinHandle`, join, detach, park/unpark); **M:N scheduler** (lightweight routine → OS thread fan-out; work-stealing queue) | S2, S3 | W13 |
+| ⬜ | **C10.S8** concurrency capstone — `scope{}`/`spawn` (routine launch); `chan<T>`/`send`/`recv`; **`Mutex<T>`** (lock/unlock, poisoning on panic); **`Semaphore`** (acquire/release, counting); **`RWMutex`** (concurrent reads, exclusive write); **`WaitGroup`** (add/done/wait); **thread-control** (`thread::spawn` → `JoinHandle`, join, detach, park/unpark); **M:N scheduler** (lightweight routine → OS thread fan-out; work-stealing queue) | S2, S3 | W13 |
 | ⬜ | **C10.S9** LTS cleanup (Parsed×14→Result<T>; unify parse/to_string) | S4 | W13 |
 | ⬜ | **C10.S10** async/await — coroutine-based non-blocking I/O; `async fn`/`await expr`; Teko runtime event loop (epoll/kqueue/IOCP); cancellation via scope; composable with channels + Mutex | S8 | W14 |
 
