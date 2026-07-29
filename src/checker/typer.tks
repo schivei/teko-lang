@@ -3223,18 +3223,23 @@ fn tblock_type(stmts: []TStatement) -> Type {
     }
 }
 
-// ---- does a TYPED block DIVERGE (exit via return/break/continue on every path)? ----
-// True when its trailing statement is a return/break/continue, OR a trailing `if`-with-else
-// / `match` whose every branch / arm diverges. Such a block yields NO trailing value, so
-// match-as-value unification (type_match) skips it (B.20).
-// A panic/exit call DIVERGES (terminates the program — legislator's ruling: no `never` type), so
-// its result may stand in for ANY type at a value position. Recognized structurally (the injected
-// global builtins panic/exit, unqualified).
-fn texpr_diverges(e: TExpr) -> bool {
+/**
+ * texpr_diverges — does a TYPED expression DIVERGE (never fall through to a following
+ * statement)? True for an unqualified call to the injected global `panic`/`exit` builtins
+ * (recognized structurally — the SAME fronteira the lowering/emission passes consume, so a
+ * `defer` scope replay fires on exactly the calls this predicate names; never duplicate this
+ * name list elsewhere), for a `match` whose EVERY arm diverges, or for an `if`/`else` where
+ * BOTH branches diverge. Such an expression yields no value and never falls through, so
+ * match-as-value unification (`type_match`) skips it (B.20), and it may stand in for ANY
+ * type at a value position (the legislator's ruling: no `never` type).
+ *
+ * @param e  the typed expression
+ * @return   true iff `e` unconditionally terminates the enclosing frame (a panic/exit call, or
+ *           a fully-diverging match/if)
+ */
+pub fn texpr_diverges(e: TExpr) -> bool {
     match e.kind {
         TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
-        // a `match` whose EVERY arm diverges, or an `if`/`else` where both branches diverge, yields
-        // no value and never falls through — so a function ending in it satisfies any return type.
         TMatchExpr as m => {
             if m.arms.len == 0 { return false }
             mut i = 0

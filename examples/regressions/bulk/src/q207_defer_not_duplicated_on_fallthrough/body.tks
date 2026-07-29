@@ -1,0 +1,29 @@
+/**
+ * once — the non-duplication proof for the diverging-call defer fix (W15/#defer-nas-saidas step
+ * 5): the block a diverging `exit` sits in ALSO has its own pre-existing lexical fall-through
+ * defer replay (`emit_block_region`'s own unconditional fall-through, unrelated to this fix — the
+ * SAME site that already tolerates dead text after an explicit `return`, per the C precedent this
+ * fix relies on). `exit`'s own ARGUMENT is read AFTER the (single) replay, so a defer that fired
+ * TWICE would report 3, not 2 — the exit code itself is the proof, no output-stream parsing
+ * needed.
+ *
+ * @return never — the process exits with `acc`'s value after EXACTLY one replay of the defer
+ */
+fn once() -> i64 {
+    mut acc: i64 = 1
+    if true {
+        defer { acc = acc + 1 }
+        exit((acc) to i32)
+    }
+    return 0
+}
+
+/**
+ * entry — proves the diverging-call replay site (`lower_expr_stmt`/`emit_expr_stmt_default`)
+ * fires a scope's pending defer EXACTLY once, never duplicating it against the pre-existing
+ * lexical fall-through site. Selected by `TEKO_REGR_ENTRY=q207_defer_not_duplicated_on_fallthrough`.
+ */
+pub fn entry() {
+    once()
+    eprintln("unreachable: `once` always exits")
+}

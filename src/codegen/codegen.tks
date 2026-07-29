@@ -8295,6 +8295,32 @@ fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str) -> []byte
     out
 }
 
+/**
+ * emit_stmt — emit ONE statement's C text, dispatched on its checker kind. An `if`/`match` in
+ * statement position runs as direct CONTROL FLOW (`emit_if_stmt`/`emit_match_stmt`, so a nested
+ * `break`/`continue`/`return`/diverging call propagates through C's own semantics); any other
+ * expression statement (a bare call, most commonly) runs for effect via `emit_expr_stmt_default`,
+ * which is the ONE site an unqualified `panic`/`exit` STATEMENT call is recognized and replays
+ * the scope's pending defers before it (W15/#defer-nas-saidas — `lower_expr_stmt`'s own C twin).
+ * `break`/`continue` each fire their target's crossed-scope defers before their `goto`/keyword;
+ * `defer` registers onto `dctx` and emits nothing inline (fired at its scope's own exit edge).
+ *
+ * @param buf     the C output buffer
+ * @param s       the typed statement
+ * @param in_main bool  whether the enclosing function is the virtual-main entry
+ * @param prog    the whole-program codegen context (symbol/class/namespace tables)
+ * @param ret_type checker::Type  the enclosing function's own declared return type
+ * @param indent  the C indentation for this statement
+ * @param frame   the enclosing frame region's C identifier, or "" when the function opened none
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions []RegionFrame  the active block-region stack (S2)
+ * @param fn_body []checker::TStatement  the enclosing function's full body (class-cleanup lookups)
+ * @param dctx    DeferCtx  the pending-defer stack + active loop targets + coverage context
+ * @param cur_block []checker::TStatement  the statement's own enclosing block (region-locality)
+ * @param cur_block_is_value bool  whether `cur_block` is a value-producing arm
+ * @return        the buffer with this statement's C text appended
+ * @throws        propagated from whichever branch lowers the statement's own sub-expressions
+ */
 fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     let b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     match s {
@@ -8308,11 +8334,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
             match es.expr.kind {
                 checker::TIfExpr as f => emit_if_stmt(b0, f, es.expr.line, es.expr.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
                 checker::TMatchExpr as m => emit_match_stmt(b0, prog, es.expr, m, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
-                _ => {
-                    mut out = cb(b0, indent)
-                    out = match emit_expr_ctx(out, prog, checker::Void { }, es.expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-                    cb(out, ";\n")
-                }
+                _ => emit_expr_stmt_default(b0, es.expr, prog, escaping, regions, fn_body, dctx, indent)
             }
         }
         checker::TLoopStmt as l => emit_loop(b0, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
@@ -8347,6 +8369,36 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
         checker::TDeferStmt => b0
         checker::TAdoptStmt as a => emit_adopt(b0, a, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
     }
+}
+
+/**
+ * emit_expr_stmt_default — `emit_stmt`'s default expression-statement arm: a bare call run for
+ * effect, its VReg discarded. A DIVERGING call (`checker::texpr_diverges` — an unqualified
+ * `panic`/`exit`, the SAME fronteira `emit_return` leaves via) leaves EVERY enclosing scope
+ * exactly like a `return`, so its pending defers replay FIRST (`emit_return`'s own ordering,
+ * `codegen.tks` — fires before the call TEXT, so the defer body runs before the `_Noreturn`
+ * runtime call that follows it, instead of after it in UNREACHABLE text, W15/#defer-nas-saidas).
+ * Every OTHER call's own later fall-through/return/break/continue edge already fires this same
+ * scope's defers at its own exit — this site only closes the one edge those never reach.
+ *
+ * @param buf      the C output buffer
+ * @param expr     the typed statement expression (the call, run for effect)
+ * @param prog     the whole-program codegen context
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions  []RegionFrame  the active block-region stack (S2)
+ * @param fn_body  []checker::TStatement  the enclosing function's full body
+ * @param dctx     DeferCtx  the pending-defer stack this statement may replay from
+ * @param indent   the C indentation for this statement
+ * @return         the buffer with this statement's C text appended
+ * @throws         propagated from replaying a pending defer or emitting `expr` itself
+ */
+fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, indent: str) -> []byte | error {
+    let b1 = if checker::texpr_diverges(expr) {
+        match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    } else { buf }
+    mut out = cb(b1, indent)
+    out = match emit_expr_ctx(out, prog, checker::Void { }, expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
 }
 
 /**

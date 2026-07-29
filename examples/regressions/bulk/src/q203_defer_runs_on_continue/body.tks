@@ -1,0 +1,48 @@
+/**
+ * same_scope_continue — a `defer` registered in the SAME loop-body block as the `continue` that
+ * ends its iteration must fire once PER iteration (two iterations here, `+100` each).
+ *
+ * @return 201 (1, then `+100` twice — once per iteration's `continue`/fall-through)
+ */
+fn same_scope_continue() -> i64 {
+    mut acc: i64 = 1
+    mut n = 0
+    loop {
+        defer { acc = acc + 100 }
+        n = n + 1
+        if n < 2 { continue }
+        break
+    }
+    return acc
+}
+
+/**
+ * outer_scope_continue — a `defer` registered in the FUNCTION's own (outer) block, with the
+ * `continue` written inside the loop it wraps, still fires exactly ONCE — at the function's own
+ * later fall-through/return, since `continue` only crosses scopes down to & including its target
+ * loop (owner-confirmed limit; the function has not exited on any single iteration).
+ *
+ * @return 11 (1, then `+10` from the outer defer, fired once — after the loop, not per iteration)
+ */
+fn outer_scope_continue() -> i64 {
+    mut acc: i64 = 1
+    mut n = 0
+    defer { acc = acc + 10 }
+    loop {
+        n = n + 1
+        if n < 2 { continue }
+        break
+    }
+    return acc
+}
+
+/**
+ * entry — the `continue` row of the five-exits x two-scopes defer matrix (owner ruling
+ * 2026-07-29): `continue` already fires the pending defer once per iteration in the loop's own
+ * block, and exactly once (at the function's own exit, not per iteration) in an outer block; this
+ * fixture pins both as a permanent regression lock. Selected by
+ * `TEKO_REGR_ENTRY=q203_defer_runs_on_continue`.
+ */
+pub fn entry() {
+    exit((same_scope_continue() + outer_scope_continue()) to i32)
+}
