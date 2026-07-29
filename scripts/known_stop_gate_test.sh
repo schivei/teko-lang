@@ -10,6 +10,14 @@
 # fixture proving the inversion, a future edit could reintroduce the substring match and nothing
 # here would notice.
 #
+# A SECOND INVERSION PROOF (fixture 8b): every fixture above only proves the gate's JUDGING logic,
+# and only on Linux. Run `30496810306` (job `90728702483`) showed that is not the same as proving
+# the gate RUNS where it has to: `known_stop_gate.sh` used to invoke `sed -E`, a GNU/BSD extension
+# no POSIX `sed` promises, and Windows' Git-Bash could not resolve it — a bare exit 127, no verdict
+# printed, before any fixture like the ones above could matter. Fixture 8b inspects the gate's own
+# source text for that shape (`sed -E`/`sed -r`/`grep -P`) so a portability regression fails HERE,
+# not silently on the one platform this file cannot be run on directly.
+#
 # Every fixture is a throwaway log file in a temp dir — no compiler, no network, runs in the
 # `CI gate` job alongside `scripts/no_c_in_tests_gate_test.sh`.
 #
@@ -110,6 +118,25 @@ rc="$(gate_rc 1 "some unrelated crash before any regression ran, mentions B1-arg
 [ "$rc" = "1" ] && pass "an unrelated mention of the family name with no summary stays RED (rc=1)" \
     || fail "a foreign mention must never be held: got rc=$rc"
 
+# 8b. PORTABILITY, not just logic. Measured in run `30496810306` (job `90728702483`): the gate
+# used `sed -E` to pull the failed-row count out of the summary line, and Windows'
+# `C:\Program Files\Git\bin\bash.EXE` could not resolve it — the whole step died at a bare exit
+# 127 BEFORE the gate printed even one `known-stop:` line, so every fixture above (which only
+# proves the JUDGING logic, on Linux) never got exercised where it mattered. `-E` is a GNU/BSD
+# `sed` EXTENSION, never POSIX (POSIX `sed` defines only `-n`/`-e`/`-f`); `grep -E` is not the same
+# risk — POSIX defines it, and this gate's own regression-summary/unit-fail-line matches already
+# rely on it, proven on this exact Windows runner by `scripts/ci_provision_teko.sh`'s own `grep -E`
+# call. This fixture is the inversion proof for THAT bug: it inspects the gate's OWN SOURCE TEXT,
+# not a log fixture, and fails the moment a future edit reintroduces `sed -E`/`sed -r` (or a
+# Perl-regex `grep -P`, never POSIX either) — the exact shape that shipped a working gate which
+# could not run where it was needed.
+# -vn first strips comment-only lines (this very fixture's own doc-comment names `sed -E` in
+# prose, and must not trip on its own explanation) while KEEPING each surviving line's true
+# original number; the second grep then looks for the banned flag only in actual CODE lines.
+PORTABILITY_HIT="$(grep -vn '^[[:space:]]*#' "$GATE" | grep -E 'sed[[:space:]]+-[A-Za-z]*(E|r)[A-Za-z]*|grep[[:space:]]+-[A-Za-z]*P[A-Za-z]*' || true)"
+[ -z "$PORTABILITY_HIT" ] && pass "known_stop_gate.sh's own source stays POSIX-minimum (no sed -E/-r, no grep -P)" \
+    || fail "known_stop_gate.sh reintroduced a non-POSIX sed/grep flag Git-Bash on Windows cannot promise: $PORTABILITY_HIT"
+
 # 8. FATAL inputs are never silently read as held or as a plain fail.
 rc=0
 sh "$GATE" 1 "$ROOT/does-not-exist" >"$ROOT/out8" 2>"$ROOT/err8" || rc=$?
@@ -128,4 +155,5 @@ if [ "$FAILED" = "1" ]; then
 fi
 echo "known_stop_gate_test OK — the pinned diagnostic alone is held, both SIBLING B1-args stops"
 echo "stay red (the inversion proof), a second failure or a failed unit test are never absorbed,"
-echo "a lifted (RC=0) suite is never held, and every malformed input is FATAL rather than a guess."
+echo "a lifted (RC=0) suite is never held, every malformed input is FATAL rather than a guess, and"
+echo "the gate's own source stays POSIX-minimum (the Windows portability inversion proof)."

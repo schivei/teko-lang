@@ -38,6 +38,22 @@
 #              1  RED — the stop is lifted (RC == 0), or the log shows a DIFFERENT failure shape;
 #                 the caller must not treat this as a pass
 #              2  FATAL — the inputs themselves could not be read/parsed
+#
+# WINDOWS PORTABILITY (this gate's OWN Windows leg is the caller — see the workflow step this
+# replaces). Measured directly in run `30496810306` (job `90728702483`): the first version of this
+# file used `sed -E` (extended-regex mode) to pull the failed-row count out of the summary line.
+# `-E` is a GNU/BSD sed EXTENSION, never a POSIX `sed` option (POSIX only standardizes `-n`/`-e`/
+# `-f`); unlike `grep -E`, which POSIX itself defines and which this file already relies on
+# elsewhere (proven on this exact Windows runner by `scripts/ci_provision_teko.sh`'s own `grep -E`
+# call), `sed -E` is not a portability guarantee anywhere, it is a convenience this file had not
+# earned. That command failed to resolve on the Windows leg's `C:\Program Files\Git\bin\bash.EXE`
+# before this gate could print a single `known-stop:` line — the caller saw a bare exit 127, not a
+# verdict, so the very fix this gate exists to make testable never even ran. The extraction below
+# is now plain POSIX BRE (`\( \)` capture groups, `[0-9][0-9]*` where ERE would spell `[0-9]+`) —
+# the same dialect `sed 's/^/known-stop:   /'` already uses three times below without incident.
+# `scripts/known_stop_gate_test.sh` now asserts this file's OWN source never regresses to `-E`/`-r`
+# on `sed` again (the inversion proof for THIS bug, the same shape as the B1-args inversion proof
+# above).
 set -eu
 
 PINNED_DIAG="isel x86-64: B1-args — an integer call argument past the ABI's argument-register window needs the stack-arg slot (0.3.1)"
@@ -67,14 +83,14 @@ if [ -z "$SUMMARY_LINE" ]; then
     exit 1
 fi
 
-FAILED_COUNT="$(printf '%s\n' "$SUMMARY_LINE" | sed -E 's/.*, ([0-9]+) failed.*/\1/')"
+FAILED_COUNT="$(printf '%s\n' "$SUMMARY_LINE" | sed 's/.*, \([0-9][0-9]*\) failed.*/\1/')"
 if [ "$FAILED_COUNT" != "1" ]; then
     log "more than the pinned row failed (or none did) — this envelope must not cover a second"
     log "break: '$SUMMARY_LINE'"
     exit 1
 fi
 
-UNIT_FAIL_LINES="$(grep -E '^test [^ ]+ \.\.\. ' "$LOG_FILE" | grep -v -E ' ok$' || true)"
+UNIT_FAIL_LINES="$(grep -E '^test [^ ]+ \.\.\. ' "$LOG_FILE" | grep -v ' ok$' || true)"
 if [ -n "$UNIT_FAIL_LINES" ]; then
     log "a UNIT test failed on this host; the B1-args pin covers the regression tier only:"
     printf '%s\n' "$UNIT_FAIL_LINES" | sed 's/^/known-stop:   /' >&2
