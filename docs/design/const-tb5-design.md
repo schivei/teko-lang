@@ -1,5 +1,7 @@
 # T-B5 — VM resolve o ponteiro rodata-INTERNO + o encoder nativo fecha a cadeia data→data (#594 Tier-B)
 
+> **[HISTÓRICO]** — documenta o planejamento do crumb T-B5 de Tier-B (2026-07-18), já executado. Não descreve o estado atual do projeto.
+
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing
 aggregate → rodata (`docs/design/const-module-level-plan.md` §8 crumb T-B5, §5.1
 verdict, DECISION_LOG D2). Base: o working tree da const-wave com **T-B1, T-B2, T-B3 e
