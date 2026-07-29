@@ -399,3 +399,29 @@ Feature: str query/slice builtins — `contains`/`ends_with`/`slice`/`slice_to`/
   Scenario: str_slice_family (own-native — `slice`/`slice_to`/`slice_from`, each length AND content)
     When built and run
     Then exit = 42
+
+
+Feature: a breakless loop tail — a value-returning function/arm whose LAST statement is a bare `loop { … }` with no `break` at all
+
+  # (0.3.1.0 degrau 13) `teko::backend::idom_intersect` (`src/backend/stackify.tks`) stopped the
+  # compiler's own native self-build: "if-expression arm's tail statement does not yield a value
+  # (internal)". `lower_tail_non_expr` (`src/lir/lower.tks`) treated ANY non-`return`-terminated
+  # tail statement as an internal checker-invariant break, but `lower_loop` always reports
+  # `terminated=false` for a loop (break or not) — and the checker itself makes NO claim about a
+  # non-expression tail (`check_trailing_value`'s own doc, typer.tks), TRUSTING that every
+  # reachable path diverges, exactly the trust the C emitter already honors via a bare
+  # `__builtin_unreachable()` after such a tail (`cg_stmt_c_terminates` + `codegen.tks:9008`). The
+  # message's own "(internal)" framing was itself the bug: not a broken invariant, a genuine
+  # program shape the lowering had not implemented yet. Fixed by reusing the ALREADY-EXISTING
+  # diverging-tail defensive-constant treatment (`diverging_tail_value`, built for a diverging
+  # `panic`/`exit` tail expression) for this one more statement shape — SAFER than the C route's
+  # raw UB (a well-defined placeholder, never observed under the checker's own guarantee) and
+  # zero new machinery.
+  #
+  # The row mirrors `idom_intersect`'s own shape EXACTLY (`gcd_subtract`, `corpus.tks`): the
+  # function's last statement is a bare breakless `loop`, wrapping two NESTED loops that each DO
+  # `break`, one per "finger" walked toward the other — checked by VALUE across three GCD pairs,
+  # including the x==y edge where neither inner loop ever runs.
+  Scenario: loop_tail_no_break (own-native — a value-returning function/arm whose tail is a breakless `loop`)
+    When built and run
+    Then exit = 42

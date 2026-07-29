@@ -4019,13 +4019,23 @@ fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LTyp
     lower_tail_stmt(cur, body[body.len - 1], result_ty, target_ty)
 }
 
-/** lower_tail_stmt — an if-expression arm's final statement: an expression-statement's
-    value IS the arm's tail value; any other statement kind is delegated to
-    lower_tail_non_expr. */
+/**
+ * lower_tail_stmt — a value-producing arm/function-body's final statement: an
+ * expression-statement's value IS the tail value (`lower_tail_expr_stmt`); any other statement
+ * kind is delegated to `lower_tail_non_expr`.
+ *
+ * @param ctx        the lowering context positioned at the tail statement
+ * @param s          the tail statement
+ * @param result_ty  the enclosing arm/function's own expected result machine class
+ * @param target_ty  the enclosing arm/function's own DECLARED checker type
+ * @return           the value outcome (`lower_tail_expr_stmt`/`lower_tail_non_expr`'s own
+ *                    contract)
+ * @throws           propagated from lowering the tail statement
+ */
 fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
     match s {
         checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty, target_ty)
-        _ => lower_tail_non_expr(ctx, s)
+        _ => lower_tail_non_expr(ctx, s, result_ty)
     }
 }
 
@@ -4086,13 +4096,46 @@ fn diverging_tail_value(ctx: LowerCtx, result_ty: LType) -> LowerBlockValue {
     LowerBlockValue { ctx = with_const; terminated = false; vreg = r.vreg }
 }
 
-/** lower_tail_non_expr — a non-expression-statement tail: valid only if it terminates the
-    arm (a `return`); anything else honest-stops (a checker invariant break — a value-typed
-    if-expr arm whose tail neither returns nor yields a value). */
-fn lower_tail_non_expr(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValue | error {
+/**
+ * lower_tail_non_expr — a value-producing arm/function-body's tail statement that is NOT an
+ * expression-statement (a `loop`, a bare `if`/`match` STATEMENT, a `TBinding`/`TAssign`, …).
+ *
+ * A `return`/`break`/`continue` genuinely terminates (`lower_stmt`'s own `out.terminated`), and
+ * closes the arm exactly like an explicit `return` (`terminated=true`, `vreg` unused). Anything
+ * else falls through this statement's OWN close (e.g. `lower_loop`'s exit block, reachable in
+ * principle through a `break` — `lower_loop`'s own doc) WITHOUT ever having produced a value of
+ * `result_ty`.
+ *
+ * That is not an invariant break: `check_trailing_value` (typer.tks) makes NO claim whatsoever
+ * about a non-expression tail — "the guard against false-rejecting a body that ends in a
+ * diverging loop/if/match" (its own doc) — so the checker ALREADY admits, e.g., a breakless
+ * `loop` whose only exits are inner `return`s, TRUSTING the programmer that every reachable path
+ * actually diverges (M.4, the full every-path-returns analysis, is a documented SEPARATE later
+ * item). The C emitter honors that exact same trust: `cg_stmt_c_terminates` returns `false` for
+ * every non-expression tail kind, and `emit_function_cov` follows a `false` with a bare
+ * `__builtin_unreachable()` — no value materialized, the fall-through is UB IF the trust is ever
+ * violated, and the checker's contract is that it never is (`codegen.tks:8659-9013`).
+ *
+ * This mirrors that same contract with a STRICTLY SAFER placeholder than raw C UB: reuse
+ * `diverging_tail_value`'s defensive, width-correct constant of `result_ty` (never observed at
+ * runtime under the checker's own guarantee) and stay `terminated=false`, so this tail's arm
+ * merges/returns through the exact same edge every sibling arm's real value takes — no separate
+ * code path, no redesign, just the established diverging-tail treatment applied to one more
+ * statement shape.
+ *
+ * @param ctx        the lowering context positioned at the tail statement
+ * @param s          the tail statement (not a `checker::TExprStmt` — `lower_tail_stmt` already
+ *                   routed that case to `lower_tail_expr_stmt`)
+ * @param result_ty  the enclosing arm/function's own result machine class (`lower_block_value`'s
+ *                   `result_ty`), threaded through to the placeholder constant's width
+ * @return           `terminated=true` (a real `return`/`break`/`continue`) or the diverging-tail
+ *                    placeholder (`terminated=false`, matching `diverging_tail_value`)
+ * @throws           propagated from lowering the tail statement itself
+ */
+fn lower_tail_non_expr(ctx: LowerCtx, s: checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
     let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
     if out.terminated { return LowerBlockValue { ctx = out.ctx; terminated = true; vreg = 0 } }
-    error { message = "native backend N1: if-expression arm's tail statement does not yield a value (internal)" }
+    diverging_tail_value(out.ctx, result_ty)
 }
 
 /** lower_if_expr — cond ? then : else via LBranch + per-arm blocks merging through a
