@@ -1201,8 +1201,17 @@ jobs:
           fi
           "$art" --version || exit $?
 
+          # `set +e` IS LOAD-BEARING, NOT DECORATION. GitHub runs every `shell: bash` step as
+          # `bash --noprofile --norc -e -o pipefail`, so WITHOUT it the failing `test .` aborts the
+          # step on the spot: `rc=$?`, the `cat`, and the gate below all become dead code, and the
+          # step exits with teko's RAW code while the diagnostic that would explain it is still
+          # sitting unread inside teko-test.log. That is exactly how this leg reported a bare
+          # `exit 127` with no output. The `ar_link_run` consumer steps in this same file already
+          # wrap their rc-capture in `set +e` / `set -e`; this twin had drifted without it.
+          set +e
           "$art" test . > teko-test.log 2>&1
           rc=$?
+          set -e
           cat teko-test.log
           sh scripts/known_stop_gate.sh "$rc" teko-test.log
 
