@@ -5681,12 +5681,15 @@ pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
  * (`lower_if_fat`, degrau 5), a `match`-VALUE whose result is fat (`lower_match_fat`, 0.3.1.0
  * degrau 5), a DIRECT call whose own result is fat (`lower_call_fat`; measured via a corpus probe
  * to be the shape that actually reaches this site — a closure-call/interface-dispatch receiver is
- * `lower_call_fat`'s OWN narrower named stop, not this one), and — closed at 0.3.1.0 degrau 9 — a
- * string interpolation (`lower_interp_fat`: pieces/holes concatenated through the runtime's
- * out-parameter-length twins, `lower_len_out_call`). Any other producer (a deeper index chain, …)
- * honest-stops — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382;
- * if-expression producer: degrau 5, cargo/20-degrau5-if-gordo; call producer: call-gordo degrau,
- * #382 N2; interpolation producer: 0.3.1.0 degrau 9).
+ * `lower_call_fat`'s OWN narrower named stop, not this one), a string interpolation
+ * (`lower_interp_fat`: pieces/holes concatenated through the runtime's out-parameter-length twins,
+ * `lower_len_out_call`, closed at 0.3.1.0 degrau 9), and — closed at 0.3.1.0 degrau 10 — an index
+ * into a slice of FAT elements (`[]str`/`[][]T`, `lower_index_fat`: the element's two-word
+ * `{ptr, len}` pair, read back at the SAME stride the array literal's store and the push's
+ * `sizeof` now share, `elem_byte_stride`). Any other producer (a deeper field/index chain over a
+ * fat result, …) honest-stops — those arrive with a wider fat-pointer ABI in a later phase (A1-4,
+ * #382; if-expression producer: degrau 5, cargo/20-degrau5-if-gordo; call producer: call-gordo
+ * degrau, #382 N2; interpolation producer: 0.3.1.0 degrau 9; index producer: 0.3.1.0 degrau 10).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed (`str`/`[]T`) expression to lower
@@ -5703,6 +5706,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TMatchExpr as mx => lower_match_fat(ctx, e, mx)
         checker::TCall as cl => lower_call_fat(ctx, e, cl)
         checker::TInterp as ip => lower_interp_fat(ctx, e, ip)
+        checker::TIndex as ix => lower_index_fat(ctx, e, ix)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
 }
@@ -5882,66 +5886,93 @@ fn lower_list_empty(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat {
 /**
  * lower_list_push — `teko::list::push(base, item)` / `teko::mem::push_fo(base, item)`: the
  * value-semantics grow-by-one, lowered to the runtime's amortized copy-grow. The runtime takes the
- * item BY ADDRESS and returns the length through an out-parameter, so the caller reserves two frame
- * slots — one sized to the element, one to the `u64` length — stores the item into the first, and
- * loads the new length back out of the second once the call returns:
+ * item BY ADDRESS and returns the length through an out-parameter (`lower_len_out_call`), so the
+ * caller reserves a frame slot sized to the element, stores the item into it, and passes its
+ * address + byte size:
  *
  *   `<sym>(base.ptr, base.len, &item, sizeof(elem), &out_len)` -> the grown buffer's pointer
  *
- * A REGISTER-VALUE element (`is_register_value_type`: a primitive or an enum's carrier) is stored
- * into the item slot as it lowers. An AGGREGATE element is BOXED first (`push_box_bytes` /
- * `box_push_item`): what the slice holds for it is an ADDRESS, and the address this backend lowers
- * an aggregate to is a per-INSTRUCTION frame slot, so the aggregate is copied into fresh
- * per-EXECUTION runtime storage and THAT address is pushed (NATIVE-AGG-SLICE-BY-ADDRESS).
- *
- * The item is COERCED INTO THE ELEMENT TYPE (`lower_value_into_type`), never merely lowered. A push
- * is a placement like a binding, an assignment or a return, and a placement into a union slot must
- * build the uniform tag+payload wrapper; lowering the item plainly stored the bare case and left the
- * tag to whatever the fresh storage happened to hold, so reading the element back took an arbitrary
- * arm. That was measurable before degrau 8 on the only union element that reached here at all
- * (a `[]T | error`): the element read back took the `error` arm, silently.
+ * A FAT element (`str`/`[]T`, `is_fat_type`) delegates to `lower_fat_element_push`: its item slot
+ * holds the two-word `{ptr, len}` pair, at the SAME stride the array literal's store and the index
+ * load now share (`elem_byte_stride`, 0.3.1.0 degrau 10). Every other element delegates to
+ * `lower_scalar_element_push`.
  *
  * @param ctx  the lowering context
  * @param e    the push call expression (its type is the result `[]T`)
  * @param cl   the call node (`args[0]` the base slice, `args[1]` the item)
  * @param sym  the runtime grow symbol (`slice_push_symbol`)
  * @return     the grown slice's (ptr, len) pair
- * @throws     on a malformed call, on a FAT element type (`fat_element_push_stop`), on an aggregate
- *             element whose byte width this backend cannot pin (`push_box_bytes`), or propagated
- *             from lowering the base/item
+ * @throws     on a malformed call, on an aggregate element whose byte width this backend cannot pin
+ *             (`push_box_bytes`), or propagated from lowering the base/item
  */
 fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: str) -> LoweredFat | error {
     if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
     let elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
-    if is_fat_type(elem) { return fat_element_push_stop() }
-    let box_bytes = match push_box_bytes(elem, ctx) { u32 as n => n; error as err => return err }
-    let elem_lt = ltype_of(elem, ctx.enums)
-    if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
     let base = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
-    let lowered = match lower_value_into_type(base.ctx, elem, cl.args[1]) { Lowered as x => x; error as err => return err }
-    let item = box_aggregate_value(lowered, box_bytes, e)
-    let slots = reserve_push_slots(item.ctx, item.vreg, elem_lt, e)
-    let args = push_call_args(base.ptr, base.len, slots.item_slot, slots.esz, slots.len_slot)
-    let called = ctx_alloc(slots.ctx)
-    let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, args, false, e.line, e.col))
-    let lenr = ctx_alloc(with_call)
-    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slots.len_slot, LType::I64, e.line, e.col))
-    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+    if is_fat_type(elem) { return lower_fat_element_push(base, cl.args[1], sym, e) }
+    lower_scalar_element_push(base, elem, cl.args[1], sym, e)
 }
 
 /**
- * fat_element_push_stop — the NAMED honest stop for pushing onto a slice whose ELEMENT is itself
- * fat (`[]str`, `[][]T`). Such an element's machine image is two words, not the one word
- * `ltype_of` reports for it, and the element WIDTH is a whole-backend fact: the array literal's
- * store stride, the index load, and this push's `sizeof` argument must pick the same number or the
- * buffer is read back shifted. Widening all three (and giving `lower_fat_expr` an index producer to
- * read the pair back with) is its own degrau; refusing here keeps the scalar-element push honest
- * instead of emitting a call that agrees with nothing.
+ * lower_scalar_element_push — the non-fat arm of `lower_list_push`: the item is COERCED INTO THE
+ * ELEMENT TYPE (`lower_value_into_type`), never merely lowered — a push is a placement like a
+ * binding, an assignment or a return, and a placement into a union slot must build the uniform
+ * tag+payload wrapper; lowering the item plainly stored the bare case and left the tag to whatever
+ * the fresh storage happened to hold, so reading the element back took an arbitrary arm. That was
+ * measurable before degrau 8 on the only union element that reached here at all (a `[]T | error`):
+ * the element read back took the `error` arm, silently.
  *
- * @return  the honest stop, always
+ * A REGISTER-VALUE element (`is_register_value_type`: a primitive or an enum's carrier) is stored
+ * into the item slot as it lowers. An AGGREGATE element is BOXED first (`push_box_bytes` /
+ * `box_aggregate_value`): what the slice holds for it is an ADDRESS, and the address this backend
+ * lowers an aggregate to is a per-INSTRUCTION frame slot, so the aggregate is copied into fresh
+ * per-EXECUTION runtime storage and THAT address is pushed (NATIVE-AGG-SLICE-BY-ADDRESS).
+ *
+ * @param base  the base slice's already-lowered (ptr, len) pair
+ * @param elem  the concrete (non-fat) element type
+ * @param item  the item expression
+ * @param sym   the runtime grow symbol
+ * @param e     the push call expression (its source position)
+ * @return      the grown slice's (ptr, len) pair
+ * @throws      on an aggregate element whose byte width this backend cannot pin
+ *              (`push_box_bytes`), or propagated from lowering the item
  */
-fn fat_element_push_stop() -> error {
-    error { message = "native backend N1: a push onto a slice of FAT elements (`[]str`/`[][]T`) needs the two-word element stride the array-literal store and the index load do not carry yet (N2)" }
+fn lower_scalar_element_push(base: LoweredFat, elem: checker::Type, item: checker::TExpr, sym: str, e: checker::TExpr) -> LoweredFat | error {
+    let box_bytes = match push_box_bytes(elem, base.ctx) { u32 as n => n; error as err => return err }
+    let elem_lt = ltype_of(elem, base.ctx.enums)
+    if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
+    let lowered = match lower_value_into_type(base.ctx, elem, item) { Lowered as x => x; error as err => return err }
+    let boxed = box_aggregate_value(lowered, box_bytes, e)
+    let slot = reserve_item_slot(boxed.ctx, ltype_size(elem_lt), ltype_align(elem_lt), e)
+    let with_store = ctx_append(slot.ctx, store_inst(slot.vreg, boxed.vreg, elem_lt, e.line, e.col))
+    let esz = ctx_alloc(with_store)
+    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, ltype_size(elem_lt) to i64, e.line, e.col))
+    lower_len_out_call(with_esz, sym, push_head_args(base, slot.vreg, esz.vreg), e)
+}
+
+/**
+ * lower_fat_element_push — the FAT arm of `lower_list_push`: the pushed item is a `str`/`[]T`
+ * value, stored BY VALUE as its two-word `{ptr, len}` pair into the SAME 16-byte frame-slot shape a
+ * mutable fat local's frame slot uses (`fat_slot_bytes`/`store_fat_slot`), then passed to the
+ * runtime grow at that width (`elem_byte_stride`) — the same stride the array literal's store and
+ * the index load now use for this element (0.3.1.0 degrau 10). No boxing: this mirrors the retired
+ * C emitter's `emit_list_push`, which lowers the item into a by-value C-typed local (a `tk_str` for
+ * a `str` element) before the call — the oracle the owner's ruling points this arm at.
+ *
+ * @param base  the base slice's already-lowered (ptr, len) pair
+ * @param item  the item expression (its type is the fat element type)
+ * @param sym   the runtime grow symbol
+ * @param e     the push call expression (its source position)
+ * @return      the grown slice's (ptr, len) pair
+ * @throws      propagated from lowering the item as a fat-pointer producer
+ */
+fn lower_fat_element_push(base: LoweredFat, item: checker::TExpr, sym: str, e: checker::TExpr) -> LoweredFat | error {
+    let fo = match lower_fat_expr(base.ctx, item) { LoweredFat as x => x; error as err => return err }
+    let slot = reserve_item_slot(fo.ctx, fat_slot_bytes(), ltype_align(LType::Ptr), e)
+    let with_store = store_fat_slot(slot.ctx, slot.vreg, fo, e.line, e.col)
+    let esz = ctx_alloc(with_store)
+    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, fat_slot_bytes() to i64, e.line, e.col))
+    lower_len_out_call(with_esz, sym, push_head_args(base, slot.vreg, esz.vreg), e)
 }
 
 /**
@@ -6144,71 +6175,38 @@ fn push_elem_type(e: checker::TExpr, cl: checker::TCall) -> checker::Type | erro
 }
 
 /**
- * PushSlots — the frame slots and constants one lowered push needs beside its base pair: the
- * address of the stored item, the element-size constant, and the address of the length
- * out-parameter, plus the context they were appended into.
- */
-type PushSlots = struct {
-    /**
-     * ctx — the lowering context advanced past the two allocas, the item store, and the size constant.
-     */
-    ctx: LowerCtx
-    /**
-     * item_slot — the VReg holding the address of the frame slot the item was stored into.
-     */
-    item_slot: u32
-    /**
-     * esz — the VReg holding the element's byte size (the runtime's `sizeof` argument).
-     */
-    esz: u32
-    /**
-     * len_slot — the VReg holding the address of the `u64` length out-parameter slot.
-     */
-    len_slot: u32
-}
-
-/**
- * reserve_push_slots — build a push's by-address operands: alloca a slot the width of ONE element
- * and store the already-lowered item into it, materialize the element size as a constant, and
- * alloca the 8-byte slot the runtime writes the grown length into. Each alloca is selected once and
- * becomes ONE static frame slot, so a push inside a loop reuses its slots rather than growing the
- * stack per iteration.
+ * reserve_item_slot — alloca a push item's frame slot, sized/aligned for `bytes`/`align`. The
+ * caller stores the item's own representation into the returned address afterward — split from the
+ * store so a scalar item's single `store_inst` (`lower_scalar_element_push`) and a fat item's two
+ * (`store_fat_slot`, `lower_fat_element_push`) can share this one allocation step (0.3.1.0 degrau
+ * 10). Each alloca is selected once and becomes ONE static frame slot, so a push inside a loop
+ * reuses its slot rather than growing the stack per iteration.
  *
- * @param ctx      the lowering context, positioned after the item's own instructions
- * @param item     the VReg holding the item's value
- * @param elem_lt  the element's machine class (its size fixes both the slot and the `sizeof` arg)
- * @param e        the push call expression (its source position)
- * @return         the two slot addresses + the size constant
+ * @param ctx    the lowering context
+ * @param bytes  the slot's byte width
+ * @param align  the slot's byte alignment
+ * @param e      the push call expression (its source position)
+ * @return       the advanced context + the slot's address VReg
  */
-fn reserve_push_slots(ctx: LowerCtx, item: u32, elem_lt: LType, e: checker::TExpr) -> PushSlots {
+fn reserve_item_slot(ctx: LowerCtx, bytes: u32, align: u32, e: checker::TExpr) -> Lowered {
     let islot = ctx_alloc(ctx)
-    let with_islot = ctx_append(islot.ctx, alloca_inst(islot.vreg, ltype_size(elem_lt), ltype_align(elem_lt), e.line, e.col))
-    let with_store = ctx_append(with_islot, store_inst(islot.vreg, item, elem_lt, e.line, e.col))
-    let esz = ctx_alloc(with_store)
-    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, ltype_size(elem_lt) to i64, e.line, e.col))
-    let lslot = ctx_alloc(with_esz)
-    let with_lslot = ctx_append(lslot.ctx, alloca_inst(lslot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
-    PushSlots { ctx = with_lslot; item_slot = islot.vreg; esz = esz.vreg; len_slot = lslot.vreg }
+    Lowered { ctx = ctx_append(islot.ctx, alloca_inst(islot.vreg, bytes, align, e.line, e.col)); vreg = islot.vreg }
 }
 
 /**
- * push_call_args — the runtime grow's five operands in ABI ORDER, the order
- * `tk_slice_push`/`tk_slice_push_fo` declare: `(ptr, len, &item, esz, &out_len)`. Written out here
- * so the ONE place that fixes the order is named, rather than inline at the call site.
+ * push_head_args — a push's first FOUR runtime-grow operands, in ABI order: the base slice's
+ * (ptr, len) then the stored item's (address, byte size). `lower_len_out_call` appends the
+ * trailing `&out_len` operand itself (the runtime's fifth, `tk_slice_push`/`tk_slice_push_fo`'s own
+ * `(ptr, len, &item, esz, &out_len)` shape), so this builds only the part every push shares —
+ * scalar and fat items alike route through the SAME tail (0.3.1.0 degrau 10).
  *
- * @param base_ptr   the base slice's pointer half
- * @param base_len   the base slice's length half
+ * @param base       the base slice's already-lowered (ptr, len) pair
  * @param item_slot  the address of the stored item
- * @param esz        the element's byte size
- * @param len_slot   the address of the length out-parameter
- * @return           the five argument VRegs, in ABI order
+ * @param esz        the element's byte size VReg
+ * @return           the four argument VRegs, in ABI order
  */
-fn push_call_args(base_ptr: u32, base_len: u32, item_slot: u32, esz: u32, len_slot: u32) -> []u32 {
-    mut out: []u32 = teko::list::push(teko::list::empty(), base_ptr)
-    out = teko::list::push(out, base_len)
-    out = teko::list::push(out, item_slot)
-    out = teko::list::push(out, esz)
-    teko::list::push(out, len_slot)
+fn push_head_args(base: LoweredFat, item_slot: u32, esz: u32) -> []u32 {
+    teko::list::push(teko::list::push(two_args(base.ptr, base.len), item_slot), esz)
 }
 
 /**
@@ -6737,8 +6735,9 @@ fn four_args(a_ptr: u32, a_len: u32, b_ptr: u32, b_len: u32) -> []u32 {
  * lower_len_out_call — call a runtime symbol whose fat (`str`) result travels back through an
  * OUT-PARAMETER length instead of a genuine 2-eightbyte struct return: the caller reserves an
  * 8-byte slot, appends its address as the LAST argument, calls `sym`, then loads the slot back.
- * This is `tk_slice_push`'s own `(ptr, len, &item, esz, &out_len)` convention
- * (`reserve_push_slots`/`push_call_args`), reused here for the runtime's str-building family
+ * This is `tk_slice_push`'s own `(ptr, len, &item, esz, &out_len)` convention (`push_head_args`
+ * builds the first four; `lower_list_push`'s two arms call this SAME function for the tail), reused
+ * here for the runtime's str-building family
  * (`tk_str_concat_len`/`tk_i64_to_str_len`/`tk_u64_to_str_len`, `teko_rt.h`) — the shape that lets
  * a call whose REAL C ABI returns a 2-eightbyte struct (SysV/AAPCS64's small-aggregate register
  * pair) stay reachable from this backend's `LCall`, which captures only ONE result register
@@ -7102,50 +7101,115 @@ fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Low
     Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
 }
 
-/** lower_index_slice — `recv[index]` on a `[]T` receiver (A1-3 behavior, unchanged): lower
-    the receiver to its base address, compute the element's address (folded when `index` is
-    constant), then load its value. */
+/**
+ * elem_byte_stride — the byte width ONE element of type `t` occupies inside a slice buffer: the
+ * two-word `{ptr, len}` pair `fat_slot_bytes()` already names for a FAT element (`str`/`[]T`),
+ * matching the runtime's `tk_str{ptr;len}` layout every route agrees on (`teko_rt.h`), else the
+ * ordinary scalar machine width. ONE function answers this for the array literal's store
+ * (`store_array_elem`), the index load (`lower_index_fat`/`lower_index_slice`), and the push's
+ * `sizeof` argument (`lower_scalar_element_push`/`lower_fat_element_push`), so the three sites the
+ * 0.3.1.0 degrau 10 honest stop named can never disagree about the number.
+ *
+ * @param t      the element type
+ * @param enums  the program's declared-enum table (`ltype_of`'s own requirement)
+ * @return       the element's byte stride inside a slice buffer
+ */
+fn elem_byte_stride(t: checker::Type, enums: []LEnumInfo) -> u32 {
+    if is_fat_type(t) { return fat_slot_bytes() }
+    ltype_size(ltype_of(t, enums))
+}
+
+/**
+ * elem_byte_align — the natural alignment of one slice element: a FAT element aligns like its
+ * pointer half (`ltype_align(LType::Ptr)`, matching `alloc_fat_slot`'s own mutable-fat-local frame
+ * slot), else the ordinary scalar alignment.
+ *
+ * @param t      the element type
+ * @param enums  the program's declared-enum table
+ * @return       the element's byte alignment
+ */
+fn elem_byte_align(t: checker::Type, enums: []LEnumInfo) -> u32 {
+    if is_fat_type(t) { return ltype_align(LType::Ptr) }
+    ltype_align(ltype_of(t, enums))
+}
+
+/**
+ * lower_index_fat — the FAT arm of a slice-element read (`recv[index]` on a `[]str`/`[][]T`
+ * receiver): the element's address (`index_addr`, at the two-word `elem_byte_stride` every
+ * fat-element site now shares), read back through the SAME `{ptr, len}` load a mutable fat local's
+ * frame slot uses (`load_fat_slot`) — the element's storage IS that shape (0.3.1.0 degrau 10).
+ *
+ * @param ctx  the lowering context
+ * @param e    the index expression (its type is the fat element type)
+ * @param ix   the index node (its receiver is a `[]T` of fat elements)
+ * @return     the element's (ptr, len) pair
+ * @throws     propagated from lowering the receiver/index, or when the receiver is not a slice
+ */
+fn lower_index_fat(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> LoweredFat | error {
+    let ro = match lower_expr(ctx, ix.receiver) { Lowered as x => x; error as err => return err }
+    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
+    let addr_out = match index_addr(ro.ctx, ro.vreg, ix.index, fat_slot_bytes(), e.line, e.col) { Lowered as x => x; error as err => return err }
+    load_fat_slot(addr_out.ctx, addr_out.vreg, e.line, e.col)
+}
+
+/** lower_index_slice — `recv[index]` on a `[]T` receiver of NON-fat elements (a fat-element
+    receiver's index instead reaches `lower_index_fat`, via `lower_fat_expr`'s own `TIndex` arm):
+    lower the receiver to its base address, compute the element's address (folded when `index`
+    is constant), then load its value. */
 fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Lowered | error {
     let ro = match lower_expr(ctx, ix.receiver) { Lowered as x => x; error as err => return err }
     match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
     let elem_ty = ltype_of(e.type, ro.ctx.enums)
-    let addr_out = match index_addr(ro.ctx, ro.vreg, ix.index, ltype_size(elem_ty), e.line, e.col) { Lowered as x => x; error as err => return err }
+    let addr_out = match index_addr(ro.ctx, ro.vreg, ix.index, elem_byte_stride(e.type, ro.ctx.enums), e.line, e.col) { Lowered as x => x; error as err => return err }
     let r = ctx_alloc(addr_out.ctx)
     Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
 }
 
 /** lower_array_lit — `[e0, e1, …]`: alloca `elements.len * stride` bytes (the element's
-    machine size), then store each element at its constant offset. The literal's "value" is
-    its alloca'd base address, exactly like a struct literal — the length/fat-pointer
-    wrapping (`.len`, slicing, spreads) is A1-4's concern; a spread element (`..xs`) is out
-    of the A1-3 subset (its length isn't known until then). */
+    byte stride — `elem_byte_stride`, the two-word `{ptr, len}` pair for a FAT element, 0.3.1.0
+    degrau 10), then store each element at its constant offset. The literal's "value" is its
+    alloca'd base address, exactly like a struct literal — the length/fat-pointer wrapping
+    (`.len`, slicing, spreads) is A1-4's concern; a spread element (`..xs`) is out of the A1-3
+    subset (its length isn't known until then). */
 fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> Lowered | error {
     let elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
-    let elem_ty = ltype_of(elem_t, ctx.enums)
-    let stride = ltype_size(elem_ty)
+    let stride = elem_byte_stride(elem_t, ctx.enums)
     let total = (al.elements.len to u32) * stride
     let base = ctx_alloc(ctx)
-    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, ltype_align(elem_ty), e.line, e.col))
-    store_array_elements(with_alloca, base.vreg, al.elements, stride, e.line, e.col)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
+    store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col)
 }
 
 /** store_array_elements — lower each non-spread element in turn, storing it at its
-    constant `index * stride` offset from `base`; the result VReg is `base` itself. */
-fn store_array_elements(ctx: LowerCtx, base: u32, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32) -> Lowered | error {
+    constant `index * stride` offset from `base` (`store_array_elem`); the result VReg is
+    `base` itself. */
+fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32) -> Lowered | error {
     mut cur = ctx
     mut i: u64 = 0
     loop {
         if i >= elements.len { break }
         let elem = elements[i]
         if elem.is_spread { return error { message = "native backend N1: spread array element not yet lowered (N2)" } }
-        let vo = match lower_expr(cur, elem.expr) { Lowered as x => x; error as err => return err }
         let offset = (i to u32) * stride
-        let addr = ctx_alloc(vo.ctx)
-        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(elem.expr.type, cur.enums), line, col))
+        cur = match store_array_elem(cur, base, offset, elem_t, elem.expr, line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
     Lowered { ctx = cur; vreg = base }
+}
+
+/** store_array_elem — store ONE array-literal element at `base + offset`: a FAT element
+    (`elem_t`, 0.3.1.0 degrau 10) lowers through the fat-pointer producer path and writes BOTH
+    halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame
+    slot uses); every other element lowers plainly and writes its single machine word. */
+fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    if is_fat_type(elem_t) {
+        let fo = match lower_fat_expr(with_addr, expr) { LoweredFat as x => x; error as err => return err }
+        return store_fat_slot(fo.ctx, addr.vreg, fo, line, col)
+    }
+    let vo = match lower_expr(with_addr, expr) { Lowered as x => x; error as err => return err }
+    ctx_append(vo.ctx, store_inst(addr.vreg, vo.vreg, ltype_of(expr.type, vo.ctx.enums), line, col))
 }
 
 /** lower_array_lit_fat — an array literal's (ptr, len) pair: the SAME alloca+stores
