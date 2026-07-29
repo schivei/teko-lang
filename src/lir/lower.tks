@@ -1942,14 +1942,32 @@ fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> s
         if is_list_builtin_call(c.callee) {
             return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
         }
-        if segs.len == 1 {
-            return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
-        }
+        return unresolved_builtin_stop(last)
     }
     match find_extern_symbol(externs, c.call_ns, last) {
         str as foreign => foreign
         null => mangle_fn_symbol(c.call_ns, last, flat)
     }
+}
+
+/**
+ * unresolved_builtin_stop — the NAMED honest stop for a callee whose `call_ns` came back empty
+ * (the checker's own signal that no declaration was found — `call_symbol`'s doc) and that matched
+ * none of the builtin families this function already recognizes.
+ *
+ * Before this stop existed for a MULTI-segment callee, only a single-segment one (`segs.len == 1`)
+ * reached it; a path of two or more segments — `teko::str::slice`, `teko::str::ends_with`, …, 80+
+ * call sites in this compiler's own source — instead fell through to `mangle_fn_symbol("", last,
+ * flat)`, producing `teko_<last>` with NO declaration anywhere to back it: a silent LINK-time
+ * failure (`undefined reference to teko_slice`) rather than a compile-time stop this backend can
+ * name. `call_ns.len == 0` means "a builtin, or nothing" for EVERY segment count — the mangler was
+ * never a legitimate fallback for it — so this stop is now unconditional (0.3.1.0 raiz-comum §6 R6).
+ *
+ * @param last  the callee path's bare last segment
+ * @return      the honest stop, always
+ */
+fn unresolved_builtin_stop(last: str) -> error {
+    error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
 }
 
 /**
@@ -6999,21 +7017,42 @@ fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit)
 }
 
 /** store_struct_fields — lower each field value in turn, storing it at its layout offset
-    from `base`; the result VReg is `base` itself (the struct's address, unchanged by the
-    stores). */
+    from `base` (`store_struct_field`); the result VReg is `base` itself (the struct's
+    address, unchanged by the stores). */
 fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_names: []str, field_vals: []checker::TExpr, line: u32, col: u32) -> Lowered | error {
     mut cur = ctx
     mut i: u64 = 0
     loop {
         if i >= field_names.len { break }
-        let vo = match lower_expr(cur, field_vals[i]) { Lowered as x => x; error as err => return err }
         let off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
-        let addr = ctx_alloc(vo.ctx)
-        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(field_vals[i].type, cur.enums), line, col))
+        cur = match store_struct_field(cur, base, off, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
     Lowered { ctx = cur; vreg = base }
+}
+
+/** store_struct_field — store ONE struct-literal field value at `base + offset`: a FAT field
+    (`value.type`, 0.3.1.0 raiz A — R3) lowers through the fat-pointer producer path and writes
+    BOTH halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape the array-literal's
+    fat element and a mutable fat local's frame slot both use); every other field lowers
+    plainly and writes its single machine word.
+
+    Before this arm, EVERY field wrote one machine word (`ltype_of(field_vals[i].type)`, always
+    8 bytes for `str`/`[]T` — `ltype_of` collapses both to `Ptr`), so a struct's `str`/`[]T`
+    field's LENGTH half was never written: `lower_fat_field`'s own 16-byte read (#594 T-B6)
+    then read whatever garbage the fresh `alloca` happened to hold at `off+8`, measured to read
+    back `.len == 0` — silently, not a compile-time stop (0.3.1.0 raiz-comum, §5.1-5.4). */
+fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, value: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+    if is_fat_type(value.type) {
+        let fo = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
+        let addr = ctx_alloc(fo.ctx)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+        return store_fat_slot(with_addr, addr.vreg, fo, line, col)
+    }
+    let vo = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
+    let addr = ctx_alloc(vo.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(value.type, vo.ctx.enums), line, col))
 }
 
 /** lower_field_access — `recv.field` on a struct receiver: lower the receiver to its base
@@ -7202,14 +7241,16 @@ fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, element
     halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame
     slot uses); every other element lowers plainly and writes its single machine word. */
 fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
-    let addr = ctx_alloc(ctx)
-    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
     if is_fat_type(elem_t) {
-        let fo = match lower_fat_expr(with_addr, expr) { LoweredFat as x => x; error as err => return err }
-        return store_fat_slot(fo.ctx, addr.vreg, fo, line, col)
+        let fo = match lower_fat_expr(ctx, expr) { LoweredFat as x => x; error as err => return err }
+        let addr = ctx_alloc(fo.ctx)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+        return store_fat_slot(with_addr, addr.vreg, fo, line, col)
     }
-    let vo = match lower_expr(with_addr, expr) { Lowered as x => x; error as err => return err }
-    ctx_append(vo.ctx, store_inst(addr.vreg, vo.vreg, ltype_of(expr.type, vo.ctx.enums), line, col))
+    let vo = match lower_expr(ctx, expr) { Lowered as x => x; error as err => return err }
+    let addr = ctx_alloc(vo.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(expr.type, vo.ctx.enums), line, col))
 }
 
 /** lower_array_lit_fat — an array literal's (ptr, len) pair: the SAME alloca+stores
@@ -7409,8 +7450,11 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
 }
 
 /** lower_assign_field — `recv.field = e` / `recv.field op= e`: lower the receiver to its
-    base address, compute the field's address via its registered layout offset, then store
-    (a compound op first loads the current value, applies it, then stores the result). */
+    base address, compute the field's address via its registered layout offset, then store. A
+    FAT field (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_assign_fat_field`, which
+    writes both halves of its `{ptr, len}` pair; every other field delegates to
+    `store_assign_value` (a compound op first loads the current value, applies it, then stores
+    the result). */
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
     let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
@@ -7419,7 +7463,32 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
+    if is_fat_type(a.bound) { return store_assign_fat_field(with_addr, addr.vreg, a) }
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
+}
+
+/**
+ * store_assign_fat_field — the FAT arm of `lower_assign_field`: a plain `=` writes the RHS's
+ * `{ptr, len}` pair through `store_fat_slot` — a compound `op=` is refused, mirroring
+ * `lower_assign_fat`'s SAME refusal for a fat LOCAL (no arithmetic operator applies to a
+ * `str`/`[]T`).
+ *
+ * Before this arm, `h.name = "xy"` reached the plain `store_assign_value` below, which writes
+ * ONE machine word at the field's address — the pointer half only — and `h.name.len` read back
+ * whatever the field's PREVIOUS length happened to be, silently (0.3.1.0 raiz-comum, §5.2).
+ *
+ * @param ctx   the lowering context, positioned after the field's address is computed
+ * @param addr  the field's address VReg
+ * @param a     the typed assignment (kind `Field`, a str/slice `bound`)
+ * @return      the context with both halves stored
+ * @throws      for a compound `op=` on a fat field, or propagated from lowering the value
+ */
+fn store_assign_fat_field(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = "native backend N1: compound assignment to a str/slice field has no arithmetic form (internal)" }
+    }
+    let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
+    LowerStmtOut { ctx = store_fat_slot(fo.ctx, addr, fo, a.value.line, a.value.col); terminated = false }
 }
 
 /**

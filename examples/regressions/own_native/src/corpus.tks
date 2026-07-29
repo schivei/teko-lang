@@ -1091,3 +1091,141 @@ fn f_interp_fat_positions() -> i64 {
     if joined != "abcd" { return 8 }
     0
 }
+
+/**
+ * FatHolder — a struct with a leading `str` field, at offset 0. 0.3.1.0 raiz-comum §5.1: before
+ * the R3 crumb, a struct's fat field was constructed with its LENGTH half never written, so
+ * `.len` read back whatever the fresh `alloca` happened to hold (measured 0) instead of the
+ * field's true length.
+ */
+type FatHolder = struct { name: str; n: i64 }
+
+/**
+ * FatHolderShift — the same fat field, SECOND (offset 8, not 0), so the fix's correctness does
+ * not depend on the field's position within the struct.
+ */
+type FatHolderShift = struct { n: i64; name: str }
+
+/**
+ * FatSliceHolder — a struct with a `[]i64` (fat, non-`str`) field: `is_fat_type` covers `Slice`
+ * too, and so does the defect it names (0.3.1.0 raiz-comum §5.4).
+ */
+type FatSliceHolder = struct { xs: []i64; n: i64 }
+
+/**
+ * f_fat_field_roundtrip — construct a struct with a fat `str` field at offset 0, read its
+ * length and content back.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_field_roundtrip() -> i64 {
+    let h = FatHolder { name = "abcde"; n = 7 }
+    if h.n != 7 { return 1 }
+    if h.name.len != 5 { return 2 }
+    if h.name != "abcde" { return 3 }
+    0
+}
+
+/**
+ * f_fat_field_offset_shift — the same construction with the fat field at a non-zero offset.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_field_offset_shift() -> i64 {
+    let h = FatHolderShift { n = 7; name = "abcde" }
+    if h.n != 7 { return 1 }
+    if h.name.len != 5 { return 2 }
+    if h.name != "abcde" { return 3 }
+    0
+}
+
+/**
+ * f_fat_field_reassign — reassign a struct's `str` field and reread its length (0.3.1.0
+ * raiz-comum §5.2: measured to keep the OLD length before R3, since the plain assignment path
+ * wrote only the pointer half).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_field_reassign() -> i64 {
+    mut h = FatHolder { name = "abcde"; n = 7 }
+    h.name = "xy"
+    if h.name.len != 2 { return 1 }
+    if h.name != "xy" { return 2 }
+    0
+}
+
+/**
+ * f_fat_field_len — the length of a `str` argument, as `i64`.
+ *
+ * @param s  the string to measure
+ * @return   its byte length
+ */
+fn f_fat_field_len(s: str) -> i64 { s.len to i64 }
+
+/**
+ * f_fat_field_as_argument — pass a struct's `str` field as a call argument (0.3.1.0 raiz-comum
+ * §5.3): the READ side (`lower_fat_field`) was already correct before R3 — it was the WRITE
+ * side that left the length half unset, so this probe exercises the reader against the
+ * now-correctly-written field.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_field_as_argument() -> i64 {
+    let h = FatHolder { name = "abcde"; n = 7 }
+    if f_fat_field_len(h.name) != 5 { return 1 }
+    0
+}
+
+/**
+ * f_fat_slice_field — a struct's `[]i64` field: length and index read.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_slice_field() -> i64 {
+    let h = FatSliceHolder { xs = [10, 20, 30]; n = 1 }
+    if h.xs.len != 3 { return 1 }
+    if h.xs[2] != 30 { return 2 }
+    0
+}
+
+/**
+ * f_fat_slice_literal_index — a `[]str` array literal's store and index read: each element's
+ * OWN `.len` and content, not just the outer slice's element count (0.3.1.0 degrau 10 /
+ * raiz-comum §5.5 — measured to build with a silently corrupted stride before the fix, and to
+ * honest-stop at the first index read once only the push side closed).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_slice_literal_index() -> i64 {
+    let xs: []str = ["one", "two", "three"]
+    if xs.len != 3 { return 1 }
+    if xs[0].len != 3 { return 2 }
+    if xs[0] != "one" { return 3 }
+    if xs[1] != "two" { return 4 }
+    if xs[2] != "three" { return 5 }
+    0
+}
+
+/**
+ * f_fat_slice_push_in_loop — push `str` elements onto a `[]str` inside a loop, mirroring
+ * `global_symbol_names`' own shape (the function 0.3.1.0 degrau 10 was measured in), each
+ * element read back BY ITS OWN LENGTH afterward — a plausible length with the wrong bytes would
+ * still be caught by the content check.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_slice_push_in_loop() -> i64 {
+    let names: []str = ["alpha", "beta", "gamma", "delta"]
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, names[i])
+        i++
+    }
+    if out.len != 4 { return 1 }
+    if out[0].len != 5 { return 2 }
+    if out[0] != "alpha" { return 3 }
+    if out[3] != "delta" { return 4 }
+    0
+}
