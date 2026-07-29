@@ -361,3 +361,71 @@ fn iat_a25_call_with_result_moves_x0_out() {
     teko::assert::str_contains(text, "call @teko__demo__f() -> %p0")
     teko::assert::str_contains(text, "mov.x %0, %p0")
 }
+
+/**
+ * iat_guarded_div_func — the div-by-zero guard's exact LIR shape, hand-built from the SAME
+ * primitives `teko::lir::lower_div_zero_guard` composes (`const_int_inst`, `bin_inst(ICmpNe)`,
+ * `alloc_block`, `branch_inst`, `void_call_inst("tk_panic_div0")`, `jump_inst`) ahead of one
+ * guarded `op` over two `i64` params — the isel-level proof that A2's compare/branch/call
+ * machinery selects this COMPOSITE shape without a stop (0.3.1 div-by-zero-nativo).
+ *
+ * @param lir::LBinOp op  the guarded division/remainder opcode (`IDivS`/`IDivU`/`IRemS`/`IRemU`)
+ * @return lir::LFunc  `%0`,`%1` = params (dividend, divisor); `%2` = `const 0`; `%3` = `%1 !=
+ *                      %2`; branch `%3` to an "ok" block (else a "trap" block); trap calls
+ *                      `tk_panic_div0()` then jumps to itself (dead, never returns); ok computes
+ *                      `op(%0, %1)` and returns it
+ */
+fn iat_guarded_div_func(op: lir::LBinOp) -> lir::LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::empty(), lir::LType::I64), lir::LType::I64)
+    mut f = lir::new_func("teko__demo__guarded_div", 2, ptypes, lir::LType::I64)
+    f = lir::append_inst(f, 0, lir::param_inst(0, 0, 0, 0))
+    f = lir::append_inst(f, 0, lir::param_inst(1, 1, 0, 0))
+    let z = lir::alloc_vreg(f)
+    f = lir::append_inst(z.func, 0, lir::const_int_inst(z.vreg, 0, 0, 0))
+    let c = lir::alloc_vreg(f)
+    f = lir::append_inst(c.func, 0, lir::bin_inst(c.vreg, lir::LBinOp::ICmpNe, 1, z.vreg, 0, 0))
+    let okb = lir::alloc_block(f)
+    f = okb.func
+    let trapb = lir::alloc_block(f)
+    f = trapb.func
+    f = lir::append_inst(f, 0, lir::branch_inst(c.vreg, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), 0, 0))
+    f = lir::append_inst(f, trapb.block_id, lir::void_call_inst("tk_panic_div0", teko::list::empty(), false, 0, 0))
+    f = lir::append_inst(f, trapb.block_id, lir::jump_inst(trapb.block_id, teko::list::empty(), 0, 0))
+    let q = lir::alloc_vreg(f)
+    f = lir::append_inst(q.func, okb.block_id, lir::bin_inst(q.vreg, op, 0, 1, 0, 0))
+    lir::append_inst(f, okb.block_id, lir::ret_inst(q.vreg, 0, 0))
+}
+
+#test
+/**
+ * iat_div_zero_guard_selects_compare_branch_call_and_selfloop — the guard's ICmpNe fuses into
+ * a `cmp` at the branch site (`%1` is used exactly once, by the branch — `is_fused_compare`),
+ * takes the nonzero edge on `NE`, calls the SAME `tk_panic_div0` runtime symbol the C route's
+ * `tk_div_*`/`tk_mod_*` already call, and closes the trap block with an unconditional branch TO
+ * ITSELF (the dead terminator `lower_div_zero_guard` documents — the call never returns).
+ *
+ * @return void
+ */
+fn iat_div_zero_guard_selects_compare_branch_call_and_selfloop() {
+    let text = iat_dump(iat_guarded_div_func(lir::LBinOp::IDivS))
+    teko::assert::str_contains(text, "cmp.x %1, %2")
+    teko::assert::str_contains(text, "b.ne #M")
+    teko::assert::str_contains(text, "call @tk_panic_div0()")
+    teko::assert::str_contains(text, "b #M2")
+}
+
+#test
+/**
+ * iat_div_zero_guard_ok_path_selects_every_guarded_op — the guard's "ok" block (reached once
+ * the divisor is proven nonzero) still selects the SAME per-op instruction the unguarded kitchen
+ * sink already covers (`sdiv`/`udiv` for `/`, the two-instruction `sdiv`/`udiv`+`msub` for `%`) —
+ * the guard changes nothing about the division/remainder itself, only what precedes it.
+ *
+ * @return void
+ */
+fn iat_div_zero_guard_ok_path_selects_every_guarded_op() {
+    teko::assert::str_contains(iat_dump(iat_guarded_div_func(lir::LBinOp::IDivS)), "sdiv.x ")
+    teko::assert::str_contains(iat_dump(iat_guarded_div_func(lir::LBinOp::IDivU)), "udiv.x ")
+    teko::assert::str_contains(iat_dump(iat_guarded_div_func(lir::LBinOp::IRemS)), "msub.x ")
+    teko::assert::str_contains(iat_dump(iat_guarded_div_func(lir::LBinOp::IRemU)), "msub.x ")
+}
