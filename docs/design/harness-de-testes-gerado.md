@@ -107,6 +107,13 @@ O que R13 muda, e são duas coisas:
 `docs/design/harness-briefing-fatia-1.md`** — briefing auto-contido, entregável a um implementador
 que não leu este documento.
 
+**R14 (2026-07-29) — A NUANCE DE R10, FECHADA. Literal:**
+
+> *"1. Compilação"* — em resposta à pergunta de §6.11.9 (a marca "isto é um teste" é de tempo de
+> COMPILAÇÃO ou de EXECUÇÃO?), e *"Vou na sua recomendação em todos os casos"*.
+
+**Fica a opção (A): marca de TEMPO DE COMPILAÇÃO.** Consequências em §6.11.9.
+
 **R11 (2026-07-29) — `cancel`, e é de OUTRA CATEGORIA: PÚBLICA. Literal:**
 
 > *"o que podemos pensar, e isso vai valer lá na frente quando tivermos async/await, uma função
@@ -320,11 +327,12 @@ antigo, e são só duas:
 1. *"This language has no threads"* (§ "Why a PATH") deixa de ser premissa: R1 manda criá-las. O
    argumento do PATH continua a valer na via 1 pelos OUTROS dois motivos que ele próprio dá —
    sobrevive ao filho morrer a meio, e continua lá depois.
-2. A auto-reexecução (`argv[1]` como selector) **está fora, e a exclusão é CONDICIONAL — não
-   definitiva.** Hoje ela é impossível: um binário do backend próprio que leia a linha de comando
-   **nem sequer linka** (§16, medido — `undefined reference to 'teko_args'`). O dono aceitou o achado
-   e mandou corrigir (*"precisa corrigir, ensinar o native"*); a correcção está a ser feita noutra
-   carga (`cargo/0.3.1.0-args-native`) e **não é desta**.
+2. A auto-reexecução (`argv[1]` como selector) **está fora por ESCOLHA, e já não por impedimento.**
+   Quando este desenho foi escrito ela era impossível — um binário do backend próprio que lesse a
+   linha de comando **nem sequer linkava** (§16, medido). **Esse defeito foi corrigido**
+   (`cargo/0.3.1.0-args-native`, já no vagão principal): o `main` nativo recebe `argc`/`argv` e chama
+   `tk_set_args`. **O impedimento caiu; a exclusão mantém-se**, agora sustentada só por R1 (threads
+   para os unitários).
 
    **A porta fica identificada:** no dia em que o `args()` nativo funcionar, a auto-reexecução volta a
    estar em cima da mesa, e é uma alternativa REAL à forma escolhida — um binário que se relança a si
@@ -1333,42 +1341,71 @@ entre a superfície da linguagem e o fundo de FFI — que é exactamente a front
 `concorrencia-adiantada-s8.md` §4.2 já usa quando diz que o `panic` em Teko *"só toca o host, no
 caminho não-guardado, por `extern fn` para `write` e `abort`"*.
 
-#### 6.11.9 A NUANCE POR FECHAR — a marca é de COMPILAÇÃO ou de EXECUÇÃO?
+#### 6.11.9 A NUANCE — FECHADA por R14: marca de TEMPO DE COMPILAÇÃO
 
-R10 tem duas metades que apontam para tempos diferentes, e a diferença tem consequências que só o
-dono pode arbitrar:
+R10 tinha duas metades a apontar para tempos diferentes (*"ao **compilar** um teste, informar que se
+trata de teste"* × *"capturar somente quando **rodar** … com um argumento"*). Apresentei as duas
+leituras; **o dono respondeu `"1. Compilação"` (R14). Fica a (A).**
 
-- *"se ao **compilar** um teste, informar que se trata de teste, pode bifurcar…"* — **tempo de
-  compilação**;
-- *"…assim consegue capturar somente quando **rodar** em teste com um argumento que só o próprio
-  compilador conhece"* — **tempo de execução**.
+**As duas leituras, e o que a escolha compra:**
 
-**As duas leituras, com o que cada uma custa:**
-
-| | **(A) marca de COMPILAÇÃO** | **(B) argumento em EXECUÇÃO** |
+| | **(A) marca de COMPILAÇÃO — ESCOLHIDA** | **(B) argumento em EXECUÇÃO — não escolhida** |
 |---|---|---|
-| o que é | o sintetizador compila o binário de gate com a bifurcação DENTRO; um binário normal é compilado sem ela | o binário traz OS DOIS caminhos e escolhe por um argumento que só o compilador sabe passar |
-| binário que não é de teste | **byte-idêntico ao de hoje** — o ramo guardado não existe | também não muda, se o argumento nunca for passado; mas o ramo está lá |
-| binário de teste | tem só o caminho guardado | tem os dois, e um `if` por chamada global |
-| fixpoint | **não sente nada** | também não, desde que o argumento não influencie bytes emitidos (§8.1) |
-| custo em execução | zero | um teste de argumento por `panic`/`exit` — desprezável, mas não nulo |
-| como se esconde do utilizador | **estruturalmente**: não há código para chamar | por o argumento ser secreto — o que é mais fraco: o ramo existe e um binário pode ser invocado à mão |
-| **bloqueio** | **nenhum — executável hoje** | **BLOQUEADA**: exige `teko::env::args()` a funcionar, e §16 mediu que um binário do backend nativo **nem linka** se ler argv (`undefined reference to 'teko_args'`). Só desbloqueia quando `cargo/0.3.1.0-args-native` aterrar |
+| o que é | o binário de gate é compilado COM a bifurcação; um binário normal é compilado SEM ela | o binário traria os DOIS caminhos e escolheria por um argumento secreto |
+| binário que não é de teste | **byte-idêntico ao de hoje — o ramo guardado nem é emitido** | não mudaria, mas o ramo estaria lá |
+| custo em execução | **zero** | um teste de argumento por `panic`/`exit` |
+| como se esconde do utilizador | **estruturalmente: não há código para chamar** | por o argumento ser secreto — mais fraco: o ramo existe e o binário pode ser invocado à mão |
+| fixpoint | não sente nada | não sentiria, desde que o argumento não influenciasse bytes (§8.1) |
 
-**A leitura que me parece certa, e apresento-a COMO LEITURA e não como decisão:** as duas não se
-contradizem se forem lidas como camadas — o compilador bifurca em tempo de COMPILAÇÃO (só o binário
-de gate leva a bifurcação) e o binário de gate decide por ARGUMENTO em tempo de execução qual o modo
-(por exemplo, `lanes=1` para a reexecução serial pós-queda de §6.6, que precisa mesmo de ser dita ao
-binário depois de ele existir).
+**O que a escolha promove de preferência a desenho oficial:** a garantia de que *"fora de uma guarda,
+o comportamento é byte a byte o de hoje"* (§6.5.2) **deixa de ser disciplina e passa a ser
+estrutura**. Não é uma promessa que alguém tem de cumprir linha a linha — é uma consequência de o
+código não existir. **O portão dessa garantia é a fixture `nontest_binary_is_byte_identical`, que
+compara BINÁRIOS e não saída** (§12). É a forma forte, e só (A) a permite.
 
-**PERGUNTA AO DONO — é a única em aberto neste documento:** a bifurcação é (A), (B), ou (A)+(B) em
-camadas? Se for (A) sozinha, o desenho arranca já e o argumento em execução nunca é preciso. Se
-envolver (B), a metade de threads ganha uma dependência dura de `cargo/0.3.1.0-args-native`, e isso
-tem de estar na sequência antes de alguém a descobrir a meio.
+**(B) fica REGISTADA como não escolhida, e com uma actualização que importa a quem a reabrir:** a
+razão de ela estar em desvantagem incluía um BLOQUEIO — dependia de `teko::env::args()`, que §16
+mediu **nem linkar** no backend nativo (`undefined reference to 'teko_args'`). **Esse bloqueio CAIU:**
+o vagão `cargo/0.3.1.0-args-native` aterrou no vagão principal — o `main` sintetizado passou a receber
+`argc`/`argv` e a chamar `tk_set_args`, e `args` foi resolvido no `call_symbol`. **Portanto (B)
+deixou de estar bloqueada e continua não escolhida**, agora só pelos seus méritos (contenção mais
+fraca, custo em execução não-nulo). Quem a reabrir tem de saber as duas coisas: que o impedimento
+técnico desapareceu, e que a escolha não mudou por isso.
 
-**O que NÃO muda com a resposta:** a fronteira de §6.11.8, a tabela de guardas, o par
-`gate_guard_begin`/`gate_guard_end`, e tudo em §6.1–§6.10. A nuance decide ONDE está o interruptor,
+**O que NÃO muda com a decisão:** a fronteira de §6.11.8, a tabela de guardas, o par
+`gate_guard_begin`/`gate_guard_end`, e tudo em §6.1–§6.10. A nuance decidia ONDE está o interruptor,
 não o que ele liga.
+
+#### 6.11.9b ONDE VIVE a marca, e como se propaga — deixa de ser primitiva por decidir
+
+A marca era a primitiva bloqueada **5d** ("não existe seam nenhuma"). Com R14 passa a ser **trabalho
+nomeado**, e o achado é que **não precisa de maquinaria nova**: o passo 3 da fatia 1 já tem de levar
+um modo até ao lowering, porque `lower_item_function` tem de parar de descartar `is_test` e
+`lower_virtual_main` tem de tomar as statements sintetizadas. **A marca É esse mesmo modo.**
+
+O precedente exacto já existe no ficheiro e deve ser copiado em vez de inventado — `flat_symbols`:
+
+```teko
+pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error
+```
+
+um parâmetro de topo com omissão, carregado em `LowerCtx` (`flat_symbols: bool`) e reproduzido em
+cada construtor de contexto. A marca de teste faz a mesma viagem, pelo mesmo caminho:
+
+| camada | o que carrega |
+|---|---|
+| `src/build/project.tks` | decide que ESTE build é o do gate e passa a marca |
+| `src/build/gate.tks` | sintetiza o `main`; a marca viaja ao lado, não dentro do `GatePlan` (o `GatePlan` descreve a FORMA do `main`, não o modo do compilador) |
+| `lower_program` | recebe-a como parâmetro de topo, à imagem de `flat_symbols` |
+| `LowerCtx` | carrega-a, e cada construtor de contexto reproduz o campo |
+| `lower_item_function` / `lower_virtual_main` | consomem-na já no passo 3 da fatia 1 |
+| `call_symbol` | consome-a mais tarde (migalha 14) para decidir se bifurca `panic`/`exit` |
+
+**A instrução que fica para quem implementar o passo 3:** dar ao sinalizador um nome de primeira
+classe e um doc-comment que diga que ele é TAMBÉM o interruptor da bifurcação — **não um `bool`
+ad-hoc chamado `is_gate`**. Se o passo 3 introduzir um sinalizador anónimo, a migalha 14 inventa um
+segundo, e passam a existir duas respostas para "isto é um teste?" — que é a doença que este
+repositório já pagou várias vezes.
 
 #### 6.11.10 O que esta decisão APAGA do plano
 
@@ -1648,7 +1685,7 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | `gate_coverage_lanes_identical` | o relatório de cobertura com `lanes` 1 e N | 0 **e** byte-idênticos |
 | `gate_unguarded_panic_is_unchanged` | um `panic` FORA de um teste guardado | 134, **e** a linha `TK_PANIC_MARKER` byte-idêntica à de hoje |
 | `gate_unguarded_exit_is_unchanged` | um `exit(7)` FORA de um teste guardado | 7, saída byte-idêntica à de hoje |
-| `nontest_binary_is_byte_identical` | o MESMO projecto sem `#test`, compilado antes e depois de a migalha 14 aterrar; **binários** comparados byte a byte. A forma forte que R10 permite: sem marca de teste, o ramo guardado nem é emitido (§6.11.7) | 0 só se idênticos |
+| `nontest_binary_is_byte_identical` | o MESMO projecto sem `#test`, compilado antes e depois de a migalha 14 aterrar; **binários** comparados byte a byte. **É O PORTÃO da garantia de R14** — com a marca de COMPILAÇÃO, um binário que não é de teste não leva o ramo guardado, logo a identidade não é uma promessa a cumprir: é uma consequência de o código não existir (§6.11.9) | 0 só se idênticos |
 | `os_direct_abort_never_bifurcates` | um `#test` guardado que chama `abort()` (o builtin injectado, a directa nº2 de §6.11.8) em vez de `panic` | o processo aborta de facto — a captura NÃO o apanha, e é isso que se afirma |
 | `runtime_guards_inherit_the_bifurcation` | um `#test` guardado com índice fora de limites (`panic_oob`) e outro com divisão por zero (`panic_div0`) | não-zero, **e** os dois com VEREDICTO nomeado, **e** os restantes testes reportados |
 | `thread_lane_unguard_pairs` | uma thread que retorna sem `gate_guard_end` deixa linha morta na tabela | 1 (detectado, nomeando a linha) |
@@ -1684,8 +1721,8 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | 3 | **raiz de região e pilha de marcas POR THREAD** | `tk_g_root`/`tk_g_regs`/`tk_arena_marks` são estáticos de processo. **Hipótese de custo baixo (classe de armazenamento) por MEDIR** | 13-17 |
 | 4 | **sinks de cobertura por thread + fusão** | `tk_cov_ids`/`tk_cov_n`/`tk_cov_cap` são de processo | 13, 16 |
 | 5 | **captura de `panic` (P-A) e captura de `exit` (P-B)** | `tk_panic_str`/`tk_exit` são `_Noreturn` e matam o processo; o único "catch" que existe (`tk_rt_crash_handler`) trata sem interromper. **DUAS primitivas novas (R7), sem antecedente para P-B.** Por R10 são INTERCEPÇÃO, não recuperação — logo **não exigem desenrolador** | 14, 16 |
-| 5d | **a marca "isto é um teste" em tempo de COMPILAÇÃO** | não existe seam nenhuma: `run_native_gate` não distingue perfil, e `CgMode::TestCov`/`TestPlain` são do EMISSOR de C, não do lowering. É a condição de R10 e é o interruptor da bifurcação | 14 |
-| 5e | **(só se a leitura for (B)) o argumento em tempo de EXECUÇÃO** | **BLOQUEADA por §16** — um binário nativo que lê argv não linka. Desbloqueia com `cargo/0.3.1.0-args-native`. Se a resposta do dono for (A), esta linha desaparece | 14, 16 |
+| 5d | ~~a marca "isto é um teste"~~ — **JÁ NÃO É PRIMITIVA BLOQUEADA (R14)** | continua a não existir seam (`CgMode::TestCov`/`TestPlain` são do EMISSOR de C, não do lowering), mas deixou de ser pergunta: é **trabalho nomeado**, com o precedente `flat_symbols` a copiar, e **viaja no mesmo sinalizador que o passo 3 da fatia 1 já tem de levar** (§6.11.9b) | — |
+| ~~5e~~ | ~~o argumento em tempo de EXECUÇÃO~~ | **RETIRADA**: a opção (B) não foi escolhida (R14). E o bloqueio que a penalizava CAIU — `cargo/0.3.1.0-args-native` aterrou, o `main` nativo recebe `argc`/`argv` e chama `tk_set_args`. Registado em §6.11.9 para quem a reabrir | — |
 | 5b | **`panic`/`exit` em Teko** (pré-condição de 5) | `call_symbol` aponta hoje a `tk_panic_str`/`tk_exit`; o fundo `write`/`abort` por `extern fn` está desenhado e não escrito | 13b, 14 |
 | 5c | **namespace reservado + regra de prefixo `__`** | não existe; `builtin_fn` resolve por ÚLTIMO SEGMENTO, o que torna todo builtin injectado publicamente chamável — o oposto do que R7 exige | 3b, 14 |
 | 6 | **`chan<T>`** e as quatro funções | palavra não reservada no lexer; superfície de linguagem nova. Grafia RESOLVIDA por ruling (§6.12) e as três fontes divergentes corrigidas | 15-16 |
@@ -1722,11 +1759,10 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
    (§17.4.3, recomendo (1) na v1 e NUNCA (2)), se se avança já para a propagação estática, e a
    sequência. O que NÃO está em aberto é §17.4.5: `cancel` não pode herdar a isenção de `#must_free`,
    sob pena de introduzir uma fuga silenciosa e repetida num processo que sobrevive.
-2d. **A NUANCE DE R10: a marca é de COMPILAÇÃO (A), de EXECUÇÃO (B), ou as duas em camadas?**
-   (§6.11.9). **É a única pergunta em aberto neste documento**, e não é de estilo: (A) arranca hoje e
-   dá contenção estrutural; (B) traz uma dependência dura de `cargo/0.3.1.0-args-native`, porque §16
-   mediu que um binário nativo que lê argv nem linka. Apresentei as duas com as consequências; a
-   escolha é do dono.
+2d. ~~A NUANCE DE R10~~ — **FECHADA (R14, 2026-07-29): marca de tempo de COMPILAÇÃO** (§6.11.9).
+   Deixada riscada e não apagada porque era a última pergunta em aberto deste documento, e o registo
+   de que foi respondida vale mais do que a linha limpa. **Não sobra nenhuma pergunta minha ao
+   dono**; o que resta em aberto (2c, 2e) é escolha dele sobre superfície futura, não bloqueio.
 3. **Se `chan<T>` deve suportar múltiplos recetores.** O harness tem exactamente um. Um canal
    multi-recetor precisa de uma disciplina de fecho diferente (§6.4) e não há caso que o exija.
    Recusado por ausência de necessidade, não por dificuldade.
@@ -1894,15 +1930,23 @@ function ever defines (a link-time failure at best)"* — e que ali foi fechada 
    qualificado ou nu**. Vale por si, independentemente de (1): converte uma classe inteira de
    símbolos indefinidos em diagnósticos com endereço.
 
-**REPORTADO E ACEITE PELO DONO** (2026-07-29: *"precisa corrigir, ensinar o native"*). **A correcção
-NÃO é desta carga** — corre em `cargo/0.3.1.0-args-native`, com esta medição como prova. Nada em
+**REPORTADO, ACEITE E JÁ CORRIGIDO.** O dono aceitou (2026-07-29: *"precisa corrigir, ensinar o
+native"*) e o vagão `cargo/0.3.1.0-args-native` **aterrou no vagão principal**: o `main` sintetizado
+passou a receber `argc`/`argv` e a chamar `tk_set_args`, e `args` foi resolvido no `call_symbol`.
+**A medição abaixo fica como o registo do defeito e da sua prova** — não como estado presente. A
+correcção não foi desta carga. Nada em
 `src/lir` nem em `src/backend` é tocado aqui, para as duas cargas não colidirem. As fixtures que o
 afirmariam, deixadas para essa carga: `native_main_reads_argv` (exit 4 com três argumentos, nas duas
 rotas) e `qualified_host_builtin_stops_honestly` (a forma qualificada pára com a mesma mensagem que a
 nua, em vez de falhar no linker).
 
-**Consequência para ESTE desenho, e é só uma:** a exclusão da auto-reexecução por `argv[1]` (§4) passa
-a ser CONDICIONAL. Ver a nota lá — a porta está identificada e fechada por agora.
+**Consequências para ESTE desenho, e são duas:**
+
+1. A exclusão da auto-reexecução por `argv[1]` (§4) era CONDICIONAL e **a condição caiu**: `args()`
+   funciona. Continua não escolhida — R1 manda threads para os unitários — mas quem a reabrir já não
+   encontra impedimento técnico, só a decisão.
+2. A opção (B) de §6.11.9 (marca por argumento em execução) **deixou de estar bloqueada pelo mesmo
+   motivo**, e continua não escolhida por R14. As duas coisas estão registadas lá.
 
 ---
 
