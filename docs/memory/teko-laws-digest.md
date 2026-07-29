@@ -62,6 +62,24 @@ A recusa é a MESMA do vagão. Não sei qual das duas leituras é a verdadeira e
 
 Nota de método, porque foi assim que este erro se descobriu: um agente veio dizer, sem lhe ser perguntado, que os commits dele estavam limpos de trailer "matching commit hygiene rules". Ele conhecia esta lei e o integrador não. **Ler este ficheiro por inteiro é barato; descobrir cada lei por acidente não é.**
 
+**AS QUATRO REFERÊNCIAS DE DESENHO (ruling do dono, 2026-07-29, literal):** *"os mais complexos podem ser resolvidos se espelhando na abordagem de outras linguagens parecidas, temos bastante referência de Rust na superfície e zig no controle, bem como C# em 'addins' e go para alguns comportamentos."*
+
+| eixo | referência |
+|---|---|
+| superfície (sintaxe, tipos, ergonomia) | **Rust** |
+| controlo (fluxo, erros, explicitude) | **Zig** |
+| *addins* / extensibilidade | **C#** |
+| certos comportamentos | **Go** |
+
+Não é permissão para copiar: é onde ir buscar a abordagem quando o caso é complexo e a decisão não é óbvia. **Nomeia sempre QUAL das quatro estás a espelhar e porquê** — dizer "como as outras linguagens fazem" esconde que elas fazem coisas diferentes, e a escolha entre elas é a decisão.
+
+Exemplo trabalhado, e mostra porque a distinção importa. O dono pediu estreitamento por teste de `null` num `if`:
+```teko
+let a: i32 | null = 0
+if a != null { exit(a) }   // 'a' livre da parte null
+```
+Das quatro referências, **só o C# faz isto** — refina A MESMA variável por análise de fluxo. Rust (`if let Some(x)`), Zig (`if (opt) |v|`) e Go (`if v, ok := …`) **ligam um nome NOVO**, que é precisamente o que o `match` do Teko já faz com `i32 as n`. Logo o pedido não é corrigir o `if`: é acrescentar um eixo que a linguagem não tem e que apenas uma das referências tem.
+
 **DRY-last:** the whole-codebase DRY refactor is final phase; every other item lands first.
 
 **Metaprogramming-out-of-LTS:** comptime/macros deferred to post-`1.0.0.0`; traits (structural derive) stay.
