@@ -8,49 +8,6 @@ fn parse_manifest_or_die() -> Manifest {
     match parse_manifest("name = \"h\"\nsource = \"src\"\n") { Manifest as m => m; error => parse_manifest_or_die() }
 }
 
-#test
-/**
- * windows_path_to_sh_rewrites_every_backslash — the first `to_sh_path` rewrite: every `\` becomes
- * `/`, and a path that already carries no backslash (the POSIX shape) passes through unchanged.
- *
- * @return void
- */
-fn windows_path_to_sh_rewrites_every_backslash() {
-    teko::assert::is_true(windows_path_to_sh("D:\\a\\teko-lang\\bin\\teko.exe") == "D:/a/teko-lang/bin/teko.exe")
-    teko::assert::is_true(windows_path_to_sh("/home/user/teko-lang/bin/teko") == "/home/user/teko-lang/bin/teko")
-}
-
-#test
-/**
- * windows_drive_to_mount_folds_the_drive_letter — the second `to_sh_path` rewrite: a forward-slashed
- * drive-letter path folds into the git-bash POSIX mount form (`D:/a/b` -> `/d/a/b`, lowercased), and a
- * path with no `<letter>:` prefix (already POSIX, or a bare relative path) passes through unchanged.
- *
- * @return void
- */
-fn windows_drive_to_mount_folds_the_drive_letter() {
-    teko::assert::is_true(windows_drive_to_mount("D:/a/teko-lang/bin/teko.exe") == "/d/a/teko-lang/bin/teko.exe")
-    teko::assert::is_true(windows_drive_to_mount("c:/") == "/c/")
-    teko::assert::is_true(windows_drive_to_mount("examples/regressions/cwd_build") == "examples/regressions/cwd_build")
-    teko::assert::is_true(windows_drive_to_mount("/home/user/teko-lang/bin/teko") == "/home/user/teko-lang/bin/teko")
-}
-
-#test
-/**
- * to_sh_path_gates_on_host_os — `to_sh_path` applies the full backslash + mount-letter rewrite ONLY
- * on a Windows host: a Windows-shaped path converts to its git-bash mount form there and passes
- * through unchanged on every other host, so the same assertion holds whichever platform this test
- * itself runs under (linux/macos/windows CI).
- *
- * @return void
- */
-fn to_sh_path_gates_on_host_os() {
-    let raw = "D:\\a\\teko-lang\\bin\\teko.exe"
-    let converted = to_sh_path(raw)
-    if teko::os() == "windows" { teko::assert::is_true(converted == "/d/a/teko-lang/bin/teko.exe"); return }
-    teko::assert::is_true(converted == raw)
-}
-
 /**
  * manifest_with_regression_files — a minimal valid manifest declaring `test_regression_files` as
  * exactly `[path]` and `gate = true` — the shared fixture builder for the run_regression_sources
@@ -74,32 +31,6 @@ fn manifest_with_regression_files(path: str) -> Manifest {
 fn run_regression_sources_missing_path_is_a_manifest_error() {
     let m = manifest_with_regression_files("examples/regressions/__definitely_missing__.tkr")
     teko::assert::is_true(run_regression_sources("teko", m) == 1)
-}
-
-#test
-/**
- * env_prefix_cmd_shapes_the_env_prefix — an empty env yields "" (byte-identical to the pre-C2
- * `run_captured`); a non-empty env yields an `env K=V … ` fragment with each token single-quoted.
- *
- * @return void
- */
-fn env_prefix_cmd_shapes_the_env_prefix() {
-    teko::assert::is_true(env_prefix_cmd(teko::list::empty()) == "")
-    let one = teko::list::push(teko::list::empty(), "FOO=bar")
-    teko::assert::is_true(env_prefix_cmd(one) == "env 'FOO=bar' ")
-}
-
-#test
-/**
- * cd_prefix_cmd_is_a_noop_for_dot_and_empty — `cd_prefix_cmd` is "" for "" and "." (the runner's
- * own cwd already), and a real `cd … && ` fragment otherwise (0.3.1 C3 `built in place`).
- *
- * @return void
- */
-fn cd_prefix_cmd_is_a_noop_for_dot_and_empty() {
-    teko::assert::is_true(cd_prefix_cmd("") == "")
-    teko::assert::is_true(cd_prefix_cmd(".") == "")
-    teko::assert::is_true(cd_prefix_cmd("examples/regressions/cwd_build") == "cd 'examples/regressions/cwd_build' && ")
 }
 
 #test
@@ -171,6 +102,7 @@ fn compile_failure_message_carries_the_cc_output() {
         harness_ns = 0
         child_ns = 0
         cmd = ""
+        chan_text = ""
     }
     let msg = compile_failure_message(comp)
     teko::assert::str_contains(msg, "undefined reference")
@@ -186,9 +118,9 @@ fn compile_failure_message_carries_the_cc_output() {
  * @return void
  */
 fn compile_failure_message_falls_back_to_stdout() {
-    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
+    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
     teko::assert::str_contains(compile_failure_message(out_only), "no input files")
-    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
+    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
     teko::assert::str_contains(compile_failure_message(silent), "wrote nothing")
 }
 
@@ -199,40 +131,42 @@ fn compile_failure_message_falls_back_to_stdout() {
  *
  * This exists because PR #94's `test / windows` produced `exit 127, expected 134` with a real panic
  * on the captured stderr: the child had plainly run, and the message still could not say whether
- * `sh` failed to find something, whether the spawn failed, or whether Windows translates an aborting
- * child differently. Three assertions, one per reading:
+ * the exec failed, whether the spawn failed, or whether Windows translates an aborting child
+ * differently. Three assertions, one per reading:
  *   - the spawn sentinel is NAMED, not printed as a bare -1 (nothing ran; harness/host fault);
- *   - 127 is attributed to `sh`, since the runtime no longer produces it;
- *   - the exact shell command is quoted whenever the capture has one.
+ *   - 127 is attributed to a failed exec, not the runtime;
+ *   - the argv that was launched is quoted whenever the capture has one.
  *
  * The third case is the negative: an ordinary mismatch gets NO origin gloss (a note on every line
  * is a note nobody reads), and a synthesized capture with no command must not print an empty
- * `sh -c:` line.
+ * `argv:` line.
  *
  * @return void
  */
 fn exit_mismatch_message_names_the_origin_and_quotes_the_command() {
     let spawned = CapResult {
         exit = SPAWN_FAILED_EXIT; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0
-        cmd = "'/w/bin/x' < '/w/x.in' > '/w/x.out' 2> '/w/x.err'"
+        cmd = "/w/bin/x"
+        chan_text = ""
     }
     let m_spawn = exit_mismatch_message(spawned, 134)
     teko::assert::str_contains(m_spawn, "could not start the child")
-    teko::assert::str_contains(m_spawn, "sh -c: '/w/bin/x'")
+    teko::assert::str_contains(m_spawn, "argv: /w/bin/x")
 
     let notfound = CapResult {
-        exit = SH_NOT_FOUND_EXIT; stdout = ""; stderr = "sh: x: command not found\n"; harness_ns = 0; child_ns = 0
-        cmd = "'x' < '/w/x.in' > '/w/x.out' 2> '/w/x.err'"
+        exit = EXEC_FAILED_EXIT; stdout = ""; stderr = "x: command not found\n"; harness_ns = 0; child_ns = 0
+        cmd = "x"
+        chan_text = ""
     }
     let m_127 = exit_mismatch_message(notfound, 134)
-    teko::assert::str_contains(m_127, "comes from `sh`")
+    teko::assert::str_contains(m_127, "could not exec")
     teko::assert::str_contains(m_127, "command not found")
 
-    let plain = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = "" }
+    let plain = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
     let m_plain = exit_mismatch_message(plain, 0)
     teko::assert::str_contains(m_plain, "exit 3, expected 0")
-    teko::assert::is_false(teko::str::contains(m_plain, "sh -c:"))
-    teko::assert::is_false(teko::str::contains(m_plain, "comes from"))
+    teko::assert::is_false(teko::str::contains(m_plain, "argv:"))
+    teko::assert::is_false(teko::str::contains(m_plain, "could not"))
 }
 
 #test
@@ -908,92 +842,172 @@ fn regr_jobs_of_reads_a_count_and_refuses_nonsense() {
     teko::assert::is_true(regr_jobs_of("4x") == REGR_JOBS_DEFAULT)
 }
 
-#test
 /**
- * regr_rc_of_text_takes_the_leading_decimal — a backgrounded child records its status with `echo`,
- * so the file carries a trailing newline (and a CR ahead of it under a Windows shell). Text with no
- * digit at all is NOT zero: a lost status must never read as a pass.
+ * spec_of — a `ProcSpec` running `argv` with no stdin/env, dir "", under `prefix` — the shared
+ * fixture builder every `run_pool` test below uses.
  *
- * @return void
+ * @param argv    the command to run
+ * @param prefix  the scratch prefix
+ * @return        the spec
  */
-fn regr_rc_of_text_takes_the_leading_decimal() {
-    teko::assert::is_true(regr_rc_of_text("0\n") == 0)
-    teko::assert::is_true(regr_rc_of_text("3\n") == 3)
-    teko::assert::is_true(regr_rc_of_text("139\r\n") == 139)
-    teko::assert::is_true(regr_rc_of_text("") == REGR_BATCH_UNREADABLE_RC)
-    teko::assert::is_true(regr_rc_of_text("\n") == REGR_BATCH_UNREADABLE_RC)
+fn spec_of(argv: []str, prefix: str) -> ProcSpec {
+    ProcSpec { argv = argv; dir = ""; env = teko::list::empty(); stdin_data = ""; prefix = prefix }
+}
+
+/**
+ * sh_argv — `["sh", "-c", script]`, the shared argv builder every `run_pool` test below spawns
+ * DIRECTLY (never through a shell scaffold this file builds — `sh` here is simply the CHILD
+ * PROGRAM, chosen because a one-line script is the shortest way to control a test child's
+ * stdout/exit).
+ *
+ * @param script  the shell script text
+ * @return        the argv
+ */
+fn sh_argv(script: str) -> []str {
+    mut argv: []str = teko::list::push(teko::list::empty(), "sh")
+    argv = teko::list::push(argv, "-c")
+    teko::list::push(argv, script)
 }
 
 #test
 /**
- * regr_batch_script_backgrounds_each_child_and_waits_every_jobs — the script's shape, which is the
- * whole concurrency contract: every command is backgrounded, every one records its own status
- * (because `$?` is unreadable after `wait`), and a `wait` barrier lands after each `jobs` launches
- * plus a final one so no child outlives the batch.
+ * run_pool_runs_every_child_and_keeps_each_status — the proof that the concurrency is REAL and not
+ * merely well-shaped data: three children actually run as separate PROCESSES, each writes to its
+ * OWN capture files, and each one's distinct exit status comes back against its own index. A pool
+ * that serialized, or that crossed two children's outputs, fails here.
  *
  * @return void
  */
-fn regr_batch_script_backgrounds_each_child_and_waits_every_jobs() {
-    mut cmds: []str = teko::list::push(teko::list::empty(), "a")
-    cmds = teko::list::push(cmds, "b")
-    cmds = teko::list::push(cmds, "c")
-    mut pre: []str = teko::list::push(teko::list::empty(), "/w/0")
-    pre = teko::list::push(pre, "/w/1")
-    pre = teko::list::push(pre, "/w/2")
-    let s = regr_batch_script(cmds, pre, 2)
-    teko::assert::is_true(teko::str::contains(s, "{ a; echo $? > '/w/0.rc'; } &"))
-    teko::assert::is_true(teko::str::contains(s, "{ c; echo $? > '/w/2.rc'; } &"))
-    teko::assert::is_true(count_occurrences(s, "wait\n") == 2)
-    teko::assert::is_true(count_occurrences(s, "} &\n") == 3)
-}
-
-/**
- * count_occurrences — how many times `needle` appears in `hay`, non-overlapping.
- *
- * @param hay     the text to scan
- * @param needle  the text to count (never empty)
- * @return        the number of occurrences
- */
-fn count_occurrences(hay: str, needle: str) -> u64 {
-    mut n: u64 = 0
-    mut i: u64 = 0
-    loop {
-        if i + needle.len > hay.len { break }
-        if teko::str::slice(hay, i, i + needle.len) == needle { n = n + 1; i = i + needle.len; continue }
-        i = i + 1
-    }
-    n
-}
-
-#test
-/**
- * run_captured_batch_runs_every_child_and_keeps_each_status — the proof that the concurrency is
- * REAL and not merely well-shaped text: three children actually run, each writes to its OWN capture
- * files, and each one's distinct exit status comes back against its own index. A batch that
- * serialized, or that crossed two children's outputs, fails here.
- *
- * @return void
- */
-fn run_captured_batch_runs_every_child_and_keeps_each_status() {
-    let w = ".regr-batch-test"
-    mut cmds: []str = teko::list::empty()
-    mut pre: []str = teko::list::empty()
+fn run_pool_runs_every_child_and_keeps_each_status() {
+    let w = ".regr-pool-test"
+    mut specs: []ProcSpec = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= 3 { break }
-        let p = $"{w}/child{i}"
-        mut argv: []str = teko::list::push(teko::list::empty(), "sh")
-        argv = teko::list::push(argv, "-c")
-        argv = teko::list::push(argv, $"echo out{i}; exit {i}")
-        cmds = teko::list::push(cmds, captured_sh_cmd("", argv, "", p))
-        pre = teko::list::push(pre, p)
+        specs = teko::list::push(specs, spec_of(sh_argv($"echo out{i}; exit {i}"), $"{w}/child{i}"))
         i = i + 1
     }
-    let caps = run_captured_batch(cmds, pre)
+    let caps = run_pool(specs, 2)
     teko::assert::is_true(caps.len == 3)
     teko::assert::is_true(caps[0].exit == 0)
     teko::assert::is_true(caps[1].exit == 1)
     teko::assert::is_true(caps[2].exit == 2)
     teko::assert::is_true(teko::str::contains(caps[0].stdout, "out0"))
     teko::assert::is_true(teko::str::contains(caps[2].stdout, "out2"))
+}
+
+#test
+/**
+ * pool_order_is_row_order — durations deliberately INVERTED (row 0 sleeps longest, the last row
+ * sleeps least): `run_pool`'s report is still in SPEC order, never completion order, because each
+ * index is harvested by waiting on THAT index's own handle — the determinism law (§8): the canal is
+ * transport, never order.
+ *
+ * @return void
+ */
+fn pool_order_is_row_order() {
+    let w = ".regr-pool-order-test"
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 4 { break }
+        let sleep_hundredths = 4 - i
+        specs = teko::list::push(specs, spec_of(sh_argv($"sleep 0.0{sleep_hundredths}; echo row{i}"), $"{w}/row{i}"))
+        i = i + 1
+    }
+    let caps = run_pool(specs, 4)
+    teko::assert::is_true(caps.len == 4)
+    mut k: u64 = 0
+    loop {
+        if k >= 4 { break }
+        teko::assert::is_true(teko::str::contains(caps[k].stdout, $"row{k}"))
+        k = k + 1
+    }
+}
+
+#test
+/**
+ * pool_child_crash_does_not_stop_the_run — a signal-killed child (row 1, `kill -ABRT $$`) reports
+ * its 128+signo status and the OTHER rows still get their own verdicts — a crash never aborts the
+ * pool, and it never bleeds into a neighbor's capture.
+ *
+ * @return void
+ */
+fn pool_child_crash_does_not_stop_the_run() {
+    let w = ".regr-pool-crash-test"
+    mut specs: []ProcSpec = teko::list::push(teko::list::empty(), spec_of(sh_argv("echo before"), $"{w}/a"))
+    specs = teko::list::push(specs, spec_of(sh_argv("kill -ABRT $$"), $"{w}/b"))
+    specs = teko::list::push(specs, spec_of(sh_argv("echo after"), $"{w}/c"))
+    let caps = run_pool(specs, 3)
+    teko::assert::is_true(caps.len == 3)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(caps[1].exit == 134)
+    teko::assert::is_true(caps[2].exit == 0)
+    teko::assert::is_true(teko::str::contains(caps[0].stdout, "before"))
+    teko::assert::is_true(teko::str::contains(caps[2].stdout, "after"))
+}
+
+#test
+/**
+ * run_pool_output_identical_across_job_counts — the determinism law's headline claim, pinned: the
+ * SAME specs run at `jobs=1` (fully serial) and `jobs=6` (fully parallel — every row fits in one
+ * window) produce byte-identical exit codes and stdout, row for row. The window size is a SPEED
+ * knob, never a CORRECTNESS one.
+ *
+ * @return void
+ */
+fn run_pool_output_identical_across_job_counts() {
+    let w = ".regr-pool-determinism-test"
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 6 { break }
+        specs = teko::list::push(specs, spec_of(sh_argv($"echo v{i}; exit {i % 3}"), $"{w}/j{i}"))
+        i = i + 1
+    }
+    let serial = run_pool(specs, 1)
+    let parallel = run_pool(specs, 6)
+    teko::assert::is_true(serial.len == parallel.len)
+    mut k: u64 = 0
+    loop {
+        if k >= serial.len { break }
+        teko::assert::is_true(serial[k].exit == parallel[k].exit)
+        teko::assert::is_true(serial[k].stdout == parallel[k].stdout)
+        k = k + 1
+    }
+}
+
+#test
+/**
+ * pool_wires_the_verdict_channel_per_spec — migalha 10's reader half: `run_pool` names a distinct
+ * `TEKO_VERDICT_CHANNEL` for every spec (`spec_env_with_channel`), and a child that writes to it
+ * comes back with that content in `CapResult.chan_text` — a channel an ordinary regressive never
+ * uses, proven here by a child that DOES.
+ *
+ * @return void
+ */
+fn pool_wires_the_verdict_channel_per_spec() {
+    let w = ".regr-pool-verdict-test"
+    let spec = spec_of(sh_argv("printf channel-payload > \"$TEKO_VERDICT_CHANNEL\""), $"{w}/v")
+    let caps = run_pool(teko::list::push(teko::list::empty(), spec), 1)
+    teko::assert::is_true(caps.len == 1)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(caps[0].chan_text == "channel-payload")
+}
+
+#test
+/**
+ * pool_verdict_channel_survives_child_death — the channel's whole reason to outlive `.rc` (§5.4):
+ * what a child wrote BEFORE dying (by signal, here) is still on disk after — its exit code alone
+ * (134) could never carry the in-flight payload.
+ *
+ * @return void
+ */
+fn pool_verdict_channel_survives_child_death() {
+    let w = ".regr-pool-verdict-crash-test"
+    let spec = spec_of(sh_argv("printf in-flight > \"$TEKO_VERDICT_CHANNEL\"; kill -ABRT $$"), $"{w}/v")
+    let caps = run_pool(teko::list::push(teko::list::empty(), spec), 1)
+    teko::assert::is_true(caps.len == 1)
+    teko::assert::is_true(caps[0].exit == 134)
+    teko::assert::is_true(caps[0].chan_text == "in-flight")
 }
