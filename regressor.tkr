@@ -146,6 +146,34 @@ Feature: native process entry — teko::env::args() reaches the own-backend's ar
     Given args = ["alpha", "beta", "gamma"]
     When built and run
     Then exit = 4
+
+Feature: builtin-qualifier validation — a builtin call is resolved by NAME and QUALIFIER, not name alone (0.3.1.0, owner ruling 2026-07-29)
+
+  # `teko::str::concat` is a term USED IN PRODUCT SOURCE 495+ times (`builtin_fn`,
+  # `src/checker/scope.tks`, matches a call by its LAST path segment only), so a regression of its
+  # dispatch mechanism lives HERE, at the project root, never in a channel (the SAME 2026-07-29
+  # ruling as the `teko::env::args()` Feature above).
+  #
+  # Measured and documented in docs/memory/colisao-use-str-0.3.1.md §7: before this fix, a call
+  # through ANY qualifier — invented, a real namespace missing its `teko::` root, or a `use`-
+  # declared alias — resolved to the SAME builtin as the canonical `teko::X::name(...)` spelling,
+  # with NO checker diagnostic; only an accident of codegen (its own gate only knows how to lower a
+  # bare or `teko::`-rooted callee) turned it into a `cc`/`ld` failure downstream. `builtin_qualifier_ok`
+  # (`src/checker/typer.tks`) closes that gap at the checker, honestly, before codegen ever runs.
+  Scenario: a builtin call through an invented namespace is rejected, not silently miscompiled
+    Given source = "cases/qualifier_bogus_namespace_rejected.tks"
+    When compilation fails
+    Then diagnostic = "unknown function: bogus_namespace::str — `bogus_namespace` is not a recognized namespace"
+
+  # `use teko::str as tstr` is a checker no-op for value-level references today (`UseDecl` passes
+  # through verbatim) — an alias must NOT make a builtin resolvable under its short name until that
+  # separate, larger increment lands. Silently accepting it would be the exact hazard the owner
+  # asked to have tested (docs/memory/colisao-use-str-0.3.1.md's opening probe).
+  Scenario: a builtin call through a `use`-declared alias is rejected, not silently resolved
+    Given source = "cases/qualifier_alias_not_builtin_rejected.tks"
+    When compilation fails
+    Then diagnostic = "unknown function: tstr::concat — `tstr` is not a recognized namespace"
+
 Feature: F12 defer-nas-saidas — a defer fires on every scope exit (return/break/continue/panic/exit, owner ruling 2026-07-29)
 
   Scenario: defer_return_break_continue_matrix (own-native)
