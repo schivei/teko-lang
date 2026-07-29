@@ -729,6 +729,25 @@ pub type LEnumInfo = struct { name: str; members: []str }
 pub type LVariantDef = struct { name: str; ty: checker::Variant }
 
 /**
+ * LFieldDecls — one field-shaped type declaration's DECLARED field types, as resolved
+ * `checker::Type`s, parallel to `field_names` and in the same declared order `LStructLayout` uses.
+ *
+ * WHY THE TABLE EXISTS AT ALL. A struct-literal field is a PLACEMENT: the value written there must
+ * be COERCED into the field's declared type (`lower_value_into_type`), exactly as a binding, an
+ * assignment and a return already are. `LStructLayout` deliberately keeps MACHINE classes
+ * (`LType`), which cannot express "this field is a `T | null` union whose slot holds a tag+payload
+ * wrapper", so the store site had no declared type to coerce against and wrote the value's own raw
+ * representation instead — a bare `null` honest-stopped (`lower_null_lit`) and a bare `T` was
+ * stored UNWRAPPED, which a later `match` then read as the wrapper's base address (a load from
+ * whatever the payload's bits happened to be — measured as a SIGSEGV, not a diagnostic). This table
+ * is the checker-typed companion of the layout table, the own-backend twin of the C route's own
+ * `cg_find_struct_field_type` lookup.
+ *
+ * @since 0.3.1.0 (degrau 25 — the union-field placement)
+ */
+pub type LFieldDecls = struct { name: str; field_names: []str; field_types: []checker::Type }
+
+/**
  * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
  * FOREIGN symbol it binds to (C7.1a: `extern fn f(…) -> T = "sym"`). A call to
  * an `extern` must target that raw symbol, NOT the Teko namespace mangling —
@@ -818,6 +837,13 @@ pub type LowerCtx = struct {
      */
     ref_fns: []LRefFnInfo
     /**
+     * field_decls — the whole program's DECLARED-field-type table (0.3.1.0 degrau 25), threaded
+     * read-only exactly like `variants`/`ref_fns`: the ONE place a struct-literal field store asks
+     * "what type does this field DECLARE?" (`find_field_decl_type`), so the value written there is
+     * coerced into it (`lower_value_into_type`) like every other placement's value is.
+     */
+    field_decls: []LFieldDecls
+    /**
      * addr_taken — the CURRENT function's own address-taken `mut` scalar local names (0.3.1.0
      * degrau 18): every name `collect_addr_taken_locals` found passed as a `ref<T>` call
      * argument anywhere in this function's body, computed ONCE before the body lowers. A name in
@@ -859,7 +885,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
     }
 }
 
@@ -880,7 +906,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
     }
 }
 
@@ -901,7 +927,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
     }
 }
 
@@ -922,7 +948,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
     }
 }
 
@@ -943,7 +969,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
-        ref_fns = ctx.ref_fns; addr_taken = ctx.addr_taken
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
     }
 }
 
@@ -2250,17 +2276,78 @@ fn arg_needs_auto_ref(arg: checker::TExpr) -> bool {
  * returns `null` — the overwhelming majority of calls) falls straight through to the plain
  * `lower_args`, unchanged.
  *
+ * Every argument is additionally COERCED into its PARAMETER's declared type
+ * (`callee_param_types`, degrau 25) — a call argument is a placement like a binding or a return,
+ * and until this the own backend was the only one that did not treat it as one.
+ *
  * @param ctx  the lowering context
  * @param c    the call node
  * @return     the advanced context + the ABI-flattened argument VRegs, in order
  * @throws     propagated from lowering any argument, or from `lower_addr_of_arg`
  */
 fn lower_call_args(ctx: LowerCtx, c: checker::TCall) -> LoweredArgs | error {
-    if c.callee.segments.len == 0 { return lower_args(ctx, c.args) }
+    let params = callee_param_types(c)
+    if c.callee.segments.len == 0 { return lower_args(ctx, c.args, params) }
     let last = c.callee.segments[c.callee.segments.len - 1].name
     match find_ref_flags(ctx.ref_fns, c.call_ns, last) {
-        []bool as rf => lower_args_ref_aware(ctx, c.args, rf, 0)
-        null => lower_args(ctx, c.args)
+        []bool as rf => lower_args_ref_aware(ctx, c.args, rf, params, 0)
+        null => lower_args(ctx, c.args, params)
+    }
+}
+
+/**
+ * callee_param_types — the callee's DECLARED parameter types, in order, as the checker resolved
+ * them (`TCall.callee_type`, the `Func` the checker attaches to a direct, closure or
+ * interface-dispatch call); an EMPTY list for a call whose callee the checker left untyped (a
+ * builtin, a generic instantiation) and for a VARIADIC callee, whose trailing arguments do not
+ * correspond one-to-one with its declared parameters.
+ *
+ * An empty list means "coerce nothing", which is what every argument did before degrau 25 — so a
+ * call shape this cannot answer for keeps its previous behaviour rather than guessing a placement.
+ *
+ * @param c  the call node
+ * @return   the callee's parameter types, positionally parallel to `c.args`, or an empty list
+ */
+fn callee_param_types(c: checker::TCall) -> []checker::Type {
+    match c.callee_type {
+        checker::Func as f => if f.variadic { teko::list::empty() } else { f.params }
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * param_type_at — the declared type of the parameter at index `i`, or `null` past the end of the
+ * declared list (an argument `callee_param_types` cannot place).
+ *
+ * @param params  the callee's declared parameter types
+ * @param i       the argument index
+ * @return        the parameter's declared type, or `null`
+ */
+fn param_type_at(params: []checker::Type, i: u64) -> checker::Type | null {
+    if i >= params.len { return null }
+    params[i]
+}
+
+/**
+ * lower_arg_into_param — lower ONE call argument COERCED into its parameter's declared type: a
+ * UNION parameter (`union_field_placement` — the same predicate the struct-field placement uses,
+ * since both ask "does this slot hold a tag+payload wrapper?") takes `lower_value_into_type` and
+ * contributes its single wrapper-address word; every other parameter lowers exactly as
+ * `lower_arg_vregs` already does, including a fat argument's (ptr, len) pair.
+ *
+ * @param ctx    the lowering context
+ * @param decl   the parameter's declared type, or `null` when the callee's is unknown
+ * @param arg    the argument expression
+ * @return       the advanced context + the argument's VReg(s), in ABI order
+ * @throws       propagated from lowering (or coercing) the argument
+ */
+fn lower_arg_into_param(ctx: LowerCtx, decl: checker::Type | null, arg: checker::TExpr) -> LoweredArgs | error {
+    match union_field_placement(ctx, decl) {
+        checker::Type as bound => {
+            let lo = match lower_value_into_type(ctx, bound, arg) { Lowered as x => x; error as err => return err }
+            LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
+        }
+        null => lower_arg_vregs(ctx, arg)
     }
 }
 
@@ -2271,18 +2358,20 @@ fn lower_call_args(ctx: LowerCtx, c: checker::TCall) -> LoweredArgs | error {
  * `lower_arg_vregs` already does. `i >= rf.len` (a callee param this call's own arity check
  * already fixed the count of) is never a `ref` position, so it always takes the plain path.
  *
- * @param ctx   the lowering context
- * @param args  the full argument list
- * @param rf    the callee's `ref_flags` (`find_ref_flags`'s hit)
- * @param i     the next argument index to lower
- * @return      the advanced context + the ABI-flattened argument VRegs, in order
- * @throws      propagated from lowering any argument, or from `lower_addr_of_arg`
+ * @param ctx     the lowering context
+ * @param args    the full argument list
+ * @param rf      the callee's `ref_flags` (`find_ref_flags`'s hit)
+ * @param params  the callee's declared parameter types (`callee_param_types`), for the coercion
+ *                every non-`ref` position takes
+ * @param i       the next argument index to lower
+ * @return        the advanced context + the ABI-flattened argument VRegs, in order
+ * @throws        propagated from lowering any argument, or from `lower_addr_of_arg`
  */
-fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, i: u64) -> LoweredArgs | error {
+fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, params: []checker::Type, i: u64) -> LoweredArgs | error {
     if i >= args.len { return LoweredArgs { ctx = ctx; vregs = teko::list::empty() } }
     let is_ref_pos = i < rf.len && rf[i] && arg_needs_auto_ref(args[i])
-    let one = match if is_ref_pos { lower_addr_of_arg(ctx, args[i]) } else { lower_arg_vregs(ctx, args[i]) } { LoweredArgs as x => x; error as err => return err }
-    let rest = match lower_args_ref_aware(one.ctx, args, rf, i + 1) { LoweredArgs as x => x; error as err => return err }
+    let one = match if is_ref_pos { lower_addr_of_arg(ctx, args[i]) } else { lower_arg_into_param(ctx, param_type_at(params, i), args[i]) } { LoweredArgs as x => x; error as err => return err }
+    let rest = match lower_args_ref_aware(one.ctx, args, rf, params, i + 1) { LoweredArgs as x => x; error as err => return err }
     LoweredArgs { ctx = rest.ctx; vregs = append_vregs(one.vregs, rest.vregs) }
 }
 
@@ -2904,14 +2993,16 @@ pub type LoweredArgs = struct { ctx: LowerCtx; vregs: []u32 }
 
 /**
  * lower_args — lower every argument expression left-to-right, ABI-FLATTENING each one into
- * its incoming register(s) (`lower_arg_vregs`).
+ * its incoming register(s) and COERCING it into its parameter's declared type
+ * (`lower_arg_into_param`).
  *
  * @param LowerCtx ctx  the lowering context
  * @param []checker::TExpr args  the argument list to lower
+ * @param []checker::Type params  the callee's declared parameter types (`callee_param_types`)
  * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
-fn lower_args(ctx: LowerCtx, args: []checker::TExpr) -> LoweredArgs | error {
-    lower_args_from(ctx, args, 0)
+fn lower_args(ctx: LowerCtx, args: []checker::TExpr, params: []checker::Type) -> LoweredArgs | error {
+    lower_args_from(ctx, args, params, 0)
 }
 
 /**
@@ -2923,18 +3014,23 @@ fn lower_args(ctx: LowerCtx, args: []checker::TExpr) -> LoweredArgs | error {
  * `bind_param` expects on the receiving end, so a caller and callee compiled by this backend
  * never disagree on a fat argument's register count.
  *
+ * Each argument is COERCED into its parameter's declared type (`lower_arg_into_param`) — the
+ * parameter list is indexed by the argument's OWN position, so the interface-dispatch path's
+ * `start=1` still pairs `args[i]` with `params[i]` (its `params[0]` is the receiver).
+ *
  * @param LowerCtx ctx  the lowering context
  * @param []checker::TExpr args  the full argument list
+ * @param []checker::Type params  the callee's declared parameter types (`callee_param_types`)
  * @param u64 start  the first index to lower (0 lowers every argument)
  * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
  */
-fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, start: u64) -> LoweredArgs | error {
+fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, params: []checker::Type, start: u64) -> LoweredArgs | error {
     mut cur = ctx
     mut vregs: []u32 = teko::list::empty()
     mut i: u64 = start
     loop {
         if i >= args.len { break }
-        let one = match lower_arg_vregs(cur, args[i]) { LoweredArgs as x => x; error as err => return err }
+        let one = match lower_arg_into_param(cur, param_type_at(params, i), args[i]) { LoweredArgs as x => x; error as err => return err }
         cur = one.ctx
         vregs = append_vregs(vregs, one.vregs)
         i++
@@ -3672,7 +3768,7 @@ fn lower_iface_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowe
     let ro = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
     let fp = lower_iface_fatptr(ro.ctx, ro.vreg, e.line, e.col)
     let tgt = lower_iface_slot(fp.ctx, fp.vtable, c.iface_slot, e.line, e.col)
-    let rest = match lower_args_from(tgt.ctx, c.args, 1) { LoweredArgs as x => x; error as err => return err }
+    let rest = match lower_args_from(tgt.ctx, c.args, callee_param_types(c), 1) { LoweredArgs as x => x; error as err => return err }
     lower_call_indirect(rest.ctx, e, tgt.vreg, iface_call_args(fp.data, rest.vregs))
 }
 
@@ -4006,7 +4102,7 @@ fn lower_closure_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lo
     let hit = lenv_lookup(ctx.env, name)
     if !hit.found { return error { message = teko::str::concat("native backend N1: unbound closure local `", name, "` (internal)") } }
     let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
-    let rest = match lower_args(fp.ctx, c.args) { LoweredArgs as x => x; error as err => return err }
+    let rest = match lower_args(fp.ctx, c.args, callee_param_types(c)) { LoweredArgs as x => x; error as err => return err }
     lower_call_indirect(rest.ctx, e, fp.target, closure_call_args(fp.env, rest.vregs))
 }
 
@@ -4274,7 +4370,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = false; ret_len_slot = 0
-        ref_fns = ctx.ref_fns; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums)
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums)
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -4405,15 +4501,22 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * it in `emit_as`, on EVERY placement (binding, assign, return, argument, field), and this is the
  * own-backend analog.
  *
- * Every own-backend placement that KNOWS its declared type routes through here: `lower_binding`
- * (`b.bound`), `lower_assign_simple` and `store_assign_value` (`a.bound`), `lower_return_value`
- * (`ctx.ret_type`) and `lower_tail_expr_stmt` (`target_ty` — an if/match arm's own enclosing
- * result type, or, via `lower_fn_body`, the enclosing function's return type, #382 degrau N2). The
- * placements that do NOT carry a declared type — a call argument (a direct call's `TCall` has no
- * callee signature) and a struct literal field (the layout keeps machine classes, not checker
- * types) — are closed at the other end instead, by `lower_null_lit`'s honest-stop, so no placement
- * can write a raw `const 0` into a VReg that a later `match` reads as the wrapper's base address
- * (that was a deref of address 0).
+ * EVERY own-backend placement routes through here: `lower_binding` (`b.bound`),
+ * `lower_assign_simple` and `store_assign_value` (`a.bound`), `lower_return_value`
+ * (`ctx.ret_type`), `lower_tail_expr_stmt` (`target_ty` — an if/match arm's own enclosing result
+ * type, or, via `lower_fn_body`, the enclosing function's return type, #382 degrau N2),
+ * `lower_list_push` (the slice's element type), `store_struct_field` (`find_field_decl_type`) and
+ * `lower_arg_into_param` (`callee_param_types`).
+ *
+ * THE LAST TWO WERE MISSING UNTIL DEGRAU 25, and this doc used to claim they were closed at the
+ * other end instead, by `lower_null_lit`'s honest-stop. They were not. Only the struct-literal
+ * field reached that stop (a field value IS typed against its declared type, so its bare `null`
+ * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and carries the
+ * `Optional{Void}` bare-null sentinel, which walked straight past the stop into a raw `const 0`
+ * that the callee's own `match` then read as the wrapper's base address — measured as a SIGSEGV
+ * against a C route that answered correctly. A bare `T` flowing into either placement was equally
+ * unwrapped and equally fatal. Neither placement guesses any more: each looks its declared type up
+ * in a table built for exactly that (`collect_field_decls`, `TCall.callee_type`).
  *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Type bound  the DECLARED type of the slot the value is placed into
@@ -5612,7 +5715,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
-        ref_fns = body_done.ref_fns; addr_taken = body_done.addr_taken
+        ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken
     }
 }
 
@@ -8024,7 +8127,7 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
-    let lo = match lower_args(ctx, cl.args) { LoweredArgs as x => x; error as err => return err }
+    let lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
     lower_len_out_call(lo.ctx, sym, lo.vregs, e)
 }
 
@@ -9721,33 +9824,140 @@ fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit)
     }
 }
 
-/** store_struct_fields — lower each field value in turn, storing it at its layout offset
-    from `base` (`store_struct_field`); the result VReg is `base` itself (the struct's
-    address, unchanged by the stores). */
+/**
+ * store_struct_fields — lower each field value in turn, storing it at its layout offset from
+ * `base` (`store_struct_field`) and COERCED into that field's own declared type
+ * (`find_field_decl_type` over `ctx.field_decls`, keyed by the layout's own declaration name);
+ * the result VReg is `base` itself (the struct's address, unchanged by the stores).
+ *
+ * @param ctx  the lowering context to append the stores into
+ * @param base  the struct slot's alloca'd base-address VReg
+ * @param layout  the struct's registered layout (its name is the declared-field-type lookup key)
+ * @param field_names  the field names the literal actually writes, in written order
+ * @param field_vals  the values written, parallel to `field_names`
+ * @param line  the literal's source line
+ * @param col  the literal's source column
+ * @return Lowered  the advanced context plus `base`
+ * @throws  when a written field is not registered on `layout`, or propagated from storing a value
+ */
 fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_names: []str, field_vals: []checker::TExpr, line: u32, col: u32) -> Lowered | error {
     mut cur = ctx
     mut i: u64 = 0
     loop {
         if i >= field_names.len { break }
         let off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
-        cur = match store_struct_field(cur, base, off, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
+        let decl = find_field_decl_type(ctx.field_decls, layout.name, field_names[i])
+        cur = match store_struct_field(cur, base, off, decl, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
     Lowered { ctx = cur; vreg = base }
 }
 
-/** store_struct_field — store ONE struct-literal field value at `base + offset`: a FAT field
-    (`value.type`, 0.3.1.0 raiz A — R3) lowers through the fat-pointer producer path and writes
-    BOTH halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape the array-literal's
-    fat element and a mutable fat local's frame slot both use); every other field lowers
-    plainly and writes its single machine word.
+/**
+ * find_field_decl_type — the DECLARED type of `field` on the declaration named `sname`, or `null`
+ * when the program's field-declaration table (`collect_field_decls`) holds no resolved type for it
+ * — a synthetic layout with no declaration behind it (the `error` type, a closure env), or an
+ * annotation that did not resolve (a generic type parameter). A `null` answer means "place the
+ * value with no coercion", which is what every field store did before this table existed.
+ *
+ * @param decls  the program's declared-field-type table
+ * @param sname  the declaration's canonical name (the layout's own key)
+ * @param field  the field name to look up
+ * @return  the field's declared type, or `null` when the table names none
+ */
+fn find_field_decl_type(decls: []LFieldDecls, sname: str, field: str) -> checker::Type | null {
+    mut i: u64 = 0
+    loop {
+        if i >= decls.len { break }
+        if decls[i].name == sname { return field_type_in_decls(decls[i], field) }
+        i++
+    }
+    null
+}
 
-    Before this arm, EVERY field wrote one machine word (`ltype_of(field_vals[i].type)`, always
-    8 bytes for `str`/`[]T` — `ltype_of` collapses both to `Ptr`), so a struct's `str`/`[]T`
-    field's LENGTH half was never written: `lower_fat_field`'s own 16-byte read (#594 T-B6)
-    then read whatever garbage the fresh `alloca` happened to hold at `off+8`, measured to read
-    back `.len == 0` — silently, not a compile-time stop (0.3.1.0 raiz-comum, §5.1-5.4). */
-fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, value: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+/**
+ * field_type_in_decls — `field`'s resolved declared type within ONE declaration's entry, or `null`
+ * when the entry does not name it or resolved it to the `Void` "did not resolve" marker
+ * (`field_decls_of`).
+ *
+ * @param fd  the declaration's declared-field-type entry
+ * @param field  the field name to look up
+ * @return  the field's declared type, or `null`
+ */
+fn field_type_in_decls(fd: LFieldDecls, field: str) -> checker::Type | null {
+    mut i: u64 = 0
+    loop {
+        if i >= fd.field_names.len { break }
+        if fd.field_names[i] == field {
+            match fd.field_types[i] { checker::Void => return null; _ => return fd.field_types[i] }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * union_field_placement — the field's declared type WHEN that type is a union whose slot holds a
+ * tag+payload wrapper (an inline `A | B` or a nominal `Named` naming a declared `variant`,
+ * `expand_named_variant`); `null` for every other declared type, and for a field the
+ * declared-field-type table names none for.
+ *
+ * Splitting this out is what keeps the store site's THREE shapes from colliding: a union field
+ * always holds ONE word (the wrapper's address), so it must be decided BEFORE the fat-pointer
+ * arm — a `str | null` field is not fat even though a `str` value flowing into it is.
+ *
+ * @param ctx  the lowering context (its declared-`variant` table expands a nominal union)
+ * @param decl  the field's declared type, or `null` when the table names none
+ * @return  the declared type when it is a union placement, else `null`
+ */
+fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null) -> checker::Type | null {
+    let d = match decl { checker::Type as t => t; null => return null }
+    match expand_named_variant(d, ctx.variants) { checker::Variant => d; _ => null }
+}
+
+/**
+ * store_struct_field — store ONE struct-literal field value at `base + offset`, in the ONE shape
+ * the field's DECLARED type calls for:
+ *
+ * - a UNION field (`union_field_placement`) holds the tag+payload wrapper's ADDRESS, so the value
+ *   is COERCED into the union first (`lower_value_into_type`, the same routine a binding, an
+ *   assignment and a return already place their values through) and its single word is stored;
+ * - a FAT field (`value.type`, 0.3.1.0 raiz A — R3) lowers through the fat-pointer producer path
+ *   and writes BOTH halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape the
+ *   array-literal's fat element and a mutable fat local's frame slot both use);
+ * - every other field lowers plainly and writes its single machine word.
+ *
+ * Before the FAT arm, EVERY field wrote one machine word (`ltype_of(field_vals[i].type)`, always
+ * 8 bytes for `str`/`[]T` — `ltype_of` collapses both to `Ptr`), so a struct's `str`/`[]T`
+ * field's LENGTH half was never written: `lower_fat_field`'s own 16-byte read (#594 T-B6)
+ * then read whatever garbage the fresh `alloca` happened to hold at `off+8`, measured to read
+ * back `.len == 0` — silently, not a compile-time stop (0.3.1.0 raiz-comum, §5.1-5.4).
+ *
+ * Before the UNION arm (0.3.1.0 degrau 25) the same class of defect sat on the union axis: a bare
+ * `null` written into a `T | null` field honest-stopped (`lower_null_lit`) and a bare `T` was
+ * stored UNWRAPPED, which a later `match` read as the wrapper's base address — measured as a
+ * SIGSEGV where the C route answered correctly.
+ *
+ * @param ctx  the lowering context to append the store into
+ * @param base  the struct slot's alloca'd base-address VReg
+ * @param offset  the field's byte offset within the slot
+ * @param decl  the field's declared type, or `null` when the table names none
+ * @param value  the value written into the field
+ * @param line  the literal's source line
+ * @param col  the literal's source column
+ * @return LowerCtx  the advanced context
+ * @throws  propagated from lowering (or coercing) `value`
+ */
+fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type | null, value: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+    match union_field_placement(ctx, decl) {
+        checker::Type as bound => {
+            let uo = match lower_value_into_type(ctx, bound, value) { Lowered as x => x; error as err => return err }
+            let uaddr = ctx_alloc(uo.ctx)
+            let with_uaddr = ctx_append(uaddr.ctx, field_addr_inst(uaddr.vreg, base, offset, line, col))
+            return ctx_append(with_uaddr, store_inst(uaddr.vreg, uo.vreg, LType::Ptr, line, col))
+        }
+        null => { }
+    }
     if is_fat_type(value.type) {
         let fo = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
         let addr = ctx_alloc(fo.ctx)
@@ -10057,10 +10267,14 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
  * A null typed `checker::Null` is a different thing and HONEST-STOPS here. The checker gives a bare
  * `null` the `Null` type exactly when its context is a null-bearing union (`typer.type_expr`'s
  * `null_widens_into` arm), and in the own backend such a value must become the union's tag+payload
- * wrapper (`lower_value_into_type`). The placements that know their declared type intercept it
- * before this function is ever reached; anything else — a call argument, a struct-literal field —
- * would otherwise write a raw `const 0` into a VReg that a later `match` reads as the wrapper's
- * BASE ADDRESS, i.e. a load from address 0. Refusing to lower it names the gap instead (M.3).
+ * wrapper (`lower_value_into_type`). Every placement intercepts it before this function is reached
+ * — a binding, an assignment, a return, a tail value, a pushed element and, since degrau 25, a
+ * struct-literal field (`find_field_decl_type`) and a call argument (`callee_param_types`). What is
+ * left for this stop is a placement whose DECLARED type the backend genuinely cannot name: an
+ * argument at a callee the checker left untyped (a generic instantiation), or a field of a
+ * declaration whose annotation did not resolve. Writing a raw `const 0` there would put a value a
+ * later `match` reads as the wrapper's BASE ADDRESS into the slot, i.e. a load from address 0, so
+ * refusing to lower it names the gap instead (M.3).
  *
  * @param LowerCtx ctx  the lowering context to append the constant into
  * @param checker::TExpr e  the null-literal expression (its `.type` decides value vs union)
@@ -10689,6 +10903,8 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *               crumb R0) — defaulted empty so a fixture with no alias in its parameter list
  *               need not build one; a bare `str`/`[]T` parameter resolves through
  *               `checker::resolve_type`'s builtin-name path regardless, needing no table entry
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
  * @return LoweredFunction | error  the built `LFunc` + its grown rodata/
  *                                  lifted tables; the `error` arm for a
  *                                  generic/extern function, or when its body
@@ -10700,7 +10916,7 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
  *           degrau, #382 N2).
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty(), ref_fns: []LRefFnInfo = teko::list::empty()) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty(), ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let fat_ret = is_fat_type(f.return_type)
@@ -10717,7 +10933,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
-        ref_fns = ref_fns; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums)
+        ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums)
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -10885,19 +11101,20 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     let externs = collect_externs(prog)
     let variants = collect_variant_defs(prog)
     let ref_fns = collect_ref_fns(prog)
+    let field_decls = match collect_field_decls(prog) { []LFieldDecls as fd => fd; error as e => return e }
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
     mut lifted: []LFunc = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns) { LoweredFunction as x => x; error as err => return err }
+    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
 }
 
@@ -11519,13 +11736,15 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  *                           threaded down to the one item kind it affects: a function)
  * @param table  the program's type table, threaded down to a function item's own params
  *               (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A, crumb R0)
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
  * @return LowerItemOut | error  the advanced module + loose-statement/lifted
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -11597,14 +11816,16 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @param bool flat_symbols  the static/shared-archive carve-out (`lower_function`'s own param)
  * @param table  the program's type table (`lower_function`'s own param, 0.3.1.0 raiz A, crumb R0)
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
  * @return LowerItemOut | error  the advanced module (unchanged `loose`) + the
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
@@ -11630,11 +11851,13 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  * @param bool flat_symbols  the static/shared-archive carve-out (`mangle_fn_symbol`'s `flat`) —
  *                           a loose top-level call to another project function must resolve the
  *                           SAME way that function's own symbol was declared
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
  * @return LoweredFunction | error  the built virtual-main `LFunc` + its grown
  *                                  rodata/lifted tables; the `error` arm when
  *                                  any loose statement fails to lower
  */
-fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty()) -> LoweredFunction | error {
+fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty()) -> LoweredFunction | error {
     let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
@@ -11643,7 +11866,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
-        ref_fns = ref_fns; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums)
+        ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums)
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
