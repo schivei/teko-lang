@@ -2889,6 +2889,148 @@ fn cg_prim_is_subint(k: checker::PrimKind) -> bool {
     k == checker::PrimKind::U8 || k == checker::PrimKind::U16 || k == checker::PrimKind::I8 || k == checker::PrimKind::I16
 }
 
+/**
+ * A recognized TAGGED-variant/member operand pairing in an equality/inequality comparison term.
+ * `subj_expr` is the operand whose resolved type is a `Variant` with neither a null NICHE nor a
+ * BOX-in-arena representation (REBOOT_PLAN §202/C3/C4 — either of those stores the runtime value
+ * as a bare pointer/fat handle with no `.tag` word, so it already compares correctly through the
+ * plain `==`/`!=`/`tk_str_eq` fallback and never needs this path). `member` is its comparison
+ * partner, already narrowed by the checker (`adopt_binop_operands`/`retype_literal`, C6/C2b) to
+ * exactly one of `subj_expr`'s own union members — `null` itself, or a numeric literal's sole
+ * fitting member.
+ */
+type CgVariantMemberCmp = struct {
+    /** The operand whose type is the tagged `Variant`. */
+    subj_expr: checker::TExpr
+    /** The variant's resolved member list (for the tag-constant prefix). */
+    variant_type: checker::Variant
+    /** The comparison partner, already resolved to one of `variant_type`'s members. */
+    member: checker::TExpr
+}
+
+/**
+ * cg_tagged_variant_side — is `e`'s type a TAGGED `Variant` (REBOOT_PLAN §202/C3/C4)? A niche or
+ * box-in-arena union's runtime value has no `.tag` word (the null pattern IS the pointer's own
+ * zero, or a fat value's zeroed head field), so only the true tagged `{ uint8_t tag; union {…} as; }`
+ * shape needs the `.tag`/`.as.<key>` comparison this module builds.
+ *
+ * @param prog  the checked program (class/interface/size resolution `cg_union_niche_member` and
+ *              `cg_union_box_member` need)
+ * @param e     the candidate operand
+ * @return      `e.type`'s `Variant` payload when it is tagged, else `null`
+ */
+fn cg_tagged_variant_side(prog: CgProg, e: checker::TExpr) -> checker::Variant | null {
+    match e.type {
+        checker::Variant as v => {
+            match cg_union_niche_member(prog, v) { checker::Type => return null; null => { } }
+            match cg_union_box_member(prog, v) { checker::Type => return null; null => { } }
+            v
+        }
+        _ => null
+    }
+}
+
+/**
+ * cg_variant_member_cmp — recognize an equality/inequality comparison TERM as a tagged-variant-vs-
+ * member comparison (`a == null` / `a != 5` over `a: i32 | null`): exactly one of `prev`/`opnd`
+ * resolves to a tagged `Variant` (`cg_tagged_variant_side`); the other is its member partner.
+ * Neither side being a tagged variant answers `null` — the ordinary `==`/`!=`/`tk_str_eq` fallback
+ * already handles a niche/box variant and a plain non-variant pairing alike.
+ *
+ * @param prog  the checked program
+ * @param prev  the comparison term's left-hand (already-adopted) operand
+ * @param opnd  the comparison term's right-hand (already-adopted) operand
+ * @return      the recognized pairing, or `null` when neither/both sides are a tagged variant
+ */
+fn cg_variant_member_cmp(prog: CgProg, prev: checker::TExpr, opnd: checker::TExpr) -> CgVariantMemberCmp | null {
+    let opnd_is_variant = match opnd.type { checker::Variant => true; _ => false }
+    let prev_is_variant = match prev.type { checker::Variant => true; _ => false }
+    if opnd_is_variant && prev_is_variant { return null }
+    if !opnd_is_variant {
+        match cg_tagged_variant_side(prog, prev) {
+            checker::Variant as v => return CgVariantMemberCmp { subj_expr = prev; variant_type = v; member = opnd }
+            null => { }
+        }
+    }
+    if !prev_is_variant {
+        match cg_tagged_variant_side(prog, opnd) {
+            checker::Variant as v => return CgVariantMemberCmp { subj_expr = opnd; variant_type = v; member = prev }
+            null => { }
+        }
+    }
+    null
+}
+
+/**
+ * cg_variant_member_payload_comparable — may `t` (a tagged variant's resolved member) be compared
+ * with plain C `==`/`!=` once its `.tag` already matches? True for a numeric `Prim` (never `Bool`,
+ * which `cast_kind`/`number_fits_member` already exclude from literal adoption) and `Byte`
+ * (`uint8_t`) — the only member kinds a numeric-literal adoption (C2b's `union_sole_numeric_member`)
+ * ever produces. Any other member kind (a fat `Str`/`Error`, a by-value `Named` struct, `Slice`,
+ * `Char`, …) has NO defined C `==` and is not yet supported here.
+ *
+ * @param t  the tagged variant's resolved member type (never `Null` — the caller handles that
+ *           tag-only case before asking)
+ * @return   true iff `t`'s C representation is plain-`==`-comparable
+ */
+fn cg_variant_member_payload_comparable(t: checker::Type) -> bool {
+    match t {
+        checker::Prim as p => p.kind != checker::PrimKind::Bool
+        checker::Byte => true
+        _ => false
+    }
+}
+
+/**
+ * cg_emit_variant_member_cmp — emit the boolean test for a recognized tagged-variant/member
+ * equality (`==`) or inequality (`!=`) comparison: single-evaluates the variant side into a fresh
+ * temp (a GNU statement-expression, mirroring `emit_coalesce`/`emit_safe_field_access`'s single-eval
+ * shape), then tests its `.tag` against the member's tag constant — and, when the member is a
+ * payload-comparable non-`null` member (`cg_variant_member_payload_comparable`), additionally
+ * compares the `.as.<key>` payload once the tag already matches (`null` carries no payload, so a
+ * `null` member stops at the tag test).
+ *
+ * @param buf       the emit buffer
+ * @param prog      the checked program (tag/member-key mangling)
+ * @param cmp       the recognized variant/member pairing
+ * @param eq        true for `==`, false for `!=`
+ * @param escaping  the region-escape set threaded to the variant/member emitters
+ * @param regions   the active region stack
+ * @param fn_body   the enclosing function's statements (defer resolution)
+ * @param dctx      the defer-lowering context
+ * @return          `buf` with the boolean test appended, or an error
+ * @throws          when the variant's C type or a member's key cannot be emitted, or the non-`null`
+ *                  member has no defined payload comparison (`cg_variant_member_payload_comparable`)
+ */
+fn cg_emit_variant_member_cmp(buf: []byte, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let is_null_member = match cmp.member.type { checker::Null => true; _ => false }
+    if !is_null_member && !cg_variant_member_payload_comparable(cmp.member.type) {
+        return error { message = "codegen: comparing a tagged union to a non-null, non-numeric member is not yet supported" }
+    }
+    let tmp = fresh_named("_vm", buf.len to i64)
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, prog, cmp.subj_expr.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    out = cb(out, " = (")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.subj_expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); (")
+    out = cb(out, tmp)
+    out = cb(out, ".tag ")
+    out = cb(out, if eq { "== " } else { "!= " })
+    out = match cg_emit_tag_prefix(out, checker::Variant { members = cmp.variant_type.members }) { []byte as o => o; error as err => return err }
+    let mk = match cg_member_key_str(cmp.member.type) { str as s => s; error as err => return err }
+    out = cb_upper(out, mk)
+    if is_null_member { return cb(out, "); })") }
+    out = cb(out, if eq { " && " } else { " || " })
+    out = cb(out, tmp)
+    out = cb(out, ".as.")
+    out = match cg_member_key(out, cmp.member.type) { []byte as o => o; error as err => return err }
+    out = cb(out, if eq { " == (" } else { " != (" })
+    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.member, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ")); })")
+}
+
 // emit_compare — a TCompare -> chained `a<b<c` => `((a<b) && (b<c))` over ADJACENT
 // operands. A lone subject (no rest) is degenerate: emit it bare. (C: TK_TEXPR_COMPARE.)
 fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
@@ -2906,22 +3048,30 @@ fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str
         let prev_str = match prev.type { checker::Str => true; _ => false }
         let opnd_str = match term.operand.type { checker::Str => true; _ => false }
         let is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
-        if (prev_str || opnd_str) && is_eq {
-            out = cb(out, "(")
-            if term.op == lexer::TokenKind::Ne { out = cb(out, "!") }
-            out = cb(out, "tk_str_eq(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, ", ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, "))")
-        } else {
-            out = cb(out, "(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, " ")
-            out = cb(out, op)
-            out = cb(out, " ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, ")")
+        let vm_cmp = if is_eq { cg_variant_member_cmp(prog, prev, term.operand) } else { null }
+        match vm_cmp {
+            CgVariantMemberCmp as cmp => {
+                out = match cg_emit_variant_member_cmp(out, prog, cmp, term.op == lexer::TokenKind::EqEq, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+            }
+            null => {
+                if (prev_str || opnd_str) && is_eq {
+                    out = cb(out, "(")
+                    if term.op == lexer::TokenKind::Ne { out = cb(out, "!") }
+                    out = cb(out, "tk_str_eq(")
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                    out = cb(out, ", ")
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                    out = cb(out, "))")
+                } else {
+                    out = cb(out, "(")
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                    out = cb(out, " ")
+                    out = cb(out, op)
+                    out = cb(out, " ")
+                    out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                    out = cb(out, ")")
+                }
+            }
         }
         prev = term.operand
         i++

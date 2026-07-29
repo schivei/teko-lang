@@ -1209,10 +1209,30 @@ fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
-/** lower_cast — a numeric `to` cast: lower the inner value, then emit the conversion LUn
-    chosen by the src/dst machine classes. Only numeric casts are in the N1 subset; a cast
-    to/from a non-primitive honest-stops. */
+/**
+ * lower_cast — a numeric `to` cast: lower the inner value, then emit the conversion LUn chosen by
+ * the src/dst machine classes. Only numeric casts are in the N1 subset; a cast to/from a non-
+ * primitive honest-stops — EXCEPT a `Variant`-targeted cast, which is never a user `to` (the
+ * checker restricts `to` to numeric/char/bool): it is the synthetic widening node the const inliner
+ * (`widen_inlined_const`, #630) wraps a variant const's collapsed case-member initializer in when a
+ * `let`-bound scalar-const reference's declared type (`e.type`, the union) differs from its
+ * substituted initializer's narrower member type — the SAME shape the C backend's `emit_cast`
+ * routes through `cg_cast_target_is_variant`/`emit_as`. This backend's placement-aware analog is
+ * `lower_value_into_type`, so a `Variant` target routes there instead of `prim_kind_of`, which has
+ * no single machine class for a union to answer with.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the cast expression (its resolved `.type` is the cast's target)
+ * @param checker::TCast c  the cast node (`c.expr` is the operand)
+ * @return Lowered | error  the lowered (converted, or union-coerced) value
+ * @throws  propagated from lowering the operand, or when neither side resolves to a single
+ *          machine class (a non-`Variant`, non-primitive cast target/source)
+ */
 fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | error {
+    match variant_type_of(e.type, ctx.variants) {
+        checker::Variant => return lower_value_into_type(ctx, e.type, c.expr)
+        null => { }
+    }
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
     let src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
     let dst = match prim_kind_of(e.type, ctx.enums, "cast target") { checker::PrimKind as p => p; error as err => return err }
@@ -1501,12 +1521,211 @@ fn str_eq_call_args(a: LoweredFat, b: LoweredFat) -> []u32 {
     args
 }
 
+/**
+ * variant_type_of — `t`'s resolved `Variant` payload, expanding a declared (`Named`) variant
+ * through the program's variant table first (`expand_named_variant` — a DECLARED variant reaches
+ * this backend nominally, so every union-shaped decision must expand it the same way the match
+ * subject does, else construction and this comparison would read two different member lists).
+ *
+ * @param checker::Type t  the operand's resolved type
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return checker::Variant?  `t`'s union payload, or `null` when `t` is not variant-shaped
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn variant_type_of(t: checker::Type, variants: []LVariantDef) -> checker::Variant | null {
+    match expand_named_variant(t, variants) {
+        checker::Variant as v => v
+        _ => null
+    }
+}
+
+/**
+ * variant_cmp_member_matches — does variant member `member` match a comparison partner already
+ * narrowed to type `ty`? Widens `variant_member_type_matches` (the construction-time BY-TYPE
+ * lookup) with a `Null` arm: a comparison partner's `null` literal is retyped to bare `checker::Null`
+ * by the checker (`retype_literal`, C6/C2b), a shape `variant_member_type_matches` never needs to
+ * recognize at CONSTRUCTION time (a null-union's own null case is always written by the fixed index
+ * 0, never by-type) but this comparison lookup does.
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param checker::Type ty  the comparison partner's own (already-narrowed) resolved type
+ * @return bool  whether `member` is the case `ty` names
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn variant_cmp_member_matches(member: checker::Type, ty: checker::Type) -> bool {
+    match member {
+        checker::Null => match ty { checker::Null => true; _ => false }
+        _ => variant_member_type_matches(member, ty)
+    }
+}
+
+/**
+ * variant_index_of_member_type — the index of `members` whose type matches `member_ty`
+ * (`variant_cmp_member_matches`) — the comparison-lowering counterpart of
+ * `variant_member_index_of` (kept SEPARATE rather than widening that construction-time lookup's
+ * `Null` handling, since a construction site never receives a bare `Null`-typed value for a
+ * general variant — only a comparison operand does).
+ *
+ * @param []checker::Type members  the variant's declared members, in order
+ * @param checker::Type member_ty  the comparison partner's resolved type
+ * @return u32  the matching member's declared index
+ * @throws  when no member of `members` matches `member_ty` (an internal invariant break — the
+ *          checker's `variant_has_member` already guarantees the fit)
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn variant_index_of_member_type(members: []checker::Type, member_ty: checker::Type) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_cmp_member_matches(members[i], member_ty) { return i to u32 }
+        i++
+    }
+    error { message = "native backend N1: comparison member's type is not a member of its variant (internal)" }
+}
+
+/**
+ * variant_cmp_payload_comparable — may a variant member of resolved type `t` be read as ONE
+ * machine word and compared with a plain `ICmp`/`FCmp`? True for a numeric `Prim` (never `Bool`,
+ * which the checker's literal adoption already excludes) and `Byte` — the only member kinds a
+ * numeric-literal adoption (C2b's `union_sole_numeric_member`) ever produces. Any other member
+ * kind (a fat `Str`/`[]T`, a by-value `Named` struct, …) has no single-word payload comparison
+ * this backend builds yet.
+ *
+ * @param checker::Type t  the variant member's resolved type (never `Null` — the caller handles
+ *                         that tag-only case before asking)
+ * @return bool  whether `t`'s payload may be compared as one word
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn variant_cmp_payload_comparable(t: checker::Type) -> bool {
+    match t {
+        checker::Prim as p => p.kind != checker::PrimKind::Bool
+        checker::Byte => true
+        _ => false
+    }
+}
+
+/**
+ * lower_variant_payload_eq — read the variant wrapper's single-word payload at `base` (the fixed
+ * `variant_payload_offset()` every case shares — `bind_scalar_case_payload`'s sibling read), lower
+ * `member_expr` for the value to compare it against, then AND their `ICmp`/`FCmp` equality with the
+ * already-computed `tag_eq` bool (`lower_bool_and`) — the tag word must ALSO match, else the payload
+ * word holds a different case's bit pattern and an accidental equality would be a false positive.
+ *
+ * @param LowerCtx ctx  the lowering context (already past the tag test)
+ * @param u32 base  the variant wrapper's base-address VReg
+ * @param checker::TExpr member_expr  the narrowed member-typed comparison partner
+ * @param u32 tag_eq  the already-computed `tag == index` bool VReg
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered | error  the combined `tag_eq && payload_eq` bool
+ * @throws  propagated from lowering `member_expr`, or when `member_expr.type` has no single-word
+ *          payload comparison (`variant_cmp_payload_comparable`)
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn lower_variant_payload_eq(ctx: LowerCtx, base: u32, member_expr: checker::TExpr, tag_eq: u32, line: u32, col: u32) -> Lowered | error {
+    if !variant_cmp_payload_comparable(member_expr.type) {
+        return error { message = "native backend N1: comparing a tagged union to a non-null, non-numeric member is not yet lowered (N2)" }
+    }
+    let lty = ltype_of(member_expr.type, ctx.enums)
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, variant_payload_offset(), line, col))
+    let pr = ctx_alloc(with_addr)
+    let with_load = ctx_append(pr.ctx, load_inst(pr.vreg, addr.vreg, lty, line, col))
+    let mo = match lower_expr(with_load, member_expr) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(member_expr.type, ctx.enums, "variant member comparison") { checker::PrimKind as p => p; error as err => return err }
+    let op = match cmp_lbinop_of(lexer::TokenKind::EqEq, k) { LBinOp as o => o; error as err => return err }
+    let r = ctx_alloc(mo.ctx)
+    let with_cmp = ctx_append(r.ctx, bin_inst(r.vreg, op, pr.vreg, mo.vreg, line, col))
+    lower_bool_and(with_cmp, tag_eq, r.vreg, line, col)
+}
+
+/**
+ * lower_variant_member_cmp — lower a recognized tagged-variant/member equality (`==`) or
+ * inequality (`!=`) comparison (`a == null` / `a != 5` over `a: i32 | null` — this backend's
+ * every union is uniformly tagged, `null_union_payload`'s doc, so no niche/box dial gates this the
+ * way the C emitter's `cg_variant_member_cmp` is gated): load the variant side's `.tag`
+ * (`lower_variant_tag_eq_test`, the SAME test a `match` arm's tag check uses) against `member_expr`'s
+ * declared index, then, for a non-`null` member, additionally AND the payload equality
+ * (`lower_variant_payload_eq` — `null` carries no payload, so a `null` member stops at the tag
+ * test). `!=` is the SAME `==` result, logically negated (`lower_logical_not`) rather than a
+ * separately-built OR chain.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the comparison expression (source position)
+ * @param checker::Variant variant_ty  the variant side's expanded member list
+ * @param checker::TExpr subj_expr  the variant-typed operand
+ * @param checker::TExpr member_expr  the already-narrowed member-typed operand
+ * @param bool eq  true for `==`, false for `!=`
+ * @return Lowered | error  the comparison's bool result
+ * @throws  propagated from lowering either operand, or when `member_expr`'s type names no member
+ *          of `variant_ty` or has no single-word payload comparison
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn lower_variant_member_cmp(ctx: LowerCtx, e: checker::TExpr, variant_ty: checker::Variant, subj_expr: checker::TExpr, member_expr: checker::TExpr, eq: bool) -> Lowered | error {
+    let subj = match lower_expr(ctx, subj_expr) { Lowered as x => x; error as err => return err }
+    let index = match variant_index_of_member_type(variant_ty.members, member_expr.type) { u32 as i => i; error as err => return err }
+    let msubj = MatchSubj { ty = variant_ty; vreg = subj.vreg; is_fat = false; len = 0 }
+    let tag_test = lower_variant_tag_eq_test(subj.ctx, msubj, index to i64, e.line, e.col)
+    let is_null_member = match member_expr.type { checker::Null => true; _ => false }
+    let eq_result = if is_null_member {
+        Lowered { ctx = tag_test.ctx; vreg = tag_test.vreg }
+    } else {
+        match lower_variant_payload_eq(tag_test.ctx, subj.vreg, member_expr, tag_test.vreg, e.line, e.col) { Lowered as x => x; error as err => return err }
+    }
+    if eq { return eq_result }
+    lower_logical_not(eq_result, e.line, e.col)
+}
+
+/**
+ * lower_variant_member_compare_dispatch — recognize a single (non-chained) equality/inequality
+ * `TCompare` as a tagged-variant-vs-member comparison: exactly one of `cmp.first`/its lone
+ * `cmp.rest[0].operand` resolves to a `Variant` (`variant_type_of`) and the other is not itself
+ * variant-shaped (a variant-vs-variant pairing — reachable only when both sides already share the
+ * SAME declared type, `is_comparable`'s plain `type_eq` arm — falls through unchanged to the
+ * ordinary ICmp path below, exactly like `emit_compare`'s C twin). A chained comparison, an ordering
+ * operator, or a pairing with no variant side answers `null` — `lower_compare` falls through to the
+ * plain chain for all three.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the comparison expression (source position)
+ * @param checker::TCompare cmp  the comparison node
+ * @return Lowered | null | error  the recognized comparison's result, `null` when unrecognized, or
+ *                                 a propagated lowering error
+ * @since 0.3.1.0 (null-union comparison — cargo/0.3.1.0-null-adopt)
+ */
+fn lower_variant_member_compare_dispatch(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lowered | null | error {
+    if cmp.rest.len != 1 { return null }
+    let op = cmp.rest[0].op
+    if op != lexer::TokenKind::EqEq && op != lexer::TokenKind::Ne { return null }
+    let opnd = cmp.rest[0].operand
+    let eq = op == lexer::TokenKind::EqEq
+    let first_v = variant_type_of(cmp.first.type, ctx.variants)
+    let opnd_v = variant_type_of(opnd.type, ctx.variants)
+    match first_v {
+        checker::Variant as v => {
+            match opnd_v { checker::Variant => return null; null => { } }
+            match lower_variant_member_cmp(ctx, e, v, cmp.first, opnd, eq) { Lowered as r => return r; error as err => return err }
+        }
+        null => { }
+    }
+    match opnd_v {
+        checker::Variant as v => match lower_variant_member_cmp(ctx, e, v, opnd, cmp.first, eq) { Lowered as r => return r; error as err => return err }
+        null => null
+    }
+}
+
 /** lower_compare — a TCompare (`first` + `rest` chain) -> the chain of ICmp/FCmp opcodes,
     ANDed together. A `str` subject goes to `lower_str_compare` (two words, no single machine
-    comparison). A lone subject (no `rest`) is degenerate: its own value is already the
-    bool result (mirrors emit_compare's C twin). */
+    comparison). A tagged-variant-vs-member comparison (`a == null` / `a != 5` over
+    `a: i32 | null`) goes to `lower_variant_member_compare_dispatch`. A lone subject (no `rest`)
+    is degenerate: its own value is already the bool result (mirrors emit_compare's C twin). */
 fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lowered | error {
     if cmp.rest.len > 0 && is_str_type(cmp.first.type) { return lower_str_compare(ctx, e, cmp) }
+    match lower_variant_member_compare_dispatch(ctx, e, cmp) {
+        Lowered as r => return r
+        error as err => return err
+        null => { }
+    }
     let lo = match lower_expr(ctx, cmp.first) { Lowered as x => x; error as err => return err }
     if cmp.rest.len == 0 { return Lowered { ctx = lo.ctx; vreg = lo.vreg } }
     let chain = match lower_compare_terms(lo.ctx, e, cmp.first.type, lo.vreg, cmp.rest) { CmpChain as c => c; error as err => return err }

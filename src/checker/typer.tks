@@ -578,11 +578,13 @@ type BinOperands = struct {
 }
 
 /**
- * adopt_binop_operands — when a binary's operands differ only because one is an untyped numeric
- * LITERAL, retype that literal to the other (non-literal) operand's type so `line + 1` / `n % 10`
- * type-check (C6): the non-literal operand's type wins, and the literal node is rebuilt with it. The
- * left operand takes priority when both would adopt. Already-equal or non-adoptable operands pass
- * through unchanged.
+ * adopt_binop_operands — when a binary's operands differ only because one is an untyped LITERAL
+ * (numeric, `null`, or an `if`/`match`/array composite whose leaves are literals), retype that
+ * literal to the other (non-literal) operand's type through `retype_literal` so `line + 1` /
+ * `n % 10` type-check (C6) and `a != null` over an `i32 | null` `a` retypes the bare `null` to its
+ * matching `Null` member rather than the whole union (the union is a `Variant`, and codegen only
+ * ever accepts a bare `null` typed exactly `Null`). The left operand takes priority when both would
+ * adopt. Already-equal or non-adoptable operands pass through unchanged.
  *
  * @param l  the typed left operand
  * @param r  the typed right operand
@@ -590,8 +592,8 @@ type BinOperands = struct {
  */
 fn adopt_binop_operands(l: TExpr, r: TExpr) -> BinOperands {
     if type_eq(l.type, r.type) { return BinOperands { l = l; r = r } }
-    if literal_adopts(l, r.type) { return BinOperands { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col }; r = r } }
-    if literal_adopts(r, l.type) { return BinOperands { l = l; r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
+    if literal_adopts(l, r.type) { return BinOperands { l = retype_literal(l, r.type); r = r } }
+    if literal_adopts(r, l.type) { return BinOperands { l = l; r = retype_literal(r, l.type) } }
     BinOperands { l = l; r = r }
 }
 
@@ -800,6 +802,10 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
         if i == 0 { first = adopted.l }
         match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
         if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        let is_variant_member_pair = variant_has_member(adopted.l.type, adopted.r.type) || variant_has_member(adopted.r.type, adopted.l.type)
+        if is_variant_member_pair && !op_is_eq_ne(c.rest[i].op) {
+            return error { message = "a union compares to one of its own members only with `==`/`!=` (ordering needs an explicit `to`)" }
+        }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
         prev = adopted.r
         i++
