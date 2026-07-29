@@ -24,19 +24,40 @@
 # KNOWN-STOP que falha (vermelho) não necessariamente significa que o erro que existia foi
 # corrigido"* — it may equally mean the direction changed.
 #
-# THE PROMOTION CRUMB, for the wasm version, so it arrives ready:
-#   1. SPLIT THE ROW'S CLAIM. `When built` + `Then object well-formed` needs NO engine — the same
+# THE FIXTURE IS CALIBRATED TO PASS, WHICH IS THE DEEPER DEFECT (owner, 2026-07-29). The program
+# this row compiles is `cases/wasm_exit7.tks`, and it is one line: `exit(7)`. No `alloca`, no rodata,
+# no `Ptr`-typed signature — which is EXACTLY the subset `src/backend/stackify.tks`'s
+# `C1-wasm64-scope` still refuses. So the row avoids everything hard and would stay green even if
+# wasm were broken for every real program. That is the "fixture that proves it compiles, not that it
+# works" pattern this lane has now been bitten by five times.
+#
+# WHAT THE OWNER RULED, and it supersedes a mere engine-provisioning fix: *"WASI e Browser ganham
+# cada um uma versão dedicada, compilando um app real."* A one-line exit is not a wasm proof.
+#
+# ONE PREMISE OF HIS, CORRECTED BY MEASUREMENT, recorded so nobody re-derives it: he suspected the
+# failures came from the compiler trying to compile ITSELF to wasm. It does not. There is no wasm
+# producer leg — `scripts/ci_producer_matrix.sh` declares only linux-*, macos-arm64 and
+# windows-x86_64, and its "wasm regressor" is a CONSUMER that downloads the linux-x86_64-glibc asset
+# and uses that x86-64 compiler to build a wasm program. Self-hosting on wasm is not attempted, and
+# could not usefully be: WASI has no fork/exec and the browser has no filesystem, so a compiler that
+# spawns processes and walks file trees is the worst possible wasm candidate.
+#
+# THE PROMOTION CRUMB, for the dedicated wasm version, so it arrives ready:
+#   1. REPLACE THE FIXTURE WITH A REAL APP — the owner's ruling, and the step that actually raises
+#      the bar. It must exercise what `C1-wasm64-scope` refuses (alloca, rodata, `Ptr` signatures),
+#      because a wasm proof that avoids those measures nothing. Expect it to go RED at first; that
+#      red IS the wasm work item, and threading `ptr64` through the frame/rodata plumbing is the
+#      named scoped follow-up.
+#   2. SPLIT THE ROW'S CLAIM. `When built` + `Then object well-formed` needs NO engine — the same
 #      insight that removed mingw from the COFF cross row (docs/memory/teko-laws-digest.md, "cross
 #      compiling SIM, mingw NUNCA"): a claim about the emitted artefact's FORMAT is checkable
-#      anywhere. Only `and run` / `Then exit = 7` wants an engine. Split, and the format half runs
-#      on all six legs immediately.
-#   2. Then give one both-tier leg an engine, so the executing half has an owner every PR.
-#   3. Drop the "(or honest-skips without the toolchain)" tail from the scenario name — a row must
+#      anywhere. Only `and run` wants an engine. Split, and the format half runs on all six legs.
+#   3. Then give one both-tier leg an engine, so the executing half has an owner every PR.
+#   4. Drop the "(or honest-skips without the toolchain)" tail from the scenario name — a row must
 #      not carry its own excuse.
-#   4. Retire this file. A pin outliving its gap is a lie in the other direction.
-# Known wasm constraints already recorded, so step 2 is not a surprise: WASI and Browser are 64-bit
-# only (owner), and `src/backend/stackify.tks`'s `C1-wasm64-scope` still refuses `LAlloca`, rodata
-# and `Ptr` signatures on wasm64.
+#   5. Retire this file. A pin outliving its gap is a lie in the other direction.
+# WASI and Browser are 64-bit only (owner), so step 1's app lands on wasm64, where the scope stop
+# lives — the two constraints meet in the same crumb, not in separate ones.
 #
 # NO YAML PARSER, NO GNU-ONLY TOOL. It walks the workflow with awk, because this gate runs on all
 # six hosts and pyyaml is not guaranteed on any of them — and `sed -E`/`grep -P` are absent from the

@@ -603,3 +603,48 @@ Cross-link completo (Linux → binário Windows) sem mingw exige o **linker pró
 planeia para uma versão adiante. Até lá, o cross honesto é: emitir o objeto, validar o formato,
 parar. Adiado por ordem explícita — *"quando todos os natives estiverem funcionando"* — não por
 incapacidade.
+
+## Lei — wasm prova-se com um app real, e WASI/Browser ganham versão própria (dono, 2026-07-29)
+
+Palavras dele:
+
+> Acredito que as falhas do wasm ocorrem pq o compilador está tentando compilar a si mesmo em wasm,
+> o que não deveria acontecer, e por isso também WASI e Browser ganham cada um uma versão dedicada,
+> compilando um app real.
+
+### A premissa, corrigida por medição
+
+O compilador **não** se compila em wasm, e nada tenta. Não existe perna produtora wasm:
+`scripts/ci_producer_matrix.sh` declara `linux-*`, `macos-arm64` e `windows-x86_64`, e o
+*"wasm regressor"* que ele cita em `:146` é **consumidor** — baixa o asset `linux-x86_64-glibc` e usa
+esse compilador x86-64 para construir um programa wasm. Fica registado para ninguém re-derivar.
+
+E não poderia ser de outro modo com proveito: **o WASI não tem `fork`/`exec` e o browser não tem
+sistema de ficheiros.** Um compilador que lança processos e percorre árvores de ficheiros é o pior
+candidato possível a binário wasm por esta rota.
+
+### A conclusão, que fica de pé — e com razão mais forte
+
+O programa que a linha wasm compila é `cases/wasm_exit7.tks`, e é uma linha:
+
+```teko
+exit(7)
+```
+
+Sem `alloca`, sem rodata, sem assinatura com `Ptr`. E esses três são **exatamente** o subconjunto que
+o `C1-wasm64-scope` de `src/backend/stackify.tks` ainda recusa. Logo a fixture está calibrada para
+passar por evitar tudo o que é difícil: **ela ficaria verde mesmo que o wasm estivesse quebrado para
+qualquer programa real.**
+
+É a quinta vez nesta lane que o mesmo padrão morde — *fixture que verifica que compila, não que
+funciona*. A regra que já valia para valores vale igual para alvos: **uma fixture calibrada para o
+subconjunto suportado não mede o alvo, mede a calibração.**
+
+### O que isto muda no pin
+
+O KNOWN-STOP do wasm (`scripts/wasm_known_stop_gate.sh`) continua válido, mas a sua migalha de
+promoção passou a começar noutro sítio. Não é "dar motor a uma perna both-tier" — é **trocar a
+fixture por um app real que exercite alloca, rodata e assinaturas `Ptr`**, e esperar vermelho no
+início. Esse vermelho É o item de trabalho da versão do wasm, e casa com o seguimento já nomeado:
+fiar `ptr64` pelo frame e pela rodata. Como WASI e Browser são só 64 bits por ordem do dono, o app
+cai em wasm64 — onde a paragem vive. As duas restrições encontram-se na mesma migalha.
