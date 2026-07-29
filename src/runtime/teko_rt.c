@@ -1772,6 +1772,12 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle) {
     return (tk_ffi_u64res){ .ok = false };
 }
 
+bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index) {
+    tk_ffi_u64res r = tk_rt_last_index_of(hay, needle);
+    if (r.ok) { *out_index = r.value; }
+    return r.ok;
+}
+
 // (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
 // A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
 // child, so an expected exit code is the same whether the program is run directly through
