@@ -10,7 +10,7 @@ source: docs/design/ref-transparent-model.md, docs/design/marshall-spec.md, DECI
 
 **Mandatory ref modifier everywhere:** functions receiving class args use `ref` (receiver implicit; params explicit at call); same for stored borrows in structs (ref fields = borrowed pointers). `Ref<T>` internal (no user surface); capability-import model for Wasm.
 
-**Ref grafia:** everywhere in surface (param + field decls); `Ref<>` in internal C (VM/codegen); cap-2 safety invariant (two owning refs max per heap allocation; spine infers, checker validates); unbounded unsafe (explicit `unsafe` type modifier breaks the cap).
+**Ref grafia:** everywhere in surface (param + field decls); `Ref<>` in internal C (ROTA C / native codegen); cap-2 safety invariant (two owning refs max per heap allocation; spine infers, checker validates); unbounded unsafe (explicit `unsafe` type modifier breaks the cap).
 
 **Never-null refs:** `T` is guaranteed non-null (NULL ≠ absent); `T?` is the absence vessel. Bare `?` is narrowing (T → T?); methods return T or T? explicitly.
 

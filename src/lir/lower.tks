@@ -260,9 +260,9 @@ fn enum_carrier_ltype() -> LType { LType::I32 }
 /** ltype_of — the machine class of a RESOLVED checker::Type: an integer/float by width,
     an `enum`'s integer carrier for a Named type registered in `enums` (`enum_carrier_ltype`),
     or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Optional/Variant/
-    Func/Byte — all EXERCISED from N2; `byte`'s own I8 mapping is deferred past A1-4, a
-    seed-VM match quirk on `checker::Byte` misfires when the SUBJECT is a `Slice{element:
-    Byte}` — see `prim_kind_of`'s doc for the narrower, SAFE fix this phase actually needs),
+    Func/Byte — all EXERCISED from N2; `byte`'s own I8 mapping is deferred past A1-4,
+    CAUTION: only apply this mapping to an operand's OWN type, never to a container's element type
+    (e.g., do not map `Byte` in `Slice{element: Byte}`) — see `prim_kind_of`'s doc for the narrower, SAFE fix this phase actually needs),
     or Void for the return-only marker. `enums` is REQUIRED, with no empty default: a caller
     that forgot it would silently size every enum as an 8-byte pointer at THAT site only, and a
     per-site disagreement about one type's width is the corruption this parameter prevents.
@@ -1142,9 +1142,9 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | 
  * (`enum_ordinal_kind_of`), distinct from the catch-all below so a future flags-arithmetic
  * increment finds its own diagnostic instead of this one silently swallowing it. ONLY ever
  * called on an operand's OWN type here (a cast/binary/unary/compare/in-expr operand, never a
- * container's element type) — safe against a seed-VM match quirk where `checker::Byte` as an
- * arm misfires when the SUBJECT is instead `Slice{element: Byte}` (verified: a BARE `Byte`
- * subject resolves correctly; do not widen this match's use to a container type).
+ * container's element type) — keep this call site narrow; do not apply to container types like
+ * `Slice{element: Byte}` (verified: a BARE `Byte` subject resolves correctly; container-element
+ * mappings belong elsewhere).
  *
  * @param checker::Type t  the operand's own type
  * @param []LEnumInfo enums  the program's declared-enum table (`ctx.enums`), consulted ONLY to
@@ -6954,8 +6954,7 @@ fn utf8_codepoint(s: str) -> i64 {
 }
 
 /** lower_char_lit — a char literal -> its decoded codepoint (the LIR's scalar
-    representation of `char` — distinct from the VM/C backend's `{ptr,len}` carrier; the
-    interp is an exit-code oracle, not a layout verifier, §5.1). */
+    representation of `char` — the interp is an exit-code oracle, not a layout verifier, §5.1). */
 fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit) -> Lowered {
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
@@ -7264,9 +7263,8 @@ type ParamBind = struct {
  * bind_fn_params — bind every declared parameter into the function prologue, in order,
  * threading the running func/env/register-index through `bind_param` (`lower_function`'s
  * prologue, extracted so the fat-vs-scalar branch lives in exactly one place). Named
- * distinctly from `lir_interp.tks`'s OWN `bind_params` (the VM oracle's block-arg binder,
- * an unrelated function over `[]u32` — this module has no overload-by-type, so the two
- * cannot share a name).
+ * distinctly from `lir_interp.tks`'s OWN `bind_params` (a different block-arg binder function
+ * over `[]u32` — this module has no overload-by-type, so the two cannot share a name).
  *
  * @param LFunc func  the (still paramless-bodied) function to extend — its entry block (id 0)
  *                     receives one `param` inst per incoming register
