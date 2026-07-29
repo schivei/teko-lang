@@ -1864,9 +1864,10 @@ fn assert_seed_symbol(callee: parser::Path) -> str | null {
 
 /**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
- * three families the N1 call path resolves DIRECTLY: io/process, coverage sinks and arena
- * checkpoints. Split into one predicate per family so a family grows without lengthening the
- * others.
+ * four families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * checkpoints, and the one `teko::env` host-surface primitive with a native lowering
+ * (`builtin_env_symbol`). Split into one predicate per family so a family grows without
+ * lengthening the others.
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
@@ -1874,7 +1875,30 @@ fn assert_seed_symbol(callee: parser::Path) -> str | null {
 fn native_builtin_symbol(last: str) -> str | null {
     match builtin_io_symbol(last) { str as s => return s; null => { } }
     match builtin_cov_symbol(last) { str as s => return s; null => { } }
-    builtin_arena_symbol(last)
+    match builtin_arena_symbol(last) { str as s => return s; null => { } }
+    builtin_env_symbol(last)
+}
+
+/**
+ * builtin_env_symbol — the runtime twin of the ONE `teko::env` host-surface builtin this N1
+ * subset lowers directly: `args` (`teko::env::args`). Its fixed-ABI shape (`tk_str
+ * *tk_rt_args(uint64_t *n)`, `teko_rt.h`) already matches the fat-return hidden-out-param
+ * convention `lower_call_fat` builds for EVERY fat-returning call (the caller allocates an
+ * 8-byte length slot and passes its address as the call's own last argument), so once the
+ * symbol resolves, no extra plumbing is needed for the ABI itself.
+ *
+ * Scoped to `args` ONLY (0.3.1 native-args-native fix): the rest of `teko::env`/`io`/`fs`/
+ * `process`'s host surface (`var`/`cwd`/`read_file`/`write_file`/`list_dir`/`run`/…) each carry
+ * their OWN result shape (`str | error`, `error?`, `[]str | error`, …) that native lowering does
+ * not build yet — a bare call to one of those still falls through to `call_symbol`'s honest
+ * `builtin \`<name>\` not yet lowered` stop, unchanged.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_rt_args"` for `args`, else `null`
+ */
+fn builtin_env_symbol(last: str) -> str | null {
+    if last == "args" { return "tk_rt_args" }
+    null
 }
 
 /**
@@ -8553,4 +8577,103 @@ fn close_virtual_main(tail: LowerMainTail) -> LowerCtx | error {
     let r = ctx_alloc(replayed)
     let c0 = ctx_append(r.ctx, const_int_inst(r.vreg, 0, 0, 0))
     ctx_append(c0, ret_inst(r.vreg, 0, 0))
+}
+
+/**
+ * NATIVE_ENTRY_VMAIN_SYMBOL — the internal symbol `wrap_native_entry` renames the synthesized
+ * virtual-main `LFunc` to, once its own platform-ABI entry stub takes the bare `"main"` name.
+ * Never producible by `mangle_fn_symbol`: every real user symbol is either `TEKO_USER_PREFIX`-
+ * decorated or, under `flat`, `<ns>__<name>` — both shapes require a non-empty escaped name
+ * segment, never this literal's leading double underscore — so a real program's own function
+ * can never collide with it.
+ */
+const NATIVE_ENTRY_VMAIN_SYMBOL: str = "__teko_native_vmain"
+
+/**
+ * wrap_native_entry — the NATIVE (ELF/COFF/Mach-O) object's own process entry point: renames the
+ * synthesized virtual-main `LFunc` (`lower_virtual_main`, always emitted as the bare symbol
+ * `"main"`) to `NATIVE_ENTRY_VMAIN_SYMBOL`, then appends a tiny platform-ABI STUB `LFunc`, itself
+ * named `"main"`, that receives the platform's own `argc`/`argv` entry registers, forwards them
+ * to the runtime's `tk_set_args` BEFORE anything else runs, then calls the renamed virtual-main
+ * and returns its result — mirroring the C emitter's own generated `main`
+ * (`codegen.tks`'s `emit_program_main_body`: `int main(int argc, char **argv) { tk_set_args(argc,
+ * argv); … }`), so `teko::env::args()` (`tk_rt_args`) observes the real process argv under the
+ * native backend too, instead of the runtime's zero-initialized globals (0.3.1 native-args fix).
+ *
+ * NOT applied to the wasm targets (`project.tks`'s `emit_native_wasm` never calls this): a
+ * WASI/browser module has no `argc`/`argv` entry convention to receive here (WASI's own arg
+ * surface is a SEPARATE import pair, `args_sizes_get`/`args_get`, out of this fix's scope), and
+ * `lower_program`'s `"main"` `LFunc` is SHARED with `stackify.tks`'s `wasm_synth_start`, whose
+ * `_start` does a zero-operand `call $main` sized off `main`'s OWN type-table entry — widening
+ * `main`'s arity there would desync that call's operand count from its type. Splitting the entry
+ * stub OFF as its own separate `LFunc` (rather than widening `lower_virtual_main`'s own
+ * signature) is what keeps the wasm path byte-for-byte untouched.
+ *
+ * THE ABI SHAPE IS PLATFORM-UNIFORM, deliberately: the stub is ordinary target-independent LIR
+ * (an `I32`/`Ptr`-param, `I32`-returning function like any other), so the SAME EXISTING
+ * per-target ABI lowering (`SYSV64`/`WIN64`/`AAPCS64`, already proven for every other function's
+ * incoming int/pointer parameters) binds `argc`/`argv` to the right entry registers on both
+ * x86-64 (SysV `edi`/`rsi`, Win64 `ecx`/`rdx`) and arm64 (AAPCS64 `w0`/`x1`) — no new
+ * per-architecture code is needed in this module.
+ *
+ * @param m  the lowered, target-independent module (its own `"main"` always present —
+ *           `lower_program` unconditionally synthesizes one)
+ * @return   `m` with its virtual-main renamed and the platform-entry stub appended, or a NAMED
+ *           internal error when `m` carries no `"main"` (unreachable under `lower_program`)
+ */
+pub fn wrap_native_entry(m: LModule) -> LModule | error {
+    let renamed = match native_entry_rename_vmain(m.funcs) { []LFunc as fs => fs; error as e => return e }
+    let stubbed = teko::list::push(renamed, native_entry_stub())
+    LModule { funcs = stubbed; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+}
+
+/**
+ * native_entry_rename_vmain — `funcs` with the synthesized virtual-main (the exact,
+ * un-namespaced `"main"` symbol `lower_virtual_main` builds) renamed to
+ * `NATIVE_ENTRY_VMAIN_SYMBOL`, every other function unchanged.
+ *
+ * @param funcs  the lowered module's whole-program function table
+ * @return       `funcs` with the virtual-main renamed, or a NAMED internal error when no
+ *               function is named `"main"`
+ */
+fn native_entry_rename_vmain(funcs: []LFunc) -> []LFunc | error {
+    mut out: []LFunc = teko::list::empty()
+    mut found = false
+    mut i: u64 = 0
+    loop {
+        if i >= funcs.len { break }
+        let f = funcs[i]
+        if f.symbol == "main" {
+            found = true
+            out = teko::list::push(out, rename_lfunc(f, NATIVE_ENTRY_VMAIN_SYMBOL))
+        } else {
+            out = teko::list::push(out, f)
+        }
+        i++
+    }
+    if !found { return error { message = "native backend: wrap_native_entry — no `main` entry function found in the lowered module (internal)" } }
+    out
+}
+
+/**
+ * native_entry_stub — the platform-ABI `"main"` `LFunc` itself: bind the two incoming
+ * `argc`/`argv` registers, call `tk_set_args(argc, argv)`, call the renamed virtual-main with no
+ * arguments, and return its result. Built directly over the raw `LFunc`/`append_inst`/
+ * `alloc_vreg` primitives (no `LowerCtx` needed — there is no checker AST behind this
+ * synthesized body, only four fixed instructions).
+ *
+ * @return the entry stub `LFunc`
+ */
+fn native_entry_stub() -> LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::empty(), LType::I32), LType::Ptr)
+    let fn0 = new_func("main", 2, ptypes, LType::I32)
+    let with_argc = append_inst(fn0, 0, param_inst(0, 0, 0, 0))
+    let with_argv = append_inst(with_argc, 0, param_inst(1, 1, 0, 0))
+    mut set_args_args: []u32 = teko::list::empty()
+    set_args_args = teko::list::push(set_args_args, 0)
+    set_args_args = teko::list::push(set_args_args, 1)
+    let with_set = append_inst(with_argv, 0, void_call_inst("tk_set_args", set_args_args, false, 0, 0))
+    let called = alloc_vreg(with_set)
+    let with_call = append_inst(called.func, 0, call_inst(called.vreg, NATIVE_ENTRY_VMAIN_SYMBOL, teko::list::empty(), false, 0, 0))
+    append_inst(with_call, 0, ret_inst(called.vreg, 0, 0))
 }
