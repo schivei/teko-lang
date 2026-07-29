@@ -1374,6 +1374,55 @@ fn f_loop_tail_no_break() -> i64 {
     0
 }
 
+/**
+ * strip_leading_hash_lines — `gcd_subtract`'s breakless-loop-tail shape, one axis over
+ * (scalar -> FAT): the LAST statement is a bare `loop { … }` that never `break`s, every exit an
+ * inner `return`, but this function returns `str` instead of `i64` — the exact shape
+ * `src/build/regression.tks::snippet_chunk_skip_attr_lines` uses in the compiler's own source.
+ * Degrau 13 closed the scalar axis (`lower_tail_non_expr` falling back to `diverging_tail_value`);
+ * the FAT axis (`lower_tail_non_expr_fat`) honest-stopped unconditionally until 0.3.1.0 degrau 20,
+ * because a fat-typed if-expr-arm/function-body tail that only diverges through inner `return`s
+ * never actually produces a (ptr, len) pair of its own to fall through with.
+ *
+ * Strips every leading line that starts with `#` (one per line, `\n`-terminated) off `text`,
+ * returning whatever remains.
+ *
+ * @param text  the input, `\n`-joined lines
+ * @return      `text` with every leading `#`-prefixed line removed
+ */
+fn strip_leading_hash_lines(text: str) -> str {
+    mut rest = text
+    loop {
+        if rest.len == 0 || rest[0] != b'#' { return rest }
+        mut k: u64 = 0
+        loop {
+            if k >= rest.len { break }
+            if rest[k] == b'\n' { break }
+            k = k + 1
+        }
+        if k >= rest.len { return "" }
+        rest = teko::str::slice(rest, k + 1, rest.len)
+    }
+}
+
+/**
+ * f_fat_loop_tail_no_break — `strip_leading_hash_lines`'s own breakless-loop-tail shape,
+ * exercised by VALUE (not merely "does it compile"): no leading `#` line, one, two consecutive
+ * ones, an all-`#` input with no trailing newline (the `return ""` exit), and the empty string
+ * (the FIRST loop iteration already satisfies the exit test, mirroring `f_loop_tail_no_break`'s
+ * own x==y edge).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_fat_loop_tail_no_break() -> i64 {
+    if strip_leading_hash_lines("hello") != "hello" { return 1 }
+    if strip_leading_hash_lines("#a\nhello") != "hello" { return 2 }
+    if strip_leading_hash_lines("#a\n#b\nhello") != "hello" { return 3 }
+    if strip_leading_hash_lines("#a") != "" { return 4 }
+    if strip_leading_hash_lines("") != "" { return 5 }
+    0
+}
+
 /** GBox<T> — a one-field generic wrapper, the shape `parser::Parsed<T>` (asm_parse's own return
  * payload) is: a plain generic struct, never a variant/enum in its own right. */
 type GBox<T> = struct { value: T }
