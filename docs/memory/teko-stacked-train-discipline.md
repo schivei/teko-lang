@@ -593,6 +593,15 @@ env var sem varrer os scripts que afirmavam sobre a mensagem antiga. Lead time d
 defeito de lead time potencial de dois segundos — **a varredura de consumidores de uma string que
 se está removendo faz parte da remoção**, não é zelo opcional.
 
+> **[AUDIT] CATEGORIA B — GENERALIZADA**
+>
+> Citação literal: *"quanto a ordem, deveria drenar tudo de uma vez"* (owner 2026-07-27)
+>
+> A regra afirma além disso: que é lei permanente e universal de drenagem ("acumule as cargas prontas, faça TODOS os merges localmente, e empurre uma vez"); a citação refere apenas uma situação específica naquele dia — acúmulo e conflitos. O dono esclareceu (2026-07-29): *"Esse de mergear tudo e empurrar foi a sessão anterior quem escreveu, não eu, apenas pedi uma vez pra fazer isso pq ela estava com acúmulo e conflitos."*
+>
+> Esta continua sendo conselho valioso — o custo medido é real (cinco pushes = cinco corridas + quatro cancelamentos). Muda de LEI para OBSERVAÇÃO.
+>
+
 ### O DRENO É UM MARCO SÓ — drenar tudo de uma vez (owner 2026-07-27)
 
 > *"quanto a ordem, deveria drenar tudo de uma vez"*
