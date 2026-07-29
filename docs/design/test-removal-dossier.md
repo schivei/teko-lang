@@ -56,8 +56,9 @@ Each entry: file · what it covers · who else covers it (retention) · verdict 
 | `#test` names | `own_probe_resolves_within_its_own_namespace`, `inner_probe_resolves_within_its_own_namespace`, `build_items_no_early_return_has_three`, `build_items_early_return_has_two`, `holder_field_not_corrupted_by_later_pushes` |
 
 - **What it covered:** the module was a minimal repro + guard for a namespace-resolution defect in the
-  retired interpreter engine, where same-named functions across different namespaces could be
-  misresolved during name lookup.
+  execution engine retired by #524, where same-named functions across different namespaces could be
+  misresolved during name lookup. Neither survivor inherits the defect: the C route resolves through
+  `src/codegen/codegen.tks`, the own backend through `src/backend/**`.
 - **Why obsolete (proven):** the defected code path was retired **100 %** (issue #524;
   owner-ratified 2026-07-12). **The guarded code path no longer exists** —
   the strongest possible obsolescence proof.
