@@ -485,3 +485,23 @@ utilizador ganha a resolução mas continua a ser tratado como divergente, e o c
 verificação de tipo de retorno nesse ramo. **Na rota C o `cc` apanha por acidente. O backend nativo
 não tem `cc`** — e esta lane é precisamente a que remove essa rede do Linux. Verificado por leitura
 directa, não aceite do relatório.
+
+## A regra de entrada na `main` — precisada pelo dono (2026-07-29)
+
+Literal: *"Eu bloqueei force-push até para mim e tudo que vai pra main tem que passar pela
+`remodel/**` com pr e bump."*
+
+**Nada entra na `main` senão por um `remodel/**` com PR e bump de versão.** Sem atalho, sem empurrão
+directo, sem reescrita de história.
+
+Isto PRECISA duas leituras anteriores que estavam menos completas:
+
+- O force-push não está recusado apenas ao token do agente — está bloqueado **para toda a gente,
+  incluindo o dono**, por protecção que ele pôs sobre si próprio. Medições anteriores registaram a
+  recusa do lado do agente e deixaram em aberto se era limitação de token ou regra de repositório.
+  É regra de repositório, e é universal.
+- A linearidade `main` ↔ org e `remodel/**` ↔ `main` não é um hábito: é o ÚNICO caminho que existe.
+
+Consequência já apurada num caso concreto: os 13.4 MB de blobs `.fixpoint/` no histórico são
+**permanentes** enquanto a protecção existir, porque nenhum squash remove um blob já ancestral e
+nenhuma reescrita é possível. Ver `expurgo-fixpoint-historico.md`.

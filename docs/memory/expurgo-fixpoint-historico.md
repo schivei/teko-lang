@@ -51,10 +51,25 @@ contém. Os 13.4 MB sobrevivem a qualquer número de squashes.
 Só duas coisas removem um blob do histórico: reescrever os commits que o contêm, ou abandonar essa
 história por completo.
 
-## O procedimento, para o dia em que o dono o quiser correr
+## O procedimento — e porque HOJE ninguém o pode correr, nem o dono
 
-**Não é executável por um agente** — o passo 4 exige force-push, recusado pelo token. Fica escrito
-para o dono correr, na ordem exacta.
+**Correcção do dono, 2026-07-29**: *"Eu bloqueei force-push até para mim e tudo que vai pra main tem
+que passar pela `remodel/**` com pr e bump."*
+
+Isto muda o estatuto deste documento. Eu tinha escrito o procedimento "para o dono correr" — errado.
+O passo 4 exige force-push em `main`, e o force-push está bloqueado **para toda a gente, incluindo o
+dono**. Não é uma limitação do token do agente; é uma regra de protecção que ele pôs deliberadamente
+sobre si próprio.
+
+Consequência honesta, sem rodeios: **enquanto essa protecção existir, os 13.4 MB são permanentes.**
+Não há caminho. A única via seria o dono suspender temporariamente a sua própria protecção, correr o
+expurgo, e repô-la — uma decisão que só ele pode tomar, e que vale a pena pesar contra 13 MB.
+
+A regra completa, que vale para tudo e não só para isto: **nada entra na `main` senão por um
+`remodel/**` com PR e bump de versão.** Não há atalho, não há empurrão directo, não há reescrita.
+
+O procedimento abaixo fica registado como **referência**, não como plano — para que, se um dia a
+pergunta voltar, ninguém tenha de a re-investigar do zero.
 
 ```sh
 # 0. BACKUP primeiro. Isto é irreversível e toca a mainline.
@@ -82,11 +97,15 @@ git push --force origin main
 #    suporte do GitHub. Até lá o ganho de espaço não aparece do lado remoto.
 ```
 
-## Recomendação registada
+## Veredicto
 
-**Deixar a história em paz.** O custo real é 13.4 MB mortos no tamanho do clone — nada os referencia,
-nada os lê, e não voltam a acontecer. O custo do expurgo é re-ancorar a proveniência da semente,
-partir a linearidade com o org, e obrigar toda a gente a re-clonar, para poupar 13 MB.
+**A história fica.** Não por preferência minha, mas porque o caminho não existe: force-push está
+bloqueado para toda a gente, e `main` só aceita entrada por `remodel/**` com PR e bump — e nenhum
+PR, por mais squashado que seja, remove um blob que já é ancestral.
 
-O dono ficou informado dos três choques de lei antes de decidir. Se um dia decidir correr, o
-procedimento acima está pronto — e o passo 3 é o que não pode ser esquecido.
+O custo de conviver com isto é 13.4 MB mortos no tamanho do clone. Nada os referencia, nada os lê, e
+a recorrência está fechada por duas camadas de `.gitignore`. É o desfecho certo mesmo que o
+force-push estivesse disponível — o expurgo custaria re-ancorar a proveniência da semente e partir a
+linearidade com o org, para poupar 13 MB.
+
+O dono ficou informado dos três choques de lei antes de isto ficar assim decidido.
