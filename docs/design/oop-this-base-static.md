@@ -265,7 +265,7 @@ Each crumb is independently gate-able (`./build/teko . -o bin` + `.tkt` gate, th
 - Delete the old loose-receiver + `(binding)` parse paths and the structural static fallback.
 - Ritual: full gate + fixpoint.
 
-### Regression fixtures (inputs → expected, both paths identical)
+### Regression fixtures (inputs → expected, rota C e backend nativo identical)
 - `parser_test.tkt`:
   - `type C = class { pub fn f() -> i64 { 0 } }` → parses; `methods[0].params[0].name=="this"`,
     `has_type==false`, `is_static==false`.
@@ -278,7 +278,7 @@ Each crumb is independently gate-able (`./build/teko . -o bin` + `.tkt` gate, th
   - interface `type R = interface { fn read(into: Buf) -> u64 | error }` conformance still holds.
   - a static factory called `C::make()` and an instance `x.f()` both resolve (parity unchanged).
 - `vm_test.tkt` + `codegen_test.tkt`: port the existing VmCounter/VmShape/VmDogD3 fixtures to the
-  new syntax; assert IDENTICAL exit codes/outputs on both paths (the whole point: behavior frozen).
+  new syntax; assert IDENTICAL exit codes/outputs on rota C e backend nativo (the whole point: behavior frozen).
 
 ### Ritual points (full gate MUST pass)
 - End of C1, C2, C3, C4 (and C5 if used). C4's ritual additionally REQUIRES the byte-identity

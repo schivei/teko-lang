@@ -433,40 +433,40 @@ Parser: recognize `Ident : loop`; dispatch `{`→infinite, else→while-fold
 in a later step`. Remove suffix-label parsing. Checker: `check_labels` enforces
 UPPER_SNAKE. **Migration** (§6.1): rename all label fixtures; migrate the adopt
 example; update `parser_test`. Ritual: FULL gate + fixpoint re-baseline (goto
-labels). Fixtures (both paths): `OUTER: loop { break OUTER }` runs; `loop i < n {}`
+labels). Fixtures (rota C e backend nativo): `OUTER: loop { break OUTER }` runs; `loop i < n {}`
 counts to exit code n; `loop ready {}` treats `ready` as bool; **compile-fail**:
 `outer: loop {}` (lowercase label), adopt example on `NOSUCHLABEL`. **Ritual point.**
 
 **Crumb 4 — range (`loop mut i in a..b` / `a..=b`) — brings `init` online.**
 Parser: loop-head binding + `in` + range; desugar §5.2. First non-empty `init`:
 codegen `{ }` wrapper for non-empty `init`, LIR `lower_loop` lowering `init` before the loop. Ritual: FULL
-gate. Fixtures (both paths, exit codes): `loop mut i in 0..3 { s += i }` → 3;
+gate. Fixtures (rota C e backend nativo, exit codes): `loop mut i in 0..3 { s += i }` → 3;
 `0..=3` → 6; a `continue`-skips-evens loop proves `continue` runs the step;
 **compile-fail**: reading `i` after the loop (non-leak); endpoint captured once
 (mutating `n` in the body does not extend the range). **Ritual point.**
 
 **Crumb 5 — 3-part (`loop mut i = a; cond; step {}`).**
 Parser: binding + `;` cond `;` step; desugar §5.3. Reuses crumb-4 machinery.
-Ritual: FULL gate. Fixtures (both paths): `loop mut i = 0; i < 4; i++ { s += i }`
+Ritual: FULL gate. Fixtures (rota C e backend nativo): `loop mut i = 0; i < 4; i++ { s += i }`
 → 6; a `continue` loop proves the step still runs; **compile-fail**: non-bool
 cond, reading `i` after the loop.
 
 **Crumb 6 — `_ as x` wildcard-binding pattern.**
 Parser (`_ as name`), checker (subject-minus-null bind),
-codegen (payload extract), tkb codec. Ritual: FULL gate. Fixture (both paths):
+codegen (payload extract), tkb codec. Ritual: FULL gate. Fixture (rota C e backend nativo):
 `match some_opt { null => 0; _ as x => x }` binds the payload; `match plainval {
 _ as x => x }` binds the whole value. **Ritual point.**
 
 **Crumb 7 — for-each closure-iterator (simple `mut x`).**
 Parser: non-range `in` → closure desugar §5.4. Ritual: FULL gate. Fixtures
-(both paths): `loop mut x in range(rc) { s += x }` over `0..3` → 3;
+(rota C e backend nativo): `loop mut x in range(rc) { s += x }` over `0..3` → 3;
 `continue` re-advances; a raw-collection iterable is a clean **type error** at
 `_it()` (deferred case). Confirm the `mut` copy has no write-back (rebinding `x`
 does not change the source).
 
 **Crumb 8 — for-each destructure (`mut { a; b }`).**
 Parser: destructure target → per-field `mut` bindings §5.5. Ritual: FULL gate.
-Fixtures (both paths): `loop mut { index; value } in enumerate(range(rc)) { … }`
+Fixtures (rota C e backend nativo): `loop mut { index; value } in enumerate(range(rc)) { … }`
 binds both fields with inferred types; **compile-fail**: destructuring an unknown
 field. Verify class-element field-write reaches the shared object; struct-element
 field-write does not.

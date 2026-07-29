@@ -12,9 +12,9 @@ the model is for the user programs Teko will host.
 
 ## 0. The honest framing — what "the memory problem" is, and is not
 
-- **Previously, 1.5 GB was consumed by interpreter-mode test execution, not the arena.** Isolation (measured): pure codegen ≈ 366 MB; the old
-  test-gate with interpreter ≈ 1566 MB (the functional-env O(n) rebuild interpreting the whole `#test`
-  corpus in-process added ~1.2 GB). `#324` moved the gate to native execution → ~937 MB, removing the interpreter from the
+- **Previously, 1.5 GB was consumed by bytecode-interpreter test execution, not the arena.** Isolation (measured): pure codegen ≈ 366 MB; the old
+  test-gate with the bytecode interpreter ≈ 1566 MB (the functional-env O(n) rebuild interpreting the whole `#test`
+  corpus in-process added ~1.2 GB). `#324` moved the gate to native execution → ~937 MB, removing the bytecode interpreter from the
   per-PR gate. The compiler's own arena is ~366 MB, a **safe batch leak-to-root** (it exits; the OS
   reclaims). It is NOT a runaway.
 - **The 8.5 GB → 293 MB self-host win was already banked** by the arena machinery (free-list reuse +
@@ -160,25 +160,25 @@ valid segment), OR name the namespace `teko::mem::raw` and reserve `unsafe` as a
 
 ---
 
-## 4. Backend direction (interpreter retired)
+## 4. Backend direction (bytecode interpreter retired)
 
 - **Build a new own AOT backend + linker**, to leave C codegen + external `cc`/linker. North-star:
   toolchain independence, compile speed, the bare-metal/OS vision.
-- **The interpreter has been retired.** Its roles were handled as follows:
+- **The bytecode interpreter has been retired.** Its roles were handled as follows:
   - `teko run` (interpret, `driver.tks:207`) — **unused today**; the own-backend's fast AOT replaces it.
-  - **REPL** (`teko repl`) — was the one role to decide: an interactive REPL is
-    naturally an interpreter; on an AOT backend it becomes compile-and-run-per-line, or keep a minimal
+  - **REPL** (`teko repl`) — was the one role to decide: an interactive REPL wants
+    a bytecode interpreter; on an AOT backend it becomes compile-and-run-per-line, or keep a minimal
     tree-walker just for it. **Decide consciously.**
-  - **Differential** — the interpreter was "often the wrong side," so the oracle became noisy and was replaced.
+  - **Differential** — the bytecode interpreter was "often the wrong side," so the oracle became noisy and was replaced.
     It **migrates** to **C-backend vs own-backend** (both native, C-backend trusted/self-hosting) — a
     *stronger* oracle that validates the new backend exactly when it is born. Then retire the C-backend.
-  - **LSan with per-`#test` arena rewind** — the interpreter gate's rewind (`tk_arena_push/pop`) was what made
+  - **LSan with per-`#test` arena rewind** — the bytecode interpreter gate's rewind (`tk_arena_push/pop`) was what made
     leak-detection *meaningful* (LSan sees leaks beyond the rewound set). The native gate runs
     without rewind → the arena holds everything to exit → LSan cannot tell a deliberate hold from a
     real leak (this broke `#327`'s native lane; fixed by `detect_leaks=0` there). **LSan's meaningful
-    home would be a per-test-rewound run — which is no longer available after the interpreter was retired**.
+    home would be a per-test-rewound run — which is no longer available after the bytecode interpreter was retired**.
   - **No comptime / const-eval dependency** — VERIFIED (`escape`/`fold` in the checker are type-table
-    folds, not separate evaluation). This de-risked the interpreter's retirement: its removal does not break
+    folds, not separate evaluation). This de-risked the bytecode interpreter's retirement: its removal does not break
     *compilation*.
 - **The native-ASan gate is a rolling UB audit** of the production native path — it has already
   driven root fixes for the `#291` trait-vtable function-pointer UB, `tk_mul_u16` overflow, and the
@@ -186,7 +186,7 @@ valid segment), OR name the namespace `teko::mem::raw` and reserve `unsafe` as a
   where native is the sole path.
 - **Sequence (executed):** kept C-transpile shipping; built the own-backend validated against it; flipped when
   trusted; then retired the interpreter and its differential. This was the right order: completing C-vs-own first ensured
-  we had a solid alternative before removing the interpreter.
+  we had a solid alternative before removing the bytecode interpreter.
 
 ---
 
@@ -250,4 +250,4 @@ ownership, nominal containment, contagious by composition) and ships **first**, 
 spine. `adopt` is the opt-in cyclic-reclamation closer, reusing the arena tree. The surface cost is
 tiny (contextual keywords + a few declaration modifiers + `use path::[…]`). In parallel, build the
 **own AOT backend + linker**; validate it against the trusted C-backend (the differential moved
-to backend-vs-backend comparison); the interpreter has been retired with its roles (REPL, LSan-with-rewind) handled or discontinued.
+to backend-vs-backend comparison); the bytecode interpreter has been retired with its roles (REPL, LSan-with-rewind) handled or discontinued.
