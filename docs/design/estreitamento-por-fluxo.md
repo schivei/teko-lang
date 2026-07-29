@@ -378,8 +378,8 @@ apaga-se. Quatro fontes de invalidação, e o que o Teko já garante sobre cada 
 |---|---|---|
 | **I1 — atribuição directa** `a = …` no bloco | o facto sobre `a` **morre no ponto da atribuição**; os statements seguintes vêem `a` com o tipo declarado. Uma re-atribuição a um valor não-`null` **não** reinstala o facto (fica para o vagão seguinte — conservador) | `TAssign` com `kind = Simple` e `name == a`, visível directamente no walker de statements |
 | **I2 — `a` é `let`, não `mut`** | **imune**. Um `let` nunca é reatribuído (B.21), e nenhum dos I1/I3/I4 se lhe aplica. Os factos sobre `let` **sobrevivem a tudo**, incluindo entrar em `loop` | `ValBinding.is_mut == false` (`scope.tks:24`) |
-| **I3 — chamada que possa mudar `a`** | **NÃO invalida**, e isto é uma prova, não uma aposta: o Teko não tem out-params, não tem passagem por referência implícita, e um `mut` local não pode ser observado por um callee **excepto** via `Ref<T>`. Regra operacional: um facto sobre `a` morre numa chamada **se e só se** `a` for de tipo `Reference` ou o seu endereço tiver sido tomado (`Borrow`) algures na função | `Type::Reference` (`type.tks:127`); `parser::Borrow` (`ast.tks:258`) é uma forma sintáctica localizável |
-| **I4 — captura por lambda** | quase-imune, **e isto foi verificado**: as capturas são **por CÓPIA** (`tast.tks:94`) e o checker **rejeita** escrita a capturada por cópia (`typer.tks:200`, `lam_reject_copy_capture_write`): *"a lambda cannot assign to the captured variable `{nm}` — the capture is by COPY, so the write would be lost"*. Só uma captura `by_ref` (i.e. a variável é `Ref<T>`) escapa — e essa já cai em I3 | `lam_reject_copy_capture_write`, `typer.tks:200-215` |
+| **I3 — chamada que possa mudar `a`** | **NÃO invalida**, e isto é uma prova, não uma aposta: o Teko não tem out-params, não tem passagem por referência implícita, e um `mut` local não pode ser observado por um callee **excepto** via a keyword `ref` (internamente `Type::Reference`). Regra operacional: um facto sobre `a` morre numa chamada **se e só se** `a` for de tipo `Reference` ou o seu endereço tiver sido tomado (`Borrow`) algures na função | `Type::Reference` (`type.tks:127`); `parser::Borrow` (`ast.tks:258`) é uma forma sintáctica localizável |
+| **I4 — captura por lambda** | quase-imune, **e isto foi verificado**: as capturas são **por CÓPIA** (`tast.tks:94`) e o checker **rejeita** escrita a capturada por cópia (`typer.tks:200`, `lam_reject_copy_capture_write`): *"a lambda cannot assign to the captured variable `{nm}` — the capture is by COPY, so the write would be lost"*. Só uma captura `by_ref` (i.e. a variável é `ref`, i.e. `Type::Reference` internamente) escapa — e essa já cai em I3 | `lam_reject_copy_capture_write`, `typer.tks:200-215` |
 
 **Regra final de invalidação, na forma implementável:**
 
@@ -585,7 +585,7 @@ pub fn type_without_null(t: Type, table: TypeTable) -> Type | null
 /**
  * fn_takes_address_of — does the function body `stmts` anywhere take the address of `name` (a
  * `&name` borrow) or bind it to a `Reference`? A binding whose address escapes may be written
- * through a `Ref<T>` by any callee, so no flow fact about it survives a call. Computed ONCE per
+ * through a `ref` binding (internally `Type::Reference`) by any callee, so no flow fact about it survives a call. Computed ONCE per
  * function body and consulted for every candidate fact, rather than re-walked per guard.
  *
  * @param stmts  the function body's typed statements
