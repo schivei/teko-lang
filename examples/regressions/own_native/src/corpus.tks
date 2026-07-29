@@ -1433,3 +1433,63 @@ fn f_generic_variant_match() -> i64 {
     }
     0
 }
+
+/**
+ * f_last_index_of — `teko::str::last_index_of(str, str) -> u64 | error` (0.3.1.0 degrau 15 /
+ * raiz-comum §R5): before this degrau, `native_builtin_symbol` had no entry for this bare name at
+ * all, so a reached call honest-stopped ("builtin `last_index_of` not yet lowered") — first
+ * surfaced through `teko::build::basename`'s own body. Unlike the degrau 11/12 families
+ * (`bool`/`str` results), this builtin's REAL C ABI (`tk_rt_last_index_of`) returns a genuine
+ * 2-eightbyte `{bool ok; uint64_t value}` struct, and its DECLARED Teko return type is a
+ * `u64 | error` VARIANT — neither fat nor a plain scalar — so it needed its own bool-branch +
+ * variant-wrapper construction (`lower_last_index_of_call`), not a resolver-table entry alone.
+ * Checked by VALUE across the found/not-found/empty-needle/repeated-match axes, plus the
+ * not-found arm's own message (empty, per this builtin's own "not-found is the only failure"
+ * contract).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_last_index_of() -> i64 {
+    match teko::str::last_index_of("hello world", "o") {
+        u64 as i => { if i != 7 { return 1 } }
+        error => return 2
+    }
+    match teko::str::last_index_of("hello world", "xyz") {
+        u64 as i => return 3
+        error as e => { if e.message != "" { return 4 } }
+    }
+    match teko::str::last_index_of("hello world", "") {
+        u64 as i => { if i != 11 { return 5 } }
+        error => return 6
+    }
+    match teko::str::last_index_of("aaa", "a") {
+        u64 as i => { if i != 2 { return 7 } }
+        error => return 8
+    }
+    0
+}
+
+/**
+ * f_str_of_bytes — `teko::str_of_bytes([]byte) -> str` (fat) (0.3.1.0 degrau 16 / raiz-comum §R5):
+ * found immediately after closing degrau 15's own `last_index_of` gap, while enumerating
+ * `native_builtin_symbol`'s remaining holes — `str`/`str_of_bytes` (ONE checker registration, two
+ * spellings, `checker/scope.tks`) had no entry either, first surfaced through
+ * `teko::build::sanitize_ident`'s own body. Unlike `last_index_of`, this builtin's shape fits the
+ * ESTABLISHED out-parameter-length molde exactly (`tk_str_of_bytes_len`, the SAME
+ * `lower_len_out_call` shape `builtin_str_slice_symbol`/`builtin_int_to_str_symbol` already use) —
+ * a resolver-table entry alone, no new lowering arm. Checked by VALUE, including the empty-slice
+ * edge (a zero-length `str`, not a null/garbage pointer).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_str_of_bytes() -> i64 {
+    let bs: []byte = [b'h', b'i', b'!']
+    let s = str_of_bytes(bs)
+    if s.len != 3 { return 1 }
+    if s != "hi!" { return 2 }
+    let empty: []byte = []
+    let es = str_of_bytes(empty)
+    if es.len != 0 { return 3 }
+    if es != "" { return 4 }
+    0
+}

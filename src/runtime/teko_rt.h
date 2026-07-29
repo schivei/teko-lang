@@ -232,6 +232,11 @@ const tk_byte *tk_u64_to_str_len(uint64_t v, uint64_t *out_len);
 // SAME {ptr,len} shape as tk_str, so codegen passes the slice value directly; this copies it
 // into a fresh owned buffer (the `str_of_bytes` builtin; the `str` builtin aliases it).
 tk_str tk_str_of_bytes(tk_str bytes);
+// tk_str_of_bytes_len — the out-parameter-length twin of `tk_str_of_bytes` (mirrors
+// `tk_str_concat_len`'s own doc): the native backend's `LCall` reads exactly one result
+// register, never the true 2-eightbyte SysV/AAPCS64 struct `tk_str_of_bytes` returns by value,
+// so the copied buffer's pointer rides the return register and its length rides `*out_len`.
+const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c);
 // tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
