@@ -515,6 +515,64 @@ fn lbinop_int(op: lexer::TokenKind, signed: bool) -> LBinOp | error {
 }
 
 /**
+ * is_int_div_or_rem — true for the four integer division/remainder `LBinOp` variants
+ * (`IDivS`/`IDivU`/`IRemS`/`IRemU`) — the opcodes a zero divisor corrupts on EITHER real
+ * target (x86-64 traps on `idiv`/`div` by ISA accident, arm64's `SDIV`/`UDIV` defines a
+ * SILENT zero result) unless the compiler itself guards the divisor first.
+ *
+ * @param op  the `LBinOp` to classify
+ * @return    whether `op` is an integer divide or remainder
+ */
+fn is_int_div_or_rem(op: LBinOp) -> bool {
+    op == LBinOp::IDivS || op == LBinOp::IDivU || op == LBinOp::IRemS || op == LBinOp::IRemU
+}
+
+/**
+ * lower_div_zero_guard — the compiler-organized division/remainder-by-zero guard (owner
+ * ruling 2026-07-29: an ISA ACCIDENT is never a guard — x86-64's `idiv`/`div` `#DE` trap and
+ * arm64's architecturally-defined "`SDIV`/`UDIV` by zero yields 0" must agree BY
+ * CONSTRUCTION, not by the coincidence of whichever host ISA happens to compile the
+ * program). Lowered ONCE, in the target-neutral LIR — every caller (`lower_binary`'s plain
+ * `/`/`%`, `lower_assign_simple`/`store_assign_value`'s compound `/=`/`%=`) reaches this
+ * SAME shape, so `isel_x86_64`/`isel_arm64` select it through their existing, already-tested
+ * compare/branch/call machinery (the SAME idiom `lower_logical`'s `&&`/`||` and every
+ * `if`/`match` condition already lowers to) — neither backend needs its OWN div-by-zero
+ * special case.
+ *
+ * Compares the divisor against a materialized zero (`ICmpNe`, fused into the branch exactly
+ * like any other condition), continuing into a fresh "ok" block when nonzero; a zero divisor
+ * branches into a fresh "trap" block that calls the runtime's `tk_panic_div0` — the SAME
+ * symbol `teko_rt.h`'s `tk_div_*`/`tk_mod_*` helpers already call on the C route, so both
+ * routes panic with the identical message and exit status — then closes with a JUMP TO
+ * ITSELF: a dead terminator (the call never returns) that keeps the block well-formed
+ * without inventing a placeholder return value the enclosing function's own type may not
+ * even have room for (unlike `terminate_diverging_stmt`, which needs exactly that and
+ * refuses a fat return type — this guard fires inside arbitrary EXPRESSION lowering, where a
+ * fat-returning function must still compile).
+ *
+ * @param ctx      the lowering context, positioned right after the divisor is lowered
+ * @param divisor  the already-lowered divisor VReg to guard
+ * @param line     the source line of the division/remainder expression
+ * @param col      the source column of the division/remainder expression
+ * @return         the advanced context, now emitting into the "ok" block — the divisor is
+ *                 proven nonzero on every path that reaches it
+ */
+fn lower_div_zero_guard(ctx: LowerCtx, divisor: u32, line: u32, col: u32) -> LowerCtx {
+    let z = ctx_alloc(ctx)
+    let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
+    let c = ctx_alloc(with_zero)
+    let with_cmp = ctx_append(c.ctx, bin_inst(c.vreg, LBinOp::ICmpNe, divisor, z.vreg, line, col))
+    let okb = alloc_block(with_cmp.func)
+    let trapb = alloc_block(okb.func)
+    let br = branch_inst(c.vreg, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), line, col)
+    let branched = ctx_append(ctx_with(with_cmp, trapb.func, with_cmp.block_id, with_cmp.env), br)
+    let trap_ctx = ctx_goto(branched, trapb.block_id)
+    let called = ctx_append(trap_ctx, void_call_inst("tk_panic_div0", teko::list::empty(), false, line, col))
+    let trap_closed = ctx_append(called, jump_inst(trapb.block_id, teko::list::empty(), line, col))
+    ctx_with(trap_closed, trap_closed.func, okb.block_id, branched.env)
+}
+
+/**
  * lunop_of — the LUnOp for a prefix operator token given the operand's PrimKind. `-` picks
  * FNeg/INeg by family; `~` (bitwise one's-complement, integer-only per the checker) picks
  * INot. `!` (logical-not) is NOT handled here — it is intercepted in lower_unary and lowered
@@ -1150,7 +1208,8 @@ fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowere
     let ro = match lower_expr(lo.ctx, b.right) { Lowered as x => x; error as err => return err }
     let k = match prim_kind_of(e.type, ctx.enums, "binary result") { checker::PrimKind as p => p; error as err => return err }
     let op = match lbinop_of(b.op, k) { LBinOp as o => o; error as err => return err }
-    let r = ctx_alloc(ro.ctx)
+    let guarded = if is_int_div_or_rem(op) { lower_div_zero_guard(ro.ctx, ro.vreg, e.line, e.col) } else { ro.ctx }
+    let r = ctx_alloc(guarded)
     let inst = bin_inst(r.vreg, op, lo.vreg, ro.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
@@ -10170,7 +10229,8 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
-    let r = ctx_alloc(vo.ctx)
+    let guarded = if is_int_div_or_rem(op) { lower_div_zero_guard(vo.ctx, vo.vreg, a.value.line, a.value.col) } else { vo.ctx }
+    let r = ctx_alloc(guarded)
     let inst = bin_inst(r.vreg, op, cur.vreg, vo.vreg, a.value.line, a.value.col)
     LowerStmtOut { ctx = ctx_reassign(ctx_append(r.ctx, inst), a.name, r.vreg); terminated = false }
 }
@@ -10270,7 +10330,8 @@ fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAs
     let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
     let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
     let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
-    let rr = ctx_alloc(vo.ctx)
+    let guarded = if is_int_div_or_rem(op) { lower_div_zero_guard(vo.ctx, vo.vreg, a.value.line, a.value.col) } else { vo.ctx }
+    let rr = ctx_alloc(guarded)
     let with_bin = ctx_append(rr.ctx, bin_inst(rr.vreg, op, cr.vreg, vo.vreg, a.value.line, a.value.col))
     LowerStmtOut { ctx = ctx_append(with_bin, store_inst(addr, rr.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
 }
