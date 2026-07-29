@@ -242,6 +242,13 @@ tk_str tk_one_byte(tk_byte c);
 // tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
 // pointing into the same memory. The caller must not outlive the originating str allocation.
 tk_slice_byte tk_bytes_of_str(tk_str s);
+// tk_bytes_of_str_len — the out-parameter-length twin of `tk_bytes_of_str` (mirrors
+// `tk_str_of_bytes_len`'s own doc, reversed direction): the native backend's `LCall` reads
+// exactly one result register, never the true 2-eightbyte SysV/AAPCS64 struct `tk_bytes_of_str`
+// returns by value, so the view's pointer rides the return register and its length rides
+// `*out_len`. Zero-copy, same as `tk_bytes_of_str`: no allocation, no ownership transfer (0.3.1.0
+// degrau 21).
+const tk_byte *tk_bytes_of_str_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_char_to_u32 — decode a `char` (its 1–4 UTF-8 bytes) to the scalar codepoint value. The bytes
 // are valid UTF-8 by construction (the lexer validated the literal), so this is a pure decode.
 uint32_t tk_char_to_u32(tk_char c);
@@ -450,6 +457,14 @@ tk_ffi_bytes tk_bytes_from_ptr(const void *p, uint64_t n);
 // str COPYING the bytes; !ok → err "invalid UTF-8". Reuses tk_ffi_sres (same {ok,value,err}
 // shape as read_file/getenv). Takes ptr+len (the []byte ABI), mirroring write_file_bytes's arg.
 tk_ffi_sres tk_rt_str_from_utf8(const tk_byte *ptr, uint64_t len);
+// tk_rt_str_from_utf8_ok — the native backend's OWN-REGISTER twin of `tk_rt_str_from_utf8`
+// (mirrors `tk_rt_last_index_of_ok`'s own doc, 0.3.1.0 degrau 21): the real `tk_ffi_sres` ABI
+// (three eightbytes) is wider than the ONE result register this backend's `LCall` captures, so
+// the found/failed flag travels back as this function's OWN single-register `bool` return, and
+// the ACTIVE case's (ptr, len) pair — the decoded str on success, the "invalid UTF-8" message on
+// failure — travels back through the SAME two out-parameters either way; the caller's own `bool`
+// decides which meaning to read (`lower_str_from_utf8_call`'s doc, lir/lower.tks).
+bool tk_rt_str_from_utf8_ok(const tk_byte *ptr, uint64_t len, const tk_byte **out_ptr, uint64_t *out_len);
 
 // teko::io::read_file(path) — slurp the whole file as UTF-8 bytes (owned copy).
 tk_ffi_sres tk_rt_read_file(tk_str path);

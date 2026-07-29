@@ -234,3 +234,80 @@ iteração de uma `str` tem de ser igual ao `.len` do seu `bytes_of_str`.
 
 Uma fixture que verifica os dois contadores E a sua reconciliação apanha uma troca de contador em
 qualquer um dos três sítios — coisa que verificar `5` e `9` isoladamente não apanha.
+
+## Degrau 21 — CLOSED (`cargo/0.3.1.0-degrau-21`): ambos os builtins, na rota nativa
+
+O gap da §3 (rota own-native) está FECHADO. `native_builtin_symbol` (`src/lir/lower.tks`) ganhou
+duas famílias novas:
+
+- `bytes_of_str` (`builtin_bytes_of_str_symbol`) cabe EXACTAMENTE no molde `_len` out-parameter já
+  usado por `str_of_bytes` (a mesma direcção invertida): `s`'s `(ptr, len)` já chega flattened por
+  `lower_args`, e o runtime twin (`tk_bytes_of_str_len`, `teko_rt.c`/`.h`) devolve o MESMO par — sem
+  cópia, sem alocação (o próprio `bytes_of_str` já era zero-copy). Uma entrada na tabela, nenhum
+  ARM novo de lowering.
+- `str_from_utf8` (`str | error`) É o irmão de payload-gordo de `last_index_of` (degrau 15, `u64 |
+  error`): a ABI real do runtime (`tk_ffi_sres`, três eightbytes) não cabe no ÚNICO registo de
+  resultado que `LCall` lê, então ganhou o mesmo tratamento — um twin `tk_rt_str_from_utf8_ok` que
+  devolve `bool` (achou/falhou) e escreve o par `(ptr, len)` ACTIVO (o valor decodificado OU a
+  mensagem "invalid UTF-8") em dois out-parameters partilhados pelas duas saídas —, um branch sobre
+  esse bool, e a construção do wrapper de variant de 24 bytes uniforme (degrau 6): o arm OK escreve
+  o par fat directamente no payload (`store_fat_variant_payload_pair`, extraído de
+  `store_fat_variant_payload` para ser reutilizável sem uma `TExpr` fonte), o arm de erro caixa um
+  `error { message = … }` do MESMO jeito que o arm not-found de `last_index_of` já fazia.
+
+**Medido por VALOR, sonda `café🐝`, `/tmp/.../scratchpad/probe/` (projecto descartável, nunca dentro
+da árvore), pelas DUAS rotas, `.gen1b/teko`**:
+
+```
+$ TEKO_BACKEND=c .gen1b/teko . -o outc --no-verify && ./outc/probe
+len_bytes=9
+roundtrip_str=café🐝
+invalid_error=invalid UTF-8
+
+$ .gen1b/teko . -o outn --no-verify && ./outn/probe
+len_bytes=9
+roundtrip_str=café🐝
+invalid_error=invalid UTF-8
+```
+
+`diff <(./outc/probe) <(./outn/probe)` — IDÊNTICO, byte a byte, incluindo o caso de erro (a mesma
+mensagem "invalid UTF-8" da própria `tk_rt_str_from_utf8`, não uma mensagem vazia). Confirmado
+também no channel `examples/regressions/own_native` (`f_bytes_of_str`/`f_str_from_utf8`,
+`main.tks` códigos 55/56): as duas rotas (C e own-native) do PROJECTO deste channel constroem e
+correm, exit 42 nas duas.
+
+`bootstrap/teko.c`/`teko.tkp` não foram tocados — só `.tks` (a tabela de lowering + a construção do
+variant) e o runtime `teko_rt.c`/`.h` (dois twins novos, `tk_bytes_of_str_len` e
+`tk_rt_str_from_utf8_ok`, cada um um wrapper fino sobre uma função já existente — nenhuma lógica de
+validação/cópia duplicada).
+
+### Achado ADJACENTE, fora de escopo — reportado, não corrigido
+
+A auto-construção NATIVA do compilador inteiro (`teko . -o out --no-verify`, sem `TEKO_BACKEND=c`)
+NÃO chega a `bytes_of_str`/`str_from_utf8` nesta árvore — pára ANTES, num sítio diferente e já
+DOCUMENTADO como fora de escopo:
+
+```
+teko: .: native backend N1: unknown field `line` on struct `error` (internal) [in `teko::checker::const_type_located`]
+```
+
+`error_struct_layout` (`lir/lower.tks:8620-8632`) já documenta, por decisão PRÉVIA e deliberada, que
+os campos de diagnóstico do `error` interno do checker (`file`/`line`/`col`/`expected`/`actual`) —
+que `teko::checker::const_type_located`/`teko::error::err_loc` (`#594`) LÊEM — "have no
+Teko-surface constructor and stay out of scope" (degrau N2, #382). `const_type_located` já existia
+antes desta lane (mesclado por `#594`/`#600`, muito antes de `cargo/0.3.1.0-degrau-21`); medido com
+`git stash` que a paragem é a MESMA, no MESMO ponto (`checker 6140/6140 ✓`), COM ou SEM as mudanças
+desta lane — não é uma regressão introduzida aqui.
+
+Ampliar `error_struct_layout` para os cinco campos de diagnóstico (e actualizar TODO ponto que hoje
+caixa um `error { message = … }` de duas words só) é uma peça MAIOR, MAL escopada — um redesenho do
+layout do `error` nativo — e não o "molde estreito" que este degrau fecha. Reportado ao integrador
+para o wagon apropriado, não expandido aqui.
+
+**Porque o `bytes_of_str`/`str_from_utf8` da CI (corrida 30455263710) e o `const_type_located` desta
+lane nunca colidem no MESMO run**: a auto-construção nativa pára no PRIMEIRO item cujo lowering
+falha, e qual item é esse depende da ORDEM de processamento dos itens do projecto — determinística
+NESTA árvore/binário (reproduzido idêntico em runs repetidos), mas não necessariamente a MESMA de um
+binário `gen1b` diferente (outra cadeia de bootstrap, outra CI). Os dois gaps são REAIS e
+INDEPENDENTES; qual aparece primeiro num run de auto-construção completa é um detalhe de qual
+binário/ordem, não um sinal de qual foi corrigido quando.
