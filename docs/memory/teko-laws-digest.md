@@ -8,6 +8,14 @@ source: TEKO_CONSTITUTION.md, TEKO_LEGISLATION.md, TEKO_MASTER_PLAN.md (wave con
 
 **Teko-only (ruling 2026-07-04):** compiler source canonical in `.tks`; frozen C bootstrap (`0.0.1.3-bootstrap`) archived; C runtime (`teko_rt.c`) maintained.
 
+**The C runtime may GROW to serve the native backend (ruling 2026-07-29, literal):** *"Faz sentido e concordo com o agente sobre as funções que adicionou para conseguir resolver o runtime nativo através do C, isso não é proíbido, o mesmo vale para um bug conhecido que possa quebrar o runtime silenciosamente sem conseguir corrigir o nativo adequadamente."*
+
+Two permissions, and they are narrow. Adding to `teko_rt.c`/`.h` is allowed **(a)** when the native backend needs a shape the existing runtime does not offer, and **(b)** as the escape hatch for a KNOWN bug that would otherwise break the runtime SILENTLY and that the native path cannot yet fix properly. Silent breakage is the operative word: a loud, addressed stop is a degrau to close, not a reason to reach for C.
+
+This does not soften "no new C emissions" — that ruling is about the compiler EMITTING C, and `teko_rt.c` is the RUNTIME the native backend LINKS AGAINST, which outlives the C route. It also does not make the runtime a dumping ground: what lands there is still owed a written reason at the site, and it is still surface that `src/runtime/teko_rt.tks` must eventually absorb.
+
+Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `tk_u64_to_str_len` — out-parameter-length twins of three existing builders, because the native backend's `LCall` captures a result in ONE register while a `tk_str` returned by value occupies the two-eightbyte SysV/AAPCS64 pair. Thin wrappers over their own twins, owning no logic, mirroring `tk_slice_push`'s established `(…, &out_len)` shape.
+
 **Twins retired (2026-07-13, #524):** VM interpreter, REPL, C bootstrap all retired; native AOT sole engine.
 
 **W15-from-now:** code quality (doc-comments only, no inline; flatten, extract; cyclomatic <N) applied continuously, not deferred.
