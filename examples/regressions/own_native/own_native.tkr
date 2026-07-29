@@ -451,3 +451,48 @@ Feature: a FAT breakless loop tail — a `str`-returning function/arm whose LAST
   Scenario: fat_loop_tail_no_break (own-native — a str-returning function/arm whose tail is a breakless `loop`)
     When built and run
     Then exit = 42
+
+
+Feature: the built-in `error`'s six-field native layout, zeroed, plus `err_loc`/`err_typed`
+
+  # (0.3.1.0 degrau 22) `error_struct_layout` registered ONE field (`message`); the checker reads
+  # six (`message`/`file`/`line`/`col`/`expected`/`actual`), so a program reading `.line` honest-
+  # stopped natively ("unknown field `line` on struct `error`"), starting with the compiler's own
+  # `const_type_located`. The layout now matches the C route's `tk_error` field for field, in the
+  # SAME commit that zeroes the five fields no Teko-surface literal writes (`zero_error_
+  # diagnostics`) — growing the slot without zeroing it would have left 56 bytes of frame garbage
+  # readable as a plausible-looking `line`/`col`, a silent divergence rather than a stop.
+  #
+  # The row is a MEMBER of this channel (one build, no extra cost) and asserts every field by
+  # VALUE, plus the variant-wrapped arm proving the grown 72-byte payload still boxes by ADDRESS
+  # into the pre-existing 24-byte uniform wrapper (degrau 15/21) without growing it.
+  Scenario: error_diagnostic_fields (own-native — the six built-in `error` fields, zeroed where unwritten)
+    When built and run
+    Then exit = 42
+
+
+Feature: `err_loc`/`err_typed` — the `error` diagnostic-adornment builtins, native
+
+  # (0.3.1.0 degrau 22) `tk_error_loc`/`tk_error_types` (`teko_rt.h`) are `static inline` with no
+  # linkable symbol, so this backend lowers `teko::error::err_loc`/`err_typed` directly in
+  # `lower_call` (the SAME molde `last_index_of`/`str_from_utf8` already use), through a shared
+  # `copy_error_value`: a fresh slot, `tk_mem_copy`'d from the source, then the two named fields
+  # overwritten on the COPY. A mutation in place would have been silent and wrong — this backend
+  # represents an `error` VALUE by the address of its slot, so adorning without copying would
+  # mutate the caller's own binding, diverging from the C route's copy-return semantics with no
+  # stop at all.
+  #
+  # `err_typed` had NO prior measurement in this lane despite more than double `err_loc`'s own
+  # call count, and its own distinct, confirmed native stop ("builtin `err_typed` not yet lowered
+  # (N2)").
+  #
+  # Each row is a MEMBER of this channel (one build, no extra cost) and asserts the adorned
+  # fields by VALUE AND that the source was NOT mutated; the second row chains both builtins (the
+  # ONE site in the compiler where they compose, `surface_at`).
+  Scenario: err_loc (own-native — a copy of an `error` with `line`/`col` overwritten, source untouched)
+    When built and run
+    Then exit = 42
+
+  Scenario: err_typed (own-native — `err_loc`'s fat-field twin, chained through `err_loc` itself)
+    When built and run
+    Then exit = 42

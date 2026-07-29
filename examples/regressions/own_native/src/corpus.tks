@@ -1933,3 +1933,92 @@ fn f_str_from_utf8() -> i64 {
     }
     0
 }
+
+/**
+ * f_error_diagnostic_fields — the six readable fields of the built-in `error` (0.3.1.0 degrau
+ * 22).
+ *
+ * Asserts by VALUE what the C route already guarantees through `tk_error_make`: an
+ * `error { message = … }` literal has `line`/`col` at `0` and `file`/`expected`/`actual` empty.
+ * Before this degrau the native backend modeled only `message`, and reading `line` was a
+ * compile-time stop; a grown layout WITHOUT zeroing the other five fields would have read
+ * garbage from the fresh frame slot instead — so this fixture asserts the ZERO, not merely that
+ * it compiled.
+ *
+ * The variant-wrapped arm exercises the interaction with the degrau 15/21 24-byte uniform
+ * wrapper: the 72-byte payload is boxed by ADDRESS, so the wrapper itself never grows.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_error_diagnostic_fields() -> i64 {
+    let e = error { message = "x" }
+    if e.line != 0 { return 1 }
+    if e.col != 0 { return 2 }
+    if e.file != "" { return 3 }
+    if e.expected != "" { return 4 }
+    if e.actual != "" { return 5 }
+    if e.message != "x" { return 6 }
+    match mk_error_union() {
+        str => return 7
+        error as w => {
+            if w.line != 0 { return 8 }
+            if w.message != "y" { return 9 }
+        }
+    }
+    0
+}
+
+/**
+ * mk_error_union — a `str | error` that always takes the error member, to exercise the `error`
+ * payload boxed inside the 24-byte variant wrapper.
+ *
+ * @return str|error  always the `error` member
+ * @throws  always
+ */
+fn mk_error_union() -> str | error { error { message = "y" } }
+
+/**
+ * f_err_loc — `teko::error::err_loc(error, u32, u32) -> error` (E2, 0.3.1.0 degrau 22): a COPY of
+ * its `error` argument with `line`/`col` overwritten.
+ *
+ * Asserts the adorned copy's three fields by VALUE, AND that the source `error` was NOT mutated
+ * (`orig.line`/`orig.col` still `0` after the call) — `tk_error_loc` (`teko_rt.h`) returns a
+ * modified copy on the C route, and this backend represents an `error` value by the ADDRESS of
+ * its slot, so adorning in place would have mutated the caller's own binding, diverging from the
+ * C route silently.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_err_loc() -> i64 {
+    let orig = error { message = "boom" }
+    let adorned = teko::error::err_loc(orig, 7, 3)
+    if adorned.line != 7 { return 1 }
+    if adorned.col != 3 { return 2 }
+    if adorned.message != "boom" { return 3 }
+    if orig.line != 0 { return 4 }
+    if orig.col != 0 { return 5 }
+    0
+}
+
+/**
+ * f_err_typed — `teko::error::err_typed(error, str, str) -> error` (E2, 0.3.1.0 degrau 22): a
+ * COPY of its `error` argument with `expected`/`actual` overwritten (the fat-field twin of
+ * `err_loc`'s two scalar fields).
+ *
+ * Chains `err_typed(err_loc(e, l, c), exp, act)` — the ONE site in the compiler where the two
+ * compose (`surface_at`) — so `line` survives THROUGH the second adornment, and asserts that the
+ * `err_loc`-adorned source was NOT further mutated by `err_typed`.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_err_typed() -> i64 {
+    let orig = teko::error::err_loc(error { message = "mismatch" }, 11, 4)
+    let adorned = teko::error::err_typed(orig, "i64", "str")
+    if adorned.expected != "i64" { return 1 }
+    if adorned.actual != "str" { return 2 }
+    if adorned.line != 11 { return 3 }
+    if adorned.message != "mismatch" { return 4 }
+    if orig.expected != "" { return 5 }
+    if orig.actual != "" { return 6 }
+    0
+}
