@@ -2156,20 +2156,25 @@ fn lwt_honest_stop_on_unsized_aggregate_element_push() {
 }
 
 /**
- * lwt_honest_stop_on_fat_element_push — a push onto a slice whose ELEMENT is fat (`[]str`) stops by
- * name: the element's two-word image is not the one-word width the array-literal store stride and
- * the index load use, and a `sizeof` that disagrees with them would read the buffer back shifted
- * (list-builtin degrau — the next named step).
+ * lwt_lowers_fat_element_push_at_the_two_word_stride — a push onto `[]str` (0.3.1.0 raiz-comum §6
+ * R4, closing the degrau 10 stop this test used to assert by name): the pushed item's `{ptr, len}`
+ * pair is stored BY VALUE into a 16-byte item slot (`fat_slot_bytes()`, the SAME shape a mutable
+ * fat local's own frame slot uses), and the runtime grow's `sizeof` argument is 16 — the two-word
+ * stride the array literal's store and the index load also use now, so the three sites the honest
+ * stop used to name can never disagree about the number again.
  *
  * @return void
  */
 #test
-fn lwt_honest_stop_on_fat_element_push() {
+fn lwt_lowers_fat_element_push_at_the_two_word_stride() {
     let str_slice = checker::Slice { element = checker::Str { } }
     let base = lwt_call(lwt_path2("list", "empty"), "", teko::list::empty(), str_slice)
     let args = teko::list::push(teko::list::push(teko::list::empty(), base), lwt_strlit("hi"))
     let call = lwt_call(lwt_path2("list", "push"), "", args, str_slice)
-    teko::assert::str_contains(lwt_lower_expr_text(lwt_len_field(call)), "slice of FAT elements")
+    let text = lwt_lower_expr_text(lwt_len_field(call))
+    teko::assert::str_contains(text, "alloca 16, align 8")
+    teko::assert::str_contains(text, "const 16")
+    teko::assert::str_contains(text, "call @tk_slice_push(")
 }
 
 /**
