@@ -758,9 +758,9 @@ subset A1's interp already runs. **C1 does not HALT.**
 
 ### 12.2 End-to-end differential fixtures (`examples/regressions/`, driven by the wasm leg)
 
-| fixture | program (shape) | expected exit | VM | C-native | own-wasm |
+| fixture | program (shape) | expected exit | C-native | own-wasm |
 |---|---|---|---|---|---|
-| `wasm_exit_zero` | `exit(0)` | 0 | ✓ | ✓ | **new** |
+| `wasm_exit_zero` | `exit(0)` | 0 | ✓ | **new** |
 | `wasm_exit_code` | `exit(42)` | 42 | ✓ | ✓ | **new** |
 | `wasm_arith_exit` | `exit(6 * 7)` | 42 | ✓ | ✓ | **new** |
 | `wasm_if_exit` | `if 5 > 3 { exit(1) } else { exit(2) }` | 1 | ✓ | ✓ | **new** |
@@ -779,16 +779,16 @@ correctness fixes** — an implementer who reverts to "≥2 forward preds" (FIX 
 loop extent (FIX 2) fails to produce a valid module for them.
 
 ### 12.3 Ritual posture — RIGHT-SIZED (CI is the gate; dono ruling 2026-07-10)
-- **Every C1-N** owes the full ritual on the primary lane: the **both-engine gate** (native `teko . -o
-  bin` AND `teko test .` VM), **paranoid**, **fixpoint**, and **100% coverage on its new code**
+- **Every C1-N** owes the full ritual on the primary lane: the **native gate** (native `teko . -o
+  bin`), **paranoid**, **fixpoint**, and **100% coverage on its new code**
   (definition-of-done). The stackifier is branchy (per-block, per-terminator, per-scope) — cover every
   labeling-rule arm, every scope-kind, every honest-stop arm via golden tests; a genuinely unreachable
   arm is justified in the PR. The wasm differential leg (§12.2) is a wasmtime/node lane, honest-skipped
   where no wasm engine is present (a named reason, mirroring A4's macOS-only diff skip).
-- **VM-gotcha watch** (dense byte-work): (a) build buffers via `teko::list::push(buf, (x & 0xFF) to
+- **byte-work gotcha watch** (dense byte-work): (a) build buffers via `teko::list::push(buf, (x & 0xFF) to
   byte)` — never widen a `byte` mid-expression (byte-width anchoring); (b) LEB128 in `u32`/`u64`
   arithmetic, narrow to `byte` only at the last step; (c) no `x = match {…return}` — use `let x =
-  match {…}` then act (the isel/regalloc VM gotcha); (d) the scope stack + `br_depth` math in `u32`.
+  match {…}` then act (byte-width patterns); (d) the scope stack + `br_depth` math in `u32`.
 - **Fixpoint is trivially preserved** through C1-1..C1-7 (new files, no reachable call from the default
   path) and through C1-8 (the wasm path is behind the `TEKO_BACKEND=wasm` env seam; default stays C).
 
@@ -969,9 +969,9 @@ HALTs.
   itself already flagged this ("superseded by no external linker being needed"). The §8 host `panic`
   IMPORT is likewise superseded by the synthesized `tk_panic_str` fd_write-then-`unreachable`
   trampoline (still fail-loud: observe via fd_write to the host, then trap).
-- **S-3 · The keystone differential is own-wasm(wasmtime) == C-native ONLY — there is no `interp`/VM
-  leg (supersedes §12/§12.4's "== interp" and the §12.3 "both-engine gate", and the §13 "wasm leg of
-  `scripts/diff_c_own.sh`").** The VM was **retired (issue #524, `docs/design/vm-retirement.md`)**;
+- **S-3 · The keystone differential is own-wasm(wasmtime) == C-native ONLY — there is no `interp`
+  path (supersedes §12/§12.4's "== interp" and the prior "both-engine gate", and the §13 "wasm leg of
+  `scripts/diff_c_own.sh`").** This differential was **superseded (issue #524, `docs/design/vm-retirement.md`)**;
   `scripts/diff_c_own.sh` no longer exists on the lane (only `native_regressions.sh`'s CWD check
   survived it), and the test gate runs **natively only** (#265, `run_gate_native`, `project.tks:1355`).
   **Law-first:** the later, ratified #524/#265 win over the pre-#524 §12 sketch. C-native is the single

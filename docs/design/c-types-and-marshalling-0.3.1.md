@@ -94,7 +94,7 @@ Every row is a read measurement.
 | Teko has **NO macros**, and none are planned before 1.0 | confirmed | zero hits for `macro` in `src/lexer`, `src/parser`, `src/parser/ast.tks`; `docs/memory/teko-laws-digest.md` "Metaprogramming-out-of-LTS" |
 | `#os("…")` may precede **a function ONLY** — a `type` decl cannot be OS-guarded | yes | `parse_decl.tks:1239` |
 | native targets | `Arm64Macho`, `X8664Linux`, `X8664Windows`, `Wasm32Wasi`, `Wasm64Wasi`, `Wasm32Browser` | `src/build/project.tks:1421` |
-| the VM is **retired** — native AOT is the sole engine | ruled | `docs/memory/teko-laws-digest.md` ("Twins retired, 2026-07-13, #524") |
+| native AOT is the sole engine | ruled | `docs/memory/teko-laws-digest.md` ("Twins retired, 2026-07-13, #524") |
 | `Ptr` and `Uptr` are both **admissible union members** (they fall to the permissive arm) | yes | `resolve.tks:1642-1658` (`variant_member_admissible`) |
 | `ptr<T> \| null` lowers to a **bare `T *` with NULL meaning null** — zero overhead, C-identical | yes | `cg_type_is_niche_able`'s `Ptr => true` arm, `codegen.tks:1868-1877`; the emit path at `codegen.tks:1532-1534` |
 | `uptr \| null` is **NOT** niche-able — it falls to `_ => false` and lowers to a **tagged struct** | yes | `codegen.tks:1868-1877` (no `Uptr` arm) |
@@ -962,9 +962,7 @@ a width-insensitive value.
 
 ## 11. Regression fixtures
 
-The VM is retired (`teko-laws-digest.md`, #524), so **every oracle is native**. There is no
-VM/native differential to state; where the brief asks for "VM and native", the honest answer is that
-one engine remains and the fixtures say so.
+Every oracle is native (`teko-laws-digest.md`, #524). Prior briefs mentioned both engines; now only native remains and the fixtures validate accordingly.
 
 Fixture mechanics follow the house exactly: exit-code oracles are a namespace under
 `examples/regressions/bulk/src/qNNN_<name>/body.tks` plus a `Scenario` in `bulk.tkr`

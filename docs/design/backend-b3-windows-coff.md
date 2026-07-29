@@ -840,7 +840,7 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
 - **100% coverage on new code (definition-of-done).** The COFF writer is branchy (per-section,
   inline-vs-strtab name, per-reloc-kind, static-vs-external symbol) — cover every branch + every
   honest-stop arm via goldens; a genuinely unreachable arm is justified in the PR.
-- **VM-gotcha watch** (dense byte-work, the A4/B1/B2 list carries over): (a) build the COFF records in
+- **byte-work gotcha watch** (dense byte-work, the A4/B1/B2 list carries over): (a) build the COFF records in
   `u32`/`u64`, narrow to `byte` only at the last LE-emit step; (b) the 18-byte `IMAGE_SYMBOL` is
   UNALIGNED — do not `pad_to_mult` the symbol table (COFF packs it); (c) no `x = match {…return}` —
   use `let x = match {…}` then act; (d) a NEGATIVE `to u32`/`to u8` **panics** — the strtab 4-byte size

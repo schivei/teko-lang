@@ -387,13 +387,12 @@ Now that no `OptionalType`/`TSafeFieldAccess`/`TCoalesce` produce it, `Optional`
 
 ---
 
-## 4. REGRESSION FIXTURES to add (inputs → expected exit, VM + native)
+## 4. REGRESSION FIXTURES to add (inputs → expected exit, native)
 
 Behavior-preservation (Phase A) is guarded by the SEVEN rewritten fixtures keeping their existing
 `EXPECT_EXIT` unchanged (np_oop, optionals, safe_field_access_class, lambda_opt_typedef,
 selfref_class_optional, native_gate_coercions, wasm_panic_hook). No new positive fixture is needed for
-the rewrite itself — the unchanged exit codes across the rewrite ARE the assertion, run in both the
-VM/self-test lane and the native `./bin/teko test .` lane.
+the rewrite itself — the unchanged exit codes across the rewrite ARE the assertion, run natively via `./bin/teko test .`.
 
 Add, after Phase B, to lock in ERADICATION — negative/expect-fail cases (each a minimal `.tkb`
 project whose BUILD must fail). Placement: the main gate's `[tests] regression = ["examples/regressions"]`
