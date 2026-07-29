@@ -77,7 +77,7 @@ you for the rest). Everything in §5 is a corollary of that one picture.
 
 For the implementer, the meta-types (from `src/checker/type.tks`):
 
-- **`Reference { inner: Type }`** — surface `Ref<T>`. Never null (R2). C-repr = bare `T *`. The safe
+- **`Reference { inner: Type }`** — surface `ref` (user-written keyword); internal checker notation `Ref<T>`. Never null (R2). C-repr = bare `T *`. The safe
   side. Auto-deref is type-directed (§4 ref model). **Depends on the transparent redesign** (today it
   is `.value`-based; the redesign makes it transparent).
 - **`Ptr { inner: Type? }`** — surface `ptr<T>`. `inner = null` is the opaque `ptr` (≡ `ptr<void>` ≡
