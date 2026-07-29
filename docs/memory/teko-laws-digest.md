@@ -113,6 +113,11 @@ Nota de método, porque foi assim que este erro se descobriu: um agente veio diz
 
 **STS-before-LTS (2026-07-13):** sequential-task-structure ruling stabilizes before LTS lockdown; waves solve independently.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal, mas princípio bem estabelecido. Fica como norma de portões.
+>
+
 - **Gate que não gateia é pior que gate ausente (2026-07-25).** Quatro instâncias na .31: dois jobs de
   sanitizer com condição que nunca casa (`github.ref` em `pull_request` é `refs/pull/N/merge`); o
   runner de regressivo contando pulo como sucesso e escondendo no agregado (`N run, 0 failed` com
@@ -121,6 +126,11 @@ Nota de método, porque foi assim que este erro se descobriu: um agente veio diz
   (`on: pull_request:` apenas), o que travou release E seed novo. Regra: **todo gate afirma o modo em
   que está e falha quando o que devia rodar pulou.** `skipped` no caminho obrigatório é ERRO, não
   aprovação — e um gate que **não pode** passar bloqueia mais do que protege.
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal. Fica como norma de documentação (não frase sobrevive, significado não).
+>
+
 - **Prova removida tem que ser substituída por prova, não por prosa (2026-07-25).** O drop-128 tirou
   carriers de 128 bits que eram provas carregando peso, e em três lugares distintos a substituição foi
   uma frase de doc-comment que deixou de ser verdadeira: os `@throws panics on overflow` do
@@ -129,6 +139,11 @@ Nota de método, porque foi assim que este erro se descobriu: um agente veio diz
   o oráculo divergiu do backend que ele valida). O contra-exemplo correto está no mesmo trem:
   `numint_hi`/`numint_lo`, com prova escrita e verificável no doc-comment. **Frase sobrevive a
   refactor; significado não.**
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal do dono. Fica como princípio de design (phase separation, paralelização, amortização).
+>
+
 - **Um build por cenário é erro de design; a separação de fases é o habilitador, não a economia
   (owner 2026-07-25).** O runner de regressivo sintetiza um projeto descartável por cenário **e por
   linha de `Examples`** (`<prefix>.proj/` com `.tkp` mínimo + os statements), e paga **quatro
@@ -297,6 +312,11 @@ ASan. Se a ideia voltar, a chave tem de ser QUALIFICADA pelo namespace de escrit
 **GATILHO para reabrir:** um consumidor real que precise de estado MUTAVEL compartilhado entre
 isolates E que nao caiba em fork-join. E mesmo entao a resposta provavelmente nao e um grupo, e
 **canal** — o mecanismo ja reservado para compartilhamento, que por ruling vem DEPOIS.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal. Fica como regra de composição (código novo em seed funciona, uso novo rejeita).
+>
 
 ## CARGA ADITIVA: quem ensina um builtin novo NAO pode consumi-lo em `src/` (2026-07-27)
 
