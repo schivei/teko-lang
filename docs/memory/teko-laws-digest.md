@@ -41,6 +41,13 @@ Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `
 - Em **`remodel/**`** (o vagão) está mesmo desabilitado: uma tentativa de `--amend` + `--force-with-lease` no vagão desta lane foi recusada com *"push declined due to repository rule violations"*. Aqui vale forward-only sem excepção — corpo estragado corrige-se com um commit NOVO que explique o estrago.
 - Em **`cargo/**`** (a esteira) é PERMITIDO. Uma carga pode rebasear e reescrever a sua própria história à vontade, porque o que interessa é o que chega ao vagão.
 
+**A LINEARIDADE É EM DUAS RELAÇÕES — precisão do dono (2026-07-29, literal):** *"Tem que ser linear na `remodel/**` em relação a main e a main em relação ao org (repo principal)."*
+
+1. **`remodel/**` linear em relação à `main` da fork.** Verificável aqui e verificado nesta lane: zero commits de merge desde a `main`, a `main` é ancestral do vagão, base comum `4e6c4e4`.
+2. **A `main` da fork linear em relação à do org (repositório principal).** Esta NÃO é verificável do lado do agente: só a fork está configurada como remoto e o acesso ao GitHub está limitado a `schivei/teko-lang`. Quem a garante é o dono, que executa os merges.
+
+**Foi a relação 2 que mordeu no arranque desta lane:** o vagão nasceu da `main` do ORG enquanto o PR apontava para a `main` da FORK. As árvores eram idênticas (`7bd2318a` nas duas) e a topologia divergia, por causa dos squash-merges — resultado, conflito impossível de ler pelo diff. O sintoma a reconhecer: **um vagão sem CI de PR é conflito, não gatilho partido** — o GitHub não calcula ref de merge para um PR em conflito, portanto nenhum workflow `pull_request` dispara.
+
 **Consequência prática, e custou trabalho a aprender:** uma carga que precise de base nova deve **rebasear**, nunca fazer merge do vagão para dentro de si. Um agente desta lane fez merge por acreditar que não podia reescrever depois de ter empurrado, e o commit de merge teve de ser saltado à mão no dreno para a história do vagão continuar linear. Com o force-push disponível na esteira, esse merge era evitável.
 
 Nota de método, porque foi assim que este erro se descobriu: um agente veio dizer, sem lhe ser perguntado, que os commits dele estavam limpos de trailer "matching commit hygiene rules". Ele conhecia esta lei e o integrador não. **Ler este ficheiro por inteiro é barato; descobrir cada lei por acidente não é.**
