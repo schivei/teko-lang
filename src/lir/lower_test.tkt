@@ -2588,6 +2588,39 @@ fn lwt_lowers_str_slice_as_the_out_parameter_length_twin() {
 }
 
 /**
+ * Assert `call_symbol` resolves the two INTEGER-TO-STRING builtins (`i64_to_str`/`u64_to_str`) to
+ * their runtime OUT-PARAMETER-LENGTH twin (0.3.1.0 degrau 12): before this, either bare name fell
+ * through to `unresolved_builtin_stop` — first surfaced through `teko::backend::reg_ref`'s own
+ * `teko::u64_to_str(r.id to u64)` call, on the compiler's own self-build. The runtime twins
+ * (`tk_i64_to_str_len`/`tk_u64_to_str_len`) already existed (0.3.1.0 degrau 9) and were already
+ * reachable through `$"…{n}…"` interpolation's own hardcoded call — only the DIRECT-call
+ * resolution was missing.
+ */
+#test
+fn lwt_call_symbol_resolves_int_to_str_family() {
+    let i64_call = lwt_bare_call(teko::list::push(teko::list::empty(), "i64_to_str"), "")
+    let u64_call = lwt_bare_call(teko::list::push(teko::list::empty(), "u64_to_str"), "")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(i64_call, no_ext) { str as s => s == "tk_i64_to_str_len"; error => false })
+    teko::assert::is_true(match call_symbol(u64_call, no_ext) { str as s => s == "tk_u64_to_str_len"; error => false })
+}
+
+/**
+ * Assert a DIRECT `teko::u64_to_str(n)` call actually LOWERS to the out-parameter-length twin,
+ * not merely that `call_symbol` names it — `lower_call_fat`'s generic tail (`lower_args` +
+ * `lower_len_out_call`) must reserve the hidden length out-slot and append it as the call's LAST
+ * argument, the same shape `lwt_lowers_str_slice_as_the_out_parameter_length_twin` already proves
+ * for the `str`-returning slice family (0.3.1.0 degrau 12).
+ */
+#test
+fn lwt_lowers_u64_to_str_as_the_out_parameter_length_twin() {
+    let args = teko::list::push(teko::list::empty(), lwt_num(42, checker::PrimKind::U64))
+    let call = lwt_call(lwt_path1("u64_to_str"), "", args, checker::Str { })
+    let text = lwt_lower_expr_text(call)
+    teko::assert::str_contains(text, "call @tk_u64_to_str_len(")
+}
+
+/**
  * A native builtin call whose declared return type is `bool` (`teko::str::contains`) has its raw
  * result narrowed the SAME way a DECLARED `extern fn`'s does: a shift-left by 56 then an
  * UNSIGNED shift-right by 56 — the low-byte, zero-extending round trip `extern_return_narrow`

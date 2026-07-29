@@ -1933,11 +1933,32 @@ fn builtin_str_slice_symbol(last: str) -> str | null {
 }
 
 /**
+ * builtin_int_to_str_symbol — the runtime twin of the two INTEGER-TO-DECIMAL-STRING builtins this
+ * N1 subset lowers directly: `i64_to_str`/`u64_to_str` (`checker/scope.tks`), each `(iNN) -> str`
+ * (fat), resolving to the out-parameter-length twins built at 0.3.1.0 degrau 9
+ * (`tk_i64_to_str_len`/`tk_u64_to_str_len`, `teko_rt.h`) — the SAME `lower_len_out_call` shape
+ * `builtin_str_slice_symbol` already uses. Before this resolved, the ONLY native path to either
+ * twin was `lower_interp_hole_prim_fat`'s own HARDCODED symbol string, reached solely from inside
+ * a `$"…{n}…"` interpolation hole; a DIRECT call (`teko::u64_to_str(n)`, the shape
+ * `teko::backend::reg_ref` itself uses) fell through `call_symbol` to `unresolved_builtin_stop`
+ * (0.3.1.0 degrau 12) — the same builtin reachable through one path and not the other, this lane's
+ * recurring disease (named at degrau 11's own family, R5).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*_to_str_len` runtime twin, or `null` when `last` names neither
+ */
+fn builtin_int_to_str_symbol(last: str) -> str | null {
+    if last == "i64_to_str" { return "tk_i64_to_str_len" }
+    if last == "u64_to_str" { return "tk_u64_to_str_len" }
+    null
+}
+
+/**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
- * six families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena checkpoints,
- * the `str` predicate pair, the `str` slice trio, and the one `teko::env` host-surface primitive
- * with a native lowering (`builtin_env_symbol`). Split into one predicate per family so a family
- * grows without lengthening the others.
+ * seven families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * checkpoints, the `str` predicate pair, the `str` slice trio, the integer-to-string pair, and the
+ * one `teko::env` host-surface primitive with a native lowering (`builtin_env_symbol`). Split into
+ * one predicate per family so a family grows without lengthening the others.
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
@@ -1948,6 +1969,7 @@ fn native_builtin_symbol(last: str) -> str | null {
     match builtin_arena_symbol(last) { str as s => return s; null => { } }
     match builtin_str_query_symbol(last) { str as s => return s; null => { } }
     match builtin_str_slice_symbol(last) { str as s => return s; null => { } }
+    match builtin_int_to_str_symbol(last) { str as s => return s; null => { } }
     builtin_env_symbol(last)
 }
 
