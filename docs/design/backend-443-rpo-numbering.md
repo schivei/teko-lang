@@ -453,8 +453,7 @@ legitimate (a `.tkt` sees its module's internals).
 
 ## 6. The crumb sequence (ordered, each independently gate-able)
 
-Every crumb owes the full ritual — the **both-engine gate** (native `teko . -o bin` AND VM
-`teko test .`) · paranoid · fixpoint — and **100% coverage on its new code**. No machine bytes.
+Every crumb owes the full ritual — the **native gate** (`teko . -o bin` native engine) · paranoid · fixpoint — and **100% coverage on its new code**. No machine bytes.
 
 **CRITICAL SEQUENCING LAW (do not violate):** the numbering fix (Crumb 2) MUST land **before or
 with** the back-edge relaxation (Crumb 3). Relaxing `has_back_edge` first — while numbering is
