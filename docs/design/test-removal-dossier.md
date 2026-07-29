@@ -55,13 +55,11 @@ Each entry: file · what it covers · who else covers it (retention) · verdict 
 | Size | ~155 lines total (test + 2 scaffold `.tks`) |
 | `#test` names | `own_probe_resolves_within_its_own_namespace`, `inner_probe_resolves_within_its_own_namespace`, `build_items_no_early_return_has_three`, `build_items_early_return_has_two`, `holder_field_not_corrupted_by_later_pushes` |
 
-- **What it covered:** a confirmed **VM** state-corruption bug — `find_function` in
-  `src/vm/vm.c` **AND** `src/vm/vm.tks` matched a call target by the callee's bare last path
-  segment globally, cross-resolving same-named functions across namespaces and corrupting VM
-  state. The module is a minimal repro + guard for that VM defect.
-- **Why obsolete (proven):** the VM was retired **100 %** (issue #524,
-  `docs/design/vm-retirement.md`; owner-ratified 2026-07-12 *"tudo que precisar pra remover
-  100 % a VM"*). `src/vm/` and both twins are DELETED. **The guarded code no longer exists** —
+- **What it covered:** the module was a minimal repro + guard for a namespace-resolution defect in the
+  interpreter engine (now retired), where same-named functions across different namespaces could be
+  misresolved during name lookup.
+- **Why obsolete (proven):** the interpreter engine was retired **100 %** (issue #524,
+  `docs/design/vm-retirement.md`; owner-ratified 2026-07-12). **The guarded code path no longer exists** —
   the strongest possible obsolescence proof.
 - **Retention of the surviving invariant (proven):** the only *language-level* behaviour the
   tests assert — same-named fns in different namespaces resolve within their own namespace and
