@@ -147,17 +147,23 @@ on:
     # docs-only PR costs one ~12s ubuntu job, the aggregators REPORT (green, having asserted that
     # everything below them was correctly skipped), and nothing hangs.
 
-# ONE LIVE RUN PER PR. Without this, every push starts a full set — four producers plus six test
-# legs — and the previous set keeps running to completion on a commit nobody will ever merge,
-# burning parallel capacity to grade dead commits.
+# ONE RUN AT A TIME PER PR, AND EVERY RUN FINISHES. A newer push QUEUES behind the run in flight
+# instead of killing it. The group is keyed on the PR ref so distinct PRs never wait on each other,
+# and `github.workflow` is included so this file's runs never collide with another workflow's.
 #
-# Cancelling is safe here because a required check is evaluated on the PR's HEAD commit: a run
-# cancelled by a newer push belongs to a superseded SHA, which no longer gates anything. The
-# group is keyed on the PR ref so distinct PRs never cancel each other, and `github.workflow` is
-# included so this file's runs never collide with another workflow's.
+# This used to cancel, on the reasoning that a run superseded by a newer push grades a commit that
+# no longer gates anything. That reasoning holds for the VERDICT and fails for the MEASUREMENT. On a
+# lane whose whole job is to find where the native backend stops, a cancelled run destroys the only
+# evidence of a stop address — and `cancelled` reaches the reader looking like `failure`, which has
+# already been misread here. Owner ruling 2026-07-29: "Disparar vários de uma vez não é problema, o
+# problema é quando algo chega na fila e o processo já está em curso."
+#
+# The cost is real and accepted: a burst of pushes now runs a full set each — four producers plus
+# six test legs — rather than only the last. Batch what is ready into ONE push and the cost is the
+# same as before; the difference is that carelessness now buys minutes instead of losing evidence.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
