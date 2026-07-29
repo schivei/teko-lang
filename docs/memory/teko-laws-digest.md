@@ -6,6 +6,11 @@ source: TEKO_CONSTITUTION.md, TEKO_LEGISLATION.md, TEKO_MASTER_PLAN.md (wave con
 
 # Teko Laws Digest
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Esta regra não tem citação literal do dono, apenas datação '(ruling 2026-07-04)'. É configuração arquitetural documentada. Fica como princípio.
+>
+
 **Teko-only (ruling 2026-07-04):** compiler source canonical in `.tks`; frozen C bootstrap (`0.0.1.3-bootstrap`) archived; C runtime (`teko_rt.c`) maintained.
 
 **The C runtime may GROW to serve the native backend (ruling 2026-07-29, literal):** *"Faz sentido e concordo com o agente sobre as funções que adicionou para conseguir resolver o runtime nativo através do C, isso não é proíbido, o mesmo vale para um bug conhecido que possa quebrar o runtime silenciosamente sem conseguir corrigir o nativo adequadamente."*
@@ -16,17 +21,52 @@ This does not soften "no new C emissions" — that ruling is about the compiler 
 
 Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `tk_u64_to_str_len` — out-parameter-length twins of three existing builders, because the native backend's `LCall` captures a result in ONE register while a `tk_str` returned by value occupies the two-eightbyte SysV/AAPCS64 pair. Thin wrappers over their own twins, owning no logic, mirroring `tk_slice_push`'s established `(…, &out_len)` shape.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Retirada de três motores (VM, REPL, seed C) não tem citação literal. É decisão arquitetural datada. Fica como fato histórico.
+>
+
 **Twins retired (2026-07-13, #524):** VM interpreter, REPL, C bootstrap all retired; native AOT sole engine.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Qualidade contínua no W15 sem citação literal do dono. É norma operacional derivada de disciplina geral. Fica como conselho.
+>
 
 **W15-from-now:** code quality (doc-comments only, no inline; flatten, extract; cyclomatic <N) applied continuously, not deferred.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal, apenas 'reforçado 2026-07-16'. É política derivada de princípio de fechamento. Fica como diretriz.
+>
+
 **Issues-100% + NO-DEFERRAL (reforçado 2026-07-16):** every open item ships complete; no deferrers ("future wave"); tensions → law-first ruling + tribunal. **Toda falha achada (mesmo antiga, mesmo que "não bloqueie") é resolvida AGORA, in-wave — "não bloqueia" não é desculpa (é falha de design/desleixo). Se o fix precisa de peça planejada para o futuro (0.4/pós-1.0), a peça é ADIANTADA agora.** "follow-up / não bloqueia / workaround-em-vez-de-fix / completar-depois" para uma falha real = PROIBIDO. Recorte de roadmap (feature futura não-começada que nenhuma falha exige) continua ok — até uma falha exigi-la.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal. É classificação de governo de documentação. Fica como política de arquivos.
+>
 
 **Memory-is-rules-only (governança 2026-07-16):** memória = SÓ conjuntos de regras/design-rulings/convenções; definição de agente = regras + como-agir; skill = superpoderes (+regras). Um ACHADO que precisa ser resolvido (bug/gap/limitação) NÃO vive em memória → valida se já foi feito → senão vira ISSUE (`bug`) rastreada. Ao migrar p/ issue, REMOVE a nota da memória/skill/agente (o detalhe técnico vai no corpo da issue).
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal. É decisão derivada de lei de deferral. Fica como regra arquitetural.
+>
+
 **Resolve-in-same-task / don't-ask (2026-07-13):** an error found now is fixed now; a future-planned piece the task needs is pulled forward. This is LAW-decided, not an owner call — never ask the owner to choose fix-now-vs-defer or whether a disproportionate rework is "in scope" (asking is itself the violation). Owner-decision tensions = product taste or law-vs-law ONLY.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem atribuição e sem citação literal. É norma de teste. Fica como padrão de qualidade.
+>
+
 **100%-coverage-on-delta:** new/altered code covers all branches + lines; arm inalcanzaable only if listed with reason.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem atribuição e sem citação. É disciplina de entrega (todos checks completados + sucesso). Fica como protocolo.
+>
 
 **Main-integrity/never-merge-on-snapshot:** all checks `completed + success` before merge; `gh pr merge`, not direct push.
 
@@ -52,9 +92,24 @@ Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `
 
 Nota de método, porque foi assim que este erro se descobriu: um agente veio dizer, sem lhe ser perguntado, que os commits dele estavam limpos de trailer "matching commit hygiene rules". Ele conhecia esta lei e o integrador não. **Ler este ficheiro por inteiro é barato; descobrir cada lei por acidente não é.**
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem atribuição e sem citação. É decisão de sequenciamento (DRY refactor é fase final). Fica como plano.
+>
+
 **DRY-last:** the whole-codebase DRY refactor is final phase; every other item lands first.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem atribuição. Sem citação. Fica como roadmap (comptime/macros em pós-1.0.0.0).
+>
+
 **Metaprogramming-out-of-LTS:** comptime/macros deferred to post-`1.0.0.0`; traits (structural derive) stay.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Sem citação literal do dono, apenas datação. É decisão de sequência. Fica como arquitetura.
+>
 
 **STS-before-LTS (2026-07-13):** sequential-task-structure ruling stabilizes before LTS lockdown; waves solve independently.
 
