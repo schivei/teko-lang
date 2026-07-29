@@ -36,8 +36,8 @@ Author: architect. Implementer executes the crumb sequence in order.
    middle of code* (conditions, indices, offsets, masks, sizes, file magic, section
    flags) must also become named `const` / `enum` / `flags`.
 4. Some families become `enum` or `flags`, not scalar `const`.
-5. Behavior-preserving, proven by **fixpoint gen1==gen2** + both-engine (VM +
-   native) tests + 100% coverage of the delta.
+5. Behavior-preserving, proven by **fixpoint gen1==gen2** + both execution paths
+   (C rota and native backend) tests + 100% coverage of the delta.
 6. **Three placements** (owner clarification 2026-07-15, from the issue body): `const`
    is placement-polymorphic — LOCAL, MODULE, and TYPE-MEMBER. See §0.1.
 
@@ -113,7 +113,7 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 | LIR rodata (WORKS) | `src/lir/lir.tks:143` (`LRodata`), `:262` (`LGlobalAddr`), `lower.tks:3759` (`intern_rodata`) | string literals already intern rodata + reference it |
 | LIR global (STUB) | `src/lir/lir.tks:148` (`LGlobal`) | "top-level consts are a later construct" — we DO NOT use this |
 | Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, um backend encoder, `stackify.tks:4458` | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
-| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff,wasm}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend AND interpreted in the VM |
+| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff,wasm}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend and available at runtime |
 
 ### 2.1 The critical insight (validated)
 
@@ -199,7 +199,7 @@ the whole reloc model is `.text`-relative (verified §5.1). Two tiers:**
 - **Tier B — pointer/slice-bearing aggregate:** a field is a slice (`[]T`) or a
   pointer, so the rodata image contains a pointer that must hold the address of
   ANOTHER rodata datum → a **data→data relocation whose patch site is INSIDE the
-  data section**. That relocation **does not exist** in any writer/encoder/VM
+  data section**. That relocation **does not exist** in any writer/encoder or backend
   (§5.1 verdict). This tier BREAKS "zero backend" and becomes a dedicated backend
   phase (§8 crumbs T-B*). The flagship Tier-B consts are the ABI descriptors
   `abi_aapcs64.tks:14`). **None of the owner's ~50 anemic-const sites are Tier B**
@@ -631,24 +631,22 @@ pointer (a slice/pointer field) needs a reloc the toolchain cannot emit.
 
 | Backend / writer | honest-stop (gates `m.globals` only) | Tier A (scalar + flat-POD + `[]byte`) | Tier B (pointer/slice-bearing) |
 |---|---|---|---|
-| C backend (`--backend=c`) | — | none (INLINE-AT-USE: `inline_aggregate_consts` substitutes a clone of the checked initializer at every use; the decl stays a no-op residual — NOT a `static const`, since a runtime-allocated `[]T`/aggregate has no C static initializer, #607) | data-init pointer resolvable in C init, but see VM/native — sequence with them |
+| C backend (`--backend=c`) | — | none (INLINE-AT-USE: `inline_aggregate_consts` substitutes a clone of the checked initializer at every use; the decl stays a no-op residual — NOT a `static const`, since a runtime-allocated `[]T`/aggregate has no C static initializer, #607) | data-init pointer resolvable in C init, but see native backend — sequence with it |
 | x86_64 (`encode_x86_64.tks`) | `honest_globals_x86` (`:1495`) | none (text→rodata load exists) | **widen `RelocX86` with a patch-site SECTION tag + emit data-section relocs** |
 | arm64 (`encode_arm64.tks`) | `honest_globals`/`A4-globals` (`:1858`) | none | **same: data-section reloc emission** |
 | wasm (`stackify.tks`/`objfile_wasm.tks`) | `wasm_honest_globals`/`C1-globals` (`:4458`) | none | **compute+write intra-data i32 offsets in the data segment (no reloc, but new)** |
 | ELF writer | — | none | **new `.rela.rodata` section + rela emission** |
 | Mach-O writer | — | none | **new rodata-section (local) relocations** |
 | COFF writer | — | none | **new `.rdata` relocations (patch site in `.rdata`)** |
-| LIR interp (VM) | — | none (typed load off `LGlobalAddr` reuses `LFieldAddr`/`LLoad`; `lir_interp.tks:206/527`) | **resolve a rodata-INTERNAL pointer field to its target rodata base at load** |
 
 **Tier A: no honest-stop is touched (we never populate `m.globals`) and no backend
 file changes.** The only Tier-A validation risk is that `LFieldAddr` must accept a
-rodata-`LGlobalAddr` base across the 4 encoders + VM — expected to already hold
+rodata-`LGlobalAddr` base across the 4 encoders — expected to already hold
 (it is base+offset), asserted in the Tier-A fixtures.
 
 **Tier B: NOT zero-backend.** It is a dedicated phase touching the 3 native
 encoders (patch-site section tag), the ELF/Mach-O/COFF writers (a data-section
-relocation), the wasm data emitter (emit-time offsets), and the VM (rodata-internal
-pointer resolution). Sequenced in §8 (crumbs T-B1..T-B5), gated by the same
+relocation), and the wasm data emitter (emit-time offsets). Sequenced in §8 (crumbs T-B1..T-B5), gated by the same
 fixpoint + golden bytes. **Only needed to convert pointer-bearing aggregate
 factories (ABI descriptors); the owner's ~50 do not require it.**
 
@@ -862,8 +860,8 @@ corpus's OWN source — are:
 - **BUMP #3 — after Crumb T-B5 (🔑):** the data→data relocation capability is in the
   seed. This UNLOCKS Crumb T-B6 (migrating pointer-bearing aggregates — ABI
   descriptors — to rodata consts the compiler's own source then uses). Tier-B may
-  itself need >1 intermediate bump (T-B1 reloc model → T-B2/3 writers → T-B4 wasm →
-  T-B5 VM) if a later T-B crumb's source uses an earlier one's capability.
+  itself need >1 intermediate bump (T-B1 reloc model → T-B2/3 writers → T-B4 wasm)
+  if a later T-B crumb's source uses an earlier one's capability.
 
 Lane→umbrella promotion stays "as early as possible" (owner); the internal seed
 bumps are the mechanism for making each increment available to the corpus.
@@ -878,8 +876,8 @@ bumps are the mechanism for making each increment available to the corpus.
   1` → error (missing type); `const E: i64` → error (missing `=`); `const F: i64 =
   1` at LOCAL scope still parses as the existing local binding (no regression).
 - **Ritual:** full gate. Exit codes: valid programs compile-clean; each malformed
-  case exits with the parser's error code (VM and native identical — parse is
-  pre-backend so both engines share it).
+  case exits with the parser's error code (identical on both paths — parse is
+  pre-backend so both share it).
 
 ### Crumb 2 — checker collect: `collect_const_sig` + env binding
 - **Shapes:** §4.3 `collect_const_sig`; extend the pass-1 loop in `collect.tks` to
@@ -905,8 +903,8 @@ bumps are the mechanism for making each increment available to the corpus.
 ### Crumb 5 — inliner `inline_consts` (SCALARS) + pipeline placement
 - **Shapes:** §4.7 `inline_consts` (scalar arm); call it in the checker pipeline
   after `monomorphize`, before lowering; `lower_item` defensive `TConstDecl` no-op.
-- **Fixtures (both-engine):** `const K: i64 = 41; fn main() { print(K + 1) }` prints
-  42 on VM AND native; the lowered LIR contains NO reference to `K` and NO `LGlobal`
+- **Fixtures (both paths):** `const K: i64 = 41; fn main() { print(K + 1) }` prints
+  42 on both execution paths; the lowered LIR contains NO reference to `K` and NO `LGlobal`
   (assert `m.globals.len == 0`); nested `const B = A + 1; const A = 1; … B` folds.
 - **Ritual:** full gate + `m.globals.len == 0` assertion. Scalar keystone.
 
@@ -918,12 +916,12 @@ bumps are the mechanism for making each increment available to the corpus.
   `LLoad`, or a struct-copy from the rodata base into a caller slot when the value
   is passed by value). `inline_consts` routes aggregate references to the rodata
   symbol instead of substituting a literal.
-- **Fixtures (both-engine):** `const M: MReg = preg(0, MRegClass::GPR)` referenced
-  N times emits **ONE** rodata entry, all uses read identical bytes on VM AND
-  native; `gzip_magic: []byte` → 2 bytes in rodata, header at use, byte-identical;
+- **Fixtures (both paths):** `const M: MReg = preg(0, MRegClass::GPR)` referenced
+  N times emits **ONE** rodata entry, all uses read identical bytes on both execution paths;
+  `gzip_magic: []byte` → 2 bytes in rodata, header at use, byte-identical;
   `ret_inst: MInst = MRet {}` round-trips; assert `m.globals.len == 0` still holds
   (rodata, NOT globals — no honest-stop reachable); assert `LFieldAddr` accepts an
-  `LGlobalAddr` base on all 4 encoders + VM (the sole Tier-A backend risk).
+  `LGlobalAddr` base on all 4 encoders (the sole Tier-A backend risk).
 - **Ritual:** full gate. **Aggregate keystone** — proves the "→ rodata" end-state
   with zero backend change for Tier A.
 
@@ -1021,13 +1019,11 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
 - **T-B3** Mach-O + COFF writers: emit rodata-section (`.rdata`) local relocations
   whose patch site is inside the data section.
 - **T-B4** wasm: compute+write intra-data i32 offsets in the active data segment
-  (`objfile_wasm.tks:640`) — no reloc, but new emit-time resolution.
-- **T-B5** VM (`lir_interp.tks:527`): resolve a rodata-INTERNAL pointer field to its
-  target rodata base at typed load. **🔑 SEED BUMP #3 after T-B5** — the data-reloc
-  capability is now in the seed; T-B6's source may use pointer-bearing aggregate
-  consts. (T-B1..T-B5 may each tag an intermediate `-beta` if a later T-B crumb's
+  (`objfile_wasm.tks:640`) — no reloc, but new emit-time resolution. **🔑 SEED BUMP #3 after T-B4** — the data-reloc
+  capability is now in the seed; later crumbs may use pointer-bearing aggregate
+  consts. (T-B1..T-B4 may each tag an intermediate `-beta` if a later T-B crumb's
   source uses an earlier one's capability.)
-- **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`WIN64`,
+- **T-B5** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`WIN64`,
   `UPPER_SNAKE` per D7) and any other pointer-bearing aggregate to rodata consts.
 - **Fixtures:** `const AAPCS64: AbiDescriptor = …` emits ONE rodata blob with data
   relocs to its `[]u32` leaf arrays; both engines read identical register lists; all
@@ -1055,13 +1051,13 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
    dominant regression surface of #594 — the byte-identity bar is the mitigation.
 4. **Data→data relocation does not exist (§5.1) — the RULING-1 hard constraint.**
    Materializing a pointer-bearing aggregate (ABI descriptors) fully in rodata needs
-   a relocation whose patch site is inside the data section; no writer/encoder/VM
+   a relocation whose patch site is inside the data section; no writer/encoder or backend
    emits one. *Resolution:* TIER the aggregates. Tier A (flat-POD / `[]byte`, the
    entire owner ~50) ships in the feature phase with **zero backend change**. Tier B
    (pointer-bearing) is a separate backend track (crumbs T-B1–T-B6) that first BUILDS
-   the data-reloc across ELF/Mach-O/COFF/wasm/VM, then migrates. This is the honest
+   the data-reloc across ELF/Mach-O/COFF/wasm, then migrates. This is the honest
    answer to "backend fica intocado ou não": **intocado para Tier A / os ~50;
-   TOCADO (3 encoders + 3 writers + wasm emit + VM) para Tier B.**
+   TOCADO (3 encoders + 3 writers + wasm emit) para Tier B.**
 5. **`*_empty()` factory misclassification.** Converting a fresh-mutable-seed
    factory to a shared const aliases state → NOT behavior-preserving. *Resolution:*
    6.5 explicitly excludes them; the W15 rule text names the trap.
@@ -1095,9 +1091,9 @@ No genuine unresolved tension → no HALT.
 - RULING-2 sweep (crumbs S1–S6): `encode_x86_64.tks`, `encode_arm64.tks`,
   um backend encoder, `stackify.tks`, `objfile_*.tks` — frozen bytes.
 - **Feature + Tier A: ZERO backend encoder/writer changes, ZERO C twins.**
-- **Tier B ONLY (crumbs T-B1–T-B6, pointer-bearing aggregates):** the 3 native
-  encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs), wasm
-  data emitter, VM `lir_interp.tks`.
+- **Tier B ONLY (crumbs T-B1–T-B5, pointer-bearing aggregates):** the 3 native
+  encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs), and wasm
+  data emitter.
 
 ## 11. Note on bootstrap ordering — MULTIPLE seed bumps (owner 2026-07-15)
 

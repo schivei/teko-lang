@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o plano de drenagem da fase-3 de stdlib, com ordenação de issues já planejada. Não descreve o estado atual do projeto.
+
 # Drain plan — fase-3 stdlib (33 issues): ORDER + first crumbs
 
 Architect deliverable. Read-only design. NO builds were run producing this.
