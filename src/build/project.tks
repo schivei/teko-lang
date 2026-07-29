@@ -2025,13 +2025,13 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
 }
 
 /**
- * emit_native_arm64 — the arm64/Mach-O own-backend tail (the A4 reference, #385):
- * select arm64 `MInst` from the lowered module, allocate registers under AAPCS64,
- * encode to arm64 machine words, wrap them in a Mach-O object, and hand the bytes
- * to `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker).
- * This is the DEFAULT own-backend path, byte-for-byte unchanged from A4-5 (the
- * same pipeline calls in the same order), so the arm64 differential and the
- * default output's FIXPOINT are preserved.
+ * emit_native_arm64 — the arm64/Mach-O own-backend tail (the A4 reference, #385): give `lmod` the
+ * platform-ABI entry point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1
+ * native-args fix), select arm64 `MInst` from the wrapped module, allocate registers under
+ * AAPCS64, encode to arm64 machine words, wrap them in a Mach-O object, and hand the bytes to
+ * `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker). The pipeline calls
+ * are otherwise the SAME order as A4-5, so the arm64 differential and the FIXPOINT (gen2 == gen3
+ * under this SAME updated compiler) are preserved.
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
@@ -2042,15 +2042,17 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
  * @return      0 on a successful build+link, else the failing status
  */
 fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_native_object(dir, od, stem, teko::backend::emit_macho(enc), prog, m)
 }
 
 /**
- * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1): select x86-64
- * `MInstX86` from the lowered module, allocate registers under the SysV AMD64
+ * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1): give `lmod` the platform-ABI entry
+ * point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1 native-args fix),
+ * select x86-64 `MInstX86` from the wrapped module, allocate registers under the SysV AMD64
  * register file (`sysv64`), encode to variable-length x86 machine bytes, wrap them
  * in an `ET_REL` ELF64 object (`emit_elf`), and hand the bytes to
  * `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker).
@@ -2068,16 +2070,18 @@ fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, pro
  * @return      0 on a successful build+link, else the failing status
  */
 fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
 }
 
 /**
- * emit_native_win — the x86-64/Win64/PE-COFF own-backend tail (#388 B3): select
- * x86-64 `MInstX86` from the lowered module under the Win64 ABI register file
- * (`win64` — call/return arguments land in RCX/RDX/R8/R9, the byte-differing
+ * emit_native_win — the x86-64/Win64/PE-COFF own-backend tail (#388 B3): give `lmod` the
+ * platform-ABI entry point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1
+ * native-args fix), select x86-64 `MInstX86` from the wrapped module under the Win64 ABI register
+ * file (`win64` — call/return arguments land in RCX/RDX/R8/R9, the byte-differing
  * counterpart of the SysV `emit_native_x86`), allocate registers under the same
  * `win64` descriptor, encode to the SAME variable-length x86 machine bytes as the
  * Linux path (the x86 ISA is shared — only the ABI register partition differs),
@@ -2098,7 +2102,8 @@ fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
  * @return      0 on a successful build+link, else the failing status
  */
 fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, lmod) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
     finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m)
