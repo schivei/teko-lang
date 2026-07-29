@@ -1113,6 +1113,100 @@ fn add_sp_imm_word(dst_id: u32, imm12: u32) -> u32 {
 }
 
 /**
+ * add_reg_imm_word — `ADD rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative offset; `add_sp_imm_word` is its `rn=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to add (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * add_reg_imm_shifted_word — `ADD rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset ADD sequence, contributing
+ * `imm12 << 12` bytes.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_word — `SUB rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative subtraction; `sub_sp_imm_word` is its `rn=rd=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to subtract (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_shifted_word — `SUB rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset SUB sequence.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * big_offset_words — materialize `rd = rn ± off` for an `off` past the
+ * inline 12-bit ADD/SUB-immediate field, as ONE or TWO chained ADD/SUB-
+ * immediate instructions: `rd = rn ± (hi << 12)` (the `sh`-set high lane,
+ * skipped when `hi` is 0) then `rd = rd ± lo` (chained off `rd`, skipped when
+ * `lo` is 0 and the high lane already ran) — the A4-2 big-frame sequence
+ * `emit_prologue_big`/`emit_epilogue_big`/`encode_frame_addr_words` share.
+ * `rn_id`/`rd_id` may be the same id (an SP adjustment) or different (an
+ * `MFrameAddr` destination, safely used as its own scratch: nothing else
+ * reads it before both writes land). An `off` past what two chained 12-bit
+ * lanes reach (`> ARM64_IMM24_FIELD_MAX`) raises `A4-bigframe` — unreached by
+ * any real frame size or slot offset.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 off  the non-negative byte offset to add/subtract
+ * @param bool is_sub  true for a SUB sequence, false for ADD
+ * @return []u32 | error  the one or two chained instruction words, or `A4-bigframe`
+ */
+fn big_offset_words(rn_id: u32, rd_id: u32, off: u32, is_sub: bool) -> []u32 | error {
+    if off > ARM64_IMM24_FIELD_MAX { return honest_bigframe() }
+    let hi = off >> ARM64_IMM12_SPLIT_SHIFT
+    let lo = off & ARM64_IMM12_MASK
+    mut words: []u32 = teko::list::empty()
+    mut cur_rn = rn_id
+    if hi > (0 to u32) {
+        let w = if is_sub { sub_reg_imm_shifted_word(rn_id, rd_id, hi) } else { add_reg_imm_shifted_word(rn_id, rd_id, hi) }
+        words = teko::list::push(words, w)
+        cur_rn = rd_id
+    }
+    if (lo > (0 to u32)) || (hi == (0 to u32)) {
+        let w = if is_sub { sub_reg_imm_word(cur_rn, rd_id, lo) } else { add_reg_imm_word(cur_rn, rd_id, lo) }
+        words = teko::list::push(words, w)
+    }
+    words
+}
+
+/**
  * stp_gpr — `STP xa, xb, [sp, #imm7*8]` (the 64-bit GPR store-pair, Rn=SP): one
  * callee-saved GPR pair (and the FP/LR pair) save word.
  *
@@ -1313,33 +1407,111 @@ fn emit_callee_area(words0: []u32, layout: FrameLayout, is_store: bool) -> []u32
 }
 
 /**
+ * emit_frame_mem_single — append the save (or restore) words for one register
+ * class's callee-saved list as INDIVIDUAL STR/LDR (never STP/LDP), one per id
+ * at `base + i*8`: the big-frame prologue/epilogue's counterpart of
+ * `emit_frame_mem`, whose offsets can exceed the STP/LDP imm7 field while
+ * still fitting the STR/LDR unsigned 12-bit scaled field (`big_frame_fits`).
+ *
+ * @param []u32 words0  the word buffer to extend
+ * @param []u32 ids  the class's ascending callee-saved ids
+ * @param u32 base  the SP byte offset of the first id
+ * @param bool is_fpr  true for the FP register family
+ * @param bool is_store  true for saves (prologue), false for restores (epilogue)
+ * @return []u32  `words0` followed by the class's individual save/restore words
+ */
+fn emit_frame_mem_single(words0: []u32, ids: []u32, base: u32, is_fpr: bool, is_store: bool) -> []u32 {
+    mut words = words0
+    mut i: u64 = 0
+    loop {
+        if i >= ids.len { break }
+        let off = base + ((i to u32) * ARM64_REG_BYTES)
+        words = teko::list::push(words, single_frame_word(ids[i], off / ARM64_REG_BYTES, is_fpr, is_store))
+        i++
+    }
+    words
+}
+
+/**
+ * emit_callee_area_single — append the callee-saved save (or restore) words
+ * as individual STR/LDR (the big-frame prologue/epilogue counterpart of
+ * `emit_callee_area`): the GPR list first, then the FPR list immediately
+ * above it, neither ever paired.
+ *
+ * @param []u32 words0  the word buffer to extend
+ * @param FrameLayout layout  the resolved frame (size > 0)
+ * @param bool is_store  true for saves (prologue), false for restores (epilogue)
+ * @return []u32  `words0` followed by the callee-saved words
+ */
+fn emit_callee_area_single(words0: []u32, layout: FrameLayout, is_store: bool) -> []u32 {
+    let base = callee_base_offset(layout)
+    let after_gpr = emit_frame_mem_single(words0, layout.saved_gpr, base, false, is_store)
+    let fpr_base = base + ((layout.saved_gpr.len to u32) * ARM64_REG_BYTES)
+    emit_frame_mem_single(after_gpr, layout.saved_fpr, fpr_base, true, is_store)
+}
+
+/**
+ * append_u32_words — append every word of `xs` to `buf`, in order: the
+ * chained-instruction-sequence concatenation `emit_prologue_big`/
+ * `emit_epilogue_big` use to fold `big_offset_words`'s one-or-two-word result
+ * into the running word buffer.
+ *
+ * @param []u32 buf  the word buffer to extend
+ * @param []u32 xs  the words to append
+ * @return []u32  `buf` followed by `xs`
+ */
+fn append_u32_words(buf: []u32, xs: []u32) -> []u32 {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        b = teko::list::push(b, xs[i])
+        i++
+    }
+    b
+}
+
+/**
  * frame_fits — whether the FP/LR store-pair offset (the largest pair offset,
  * `size - 16`) fits the signed 7-bit scaled field. When it does, every smaller
- * pair/slot offset fits too, so this single check guards the whole prologue and
- * epilogue against `A4-bigframe`.
+ * pair/slot offset fits too, so this single check guards the SMALL
+ * prologue/epilogue path (`emit_prologue_small`/`emit_epilogue_small`), the
+ * byte-for-byte-unchanged shape every frame used before the big-frame
+ * sequence existed.
  *
  * @param FrameLayout layout  the resolved frame (size > 0)
- * @return bool  true iff the frame's offsets are all encodable
+ * @return bool  true iff the frame's offsets fit the STP/LDP field
  */
 fn frame_fits(layout: FrameLayout) -> bool {
     ((layout.size - ARM64_FP_LR_BYTES) / ARM64_REG_BYTES) <= ARM64_IMM7_MAX_POS
 }
 
 /**
- * emit_prologue — the function's entry sequence, or an empty list for a
- * frameless function: `sub sp, sp, #size`; `stp x29, x30, [sp, #size-16]`;
- * `add x29, sp, #size-16` (set FP); then one save per callee-saved pair/single.
- * A frame too large for the STP field raises `A4-bigframe`.
+ * big_frame_fits — whether a frame too large for `frame_fits` (the STP/LDP
+ * imm7 field) can still be materialized by the BIG prologue/epilogue
+ * sequence: every individual STR/LDR save/restore offset (bounded above by
+ * `size - FP_LR_BYTES`, the largest one) must fit the STR/LDR unsigned 12-bit
+ * SCALED field. Past this, `emit_prologue_big`/`emit_epilogue_big` raise
+ * `A4-bigframe` — an unrealistically large (32KB+) frame.
  *
- * @param FrameLayout layout  the resolved frame
- * @return []u32 | error  the prologue words, or the `A4-bigframe` honest-stop
+ * @param FrameLayout layout  the resolved frame (size > 0)
+ * @return bool  true iff the big-frame sequence can materialize every offset
  */
-pub fn emit_prologue(layout: FrameLayout) -> []u32 | error {
-    if layout.size == (0 to u32) {
-        let none: []u32 = teko::list::empty()
-        return none
-    }
-    if !frame_fits(layout) { return honest_bigframe() }
+fn big_frame_fits(layout: FrameLayout) -> bool {
+    (layout.size - ARM64_FP_LR_BYTES) <= ARM64_STR_LDR_FIELD_MAX_BYTES
+}
+
+/**
+ * emit_prologue_small — the ORIGINAL entry sequence for a frame whose FP/LR
+ * pair offset fits the STP field (`frame_fits`): `sub sp, sp, #size`; `stp
+ * x29, x30, [sp, #size-16]`; `add x29, sp, #size-16` (set FP); then one save
+ * per callee-saved pair/single. Byte-for-byte identical to every frame this
+ * encoder produced before the big-frame sequence existed.
+ *
+ * @param FrameLayout layout  the resolved frame (size > 0, `frame_fits`)
+ * @return []u32  the prologue words
+ */
+fn emit_prologue_small(layout: FrameLayout) -> []u32 {
     let top = layout.size - ARM64_FP_LR_BYTES
     mut words: []u32 = teko::list::empty()
     words = teko::list::push(words, sub_sp_imm_word(layout.size))
@@ -1349,21 +1521,16 @@ pub fn emit_prologue(layout: FrameLayout) -> []u32 | error {
 }
 
 /**
- * emit_epilogue — the function's frame-teardown sequence (LIFO), or an empty
- * list for a frameless function: restore the callee-saved registers; `ldp x29,
- * x30, [sp, #size-16]`; `add sp, sp, #size`. The `RET` itself is the `MRet`
- * encoding (`encode_ret`), which the function-encode layer (A4-3) emits
- * immediately after these words. A frame too large raises `A4-bigframe`.
+ * emit_epilogue_small — the ORIGINAL frame-teardown sequence (LIFO) for a
+ * frame whose FP/LR pair offset fits the STP field (`frame_fits`): restore
+ * the callee-saved registers; `ldp x29, x30, [sp, #size-16]`; `add sp, sp,
+ * #size`. Byte-for-byte identical to every frame this encoder produced
+ * before the big-frame sequence existed.
  *
- * @param FrameLayout layout  the resolved frame
- * @return []u32 | error  the teardown words (RET excluded), or `A4-bigframe`
+ * @param FrameLayout layout  the resolved frame (size > 0, `frame_fits`)
+ * @return []u32  the teardown words (RET excluded)
  */
-pub fn emit_epilogue(layout: FrameLayout) -> []u32 | error {
-    if layout.size == (0 to u32) {
-        let none: []u32 = teko::list::empty()
-        return none
-    }
-    if !frame_fits(layout) { return honest_bigframe() }
+fn emit_epilogue_small(layout: FrameLayout) -> []u32 {
     let top = layout.size - ARM64_FP_LR_BYTES
     mut words: []u32 = emit_callee_area(teko::list::empty(), layout, false)
     words = teko::list::push(words, ldp_gpr(ARM64_FP_ID, ARM64_LR_ID, top / ARM64_REG_BYTES))
@@ -1372,10 +1539,103 @@ pub fn emit_epilogue(layout: FrameLayout) -> []u32 | error {
 }
 
 /**
- * encode_frame_addr — resolve `MFrameAddr{dst, slot}` to `ADD dst, sp,
+ * emit_prologue_big — the BIG-frame entry sequence, for a frame whose FP/LR
+ * pair offset outruns the STP field (`!frame_fits`): `sub sp, sp, #size`
+ * (chained when `size` itself needs it, `big_offset_words`); `str x29, [sp,
+ * #top]` ; `str x30, [sp, #top+8]` (INDIVIDUAL, never `stp` — `top` can
+ * exceed the imm7 field while still fitting STR's wider scaled field); `add
+ * x29, sp, #top` (chained when needed); then one individual save per
+ * callee-saved register (`emit_callee_area_single`, never paired). Raises
+ * `A4-bigframe` when even the STR/LDR field cannot hold `top`
+ * (`!big_frame_fits`, an unrealistically large frame).
+ *
+ * @param FrameLayout layout  the resolved frame (size > 0, `!frame_fits`)
+ * @return []u32 | error  the big-frame prologue words, or `A4-bigframe`
+ */
+fn emit_prologue_big(layout: FrameLayout) -> []u32 | error {
+    if !big_frame_fits(layout) { return honest_bigframe() }
+    let size = layout.size
+    let top = size - ARM64_FP_LR_BYTES
+    let sub_words = match big_offset_words(ARM64_SP_ID, ARM64_SP_ID, size, true) { []u32 as w => w; error as e => return e }
+    mut words: []u32 = sub_words
+    words = teko::list::push(words, str_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES))
+    words = teko::list::push(words, str_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES))
+    let fp_words = match big_offset_words(ARM64_SP_ID, ARM64_FP_ID, top, false) { []u32 as w => w; error as e => return e }
+    words = append_u32_words(words, fp_words)
+    emit_callee_area_single(words, layout, true)
+}
+
+/**
+ * emit_epilogue_big — the BIG-frame teardown sequence (LIFO), the
+ * counterpart of `emit_prologue_big`: restore the callee-saved registers
+ * INDIVIDUALLY (`emit_callee_area_single`); `ldr x29, [sp, #top]` ; `ldr x30,
+ * [sp, #top+8]` (individual, never `ldp`); `add sp, sp, #size` (chained when
+ * needed). The `RET` itself is the `MRet` encoding, emitted immediately after
+ * by the function-encode layer. Raises `A4-bigframe` when even the STR/LDR
+ * field cannot hold `top`.
+ *
+ * @param FrameLayout layout  the resolved frame (size > 0, `!frame_fits`)
+ * @return []u32 | error  the big-frame teardown words (RET excluded), or `A4-bigframe`
+ */
+fn emit_epilogue_big(layout: FrameLayout) -> []u32 | error {
+    if !big_frame_fits(layout) { return honest_bigframe() }
+    let size = layout.size
+    let top = size - ARM64_FP_LR_BYTES
+    mut words: []u32 = emit_callee_area_single(teko::list::empty(), layout, false)
+    words = teko::list::push(words, ldr_gpr_sp(ARM64_FP_ID, top / ARM64_REG_BYTES))
+    words = teko::list::push(words, ldr_gpr_sp(ARM64_LR_ID, (top + ARM64_REG_BYTES) / ARM64_REG_BYTES))
+    let add_words = match big_offset_words(ARM64_SP_ID, ARM64_SP_ID, size, false) { []u32 as w => w; error as e => return e }
+    append_u32_words(words, add_words)
+}
+
+/**
+ * emit_prologue — the function's entry sequence, or an empty list for a
+ * frameless function: the ORIGINAL byte-for-byte `emit_prologue_small` shape
+ * when the frame fits the STP field, else the `emit_prologue_big` sequence
+ * (A4-2's big-frame fast-follow) for a frame that does not.
+ *
+ * @param FrameLayout layout  the resolved frame
+ * @return []u32 | error  the prologue words, or the `A4-bigframe` honest-stop
+ */
+pub fn emit_prologue(layout: FrameLayout) -> []u32 | error {
+    if layout.size == (0 to u32) {
+        let none: []u32 = teko::list::empty()
+        return none
+    }
+    if frame_fits(layout) { return emit_prologue_small(layout) }
+    emit_prologue_big(layout)
+}
+
+/**
+ * emit_epilogue — the function's frame-teardown sequence (LIFO), or an empty
+ * list for a frameless function: the ORIGINAL byte-for-byte
+ * `emit_epilogue_small` shape when the frame fits the STP field, else the
+ * `emit_epilogue_big` sequence for a frame that does not. The `RET` itself is
+ * the `MRet` encoding (`encode_ret`), which the function-encode layer (A4-3)
+ * emits immediately after these words.
+ *
+ * @param FrameLayout layout  the resolved frame
+ * @return []u32 | error  the teardown words, or the `A4-bigframe` honest-stop
+ */
+pub fn emit_epilogue(layout: FrameLayout) -> []u32 | error {
+    if layout.size == (0 to u32) {
+        let none: []u32 = teko::list::empty()
+        return none
+    }
+    if frame_fits(layout) { return emit_epilogue_small(layout) }
+    emit_epilogue_big(layout)
+}
+
+/**
+ * encode_frame_addr — resolve a SMALL `MFrameAddr{dst, slot}` (a slot offset
+ * within the inline 12-bit ADD-imm field) to `ADD dst, sp,
  * #slot_offset(layout, slot)`, the A4-2 replacement for A4-1's `A4-frame`
- * honest-stop. A slot offset beyond the 12-bit ADD-imm field raises
- * `A4-bigframe`.
+ * honest-stop — the ONE-word case `encode_inst_word`'s total per-`MInst`
+ * dispatch owns directly. A slot offset beyond the field raises
+ * `A4-bigframe` here; `encode_frame_addr_words` (below) is `encode_one`'s
+ * caller-side wrapper that instead expands a big offset into the chained
+ * big-frame ADD sequence, mirroring how `MRet`'s epilogue expansion also
+ * lives outside this per-instruction dispatch.
  *
  * @param FrameLayout layout  the function's resolved frame
  * @param MFrameAddr i  the frame-slot address instruction (operand physical)
@@ -1642,10 +1902,87 @@ fn wrap_plain_words(acc0: []EncWord, ws: []u32) -> []EncWord {
 }
 
 /**
+ * append_encwords — append every `EncWord` of `xs` to `acc`, in order: the
+ * concatenation `encode_one`'s `MFrameAddr` branch uses to fold
+ * `encode_frame_addr_words`'s one-or-two-word result into the running
+ * `EncWord` stream.
+ *
+ * @param []EncWord acc  the `EncWord` stream to extend
+ * @param []EncWord xs  the words to append
+ * @return []EncWord  `acc` followed by `xs`
+ */
+fn append_encwords(acc: []EncWord, xs: []EncWord) -> []EncWord {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i])
+        i++
+    }
+    out
+}
+
+/**
+ * inst_is_frame_addr — whether an instruction is `MFrameAddr`: the abstract
+ * slot-address instruction `encode_one` may need to expand into MORE than one
+ * word (the big-frame ADD sequence), mirroring `inst_is_ret`'s `MRet` check.
+ *
+ * @param MInst inst  the instruction
+ * @return bool  true iff `inst` is `MFrameAddr`
+ */
+fn inst_is_frame_addr(inst: MInst) -> bool {
+    match inst {
+        MFrameAddr => true
+        _ => false
+    }
+}
+
+/**
+ * as_frame_addr — `inst` as its `MFrameAddr` payload. Only ever called after
+ * `inst_is_frame_addr(inst)` has already held; the `_` arm's placeholder
+ * value is unreachable in practice (required by the exhaustive-match
+ * contract, the same shape `bad_word`/`bad_func` use in the golden tests).
+ *
+ * @param MInst inst  an instruction already known to be `MFrameAddr`
+ * @return MFrameAddr  its payload
+ */
+fn as_frame_addr(inst: MInst) -> MFrameAddr {
+    match inst {
+        MFrameAddr as x => x
+        _ => MFrameAddr { dst = preg(0 to u32, MRegClass::GPR); slot = 0 to u64 }
+    }
+}
+
+/**
+ * encode_frame_addr_words — resolve `MFrameAddr{dst, slot}` to one or two
+ * `EncWord`s: a slot offset within the inline 12-bit ADD-imm field resolves
+ * exactly as `encode_frame_addr` does (byte-identical, ONE word, delegated
+ * directly); a bigger offset expands to the chained big-offset ADD sequence
+ * (`big_offset_words`, A4-2's big-frame fast-follow) — two words at most,
+ * `dst` itself the scratch (safe: nothing else reads `dst` before both writes
+ * land). Past `ARM64_IMM24_FIELD_MAX`, `A4-bigframe`.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame
+ * @param MFrameAddr i  the frame-slot address instruction (operand physical)
+ * @return []EncWord | error  the one or two encoded words, or `A4-bigframe`
+ */
+fn encode_frame_addr_words(layout: FrameLayout, i: MFrameAddr) -> []EncWord | error {
+    let off = slot_offset(layout, i.slot)
+    if off <= ARM64_IMM12_FIELD_MAX {
+        let ew = match encode_frame_addr(layout, i) { EncWord as x => x; error as e => return e }
+        return teko::list::push(teko::list::empty(), ew)
+    }
+    let raw = match big_offset_words(ARM64_SP_ID, enc_reg(i.dst), off, false) { []u32 as w => w; error as e => return e }
+    wrap_plain_words(teko::list::empty(), raw)
+}
+
+/**
  * encode_one — append one instruction's `EncWord`(s) to the stream: an `MRet`
  * expands to the frame epilogue words (A4-2 left it bare) followed by the RET
- * word; every other instruction encodes to its single `EncWord` via
- * `encode_inst_word`. Any named honest-stop propagates out.
+ * word; an `MFrameAddr` expands through `encode_frame_addr_words` (one word
+ * for a small slot offset, two for a big one); every other instruction
+ * encodes to its single `EncWord` via `encode_inst_word`. Any named
+ * honest-stop propagates out.
  *
  * @param FrameLayout layout  the enclosing function's resolved frame
  * @param []EncWord words0  the `EncWord` stream to extend
@@ -1657,6 +1994,11 @@ fn encode_one(layout: FrameLayout, words0: []EncWord, inst: MInst) -> []EncWord 
         let epi = match emit_epilogue(layout) { []u32 as w => w; error as e => return e }
         let after = wrap_plain_words(words0, epi)
         return teko::list::push(after, encode_ret())
+    }
+    if inst_is_frame_addr(inst) {
+        let fa = as_frame_addr(inst)
+        let ews = match encode_frame_addr_words(layout, fa) { []EncWord as w => w; error as e => return e }
+        return append_encwords(words0, ews)
     }
     let ew = match encode_inst_word(layout, inst) { EncWord as x => x; error as e => return e }
     teko::list::push(words0, ew)

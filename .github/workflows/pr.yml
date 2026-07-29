@@ -1177,58 +1177,34 @@ jobs:
       # happen there and would take five green lanes down with it. A fixture cannot hold two
       # truths; a lane can hold the one that is true of its own ABI.
       #
-      # NOT A SKIP — three things must ALL hold, or the leg is red:
-      #   1. the suite must FAIL (if it passes, .32 landed and this pin must be promoted);
-      #   2. the failure must NAME B1-args (any other stop is a real regression);
-      #   3. exactly ONE regression row failed and NO unit test did (so this pin can never
-      #      swallow a second, unrelated breakage hiding behind it).
+      # THE VERDICT IS DELEGATED to `scripts/known_stop_gate.sh` (owner ruling: an envelope may
+      # absorb ONLY the diagnostic it pins, never a family of them). Measured directly in run
+      # `30400712261` (job `90416003791`): the PREVIOUS inline check matched the bare SUBSTRING
+      # `B1-args`, which THREE distinct honest-stops in `isel_x86_64.tks` all share (the parameter
+      # stop, the variadic-call stop, and the call-argument stop this envelope actually pins) — so
+      # any one of the three firing read as "held". The gate script matches the pinned diagnostic's
+      # FULL text instead; `scripts/known_stop_gate_test.sh` proves the distinction BY INVERSION (a
+      # log shaped like a held pin but naming a sibling stop must stay red).
       #
-      # THE DAY .32 IMPLEMENTS THE STACK-ARG SLOT, CONDITION 1 GOES RED. Restore the two lines
-      # this replaced: `& $art test .` / `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`.
+      # THE DAY .32 IMPLEMENTS THE STACK-ARG SLOT, THE GATE'S "LIFTED" BRANCH FIRES. Restore the
+      # plain `dl/windows-x86_64/teko.exe test .` invocation and drop this step's gate call.
       # The plan is in docs/memory/b1-args-stack-slot.md.
       - name: Asset self-test — Windows (the published asset runs its own gate)
-        shell: pwsh
+        shell: bash
         run: |
-          $art = "dl/windows-x86_64/teko.exe"
-          if (-not (Test-Path -LiteralPath $art)) {
-            Get-ChildItem -Recurse dl | Out-String | Write-Host
-            throw "the producer's upload has no $art"
-          }
-          & $art --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -u
+          art="dl/windows-x86_64/teko.exe"
+          if [ ! -f "$art" ]; then
+            echo "ERROR: the producer's upload has no $art" >&2
+            ls -lR dl >&2
+            exit 1
+          fi
+          "$art" --version || exit $?
 
-          & $art test . 2>&1 | Tee-Object -FilePath teko-test.log
-          $rc = $LASTEXITCODE
-          $log = Get-Content -Raw teko-test.log
-          if ($rc -eq 0) {
-            Write-Host "KNOWN-STOP LIFTED: the suite passed on Windows."
-            Write-Host "This envelope exists to assert that B1-args still stops it. Promote it:"
-            Write-Host "  restore '& `$art test .' + the `$LASTEXITCODE propagation."
-            exit 1
-          }
-          if ($log -notmatch 'B1-args') {
-            Write-Host "the Windows suite failed, but NOT at the stop this envelope pins:"
-            Write-Host $log
-            exit 1
-          }
-          if ($log -notmatch 'regressions \d+ run, \d+ skipped, 1 failed') {
-            Write-Host "more than the pinned row failed — this envelope must not cover a second break:"
-            Write-Host $log
-            exit 1
-          }
-          if ($log -match '\.\.\. FAILED') {
-            Write-Host "a UNIT test failed on Windows; the B1-args pin covers regressions only:"
-            Write-Host $log
-            exit 1
-          }
-          Write-Host "KNOWN-STOP held — the Windows suite stops only where .32 will pick it up:"
-          Write-Host ($log -split "`n" | Select-String -Pattern 'isel x86-64: B1-args' | Select-Object -First 1)
-          # EXPLICIT, and the step is red without it. GitHub's `shell: pwsh` template appends
-          # `exit $LASTEXITCODE` after the script body, and the last NATIVE command here is the
-          # very `teko test .` this envelope expects to fail — so the step inherited exit 1 from
-          # the command whose failure it had just finished asserting was correct. Measured: the
-          # run printed "KNOWN-STOP held" and still reported failure.
-          exit 0
+          "$art" test . > teko-test.log 2>&1
+          rc=$?
+          cat teko-test.log
+          sh scripts/known_stop_gate.sh "$rc" teko-test.log
 
   # ══ cli-surface-linux-x86_64-glibc ═════════════════════════════════════════════════════════
   # TIER: both.
@@ -2012,6 +1988,18 @@ jobs:
       # against throwaway git fixtures, needing no compiler and no network.
       - name: Structural — the no-C-in-tests gate passes clean, fails dirty, never mistakes tracked C
         run: sh scripts/no_c_in_tests_gate_test.sh
+
+      # THE KNOWN-STOP ENVELOPE INTEGRITY GATE. Owner ruling: an envelope may absorb ONLY the
+      # diagnostic it pins, never a family of them. Measured directly in run `30400712261` (job
+      # `90416003791`, `test / windows-x86_64`): the PREVIOUS inline PowerShell check matched the
+      # bare substring `B1-args`, and `src/backend/isel_x86_64.tks` names THREE distinct
+      # honest-stops that share it — any one of the three firing read as "KNOWN-STOP held" and
+      # would have turned a genuinely different regression green. `scripts/known_stop_gate.sh`
+      # (wired onto `test-windows-x86_64` above) matches the pinned diagnostic's FULL text instead.
+      # This step proves the gate BY INVERSION: a log shaped exactly like a held pin, but naming a
+      # SIBLING B1-args stop, MUST stay red — the shape the bug actually shipped.
+      - name: Structural — the KNOWN-STOP envelope absorbs only its own pinned diagnostic
+        run: sh scripts/known_stop_gate_test.sh
 
       # THE PROVENANCE PROOF, against the ACTUAL checked-out tree — not a fixture. `degrau_test.sh`
       # above only proves the DEGRAU library's own logic; nothing yet asks whether a PR that
