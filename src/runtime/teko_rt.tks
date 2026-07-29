@@ -319,9 +319,8 @@ exp fn fmt_n_i(x: i64) -> str {
  * The float families bottom out at the host `%.*f`/`%.*e`/`%.*g` renderer — the SAME deferred
  * FFI edge (C1) `ftoa`/`f64_g17` bottom out at. Reproducing libc's binary64-to-decimal rounding
  * byte-for-byte in Teko needs a precision-aware host primitive the current seed does not yet
- * expose, so this body renders through the seed-known `ftoa` bottom; the C twin
- * (teko_rt.c::tk_fmt_f) carries the precise `%.*f` behavior, and the VM intercepts `fmt_f` by
- * name at the interpolation layer so `teko run` matches the native build.
+ * expose, so this body renders through the seed-known `ftoa` bottom; the C runtime
+ * (teko_rt.c::tk_fmt_f) carries the precise `%.*f` behavior for native builds.
  *
  * @param x     the value to render
  * @param prec  the number of fractional digits (may be 0)
@@ -333,7 +332,7 @@ exp fn fmt_f(x: f64, prec: i64) -> str { ftoa(x) }
  * fmt_e — `x` in scientific notation with `prec` fractional mantissa digits (`$"{x:E3}"`).
  *
  * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_e) carries the `%.*e`
- * behavior and the VM intercepts `fmt_e` by name.
+ * behavior for native builds.
  *
  * @param x     the value to render
  * @param prec  the number of fractional mantissa digits
@@ -345,7 +344,7 @@ exp fn fmt_e(x: f64, prec: i64) -> str { ftoa(x) }
  * fmt_g — `x` in the shorter of fixed/scientific with `prec` significant digits (`$"{x:G4}"`).
  *
  * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_g) carries the `%.*g`
- * behavior and the VM intercepts `fmt_g` by name.
+ * behavior for native builds.
  *
  * @param x     the value to render
  * @param prec  the number of significant digits
@@ -358,7 +357,7 @@ exp fn fmt_g(x: f64, prec: i64) -> str { ftoa(x) }
  * (`$"{x:N2}"`).
  *
  * Deferred host bottom, like `fmt_f` (the `%.*f` render precedes the Teko grouping the C twin
- * teko_rt.c::tk_fmt_n_f performs); the VM intercepts `fmt_n_f` by name.
+ * teko_rt.c::tk_fmt_n_f performs for native builds).
  *
  * @param x     the value to render
  * @param prec  the number of fractional digits
@@ -371,7 +370,7 @@ exp fn fmt_n_f(x: f64, prec: i64) -> str { ftoa(x) }
  * trailing `%` (`$"{x:P1}"`, so 0.25 → "25.0%").
  *
  * Deferred host bottom, like `fmt_f`; the C twin (teko_rt.c::tk_fmt_p) carries the `%.*f%%`
- * behavior and the VM intercepts `fmt_p` by name.
+ * behavior for native builds.
  *
  * @param x     the fraction to render as a percent
  * @param prec  the number of fractional digits
@@ -484,7 +483,7 @@ fn fmt_parse_prec(spec: str, def: i64) -> i64 {
 // --- Phase 3 str query/slice builtins (mirror of teko_rt.c's tk_str_eq / tk_str_slice /
 // tk_str_slice_to / tk_str_slice_from / tk_str_len / tk_str_ends_with / tk_str_contains /
 // tk_f64_g17). The query helpers ALLOCATE NOTHING; the slice helpers return a fresh owned str
-// (str() copies the byte builder), and an out-of-range slice PANICS (M.1, parity with the VM). ---
+// (str() copies the byte builder), and an out-of-range slice PANICS (M.1). ---
 
 // str_eq — same length AND same bytes. Compares byte-by-byte (the C twin uses memcmp; embedded
 // NUL tolerated). A zero-length pair is equal.
@@ -534,8 +533,8 @@ exp fn str_compare(a: str, b: str) -> i64 {
 }
 
 // str_slice — the bytes [start, end) COPIED into a fresh owned str. An out-of-range slice
-// (start > end, or end past the byte length) PANICS (M.1, fail-loud — matches the VM's bounds
-// check). The empty slice (start == end, in range) is a valid empty str.
+// (start > end, or end past the byte length) PANICS (M.1, fail-loud). The empty slice
+// (start == end, in range) is a valid empty str.
 exp fn str_slice(s: str, start: u64, end: u64) -> str {
     if start > end || end > s.len { panic("string slice out of range") }
     mut xs: []byte = teko::list::empty()
@@ -606,9 +605,8 @@ exp fn f64_g17(x: f64) -> str {
 // B.36) — the user-facing validated bytes->str door, resolved by tk_builtin_fn/builtin_fn
 // like bytes_of_str. It is the SRES-shaped host-FFI bottom (same {ok,value,err} lift as
 // read_file/getenv, `sres_byteslice` kind — the []byte arg is split into ptr+len like
-// write_file_bytes's data arg): codegen lowers it to tk_rt_str_from_utf8 (emit_host_ffi);
-// the VM intercepts it directly and calls the SAME C runtime fn (try_str_builtin). No Teko
-// function body is needed here — the RFC 3629 validation logic lives once, in teko_rt.c
+// write_file_bytes's data arg): codegen lowers it to tk_rt_str_from_utf8 (emit_host_ffi).
+// No Teko function body is needed here — the RFC 3629 validation logic lives once, in teko_rt.c
 // (rt_valid_utf8), NOT duplicated in this .tks (the SUPREME RULE covers the runtime SEAM
 // signature/wiring, not a source-language reimplementation of a host-FFI bottom's guts —
 // same precedent as str_of_bytes/one_byte/read_file all bottoming out at deferred C1 edges).
@@ -725,13 +723,11 @@ exp fn panic_overflow() { panic("integer overflow") }
 
 /**
  * The POSITIONED out-of-bounds panic: prints `"line:col: "` then the canonical OOB panic, so the
- * VM and the native backend locate an index-out-of-bounds failure identically (mirror of
- * `teko_rt.c::tk_panic_oob_at` and the VM's `vm_panic_pos`). Native-only globals
+ * The native backend locates index-out-of-bounds failures via `teko_rt.c::tk_panic_oob_at`. Globals
  * `_tk_cast_loc_line`/`_tk_cast_loc_col` (defined in `teko_rt.c`) carry the SAME position for the
  * cast guard: codegen wraps every `tk_to_*` call in a statement-expression that stores the cast
  * node's source position into those globals just before the call, and `tk_panic_cast()` reads them
- * to prefix `"line:col: "` the same way; the VM carries its own position via its eval frame
- * instead, so it needs no Teko-side twin for that half.
+ * to prefix `"line:col: "`.
  *
  * @param line  the 1-based source line of the failing index expression
  * @param col   the 1-based source column of the failing index expression
