@@ -573,3 +573,22 @@ Feature: bulk-dissolution migrations (cargo/0.3.1-dissolver-bulk, 2026-07-29) �
   Scenario: forward_un_narrowed_null_union_return (own-native — a null-union return forwarded un-narrowed to its caller)
     When built and run
     Then exit = 42
+
+
+Feature: array-literal return escape — a `[]T` array literal returned directly by a function
+
+  # (0.3.1.0 array-literal-escape) the native backend built an array literal's backing bytes in an
+  # `alloca` — the CALLEE's own frame slot — and handed the caller that bare address as the
+  # literal's fat-pointer ptr half. A function `return`ing a fresh array literal therefore handed
+  # its caller a pointer into a frame about to unwind: a SECOND such call, issued before the FIRST
+  # call's result was ever read, reused that same stack memory, and the first result silently read
+  # back the second call's bytes — no crash, no stop, the wrong answer. The C emitter never had
+  # this bug (its array-literal fast path always allocates through `malloc`); the fix boxes the
+  # native backend's filled buffer into fresh per-execution runtime storage before handing back its
+  # address, matching the C route unconditionally rather than only on the return edge.
+  #
+  # The row exercises the scalar (`[]i64`) element case, the FAT (`[]str`) element case, and the
+  # empty literal, each pair of producer calls issued before either result is read.
+  Scenario: array_lit_return_escape (own-native — two array-literal-returning calls, first result read after the second call)
+    When built and run
+    Then exit = 42

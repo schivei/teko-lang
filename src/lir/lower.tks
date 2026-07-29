@@ -8251,15 +8251,17 @@ fn unsized_aggregate_push_stop(form: str) -> error {
 }
 
 /**
- * box_aggregate_value — a lowered value as something a LONGER-LIVED container may hold: the value
- * itself for a register value (`box_bytes` = 0), else the address of a FRESH per-EXECUTION runtime
- * copy of the aggregate (`tk_slice_elem_box`).
+ * box_aggregate_value — a lowered value as something a LONGER-LIVED container (or caller) may
+ * hold: the value itself for a register value (`box_bytes` = 0), else the address of a FRESH
+ * per-EXECUTION runtime copy of the aggregate (`tk_slice_elem_box`).
  *
- * The two containers that need it are the slice a push grows and the tag+payload wrapper a variant
- * construction builds. Both hold an aggregate BY ADDRESS, and the address this backend lowers an
- * aggregate to belongs to an `alloca` — ONE frame slot per INSTRUCTION, not per EXECUTION — so a
- * container filled in a loop would otherwise hold N copies of the same address
- * (NATIVE-AGG-SLICE-BY-ADDRESS).
+ * Three call sites need it: the slice a push grows, the tag+payload wrapper a variant
+ * construction builds, and an array literal's own filled buffer (`lower_array_lit`, 0.3.1.0
+ * array-literal-escape). All three hold (or, for the array literal, ARE) an aggregate BY
+ * ADDRESS, and the address this backend lowers an aggregate to belongs to an `alloca` — ONE frame
+ * slot per INSTRUCTION, not per EXECUTION — so a container filled in a loop would otherwise hold N
+ * copies of the same address, and a value returned to the caller would point at a frame already
+ * unwound by the time it is read (NATIVE-AGG-SLICE-BY-ADDRESS).
  *
  * @param v           the already-lowered value (for an aggregate, the address of its frame slot)
  * @param box_bytes   the aggregate's byte width, or 0 for a value that needs no copy
@@ -9828,19 +9830,44 @@ fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> L
     Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
 }
 
-/** lower_array_lit — `[e0, e1, …]`: alloca `elements.len * stride` bytes (the element's
-    byte stride — `elem_byte_stride`, the two-word `{ptr, len}` pair for a FAT element, 0.3.1.0
-    degrau 10), then store each element at its constant offset. The literal's "value" is its
-    alloca'd base address, exactly like a struct literal — the length/fat-pointer wrapping
-    (`.len`, slicing, spreads) is A1-4's concern; a spread element (`..xs`) is out of the A1-3
-    subset (its length isn't known until then). */
+/**
+ * lower_array_lit — `[e0, e1, …]`: alloca `elements.len * stride` bytes (the element's byte
+ * stride — `elem_byte_stride`, the two-word `{ptr, len}` pair for a FAT element, 0.3.1.0 degrau
+ * 10), store each element at its constant offset, then BOX the whole filled buffer into fresh
+ * per-EXECUTION runtime storage (`box_aggregate_value` / `tk_slice_elem_box`) and hand back
+ * THAT address instead of the alloca's.
+ *
+ * WHY THE BOX (0.3.1.0 array-literal-escape). An alloca is a per-INSTRUCTION frame slot: it dies
+ * with the enclosing function's own frame, exactly like every other aggregate this backend
+ * addresses (NATIVE-AGG-SLICE-BY-ADDRESS, the same reasoning `lower_scalar_element_push` and the
+ * variant-construction path already box under). An array literal's fat VALUE (0.3.1.0 degrau 10)
+ * is that alloca's bare address — so `return [e0, e1, …]` handed the caller a pointer into a
+ * frame that was about to unwind, silently reused by the very next call's own frame (measured:
+ * two functions each returning a fresh array literal, called back to back before the first
+ * result is read, read back the SECOND call's values through the FIRST result — no crash, no
+ * stop, just the wrong bytes). The C emitter (`codegen::emit_array_lit`) never had this bug
+ * because its fast path allocates through `malloc`, never a C-stack local; boxing here makes
+ * the two routes agree unconditionally, matching the oracle rather than only the return edge —
+ * a literal used and dropped within its own frame pays one extra copy, in exchange for every
+ * literal being safe to return, store, or otherwise outlive its birth frame.
+ *
+ * The length/fat-pointer wrapping (`.len`, slicing, spreads) is A1-4's concern; a spread element
+ * (`..xs`) is out of the A1-3 subset (its length isn't known until then).
+ *
+ * @param ctx  the lowering context
+ * @param e    the array-literal expression (its type is the resulting `[]T`)
+ * @param al   the typed array-literal node (its elements, in order)
+ * @return     the boxed buffer's address (the literal's fat-pointer ptr half)
+ * @throws     when `e.type` is not a slice, or propagated from lowering an element
+ */
 fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> Lowered | error {
     let elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
     let stride = elem_byte_stride(elem_t, ctx.enums)
     let total = (al.elements.len to u32) * stride
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
-    store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col)
+    let filled = match store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col) { Lowered as x => x; error as err => return err }
+    box_aggregate_value(filled, total, e)
 }
 
 /** store_array_elements — lower each non-spread element in turn, storing it at its

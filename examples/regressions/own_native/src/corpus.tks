@@ -2676,3 +2676,83 @@ fn f_declared_variant_nested_alias() -> i64 {
     }
     0
 }
+
+/**
+ * array_lit_i64_a — the FIRST of a pair of scalar-element array-literal producers
+ * (`array_lit_return_escape`, 0.3.1.0 array-literal-escape): a fresh `[]i64` built and returned
+ * directly, never touching `teko::list::push`.
+ *
+ * @return a 3-element `[]i64`
+ */
+fn array_lit_i64_a() -> []i64 { [10, 20, 30] }
+
+/**
+ * array_lit_i64_b — the SECOND scalar-element array-literal producer: called right after
+ * `array_lit_i64_a`, before that first call's result is read, so its own callee frame is the one
+ * whose reuse must not corrupt the first result (0.3.1.0 array-literal-escape).
+ *
+ * @return a 3-element `[]i64`, disjoint from `array_lit_i64_a`'s
+ */
+fn array_lit_i64_b() -> []i64 { [40, 50, 60] }
+
+/**
+ * array_lit_str_a — the FAT-element twin of `array_lit_i64_a`: each element is itself a
+ * `{ptr, len}` pair, so its storage carries two words per slot instead of one.
+ *
+ * @return a 3-element `[]str`
+ */
+fn array_lit_str_a() -> []str { ["un", "deux", "trois"] }
+
+/**
+ * array_lit_str_b — the FAT-element twin of `array_lit_i64_b`, called immediately after
+ * `array_lit_str_a` and before that call's result is read.
+ *
+ * @return a 3-element `[]str`, disjoint from `array_lit_str_a`'s
+ */
+fn array_lit_str_b() -> []str { ["one", "two", "three"] }
+
+/**
+ * array_lit_i64_empty — the empty array literal, returned directly: its backing storage is
+ * zero bytes wide, the degenerate case the same escape fix must not regress (an empty literal's
+ * pointer is never dereferenced, since every read of it is guarded by `.len`).
+ *
+ * @return an empty `[]i64`
+ */
+fn array_lit_i64_empty() -> []i64 { [] }
+
+/**
+ * f_array_lit_return_escape — a function that RETURNS a fresh array literal must hand the caller
+ * storage that survives past the callee's own frame (0.3.1.0 array-literal-escape): the native
+ * backend once built an array literal's backing bytes in an `alloca`, the CALLEE's OWN frame slot,
+ * so a SECOND call issued before the FIRST call's result was read reused that same stack memory —
+ * the first result silently read back the second call's bytes, no crash, no stop. Exercises the
+ * scalar (`[]i64`) element case, the FAT (`[]str`) element case, and the empty literal, each pair
+ * of producer calls issued before either result is read.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_array_lit_return_escape() -> i64 {
+    let ia = array_lit_i64_a()
+    let ib = array_lit_i64_b()
+    if ia.len != 3 { return 1 }
+    if ia[0] != 10 { return 2 }
+    if ia[1] != 20 { return 3 }
+    if ia[2] != 30 { return 4 }
+    if ib.len != 3 { return 5 }
+    if ib[0] != 40 { return 6 }
+    if ib[1] != 50 { return 7 }
+    if ib[2] != 60 { return 8 }
+    let sa = array_lit_str_a()
+    let sb = array_lit_str_b()
+    if sa.len != 3 { return 9 }
+    if sa[0] != "un" { return 10 }
+    if sa[1] != "deux" { return 11 }
+    if sa[2] != "trois" { return 12 }
+    if sb.len != 3 { return 13 }
+    if sb[0] != "one" { return 14 }
+    if sb[1] != "two" { return 15 }
+    if sb[2] != "three" { return 16 }
+    let e = array_lit_i64_empty()
+    if e.len != 0 { return 17 }
+    0
+}
