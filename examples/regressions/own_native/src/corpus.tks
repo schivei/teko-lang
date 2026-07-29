@@ -2022,3 +2022,32 @@ fn f_err_typed() -> i64 {
     if orig.actual != "" { return 6 }
     0
 }
+
+/**
+ * f_match_value_literal_join — a `match`-as-value whose arms mix a CASE-bound concrete leaf with
+ * a bare numeric-literal leaf: `type_match`'s literal cross-adoption (mirroring `type_if`'s own,
+ * `src/checker/typer.tks`) must retype the literal leaf at the concrete sibling's type instead of
+ * defaulting it to `i64`, so the whole match joins to ONE scalar type rather than an accidental
+ * `i32 | i64` union no int-position accepts. Covers the reported shape (`i32 as n => n; null =>
+ * 0`, both the present and the absent leg), the arm order REVERSED (the literal arm first), and a
+ * literal that does NOT fit the anchor (which must still form a genuine union, never silently
+ * collapse to the anchor's type).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_match_value_literal_join() -> i64 {
+    let present: i32 | null = 7
+    let r = match present { i32 as n => n; null => 0 }
+    if r != 7 { return 1 }
+    let absent: i32 | null = null
+    let s = match absent { i32 as n => n; null => 0 }
+    if s != 0 { return 2 }
+    let reordered: i32 | null = 3
+    let t = match reordered { null => 0; i32 as n => n }
+    if t != 3 { return 3 }
+    let misfit: u8 | null = null
+    let u: u8 | i64 = match misfit { u8 as n => n; null => 999 }
+    let uval = match u { u8 as x => x to i64; i64 as y => y }
+    if uval != 999 { return 4 }
+    0
+}

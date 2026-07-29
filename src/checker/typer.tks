@@ -3809,30 +3809,114 @@ fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm |
     TArm { pattern = a.pattern; has_when = a.has_when; guard = guard; body = body.stmts }
 }
 
-// ---- match as a VALUE: the common trailing-value type of the NON-diverging arms; EXHAUSTIVE (B.15) ----
-// A diverging arm (`error as e => return e`) yields no value, so it is SKIPPED in unification
-// (B.20). If ALL arms diverge the match type is void.
+/**
+ * match_arm_literal_leaf — the trailing bare numeric-literal leaf of a NON-diverging arm body, or
+ * `null` when the arm diverges or its trailing value is not a bare number literal. The `match`
+ * counterpart of `type_if`'s `trailing_number`: it gates which arm is a LITERAL cross-adoption
+ * candidate rather than a genuinely concrete (pinned) type.
+ *
+ * @param a  the typed match arm
+ * @return   the trailing `TNumber` leaf, or `null`
+ */
+fn match_arm_literal_leaf(a: TArm) -> TExpr | null {
+    if tblock_diverges(a.body) { return null }
+    trailing_number(a.body)
+}
+
+/**
+ * match_join_anchor — the first non-diverging arm's type that is NOT a bare numeric literal, or
+ * `null` when every non-diverging arm trails a bare literal (so there is no concrete type to
+ * adopt into). Scans every arm up front, so a later concrete arm still anchors an EARLIER
+ * literal arm regardless of source order.
+ *
+ * @param arms  the typed match arms
+ * @return      the anchor type sibling literal arms should adopt, or `null`
+ */
+fn match_join_anchor(arms: []TArm) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        let a = arms[i]
+        if !tblock_diverges(a.body) {
+            match match_arm_literal_leaf(a) {
+                TExpr => { }
+                null => return tblock_type(a.body)
+            }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * adopt_match_arm_literals — rebuild every arm whose trailing value is a bare numeric literal
+ * that FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare
+ * default (`retype_literal`) — the `match` counterpart of `type_if`'s literal cross-adoption
+ * (typer.tks `type_if`), so `match k { i32 as n => n; null => 0 }` joins to `i32`, not the
+ * accidental `i32 | i64` a bare-defaulted literal would otherwise force into the union. An arm
+ * whose literal does not fit `anchor`, or whose trailing value is not a bare literal, passes
+ * through unchanged.
+ *
+ * @param arms    the typed match arms
+ * @param anchor  the type sibling literal arms adopt into
+ * @return        the arms, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_match_arm_literals(arms: []TArm, anchor: Type) -> []TArm {
+    mut out: []TArm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        let a = arms[i]
+        let next = match match_arm_literal_leaf(a) {
+            TExpr as t => if literal_adopts(t, anchor) { TArm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = retype_block_trailing(a.body, anchor) } } else { a }
+            null => a
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
+
+/**
+ * type_match — `match` as a VALUE (B.15/B.20): types every arm, then unifies the NON-diverging
+ * arms' trailing types into the match's own type. A diverging arm (`return`/`panic`/`exit`)
+ * yields no value and is skipped in unification; if EVERY arm diverges the match type is void.
+ * Before the join, a bare numeric-literal arm cross-adopts a sibling's CONCRETE (non-literal)
+ * type (`match_join_anchor` + `adopt_match_arm_literals`), mirroring `type_if`'s own literal
+ * cross-adoption.
+ *
+ * @param m      the parsed match expression
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed match expression, or an error (non-exhaustive, or an arm's own error)
+ */
 fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
     let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
     if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
-    mut arms: []TArm = teko::list::empty()
-    mut have_type = false
-    mut first: Type = Void { }   // Type-typed (so a case arm widens in); placeholder until first non-diverging arm
+    mut typed: []TArm = teko::list::empty()
     mut i = 0
     loop {
         if i >= m.arms.len { break }
         let ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
-        arms = teko::list::push(arms, ai)
-        if !tblock_diverges(ai.body) {
-            let t = tblock_type(ai.body)
-            if !have_type { first = t; have_type = true }
-            else { first = type_join(first, t, table) }   // widen (a case joins into its variant; siblings → their union)
-        }
+        typed = teko::list::push(typed, ai)
         i++
+    }
+    let arms = match match_join_anchor(typed) { Type as anchor => adopt_match_arm_literals(typed, anchor); null => typed }
+    mut have_type = false
+    mut first: Type = Void { }
+    mut j = 0
+    loop {
+        if j >= arms.len { break }
+        if !tblock_diverges(arms[j].body) {
+            let t = tblock_type(arms[j].body)
+            if !have_type { first = t; have_type = true }
+            else { first = type_join(first, t, table) }
+        }
+        j++
     }
     let rarms = match resolve_foreach_placeholders(m.arms, s.type) { []parser::Arm as a => a; error as e => return e }
     if !exhaustive(rarms, s.type, table, env.cur_ns) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
-    let result = if have_type { first } else { Void { } }   // all arms diverge → void
+    let result = if have_type { first } else { Void { } }
     TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result; line = 0; col = 0 }
 }
 
