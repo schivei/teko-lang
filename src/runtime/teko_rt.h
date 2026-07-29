@@ -319,6 +319,16 @@ tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end);
 tk_str tk_str_slice_to(tk_str s, uint64_t end);
 // tk_str_slice_from — tk_str_slice(s, start, s.len).
 tk_str tk_str_slice_from(tk_str s, uint64_t start);
+
+// tk_str_slice_len / tk_str_slice_to_len / tk_str_slice_from_len — the SAME three slice builders
+// above, with their result's length handed back through an OUT-PARAMETER instead of `tk_str`'s
+// second field. Same reason and shape as `tk_str_concat_len` (above): the native backend's own
+// `LCall` result capture is ONE register, one short of the two-eightbyte SysV/AAPCS64 register
+// pair a `tk_str`-by-value return actually occupies. Thin wrappers — each still calls its own
+// two-word twin above and owns no logic of its own (0.3.1.0 degrau 11).
+const tk_byte *tk_str_slice_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t end, uint64_t *out_len);
+const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t end, uint64_t *out_len);
+const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len);
 // tk_str_len — s.len (the byte length). No allocation.
 uint64_t tk_str_len(tk_str s);
 // tk_str_ends_with — true iff s ends with suffix (suffix.len <= s.len and the tail bytes

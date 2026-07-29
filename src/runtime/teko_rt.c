@@ -710,6 +710,26 @@ tk_str tk_str_slice_from(tk_str s, uint64_t start) {
     return tk_str_slice(s, start, s.len);
 }
 
+// tk_str_slice_len / tk_str_slice_to_len / tk_str_slice_from_len — out-parameter-length twins of
+// the three slice builders above (declared in teko_rt.h; see that comment for WHY). Each is a
+// thin wrapper: it calls its own two-word twin, writes the length out, and returns the pointer
+// half.
+const tk_byte *tk_str_slice_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t end, uint64_t *out_len) {
+    tk_str r = tk_str_slice((tk_str){ s_ptr, s_len }, start, end);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t end, uint64_t *out_len) {
+    tk_str r = tk_str_slice_to((tk_str){ s_ptr, s_len }, end);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len) {
+    tk_str r = tk_str_slice_from((tk_str){ s_ptr, s_len }, start);
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // tk_str_len — the byte length (no allocation).
 uint64_t tk_str_len(tk_str s) {
     return s.len;

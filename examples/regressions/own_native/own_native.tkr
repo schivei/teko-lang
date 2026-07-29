@@ -371,3 +371,31 @@ Feature: string interpolation in a FAT position — a `TInterp` is its own fat-p
   Scenario: interp_fat_positions (own-native — interpolation and `concat` in every fat position)
     When built and run
     Then exit = 42
+
+
+Feature: str query/slice builtins — `contains`/`ends_with`/`slice`/`slice_to`/`slice_from` have a native lowering
+
+  # (0.3.1.0 degrau 11 / raiz-comum §R5) `call_symbol` had no resolution for any of these five bare
+  # names, so a reached call fell through `unresolved_builtin_stop` and honest-stopped ("builtin
+  # `contains` not yet lowered") — first surfaced through `teko::assert::str_contains`'s own body
+  # (`src/assert/assert.tks`), which every `.tkt` test file in this project calls via the injected
+  # assert seed. `native_builtin_symbol` now resolves all five, split by RETURN SHAPE:
+  # `contains`/`ends_with` are `(str, str) -> bool` (`builtin_str_query_symbol`) and need no
+  # out-parameter-length twin — a `bool` fits the single result register every scalar call already
+  # captures. `slice`/`slice_to`/`slice_from` are `str`-returning (`builtin_str_slice_symbol`) and
+  # resolve to the runtime's out-parameter-length twins (`tk_str_slice_len`/`tk_str_slice_to_len`/
+  # `tk_str_slice_from_len`, `teko_rt.h`) through the SAME `lower_len_out_call` shape 0.3.1.0
+  # degrau 9 built for `tk_str_concat_len` — `lower_call_fat`'s own generic tail already appends
+  # the hidden length out-slot once the symbol resolves, so no new lowering ARM was needed.
+  #
+  # The two rows are MEMBERS of this channel (one build, no extra cost): one exercises the
+  # predicate pair (a match, a miss, and the empty-needle/empty-suffix edge each runtime function
+  # documents as trivially true), the other exercises all three slice builtins by both LENGTH and
+  # CONTENT, so a plausible length with the wrong bytes is caught too.
+  Scenario: str_contains_and_ends_with (own-native — the two `str` predicate builtins)
+    When built and run
+    Then exit = 42
+
+  Scenario: str_slice_family (own-native — `slice`/`slice_to`/`slice_from`, each length AND content)
+    When built and run
+    Then exit = 42
