@@ -1314,12 +1314,27 @@ jobs:
         run: sh scripts/degrau_test.sh
 
       # THE PROVENANCE PROOF, against the ACTUAL checked-out tree — not a fixture. `degrau_test.sh`
-      # above only proves the DEGRAU library's own logic; nothing yet asked whether the C actually
-      # sitting at `bootstrap/teko.c` on THIS commit can say which CI run produced it. Owner ruling
-      # 2026-07-29: "nada no repositório diz de que corrida de CI veio o bootstrap/teko.c que lá
-      # está, nem impede alguém de commitar um C construído à mão que pareça igual." Needs no
-      # compiler and no network — see scripts/provenance_gate.sh.
-      - name: Structural — every committed `bootstrap/teko.c` has a matching provenance record
+      # above only proves the DEGRAU library's own logic; nothing yet asks whether a PR that
+      # SWAPS `bootstrap/teko.c` (adds, replaces, or removes-and-reintroduces it) can say which CI
+      # run produced the new bytes. Owner ruling 2026-07-29, first pass: "nada no repositório diz
+      # de que corrida de CI veio o bootstrap/teko.c que lá está, nem impede alguém de commitar um
+      # C construído à mão que pareça igual." Second pass, which is what the gate actually checks:
+      # "só podemos trocar o teko.c se ele passar por toda uma cadeia válida" — the verb is TROCAR,
+      # so an UNCHANGED `bootstrap/teko.c` is never judged; see scripts/provenance_gate.sh.
+      #
+      # THE BASE MUST BE FETCHED BEFORE THE GATE CAN SEE IT. The checkout above is shallow
+      # (`fetch-depth` defaults to 1), so the PR's base commit is not yet a resolvable object —
+      # this fetches EXACTLY that one commit (the same "fetch what the diff needs, nothing more"
+      # idiom `scripts/build_with_seed_fallback.sh`'s `ensure_full_history` uses for its own base
+      # branch). `github.event.pull_request.base.sha` is always set on this workflow's own
+      # trigger (`on: pull_request`), so no fallback is offered here — an absent base is the gate's
+      # own FATAL to report, not a case for this step to paper over.
+      - name: Fetch the PR base commit (for the provenance gate's diff, nothing else)
+        run: git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+
+      - name: Structural — every SWAP of `bootstrap/teko.c` has a matching provenance record
+        env:
+          TEKO_PROVENANCE_BASE: ${{ github.event.pull_request.base.sha }}
         run: sh scripts/provenance_gate.sh .
 
       - name: Structural — the provenance gate's own verdicts are proven, not assumed
