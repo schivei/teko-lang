@@ -39,7 +39,17 @@ Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `
 **O resto da lei continua real, mas o force-push É POR RAMO — precisão do dono (2026-07-29, literal):** *"force push é liberado em `cargo/**` (a esteira que alimenta a branch de trabalho `remodel/`)"*.
 
 - Em **`remodel/**`** (o vagão) está mesmo desabilitado: uma tentativa de `--amend` + `--force-with-lease` no vagão desta lane foi recusada com *"push declined due to repository rule violations"*. Aqui vale forward-only sem excepção — corpo estragado corrige-se com um commit NOVO que explique o estrago.
-- Em **`cargo/**`** (a esteira) é PERMITIDO. Uma carga pode rebasear e reescrever a sua própria história à vontade, porque o que interessa é o que chega ao vagão.
+- Em **`cargo/**`** (a esteira) o dono diz que é PERMITIDO — a intenção é que uma carga possa rebasear e reescrever a sua própria história, porque o que interessa é o que chega ao vagão.
+
+**MAS ISSO NÃO É O QUE ACONTECE PELO TOKEN DO AGENTE — medido em 2026-07-29:**
+```
+$ git push --force-with-lease origin cargo/0.3.1-auditoria-memoria
+ ! [remote rejected] cargo/0.3.1-auditoria-memoria -> cargo/0.3.1-auditoria-memoria
+   (push declined due to repository rule violations)
+```
+A recusa é a MESMA do vagão. Não sei qual das duas leituras é a verdadeira e **não a invento**: pode ser que a regra do repositório não distinga ramos, ou que a permissão exista para a conta do dono e não para o token da app que o agente usa. As duas explicações cabem na evidência.
+
+**O que isto obriga na prática, até se esclarecer:** um agente **não pode contar com force-push em lado nenhum**. Uma carga que precise de base nova ou que queira desfazer um commit tem de o fazer **antes do primeiro push**, ou aceitar que a história fica como está e corrigir com commit novo. Quem drena para o vagão pode **saltar** os commits maus com `cherry-pick` selectivo — foi o que se fez com o commit duplicado desta auditoria — e a história do vagão continua limpa.
 
 **A LINEARIDADE É EM DUAS RELAÇÕES — precisão do dono (2026-07-29, literal):** *"Tem que ser linear na `remodel/**` em relação a main e a main em relação ao org (repo principal)."*
 
