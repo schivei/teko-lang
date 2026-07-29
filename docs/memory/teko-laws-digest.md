@@ -775,3 +775,21 @@ por um caminho que está a ser desmontado.
 
 Esta declaração existe para que ninguém tente `cl.exe` sobre o C emitido e conclua que está partido —
 não está: nunca foi um alvo.
+
+### Precisão: a norma é C23, e isso NÃO muda a conclusão sobre o MSVC (dono, 2026-07-29)
+
+*"usamos a versão C23"* — e com um cuidado de portabilidade que já estava no código:
+
+| compilador | grafia usada | porquê |
+|---|---|---|
+| clang | `-std=c23` | grafia moderna |
+| GCC | `-std=c2x` | o GCC só aprendeu `c23` na versão **14**, e os scripts abrangem versões anteriores |
+
+`src/build/project.tks:564`/`:903`, `scripts/build_gen1_from_c.sh:43`,
+`scripts/build_with_seed_fallback.sh:293`, `scripts/native_linux_asset.sh:199` — o comentário em
+`project.tks:547-549` registou a razão da diferença de grafia.
+
+**O C23 padronizou o `typeof`** (era extensão GNU; não o usamos — medido, zero ocorrências). **Mas
+NÃO padronizou as expressões-de-instrução `({ ... })`** — essas continuam extensão GNU, e o `cl.exe`
+recusa-as mesmo com `/std:clatest`. Portanto a declaração acima mantém-se inteira: o C emitido assume
+gcc/clang, e o MSVC entra só como linker.
