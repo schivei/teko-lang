@@ -2022,3 +2022,73 @@ fn f_err_typed() -> i64 {
     if orig.actual != "" { return 6 }
     0
 }
+
+/**
+ * dv_shape_or_err — a bare `DvShape` case constructed DIRECTLY into a `DvShape | error` slot: the
+ * exact shape 0.3.1.0 degrau 23 closes (`checker::func_type`'s own `-> Type | error`, `Type` itself
+ * a named variant). `DvShape` is a UNION MEMBER here, not the function's own bare return type, so a
+ * bare `DvCircle`/`DvSquare`/`DvTri` flows past TWO levels of union before reaching a case a `match`
+ * can bind by name: this level's own tag (is it the `DvShape` case or `error`?), then `DvShape`'s
+ * OWN tag (which of its three cases?).
+ *
+ * @param n  0 for the error case, 1 for a circle, 2 for a square, anything else for a triangle
+ * @return   the constructed value, or its `error` case
+ */
+fn dv_shape_or_err(n: i64) -> DvShape | error {
+    if n == 0 { return error { message = "dv nested" } }
+    if n == 1 { return DvCircle { r = 5 } }
+    if n == 2 { return DvSquare { s = 6 } }
+    DvTri { t = 7 }
+}
+
+/**
+ * f_declared_variant_nested_alias — 0.3.1.0 degrau 23: a bare case constructed straight into an
+ * OUTER slot whose union member is ITSELF a declared variant (`DvShape`) is tagged, and read back,
+ * by its OWN case — not by the leaf's raw bytes misread as the alias's own tag.
+ *
+ * THE MISCOMPILATION THIS CLOSES, IN TWO LAYERS. The native backend used to fail to even COMPILE
+ * this shape ("value's type is not a member of its declared variant (internal)" —
+ * `variant_member_index_of`/`variant_member_type_matches` matched a `Named` member by EXACT name
+ * only, so a value nested one alias deep never matched). Widening that match to recurse into the
+ * alias's own members closed the compile-time stop, but on its own would have left a DEEPER wrong
+ * answer standing: it would have stored the leaf's OWN raw address as the outer payload directly,
+ * so a later `match` against the alias's OWN cases (`DvCircle`/`DvSquare`/`DvTri`) would have read
+ * the leaf struct's own first FIELD as if it were the alias's tag — a SILENT wrong branch, not a
+ * stop, confirmed by disassembling the equivalent two-level scratch repro. The fix instead builds
+ * a NESTED wrapper (the alias's own tag+payload) and boxes THAT as the outer payload, so both
+ * levels read back correctly.
+ *
+ * @return 0 when every case round-trips through both match levels, else the number of the failing
+ *         check
+ */
+fn f_declared_variant_nested_alias() -> i64 {
+    match dv_shape_or_err(0) {
+        error as e => { if e.message != "dv nested" { return 1 } }
+        DvShape as s => { return 2 }
+    }
+    match dv_shape_or_err(1) {
+        error as e => { return 3 }
+        DvShape as s => match s {
+            DvCircle as c => { if c.r != 5 { return 4 } }
+            DvSquare as sq => { return 5 }
+            DvTri as t => { return 6 }
+        }
+    }
+    match dv_shape_or_err(2) {
+        error as e => { return 7 }
+        DvShape as s => match s {
+            DvCircle as c => { return 8 }
+            DvSquare as sq => { if sq.s != 6 { return 9 } }
+            DvTri as t => { return 10 }
+        }
+    }
+    match dv_shape_or_err(3) {
+        error as e => { return 11 }
+        DvShape as s => match s {
+            DvCircle as c => { return 12 }
+            DvSquare as sq => { return 13 }
+            DvTri as t => { if t.t != 7 { return 14 } }
+        }
+    }
+    0
+}
