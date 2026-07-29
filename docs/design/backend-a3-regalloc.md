@@ -674,7 +674,7 @@ small inputs without needing a 30-live-value program.
 
 A3 is XL, so it drains as four sub-sub-PRs on `fix/issue-384-regalloc`, in order. Each owes the full
 ritual — the **both-engine gate** (native `teko . -o bin` AND `teko test .` VM, per the hard lesson
-that the diff-VM==native lane runs the VM; watch the `x = match{…return}` VM gotcha — use the
+that the differential lane runs the VM; watch the `x = match{…return}` VM gotcha — use the
 `let`-then-assign shape, `isel_arm64.tks:1831-1835`) · paranoid · fixpoint — and **100% coverage on
 its new code**; each names the fixtures that PROVE it. No machine bytes in any of them.
 

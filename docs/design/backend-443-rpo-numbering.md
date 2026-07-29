@@ -584,7 +584,7 @@ proof that RPO fixed the numbering even independently of the back-edge test.
 ## 9. Ritual points
 
 - **Both-engine gate at every crumb:** native `teko . -o bin` **and** VM `teko test .`. The
-  diff-VM==native lane runs the VM; the recursion in `rpo_visit` and the `mut cur = RpoState{…}` /
+  differential lane runs the VM; the recursion in `rpo_visit` and the `mut cur = RpoState{…}` /
   `cur = rpo_visit(…)` reassignment must run on both.
 - **VM gotcha watch:**
   - No `x = match { … return }` reassignment (VM can't do control flow inside a match used as an

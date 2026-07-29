@@ -8,7 +8,7 @@ shipped through L3 (struct methods) and deferred at L4/L5 as a genuine design ga
 `Map::new()` / `Map<K,V>::new()`).
 **Rule:** every snippet is full-Javadoc, `.tks`-only. C twins FROZEN (only `teko_rt.{c,h}` maintained —
 none needed here). Ritual per crumb = full gate (gen1 native `#test` + `./bin/teko test .` VM +
-FIXPOINT gen1==gen2 byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit).
+FIXPOINT gen1==gen2 byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit).
 
 ---
 

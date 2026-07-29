@@ -550,7 +550,7 @@ built on the same `teko::list::push(buf, (x & 0x7F) …)` byte idiom A4 uses for
  * group first, high bit = "more follow"): the wasm size/index/count encoding
  * primitive, paralleling A4's `emit_u32_le` (`backend-a4-encoder.md` §2.1). All
  * arithmetic stays in u64; only the final `& 0x7F` / `| 0x80` narrows to byte
- * (the VM byte-width anchoring gotcha — never widen a byte mid-expression).
+ *.
  *
  * @param buf the buffer to extend
  * @param v the value to encode
@@ -950,7 +950,7 @@ The SAME corpus the register lanes use — re-run under wasmtime:
 | `own_match_exit` | `match k { 0 => exit(7); _ => exit(9) }` | per k | — | C1-5 (needs C1-3) |
 | `own_print_exit` | `println($"answer={6*7}!"); exit(42)` | 42 | `answer=42!` | C1-6 (needs `fd_write`, R-1) |
 
-The VM + C-native legs already exist (`diff_vm_native.sh`); C1-6 adds the **own-wasm leg** and asserts
+The VM + C-native legs already exist (`diff_c_own.sh`); C1-6 adds the **own-wasm leg** and asserts
 `own-wasm exit/stdout == C-wasm exit/stdout` under wasmtime. Browser (C1-7) re-runs the same corpus
 through the JS harness.
 

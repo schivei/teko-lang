@@ -847,7 +847,7 @@ A1 (done) ─▶ C1-1 ─▶ C1-2 ─▶ C1-3 ─▶ C1-4 ─▶ C1-5 ─▶ C1-
   **Proven by:** an overflow fixture panics via the hook; a large-pointer fixture runs on wasm64.
 - **C1-8 · `emit_native` TARGET-DISPATCH arm + the DIFFERENTIAL (KEYSTONE)** — the `TEKO_BACKEND=wasm`
   seam + the `wasm32-wasi` target triple in `src/build/project.tks` (an additive, FIXPOINT-preserving
-  target arm), the `wasm-ld` link of `teko_rt.wasm` (§11.4), the wasm leg of `diff_vm_native.sh` wiring
+  target arm), the `wasm-ld` link of `teko_rt.wasm` (§11.4), the wasm leg of `diff_c_own.sh` wiring
   **own-wasm(wasmtime) == C-native == interp** over the corpus (honest-skipped where no wasm engine is
   present). **Proven by:** the whole gate — both engines + fixpoint + the new differential leg — green.
   **#389 CLOSES.**
@@ -855,7 +855,7 @@ A1 (done) ─▶ C1-1 ─▶ C1-2 ─▶ C1-3 ─▶ C1-4 ─▶ C1-5 ─▶ C1-
 **Files:** new `src/backend/stackify.tks`, `src/backend/objfile_wasm.tks`,
 `src/backend/stackify_test.tkt`, `src/backend/objfile_wasm_test.tkt`, a wasm variant of
 `src/runtime/teko_rt` (WASI/browser build) + `extensions/`/`web` JS glue (N6b), the wasm leg of
-`scripts/diff_vm_native.sh`, `examples/regressions/wasm_*`; touched `src/build/project.tks`
+`scripts/diff_c_own.sh`, `examples/regressions/wasm_*`; touched `src/build/project.tks`
 (`emit_native` wasm arm + the `TEKO_BACKEND=wasm` env seam). **Reuses unchanged:**
 `lir::lower_program`, the whole `lir` type surface, `encode_arm64::emit_u32_le` (pub), `align_up`, the
 #443 RPO algorithm, the isel `emit_edge_moves` parallel-copy shape.
@@ -971,8 +971,8 @@ HALTs.
   trampoline (still fail-loud: observe via fd_write to the host, then trap).
 - **S-3 · The keystone differential is own-wasm(wasmtime) == C-native ONLY — there is no `interp`/VM
   leg (supersedes §12/§12.4's "== interp" and the §12.3 "both-engine gate", and the §13 "wasm leg of
-  `scripts/diff_vm_native.sh`").** The VM was **retired (issue #524, `docs/design/vm-retirement.md`)**;
-  `scripts/diff_vm_native.sh` no longer exists on the lane (only `native_regressions.sh`'s CWD check
+  `scripts/diff_c_own.sh`").** The VM was **retired (issue #524, `docs/design/vm-retirement.md`)**;
+  `scripts/diff_c_own.sh` no longer exists on the lane (only `native_regressions.sh`'s CWD check
   survived it), and the test gate runs **natively only** (#265, `run_gate_native`, `project.tks:1355`).
   **Law-first:** the later, ratified #524/#265 win over the pre-#524 §12 sketch. C-native is the single
   trusted oracle, and the three-way "own-wasm == C-native == interp" collapses to the two-way
