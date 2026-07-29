@@ -926,3 +926,174 @@ medição, e nenhuma sobrou para o dono:
 expressão na chave" é `a[f(x)]` (que já funciona, medido) ou `m[chave]` sobre `Map<V>` (que não
 existe e é uma terceira lane). **Não adivinho.** O coordenador pergunta; o desenho acima está
 completo e entregável sem essa resposta, e nenhum crumb dele muda conforme ela.
+
+**→ RESOLVIDO. Ver Apêndice A.**
+
+---
+
+# Apêndice A — o modelo de acesso do C# por inteiro
+
+> **Origem:** resposta do dono, 2026-07-29, literal: *"já respondi, quis dizer sobre fazer acessos
+> como o C# faz"*. **Acrescento, não revisão:** nada em §0–§12 muda, e a resposta de uma linha
+> mantém-se — a lane 1 continua a ser o subconjunto mínimo que entrega "substring fácil".
+
+## A.0 O modelo, item a item, e onde cada peça aterra
+
+| peça do modelo de acesso do C# | Teko |
+|---|---|
+| `a[i]` — índice inteiro | **já existe** |
+| `a[expr]` — expressão na posição do índice | **já existe** (medido, §5.1) |
+| `d[chave]` — indexador por chave, **lança** se ausente | **lane 3** — `m[k]` → `Map::at`, **panic** |
+| `d.TryGetValue(k, out v)` — a forma segura | **já existe** — `Map::get(k) -> V \| null` |
+| `a[1..3]`, `a[..n]`, `a[n..]`, `a[..]`, `a[1..=3]` | **lanes 1 e 2** |
+| `System.Range` de 1.ª classe | **RECUSADO** (§3 — medido) |
+| `System.Index` / `^n` | **RECUSADO** (§4.3 + A.4) |
+| admissão por FORMA (`Length`/`Count` + indexador + `Slice`) | **RECUSADO** (ordem do dono, §4.5) |
+
+Cinco peças entram, três ficam fora, cada uma com a sua razão já escrita.
+
+**E a objecção de §6 cai, pelo lado que o coordenador apontou.** Escrevi que `m[k]` seria "o único
+subscrito de Teko a devolver uma união". Cai porque o indexador do C# **não devolve união nenhuma**:
+lança. O par certo é `d[key]` lança / `TryGetValue` devolve — e Teko já tem a metade segura escrita
+(`Map::get -> V | null`). Falta-lhe a metade barulhenta, que é a que o subscrito usa. Sem união, sem
+excepção à regra do barulho, e coerente com o que §4.4 mediu: fora-de-limites **já é panic** hoje.
+
+## A.1 Custo de `m[chave]` — **mecanismo DIFERENTE do corte, e lowering ZERO**
+
+**Não é o mesmo mecanismo.** A diferença é a que importa para orçamentar:
+
+| | corte (lanes 1/2) | `m[k]` (lane 3) |
+|---|---|---|
+| alvo do desaçúcar | `TCall` a **builtin** (`call_ns = ""`) | **método de instância** de uma classe declarada |
+| resolução de nome | nenhuma — o nome é literal | busca de método, visibilidade `intern`, defargs |
+| monomorfização | nenhuma | **sim** — `Map<V>` é genérica |
+| função de runtime nova | 4 (`tk_str_cut*`, `tk_slice_cut*`) | **0** |
+| entrada em `native_builtin_symbol` | 4 | **0** |
+| linha nova em `codegen.tks` | 4 | **0** |
+
+`type_method_call` (`typer.tks:1278`) já faz metade do trabalho: reescreve `.m(a)` numa
+`parser::Call` com o receptor a viajar em `args[0]` e encaminha para a tipagem de chamada normal —
+que já carrega a busca de método, a visibilidade e a estampagem genérica. **A lane 3 desaçucara para
+CÓDIGO TEKO**, não para uma primitiva; os dois backends baixam-no como baixam qualquer chamada de
+método. Por isso o lowering custa zero: não há nada de novo para baixar.
+
+O que é preciso, e é tudo:
+
+**(a) um braço `Named` em `type_index`**, que reescreve `Index{receiver, index}` em
+`parser::MethodCall { receiver, method = "at", args = [index] }` e delega em `type_method_call`. O
+limite (`cut != null`) é recusado: **um `Map` não se corta** — não tem ordem, e cortar por chave não
+quer dizer nada. Frase: `"cannot cut a \`Map<V>\`: a map has no order — subscript it by ONE key"`.
+
+**(b) um método novo em `src/collections/map.tks`**, o irmão barulhento de `get`:
+
+```teko
+    /**
+     * at — o valor de `k`, ou PANIC se a chave não existir. É o alvo do subscrito `m[k]` e o irmão
+     * BARULHENTO de `get`: `get` devolve `V | null` e obriga o chamador a decidir; `at` afirma que
+     * a chave existe e faz barulho quando a afirmação é falsa. O par espelha o do C# — `d[key]`
+     * lança, `TryGetValue` devolve o sucesso ao lado —, com a excepção trocada pelo `panic` que
+     * Teko já usa para todo o acesso fora de limites (a ordem do dono, 2026-07-29).
+     *
+     * Chama a função LIVRE `map_find_index` e NÃO `self.get(k)`: um método de instância genérico
+     * que chama um irmão em `self` pode falhar a ligar no nativo (o irmão estampado nunca é
+     * emitido) — a razão que o doc-comment deste módulo já regista, e a razão por que os
+     * ajudantes partilhados desta classe são funções livres.
+     *
+     * @param k  a chave a procurar
+     * @return   o valor associado a `k`
+     * @throws   panic `"Map::at: key not found"` quando `k` não está no mapa — a forma que NÃO
+     *           faz barulho é `get`
+     * @see get
+     * @since 0.3.1.0
+     */
+    pub fn at(self, k: str) -> V
+```
+
+**Um subscrito por chave INTEIRA não existe** e não é criado por arrasto: `Map<V>` tem chaves `str`
+(a razão está no doc-comment do módulo — traço estrutural opaco sobre parâmetro de tipo). Se um dia
+`Map<K, V>` chegar, o braço de `type_index` não muda: continua a delegar em `at`, e é a assinatura
+de `at` que passa a aceitar `K`.
+
+## A.2 A lista fechada com TRÊS membros — **continua lista, e a diferença fica mais nítida**
+
+Sim, admite. O critério não afrouxa, porque o critério de Teko nunca foi o do C#:
+
+- o do **C#** é uma **FORMA** — `Length`/`Count` + indexador `int` + `Slice(int,int)` —, e a
+  especificação dele diz de si própria que a linguagem não impõe nem verifica a semântica desses
+  membros. É suposição.
+- o de **Teko** é **IDENTIDADE**, e com dois sabores, ambos factos que o checker **calcula**:
+  - `str` e `[]T` — membros **estruturais**: os braços `Str` e `Slice` do `Type` resolvido. Não há
+    forma nenhuma a adivinhar.
+  - `Map<V>` — membro **nominal**: `Named.name == "teko::collections::Map"`, o nome **CANÓNICO já
+    resolvido**, nunca o nome bare. É a mesma disciplina de `call_symbol` (*"decided by the callee's
+    ORIGIN NAMESPACE and never by its bare name"*), e o canal de regressão
+    `examples/regressions/builtin_name_not_hijacked` existe precisamente para provar que um `Map`
+    declarado pelo utilizador não sequestra o do `teko::`.
+
+**A regra que mantém a lista fechada, e tem de ficar escrita no doc-comment de `cut_receiver_error`
+e do braço `Named`:** *um membro novo entra por emenda que o NOMEIA; o critério nunca vira teste de
+forma.* No dia em que alguém escrever "qualquer tipo com um método `at`", isso É o modelo do C# e
+precisa de ratificação nova.
+
+Três nomes ainda se lêem de uma vez. É esse o teste prático de uma lista: cabe numa tabela e um
+leitor sabe dizer, sem executar nada, se o seu tipo está lá.
+
+## A.3 Ordem das lanes — **confirmo, com duas correcções**
+
+**Correcção 1 — a lane 3 não depende de nenhuma das outras duas.** `m[k]` é a forma de ELEMENTO
+(`cut == null`), que existe hoje; não precisa do `IndexCut` do crumb 1.1 nem de nada da lane 2. Pode
+ser puxada para a frente sem custo se o dono quiser `m[k]` cedo. Não recomendo — ver a correcção 2 —
+mas o desenho não a prende.
+
+**Correcção 2, e é a que importa — a lane 3 tem um pré-requisito que não é código.** Medido:
+**`teko::collections::Map<V>` tem ZERO consumidores na árvore.** As três ocorrências fora do próprio
+módulo são doc-comments (`encoding/json/json.tks:26`/`:603`, `codegen/codegen.tks:469`). O único
+exercitador é `examples/regressions/bulk/src/q046_collections_map/body.tks` — e o `bulk` está
+**DESLIGADO** (registado em `9d7c5c8`: 214 ficheiros que ninguém corre).
+
+Dar açúcar de sintaxe a um tipo cuja única prova está desligada é pôr o açúcar antes da rede. E não
+é um risco teórico: `Map<V>` é uma classe **genérica**, e o doc-comment do próprio módulo já regista
+**dois** perigos de ligação nativa nesse terreno (construir um genérico aninhado dentro de um corpo
+de método genérico; um método de instância genérico a chamar um irmão em `self`). **Pré-requisito da
+lane 3: uma fixture VIVA de `Map<V>` no canal `own_native`** (`make`/`insert`/`get`/`at`, valor nas
+duas rotas, exit 42) — que também é a primeira prova real de que a classe funciona no nativo.
+
+**Ordem recomendada:**
+
+> lane 1 (`str`) → lane 2 (`[]T`) → **[fixture viva de `Map<V>` no `own_native`]** → lane 3 (`Map`)
+
+Confirmo a tua leitura; acrescento o degrau da fixture entre a 2 e a 3.
+
+**E confirmo a dependência da lane 2 como satisfeita, com uma precisão que muda o R2 da tabela de
+riscos.** `63480b2` mexeu no `box_aggregate_value` e no `lower_array_lit` (escape de frame — o
+literal devolvido passa a ser boxed em armazenamento por-EXECUÇÃO) e **não** tocou no oráculo de
+stride. O oráculo é `elem_byte_stride` (`lower.tks:9782`): `is_fat_type(t) → fat_slot_bytes()`, senão
+`ltype_size(ltype_of(t))` — a função que já concilia o elemento gordo com o escalar.
+
+**R2 deixa de ser "esperar" e passa a ser um endereço:** `lower_list_cut` chama **`elem_byte_stride`**,
+não `ltype_size(ltype_of(elem))` cru. E o corte fica melhor servido que o push: como `tk_slice_cut` é
+paramétrico no stride, **uma chamada cobre o elemento gordo e o escalar**, enquanto o push precisa
+dos dois braços (`lower_fat_element_push` / `lower_scalar_element_push`). O corte junta-se como
+quarto consumidor do oráculo que o fix acabou de alinhar — não como um quinto sítio a recalculá-lo.
+
+## A.4 `^n` — **confirmo o NÃO, e ganha um quarto argumento, que é o mais forte**
+
+Concordo com a tua leitura. Os três argumentos de §4.3 continuam de pé e o dono não contestou nenhum.
+O quarto só ficou visível agora que ele nomeou o modelo INTEIRO:
+
+**`^n` é a parte do modelo do C# que depende da parte que a medição fechou.** Em C# `^1` não é
+açúcar: é um valor de `System.Index`, um tipo real, e `System.Range` existe para que `..^1` componha
+— um `Index` é passável, guardável, e o indexador de corte recebe um `Range`. Teko mediu que **não
+pode ter range de primeira classe**: o `..` prefixo é do spread (§3.1) e o `..` infixo parte as
+cabeças de laço (§3.2).
+
+Restam dois caminhos, e ambos estão bloqueados por medições diferentes:
+
+- **`^n` com o modelo completo** (tipos `Index`/`Range` de primeira classe) reabre exactamente o §3
+  — a decisão que a medição fechou com mais força.
+- **`^n` como açúcar puro** (`a[^1]` → `a[a.len - 1]`) fica sem o tipo que lhe dá sentido em C#, e
+  sobra-lhe só a assimetria do `^0` (legal ao cortar, ilegal ao indexar) que M.3 proíbe.
+
+**`^n` FICA FORA.** Se o dono o quiser, é ratificação própria, e tem de decidir o `^0` explicitamente
+— não entra por arrasto no "modelo do C#", porque a peça de que ele depende já foi recusada com
+medição.
