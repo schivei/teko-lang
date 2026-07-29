@@ -36,7 +36,12 @@ Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `
 
 **A metade do trailer foi SUPERADA (ruling do dono, 2026-07-29, literal):** *"pode manter l Co-Authored, o hook vai ficar te torrando a paciência e tu acaba alarmando desnecessariamente, como os merges são squash e eu os executo, esse problema foi superado."* O trailer pode ficar: o merge é **squash** e é o dono que o executa, portanto o corpo que chega à `main` é o dele, não o do commit de trabalho. Perseguir o trailer só produzia alarme e tentativas de reescrever história.
 
-**O resto da lei CONTINUA REAL, e não é teoria:** o force-push está mesmo desabilitado por regra do repositório — uma tentativa de `--amend` + `--force-with-lease` no vagão desta lane foi recusada com *"push declined due to repository rule violations"*. Forward-only é o que é: um commit com o corpo estragado corrige-se com um commit NOVO que explique o estrago, nunca reescrevendo o que já foi empurrado.
+**O resto da lei continua real, mas o force-push É POR RAMO — precisão do dono (2026-07-29, literal):** *"force push é liberado em `cargo/**` (a esteira que alimenta a branch de trabalho `remodel/`)"*.
+
+- Em **`remodel/**`** (o vagão) está mesmo desabilitado: uma tentativa de `--amend` + `--force-with-lease` no vagão desta lane foi recusada com *"push declined due to repository rule violations"*. Aqui vale forward-only sem excepção — corpo estragado corrige-se com um commit NOVO que explique o estrago.
+- Em **`cargo/**`** (a esteira) é PERMITIDO. Uma carga pode rebasear e reescrever a sua própria história à vontade, porque o que interessa é o que chega ao vagão.
+
+**Consequência prática, e custou trabalho a aprender:** uma carga que precise de base nova deve **rebasear**, nunca fazer merge do vagão para dentro de si. Um agente desta lane fez merge por acreditar que não podia reescrever depois de ter empurrado, e o commit de merge teve de ser saltado à mão no dreno para a história do vagão continuar linear. Com o force-push disponível na esteira, esse merge era evitável.
 
 Nota de método, porque foi assim que este erro se descobriu: um agente veio dizer, sem lhe ser perguntado, que os commits dele estavam limpos de trailer "matching commit hygiene rules". Ele conhecia esta lei e o integrador não. **Ler este ficheiro por inteiro é barato; descobrir cada lei por acidente não é.**
 
