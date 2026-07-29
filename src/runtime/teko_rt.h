@@ -291,6 +291,34 @@ tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec);
 // tk_str_eq — true iff a and b have the same length and the same bytes (memcmp; embedded NUL
 // tolerated). No allocation.
 bool tk_str_eq(tk_str a, tk_str b);
+// tk_char_eq — true iff a and b decode the SAME codepoint. Compares by BYTES (same length and
+// same bytes, memcmp), not by decoded scalar: the lexer only ever produces the ONE valid UTF-8
+// encoding for a given codepoint, so byte-equality and codepoint-equality coincide, and comparing
+// bytes needs no decode. (0.3.1.0 — `char ==`/`!=`, the language-hole fix: the C route rejected
+// `==` on the raw {ptr,len} struct outright, and the native route had no PrimKind for `char`.)
+bool tk_char_eq(tk_char a, tk_char b);
+// tk_slice_eq_bytes — `[]T == []T` VALUE equality (mirrors Go's slice-by-value comparison, per
+// the owner's 2026-07-29 four-references ruling) for a POD element `T` with no interior pointer
+// (an integer/bool/byte prim): same length AND `memcmp` of the packed backing array. Safe for
+// these kinds specifically because a homogeneous C array of a fixed-width scalar has no padding
+// between elements and no representation for one value that isn't also byte-identical to every
+// other encoding of that SAME value. NOT used for `float`/`char`/`str` elements — see their own
+// dedicated helpers below (a float's bit pattern is not its value equality, `-0.0`/`NaN`; a
+// char/str element's `{ptr,len}` pair differs by BACKING ADDRESS even when the two elements hold
+// the same content).
+bool tk_slice_eq_bytes(const void *a_ptr, uint64_t a_len, const void *b_ptr, uint64_t b_len, uint64_t elem_size);
+// tk_slice_f32_eq / tk_slice_f64_eq — `[]f32 == []f32` / `[]f64 == []f64`: same length AND every
+// element equal by the IEEE `==` (NOT memcmp — `-0.0 == 0.0` are value-equal but bit-distinct,
+// and `NaN != NaN` even though its bits equal themselves).
+bool tk_slice_f32_eq(const float *a_ptr, uint64_t a_len, const float *b_ptr, uint64_t b_len);
+bool tk_slice_f64_eq(const double *a_ptr, uint64_t a_len, const double *b_ptr, uint64_t b_len);
+// tk_slice_char_eq — `[]char == []char`: same length AND every element `tk_char_eq`. A `[]char`
+// element is byte-for-byte a `tk_char` (both the `{uint8_t*,uint64_t}` shape), so the backing
+// array IS an array of `tk_char` and needs no bridging.
+bool tk_slice_char_eq(const tk_char *a_ptr, uint64_t a_len, const tk_char *b_ptr, uint64_t b_len);
+// tk_slice_str_eq — `[]str == []str`: same length AND every element `tk_str_eq`. A `[]str`
+// element is byte-for-byte a `tk_str`, for the same reason `tk_slice_char_eq` needs no bridging.
+bool tk_slice_str_eq(const tk_str *a_ptr, uint64_t a_len, const tk_str *b_ptr, uint64_t b_len);
 // (TR3) tk_str_hash — FNV-1a over the str's bytes (offset basis 14695981039346656037, prime
 // 1099511628211, u64 wraparound); an empty str hashes to the offset basis. No allocation.
 uint64_t tk_str_hash(tk_str s);

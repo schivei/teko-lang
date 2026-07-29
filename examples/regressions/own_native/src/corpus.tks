@@ -1651,3 +1651,92 @@ fn f_ref_deref_assign() -> i64 {
     if acc != 10 { return 15 }
     0
 }
+
+/**
+ * ces_char_word — a `char` produced by a CALL, so the equality's operands are not both literals
+ * the folder could have collapsed before the backend ever saw them (mirrors `str_eq_word`'s own
+ * reasoning, one line up in this file, for the `char` sibling).
+ *
+ * @param n  the switch selecting the codepoint (0 = `a`, 1 = `b`, anything else = `a` again)
+ * @return   the selected codepoint
+ */
+fn ces_char_word(n: i64) -> char {
+    if n == 0 { return c'a' }
+    if n == 1 { return c'b' }
+    c'a'
+}
+
+/**
+ * f_char_and_slice_equality — `char ==`/`!=` and `[]T ==`/`!=` lowered natively (0.3.1.0
+ * igualdade-char-slice), mirroring `f_str_equality`'s own shape one function above.
+ *
+ * `char` had NO comparison at all: the C route's raw `==` rejected a `tk_char` struct outright
+ * (`invalid operands to binary ==`), and the native route's `lower_compare` asked `prim_kind_of`
+ * for `char`'s PrimKind and found none (a `char` here is a `{ptr,len}` VIEW, not a fixed-width
+ * scalar). `[]T == []T` had the SAME hole for every element type — even `[]i64` — because
+ * `emit_compare`'s content-equality detour only ever checked for `str`.
+ *
+ * `[]T` NOW COMPARES BY VALUE, mirroring **Go** (owner ruling 2026-07-29): same length AND every
+ * element equal, element-by-element — Go compares a slice by value with no ceremony, and Teko has
+ * no derived `PartialEq` a Rust-shaped alternative would need. This corpus member does NOT
+ * construct its `[]T` operands by returning an array LITERAL across a function boundary — that
+ * crosses an UNRELATED, pre-existing native-backend gap (an array literal's backing store is a
+ * STACK alloca in the producing function's own frame, which a SUBSEQUENT call is free to reuse,
+ * dangling the first result's content the moment a second fat-returning call runs before the
+ * first is dereferenced; found while writing this fixture, reported rather than fixed here, since
+ * it is not a comparison defect — a bare `.len` read or a same-function-scope compare never
+ * triggers it, which is why every operand below is either a same-function local or a `char`
+ * (a plain scalar in this backend, never stack-escaped).
+ *
+ * The rows mirror `f_str_equality`'s own list, generalized to two more shapes: two EQUAL values,
+ * two DIFFERENT values (last element only, so a prefix-only compare would lie), a shorter vs a
+ * longer value (so a length-only compare would still need the content check to fail correctly),
+ * the empty pair, and multi-byte content (`café🐝` — U+00E9 then U+1F41D, 2 and 4 UTF-8 bytes) so
+ * a byte-width assumption cannot silently pass.
+ *
+ * @return 0 when every comparison answers correctly, else the number of the failing check
+ * @since 0.3.1.0 (igualdade-char-slice)
+ */
+fn f_char_and_slice_equality() -> i64 {
+    if !(ces_char_word(0) == ces_char_word(0)) { return 1 }
+    if ces_char_word(0) == ces_char_word(1) { return 2 }
+    if ces_char_word(0) != ces_char_word(0) { return 3 }
+    if !(ces_char_word(0) != ces_char_word(1)) { return 4 }
+    if !(c'é' == c'é') { return 5 }
+    if c'é' == c'🐝' { return 6 }
+    if !(c'é' != c'🐝') { return 7 }
+
+    let ints_a = [1, 2, 3]
+    let ints_b = [1, 2, 3]
+    let ints_c = [1, 2, 4]
+    let ints_d = [1, 2, 3, 4]
+    let ints_empty_1: []i64 = []
+    let ints_empty_2: []i64 = []
+    if !(ints_a == ints_b) { return 8 }
+    if ints_a == ints_c { return 9 }
+    if ints_a == ints_d { return 10 }
+    if !(ints_a != ints_c) { return 11 }
+    if !(ints_empty_1 == ints_empty_2) { return 12 }
+    if ints_empty_1 == ints_a { return 13 }
+
+    let strs_a = ["café🐝", "beta"]
+    let strs_b = ["café🐝", "beta"]
+    let strs_c = ["café🐝", "betb"]
+    let strs_d = ["café🐝", "beta", "gamma"]
+    let strs_empty_1: []str = []
+    let strs_empty_2: []str = []
+    if !(strs_a == strs_b) { return 14 }
+    if strs_a == strs_c { return 15 }
+    if strs_a == strs_d { return 16 }
+    if !(strs_a != strs_c) { return 17 }
+    if !(strs_empty_1 == strs_empty_2) { return 18 }
+    if strs_empty_1 == strs_a { return 19 }
+
+    let chars_a = [c'c', c'a', c'f', c'é', c'🐝']
+    let chars_b = [c'c', c'a', c'f', c'é', c'🐝']
+    let chars_c = [c'c', c'a', c'f', c'e']
+    if !(chars_a == chars_b) { return 20 }
+    if chars_a == chars_c { return 21 }
+    if !(chars_a != chars_c) { return 22 }
+    0
+}
