@@ -249,7 +249,7 @@ fn ref_binding_missing_init(b: parser::Binding) -> bool { /* is-ref-typed ∧ no
 ```
 
 **Fixtures:** `ref_uninit_rejected` (COMPILE-REJECT, both engines, non-zero) · `ref_init_ok`
-(RUN, VM==native, sentinel 0).
+(RUN, native, sentinel 0).
 
 **Honest-stop:** none — this is total and local. **Dogfooding exposure:** ZERO (the compiler declares
 no `ref` local; refs are param-only today). A4 is future-proofing the surface.
@@ -279,7 +279,7 @@ fn arg_is_lvalue(e: TExpr) -> bool { /* TVar | (TFieldAccess/TIndex over an lval
 ```
 
 **Fixtures:** `refparam_lvalue_aliases` (RUN — pass a `mut` local, callee writes through, caller
-observes the mutation; VM==native, sentinel encodes the written value) · `refparam_rvalue_copies` (RUN
+observes the mutation; native, sentinel encodes the written value) · `refparam_rvalue_copies` (RUN
 — pass a temporary, callee's write does NOT escape; sentinel encodes the unchanged caller state).
 
 **Honest-stop:** an access-path whose addressability the classifier cannot confirm ⇒ treat as **rvalue
@@ -328,7 +328,7 @@ fn escaping_value_leaks_ref(val: TExpr, s: Spine, sum: BorrowSummary) -> bool { 
   engines non-zero with the A1 diagnostic. THE hole made a static error.
 - `leak_ref_in_returned_collection` (COMPILE-REJECT) — `[]Ref<T>` built from locals, returned.
 - `sound_ref_struct_frame_local` (RUN) — a `Holder { r = <param-rooted borrow> }` used within the frame,
-  never returned; VM==native sentinel. Proves A1 does not over-reject the frame-local case.
+  never returned; native sentinel. Proves A1 does not over-reject the frame-local case.
 
 **Honest-stop:** anything the reachability walk cannot resolve (an opaque generic `U` before
 monomorphization, a `.tkb`-imported type whose Ref-reachability is not serialized) ⇒ treat as
@@ -375,12 +375,12 @@ fn borrowed_result_escapes(call: TCall, s: Spine, sum: BorrowSummary) -> bool { 
 
 **Fixtures:**
 - `iter_over_param_ref_ok` (RUN) — `over_array`-shaped: take `Ref<Cursor>` + slice PARAMS, return a
-  closure, caller drives it within the frame; VM==native, sentinel = sum of yielded elements. Proves the
+  closure, caller drives it within the frame; native, sentinel = sum of yielded elements. Proves the
   stdlib idiom COMPILES.
 - `iter_over_local_escapes_rejected` (COMPILE-REJECT) — the `make()` UAF: feed a LOCAL cursor, return the
   closure; both engines non-zero with the A1-interproc diagnostic. Proves soundness for users.
 - `iter_combinator_chain_ok` (RUN) — `take(skip(over_array(xs, c1), c2), c3)`-shaped nesting, exercising
-  the ACYCLIC bottom-up summary composition; VM==native. Proves the summary composes without widening.
+  the ACYCLIC bottom-up summary composition; native. Proves the summary composes without widening.
 
 **Honest-stop / KNOWN BOUNDS (must be documented in `spine.tks`):**
 - **Higher-order opacity:** a combinator that takes an `IntIter` (a closure) as a param and RE-wraps it
@@ -415,7 +415,7 @@ capturing a narrower local ref is rejected.
 
 **Fixtures:** `borrow_stored_in_field_rejected` (COMPILE-REJECT) · `borrow_in_escaping_closure_rejected`
 (COMPILE-REJECT) · `borrow_down_used_locally_ok` (RUN — the accumulator idiom: pass `mut acc` down,
-mutate `.value`, read `acc` after; VM==native — THE compiler's own pattern).
+mutate `.value`, read `acc` after; native — THE compiler's own pattern).
 
 **Honest-stop:** the closure body modeling in the spine is shallow (the #331 `spine.tks` does not descend
 into lambda bodies — documented in `spine-build-plan.md` "KNOWN BOUND"); A2 relies on the CAPTURE LIST

@@ -7,7 +7,7 @@ itself, each independently gate-able and kept well under the timebox. Base for t
 `docs/design/own-backend-architecture.md` §3.2 (the N2 coverage frontier) and §4 Phase A.
 
 > The deliverable of A1 is a COMPLETE TAST→LIR lowering (every construct the checker produces)
-> proven by the LIR-interpreter oracle (exit-code parity vs the VM over the runnable subset) plus
+> proven by the LIR-interpreter oracle (exit-code parity vs the LIR interpreter over the runnable subset) plus
 > golden LIR-dump diffs. A1 emits NO machine code: isel/regalloc/encode/objfile are A2–A4. The value
 > of A1 is lowering completeness, validated independently of any target.
 
@@ -368,9 +368,9 @@ after it. When A1-7 merges, the branch's honest-stops are all closed and the min
 
 A1 has **no machine code**, so correctness is proven two ways, both cheap and host-only:
 
-1. **The LIR-interpreter oracle — exit-code parity vs the VM.** Each sub-sub-PR adds `iwt_*` fixtures
+1. **The LIR-interpreter oracle — exit-code parity vs the LIR interpreter.** Each sub-sub-PR adds `iwt_*` fixtures
    (`lir_interp_test.tkt`) that build the construct as LIR (by hand or via the lowering) and assert
-   the exit code `interp_lmodule` produces equals what the VM produces for the equivalent Teko source.
+   the exit code `interp_lmodule` produces validates the lowering for the equivalent Teko source.
    **All A1 fixtures must be exit-code-observable** — `exit(n)`, a returned value, or `.len`/byte-index
    into a constant — because the interp honest-stops on `tk_println` and the other non-subset runtime
    calls (`lir_interp.tks:270-271`). Do NOT write print-based fixtures for A1.
@@ -385,7 +385,7 @@ the aggregate alloca/field layout (A1-3), the rodata + fat-pointer form (A1-4), 
 (A1-5), the vtable-load + indirect-call sequence (A1-6), and the closure `{fn,env}` form (A1-7).
 
 The full ritual gate (paranoid · differential · fixpoint) runs at each sub-sub-PR's merge —
-but note the differential leg here is **only** the LIR-interp-vs-VM leg; the C-native-vs-own-native
+but note the differential leg here is **only** the LIR-interp validation; the C-native-vs-own-native
 differential is born later, at A4. Fixpoint must hold because the lowering is additive to `src/` and
 does not change any existing emitted artifact.
 
@@ -727,7 +727,7 @@ indices). `reassigned_scalars` (`:2257`) drops its `bound`/exclusion term;
 - **`lwt_if_stmt_non_mutating_arm_keeps_zero_param_merge` stays green** (no assign → `names` empty →
   zero-param merge, byte-identical).
 
-### 6.2.6 Regression fixtures (own == C, both VM-oracle exit and own-native/own-wasm binary)
+### 6.2.6 Regression fixtures (own == C, both LIR-interp validation and own-native/own-wasm binary)
 
 New `examples/regressions/` binary fixtures (kind = "binary", `scripts/validate_wasm_own.sh`,
 own-native/own-wasm exit == C-native exit):
@@ -763,7 +763,7 @@ Golden LIR-dump fixtures in `src/lir/lower_test.tkt`:
 
 Doc-only design PR: no ritual gate beyond a clean build (it emits no code). The IMPLEMENTATION carries
 the gate. Split into two crumbs, each a ritual point (full gate — paranoid · differential
-(LIR-interp-vs-VM over the runnable subset AND own-vs-C binary for the new regressions) · fixpoint) at
+(LIR-interp validation over the runnable subset AND own-vs-C binary for the new regressions) · fixpoint) at
 its merge into `fix/issue-389-c1-8-keystone`:
 
 - **Crumb 1 (reassign-in-place, pure refactor):** add `lenv_reassign`; switch `lower_assign_simple`'s

@@ -950,21 +950,20 @@ The SAME corpus the register lanes use — re-run under wasmtime:
 | `own_match_exit` | `match k { 0 => exit(7); _ => exit(9) }` | per k | — | C1-5 (needs C1-3) |
 | `own_print_exit` | `println($"answer={6*7}!"); exit(42)` | 42 | `answer=42!` | C1-6 (needs `fd_write`, R-1) |
 
-The VM + C-native legs already exist (`diff_c_own.sh`); C1-6 adds the **own-wasm leg** and asserts
+The C-native leg already exists (`diff_c_own.sh`); C1-6 adds the **own-wasm leg** and asserts
 `own-wasm exit/stdout == C-wasm exit/stdout` under wasmtime. Browser (C1-7) re-runs the same corpus
 through the JS harness.
 
 ### 12.3 Ritual + coverage posture
 
-- **Every C1-N** owes the full ritual: **both-engine gate** (native `teko . -o bin` AND `teko test .`
-  VM), **paranoid**, **fixpoint**, and **100% coverage on new code** (definition-of-done). The
+- **Every C1-N** owes the full ritual: **native gate** (native `teko . -o bin`), **paranoid**, **fixpoint**, and **100% coverage on new code** (definition-of-done). The
   stackifier + LEB128 writer are highly branchy (per-`LOp`, per-width, per-scope) — cover every lowered
   case + every honest-stop arm via golden tests; the one genuinely-unreachable arm (`C1-irreducible`)
   is justified in the PR (the coverage-ruling exception).
-- **VM-gotcha watch** (dense byte-work, from A4 §9.3): (a) build buffers via `teko::list::push(buf, (x
+- **byte-work gotcha watch** (dense byte-work, from A4 §9.3): (a) build buffers via `teko::list::push(buf, (x
   & 0x7F) to byte)` — never widen a `byte` mid-expression (byte-width anchoring); (b) all LEB128
   bit-slicing in `u64`/`i64`, narrow to `byte` only at the last step; (c) no `x = match {…return}` — use
-  `let x = match {…}` then act (the isel/regalloc VM gotcha); (d) qualify every ns (`teko::backend::…`)
+  `let x = match {…}` then act (code pattern restriction); (d) qualify every ns (`teko::backend::…`)
   — a bare name colliding with a builtin gives no diagnostic (fase-3 gotcha).
 - **Fixpoint is trivially preserved** through C1-1..C1-4 (new files, unreachable from the default path)
   and C1-5..C1-7 (the wasm path is behind `TEKO_BACKEND=native` + `TEKO_TARGET=wasm32-*`; the default

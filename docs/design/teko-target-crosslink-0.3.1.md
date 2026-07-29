@@ -487,7 +487,7 @@ harness:
   post-build check that a cross object is the RIGHT format — this is the direct regressor for the
   motivating bug (a linux-host default MUST produce ELF, asserted by `check_elf`, not Mach-O).
 
-New scenarios to add (inputs → expected exit, VM=interp and native where applicable):
+New scenarios to add (inputs → expected exit, LIR interp and native where applicable):
 
 | # | scenario | target/env | expect |
 |---|---|---|---|
@@ -501,7 +501,7 @@ New scenarios to add (inputs → expected exit, VM=interp and native where appli
 | T7b | cross shared: lib absent, WITH --allow-undef (ELF) | set, cross, --allow-undef | emit + link ok (blind); run SKIPPED honest (R5 opt-in) |
 | T8 | cross shared: on x86_64-windows, no import lib (even with --allow-undef) | set, cross | honest error / named stop (R5 COFF gap) |
 
-VM vs native: T1-T3 assert absolute exit on both engines where the snippet runs; T4/T6/T8 are
+LIR interp vs native: T1-T3 assert absolute exit on both engines where the snippet runs; T4/T6/T8 are
 compile-fail (engine-independent, diagnostic-pinned per the F1 inversion); T5/T7 assert emit + object
 well-formed with an honest RUN-skip label.
 

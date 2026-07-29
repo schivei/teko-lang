@@ -17,7 +17,7 @@
 > C backend is a **transitional emitter to be deleted**, never a capability we bank on.
 >
 > **Semantic model = `docs/design/ref-transparent-model.md`** (executed here). Companions:
-> `docs/design/marshall-spec.md`, `docs/design/memory-unsafe-backend-remodel.md` (§4 the VM/backend
+> `docs/design/marshall-spec.md`, `docs/design/memory-unsafe-backend-remodel.md` (§4 backend
 > direction — own AOT backend + linker; C dies), `docs/design/own-backend-architecture.md`,
 > `docs/design/null-union-c3-c7-0.3.0.30.md` (the accept→adopt seed dance), `docs/design/
 > wave-0.3.1-plan.md`. Verified against `src/`.
@@ -341,7 +341,7 @@ Each KC crumb rides GATE-G; KC4 is the ritual proof that the own backend stands 
 `teko build . --no-verify --release && ./bin/teko test .` + fixpoint + `diff_vm_native`. In .30 `src/`
 is unchanged, so fixpoint holds trivially (additions inert). In .31 each swap crumb holds fixpoint on
 the new spelling. **When the own-backend FFI paths land (KC), the differential migrates from
-VM/C-backend to own-vs-C-backend and then, at kill-C, to own-backend-only** (remodel §4). A0/D4/A31.5
+C-backend to own-vs-C-backend and then, at kill-C, to own-backend-only** (remodel §4). A0/D4/A31.5
 skip fixpoint.
 
 ## 10. Seed-safety (.30 built by seed `0.3.0.29`)
@@ -362,7 +362,7 @@ passes via the C emitter is a regression trap. Native oracle = own backend.
 `ref_optional_pointee_ok`; `old_surface_still_ok` (coexistence); `let_ref_rejected`/
 `ref_uninit_rejected`/`ref_depth_cap3_rejected` (COMPILE_FAIL). Pointers: `ptr_deref_ok`/
 `ptr_index_ok`/`ptr_arrow_ok`/`ptr_arith_ok`/`ptr_addr_of_ok`; `ptr_deref_in_safe_rejected`/
-`ptr_void_deref_rejected`/`ptr_optional_question_rejected`. `marshall_swap_values` (VM==native)/
+`ptr_void_deref_rejected`/`ptr_optional_question_rejected`. `marshall_swap_values` /
 `marshall_wrap_null_panics`. FFI: `macro_const_flag_ok` (**Tier 0, own backend, no cc** — e.g.
 `O_RDONLY`), `macro_htonl_expand_ok` (**Tier 2, own backend**), `macro_complex_rejected` (Tier 3
 honest error); `repr_c_struct_byval` (own layout), `cabi_callback_noncapturing` (+ `_capturing_rejected`),

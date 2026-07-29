@@ -259,7 +259,7 @@ fn prim_of(b: byte) -> checker::PrimKind {
   substrate). **Owner note:** these C helpers are the *reference* semantics; §3.7 mirrors them
   pure-Teko for kill-c.
 - **Determinism.** Round-to-nearest-ties-to-even, fixed saturation, single canonical NaN
-  (e4m3) — pinned so VM and native agree byte-for-byte (the round-trip fixtures gate this).
+  (e4m3) — pinned so native implementations agree byte-for-byte (the round-trip fixtures gate this).
 
 ### 3.7 CODEGEN — own-backend (isel) — couples to the `B1-fp` float epic
 
@@ -430,10 +430,10 @@ per-sub-wave merge gate).
 
 ---
 
-## 8. Regression fixtures (inputs → expected exit code; VM **and** native must agree)
+## 8. Regression fixtures (inputs → expected exit code; native validation required)
 
 > Convention: a program that computes and `exit(n)`s an expected byte; a mismatch/panic path
-> `exit`s a distinct code. Every fixture runs under both the VM/C backend and (where the train
+> `exit`s a distinct code. Every fixture runs on the C backend and (where the train
 > reaches it) the own-backend; the two must agree byte-for-byte.
 
 **f8 round-trip / arithmetic (f8-A, f8-B):**

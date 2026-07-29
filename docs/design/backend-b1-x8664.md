@@ -658,7 +658,7 @@ side unset, and `TEKO_BACKEND=native TEKO_TARGET=x86_64-linux` for the own side)
 (`scripts/check_elf.sh` — new, mirroring `check_macho.sh`: `readelf -h/-S/-s/-r` + `objdump -d`
 sanity + `ld -r` accept). The same F1 guards apply: the own build MUST print `"(own backend)"`, and
 the `<stem>.o` MUST exist. `native.yml` already carries a `linux-x86_64` leg in the
-`diff VM==native` matrix (`:176`) — B1-8 adds the `diff_c_own.sh` invocation to it.
+`diff_c_own.sh` validation matrix (`:176`) — B1-8 adds the full invocation to it.
 
 **Validation matrix (which runs where):**
 
@@ -783,7 +783,7 @@ linker), NOT at #386 — recorded so no one claims independence prematurely (M.3
 B1 adds NO new fixtures; it adds the x86 own-native column to the existing corpus
 (`diff_c_own.sh:95`):
 
-| fixture | program | expected exit | VM | C-native | own-arm64 | **own-x86 (new)** |
+| fixture | program | expected exit | C-native | own-arm64 | **own-x86 (new)** |
 |---|---|---|---|---|---|---|
 | `own_exit_zero` | `exit(0)` | 0 | ✓ | ✓ | ✓ | **linux-run** |
 | `own_exit_code` | `exit(42)` | 42 | ✓ | ✓ | ✓ | **linux-run** |
@@ -799,13 +799,12 @@ exercise (the A4 §8 caveat carries over — no NEW divergence).
 
 ### 11.3 Ritual + coverage posture
 
-- **Every B1-N** owes the full ritual: **both-engine gate** (native `teko . -o bin` AND `teko test .`
-  VM), **paranoid**, **FIXPOINT** (the arm64/default output is byte-unchanged — B1 is purely
+- **Every B1-N** owes the full ritual: **native gate** (native `teko . -o bin`), **paranoid**, **FIXPOINT** (the arm64/default output is byte-unchanged — B1 is purely
   additive files + the `TEKO_TARGET` branch whose default arm is verbatim), and **100% coverage on
   its new code** (definition-of-done). The encoder is highly branchy (per-`MInstX86`, per-width,
   per-cond, REX/SIB) — cover every encoded case + every honest-stop arm via goldens; a genuinely
   unreachable arm is justified in the PR.
-- **VM-gotcha watch** (dense byte-work, the A4 §9.3 list carries over): (a) build buffers via
+- **byte-work gotcha watch** (dense byte-work, the A4 §9.3 list carries over): (a) build buffers via
   `teko::list::push(buf, (x & 0xFF) to byte)` — never widen a `byte` mid-expression; (b) do all
   bit-slicing in `u32`/`u64`, narrow to `byte` only at the last step; (c) no `x = match {…return}` —
   use `let x = match {…}` then act; (d) a NEGATIVE `to u32`/`to u8` **panics** — rel32 displacement

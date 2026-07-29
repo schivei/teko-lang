@@ -82,7 +82,7 @@ law-first, and delivers the IO1 payoff on the half that ships **today**.
    (`lir/lower.tks:5,13`, exit(n)/integer/control only). A `class & Reader`
    build on the own backend fails `native backend N1: no layout registered for
    struct …` (reproduced). This is the emit-throughput remodel's own multi-wave
-   track, **NOT this keystone** — see §3 (VM-is-dead → the differential is C-vs-own,
+   track, **NOT this keystone** — see §3 (the VM is retired — the differential is C-vs-own,
    `scripts/diff_c_own.sh`, and its corpus is exit(n)-scoped by design).
 
 **Verdict up front:** the keystone ships its user-visible value (dynamic
@@ -192,8 +192,7 @@ so interface dispatch is C-backend-only until the emit-throughput remodel reache
 aggregates. **The differential harness `scripts/diff_c_own.sh` is exit(n)-scoped
 by design (§9.2 of that script) and does NOT cover interface programs** — so this
 keystone introduces no C-vs-own divergence (there is nothing to diverge against
-yet). The VM is retired (issue #524, `scripts/positive_regressions.sh:26`), so
-"VM-is-dead" here means the only oracle is C-native, and the keystone's gate is the
+yet). The only oracle is C-native (issue #524, `scripts/positive_regressions.sh:26`), and the keystone's gate is the
 positive/native (cc) regression lane.
 
 ---
@@ -506,7 +505,7 @@ post-IO1 consumer; it needs S3's class-interface-value pattern, nothing more.
 
 ## 7. Regression fixtures (inputs → expected C-native exit)
 
-VM is retired (issue #524); all exits are **C-native** (`teko build <dir> -o bin`
+All exits are **C-native** (`teko build <dir> -o bin`
 then run) — the positive/native regression lane. Own-backend (`--backend=native`)
 is NOT asserted for these (interface layout is unbuilt there, §1 piece 3); each
 fixture's `.tkp` header states C-native-only, mirroring the `NATIVE_ONLY`/honest-
