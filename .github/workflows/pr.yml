@@ -282,12 +282,28 @@ jobs:
           # label (the four Linux sublanes), a Linux label's producer IS that label — the two
           # columns are equal here, and stay separate fields only because they are NOT equal for
           # a `native` producer, which mints under its own host name.
-          T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":45}'
-          T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":45}'
-          T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":45}'
-          T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":45}'
-          T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45}'
-          T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60}'
+          #
+          # `fixpoint_backend` RIDES ALONG from the SAME leg table (scripts/ci_producer_matrix.sh)
+          # that already carries it for the `artifact` job — `native` on the four Linux legs, `c`
+          # on macOS and Windows. This is what the `test` job's no-C-in-tests step (owner ruling
+          # 2026-07-29) reads to decide whether IT applies to a leg: no second list of "which legs
+          # are native" is written here, this is a LOOKUP into the one table that already exists.
+          backend_of() {
+            sh scripts/ci_producer_matrix.sh full \
+              | grep -o '{"producer":"'"$1"'"[^}]*}' \
+              | sed -n 's/.*"fixpoint_backend":"\([^"]*\)".*/\1/p'
+          }
+
+          T_XG='{"label":"linux-x86_64-glibc","producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":45,"fixpoint_backend":"'"$(backend_of linux-x86_64-glibc)"'"}'
+          T_XM='{"label":"linux-x86_64-musl","producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":45,"fixpoint_backend":"'"$(backend_of linux-x86_64-musl)"'"}'
+          T_AG='{"label":"linux-arm64-glibc","producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":45,"fixpoint_backend":"'"$(backend_of linux-arm64-glibc)"'"}'
+          T_AM='{"label":"linux-arm64-musl","producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":45,"fixpoint_backend":"'"$(backend_of linux-arm64-musl)"'"}'
+          T_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest","timeout":45,"fixpoint_backend":"'"$(backend_of macos-arm64)"'"}'
+          T_WX='{"label":"windows-x86_64","producer":"windows-x86_64","os":"windows-latest","timeout":60,"fixpoint_backend":"'"$(backend_of windows-x86_64)"'"}'
+
+          for t_label in linux-x86_64-glibc linux-x86_64-musl linux-arm64-glibc linux-arm64-musl macos-arm64 windows-x86_64; do
+            [ -n "$(backend_of "$t_label")" ] || { echo "ERROR: no fixpoint_backend for '$t_label' in scripts/ci_producer_matrix.sh" >&2; exit 1; }
+          done
 
           C_X='{"label":"linux-x86_64-glibc","producer":"linux-x86_64-glibc","os":"ubuntu-latest"}'
           C_MAC='{"label":"macos-arm64","producer":"macos-arm64","os":"macos-latest"}'
@@ -660,6 +676,33 @@ jobs:
             exit 1
           fi
           echo "asset '$LABEL' — the self-test ran"
+
+      # THE NO-C-IN-TESTS GATE (owner ruling 2026-07-29, literal): "esse é outro que não pode
+      # emitir C quando for compilar nativo [...] se ao final de uma sessão de testes houver um C
+      # gerado, tem que fechar vermelha a lane." `teko test .`'s unit half emits the `#test` corpus
+      # as C and compiles it with `cc` UNCONDITIONALLY — it never reads `TEKO_BACKEND` — so a green
+      # suite on a leg that claims to run native proves nothing about the native backend unless
+      # something checks that no C survived the session. `scripts/no_c_in_tests_gate.sh` is that
+      # check; `scripts/no_c_in_tests_gate_test.sh` (run in `CI gate`) proves the check itself.
+      #
+      # SCOPED TO NATIVE LEGS ONLY, via the SAME `fixpoint_backend` field the `artifact` job's
+      # fixpoint step already reads from `scripts/ci_producer_matrix.sh` — `native` on the four
+      # Linux legs, `c` on macOS and Windows (which still run the C route on purpose and are not
+      # this gate's business until the platform-sequenced plan reaches them).
+      #
+      # RUNS ON THE CHECKED-OUT SOURCE TREE (`.`), NOT ON `dl/`: `teko test .` compiled ITS OWN
+      # `#test`/regression corpus in the checkout's `bin/`, so that is where a leftover emission
+      # would land — the downloaded asset directory holds only the published binary.
+      #
+      # EXPECTED RED ON THE FOUR LINUX LEGS TODAY, and that red is not a bug in this step: the
+      # emission this gate is built to catch is real and unfixed (see the script's header). The
+      # four Linux legs currently fail earlier still (`MInst` has no registered layout, a known
+      # native-backend stop) — this gate is very unlikely to even be reached there today, and that
+      # earlier failure is not this step's to fix.
+      - name: No generated C after a native-backend test session
+        if: runner.os != 'Windows' && matrix.fixpoint_backend == 'native'
+        shell: bash
+        run: sh scripts/no_c_in_tests_gate.sh .
 
   # ══ cli-surface ════════════════════════════════════════════════════════════════════════════
   # TIER: both (linux-x86_64-glibc on light; + macos-arm64 on full).
@@ -1312,6 +1355,16 @@ jobs:
       # network: fixtures in a temp dir, under a second.
       - name: Structural — `bootstrap/teko.c` is a rung only when a degrau declares it
         run: sh scripts/degrau_test.sh
+
+      # THE GATE THAT MAKES "teko test . passed" MEAN SOMETHING ON A NATIVE LEG. Owner ruling
+      # 2026-07-29: a native-backend test session that still leaves generated C on disk proves
+      # nothing about the native backend, so `scripts/no_c_in_tests_gate.sh` (wired onto the `test`
+      # job below, on the legs whose `fixpoint_backend` is `native`) fails that lane RED when it
+      # finds one. This step proves the GATE ITSELF — clean passes, a generated .c/.h fails and is
+      # named, a versioned one is never mistaken for it, every unprovable state is FATAL — against
+      # throwaway git fixtures, needing no compiler and no network.
+      - name: Structural — the no-C-in-tests gate passes clean, fails dirty, never mistakes tracked C
+        run: sh scripts/no_c_in_tests_gate_test.sh
 
       - name: Cross-check the mode against an independent derivation
         if: needs.plan.result == 'success'
