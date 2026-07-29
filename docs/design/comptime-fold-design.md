@@ -356,7 +356,7 @@ fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr
  * `TExprKind`, mirroring `inline_rw_expr` (`consteval.tks:177`) — which it EXTENDS:
  * `inline_rw_expr` substitutes references but leaves the op-tree for the C compiler;
  * `fold_expr` evaluates the op-tree to provide the literal (zero runtime on
- * both execution paths — the owner's mandate).
+ * rota C e backend nativo — the owner's mandate).
  *
  * @param e      the typed expression to fold
  * @param table  the type table (forwarded to the const oracle + evaluator)
@@ -516,10 +516,10 @@ independently gate-able; ritual points (full gate) marked **[RITUAL]**.
 | # | Crumb | Size | Ritual of proof |
 |---|---|---|---|
 | **CF1** | `comptime_fold.tks` skeleton: `ConstValue` domain + `eval_const` for Tier 0–2 scalars (literals, cast, unary `~`/`-`, binary `+ - * / % & | ^ << >>`) with overflow/÷0/out-of-range → located compile error. Pure; no wiring yet. | **M** | `comptime_fold_test.tkt`: unit-assert `eval_const` on a value matrix (each int family min/max/wrap-edge, ÷0, out-of-range cast → error). Build green. |
-| **CF2** | `literal_of` + `fold_expr` (Tier 0–5 driver) wired into `inline_consts` AFTER reference-substitution. Module consts now fold their op-trees to literals. | **S/M** | **[RITUAL]** fixpoint gen1==gen2 GREEN vs **new** golden (fold changes emitted bytes — §9); both execution paths differential on a folding corpus; 100% coverage of the CF1/CF2 delta. |
-| **CF3** | Layer 1b: per-fn pre-pass seeding provably-const LOCAL `let`/`const` bindings into the fold env; guard skips any runtime-valued binding (DECISION_LOG:391). | **M** | **[RITUAL]** fixpoint GREEN vs new golden; fixtures E/F (runtime binding NOT folded) exit-code identical across both execution paths; boundary coverage. |
-| **CF4** | Layer 1c: `eval_const` handles `TIndex` of const aggregate + const index (+ str→[]byte coercion). **Coordinate with AL0 Tier-6 — do not double-ship (§5).** | **S** | fixture D folds; `TIndex` with runtime index/receiver stays runtime; both execution paths agree. |
-| **CF5** | Layer 2: `comptime_format` (mirror `teko_rt.c`) + `fold_interp`; `inline_rw_interp` delegates its final step. + the **format-oracle** differential fixture. | **M** | **[RITUAL]** fixpoint GREEN vs new golden; **format-oracle exhaustive fixture** (§8) byte-identical; both execution paths agree on `$"{a:X}"`-class programs; coverage. |
+| **CF2** | `literal_of` + `fold_expr` (Tier 0–5 driver) wired into `inline_consts` AFTER reference-substitution. Module consts now fold their op-trees to literals. | **S/M** | **[RITUAL]** fixpoint gen1==gen2 GREEN vs **new** golden (fold changes emitted bytes — §9); rota C e backend nativo differential on a folding corpus; 100% coverage of the CF1/CF2 delta. |
+| **CF3** | Layer 1b: per-fn pre-pass seeding provably-const LOCAL `let`/`const` bindings into the fold env; guard skips any runtime-valued binding (DECISION_LOG:391). | **M** | **[RITUAL]** fixpoint GREEN vs new golden; fixtures E/F (runtime binding NOT folded) exit-code identical across rota C e backend nativo; boundary coverage. |
+| **CF4** | Layer 1c: `eval_const` handles `TIndex` of const aggregate + const index (+ str→[]byte coercion). **Coordinate with AL0 Tier-6 — do not double-ship (§5).** | **S** | fixture D folds; `TIndex` with runtime index/receiver stays runtime; rota C e backend nativo agree. |
+| **CF5** | Layer 2: `comptime_format` (mirror `teko_rt.c`) + `fold_interp`; `inline_rw_interp` delegates its final step. + the **format-oracle** differential fixture. | **M** | **[RITUAL]** fixpoint GREEN vs new golden; **format-oracle exhaustive fixture** (§8) byte-identical; rota C e backend nativo agree on `$"{a:X}"`-class programs; coverage. |
 | **CF6** | Metric probe wiring: emit the runtime-ops-eliminated count via the arena-observability probe (reuse AL1's dark-matter table) for the acceptance report. | **S** | Report: concat/format/alloc ops eliminated (§9), no behavior change. |
 | — | **Layer 3 (const fn / comptime loops / recursion)** — NOT scheduled here. Separately ratifiable per §11 Q1. | **L+** | Deferred; M.5-staged. |
 
@@ -532,7 +532,7 @@ it. **Everything in this plan is buildable now.**
 
 ---
 
-## 8. Regression fixtures (inputs → expected exit codes, both execution paths)
+## 8. Regression fixtures (inputs → expected exit codes, rota C e backend nativo)
 
 Placed as `.tkt` co-located suites plus end-to-end `.tkp` programs run on BOTH engines
 for exit-code parity. The differential principle: a folded program and its unfolded
@@ -578,7 +578,7 @@ against the wrong baseline.
 2. **Fixpoint gen1==gen2 GREEN against the new golden**: the compiler, compiled by
    itself, still reaches a fixed point — self-stability preserved *with* the fold on.
 3. **Execution path parity**: the folded program's observable output (exit code +
-   printed bytes) is identical on both execution paths, and identical to the unfolded twin.
+   printed bytes) is identical on rota C e backend nativo, and identical to the unfolded twin.
 
 ### 9.2 The gain metric (owner's metric — ops, not peak bytes)
 
@@ -920,7 +920,7 @@ fn cf_can_index(ix: TIndex, agg: AggConstMap) -> bool
 | # | Crumb | Size | Ritual of proof |
 |---|---|---|---|
 | **CF4a** | `cv_agg` + `AggConstMap` alias + `eval_array_agg` + `eval_index_expr` + `eval_agg_ref` + the `eval_const` `TVar`/`TArrayLit`/`TIndex` arms + `cf_agg_value`/`cf_can_index`; thread `agg` through `eval_const`/`eval_*`. Pure evaluator, unit-testable via `eval_const` with a hand-built `AggConstMap`. **No fold wiring, no `inline_consts` change yet.** | **M** | `comptime_fold_test.tkt`: unit-assert `eval_const(G[0])` over a hand-built map → the element; out-of-range index → located error; negative index → error; runtime-index shape not admitted by `cf_can_index`. Build green. |
-| **CF4b** | Thread `agg` through the `fold_*` spine; `fold_index` gates on `cf_can_index` → eval + `fold_splice`; `fold_program` takes `agg`; `inline_consts` builds it via `build_module_agg_map`. Extend `cf_int_value` with the `TIndex` arm (full collapse of an enclosing cast). | **M** | **[RITUAL]** fixpoint gen1==gen2 byte-identical vs **new** golden (fold changes emit bytes — §9.1, only index-elimination); both execution paths agree; fixture D + negatives green; 100% coverage of the CF4a/CF4b delta; `seed_from_dep_qualified_value_const_and_fn` still green (§13.4). |
+| **CF4b** | Thread `agg` through the `fold_*` spine; `fold_index` gates on `cf_can_index` → eval + `fold_splice`; `fold_program` takes `agg`; `inline_consts` builds it via `build_module_agg_map`. Extend `cf_int_value` with the `TIndex` arm (full collapse of an enclosing cast). | **M** | **[RITUAL]** fixpoint gen1==gen2 byte-identical vs **new** golden (fold changes emit bytes — §9.1, only index-elimination); rota C e backend nativo agree; fixture D + negatives green; 100% coverage of the CF4a/CF4b delta; `seed_from_dep_qualified_value_const_and_fn` still green (§13.4). |
 | **CF4c** | *(optional, ratification-gated — §13.1(2)/(3))* `CVBytes`/`CVAgg` `literal_of` + `str→[]byte` const coercion + `TStructInit` `eval_agg`. | **S** | fixtures for the struct-field / str-slice cases; same RITUAL if it lands same-seed. |
 
 ### 13.4 How the sequence keeps `seed_from_dep_qualified_value_const_and_fn` green
@@ -964,7 +964,7 @@ CF4b RITUAL.**
 | index-oob-error | `comptime_fold_test.tkt` | `eval_const` of `G[2]` (len 2) | **located compile error** (M.1); not a wrap, not a panic-shape |
 | index-neg-error | `comptime_fold_test.tkt` | `eval_const` of `G[-1 to i64]` | **located compile error** (M.1) |
 | index-arraylit-inline | `comptime_fold_test.tkt` | `fold_expr` of `[10 to byte, 20 to byte][1]` (in-tree `TArrayLit` receiver, empty map) | folds to `TNumber 20` (proves the no-map literal-receiver path) |
-| **fixture D (e2e)** | `examples/regressions/cf4_index_fold/` (`.tkp` + `src`) | `const G: []byte = [0x1F to byte, 0x8B to byte]` … `exit((G[0] to u64) to i32)` | exit **31** in both execution paths (C rota and native backend); the emitted body carries the folded literal, no index op at the `G[0]` site |
+| **fixture D (e2e)** | `examples/regressions/cf4_index_fold/` (`.tkp` + `src`) | `const G: []byte = [0x1F to byte, 0x8B to byte]` … `exit((G[0] to u64) to i32)` | exit **31** in rota C e backend nativo (C rota and native backend); the emitted body carries the folded literal, no index op at the `G[0]` site |
 | index-in-const-init (e2e/tkt) | `comptime_fold_test.tkt` or the e2e dir | `const H: []byte = [G[0], G[1]]` (AL0's rewrite shape) | `H`'s init folds each `G[i]` to a byte literal; proves the module-const-index-inside-a-const-initializer path AL0 depends on |
 | **noflod-runtime-index (e2e/tkt)** | `comptime_fold_test.tkt` (negative) | `fn f(i: u64) -> byte { G[i] }` | `cf_can_index` false → `G[i]` stays a runtime `TIndex`; behavior identical to today; exit parity |
 | noflod-runtime-recv (negative) | `comptime_fold_test.tkt` | `fn f(a: []byte) -> byte { a[0] }` | runtime receiver → stays runtime |
@@ -979,7 +979,7 @@ sites gain the `agg` argument (mechanical).
 - **CF4a** — build-green + unit `.tkt` suite (pure evaluator; no emit change, no RITUAL).
 - **CF4b — [RITUAL]:** fixpoint gen1==gen2 byte-identical vs a **new** golden (§9.1: the
   diff must be ONLY index-op elimination at const-index sites; review it); own==C
-  differential unchanged; both execution paths agree on fixture D and the negatives; 100% coverage of the
+  differential unchanged; rota C e backend nativo agree on fixture D and the negatives; 100% coverage of the
   CF4a+CF4b delta; the §13.4 regression asserted green.
 - **CF4c** (if it lands) — same RITUAL as CF4b.
 

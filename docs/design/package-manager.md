@@ -710,7 +710,7 @@ ONE seam where the "integrity-now, authenticity-later" default is overridden.
 ## 6. The PK0–PK3 crumb sequence (the executable plan)
 
 Each crumb is the smallest independently gate-able step, with its key signatures (above, §3), its
-regression fixtures (inputs → exit code, both execution paths), and its ritual point. Fixtures for pure
+regression fixtures (inputs → exit code, rota C e backend nativo), and its ritual point. Fixtures for pure
 logic are `.tkt` tests; end-to-end build fixtures run native (per the native-test-gate
 ruling — `#test` is compiled native). New modules land as compilable skeletons with
 full doc-comments + honest-stops so the plan advances even before every dep closes (design-ahead).
@@ -726,7 +726,7 @@ New module `src/build/version.tks` (namespace `teko::build`): `Version`, `CmpOp`
   - `V1b` `parse_version("1.x")` / `""` → error path taken; exit 0 (the test asserts the error).
   - `V1c` `compare_versions(1.2.3, 1.2.4)` = -1; `compare_versions(1.0.0, 1.0.0-beta)` = 1
     (final > prerelease); `compare_versions(0.2.0.1, 0.2.0.2)` = -1 (build field); exit 0.
-- **Ritual:** none required (pure additive logic, no compiler behavior change); a both paths
+- **Ritual:** none required (pure additive logic, no compiler behavior change); a rota C e backend nativo
   build of the new module must pass. Fixpoint is neutral (compiler does not yet use it).
 
 ### Crumb C2 — `version.tks`: requirements (PK1-b)
@@ -740,7 +740,7 @@ Add `VersionBound`, `VersionReq`, `parse_version_req` (with `^`/`~` desugar + ra
   - `V2b` `^1.2.3` accepts 1.9.0, rejects 2.0.0; `^0.2.3` accepts 0.2.9, rejects 0.3.0; exit 0.
   - `V2c` `~1.2.3` accepts 1.2.9, rejects 1.3.0; `=1.2.3` accepts only 1.2.3; exit 0.
   - `V2d` `parse_version_req(">= bad")` → error; exit 0 (asserts error).
-- **Ritual:** none required (pure). both paths build passes.
+- **Ritual:** none required (pure). rota C e backend nativo build passes.
 
 ### Crumb C3 — `manifest.tks`: `[dependencies]` with sources + constraints (PK0)
 
@@ -792,7 +792,7 @@ declared interface fed by an in-memory fixture today and by the real store when 
     C instance → one canonical stamped type (ties to #180 F1/F5 byte-identity); exit 0.
 - **Ritual:** FULL GATE after the resolver is wired into the build (compiler behavior change);
   both engines + byte-identity + fixpoint. (The resolver logic alone, tested over in-memory
-  stores, gates both paths without the fixpoint dependency until it is wired.)
+  stores, gates rota C e backend nativo without the fixpoint dependency until it is wired.)
 
 ### Crumb C6 — `teko.lock` (PK3)
 
@@ -850,7 +850,7 @@ build to a native exe now.
 
 The **full gate** (both engines · paranoid · diff_vm_native · parity · fixpoint gen1==gen2) is
 mandatory at crumbs **C3, C4, C5, C6, C7, C8** — every crumb that touches production compiler code
-or the serializer. C1/C2 are pure additive logic (both paths build must pass; no fixpoint
+or the serializer. C1/C2 are pure additive logic (rota C e backend nativo build must pass; no fixpoint
 dependency). The serializer crumb (C4) and the cache-wire crumb (C7) are the two where
 byte-identity regressions are most likely — treat their fixpoint as the primary bar.
 
