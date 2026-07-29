@@ -81,6 +81,32 @@ reconcilia: docs/memory/parallel-test-harness-0.3.2.md, docs/design/concorrencia
 > e panic (mantendo as diretas de os intactas), assim consegue capturar somente quando rodar em teste
 > com um argumento que só o própio compilador conhece."*
 
+**R13 (2026-07-29) — PROMOÇÃO DE PRIORIDADE, e a ordem. Literal:**
+
+> *"Por isso que precisa adiantar o trabalho de executar testes em paralelo (mesmo que tenha que
+> primeiro corrigir a emissão em C / até pq pode quebrar Windows, Mac e wasm), além de implementar em
+> Teko nativo."*
+
+O *"por isso"* tem antecedente medido: o comportamento do `defer` sob `panic` (§18) **não era
+testável por construção** — não há expect-panic no framework unitário, um panic mata o binário de
+testes, e um projecto de regressão dedicado estouraria o tecto de 10 que o dono adiou para a .32.
+**Ninguém podia ter apanhado aquele bug porque não havia onde escrever o teste que o apanharia.**
+
+O que R13 muda, e são duas coisas:
+
+1. **A ORDEM.** A migalha 5 (a rota C consome o MESMO `main` sintetizado) sobe de consequência a
+   **PRÉ-REQUISITO**. A razão do dono é de risco (macOS/Windows vivem na rota C); e há uma segunda,
+   mecânica, que o desenho não tinha explicitado: **o `main` que chama os `#test` só existe hoje
+   dentro do emissor de C**, logo mandar o gate para a rota nativa antes de existir um `main`
+   independente do emissor não troca C por nativo — troca gate por NENHUM gate. A ordem do dono é
+   obrigatória, não apenas prudente.
+2. **A PRIORIDADE.** Deixa de ser trabalho a registar e passa a andar **em paralelo com a escada de
+   degraus**.
+
+**A fatia executável, o mapa de colisões e o risco por plataforma estão em
+`docs/design/harness-briefing-fatia-1.md`** — briefing auto-contido, entregável a um implementador
+que não leu este documento.
+
 **R11 (2026-07-29) — `cancel`, e é de OUTRA CATEGORIA: PÚBLICA. Literal:**
 
 > *"o que podemos pensar, e isso vai valer lá na frente quando tivermos async/await, uma função
