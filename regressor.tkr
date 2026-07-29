@@ -10,10 +10,14 @@
 #
 # THE CHANNELS, and what each one costs on this host (measured, `teko: regressions … (N builds`):
 #
-#   * examples/regressions/bulk — the cross-namespace composition regressors and the whole language
-#     corpus, one MEMBER NAMESPACE per scenario under a single build, selected by `TEKO_REGR_ENTRY`.
-#     1 build. (Its codegen-stage KNOWN-STOP pin adds a second one the day the channel goes green:
-#     a build that reaches codegen is one whose checker PASSED, so that pin can share with nothing.)
+#   * examples/regressions/bulk — DISSOLVED (owner ruling 2026-07-29, cargo/0.3.1-dissolver-bulk):
+#     its 214 files were never distributed among the ten permitted regression channels this header
+#     already commits to, so the whole project was retired rather than fixed. The cross-namespace
+#     composition regressors it carried, and the slice of its language corpus that both builds and
+#     runs correctly on the native backend today, moved into `own_native` below; the rest either
+#     duplicated coverage this repo already has (the self-hosting build IS the language corpus) or
+#     turned out to be currently BROKEN on the native backend — reported to the owner, not fixed
+#     here, and not silently kept alive in a channel of its own.
 #   * examples/regressions/own_native — the own-backend corpus (F2/F5/F9): ONE program, and one build
 #     per TARGET, which is the only axis on it that varies. 4 builds on this host: the host project
 #     itself, plus the lone rows for x86_64-windows, wasm32-wasi and `host-os-arch`.
@@ -60,14 +64,18 @@
 #     dependency shape · in-place shape · builtin-hijack · checker-fail · parse-fail
 #     signature-prewalk-fail · unsupported-target-fail
 #
-# Dois sao removiveis, e cada um nomeia quem o remove:
+# UPDATE (cargo/0.3.1-dissolver-bulk, 2026-07-29): `host (bulk)` in the list above no longer
+# applies — `bulk` never actually fired in the measured-ten count in the first place (it was not,
+# and had never been, wired into `teko.tkp`'s `[tests] regression` list; the entry was aspirational,
+# not measured), and the project it named is now dissolved outright. The next fail-closed
+# `teko: regressions … (N builds` run is the number to cite, not this list — MEASURE, do not derive
+# by subtraction, the same rule the paragraph above this one already states.
+#
+# Um e removivel, e nomeia quem o remove:
 #
 #   1. o build do SIGNATURE walk dobra na build de checker-fail o dia em que essa passagem HARD
 #      tambem coletar em vez de parar no primeiro erro — trabalho do all-diagnostics, nao deste
 #      canal. As duas passagens SOFT ja dobraram; e por isso que diagnostics caiu de seis para tres.
-#   2. os dois builds de HOST viram um o dia em que `bulk` compilar: o corpus de `own_native` esta
-#      verde e `bulk` esta vermelho num stop de monomorfizacao pre-existente, entao junta-los hoje
-#      tornaria dezessete cenarios que passam em vermelho para economizar um build.
 #
 # THERE IS NO INLINE CODE IN THIS FILE OR IN ANY `.tkr` (owner ruling: "está proibido inline code em
 # tkr"). Every scenario names its source as a file a human can open, compile by hand and diff.
@@ -84,16 +92,26 @@
 # is the build it was costing. It is dormant, not deleted: that is a compiler change, not a channel
 # one, and it is reported rather than taken here.
 #
-# THE F3 NULL-UNION MATRIX (regressor-principal-0.3.1.md §3.1) lives in the channels, not here: every
-# shape × operation × recursion cell is a runnable member of `bulk`, and two cells are HONEST GAPS
-# pinned as compile-fail scenarios rather than silently dropped — a slice whose ELEMENT is itself a
-# null-union (`[]T` where `T = X | null`) is REJECTED today (the parser reads `[](` as a FUNCTION
-# type; spelled through an alias it reaches codegen's "optional/slice inner type not yet supported"),
-# and an `Iface | null` (interface-in-union) construction is a checker-level KNOWN-STOP. The day
-# support lands each pin fails LOUDLY, forcing a conscious promotion to a positive scenario. FFI
-# `ptr<T> | null`/`uptr | null` (§3.1 "FFI") is NOT authored — there is no existing in-tree
-# `ptr<T>`/`uptr` USAGE pattern to model a snippet against safely; flagged for the architect/owner,
-# not guessed.
+# THE F3 NULL-UNION MATRIX (regressor-principal-0.3.1.md §3.1) lives in the channels, not here. Two
+# cells are HONEST GAPS pinned as compile-fail scenarios rather than silently dropped — a slice
+# whose ELEMENT is itself a null-union (`[]T` where `T = X | null`) is REJECTED today (the parser
+# reads `[](` as a FUNCTION type; spelled through an alias it reaches codegen's "optional/slice
+# inner type not yet supported"), and an `Iface | null` (interface-in-union) construction is a
+# checker-level KNOWN-STOP. The day support lands each pin fails LOUDLY, forcing a conscious
+# promotion to a positive scenario. FFI `ptr<T> | null`/`uptr | null` (§3.1 "FFI") is NOT authored —
+# there is no existing in-tree `ptr<T>`/`uptr` USAGE pattern to model a snippet against safely;
+# flagged for the architect/owner, not guessed.
+#
+# UPDATE (cargo/0.3.1-dissolver-bulk, 2026-07-29): this paragraph used to say the matrix's shape ×
+# operation × recursion cells were "a runnable member of `bulk`" — `bulk` is dissolved. Triaging its
+# corpus while dissolving it found the matrix in WORSE shape than that sentence claimed: several
+# cells that nominally "ran" on the native backend either hit the SAME already-pinned struct-
+# literal-field-null-init stop `native_union_nested_known_stop` pins (reported there, not re-pinned)
+# or produced a silently WRONG value (a nested `Op | null` field read back 0 instead of 42, a
+# self-referential boxed list read back 0 instead of 42 — a genuine native-backend correctness gap,
+# not merely an unimplemented one). Only the plain (non-nested, non-recursive) shapes — a `struct`
+# and a `class` carrying a scalar `T | null` field, and a forwarded un-narrowed return — survived
+# triage intact and moved to `examples/regressions/own_native` as part of that same dissolution.
 #
 # The root-project guard (`guard_no_project_build_at_root`) refuses a scenario here with no
 # inline/explicit source — which is exactly why every scenario below is declarative.
@@ -279,22 +297,19 @@ Feature: null-union member comparison — `a == null`/`a != null` (and a numeric
   # `null` to the WHOLE union instead of narrowing it to `Null`, `retype_literal`'s own correct arm),
   # so codegen honestly rejected the mistyped bare `null` downstream — "a bare `null` needs a known
   # optional type from context". A LANGUAGE gap (fails on both routes, no oracle to measure a fix
-  # against), not a route-specific bug, so it belongs here rather than in a channel project.
+  # against), not a route-specific bug.
   #
-  # NOT placed in `examples/regressions/bulk` (the channel the R0 header above names for the F3
-  # null-union matrix): that project is presently BROKEN on this branch for an unrelated reason —
-  # its `main.tks`/`bulk.tkr` reference nine `q201`..`q209` defer modules (commit
-  # `14fab92 fix(defer): panic/exit statements fire the scope's pending defer`) that do not exist
-  # under its `src/`, so the whole project fails to build regardless of this change (reported, not
-  # fixed here — a different vagão's concern). NOT placed in
-  # `examples/regressions/own_native/src/corpus.tks` either: its `main.tks` exit-code budget (1-50,
-  # reserving 42 for overall success) is already fully allocated across its existing `f_*` checks,
-  # leaving no slot for a new top-level one.
-  Scenario: variant_member_compare (own-native)
-    Given source = "cases/variant_member_compare.tks"
-    When built and run
-    Then exit = 0
-
+  # THE OWN-NATIVE HALF MOVED, cargo/0.3.1-dissolver-bulk (2026-07-29): the two obstacles that used
+  # to keep it here are both gone. `examples/regressions/bulk` (the channel the R0 header above
+  # used to name for the F3 null-union matrix) is DISSOLVED — never distributed among the ten
+  # permitted regression channels, owner ruling 2026-07-29 — so it is no longer a destination to
+  # wait on. And `examples/regressions/own_native/src/corpus.tks`'s exit-code budget, full at 56
+  # then, now runs past it (`f_variant_member_compare`, code 60). The default-backend half now
+  # lives there, off a build that already exists. Only the C-ROUTE half stays here: this project's
+  # own charter (`own_native.tkp`'s header) is native-only — "no scenario here differs against a
+  # second backend" — so a `TEKO_BACKEND=c` row has no home there, and this ONE row is cheaper than
+  # the two this Feature used to cost (the own-native half now shares `own_native`'s build; only
+  # the C route still needs its own throwaway build).
   Scenario: variant_member_compare (C route)
     Given source = "cases/variant_member_compare.tks"
     Given env = ["TEKO_BACKEND=c"]

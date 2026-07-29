@@ -2024,6 +2024,531 @@ fn f_err_typed() -> i64 {
 }
 
 /**
+ * takes_bool_arg — a variant-member comparison used as a CALL ARGUMENT position: the comparison's
+ * bool result flows into an ordinary parameter, exercising the SAME lowering an `if`/`let` site
+ * uses but through a call-argument slot.
+ *
+ * @param b  the already-computed comparison result
+ * @return   1 when `b` is true, else 0
+ */
+fn takes_bool_arg(b: bool) -> i32 {
+    if b { 1 } else { 0 }
+}
+
+/**
+ * eq_null_ret — a variant-member comparison used as a function RETURN position: the comparison's
+ * bool result is the function's own trailing (return) value.
+ *
+ * @param a  an `i32 | null` value to test against `null`
+ * @return   whether `a` currently holds `null`
+ */
+fn eq_null_ret(a: i32 | null) -> bool {
+    a == null
+}
+
+/**
+ * f_variant_member_compare — the `a != null` / `a == null` combinatorics (`i32 | null`,
+ * cargo/0.3.1.0-null-adopt): `if`, `let`, call-argument, and return position, over both a PRESENT
+ * and an ABSENT (`null`) value, plus the numeric-literal sibling (`a != 5` / `a == 5`) — the same
+ * root (`adopt_binop_operands`'s literal retyping) and the same backend lowering (a tagged union's
+ * `.tag`/`.as.<key>` comparison) close both.
+ *
+ * Migrated here from `regressor.tkr`'s `cases/variant_member_compare.tks` (cargo/0.3.1-dissolver-
+ * bulk, 2026-07-29): the scenario is a LANGUAGE gap (fails identically on both backend routes, no
+ * differential oracle), not a term used in the compiler's OWN product source, so it never actually
+ * satisfied the regressor's rule 1 (a regression of a term used in the compiler's own Teko sources
+ * lives strictly in `regressor.tkr`) — it sat at the project root only because its two better homes
+ * were both unavailable at the time (`bulk` was broken, and this project's own exit-code budget was
+ * full). Both obstacles are gone: `bulk` is dissolved and this project's budget now runs past 56.
+ *
+ * @return 0 on success; a distinct non-zero code names which check diverged
+ */
+fn f_variant_member_compare() -> i64 {
+    let some: i32 | null = 7
+    let none: i32 | null = null
+
+    if some == null { return 1 }
+    if some != null { } else { return 2 }
+    if none != null { return 3 }
+    if none == null { } else { return 4 }
+
+    let l1: bool = some != null
+    if !l1 { return 5 }
+    let l2: bool = none == null
+    if !l2 { return 6 }
+
+    if takes_bool_arg(some != null) != 1 { return 7 }
+    if takes_bool_arg(none == null) != 1 { return 8 }
+
+    if eq_null_ret(some) { return 9 }
+    if !eq_null_ret(none) { return 10 }
+
+    if some != 7 { return 11 }
+    if some == 7 { } else { return 12 }
+
+    0
+}
+
+/**
+ * wide_product — a `u32 * u32` multiply widened through `u64` BEFORE the multiply, so the result
+ * cannot overflow the narrower operand width (0.3.1.0 D1 boundary-widen-cast).
+ *
+ * @param a  the first `u32` factor, cast to `u64` before the multiply
+ * @param b  the second `u32` factor, multiplied at `u64` width
+ * @return   the full-width `u64` product
+ */
+fn wide_product(a: u32, b: u32) -> u64 { (a to u64) * b }
+
+/**
+ * f_d1_boundary_widen_cast_compiles — a `u32 to u64` widening cast used as the LHS of a multiply
+ * against a bare `u32` RHS compiles and lowers correctly (0.3.1.0 D1 audit, migrated from `bulk`'s
+ * `q185_d1_boundary_widen_cast_compiles`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the low byte of the product is wrong
+ */
+fn f_d1_boundary_widen_cast_compiles() -> i64 {
+    if (wide_product(7 to u32, 6 to u32) & 255) != 42 { return 1 }
+    0
+}
+
+/**
+ * spread_di — a `u32`-to-`i64` cast pair used identically at an ARITHMETIC site (the subtraction)
+ * and a COMPARISON site (the `<`) over the SAME two operands — the D1 audit's parity check: before
+ * the shared predicate, the arithmetic site compiled and the comparison site was a hard error.
+ *
+ * @param a  the minuend/left comparison operand, cast to `i64`
+ * @param b  the subtrahend/right comparison operand, cast to `i64`
+ * @return   42 when the subtraction is negative AND the comparison agrees it is; else 0
+ */
+fn spread_di(a: u32, b: u32) -> i64 {
+    let d = (a to i64) - (b to i64)
+    if d < 0 && (a to i64) < (b to i64) { return 42 }
+    0
+}
+
+/**
+ * f_d1_cast_pair_parity — the arithmetic-site/comparison-site D1 cast pair agree over the same
+ * operands (0.3.1.0 D1 audit, migrated from `bulk`'s `q186_d1_cast_pair_parity_between_arith_and`,
+ * cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 42 on success (matching the original fixture's own asserted value)
+ */
+fn f_d1_cast_pair_parity() -> i64 {
+    spread_di(1 to u32, 2 to u32)
+}
+
+/**
+ * bump_through — forwards an exclusive `ref` PARAMETER into a second, LOCAL `ref` binding over the
+ * SAME referent type, then writes through the forwarded ref. The LEGITIMATE `ref`-to-`ref` forward
+ * (same referent type) must keep compiling — the shape the original wagon shipped without a
+ * fixture for, which is why the missing `type_eq` check went unnoticed (0.3.1.0 audit A-S3/B-S3).
+ *
+ * @param p  the caller's `i64` referent, forwarded through a second local `ref`
+ */
+fn bump_through(ref p: i64) -> void {
+    ref q: i64 = p
+    q = 42
+}
+
+/**
+ * probe_mcni — drives `bump_through` over a local `mut` and reads back the write-through.
+ *
+ * @return the referent's value after `bump_through` (42 on success)
+ */
+fn probe_mcni() -> i64 {
+    mut n: i64 = 1
+    bump_through(n)
+    n
+}
+
+/**
+ * f_ref_forwarding_same_referent_compiles — a `ref` parameter forwarded into a second local `ref`
+ * over the same referent type compiles and writes through correctly (migrated from `bulk`'s
+ * `q187_ref_forwarding_same_referent_compiles`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 42 on success (matching the original fixture's own asserted value)
+ */
+fn f_ref_forwarding_same_referent_compiles() -> i64 {
+    probe_mcni()
+}
+
+/**
+ * f_tilde_concat — the `~` string-concatenation operator over every string-literal FORM this
+ * corpus spells: plain, raw (`@"..."`), verbatim-multiline (`@"""..."""`), interpolated (`$"..."`),
+ * interpolated-multiline, raw-interpolated (`$@"..."`), and combinations with no interpolation
+ * holes at all — each concatenated with a plain literal so the operator's own lowering runs at
+ * every producer shape (migrated from `bulk`'s `q189_tilde_concat`, cargo/0.3.1-dissolver-bulk
+ * 2026-07-29). Several of the literals below are multi-line: their CONTENT is measured by this
+ * check, so re-indenting them changes the expected sum.
+ *
+ * @return 0 on success, 1 if the summed length of every concatenation disagrees with the fixture's
+ *         own measured total (198)
+ */
+fn f_tilde_concat() -> i64 {
+    let x = "hello"
+    let y = "world"
+    let a = "lit" ~ "eral" ~ "-fold"
+    let b = x ~ " " ~ y
+    let c = "pre-" ~ "fix-" ~ x ~ "-suf" ~ "-fix"
+
+    let name = "world"
+    let m1 = "foo" ~ "bar"
+    let m2 = @"C:\raw" ~ "-tail"
+    let m3 = """multi
+line""" ~ "-tail"
+    let m4 = @"""verbatim
+multi""" ~ "-tail"
+    let m5 = $"hi {name}" ~ "!"
+    let m6 = $"""hi
+{name}""" ~ "!"
+    let m7 = $@"raw {name}\n" ~ "!"
+    let m8 = $@"""raw
+{name}""" ~ "!"
+    let m9 = "pre-" ~ @"""mid
+part""" ~ name ~ "-post"
+    let m10 = $"no holes here" ~ "-tail"
+    let m11 = $@"""no holes
+multiline""" ~ "-tail"
+
+    let total = a.len + b.len + c.len + m1.len + m2.len + m3.len + m4.len + m5.len + m6.len + m7.len + m8.len + m9.len + m10.len + m11.len
+    if total != 198 { return 1 }
+    0
+}
+
+/**
+ * grow_bridge — grow `x` by appending `v`, mutating `x` IN-PLACE through the exclusive mutable
+ * reference `ref x` (0.3.1 adoption — a byte-identical LOCAL copy of `teko::list::grow`; the
+ * compiler-tree stdlib symbol is not addressable from a user project, so the fixture re-declares
+ * the contract). Write-through preserves value semantics: `push` is a checker builtin whose
+ * argument typing does not yet auto-deref a bare `ref` argument, so the read stays explicit
+ * `x.value` (still legal — only the `Ref<T>` type name is hidden, not the accessor).
+ *
+ * @param x  the target slice, referenced mutably and exclusively (`ref x`)
+ * @param v  the element to append, of the slice's concrete `T`
+ */
+fn grow_bridge<T>(ref x: []T, v: T) -> void {
+    x.value = teko::list::push(x.value, v)
+}
+
+/**
+ * f_list_grow_bridge — a generic `ref`-taking helper grows a slice write-through, in place
+ * (migrated from `bulk`'s `q190_list_grow_bridge`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_list_grow_bridge() -> i64 {
+    mut x: []i64 = [1, 2]
+    grow_bridge(x, 3)
+    if x.len != 3 { return 1 }
+    if x[0] != 1 { return 1 }
+    if x[1] != 2 { return 1 }
+    if x[2] != 3 { return 1 }
+    0
+}
+
+/**
+ * arena_budget_sum — a fn carrying `#arena_size(4096)`, the additive, non-`unsafe` per-function
+ * arena-budget directive (0.3.1 SW1 crumb `#453`). Its own frame region opens as an INDEPENDENT
+ * tree root (`tk_region_new(NULL)`), never a child of the shared process root — the owner's
+ * isolate-boundary ruling (2026-07-27): a function that declares its own arena is its own isolation
+ * boundary, "como se fosse outro programa" (as if it were another program). The workload below (an
+ * 8-element list, summed) allocates well under the declared 4096-byte budget: sizing accuracy is
+ * the DEVELOPER's job by ruling — the compiler only wires the declared number through, it never
+ * infers one.
+ *
+ * @return the deterministic sum the driver checks (0+1+…+7 == 28)
+ */
+#arena_size(4096)
+fn arena_budget_sum() -> i64 {
+    mut xs: []i64 = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        xs = teko::list::push(xs, i)
+        i = i + 1
+    }
+    mut total: i64 = 0
+    mut j: u64 = 0
+    loop {
+        if j >= xs.len { break }
+        total = total + xs[j]
+        j = j + 1
+    }
+    total
+}
+
+/**
+ * f_arena_size_directive_ok — `#arena_size(N)` wires an independent per-function arena budget
+ * through to the runtime, and ordinary list accumulation inside it still round-trips correctly
+ * (migrated from `bulk`'s `q200_arena_size_directive_ok`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the accumulated sum disagrees with the expected 28
+ */
+fn f_arena_size_directive_ok() -> i64 {
+    if arena_budget_sum() != 28 { return 1 }
+    0
+}
+
+/**
+ * pub extern unsafe fn c_abs — the frontier's spelling PARSES, CHECKS, LINKS, and RUNS (0.3.1.0
+ * C0, c-types-and-marshalling-0.3.1.md §4), pinning the doc-comment correction at
+ * `src/parser/parse_decl.tks::consume_unsafe_modifier`: `extern` is consumed FIRST, `unsafe` is
+ * consumed second and threads `is_unsafe` through to the `Function` node unchanged. Migrated from
+ * `bulk`'s `q191_c_extern_unsafe_accepted` (cargo/0.3.1-dissolver-bulk, 2026-07-29) — the first
+ * fixture in this tree to mark a raw-libc extern `unsafe` and prove the marker survives to a
+ * linked, running binary.
+ *
+ * @param x  the value to negate before taking its absolute value
+ * @return   `abs(x)`, computed by the linked libc symbol
+ */
+pub extern unsafe fn c_abs(x: i32) -> i32 = "abs"
+
+/**
+ * f_c_extern_unsafe_accepted — `pub extern unsafe fn … = "sym"` parses, checks, links and runs
+ * (migrated from `bulk`'s `q191_c_extern_unsafe_accepted`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the linked `abs` call disagrees with the expected magnitude
+ */
+fn f_c_extern_unsafe_accepted() -> i64 {
+    let negated: i32 = -42
+    if c_abs(negated) != 42 { return 1 }
+    0
+}
+
+/** A LOCAL COPY of `teko::c_types`'s `c_int` alias (`docs/design/c-types-and-marshalling-0.3.1.md`
+    §5.1, crumb C1) — a regression fixture cannot `use` the compiler's own stdlib. */
+pub type c_int = i32
+
+/** See `c_int`'s doc-comment — the unsigned 8-bit twin under test here. */
+pub type c_uchar = u8
+
+/** See `c_int`'s doc-comment — the 64-bit twin under test here. */
+pub type c_ulonglong = u64
+
+/**
+ * round_trip_int — receives and returns the `c_int` alias unchanged — the §2.1 measurement this
+ * fixture exists to bank: no alias to a bare PRIMITIVE existed anywhere in the corpus before this
+ * design, and the resolution path (`resolve_named` -> `builtin_type`) is mechanically identical to
+ * an alias targeting a slice/union/named type but was, until now, unproven.
+ *
+ * @param i  passed straight through
+ * @return   the same value, unchanged
+ */
+fn round_trip_int(i: c_int) -> c_int {
+    i
+}
+
+/** See `round_trip_int` — the `u8` twin. */
+fn round_trip_uchar(u: c_uchar) -> c_uchar {
+    u
+}
+
+/** See `round_trip_int` — the `u64` twin. */
+fn round_trip_ulonglong(n: c_ulonglong) -> c_ulonglong {
+    n
+}
+
+/**
+ * f_c_types_alias_identity — a value assigned THROUGH each of three `c_types` aliases (spanning
+ * sign and width: `c_int`/`c_uchar`/`c_ulonglong`) and back is unchanged, and each alias is exactly
+ * its aliased primitive — no wider, no narrower (migrated from `bulk`'s
+ * `q192_c_types_alias_identity`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the round-tripped total disagrees with the expected 7
+ */
+fn f_c_types_alias_identity() -> i64 {
+    let i: c_int = 5
+    let u: c_uchar = 2
+    let n: c_ulonglong = 0
+    let ri = round_trip_int(i)
+    let ru = round_trip_uchar(u)
+    let rn = round_trip_ulonglong(n)
+    let total: i32 = ri + ru + (rn to i32)
+    if total != 7 { return 1 }
+    0
+}
+
+/**
+ * f_qualified_optional_cross_ns — same-bare-name types (`aa::Thing`/`bb::Thing`) coexist across
+ * namespaces in optional and named-variant position (issues #109/#149; migrated from `bulk`'s
+ * `p_qualified_optional`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the summed readings disagree with the expected 22
+ */
+fn f_qualified_optional_cross_ns() -> i64 {
+    if qualified_optional_ns::scenario() != 22 { return 1 }
+    0
+}
+
+/**
+ * f_member_const_cross_ns_pub_inherit — a `pub` member const reaches across namespaces through an
+ * inheriting subclass declared in a DIFFERENT namespace (issue #594 crumb 7; migrated from `bulk`'s
+ * `p_member_const_cross_ns_pub_inherit`, cargo/0.3.1-dissolver-bulk 2026-07-29). `Base` lives in
+ * this project's ROOT namespace and `Sub` in `sub`, so the boundary the assertion depends on is a
+ * real one — with a single namespace the claim would be vacuous.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_member_const_cross_ns_pub_inherit() -> i64 {
+    let s = sub::Sub::make(7)
+    if sub::reach() != 5 { return 1 }
+    if s.kind() != 7 { return 2 }
+    0
+}
+
+/**
+ * f_same_bare_method_dispatch — classes sharing the SAME bare name `Svc` across namespaces
+ * (`sbmd_left`, `sbmd_right`, plus the sorted-first `aaa_decoy` poison decoy) dispatch an INSTANCE
+ * method to the canonically-namespaced class, never to a readdir-order same-bare collision (issue
+ * #290; migrated from `bulk`'s `p_same_bare_method_dispatch`, cargo/0.3.1-dissolver-bulk
+ * 2026-07-29).
+ *
+ * @return 0 on success, 1 if the dispatched tags disagree with the expected sum (10)
+ */
+fn f_same_bare_method_dispatch() -> i64 {
+    if same_bare_method_dispatch_ns::scenario() != 10 { return 1 }
+    0
+}
+
+/**
+ * f_native_gate_coercions — the restored `native_gate_coercions` regressive (#265; migrated from
+ * `bulk`'s `native_gate`, cargo/0.3.1-dissolver-bulk 2026-07-29): a bare `[]T` into a `[](T | null)`
+ * PARAM (element-wise present-wrap), the same into a struct FIELD, and `~` on a sub-`int` unsigned
+ * prim, re-narrowed to its own width.
+ *
+ * @return 0 on success, 1 if the scenario's own falling-off-the-end value disagrees with 21
+ */
+fn f_native_gate_coercions() -> i64 {
+    if native_gate::scenario() != 21 { return 1 }
+    0
+}
+
+/** Point_iface — a plain two-field struct, the F3 null-union matrix's STRUCT shape. */
+type Point_iface = struct {
+    /** the point's first coordinate. */
+    x: i64
+    /** the point's second coordinate. */
+    y: i64
+}
+
+/**
+ * sum_or — narrow a `Point_iface | null`, summing its two fields when present.
+ *
+ * @param p         the value to narrow
+ * @param fallback  the value to use when `p` is `null`
+ * @return          `p.x + p.y` when present, else `fallback`
+ */
+fn sum_or(p: Point_iface | null, fallback: i64) -> i64 {
+    match p { Point_iface as v => v.x + v.y; null => fallback }
+}
+
+/**
+ * f_null_union_struct_present_and_absent — the F3 null-union matrix's STRUCT shape, both a
+ * present and an absent (`null`) value narrowed through the same `match` (migrated from `bulk`'s
+ * `q002_struct_point_null_present_and_absent`, cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the summed readings disagree with the expected 42
+ */
+fn f_null_union_struct_present_and_absent() -> i64 {
+    let present: Point_iface | null = Point_iface { x = 10; y = 20 }
+    let absent: Point_iface | null = null
+    if sum_or(present, 0) + sum_or(absent, 12) != 42 { return 1 }
+    0
+}
+
+/** Counter_mcni — a one-field class with an instance method, the F3 null-union matrix's CLASS shape. */
+type Counter_mcni = class {
+    /** the counter's current value. */
+    pub n: i64
+
+    /**
+     * make — build a `Counter_mcni` at value `v`.
+     *
+     * @param v  the initial value
+     * @return   a fresh `Counter_mcni`
+     */
+    pub fn make(v: i64) -> Counter_mcni { Counter_mcni { n = v } }
+
+    /**
+     * bump — the instance method a null-union narrow must be able to dispatch through.
+     *
+     * @param self  the receiver
+     * @return      `self.n + 1`
+     */
+    pub fn bump(self) -> i64 { self.n + 1 }
+}
+
+/**
+ * bump_or — narrow a `Counter_mcni | null`, dispatching its instance method when present.
+ *
+ * @param c         the value to narrow
+ * @param fallback  the value to use when `c` is `null`
+ * @return          `c.bump()` when present, else `fallback`
+ */
+fn bump_or(c: Counter_mcni | null, fallback: i64) -> i64 {
+    match c { Counter_mcni as v => v.bump(); null => fallback }
+}
+
+/**
+ * f_null_union_class_present_and_absent — the F3 null-union matrix's CLASS shape, both a present
+ * and an absent (`null`) value narrowed through the same `match`, dispatching an instance method on
+ * the present arm (migrated from `bulk`'s `q003_class_counter_null_present_and_absent`,
+ * cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the summed readings disagree with the expected 42
+ */
+fn f_null_union_class_present_and_absent() -> i64 {
+    let present: Counter_mcni | null = Counter_mcni::make(9)
+    let absent: Counter_mcni | null = null
+    if bump_or(present, 0) + bump_or(absent, 32) != 42 { return 1 }
+    0
+}
+
+/** Point_mcni — a plain two-field struct, distinct from `Point_iface` (the FORWARD shape's own type). */
+type Point_mcni = struct {
+    /** the point's first coordinate. */
+    x: i64
+    /** the point's second coordinate. */
+    y: i64
+}
+
+/**
+ * maybe_point — returns a null-union WITHOUT narrowing it first: the caller receives the raw
+ * `Point_mcni | null` and must narrow it itself (the "forward an un-narrowed return" shape).
+ *
+ * @param present  when true, returns a present `Point_mcni`; else `null`
+ * @return         `Point_mcni { x = 21; y = 21 }` when `present`, else `null`
+ */
+fn maybe_point(present: bool) -> Point_mcni | null {
+    if present { return Point_mcni { x = 21; y = 21 } }
+    null
+}
+
+/**
+ * read_or — narrow a `Point_mcni | null`, summing its two fields when present.
+ *
+ * @param p         the value to narrow
+ * @param fallback  the value to use when `p` is `null`
+ * @return          `p.x + p.y` when present, else `fallback`
+ */
+fn read_or(p: Point_mcni | null, fallback: i64) -> i64 {
+    match p { Point_mcni as v => v.x + v.y; null => fallback }
+}
+
+/**
+ * f_forward_un_narrowed_null_union_return — a function's null-union RETURN value is forwarded to
+ * its caller un-narrowed, and narrowing happens only at the call site — both over a present and an
+ * absent value (migrated from `bulk`'s `q007_forward_an_un_narrowed_null_union_retu`,
+ * cargo/0.3.1-dissolver-bulk 2026-07-29).
+ *
+ * @return 0 on success, 1 if the summed readings disagree with the expected 42
+ */
+fn f_forward_un_narrowed_null_union_return() -> i64 {
+    if read_or(maybe_point(true), 0) + read_or(maybe_point(false), 0) != 42 { return 1 }
+    0
+}
+
+/**
  * f_match_value_literal_join — a `match`-as-value whose arms mix a CASE-bound concrete leaf with
  * a bare numeric-literal leaf: `type_match`'s literal cross-adoption (mirroring `type_if`'s own,
  * `src/checker/typer.tks`) must retype the literal leaf at the concrete sibling's type instead of
