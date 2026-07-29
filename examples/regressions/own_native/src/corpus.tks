@@ -1332,3 +1332,44 @@ fn f_int_to_str() -> i64 {
     if teko::i64_to_str(i64_min) != "-9223372036854775808" { return 8 }
     0
 }
+
+/**
+ * gcd_subtract — Euclidean GCD by repeated subtraction, structured to mirror
+ * `teko::backend::idom_intersect`'s (`src/backend/stackify.tks`) own shape EXACTLY: the function's
+ * LAST statement is a bare `loop { … }` that never `break`s — every exit is an inner `return` —
+ * around two NESTED loops that each DO `break`, one per "finger" walked toward the other. This is
+ * the shape that stopped native lowering at 0.3.1.0 degrau 13: `lower_tail_non_expr`
+ * (`src/lir/lower.tks`) treated a non-`return`-terminated tail as an internal invariant break,
+ * when `lower_loop` always reports `terminated=false` for ANY loop (break or not) — the checker
+ * itself makes NO claim about a non-expression tail (`check_trailing_value`'s own doc: "the guard
+ * against false-rejecting a body that ends in a diverging loop/if/match"), trusting the programmer
+ * exactly as the C emitter already does (`cg_stmt_c_terminates` + `__builtin_unreachable()`,
+ * `codegen.tks:8659-9013`).
+ *
+ * @param x  the first operand (positive)
+ * @param y  the second operand (positive)
+ * @return   gcd(x, y)
+ */
+fn gcd_subtract(x: i64, y: i64) -> i64 {
+    mut a = x
+    mut b = y
+    loop {
+        if a == b { return a }
+        loop { if a <= b { break }; a = a - b }
+        loop { if b <= a { break }; b = b - a }
+    }
+}
+
+/**
+ * f_loop_tail_no_break — `gcd_subtract`'s own breakless-loop-tail shape, exercised by VALUE (not
+ * merely "does it compile"): three GCD pairs, including the x==y edge (the outer loop's FIRST
+ * iteration already satisfies `a == b`, so the two inner loops never run at all).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_loop_tail_no_break() -> i64 {
+    if gcd_subtract(30, 18) != 6 { return 1 }
+    if gcd_subtract(17, 5) != 1 { return 2 }
+    if gcd_subtract(9, 9) != 9 { return 3 }
+    0
+}
