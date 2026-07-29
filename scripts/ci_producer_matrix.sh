@@ -65,15 +65,29 @@
 # Owner, 2026-07-28: *"Só tem uma falha, gen2 e gen3 estão emitindo C e não deveriam, reabilite o
 # check de emissão (somente nas pernas Linux), verá que não passará nada."*
 #
-# The four Linux legs — `linux-x86_64-glibc`, `linux-x86_64-musl`, `linux-arm64-glibc`,
-# `linux-arm64-musl` — carry `"fixpoint_backend":"native"`. macOS, Windows and wasm carry `"c"`,
-# because the platform-sequenced plan (docs/memory/0.3.1-plano-sequenciado-por-plataforma.md)
-# migrates them at 0.3.1.1–0.3.1.4 and retires the C route after that.
+# REFINADO pelo dono em 2026-07-29: *"pode pegar uma perna musl do x86 e uma glibc do arm64 e
+# colocar em c, assim tem duas pernas para cada lado em libc diferentes"*. Passam a ser DUAS as
+# pernas nativas, não quatro, escolhidas para que cada backend cubra os dois arcos E as duas libc:
+#
+#   | perna                | backend  |
+#   |----------------------|----------|
+#   | linux-x86_64-glibc   | native   |
+#   | linux-arm64-musl     | native   |
+#   | linux-x86_64-musl    | c        |
+#   | linux-arm64-glibc    | c        |
+#
+# A régua continua a medir (x86 + arm, glibc + musl) e ganham-se duas pernas verdes que provam o
+# resto do oleoduto — produção de asset, testes, determinismo — que o vermelho total escondia.
+# macOS, Windows e wasm carregam `"c"`, porque o plano sequenciado por plataforma
+# (docs/memory/0.3.1-plano-sequenciado-por-plataforma.md) os migra em 0.3.1.1–0.3.1.4 e retira a
+# rota C depois disso.
 #
 # THE RED IS THE PRODUCT, NOT AN ACCIDENT. The native backend does not build the compiler yet —
 # `docs/memory/0.3.1.0-linux-native-first-stop.md` names the stop it reaches today, by address —
-# so the four Linux legs are EXPECTED to fail, and that failure is the honest measurement of how
-# far the native self-build gets. The owner asked for it in as many words: *"verá que não passará
+# so the TWO native Linux legs are EXPECTED to fail, and that failure is the honest measurement of
+# how far the native self-build gets. Reduzir de quatro para duas NÃO abranda a régua: as duas que
+# ficam cobrem os dois arcos e as duas libc, logo qualquer divergência entre arco ou entre libc
+# continua a aparecer. The owner asked for it in as many words: *"verá que não passará
 # nada."* It is not to be softened with `continue-on-error`, a narrowed criterion, or files
 # excluded from the emission check; the address it reports IS the deliverable.
 #
@@ -98,9 +112,9 @@ set -eu
 MODE="${1:?usage: ci_producer_matrix.sh <light|full>}"
 
 # The arm64 legs lead: their runner pool is the scarcer one, so they must not queue behind x86_64.
-A_AG='{"producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc","fixpoint_backend":"native"}'
+A_AG='{"producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc","fixpoint_backend":"c"}'
 A_AM='{"producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-musl","fixpoint_backend":"native"}'
-A_XM='{"producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-musl","fixpoint_backend":"native"}'
+A_XM='{"producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-musl","fixpoint_backend":"c"}'
 A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64","fixpoint_backend":"c"}'
 A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64","fixpoint_backend":"c"}'
 
