@@ -61,6 +61,17 @@ reconcilia: docs/memory/parallel-test-harness-0.3.2.md, docs/design/concorrencia
 > *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* (era
 > HIPÓTESE; foi avaliada em §6.11 e **decidida por R10, abaixo**)
 
+**R12 (2026-07-29) — a regra das CINCO SAÍDAS, e o veredicto de bug. Literal:**
+
+> *"defer, sim, basta olhar o código atual, rodarão pq independem de thread, estão ligadas ao escopo.
+> o panic executa após o defer (ao menos deveria, precisa olhar na emissão em C como é construída, e
+> o repo tem o teko.c da última versão pra aferir)."*
+
+> *"O que, sinceramente, deveria acontecer, `panic`, `exit`, `return`, `break` e `continue` deveriam
+> disparar o defer do escopo sempre, se não estão, temos BUG"*
+
+**Verificado: três dos cinco funcionam, `panic` e `exit` estão PARTIDOS. Diagnóstico em §18.**
+
 **R10 (2026-07-29) — O RULING QUE FECHA A CAPTURA. Literal:**
 
 > *"Certo, não gosto do recover, mas podemos o ter somente para testes (capturar aborts/panic sem
@@ -69,6 +80,26 @@ reconcilia: docs/memory/parallel-test-harness-0.3.2.md, docs/design/concorrencia
 > *se ao compilar um teste, informar que se trata de teste, pode bifurcar as funções globais de exit
 > e panic (mantendo as diretas de os intactas), assim consegue capturar somente quando rodar em teste
 > com um argumento que só o própio compilador conhece."*
+
+**R11 (2026-07-29) — `cancel`, e é de OUTRA CATEGORIA: PÚBLICA. Literal:**
+
+> *"o que podemos pensar, e isso vai valer lá na frente quando tivermos async/await, uma função
+> global `cancel(error | null)`.*
+>
+> *O que ela faz?*
+>
+> *Em uma thread: cancela a thread com uma mensagem de erro.*
+>
+> *Em um processo: causa panico*
+>
+> *Sem informar nada (null):*
+> *Em thread apenas cancela sem motivo*
+> *Em processo causa exit(1)*
+>
+> *E com isso consegue formar um rulling que até pode (e deve) ser utilizado por outros
+> desenvolvedores para interromper todo um fluxo de thread sem derrubar a aplicação/processo."*
+
+Desenhada em **§17**. **NÃO é para implementar nesta lane** — é desenho a registar.
 
 **R8 (2026-07-28), a solução já nomeada para o gate sem C, e que R1/R5/R7 confirmam um ano depois**
 (`docs/design/concorrencia-adiantada-s8.md`, §introdução):
@@ -265,7 +296,7 @@ antigo, e são só duas:
    sobrevive ao filho morrer a meio, e continua lá depois.
 2. A auto-reexecução (`argv[1]` como selector) **está fora, e a exclusão é CONDICIONAL — não
    definitiva.** Hoje ela é impossível: um binário do backend próprio que leia a linha de comando
-   **nem sequer linka** (§17, medido — `undefined reference to 'teko_args'`). O dono aceitou o achado
+   **nem sequer linka** (§16, medido — `undefined reference to 'teko_args'`). O dono aceitou o achado
    e mandou corrigir (*"precisa corrigir, ensinar o native"*); a correcção está a ser feita noutra
    carga (`cargo/0.3.1.0-args-native`) e **não é desta**.
 
@@ -1008,33 +1039,125 @@ framework faz `recover`, que é literalmente o problema deste documento.
 
 Por isso a hipótese merecia medição em vez de opinião. Foi medida.
 
-#### 6.11.1 Os `defer` correm hoje quando há panic? **NÃO. E nem o `stdout` de antes sobrevive.**
+#### 6.11.1 Os `defer` correm quando há panic? — A PRIMEIRA MEDIÇÃO ESTAVA CONFUNDIDA
 
-Sonda `deferprobe`, `.gen1` construído de `bootstrap/teko.c`, as duas rotas:
+**Fica registada com o erro à vista, e não apagada**, porque uma medição errada com a razão do erro
+escrita vale mais do que silêncio — e evita que o próximo agente refaça a sonda pelo mesmo caminho.
+
+A primeira sonda marcava os pontos com `println` (**stdout, BUFFERIZADO**):
+
+| caso | rota C | nativo |
+|---|---|---|
+| `fail = false` (controlo) | `BEFORE` · `DEFER RAN` · exit **7** | idem |
+| `fail = true` | só a linha de panic · exit **134** — **nem `BEFORE` nem `DEFER RAN`** | idem |
+
+E no mesmo relatório registei, como achado lateral, que **`abort()` não faz flush do `FILE*`** — por
+isso o `BEFORE`, que comprovadamente CORREU, também não apareceu.
+
+**Esse achado destrói a conclusão principal, e eu não o apliquei a ela.** Se o `abort()` engole a
+saída de código que comprovadamente correu, a ausência de `DEFER RAN` **não distingue** "o defer não
+correu" de "o defer correu e a linha morreu no buffer". **Medi a saída, não a execução.**
+
+#### 6.11.1b A REMEDIÇÃO — instrumento que sobrevive ao `abort()`, e o C emitido
+
+O instrumento certo já estava à mão na própria sonda: a linha de panic APARECIA, e ela sai por
+`ewrite` → **stderr, não-bufferizado**. Sonda reescrita com `eprintln` nos dois pontos:
 
 ```teko
 pub fn body(fail: bool) -> i32 {
-    defer { println("DEFER RAN") }
-    println("BEFORE")
+    defer { eprintln("DEFER RAN") }
+    eprintln("BEFORE")
     if fail { panic("probe") }
     7
 }
 ```
 
-| caso | rota C | nativo |
-|---|---|---|
-| `fail = false` (controlo) | `BEFORE` · `DEFER RAN` · exit **7** | `BEFORE` · `DEFER RAN` · exit **7** |
-| `fail = true` | `teko: deliberate panic: probe` · exit **134** — **nem `BEFORE` nem `DEFER RAN`** | idêntico, exit **134** |
+```
+=== COM panic, marcas por STDERR, rota C ===
+BEFORE
+teko: deliberate panic: probe
+--- exit=134
 
-Duas leituras, e a segunda é um bónus que não se procurava:
+=== COM panic, marcas por STDERR, NATIVO ===
+BEFORE
+teko: deliberate panic: probe
+--- exit=134
 
-1. **O `defer` NÃO corre sob panic, nas duas rotas.** Não há desenrolamento nenhum.
-2. **O `BEFORE`, que foi executado, também não aparece.** `tk_print` escreve num `FILE*` com buffer e
-   `abort()` não faz flush. Isto **mede** a necessidade do builtin `flush_out` (migalha 3), que até
-   aqui era só uma nota herdada de `gate-sem-c-0.3.0.31.md` §2.2(d): sem ele, o rótulo de um teste que
-   entra em panic perde-se, e o diagnóstico morre com o veredicto.
+=== CONTROLO (sem panic), rota C ===
+BEFORE
+DEFER RAN
+--- exit=7
+```
 
-#### 6.11.2 Porque não corre — o `defer` do Teko é ESTÁTICO, por desenho
+**Agora o confundidor está removido:** `BEFORE` sai por stderr e APARECE, provando que o canal
+sobrevive ao `abort()`; `DEFER RAN` sai pelo MESMO canal e está genuinamente AUSENTE. **O `defer`
+não correu.** A conclusão anterior estava certa; a evidência é que não estava.
+
+**E a prova documental, que dispensa sondas — o C EMITIDO.** (Leitura de artefacto, não geração: a
+sonda foi compilada em scratchpad e o seu `.c` LIDO; nada gerado foi commitado. `bootstrap/teko.c`
+não serve para esta pergunta por um facto que vale a pena registar — **o compilador não usa `defer`
+em lado nenhum do seu próprio código**: `grep 'defer {' src/**/*.tks` só devolve menções em
+comentários e no AST.)
+
+```c
+int32_t teko_deferprobe__body(bool fail) {
+    tk_eprintln((tk_str) { (const tk_byte *)"BEFORE", 6 });
+    if (fail) {
+        tk_panic_str((tk_str) { (const tk_byte *)"probe", 5 });
+    } tk_eprintln((tk_str) { (const tk_byte *)"DEFER RAN", 9 });
+    return ((int64_t)7ULL);
+}
+```
+
+**Está tudo aqui, em cinco linhas.** O corpo do `defer` **É emitido** — inline, na SAÍDA LÉXICA (a
+queda pelo fim), imediatamente antes do `return`. E está **DEPOIS** do `if (fail) { tk_panic_str(...)
+}`. Como `tk_panic_str` é `_Noreturn`, no caminho de panic o controlo nunca chega lá. Não é que o
+`defer` não exista: **é que o panic salta por cima dele por nunca regressar.**
+
+O emissor é `emit_defers` (`src/codegen/codegen.tks`), chamado nas saídas léxicas — e **em nenhum
+sítio no caminho de uma chamada divergente**.
+
+#### 6.11.1c O QUE O DONO TEM DE CERTO, e o que a medição corrige
+
+> *"defer, sim, basta olhar o código atual, rodarão pq independem de thread, estão ligadas ao escopo.
+> o panic executa após o defer (ao menos deveria …)"* — dono, 2026-07-29
+
+| afirmação | veredicto |
+|---|---|
+| *"independem de thread"* | **CERTO.** O `defer` é resolvido em tempo de compilação; não há estado de thread envolvido. Nada no desenho de threads o afecta — e isto é load-bearing para `cancel` (§17.4) |
+| *"estão ligadas ao escopo"* | **CERTO, e é literalmente o que o C mostra** — o corpo aparece na saída léxica do escopo |
+| *"o panic executa após o defer"* | **NÃO é o que acontece.** O C emite o corpo do `defer` DEPOIS do sítio da chamada de panic, e o panic não regressa. O `defer` fica inalcançável nesse caminho |
+| *"ao menos deveria"* | **pergunta legítima; a resposta é PARCIAL — §6.11.1d** |
+
+#### 6.11.1d "Deveria"? — **SIM, e é BUG.** O dono decidiu; o diagnóstico está em §18
+
+O dono respondeu à sua própria pergunta no mesmo dia:
+
+> *"O que, sinceramente, deveria acontecer, `panic`, `exit`, `return`, `break` e `continue` deveriam
+> disparar o defer do escopo sempre, se não estão, temos BUG"*
+
+Verifiquei os cinco: **três funcionam, dois estão partidos**, e os dois partidos são exactamente os
+que são CHAMADAS em vez de palavras-chave. **A matriz medida, a causa no código e a sequência de
+correcção estão em §18.**
+
+*(Uma posição minha que retiro: eu tinha recomendado NÃO mexer no `panic`, argumentando que correr os
+`defer` só na forma explícita seria "meio-limpo". Esse argumento é fraco aqui e está retirado em
+§18.4 — quando o processo morre, o SO reclama o que ficou por fechar. Ele só vale quando o processo
+SOBREVIVE, que é o caso do `cancel`, não este.)*
+
+#### 6.11.1e O achado lateral, que sobrevive intacto e agora está bem fundado
+
+`abort()` **não faz flush do `FILE*` com buffer** — provado pelo contraste directo entre as duas
+sondas: com `println` (stdout) o `BEFORE` desaparece; com `eprintln` (stderr) aparece. Isto **mede** a
+necessidade do builtin `flush_out` (migalha 3), que até aqui era nota herdada de
+`gate-sem-c-0.3.0.31.md` §2.2(d): sem ele, tudo o que um teste escreveu em stdout antes de entrar em
+panic **perde-se**, e o diagnóstico morre com o veredicto.
+
+#### 6.11.2 Porque não corre — o `defer` do Teko é ESTÁTICO e LÉXICO, e o panic não é uma saída léxica
+
+**A formulação certa, que a primeira redacção não tinha:** não é que o Teko "não tenha `defer` sob
+panic". É que **o `defer` só conhece SAÍDAS LÉXICAS, e uma chamada divergente não é uma delas.** O
+corpo está lá, emitido; o panic é que nunca regressa para o alcançar.
 
 `replay_defers` (`src/lir/lower.tks`) di-lo no próprio doc-comment:
 
@@ -1043,8 +1166,8 @@ Duas leituras, e a segunda é um bónus que não se procurava:
 > already-lowered source structure, not a runtime pop**)"*
 
 Ou seja: **os corpos de `defer` são INLINE em cada saída LÉXICA de escopo, em tempo de compilação.**
-O backend C faz o mesmo (`emit_defers`, `codegen.tks`). E há três confirmações independentes de que o
-modelo é deliberadamente estático:
+O backend C faz o mesmo (`emit_defers`, `codegen.tks`), e o C de §6.11.1b mostra-o linha a linha.
+E há três confirmações independentes de que o modelo é deliberadamente estático:
 
 - **não existe registo de `defer` no runtime** — `grep -in defer src/runtime/teko_rt.{c,h}` devolve
   três ocorrências e as três são a palavra inglesa "deferred" em comentários sobre outras coisas;
@@ -1059,7 +1182,7 @@ modelo é deliberadamente estático:
 | | **recovery à Go** | **guarda por thread (§6.5)** |
 |---|---|---|
 | **o que é preciso construir** | (1) **pilha de `defer` em TEMPO DE EXECUÇÃO** — cada `defer` passa a EMPILHAR um registo chamável em vez de ser inline, o que obriga o corpo do `defer` a virar um valor chamável com ambiente capturado (isto é, depende de `cabi fn`/thunks, que também não existem); (2) **um desenrolador** — ou DWARF/`.eh_frame` + CFI emitidos pelo backend, ou `setjmp`/`longjmp` com um buffer por frame guardado; (3) **um protocolo de retoma** — o frame que faz `recover` tem de RETORNAR normalmente a partir de um ponto de desenrolamento arbitrário, o que o backend tem de saber sintetizar | (1) o par `gate_guard_begin`/`gate_guard_end`; (2) a tabela de guardas na região do pai; (3) uma bifurcação em `panic`/`exit`. O "desenrolamento" é `sys_thread_exit` — **fornecido pela plataforma** |
-| **o backend emite CFI hoje?** | **NÃO.** O próprio linker o diz na sonda de §17: `binn/argvprobe.o: missing .note.GNU-stack section implies executable stack`. Um backend que ainda não emite `.note.GNU-stack` está longe de emitir `.eh_frame` correcto | irrelevante — não precisa |
+| **o backend emite CFI hoje?** | **NÃO.** O próprio linker o diz na sonda de §16: `binn/argvprobe.o: missing .note.GNU-stack section implies executable stack`. Um backend que ainda não emite `.note.GNU-stack` está longe de emitir `.eh_frame` correcto | irrelevante — não precisa |
 | **muda a superfície visível ao utilizador?** | **MUITO.** `defer` deixa de ser gratuito (passa a custar um push por execução); a semântica de `defer` sob panic muda para toda a gente; `recover()` passa a ser capacidade da linguagem, usável por qualquer `.tks`; um programa passa a poder ser observado parcialmente desenrolado | **NADA.** Fora de uma guarda, `panic` e `exit` são byte a byte o que são hoje. O par está num namespace que fonte nenhuma alcança (§6.5.4) |
 | **emite C?** | **nenhuma das duas emite C** — mas a via Go quase de certeza acrescenta C ou uma dependência externa: `setjmp`/`longjmp` são C de runtime, e a alternativa DWARF traz `libunwind` para a linha de link | zero C novo (`call_symbol` → funções Teko, `concorrencia-adiantada-s8.md` §4.2) |
 | **determinismo / fixpoint** | **o pior dos dois, e por larga margem.** Passar os `defer` a runtime muda os bytes emitidos de **toda a função com `defer` no fonte do compilador** — e o compilador é escrito em `defer`. Mais: tabelas `.eh_frame` são superfície NOVA de fixpoint, com ordenação e endereços próprios. Um `gen2 != gen3` daí sairia com um diff que aponta uma tabela de unwind | não toca em código de produção nenhum: só a `main` sintetizada e as duas funções de guarda existem no binário de gate |
@@ -1204,7 +1327,7 @@ dono pode arbitrar:
 | fixpoint | **não sente nada** | também não, desde que o argumento não influencie bytes emitidos (§8.1) |
 | custo em execução | zero | um teste de argumento por `panic`/`exit` — desprezável, mas não nulo |
 | como se esconde do utilizador | **estruturalmente**: não há código para chamar | por o argumento ser secreto — o que é mais fraco: o ramo existe e um binário pode ser invocado à mão |
-| **bloqueio** | **nenhum — executável hoje** | **BLOQUEADA**: exige `teko::env::args()` a funcionar, e §17 mediu que um binário do backend nativo **nem linka** se ler argv (`undefined reference to 'teko_args'`). Só desbloqueia quando `cargo/0.3.1.0-args-native` aterrar |
+| **bloqueio** | **nenhum — executável hoje** | **BLOQUEADA**: exige `teko::env::args()` a funcionar, e §16 mediu que um binário do backend nativo **nem linka** se ler argv (`undefined reference to 'teko_args'`). Só desbloqueia quando `cargo/0.3.1.0-args-native` aterrar |
 
 **A leitura que me parece certa, e apresento-a COMO LEITURA e não como decisão:** as duas não se
 contradizem se forem lidas como camadas — o compilador bifurca em tempo de COMPILAÇÃO (só o binário
@@ -1536,7 +1659,7 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | 4 | **sinks de cobertura por thread + fusão** | `tk_cov_ids`/`tk_cov_n`/`tk_cov_cap` são de processo | 13, 16 |
 | 5 | **captura de `panic` (P-A) e captura de `exit` (P-B)** | `tk_panic_str`/`tk_exit` são `_Noreturn` e matam o processo; o único "catch" que existe (`tk_rt_crash_handler`) trata sem interromper. **DUAS primitivas novas (R7), sem antecedente para P-B.** Por R10 são INTERCEPÇÃO, não recuperação — logo **não exigem desenrolador** | 14, 16 |
 | 5d | **a marca "isto é um teste" em tempo de COMPILAÇÃO** | não existe seam nenhuma: `run_native_gate` não distingue perfil, e `CgMode::TestCov`/`TestPlain` são do EMISSOR de C, não do lowering. É a condição de R10 e é o interruptor da bifurcação | 14 |
-| 5e | **(só se a leitura for (B)) o argumento em tempo de EXECUÇÃO** | **BLOQUEADA por §17** — um binário nativo que lê argv não linka. Desbloqueia com `cargo/0.3.1.0-args-native`. Se a resposta do dono for (A), esta linha desaparece | 14, 16 |
+| 5e | **(só se a leitura for (B)) o argumento em tempo de EXECUÇÃO** | **BLOQUEADA por §16** — um binário nativo que lê argv não linka. Desbloqueia com `cargo/0.3.1.0-args-native`. Se a resposta do dono for (A), esta linha desaparece | 14, 16 |
 | 5b | **`panic`/`exit` em Teko** (pré-condição de 5) | `call_symbol` aponta hoje a `tk_panic_str`/`tk_exit`; o fundo `write`/`abort` por `extern fn` está desenhado e não escrito | 13b, 14 |
 | 5c | **namespace reservado + regra de prefixo `__`** | não existe; `builtin_fn` resolve por ÚLTIMO SEGMENTO, o que torna todo builtin injectado publicamente chamável — o oposto do que R7 exige | 3b, 14 |
 | 6 | **`chan<T>`** e as quatro funções | palavra não reservada no lexer; superfície de linguagem nova. Grafia RESOLVIDA por ruling (§6.12) e as três fontes divergentes corrigidas | 15-16 |
@@ -1565,9 +1688,17 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
 2c. **Se as duas primitivas se armam com UM par ou com DOIS** (§6.5.2). R7 diz "duas primitivas";
    o desenho entrega duas CAPACIDADES armadas por um par, com o argumento de que dois pares dobram as
    maneiras de deixar um por desarmar. Se o dono quis dois pontos de armar, é uma linha.
+2f. **O BUG das cinco saídas (§18)** não é decisão nenhuma — é correcção, com dono próprio, e não é
+   desta lane. O que fica em aberto é só a SEQUÊNCIA: corrigi-lo antes ou depois da migalha 14. Recomendo
+   ANTES — a migalha 14 bifurca `panic`/`exit`, e bifurcar uma função cujo contrato de `defer` está
+   partido é assentar a captura sobre um defeito.
+2e. **`cancel` — as três decisões de §17.5**, que são do dono e não desta lane: a forma de `defer`
+   (§17.4.3, recomendo (1) na v1 e NUNCA (2)), se se avança já para a propagação estática, e a
+   sequência. O que NÃO está em aberto é §17.4.5: `cancel` não pode herdar a isenção de `#must_free`,
+   sob pena de introduzir uma fuga silenciosa e repetida num processo que sobrevive.
 2d. **A NUANCE DE R10: a marca é de COMPILAÇÃO (A), de EXECUÇÃO (B), ou as duas em camadas?**
    (§6.11.9). **É a única pergunta em aberto neste documento**, e não é de estilo: (A) arranca hoje e
-   dá contenção estrutural; (B) traz uma dependência dura de `cargo/0.3.1.0-args-native`, porque §17
+   dá contenção estrutural; (B) traz uma dependência dura de `cargo/0.3.1.0-args-native`, porque §16
    mediu que um binário nativo que lê argv nem linka. Apresentei as duas com as consequências; a
    escolha é do dono.
 3. **Se `chan<T>` deve suportar múltiplos recetores.** O harness tem exactamente um. Um canal
@@ -1630,7 +1761,7 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
 
 ---
 
-## 17. DEGRAU DESCOBERTO — um binário nativo NÃO LÊ a sua linha de comando. E é pior do que "vazio".
+## 16. DEGRAU DESCOBERTO — um binário nativo NÃO LÊ a sua linha de comando. E é pior do que "vazio".
 
 Isto começou como nota de rodapé deste desenho (§4: *"o `main` nativo é `new_func("main", 0, …)`"*) e
 foi medido a pedido do coordenador. **A medição é pior do que a leitura estática dizia, e isto é um
@@ -1749,7 +1880,472 @@ a ser CONDICIONAL. Ver a nota lá — a porta está identificada e fechada por a
 
 ---
 
-## 16. Como este documento se verifica
+## 17. `cancel(error | null)` — a primitiva PÚBLICA (R11). Desenho, para outra versão.
+
+**MUDANÇA DE CATEGORIA, e é a primeira coisa a dizer.** As duas primitivas de R7 são invisíveis,
+só-testes, *"conhecidas somente pelo compilador"*. **`cancel` é o oposto**: o dono escreve-o em letra
+— *"pode (e deve) ser utilizado por outros desenvolvedores"*. Portanto **R7 não se lhe aplica**, o
+mecanismo de contenção de §6.5.4 não se lhe aplica, e o padrão de qualidade sobe: o que passa numa
+primitiva escondida não passa numa palavra que toda a gente vai escrever.
+
+### 18.1 A matriz
+
+|  | **em thread (raia guardada)** | **em processo (não guardado)** |
+|---|---|---|
+| `cancel(e)` | cancela a raia, com `e` como motivo | **panic**, com `e` como mensagem |
+| `cancel(null)` | cancela a raia, sem motivo | **`exit(1)`** |
+
+```teko
+/**
+ * cancel — interrompe o FLUXO corrente: a raia, quando há uma; o processo, quando não há.
+ *
+ * É a saída VOLUNTÁRIA e é PÚBLICA — ao contrário da captura de `panic`/`exit` (§6.5), que é
+ * involuntária e só existe sob compilação de teste. As duas terminam a raia pelo MESMO caminho e
+ * depositam veredicto pelo MESMO canal; a diferença é quem as chama e porquê.
+ *
+ * O comportamento depende de haver ou não uma raia guardada para a thread chamadora, e essa é a
+ * ÚNICA condição — não há modo, não há flag, não há variável de ambiente:
+ *
+ * - **numa raia**, com `reason` presente, a raia termina e `reason` vai no veredicto; com `reason`
+ *   nulo, a raia termina sem motivo registado. O PROCESSO SOBREVIVE, que é o ponto inteiro.
+ * - **fora de uma raia**, com `reason` presente é um `panic` com a mensagem de `reason`; com
+ *   `reason` nulo é `exit(1)`. A assimetria é deliberada e está justificada em §17.8.
+ *
+ * @param reason  o motivo do cancelamento, ou `null` para cancelar sem motivo
+ * @return        nada; a chamada não retorna
+ * @since (a decidir — ver §17.10)
+ */
+pub fn cancel(reason: error | null) -> void
+```
+
+### 18.2 Como é que `cancel` sabe onde está? **É a MESMA tabela. Verificado, não presumido.**
+
+A pergunta é: existe uma noção em runtime de "sou uma raia?". Existe, e é exactamente a tabela de
+guardas de §6.5.2 — `gate_guard_begin` escreve a linha, `sys_thread_self()` procura-a,
+`gate_guard_end` limpa-a. `cancel` faz **a mesma varredura**: linha encontrada → caminho de raia;
+linha ausente → caminho de processo.
+
+**Não precisa de tabela nova, nem de campo novo, nem de estado novo.** A linha já carrega
+`{thread_id, index, state, code, message, site}`; `cancel` escreve `state` e `message` e mais nada.
+
+**Isto é um argumento forte a favor do desenho inteiro, e vale dizê-lo:** a mesma máquina serve a
+captura INVOLUNTÁRIA (um teste que entra em panic sem querer) e a saída VOLUNTÁRIA (`cancel`). Duas
+peças que pareciam independentes partilham o único estado de runtime que ambas precisam. Se
+precisassem de tabelas diferentes, seria sinal de que uma delas estava mal desenhada.
+
+**Uma consequência que tem de ser dita:** hoje a tabela só é POPULADA sob compilação de teste (R10).
+Se `cancel` for pública e usável fora de testes, **a tabela tem de existir sempre que houver raias** —
+isto é, deixa de ser artefacto de teste e passa a ser parte do runtime de concorrência. Isso não a
+torna maior nem mais cara (uma linha por raia viva, varredura linear sobre uma dezena), mas move-a de
+sítio no mapa: sai de "andaime de gate" para "estado de tarefa". A bifurcação de R7 continua condicional
+à compilação de teste; a TABELA passa a ser condicional a haver concorrência.
+
+### 18.3 `cancel` como a CARA PÚBLICA da guarda — aguenta-se, e diverge em um ponto
+
+A simetria é real:
+
+| | captura (R7) | `cancel` (R11) |
+|---|---|---|
+| quem dispara | o código, sem querer | o programador, de propósito |
+| visibilidade | invisível, só o compilador | **pública** |
+| existe fora de teste? | não | **sim** |
+| como termina a raia | deposita e termina | **igual** |
+| por onde vai o veredicto | tabela de guardas → `chan<T>` → casa do índice | **igual** |
+| estado depositado | `Panicked` / `Exited` | **`Cancelled`** — estado NOVO (§17.4) |
+
+**Onde DIVERGE, e é o único sítio:** a captura é um efeito colateral de uma terminação que já ia
+acontecer; `cancel` é uma chamada que o compilador VÊ no sítio. Essa diferença parece pequena e é o
+eixo de toda a §17.4 — é ela que permite a `cancel` correr `defer` que um `panic` nunca poderá correr.
+
+`TestState` ganha portanto um membro, e a razão é a mesma que separou `Failed` de `Panicked`: distinguir
+na ORIGEM em vez de por inspecção de texto.
+
+```teko
+    /** o fluxo foi interrompido por uma chamada explícita a `cancel` — voluntário, não uma falha. */
+    Cancelled
+```
+
+**Política:** num `#test`, `Cancelled` é **vermelho** pela mesma regra que `Exited` (§6.5.6) — o
+contrato de um teste é retornar normalmente. Fora de um teste, `cancel` não tem política nenhuma: é
+controlo de fluxo do programa.
+
+### 18.4 A PERGUNTA DURA — os `defer` correm quando uma raia é cancelada?
+
+#### 18.4.1 O que a maquinaria já dá, medido no código
+
+Sob `panic` **não correm** — medido em §6.11.1, nas duas rotas. A causa é que `panic` não tem sítio de
+chamada garantido: uma divisão por zero, um índice fora de limites ou um `abort` da libc entram no
+caminho de terminação sem que o compilador saiba onde.
+
+**`cancel` é outra coisa: é SEMPRE uma chamada explícita, e o compilador vê-a.** E a maquinaria de
+saída léxica que já existe é geral — `replay_defers(ctx, 0)` é invocada em **onze** sítios distintos
+de `src/lir/lower.tks`, um por cada construção que o compilador reconhece como saída de escopo:
+
+| sítio | construção |
+|---|---|
+| `lower_return` | `return` |
+| `close_lambda_body` / fecho do corpo de função | queda pelo fim |
+| `lower_break` / `lower_continue` / saída de laço | `break`, `continue` |
+| braço de `match` com valor | a cauda do braço |
+| cauda do virtual-main (três sítios) | fim do programa |
+
+**Conclusão da investigação: sim, mecanicamente `cancel` pode correr `defer` — e é grátis.** Lowerá-lo
+é copiar `lower_return` linha por linha: `replay_defers(ctx, 0)` e depois o terminador. Nenhuma peça
+nova, nenhum desenrolador, nenhuma tabela.
+
+#### 18.4.2 O LIMITE, e é ele que decide se a primitiva é usável ou uma armadilha
+
+`ctx.defers` é, pelo doc-comment de `LowerCtx`, *"the **CURRENT FUNCTION'S** pending-defer stack …
+**reset per function/lambda body**"*.
+
+Portanto `replay_defers(ctx, 0)` corre os `defer` **do frame onde `cancel` está escrito, e só desse**.
+
+```
+raia -> task()          defer { close(f) }      <- NÃO corre
+          -> step()     defer { unlock(m) }     <- NÃO corre
+             -> leaf()  defer { close(g) }      <- corre
+                cancel(e)
+```
+
+**Sem desenrolamento, nenhuma primitiva consegue correr os `defer` dos frames chamadores. É um facto
+da arquitectura, não uma escolha.** E o dono acabou de tirar o desenrolador da mesa (R10), com razões
+que continuam válidas.
+
+#### 18.4.3 As três formas possíveis, e porque a do meio é a pior
+
+| forma | o que promete | veredicto |
+|---|---|---|
+| **(1) nenhum `defer` corre** | nada — igual a `exit`/`panic` hoje | previsível e consistente. Não mente |
+| **(2) só os do frame de `cancel`** | limpa "alguma coisa" | **A PIOR DAS TRÊS.** Parece que limpa, limpa só um bocado, e o programador deixa de verificar. Meia-limpeza é mais perigosa que nenhuma, porque desliga a atenção sem desligar o problema |
+| **(3) todos os `defer` até à entrada da raia** | o que um programador espera | é o certo, e exige propagação — ver §17.4.5 |
+
+**Recomendação: (1) numa v1, NUNCA (2)**, e (3) como destino declarado. A consistência é o argumento:
+hoje `exit` e `panic` não correm `defer` nenhum; `cancel` a correr *alguns* introduziria três
+comportamentos diferentes para três terminações, e ninguém decora isso certo.
+
+#### 18.4.4 O que MITIGA (1), e é preciso dizer para a recomendação não parecer resignação
+
+**A memória não é o problema — a arena resolve-a por inteiro.** Uma raia cancelada tem a sua região
+libertada na íntegra (§17.6). Nenhum `defer` é necessário para memória, ao contrário de uma linguagem
+com `malloc`/`free` manuais, onde (1) seria inaceitável.
+
+O que fica exposto são **alças do host**: ficheiros, sockets, locks. Hoje a superfície é pequena
+(`teko::io` trabalha por ficheiro inteiro, sem alça persistente). **Mas está a crescer, e o projecto já
+tem o vocabulário:** `#must_free` — e é aí que está o achado a seguir.
+
+#### 18.4.5 O ACHADO QUE MUDA O PESO DA DECISÃO — `#must_free` já trata divergência como segura, e para `cancel` isso é FALSO
+
+`src/checker/typer.tks` verifica que toda a alça `#must_free` é consumida antes do fim do escopo. E o
+seu doc-comment diz, textualmente:
+
+> *"A path that DIVERGES (`break`/`continue`/a trailing **`panic`/`exit`** call) before reaching the
+> block's end **never drops the value, so it needs no consume**"*
+
+E nomeia o idioma canónico: *"`mut h = make(); defer { mem::free(h) }`"* — **exactamente a construção
+que `cancel` não correria.**
+
+**Porque é que "divergência é segura" é VERDADE para `panic`/`exit` e FALSO para `cancel`:**
+
+| | `panic` / `exit` | `cancel` numa raia |
+|---|---|---|
+| o que morre | **o processo inteiro** | **só a raia** |
+| quem recupera a alça vazada | **o sistema operativo**, ao fechar o processo | **ninguém** |
+| a fuga acumula? | não — acontece uma vez e o processo acaba | **SIM — uma por raia cancelada, para sempre** |
+
+Ou seja: se `cancel` for acrescentada ao conjunto de divergência sem mais nada, **o verificador de
+`#must_free` deixa de exigir consumo num caminho que agora vaza de verdade** — e vaza em silêncio,
+repetidamente, num processo que sobrevive. **Isto é uma regressão de segurança de memória introduzida
+por uma primitiva de conveniência**, e é o tipo de coisa que só se vê antes de a escrever.
+
+**Portanto, seja qual for a forma escolhida em §17.4.3, uma coisa não é opcional:**
+
+> **`cancel` NÃO pode entrar no conjunto de divergência de `#must_free` com o mesmo estatuto de
+> `panic`/`exit`.** Ou o verificador passa a EXIGIR que toda a alça `#must_free` viva seja consumida
+> antes de um `cancel` alcançável (paragem honesta, na compilação), ou a forma (3) é construída para
+> que o `defer` canónico corra mesmo. **Silêncio não é opção.**
+
+Isto é também o argumento mais forte a favor de (3) — e a via para lá, sem desenrolador, é
+**propagação estática**: uma função que pode cancelar declara-o na assinatura (como um efeito), e em
+cada sítio de chamada dessa função o compilador emite "se cancelou → replay dos MEUS defers →
+propaga". É desenrolamento feito em tempo de COMPILAÇÃO, com zero maquinaria de runtime — o custo é um
+teste por chamada e superfície de assinatura. **Não a desenho aqui** (é sistema de efeitos, e é
+vagão), mas registo que é o caminho, e que **async/await vai precisar de propagação de efeitos de
+qualquer maneira** — o que faz de (3) um investimento partilhado e não um imposto de `cancel`.
+
+### 18.5 O que fica por decidir, e é do dono
+
+1. **Qual das três formas de §17.4.3.** A minha recomendação é (1) na v1 com (3) declarada como
+   destino; nunca (2).
+2. **Se se avança já para (3)**, isso é um vagão de sistema de efeitos e deve ser sequenciado com
+   async/await, não com o harness.
+3. Seja qual for: **§17.4.5 não é negociável** — `cancel` não pode herdar a isenção de `#must_free`.
+
+### 18.6 A arena de uma raia cancelada, e a mensagem que a atravessa
+
+A mesma resposta que aguentou o panic (§6.7), e é preciso verificar que aguenta este caso — aguenta,
+pela mesma razão:
+
+- **Quem fecha:** o guarda, na ordem obrigatória — **copiar o motivo para a linha da tabela (que é da
+  região do PAI) → libertar a região da raia → terminar a thread.** Invertida, o `str` do motivo é lido
+  de memória já libertada.
+- **A mensagem sobrevive** porque **nunca esteve na região da raia**: a linha da tabela é do pai, e o
+  `TestVerdict` que segue para o `chan<T>` é **copiado para a região do RECETOR** (§6.3). É exactamente
+  o caso que aquela decisão foi desenhada para aguentar, agora com um segundo cliente.
+- **O `error` que `cancel` recebe** é um valor da raia — o seu campo `message` é um `str` na região da
+  raia. É copiado como todos os outros, com o mesmo limite `TEST_TEXT_CAP` e a mesma truncagem visível.
+
+**Verificação feita: a decisão de §6.3 aguenta `cancel` sem uma alteração.** Se não aguentasse, seria
+sinal de que aguentava o panic por acidente.
+
+### 18.7 `cancel(e)` num processo faz panic — logo herda a dependência do `flush_out`
+
+§6.11.1 mediu: sob `abort()` o `stdout` com buffer **não é descarregado** — o `BEFORE` da sonda, que
+foi executado, não apareceu. `cancel(e)` fora de uma raia É um panic, portanto **a mensagem de um
+`cancel` num processo pode perder-se exactamente da mesma maneira**, e junto com ela tudo o que o
+programa tinha escrito antes.
+
+**Dependência nomeada:** o builtin `flush_out` (migalha 3) é pré-requisito de `cancel` ser diagnosticável
+fora de uma raia. Para uma primitiva pública isto pesa mais do que para o gate: um programador que
+chama `cancel(error { message = "..." })` e não vê a mensagem conclui que a primitiva não funciona.
+
+### 18.8 A assimetria `panic` × `exit(1)` — e ela faz sentido
+
+`cancel(e)` num processo → **panic**; `cancel(null)` → **`exit(1)`**. Parece arbitrário e não é:
+
+- **com motivo, há o que dizer.** Um `panic` escreve a linha `TK_PANIC_MARKER` com a mensagem e imprime
+  traço. Um `exit(1)` é mudo — deitaria fora o `error` que o chamador se deu ao trabalho de construir.
+- **sem motivo, não há o que dizer.** Um `panic` com mensagem vazia produziria uma linha de panic oca e
+  um traço de pilha para um evento que o programa pediu de propósito. `exit(1)` é a saída honesta:
+  terminou, sem sucesso, sem história.
+- **e os códigos distinguem-se**: 134 (SIGABRT) para "houve um motivo", 1 para "não houve". Um script
+  que chama o programa consegue separá-los sem ler texto nenhum.
+
+A regra por trás, que generaliza: **o canal de saída é escolhido pela existência de informação, não
+pela gravidade.** Havendo informação, usa-se o caminho que a transporta.
+
+### 18.9 A ponte para async/await — o que `cancel` já compromete e o que deixa aberto
+
+O dono deu esta razão para a peça existir: *"isso vai valer lá na frente quando tivermos
+async/await"*. Sem desenhar async aqui, o que a forma de `cancel` **já compromete**:
+
+1. **O cancelamento é do FLUXO, não de um objecto.** `cancel` não recebe alça de tarefa — cancela o
+   fluxo corrente. Isso exclui, por construção, um `t.cancel()` de fora sobre uma tarefa alheia:
+   cancelar é sempre algo que o próprio fluxo faz a si mesmo. É coerente com R6 (*"sem ref em threads
+   … em isolation principalmente"*): cancelar de fora exigiria uma alça partilhada e mutável, que é
+   precisamente o que R6 proíbe.
+2. **O motivo é um `error`, portanto atravessa por CÓPIA** (§17.6), como tudo o resto.
+3. **O comportamento é decidido pelo CONTEXTO** (há raia? não há?), não por um modo. Uma tarefa `async`
+   será mais um contexto na mesma tabela.
+
+O que fica **ABERTO**, e é honesto listá-lo em vez de fingir que a peça o resolve:
+
+- **`cancel` numa tarefa SUSPENSA.** Uma tarefa parada num `await` não está a executar, logo não há
+  frame onde a chamada aconteça. Cancelá-la é uma operação de FORA, e §17.9(1) acabou de excluir a
+  forma de fora. **Falta a peça, e ela não é `cancel`** — é um cancelamento cooperativo (a tarefa
+  observa um pedido no ponto de retoma e chama `cancel` ela própria). Nomeio-o; não o desenho.
+- **Propagação por uma árvore de tarefas.** Cancelar um pai cancela os filhos? `scope { }`, reservada,
+  é o sítio natural para essa resposta.
+- **`cancel` dentro de um `defer`.** Reentrância; o checker já proíbe `return`/`break`/`continue`/`defer`
+  dentro de um `defer` e este é o mesmo tipo de pergunta.
+- **Se `cancel(null)` numa raia é distinguível de a raia terminar normalmente.** No desenho de §17.3 é:
+  `Cancelled` × `Ok`. Numa tarefa `async`, quem lê essa diferença ainda não existe.
+
+### 18.10 Em que versão cabe
+
+**Não é 0.3.1.x e não é o harness.** `cancel` depende de haver raias (migalhas 12-16) e a sua metade
+interessante — a de thread — não existe antes delas. E a decisão de §17.4.3, se for (3), é um vagão de
+sistema de efeitos.
+
+| peça | degrau |
+|---|---|
+| a tabela de guardas que `cancel` reutiliza | **0.3.2** (migalha 14, já planeada) |
+| `cancel` com a matriz de §17.1, forma (1) | **0.3.2**, depois da migalha 16 — é pequena, uma vez que a tabela exista |
+| a regra de `#must_free` de §17.4.5 | **junto com `cancel`, obrigatoriamente** — nunca depois |
+| a forma (3) por propagação estática | **com async/await**, não antes |
+
+**Fixtures que a afirmariam, deixadas escritas para quem a implementar:**
+
+| fixture | forma | esperado |
+|---|---|---|
+| `cancel_in_lane_reports_reason` | uma raia chama `cancel(error{...})`; as outras completam | não-zero, **e** a raia com `Cancelled` + o motivo, **e** as outras reportadas |
+| `cancel_in_lane_null_has_no_reason` | `cancel(null)` numa raia | `Cancelled` com motivo vazio, processo vivo |
+| `cancel_outside_lane_with_reason_panics` | `cancel(error{...})` num programa sem raias | 134 **e** a linha `TK_PANIC_MARKER` com a mensagem |
+| `cancel_outside_lane_null_exits_one` | `cancel(null)` num programa sem raias | **1**, sem linha de panic |
+| `cancel_process_survives_lane_death` | N raias, metade cancela | o processo devolve veredicto para as N |
+| `cancel_must_free_is_not_exempt` | uma alça `#must_free` viva num caminho que alcança `cancel` | 1 (erro de compilação) — §17.4.5 |
+| `cancel_defer_contract` | um `defer` no frame de `cancel` e outro num frame chamador | **o que a forma escolhida em §17.4.3 prometer, e nada mais** |
+
+---
+
+## 18. BUG CONFIRMADO — `panic` e `exit` não disparam o `defer` do escopo
+
+> *"O que, sinceramente, deveria acontecer, `panic`, `exit`, `return`, `break` e `continue` deveriam
+> disparar o defer do escopo sempre, se não estão, temos BUG"* — dono, 2026-07-29
+
+**Verificado. Três dos cinco funcionam; dois estão partidos. É bug, e a correcção é LIGAR
+informação que o compilador já calcula — não construir maquinaria nova.**
+
+**NÃO corrigido aqui** (sou o arquitecto). Diagnóstico completo + sequência para quem corrigir.
+
+### 18.1 A MATRIZ MEDIDA — cinco saídas × dois escopos × duas rotas
+
+Sondas por **`eprintln`/stderr** (não-bufferizado — o instrumento que sobrevive ao `abort()`; a
+sonda anterior por `println` estava confundida, §6.11.1).
+
+| saída | `defer` no MESMO escopo | `defer` em escopo EXTERIOR | rota C | nativo |
+|---|---|---|---|---|
+| `return` | ✅ **corre** | ✅ **corre** | ✓ | ✓ |
+| `break` | ✅ **corre** (o do corpo do laço) | ✅ **corre** (o da função) | ✓ | ✓ |
+| `continue` | ✅ **corre** (uma vez por iteração) | ✅ **corre** (o da função) | ✓ | ✓ |
+| **`panic`** | ❌ **NÃO CORRE** | ❌ **NÃO CORRE** | ✗ | ✗ |
+| **`exit`** | ❌ **NÃO CORRE** | ❌ **NÃO CORRE** | ✗ | ✗ |
+
+Saída literal, rota C:
+
+```
+== RETURN ==            == BREAK ==                  == CONTINUE ==
+  in f_return             in loop (break)              continue taken
+D:return-fn             D:break-inloop               D:continue-inloop
+                          after loop (break)         D:continue-inloop
+                        D:break-outerfn              D:continue-outerfn
+```
+```
+== PANIC ==                          == EXIT ==
+  in inner                             in inner
+teko: deliberate panic: boom         --- exit=5
+--- exit=134
+                     (nem D:inner-fn nem D:outer-fn, em nenhum dos dois)
+```
+
+Nativo: **idêntico nos cinco**. Não é defeito de rota — é do modelo partilhado.
+
+### 18.2 A CAUSA — a hipótese estrutural, confirmada no código
+
+**`return`, `break` e `continue` são PALAVRAS-CHAVE; `panic` e `exit` são CHAMADAS.** A maquinaria de
+replay só conhece as palavras-chave.
+
+Os **dez** sítios de `replay_defers` em `src/lir/lower.tks` dividem-se em exactamente dois grupos, e
+não há um terceiro:
+
+| grupo | sítios | disparado por |
+|---|---|---|
+| **por PALAVRA-CHAVE** | `lower_return`, `lower_break`, `lower_continue` | `return` / `break` / `continue` |
+| **por QUEDA LÉXICA** | fecho de corpo de função/lambda, saída de laço, braço de `match`, três caudas de virtual-main | chegar ao fim do escopo |
+| **por CHAMADA DIVERGENTE** | **NENHUM** | — |
+
+E o C emitido mostra a consequência exacta (sonda compilada em scratchpad e **lida**; nada gerado foi
+commitado):
+
+```c
+int32_t teko_deferprobe__body(bool fail) {
+    tk_eprintln((tk_str) { (const tk_byte *)"BEFORE", 6 });
+    if (fail) {
+        tk_panic_str((tk_str) { (const tk_byte *)"probe", 5 });   /* _Noreturn — nunca regressa */
+    } tk_eprintln((tk_str) { (const tk_byte *)"DEFER RAN", 9 });  /* o defer, na QUEDA LÉXICA */
+    return ((int64_t)7ULL);
+}
+```
+
+O corpo do `defer` **é emitido** — mas na queda léxica, **depois** do sítio da chamada. Como
+`tk_panic_str` é `_Noreturn`, o controlo nunca lá chega. **Não é `defer` em falta: é uma saída não
+reconhecida como saída.**
+
+*(`bootstrap/teko.c` não serve de prova aqui, e o facto merece registo: **o compilador não usa `defer`
+em lado nenhum do seu próprio código** — `grep 'defer {' src/**/*.tks` só devolve menções em
+comentários e no AST. Não há no artefacto versionado nenhuma composição `defer`+`panic` para ler.)*
+
+### 18.3 A CORREÇÃO É LIGAR, NÃO CONSTRUIR — a informação já está calculada
+
+O compilador **já sabe** que aquelas duas chamadas são saídas. `src/checker/typer.tks`:
+
+```teko
+// global builtins panic/exit, unqualified.
+fn texpr_diverges(e: TExpr) -> bool {
+    match e.kind {
+        TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
+```
+
+O facto existe, está computado, e é a **mesma fronteira** que R10 escolheu para a bifurcação
+(§6.11.8). **O `replay_defers` simplesmente não o consome.** Ligar as duas coisas é a correcção
+inteira — nenhum desenrolador, nenhuma pilha de runtime, nenhuma estrutura nova.
+
+### 18.4 O LIMITE QUE A CORREÇÃO **NÃO** REMOVE — e é obrigatório dizê-lo
+
+`ctx.defers` é, pelo doc-comment de `LowerCtx`, *"the **CURRENT FUNCTION'S** pending-defer stack …
+reset per function/lambda body"*. Logo a correcção restaura os `defer` **do frame onde a saída está
+ESCRITA**, e só desse.
+
+```
+probe()   defer { A }                  <- continua a NÃO correr
+  -> inner()   defer { B }             <- passa a correr  ✅
+       panic("boom")
+```
+
+**Consequência que ninguém pode ignorar:** `teko::assert::is_true` chama `panic` **dentro de si**.
+Depois da correcção, um `#test` com `defer` que falhe uma asserção **continua** a não correr o seu
+`defer` — o panic acontece no frame do `assert`, não no do teste. Correr frames chamadores exige
+desenrolamento, que R10 tirou da mesa por razões que continuam válidas.
+
+**A assimetria residual, e porque é ACEITÁVEL aqui** (revendo o meu próprio argumento de §6.11.1d):
+
+| | corre `defer` depois da correcção? |
+|---|---|
+| `exit(n)` — sempre chamada explícita | **SIM, sem excepção** |
+| `panic("...")` explícito | **SIM**, no frame onde está escrito |
+| panic IMPLÍCITO — div/0, índice fora de limites, cast, overflow, OOM | **NÃO** — não há sítio de chamada que o compilador veja |
+
+Eu tinha argumentado que meia-limpeza é pior do que nenhuma. **Para `panic`/`exit` esse argumento é
+FRACO e retiro-o**, por um motivo concreto: nos dois casos **o processo morre**, portanto o SO
+reclama tudo o que ficou por fechar. A meia-limpeza só é armadilha quando o processo SOBREVIVE — que
+é o caso do `cancel` (§17.4.5), não este. O argumento estava certo; estava aplicado ao caso errado.
+
+### 18.5 A SEQUÊNCIA PARA QUEM CORRIGIR
+
+| # | passo | nota |
+|---|---|---|
+| **1** | **Fixtures PRIMEIRO, a falhar.** Os cinco casos × dois escopos, marcados por **`eprintln`/stderr** — nunca `println`: `abort()` não faz flush e a sonda mente (§6.11.1) | as três de palavra-chave passam já; as duas de chamada falham. É o produto do passo |
+| **2** | **Expor o predicado.** `texpr_diverges` vive no checker; o lowering precisa da mesma pergunta. Exportar, ou espelhar a fronteira num sítio único partilhado — **nunca duplicar a lista de nomes** | duas listas divergem; é a doença deste repositório |
+| **3** | **Ligar no LIR.** Em `lower_stmt`, uma statement de expressão cuja chamada diverge → `replay_defers(ctx, 0)` **ANTES** de baixar a chamada | é o corpo de `lower_return` sem o valor de retorno |
+| **4** | **Ligar no emissor C.** O mesmo em `emit_stmt`/`emit_defers` (`src/codegen/codegen.tks`) | **as duas rotas têm de mudar juntas** — divergirem seria pior que o bug |
+| **5** | **A queda léxica não pode replicar duas vezes.** Hoje o corpo é emitido na queda; se a chamada passar a replicar antes, verificar os guardas `block_terminated`/`tail.terminated` para não haver dupla emissão | duplicar um `defer` que liberta memória é pior que não o correr |
+| **6** | **Fixpoint.** O compilador não usa `defer`, portanto os seus próprios bytes **não devem mudar**. `gen2 == gen3` byte-idêntico é o portão | se mudarem, alguma coisa a mais mexeu |
+| **7** | **`#must_free`.** O verificador isenta caminhos divergentes (§17.4.5). Com `defer` a correr antes do `panic`/`exit`, o idioma canónico `defer { mem::free(h) }` passa a ser honrado — **confirmar que a isenção continua correcta e não passou a esconder outra coisa** | |
+
+**Fixtures nomeadas:** `defer_runs_on_return`, `defer_runs_on_break`, `defer_runs_on_continue`,
+`defer_runs_on_explicit_panic`, `defer_runs_on_exit`, `defer_outer_scope_on_each_exit`,
+`defer_not_duplicated_on_fallthrough`, `defer_implicit_panic_documented` (afirma o limite de §18.4,
+para que a assimetria seja CONTRATO e não surpresa).
+
+### 18.6 CONSEQUÊNCIAS NO RESTO DO DOCUMENTO
+
+**§6.11 (recovery à Go).** A recomendação contra o desenrolador **mantém-se**, e o dono já a ratificou
+por mérito próprio (R10: interceptar, não recuperar). **Mas o argumento muda e não o defendo com a
+medição furada:** já não é *"os `defer` não correm, logo o modelo é estático e distante do Go"*. É
+*"os `defer` correm em três das cinco saídas e vão correr nas cinco depois desta correcção — e mesmo
+assim isso NÃO é o recovery do Go, porque continua a ser por frame e o Go desenrola a pilha inteira"*.
+A distância ao Go é **frames**, não `defer`.
+
+**§17 (`cancel`).** A pergunta dura **dissolve-se em parte, e só em parte** — e digo-o assim porque
+overclaimar aqui seria repetir o erro da primeira medição:
+
+| caso | depois da correcção |
+|---|---|
+| `cancel` escrito no frame de entrada da raia | **os `defer` desse frame correm.** Sem armadilha, sem trabalho extra — `cancel` entra como a **sexta saída** e herda o comportamento |
+| `cancel` escrito N frames abaixo | os `defer` dos frames chamadores **continuam a não correr** |
+
+Portanto a forma **(2)** de §17.4.3 — "só os do frame do `cancel`" — deixa de ser uma escolha
+esquisita e passa a ser **a consequência natural e consistente da regra dos cinco**: toda a saída
+corre os `defer` do seu escopo. **Revejo a recomendação de §17.4.3:** com o bug corrigido, a v1 de
+`cancel` deve ser a forma (2) — não porque meia-limpeza seja boa, mas porque passa a ser a MESMA
+semântica que `return`, `break`, `continue`, `panic` e `exit` têm, e uma sexta saída com regra
+própria é que seria a armadilha.
+
+**O que NÃO muda:** §17.4.5 continua inteiro e continua a ser o ponto não-negociável — `cancel` não
+pode herdar a isenção de `#must_free`, porque no caso dele **o processo sobrevive** e a fuga acumula.
+
+---
+
+## 19. Como este documento se verifica
 
 Toda afirmação de código acima é reproduzível com a árvore em mãos:
 
@@ -1775,6 +2371,11 @@ grep -n 'rt_abort\|"abort" from "c"' src/runtime/teko_rt.tks                    
 grep -n 'name == "abort"' src/checker/scope.tks                                        # directa nº2 (o builtin injectado): §6.11.8
 grep -n 'void tk_exit\|_exit(127)\|_Exit(128' src/runtime/teko_rt.c                    # directas nº3, nº4, nº5: §6.11.8
 grep -n 'panic_div0\|panic_oob\|panic_cast\|panic_overflow' src/runtime/teko_rt.tks    # as guardas que herdam a bifurcacao: §6.11.8
+grep -n 'replay_defers' src/lir/lower.tks                                             # ONZE saidas lexicas — a maquinaria que `cancel` pode reusar: §17.4.1
+grep -n "CURRENT FUNCTION'S pending-defer" src/lir/lower.tks                          # o LIMITE: a pilha e por FUNCAO: §17.4.2
+grep -n 'never drops the value, so it needs no consume' src/checker/typer.tks         # `#must_free` isenta divergencia — FALSO para cancel: §17.4.5
+grep -n 'fn lower_return\|fn lower_break\|fn lower_continue' src/lir/lower.tks         # os TRES sitios por PALAVRA-CHAVE: §18.2
+grep -rn 'defer {' --include=*.tks src/ | grep -v '\*'                                 # VAZIO: o compilador nao usa defer: §18.2
 ```
 
 Se alguma dessas leituras divergir do que está escrito aqui, **o documento está errado e deve ser
