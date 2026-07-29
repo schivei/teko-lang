@@ -91,6 +91,30 @@
 # nada."* It is not to be softened with `continue-on-error`, a narrowed criterion, or files
 # excluded from the emission check; the address it reports IS the deliverable.
 #
+# ── A ESCADA DE VALIDAÇÃO DA ALAVANCA (ruling do dono, 2026-07-29) ────────────────────────────
+# O 2×2 de hoje é o PRIMEIRO de quatro estados, não o estado final. Literal do dono:
+#
+#   *"Assim, quando ambas as 4 pernas percorrerem verdes todo o caminho, inverte o fixpoint, para
+#   garantir, e depois as 4 em c e por último as 4 em native (que fecha o arco e estabiliza tudo)."*
+#
+#   | # | estado                                   | o que prova                                    |
+#   |---|------------------------------------------|------------------------------------------------|
+#   | 1 | 2 native + 2 c (HOJE)                    | a régua mede, e o oleoduto a jusante volta a correr |
+#   | 2 | INVERTER o par                           | o self-host nativo não é específico das pernas escolhidas |
+#   | 3 | as 4 em `c`                              | a rota C não regrediu em lado nenhum com o trabalho nativo |
+#   | 4 | as 4 em `native`                         | fecha o arco e estabiliza                      |
+#
+# O estado 1 avança para o 2 **só quando as quatro pernas percorrerem verdes TODO o caminho** — o
+# que hoje não acontece, porque as duas nativas param no degrau da vez
+# (`docs/memory/0.3.1.0-linux-native-first-stop.md` nomeia-o por endereço).
+#
+# O estado 2 é o passo que a intuição saltaria, e é o que apanha o erro mais caro: se o self-host
+# nativo funcionasse por acidente de arco ou de libc, o 2×2 de hoje NÃO o revelaria — só inverter
+# revela. Não o saltes para chegar mais depressa ao 4.
+#
+# A inversão do estado 2 é: `linux-x86_64-musl` e `linux-arm64-glibc` passam a `"native"`;
+# `linux-x86_64-glibc` e `linux-arm64-musl` passam a `"c"`.
+#
 # TO TURN IT BACK: set the leg's `fixpoint_backend` to `"c"`. Nothing else moves — the emission
 # check is DERIVED from this field inside `fixpoint_gate.sh` (a native generation that emits C is
 # a defect on any leg), so one word per leg is the whole switch, in both directions.
