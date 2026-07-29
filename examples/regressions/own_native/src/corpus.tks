@@ -1022,3 +1022,72 @@ fn f_declared_variant_error_and_null() -> i64 {
     }
     0
 }
+
+/**
+ * pad_word — an interpolated, non-const-foldable prefix ("n=<n>") right-padded with spaces to
+ * `width`. Mirrors `src/backend/objfile_ar.tks`'s own `ar_pad_right` shape (0.3.1.0 degrau 9): a
+ * loop-carried `mut str` reassigned through `teko::str::concat`, seeded from a string
+ * interpolation passed as the CALL's own argument — a genuine function parameter, so the checker's
+ * const-folder cannot collapse it into a plain literal before the native lowering ever sees it.
+ *
+ * @param n      the value interpolated into the prefix
+ * @param width  the minimum total width to pad to
+ * @return       the padded text
+ */
+fn pad_word(n: i64, width: u64) -> str {
+    mut out = $"n={n}"
+    loop {
+        if out.len >= width { break }
+        out = teko::str::concat(out, " ")
+    }
+    out
+}
+
+/**
+ * self_interp_loop — `out = $"{out}"` reassigned across a loop's own back-edge: the minimal
+ * reproduction of 0.3.1.0 degrau 9's honest stop. The loop-merge machinery needs the
+ * reassignment's RIGHT-hand side (an interpolation reading the SAME loop-carried local) through
+ * `lower_fat_expr`, which had no `TInterp` arm.
+ *
+ * @param n  the iteration count
+ * @return   `"a"` re-wrapped in its own interpolation `n` times (the content never changes; only
+ *           the lowering path is under test)
+ */
+fn self_interp_loop(n: i64) -> str {
+    mut out = "a"
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        out = $"{out}"
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * f_interp_fat_positions — string interpolation exercised in every FAT position 0.3.1.0 degrau 9
+ * closed: a call ARGUMENT (`pad_word`'s own caller), a loop-carried self-reassignment
+ * (`self_interp_loop`), a MULTI-hole/multi-piece interpolation checked by both its content and its
+ * LENGTH (a plausible length with the wrong bytes would still be caught by the byte check), and
+ * the `teko::str::concat` builtin folded over more than two arguments (`lower_concat_call`'s own
+ * loop, beside the 2-ary shape `pad_word` already exercises).
+ *
+ * @return 0 when every position lowers correctly, else the number of the failing check
+ */
+fn f_interp_fat_positions() -> i64 {
+    let p = pad_word(7, 6 to u64)
+    if p.len != 6 { return 1 }
+    if p != "n=7   " { return 2 }
+    let s = self_interp_loop(3)
+    if s.len != 1 { return 3 }
+    if s != "a" { return 4 }
+    let x: i64 = 12
+    let y = "mid"
+    let multi = $"x={x}-{y}-end"
+    if multi.len != 12 { return 5 }
+    if multi != "x=12-mid-end" { return 6 }
+    let joined = teko::str::concat("a", "b", "c", "d")
+    if joined.len != 4 { return 7 }
+    if joined != "abcd" { return 8 }
+    0
+}

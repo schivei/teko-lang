@@ -210,6 +210,20 @@ tk_str tk_str_from_cstr(const void *p);
 tk_str tk_i64_to_str(int64_t v);
 tk_str tk_u64_to_str(uint64_t v);
 
+// tk_str_concat_len / tk_i64_to_str_len / tk_u64_to_str_len — the SAME three builders above, with
+// their result's length handed back through an OUT-PARAMETER instead of `tk_str`'s second field.
+// A genuine C caller never needs these (a `tk_str` return already carries both halves); they exist
+// for the native backend's own `LCall`, whose result capture is ONE register
+// (`select_call_result_x86`/`select_call_result_arm64`) — the same width a plain scalar/pointer
+// call answers with, one short of the two-eightbyte SysV/AAPCS64 register pair a `tk_str`-by-value
+// return actually occupies. Mirrors `tk_slice_push`'s own `(ptr, len, &item, esz, &out_len)`
+// shape: the pointer half rides the ordinary return value, the length rides `*out_len`. Thin
+// wrappers — each still calls its own two-word twin above and owns no logic of its own
+// (0.3.1.0 degrau 9).
+const tk_byte *tk_str_concat_len(const tk_byte *a_ptr, uint64_t a_len, const tk_byte *b_ptr, uint64_t b_len, uint64_t *out_len);
+const tk_byte *tk_i64_to_str_len(int64_t v, uint64_t *out_len);
+const tk_byte *tk_u64_to_str_len(uint64_t v, uint64_t *out_len);
+
 // --- Phase 3 str/byte stdlib (the four recognized-but-not-yet-lowered builtins) ---
 // Same contract as tk_str_concat: a fresh malloc'd buffer the result OWNS, tk_panic on OOM
 // (M.1), leak-tolerant (M.5 — short-lived).
