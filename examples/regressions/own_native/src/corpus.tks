@@ -2911,3 +2911,167 @@ fn f_arm64_bigframe_locals() -> i64 {
     if a != 0 { return a }
     check_arm64_bigframe_two()
 }
+
+/**
+ * DivGuardHolder — a struct carrying one `i64` field, the receiver `f_compound_rem_assign_field`
+ * writes THROUGH via a compound `%=`: the div-by-zero guard (`teko::lir::lower_div_zero_guard`)
+ * must reach a struct-field compound assignment exactly like a plain local (both route through
+ * `teko::lir::store_assign_value`), and a struct receiver is the shape that path is exercised
+ * under.
+ */
+type DivGuardHolder = struct { v: i64 }
+
+/**
+ * f_div_signed_i32_value — the div-by-zero guard's "ok" (nonzero-divisor) path on a SIGNED `i32`
+ * `/`: `lower_div_zero_guard` must fall straight through to the ordinary `IDivS` with the exact
+ * same quotient a guardless division would give, over both a positive and a negative dividend (so
+ * `IDivS`'s truncating-toward-zero rounding is exercised, not just the unsigned-adjacent positive
+ * case). `n` is a `mut` local so the divisor is fold-opaque (the checker cannot constant-fold it
+ * away, the same "own_arith_exit" rationale above): a real `IDivS` reaches the guard, not a
+ * compile-time-collapsed literal.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_signed_i32_value() -> i64 {
+    mut n: i32 = 4
+    let q1: i32 = 100 to i32 / n
+    if q1 != 25 { return 1 }
+    n = 3
+    let q2: i32 = -100 to i32 / n
+    if q2 != -33 { return 2 }
+    0
+}
+
+/**
+ * f_div_unsigned_u32_value — the guard's "ok" path on an UNSIGNED `u32` `/`: `lower_div_zero_guard`
+ * emits the SAME zero-check ahead of `IDivU` (never `IDivS`) so an unsigned dividend near
+ * `u32::MAX` still divides in the unsigned domain, not sign-extended.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_unsigned_u32_value() -> i64 {
+    mut n: u32 = 7 to u32
+    let q: u32 = 4294967295 to u32 / n
+    if q != 613566756 to u32 { return 1 }
+    0
+}
+
+/**
+ * f_rem_signed_i32_value — the guard's "ok" path on a SIGNED `i32` `%` (`IRemS`): the remainder's
+ * sign follows the DIVIDEND (Teko's truncating `%`, mirroring C), over both a positive and a
+ * negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_signed_i32_value() -> i64 {
+    mut n: i32 = 9
+    let r1: i32 = 100 to i32 % n
+    if r1 != 1 { return 1 }
+    n = 9
+    let r2: i32 = -100 to i32 % n
+    if r2 != -1 { return 2 }
+    0
+}
+
+/**
+ * f_rem_unsigned_u32_value — the guard's "ok" path on an UNSIGNED `u32` `%` (`IRemU`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_unsigned_u32_value() -> i64 {
+    mut n: u32 = 9 to u32
+    let r: u32 = 4294967295 to u32 % n
+    if r != 3 to u32 { return 1 }
+    0
+}
+
+/**
+ * f_div_signed_i64_value — the guard's "ok" path at the WIDE `i64` `/` width, the SAME width the
+ * guard's zero-materialization (`const_int_inst`) must match bit-for-bit against, over both a
+ * positive and a negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_signed_i64_value() -> i64 {
+    mut n: i64 = 4
+    let q1 = 100 / n
+    if q1 != 25 { return 1 }
+    n = 3
+    let q2 = -100 / n
+    if q2 != -33 { return 2 }
+    0
+}
+
+/**
+ * f_div_unsigned_u64_value — the guard's "ok" path at the WIDE `u64` `/` width, over a dividend
+ * past `i64::MAX` (only meaningful in the unsigned domain — `IDivU`, never `IDivS`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_unsigned_u64_value() -> i64 {
+    let u64_max: u64 = 18446744073709551615
+    mut n: u64 = 7 to u64
+    let q: u64 = u64_max / n
+    if q != 2635249153387078802 to u64 { return 1 }
+    0
+}
+
+/**
+ * f_rem_signed_i64_value — the guard's "ok" path at the WIDE `i64` `%` width, over both a
+ * positive and a negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_signed_i64_value() -> i64 {
+    mut n: i64 = 9
+    let r1 = 100 % n
+    if r1 != 1 { return 1 }
+    n = 9
+    let r2 = -100 % n
+    if r2 != -1 { return 2 }
+    0
+}
+
+/**
+ * f_rem_unsigned_u64_value — the guard's "ok" path at the WIDE `u64` `%` width, over a dividend
+ * past `i64::MAX` (only meaningful in the unsigned domain — `IRemU`, never `IRemS`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_unsigned_u64_value() -> i64 {
+    let u64_max: u64 = 18446744073709551615
+    mut n: u64 = 9 to u64
+    let r: u64 = u64_max % n
+    if r != 6 to u64 { return 1 }
+    0
+}
+
+/**
+ * f_compound_div_assign_value — the guard's "ok" path reached through a COMPOUND `/=` on a plain
+ * `mut` local (`teko::lir::lower_assign_simple`'s own call to `lower_div_zero_guard`, a SEPARATE
+ * call site from the plain-`/` one `f_div_signed_i64_value` exercises).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_compound_div_assign_value() -> i64 {
+    mut x: i64 = 100
+    mut n: i64 = 3
+    x /= n
+    if x != 33 { return 1 }
+    0
+}
+
+/**
+ * f_compound_rem_assign_field_value — the guard's "ok" path reached through a COMPOUND `%=` on a
+ * STRUCT FIELD (`teko::lir::store_assign_value`'s own call to `lower_div_zero_guard`, the THIRD
+ * and last call site — distinct from both the plain-`/` and the local-`/=` ones above).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_compound_rem_assign_field_value() -> i64 {
+    mut h = DivGuardHolder { v = 107 }
+    mut n: i64 = 10
+    h.v %= n
+    if h.v != 7 { return 1 }
+    0
+}
