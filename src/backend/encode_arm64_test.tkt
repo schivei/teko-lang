@@ -575,7 +575,13 @@ fn slot_offset_reads_the_map() {
 #test
 /**
  * big_frame_addr_honest_stops — a slot offset beyond the 12-bit ADD-imm field
- * raises the `A4-bigframe` honest-stop.
+ * still honest-stops through `encode_inst_word` CALLED DIRECTLY: that entry
+ * point resolves `MFrameAddr` to exactly ONE word (`encode_frame_addr`,
+ * unchanged), so it stays a per-instruction, single-word contract. The
+ * multi-word big-offset EXPANSION lives one layer up, in
+ * `encode_frame_addr_words`/`encode_one` (`big_frame_addr_words_chain_the_add_sequence`
+ * below) — mirroring how `MRet`'s epilogue expansion also lives outside this
+ * per-instruction dispatch.
  *
  * @return void
  */
@@ -586,14 +592,74 @@ fn big_frame_addr_honest_stops() {
 
 #test
 /**
- * big_prologue_epilogue_honest_stops — a frame whose FP/LR pair offset outruns
- * the signed 7-bit STP field raises `A4-bigframe` from both prologue and
- * epilogue.
+ * big_prologue_epilogue_uses_the_big_sequence — a frame whose FP/LR pair
+ * offset outruns the signed 7-bit STP field (`!frame_fits`) no longer
+ * honest-stops: `emit_prologue`/`emit_epilogue` fall back to the big-frame
+ * sequence — `sub sp,sp,#1024` (a single instruction: 1024 still fits the
+ * inline ADD/SUB-imm field, only the STP pairing did not); individual `str
+ * x29,[sp,#1008]` / `str x30,[sp,#1016]` (never `stp`); `add x29,sp,#1008` —
+ * and its LIFO teardown mirror. Every word is bit-exact
+ * (assembler-verified via the same formula the doc's worked examples use).
  *
  * @return void
  */
-fn big_prologue_epilogue_honest_stops() {
+fn big_prologue_epilogue_uses_the_big_sequence() {
     let fl = layout_of(1024 to u32, l0(), l0(), l0())
+    let p = pro(fl)
+    teko::assert::is_true(p.len == 4)
+    teko::assert::is_true(p[0] == (0xD11003FF to u32))
+    teko::assert::is_true(p[1] == (0xF901FBFD to u32))
+    teko::assert::is_true(p[2] == (0xF901FFFE to u32))
+    teko::assert::is_true(p[3] == (0x910FC3FD to u32))
+    let e = epi(fl)
+    teko::assert::is_true(e.len == 3)
+    teko::assert::is_true(e[0] == (0xF941FBFD to u32))
+    teko::assert::is_true(e[1] == (0xF941FFFE to u32))
+    teko::assert::is_true(e[2] == (0x911003FF to u32))
+}
+
+#test
+/**
+ * big_prologue_epilogue_saves_callee_saved_individually — the big-frame
+ * sequence's callee-saved area (`emit_callee_area_single`) never pairs, even
+ * when the ids would pair cleanly: two GPRs (`x19`,`x20`) each get their own
+ * `str`/`ldr`, at the offsets `callee_base_offset` places them (below the
+ * FP/LR pair, `size=2000` — well past `frame_fits` but within
+ * `big_frame_fits`).
+ *
+ * @return void
+ */
+fn big_prologue_epilogue_saves_callee_saved_individually() {
+    let fl = layout_of(2000 to u32, l2(19, 20), l0(), l0())
+    let p = pro(fl)
+    teko::assert::is_true(p.len == 6)
+    teko::assert::is_true(p[0] == (0xD11F43FF to u32))
+    teko::assert::is_true(p[1] == (0xF903E3FD to u32))
+    teko::assert::is_true(p[2] == (0xF903E7FE to u32))
+    teko::assert::is_true(p[3] == (0x911F03FD to u32))
+    teko::assert::is_true(p[4] == (0xF903DBF3 to u32))
+    teko::assert::is_true(p[5] == (0xF903DFF4 to u32))
+    let e = epi(fl)
+    teko::assert::is_true(e.len == 5)
+    teko::assert::is_true(e[0] == (0xF943DBF3 to u32))
+    teko::assert::is_true(e[1] == (0xF943DFF4 to u32))
+    teko::assert::is_true(e[2] == (0xF943E3FD to u32))
+    teko::assert::is_true(e[3] == (0xF943E7FE to u32))
+    teko::assert::is_true(e[4] == (0x911F43FF to u32))
+}
+
+#test
+/**
+ * huge_prologue_epilogue_honest_stops — a frame whose FP/LR pair offset
+ * outruns even the STR/LDR field's 12-bit SCALED range (`big_frame_fits`'s
+ * own ceiling, `32760` bytes) still raises `A4-bigframe` from both prologue
+ * and epilogue: an unrealistically large (32KB+) frame, the residual stop
+ * past the big-frame fast-follow.
+ *
+ * @return void
+ */
+fn huge_prologue_epilogue_honest_stops() {
+    let fl = layout_of(32800 to u32, l0(), l0(), l0())
     teko::assert::str_contains(pro_stop(fl), "A4-bigframe")
     teko::assert::str_contains(epi_stop(fl), "A4-bigframe")
 }
@@ -940,15 +1006,29 @@ fn dangling_branch_target_honest_stops() {
 
 #test
 /**
- * encode_func_propagates_prologue_big_frame — a function whose frame outruns the
- * STP field surfaces the prologue's `A4-bigframe` honest-stop from `encode_func`.
+ * encode_func_uses_the_big_sequence_for_a_big_alloca — a function whose frame
+ * outruns the STP field (a single 8192-byte alloca, `size=8208`) no longer
+ * honest-stops through `encode_func`: it emits the full big-frame prologue
+ * (`sub sp` chained over two words, since `8208 = (2<<12)+16`; individual
+ * `str x29`/`str x30`; a single chained-shift `add x29`), the epilogue mirror,
+ * and the `ret` — ten words total, every one bit-exact.
  *
  * @return void
  */
-fn encode_func_propagates_prologue_big_frame() {
+fn encode_func_uses_the_big_sequence_for_a_big_alloca() {
     let frame = teko::list::push(l_frame(), alloca_slot(8192, 8))
-    let e = func_of(frame, i1(RET_INST))
-    teko::assert::str_contains(ef_stop(e), "A4-bigframe")
+    let e = ef(func_of(frame, i1(RET_INST)))
+    teko::assert::is_true(e.words.len == 10)
+    teko::assert::is_true(e.words[0] == (0xD1400BFF to u32))
+    teko::assert::is_true(e.words[1] == (0xD10043FF to u32))
+    teko::assert::is_true(e.words[2] == (0xF91003FD to u32))
+    teko::assert::is_true(e.words[3] == (0xF91007FE to u32))
+    teko::assert::is_true(e.words[4] == (0x91400BFD to u32))
+    teko::assert::is_true(e.words[5] == (0xF95003FD to u32))
+    teko::assert::is_true(e.words[6] == (0xF95007FE to u32))
+    teko::assert::is_true(e.words[7] == (0x91400BFF to u32))
+    teko::assert::is_true(e.words[8] == (0x910043FF to u32))
+    teko::assert::is_true(e.words[9] == (0xD65F03C0 to u32))
 }
 
 /**
@@ -1128,4 +1208,190 @@ fn module_globals_honest_stops() {
 fn module_propagates_function_honest_stop() {
     let f = one_block_func("main", i1(falu_inst(MFAluOp::FAdd, true, fp(0), fp(1), fp(2))))
     teko::assert::str_contains(em_stop(add_mfunc(empty_mmodule(), f)), "A4-fp")
+}
+
+/**
+ * l0_ew — the empty `[]EncWord` list, typed for the big-frame-addr fixtures.
+ *
+ * @return []EncWord  an empty `EncWord` list
+ */
+fn l0_ew() -> []EncWord {
+    teko::list::empty()
+}
+
+/**
+ * faw — `encode_frame_addr_words(layout, fa)`, unwrapping the success case
+ * and falling back to the empty list on an unexpected honest-stop (so a
+ * golden length/word assertion fails loudly rather than aborting).
+ *
+ * @param FrameLayout layout  the enclosing frame
+ * @param MFrameAddr fa  the frame-slot address instruction
+ * @return []EncWord  the encoded word(s), or empty on error
+ */
+fn faw(layout: FrameLayout, fa: MFrameAddr) -> []EncWord {
+    match encode_frame_addr_words(layout, fa) {
+        []EncWord as w => w
+        error as e => l0_ew()
+    }
+}
+
+/**
+ * faw_stop — the honest-stop message `encode_frame_addr_words` produces for
+ * `(layout, fa)`, or `<ok>` when it encodes successfully.
+ *
+ * @param FrameLayout layout  the enclosing frame
+ * @param MFrameAddr fa  the frame-slot address instruction
+ * @return str  the error message, or `<ok>`
+ */
+fn faw_stop(layout: FrameLayout, fa: MFrameAddr) -> str {
+    match encode_frame_addr_words(layout, fa) {
+        []EncWord as w => "<ok>"
+        error as e => e.message
+    }
+}
+
+#test
+/**
+ * big_frame_addr_words_chain_the_add_sequence — `encode_frame_addr_words`
+ * expands a big `MFrameAddr` slot offset (past the 12-bit ADD-imm field) into
+ * the chained `big_offset_words` ADD sequence: `add p0, sp, #1, LSL #12` then
+ * `add p0, p0, #904` for `off=5000` (`5000 = (1<<12)+904`) — the SAME
+ * displacement `big_frame_addr_honest_stops` proved `encode_inst_word` alone
+ * still stops on; this is the layer above that resolves it. Neither word
+ * carries a branch or reloc fixup (both position-independent).
+ *
+ * @return void
+ */
+fn big_frame_addr_words_chain_the_add_sequence() {
+    let fl = layout_of(8192 to u32, l0(), l0(), l1(5000))
+    let ws = faw(fl, MFrameAddr { dst = p(0); slot = 0 to u64 })
+    teko::assert::is_true(ws.len == 2)
+    teko::assert::is_true(ws[0].word == (0x914007E0 to u32))
+    teko::assert::is_true(ws[1].word == (0x910E2000 to u32))
+    teko::assert::is_false(ws[0].has_branch)
+    teko::assert::is_false(ws[0].has_reloc)
+    teko::assert::is_false(ws[1].has_branch)
+    teko::assert::is_false(ws[1].has_reloc)
+}
+
+#test
+/**
+ * small_frame_addr_words_matches_encode_inst_word — a slot offset within the
+ * inline field resolves through `encode_frame_addr_words` to exactly the SAME
+ * single word `encode_inst_word` would (byte-identical delegation, no
+ * duplicated bit-slicing): slot 1 sits at offset 16, so both resolve to
+ * `add p3, sp, #16` (`0x910043E3`).
+ *
+ * @return void
+ */
+fn small_frame_addr_words_matches_encode_inst_word() {
+    let fl = layout_of(48 to u32, l0(), l0(), l3(0, 16, 24))
+    let ws = faw(fl, MFrameAddr { dst = p(3); slot = 1 to u64 })
+    teko::assert::is_true(ws.len == 1)
+    teko::assert::is_true(ws[0].word == (0x910043E3 to u32))
+}
+
+#test
+/**
+ * frame_addr_words_succeeds_at_the_imm24_boundary — `ARM64_IMM24_FIELD_MAX`
+ * itself (`2^24-1 = 16777215`) is the LARGEST offset the two-word chained
+ * sequence reaches: it still resolves (two words), one past it does not
+ * (`frame_addr_words_honest_stops_past_imm24`, below).
+ *
+ * @return void
+ */
+fn frame_addr_words_succeeds_at_the_imm24_boundary() {
+    let fl = layout_of(20000000 to u32, l0(), l0(), l1(16777215))
+    let ws = faw(fl, MFrameAddr { dst = p(3); slot = 0 to u64 })
+    teko::assert::is_true(ws.len == 2)
+    teko::assert::is_true(ws[0].word == (0x917FFFE3 to u32))
+    teko::assert::is_true(ws[1].word == (0x913FFC63 to u32))
+}
+
+#test
+/**
+ * frame_addr_words_honest_stops_past_imm24 — an `MFrameAddr` slot offset one
+ * past `ARM64_IMM24_FIELD_MAX` (past what two chained 12-bit lanes reach)
+ * still raises `A4-bigframe` — the residual ceiling `big_offset_words`
+ * documents (an unreached, three-instruction-or-scratch-register case).
+ *
+ * @return void
+ */
+fn frame_addr_words_honest_stops_past_imm24() {
+    let fl = layout_of(20000000 to u32, l0(), l0(), l1(16777216))
+    teko::assert::str_contains(faw_stop(fl, MFrameAddr { dst = p(0); slot = 0 to u64 }), "A4-bigframe")
+}
+
+#test
+/**
+ * frame_fits_boundary — `frame_fits`'s own exact ceiling: a `size` whose
+ * FP/LR pair offset scales to exactly `ARM64_IMM7_MAX_POS` (`63`, i.e.
+ * `size - 16 = 504`) fits; one 8 bytes past it does not.
+ *
+ * @return void
+ */
+fn frame_fits_boundary() {
+    teko::assert::is_true(frame_fits(layout_of(520 to u32, l0(), l0(), l0())))
+    teko::assert::is_false(frame_fits(layout_of(528 to u32, l0(), l0(), l0())))
+}
+
+#test
+/**
+ * big_frame_fits_boundary — `big_frame_fits`'s own exact ceiling: a `size`
+ * whose FP/LR pair offset is exactly `ARM64_STR_LDR_FIELD_MAX_BYTES`
+ * (`32760`, i.e. `size - 16 = 32760`) fits; one byte past it does not.
+ *
+ * @return void
+ */
+fn big_frame_fits_boundary() {
+    teko::assert::is_true(big_frame_fits(layout_of(32776 to u32, l0(), l0(), l0())))
+    teko::assert::is_false(big_frame_fits(layout_of(32777 to u32, l0(), l0(), l0())))
+}
+
+#test
+/**
+ * div_zero_guard_encodes_compare_branch_call_and_selfloop — the div-by-zero guard's
+ * three-block shape (0.3.1 div-by-zero-nativo), hand-built at the `MInst` level exactly as
+ * `select_lfunc` selects `teko::lir::lower_div_zero_guard`'s LIR (a materialized-zero `cmp`
+ * fused into a `b.ne`, an unconditional fallthrough to the trap block, `bl tk_panic_div0`,
+ * an unconditional branch TO ITS OWN block — the dead terminator after a call that never
+ * returns — then the guarded `sdiv`), byte-exact and assembler-verified:
+ *
+ *   b0:  sub sp, sp, #0x10 ; stp x29, x30, [sp] ; mov x29, sp   (auto LR-save prologue —
+ *        `needs_lr_save`, A4-2: this function BOTH calls and returns)
+ *        movz x2, #0                       ; the materialized zero divisor is compared against
+ *        cmp  x1, x2                       ; fused compare (divisor vs zero)
+ *        b.ne #M1                          ; nonzero divisor takes the "ok" edge
+ *        b    #M2                          ; zero divisor falls through to the "trap" edge
+ *   b1:  sdiv x3, x0, x1                   ; the guarded quotient (dividend/divisor)
+ *        ldp x29, x30, [sp] ; add sp, sp, #0x10 ; ret   (the epilogue attached to THIS `ret`)
+ *   b2:  bl tk_panic_div0                  ; the SAME symbol the C route's `tk_div_*` calls
+ *        b    #M2                          ; self-loop — the call never returns
+ *
+ * @return void
+ */
+fn div_zero_guard_encodes_compare_branch_call_and_selfloop() {
+    let b0 = mblock(0 to u32, i4(movz_inst(true, p(2), 0, 0), cmp_inst(true, p(1), p(2)), branch_cond_inst(MCond::NE, 1 to u32), branch_inst(2 to u32)))
+    let b1 = mblock(1 to u32, i2(alu_inst(MAluOp::Sdiv, true, p(3), p(0), p(1)), RET_INST))
+    let no_uses: []MReg = teko::list::empty()
+    let b2 = mblock(2 to u32, i2(call_inst("tk_panic_div0", no_uses, p(0), false, false), branch_inst(2 to u32)))
+    let e = ef(func_blocks(bl3(b0, b1, b2)))
+    teko::assert::is_true(e.words.len == 13)
+    teko::assert::is_true(e.words[0] == (0xD10043FF to u32))
+    teko::assert::is_true(e.words[1] == (0xA9007BFD to u32))
+    teko::assert::is_true(e.words[2] == (0x910003FD to u32))
+    teko::assert::is_true(e.words[3] == (0xD2800002 to u32))
+    teko::assert::is_true(e.words[4] == (0xEB02003F to u32))
+    teko::assert::is_true(e.words[5] == (0x54000041 to u32))
+    teko::assert::is_true(e.words[6] == (0x14000005 to u32))
+    teko::assert::is_true(e.words[7] == (0x9AC10C03 to u32))
+    teko::assert::is_true(e.words[8] == (0xA9407BFD to u32))
+    teko::assert::is_true(e.words[9] == (0x910043FF to u32))
+    teko::assert::is_true(e.words[10] == (0xD65F03C0 to u32))
+    teko::assert::is_true(e.words[11] == (0x94000000 to u32))
+    teko::assert::is_true(e.words[12] == (0x17FFFFFF to u32))
+    teko::assert::is_true(e.relocs.len == 1)
+    teko::assert::is_true(e.relocs[0].offset == (44 to u32))
+    teko::assert::is_true(e.relocs[0].sym == "tk_panic_div0")
+    teko::assert::is_true(kind_name(e.relocs[0].kind) == "Call")
 }

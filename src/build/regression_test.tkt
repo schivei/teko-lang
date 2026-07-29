@@ -733,9 +733,11 @@ fn host_cc_arch_is_canonical_or_unknown() {
  * `host_cc_cannot_link_cross_reason`'s question, and answering it twice would double-report), and a
  * host row is judged only against the arch this host's `cc` actually targets, and only where an arch
  * mismatch is actually fatal (ELF — the Mach-O and PE/COFF linkers are cross-arch by design). The
- * last assertion is an EQUIVALENCE so it holds on every lane: where the arches agree — x86_64-linux,
- * macos-arm64, windows-x86_64 — the reason is empty and nothing changes; where they cannot, it names
- * both.
+ * last assertion is an EQUIVALENCE so it holds on every lane: on a host `host_default_target` names
+ * a real target for, where the arches agree — x86_64-linux, macos-arm64, windows-x86_64 — the reason
+ * is empty and nothing changes; where they cannot, it names both. On a host with NO own-backend
+ * target at all (an aarch64 linux host, an x86_64 macOS host), the reason is the DIFFERENT, honest
+ * `host_default_unsupported_skip_reason` line, which the row's own R2 error already names.
  *
  * @return void
  */
@@ -749,19 +751,28 @@ fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
         return
     }
     let reason = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
-    let arch = host_cc_arch()
-    let want = target_arch_name(host_default_target())
-    if target_objfmt(host_default_target()) != OBJFMT_ELF {
-        teko::assert::is_true(reason == "")
-        return
+    match host_default_target() {
+        error as e => {
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, e.message)
+            return
+        }
+        NativeTarget as h => {
+            let arch = host_cc_arch()
+            let want = target_arch_name(h)
+            if target_objfmt(h) != OBJFMT_ELF {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            if arch.len == 0 || arch == want {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, target_name(h))
+            teko::assert::str_contains(reason, arch)
+        }
     }
-    if arch.len == 0 || arch == want {
-        teko::assert::is_true(reason == "")
-        return
-    }
-    teko::assert::is_true(reason.len > 0)
-    teko::assert::str_contains(reason, target_name(host_default_target()))
-    teko::assert::str_contains(reason, arch)
 }
 
 #test
@@ -925,11 +936,32 @@ fn pool_order_is_row_order() {
     }
 }
 
+/**
+ * crashed_child_exit_matches — whether a signal-killed child's reported exit is the one an
+ * `abort()` (`kill -ABRT $$`) is expected to leave behind on THIS host. `TkrKind::Trap`
+ * (`src/build/tkr.tks`) already establishes why an abort's synthesized status may never be
+ * byte-compared across hosts: it is "134 under a POSIX shell and something else on Windows", the
+ * wait-status encoding of the SHELL that ran the child, not anything Teko emitted. On a POSIX host
+ * this still checks the EXACT expected value (128+SIGABRT is a stable, meaningful signal); on
+ * Windows it falls back to the same non-zero-only reading `TkrKind::Trap` uses, because no fixed
+ * number is portable there.
+ *
+ * @param actual          the child's reported exit status
+ * @param posix_expected  the exact 128+signo value a POSIX host's shell reports for this abort
+ * @return                whether `actual` is the crash reading this host can honestly promise
+ * @since 0.3.1
+ */
+fn crashed_child_exit_matches(actual: i32, posix_expected: i32) -> bool {
+    if teko::os() == "windows" { return actual != 0 }
+    actual == posix_expected
+}
+
 #test
 /**
  * pool_child_crash_does_not_stop_the_run — a signal-killed child (row 1, `kill -ABRT $$`) reports
- * its 128+signo status and the OTHER rows still get their own verdicts — a crash never aborts the
- * pool, and it never bleeds into a neighbor's capture.
+ * its crash status (128+signo on a POSIX host; a non-zero, host-specific status on Windows — see
+ * `crashed_child_exit_matches`) and the OTHER rows still get their own verdicts — a crash never
+ * aborts the pool, and it never bleeds into a neighbor's capture.
  *
  * @return void
  */
@@ -941,7 +973,7 @@ fn pool_child_crash_does_not_stop_the_run() {
     let caps = run_pool(specs, 3)
     teko::assert::is_true(caps.len == 3)
     teko::assert::is_true(caps[0].exit == 0)
-    teko::assert::is_true(caps[1].exit == 134)
+    teko::assert::is_true(crashed_child_exit_matches(caps[1].exit, 134))
     teko::assert::is_true(caps[2].exit == 0)
     teko::assert::is_true(teko::str::contains(caps[0].stdout, "before"))
     teko::assert::is_true(teko::str::contains(caps[2].stdout, "after"))
@@ -999,7 +1031,8 @@ fn pool_wires_the_verdict_channel_per_spec() {
 /**
  * pool_verdict_channel_survives_child_death — the channel's whole reason to outlive `.rc` (§5.4):
  * what a child wrote BEFORE dying (by signal, here) is still on disk after — its exit code alone
- * (134) could never carry the in-flight payload.
+ * (128+signo on a POSIX host, see `crashed_child_exit_matches`) could never carry the in-flight
+ * payload.
  *
  * @return void
  */
@@ -1008,6 +1041,7 @@ fn pool_verdict_channel_survives_child_death() {
     let spec = spec_of(sh_argv("printf in-flight > \"$TEKO_VERDICT_CHANNEL\"; kill -ABRT $$"), $"{w}/v")
     let caps = run_pool(teko::list::push(teko::list::empty(), spec), 1)
     teko::assert::is_true(caps.len == 1)
-    teko::assert::is_true(caps[0].exit == 134)
+    teko::assert::is_true(crashed_child_exit_matches(caps[0].exit, 134))
     teko::assert::is_true(caps[0].chan_text == "in-flight")
 }
+

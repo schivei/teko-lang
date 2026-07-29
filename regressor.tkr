@@ -248,14 +248,18 @@ Feature: F12 defer-nas-saidas — a defer fires on every scope exit (return/brea
 
   # the documented residual limit (harness doc §18.4): an IMPLICIT panic (div/0 here) has no call
   # site the checker sees, so its guarding defer does NOT run — a CONTRACT, not a gap. The
-  # own-native row asserts ONLY the trap: the native backend guards integer division with a raw
-  # hardware fault (SIGFPE), not the C route's software `tk_panic_div0` check, so its stderr
-  # carries the crash-handler's message, not "deliberate panic" — a PRE-EXISTING, unrelated
-  # backend-parity gap (found while writing this fixture; reported, not fixed here).
+  # own-native row now asserts the SAME stderr pattern as the C route: the native backend guards
+  # integer division with a compiler-organized zero check (lowered once, target-neutral, in
+  # `teko::lir::lower_div_zero_guard`) that calls the SAME `tk_panic_div0` runtime helper the C
+  # route's `tk_div_*`/`tk_mod_*` already call, instead of trusting an x86-64 ISA accident
+  # (`idiv`/`div`'s `#DE` fault) that arm64's architecturally-defined "SDIV/UDIV by zero yields 0"
+  # never shared — a PRE-EXISTING backend-parity gap found while writing this fixture, closed by
+  # the fix this scenario now proves.
   Scenario: defer_implicit_panic_documented (own-native)
     Given source = "cases/defer_implicit_panic_documented.tks"
     When built and run
     Then it traps
+    And stderr pattern = "teko: deliberate panic: division by zero"
 
   Scenario: defer_implicit_panic_documented (C route)
     Given source = "cases/defer_implicit_panic_documented.tks"

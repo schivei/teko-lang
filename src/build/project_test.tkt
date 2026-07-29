@@ -75,35 +75,134 @@ fn target_from_name_rejects_unsupported_values() {
     }
 }
 
-#test
 /**
- * host_target_for_os_maps_every_known_os — the R1 host default
- * (owner ruling 2026-07-24, teko-target-crosslink-0.3.1.md §2.1): `linux` and
- * `windows` pick their own-backend x86-64 pipeline, while `macos` and any other
- * (`unknown`) value keep the pre-existing `Arm64Macho` default — simulating all
- * three supported host OSes without depending on which one this test actually
- * runs on.
+ * host_target_matches — does `host_target_for_os(os, arch)` resolve to `want`? `false` on the
+ * honest R2 error, the shared assertion body every precise-pairing golden below reduces to
+ * (mirrors `target_matches`'s own idiom for `target_from_name`).
  *
- * @return void
+ * @param os    a `teko::os()` value
+ * @param arch  a `teko::arch()` value
+ * @param want  the expected mapped target
+ * @return      `true` iff `host_target_for_os(os, arch)` resolves to `want`
  */
-fn host_target_for_os_maps_every_known_os() {
-    teko::assert::is_true(host_target_for_os("linux") == NativeTarget::X8664Linux)
-    teko::assert::is_true(host_target_for_os("windows") == NativeTarget::X8664Windows)
-    teko::assert::is_true(host_target_for_os("macos") == NativeTarget::Arm64Macho)
-    teko::assert::is_true(host_target_for_os("unknown") == NativeTarget::Arm64Macho)
+fn host_target_matches(os: str, arch: str, want: NativeTarget) -> bool {
+    match host_target_for_os(os, arch) { NativeTarget as t => t == want; error => false }
+}
+
+/**
+ * host_target_is_unsupported — does `host_target_for_os(os, arch)` honestly refuse the pair
+ * (the R2 arm), naming both `os` and `arch` in its own message?
+ *
+ * @param os    a `teko::os()` value
+ * @param arch  a `teko::arch()` value
+ * @return      `true` iff the pair is refused, with `os`/`arch` both named in the message
+ */
+fn host_target_is_unsupported(os: str, arch: str) -> bool {
+    match host_target_for_os(os, arch) {
+        NativeTarget => false
+        error as e => teko::str::contains(e.message, os) && teko::str::contains(e.message, arch)
+    }
 }
 
 #test
 /**
- * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()`
- * (real `teko::os()`) resolves to exactly what `host_target_for_os` maps that same
- * OS string to — i.e. the two functions never disagree on the actual build host,
- * whichever of the three supported OSes it is.
+ * host_target_for_os_is_precise_for_every_supported_pair — Phase 2 of the two-phase host
+ * default (owner ruling 2026-07-24, teko-target-crosslink-0.3.1.md §2.1, now that
+ * `teko::arch()` is seed-recognized): `host_target_for_os` picks the ONE own-backend target
+ * this backend has a real codegen pipeline for, keyed on BOTH `os` AND `arch` — simulating
+ * every supported host without depending on which one this test actually runs on.
+ *
+ * @return void
+ */
+fn host_target_for_os_is_precise_for_every_supported_pair() {
+    teko::assert::is_true(host_target_matches("linux", "x86_64", NativeTarget::X8664Linux))
+    teko::assert::is_true(host_target_matches("windows", "x86_64", NativeTarget::X8664Windows))
+    teko::assert::is_true(host_target_matches("macos", "arm64", NativeTarget::Arm64Macho))
+}
+
+#test
+/**
+ * host_target_for_os_rejects_every_unsupported_pair — the R2 counterpart: teaching
+ * `host_target_for_os` the architecture means an `(os, arch)` pair with no own-backend target
+ * (an aarch64 linux host, an x86_64 macOS host, an arm64 windows host, or a wholly `unknown`
+ * arch) is now an honest COMPILE-time refusal naming BOTH the offending `os` and `arch` — never
+ * the pre-0.3.1-teko-arch silent mis-lower to the OS's dominant arch regardless of the host's
+ * REAL arch (the exact bug class R1 exists to close, one dimension over from the original
+ * linux-host-emits-arm64-Mach-O report).
+ *
+ * @return void
+ */
+fn host_target_for_os_rejects_every_unsupported_pair() {
+    teko::assert::is_true(host_target_is_unsupported("linux", "arm64"))
+    teko::assert::is_true(host_target_is_unsupported("macos", "x86_64"))
+    teko::assert::is_true(host_target_is_unsupported("windows", "arm64"))
+    teko::assert::is_true(host_target_is_unsupported("linux", "unknown"))
+    teko::assert::is_true(host_target_is_unsupported("unknown", "unknown"))
+}
+
+#test
+/**
+ * host_target_for_os_guess_maps_every_known_os — the Phase-1 OS-only heuristic
+ * (teko-target-crosslink-0.3.1.md §2.1), kept as `host_target_for_os_guess`: `linux` and
+ * `windows` pick their own-backend x86-64 pipeline, while `macos` and any other (`unknown`)
+ * value keep the pre-existing `Arm64Macho` default. Still the ALWAYS-TOTAL fallback
+ * `host_default_target_guess`/`resolved_target`/`cross_note` fall back to on a host whose
+ * precise (os, arch) pair has no own-backend target.
+ *
+ * @return void
+ */
+fn host_target_for_os_guess_maps_every_known_os() {
+    teko::assert::is_true(host_target_for_os_guess("linux") == NativeTarget::X8664Linux)
+    teko::assert::is_true(host_target_for_os_guess("windows") == NativeTarget::X8664Windows)
+    teko::assert::is_true(host_target_for_os_guess("macos") == NativeTarget::Arm64Macho)
+    teko::assert::is_true(host_target_for_os_guess("unknown") == NativeTarget::Arm64Macho)
+}
+
+#test
+/**
+ * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()` (real
+ * `teko::os()`/`teko::arch()`) never disagrees with `host_target_for_os` applied to that same
+ * (os, arch) pair, in EITHER arm. A host whose own pair has no own-backend target (an aarch64
+ * linux host, an x86_64 macOS host, an arm64 windows host, …) is a LEGITIMATE live outcome, not a
+ * test failure — the R2 error `host_default_target()` returns there must be the SAME honest
+ * refusal `host_target_for_os` itself gives that exact pair, never a silent divergence between
+ * the two.
+ *
+ * THE BUG THIS REPLACES (measured live on CI's `test / linux-arm64-glibc`, job 90725227419, run
+ * 30495738831): the previous body asserted `false` on the error arm, on the unstated assumption
+ * that every host this suite runs on is one of the three supported pairs. On an aarch64 linux
+ * runner `host_target_for_os("linux", "arm64")` correctly refuses — that refusal IS this crumb's
+ * own R1/R2 design, not a defect — so the assertion fired and, because a failed
+ * `teko::assert::is_true` has no soft-fail path yet (SIGABRT, `cargo/0.3.1-envelope-e-assert`
+ * owns that separately), it aborted the WHOLE test binary, not just this one case. Asserting the
+ * EQUIVALENCE instead of a fixed arm is what makes this test host-agnostic: green on every host,
+ * supported or not, without ever discovering which one it is running on.
  *
  * @return void
  */
 fn host_default_target_matches_the_real_host() {
-    teko::assert::is_true(host_default_target() == host_target_for_os(teko::os()))
+    match host_default_target() {
+        NativeTarget as live => teko::assert::is_true(host_target_matches(teko::os(), teko::arch(), live))
+        error => teko::assert::is_true(host_target_is_unsupported(teko::os(), teko::arch()))
+    }
+}
+
+#test
+/**
+ * host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported —
+ * `host_default_target_guess` is ALWAYS total, and this equivalence holds on EVERY host,
+ * supported or not — the assertion never assumes which one it is running on. On a supported pair
+ * `host_default_target()` succeeds with exactly the target `host_target_for_os_guess(teko::os())`
+ * names for that OS (each of the three supported pairs IS its own OS's dominant arch, by
+ * construction), so both sides read the identical value; on an UNSUPPORTED pair
+ * `host_default_target_guess` falls through to that very same OS-only guess, by definition. Pinned
+ * here against the Phase-1 guess so a future host whose precise pair the resolver refuses still
+ * gets a total, host-OS-derived answer instead of a crash.
+ *
+ * @return void
+ */
+fn host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported() {
+    teko::assert::is_true(host_default_target_guess() == host_target_for_os_guess(teko::os()))
 }
 
 #test
@@ -336,6 +435,23 @@ fn pt_combined_status_precedence() {
     teko::assert::is_true(status_text(combined_status(Verdict::Stale, 1, 0)) == "DEAD")
     teko::assert::is_true(status_text(combined_status(Verdict::Redundant, 1, 0)) == "REDUNDANT")
     teko::assert::is_true(status_text(combined_status(Verdict::Live, 1, 0)) == "LIVE")
+}
+
+/**
+ * test_gate_precedence — the gate's own status (`trc`) is STILL the highest-precedence failure,
+ * unchanged, no matter what the floor/per-commit/regression statuses are; a passing gate falls
+ * through to the floor status, then per-commit, then the regression tier (ignored entirely when
+ * `has_regr` is false, even if `regr_rc` carries a stray non-zero value); all-zero is 0.
+ */
+#test
+fn pt_test_gate_precedence_defers_to_the_gate_first() {
+    teko::assert::is_true(test_gate_precedence(7, 1, 1, true, 1) == 7)
+    teko::assert::is_true(test_gate_precedence(0, 3, 1, true, 1) == 3)
+    teko::assert::is_true(test_gate_precedence(0, 0, 5, true, 1) == 5)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, true, 9) == 9)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, false, 9) == 0)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, true, 0) == 0)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, false, 0) == 0)
 }
 
 /** analyzer_report renders header, per-test lines with asserts=, and a per-status summary. */
@@ -648,18 +764,18 @@ fn pt_target_name_and_objfmt_are_one_source() {
  * @return void
  */
 fn pt_cross_note_is_empty_for_the_host_target() {
-    let here = cross_note(host_default_target())
+    let here = cross_note(host_default_target_guess())
     teko::assert::is_false(here.is_cross)
     teko::assert::is_true(here.note == "")
     let cross = cross_note(pt_cross_target())
     teko::assert::is_true(cross.is_cross)
     teko::assert::str_contains(cross.note, "wasm32-wasi")
-    teko::assert::str_contains(cross.note, target_name(host_default_target()))
+    teko::assert::str_contains(cross.note, target_name(host_default_target_guess()))
     teko::assert::str_contains(cross.note, "not executed")
     teko::assert::is_true(cross_note_for_name("wasm32-wasi").is_cross)
     teko::assert::is_false(cross_note_for_name("").is_cross)
     teko::assert::is_false(cross_note_for_name("some-unknown-target").is_cross)
-    teko::assert::is_false(cross_note_for_name(target_name(host_default_target())).is_cross)
+    teko::assert::is_false(cross_note_for_name(target_name(host_default_target_guess())).is_cross)
 }
 
 #test
@@ -706,9 +822,9 @@ fn pt_static_lib_cross_must_be_pointed_at_and_present() {
     teko::assert::is_true(pt_is_error(cross))
     teko::assert::str_contains(pt_error_text(cross), "foo")
     teko::assert::str_contains(pt_error_text(cross), "wasm32-wasi")
-    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target())))
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target_guess())))
     let absent = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:__no_such_dir__/libfoo.a\"]\n")
-    let miss = validate_static_libs_for_target(absent, host_default_target())
+    let miss = validate_static_libs_for_target(absent, host_default_target_guess())
     teko::assert::is_true(pt_is_error(miss))
     teko::assert::str_contains(pt_error_text(miss), "__no_such_dir__/libfoo.a")
     let clean = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nm = []\n")
@@ -741,13 +857,13 @@ fn pt_static_validation_honours_the_section_key() {
  */
 fn pt_shared_lib_default_fails_and_allow_undef_opts_in() {
     let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:__no_such_dir__/libbar.so\"]\n")
-    let strict = validate_shared_libs_for_target(m, host_default_target(), false)
+    let strict = validate_shared_libs_for_target(m, host_default_target_guess(), false)
     teko::assert::is_true(pt_is_error(strict))
     teko::assert::str_contains(pt_error_text(strict), "__no_such_dir__/libbar.so")
     teko::assert::str_contains(pt_error_text(strict), ALLOW_UNDEF_FLAG)
-    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, host_default_target(), true)))
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, host_default_target_guess(), true)))
     let by_name = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:bar\"]\n")
-    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(by_name, host_default_target(), false)))
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(by_name, host_default_target_guess(), false)))
 }
 
 #test

@@ -2756,3 +2756,370 @@ fn f_array_lit_return_escape() -> i64 {
     if e.len != 0 { return 17 }
     0
 }
+
+/**
+ * Arm64BigLeaf — the innermost 64-byte layer of the deliberately huge nested local
+ * `Arm64BigFrame` (below, 0.3.1 A4-bigframe): eight `i64` filler fields, with no meaning beyond
+ * their own byte width.
+ */
+type Arm64BigLeaf = struct {
+    /** a — filler field 1 of 8, 8 bytes. */
+    a: i64
+    /** b — filler field 2 of 8, 8 bytes. */
+    b: i64
+    /** c — filler field 3 of 8, 8 bytes. */
+    c: i64
+    /** d — filler field 4 of 8, 8 bytes. */
+    d: i64
+    /** e — filler field 5 of 8, 8 bytes. */
+    e: i64
+    /** f — filler field 6 of 8, 8 bytes. */
+    f: i64
+    /** g — filler field 7 of 8, 8 bytes. */
+    g: i64
+    /** h — filler field 8 of 8, 8 bytes; the field every checksum below reads back. */
+    h: i64
+}
+
+/**
+ * zero_arm64_big_leaf — a zeroed `Arm64BigLeaf` with `n` written into `h`, so the checksum that
+ * reads it back is sensitive to which nesting level's copy a wrong lowering would drop.
+ *
+ * @param n  the marker value written to `h`
+ * @return   the assembled leaf
+ */
+fn zero_arm64_big_leaf(n: i64) -> Arm64BigLeaf {
+    Arm64BigLeaf { a = 0; b = 0; c = 0; d = 0; e = 0; f = 0; g = 0; h = n }
+}
+
+/**
+ * Arm64BigMid — the middle 512-byte layer of `Arm64BigFrame`: eight `Arm64BigLeaf` fields.
+ */
+type Arm64BigMid = struct {
+    /** a — nested leaf 1 of 8, 64 bytes. */
+    a: Arm64BigLeaf
+    /** b — nested leaf 2 of 8, 64 bytes. */
+    b: Arm64BigLeaf
+    /** c — nested leaf 3 of 8, 64 bytes. */
+    c: Arm64BigLeaf
+    /** d — nested leaf 4 of 8, 64 bytes. */
+    d: Arm64BigLeaf
+    /** e — nested leaf 5 of 8, 64 bytes. */
+    e: Arm64BigLeaf
+    /** f — nested leaf 6 of 8, 64 bytes. */
+    f: Arm64BigLeaf
+    /** g — nested leaf 7 of 8, 64 bytes. */
+    g: Arm64BigLeaf
+    /** h — nested leaf 8 of 8, 64 bytes. */
+    h: Arm64BigLeaf
+}
+
+/**
+ * zero_arm64_big_mid — a zeroed `Arm64BigMid` whose eight leaves all carry marker `n`.
+ *
+ * @param n  the marker value threaded into every nested leaf
+ * @return   the assembled mid-layer struct
+ */
+fn zero_arm64_big_mid(n: i64) -> Arm64BigMid {
+    let z = zero_arm64_big_leaf(n)
+    Arm64BigMid { a = z; b = z; c = z; d = z; e = z; f = z; g = z; h = z }
+}
+
+/**
+ * Arm64BigFrame — a deliberately huge (4096-byte) nested-struct local shape (0.3.1
+ * A4-bigframe): eight `Arm64BigMid` fields. A single `f_arm64_bigframe_locals` local of this
+ * type already exceeds the arm64 STP/LDP pair's signed 7-bit scaled field (504 bytes); a SECOND
+ * one's own frame-slot offset (4096 bytes) exceeds the ADD-immediate's inline 12-bit field (4095)
+ * too — the exact shape the compiler's own growing `error` struct (0.3.1.0 degrau 22, six fields
+ * instead of one) tripped over on the arm64-macos encoder (`A4-bigframe`,
+ * `src/backend/encode_arm64.tks`).
+ */
+type Arm64BigFrame = struct {
+    /** a — nested mid-layer 1 of 8, 512 bytes. */
+    a: Arm64BigMid
+    /** b — nested mid-layer 2 of 8, 512 bytes. */
+    b: Arm64BigMid
+    /** c — nested mid-layer 3 of 8, 512 bytes. */
+    c: Arm64BigMid
+    /** d — nested mid-layer 4 of 8, 512 bytes. */
+    d: Arm64BigMid
+    /** e — nested mid-layer 5 of 8, 512 bytes. */
+    e: Arm64BigMid
+    /** f — nested mid-layer 6 of 8, 512 bytes. */
+    f: Arm64BigMid
+    /** g — nested mid-layer 7 of 8, 512 bytes. */
+    g: Arm64BigMid
+    /** h — nested mid-layer 8 of 8, 512 bytes. */
+    h: Arm64BigMid
+}
+
+/**
+ * zero_arm64_big_frame — a zeroed `Arm64BigFrame` whose every nested leaf carries marker `n`.
+ *
+ * @param n  the marker value threaded into every nested leaf
+ * @return   the assembled 4096-byte struct
+ */
+fn zero_arm64_big_frame(n: i64) -> Arm64BigFrame {
+    let z = zero_arm64_big_mid(n)
+    Arm64BigFrame { a = z; b = z; c = z; d = z; e = z; f = z; g = z; h = z }
+}
+
+/**
+ * check_arm64_bigframe_one — a 4096-byte nested-struct local, ALONE in its own frame (0.3.1
+ * A4-bigframe): the frame (local + FP/LR + callee-saved area) exceeds the arm64 STP/LDP pair's
+ * signed 7-bit scaled field (504 bytes) by a wide margin — the exact shape the compiler's own
+ * growing `error` struct (0.3.1.0 degrau 22, six fields instead of one) tripped over on the
+ * arm64-macos encoder (`A4-bigframe`, `src/backend/encode_arm64.tks`). Reads a marker field back
+ * from both the first and the last nesting level, so a copy that silently drops a level shows up
+ * as a wrong checksum, not merely as "it built".
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn check_arm64_bigframe_one() -> i64 {
+    let one = zero_arm64_big_frame(1)
+    if one.a.a.h != 1 { return 1 }
+    if one.h.h.h != 1 { return 2 }
+    0
+}
+
+/**
+ * check_arm64_bigframe_two — `check_arm64_bigframe_one`'s twin, with its OWN distinct marker,
+ * called from a separate frame (0.3.1 A4-bigframe) so the corpus never holds two aggregate
+ * call-return locals live in the SAME frame at once (a distinct, pre-existing aggregate
+ * call-return aliasing gap this scenario does not exercise or claim to fix).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn check_arm64_bigframe_two() -> i64 {
+    let two = zero_arm64_big_frame(2)
+    if two.a.a.h != 2 { return 3 }
+    if two.h.h.h != 2 { return 4 }
+    0
+}
+
+/**
+ * f_arm64_bigframe_locals — two INDEPENDENT 4096-byte-local frames (0.3.1 A4-bigframe),
+ * `check_arm64_bigframe_one`/`_two`, each pinning the same large-frame shape from a distinct
+ * marker value: the compiler's own corpus proof that the arm64 encoder's big-frame sequence
+ * (prologue/epilogue STR/LDR + `MFrameAddr`'s chained ADD, `src/backend/encode_arm64.tks`)
+ * handles a frame well past the STP/LDP field's 504-byte ceiling.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_arm64_bigframe_locals() -> i64 {
+    let a = check_arm64_bigframe_one()
+    if a != 0 { return a }
+    check_arm64_bigframe_two()
+}
+
+/**
+ * DivGuardHolder — a struct carrying one `i64` field, the receiver `f_compound_rem_assign_field`
+ * writes THROUGH via a compound `%=`: the div-by-zero guard (`teko::lir::lower_div_zero_guard`)
+ * must reach a struct-field compound assignment exactly like a plain local (both route through
+ * `teko::lir::store_assign_value`), and a struct receiver is the shape that path is exercised
+ * under.
+ */
+type DivGuardHolder = struct { v: i64 }
+
+/**
+ * f_div_signed_i32_value — the div-by-zero guard's "ok" (nonzero-divisor) path on a SIGNED `i32`
+ * `/`: `lower_div_zero_guard` must fall straight through to the ordinary `IDivS` with the exact
+ * same quotient a guardless division would give, over both a positive and a negative dividend (so
+ * `IDivS`'s truncating-toward-zero rounding is exercised, not just the unsigned-adjacent positive
+ * case). `n` is a `mut` local so the divisor is fold-opaque (the checker cannot constant-fold it
+ * away, the same "own_arith_exit" rationale above): a real `IDivS` reaches the guard, not a
+ * compile-time-collapsed literal.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_signed_i32_value() -> i64 {
+    mut n: i32 = 4
+    let q1: i32 = 100 to i32 / n
+    if q1 != 25 { return 1 }
+    n = 3
+    let q2: i32 = -100 to i32 / n
+    if q2 != -33 { return 2 }
+    0
+}
+
+/**
+ * f_div_unsigned_u32_value — the guard's "ok" path on an UNSIGNED `u32` `/`: `lower_div_zero_guard`
+ * emits the SAME zero-check ahead of `IDivU` (never `IDivS`) so an unsigned dividend near
+ * `u32::MAX` still divides in the unsigned domain, not sign-extended.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_unsigned_u32_value() -> i64 {
+    mut n: u32 = 7 to u32
+    let q: u32 = 4294967295 to u32 / n
+    if q != 613566756 to u32 { return 1 }
+    0
+}
+
+/**
+ * f_rem_signed_i32_value — the guard's "ok" path on a SIGNED `i32` `%` (`IRemS`): the remainder's
+ * sign follows the DIVIDEND (Teko's truncating `%`, mirroring C), over both a positive and a
+ * negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_signed_i32_value() -> i64 {
+    mut n: i32 = 9
+    let r1: i32 = 100 to i32 % n
+    if r1 != 1 { return 1 }
+    n = 9
+    let r2: i32 = -100 to i32 % n
+    if r2 != -1 { return 2 }
+    0
+}
+
+/**
+ * f_rem_unsigned_u32_value — the guard's "ok" path on an UNSIGNED `u32` `%` (`IRemU`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_unsigned_u32_value() -> i64 {
+    mut n: u32 = 9 to u32
+    let r: u32 = 4294967295 to u32 % n
+    if r != 3 to u32 { return 1 }
+    0
+}
+
+/**
+ * f_div_signed_i64_value — the guard's "ok" path at the WIDE `i64` `/` width, the SAME width the
+ * guard's zero-materialization (`const_int_inst`) must match bit-for-bit against, over both a
+ * positive and a negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_signed_i64_value() -> i64 {
+    mut n: i64 = 4
+    let q1 = 100 / n
+    if q1 != 25 { return 1 }
+    n = 3
+    let q2 = -100 / n
+    if q2 != -33 { return 2 }
+    0
+}
+
+/**
+ * f_div_unsigned_u64_value — the guard's "ok" path at the WIDE `u64` `/` width, over a dividend
+ * past `i64::MAX` (only meaningful in the unsigned domain — `IDivU`, never `IDivS`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_div_unsigned_u64_value() -> i64 {
+    let u64_max: u64 = 18446744073709551615
+    mut n: u64 = 7 to u64
+    let q: u64 = u64_max / n
+    if q != 2635249153387078802 to u64 { return 1 }
+    0
+}
+
+/**
+ * f_rem_signed_i64_value — the guard's "ok" path at the WIDE `i64` `%` width, over both a
+ * positive and a negative dividend.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_signed_i64_value() -> i64 {
+    mut n: i64 = 9
+    let r1 = 100 % n
+    if r1 != 1 { return 1 }
+    n = 9
+    let r2 = -100 % n
+    if r2 != -1 { return 2 }
+    0
+}
+
+/**
+ * f_rem_unsigned_u64_value — the guard's "ok" path at the WIDE `u64` `%` width, over a dividend
+ * past `i64::MAX` (only meaningful in the unsigned domain — `IRemU`, never `IRemS`).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_rem_unsigned_u64_value() -> i64 {
+    let u64_max: u64 = 18446744073709551615
+    mut n: u64 = 9 to u64
+    let r: u64 = u64_max % n
+    if r != 6 to u64 { return 1 }
+    0
+}
+
+/**
+ * f_compound_div_assign_value — the guard's "ok" path reached through a COMPOUND `/=` on a plain
+ * `mut` local (`teko::lir::lower_assign_simple`'s own call to `lower_div_zero_guard`, a SEPARATE
+ * call site from the plain-`/` one `f_div_signed_i64_value` exercises).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_compound_div_assign_value() -> i64 {
+    mut x: i64 = 100
+    mut n: i64 = 3
+    x /= n
+    if x != 33 { return 1 }
+    0
+}
+
+/**
+ * f_compound_rem_assign_field_value — the guard's "ok" path reached through a COMPOUND `%=` on a
+ * STRUCT FIELD (`teko::lir::store_assign_value`'s own call to `lower_div_zero_guard`, the THIRD
+ * and last call site — distinct from both the plain-`/` and the local-`/=` ones above).
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_compound_rem_assign_field_value() -> i64 {
+    mut h = DivGuardHolder { v = 107 }
+    mut n: i64 = 10
+    h.v %= n
+    if h.v != 7 { return 1 }
+    0
+}
+
+/**
+ * f64_bits_of — the raw IEEE-754 bit pattern (as `u64`) of one of THREE runtime-selected `f64`
+ * magnitudes, including a NEGATIVE one (the sign bit set) — built from a plain integer `tag`
+ * rather than an `f64` literal/ALU op/compare, since every other path onto an `f64` value is the
+ * SEPARATE `B1-fp` honest-stop family (`isel_x86_64.tks`) this fixture does not exercise; only
+ * `f64_bits`/`f64_from_bits` (0.3.1.0 degrau 24) themselves are under test here.
+ *
+ * @param tag  0 selects 3.0's bits, 1 selects 2.0's, anything else selects -2.0's
+ * @return     the selected magnitude's bit pattern
+ */
+fn f64_bits_of(tag: i64) -> u64 {
+    if tag == 0 { return 4613937818241073152 }
+    if tag == 1 { return 4611686018427387904 }
+    13835058055282163712
+}
+
+/**
+ * f_f64_bits_roundtrip — 0.3.1.0 degrau 24: `teko::f64_bits`/`teko::f64_from_bits` round-trip
+ * THREE runtime bit patterns through `f64` and back, with every producer VALUE kept LIVE AT THE
+ * SAME TIME as its siblings (`a`/`b`/`c` are all still needed when the LAST `f64_bits` reads its
+ * own value back) — the exact shape that would have SILENTLY read the WRONG value back had either
+ * builtin lowered to a real call to its `tk_f64_bits`/`tk_f64_from_bits` runtime twin instead: with
+ * no `f64`-class argument/return handling yet (`pin_args_x86`/`select_call_result_x86`, both still
+ * GPR-only pending `B1-fp`), a real call would have carried the value through the single physical
+ * XMM0 register, so a SECOND live `f64` would silently clobber the first the moment it was
+ * produced — a measured scratch repro confirmed exactly that corruption. The fix instead lowers
+ * both builtins as a bare VReg alias (no call at all), so ordinary register allocation — which
+ * already keeps any number of plain integer values alive correctly — carries every one of
+ * `a`/`b`/`c` to its own read-back untouched.
+ *
+ * @return 0 when every one of the three round-trips (and the negative sign bit) reads back
+ *         correctly, else the number of the failing check
+ */
+fn f_f64_bits_roundtrip() -> i64 {
+    let a = teko::f64_from_bits(f64_bits_of(0))
+    let b = teko::f64_from_bits(f64_bits_of(1))
+    let c = teko::f64_from_bits(f64_bits_of(2))
+    let ba = teko::f64_bits(a)
+    let bb = teko::f64_bits(b)
+    let bc = teko::f64_bits(c)
+    if ba != f64_bits_of(0) { return 1 }
+    if bb != f64_bits_of(1) { return 2 }
+    if bc != f64_bits_of(2) { return 3 }
+    if (bc & 0x8000000000000000) == 0 { return 4 }
+    if (ba & 0x8000000000000000) != 0 { return 5 }
+    0
+}

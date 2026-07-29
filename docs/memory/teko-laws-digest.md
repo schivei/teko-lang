@@ -545,3 +545,61 @@ nada.
 `join` achatado hoje não fecha a porta ao `errors.Join` verdadeiro do Go (com `Unwrap() []error`).
 Precisamente porque a fábrica esconde o layout, crescê-lo depois não toca em código de utilizador.
 Adiado, não descartado — e adiado sem juros.
+
+## Lei — cross-compiling SIM, mingw NUNCA (dono, 2026-07-29)
+
+Palavras dele, sobre a descoberta de que o CI instalava mingw de propósito:
+
+> queremos sim Cross compiling quando todos os natives estiverem funcionando, mas não quero saber de
+> mingw.
+
+Duas metades, e a segunda não espera pela primeira.
+
+### A proibição já existia e cobria só metade do compilador
+
+`src/build/linker.tks` implementa-a bem — `linker_is_mingw`, `mingw_rejected_error`,
+`resolve_linker` que nunca devolve `"cc"`. Mas medi: `linker_is_mingw|resolve_linker` **não aparece
+em nenhum ficheiro fora de `linker.tks`**. Ela guarda a rota NATIVA e mais nada.
+
+A rota C nunca foi guardada, e por isso passou por mingw em **dois** sítios, ambos medidos em log de
+CI, não inferidos:
+
+1. **O runner Windows.** `resolve_cc` devolve `"cc"` por padrão em todo host, e o passo de
+   diagnóstico imprimiu `cc /c/mingw64/bin/cc`. Com o Windows em `fixpoint_backend=c`, o binário que
+   publicamos e o corpus que ele compila saíam por mingw — e o clang da imagem nem era usado.
+2. **A perna Linux `regressor-full`.** `.github/workflows/pr.yml` instalava
+   `gcc-mingw-w64-x86-64` **deliberadamente**, para servir a linha
+   `own_cross_x86_64_windows_emits_coff`.
+
+### O segundo sítio não precisava de mingw para nada
+
+A linha que supostamente exigia o cross-linker é:
+
+```
+Scenario: own_cross_x86_64_windows_emits_coff (0.3.1 C5 — the object is the claim)
+  Given target = "x86_64-windows"
+  When built
+  Then object well-formed
+```
+
+Sem `and run`, sem `Then exit`. **A afirmação é o objeto**, e o próprio nome do cenário o diz. O
+`scripts/check_coff.sh` é cross-format por desenho. Provar que um `.o` é COFF bem formado não pede
+linker nenhum — o mingw estava lá porque o `When built` linkava, não porque a linha o conferisse.
+
+A lição, que é a desta lane inteira: **uma capacidade instalada para satisfazer um passo é sinal de
+que o passo afirma mais do que verifica.** Antes de instalar a ferramenta, leia a afirmação.
+
+### Porque clang-com-alvo-MSVC e não `cl.exe`
+
+O emissor de C usa 49 statement-expressions `({ ... })` mais `__builtin_`/`__attribute__`. O C23
+padronizou `typeof` mas **não** as statement-expressions, e o `cl.exe` rejeita-as. O clang aceita-as
+mesmo com `--target=x86_64-pc-windows-msvc`, porque quem compila é o clang e a MSVC entra só como
+headers/libs/linker. Trocar para `cl.exe` obrigaria a reescrever os 49 sítios; o dono decidiu não
+pagar isso agora.
+
+### O que fica para depois, e com que instrumento
+
+Cross-link completo (Linux → binário Windows) sem mingw exige o **linker próprio** que o dono
+planeia para uma versão adiante. Até lá, o cross honesto é: emitir o objeto, validar o formato,
+parar. Adiado por ordem explícita — *"quando todos os natives estiverem funcionando"* — não por
+incapacidade.

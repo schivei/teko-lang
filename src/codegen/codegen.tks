@@ -2764,6 +2764,54 @@ fn emit_div_mod(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinar
     cb(out, ")")
 }
 
+/**
+ * emit_div_mod_assign — F3 (M.1)'s compound-assignment twin of `emit_div_mod`: `/=`/`%=`
+ * rewritten as `lvalue = tk_div_<w>(lvalue, rhs)` / `tk_mod_<w>(lvalue, rhs)`, the SAME
+ * zero-divisor-panicking runtime helper the binary `/`/`%` operator already routes through.
+ * Without this rewrite the raw C `/=`/`%=` compound operator falls straight to hardware
+ * division — an x86-64 SIGFPE by ISA accident, never the deliberate panic the plain-operator
+ * form already guarantees — exactly the gap `emit_assign`'s `<<=`/`>>=` rewrite already closed
+ * for the UB-prone raw shift (#61). Safe to evaluate the lvalue twice: the assign-statement
+ * grammar (`parse_stmt`) admits only two lvalue shapes here — a bare identifier, or (when
+ * `a.deref`) a `Ref<T>` handle's `(*name)` dereference — both pure, side-effect-free symbol
+ * lookups (the same justification the `<<=`/`>>=` rewrite already relies on).
+ *
+ * @param buf       the output buffer to append into (already carries the statement's indent)
+ * @param prog      the whole checked+lowered program (threaded to `emit_assign_lvalue`)
+ * @param a         the typed compound assignment (`op` is `/=` or `%=`)
+ * @param escaping  the enclosing function's escaping-name set (threaded to `emit_expr_ctx`)
+ * @param regions   the enclosing region-frame stack (threaded to `emit_expr_ctx`)
+ * @param fn_body   the enclosing function's own statement list (threaded to `emit_expr_ctx`)
+ * @param dctx      the enclosing defer context (threaded to `emit_expr_ctx`)
+ * @return          `buf` with the rewritten statement appended, or a propagated error
+ * @throws          when the target's declared type is not primitive/numeric, or `%=` targets
+ *                  a float (no C float modulo operator)
+ */
+fn emit_div_mod_assign(buf: []byte, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let prim = match a.bound {
+        checker::Prim as p => p
+        _ => return error { message = "codegen: division/modulo-assign on a non-primitive type not yet supported" }
+    }
+    if a.op == lexer::TokenKind::PercentEq && cg_prim_is_float(prim.kind) {
+        return error { message = "codegen: modulo-assign on a float type is not allowed" }
+    }
+    let tag = match prim_div_tag(prim.kind) {
+        str as t => t
+        error => return error { message = "codegen: division/modulo-assign on a non-numeric type not yet supported" }
+    }
+    let fn_prefix = if a.op == lexer::TokenKind::SlashEq { "tk_div_" } else { "tk_mod_" }
+    mut out = match emit_assign_lvalue(buf, prog, a) { []byte as o => o; error as err => return err }
+    out = cb(out, " = ")
+    out = cb(out, fn_prefix)
+    out = cb(out, tag)
+    out = cb(out, "(")
+    out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+    out = cb(out, ", ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ")")
+    cb(out, ";\n")
+}
+
 // emit_arith — C7.15: the `+`, `-`, `*` path for INTEGER prims.
 // Routes through tk_add_*/tk_sub_*/tk_mul_* helpers (teko_rt.h C7.15 block).
 // When TEKO_OVERFLOW_DEBUG is set these call tk_panic_overflow() on overflow;
@@ -8389,6 +8437,9 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
         out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
         out = cb(out, ")")
         return cb(out, ";\n")
+    }
+    if a.op == lexer::TokenKind::SlashEq || a.op == lexer::TokenKind::PercentEq {
+        return emit_div_mod_assign(out, prog, a, escaping, regions, fn_body, dctx)
     }
     // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle `r` IS the pointer, so the
     // lvalue is `(*r)`. (`Ref<T>` lowers to a bare `<T> *`; deref-assign is a plain C pointer store.)
