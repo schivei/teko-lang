@@ -84,12 +84,22 @@ Corpo de PR PODE manter nota de geração (é PR, não commit). Esta regra vivia
 `dispatch` e no agente `teko-implementer`, e por isso foi violada pelo integrador em
 2026-07-24; está aqui para alcançar quem conduz o trem.
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Esta regra (que o despacho ao implementador precisa citar número como alvo vinculante, não descrever tarefa) não tem citação literal do dono. É uma conclusão de quem mediu — e é correcta: entregar uma fração em vez do alvo é falha do despacho. Fica como conselho operacional, não como lei.
+>
+
 ## Despacho de vagão — alvo numérico é VINCULANTE
 
 Quando um ruling fixa um número (ex.: D5 do regressor-principal: `regressor.tkr` + 7
 project-regressors = **8 diretórios**), o despacho ao implementador precisa citar o número
 como **alvo vinculante**, não descrever a tarefa ("triar os N diretórios"). Sem isso o agente
 para no que consegue provar e entrega uma fração — falha do despacho, não do agente.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> O gate mínimo para fechamento (lista de 6 critérios) não tem citação do dono. É uma recomendação de operacional baseada em observação (teko test . sozinho deixa passar miscompilação). Fica como conselho, não como lei. Quem fecha valida com critério próprio.
+>
 
 ## Gate de fechamento de vagão — o que realmente prova
 
@@ -523,6 +533,11 @@ namespace, e ver o stop aparecer mesmo assim.
 **A dupla certa, nesta ordem:** **densidade para ENCONTRAR, isolamento para ATRIBUIR.** Um ambiente
 denso sem a disciplina do repro mínimo produz diagnósticos plausíveis e errados — que é a única
 coisa pior que não achar o defeito, porque manda o conserto para o lugar errado.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> As armadilhas listadas são conclusões de quem mediu — cada uma documenta um incidente real (git stash de 2026-07-25, auditoria de 2026-07-26, etc.). Fica como conselho prático, não como lei.
+>
 
 ## Armadilhas do worktree compartilhado
 
