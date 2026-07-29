@@ -145,7 +145,7 @@ the C compiler. That evaluator is the new machine this design introduces.
 
 ### 3.1 Layer 1 — const evaluation + propagation  [owner 2026-07-19, MANDATE]
 
-The provably-const subset, folded to literals in the Teko compiler so **both** engines
+The provably-const subset, folded to literals in the Teko compiler so rota C e backend nativo
 see the literal.
 
 **Layer 1a — the evaluator + expression fold.** A new comptime value domain
@@ -468,7 +468,7 @@ let m = x & MASK_ALL_U64                    // → `x & 0xFFFFFFFFFFFFFFFF` (no 
 
 // B — local let, provably const, propagated + folded (Layer 1b). The canonical case.
 let a: u64 = 0xFF
-let hi = a >> 4                             // → literal 0x0F  (both engines, zero runtime)
+let hi = a >> 4                             // → literal 0x0F  (rota C e backend nativo, zero runtime)
 
 // C — interpolation + static spec folded to a rodata literal (Layer 2). Canonical.
 let a: u64 = 0xFF
@@ -539,12 +539,12 @@ for exit-code parity. The differential principle: a folded program and its unfol
 twin produce **identical observable output** (the fold is behavior-preserving), while
 the arena probe shows the runtime ops gone.
 
-| Fixture | Where | Input | Expected (both paths) |
+| Fixture | Where | Input | Expected (rota C e backend nativo) |
 |---|---|---|---|
 | fold-scalar | `src/checker/comptime_fold_test.tkt` | `const M: u64 = ~(0 to u64); use M & x` | `eval_const(M)==0xFFF…F`; program exit 0; folded literal present |
-| fold-overflow-const | `comptime_fold_test.tkt` | `const B: u8 = 200 + 100` | **compile error** at `file:line:col` (M.1); exit ≠ 0, both paths reject |
+| fold-overflow-const | `comptime_fold_test.tkt` | `const B: u8 = 200 + 100` | **compile error** at `file:line:col` (M.1); exit ≠ 0, rota C e backend nativo reject |
 | fold-div0-const | `comptime_fold_test.tkt` | `const D: u64 = 1 / (1 - 1)` | **compile error** (÷0 seen at comptime); exit ≠ 0 |
-| fold-local-let | end-to-end `.tkp` | `let a: u64 = 0xFF; let hi = a >> 4; print(hi)` | prints `15`; folded literal; exit 0 (both paths) |
+| fold-local-let | end-to-end `.tkp` | `let a: u64 = 0xFF; let hi = a >> 4; print(hi)` | prints `15`; folded literal; exit 0 (rota C e backend nativo) |
 | fold-interp-hex | end-to-end `.tkp` | `let a: u64 = 0xFF; print($"{a:X}")` | prints `FF`; emitted `TStrLit`, **no** `tk_str_concat`/`tk_fmt_x_upper` in output; exit 0 |
 | fold-tindex-const | end-to-end `.tkp` | `const G: []byte = [0x1F to byte, 0x8B to byte]; print(G[0] to u64)` | prints `31`; folded literal; exit 0 |
 | noflod-runtime-bind | end-to-end `.tkp` | `const line = read_line(stdin); print($"{line:X}")` (E) | stays runtime; output identical to today; exit 0 |
@@ -713,7 +713,7 @@ LOCAL (the canonical `let a`)?**
 §2/§4.3 and the CF4 task brief both assume that by the time the fold sees `G[0]`, the
 module const `G` has already been substituted to its `[..]` array-literal in place, so
 `eval_const` only has to evaluate a `TArrayLit` receiver. **That assumption is FALSE for
-the pipeline that feeds both engines.** Ground truth on this branch:
+the pipeline that feeds rota C e backend nativo.** Ground truth on this branch:
 
 - `inline_consts` (`consteval.tks:531`) = `fold_program(propagate_locals(substitute_module_consts(prog)))`.
 - `substitute_module_consts` inlines **scalar consts only** (`inline_place_item`,
@@ -727,7 +727,7 @@ the pipeline that feeds both engines.** Ground truth on this branch:
   (`intern_aggregate_consts`, `lower_const.tks:690`), never inlines it.
 
 **Therefore, inside the fold, `G[0]`'s receiver is a `TVar G`, not a `TArrayLit`.** For
-fixture D to fold on **both** engines, `eval_const`'s `TIndex` arm must resolve the
+fixture D to fold on rota C e backend nativo, `eval_const`'s `TIndex` arm must resolve the
 `TVar` receiver to the aggregate const's collapsed initializer through a threaded
 **module-aggregate map**. We must NOT reuse `inline_aggregate_consts` in the fold
 pipeline: inlining every aggregate ref would materialise per-use clones on the LIR/native
@@ -958,7 +958,7 @@ CF4b RITUAL.**
 
 ### 13.5 Regression fixtures + `.tkt` tests to add
 
-| Fixture | Where | Input | Expected (both paths) |
+| Fixture | Where | Input | Expected (rota C e backend nativo) |
 |---|---|---|---|
 | eval-index-unit | `src/checker/comptime_fold_test.tkt` | `eval_const` of `G[0]`, `G[1]` over a hand-built `AggConstMap` for `const G: []byte = [0x1F,0x8B]` | `eval_const` → `CVInt(0x1F)`, `CVInt(0x8B)` |
 | index-oob-error | `comptime_fold_test.tkt` | `eval_const` of `G[2]` (len 2) | **located compile error** (M.1); not a wrap, not a panic-shape |

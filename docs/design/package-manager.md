@@ -754,7 +754,7 @@ Parse `[tools]` into a parallel `tool_specs: []DepSpec`.
   - `D3` `baz = { git = "https://…", tag = "v1.0" }` → `GitSource{git_ref="v1.0"}`; exit 0.
   - `D4` `[tools]` entry parses into `tool_specs`, distinct from `dep_specs`; exit 0.
   - `D5` malformed inline table (`{ path = }`) → honest error; exit non-zero.
-- **Ritual:** FULL GATE — `manifest.tks` is production code the compiler reads; both engines +
+- **Ritual:** FULL GATE — `manifest.tks` is production code the compiler reads; rota C e backend nativo +
   byte-identity + fixpoint gen1==gen2 (the compiler self-builds through the manifest parser).
 
 ### Crumb C4 — `.tkh` manifest block (PK-codec)
@@ -772,7 +772,7 @@ accessor. This is the codec change that lets the resolver read dep edges from th
     `header_manifest` and yields the declared deps; exit 0.
   - `H4` a version-1 `.tkh` (no manifest block) → honest "unsupported/legacy .tkh" OR forward-read
     with an empty manifest (decide at implementation; the honest-stop is acceptable); exit as designed.
-- **Ritual:** FULL GATE — touches the serializer; both engines + byte-identity + **fixpoint**
+- **Ritual:** FULL GATE — touches the serializer; rota C e backend nativo + byte-identity + **fixpoint**
   (the codec is exactly where byte-identity regressions hide).
 
 ### Crumb C5 — the flat single-aligned resolver (PK2)
@@ -788,10 +788,10 @@ declared interface fed by an in-memory fixture today and by the real store when 
   - `R2` conflict A→C(`<1.5`), B→C(`>=1.5`) → BUILD ERROR naming both imposers; exit non-zero.
   - `R3` cycle A→B→A → honest build error (no hang); exit non-zero.
   - `R4` `order` is leaves-first (Kahn): for A→B→C, `order` = [C, B, A]; exit 0.
-  - `R5` single-aligned canonicity: two deps both requiring `Foo<i64>` from C resolve to the SAME
+  - `R5` single-aligned canonicity: two deps requiring `Foo<i64>` from C resolve to the SAME
     C instance → one canonical stamped type (ties to #180 F1/F5 byte-identity); exit 0.
 - **Ritual:** FULL GATE after the resolver is wired into the build (compiler behavior change);
-  both engines + byte-identity + fixpoint. (The resolver logic alone, tested over in-memory
+  rota C e backend nativo + byte-identity + fixpoint. (The resolver logic alone, tested over in-memory
   stores, gates rota C e backend nativo without the fixpoint dependency until it is wired.)
 
 ### Crumb C6 — `teko.lock` (PK3)
@@ -809,7 +809,7 @@ sha256_of; already exists in `src/crypto/hash.tks` #194-204). FNV is used ONLY f
     integrity error (tamper detected); exit non-zero.
   - `L3` (native) lockfile present + matches → build re-uses pinned versions, output byte-identical
     to the no-lock build (reproducibility); exit 0.
-- **Ritual:** FULL GATE (production build path); both engines + byte-identity + fixpoint.
+- **Ritual:** FULL GATE (production build path); rota C e backend nativo + byte-identity + fixpoint.
 
 ### Crumb C7 — wire resolution into the build cache + CLI (PK5, into #180)
 
@@ -825,7 +825,7 @@ not yet merged it is design-ahead against #180's declared seam.
   - `C7c` `teko clean` → `<target>/.teko-cache/` removed; `<stem>` + `<stem>.c` + the store remain;
     idempotent re-run exits 0 (F7).
   - `C7d` the read-only store is not mutated during a build (F9); exit 0.
-- **Ritual:** FULL GATE (the whole native build path) — both engines + byte-identity + **fixpoint
+- **Ritual:** FULL GATE (the whole native build path) — rota C e backend nativo + byte-identity + **fixpoint
   gen1==gen2** is the wall for the "don't-recompile-from-source" invariant (§2.6). Register that
   the self-host does NOT exercise cross-package generics (the compiler is single-package) — the
   resolver/lockfile fixtures are the only coverage there; the ritual proves no regression but does
@@ -844,11 +844,11 @@ build to a native exe now.
   - `T3` (native) a `path=` tool builds to a native exe; exit 0.
   - `T4` (native) a REMOTE-registry `[tools]` entry → honest-stop "requires signature verification
     (PK7)"; exit non-zero.
-- **Ritual:** FULL GATE (production build dispatch touched); both engines + byte-identity + fixpoint.
+- **Ritual:** FULL GATE (production build dispatch touched); rota C e backend nativo + byte-identity + fixpoint.
 
 ### Ritual summary
 
-The **full gate** (both engines · paranoid · diff_vm_native · parity · fixpoint gen1==gen2) is
+The **full gate** (rota C e backend nativo · paranoid · diff_vm_native · parity · fixpoint gen1==gen2) is
 mandatory at crumbs **C3, C4, C5, C6, C7, C8** — every crumb that touches production compiler code
 or the serializer. C1/C2 are pure additive logic (rota C e backend nativo build must pass; no fixpoint
 dependency). The serializer crumb (C4) and the cache-wire crumb (C7) are the two where

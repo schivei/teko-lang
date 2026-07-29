@@ -36,8 +36,7 @@ Author: architect. Implementer executes the crumb sequence in order.
    middle of code* (conditions, indices, offsets, masks, sizes, file magic, section
    flags) must also become named `const` / `enum` / `flags`.
 4. Some families become `enum` or `flags`, not scalar `const`.
-5. Behavior-preserving, proven by **fixpoint gen1==gen2** + both execution paths
-   (C rota and native backend) tests + 100% coverage of the delta.
+5. Behavior-preserving, proven by **fixpoint gen1==gen2** + rota C e backend nativo tests + 100% coverage of the delta.
 6. **Three placements** (owner clarification 2026-07-15, from the issue body): `const`
    is placement-polymorphic — LOCAL, MODULE, and TYPE-MEMBER. See §0.1.
 
@@ -646,7 +645,7 @@ rodata-`LGlobalAddr` base across the 4 encoders — expected to already hold
 
 **Tier B: NOT zero-backend.** It is a dedicated phase touching the 3 native
 encoders (patch-site section tag), the ELF/Mach-O/COFF writers (a data-section
-relocation), and the wasm data emitter (emit-time offsets). Sequenced in §8 (crumbs T-B1..T-B5), gated by the same
+relocation), and the wasm data emitter (emit-time offsets). Sequenced in §8 (crumbs T-B1..T-B6), gated by the same
 fixpoint + golden bytes. **Only needed to convert pointer-bearing aggregate
 factories (ABI descriptors); the owner's ~50 do not require it.**
 
@@ -733,7 +732,7 @@ pointer): they materialize in `m.rodata` at the feature baseline (D2, RULING 1).
 are converted:
 
   `[]u32` slice fields (`abi_aapcs64.tks:14`). Full rodata materialization needs a
-  data→data reloc (§5.1) → deferred behind crumbs T-B1..T-B5, OR legitimately stay
+  data→data reloc (§5.1) → deferred behind crumbs T-B1..T-B6, OR legitimately stay
   `fn` (a genuine pointer-bearing aggregate whose per-call construction is honest
   until data-relocs exist). Recommend: **convert after T-B lands**; until then they
   stay `fn` with a `// #594 Tier-B: awaits data-reloc` doc-note.
@@ -834,7 +833,7 @@ decides. The `*_empty()` factories are never touched (they are not constants).
 ## 8. Ordered crumb sequence (each: step · shapes · fixtures · ritual)
 
 Each crumb is independently gate-able. The **ritual point** is where the FULL gate
-(both engines + `.tkt` + fixpoint gen1==gen2 + 100% delta coverage) must pass.
+(rota C e backend nativo, `.tkt`, fixpoint gen1==gen2, 100% delta coverage) must pass.
 Bootstrap-seed rule: `const` must be usable by the corpus only *after* it lands in
 the seed — so the FEATURE crumbs (1–8) land and become part of the released seed
 BEFORE the MIGRATION crumbs (9+) and the RULING-2 encoder sweep (S*) may use
@@ -904,7 +903,7 @@ bumps are the mechanism for making each increment available to the corpus.
 - **Shapes:** §4.7 `inline_consts` (scalar arm); call it in the checker pipeline
   after `monomorphize`, before lowering; `lower_item` defensive `TConstDecl` no-op.
 - **Fixtures (rota C e backend nativo):** `const K: i64 = 41; fn main() { print(K + 1) }` prints
-  42 on both execution paths; the lowered LIR contains NO reference to `K` and NO `LGlobal`
+  42 on rota C e backend nativo; the lowered LIR contains NO reference to `K` and NO `LGlobal`
   (assert `m.globals.len == 0`); nested `const B = A + 1; const A = 1; … B` folds.
 - **Ritual:** full gate + `m.globals.len == 0` assertion. Scalar keystone.
 
@@ -917,7 +916,7 @@ bumps are the mechanism for making each increment available to the corpus.
   is passed by value). `inline_consts` routes aggregate references to the rodata
   symbol instead of substituting a literal.
 - **Fixtures (rota C e backend nativo):** `const M: MReg = preg(0, MRegClass::GPR)` referenced
-  N times emits **ONE** rodata entry, all uses read identical bytes on both execution paths;
+  N times emits **ONE** rodata entry, all uses read identical bytes on rota C e backend nativo;
   `gzip_magic: []byte` → 2 bytes in rodata, header at use, byte-identical;
   `ret_inst: MInst = MRet {}` round-trips; assert `m.globals.len == 0` still holds
   (rodata, NOT globals — no honest-stop reachable); assert `LFieldAddr` accepts an
@@ -948,7 +947,7 @@ bumps are the mechanism for making each increment available to the corpus.
   the `TypeDecl` body's `consts` list); `seed_from_dep` surfaces `pub`/`exp` module +
   member consts.
 - **Fixtures:** module `m1` exports `pub const P: u32 = 0x78` and `type T = struct {
-  exp const Q: u32 = 9 }`; `m2` uses `m1::P` and `m1::T::Q` → compiles, both engines
+  exp const Q: u32 = 9 }`; `m2` uses `m1::P` and `m1::T::Q` → compiles, rota C e backend nativo
   (scalar inlined in `m2`); a `pub const A: MReg = …` aggregate re-materializes ONE
   rodata entry per consuming module; a non-`pub`/`exp` const used cross-module →
   visibility error.
@@ -972,7 +971,7 @@ bumps are the mechanism for making each increment available to the corpus.
   → `RAX_X86`). File-by-file (math, compress, lir, io, isel_arm64 i128 trio, gzip,
   minst, register consts).
 - **Fixtures:** existing per-module tests keep their exit codes; a golden asserts the
-  migrated value equals the old fn's value (both engines).
+  migrated value equals the old fn's value (rota C e backend nativo).
 - **Ritual:** full gate per file batch (fixpoint gen1==gen2 is the real proof). Each
   merge tags a `-beta` (rolling BUMP #2).
 
@@ -981,13 +980,13 @@ bumps are the mechanism for making each increment available to the corpus.
   ZipMethod`; replace the tag fns; route wire-byte emission through a single
   `match`-driven `_wire` helper so emitted bytes are byte-identical.
 - **Fixtures:** the deflate/inflate/wasm golden byte tests are UNCHANGED and pass
-  (proves wire compatibility); both engines.
+  (proves wire compatibility); rota C e backend nativo.
 - **Ritual:** full gate. Wire-byte identity is the acceptance bar.
 
 ### Crumb 11 — migrate flags families + file magic (6.3)
 - **Step:** `flags ElfSectionFlags/ElfSymInfo/MachoSectionAttr`; named file-magic
   consts. Object-writer golden byte tests must be byte-identical.
-- **Fixtures:** ELF/Mach-O/COFF/wasm object golden tests unchanged; both engines.
+- **Fixtures:** ELF/Mach-O/COFF/wasm object golden tests unchanged; rota C e backend nativo.
 - **Ritual:** full gate.
 
 ### Crumbs S1–S6 — RULING-2 ISA-encoder + writer magic-value sweep (file-by-file)
@@ -1020,14 +1019,14 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
   whose patch site is inside the data section.
 - **T-B4** wasm: compute+write intra-data i32 offsets in the active data segment
   (`objfile_wasm.tks:640`) — no reloc, but new emit-time resolution.
-- **T-B5** [REMOVIDO — interpretador de LIR (`lir_interp.tks:527`): resolve rodata-INTERNAL pointer field to its target rodata base at typed load. Removido com a retirada do interpretador.] **🔑 SEED BUMP #3 after T-B5** — the data-reloc
+- **T-B5** interpretador de LIR (`lir_interp.tks:527`): resolve a rodata-INTERNAL pointer field to its target rodata base at typed load. **🔑 SEED BUMP #3 after T-B5** — the data-reloc
   capability is now in the seed; later crumbs may use pointer-bearing aggregate
   consts. (T-B1..T-B6 may each tag an intermediate `-beta` if a later T-B crumb's
   source uses an earlier one's capability.)
 - **T-B6** migrate the ABI descriptors (`SYSV64`/`AAPCS64`/`WIN64`,
   `UPPER_SNAKE` per D7) and any other pointer-bearing aggregate to rodata consts.
 - **Fixtures:** `const AAPCS64: AbiDescriptor = …` emits ONE rodata blob with data
-  relocs to its `[]u32` leaf arrays; both engines read identical register lists; all
+  relocs to its `[]u32` leaf arrays; rota C e backend nativo leem identical register lists; all
   object goldens updated once, then frozen.
 - **Ritual:** full gate per crumb; regalloc golden tests (they consume the ABI
   descriptors) must be byte-identical after T-B6.
