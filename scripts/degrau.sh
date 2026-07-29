@@ -1,6 +1,10 @@
 #!/usr/bin/env sh
 # scripts/degrau.sh — THE ONE ANSWER TO "IS THERE A DECLARED DEGRAU?", sourced by every script
-# that could otherwise be tempted to read `bootstrap/teko.c` as an INPUT.
+# that could otherwise be tempted to read `bootstrap/teko.c` as an INPUT. It also PUBLISHES the
+# `key: value` parsing kernel (`kv_field`) that `scripts/provenance_gate.sh` reuses for a SIBLING
+# declaration, `bootstrap/PROVENANCE` — one format, one parser, two questions ("is there a rung?"
+# vs "where did this file come from?"). See that gate's header for why they are two files and not
+# one.
 #
 # Owner ruling 2026-07-28: *"só podemos usar teko.c se e somente se identificarmos degrau."*
 #
@@ -60,15 +64,25 @@ DEGRAU_SINCE=""
 
 degrau_log() { printf '%s\n' "degrau: $*" >&2; }
 
-# degrau_field KEY — echoes the first value of `KEY:` in $DEGRAU_FILE, with comments stripped and
+# kv_field FILE KEY — echoes the first value of `KEY:` in FILE, with comments stripped and
 # surrounding blanks trimmed, or the empty string when the key is absent. Blanking a comment rather
-# than dropping the line keeps `c: bootstrap/teko.c   # the wagon-15 C` readable as a value.
-degrau_field() {
-    df_key="$1"
-    sed -e 's/#.*$//' "$DEGRAU_FILE" \
-        | sed -n "s/^[[:space:]]*${df_key}:[[:space:]]*//p" \
+# than dropping the line keeps `c: bootstrap/teko.c   # the wagon-15 C` readable as a value. THE
+# SHARED KERNEL: any script that speaks this repository's `key: value` declaration format sources
+# this file and calls it directly, instead of re-deriving the same three-stage sed pipeline against
+# a file of its own — `degrau_field` below is nothing but this, aimed at $DEGRAU_FILE.
+kv_field() {
+    kf_file="$1"
+    kf_key="$2"
+    sed -e 's/#.*$//' "$kf_file" \
+        | sed -n "s/^[[:space:]]*${kf_key}:[[:space:]]*//p" \
         | sed -e 's/[[:space:]]*$//' \
         | sed -n '1p'
+}
+
+# degrau_field KEY — echoes the first value of `KEY:` in $DEGRAU_FILE. See `kv_field`, which does
+# the actual parsing; this is the DEGRAU-specific specialisation every caller in this file uses.
+degrau_field() {
+    kv_field "$DEGRAU_FILE" "$1"
 }
 
 # degrau_scan [ROOT] — reads the declaration and publishes it in $DEGRAU_C / $DEGRAU_WHY /
