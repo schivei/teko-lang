@@ -1857,6 +1857,110 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n) {
 #endif
 }
 
+// tk_rt_next_nul_token — the next NUL-delimited token in `s`, starting at `*pos` (a VIEW into `s`,
+// never copied); `*pos` advances past the token, and past the delimiting NUL when there is one (the
+// final token in a payload has none, and is bounded by `s.len` instead). The one splitting step
+// every field of tk_rt_spawn_redirected's payload shares (teko_rt.h: TOKEN_SEP/spawn_payload).
+static tk_str tk_rt_next_nul_token(tk_str s, size_t *pos) {
+    size_t start = *pos;
+    size_t i = start;
+    while (i < s.len && s.ptr[i] != '\0') i += 1;
+    tk_str tok = { s.ptr + start, i - start };
+    *pos = (i < s.len) ? i + 1 : i;
+    return tok;
+}
+
+// tk_rt_token_u64 — the decimal value of a NUL-delimited token: the `<argc>`/`<envc>` element-count
+// prefixes tk_rt_spawn_redirected's payload is built from (process.tks: spawn_payload).
+static uint64_t tk_rt_token_u64(tk_str tok) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < tok.len; i += 1) {
+        if (tok.ptr[i] < '0' || tok.ptr[i] > '9') break;
+        v = (v * 10) + (uint64_t)(tok.ptr[i] - '0');
+    }
+    return v;
+}
+
+// tk_rt_read_nul_vector — read a COUNT-prefixed run of `n` NUL-delimited tokens starting at `*pos`
+// into a fresh NULL-terminated `char **` vector (the shape `execvp`/`putenv` want). `n` was already
+// read by the caller (the `<argc>`/`<envc>` prefix) — this only consumes the `n` tokens after it.
+static char **tk_rt_read_nul_vector(tk_str s, size_t *pos, uint64_t n) {
+    char **out = (char **)tk_alloc((n + 1) * sizeof *out);
+    for (uint64_t i = 0; i < n; i += 1) out[i] = tk_cstr(tk_rt_next_nul_token(s, pos));
+    out[n] = NULL;
+    return out;
+}
+
+// (0.3.1.2 — process-half regression harness) tk_rt_spawn_redirected(payload) — see teko_rt.h for
+// the contract and `payload`'s self-describing shape. POSIX opens the three redirection targets in
+// the PARENT (so a relative path resolves against the parent's cwd, not the child's `dir`), forks,
+// and has the CHILD dup2 them onto its own stdin/stdout/stderr before `chdir`+`execvp`; the
+// parent's own copies are closed right after the fork on every path, success or failure, so a
+// later reader of `.out`/`.err` sees EOF once the child is done with them.
+int64_t tk_rt_spawn_redirected(tk_str payload) {
+    size_t pos = 0;
+    uint64_t argv_n = tk_rt_token_u64(tk_rt_next_nul_token(payload, &pos));
+    if (argv_n == 0) return TK_RT_SPAWN_FAILED;
+    char **cargv = tk_rt_read_nul_vector(payload, &pos, argv_n);
+    uint64_t env_n = tk_rt_token_u64(tk_rt_next_nul_token(payload, &pos));
+    char **cenv = tk_rt_read_nul_vector(payload, &pos, env_n);
+    tk_str dir      = tk_rt_next_nul_token(payload, &pos);
+    tk_str in_path  = tk_rt_next_nul_token(payload, &pos);
+    tk_str out_path = tk_rt_next_nul_token(payload, &pos);
+    tk_str err_path = tk_rt_next_nul_token(payload, &pos);
+#ifdef _WIN32
+    char *cdir = dir.len ? tk_cstr(dir) : NULL;
+    char *cin  = in_path.len  ? tk_cstr(in_path)  : NULL;
+    char *cout = out_path.len ? tk_cstr(out_path) : NULL;
+    char *cerr = err_path.len ? tk_cstr(err_path) : NULL;
+    return tk_win32_spawn_redirected(cargv, cdir, cenv, (size_t)env_n, cin, cout, cerr);
+#else
+    int in_fd = -1, out_fd = -1, err_fd = -1;
+    if (in_path.len)  { char *p = tk_cstr(in_path);  in_fd  = open(p, O_RDONLY); }
+    if (out_path.len) { char *p = tk_cstr(out_path); out_fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+    if (err_path.len) { char *p = tk_cstr(err_path); err_fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+    bool dir_is_here = dir.len == 0 || (dir.len == 1 && dir.ptr[0] == '.');
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (in_fd >= 0) close(in_fd);
+        if (out_fd >= 0) close(out_fd);
+        if (err_fd >= 0) close(err_fd);
+        return TK_RT_SPAWN_FAILED;
+    }
+    if (pid == 0) {
+        if (in_fd >= 0)  { dup2(in_fd, STDIN_FILENO); close(in_fd); }
+        if (out_fd >= 0) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
+        if (err_fd >= 0) { dup2(err_fd, STDERR_FILENO); close(err_fd); }
+        for (uint64_t i = 0; i < env_n; i += 1) putenv(cenv[i]);
+        if (!dir_is_here) {
+            char *d = tk_cstr(dir);
+            if (chdir(d) != 0) _exit(127);
+        }
+        execvp(cargv[0], cargv);
+        _exit(127);
+    }
+    if (in_fd >= 0) close(in_fd);
+    if (out_fd >= 0) close(out_fd);
+    if (err_fd >= 0) close(err_fd);
+    return (int64_t)pid;
+#endif
+}
+
+// (0.3.1.2) tk_rt_wait_one(raw) — see teko_rt.h for the contract. POSIX reaps the pid `raw` names
+// through the same `tk_rt_wait_status_code` reading `tk_rt_run` uses, so a signal-killed child
+// reports 128+signo identically whether it was launched through `run` or `spawn_redirected`.
+int32_t tk_rt_wait_one(int64_t raw) {
+    if (raw < 0) return TK_RT_SPAWN_FAILED;
+#ifdef _WIN32
+    return tk_win32_wait_one(raw);
+#else
+    pid_t pid = (pid_t)raw;
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return TK_RT_SPAWN_FAILED;
+    return tk_rt_wait_status_code(status);
+#endif
+}
+
 // Captured process argv (the generated `main` calls tk_set_args before the virtual-main body).
 // tk_g_argc / tk_g_argv are declared near the top (the stack-trace's .tsym loader uses them).
 void tk_set_args(int argc, char **argv) { tk_g_argc = argc; tk_g_argv = argv; }

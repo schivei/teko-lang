@@ -1,15 +1,3 @@
-// src/process/process.tks  (namespace teko::process)
-// C7.5: real extern-fn declarations for the teko::process host surface.
-//
-// The runtime symbol is implemented in src/runtime/teko_rt.c and declared in
-// teko_rt.h. The codegen intercepts calls to `run` by last-segment name (the
-// CG_FFI_RUN path in codegen.c) and lowers the []str slice to the two-word
-// (ptr + len) ABI that tk_rt_run expects — no special lowering is needed here.
-//
-// The VM rejects extern fn calls with vm_unsupported; callers that need
-// `process::run` at test time must compile with `teko build` rather than
-// interpreting with `teko run` (C7.1a contract).
-
 /**
  * run — fork/exec `args[0]` with the given argument vector and wait for it to exit.
  *
@@ -29,7 +17,11 @@
  * exec-failed convention, and a legal choice for a child — three diagnoses wearing one number, and
  * a CI failure reading `exit 127` was therefore unanswerable.
  *
- * The codegen CG_FFI_RUN path splits the `[]str` slice into (ptr, len) before calling `tk_rt_run`.
+ * The `[]str` slice lowers to a (ptr, len) pair before it reaches `tk_rt_run` — the same generic
+ * slice ABI every `extern fn` with a `[]str` parameter uses, `spawn_redirected` included.
+ *
+ * The VM rejects `extern fn` calls with `vm_unsupported`; a caller that needs `teko::process::run`
+ * at test time must compile with `teko build` rather than interpreting with `teko run` (C7.1a).
  *
  * @param args  the argument vector; `args[0]` is the executable
  * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
@@ -48,3 +40,181 @@ pub extern fn run(args: []str) -> i32 = "tk_rt_run" from "teko_rt"
  * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
  */
 pub extern fn run_quiet(args: []str) -> i32 = "tk_rt_run_quiet" from "teko_rt"
+
+/**
+ * SPAWN_FAILED — `TK_RT_SPAWN_FAILED` (src/runtime/teko_rt.h) at the Teko level: the runtime never
+ * got a child running at all, as distinct from any status a real child could report (0..255 for one
+ * that exited, 128+signo for one a signal killed — never negative). Shared by `run`/`run_quiet`'s
+ * own return and by `ProcHandle.raw`/`wait_one`'s.
+ */
+pub const SPAWN_FAILED: i32 = -1
+
+/**
+ * ProcHandle — an opaque handle to a child process `spawn_redirected` launched and that has not yet
+ * been collected by `wait_one`.
+ *
+ * Never a bare pid: on Windows what is held is a process HANDLE and on POSIX a pid, and a raw `i64`
+ * simply called "pid" would be a lie on one of the two. `raw` negative (`SPAWN_FAILED`) means no
+ * child ever started — `wait_one` reads that without blocking.
+ *
+ * A `ProcHandle` may be waited on AT MOST ONCE: POSIX reaps the pid and Windows closes the HANDLE,
+ * so a second `wait_one` on the same value is undefined on both hosts.
+ *
+ * @since 0.3.1.2
+ */
+pub type ProcHandle = struct {
+    /** the host's opaque process reference (pid on POSIX, a HANDLE cast to i64 on Windows). */
+    raw: i64
+}
+
+/**
+ * TOKEN_SEP — the byte every field of `spawn_redirected`'s payload joins on before it crosses the
+ * `extern fn` boundary, and the runtime splits back on. Safe as a universal separator because NONE
+ * of an argv element, an environment token, or a path may itself carry a NUL byte — the OS APIs
+ * underneath (`execvp`, `CreateProcess`, `open`) are NUL-TERMINATED C strings, so a NUL inside any
+ * of these values could never have reached the child anyway.
+ */
+const TOKEN_SEP: str = "\0"
+
+/**
+ * spawn_payload — every one of `spawn_redirected`'s arguments flattened into ONE `str`, the shape
+ * `spawn_redirected_raw` actually crosses the `extern fn` boundary with.
+ *
+ * A SINGLE `str` PARAMETER, NOT SIX, AND THIS IS MEASURED, NOT STYLE. Six `str` parameters checked
+ * cleanly but the native x86-64 backend does not yet spill a call argument past its six-register
+ * window (`isel x86-64: B1-args`) — each `str` is a two-word fat pointer, so six of them need
+ * TWELVE registers where the ABI offers six. One flattened `str` needs exactly one. The payload is
+ * SELF-DESCRIBING (a decimal element count precedes each variable-length list) so the runtime can
+ * split it back out without a second channel: `<argc>` TOKEN_SEP `argv[0]` … `argv[argc-1]`
+ * TOKEN_SEP `<envc>` TOKEN_SEP `env[0]` … `env[envc-1]` TOKEN_SEP `dir` TOKEN_SEP `in_path`
+ * TOKEN_SEP `out_path` TOKEN_SEP `err_path`.
+ *
+ * @param argv      the child's argument vector; `argv[0]` is the executable
+ * @param dir       the child's working directory ("" = the parent's)
+ * @param env       `K=V` tokens appended to the child's inherited environment ([] = inherit only)
+ * @param in_path   the file backing the child's stdin ("" = inherit)
+ * @param out_path  the file backing the child's stdout ("" = inherit)
+ * @param err_path  the file backing the child's stderr ("" = inherit)
+ * @return          the flattened, self-describing payload
+ */
+fn spawn_payload(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> str {
+    mut out = teko::str::u64_to_str(argv.len)
+    mut k: u64 = 0
+    loop {
+        if k >= argv.len { break }
+        out = out ~ TOKEN_SEP ~ argv[k]
+        k = k + 1
+    }
+    out = out ~ TOKEN_SEP ~ teko::str::u64_to_str(env.len)
+    k = 0
+    loop {
+        if k >= env.len { break }
+        out = out ~ TOKEN_SEP ~ env[k]
+        k = k + 1
+    }
+    out ~ TOKEN_SEP ~ dir ~ TOKEN_SEP ~ in_path ~ TOKEN_SEP ~ out_path ~ TOKEN_SEP ~ err_path
+}
+
+/**
+ * spawn_redirected_raw — the runtime symbol `spawn_redirected` wraps: `spawn_payload`'s single-`str`
+ * encoding in, the bare `i64` handle `ProcHandle` wraps out. Kept private so every caller goes
+ * through the typed wrapper.
+ *
+ * @param payload  `spawn_payload`'s encoding of the six logical arguments
+ * @return         the opaque handle, or `SPAWN_FAILED` when no child ever started
+ */
+extern fn spawn_redirected_raw(payload: str) -> i64 = "tk_rt_spawn_redirected" from "teko_rt"
+
+/**
+ * spawn_redirected — launch `argv` WITHOUT waiting for it, with its three standard streams
+ * redirected to the paths the caller names and its working directory set to `dir`.
+ *
+ * This is the primitive that materializes R3 (the parent NAMES the destination, the child writes
+ * there): a "" path inherits the corresponding descriptor of the PARENT, which is what makes a call
+ * with every path empty behave exactly like `run`, minus the wait. `env` tokens (`K=V`) are ADDED to
+ * the child's inherited environment — the parent's own environment is never touched.
+ *
+ * Every redirection target is opened by the PARENT, before the fork/`CreateProcess`, so a RELATIVE
+ * `in_path`/`out_path`/`err_path` resolves against the PARENT's own working directory, never the
+ * child's `dir` — the redirection targets are the parent's concern, the argv's own cwd is the
+ * child's, and the two do not share a base.
+ *
+ * @param argv      the child's argument vector; `argv[0]` is the executable
+ * @param dir       the child's working directory ("" = the parent's)
+ * @param env       `K=V` tokens appended to the child's inherited environment ([] = inherit only)
+ * @param in_path   the file backing the child's stdin ("" = inherit)
+ * @param out_path  the file backing the child's stdout ("" = inherit)
+ * @param err_path  the file backing the child's stderr ("" = inherit)
+ * @return          the child's handle, or a handle with `raw = SPAWN_FAILED` when none started
+ * @since 0.3.1.2
+ */
+pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> ProcHandle {
+    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, in_path, out_path, err_path)) }
+}
+
+/**
+ * wait_one_raw — the runtime symbol `wait_one` wraps: the same bare `i64` handle `ProcHandle.raw`
+ * carries. Kept private so every caller goes through the typed wrapper.
+ *
+ * @param raw  the opaque handle `spawn_redirected_raw` returned
+ * @return     the child's exit status, or `SPAWN_FAILED` when `raw` never named a real child
+ */
+extern fn wait_one_raw(raw: i64) -> i32 = "tk_rt_wait_one" from "teko_rt"
+
+/**
+ * wait_one — block until `h` terminates and return the status it terminated with.
+ *
+ * The status is the CHILD's, with the same reading `run` documents: 0–255 for one that exited,
+ * 128+signo for one a signal killed on POSIX, and the host exit code on Windows, which has no
+ * signals. A number never identifies a panic by itself — a panic identifies itself on stderr, with
+ * the `TK_PANIC_MARKER` line.
+ *
+ * @param h  the handle `spawn_redirected` returned
+ * @return   the child's exit status, or `SPAWN_FAILED` when `h` never named a real child
+ * @since 0.3.1.2
+ */
+pub fn wait_one(h: ProcHandle) -> i32 { wait_one_raw(h.raw) }
+
+/**
+ * VERDICT_CHANNEL_ENV — the environment key naming the THIRD channel (distinct from stdin/
+ * stdout/stderr): a path a child MAY append structured records to that neither its exit code nor
+ * its captured streams carry cleanly — a panic line, an in-flight test index, a coverage image.
+ *
+ * A PATH and not a fourth file descriptor, because POSIX and Windows both offer exactly three
+ * inheritable standard streams and no portable fourth one; a path is the one destination-naming
+ * mechanism both hosts already read the same way, survives the child dying mid-write, and stays on
+ * disk to be read after the fact.
+ */
+pub const VERDICT_CHANNEL_ENV: str = "TEKO_VERDICT_CHANNEL"
+
+/**
+ * verdict_channel_path — the path this process should append its structured records to.
+ *
+ * @return the channel path named by `VERDICT_CHANNEL_ENV`, or "" when the environment names none
+ * @since 0.3.1.2
+ */
+pub fn verdict_channel_path() -> str {
+    match teko::env::var(VERDICT_CHANNEL_ENV) { str as v => v; error => "" }
+}
+
+/**
+ * verdict_emit — append one structured record to the third channel, or print it to stderr when no
+ * channel is named.
+ *
+ * THE FALLBACK IS THE POINT (R0): a binary run by hand, with no `VERDICT_CHANNEL_ENV` in its
+ * environment, still shows every record it emits — the protocol is observable without a flag.
+ *
+ * NOT ATOMIC ACROSS PROCESSES: appending is a read-modify-write of the whole file, correct for the
+ * one writer per channel every caller of this module upholds (a channel path is unique per child),
+ * and wrong for a path two processes write concurrently.
+ *
+ * @param line  one record, WITHOUT a trailing newline (one is added)
+ * @return      nothing on success, or the write failure
+ * @since 0.3.1.2
+ */
+pub fn verdict_emit(line: str) -> null | error {
+    let path = verdict_channel_path()
+    if path.len == 0 { teko::io::eprintln(line); return null }
+    let prior = match teko::io::read_file(path) { str as s => s; error => "" }
+    teko::io::write_file(path, prior ~ line ~ "\n")
+}
