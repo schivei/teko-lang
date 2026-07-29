@@ -975,7 +975,7 @@ through the JS harness.
   match goldens (the riskiest bit — the region reconstruction).
 - After **C1-5** (first END-TO-END module): the whole gate + the first `own-wasm == C-wasm` run on the
   wasm lane (`exit(n)` corpus).
-- The **KEYSTONE full ritual at C1-6**: the whole gate — both engines + fixpoint + the **new wasm
+- The **KEYSTONE full ritual at C1-6**: the whole gate — native (C-wasm + own-wasm) + fixpoint + the **new wasm
   differential leg green under wasmtime** (WASI, **N6a done**).
 - **C1-7** (Browser, **N6b done**): the JS-harness differential green (headless). **#389 CLOSES here.**
 

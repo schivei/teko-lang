@@ -794,9 +794,9 @@ loop extent (FIX 2) fails to produce a valid module for them.
 
 ### 12.4 Ritual points (where the FULL gate must pass)
 - After **C1-3** (the stackifier core, the FIX-1 labeling rule) and **C1-4** (loops, the FIX-2
-  natural-loop extent): full both-engine gate + golden goldens green (these are the riskiest CFG-shape
+  natural-loop extent): full native gate (C-native + own-wasm) + golden goldens green (these are the riskiest CFG-shape
   bits — the two correctness fixes live here).
-- The **KEYSTONE full ritual at C1-8**: the whole gate — both engines + fixpoint + the **new own-wasm
+- The **KEYSTONE full ritual at C1-8**: the whole gate — native (C-native + own-wasm) + fixpoint + the **new own-wasm
   == C-native (== interp) differential leg green under wasmtime** — must pass. **#389 CLOSES here.**
 
 ---
@@ -849,7 +849,7 @@ A1 (done) ─▶ C1-1 ─▶ C1-2 ─▶ C1-3 ─▶ C1-4 ─▶ C1-5 ─▶ C1-
   seam + the `wasm32-wasi` target triple in `src/build/project.tks` (an additive, FIXPOINT-preserving
   target arm), the `wasm-ld` link of `teko_rt.wasm` (§11.4), the wasm leg of `diff_c_own.sh` wiring
   **own-wasm(wasmtime) == C-native == interp** over the corpus (honest-skipped where no wasm engine is
-  present). **Proven by:** the whole gate — both engines + fixpoint + the new differential leg — green.
+  present). **Proven by:** the whole gate — native (C-native + own-wasm) + fixpoint + the new differential leg — green.
   **#389 CLOSES.**
 
 **Files:** new `src/backend/stackify.tks`, `src/backend/objfile_wasm.tks`,

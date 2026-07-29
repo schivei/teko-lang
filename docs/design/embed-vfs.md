@@ -464,7 +464,7 @@ the compiler's own corpus). Sequence: land C1–C5 → 🔑 SEED BUMP → then C
   re-golden every backend/object goldens, **fixpoint gen1==gen2 byte-identical**, native validation (same read/exit outcome), `TEKO_MEM_PARANOID=1`, Javadoc/`//`-audit. C0–C3 are
   byte-inert (no emitted-const change) and prove out on their unit gates + a green full gate.
 - **RITUAL POINT — after C5, before the C5→seed bump:** full gate again; the accessor is now
-  exercised by `embed_test.tkt` round-trips under both engines.
+  exercised by `embed_test.tkt` round-trips natively.
 
 ---
 

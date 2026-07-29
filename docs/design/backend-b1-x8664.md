@@ -825,7 +825,7 @@ exercise (the A4 §8 caveat carries over — no NEW divergence).
   assembler-cross-checked goldens green (the riskiest bit-work).
 - After **B1-7** (ELF writer): full gate + `readelf`/`llvm-readobj` round-trip green on the emitted
   `.o` (runs on any host — machine-free).
-- The **KEYSTONE full ritual at B1-8**: the whole gate — both engines + fixpoint + the **new
+- The **KEYSTONE full ritual at B1-8**: the whole gate — native validation (C-native + own-x86) + fixpoint + the **new
   linux-x86_64 C-vs-own leg green** (executing the ELF) + the macOS byte-test lane green. **#386
   CLOSES here.**
 

@@ -868,7 +868,7 @@ so the rewrite changes source spelling only, not emitted bytes). RITUAL: fixpoin
 `match`/`if x != null`. After this crumb no source uses the legacy forms.
 
 Fixture: `t/error_union_migration.tks` — a representative `null | error` fn
-round-trips success (`null`) and failure (`error`) on both engines; and the whole
+round-trips success (`null`) and failure (`error`) natively; and the whole
 corpus rebuild is byte-identical to its C5 output.
 
 **Crumb 7 — DELETE the dead surface + the `Optional` former. M (net deletion).
