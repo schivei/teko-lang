@@ -58,8 +58,17 @@ reconcilia: docs/memory/parallel-test-harness-0.3.2.md, docs/design/concorrencia
 > *"1. Grafia, prefira `chan<T>` e combina com os outros tipos que são curtos. 2. precisa corrigir,
 > ensinar o native"*
 
-> *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* (HIPÓTESE,
-> não ruling — avaliada e respondida em §6.11)
+> *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* (era
+> HIPÓTESE; foi avaliada em §6.11 e **decidida por R10, abaixo**)
+
+**R10 (2026-07-29) — O RULING QUE FECHA A CAPTURA. Literal:**
+
+> *"Certo, não gosto do recover, mas podemos o ter somente para testes (capturar aborts/panic sem
+> executá-los), o exit ainda acredito ser necessário, mas, tem uma nuance aqui.*
+>
+> *se ao compilar um teste, informar que se trata de teste, pode bifurcar as funções globais de exit
+> e panic (mantendo as diretas de os intactas), assim consegue capturar somente quando rodar em teste
+> com um argumento que só o própio compilador conhece."*
 
 **R8 (2026-07-28), a solução já nomeada para o gate sem C, e que R1/R5/R7 confirmam um ano depois**
 (`docs/design/concorrencia-adiantada-s8.md`, §introdução):
@@ -980,10 +989,15 @@ usada para QUALQUER decisão — ordenar saída, atribuir cobertura, escolher o 
 **a ordem de chegada ao `recv` não pode influenciar nenhum byte de saída.** É afirmada por
 `gate_lanes_output_identical` e por `gate_coverage_lanes_identical`.
 
-### 6.11 A HIPÓTESE DO DONO — "a mesma táctica de recovery do Go". MEDIDA, e a recomendação é NÃO.
+### 6.11 O recovery do Go — MEDIDO, e DECIDIDO: fica FORA. A captura é INTERCEPÇÃO (R10).
 
 > *"a não ser que implementemos a mesma tática de recovery do Go para capturar pânicos"* — dono,
-> 2026-07-29. É hipótese, não ruling, e é avaliada aqui como tal.
+> 2026-07-29. Era hipótese; foi medida (§6.11.1–§6.11.5) e **decidida por R10** (§6.11.6–§6.11.10).
+>
+> **O veredicto, em uma linha:** *"não gosto do recover, mas podemos o ter somente para testes
+> (capturar aborts/panic **sem executá-los**)"* — e "sem executá-los" é o que dispensa o
+> desenrolador por inteiro. A medição abaixo fica porque é ela que sustenta o veredicto: sem ela,
+> "não vale a pena" seria opinião.
 
 **A ideia é boa e o encaixe aparente é melhor do que parece.** Em Go, `recover()` só funciona dentro
 de uma função DIFERIDA, e o Teko **já tem `defer`** — é o único bloco com escopo que a linguagem tem
@@ -1078,45 +1092,159 @@ teste) coincide com a granularidade de recuperação de que o harness precisa. O
 para recuperar NO MEIO de uma pilha e continuar; o harness nunca quer continuar — quer terminar o
 teste e reportá-lo.
 
-#### 6.11.6 A TENSÃO, em texto claro — e é decisão do dono
+#### 6.11.6 A TENSÃO — RESOLVIDA POR R10, e a resolução é melhor do que a recomendação
 
-R7 diz que estas primitivas ficam *"apenas para rodar os testes e conhecidas somente pelo
-compilador"*. **Recovery à Go contradiz essa frase, e não por descuido de desenho: contradi-la é o
-que ela É.**
+A tensão levantada era: R7 quer as primitivas *"apenas para rodar os testes"*, e desenrolamento não se
+esconde do utilizador. **R10 fechou-a, e não escolhendo um dos dois lados que eu apresentei — mudando
+a pergunta.** A frase que o faz é esta:
 
-- Desenrolamento **não se esconde do utilizador**: muda a semântica de `defer`, que é palavra da
-  linguagem que qualquer `.tks` já escreve hoje.
-- `recover()` escondido do utilizador seria pior do que inútil — seria pagar o preço inteiro (pilha
-  de defers em runtime, CFI, protocolo de retoma) e não colher o único ganho que o justifica, que é o
-  utilizador poder recuperar.
+> *"capturar aborts/panic **sem executá-los**"*
 
-Portanto as duas leituras são coerentes e **excluem-se**:
+**Isso não é recuperar. É INTERCEPTAR — e a diferença dispensa o desenrolador inteiro.** Recuperar é
+apanhar um panic em voo e continuar a partir de um frame no meio da pilha; para isso é preciso
+desenrolar. Interceptar é o panic guardado **nunca chegar ao `abort()`**: deposita o veredicto e
+termina a raia. **Não há nada para desenrolar, porque a coisa que desenrolaria nunca acontece.**
 
-| leitura | consequência |
+O dono escolheu interceptar. As três razões de custo que a §6.11.3 mediu deixam de estar em jogo:
+não há pilha de `defer` em runtime, não há CFI/`.eh_frame`, não há protocolo de retoma. A semântica
+de `defer` para o utilizador **não muda uma vírgula**, e `recover` não passa a existir como palavra
+da linguagem.
+
+| | o que R10 mantém | o que R10 apaga |
+|---|---|---|
+| R7 (*"só para testes, só o compilador conhece"*) | **INTACTO** | — |
+| a via da guarda por thread (§6.5) | **é a via escolhida** | — |
+| pilha de `defer` em runtime | — | **fora** |
+| desenrolador (DWARF/CFI ou setjmp) | — | **fora** |
+| protocolo de retoma | — | **fora** |
+| `recover()` como capacidade da linguagem | — | **fora** |
+| mudança na semântica de `defer` | — | **fora** |
+| P-B (captura de `exit`) | **confirmado necessário e SEPARADO** (§6.11.4) | — |
+
+#### 6.11.7 O RULING, e o que ele acrescenta ao desenho de §6.5
+
+**Guarda por thread. Recovery à Go FORA.** A recomendação que esta secção fazia foi ratificada, e R10
+traz uma peça a mais que §6.5 não tinha — a **condição** e a **fronteira**:
+
+> *"se ao compilar um teste, informar que se trata de teste, pode bifurcar as funções globais de exit
+> e panic (mantendo as diretas de os intactas)"*
+
+Ou seja: a bifurcação **não é incondicional**. Ela só existe quando o compilador SABE que está a
+compilar um teste, e as chamadas DIRECTAS ao SO ficam por tocar. As duas metades estão em §6.11.8 e
+§6.11.9, e a segunda tem de estar escrita com nomes — senão alguém bifurca a errada.
+
+**O ganho lateral, e não é pequeno:** com a bifurcação condicionada à compilação de um teste, a
+exigência de §6.5.2 ("fora de uma guarda, o comportamento é byte a byte o de hoje") deixa de ser
+**disciplina** e passa a ser **estrutura**: num binário que não é de teste, o ramo guardado **não é
+emitido**. A fixture `gate_unguarded_panic_is_unchanged` ganha por isso uma forma mais forte — não é
+só a SAÍDA que tem de ser idêntica, é o **BINÁRIO**. Está em §12.
+
+#### 6.11.8 A FRONTEIRA — o que bifurca e o que fica intacto
+
+**O que BIFURCA: as duas funções GLOBAIS, e o compilador já tem essa fronteira desenhada e nomeada.**
+
+`texpr_diverges` (`src/checker/typer.tks`) define-a em uma linha, e o comentário por cima dela usa as
+palavras do dono antes de ele as escrever — *"global builtins panic/exit, unqualified"*:
+
+```teko
+TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
+```
+
+`codegen.tks` tem a mesma linha. **Esta é a definição de "função global" para este efeito**, e não é
+inventada aqui: um caminho de UM segmento chamado `panic` ou `exit`. Adoptá-la significa que a
+bifurcação e a análise de divergência nunca podem discordar sobre o que é uma chamada global.
+
+**Herdam a bifurcação DE GRAÇA, e é isso que se quer** — a família de guardas de runtime, porque
+todas chamam `panic` (`src/runtime/teko_rt.tks`):
+
+| guarda | dispara em |
 |---|---|
-| **R7 vale como está** ("só para testes, só o compilador conhece") | a via da guarda é a única compatível; recovery à Go fica FORA |
-| **R7 cede à hipótese** (o dono quer a capacidade permanente) | então isto deixa de ser carga de harness e passa a ser um **vagão de linguagem**: defers em runtime + desenrolador + `recover` + a re-especificação de `defer`, com o harness como primeiro consumidor e não como motivo |
+| `panic_div0` | divisão por zero |
+| `panic_oob` / `panic_oob_at` | índice fora de limites |
+| `panic_cast` | conversão impossível |
+| `panic_overflow` | overflow inteiro |
 
-#### 6.11.7 RECOMENDAÇÃO
+Um `#test` que faça um acesso fora de limites recebe assim um VEREDICTO em vez de matar a suíte —
+sem uma linha de trabalho extra, porque a bifurcação está no `panic` que todas elas atravessam.
 
-**Guarda por thread agora; recovery à Go NÃO agora — e não por ser má ideia.**
+**O que FICA INTACTO — as directas do SO. Nomeadas, uma a uma:**
 
-Três razões, por ordem de força:
+| # | sítio | o que é | porque NUNCA bifurca |
+|---|---|---|---|
+| 1 | `rt_abort()` — `exp extern fn rt_abort() -> void = "abort" from "c"` (`src/runtime/teko_rt.tks`) | o `abort` da libc, declarado verbatim | é o FUNDO. Se bifurcasse, a bifurcação não teria fundo nenhum e o panic não-guardado deixaria de abortar |
+| 2 | o builtin injectado `abort` (`src/checker/scope.tks`, *"teko::abort — host abort FFI bottom"*) | a mesma coisa, pela via do builtin | quem escreve `abort()` pediu o abort do host, não o panic do Teko. Bifurcá-lo seria mudar o significado de uma chamada directa |
+| 3 | `exit(code)` da libc, dentro de `tk_exit` (`src/runtime/teko_rt.c`) | a saída real do processo | é o FUNDO de P-B, pela mesma razão de (1) |
+| 4 | `_exit(127)` no filho do `fork` após `execvp` falhar (`teko_rt.c`, dois sítios) | a saída do filho que não conseguiu executar | corre **noutro processo**, entre `fork` e `exec`, onde só é legal chamar funções async-signal-safe. Uma bifurcação aqui escreveria numa tabela de guardas que pertence ao PAI |
+| 5 | `_Exit(128 + sig)` em `tk_rt_crash_handler` (`teko_rt.c`) | o "catch" global de §6.5.1 | corre dentro de um handler de SINAL. `_Exit` é async-signal-safe; quase tudo o resto não é. É a última rede, e uma rede que chama código de utilizador deixa de ser rede |
+| 6 | `abort()` na macro de OOM (`src/runtime/teko_rt.h`) | falha de alocação | não há memória para depositar veredicto nenhum |
 
-1. **O custo não é comparável, e a medição diz porquê.** A via Go exige inverter o modelo de `defer`
-   de estático para dinâmico, num compilador que é ele próprio escrito em `defer`, com um backend que
-   ainda não emite `.note.GNU-stack` — quanto mais `.eh_frame` — e que ainda não se auto-compila
-   (para no degrau 8). A via da guarda não toca em código de produção nenhum.
-2. **Ela não fecha o problema.** Não apanha `exit` (§6.11.4). Adoptá-la deixaria P-B por construir na
-   mesma: pagaria o vagão e ainda assim precisaria da via da guarda ao lado.
-3. **A propriedade que se quer já é alcançada** pela granularidade que o dono já escolheu (§6.11.5).
+**A regra que resume as seis, para não ser preciso decorar a tabela:** bifurca-se o que o PROGRAMA
+TEKO chama pelo nome global; não se toca no que o RUNTIME chama para terminar de facto. A fronteira é
+entre a superfície da linguagem e o fundo de FFI — que é exactamente a fronteira que
+`concorrencia-adiantada-s8.md` §4.2 já usa quando diz que o `panic` em Teko *"só toca o host, no
+caminho não-guardado, por `extern fn` para `write` e `abort`"*.
 
-**O gatilho que deve fazer reabrir isto, escrito para não se perder:** no dia em que a linguagem
-quiser recuperação de erro VISÍVEL AO UTILIZADOR — e não meramente testes que não se matam uns aos
-outros — o desenrolador passa a ser necessário por mérito próprio. Nesse dia, **o harness deve ser
-RE-ASSENTE sobre ele, não duplicado**: `gate_guard_begin`/`gate_guard_end` viram um `defer` +
-`recover` sintetizados pelo mesmo `src/build/gate.tks`, e a tabela de guardas desaparece. O desenho
-de §6.5 é deliberadamente pequeno o suficiente para ser deitado fora nesse dia sem lamentar.
+#### 6.11.9 A NUANCE POR FECHAR — a marca é de COMPILAÇÃO ou de EXECUÇÃO?
+
+R10 tem duas metades que apontam para tempos diferentes, e a diferença tem consequências que só o
+dono pode arbitrar:
+
+- *"se ao **compilar** um teste, informar que se trata de teste, pode bifurcar…"* — **tempo de
+  compilação**;
+- *"…assim consegue capturar somente quando **rodar** em teste com um argumento que só o próprio
+  compilador conhece"* — **tempo de execução**.
+
+**As duas leituras, com o que cada uma custa:**
+
+| | **(A) marca de COMPILAÇÃO** | **(B) argumento em EXECUÇÃO** |
+|---|---|---|
+| o que é | o sintetizador compila o binário de gate com a bifurcação DENTRO; um binário normal é compilado sem ela | o binário traz OS DOIS caminhos e escolhe por um argumento que só o compilador sabe passar |
+| binário que não é de teste | **byte-idêntico ao de hoje** — o ramo guardado não existe | também não muda, se o argumento nunca for passado; mas o ramo está lá |
+| binário de teste | tem só o caminho guardado | tem os dois, e um `if` por chamada global |
+| fixpoint | **não sente nada** | também não, desde que o argumento não influencie bytes emitidos (§8.1) |
+| custo em execução | zero | um teste de argumento por `panic`/`exit` — desprezável, mas não nulo |
+| como se esconde do utilizador | **estruturalmente**: não há código para chamar | por o argumento ser secreto — o que é mais fraco: o ramo existe e um binário pode ser invocado à mão |
+| **bloqueio** | **nenhum — executável hoje** | **BLOQUEADA**: exige `teko::env::args()` a funcionar, e §17 mediu que um binário do backend nativo **nem linka** se ler argv (`undefined reference to 'teko_args'`). Só desbloqueia quando `cargo/0.3.1.0-args-native` aterrar |
+
+**A leitura que me parece certa, e apresento-a COMO LEITURA e não como decisão:** as duas não se
+contradizem se forem lidas como camadas — o compilador bifurca em tempo de COMPILAÇÃO (só o binário
+de gate leva a bifurcação) e o binário de gate decide por ARGUMENTO em tempo de execução qual o modo
+(por exemplo, `lanes=1` para a reexecução serial pós-queda de §6.6, que precisa mesmo de ser dita ao
+binário depois de ele existir).
+
+**PERGUNTA AO DONO — é a única em aberto neste documento:** a bifurcação é (A), (B), ou (A)+(B) em
+camadas? Se for (A) sozinha, o desenho arranca já e o argumento em execução nunca é preciso. Se
+envolver (B), a metade de threads ganha uma dependência dura de `cargo/0.3.1.0-args-native`, e isso
+tem de estar na sequência antes de alguém a descobrir a meio.
+
+**O que NÃO muda com a resposta:** a fronteira de §6.11.8, a tabela de guardas, o par
+`gate_guard_begin`/`gate_guard_end`, e tudo em §6.1–§6.10. A nuance decide ONDE está o interruptor,
+não o que ele liga.
+
+#### 6.11.10 O que esta decisão APAGA do plano
+
+Honestamente: **do plano de migalhas, nada** — porque a §6.11 recomendou contra o desenrolador desde
+a primeira redacção e nenhuma migalha de 11 a 17 foi escrita para o servir. Não vou fabricar uma
+supressão para parecer que houve.
+
+O que a decisão apaga é um **RISCO** e um **ramo de futuro**, e vale registá-los porque estavam
+mesmo em cima da mesa:
+
+- morre a hipótese de a metade de threads arrastar consigo um vagão de linguagem (defers em runtime +
+  desenrolador + `recover` + re-especificação de `defer`) — que era o cenário em que o harness deixava
+  de ser harness;
+- morre a variante da migalha 13b em que `panic`/`exit` em Teko teriam de suportar retoma. Ficam a ser
+  o que §6.5.3 já desenhava: escrever e terminar.
+
+O que a decisão **ACRESCENTA** ao plano está em §6.11.8 (a fronteira, que agora é obrigatória e
+tem de estar escrita no código) e na migalha 14, que ganha a condição de compilação.
+
+**O gatilho de reabertura mantém-se, e agora com um dono explícito para a frase:** o dono disse *"não
+gosto do recover"*. Se algum dia a linguagem quiser recuperação de erro VISÍVEL AO UTILIZADOR, o
+desenrolador passa a ser necessário por mérito próprio — e nesse dia **o harness deve ser RE-ASSENTE
+sobre ele, não duplicado**: `gate_guard_begin`/`gate_guard_end` viram um `defer` + `recover`
+sintetizados pelo mesmo `src/build/gate.tks`, e a tabela de guardas desaparece. §6.5 é
+deliberadamente pequeno o suficiente para ser deitado fora nesse dia sem lamentar.
 
 ### 6.12 O NOME — RESOLVIDO. É `chan<T>`, por ruling e por coerência.
 
@@ -1335,7 +1463,7 @@ byte-idêntico + `sh scripts/no_emitted_c.sh`. Migalhas de sonda e de fixture sa
 | **12** | **o chão de thread** | `pthread_create`/`join`/`exit`/`self` e os gémeos Win32 como `extern fn` sob `#os` | **sim** |
 | **13** | **raiz de arena e sinks de cobertura POR THREAD** | o que a migalha 0(d) tiver medido. **BLOQUEANTE:** nenhuma migalha posterior pousa antes desta | **sim** |
 | **13b** | **`panic`/`exit` reimplementados em TEKO** | `call_symbol` deixa de apontar a `tk_panic_str`/`tk_exit` e passa a apontar a funções Teko em `src/runtime/teko_rt.tks`, cujo fundo NÃO-guardado é `extern fn` para `write`/`abort`. **Zero C novo.** Saída byte-idêntica, exit 134 preservado — é a pré-condição das duas primitivas e é `concorrencia-adiantada-s8.md` C3 verbatim | **sim** |
-| **14** | **as DUAS PRIMITIVAS — captura de `panic` (P-A) e de `exit` (P-B)** | `gate_guard_begin`/`gate_guard_end` no namespace reservado; a tabela de guardas na região do pai, varrida por `sys_thread_self()`; `teko::assert::assert_fail`. Fora de guarda, comportamento de hoje byte a byte | **sim** |
+| **14** | **as DUAS PRIMITIVAS — captura de `panic` (P-A) e de `exit` (P-B)** | a bifurcação **CONDICIONADA à compilação de um teste** (R10) das duas funções GLOBAIS `panic`/`exit` — as de UM segmento, a fronteira que `texpr_diverges` já define; as SEIS directas do SO de §6.11.8 ficam intactas; `gate_guard_begin`/`gate_guard_end` no namespace reservado; a tabela de guardas na região do pai, varrida por `sys_thread_self()`; `teko::assert::assert_fail`. Num binário que NÃO é de teste o ramo guardado não é emitido — a identidade com o de hoje passa a ser estrutural | **sim** |
 | **15** | **`chan<T>`** | `chan_new`/`send`/`recv`/`chan_close`; a cópia para a região do recetor; a recusa de compilação para `T` não copiável | **sim** |
 | **16** | **`GateShape::Threaded`** | o `main` gerado lança uma thread por teste, no máximo `lanes` em voo, drena o canal, ordena por índice, imprime. Balanço de esperados; `Vanished` é vermelho | **sim** |
 | **17** | **P4 + a reexecução serial pós-queda** | `lanes` 1/4/16 byte-idênticos, cobertura incluída; e a política de reexecutar com `lanes=1` os índices que o canal diz que estavam em voo quando o processo morreu | **sim** |
@@ -1371,6 +1499,9 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | `gate_coverage_lanes_identical` | o relatório de cobertura com `lanes` 1 e N | 0 **e** byte-idênticos |
 | `gate_unguarded_panic_is_unchanged` | um `panic` FORA de um teste guardado | 134, **e** a linha `TK_PANIC_MARKER` byte-idêntica à de hoje |
 | `gate_unguarded_exit_is_unchanged` | um `exit(7)` FORA de um teste guardado | 7, saída byte-idêntica à de hoje |
+| `nontest_binary_is_byte_identical` | o MESMO projecto sem `#test`, compilado antes e depois de a migalha 14 aterrar; **binários** comparados byte a byte. A forma forte que R10 permite: sem marca de teste, o ramo guardado nem é emitido (§6.11.7) | 0 só se idênticos |
+| `os_direct_abort_never_bifurcates` | um `#test` guardado que chama `abort()` (o builtin injectado, a directa nº2 de §6.11.8) em vez de `panic` | o processo aborta de facto — a captura NÃO o apanha, e é isso que se afirma |
+| `runtime_guards_inherit_the_bifurcation` | um `#test` guardado com índice fora de limites (`panic_oob`) e outro com divisão por zero (`panic_div0`) | não-zero, **e** os dois com VEREDICTO nomeado, **e** os restantes testes reportados |
 | `thread_lane_unguard_pairs` | uma thread que retorna sem `gate_guard_end` deixa linha morta na tabela | 1 (detectado, nomeando a linha) |
 | `gate_primitive_not_callable_from_source` | um `.tks` que escreve `gate_guard_begin(0)` | 1 (`unknown function`) |
 | `gate_reserved_namespace_rejected` | um `.tks` com `use teko::__gate` ou um `src/__gate/` | 1 (segmento reservado, diagnóstico próprio) |
@@ -1403,7 +1534,9 @@ nativo, e a rota C só aparece nas fixtures de EQUIVALÊNCIA, que a nomeiam expl
 | 2 | **chão de thread** (`pthread_create`/`join`/`exit`/`self`, gémeos Win32) | não existe; `src/` não tem `thread` nem `isolate` | 12-17 |
 | 3 | **raiz de região e pilha de marcas POR THREAD** | `tk_g_root`/`tk_g_regs`/`tk_arena_marks` são estáticos de processo. **Hipótese de custo baixo (classe de armazenamento) por MEDIR** | 13-17 |
 | 4 | **sinks de cobertura por thread + fusão** | `tk_cov_ids`/`tk_cov_n`/`tk_cov_cap` são de processo | 13, 16 |
-| 5 | **captura de `panic` (P-A) e captura de `exit` (P-B)** | `tk_panic_str`/`tk_exit` são `_Noreturn` e matam o processo; o único "catch" que existe (`tk_rt_crash_handler`) trata sem interromper. **DUAS primitivas novas (R7), sem antecedente para P-B** | 14, 16 |
+| 5 | **captura de `panic` (P-A) e captura de `exit` (P-B)** | `tk_panic_str`/`tk_exit` são `_Noreturn` e matam o processo; o único "catch" que existe (`tk_rt_crash_handler`) trata sem interromper. **DUAS primitivas novas (R7), sem antecedente para P-B.** Por R10 são INTERCEPÇÃO, não recuperação — logo **não exigem desenrolador** | 14, 16 |
+| 5d | **a marca "isto é um teste" em tempo de COMPILAÇÃO** | não existe seam nenhuma: `run_native_gate` não distingue perfil, e `CgMode::TestCov`/`TestPlain` são do EMISSOR de C, não do lowering. É a condição de R10 e é o interruptor da bifurcação | 14 |
+| 5e | **(só se a leitura for (B)) o argumento em tempo de EXECUÇÃO** | **BLOQUEADA por §17** — um binário nativo que lê argv não linka. Desbloqueia com `cargo/0.3.1.0-args-native`. Se a resposta do dono for (A), esta linha desaparece | 14, 16 |
 | 5b | **`panic`/`exit` em Teko** (pré-condição de 5) | `call_symbol` aponta hoje a `tk_panic_str`/`tk_exit`; o fundo `write`/`abort` por `extern fn` está desenhado e não escrito | 13b, 14 |
 | 5c | **namespace reservado + regra de prefixo `__`** | não existe; `builtin_fn` resolve por ÚLTIMO SEGMENTO, o que torna todo builtin injectado publicamente chamável — o oposto do que R7 exige | 3b, 14 |
 | 6 | **`chan<T>`** e as quatro funções | palavra não reservada no lexer; superfície de linguagem nova. Grafia RESOLVIDA por ruling (§6.12) e as três fontes divergentes corrigidas | 15-16 |
@@ -1432,6 +1565,11 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
 2c. **Se as duas primitivas se armam com UM par ou com DOIS** (§6.5.2). R7 diz "duas primitivas";
    o desenho entrega duas CAPACIDADES armadas por um par, com o argumento de que dois pares dobram as
    maneiras de deixar um por desarmar. Se o dono quis dois pontos de armar, é uma linha.
+2d. **A NUANCE DE R10: a marca é de COMPILAÇÃO (A), de EXECUÇÃO (B), ou as duas em camadas?**
+   (§6.11.9). **É a única pergunta em aberto neste documento**, e não é de estilo: (A) arranca hoje e
+   dá contenção estrutural; (B) traz uma dependência dura de `cargo/0.3.1.0-args-native`, porque §17
+   mediu que um binário nativo que lê argv nem linka. Apresentei as duas com as consequências; a
+   escolha é do dono.
 3. **Se `chan<T>` deve suportar múltiplos recetores.** O harness tem exactamente um. Um canal
    multi-recetor precisa de uma disciplina de fecho diferente (§6.4) e não há caso que o exija.
    Recusado por ausência de necessidade, não por dificuldade.
@@ -1457,7 +1595,8 @@ Secção obrigatória. Cada item diz porque não foi decidido aqui — e nenhum 
 |---|---|
 | **"ZERO emissão de C" × "a rota C é a referência de comportamento até 0.3.1.4"** | R2 diz *"não pode emitir C **quando for compilar nativo**"*. Logo: sob nativo (o default) zero `.c`, e a catraca fecha a lane a vermelho; a rota C sobrevive **só** sob `TEKO_BACKEND=c`, o seletor já declarado em retirada, e **só** para servir P2/P3. As duas leis passam sem excepção nenhuma. |
 | **Lei Teko-only × a captura de panic** | **RESOLVIDA SEM TOCAR EM C**: as duas primitivas nascem em Teko (`src/runtime/teko_rt.tks`), alcançadas por uma arm de `call_symbol`, com o fundo não-guardado em `extern fn` para `write`/`abort` — o mecanismo de `concorrencia-adiantada-s8.md` §4.2, adoptado verbatim. R7 (*"nascem no caminho nativo"*) confirma-o. A primeira redacção deste documento propunha remendar `teko_rt.c`; estava errada e está substituída (§6.5.3). |
-| **R7 "conhecidas somente pelo compilador" × o precedente dos builtins injectados** | O precedente (`builtin_fn`, resolução por último segmento) faz EXACTAMENTE o contrário — torna tudo chamável por nome nu, e o doc-comment de `call_symbol` já regista o preço. Seguir o precedente violaria R7, logo **abre-se mecanismo novo** (namespace reservado + regra de prefixo `__`), e o dono tem de o saber: é peso a mais, e é peso obrigatório (§6.5.4). |
+| **R7 "conhecidas somente pelo compilador" × o precedente dos builtins injectados** | O precedente (`builtin_fn`, resolução por último segmento) faz EXACTAMENTE o contrário — torna tudo chamável por nome nu, e o doc-comment de `call_symbol` já regista o preço. Seguir o precedente violaria R7, logo **abre-se mecanismo novo** (namespace reservado + regra de prefixo `__`), e o dono tem de o saber: é peso a mais, e é peso obrigatório (§6.5.4). **R10 acrescenta a contenção MAIS FORTE das quatro** — com a bifurcação condicionada à compilação de um teste, num binário normal o ramo guardado nem existe. |
+| **R7 (só para testes) × a hipótese de recovery à Go (capacidade permanente)** | **DISSOLVIDA por R10**, e não por eu ter escolhido um lado: *"capturar aborts/panic **sem executá-los**"* é INTERCEPÇÃO, não recuperação, e intercepção não precisa de desenrolar nada. R7 fica intacto e o desenrolador sai (§6.11.6). |
 | **`MASTER_PLAN`:262 (não congelar as cinco primitivas sem dado de duplicação) × entregar `chan<T>`** | O dado existe e é R4: o dono nomeou `chan<T>` e nomeou o caso. Congela-se **uma** das cinco, a que foi nomeada; as outras quatro ficam reservadas. |
 | **issues-100% × a metade de threads estar bloqueada por `cabi fn`** | Nada fica devendo no DESENHO: as 17 migalhas cobrem a proposta inteira e as fixtures existem para todas. O que está bloqueado é EXECUÇÃO, e está nomeado com endereço (§13). |
 | **R1 diz "cada `#test` numa thread isolada" × economia de threads** | Cumprido literalmente: **uma thread por teste**, com no máximo `lanes` em voo. A alternativa (uma thread longa por raia, a varrer `i % lanes`) foi REJEITADA porque um panic mataria a raia e levaria consigo a cauda de testes dela — o oposto do que R1 pede. Uma criação de thread custa dezenas de microssegundos; mil testes pagam dezenas de milissegundos, que é ruído ao lado de uma suíte. |
@@ -1631,6 +1770,11 @@ sed -n '116,128p' src/runtime/teko_rt.c                                         
 grep -n 'fn builtin_fn' -A 6 src/checker/scope.tks                                     # builtins resolvidos por ÚLTIMO SEGMENTO: §6.5.4
 grep -n 'bare name happened to match a builtin' src/lir/lower.tks                      # o preço já pago por isso: §6.5.4
 grep -n 'fn count_prod_fns' src/coverage/coverage.tks                                  # o denominador de cobertura a proteger: §6.5.4
+grep -n 'fn texpr_diverges' -B 2 -A 4 src/checker/typer.tks                            # a fronteira "global panic/exit, unqualified" JA existe: §6.11.8
+grep -n 'rt_abort\|"abort" from "c"' src/runtime/teko_rt.tks                           # directa do SO nº1: §6.11.8
+grep -n 'name == "abort"' src/checker/scope.tks                                        # directa nº2 (o builtin injectado): §6.11.8
+grep -n 'void tk_exit\|_exit(127)\|_Exit(128' src/runtime/teko_rt.c                    # directas nº3, nº4, nº5: §6.11.8
+grep -n 'panic_div0\|panic_oob\|panic_cast\|panic_overflow' src/runtime/teko_rt.tks    # as guardas que herdam a bifurcacao: §6.11.8
 ```
 
 Se alguma dessas leituras divergir do que está escrito aqui, **o documento está errado e deve ser
