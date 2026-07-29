@@ -747,3 +747,45 @@ rebaseie fica com a branch impublicável (force-push bloqueado para toda a gente
 mas **não precisa de publicar**: commita local, diz o SHA, e o integrador drena do objecto
 partilhado. Nenhuma lei é revogada e nada se perde. Aconteceu duas vezes nesta sessão, e nas duas o
 agente parou correctamente em vez de forçar.
+
+## Consumo da API do GitHub — divisão de trabalho (ruling do dono, 2026-07-29)
+
+Literal: *"eu fico de olho no que passa verde, se eu vejo anomalia te informo e então você extrai os logs (para reduzir o consumo de rate limit do GH)"*
+
+| quem | o quê |
+|---|---|
+| **o dono** | vigia o VERDE — é onde a anomalia se esconde, e onde o integrador não tem como desconfiar sozinho |
+| **o integrador** | puxa logs quando há VERMELHO a diagnosticar, ou quando o dono aponta |
+
+**Não puxar logs para confirmar verde.** Regras práticas, aprendidas por desperdício:
+
+- usa o `job_id` que vem no próprio webhook — listar corridas para o descobrir gasta duas chamadas
+  onde bastava zero;
+- **nunca `list_workflow_runs` sem necessidade real** — uma delas devolveu **427 KB** para extrair
+  cinco linhas;
+- **um vermelho repetido não se relê**: várias pernas e os agregadores partilham UMA causa;
+- **mas relê quando o SHA muda**, sobretudo depois de um dreno com resolução de conflito à mão.
+
+## EMPURRAR quando está feito — e `cargo/**` é o sítio (2026-07-29)
+
+Ruling do dono, depois de eu perder sete commits num reinício de container: *"Foi por isso que disse
+para empurrar sempre que estiver feito. E mais, empurrar em uma branch `cargo/**` custa ZERO, ela não
+dispara (ou não deveria) CI e serve para isso mesmo."*
+
+**O incidente**: o processo reiniciou, as worktrees reverteram, o `wt-lin` ficou com HEAD desanexado,
+e **sete commits de memória e leis evaporaram** — todos feitos depois do último push, retidos à
+espera de um "marco" que a documentação não precisava de esperar. O código estava seguro por ter
+sido empurrado. Dois agentes que ainda não tinham empurrado perderam o trabalho pela mesma razão.
+
+**A ironia registada**: passei o dia a cobrar agentes por não empurrarem cedo, e fiz oito commits em
+duas horas sem empurrar nenhum. Os agentes que obedeceram não perderam nada.
+
+**A regra**: trabalho feito empurra-se **imediatamente** para uma branch `cargo/**`, e só depois se
+drena para o vagão no marco. A branch de carga é a rede; o vagão é a entrega. Segurar no vagão para
+"não sujar" é confundir as duas.
+
+**Precisão sobre o custo**: um push a `cargo/**` **dispara** o `agent-fast-lane.yml` (ruling do dono
+de 2026-07-28, para os agentes medirem no macOS em vez de construírem no container). Com a trava de
+concorrência posta em 2026-07-29 (`group: workflow-ref`, `cancel-in-progress: true`), pushes
+sucessivos da mesma branch colapsam no último. O custo é **pequeno e limitado**, não zero — e muito
+menor que perder trabalho.

@@ -545,3 +545,96 @@ nada.
 `join` achatado hoje não fecha a porta ao `errors.Join` verdadeiro do Go (com `Unwrap() []error`).
 Precisamente porque a fábrica esconde o layout, crescê-lo depois não toca em código de utilizador.
 Adiado, não descartado — e adiado sem juros.
+
+## A barra de entrada no tronco — ruling do dono (2026-07-29)
+
+Literal: *"Só vai ao tronco se passar pelo CI, sem erros, alertas ou mesmo erros escondidos (que não disparam)."*
+
+Três exigências, e a terceira é a difícil: **verde por não ter corrido NÃO É VERDE.** A mesma sessão
+produziu três instâncias exactas do que a lei proíbe, nenhuma visível como vermelho:
+
+| erro escondido | como estava calado | como apareceu |
+|---|---|---|
+| 214 ficheiros do `examples/regressions/bulk` | não estavam no `[tests] regression` do `teko.tkp` | triagem ordenada pelo dono — escondiam um crash do compilador e 4 bugs de valor |
+| 2 cenários de regressão | declarados `skipped — capability absent on this host` | a topologia por perna deixou macOS e Windows correrem, e **falharam** |
+| `teko::str::slice` em 104 sítios | corta bytes onde a lei exige caracteres | acidentalmente correcto porque quase tudo é ASCII |
+
+Nenhum teria travado uma promoção sob a leitura fraca ("o CI está verde"). Todos travam sob esta.
+
+A reestruturação do CI por perna e a dissolução do `bulk` não foram arrumação — foram **o que tornou
+esta lei verificável**. Um portão que aceita `skipped` como passe não é um portão.
+
+## `SKIPPED` é falha; limitação conhecida é KNOWN-STOP — ruling do dono (2026-07-29)
+
+Literal: *"A regra é clara e única, testes com skip ou warnings do compilador não serão aceitos, foi como promovemos a .31, que aliás, deve conter known-stops para correção em native"*
+
+- **`skipped` não é aceite, seja qual for a justificação** — incluindo `capability absent on this
+  host`. Uma justificação **plausível e verdadeira** não torna o skip aceitável: foi exactamente
+  assim que dois vermelhos reais de macOS e Windows ficaram calados durante toda a lane 0.3.1.0.
+- **warnings do compilador não são aceites** — mesma barra.
+- **o mecanismo para uma limitação real é o KNOWN-STOP.**
+
+A inversão da asserção é o que o torna superior ao skip:
+
+| | enquanto partido | quando alguém corrige |
+|---|---|---|
+| `skipped` | calado | **calado** — o pino apodrece |
+| **KNOWN-STOP** | **verde** | **VERMELHO** — obriga a promover o pino |
+
+Não é regra nova: foi assim que a 0.3.0.31 foi promovida, e essa release **contém known-stops para
+correcção em native**.
+
+**Eu tinha levantado uma falsa ambiguidade** — *"o produto não faz isto"* contra *"este host não
+consegue correr isto"* — e proposto três saídas. Não havia o que escolher: a regra é única e já
+estava aplicada.
+
+## Quem pode cunhar um KNOWN-STOP — ruling do dono (2026-07-29)
+
+Literal: *"agente não define KNOWN-STOP, eles devem ser negociados entre eu e você, o agente apenas levanta red-flag pra te sinalizar"*
+
+| papel | pode |
+|---|---|
+| **agente** | levantar bandeira — medir, relatar o que falha e porquê, sinalizar se lhe parece limitação real |
+| **agente** | **NÃO** propor known-stop, **NÃO** escrever texto de pino, **NÃO** decidir que algo "fica assim" |
+| **integrador + dono** | negociar e cunhar o pino |
+
+**A razão é de governo, não de competência.** Um known-stop é a **admissão de que algo fica
+partido**, codificada como um teste que passa VERDE. Um agente que os pudesse cunhar poderia
+silenciar um achado ao declará-lo esperado. **Um pino errado não faz barulho nenhum: é essa a sua
+natureza**, e é por isso que a sua criação não se delega.
+
+Falha minha registada: instruí um agente a *"recomendar known-stop e propor o texto do pino"*.
+Corrigido no mesmo dia, antes de ele responder.
+
+Corolário para briefings: *"não deixes de sinalizar por receio de estares errado — bandeira
+levantada a mais custa uma conversa; bandeira em falta custa um erro escondido."*
+
+## Um KNOWN-STOP vermelho NÃO significa que o erro foi corrigido — aviso do dono (2026-07-29)
+
+Literal: *"um KNOWN-STOP que falha (vermelho) não necessariamente significa que o erro que existia foi corrigido"* — porque *"ou pq mudamos a direção (e falha por outro motivo) ou pq de fato o corrigimos"*.
+
+Os pinos afirmam **texto exacto de diagnóstico**:
+
+```gherkin
+When compilation fails
+Then diagnostic = "fat-pointer interface-dispatch result not yet lowered"
+```
+
+Logo ficam vermelhos em **TRÊS** situações, e só **uma** é boa notícia:
+
+| # | o que aconteceu | o buraco | acção |
+|---|---|---|---|
+| 1 | a compilação passou a ter sucesso | **fechado** | **promover** a teste que verifica VALOR |
+| 2 | falha com **diagnóstico diferente** | **INTACTO** | actualizar a asserção; continua pino |
+| 3 | falha numa **paragem anterior** | **INTACTO e MASCARADO** | actualizar e registar as duas paragens empilhadas |
+
+**O caso 3 é o que esta esteira produz em série**: fechar um degrau faz um programa que parava no
+degrau N alcançar o N+1 e parar ali. O pino quebra sem nada do problema pinado ter sido resolvido, e
+a paragem nova **esconde** a antiga.
+
+**O reflexo errado é o natural**: *"ficou vermelho, logo foi corrigido, logo promove-se"* — isto
+**despina um bug vivo** e converte-o num teste que afirma o contrário da verdade. Um erro escondido
+criado pelo mecanismo que existe para os impedir.
+
+**Protocolo**: nenhum pino se promove sem determinar POR QUE ficou vermelho. A pergunta não é *"ficou
+vermelho?"* mas ***"passou a compilar, ou só mudou de queixa?"***.
