@@ -2024,6 +2024,12 @@ tk_str tk_rt_os(void) {
     return (tk_str){ (const tk_byte *)s, strlen(s) };
 }
 
+const tk_byte *tk_rt_os_len(uint64_t *out_len) {
+    tk_str r = tk_rt_os();
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // (0.3.1 C2) the HOST CPU ARCHITECTURE as a canonical lowercase token — "x86_64" / "arm64"
 // (else "unknown"), selected from the compiler's own target predefines. Mirrors
 // tk_rt_os's already-working plain-str shape (no {ok,value,err} lift), so the released seed's
@@ -2040,6 +2046,12 @@ tk_str tk_rt_arch(void) {
     static const char *s = "unknown";
 #endif
     return (tk_str){ (const tk_byte *)s, strlen(s) };
+}
+
+const tk_byte *tk_rt_arch_len(uint64_t *out_len) {
+    tk_str r = tk_rt_arch();
+    *out_len = r.len;
+    return r.ptr;
 }
 
 // (CLI --version) the build's VERSION STRING — the RAW project-manifest `version` +
@@ -2123,6 +2135,12 @@ tk_slice_byte tk_rt_secure_bytes(uint64_t n) {
 tk_str tk_rt_version(void) {
     static const char *s = TK_VERSTR1(TEKO_VERSION_STRING);
     return (tk_str){ (const tk_byte *)s, strlen(s) };
+}
+
+const tk_byte *tk_rt_version_len(uint64_t *out_len) {
+    tk_str r = tk_rt_version();
+    *out_len = r.len;
+    return r.ptr;
 }
 
 // D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,

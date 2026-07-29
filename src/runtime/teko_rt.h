@@ -505,6 +505,14 @@ tk_str tk_rt_arch(void);
 // (e.g. "0.0.1.0-bootstrap"). Compiled from the TEKO_VERSION_STRING define injected by both build
 // paths (CMake for the bootstrap, run_cc for self-host), never a runtime file read. (teko::env::version)
 tk_str tk_rt_version(void);
+// tk_rt_os_len / tk_rt_arch_len / tk_rt_version_len — the out-parameter-length twins of the three
+// zero-argument host-info strings above (mirrors `tk_str_concat_len`'s own doc): the native
+// backend's `LCall` reads exactly one result register, never the true 2-eightbyte SysV/AAPCS64
+// struct each plain twin returns by value, so each COMPILE-TIME-CONSTANT string's pointer rides
+// the return register and its length rides `*out_len` (0.3.1.0 degrau 17).
+const tk_byte *tk_rt_os_len(uint64_t *out_len);
+const tk_byte *tk_rt_arch_len(uint64_t *out_len);
+const tk_byte *tk_rt_version_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
 
