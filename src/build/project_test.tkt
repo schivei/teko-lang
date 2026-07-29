@@ -161,27 +161,42 @@ fn host_target_for_os_guess_maps_every_known_os() {
 #test
 /**
  * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()` (real
- * `teko::os()`/`teko::arch()`) resolves to exactly what `host_target_for_os` maps that same
- * (os, arch) pair to — i.e. the two functions never disagree on the actual build host. This
- * host's own pair is always one `host_target_for_os` has a real target for (every CI/dev host
- * this suite runs on today is linux/x86_64, windows/x86_64 or macos/arm64), so both sides
- * resolve to the same `Ok` arm, never the R2 error.
+ * `teko::os()`/`teko::arch()`) never disagrees with `host_target_for_os` applied to that same
+ * (os, arch) pair, in EITHER arm. A host whose own pair has no own-backend target (an aarch64
+ * linux host, an x86_64 macOS host, an arm64 windows host, …) is a LEGITIMATE live outcome, not a
+ * test failure — the R2 error `host_default_target()` returns there must be the SAME honest
+ * refusal `host_target_for_os` itself gives that exact pair, never a silent divergence between
+ * the two.
+ *
+ * THE BUG THIS REPLACES (measured live on CI's `test / linux-arm64-glibc`, job 90725227419, run
+ * 30495738831): the previous body asserted `false` on the error arm, on the unstated assumption
+ * that every host this suite runs on is one of the three supported pairs. On an aarch64 linux
+ * runner `host_target_for_os("linux", "arm64")` correctly refuses — that refusal IS this crumb's
+ * own R1/R2 design, not a defect — so the assertion fired and, because a failed
+ * `teko::assert::is_true` has no soft-fail path yet (SIGABRT, `cargo/0.3.1-envelope-e-assert`
+ * owns that separately), it aborted the WHOLE test binary, not just this one case. Asserting the
+ * EQUIVALENCE instead of a fixed arm is what makes this test host-agnostic: green on every host,
+ * supported or not, without ever discovering which one it is running on.
  *
  * @return void
  */
 fn host_default_target_matches_the_real_host() {
     match host_default_target() {
         NativeTarget as live => teko::assert::is_true(host_target_matches(teko::os(), teko::arch(), live))
-        error => teko::assert::is_true(false)
+        error => teko::assert::is_true(host_target_is_unsupported(teko::os(), teko::arch()))
     }
 }
 
 #test
 /**
  * host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported —
- * `host_default_target_guess` is ALWAYS total: on THIS host (a supported pair, per
- * `host_default_target_matches_the_real_host`) it agrees with the precise reading; pinned here
- * against the Phase-1 guess too, so a future host whose precise pair the resolver refuses still
+ * `host_default_target_guess` is ALWAYS total, and this equivalence holds on EVERY host,
+ * supported or not — the assertion never assumes which one it is running on. On a supported pair
+ * `host_default_target()` succeeds with exactly the target `host_target_for_os_guess(teko::os())`
+ * names for that OS (each of the three supported pairs IS its own OS's dominant arch, by
+ * construction), so both sides read the identical value; on an UNSUPPORTED pair
+ * `host_default_target_guess` falls through to that very same OS-only guess, by definition. Pinned
+ * here against the Phase-1 guess so a future host whose precise pair the resolver refuses still
  * gets a total, host-OS-derived answer instead of a crash.
  *
  * @return void
