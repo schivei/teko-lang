@@ -98,7 +98,9 @@ Fechar vagão só com o teste unitário deixa passar miscompilação. O gate mí
 
 1. build gen1 + `teko test .`;
 2. **`scripts/positive_regressions.sh` + `scripts/compile_fail_regressions.sh`** (TEKO=bin/teko);
-3. `scripts/diff_c_own.sh` (differential own==C) quando houver toolchain;
+3. `scripts/diff_c_own.sh` (differential own==C) quando houver toolchain — **mas o alcance dele encolhe por PERNA, não desaparece de vez (ruling do dono, 2026-07-29, literal):** *"own == C, faz sentido somente para Windows, Mac e wasm, para o Linux iremos remover ao final desse trem."*
+   O oráculo só existe onde as duas rotas existem. Uma perna que gera NATIVO não tem C com que se comparar, portanto exigir-lho seria exigir o impossível — e um gate que não pode passar bloqueia mais do que protege (lei de 2026-07-25, neste mesmo ficheiro). Na 0.3.1.0: as quatro pernas Linux perdem-no **no fim deste trem**; `windows-x86_64`, `macos-arm64` e wasm mantêm-no enquanto viverem na rota C. O que substitui o oráculo nas pernas nativas é o que já as gateia: `gen2 == gen3` byte-idêntico, o corpus `own_native`, e o `TEKO_MEM_PARANOID`.
+   **A remover ao fechar o trem, não antes:** enquanto as pernas Linux ainda param num degrau, o diferencial continua a ser evidência útil.
 4. fixpoint gen2 == gen3 **byte-idêntico**;
 5. `TEKO_MEM_PARANOID=1` no fechamento;
 6. auditoria W15 do delta (zero `//` inline; D39).
