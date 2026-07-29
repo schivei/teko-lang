@@ -1,5 +1,7 @@
 # T-B6 — o FINALE do Tier-B: abrir o PRODUTOR (`serialize_const`) para agregados com campo slice/ponteiro + migrar os 4 descritores ABI para `const` rodata (#594 Tier-B)
 
+> **[HISTÓRICO]** — documenta o planejamento do crumb T-B6 de Tier-B (2026-07-18), já executado. Não descreve o estado atual do projeto.
+
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing
 aggregate → rodata (`docs/design/const-module-level-plan.md` §8 crumb **T-B6**, §5.1
 verdict, DECISION_LOG/plano D2/D7). Base: o working tree da const-wave com **T-B1..T-B5
