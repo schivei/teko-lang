@@ -75,21 +75,30 @@ pub fn name_qualifier(name: str) -> str {
     teko::str::slice_to(name, last_sep to u64)   // (#148) builtin slice — see name_last_segment
 }
 
-// find a user type by name; error if not registered.
-// (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) OR a bare source name. The
-// table entry may carry (bare name + real ns) [the typing collect table] OR (canonical name + "")
-// [the codegen/vm type_table_of re-collection]. Match when the entry's name equals `name` directly
-// OR when its qualified form qualify(ns, name) equals `name` — covering every combination. ref_ns is
-// unused (a resolved-name probe is namespace-blind; the SOURCE-reference sites use resolve_type_ref).
-fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
-    // (#152) TWO PASSES: pass 1 = exact name OR the entry's qualified form (both UNIQUE post-W0's
-    // per-namespace dup ban) — so a canonical query can never be stolen by a same-bare cousin that
-    // merely appears earlier in the table (discovery order differs per platform). Pass 2 = the
-    // legacy bare last-segment fallback (bare probes of a CANONICAL-keyed type_table_of table).
+/**
+ * type_table_find — find a user type's declaration by name, tolerant of BOTH shapes a `TypeTable`
+ * in this compiler ever takes: `name` may be a CANONICAL `"ns::Name"` (a resolved `Named.name`) or
+ * a bare source name, and a table entry may carry (bare name + real namespace — the typing collect
+ * table) or (canonical name + `""` — `type_table_of`'s codegen/lowering re-collection).
+ *
+ * A resolved-name probe is namespace-blind by design (`ref_ns` is accepted for call-site symmetry
+ * with the source-reference resolvers, `resolve_type_ref` and friends, but never read): TWO PASSES
+ * cover every combination. Pass 1 matches the entry's name EXACTLY or through its qualified form
+ * (`qualify_eq`, allocation-free) — both unique post-W0's per-namespace duplicate ban, so a
+ * canonical query can never be stolen by a same-bare cousin that merely appears earlier in the
+ * table (discovery order differs per platform). Pass 2 is the legacy bare last-segment fallback,
+ * for a bare probe of a CANONICAL-keyed `type_table_of` table.
+ *
+ * @param table   the folded type table to search
+ * @param name    the type name to find (bare or canonical)
+ * @param ref_ns  accepted for symmetry with the source-reference resolvers; unused here
+ * @return        the matching declaration, or a named error when `name` registers nothing
+ */
+pub fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
     mut i = 0
     loop {
         if i >= table.len { break }
-        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }   // (#148) allocation-free qualified compare
+        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }
         i++
     }
     mut j = 0

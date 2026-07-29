@@ -7766,14 +7766,17 @@ type ParamBind = struct {
  * @param []parser::Param params  the declared parameter list, in order
  * @param u32 line  the source line to stamp every emitted `param` inst with
  * @param u32 col  the source column to stamp every emitted `param` inst with
+ * @param table  the program's type table — `bind_param`'s alias resolver (`typeexpr_is_fat`),
+ *               so a parameter ANNOTATED through an alias (`type S = str`) binds exactly like a
+ *               parameter annotated `str` directly (0.3.1.0 raiz A, crumb R0)
  * @return ParamBind  the func/env with every parameter bound
  */
-fn bind_fn_params(func: LFunc, params: []parser::Param, line: u32, col: u32) -> ParamBind {
+fn bind_fn_params(func: LFunc, params: []parser::Param, line: u32, col: u32, table: checker::TypeTable) -> ParamBind {
     mut cur = ParamBind { func = func; env = empty_lenv(); next_reg = 0 }
     mut i: u64 = 0
     loop {
         if i >= params.len { break }
-        cur = bind_param(cur.func, cur.env, cur.next_reg, params[i], line, col)
+        cur = bind_param(cur.func, cur.env, cur.next_reg, params[i], line, col, table)
         i++
     }
     cur
@@ -7796,10 +7799,11 @@ fn bind_fn_params(func: LFunc, params: []parser::Param, line: u32, col: u32) -> 
  * @param parser::Param p  the declared parameter to bind
  * @param u32 line  the enclosing function's source line (stamps the `param` inst(s))
  * @param u32 col  the enclosing function's source column (stamps the `param` inst(s))
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
  * @return ParamBind  the advanced func/env/next_reg
  */
-fn bind_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32) -> ParamBind {
-    if typeexpr_is_fat(p.type_ann) { return bind_fat_param(func, env, next_reg, p, line, col) }
+fn bind_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32, table: checker::TypeTable) -> ParamBind {
+    if typeexpr_is_fat(p.type_ann, table) { return bind_fat_param(func, env, next_reg, p, line, col) }
     let with_inst = append_inst(func, 0, param_inst(next_reg, next_reg, line, col))
     ParamBind { func = with_inst; env = lenv_bind(env, p.name, next_reg); next_reg = next_reg + 1 }
 }
@@ -7878,6 +7882,10 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  * @param bool flat_symbols  the static/shared-archive carve-out (`mangle_fn_symbol`'s `flat`):
  *                           when true, `f`'s own declared symbol drops `TEKO_USER_PREFIX`;
  *                           defaults to `false` (the ordinary, prefixed shape)
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A,
+ *               crumb R0) — defaulted empty so a fixture with no alias in its parameter list
+ *               need not build one; a bare `str`/`[]T` parameter resolves through
+ *               `checker::resolve_type`'s builtin-name path regardless, needing no table entry
  * @return LoweredFunction | error  the built `LFunc` + its grown rodata/
  *                                  lifted tables; the `error` arm for a
  *                                  generic/extern function, or when its body
@@ -7889,14 +7897,14 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
  *           degrau, #382 N2).
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty()) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let fat_ret = is_fat_type(f.return_type)
-    let ptypes = param_ltypes(f.params, enums)
+    let ptypes = param_ltypes(f.params, enums, table)
     let all_ptypes = if fat_ret { teko::list::push(ptypes, LType::Ptr) } else { ptypes }
     let fn0 = new_func(mangle_fn_symbol(f.namespace, f.name, flat_symbols), all_ptypes.len to u32, all_ptypes, ltype_of(f.return_type, enums))
-    let bound = bind_fn_params(fn0, f.params, f.line, f.col)
+    let bound = bind_fn_params(fn0, f.params, f.line, f.col, table)
     let slot_reg = bound.next_reg
     let with_slot = if fat_ret { bind_ret_len_slot(bound, f.line, f.col) } else { bound }
     let ctx0 = LowerCtx {
@@ -8007,15 +8015,17 @@ fn inst_is_terminator(inst: LInst) -> bool {
  * @param []parser::Param params  the parameter list to map
  * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed parameter
  *                           carries its integer width, not `Ptr`)
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A,
+ *               crumb R0)
  * @return []LType  each parameter's machine class(es), in declared order (a fat parameter's
  *                  `Ptr` class immediately followed by its `I64` len class)
  */
-fn param_ltypes(params: []parser::Param, enums: []LEnumInfo) -> []LType {
+fn param_ltypes(params: []parser::Param, enums: []LEnumInfo, table: checker::TypeTable) -> []LType {
     mut out: []LType = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= params.len { break }
-        out = append_param_ltypes(out, params[i], enums)
+        out = append_param_ltypes(out, params[i], enums, table)
         i++
     }
     out
@@ -8029,10 +8039,11 @@ fn param_ltypes(params: []parser::Param, enums: []LEnumInfo) -> []LType {
  * @param []LType out  the machine-class list accumulated so far
  * @param parser::Param p  the parameter to append
  * @param []LEnumInfo enums  the program's declared-enum table
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
  * @return []LType  `out` with `p`'s machine class(es) appended
  */
-fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo) -> []LType {
-    if typeexpr_is_fat(p.type_ann) {
+fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table: checker::TypeTable) -> []LType {
+    if typeexpr_is_fat(p.type_ann, table) {
         return teko::list::push(teko::list::push(out, LType::Ptr), LType::I64)
     }
     teko::list::push(out, ltype_of_typeexpr(p.type_ann, enums))
@@ -8064,8 +8075,9 @@ fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo) -> []
  *                          function or the virtual main fails to lower
  */
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error {
+    let table = checker::type_table_of(prog)
     let enums = collect_enums(prog)
-    let layouts = match collect_struct_layouts(prog, enums) { []LStructLayout as ls => ls; error as e => return e }
+    let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
     let variants = collect_variant_defs(prog)
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
@@ -8074,7 +8086,7 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
@@ -8136,14 +8148,17 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
  * @param prog   the whole typed program, in program order
  * @param enums  the program's declared-enum table, collected FIRST because an enum-typed
  *               field's width decides the offsets of every field after it
+ * @param table  the program's type table (`checker::type_table_of(prog)`) — threaded down to
+ *               `layout_of_fields`'s alias resolver (`typeexpr_is_fat`, 0.3.1.0 raiz A, crumb
+ *               R0), taken as a PARAMETER rather than recomputed here so `lower_program` builds
+ *               it exactly once and shares it with a function's own parameter list too
  * @return      every registered layout (the seeded `error` layout first, then every
  *              declaration's own, in the order it appears)
  * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
  *              an invariant the checker already enforces, so a miss here is an internal
  *              break, reported as a NAMED stop instead of a guessed layout (M.3)
  */
-fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo) -> []LStructLayout | error {
-    let table = checker::type_table_of(prog)
+fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: checker::TypeTable) -> []LStructLayout | error {
     mut out: []LStructLayout = teko::list::push(teko::list::empty(), error_struct_layout())
     mut i: u64 = 0
     loop {
@@ -8200,7 +8215,7 @@ fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: c
  */
 fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     match td.body {
-        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums))
+        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table))
         parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums)
         _ => acc
     }
@@ -8223,7 +8238,7 @@ fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, tab
         []parser::Field as fs => fs
         error as e => return e
     }
-    teko::list::push(acc, layout_of_fields(name, fields, acc, enums))
+    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table))
 }
 
 /**
@@ -8288,9 +8303,12 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
  *                           occupies `enum_carrier_ltype()`'s width, not the 8-byte
  *                           `Ptr` fallback, and that width sets every LATER field's
  *                           offset as well as the struct's own size/align
+ * @param table  the program's type table — `field_layout_size`/`field_layout_align`'s alias
+ *               resolver, so a field ANNOTATED through an alias (`type S = str`) sizes exactly
+ *               like a field annotated `str` directly (0.3.1.0 raiz A, crumb R0)
  * @return LStructLayout  the resolved size/align/per-field offsets
  */
-fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo) -> LStructLayout {
+fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable) -> LStructLayout {
     mut field_names: []str = teko::list::empty()
     mut field_types: []LType = teko::list::empty()
     mut field_sizes: []u32 = teko::list::empty()
@@ -8303,8 +8321,8 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
         let nested = struct_layout_of_field(te, known)
         field_names = teko::list::push(field_names, fields[i].name)
         field_types = teko::list::push(field_types, ft)
-        field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested))
-        field_aligns = teko::list::push(field_aligns, field_layout_align(te, ft, nested))
+        field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table))
+        field_aligns = teko::list::push(field_aligns, field_layout_align(te, ft, nested, table))
         i++
     }
     layout_of_sized(name, field_names, field_types, field_sizes, field_aligns)
@@ -8408,67 +8426,167 @@ fn field_align_of(ft: LType, nested: LStructLayout | null) -> u32 {
 }
 
 /**
- * typeexpr_is_fat — true iff the syntactic annotation `te` is a fat-pointer type (a `[]T` slice or
- * `str`), the field whose layout occupies 16 bytes `{ptr, len}` instead of the scalar fallback's
- * 8-byte `Ptr` (#594 T-B6). A `char`/Named-by-value/`ptr<T>` is NOT fat (it is an 8-byte `Ptr` or a
- * nested struct), so it does not match here.
+ * visited_name_has — is `name` already present in `visited` — the alias-chain recursion guard
+ * `typeexpr_is_fat_named` threads (mirrors `checker::str_set_has`'s job, kept local since that
+ * helper is private to the checker module).
  *
- * @param te  the field's syntactic type annotation
- * @return    whether the field is a fat pointer (16 bytes {ptr, len})
- * @since #594 T-B6
+ * @param visited  the alias names already entered on this chain
+ * @param name     the name to test
+ * @return         whether `name` already appears in `visited`
  */
-fn typeexpr_is_fat(te: parser::TypeExpr) -> bool {
-    match te {
-        parser::SliceType => true
-        parser::NamedType as nt => named_single_segment_is(nt.path, "str")
+fn visited_name_has(visited: []str, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= visited.len { break }
+        if visited[i] == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * typeexpr_is_fat_named — is a single-segment NAMED annotation `nt` fat, resolved THROUGH any
+ * alias chain? A bare `str` answers directly; any other name is looked up in `table`
+ * (`checker::type_table_find`, tolerant of BOTH `TypeTable` shapes this compiler builds — a
+ * bare-name declaration and `checker::type_table_of`'s canonical-name re-collection). When the
+ * found declaration is a transparent `AliasBody` (`type S = str`), the SAME question is asked of
+ * the alias's own right-hand-side annotation instead (`typeexpr_is_fat_walk`), recursively, until
+ * a non-alias answer is reached. A name the table does not know at all — a generic type-
+ * PARAMETER (`T`), never registered as a type — answers `false`, the same answer the old
+ * syntactic-only check always gave a non-`str` name, so a generic struct's still-untested layout
+ * path (`layout_of_fields`'s own doc-comment: "collapse to Ptr … harmless, since no A1-3 fixture
+ * instantiates one") is unaffected. A name found but NOT an alias (a struct/class/enum/trait/
+ * variant/extern/interface) answers `false` too — those are sized by their OWN layout or a plain
+ * scalar word, never the `{ptr, len}` image.
+ *
+ * @param nt       the single-segment named annotation
+ * @param table    the program's type table
+ * @param visited  the alias names already entered on this chain (`visited_name_has`'s recursion
+ *                 guard — the checker already rejects a cyclic alias before lowering ever runs, so
+ *                 this is a defensive backstop, never a live path, mirroring `type_reaches_ref`'s
+ *                 own guard in `checker/borrow.tks`)
+ * @return         whether `nt`, resolved through any alias, denotes `str` or `[]T`
+ */
+fn typeexpr_is_fat_named(nt: parser::NamedType, table: checker::TypeTable, visited: []str) -> bool {
+    let name = match single_segment_name(nt.path) { str as s => s; null => return false }
+    if name == "str" { return true }
+    if visited_name_has(visited, name) { return false }
+    match checker::type_table_find(table, name, "") {
+        parser::TypeDecl as td => typeexpr_is_fat_decl_body(td.body, table, teko::list::push(visited, name))
+        error => false
+    }
+}
+
+/**
+ * typeexpr_is_fat_decl_body — `typeexpr_is_fat_named`'s per-declaration step: a transparent
+ * `AliasBody` defers the fat-or-not answer to its own right-hand-side annotation
+ * (`typeexpr_is_fat_walk`); every other declaration body (struct/class/enum/flags/variant/extern/
+ * interface/trait) is NOT a fat-pointer type by construction and answers `false`.
+ *
+ * @param body     the found declaration's body
+ * @param table    the program's type table
+ * @param visited  the alias-chain recursion guard, already extended with this declaration's name
+ * @return         whether `body`, resolved through any alias, denotes `str` or `[]T`
+ */
+fn typeexpr_is_fat_decl_body(body: parser::TypeBody, table: checker::TypeTable, visited: []str) -> bool {
+    match body {
+        parser::AliasBody as ab => typeexpr_is_fat_walk(ab.alias, table, visited)
         _ => false
     }
 }
 
 /**
- * named_single_segment_is — true iff `p` is a single-segment path whose lone segment name equals
- * `want` (#594 T-B6): the shape a bare `str` type annotation takes (`str`, not `a::str`).
+ * typeexpr_is_fat_walk — the annotation-shape dispatch shared by `typeexpr_is_fat` (fresh chain)
+ * and `typeexpr_is_fat_decl_body` (continuing an alias chain): a `[]T` slice is fat regardless of
+ * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a single-
+ * segment named annotation defers to `typeexpr_is_fat_named`; every other annotation shape
+ * (optional, union, function type, multi-segment path, generic instantiation) is never fat.
  *
- * @param p     the path to inspect
- * @param want  the segment name to match
- * @return      whether `p` is the single segment `want`
- * @since #594 T-B6
+ * @param te       the syntactic type annotation
+ * @param table    the program's type table
+ * @param visited  the alias-chain recursion guard
+ * @return         whether `te` denotes a fat-pointer-VALUED type (`str` or `[]T`)
  */
-fn named_single_segment_is(p: parser::Path, want: str) -> bool {
-    match single_segment_name(p) {
-        str as s => s == want
-        null => false
+fn typeexpr_is_fat_walk(te: parser::TypeExpr, table: checker::TypeTable, visited: []str) -> bool {
+    match te {
+        parser::SliceType => true
+        parser::NamedType as nt => typeexpr_is_fat_named(nt, table, visited)
+        _ => false
     }
 }
 
 /**
- * field_layout_size — a field's byte size, widening a fat-pointer field (`[]T`/`str`) to the 16-byte
- * `{ptr, len}` image and otherwise deferring to `field_size_of` (#594 T-B6). The 16-byte width is the
- * layout the aggregate-const serializer writes (`{ptr@off, len@off+8}`) and the reader loads.
+ * typeexpr_is_fat — the syntactic gate for `is_fat_type`: is the ANNOTATION `te`, resolved
+ * THROUGH any alias, a fat-pointer type?
+ *
+ * Before 2026-07-29 this asked the ANNOTATION directly — `[]T` or a literal `str` — never the
+ * type it names. A type ALIAS (`type S = str`) parses as `NamedType "S"`, which matched neither
+ * arm of that syntactic check, so `field_layout_size` reserved 8 bytes for an `s: S` field while
+ * `store_struct_field` — which asks the SEMANTIC `is_fat_type` on the field VALUE's resolved
+ * type — wrote the full 16-byte `{ptr, len}` image there, spilling into whatever field followed.
+ * The two predicates disagreed on the exact same field, and nothing enforced agreement: a LIVE
+ * miscompilation, measured with no `char` involved at all
+ * (`docs/memory/raiz-comum-dos-degraus-0.3.1.0.md` §7-quater.3-bis — `type S = str; struct H {
+ * s: S; n: i32 }` reads `h.s.len` back as `h.n`'s own value on the native route, `5` on the C
+ * route).
+ *
+ * The fix chases the alias chain itself (`typeexpr_is_fat_walk`/`typeexpr_is_fat_named`) using
+ * `checker::type_table_find` — the SAME tolerant lookup the class base-chain walk
+ * (`checker::effective_class_fields`) already resolves field layouts through, so no NEW table
+ * shape or namespace convention enters this file. A first attempt routed through
+ * `checker::resolve_type` instead (the resolver every annotation-to-semantic-type step elsewhere
+ * in this compiler uses); measured against this exact bug's own probe it failed to resolve a
+ * SINGLE-SEGMENT bare name against `checker::type_table_of`'s CANONICAL-keyed table (`"S"` vs. a
+ * registered `"aliasfield::S"`) and silently fell back to the old syntactic answer — the very
+ * "compiles and lies" outcome this lane's own restrictions forbid. `type_table_find` is the
+ * function this compiler ALREADY trusts for a bare-or-canonical lookup against that exact table
+ * shape, so this walk reuses it instead of asking `resolve_type` to do a job its own bare-name
+ * resolver (`checker::resolve_bare_type_reg`) is not built for.
+ *
+ * @param te     the field's or parameter's syntactic type annotation
+ * @param table  the program's type table (`checker::type_table_of`)
+ * @return       whether `te` denotes a fat-pointer-VALUED type (`str` or `[]T`), resolved
+ *               THROUGH any alias
+ * @see is_fat_type  the semantic predicate this now agrees with BY CONSTRUCTION for every alias
+ *                    an `is_fat_type`-typed value can carry
+ * @since 0.3.1.0 raiz A, crumb R0
+ */
+fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable) -> bool {
+    typeexpr_is_fat_walk(te, table, teko::list::empty())
+}
+
+/**
+ * field_layout_size — a field's byte size, widening a fat-pointer field (`[]T`/`str`, resolved
+ * THROUGH any alias — `typeexpr_is_fat`) to the 16-byte `{ptr, len}` image and otherwise
+ * deferring to `field_size_of` (#594 T-B6). The 16-byte width is the layout the aggregate-const
+ * serializer writes (`{ptr@off, len@off+8}`) and the reader loads.
  *
  * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
  * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param nested  the field's nested struct layout, when known
+ * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
  * @return        the field's byte size
  * @since #594 T-B6
  */
-fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
-    if typeexpr_is_fat(te) { return ltype_size(LType::Ptr) * (2 to u32) }
+fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable) -> u32 {
+    if typeexpr_is_fat(te, table) { return ltype_size(LType::Ptr) * (2 to u32) }
     field_size_of(ft, nested)
 }
 
 /**
- * field_layout_align — a field's byte alignment, pinning a fat-pointer field (`[]T`/`str`) to
- * pointer alignment and otherwise deferring to `field_align_of` (#594 T-B6).
+ * field_layout_align — a field's byte alignment, pinning a fat-pointer field (`[]T`/`str`,
+ * resolved THROUGH any alias — `typeexpr_is_fat`) to pointer alignment and otherwise deferring
+ * to `field_align_of` (#594 T-B6).
  *
  * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
  * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param nested  the field's nested struct layout, when known
+ * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
  * @return        the field's byte alignment
  * @since #594 T-B6
  */
-fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
-    if typeexpr_is_fat(te) { return ltype_align(LType::Ptr) }
+fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable) -> u32 {
+    if typeexpr_is_fat(te, table) { return ltype_align(LType::Ptr) }
     field_align_of(ft, nested)
 }
 
@@ -8594,13 +8712,15 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @param bool flat_symbols  the static/shared-archive carve-out (`lower_program`'s own param,
  *                           threaded down to the one item kind it affects: a function)
+ * @param table  the program's type table, threaded down to a function item's own params
+ *               (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A, crumb R0)
  * @return LowerItemOut | error  the advanced module + loose-statement/lifted
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -8671,14 +8791,15 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  *                        table accumulated so far (A1-7, #382)
  * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
  * @param bool flat_symbols  the static/shared-archive carve-out (`lower_function`'s own param)
+ * @param table  the program's type table (`lower_function`'s own param, 0.3.1.0 raiz A, crumb R0)
  * @return LowerItemOut | error  the advanced module (unchanged `loose`) + the
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
