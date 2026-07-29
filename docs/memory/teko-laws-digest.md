@@ -720,3 +720,58 @@ shadow-stack ainda calculam em `i32` — o que faria mismatch silencioso com um 
 
 Nota operacional medida: o harness invoca `wasmtime run` e acrescenta `-W memory64=y` para alvos de
 64 bits — ou seja, **o wasm64 depende de uma flag experimental do wasmtime**, não de suporte de série.
+
+## O baseline do backend x86-64, e o dialecto do C emitido (2026-07-29)
+
+Duas declarações que faltavam. O arm64 já tinha o hábito — `docs/design/backend-a2-isel-arm64.md:433`
+diz *"the portable AAPCS64 baseline (no FEAT_FP16 assumption)"*. O x86-64 não declarava nada, e por
+isso hoje um agente foi instruído a não sair do baseline por mensagem avulsa em vez de por lei.
+
+### 1. O backend nativo x86-64 assume o baseline: SSE2, e nada acima
+
+**Sem AVX, sem SSE4, sem `popcnt`/BMI, sem `CPUID`.** Medido em 2026-07-29: o backend inteiro só
+menciona registos XMM — zero AVX, zero SSE4.
+
+Duas razões, e a segunda é de CORRECÇÃO, não de portabilidade:
+
+- **SSE2 é obrigatório no x86-64 por definição da ABI** — está garantido em qualquer processador,
+  Intel ou AMD. `movsd`/`addsd`/`cvtsi2sd` não precisam de verificação nenhuma.
+- **SSE2 é IEEE-754 exacto; o x87 tem 80 bits internos.** O compilador faz dobragem de constantes
+  float, e o fixpoint exige gen2 == gen3 **byte a byte**. Com x87, o mesmo cálculo pode dar um bit
+  diferente conforme a pressão de registos decida manter um valor em registo ou passá-lo pela
+  memória — e o fixpoint quebraria de forma incompreensível. **A escolha portável é também a única
+  que preserva a propriedade de que a lane inteira depende.**
+
+Riscos concretos de sair do baseline, para quem for tentado: extensões diferem por fabricante
+(AVX-512 é Intel; SSE4a foi AMD), e resultados **arquitecturalmente indefinidos** divergem na prática
+— o clássico é `BSF`/`BSR` com entrada zero, cujo destino é indefinido por especificação.
+
+**E não é preciso emitir AVX para o aproveitar**: as operações de memória em massa passam pela libc,
+que já é vectorizada e já faz o despacho por `CPUID` sozinha. O ganho está a ser colhido de graça. O
+que sobraria para vectorizar à mão é o lexer/parser — que faz 143 ficheiros em 0,1s, enquanto o `cc`
+leva 49s. **Não é onde o tempo está.**
+
+### 2. O C emitido assume extensões GNU (gcc/clang). O MSVC entra SÓ como linker
+
+Medido em 2026-07-29: `src/codegen/codegen.tks` emite **49 expressões-de-instrução `({ ... })`**, mais
+`__builtin_*` e `__attribute__`; `src/runtime/teko_rt.{c,h}` tem 35 `__builtin_*`. **O `cl.exe` do
+MSVC não suporta expressões-de-instrução**, nem com `/std:c17`.
+
+Isto **não** entra em conflito com a diretiva do linker (*"usar linker nativo em vez de cc/gcc"*),
+porque os dois vivem em sítios diferentes:
+
+| caminho | ferramenta | as `({ })` importam? |
+|---|---|---|
+| nativo (objecto → `link.exe`) | linker MSVC | **não** — não há C nenhum |
+| rota C no Windows | **clang** (a imagem do runner traz clang) | **não** — clang aceita GNU |
+| rota C com `cl.exe` | não usada | sim, quebraria |
+
+O `link.exe` consome **objectos**, e objectos não têm dialecto de C. A diretiva do linker está
+satisfeita sem tocar no emissor.
+
+**Tornar o C emitido portável ao `cl.exe` seria lane própria** (49 sítios mais o runtime) e **não se
+recomenda**: o plano sequenciado por plataforma retira a rota C depois de 0.3.1.4, logo seria pagar
+por um caminho que está a ser desmontado.
+
+Esta declaração existe para que ninguém tente `cl.exe` sobre o C emitido e conclua que está partido —
+não está: nunca foi um alvo.
