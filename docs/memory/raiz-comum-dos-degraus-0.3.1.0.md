@@ -797,6 +797,551 @@ na perna Linux, o modelo "a lowering é a estrangulação" está errado e isso �
 
 ---
 
+## 7-bis. ADENDA (2026-07-29) — o `char` é o TERCEIRO tipo gordo, e a sequência R1-R6 NÃO o cobre
+
+Levantado pelo dono no mesmo dia, e medido aqui. Duas citações literais:
+
+> *"sobre esses fat-pointers, não lembro se foi implementado, mas, dado que Teko opera em utf8, se
+> não me engano tem mais coisa aí (ou deveria): `type byte = u8` / `type char = []byte` /
+> `type str = []char`. Logo, um `.len` diz sobre o array em si, não o valor de um item lá dentro."*
+
+> *"Até pq o multi-byte será necessário ao construir a stdlib"*
+
+**O modelo do dono está implementado no runtime e no checker. O `char` está a FALTAR nas listas da
+lowering.** Isto entra na RAIZ A e obriga a corrigir a própria RAIZ A em dois pontos.
+
+### 7-bis.1 A evidência de que `char` é gordo — e de que o backend não sabe
+
+`src/checker/type.tks:92` — `char` é uma tag PRÓPRIA, com o layout escrito no comentário:
+
+```
+pub type Char = struct { }   // a UTF-8 codepoint (1–4 bytes); distinct by tag, runtime layout == []byte
+```
+
+`src/runtime/teko_rt.h:52-59` — e o layout de facto é `{ptr,len}`, o mesmo de `tk_slice_byte`:
+
+```
+} tk_char;
+// tk_slice_byte — the runtime layout of a `[]byte` slice. Same {ptr,len} shape as tk_char
+```
+
+`src/lir/lower_const.tks:187` — e o serializador de consts JÁ SABE que é gordo:
+
+```
+checker::TCharLit => error { message = "const aggregate: char value is fat (Tier-B, T-B) (#594)" }
+```
+
+Mas as listas da lowering não sabem:
+
+| lista | ficheiro:linha | o que faz com `Char` | verdade |
+|---|---|---|---|
+| `is_fat_type` | `src/lir/lower.tks:5590` | `_ => false` | é gordo |
+| `ltype_of` | `src/lir/lower.tks:270` | `_ => LType::Ptr` (8 bytes) | 16 bytes |
+| `typeexpr_is_fat` | `src/lir/lower.tks:8141` | `SliceType` ou `"str"`; `char` não casa | é gordo |
+| `is_register_value_type` | `src/lir/lower.tks:6029` | `_ => false` | correcto (um `char` não é valor de registo) |
+
+**É a mesma expressão `ltype_size(ltype_of(t, enums))` já nomeada como raiz textual da RAIZ A, agora
+num TERCEIRO tipo.** E é outra vez o padrão do degrau 1: *a documentação estava certa e o código
+discordava dela* — aqui em três sítios (`type.tks:92`, `teko_rt.h:59`, `lower_const.tks:187`) contra
+dois (`is_fat_type`, `typeexpr_is_fat`).
+
+### 7-bis.2 Mas há um facto MAIOR do que a largura: o `char` tem DUAS representações
+
+`lower_char_lit`, `src/lir/lower.tks:7174`:
+
+```
+fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
+}
+```
+
+O backend nativo baixa `c'A'` para o **INTEIRO 65** — o ponto de código escalar. A rota C baixa-o
+para um `tk_char`, uma VISTA `{ptr,len}` sobre os bytes UTF-8. **Não são o mesmo valor com larguras
+diferentes: são representações diferentes do mesmo tipo.** É a décima representação do
+inventário de §3 — e a única que se representa como UM word por decisão explícita e não por
+esquecimento. **A contagem de §3 sobe de nove para dez.**
+
+### 7-bis.3 O que o `char` errado já está a causar — MEDIDO
+
+Sete sondas, mesmo método de §5 (projecto standalone, `main.tks` = `exit(probe())`, compilador
+`.gen1c`).
+
+| sonda | o que faz | C | nativo |
+|---|---|---|---|
+| `charscalar` | `c'A' to u32`, `c'é' to u32` | 0 | **PARA**: ``native backend N1: `char` has no single PrimKind, asked by the cast source (N2)`` |
+| `charseq` | `cs[i] != c'A'` | **FALHA** (`cc failed to build the generated C`) | **PARA**: ``… asked by the comparison chain (N2)`` |
+| `charfield` | `struct { c: char; n: i32 }` | **FALHA** (`codegen: cyclic value-type dependency`) | **PARA** (no cast, a montante) |
+| `charslice` | `[]char` literal + índice + cast | 0 | **PARA** (no cast) |
+| `charat` | `teko::str::char_at(s, i)` | 0 | **PARA** (no cast) |
+| `charisalpha` | `teko::str::is_alpha(c)` | 0 | **FALHA A LINKAR**: ``undefined reference to `teko_is_alpha`` |
+| `charlen` | `c.len` | **erro do checker** (`field access requires a struct receiver`) | idem |
+| `bytesym` (CONTROLO) | campo `byte`, literal `[]byte`, índice e push | 0 | **0** |
+
+**Veredicto sobre o `char`, e é melhor notícia do que eu temia: hoje o `char` NÃO produz nenhuma
+resposta errada e calada no nativo.** Toda a via que lá chega bate primeiro em `prim_kind_of` — a
+MESMA guarda que fez o degrau 7 (``a `str` … has no single PrimKind``) — e pára honestamente, ou
+falha a linkar. O `char` está protegido por acidente: é impossível FAZER alguma coisa com um `char`
+no nativo sem passar por um cast ou por uma comparação, e as duas param.
+
+**Isso é exactamente o que torna o `char` perigoso da forma oposta:** a protecção é uma guarda a
+montante, não um modelo correcto. No dia em que alguém der a `prim_kind_of` um braço para `char`
+para "fechar o degrau do cast", o modelo escalar de `lower_char_lit` passa a correr — e aí sim há
+respostas erradas e caladas, porque largura de campo, passo de elemento e ABI de argumento continuam
+todos a dizer 8.
+
+**Duas falhas ADJACENTES da rota C, medidas aqui e NÃO corrigidas** (são de outra tarefa, e existem
+porque para o `char` o oráculo tem buracos): `struct { c: char }` pára a rota C com
+`codegen: cyclic value-type dependency` — a mesma mensagem mal-aplicada da família já registada para
+o `null` (secção "A ROTA C E O `null` EM COMPOSIÇÃO" do ficheiro irmão); e `char == char` faz o `cc`
+falhar sobre o C gerado.
+
+### 7-bis.4 A pergunta de semântica devolvida ao dono — com factos, sem decisão
+
+**O que o esboço diz:** `type byte = u8` / `type char = []byte` / `type str = []char`.
+
+**O que o código faz, medido, não lido:**
+
+| facto | medição |
+|---|---|
+| `byte` é `u8` | **SIM.** `ltype_of(Byte) => LType::I8` (`lower.tks:272`), `ltype_size(I8) = 1` (`lir.tks:538`), `is_register_value_type(Byte) => true` (`lower.tks:6032`). Sonda `bytesym`: **0 nas duas rotas**. |
+| `char` é `[]byte` no LAYOUT | **SIM.** `tk_char` é `{ptr,len}`, *"Same {ptr,len} shape as tk_slice_byte"* (`teko_rt.h:59`). |
+| `char` é `[]byte` no TIPO | **NÃO.** `checker::Char` é tag própria (`type.tks:92`, *"distinct by tag"*), não `Slice{element: Byte}`. E `c.len` é **erro do checker** nas duas rotas: `field access requires a struct receiver`. |
+| `str` é `[]char` no TIPO | **NÃO.** `checker::Str` é tag própria (`type.tks:93`). A iteração por codepoint é DERIVADA por `tk_str_chars`. |
+| **`.len` de um `str` conta BYTES** | **SIM, e medido nas duas rotas.** `"Aéz€".len == 7` (A=1, é=2, z=1, €=3): sonda `strlenbytes` sai **0 no nativo E 0 no C**. |
+| a contagem de CODEPOINTS existe, à parte | **SIM.** `teko::str::chars(s).len == 4` e `teko::str::len_chars(s) == 4` para a mesma string — rota C, exit 0. |
+| `s[i]` indexa BYTES | **SIM.** `lower_index_str` (`lower.tks:7023`) usa `elem_ty = LType::I8`, stride 1. |
+
+**Resumo em uma frase, para o dono:** o LAYOUT do esboço está implementado (um `char` É `{ptr,len}`
+sobre bytes); a ÁLGEBRA DE TIPOS do esboço não está (`str` e `char` têm tag própria, não são
+aliases); e `.len` conta **bytes**, com a contagem de codepoints disponível à parte em
+`chars()`/`len_chars()`.
+
+**O custo de `.len` passar a contar chars — medido, e é para o dono decidir, não para mim:**
+
+| o que teria de mudar | quantos sítios |
+|---|---|
+| todo `.len` no fonte do compilador (nem todos são `str` — é o TECTO) | **3 444** |
+| `.len` sobre receptor provavelmente `str` (heurística pelo nome do identificador — ESTIMATIVA, não contagem) | **~394** |
+| `lower_index_str` (`lower.tks:7023`) teria de indexar por codepoint | 1 sítio, mas passa de O(1) a O(n) |
+| a metade COMPRIMENTO de todo o par gordo passaria a ser derivada, não armazenada | as 10 representações de §3 + 7-bis.2 |
+| sítios que HOJE dependem de `.len` contar codepoints | **0** — nenhum ficheiro de `src/**` chama `len_chars` fora das tabelas de builtins |
+
+**Ler o custo com honestidade:** não é o 394 que manda, é a última linha. Hoje NADA no compilador
+quer codepoints; tudo quer bytes, e quem quer codepoints já tem `chars()`/`len_chars()`. Mudar
+`.len` para codepoints trocaria uma leitura O(1) de um campo por uma contagem O(n) em ~394 sítios
+quentes e não desbloquearia nenhum consumidor existente. **É trabalho de OUTRA lane, e de uma lane
+de LINGUAGEM, não desta** — esta lane não pode mudar a semântica de `.len` sem pôr o `fixpoint` a
+comparar dois compiladores com semânticas diferentes. Fica com o dono; a medição está feita.
+
+### 7-bis.5 A resposta sem otimismo: **a sequência R1-R6 NÃO cobre o `char`**
+
+| crumb | cobre `char` de graça? | porquê |
+|---|---|---|
+| R1 `value_image_bytes` | **SIM, condicionado** | delega em `is_fat_type(t)`. Um braço `checker::Char => true` chega. |
+| R2 `store_fat_image`/`load_fat_image` | **SIM** | são agnósticas do tipo — recebem um `LoweredFat`. |
+| R3 `store_field_value` | **SIM, condicionado** | delega em `is_fat_type(declared)`. |
+| R4 elemento gordo de slice | **SIM, condicionado** | delega em `value_image_bytes`/`is_fat_type`. |
+| R5 gémeos `_len` do runtime | **PARCIALMENTE** | `tk_str_chars` devolve `tk_slice_char` (dois words) e cabe no padrão; mas `tk_char_at`/`tk_to_lower`/`tk_to_upper` devolvem `tk_char`, que é uma SEGUNDA forma de resultado gordo. |
+| R6 backstop honesto | **SIM** | é sobre `call_symbol`, indiferente ao tipo. |
+
+**Mas há CINCO sítios que enumeram à mão e ficariam errados**, e é por isso que a resposta é NÃO:
+
+| sítio | ficheiro:linha | o que enumera |
+|---|---|---|
+| `typeexpr_is_fat` | `src/lir/lower.tks:8141` | `parser::SliceType` ou o nome `"str"` — SINTÁCTICO, não vê `char` |
+| `field_layout_size` | `src/lir/lower.tks:8176` | consulta `typeexpr_is_fat` → campo `char` fica com 8 bytes |
+| `field_layout_align` | `src/lir/lower.tks:8191` | idem |
+| `bind_param` | `src/lir/lower.tks:7523` | `typeexpr_is_fat(p.type_ann)` → parâmetro `char` ocupa 1 registo, não 2 |
+| `append_param_ltypes` | `src/lir/lower.tks:7756` | idem, do lado da aridade |
+
+**O achado estrutural que isto revela, e que vale mais do que o `char`:** existem **DOIS** predicados
+de "é gordo?", um SEMÂNTICO (`is_fat_type`, sobre `checker::Type`) e um SINTÁCTICO (`typeexpr_is_fat`,
+sobre `parser::TypeExpr`), e **nada os obriga a concordar**. Hoje concordam por coincidência sobre
+`str`/`[]T`. Sobre `char` já discordariam — e a discordância entre um LAYOUT (que usa o sintáctico) e
+um STORE (que usa o semântico) é precisamente a forma da miscompilação silenciosa medida em §5.
+
+A sequência passa portanto a ter **oito** crumbs, com um novo ANTES de tudo e um novo no fim.
+
+---
+
+**R0 — UM só predicado de "é gordo", antes de R1.** (Novo, e é agora o primeiro crumb.)
+
+```teko
+/**
+ * is_fat_type — é `t` um tipo cujo VALOR são dois words (`{ptr, len}`)?
+ *
+ * A ÚNICA resposta semântica do backend. `str` e `[]T` sempre o foram; `char` também é
+ * (`src/checker/type.tks:92`, *"runtime layout == []byte"*; `src/runtime/teko_rt.h:59`, *"Same
+ * {ptr,len} shape as tk_slice_byte"*), e a sua ausência desta lista era a razão pela qual um campo
+ * `char`, um elemento de `[]char` e um parâmetro `char` recebiam 8 bytes onde a verdade são 16.
+ *
+ * @param checker::Type t  o tipo a classificar
+ * @return bool  verdadeiro para `str`, `[]T` e `char`
+ * @see typeexpr_is_fat  o gémeo SINTÁCTICO, que responde à mesma pergunta sobre uma anotação
+ * @since 0.3.1.0 raiz A, crumb R0
+ */
+fn is_fat_type(t: checker::Type) -> bool {
+    match t {
+        checker::Str => true
+        checker::Slice => true
+        checker::Char => true
+        _ => false
+    }
+}
+
+/**
+ * typeexpr_is_fat — o gémeo SINTÁCTICO de `is_fat_type`: é a anotação `te` um tipo de dois words?
+ *
+ * Existe porque o layout de um `struct` e a aridade de uma lista de parâmetros são calculados a
+ * partir da ANOTAÇÃO, antes de haver um `checker::Type` resolvido. Os dois predicados TÊM de
+ * responder o mesmo para o mesmo tipo — um layout que reserve 8 bytes e um store que escreva 16 é
+ * a corrupção silenciosa medida a 2026-07-29 (§5), e o inverso é a mesma coisa ao contrário.
+ * `lwt_fat_predicates_agree` afirma a concordância, tipo a tipo.
+ *
+ * @param parser::TypeExpr te  a anotação a classificar
+ * @return bool  verdadeiro para `[]T`, `str` e `char`
+ * @see is_fat_type  o gémeo SEMÂNTICO
+ * @since 0.3.1.0 raiz A, crumb R0
+ */
+fn typeexpr_is_fat(te: parser::TypeExpr) -> bool {
+    match te {
+        parser::SliceType => true
+        parser::NamedType as nt => named_single_segment_is(nt.path, "str") || named_single_segment_is(nt.path, "char")
+        _ => false
+    }
+}
+```
+
+**O portão de R0 é uma asserção unitária, e é ela que impede a próxima divergência:**
+`lwt_fat_predicates_agree` — para cada um de `str`, `[]i64`, `char`, `byte`, `i32`, `bool`,
+`ptr<i32>` e um struct nominal, `is_fat_type(<tipo>) == typeexpr_is_fat(<anotação>)`. É o mesmo
+serviço que `lwt_agg_empty_variant_const_interns_its_tag_image` prestou no degrau 6: uma asserção de
+LARGURA é o que apanha o consumidor esquecido.
+
+**R0 não pode aterrar sozinho.** Assim que `is_fat_type(Char)` for verdadeiro, `lower_fat_expr`
+recebe `char` e não tem produtor para ele — paragem NOMEADA, não silêncio, mas ainda assim uma
+regressão de superfície. R0 aterra no MESMO vagão que R7.
+
+---
+
+**R7 — a representação do `char`, no fim da sequência.** (Novo.)
+
+1. `lower_char_lit` (`lower.tks:7174`) deixa de produzir um inteiro: `c'é'` interna os seus bytes
+   UTF-8 em rodata (o que `lower_str_lit_fat` já faz) e produz o par `(ptr, len)` — um
+   `lower_char_lit_fat`, braço novo de `lower_fat_expr`.
+2. `prim_kind_of` deixa de ser o caminho de um cast de `char`: `char to u32` passa a chamar
+   `tk_char_to_u32(ptr, len)` (já existe, `teko_rt.h:242`), pelo padrão que `lower_str_compare` usou
+   para `tk_str_eq` no degrau 7.
+3. `char == char` idem, por bytes, pelo mesmo `tk_str_eq` — um `char` é uma vista de bytes e a
+   igualdade de codepoints É a igualdade dos seus bytes UTF-8.
+4. `call_symbol` ganha a família `char` (`char_at`, `is_alpha`, `is_digit`, `is_space`, `to_lower`,
+   `to_upper`, `chars`, `len_chars`) — hoje **todas** manglam para um símbolo indefinido (medido:
+   `teko_is_alpha`, `teko_chars`, `teko_len_chars`).
+5. Os pontos de entrada que devolvem `tk_char` (`tk_char_at`, `tk_to_lower`, `tk_to_upper`) precisam
+   do mesmo gémeo de parâmetro de saída que R5 desenha para `tk_str` — é a SEGUNDA forma de
+   resultado gordo, e é por isso que R5 só cobre o `char` "parcialmente".
+
+**R7 é o único crumb desta sequência que NÃO está no caminho crítico da auto-construção**: o fonte do
+compilador não usa `char` em lado nenhum do caminho de `teko build` (medido — §7-bis.6). Pode
+aterrar depois de a lane fechar. **Mas R0 não pode aterrar sem ele**, e é por isso que viajam juntos.
+
+---
+
+### 7-bis.6 A stdlib multi-byte — quem depende de quê, medido, com uma correcção
+
+Foi-me dado que `src/fmt/fmt.tks`, `src/encoding/json/json.tks`, `src/encoding/url/url.tks` e
+`src/encoding/base64/base64.tks` exercitam o caminho do `char`. **Verifiquei cada um e a lista está
+errada em quatro de quatro** — o que não enfraquece o argumento, fortalece-o, porque o que eles usam
+de facto é mais usado ainda:
+
+| módulo | o que usa DE FACTO | é `char`? |
+|---|---|---|
+| `src/fmt/fmt.tks` | `f_is_digit(c: byte)`, `f_is_alpha(c: byte)`, `f_is_hex(c: byte)` — funções TEKO locais sobre **`byte`** (`fmt.tks:87,91,95`) | **NÃO.** O `fmt` não toca em `char`. E o `byte` está correcto (sonda `bytesym`). |
+| `src/encoding/json/json.tks` | `str_slice_chars(…)` ×1 + `bytes_of_str(…)` ×1 | **NÃO** — `str_slice_chars` devolve **`str`**, `bytes_of_str` devolve **`[]byte`**. Família P2. |
+| `src/encoding/url/url.tks` | `str_slice_chars(…)` ×3 + `bytes_of_str(…)` ×4 | **NÃO.** Família P2. |
+| `src/encoding/base64/base64.tks` | `bytes_of_str(…)` ×1 | **NÃO.** Família P2. |
+| **`src/regex/regex.tks`** | **`chars(input)` (`regex.tks:366` e `386`) — o ÚNICO consumidor de `[]char` em todo o `src/**`** | **SIM.** |
+
+**A dependência real da stdlib não é o `char`; é a família de builtins que devolvem valores gordos.**
+Contada:
+
+- `bytes_of_str` (`-> []byte`, gordo): **20 sítios em 11 módulos** — `base64`, `csv`, `json`, `url`,
+  `io/stream`, `iter/byte_iter`, `iter/str_iter`, `regex`, `text`, `build/regression`,
+  `checker/comptime_fold`;
+- `str_slice_chars` (`-> str`, gordo): 4 sítios (`json` 1, `url` 3);
+- `chars` (`-> []char`, slice de elementos gordos): 2 sítios, ambos em `regex`.
+
+**Medido, e é uma correcção importante ao que me foi dito:**
+
+```
+$ TEKO_BACKEND=native … teko::str::chars("Aéz€")
+(.text+0x59): undefined reference to `teko_chars'
+
+$ TEKO_BACKEND=native … teko::str::bytes_of_str("Aéz€")
+(.text+0x26): undefined reference to `teko_bytes_of_str'
+
+$ TEKO_BACKEND=native … teko::str::str_slice_chars("Aéz€", 0, 2)
+(.text+0x3a): undefined reference to `teko_str_slice_chars'
+
+$ TEKO_BACKEND=native … teko::str::len_chars("Aéz€")
+(.text+0x15): undefined reference to `teko_len_chars'
+```
+
+**`s.chars()` NÃO produz hoje um slice corrompido: falha a LINKAR.** Fica dito assim porque é a
+diferença entre um defeito presente e um defeito a um commit de distância. O resto é verdade: **a
+corrupção é o que se obtém no minuto em que alguém acrescentar a entrada de `chars` a `call_symbol`
+sem R0/R1**, porque aí o slice constrói-se com passo 8 sobre elementos de 16. Ou seja — fechar o
+degrau 10 de forma ESTREITA (só `[]str`, enumerando à mão) não é neutro para o `char`: **cria** a
+corrupção que hoje não existe.
+
+Com a rota C como oráculo, os números que a stdlib deve dar (`.gen1c`, exit 0):
+`"Aéz€".len == 7` (bytes), `chars(s).len == 4` (codepoints), `len_chars(s) == 4`,
+`bytes_of_str(s).len == 7`.
+
+### 7-bis.7 O que isto muda nas previsões
+
+**P2 sobe de "80 sítios" para a família inteira, e ganha CINCO instâncias novas MEDIDAS.** Além de
+`teko_slice` e `teko_contains` (§7 P2), agora também `teko_chars`, `teko_len_chars`,
+`teko_bytes_of_str`, `teko_str_slice_chars` e `teko_is_alpha`. **Sete símbolos indefinidos
+distintos, todos medidos, todos pelo mesmo `call_symbol` (`lower.tks:1911-1928`).** A previsão passa
+a ser: à medida que a auto-construção avançar, cada builtin de `teko::str::*` que o fonte alcança dá
+uma falha de LINKER, uma de cada vez, sem paragem nomeada a dizer onde. **R6 é o crumb que converte
+esta série inteira num degrau nomeado, e passa a ser o de melhor retorno por linha da sequência.**
+
+**P9 (nova) — a stdlib multi-byte não arranca sem R5+R6.** `src/regex/regex.tks` é o primeiro módulo
+a bater no `[]char` (`regex.tks:366,386`); os outros dez batem primeiro em `bytes_of_str`. Nenhum
+está no caminho de `teko build`, por isso **não** bloqueiam esta lane — mas bloqueiam qualquer
+programa de utilizador que os importe, e é isso que o dono quer dizer com *"o multi-byte será
+necessário ao construir a stdlib"*.
+
+**P10 (nova) — o `char` não vai dar resposta errada e calada ANTES de alguém "corrigir"
+`prim_kind_of`.** Medido: toda a via bate na guarda e pára. **Previsão falsificável: se aparecer um
+commit que dê a `prim_kind_of` um braço para `char` sem trazer R0+R7 junto, no dia seguinte há
+respostas erradas e caladas com `char` — campo de struct, elemento de slice e argumento, exactamente
+as três formas de §5.** Se isso não acontecer, o meu modelo do `char` está errado.
+
+### 7-bis.8 O que isto muda na comparação de tamanho
+
+| | antes desta adenda | depois |
+|---|---|---|
+| crumbs | 6 (R1-R6) | **8** (R0, R1-R6, R7) |
+| ficheiros de produto | 1 (`src/lir/lower.tks`) + 3 entradas de runtime | **o mesmo 1**, + runtime (gémeos de `tk_str` **e** de `tk_char`) |
+| degraus fechados | 10 | **10, mais a série inteira de símbolos indefinidos** (7 medidos, e são todos os `teko::str::*` que o fonte alcançar) |
+| desbloqueia | a auto-construção | **a auto-construção E a stdlib multi-byte** (11 módulos por `bytes_of_str`, `regex` por `[]char`) |
+| custo em degraus equivalentes | ~3 | **~4** (R0 e R7 são pequenos; R7 é o único fora do caminho crítico) |
+
+**E o argumento deixa de ser aritmética de degraus.** Fechar o degrau 10 de forma estreita —
+enumerando `Str`/`Slice` à mão, que é o caminho natural para quem só quer o `[]str` da paragem —
+**cria** a corrupção do `[]char` que hoje não existe (§7-bis.6). A sequência de raiz não é "a mesma
+coisa mais barata": é a única versão que não abre um buraco novo ao fechar o antigo.
+
+---
+
+## 7-ter. ADENDA II (2026-07-29) — o dono DECIDIU: `.len` conta CARACTERES. O quanto.
+
+A pergunta de §7-bis.4 deixou de ser pergunta. Ruling do dono, literal:
+
+> *"Semanticamente, quando conto uma string, quero saber quantos caracteres ela tem, pense em uma
+> validação de um campo, o tamanho máximo de um texto. O usuário do sistema não sabe bytes e nem
+> imagina que um caractere acentuado ocupa 2 bytes e um emoji ocupa 4.*
+>
+> *Se o dev precisa dos bytes, então teria que usar uma stdlib `teko::strings::get_bytes(str) ->
+> []byte` ou o inverso `teko::strings::from_bytes([]byte) -> str` e depois isso pode se expandir
+> para outros encondings."*
+
+O dono decide o QUÊ; esta secção dá o QUANTO. **Não implemento nada aqui e não escolho nada aqui.**
+
+### 7-ter.1 Boa notícia primeiro: as duas funções que ele pede JÁ EXISTEM
+
+`src/checker/scope.tks:614-615`:
+
+```
+if name == "bytes_of_str" { … ret = bytes_t … }   // bytes_of_str(str) -> []byte
+if name == "str_from_utf8" {   // str_from_utf8([]byte) -> str | error (ROUND 0 / B.36)
+```
+
+- `teko::str::bytes_of_str(str) -> []byte` **é** o `get_bytes` do ruling. Já usado em **20 sítios de
+  11 módulos** (§7-bis.6).
+- `teko::str::str_from_utf8([]byte) -> str | error` **é** o `from_bytes` do ruling — e já devolve
+  `| error`, isto é, já VALIDA em vez de confiar.
+
+**Nada há a construir do lado do acesso a bytes.** O que falta é (a) o NOME, (b) a extensibilidade a
+outros encodings, e (c) a troca do significado de `.len`. Só (c) é trabalho de motor.
+
+### 7-ter.2 A divergência de nome, com o custo de cada opção — apontada, não escolhida
+
+Contagem de usos em `src/**` (varrimento literal):
+
+| namespace | usos | membros |
+|---|---|---|
+| `teko::str::` | **642** | `concat` (495), `slice` (34), `ends_with` (37), `slice_to` (24), `slice_from` (22), `contains` (20), `bytes_of_str`, `str_from_utf8`, `chars`, `len_chars`, `char_at`, `is_alpha`… |
+| `teko::string::` | 13 | `concat` (alias já existente) |
+| `teko::text::` | 4 | `valid_utf` (2), `str_from_utf` (1), `concat` (1) |
+| **`teko::strings::`** | **0** | não existe |
+
+| opção | custo em sítios | consequência |
+|---|---|---|
+| (a) `teko::strings::` NOVO, ao lado | **0** a mudar | passam a existir **quatro** namespaces de string (`str`, `string`, `text`, `strings`). É a opção barata e a que mais fragmenta. |
+| (b) RENOMEAR `teko::str::` → `teko::strings::` | **655** (642 + 13) | um só namespace, mas toca 655 sítios e o seed de bootstrap tem de aceitar o nome novo ANTES de o corpus o usar (sequenciamento de seed). |
+| (c) pôr `get_bytes`/`from_bytes` no `teko::str::` que já existe | **0** a mudar; 2 aliases a acrescentar | um namespace a MENOS do que hoje se `teko::text::` for absorvido. As funções já lá estão com outro nome. |
+
+**Para a extensibilidade a outros encodings que o ruling pede,** o ponto de desenho é o mesmo nas
+três: `get_bytes(s)` é `get_bytes(s, Encoding::Utf8)` com o encoding por omissão, e
+`from_bytes(b)` é `from_bytes(b, Encoding::Utf8) -> str | error`. O `| error` já existe em
+`str_from_utf8` e é o que torna a extensão segura — um decode que falha PARA em vez de inventar.
+**Decisão do dono; a medição está feita.**
+
+### 7-ter.3 O custo de `.len` contar chars — medido, e é o número que manda
+
+**Hoje `.len` é O(1) nas duas rotas.** No nativo é `lower_len_field` (`src/lir/lower.tks:6965`), que
+devolve a metade COMPRIMENTO do par já baixado — *"read directly (no `load`)"*. Na rota C é um campo
+de `tk_str`. Não há travessia nenhuma.
+
+**A capacidade de contar chars existe e é O(n)** — `src/runtime/teko_rt.h:243-245`:
+
+```
+// tk_str_len_chars — count UTF-8 codepoints in s. Walks the byte sequence using lead-byte widths;
+// no allocation, no copy. (The `len_chars` builtin lowers to this.)
+uint64_t tk_str_len_chars(tk_str s);
+```
+
+Trocar o significado de `.len` troca **O(1) por O(n)**. O que isso custa no fonte do compilador,
+contado por varrimento (nomes declarados `: str` no ficheiro, e o seu uso na mesma linha):
+
+| classe | sítios | onde dói |
+|---|---|---|
+| **A — `str.len` como LIMITE DE CICLO**, reavaliado por iteração | **162** | `src/lexer/lexer.tks` **20**, `src/fmt/fmt.tks` 16, `src/codegen/codegen.tks` 14, `src/runtime/teko_rt.tks` 12, `src/build/regression.tks` 11, `src/build/project.tks` 10, `src/build/tkr.tks` 10, `src/build/manifest.tks` 8, `src/build/regr_group.tks` 7, `src/checker/resolve.tks` 6 |
+| **B — `str.len` em ARITMÉTICA DE BYTES** (`.len ± N`) | **24** | enumerados abaixo — são os que PARTEM, e partem calados |
+| **C — nome `str` INDEXADO por byte** (`s[i]`) | **259** | `codegen` 27, `lexer` 27, `project` 22, `teko_rt.tks` 19, `regression` 17, `fmt` 17, `parse_lit` 15, `lower` 13, `sort/cmp` 13 |
+| **D — sítios que HOJE querem codepoints** | **0** | nenhum ficheiro de `src/**` chama `len_chars` fora das tabelas de builtins |
+
+**A classe A é o custo de DESEMPENHO, e é quadrático.** O padrão dominante do compilador é
+
+```
+loop { if p >= source.len { break } … p++ }
+```
+
+— `src/lexer/lexer.tks:31,134,146,188,209` e mais quinze no mesmo ficheiro. Com `.len` a percorrer a
+string, um lexer que hoje é O(n) sobre o ficheiro passa a **O(n²)**. Não é uma regressão de
+percentagem: é de ordem, no ficheiro mais quente do compilador.
+
+### 7-ter.4 A classe B — os sítios que PARTEM, e partem em silêncio. Nomeados.
+
+Estes fazem aritmética de BYTES a partir de `.len`. Se `.len` passar a contar chars, cada um lê o
+byte errado — **e em ASCII puro nenhum deles muda**, que é exactamente o que os torna perigosos: a
+suite de testes fica verde e o comportamento com acentos muda por baixo.
+
+| ficheiro:linha | o que faz |
+|---|---|
+| `src/checker/resolve.tks:38` | `if name.len != ns.len + 2 + bare.len { return false }` — o comprimento de `ns::bare` em BYTES |
+| `src/checker/resolve.tks:42` | `if name[ns.len + 1] != b':' { return false }` — o byte do separador `::`, localizado por `.len` |
+| `src/build/assemble.tks:31` | `path[path.len - 9] == b'/'` |
+| `src/build/project.tks:1431` | `out_dir[out_dir.len - 1] == b'/'` + `slice_to(out_dir, out_dir.len - 1)` |
+| `src/build/project.tks:1957` | `dir[dir.len - 1] == b'/'` + `slice_to(dir, dir.len - 1)` |
+| `src/build/project.tks:2820` | idem, terceiro sítio da mesma forma |
+| `src/build/project.tks:4135` | `let last = s.len - needle.len` |
+| `src/build/regr_group.tks:407` | `slice(split.stmts, 0, split.stmts.len - split.tail.len)` |
+| `src/build/regression.tks:632` | `line[line.len - 1] == b'\r'` + `slice_to(line, line.len - 1)` |
+| `src/build/tkr.tks:809` | `slice_to(line, line.len - 3)` |
+| `src/codegen/codegen.tks:5801` | `let seglen = other.len - s` |
+| `src/fmt/fmt.tks:314,329,342` | `last_end = source.len + 1` (sentinela) |
+| `src/numeric/dec/dec.tks:268` | `s.len - 1` |
+| `src/parser/parse_expr.tks:186` | `spec_src[spec_src.len - 1] != b']'` |
+
+**Vinte e quatro no total.** `src/checker/resolve.tks:38,42` é o pior da lista: é a resolução de
+NOMES do checker, a localizar o `::` por aritmética de bytes sobre `.len`. Um namespace ou um
+identificador com um acento passaria a resolver mal — silenciosamente.
+
+**E a classe C (259 sítios) é a razão pela qual a classe B não é o fim da história:** `s[i]` indexa
+BYTES no backend nativo (`lower_index_str`, `src/lir/lower.tks:7023`, `elem_ty = LType::I8`,
+stride 1). Um `.len` que conte chars e um `s[i]` que indexe bytes **deixam de ser o mesmo eixo** —
+todo o idioma "limita por `.len`, lê por `[i]`" fica incoerente por construção. Ou `s[i]` também
+passa a indexar por codepoint (e aí é O(n) por acesso, ou seja O(n²) outra vez), ou o idioma
+inteiro tem de migrar para `bytes_of_str(s)`.
+
+**A migração que isto realmente pede, dita sem rodeios:** o compilador deve deixar de andar sobre
+`str` e passar a andar sobre `[]byte`. A ferramenta já existe (`bytes_of_str`, 20 sítios já a usam),
+e o resultado seria **mais** correcto do que hoje, porque tornaria explícito que o lexer trabalha em
+bytes. Mas são ~259 sítios de migração de FONTE, não uma mudança de motor.
+
+### 7-ter.5 A interacção com R0-R7 — a pergunta mais importante, e a resposta é: REFORÇA
+
+Foi-me perguntado se a mitigação óbvia — guardar as duas contagens no ponteiro gordo, tornando `str`
+de **três words** `{ptr, bytes, chars}` — destrói a sequência que está a arrumar dois.
+
+**Não destrói. É o argumento mais forte que este documento tem para fazer R0-R7 PRIMEIRO.**
+
+A razão é que R0-R2 não codificam "dois" em lado nenhum: substituem aritmética dispersa por funções
+nomeadas. Contando as edições necessárias para passar `str` a três words, ANTES e DEPOIS:
+
+| o que teria de mudar para `str` ser 3 words | HOJE | DEPOIS de R0-R2 |
+|---|---|---|
+| a largura da imagem | 10 sítios com `{ptr@0,len@8}` escrito à mão (o inventário de §3 + §7-bis.2) | **1** — `fat_value_bytes()` devolve 24 |
+| onde vive a segunda/terceira metade | os mesmos 10 | **1** — `fat_len_offset()` + um irmão |
+| o escritor em memória | 5 escritores independentes (campo, elemento, slot, payload de invólucro, const) | **1** — `store_fat_image` |
+| o leitor em memória | 4 leitores independentes | **1** — `load_fat_image` |
+| a largura do campo de struct | `field_layout_size` **e** `typeexpr_is_fat`, que podem discordar | **1** — os dois já unificados por R0 |
+| a aridade de um parâmetro gordo | `bind_fat_param` + `append_param_ltypes`, dois sítios que têm de concordar | 2, mas com o predicado já único |
+| o invólucro de variante | 24 → 32 bytes | **1** — `variant_wrapper_bytes()`, já é função desde o degrau 6 |
+| o slot escondido do retorno | `bind_ret_len_slot` + `lower_call_fat`, 8 → 16 bytes | 2, já emparelhados |
+
+**Hoje: encontrar dez sítios escritos à mão e não falhar nenhum. Depois de R0-R2: editar duas
+funções.** E "não falhar nenhum" é precisamente o que já falhou uma vez — é o defeito de §5.
+
+**Corolário de sequenciamento, e é a recomendação central desta adenda:**
+
+> **A correcção de raiz (R0-R7) é PRÉ-REQUISITO da mudança semântica, não concorrente dela.**
+> Fazer a semântica primeiro é mudar um alvo em movimento em dez sítios dispersos; fazer a raiz
+> primeiro torna a semântica uma edição de duas funções. A ordem inversa não é mais lenta — é a que
+> tem probabilidade de introduzir uma nova miscompilação silenciosa da mesma família de §5.
+
+**E o `char` fica coberto?** Sim, mas só com R0+R7 dentro. O ruling torna isto obrigatório e não
+opcional: se `.len` conta caracteres, então a contagem de caracteres deixa de ser um canto da stdlib
+(hoje: 2 sítios, ambos em `src/regex/regex.tks`) e passa a estar por baixo de **toda** a contagem de
+strings do sistema. O caminho `chars()`/`len_chars()`/`tk_char` passa a ser caminho quente. **Sem R0
+(`is_fat_type`/`typeexpr_is_fat` a conhecerem `Char`) e sem R7 (a representação do `char`), a
+semântica nova assenta sobre um tipo que o backend ainda dimensiona a 8 bytes.** Está dito, como
+pedido: a minha sequência cobre-o, e só o cobre com R0 e R7 lá dentro.
+
+### 7-ter.6 As quatro mitigações, com o custo de cada uma — para o dono escolher
+
+| mitigação | `.len` | custo em memória | o que quebra |
+|---|---|---|---|
+| **M1** — `.len` chama `tk_str_len_chars` | **O(n)** | 0 | os 162 limites de ciclo passam a O(n²); o lexer é o pior caso |
+| **M2** — `str` a TRÊS words `{ptr, bytes, chars}` | **O(1)** | +8 bytes por `str` em todo o programa | fatiar um `str` passa a recontar chars → o custo O(n) muda de sítio, não desaparece; e as duas contagens podem dessincronizar |
+| **M3** — içar `.len` para fora dos ciclos no fonte | O(n) mas 1× | 0 | migração de FONTE em ~162 sítios; não resolve as 24 aritméticas de bytes |
+| **M4** — o compilador migra para `[]byte` (`bytes_of_str`) e `.len` de `str` fica para o utilizador | **O(1)** para `[]byte` | 0 | ~259 sítios de migração de fonte, mas torna EXPLÍCITO que o lexer anda em bytes — mais correcto do que hoje |
+
+**Sem recomendar entre elas** (é semântica do dono), duas observações de facto: M2 é a única que
+mantém `.len` O(1), e é exactamente a que R0-R2 tornam barata (§7-ter.5). M4 é a única que resolve
+as classes B e C ao mesmo tempo, e é a única que não deixa incoerência entre `.len` e `s[i]`.
+
+### 7-ter.7 De quem é este trabalho — recomendação de sequenciamento
+
+| trabalho | lane | porquê |
+|---|---|---|
+| R0-R7 (a raiz A) | **ESTA lane, 0.3.1.0** | está no caminho crítico da auto-construção; sem ela a lane não fecha |
+| `get_bytes`/`from_bytes` com nome novo + encodings | **lane própria, de STDLIB** | as funções já existem; é API e nomes, não motor. Zero impacto na auto-construção. |
+| `.len` a contar chars | **lane própria, de LINGUAGEM, depois de R0-R7** | muda a semântica observável de 3 444 sítios potenciais e a complexidade do lexer. **Não pode ser feita nesta lane:** o `fixpoint` compara gen2 com gen3, e um compilador com semântica de `.len` diferente do seu seed não é comparável com o anterior — a mudança tem de atravessar um bump de versão com o seed a acompanhar. |
+| migrar o compilador para `[]byte` (M4) | **lane própria, e pode correr em PARALELO** | não depende de nenhuma decisão semântica: andar em bytes explicitamente é correcto hoje e continua correcto depois |
+
+**A ordem que recomendo, e a razão em uma linha cada:**
+
+1. **R0-R7** — desbloqueia a auto-construção e torna tudo o resto barato.
+2. **M4 (migrar o compilador para `[]byte`)** — pode começar já, em paralelo, e é a única coisa que
+   torna a mudança de `.len` segura para o próprio compilador.
+3. **`.len` conta chars**, com o bump de versão que o seed exige, depois de 1 e 2.
+4. **`get_bytes`/`from_bytes` + encodings**, quando o dono fixar o namespace.
+
+**Um aviso que não quero deixar implícito:** o ponto 3 feito ANTES do ponto 2 põe os 24 sítios de
+§7-ter.4 a ler o byte errado, em silêncio, e em ASCII puro **nenhum teste do projecto dá por isso**.
+É a mesma classe de defeito que §5 mediu e a mesma classe que o `fixpoint` não vê. Se o dono quiser
+o ponto 3 primeiro, o preço mínimo é uma fixture de corpus por cada um dos 24 sítios, com entrada
+acentuada.
+
+---
+
 ## 8. Resumo — confirma ou refuta, e o que recomendo
 
 **A hipótese do dono REFUTA-SE na letra.** O runtime foi tocado em **2 de 10** degraus e nunca
@@ -810,9 +1355,10 @@ captura de resultado do backend é **um** registo, e um `tk_str` devolvido por v
 **A suspeita sobre os valores gordos CONFIRMA-SE, com uma correcção que muda o plano.** Não há uma
 raiz comum, há **duas**, e elas alternam:
 
-- **RAIZ A — os valores gordos são cidadãos de segunda.** Degraus 5, 6, 7, 9, 10. Nove
-  representações de "dois words" espalhadas pelo ficheiro, nenhuma partilhada, e uma décima que não
-  existe (o elemento de slice).
+- **RAIZ A — os valores gordos são cidadãos de segunda.** Degraus 5, 6, 7, 9, 10. **Dez**
+  representações de "dois words" espalhadas pelo ficheiro, nenhuma partilhada, e uma décima primeira
+  que não existe (o elemento de slice). São **três** os tipos gordos, não dois: `str`, `[]T` e
+  **`char`** — e o `char` falta em `is_fat_type`, em `ltype_of` e em `typeexpr_is_fat` (§7-bis).
 - **RAIZ B — o valor de um agregado é o endereço de um slot de frame.** Degraus 4 e 8, mais o
   invólucro devolvido que pendura. Já reclassificada como BUG pelo dono.
 - Os degraus 1, 2 e 3 não são de nenhuma das duas, e já fecharam.
@@ -824,23 +1370,50 @@ metade ponteiro está certa, a metade comprimento nunca é escrita, e o caminho 
 (que é a razão pela qual isto sobreviveu). **53% dos structs do compilador têm um campo gordo, e um
 deles é `LStructLayout`.**
 
+**E o `char` é o terceiro tipo gordo, que nenhuma lista da lowering conhece** (§7-bis). Hoje não
+mente — toda a via bate em `prim_kind_of` e pára, ou falha a linkar (`teko_is_alpha`, `teko_chars`,
+`teko_len_chars`, `teko_bytes_of_str`, `teko_str_slice_chars`: **sete** símbolos indefinidos
+distintos, todos medidos). Mas está protegido por uma guarda a montante, não por um modelo certo:
+fechar o degrau 10 de forma ESTREITA **cria** a corrupção de `[]char` que hoje não existe.
+
+**E o ruling de `.len` a contar caracteres** (§7-ter) não muda o veredicto — muda a ORDEM. Medido:
+`.len` é O(1) hoje nas duas rotas; contar chars é O(n) (`tk_str_len_chars`); o compilador tem **162**
+limites de ciclo sobre `str.len` (20 só no lexer, que passaria de O(n) a O(n²)), **24** sítios de
+aritmética de bytes que partiriam em SILÊNCIO (e em ASCII puro nenhum teste daria por isso —
+`src/checker/resolve.tks:38,42` é o pior), **259** sítios que indexam um `str` por byte, e **0**
+sítios que hoje queiram codepoints. As duas funções que o dono pede já existem sob outro nome
+(`teko::str::bytes_of_str` e `teko::str::str_from_utf8`); `teko::strings::` tem **0** usos hoje
+contra **642** de `teko::str::`.
+
 **O que recomendo, por ordem:**
 
-1. **Não fechar o degrau 10 sozinho.** Ele é o crumb R4 de um desenho de seis, e fechá-lo sozinho
-   entrega um compilador que compila e mente (P3).
-2. **Abrir o vagão da RAIZ A com os seis crumbs R1-R6 de §6.** Um ficheiro de produto, três entradas
-   de runtime, sem tocar na LIR nem em `src/backend/**`. Custa cerca de três degraus e fecha dez —
-   incluindo os três que nunca se anunciariam.
-3. **Pôr as oito fixtures de §6 no corpus `own_native` ANTES das correcções**, medidas a falhar. Seis
-   delas já têm o número errado registado aqui.
-4. **R6 primeiro se houver pressa** — é o crumb mais barato e converte a próxima falha de linker
-   (P2, já medida) numa paragem nomeada. Uma paragem endereçada é um degrau; um `undefined
-   reference` é arqueologia.
-5. **Reportar, sem transformar em vagão:** a RAIZ B continua aberta e é independente; a lista fechada
-   de `is_str_arg_builtin` (P7) morde no Windows mais tarde.
+1. **Não fechar o degrau 10 sozinho.** É o crumb R4 de um desenho de oito, e fechá-lo sozinho entrega
+   um compilador que compila e mente (P3) — e, se for fechado enumerando `Str`/`Slice` à mão, cria a
+   corrupção do `[]char` (§7-bis.6).
+2. **Abrir o vagão da RAIZ A com os oito crumbs R0-R7.** Um ficheiro de produto
+   (`src/lir/lower.tks`), entradas de runtime, zero mudanças na LIR e em `src/backend/**`. Custa
+   cerca de quatro degraus e fecha dez, mais a série inteira de símbolos indefinidos — incluindo os
+   três defeitos que nunca se anunciariam.
+3. **Pôr as fixtures de §6 no corpus `own_native` ANTES das correcções**, medidas a falhar. Seis já
+   têm o número errado registado aqui.
+4. **R6 primeiro se houver pressa** — o crumb mais barato, e converte SETE falhas de linker medidas
+   numa paragem nomeada. Uma paragem endereçada é um degrau; um `undefined reference` é arqueologia.
+5. **A mudança semântica de `.len` é de OUTRA lane, e DEPOIS de R0-R7** — não por hierarquia, por
+   custo: hoje passar `str` a três words seria encontrar dez sítios escritos à mão sem falhar
+   nenhum; depois de R0-R2 é editar duas funções (§7-ter.5). **A raiz é pré-requisito da semântica,
+   não concorrente dela.** E ela não cabe nesta lane por uma razão dura: o `fixpoint` compara gen2
+   com gen3, e um compilador com semântica de `.len` diferente do seu seed não é comparável — precisa
+   de um bump de versão com o seed a acompanhar.
+6. **Migrar o compilador para `[]byte` (M4) pode começar já, em paralelo** — não depende de decisão
+   semântica nenhuma, é correcto hoje e continua correcto depois, e é a única coisa que torna a
+   mudança de `.len` segura para o próprio compilador.
+7. **Reportar, sem transformar em vagão:** a RAIZ B continua aberta e é independente; a lista fechada
+   de `is_str_arg_builtin` (P7) morde no Windows mais tarde; e a rota C tem dois buracos novos
+   medidos à volta do `char` (`struct { c: char }` e `char == char`).
 
-**A previsão pela qual quero ser julgado:** P2 (`undefined reference to teko_slice`, já medida) é o
-que aparece a seguir ao degrau 10, e P3 (o gen2 que constrói e depois falha a compilar qualquer
-`struct`) é o que aparece a seguir a P2. Se P3 não se verificar — se o gen2 nativo compilar um
-`struct` normalmente — o modelo deste documento está errado, e isso é a coisa mais útil que ele pode
-produzir.
+**As previsões pelas quais quero ser julgado:** P2 (`undefined reference to teko_slice`, já medida)
+vem a seguir ao degrau 10; P3 (o gen2 que constrói e depois falha a compilar qualquer `struct`) vem
+a seguir a P2; e P10 — se alguém der a `prim_kind_of` um braço para `char` sem trazer R0+R7, no dia
+seguinte há respostas erradas e caladas com `char`, nas mesmas três formas de §5. Se P3 não se
+verificar — se o gen2 nativo compilar um `struct` normalmente — o modelo deste documento está errado,
+e isso é a coisa mais útil que ele pode produzir.
