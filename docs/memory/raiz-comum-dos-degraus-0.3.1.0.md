@@ -1338,7 +1338,404 @@ as classes B e C ao mesmo tempo, e é a única que não deixa incoerência entre
 §7-ter.4 a ler o byte errado, em silêncio, e em ASCII puro **nenhum teste do projecto dá por isso**.
 É a mesma classe de defeito que §5 mediu e a mesma classe que o `fixpoint` não vê. Se o dono quiser
 o ponto 3 primeiro, o preço mínimo é uma fixture de corpus por cada um dos 24 sítios, com entrada
-acentuada.
+acentuada. **(REVISTO em 7-quater.4: são 25, todos MECÂNICOS, e o problema não é a dificuldade —
+é que nada obriga a fazê-los.)**
+
+---
+
+## 7-quater. ADENDA III (2026-07-29) — a iteração MEDIDA, o `char` como DEFEITO registado, e o que resta
+
+Dois rulings do dono no mesmo dia, ambos literais.
+
+**Ruling 1 — o `char` sai desta lane, e continua açúcar:**
+
+> *"char precisa de um vagão próprio então. Mexe em praticamente a codebase inteira. Mas, concordo
+> que dá para manter o apontamento atual, char viraria apenas um açúcar (como já é hoje), mas
+> colocaria no str o que havia sugerido, a contagem de chars e de bytes. Como já tem função para
+> extrair chars, sai até barato, mas eu diria que, str.len seriam chars, o outro contador seria dos
+> ponteiros, mas tem algo maior, iterar em uma string, a maioria das linguagens usam char (ou rune)
+> na saída e não bytes."*
+
+**Ruling 2 — a divergência de representação do `char` é DEFEITO, não desenho:**
+
+> *"`o lower_char_lit baixa c'A' para o inteiro 65, enquanto a rota C baixa para uma vista {ptr,len}`
+> - para mim é bug mesmo se não fizermos nada sobre str e char"*
+
+### 7-quater.1 (A) A ITERAÇÃO — medida, e é a melhor notícia deste dossiê
+
+**Um `str` É aceite hoje como sujeito de for-each, e produz BYTES.** Medido nas duas rotas com
+`"Aéz"` (A=1 byte, é=2, z=1 → 4 bytes, 3 codepoints):
+
+| sonda | o que faz | C | nativo |
+|---|---|---|---|
+| `iterslice` (controlo) | `loop x in [10,20,30]` conta iterações | 3 | **3** |
+| **`iterstr`** | **`loop c in "Aéz"` conta iterações** | **4** | **4** |
+| `iterbytes` | `loop b in bytes_of_str("Aéz")` | 4 | falha a linkar (P2) |
+| `iterchars` | `loop c in chars("Aéz")` | **3** | falha a linkar (P2) |
+| `elemisbyte` | `takes_byte(c)` dentro do `loop c in "Aéz"` | **4 (compila)** | **4 (compila)** |
+| `elemischar` | `takes_char(c)` no mesmo sítio | **`argument type mismatch`** | **`argument type mismatch`** |
+| `elemvalue` | `if c == 65 to byte` | 1 | **1** |
+| `itertuple` | `loop (c, i) in "Aéz"`, último índice | 3 | **3** |
+
+**O elemento é um `byte`, provado pelas duas direcções:** `takes_byte(c)` compila e conta 4;
+`takes_char(c)` é erro de tipo na mesma linha. As duas rotas dão exactamente o mesmo.
+
+**E a razão é a melhor possível: NÃO EXISTE máquina de iteração para mudar.** O for-each é um
+desugar SINTÁCTICO no PARSER — `parse_loop_foreach_slice`, `src/parser/loop_head.tks:668` — cujo
+próprio doc-comment o diz:
+
+> *"lower to the PROVEN counter form `loop mut _i in 0 .. <src>.len` … The element MODE is chosen
+> type-blind … Slice-ness / integer-index / element-type are validated by the ordinary checker rules
+> on the emitted `.len` / index / element-assignment."*
+
+```
+loop x in E { B }        desugara para        let _src = E
+                                              loop mut _i in 0 .. _src.len { let x = _src[_i]; B }
+```
+
+**COROLÁRIO, e é a resposta ao "algo maior" do dono:** a iteração dá bytes hoje por UMA razão só —
+`.len` conta bytes e `s[i]` indexa bytes. **Se `.len` passar a contar chars E `s[i]` a indexar
+chars, o for-each passa a dar chars SOZINHO: zero linhas no parser, zero no desugar, zero numa
+máquina de iteração que não existe.** O "algo maior" não é trabalho separado — é consequência
+automática da decisão sobre `.len`/`[i]`.
+
+**E A ARMADILHA, o outro lado da mesma moeda, MEDIDA:** se `.len` contar chars e `s[i]` continuar a
+indexar bytes, o desugar itera `n_chars` vezes indexando bytes. Simulei o desugar à mão sobre
+`"Aéz"` (`.len`=4, `len_chars`=3), sonda `trapdesugar`, rota C, **exit 143** = `100 + bytes*10 +
+chars` = `100 + 40 + 3`:
+
+```
+3 iterações, indexadas por BYTE, visitam 'A'(65), 0xC3(195), 0xA9(169)
+   -> 'é' vem partido em duas metades sem sentido, e 'z' NUNCA É VISITADO
+```
+
+**Mudar `.len` sem mudar `[i]` junto cria uma corrupção silenciosa nova, no construto mais usado da
+linguagem.** Os dois eixos movem-se juntos ou nenhum se move.
+
+**Custo no fonte do compilador: ZERO.** Há **3** sítios de `loop … in …` em todo o `src/**`, e os
+três estão dentro de literais de mensagem de erro (`src/parser/loop_head.tks:733`). O compilador não
+usa for-each; usa `loop { if i >= n.len { break } … i++ }`. **A mudança de tipo de elemento não toca
+uma linha de código do compilador.**
+
+**E os dois eixos de fatiar JÁ EXISTEM** (sonda `sliceaxis`, rota C, **exit 23**):
+`teko::str::slice(s,0,2)` → **2 bytes** (eixo de BYTES); `teko::str::str_slice_chars(s,0,2)` →
+**3 bytes**, isto é `'Aé'` = 2 CHARS (eixo de CHARS). A API já tem os dois; falta decidir qual deles
+`.len` e `[i]` nomeiam.
+
+### 7-quater.2 (B) O que resta da sequência, e onde entra o terceiro word
+
+**Confirmado no vagão `cargo/0.3.1.0-degrau-10`, lido por `git show` SEM merge** (a história fica
+linear):
+
+| crumb meu | aterrou como | commit |
+|---|---|---|
+| R1 (autoridade de largura) | `elem_byte_stride` / `elem_byte_align` (`lower.tks:7106/7121`) — `if is_fat_type(t) { return fat_slot_bytes() }` | `2549c9f` |
+| R2 (um escritor/leitor) | `store_array_elem`, `lower_index_fat`, `lower_fat_element_push` | `2549c9f` |
+| R3 (campo gordo escrito) | `if is_fat_type(value.type)` no store de campo (`lower.tks:6996`) | `9fa7e5c` |
+| R4 (elemento gordo) | os três sítios | `2549c9f` |
+| R6 (backstop honesto) | `unresolved_builtin_stop` | `9fa7e5c` |
+
+**A previsão P2 verificou-se DUAS vezes.** Previ `undefined reference to teko_contains` e recomendei
+R6 como o crumb de melhor retorno. O degrau 11 é agora ``native backend N1: builtin `contains` not
+yet lowered (N2)`` — **o símbolo que nomeei, a anunciar-se como paragem nomeada precisamente porque
+R6 aterrou.** Uma falha de linker virou degrau endereçado.
+
+**Falta:** **R0** (unificar os dois predicados), **R5** (os gémeos `_len` — é o degrau 11 e os que
+vêm atrás) e **R7**, agora repartido (§7-quater.3).
+
+**Onde entra o terceiro word — com uma correcção ao que eu disse.** Eu previa "editar duas funções".
+Medido no vagão, são duas, mas **não é uma**:
+
+```
+src/lir/lower.tks:6496   fn fat_slot_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+src/lir/lower.tks:8334       if typeexpr_is_fat(te) { return ltype_size(LType::Ptr) * (2 to u32) }
+```
+
+**Duas computações INDEPENDENTES do mesmo 16, ligadas a DOIS predicados diferentes** —
+`elem_byte_stride` pergunta ao semântico (`is_fat_type`), `field_layout_size` ao sintáctico
+(`typeexpr_is_fat`). O vagão fechou o degrau 10 correctamente e, ao fazê-lo, **criou um segundo sítio
+que responde "quanto mede um valor gordo"**. Hoje concordam nos 16 por coincidência aritmética.
+
+Isto não enfraquece a conclusão de §7-ter.5 — **confirma-a e afia-a**: o terceiro word custa hoje
+**2** edições em vez das 10 de antes de R1-R4, e custaria **1** se R0 unificasse predicados e
+larguras. **R0 deixou de ser um crumb do `char` e passou a ser o crumb do TERCEIRO WORD** — o
+pré-requisito directo do ruling do dono sobre `str`, com `char` ou sem ele.
+
+### 7-quater.3 (C) DEFEITO REGISTADO — a representação do `char` diverge entre rotas
+
+**Estado: BUG ABERTO. Dono: ruling literal de 2026-07-29 (Ruling 2, acima). Não corrigido nesta
+lane. Sequência abaixo.**
+
+| rota | representação de `c'A'` | sítio |
+|---|---|---|
+| nativa | **o inteiro 65** (ponto de código escalar) | `lower_char_lit`, `src/lir/lower.tks:7174` — `const_int_inst(r.vreg, utf8_codepoint(c.bytes), …)` |
+| C (oráculo) | **`{ptr, len}`**, vista sobre os bytes UTF-8 | `tk_char`, `src/runtime/teko_rt.h:52-57` |
+
+Não é diferença de largura: é de REPRESENTAÇÃO. Pela regra do oráculo já legislada nesta lane é bug
+do nativo até prova em contrário — e o dono confirmou-o explicitamente.
+
+#### (3) Qual das duas é a certa — RESPONDIDO PELO DONO
+
+**Ruling 3, literal (2026-07-29):**
+
+> *"E char sendo açúcar, um c'X' deveria fazer lowering para []byte, e aqui está o seu char gordo em
+> C"*
+
+Isto fecha a pergunta e resolve a incoerência que eu tinha levantado: **a gordura não é do `char`, é
+do `[]byte` em que ele se desfaz.** Um açúcar com representação gorda é coerente porque o açúcar
+DESAPARECE e o que fica é um `[]byte` legitimamente gordo. A minha própria análise já apontava para
+aí e o dono disse-o melhor:
+
+- **`{ptr,len}` é a representação que faz de `char` um AÇÚCAR** — é literalmente o que `[]byte` já
+  é, sem nada acrescentado. `checker::Char` mantém tag própria só para dar erros de tipo melhores;
+  por baixo é o mesmo par.
+- **O inteiro 65 é o que faria de `char` um PRIMITIVO NOVO** — um quarto tipo de máquina inventado
+  no backend, que nenhuma outra camada conhece. É o oposto de açúcar.
+
+**O ruling do oráculo e o ruling do açúcar apontam para o MESMO lado, e o nativo está errado pelos
+dois.** A representação certa é `{ptr,len}`.
+
+**O custo honesto dessa resposta, que registo para não parecer gratuita:** o escalar É melhor para
+comparar e converter (O(1), sem memória), e o `{ptr,len}` do `tk_char` empresta para dentro da string
+de origem — `src/runtime/teko_rt.h:338`: *"Returns a tk_char view INTO s.ptr (no copy); the caller
+must ensure s outlives the result"*, um risco de tempo de vida real. Nada disto muda a decisão hoje
+(o oráculo decide e o açúcar concorda), mas é matéria para o vagão do `char`, não para se fingir que
+não existe.
+
+#### (1) O conjunto MÍNIMO que fecha o bug sem destapar a corrupção
+
+A P10 diz que dar a `prim_kind_of` um braço para `char` sem mais nada destapa as três respostas
+erradas de §5. A lista exacta do que tem de vir junto — **mais curta que o R7 inteiro**, porque R3,
+R4 e R6 já aterraram:
+
+| peça | o que faz | porque é OBRIGATÓRIA |
+|---|---|---|
+| **R0** | unificar `is_fat_type` e `typeexpr_is_fat` (o sintáctico passa a perguntar ao tipo RESOLVIDO, não ao nome), ambos com braço `Char`; braço `Char` em `ltype_of` | sem ela `elem_byte_stride` (semântico) diz 16 e `field_layout_size` (sintáctico) diz 8 para o MESMO campo — **e isto NÃO é hipotético: já corrompe hoje atrás de um alias de tipo, medido em §7-quater.3-bis** |
+| **P-lit** | `lower_char_lit_fat`: `c'é'` interna os bytes em rodata e devolve o par; braço `checker::TCharLit` em `lower_fat_expr` | é o bug em si |
+| **P-cast** | `char to u32` sai de `prim_kind_of` e passa a chamar `tk_char_to_u32(ptr, len)` (já existe, `teko_rt.h:242`) | é a guarda que hoje protege; tirá-la sem substituto É a P10 |
+| **P-eq** | `char == char` pelo `tk_str_eq` já usado no degrau 7 (a igualdade de codepoints É a dos seus bytes UTF-8) | mesma guarda, mesmo motivo |
+| *(aterrado)* R3 | store de campo gordo escreve as duas metades | um campo `char` passa a ser escrito inteiro, sem trabalho novo |
+| *(aterrado)* R4 | `elem_byte_stride` / `lower_index_fat` / `lower_fat_element_push` | `[]char` ganha passo 16, índice e push de graça |
+| *(aterrado)* R6 | `unresolved_builtin_stop` | `char_at`/`is_alpha`/`to_lower`/`chars` PARAM por nome em vez de manglar — por isso NÃO precisam de vir agora |
+
+**Quatro peças novas** (R0, P-lit, P-cast, P-eq) — chamo-lhes **R7-min**. Todo o resto do R7 original
+(a família de builtins de `char`, os gémeos de saída para `tk_char`) **fica no vagão do `char`**, e
+fica em segurança porque R6 fá-los parar por nome.
+
+**A ordem dentro do R7-min importa, e é a lição do degrau 3 e do degrau 6:** R0 primeiro (senão as
+duas larguras discordam); P-cast e P-eq ANTES de P-lit (senão, no instante em que `is_fat_type(Char)`
+for verdadeiro, `lower_fat_expr` recebe um `char` sem produtor). Aterram no MESMO commit; nenhuma é
+portável sozinha.
+
+#### (2) Onde ela vive — o argumento é o inverso do de arrumação
+
+O dono diz que o bug é independente do vagão do `char`. Concordo, e a medição diz mais: **R7-min já
+não depende de nada que esteja nesse vagão.** Depende de R0 — que passou a ser o crumb do TERCEIRO
+WORD (§7-quater.2) e pertence a ESTA lane de qualquer forma — e de R3/R4/R6, que **já aterraram
+aqui**.
+
+**Recomendo: R7-min vem para ESTA lane; o vagão do `char` fica com a superfície** (família de
+builtins, gémeos de `tk_char`, semântica de iteração por codepoint, encodings).
+
+O argumento não é conveniência, é o estado intermédio: entre hoje e o vagão do `char`, esta lane vai
+mexer em `is_fat_type`, `typeexpr_is_fat`, `fat_slot_bytes` e `field_layout_size` para pôr o terceiro
+word no `str`. **São exactamente as quatro funções de que o R7-min precisa.** Fazer o `char` depois é
+operar as mesmas quatro duas vezes, a segunda com o alvo já em movimento — a receita de §5 outra vez.
+Fazer R0 + R7-min agora é operar uma vez, com o `char` a entrar como mais um `=> true` numa lista que
+já ficou única.
+
+**E há um estado intermédio a PROIBIR explicitamente, que é o que a P10 descreve:** enquanto o
+R7-min não aterrar, **ninguém pode dar a `prim_kind_of` um braço para `char`**. A paragem honesta é
+a guarda; removê-la sem substituto troca uma paragem por uma resposta errada e calada. Fica como
+regra escrita, no espírito do que a lane já fez com `NATIVE-AGG-SLICE-BY-ADDRESS`.
+
+#### (4) O teste que apanha a divergência — e por que não podia existir
+
+**Hoje não pode existir um membro de corpus POSITIVO sobre `char`.** Medido em §7-bis.3: toda a via
+nativa que toca um `char` pára (`prim_kind_of`) ou falha a linkar, portanto um programa que afirme
+comportamento de `char` não constrói pelo nativo, e o corpus `own_native` exige as duas rotas a sair
+42.
+
+**O que pode existir HOJE:** uma fixture de PARAGEM CONHECIDA, o padrão que a lane já usa
+(`native_iface_fat_known_stop`) — sonda `c'A' to u32`, a fixar pelo nome a mensagem ``native backend
+N1: `char` has no single PrimKind, asked by the cast source (N2)``. Vai a vermelho no dia em que o
+R7-min aterrar, que é o que uma fixture de paragem conhecida serve para fazer.
+
+**O que passa a poder existir COM o R7-min** — e é o teste que devia ter existido desde sempre:
+
+| teste | o que afirma | onde |
+|---|---|---|
+| `char_roundtrip` | `c'A' to u32 == 65`, `c'é' to u32 == 233`, `c'A' == c'A'`, `c'A' != c'é'`, um campo `char` de struct relido, um `[]char` indexado | corpus `own_native`, **42 nas duas rotas** |
+| `lwt_char_lit_lowers_to_a_fat_pair` | o TEXTO do LIR de `c'A'` é um endereço de rodata **mais** um comprimento, não um `const_int` | `src/lir/lower_test.tkt` |
+
+**E a lição institucional, maior do que o teste:** esta lane já escreveu a regra que teria apanhado
+isto, depois da miscompilação da variante DECLARADA — *"UMA linha de corpus por FORMA DE TIPO"*. O
+`char` é uma forma de tipo que **ninguém acrescentou ao corpus**. Não faltou mecanismo novo; faltou
+aplicar o que já estava escrito. A regra deve passar a enumerar as formas por extenso — `byte`,
+`char`, `str`, `[]T`, struct, class, enum, variante inline, variante declarada, união com `null`,
+união com `error` — para que *"não me lembrei do `char`"* deixe de ser possível.
+
+### 7-quater.3-bis O RAIO DE EXPLOSÃO, e a leitura do coordenador posta à prova
+
+Duas contagens, verificadas (varrimento literal de `src/**`):
+
+```
+b'X' no fonte de produto: 931
+c'X' no fonte de produto:  16
+```
+
+E os 16 confirmam-se como o coordenador disse: **nenhum é um `char` usado como VALOR.** São a
+maquinaria que DESCREVE o literal — `ast.tks:175`, `tast.tks:31`, `typer.tks:33`, `token.tks:157,160`,
+`lexer.tks:606,608,711`, `fmt.tks:63,239,364`, `codegen.tks:10192` — e o próprio reconhecedor do
+lexer (`lexer.tks:712`) testa `b'c'`, um literal de BYTE. **O compilador descreve o `c'x'` e não o
+usa em lado nenhum.** O raio de explosão do produtor é, de facto, mínimo.
+
+**E o produtor já existe, inteiro.** `lower_str_bytes_fat` (`src/lir/lower.tks:6622`) interna bytes
+UTF-8 em rodata e devolve o par `(ptr, len)`. `lower_char_lit_fat` é uma delegação de uma linha para
+ela. A leitura do coordenador — *"não é dar representação gorda ao `char`, é deixar de fingir que ele
+é escalar, reencaminhando para a maquinaria de `[]byte` que R3/R4 acabaram de arrumar"* — está
+**CERTA quanto ao produtor**.
+
+**Mas está ERRADA quanto à conclusão de que a P10 pode não se aplicar. E não é opinião minha: é
+medição.**
+
+Fui procurar se os dois predicados — `is_fat_type` (semântico) e `typeexpr_is_fat` (sintáctico) — já
+discordam hoje, sem `char` nenhum pelo meio. **Discordam, e isso é um DEFEITO PRESENTE, medido no
+tip, que ninguém tinha levantado.** Basta um ALIAS DE TIPO: a anotação é `NamedType "S"`, que
+`typeexpr_is_fat` não reconhece, enquanto o tipo resolvido é `Str`, que `is_fat_type` reconhece.
+
+| sonda | fonte | C | nativo |
+|---|---|---|---|
+| `aliasparam` | `type S = str` + `fn takes(x: S, …) { x.len … }` | **0** | **PARA**: ``native backend N1: `x` is not a fat-pointer local (internal)`` |
+| `aliasfield` | `type S = str` + `struct H { s: S; n: i32 }`, ler `h.s.len` | **0** | **exit 2 — resposta errada e calada** |
+| `aliasslice` | `type L = []i64` + `struct H2 { xs: L; n: i32 }` | **0** | **exit 2 — resposta errada e calada** |
+
+**Isolado até ao valor exacto** (sonda `aliasobs`, com `n = 41` para o distinguir do comprimento 5):
+
+```
+C  exit=0   -> h.s.len == 5   (correcto)
+N  exit=1   -> h.s.len == 41  (leu o CAMPO VIZINHO como comprimento)
+```
+
+A causa, com o código: `field_layout_size` (`lower.tks:8333`) pergunta a `typeexpr_is_fat(NamedType
+"S")` → **falso** → reserva **8** bytes para `s` em offset 0, e põe `n` em offset 8. `lower_fat_field`
+(`lower.tks:6409`) lê `ptr@0` e `len@0+8` — **que é o slot do `n`**. O leitor sai pela ponta do campo
+para dentro do vizinho.
+
+**Isto é a QUARTA miscompilação silenciosa deste dossiê, e é a mais importante para a decisão, porque
+não tem nada a ver com `char`:** existe hoje, com `str` e com `[]T`, atrás de um alias de tipo. **R0
+deixa de ser higiene ou pré-requisito do terceiro word — é a correcção de um defeito vivo.**
+
+**Veredicto sobre a leitura do coordenador:**
+
+| afirmação | veredicto |
+|---|---|
+| *"baixar `c'X'` para `[]byte` reencaminha para maquinaria que já existe e já é gorda"* | **CONFIRMADO.** `lower_str_bytes_fat` faz o trabalho todo; a peça nova é uma linha. |
+| *"o raio de explosão é minúsculo — ninguém no fonte de produto depende da representação actual"* | **CONFIRMADO.** 16 usos, todos descritivos. |
+| *"portanto a P10 pode não se aplicar, e a correcção cabe já nesta lane sem R0"* | **REFUTADO, com medição.** Os dois predicados já discordam hoje sem `char`; pôr `Char` em `is_fat_type` sem pôr em `typeexpr_is_fat` acrescenta um TERCEIRO tipo a um defeito que já está a corromper. |
+| *"a correcção é pequena, segura e imediata"* | **CONFIRMADO — mas só COM o R0**, e R0 é ele próprio pequeno e agora obrigatório por mérito próprio. |
+
+**Ou seja, o coordenador chega ao destino certo por um caminho que precisa de uma perna a mais, e a
+perna a mais paga-se sozinha.** A correcção CABE nesta lane. O que não cabe é fazê-la sem o R0.
+
+#### P11 — uma previsão sobre o vagão, verificável num comando
+
+R3 (aterrado em `9fa7e5c`) faz o STORE de um campo gordo escrever as DUAS metades. Mas o layout de um
+campo gordo ATRÁS DE UM ALIAS continua a reservar 8 bytes (`typeexpr_is_fat` não mudou). **Previsão:
+no vagão, a sonda `aliasobs` deixa de ler o vizinho e passa a ESCREVER por cima dele** — o store de
+`s` escreve `len@8`, que é o slot do `n`, portanto `h.n` passa a ler **5** (o comprimento) em vez de
+41. R3 terá convertido uma leitura errada numa corrupção do campo vizinho.
+
+Verificação, no vagão, sem merge: compilar a sonda `aliasobs` com `h.n` afirmado — se `h.n != 41`, a
+previsão confirma-se. **Se se confirmar, R0 passa de "próximo crumb" a URGENTE**, porque R3 tornou o
+defeito destrutivo em vez de apenas errado.
+
+#### As DUAS leituras de "açúcar", e qual custa menos
+
+O ruling diz *"c'X' deveria fazer lowering para []byte"*. Há duas maneiras de o cumprir, e a
+diferença importa:
+
+| leitura | onde o açúcar desaparece | custo | consequência |
+|---|---|---|---|
+| **L1 — açúcar na LOWERING** | `checker::Char` sobrevive; `lower_char_lit_fat` produz o par | R0 + P-lit + P-cast + P-eq (o R7-min) | o checker continua a dar erros de tipo bons (`takes_char(byte)` continua a ser erro) |
+| **L2 — açúcar no CHECKER** | `char` resolve para `Slice{element: Byte}`; o backend nunca vê `Char` | `is_fat_type` não precisa de braço (já vê `Slice`), mas `typeexpr_is_fat` continua a precisar, **e perde-se a distinção de tipo**: `char` e `[]byte` passam a ser o mesmo tipo, logo `takes_char(some_bytes)` deixa de ser erro | mexe no checker, que é o que o dono disse que *"mexe em praticamente a codebase inteira"* |
+
+**Recomendo L1**, e o argumento é do próprio dono: ele manteve `char` como açúcar *"como já é hoje"*
+— e hoje `checker::Char` é tag própria justamente para dar erros de tipo (medido: `takes_char(c)` num
+`loop c in str` é `argument type mismatch`, §7-quater.1). L2 deitaria fora essa rede. **L1 põe o
+açúcar exactamente onde o ruling o quer — no lowering — e mantém o checker a fazer o seu trabalho.**
+
+Note-se que **em qualquer das duas leituras o R0 é obrigatório**, porque `typeexpr_is_fat` trabalha
+sobre a ANOTAÇÃO SINTÁCTICA, antes de qualquer resolução, e é ele que decide o layout do campo e a
+aridade do parâmetro. Não há caminho que dispense o R0.
+
+### 7-quater.4 (D) Os sítios de classe B, reclassificados — e são 25, não 24
+
+Recontei com o segundo contador em mente. **São 25** (corrijo a minha contagem anterior).
+*MECÂNICO* = troca `.len` pelo contador de bytes e mais nada; *PENSAR* = a intenção do sítio é
+comprimento voltado ao utilizador.
+
+| # | sítio | o que faz | veredicto |
+|---|---|---|---|
+| 1 | `src/build/assemble.tks:31` | `path[path.len - 9] == b'/'` | MECÂNICO |
+| 2-4 | `src/build/project.tks:1431,1957,2820` | tirar `/` final + `slice_to(…, .len - 1)` | MECÂNICO |
+| 5 | `src/build/project.tks:4135` | `let last = s.len - needle.len` | MECÂNICO |
+| 6 | `src/build/regr_group.tks:407` | `slice(stmts, 0, stmts.len - tail.len)` | MECÂNICO |
+| 7 | `src/build/regression.tks:632` | tirar `\r` final | MECÂNICO |
+| 8 | `src/build/tkr.tks:809` | `slice_to(line, line.len - 3)` | MECÂNICO |
+| 9-11 | `src/checker/resolve.tks:38,42,44` | localizar o `::` de `ns::bare` por aritmética de bytes | MECÂNICO |
+| 12 | `src/codegen/codegen.tks:5801` | `let seglen = other.len - s` | MECÂNICO |
+| 13-15 | `src/fmt/fmt.tks:314,329,342` | `last_end = source.len + 1` (sentinela) | MECÂNICO |
+| 16 | `src/numeric/dec/dec.tks:268` | `s.len - 1` | MECÂNICO |
+| 17-18 | `src/parser/parse_expr.tks:186,189` | `spec_src[spec_src.len - 1] != b']'` + `slice(…, 1, .len - 1)` | MECÂNICO |
+| 19-21 | `src/parser/parse_lit.tks:137,148,160` | sufixos de literal (`bi`, `d`) por byte | MECÂNICO |
+| 22-24 | `src/runtime/teko_rt.tks:565,573,577` | `s.len - suffix.len` / `s.len - needle.len` | MECÂNICO |
+| 25 | `src/text/text.tks:37` | `if s.len - i <= lead.cont` — **o validador de UTF-8** | MECÂNICO, e o mais eloquente: o validador de UTF-8 a contar bytes |
+
+**Vinte e cinco de vinte e cinco MECÂNICOS. Zero precisam de pensar. Zero queriam chars.** São todos
+aritmética de bytes sobre texto interno — caminhos, identificadores, sufixos de literal, código-fonte.
+Nenhum é *"quantos caracteres tem este campo"*.
+
+**Isto MUDA a recomendação de sequenciamento, mas não na direcção óbvia.** O risco deixa de ser
+"25 sítios difíceis" e passa a ser pior: **25 edições triviais que NADA obriga a fazer.** Os dois
+contadores são ambos `u64`; trocar o significado de `.len` mantém os 25 a compilar sem um único
+aviso. **O compilador não pode apanhar um esquecido.** E em ASCII puro nenhum teste do projecto muda
+de cor.
+
+**A consequência de desenho — e é uma OPÇÃO para o dono, não uma decisão minha:** a DIRECÇÃO da
+mudança decide se ela é verificada pela máquina ou pela diligência humana.
+
+| direcção | os 25 sítios | quem os encontra |
+|---|---|---|
+| **D1** — `.len` passa a chars; nome novo para bytes | continuam a compilar, com o significado trocado | **ninguém**. 25 riscos silenciosos, mais o que houver fora de `src/**` |
+| **D2** — `.len` sobre `str` vira ERRO por uma versão (*"diga `.chars` ou `.bytes`"*), e só depois `.len` volta como chars | **deixam de compilar** | **o compilador**. ~394 erros, cada um uma escolha explícita |
+| **D3** — `.len` fica bytes; chars ganha nome próprio | intocados | não se aplica — mas não dá a intuição de utilizador que o dono pediu |
+
+**D2 entrega exactamente a semântica que o dono quer** (`.len` conta chars no fim) **e converte 25
+riscos silenciosos em ~394 erros que a máquina encontra sozinha.** Custa uma versão de transição. É a
+única das três que não depende de alguém se lembrar de nada — e *"não me lembrei"* é literalmente a
+causa registada da divergência do `char` (§7-quater.3, ponto 4).
+
+**O mesmo raciocínio aplica-se ao `[i]`:** como `.len` e `[i]` têm de mover juntos (§7-quater.1), D2
+deve cobrir os dois — `s[i]` sobre um `str` também erra durante a transição, obrigando a nomear o
+eixo. Os dois eixos já existem na API (`slice` vs `str_slice_chars`, medido); falta obrigar quem
+escreve a nomear o seu.
+
+### 7-quater.5 A sequência revista, com tudo o que aterrou
+
+| # | trabalho | lane | estado |
+|---|---|---|---|
+| 1 | R1, R2, R3, R4, R6 | esta | **ATERRADO** (`2549c9f`, `9fa7e5c`) |
+| 2 | **R5** — gémeos `_len` do runtime para os builtins de `str` | esta | **ABERTO — é o degrau 11** (``builtin `contains` not yet lowered``) |
+| 3 | **R0** — unificar os dois predicados e as duas larguras | esta | **ABERTO e URGENTE.** Deixou de ser crumb do `char` e deixou de ser higiene: corrige uma miscompilação silenciosa VIVA (alias de tipo, §7-quater.3-bis) e é o pré-requisito do TERCEIRO WORD |
+| 4 | **R7-min** — R0 + `lower_char_lit_fat` (uma linha, delega em `lower_str_bytes_fat`) + `char to u32` + `char == char` | esta (argumento em 7-quater.3 e 3-bis) | **ABERTO — o DEFEITO registado.** Cabe já nesta lane, com R0 |
+| 5 | `str` a três words (`.len` chars + contador de bytes) | lane de LINGUAGEM, depois de 3 | 1 edição se R0 aterrar; 2 se não |
+| 6 | iteração por codepoint | **NENHUMA — sai de graça com o ponto 5** | zero linhas de parser (§7-quater.1) |
+| 7 | vagão do `char`: builtins, gémeos de `tk_char`, encodings | vagão próprio | seguro atrás do R6 |
+| 8 | `get_bytes`/`from_bytes` + namespace | lane de STDLIB | as funções já existem sob outro nome |
+
+**A regra a escrever antes de qualquer uma delas:** enquanto o R7-min não aterrar, **`prim_kind_of`
+não recebe braço para `char`**. A paragem é a guarda.
 
 ---
 
