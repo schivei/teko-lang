@@ -674,3 +674,49 @@ não está a ligar objectos nossos. A diretiva rege o caminho NATIVO.
 Windows a partir de um host Linux não tem saída limpa — o MSVC não corre em Linux, e o mingw está
 proibido. As saídas reais são correr essa linha **só no runner Windows**, removê-la, ou aceitar um
 skip, que a lei da barra do tronco proíbe. Decisão do dono, registada como pendente.
+
+## Recuperação de pânico em `#test` — DUAS camadas (ruling do dono, 2026-07-29)
+
+O dono assinou a recomendação do integrador. O âmbito **não** é "só `assert::*`":
+
+1. **Em processo, recuperar os pânicos de POLÍTICA** — `assert`, `exit`, overflow, cast inválido,
+   divisão por zero. Têm ponto de desenrolamento limpo, e o bracket de arena (`tk_arena_push/pop`)
+   já existente serve-o.
+2. **O RUNNER imputa ao teste a morte que não é recuperável.** Se o binário morrer mesmo (corrupção
+   de memória por escrita fora de limites, por exemplo), nenhuma recuperação em processo é honesta —
+   então o runner deteta e atribui a morte ao teste que estava a correr, como o tier de regressões já
+   faz com os filhos.
+
+**A propriedade que as duas juntas garantem, e que nenhuma garante sozinha: nenhum apagão perde mais
+do que o teste que o causou.** A primeira sozinha mentiria sobre corrupção; a segunda sozinha
+perderia os resultados dos testes que já tinham passado.
+
+**A evidência que decidiu**: os três apagões de 2026-07-29 (Windows, arm64, e um agente) foram todos
+pânicos **não previstos** — uma asserção POSIX num host não-POSIX, um teste que interrogava o host
+real, um script com `sed -E`. Recuperar só o previsto não teria evitado nenhum.
+
+Corolário: um pânico dentro de um `#test` **é o resultado**, não uma falha do sistema. E o tier de
+regressões já funcionava assim (`pool_child_crash_does_not_stop_the_run`) — os unitários serem mais
+fracos era inconsistência, não desenho.
+
+Pertence ao arco do harness paralelo que o dono já desenhou (threads + `chan<T>` para unitários,
+processos para regressões, duas primitivas de captura conhecidas só pelo compilador e só para testes,
+espelhando o `recover` do Go). Não é lane nova.
+
+## Wasm: terminar o `Wasm64*` antes de mexer no `Wasm32*` (ruling do dono, 2026-07-29)
+
+O dono assinou a recomendação. Contexto: ele quer WASI e Browser **só em 64 bits**, e hoje existem
+`Wasm32Wasi`, `Wasm64Wasi` e `Wasm32Browser` — **falta `Wasm64Browser`**.
+
+**Mas o wasm64 de hoje é subconjunto de brinquedo**, e a paragem honesta di-lo (`wasm_scope_stop_wasm64`,
+`src/backend/stackify.tks:5370`, `C1-wasm64-scope`): só suporta programas **sem `LAlloca`, sem rodata
+e sem assinatura de tipo `Ptr`**, porque `LFieldAddr`/`LAlloca`/`LGlobalAddr` e o `$sp` da
+shadow-stack ainda calculam em `i32` — o que faria mismatch silencioso com um módulo indexado em
+`i64`. Falha alto em vez de emitir módulo inválido.
+
+**Logo apagar os alvos de 32 bits agora deixaria-nos sem nenhum utilizável.** O trabalho é enfiar
+`ptr64` pelo frame e pelo rodata (o que a própria paragem chama *"scoped follow-up"*), não remover o
+`Wasm32*`.
+
+Nota operacional medida: o harness invoca `wasmtime run` e acrescenta `-W memory64=y` para alvos de
+64 bits — ou seja, **o wasm64 depende de uma flag experimental do wasmtime**, não de suporte de série.
