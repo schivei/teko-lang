@@ -241,6 +241,12 @@ tk_str tk_str_of_bytes(tk_str bytes) {
     return (tk_str){ buf, n };
 }
 
+const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len) {
+    tk_str r = tk_str_of_bytes((tk_str){ ptr, len });
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // tk_bytes_of_str — zero-copy view of a str's bytes as a tk_slice_byte. Same ptr and len,
 // reinterpret-cast from const to mutable pointer; the slice is read-only in practice.
 tk_slice_byte tk_bytes_of_str(tk_str s) {
