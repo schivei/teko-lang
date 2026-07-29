@@ -209,3 +209,28 @@ seguir, porque o fixpoint não compara um compilador cuja semântica de `.len` d
 
 Fixture: tem de verificar VALOR (5 e 9), não que compila — a lei das fixtures desta esteira nasceu
 precisamente de quatro miscompilações silenciosas que passaram por só verificarem compilação.
+
+### `.len` de um `char` = BYTES — decidido pelo dono (2026-07-29)
+
+Eu recomendei `1` (por coerência com "`.len` conta caracteres"). **O dono corrigiu, e a correcção é
+melhor.** Literal: *"Se char tem len (por fazer lower de []byte), o len do char deve responder o
+número de bytes que ele carrega; já o len de str é o número de caracteres; pq o char não carrega
+2,3,4 caracteres, o caractere é 1 de largura sempre."*
+
+O argumento: perguntar quantos CARACTERES tem um `char` não informa nada — a resposta é sempre 1,
+por definição. A única resposta com conteúdo é quantos bytes ele carrega. E isso mantém o `char`
+honesto sobre o que ele é: açúcar que baixa para `[]byte`.
+
+| expressão | valor |
+|---|---|
+| `"café🐝".len` | **5** (caracteres) |
+| `c'🐝'.len` | **4** (bytes) |
+| `c'a'.len` | **1** (bytes — e caractere, por coincidência) |
+
+**Invariante que sai daqui, e que vira fixture:** a soma dos `.len` dos chars produzidos pela
+iteração de uma `str` tem de ser igual ao `.len` do seu `bytes_of_str`.
+
+    1 + 1 + 1 + 2 + 4 = 9 == teko::text::bytes_of_str("café🐝").len
+
+Uma fixture que verifica os dois contadores E a sua reconciliação apanha uma troca de contador em
+qualquer um dos três sítios — coisa que verificar `5` e `9` isoladamente não apanha.

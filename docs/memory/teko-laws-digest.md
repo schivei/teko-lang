@@ -458,3 +458,30 @@ CONTORNA o defeito em vez de esperar por ele.
 **Consequencia pratica registrada:** enquanto isso nao fechar, nenhum binario produzido pelo backend
 proprio que retorne struct/class por valor e confiavel, e o `bulk` nao fecha verde — nem depois de
 resolvido o `fat-pointer receiver call` (N2), que e um problema SEPARADO no mesmo arquivo.
+
+## Quatro decisões do dono — 2026-07-29 (comparações, `char`, ordem da lane)
+
+Respondidas em bloco, na sequência das duas auditorias (`cargo/0.3.1-superficie-obvia` e
+`cargo/0.3.1-comparacoes`) e do dimensionamento do fluxo (`cargo/0.3.1-estreitamento-fluxo`).
+
+1. **`[]T ==` compara POR VALOR.** Referência espelhada: **Go**. Razão nomeada, como a lei exige:
+   Go compara slice por valor sem cerimónia; a alternativa Rust exige `PartialEq` derivado, e o Teko
+   não tem traits derivados — espelhar Rust exigiria maquinaria que não existe.
+2. **`.len` de um `char` devolve BYTES** (`c'🐝'.len == 4`), enquanto `.len` de uma `str` devolve
+   CARACTERES (`"café🐝".len == 5`). Ver `text-bytes-escape-hatch-0.3.1.0.md` para o argumento do
+   dono e o invariante de reconciliação que daí sai.
+3. **D2 fecha NESTA lane** (0.3.1.0 Linux-native), não em vagão próprio. É solidez do backend que
+   esta lane constrói. D1 + M.4 + estreitamento vão a vagão separado.
+4. **A quebra de D2 é ACEITE**, com nota de release. Corrigir a solidez faz o checker passar a
+   rejeitar programas que hoje compilam (quem declare o seu próprio `exit`/`panic`). Mesmo espírito
+   do "bora fazer barulho" já cravado para a migração do `.len`.
+
+### Porque D2 é urgente e não uma curiosidade
+
+`texpr_diverges` (`typer.tks:3281`) e a sua cópia `cg_expr_diverges` (`codegen.tks:3986`) reconhecem
+divergência por **comparação de string com o nome nu** — `segments.len == 1 && (name == "panic" ||
+name == "exit")` — sem nunca consultar o resolvedor. Um `pub fn exit(code: i32) -> str` do
+utilizador ganha a resolução mas continua a ser tratado como divergente, e o checker salta a
+verificação de tipo de retorno nesse ramo. **Na rota C o `cc` apanha por acidente. O backend nativo
+não tem `cc`** — e esta lane é precisamente a que remove essa rede do Linux. Verificado por leitura
+directa, não aceite do relatório.
