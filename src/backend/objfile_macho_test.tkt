@@ -266,3 +266,184 @@ fn tb3_macho_const_reloc_emitted() {
     teko::assert::is_true(obj[392] == (0 to byte))
     teko::assert::is_true(obj[400] == (0x41 to byte))
 }
+
+/**
+ * MO_SECT1_OFFSET_FIELD — the byte offset of the FIRST `section_64`'s `offset`
+ * field inside a Mach-O object: 32 (`mach_header_64`) + 72 (the `LC_SEGMENT_64`
+ * command header) + 48 (`sectname`+`segname`+`addr`+`size`).
+ */
+const MO_SECT1_OFFSET_FIELD: u64 = 152 to u64
+
+/**
+ * MO_SECT1_RELOFF_FIELD — the byte offset of the first `section_64`'s `reloff`
+ * field (`MO_SECT1_OFFSET_FIELD` + 4 for `offset` + 4 for `align`).
+ */
+const MO_SECT1_RELOFF_FIELD: u64 = 160 to u64
+
+/**
+ * MO_SECT1_NRELOC_FIELD — the byte offset of the first `section_64`'s `nreloc`
+ * field (`MO_SECT1_RELOFF_FIELD` + 4).
+ */
+const MO_SECT1_NRELOC_FIELD: u64 = 164 to u64
+
+/**
+ * MO_RTYPE_SHIFT — the bit position of `r_type` inside a `relocation_info`'s
+ * packed second word (bits 28..31).
+ */
+const MO_RTYPE_SHIFT: u32 = 28 to u32
+
+/**
+ * MO_ADRP_MASK — the bit mask isolating the ADRP opcode of an ARM64 instruction
+ * word (`op` at bit 31 and `0b10000` at bits 28..24; `immlo` at 30..29, `immhi`
+ * at 23..5 and `Rd` at 4..0 are operands), so `word & MO_ADRP_MASK ==
+ * ARM64_ADRP` recognizes any ADRP whatever its page immediate or destination.
+ */
+const MO_ADRP_MASK: u32 = 0x9F000000 to u32
+
+/**
+ * MO_ADD_IMM_MASK — the bit mask isolating the 64-bit ADD-immediate opcode of an
+ * ARM64 instruction word (bits 31..24), so `word & MO_ADD_IMM_MASK ==
+ * ARM64_ADD_IMM64_BASE` recognizes any `add Xd, Xn, #imm12`.
+ */
+const MO_ADD_IMM_MASK: u32 = 0xFF000000 to u32
+
+/**
+ * mo_reloc_field_word — the packed second word (`r_pcrel`/`r_length`/`r_extern`/
+ * `r_type` + `r_symbolnum`) of the first section's `relocs[i]` entry, read out of
+ * the emitted object through its own `section_64.reloff`.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index within the first section's table
+ * @return u32  the packed `relocation_info` bitfield word
+ */
+fn mo_reloc_field_word(obj: []byte, i: u64) -> u32 {
+    let reloff = mo_u32_at(obj, MO_SECT1_RELOFF_FIELD) to u64
+    mo_u32_at(obj, reloff + (MACHO_RELOC_ENTRY_SIZE to u64) * i + (4 to u64))
+}
+
+/**
+ * mo_reloc_rtype — the `r_type` field of the first section's `relocs[i]` entry:
+ * the external `ARM64_RELOC_*` number the linker reads.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index
+ * @return u32  the `r_type` value
+ */
+fn mo_reloc_rtype(obj: []byte, i: u64) -> u32 {
+    mo_reloc_field_word(obj, i) >> MO_RTYPE_SHIFT
+}
+
+/**
+ * mo_reloc_patched_word — the `__text` instruction word the first section's
+ * `relocs[i]` entry patches, read through the relocation's own `r_address` and
+ * the section's file `offset`. This is what proves a relocation type sits on the
+ * instruction encoding that can carry it.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index
+ * @return u32  the little-endian instruction word at the patch site
+ */
+fn mo_reloc_patched_word(obj: []byte, i: u64) -> u32 {
+    let reloff = mo_u32_at(obj, MO_SECT1_RELOFF_FIELD) to u64
+    let addr = mo_u32_at(obj, reloff + (MACHO_RELOC_ENTRY_SIZE to u64) * i) to u64
+    let text_off = mo_u32_at(obj, MO_SECT1_OFFSET_FIELD) to u64
+    mo_u32_at(obj, text_off + addr)
+}
+
+/**
+ * mo_selected_object — the FULL producer pipeline for one LIR function: instruction
+ * selection (`select_lfunc`), encoding (`encode_module`) and the Mach-O writer
+ * (`emit_macho`). The relocation goldens below run through it rather than
+ * hand-tagging `MAdrp`/`MAddLo`, because the defect being pinned was isel choosing
+ * the wrong tag — a hand-built module cannot see it.
+ *
+ * @param lir::LFunc f  the LIR function to lower end to end
+ * @return []byte  the emitted Mach-O object bytes, or empty on an honest stop
+ */
+fn mo_selected_object(f: lir::LFunc) -> []byte {
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return teko::list::empty() }
+    mo_object_of(add_mfunc(empty_mmodule(), mf))
+}
+
+/**
+ * mo_func_addr_func — a `main` that materializes the address of the function
+ * `teko__demo__f` and returns it: the minimal `LFuncAddr` producer, which isel
+ * lowers to one `ADRP` + one `ADD` pair.
+ *
+ * @return lir::LFunc  the one-`LFuncAddr` function
+ */
+fn mo_func_addr_func() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let v = lir::alloc_vreg(f0)
+    let s0 = lir::append_inst(v.func, 0, lir::func_addr_inst(v.vreg, "teko__demo__f", 0, 0))
+    lir::append_inst(s0, 0, lir::ret_inst(v.vreg, 0, 0))
+}
+
+/**
+ * mo_global_addr_func — a `main` that materializes the address of the rodata
+ * datum `.Lstr0` and returns it: the minimal `LGlobalAddr` producer, the twin of
+ * `mo_func_addr_func`.
+ *
+ * @return lir::LFunc  the one-`LGlobalAddr` function
+ */
+fn mo_global_addr_func() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let v = lir::alloc_vreg(f0)
+    let s0 = lir::append_inst(v.func, 0, lir::global_addr_inst(v.vreg, ".Lstr0", 0, 0))
+    lir::append_inst(s0, 0, lir::ret_inst(v.vreg, 0, 0))
+}
+
+/**
+ * mo_assert_addr_pair_relocs — assert that the object's first two `__text`
+ * relocations are a well-formed ADRP/ADD address pair: entry 0 is
+ * `ARM64_RELOC_PAGE21` sitting on an `ADRP` word, entry 1 is
+ * `ARM64_RELOC_PAGEOFF12` sitting on a 64-bit `ADD`-immediate word, and there are
+ * exactly two.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return void
+ */
+fn mo_assert_addr_pair_relocs(obj: []byte) {
+    teko::assert::is_true(mo_u32_at(obj, MO_SECT1_NRELOC_FIELD) == (2 to u32))
+    teko::assert::is_true(mo_reloc_rtype(obj, 0 to u64) == ARM64_RELOC_PAGE21)
+    teko::assert::is_true(mo_reloc_rtype(obj, 1 to u64) == ARM64_RELOC_PAGEOFF12)
+    teko::assert::is_true((mo_reloc_patched_word(obj, 0 to u64) & MO_ADRP_MASK) == ARM64_ADRP)
+    teko::assert::is_true((mo_reloc_patched_word(obj, 1 to u64) & MO_ADD_IMM_MASK) == ARM64_ADD_IMM64_BASE)
+}
+
+#test
+/**
+ * an `LFuncAddr`'s ADRP/ADD pair leaves the writer as PAGE21(3)+PAGEOFF12(4).
+ * BEFORE the fix isel tagged BOTH halves `Call`, so both entries came out
+ * `ARM64_RELOC_BRANCH26`(2) — a branch relocation on an ADRP and on an ADD, which
+ * Apple's `ld` refuses to link (`ARM64_RELOC_BRANCH26 relocation on non-b/bl
+ * instruction`). The assertion is on the NUMBERS in the emitted bytes, not on the
+ * fact that anything compiled.
+ */
+fn macho_func_addr_pair_is_page21_pageoff12() {
+    mo_assert_addr_pair_relocs(mo_selected_object(mo_func_addr_func()))
+}
+
+#test
+/**
+ * the `LGlobalAddr` twin: the same ADRP/ADD pair, the same PAGE21+PAGEOFF12
+ * numbers. This half was already correct; pinning both proves the two selections
+ * agree and cannot drift apart again.
+ */
+fn macho_global_addr_pair_is_page21_pageoff12() {
+    mo_assert_addr_pair_relocs(mo_selected_object(mo_global_addr_func()))
+}
+
+#test
+/**
+ * a direct `bl` is the ONLY relocation that may be `ARM64_RELOC_BRANCH26`(2), and
+ * it lands on a `BL` word: the negative half of the pair goldens above, so a
+ * future "just make everything PAGE21" cannot pass by deleting the branch case.
+ */
+fn macho_direct_call_reloc_is_branch26_on_bl() {
+    let insts = teko::list::push(teko::list::empty(), call_inst("tk_exit", mo_no_uses(), mo_gpr(0), false, false))
+    let obj = mo_object_of(MModule { funcs = teko::list::push(teko::list::empty(), mo_func("main", insts)); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() })
+    teko::assert::is_true(mo_u32_at(obj, MO_SECT1_NRELOC_FIELD) == (1 to u32))
+    teko::assert::is_true(mo_reloc_rtype(obj, 0 to u64) == ARM64_RELOC_BRANCH26)
+    teko::assert::is_true(mo_reloc_patched_word(obj, 0 to u64) == ARM64_BL)
+}

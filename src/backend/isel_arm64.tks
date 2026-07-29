@@ -1456,28 +1456,37 @@ fn select_store(ctx0: SelCtx, s: lir::LStore) -> SelCtx | error {
 }
 
 /**
- * select_addr_pair — the shared `ADRP + ADD` relocation pair that
- * materializes a symbol's address: `MAdrp{dst, sym, hi}` then
- * `MAddLo{dst, dst, sym, lo}`. `LGlobalAddr` uses the data `PageHi`/`PageLo`
- * kinds; `LFuncAddr` uses the text `Call` kind (A4 emits the matching reloc).
+ * select_addr_pair — the ONE `ADRP + ADD` sequence that materializes a symbol's
+ * address, and the ONE relocation pair it may carry: `MAdrp{dst, sym, PageHi}`
+ * (`ARM64_RELOC_PAGE21`) then `MAddLo{dst, dst, sym, PageLo}`
+ * (`ARM64_RELOC_PAGEOFF12`).
+ *
+ * THE HALVES ARE NOT A PARAMETER, and that is the whole point. They used to be,
+ * and `LFuncAddr` passed `Call` for both — so a `BRANCH26` relocation landed on
+ * an `ADRP` and on an `ADD`, which Apple's `ld` rejects outright
+ * (`ARM64_RELOC_BRANCH26 relocation on non-b/bl instruction`). The page/page-off
+ * pair does not depend on whether the symbol lives in `__text` or in `__const`:
+ * a relocation type describes the INSTRUCTION FIELD being patched, never the
+ * target's section. Making the kinds unreachable from the call site makes that
+ * mispairing unrepresentable, which is the same shape the x86-64 twin already
+ * had (`select_global_addr_x86`/`select_func_addr_x86` both emit one
+ * `lea rip`-relative `Pc32`).
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param str symbol  the symbol whose address is materialized
- * @param MRelocKind hi  the ADRP (page-high) relocation kind
- * @param MRelocKind lo  the ADD (page-low) relocation kind
  * @return SelCtx  the advanced context
  */
-fn select_addr_pair(ctx0: SelCtx, inst: lir::LInst, symbol: str, hi: MRelocKind, lo: MRelocKind) -> SelCtx {
+fn select_addr_pair(ctx0: SelCtx, inst: lir::LInst, symbol: str) -> SelCtx {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    let ctx2 = selctx_emit(ctx1, adrp_inst(dst, symbol, hi))
-    selctx_emit(ctx2, add_lo_inst(dst, dst, symbol, lo))
+    let ctx2 = selctx_emit(ctx1, adrp_inst(dst, symbol, MRelocKind::PageHi))
+    selctx_emit(ctx2, add_lo_inst(dst, dst, symbol, MRelocKind::PageLo))
 }
 
 /**
- * select_global_addr — the `LGlobalAddr` selection: the data `ADRP + ADD`
- * relocation pair (`PageHi`/`PageLo`) for a rodata/global symbol.
+ * select_global_addr — the `LGlobalAddr` selection: the `ADRP + ADD`
+ * page/page-off relocation pair for a rodata/global symbol.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -1485,13 +1494,14 @@ fn select_addr_pair(ctx0: SelCtx, inst: lir::LInst, symbol: str, hi: MRelocKind,
  * @return SelCtx  the advanced context
  */
 fn select_global_addr(ctx0: SelCtx, inst: lir::LInst, g: lir::LGlobalAddr) -> SelCtx {
-    select_addr_pair(ctx0, inst, g.symbol, MRelocKind::PageHi, MRelocKind::PageLo)
+    select_addr_pair(ctx0, inst, g.symbol)
 }
 
 /**
- * select_func_addr — the `LFuncAddr` selection: the same `ADRP + ADD` pair as
- * a global address but with the text `Call` relocation kind, so A4 emits a
- * text-section reloc for the function symbol.
+ * select_func_addr — the `LFuncAddr` selection: the same `ADRP + ADD`
+ * page/page-off relocation pair a global address uses. A function's address is
+ * materialized, not branched to, so it owes `PAGE21`/`PAGEOFF12` exactly like
+ * any other symbol; `BRANCH26` belongs to `MCall` (a `bl`) alone.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -1499,7 +1509,7 @@ fn select_global_addr(ctx0: SelCtx, inst: lir::LInst, g: lir::LGlobalAddr) -> Se
  * @return SelCtx  the advanced context
  */
 fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr) -> SelCtx {
-    select_addr_pair(ctx0, inst, fa.symbol, MRelocKind::Call, MRelocKind::Call)
+    select_addr_pair(ctx0, inst, fa.symbol)
 }
 
 /**
