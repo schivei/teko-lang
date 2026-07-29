@@ -115,6 +115,11 @@ Fechar vagão só com o teste unitário deixa passar miscompilação. O gate mí
 5. `TEKO_MEM_PARANOID=1` no fechamento;
 6. auditoria W15 do delta (zero `//` inline; D39).
 
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> Os invariantes do bootstrap escalonado (sondagem por descoberta, pinagem de TK_RT_DIR, etc.) não têm citação literal. São conclusões arquiteturais documentadas aqui. Ficam como princípios de implementação.
+>
+
 ## Bootstrap escalonado do CI (seed-fallback)
 
 O seed liberado só precisa construir a **linhagem da base**, não o tip (ruling 2026-07-24). Num
@@ -213,6 +218,11 @@ invisíveis por construção antes deste vagão — a primeira porque cross-comp
 segunda porque nenhum fixture do corpus tinha uma chamada de runtime que RETORNA e leva agregado.
 Nenhuma varredura estática as teria achado. O "pré-carregue o vagão" acima continua certo, mas não
 substitui a estreia: ele reduz a lista, não a zera.
+
+> **[AUDIT] CATEGORIA C — SEM FONTE**
+>
+> A observação sobre comentários errados ser pior que nenhum, e o padrão diagnóstico das funções que guardam edge cases vs. as que afirmam, não têm citação literal do dono. Fica como aprendizado de revisão.
+>
 
 ### Um comentário errado é pior que nenhum
 
