@@ -28,7 +28,12 @@ set -u
 trace() { echo "check_ar_macho: $*" >&2; }
 fail() { echo "check_ar_macho: FAIL — $1" >&2; exit 1; }
 
-require="${AR_CHECK_REQUIRE_TOOLS:-0}"
+# FAIL-CLOSED BY DEFAULT SINCE 2026-07-29. The seam existed but NOBODY ARMED IT: pr.yml
+# called this gate without AR_CHECK_REQUIRE_TOOLS=1, so a missing archive or a missing
+# binutils would have scored a green row having validated nothing. Defaulting to 1 makes the
+# safe behaviour the one you get by forgetting; AR_CHECK_REQUIRE_TOOLS=0 is now the explicit
+# opt-out for a local sandbox that genuinely lacks the toolchain.
+require="${AR_CHECK_REQUIRE_TOOLS:-1}"
 
 skip_or_fail() {
     local reason="$1"
