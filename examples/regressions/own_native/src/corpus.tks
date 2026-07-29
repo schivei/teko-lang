@@ -1651,3 +1651,83 @@ fn f_ref_deref_assign() -> i64 {
     if acc != 10 { return 15 }
     0
 }
+
+/**
+ * f_static_format_spec — a STATIC interpolation format spec (`$"{v:F2}"`), whose LEADING
+ * character selects one of `emit_interp`'s own ten runtime `tk_fmt_*` families (`codegen.tks`,
+ * the oracle this backend's lowering mirrors) (0.3.1.0 degrau 19): before this degrau,
+ * `lower_interp_hole_fat`'s `TFSpecStatic` arm honest-stopped UNCONDITIONALLY ("static
+ * interpolation format spec not yet lowered"), first surfaced through the compiler's own
+ * `teko::build::arith_cast_rate_line` (`{pct:F2}%`).
+ *
+ * `pct` there is `f64`, and a FLOAT static spec DOES lower correctly at this backend's own N1
+ * stage (measured directly: `$"{x:F2}"` on an `f64` produces a `call @tk_fmt_f_len(...)` LIR
+ * shape identical in kind to the integer families below, `lwt_lowers_static_float_family_spec_…`
+ * in `src/lir/lower_test.tkt`) — but it cannot yet RUN here: every float value still
+ * honest-stops at the pre-existing, unrelated `isel x86-64: B1-fp` epic the moment it needs an
+ * XMM register, regardless of format specs. This fixture, which MUST build and run on both
+ * routes, therefore checks every INTEGER-hole family the static spec accepts: `d` (zero-padded
+ * decimal, explicit AND default width), `x`/`X` (hex, both cases), `b` (binary), and `n`
+ * (thousands separator on an int) — plus the two coercion edges `codegen.tks`'s own dispatch
+ * commits to (a SIGNED negative value through the ALWAYS-`uint64_t` `x`/`b` cast, and an
+ * UNSIGNED value through the ALWAYS-`int64_t` `d` cast) — every one BY VALUE, expected strings
+ * cross-checked against `examples/regressions/bulk/src/q080_format_spec_families/body.tks`
+ * (the SAME families, proven correct on the C/VM routes already).
+ *
+ * Every hole is a `mut` local, never reassigned — the SAME fold-opaque idiom `f_arith` itself
+ * established at the top of this file — so the check exercises the RUNTIME lowering and not the
+ * comptime folder, which already renders every one of these integer families byte-identical on
+ * a bare literal (`checker::comptime_fold`'s own `cf_static_spec_ok`).
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_static_format_spec() -> i64 {
+    mut n: i64 = 255
+    if $"{n:D5}" != "00255" { return 1 }
+    if $"{n:D}" != "255" { return 2 }
+    if $"{n:X}" != "FF" { return 3 }
+    if $"{n:x}" != "ff" { return 4 }
+    if $"{n:b}" != "11111111" { return 5 }
+    mut big: i64 = 1234567
+    if $"{big:N}" != "1,234,567" { return 6 }
+    mut neg: i64 = -1
+    if $"{neg:X}" != "FFFFFFFFFFFFFFFF" { return 7 }
+    if $"{neg:b}" != "1111111111111111111111111111111111111111111111111111111111111111" { return 8 }
+    mut u: u64 = 10
+    if $"{u:D3}" != "010" { return 9 }
+    if $"{u:X}" != "A" { return 10 }
+    0
+}
+
+/**
+ * f_dynamic_format_spec — a DYNAMIC interpolation format spec (`$"{v:[spec]}"`, the spec text
+ * itself a RUNTIME `str` argument), the sibling of `f_static_format_spec` this degrau closed in
+ * the SAME wagon: `lower_interp_hole_fat`'s `TFSpecDynamic` arm honest-stopped the same way, and
+ * closes the same way — `lower_interp_hole_dynamic_fat` flattens the hole's value plus the spec
+ * string's (ptr, len) pair through one of the three `tk_fmt_dyn_*_len` twins, split only by the
+ * hole's own numeric family. This project's own source never writes a dynamic spec (searched:
+ * `examples/regressions/bulk`'s own `q080_format_spec_families` is the only user in the whole
+ * tree, and it targets the C/VM routes only), so THIS fixture is the first to exercise it
+ * natively — the same INTEGER-family subset `f_static_format_spec` covers (the float family
+ * being blocked by the SAME pre-existing `B1-fp` epic, not a gap of this degrau's own), each
+ * spec string itself a `mut` local so neither the VALUE nor the SPEC TEXT can be folded away.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_dynamic_format_spec() -> i64 {
+    mut n: i64 = 255
+    mut spec_d5: str = "D5"
+    if $"{n:[spec_d5]}" != "00255" { return 1 }
+    mut spec_x_up: str = "X"
+    if $"{n:[spec_x_up]}" != "FF" { return 2 }
+    mut spec_x_lo: str = "x"
+    if $"{n:[spec_x_lo]}" != "ff" { return 3 }
+    mut spec_b: str = "b"
+    if $"{n:[spec_b]}" != "11111111" { return 4 }
+    mut big: i64 = 1234567
+    mut spec_n: str = "N"
+    if $"{big:[spec_n]}" != "1,234,567" { return 5 }
+    mut u: u64 = 10
+    if $"{u:[spec_x_up]}" != "A" { return 6 }
+    0
+}

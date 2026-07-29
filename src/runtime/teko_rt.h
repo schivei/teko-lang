@@ -284,6 +284,30 @@ tk_str tk_fmt_dyn_f64(double val, tk_str spec);
 tk_str tk_fmt_dyn_i64(int64_t val, tk_str spec);
 tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec);
 
+// tk_fmt_*_len — the SAME thirteen format-spec builders above, with their result's length handed
+// back through an OUT-PARAMETER instead of `tk_str`'s second field — the identical convention
+// `tk_str_concat_len`/`tk_i64_to_str_len`/`tk_u64_to_str_len` already carry (see their own comment
+// above for WHY: this backend's `LCall` captures one result register, one short of the
+// two-eightbyte SysV/AAPCS64 pair a `tk_str`-by-value return occupies). A genuine C caller never
+// needs these; each is a thin wrapper calling its own `tk_str`-returning twin, owning no logic of
+// its own. Every scalar parameter here is widened to a 64-bit width (`int64_t`/`uint64_t`) even
+// where the `tk_str`-returning twin takes a narrower C `int`, so the native lowering's own VReg
+// width (always a full machine word) never needs a narrowing move to call these (0.3.1.0
+// degrau 19).
+const tk_byte *tk_fmt_f_len(double val, int64_t prec, uint64_t *out_len);
+const tk_byte *tk_fmt_d_len(int64_t val, int64_t width, uint64_t *out_len);
+const tk_byte *tk_fmt_x_upper_len(uint64_t val, uint64_t *out_len);
+const tk_byte *tk_fmt_x_lower_len(uint64_t val, uint64_t *out_len);
+const tk_byte *tk_fmt_e_len(double val, int64_t prec, uint64_t *out_len);
+const tk_byte *tk_fmt_n_f_len(double val, int64_t prec, uint64_t *out_len);
+const tk_byte *tk_fmt_n_i_len(int64_t val, uint64_t *out_len);
+const tk_byte *tk_fmt_g_len(double val, int64_t prec, uint64_t *out_len);
+const tk_byte *tk_fmt_b_len(uint64_t val, uint64_t *out_len);
+const tk_byte *tk_fmt_p_len(double val, int64_t prec, uint64_t *out_len);
+const tk_byte *tk_fmt_dyn_f64_len(double val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
+const tk_byte *tk_fmt_dyn_i64_len(int64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
+const tk_byte *tk_fmt_dyn_u64_len(uint64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len);
+
 // --- Phase 3 str query/slice builtins (the checker types these via tk_builtin_fn) ---
 // The query helpers (eq/ends_with/contains/len) do NO allocation; the slice helpers return a
 // FRESH owned buffer (same ownership as tk_str_concat), tk_panic on OOM/out-of-range (M.1).
