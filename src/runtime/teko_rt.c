@@ -208,6 +208,25 @@ tk_str tk_i64_to_str(int64_t v) {
     return (tk_str){ buf, digits.len + 1 };
 }
 
+// tk_str_concat_len / tk_i64_to_str_len / tk_u64_to_str_len — out-parameter-length twins of the
+// three builders above (declared in teko_rt.h; see that comment for WHY). Each is a thin wrapper:
+// it calls its own two-word twin, writes the length out, and returns the pointer half.
+const tk_byte *tk_str_concat_len(const tk_byte *a_ptr, uint64_t a_len, const tk_byte *b_ptr, uint64_t b_len, uint64_t *out_len) {
+    tk_str r = tk_str_concat((tk_str){ a_ptr, a_len }, (tk_str){ b_ptr, b_len });
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_i64_to_str_len(int64_t v, uint64_t *out_len) {
+    tk_str r = tk_i64_to_str(v);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_u64_to_str_len(uint64_t v, uint64_t *out_len) {
+    tk_str r = tk_u64_to_str(v);
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // --- Phase 3 str/byte stdlib (modeled exactly on tk_str_concat — fresh malloc'd buffer the
 // result OWNS, tk_panic on OOM (M.1), leak-tolerant (M.5)) ---
 

@@ -341,3 +341,33 @@ Feature: declared variant match arms — a `type X = variant …` subject select
   Scenario: declared_variant_error_and_null (own-native — the error case and the null case, mixed with nominals)
     When built and run
     Then exit = 42
+
+
+Feature: string interpolation in a FAT position — a `TInterp` is its own fat-pointer producer
+
+  # (0.3.1.0 degrau 9) `lower_fat_expr` accepted a CLOSED producer set (literal, array literal,
+  # bound local, struct field, `if`-expression, `match`-value, direct call) and a string
+  # interpolation was not in it, so a `$"..."` reaching a FAT position (a call argument, a
+  # loop-carried reassignment, …) honest-stopped — starting with the compiler's own
+  # `ar_header`/`ar_pad_right` (`src/backend/objfile_ar.tks`), whose `ar_pad_right($"{size}", …)`
+  # passes an interpolation as a call argument. The arm now chains the runtime's
+  # out-parameter-length twins (`tk_str_concat_len`/`tk_i64_to_str_len`/`tk_u64_to_str_len`,
+  # `teko_rt.h`) — added because this backend's own `LCall` captures only ONE result register,
+  # one short of the two-eightbyte register pair `tk_str_concat`'s REAL C ABI struct return
+  # occupies; the pre-degrau-9 lowering had called that same runtime symbol with only ONE word per
+  # `tk_str` operand, which is not a missing length so much as a wrong ABI call.
+  #
+  # The SAME gap sat behind `teko::str::concat`/`teko::string::concat` (the LEGISLATED
+  # string-building builtin `ar_pad_right`'s own loop calls, and the primitive the rest of this
+  # project's own source is written in by the hundreds): `call_symbol` had no entry for it either,
+  # so a call reached would have silently mangled to a symbol nothing defines — a LINK failure,
+  # not a named stop. `lower_concat_call` folds the builtin's own N literal `str` arguments
+  # pairwise through the SAME out-parameter-length concat.
+  #
+  # The row is a MEMBER of this channel (one build, no extra cost) and covers every FAT position
+  # this degrau closed: a call argument, a loop-carried self-reassignment (the minimal
+  # reproduction), a multi-hole/multi-piece interpolation checked by both content and length, and
+  # the `concat` builtin folded over more than two arguments.
+  Scenario: interp_fat_positions (own-native — interpolation and `concat` in every fat position)
+    When built and run
+    Then exit = 42

@@ -5605,12 +5605,14 @@ pub type LoweredFat = struct { ctx: LowerCtx; ptr: u32; len: u32 }
  * compile-time-known element count), a local bound via `lenv_bind_fat` (a `let` of str/slice
  * type), a struct field of fat type (`lower_fat_field`), an `if`-expression whose result is fat
  * (`lower_if_fat`, degrau 5), a `match`-VALUE whose result is fat (`lower_match_fat`, 0.3.1.0
- * degrau 5), and — closed at the `call` degrau — a DIRECT call whose own result is fat
- * (`lower_call_fat`; measured via a corpus probe to be the shape that actually reaches this site —
- * a closure-call/interface-dispatch receiver is `lower_call_fat`'s OWN narrower named stop, not
- * this one). Any other producer (a deeper index chain, …) honest-stops — those arrive with a wider
- * fat-pointer ABI in a later phase (A1-4, #382; if-expression producer: degrau 5,
- * cargo/20-degrau5-if-gordo; call producer: call-gordo degrau, #382 N2).
+ * degrau 5), a DIRECT call whose own result is fat (`lower_call_fat`; measured via a corpus probe
+ * to be the shape that actually reaches this site — a closure-call/interface-dispatch receiver is
+ * `lower_call_fat`'s OWN narrower named stop, not this one), and — closed at 0.3.1.0 degrau 9 — a
+ * string interpolation (`lower_interp_fat`: pieces/holes concatenated through the runtime's
+ * out-parameter-length twins, `lower_len_out_call`). Any other producer (a deeper index chain, …)
+ * honest-stops — those arrive with a wider fat-pointer ABI in a later phase (A1-4, #382;
+ * if-expression producer: degrau 5, cargo/20-degrau5-if-gordo; call producer: call-gordo degrau,
+ * #382 N2; interpolation producer: 0.3.1.0 degrau 9).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed (`str`/`[]T`) expression to lower
@@ -5626,6 +5628,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
         checker::TMatchExpr as mx => lower_match_fat(ctx, e, mx)
         checker::TCall as cl => lower_call_fat(ctx, e, cl)
+        checker::TInterp as ip => lower_interp_fat(ctx, e, ip)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
 }
@@ -5647,10 +5650,12 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
  * closes only the PLAIN direct-call producer, the shape the corpus probe measured actually
  * reaching this site (#382 N2, call-gordo degrau).
  *
- * The `teko::list::*`/`teko::mem::push_fo` GROWTH-BUILTIN family is intercepted BEFORE the
- * hidden-out-slot convention is applied (`lower_list_builtin`): those calls target the runtime's
- * OWN fixed C ABI (`tk_slice_push`), which owes this backend no hidden length register — its
- * length travels through an explicit `uint64_t *out_len` argument instead (list-builtin degrau).
+ * The `teko::list::*`/`teko::mem::push_fo` GROWTH-BUILTIN family and the `teko::str::concat`/
+ * `teko::string::concat` STRING-BUILDING builtin are intercepted BEFORE the hidden-out-slot
+ * convention is applied (`lower_list_builtin`, `lower_concat_call`): those calls target the
+ * runtime's OWN fixed C ABI (`tk_slice_push`, `tk_str_concat`), which owes this backend no hidden
+ * length register — their length travels back through an explicit `uint64_t *out_len` argument
+ * instead (list-builtin degrau; concat: 0.3.1.0 degrau 9).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed call expression (its type is `str`/`[]T`)
@@ -5663,16 +5668,81 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.is_closure_call { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
     if cl.is_iface_dispatch { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
     if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
+    if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     let lo = match lower_args(ctx, cl.args) { LoweredArgs as x => x; error as err => return err }
-    let slot = ctx_alloc(lo.ctx)
-    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
-    let all_args = teko::list::push(lo.vregs, slot.vreg)
-    let called = ctx_alloc(with_slot)
-    let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, all_args, false, e.line, e.col))
-    let lenr = ctx_alloc(with_call)
-    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
-    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+    lower_len_out_call(lo.ctx, sym, lo.vregs, e)
+}
+
+/**
+ * is_concat_builtin_call — recognizes the checker's OWN `teko::str::concat`/`teko::string::concat`
+ * builtin (the LEGISLATED public string-building API, `checker/scope.tks`'s "concat" — resolved
+ * by BARE LAST SEGMENT, so any namespace prefix ending in it matches, the same shape
+ * `is_list_builtin_call` recognizes its own family by). The checker leaves NO declaration behind
+ * for it (`call_ns` stays empty, C7.1a's sibling gap), so without this check it would fall through
+ * to the plain mangler and target a symbol no function ever defines (0.3.1.0 degrau 9).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names the concat builtin
+ */
+fn is_concat_builtin_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "concat"
+}
+
+/**
+ * lower_concat_call — `teko::str::concat`/`teko::string::concat`(a, b, …): fold the built
+ * argument list pairwise through the runtime's out-parameter-length concat (`lower_len_out_call`,
+ * `tk_str_concat_len`) — the same unrolled chain `lower_interp_fat` builds over its pieces/holes.
+ * The checker's variadic call-site desugar (`checker/scope.tks`'s own doc on `concat`: "N trailing
+ * str args… OR an existing []str straight through") packs N EXPLICIT trailing `str` args into ONE
+ * `checker::TArrayLit` argument (measured: every call in this project's own source uses that
+ * literal spelling — `grep`'d, none pass an existing slice), so `cl.args[0]`'s KIND, not its
+ * arity, is what tells the two shapes apart: a `TArrayLit` is the closed, compile-time-known-count
+ * shape this degrau unrolls; anything else is the pass-through spelling, which needs a genuine
+ * runtime fold over a length known only at RUN time and honest-stops instead of being guessed at.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `str`)
+ * @param cl   the call node (its own, checker-packed argument list)
+ * @return     the folded (ptr, len) pair — `(0, 0)` for zero elements
+ * @throws     when the call's argument is not a `TArrayLit` (the pass-through `[]str` spelling,
+ *             out of this degrau's closed shape) or contains a spread element, or propagated from
+ *             lowering an element
+ */
+fn lower_concat_call(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
+    if cl.args.len == 0 { return lower_list_empty(ctx, e) }
+    match cl.args[0].kind {
+        checker::TArrayLit as al => lower_concat_elements(ctx, e, al.elements)
+        _ => error { message = "native backend N1: `teko::str::concat` over an existing []str slice is not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_concat_elements — the pairwise fold `lower_concat_call` runs over a `concat` call's
+ * checker-packed element list, once it is known to be the closed (compile-time-known-count)
+ * shape.
+ *
+ * @param ctx       the lowering context
+ * @param e         the call expression (its source position)
+ * @param elements  the packed argument list, in call order
+ * @return          the folded (ptr, len) pair — `(0, 0)` for zero elements
+ * @throws          when an element is a spread (`...xs`, a runtime-length contribution this
+ *                   degrau's closed shape does not cover), or propagated from lowering an element
+ */
+fn lower_concat_elements(ctx: LowerCtx, e: checker::TExpr, elements: []checker::TArrayElem) -> LoweredFat | error {
+    if elements.len == 0 { return lower_list_empty(ctx, e) }
+    if elements[0].is_spread { return error { message = "native backend N1: a spread argument to `teko::str::concat` is not yet lowered (N2)" } }
+    mut acc = match lower_fat_expr(ctx, elements[0].expr) { LoweredFat as x => x; error as err => return err }
+    mut i: u64 = 1
+    loop {
+        if i >= elements.len { break }
+        if elements[i].is_spread { return error { message = "native backend N1: a spread argument to `teko::str::concat` is not yet lowered (N2)" } }
+        let arg = match lower_fat_expr(acc.ctx, elements[i].expr) { LoweredFat as x => x; error as err => return err }
+        acc = lower_len_out_call(arg.ctx, "tk_str_concat_len", four_args(acc.ptr, acc.len, arg.ptr, arg.len), e)
+        i++
+    }
+    acc
 }
 
 /**
@@ -6571,8 +6641,8 @@ fn lower_str_lit(ctx: LowerCtx, e: checker::TExpr, s: checker::TStrLit) -> Lower
     Lowered { ctx = f.ctx; vreg = f.ptr }
 }
 
-/** two_args — a two-element VReg argument list (the shape every `tk_str_concat`/formatter
-    call below takes) (A1-4, #382). */
+/** two_args — a two-element VReg argument list (the shape a one-`tk_str`-argument runtime call's
+    ABI-flattened pair takes) (A1-4, #382). */
 fn two_args(a: u32, b: u32) -> []u32 {
     teko::list::push(teko::list::push(teko::list::empty(), a), b)
 }
@@ -6582,74 +6652,131 @@ fn single_arg(a: u32) -> []u32 {
     teko::list::push(teko::list::empty(), a)
 }
 
-/** lower_interp_piece — one interpolation PIECE literal (a raw str span, not a TExpr) as its
-    ptr VReg — the same rodata materialization a `TStrLit` gets, the length dropped (A1-4,
-    #382). */
-fn lower_interp_piece(ctx: LowerCtx, text: str, line: u32, col: u32) -> Lowered {
-    let f = lower_str_bytes_fat(ctx, text, line, col)
-    Lowered { ctx = f.ctx; vreg = f.ptr }
+/** four_args — a four-element VReg argument list: the shape a TWO-`tk_str`-argument runtime
+    call's fully ABI-flattened args take — `a`'s (ptr, len) then `b`'s (ptr, len), `tk_str`'s own
+    field order twice (0.3.1.0 degrau 9, `lower_interp_fat`'s concat calls). */
+fn four_args(a_ptr: u32, a_len: u32, b_ptr: u32, b_len: u32) -> []u32 {
+    teko::list::push(teko::list::push(two_args(a_ptr, a_len), b_ptr), b_len)
 }
 
-/** lower_interp_hole_prim — a NO-FORMAT-SPEC hole of a resolved primitive type: an integer
-    formats through the runtime's `tk_i64_to_str`/`tk_u64_to_str` (by signedness, mirroring
-    the C backend's own no-spec builders); a float/bool hole is out of the A1-4 subset (A1-4,
-    #382 — TFSpecNone's full family is a later closure). */
-fn lower_interp_hole_prim(ctx: LowerCtx, h: checker::TExpr, k: checker::PrimKind) -> Lowered | error {
+/**
+ * lower_len_out_call — call a runtime symbol whose fat (`str`) result travels back through an
+ * OUT-PARAMETER length instead of a genuine 2-eightbyte struct return: the caller reserves an
+ * 8-byte slot, appends its address as the LAST argument, calls `sym`, then loads the slot back.
+ * This is `tk_slice_push`'s own `(ptr, len, &item, esz, &out_len)` convention
+ * (`reserve_push_slots`/`push_call_args`), reused here for the runtime's str-building family
+ * (`tk_str_concat_len`/`tk_i64_to_str_len`/`tk_u64_to_str_len`, `teko_rt.h`) — the shape that lets
+ * a call whose REAL C ABI returns a 2-eightbyte struct (SysV/AAPCS64's small-aggregate register
+ * pair) stay reachable from this backend's `LCall`, which captures only ONE result register
+ * (`select_call_result_x86`/`select_call_result_arm64`): the length rides memory instead of a
+ * second return register the isel does not yet capture (0.3.1.0 degrau 9).
+ *
+ * @param ctx   the lowering context
+ * @param sym   the runtime symbol; ITS OWN last parameter is the `uint64_t *out_len` this
+ *              function supplies — `args` must NOT include it
+ * @param args  the call's own arguments, in ABI order
+ * @param e     the source expression (its line/col, for the emitted instructions)
+ * @return      the (ptr, len) pair the call produced
+ */
+fn lower_len_out_call(ctx: LowerCtx, sym: str, args: []u32, e: checker::TExpr) -> LoweredFat {
+    let slot = ctx_alloc(ctx)
+    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    let all_args = teko::list::push(args, slot.vreg)
+    let called = ctx_alloc(with_slot)
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, all_args, false, e.line, e.col))
+    let lenr = ctx_alloc(with_call)
+    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+}
+
+/** lower_interp_hole_prim_fat — a NO-FORMAT-SPEC hole of a resolved primitive type, as its (ptr,
+    len) pair: an integer formats through the runtime's `tk_i64_to_str_len`/`tk_u64_to_str_len`
+    (by signedness, mirroring the C backend's own no-spec builders, `lower_len_out_call`
+    recovering the length `lower_interp`'s pre-degrau-9 scalar path used to drop); a float/bool
+    hole is out of the A1-4 subset (A1-4, #382 — TFSpecNone's full family is a later closure)
+    (0.3.1.0 degrau 9). */
+fn lower_interp_hole_prim_fat(ctx: LowerCtx, h: checker::TExpr, k: checker::PrimKind) -> LoweredFat | error {
     if prim_is_float_kind(k) { return error { message = "native backend N1: float interpolation hole not yet lowered (N2)" } }
     if k == checker::PrimKind::Bool { return error { message = "native backend N1: bool interpolation hole not yet lowered (N2)" } }
     let ho = match lower_expr(ctx, h) { Lowered as x => x; error as err => return err }
-    let sym = if prim_is_signed_int(k) { "tk_i64_to_str" } else { "tk_u64_to_str" }
-    let r = ctx_alloc(ho.ctx)
-    Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, sym, single_arg(ho.vreg), false, h.line, h.col)); vreg = r.vreg }
+    let sym = if prim_is_signed_int(k) { "tk_i64_to_str_len" } else { "tk_u64_to_str_len" }
+    lower_len_out_call(ho.ctx, sym, single_arg(ho.vreg), h)
 }
 
-/** lower_interp_hole_none — a NO-FORMAT-SPEC hole (`TFSpecNone`): a `str` hole passes
-    through unchanged; a primitive hole formats via `lower_interp_hole_prim`; any other hole
-    type is out of the A1-4 subset (A1-4, #382). */
-fn lower_interp_hole_none(ctx: LowerCtx, h: checker::TExpr) -> Lowered | error {
+/** lower_interp_hole_none_fat — a NO-FORMAT-SPEC hole (`TFSpecNone`), as its (ptr, len) pair: a
+    `str` hole is itself a fat producer (`lower_fat_expr`); a primitive hole formats via
+    `lower_interp_hole_prim_fat`; any other hole type is out of the A1-4 subset (A1-4, #382,
+    0.3.1.0 degrau 9). */
+fn lower_interp_hole_none_fat(ctx: LowerCtx, h: checker::TExpr) -> LoweredFat | error {
     match h.type {
-        checker::Str => lower_expr(ctx, h)
-        checker::Prim as p => lower_interp_hole_prim(ctx, h, p.kind)
+        checker::Str => lower_fat_expr(ctx, h)
+        checker::Prim as p => lower_interp_hole_prim_fat(ctx, h, p.kind)
         _ => error { message = "native backend N1: interpolation hole of this type not yet lowered (N2)" }
     }
 }
 
-/** lower_interp_hole — one interpolation hole's str-VALUED VReg, per its format spec
-    (A1-4, #382). Only `TFSpecNone` (no `:spec`) is closed; a static (`:F2`) or dynamic
-    (`:[…]`) spec is out of the A1-4 subset — a later closure over `emit_interp`'s full
+/** lower_interp_hole_fat — one interpolation hole's (ptr, len) pair, per its format spec
+    (A1-4, #382, 0.3.1.0 degrau 9). Only `TFSpecNone` (no `:spec`) is closed; a static (`:F2`) or
+    dynamic (`:[…]`) spec is out of the A1-4 subset — a later closure over `emit_interp`'s full
     `tk_fmt_*` family. */
-fn lower_interp_hole(ctx: LowerCtx, h: checker::TExpr, spec: checker::TFSpec) -> Lowered | error {
+fn lower_interp_hole_fat(ctx: LowerCtx, h: checker::TExpr, spec: checker::TFSpec) -> LoweredFat | error {
     match spec.kind {
-        checker::TFSpecNone => lower_interp_hole_none(ctx, h)
+        checker::TFSpecNone => lower_interp_hole_none_fat(ctx, h)
         checker::TFSpecStatic => error { message = "native backend N1: static interpolation format spec not yet lowered (N2)" }
         checker::TFSpecDynamic => error { message = "native backend N1: dynamic interpolation format spec not yet lowered (N2)" }
     }
 }
 
-/** lower_interp — `$"…{expr}…"`: nested `tk_str_concat` calls over `pieces[0] ++
-    fmt(holes[0]) ++ pieces[1] ++ … ++ pieces[last]`, left-associative (mirrors the C
-    backend's own nesting, `codegen.tks`'s `emit_interp`). Not itself run by the interp oracle
-    (the concat/format symbols are runtime builtins outside the N1 run subset — honest-stops
-    gracefully AT RUNTIME like any other unrecognized call, per the existing convention); this
-    closes the LOWERING honest-stop only (A1-4, #382). */
-fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lowered | error {
-    let seg0 = lower_interp_piece(ctx, ip.pieces[0], e.line, e.col)
+/**
+ * lower_interp_fat — `$"…{expr}…"` as its (ptr, len) pair: nested `tk_str_concat_len` calls over
+ * `pieces[0] ++ fmt(holes[0]) ++ pieces[1] ++ … ++ pieces[last]`, left-associative (mirrors the C
+ * backend's own nesting, `codegen.tks`'s `emit_interp`, down to the SAME runtime concatenation —
+ * only the ABI `lower_len_out_call` walks differs, since real C needs no such detour).
+ *
+ * Every piece and every hole is threaded through fully (ptr, len) — 0.3.1.0 degrau 9's own fix:
+ * the pre-degrau-9 `lower_interp` called the raw two-`tk_str`-argument runtime `tk_str_concat`
+ * with only ONE word per operand (the length silently dropped at every step, not merely at the
+ * closed producer set's boundary), which is not a missing length so much as a wrong ABI call —
+ * `tk_str_concat`'s real C signature reads two 2-eightbyte structs, and a 1-word-per-operand call
+ * leaves its second SysV argument register whatever the NEXT operand's low word happened to be.
+ * `lower_len_out_call`'s out-parameter convention sidesteps needing this backend's `LCall` to
+ * capture a 2-register return at all (the wider N2 gap `is_str_arg_builtin`'s own doc names), so
+ * every operand this function passes is now the REAL argument the runtime signature declares.
+ *
+ * @param ctx  the lowering context
+ * @param e    the interpolation expression (its source position)
+ * @param ip   the interpolation node (pieces/holes/specs)
+ * @return     the built string's (ptr, len) pair
+ * @throws     propagated from a hole's own fat lowering (a float/bool hole, a format spec, or a
+ *             hole whose type is outside the A1-4 subset)
+ */
+fn lower_interp_fat(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> LoweredFat | error {
+    let seg0 = lower_str_bytes_fat(ctx, ip.pieces[0], e.line, e.col)
     mut cur = seg0.ctx
-    mut acc = seg0.vreg
+    mut acc_ptr = seg0.ptr
+    mut acc_len = seg0.len
     mut i: u64 = 0
     loop {
         if i >= ip.holes.len { break }
         let spec = if i < ip.specs.len { ip.specs[i] } else { checker::TFSpec { kind = checker::TFSpecNone { } } }
-        let ho = match lower_interp_hole(cur, ip.holes[i], spec) { Lowered as x => x; error as err => return err }
-        let cr = ctx_alloc(ho.ctx)
-        let with_concat = ctx_append(cr.ctx, call_inst(cr.vreg, "tk_str_concat", two_args(acc, ho.vreg), false, e.line, e.col))
-        let piece = lower_interp_piece(with_concat, ip.pieces[i + 1], e.line, e.col)
-        let pr = ctx_alloc(piece.ctx)
-        cur = ctx_append(pr.ctx, call_inst(pr.vreg, "tk_str_concat", two_args(cr.vreg, piece.vreg), false, e.line, e.col))
-        acc = pr.vreg
+        let ho = match lower_interp_hole_fat(cur, ip.holes[i], spec) { LoweredFat as x => x; error as err => return err }
+        let with_hole = lower_len_out_call(ho.ctx, "tk_str_concat_len", four_args(acc_ptr, acc_len, ho.ptr, ho.len), e)
+        let piece = lower_str_bytes_fat(with_hole.ctx, ip.pieces[i + 1], e.line, e.col)
+        let with_piece = lower_len_out_call(piece.ctx, "tk_str_concat_len", four_args(with_hole.ptr, with_hole.len, piece.ptr, piece.len), e)
+        cur = with_piece.ctx
+        acc_ptr = with_piece.ptr
+        acc_len = with_piece.len
         i++
     }
-    Lowered { ctx = cur; vreg = acc }
+    LoweredFat { ctx = cur; ptr = acc_ptr; len = acc_len }
+}
+
+/** lower_interp — `$"…{expr}…"` in a plain (scalar) VALUE position: `lower_interp_fat`'s ptr
+    half, the length dropped — the same "a `str` scalar drops its length" convention
+    `lower_str_lit`/`lower_call_fat_as_scalar` already carry (0.3.1.0 degrau 9). */
+fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lowered | error {
+    let fo = match lower_interp_fat(ctx, e, ip) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.ptr }
 }
 
 /** lower_in_expr — `lhs in [e0, e1, …]`: the lhs lowers ONCE, then each element compares
