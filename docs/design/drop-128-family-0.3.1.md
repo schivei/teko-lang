@@ -308,10 +308,9 @@ correctness cost. But by design intent the owner's "maximum death now" is achiev
   member name** mirroring PrimKind's shape (issue #263) — that is an identifier, NOT the builtin `f16`
   type, and **must survive** the sweep. The f16 sweep keys on the builtin type `f16`, never the token.
 
-**`math/checked.tks:25-31`** — the 128-bit `checked_*` family is *deliberately not shipped* (the retired
-VM's `norm_int` trapping `raw to u128` PANICS on a high-bit u128). Wave B **formalizes** this: the
-"once the VM reinterpret is corrected, u128/i128 are a mechanical extension" prose is deleted (there is
-no longer any 128 to extend to).
+**`math/checked.tks:25-31`** — the 128-bit `checked_*` family is *deliberately not shipped*. Wave B
+**formalizes** this: the prose about conditional future extension of the 128-bit family is deleted
+(there is no longer any 128 to extend to).
 
 **`.tkb` wire (frozen codec).** `parser::Number.value` (an i128) is serialized as **two u64 halves —
 hi = `(value >> 64)`, lo = `(value & 0xFFFF…FFFF)`** at `src/emit/tkb_write.tks:100-101` (general
@@ -366,8 +365,8 @@ fn numint_fits(v: NumInt, k: PrimKind) -> bool
 The two differential interpreters (`lir_interp`, `minst_interp`) hold **`RegFile.values: []i128`** and
 `IResult.value: i128` as an *unmasked* carrier (`lir_interp.tks:11` "Values are the i128 carrier; a
 numeric `to` cast masks to the target"). After the drop, the carrier becomes a **64-bit two's-complement
-register value held in `i64`**, with per-op width/sign reinterpretation retained (mirroring the retired
-VM's `norm_int`). See §9-g for the **behavioral decision** this forces (unmasked-i128 → 64-bit-wrapping),
+register value held in `i64`**, with per-op width/sign reinterpretation retained (maintaining
+historical semantics). See §9-g for the **behavioral decision** this forces (unmasked-i128 → 64-bit-wrapping),
 which is a *ratification item*, not a default.
 
 ```teko
@@ -538,7 +537,7 @@ Precondition: **all of Wave A landed** (removing `scope.tks`'s `i128` arm also s
 use) — it can even ship as its own tiny crumb ahead of the i128/u128 arm if the detox slips (§10).
 
 #### B3(.31) — `math/checked.tks` — formalize the removal  — **S**
-Delete the `checked.tks:24-31` "128-bit deferred / mechanical extension once the VM is fixed" prose;
+Delete the `checked.tks:24-31` prose about conditional future extension of 128-bit support;
 restate the width scope as **"exactly u8..u64 / i8..i64 — the language's full integer set"**. No code
 change (the family was never shipped). **Ritual:** GATE-G.
 
@@ -740,8 +739,8 @@ exceeded 64 bits used to be held wide and only masked at a `to` cast — it now 
 op**. RECOMMEND the wrapping carrier: it is **more faithful to the native backend** (real 64-bit
 registers wrap), and both interpreters change in lockstep so the interp-equiv oracle is preserved. *Risk:*
 a corpus test whose exit code depended on the unmasked-then-masked intermediate could shift; the A4
-ritual (isel differential) surfaces any such case. **This is the interpreters' analogue of the retired
-VM's `norm_int` — the same "reinterpret at the boundary" model the `checked.tks:22` note describes.**
+ritual (isel differential) surfaces any such case. **The interpreters follow the "reinterpret at the
+boundary" model the `checked.tks:22` note describes.**
 Ratify the wrapping model (or, alternatively, keep an unmasked model on a `{neg,mag}` pair — heavier, and
 it re-introduces a non-machine value model; not recommended).
 
@@ -767,7 +766,7 @@ R2; own==C without the 128 KNOWN-STOP = R2.
   line:offset here shifts — re-grep the symbol). Cite offsets as *approximate*.
 - **Interaction with the interpreter detox:** the LIR interpreter (`lir_interp`) and machine-code
   interpreter (`minst_interp`, in `src/lir`/`src/backend`) are orthogonal to the native backend (A4) and
-  needed regardless. If the VM retirement (#524) lands first, one fewer coverage interaction to reason about;
+  needed regardless. If the interpreter detox (#524) lands first, one fewer coverage interaction to reason about;
   no ordering hard-dependency either way. `checked.tks:26` references the `norm_int` constant — B3's prose
   cleanup should also review this reference to ensure it aligns with the current integer model.
 - **Interaction with KP16 (objfile) + the float-slice work:** R2's ABI edits (size-16/eightbyte-pair
