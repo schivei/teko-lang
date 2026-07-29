@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o planejamento de 2026-07-06 para drenagem serial de 74 issues em cascata, já executado parcialmente. Muitos dos keystones (#254, #265, #168, #290, etc.) e seus dependentes já foram implementados. Este documento registra o plano executado, não o estado atual do projeto.
+
 # Backlog-drain master plan — zero the 74-issue backlog
 
 **Author:** architect (READ-ONLY synthesis; no builds run producing this).
