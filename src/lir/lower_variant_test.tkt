@@ -206,6 +206,50 @@ fn lvt_declared_variant_match_tests_the_tag_of_every_arm() {
 
 #test
 /**
+ * lvt_variant_member_named_matches_a_generic_instance_by_its_base — a bind pattern with no
+ * type-args (`Parsed as x`, mirroring `bind_pattern_case_name`'s bare-base read) selects the
+ * variant member whose canonical name is a GENERIC INSTANCE (`Parsed__g__MainFile`) by the base
+ * `generic_inst_name` built it from — the exact shape `teko::build::asm_parse`'s
+ * `parser::Parsed<parser::MainFile> as x => x.node` needed (0.3.1.0 degrau 14). The base alone is
+ * not the FULL identity, so it does NOT also answer to the instantiating argument's own name.
+ */
+fn lvt_variant_member_named_matches_a_generic_instance_by_its_base() {
+    teko::assert::is_true(variant_member_named(checker::Named { name = "Parsed__g__MainFile" }, "Parsed"))
+    teko::assert::is_true(!variant_member_named(checker::Named { name = "Parsed__g__MainFile" }, "MainFile"))
+}
+
+#test
+/**
+ * lvt_find_variant_member_resolves_a_generic_instance_case — `find_variant_member` over a
+ * `Parsed<MainFile> | error` subject resolves the pattern's bare base `Parsed` to the generic
+ * member at index 0, mirroring the union `teko::build::asm_parse` matches on.
+ */
+fn lvt_find_variant_member_resolves_a_generic_instance_case() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, checker::Named { name = "Parsed__g__MainFile" })
+    members = teko::list::push(members, checker::Error { })
+    let vm = match find_variant_member(members, "Parsed") { VariantMember as x => x; error as err => return }
+    teko::assert::is_true(vm.index == 0)
+}
+
+#test
+/**
+ * lvt_find_variant_member_refuses_an_ambiguous_shared_generic_base — TWO members instantiated
+ * from the SAME generic base with DIFFERENT type-args (`Box<i64>` and `Box<str>`, a `variant
+ * Box<i64> | Box<str>` a user CAN write) both answer the pattern's bare base `Box`. Rather than
+ * silently binding the FIRST one — a wrong-arm miscompilation this backend has already produced
+ * once for a declared variant (the match-arm degrau) — `find_variant_member` refuses with a
+ * named, honest stop instead of guessing.
+ */
+fn lvt_find_variant_member_refuses_an_ambiguous_shared_generic_base() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, checker::Named { name = "Box__g__i64" })
+    members = teko::list::push(members, checker::Named { name = "Box__g__str" })
+    teko::assert::is_true(match find_variant_member(members, "Box") { error => true; _ => false })
+}
+
+#test
+/**
  * lvt_declared_variant_return_wraps_the_case_into_the_uniform_wrapper — the CONSTRUCTION half of the
  * same defect: `return Box { v = 7 }` out of a function declared `-> Shape` (a DECLARED variant)
  * builds the uniform 24-byte tag+payload wrapper, exactly as it does for an inline `Box | error`.

@@ -1888,6 +1888,67 @@ pub fn generic_inst_name(base: str, args: []Type) -> str {
 }
 
 /**
+ * GenericInstanceSplit — the result of locating `generic_inst_name`'s `__g__` stamp inside a
+ * resolved `Named` canonical name: whether the name IS a generic instance, and — when it is — the
+ * BASE half before the stamp (`generic_inst_name`'s inverse). One shape serves both the membership
+ * test and the base extraction a single caller needs, so `split_generic_instance_name` scans the
+ * name once instead of twice.
+ */
+type GenericInstanceSplit = struct {
+    /** true when `name` carries the `__g__` stamp (it is a generic instance's canonical name). */
+    is_generic: bool
+    /** the base before the stamp (valid iff `is_generic`; `""` otherwise). */
+    base: str
+}
+
+/**
+ * split_generic_instance_name — locate `generic_inst_name`'s `__g__` stamp in a resolved `Named`
+ * canonical name. A generic-instance name is stamped bare (`resolve_generic_inst` takes the
+ * WRITTEN path's last segment as its base, never the namespace-qualified form — `qualify`'s own
+ * doc: "generic `__g__` instances stay bare"), so no `::` search can ever find it; the stamp
+ * itself is the only reliable marker.
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return GenericInstanceSplit  `is_generic=false, base=""` when `name` carries no stamp;
+ *                                otherwise `is_generic=true` and `base` = everything before it
+ */
+pub fn split_generic_instance_name(name: str) -> GenericInstanceSplit {
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
+            return GenericInstanceSplit { is_generic = true; base = teko::str::slice_to(name, i) }
+        }
+        i++
+    }
+    GenericInstanceSplit { is_generic = false; base = "" }
+}
+
+/**
+ * named_case_name — the case name a bind/field pattern would spell to select the `Named` member
+ * whose resolved canonical name is `name`: the BASE before `generic_inst_name`'s `__g__` stamp for
+ * a generic instance (a pattern's type-args are carried separately from its case name —
+ * `bind_pattern_case_name`'s own doc — so the stamped suffix can never appear in a case name), or
+ * the canonical name's bare last `::`-segment for an ordinary nominal member.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 14): `variant_member_named`'s `Named` arm compared only
+ * `name_last_segment(n.name)` against a pattern's case name. That is correct for an ordinary
+ * nominal member, but a generic-instance name carries no `::` at all, so `name_last_segment`
+ * returned the WHOLE mangled instance (`Parsed__g__MainFile`) unchanged — never equal to the
+ * pattern's bare base (`Parsed`). The compiler's OWN `teko::build::asm_parse` writes
+ * `match parser::parse_main_file(…) { parser::Parsed<parser::MainFile> as x => x.node; … }` and the
+ * native self-build stopped there with "unknown variant case `Parsed` (internal)".
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return str  the case name a pattern selecting this member would spell
+ */
+pub fn named_case_name(name: str) -> str {
+    let split = split_generic_instance_name(name)
+    if split.is_generic { return split.base }
+    name_last_segment(name)
+}
+
+/**
  * Is this struct/class literal a SELF-CONSTRUCT inside its own generic template — i.e. the base
  * being constructed equals the enclosing method's owner type, AND that owner is generic (so no
  * concrete instance is stamped while typing the abstract template)? Only then do we type against the

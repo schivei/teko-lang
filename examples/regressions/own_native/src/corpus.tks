@@ -1373,3 +1373,63 @@ fn f_loop_tail_no_break() -> i64 {
     if gcd_subtract(9, 9) != 9 { return 3 }
     0
 }
+
+/** GBox<T> — a one-field generic wrapper, the shape `parser::Parsed<T>` (asm_parse's own return
+ * payload) is: a plain generic struct, never a variant/enum in its own right. */
+type GBox<T> = struct { value: T }
+
+/**
+ * make_gbox_i64 — a `GBox<i64> | error` producer: the exact union shape
+ * `parser::parse_main_file` returns (`Parsed<MainFile> | error`), instantiated with `i64` so this
+ * fixture needs no second file.
+ *
+ * @param ok  true to construct the payload, false to return the error arm
+ * @return    `GBox<i64>` when `ok`, else an `error`
+ */
+fn make_gbox_i64(ok: bool) -> GBox<i64> | error {
+    if !ok { return error { message = "no" } }
+    GBox<i64> { value = 99 }
+}
+
+/**
+ * make_gbox_str — the SAME generic union, instantiated with `str` instead — a second
+ * instantiation of `GBox`'s base, exercised alongside `make_gbox_i64` to prove the case-name
+ * resolution reads the SUBJECT'S OWN member list rather than remembering the last instance seen.
+ *
+ * @param ok  true to construct the payload, false to return the error arm
+ * @return    `GBox<str>` when `ok`, else an `error`
+ */
+fn make_gbox_str(ok: bool) -> GBox<str> | error {
+    if !ok { return error { message = "no" } }
+    GBox<str> { value = "hi" }
+}
+
+/**
+ * f_generic_variant_match — a `match` over a `Generic<T> | error` union: the exact shape
+ * `teko::build::asm_parse` needed (`parser::Parsed<parser::MainFile> as x => x.node; error as e =>
+ * return e`, 0.3.1.0 degrau 14). A generic instance's RESOLVED case is a mangled instance name
+ * (`GBox__g__i64`), never the pattern's bare base (`GBox`) — the case-name lookup must recover the
+ * base from the mangled name, not compare it verbatim. Two DIFFERENT instantiations (`i64`, `str`)
+ * plus the `error` arm, checked by VALUE.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_generic_variant_match() -> i64 {
+    match make_gbox_i64(true) {
+        GBox<i64> as b => { if b.value != 99 { return 1 } }
+        error => return 2
+    }
+    match make_gbox_i64(false) {
+        GBox<i64> as b => return 3
+        error as e => { if e.message != "no" { return 4 } }
+    }
+    match make_gbox_str(true) {
+        GBox<str> as b => { if b.value != "hi" { return 5 } }
+        error => return 6
+    }
+    match make_gbox_str(false) {
+        GBox<str> as b => return 7
+        error as e => { if e.message != "no" { return 8 } }
+    }
+    0
+}

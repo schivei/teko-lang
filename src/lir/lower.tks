@@ -4336,19 +4336,29 @@ type VariantMember = struct { index: u32; ty: checker::Type }
 /**
  * find_variant_member — the member of `members` whose CASE NAME is
  * `case_name`, or a NAMED internal error. A member is nameable when it is
- * `Named`, the built-in `error`, or any type with a bare keyword spelling
- * (`u32`, `byte`, `str`, … — degrau 2 of 0.3.1.0 widened this from the
- * Named+error pair the A1-5 subset shipped with) (A1-5, #382). A `Named`
- * member's case name is its CANONICAL name's
- * last path segment (`checker::resolve`'s "ns::Name" convention, #109 W3 —
- * mirrors the checker's OWN `variant_member_by_name`), while `error`'s is the
- * literal keyword — the ONLY spelling `error` ever reaches a match pattern
- * under (`variant_member_named`). `case_name` itself is always the pattern's
- * BARE last segment, so a Named member's FULL canonical name compared
- * verbatim would reject every namespaced case, and `checker::Error`'s own
- * `_`-arm miss would reject the built-in error case outright — both are the
- * gap `examples/smoke/uniontest`'s `Box | error` match exposed once the
- * earlier construction-site honest-stop stopped masking it (degrau N2).
+ * `Named` (nominal OR a generic instance — degrau 14 of 0.3.1.0 widened this
+ * from bare-nominal-only, see `variant_member_named`), the built-in `error`,
+ * or any type with a bare keyword spelling (`u32`, `byte`, `str`, … — degrau
+ * 2 of 0.3.1.0 widened this from the Named+error pair the A1-5 subset shipped
+ * with) (A1-5, #382). A `Named` member's case name is its CANONICAL name's
+ * last path segment, or — for a generic instance — the BASE its `__g__` stamp
+ * was built from (`checker::named_case_name`, #109 W3 — mirrors the checker's
+ * OWN `variant_member_by_name`), while `error`'s is the literal keyword — the
+ * ONLY spelling `error` ever reaches a match pattern under
+ * (`variant_member_named`). `case_name` itself is always the pattern's BARE
+ * last segment, so a Named member's FULL canonical name compared verbatim
+ * would reject every namespaced case, and `checker::Error`'s own `_`-arm miss
+ * would reject the built-in error case outright — both are the gap
+ * `examples/smoke/uniontest`'s `Box | error` match exposed once the earlier
+ * construction-site honest-stop stopped masking it (degrau N2).
+ *
+ * A generic BASE name is not necessarily unique WITHIN one variant/union — a
+ * user can write `variant Box<i64> | Box<str>`, two DIFFERENT cases that
+ * share ONE bare base — so a bind pattern with no type-args to disambiguate
+ * (this backend threads none through to lowering) could name either. Rather
+ * than silently binding the FIRST one (a wrong-arm miscompilation the C route
+ * never produces — THE ORACLE RULE), a second same-base generic candidate is
+ * an honest stop instead of a guess.
  *
  * @param []checker::Type members  the variant subject's declared members, in
  *                                 order
@@ -4356,36 +4366,80 @@ type VariantMember = struct { index: u32; ty: checker::Type }
  *                       path segment, or the literal `error`)
  * @return VariantMember  the matching member's declared index + its own Type
  * @throws  when no member of `members` is named `case_name` (an internal
- *          invariant break)
+ *          invariant break), or when `case_name` names more than one member
+ *          via a shared generic base (an ambiguity this backend refuses
+ *          rather than resolves by position)
  */
 fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMember | error {
     mut i: u64 = 0
+    mut first: i64 = -1
     loop {
         if i >= members.len { break }
-        if variant_member_named(members[i], case_name) { return VariantMember { index = i to u32; ty = members[i] } }
+        if variant_member_named(members[i], case_name) {
+            if first >= 0 && generic_case_ambiguous(members[first to u64], members[i]) {
+                return error { message = teko::str::concat("native backend N1: ambiguous variant case `", case_name, "` — more than one member shares this generic base (internal)") }
+            }
+            if first < 0 { first = i to i64 }
+        }
         i++
     }
+    if first >= 0 { return VariantMember { index = first to u32; ty = members[first to u64] } }
     error { message = teko::str::concat("native backend N1: unknown variant case `", case_name, "` (internal)") }
 }
 
 /**
- * variant_member_named — does variant member `member` carry the case name
- * `case_name`? A `Named` member matches by its CANONICAL name's last path
- * segment (`checker::name_last_segment`, #109 W3); the built-in `error`
- * member matches the literal keyword `"error"` (its ONE surface spelling —
- * `error_struct_name`'s doc); every OTHER non-nominal member matches by its
- * own bare keyword spelling (`checker::builtin_case_name`), which is the
- * inverse of the very table the checker resolved the pattern through.
+ * generic_case_ambiguous — do TWO variant members that both answered a
+ * bind pattern's `case_name` (`find_variant_member`'s ambiguity guard)
+ * actually name DIFFERENT cases? True only when both are `Named`, their FULL
+ * canonical names differ, and at least one is a generic instance — the one
+ * shape `named_case_name` can fold two DIFFERENT identities onto the SAME
+ * bare base (`Box<i64>` and `Box<str>` both answer `"Box"`). Two ordinary
+ * nominal members sharing a bare last segment is a pre-existing, narrower
+ * risk this guard leaves untouched (out of degrau 14's scope).
  *
- * That last arm is degrau 2 of 0.3.1.0. It used to be `_ => false`, on the
- * reading that "a primitive is not a case A1-5 selects by name" — but the
- * checker had always let a pattern NAME one, because a pattern that is not a
- * member name falls through to `builtin_type`. The compiler's own
- * `backend::encode_alu_imm` writes `match add_sub_imm_base(i.op, neg) { u32
- * as b => b; error as e => return e }`, and the native self-build stopped
- * there with "unknown variant case `u32` (internal)". A member whose type has
- * NO keyword spelling (a slice, an optional) yields `""`, which can never
- * equal a pattern's case name — so those stay unnameable, as they were.
+ * @param checker::Type a  the first matching member
+ * @param checker::Type b  the second matching member
+ * @return bool  whether `a` and `b` are genuinely different cases wearing the
+ *               same case name
+ */
+fn generic_case_ambiguous(a: checker::Type, b: checker::Type) -> bool {
+    match a {
+        checker::Named as an => match b {
+            checker::Named as bn => an.name != bn.name && (checker::split_generic_instance_name(an.name).is_generic || checker::split_generic_instance_name(bn.name).is_generic)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * variant_member_named — does variant member `member` carry the case name
+ * `case_name`? A `Named` member matches by `checker::named_case_name` (its
+ * CANONICAL name's last path segment, or — for a generic instance — the base
+ * before its `__g__` stamp, #109 W3); the built-in `error` member matches the
+ * literal keyword `"error"` (its ONE surface spelling — `error_struct_name`'s
+ * doc); every OTHER non-nominal member matches by its own bare keyword
+ * spelling (`checker::builtin_case_name`), which is the inverse of the very
+ * table the checker resolved the pattern through.
+ *
+ * The `builtin_case_name` arm is degrau 2 of 0.3.1.0. It used to be `_ =>
+ * false`, on the reading that "a primitive is not a case A1-5 selects by
+ * name" — but the checker had always let a pattern NAME one, because a
+ * pattern that is not a member name falls through to `builtin_type`. The
+ * compiler's own `backend::encode_alu_imm` writes `match
+ * add_sub_imm_base(i.op, neg) { u32 as b => b; error as e => return e }`, and
+ * the native self-build stopped there with "unknown variant case `u32`
+ * (internal)". A member whose type has NO keyword spelling (a slice, an
+ * optional) yields `""`, which can never equal a pattern's case name — so
+ * those stay unnameable, as they were.
+ *
+ * The `named_case_name` delegation is degrau 14 of 0.3.1.0: a generic
+ * instance's canonical name (`Parsed__g__MainFile`) carries no `::` at all,
+ * so the OLD `checker::name_last_segment` compare left it whole and
+ * unmatchable against a pattern's bare base (`Parsed`). The compiler's own
+ * `teko::build::asm_parse` writes `match parser::parse_main_file(…) {
+ * parser::Parsed<parser::MainFile> as x => x.node; … }`, and the native
+ * self-build stopped there with "unknown variant case `Parsed` (internal)".
  *
  * @param checker::Type member  one of the variant's declared members
  * @param str case_name  the pattern's case name to test against
@@ -4393,7 +4447,7 @@ fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMembe
  */
 fn variant_member_named(member: checker::Type, case_name: str) -> bool {
     match member {
-        checker::Named as n => checker::name_last_segment(n.name) == case_name
+        checker::Named as n => checker::named_case_name(n.name) == case_name
         checker::Error => case_name == error_struct_name()
         _ => {
             let spelling = checker::builtin_case_name(member)
