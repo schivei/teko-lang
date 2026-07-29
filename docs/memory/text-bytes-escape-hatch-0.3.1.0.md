@@ -170,3 +170,42 @@ já mapeada noutro documento, e fora do escopo desta lane.
     `When compilation fails` / `Then diagnostic = "builtin \`bytes_of_str\` not yet lowered"`.
 - `/cases/text_byteview_roundtrip.tks` — a fonte partilhada pelas duas scenarios acima (multi-byte,
   0=ok / 1=comprimento errado / 2=roundtrip errado / 3=erro inesperado).
+
+## Critério de aceitação da lane `.len` — cravado pelo dono (2026-07-29)
+
+Literal do dono: *"o que esperamos é que o len de uma str 'café🐝' retorne 5, neste caso, e a
+iteração resulte 5 passos extraindo os caracteres."*
+
+A MESMA string que já serve de sonda deste documento pelo lado dos BYTES passa a servir de sonda
+pelo lado dos CARACTERES. Uma string, os dois contadores, os dois medidos:
+
+| expressão | valor exigido | estado |
+|---|---|---|
+| `"café🐝".len` | **5** | a implementar (hoje devolve bytes) |
+| `teko::text::bytes_of_str("café🐝").len` | **9** | MEDIDO e a funcionar na rota C |
+| passos de `for c in "café🐝"` | **5** | a implementar |
+
+`5 = c + a + f + é + 🐝`. `9 = 1+1+1+2+4`. A string foi escolhida porque cobre as três larguras
+UTF-8 que interessam (1, 2 e 4 bytes) — nenhum bug de fronteira se esconde atrás de ASCII, e a
+diferença 5≠9 é grande o bastante para que uma troca de contador falhe alto em vez de passar
+despercebida.
+
+**Consequência que muda a sequência dos vagões.** "Extrair os caracteres" quer dizer que a variável
+do laço é um `char`, e `char` é açúcar que baixa para `[]byte` (ruling do dono). Logo os 5 valores
+produzidos têm larguras 1,1,1,2,4 — a iteração NÃO pode ser um passeio indexado por byte, precisa de
+descodificar UTF-8 e devolver uma vista de largura variável.
+
+E daí sai o encaixe: o primeiro gesto de qualquer dev que itere caracteres é comparar um deles —
+`if c == c'é'`. Isso é EXACTAMENTE o buraco de Categoria 3 achado pela auditoria da superfície
+óbvia (`cargo/0.3.1-superficie-obvia`, commits `6dbc5f7`/`7952d73`): `char == char` falha nas DUAS
+rotas (rota C: `cc` recusa com `invalid operands to binary == (have 'tk_char' and 'tk_char')`;
+nativa: `'char' has no single PrimKind`). Portanto **`char ==` não é um achado lateral — está no
+caminho crítico desta lane** e tem de fechar ANTES de a iteração por caracteres ser entregue, senão
+entregamos um laço que produz valores que ninguém consegue comparar.
+
+Ordem que isto impõe: `char ==` → `c'X'` baixa para `[]byte` (vagão próprio do `char`) → `str`
+carrega os dois contadores → `.len` conta caracteres (lane própria, com bump de versão e a semente a
+seguir, porque o fixpoint não compara um compilador cuja semântica de `.len` difere da sua semente).
+
+Fixture: tem de verificar VALOR (5 e 9), não que compila — a lei das fixtures desta esteira nasceu
+precisamente de quatro miscompilações silenciosas que passaram por só verificarem compilação.
