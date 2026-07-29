@@ -1,0 +1,204 @@
+/**
+ * cascade_return — four `defer` levels deep (function, loop body, `match` arm, `if` body), a
+ * `return` written in the INNERMOST `if` must fire ALL FOUR, LIFO (owner ruling 2026-07-29: "a
+ * ordem e LIFO como nos defers"). `acc` picks pairwise-distinguishable operations per level so a
+ * missing or misordered level changes the result: `+10000` (if) then `+100` (arm) then `*2`
+ * (loop) then `+1` (fn) = `((1+10000)+100)*2+1` = 20203.
+ *
+ * @return 20203
+ */
+fn cascade_return() -> i64 {
+    mut acc: i64 = 1
+    defer { acc = acc + 1 }
+    loop {
+        defer { acc = acc * 2 }
+        match 1 {
+            1 => {
+                defer { acc = acc + 100 }
+                if true {
+                    defer { acc = acc + 10000 }
+                    return acc
+                }
+            }
+            _ => { }
+        }
+    }
+    return acc
+}
+
+/**
+ * cascade_break — the SAME four-level cascade, but the innermost exit is `break`: it fires the
+ * `if`/arm/loop levels (3) immediately, and leaves the function-level defer (1) to fire at the
+ * explicit `return` that follows the loop — the SAME total LIFO order and result as
+ * `cascade_return`, split across two firing sites instead of one.
+ *
+ * @return 20203
+ */
+fn cascade_break() -> i64 {
+    mut acc: i64 = 1
+    defer { acc = acc + 1 }
+    loop {
+        defer { acc = acc * 2 }
+        match 1 {
+            1 => {
+                defer { acc = acc + 100 }
+                if true {
+                    defer { acc = acc + 10000 }
+                    break
+                }
+            }
+            _ => { }
+        }
+    }
+    return acc
+}
+
+/**
+ * cascade_continue — the SAME cascade, but TWO iterations: the first ends in `continue` (firing
+ * levels if/arm/loop, NOT the function level — the function has not exited), the second ends in
+ * `break` (firing if/arm/loop again), then the explicit `return` after the loop fires the
+ * function level exactly ONCE, never per iteration.
+ *
+ * @return 60605 (iteration 1: `((1+10000)+100)*2` = 20202; iteration 2:
+ *         `((20202+10000)+100)*2` = 60604; `+1` at the function's own return = 60605)
+ */
+fn cascade_continue() -> i64 {
+    mut acc: i64 = 1
+    mut n = 0
+    defer { acc = acc + 1 }
+    loop {
+        defer { acc = acc * 2 }
+        n = n + 1
+        match n {
+            1 => {
+                defer { acc = acc + 100 }
+                if true {
+                    defer { acc = acc + 10000 }
+                    continue
+                }
+            }
+            _ => {
+                defer { acc = acc + 100 }
+                if true {
+                    defer { acc = acc + 10000 }
+                    break
+                }
+            }
+        }
+    }
+    return acc
+}
+
+/**
+ * cascade_exit — the SAME four-level cascade, but the innermost exit is an unqualified `exit`:
+ * its own ARGUMENT (`acc`) is read AFTER all four levels replay (the W15/#defer-nas-saidas fix's
+ * ordering), so the reported exit code is itself the LIFO proof — the SAME total as
+ * `cascade_return`.
+ *
+ * @return never — the process exits with 20203 (`& 0xFF` on the OS exit-code byte)
+ */
+fn cascade_exit() -> i64 {
+    mut acc: i64 = 1
+    defer { acc = acc + 1 }
+    loop {
+        defer { acc = acc * 2 }
+        match 1 {
+            1 => {
+                defer { acc = acc + 100 }
+                if true {
+                    defer { acc = acc + 10000 }
+                    exit((acc) to i32)
+                }
+            }
+            _ => { }
+        }
+    }
+    return acc
+}
+
+/**
+ * cascade_panic — the SAME four-level cascade, but the innermost exit is `panic`: the process
+ * dies, so the LIFO order is asserted via stderr markers (`eprintln`, unbuffered — survives
+ * `abort()`, §6.11.1) instead of an arithmetic exit code: `L4`, `L3`, `L2`, `L1`, THEN the panic
+ * message.
+ */
+fn cascade_panic() {
+    defer { eprintln("L1") }
+    loop {
+        defer { eprintln("L2") }
+        match 1 {
+            1 => {
+                defer { eprintln("L3") }
+                if true {
+                    defer { eprintln("L4") }
+                    panic("q209 cascade")
+                }
+            }
+            _ => { }
+        }
+    }
+}
+
+/**
+ * double_defer_same_scope — TWO `defer` in the SAME block must fire in REVERSE declaration order
+ * (LIFO): `*10` (declared second, fires first) then `+1` (declared first, fires second) —
+ * `(1*10)+1` = 11, distinguishable from the declaration-order result `(1+1)*10` = 20.
+ *
+ * @return 11
+ */
+fn double_defer_same_scope() -> i64 {
+    mut acc: i64 = 1
+    defer { acc = acc + 1 }
+    defer { acc = acc * 10 }
+    return acc
+}
+
+/**
+ * entry — the four-level nested-scope defer cascade the owner asked for by name (2026-07-29),
+ * exited by `return`: one `defer` at the function, the loop body, a `match` arm, and the
+ * innermost `if` — all four fire, LIFO. Selected by
+ * `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes`.
+ */
+pub fn entry() {
+    exit((cascade_return()) to i32)
+}
+
+/**
+ * entry_break — the SAME cascade, exited by `break`. Selected by
+ * `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes__break`.
+ */
+pub fn entry_break() {
+    exit((cascade_break()) to i32)
+}
+
+/**
+ * entry_continue — the SAME cascade, TWO iterations, the first ending in `continue`. Selected by
+ * `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes__continue`.
+ */
+pub fn entry_continue() {
+    exit((cascade_continue()) to i32)
+}
+
+/**
+ * entry_exit — the SAME cascade, exited by `exit` (its own argument proves the LIFO order).
+ * Selected by `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes__exit`.
+ */
+pub fn entry_exit() {
+    exit((cascade_exit()) to i32)
+}
+
+/**
+ * entry_panic — the SAME cascade, exited by `panic` (stderr markers prove the LIFO order).
+ * Selected by `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes__panic`.
+ */
+pub fn entry_panic() {
+    cascade_panic()
+}
+
+/**
+ * entry_double — two `defer` in the SAME scope, proving LIFO order independent of nesting.
+ * Selected by `TEKO_REGR_ENTRY=q209_defer_cascade_nested_scopes__double`.
+ */
+pub fn entry_double() {
+    exit((double_defer_same_scope()) to i32)
+}

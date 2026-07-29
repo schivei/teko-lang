@@ -1,0 +1,32 @@
+/**
+ * div_by_zero_leaks_the_defer — the DOCUMENTED residual limit of W15/#defer-nas-saidas (harness
+ * doc §18.4's own table): an IMPLICIT panic (div/0, index out of bounds, an impossible `to`
+ * cast, integer overflow, OOM) has no CALL SITE the checker/lowering can see — `texpr_diverges`
+ * only recognizes an explicit, unqualified `panic`/`exit` — so its guarding defer does NOT run.
+ * This is a CONTRACT, not a gap left open by accident: the process dies either way, so nothing
+ * leaks (the assimetria harness §18.4 argues is acceptable, unlike a survivor path). The division
+ * is deliberately a MID-BODY `let` binding, not this function's own trailing/return value: an
+ * IMPLICIT panic that happens to occur WHILE COMPUTING an explicit `return`'s own value (or the
+ * trailing auto-return value) already, incidentally, sees its enclosing defer fire — NOT because
+ * the panic is recognized (it still is not), but because `return`'s own replay is unconditionally
+ * sequenced BEFORE its value is computed, panic or not (`lower_return`'s documented ordering, so
+ * a defer's mutation is observable through the value read afterward). That coincidence is NOT
+ * this fixture's claim; this fixture isolates the true residual gap. If this fixture ever starts
+ * printing "should-not-run", either the compiler started synthesizing a call site for implicit
+ * panics (update this doc) or something regressed.
+ */
+fn div_by_zero_leaks_the_defer(n: i64) -> i64 {
+    defer { eprintln("should-not-run") }
+    let bad = 100 / n
+    return bad
+}
+
+/**
+ * entry — pins the documented residual asymmetry of W15/#defer-nas-saidas: an implicit panic
+ * (here, integer division by zero) does not run its guarding defer, unlike an explicit `panic`/
+ * `exit` call. Selected by `TEKO_REGR_ENTRY=q208_defer_implicit_panic_documented`.
+ */
+pub fn entry() {
+    div_by_zero_leaks_the_defer(0)
+    eprintln("unreachable")
+}
