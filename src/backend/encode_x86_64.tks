@@ -96,14 +96,15 @@ pub type FrameLayoutX86 = struct {
 }
 
 /**
- * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`-family
- * instruction: the operand-size prefix, the REX.W bit, whether the opcode is
+ * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`/SSE-
+ * family instruction: the operand-size prefix, the mandatory SSE prefix (for
+ * a float MOVSD/MOVSS transfer, `B1-fp`), the REX.W bit, whether the opcode is
  * `0F`-escaped, the primary opcode byte, and whether the register operand is
  * 8-bit (which forces a REX prefix when it is SIL/DIL/BPL/SPL or R8..R15, so
  * the low byte is addressable). `load_memop_x86`/`store_memop_x86` produce it;
  * `emit_mem_op_x86` consumes it for both loads and stores.
  *
- * @since #386 B1-5
+ * @since #386 B1-5, B1-fp
  */
 type X86MemOp = struct {
     /**
@@ -111,11 +112,18 @@ type X86MemOp = struct {
      */
     op66: bool
     /**
+     * mandatory_prefix — an SSE mandatory prefix byte (`X86_PREFIX_F2`/`F3`
+     * for a float MOVSD/MOVSS transfer), or `X86_NO_PREFIX` for every
+     * integer form (which carries its size distinction through `op66`/`rexw`
+     * instead).
+     */
+    mandatory_prefix: u32
+    /**
      * rexw — set the REX.W bit (the 64-bit quadword / sign-extending forms).
      */
     rexw: bool
     /**
-     * two_byte — the opcode is `0F`-escaped (`movsx`).
+     * two_byte — the opcode is `0F`-escaped (`movsx`, and every SSE form).
      */
     two_byte: bool
     /**
@@ -311,20 +319,6 @@ fn fits_i32_x86(x: i64) -> bool {
 }
 
 /**
- * honest_fp_x86 — the single named honest-stop the SSE float family raises when
- * it reaches the B1-5 encoder core: an `MLoadX86`/`MStoreX86` whose register
- * operand is FPR-class is an SSE memory move (MOVSD/MOVSS), deferred to 0.3.1
- * with the rest of the float family (`B1-fp`, mirroring arm64's `A4-fp`). A
- * float fixture stops IDENTICALLY on the own-native side and is compared at the
- * stop, never at a fabricated value.
- *
- * @return error  the `B1-fp` named honest-stop
- */
-fn honest_fp_x86() -> error {
-    error { message = "B1-fp: SSE float-op / FPR load-store encoding deferred to 0.3.1 (encodings in the B1 crumb-plan appendix)" }
-}
-
-/**
  * plain_inst_x86 — an `EncInstX86` for a position-independent instruction: just
  * the finished bytes, with no branch displacement and no symbol relocation
  * pending (the fixup fields carry inert defaults).
@@ -428,6 +422,42 @@ fn emit_rr_x86(buf: []byte, rexw: bool, two_byte: bool, opcode: u32, reg: MReg, 
  * @param MReg rm  the ModRM.rm-field register
  * @return []byte  `buf` followed by the encoded instruction
  */
+/**
+ * emit_sse_rr_x86 — append a register-register SSE instruction: an optional
+ * mandatory prefix byte (`X86_PREFIX_F2`/`F3`/`66`, or none), then the same
+ * REX + `0F`-escape + opcode + ModRM shape as `emit_rr_x86` (every SSE opcode
+ * this file emits is `0F`-escaped). Shared by the scalar float ALU/compare/
+ * move/convert family (`B1-fp`): MOVSD/MOVSS, ADDSD/SUBSD/MULSD/DIVSD (and the
+ * `SS` forms), UCOMISD/UCOMISS, MOVQ/MOVD, CVTSI2SD/CVTTSD2SI/CVTSD2SS/
+ * CVTSS2SD.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 prefix  the mandatory SSE prefix byte, or `X86_NO_PREFIX`
+ * @param bool rexw  set REX.W (the 64-bit GPR-crossing forms)
+ * @param u32 opcode  the primary opcode byte (after the `0F` escape)
+ * @param MReg reg  the ModRM.reg-field register
+ * @param MReg rm  the ModRM.rm-field register
+ * @return []byte  `buf` followed by the encoded instruction
+ */
+fn emit_sse_rr_x86(buf: []byte, prefix: u32, rexw: bool, opcode: u32, reg: MReg, rm: MReg) -> []byte {
+    let b0 = if prefix != X86_NO_PREFIX { push_byte_x86(buf, prefix) } else { buf }
+    emit_rr_x86(b0, rexw, true, opcode, reg, rm)
+}
+
+/**
+ * emit_rm_ext_x86 — append a single-register instruction whose ModRM.reg field
+ * is an OPCODE EXTENSION (`/0../7`), not a register: the REX prefix (from `rm`),
+ * the opcode, and the ModRM byte `mod=11 | (ext_field<<3) | rm`. Drives the
+ * unary `neg`/`not` (F7 /3, /2), the `shl`/`shr`/`sar` (D3 /4, /5, /7), and the
+ * `idiv`/`div` (F7 /7, /6) forms.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param bool rexw  set REX.W (the 64-bit form)
+ * @param u32 opcode  the primary opcode byte
+ * @param u32 ext_field  the ModRM.reg opcode-extension value
+ * @param MReg rm  the ModRM.rm-field register
+ * @return []byte  `buf` followed by the encoded instruction
+ */
 fn emit_rm_ext_x86(buf: []byte, rexw: bool, opcode: u32, ext_field: u32, rm: MReg) -> []byte {
     mut b = push_rex_x86(buf, rexw, false, false, reg_ext_x86(rm))
     b = push_byte_x86(b, opcode)
@@ -465,9 +495,10 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem) -> []byte {
 
 /**
  * emit_mem_op_x86 — encode a memory-operand instruction (a load's `dst` or a
- * store's `src` as the register operand): the optional `0x66` prefix, the REX
- * prefix (with a forced byte-register prefix when needed), the optional `0F`
- * escape, the opcode, and the ModRM/SIB/disp addressing `mem`.
+ * store's `src` as the register operand): the optional mandatory SSE prefix
+ * (`B1-fp`), the optional `0x66` operand-size prefix, the REX prefix (with a
+ * forced byte-register prefix when needed), the optional `0F` escape, the
+ * opcode, and the ModRM/SIB/disp addressing `mem`.
  *
  * @param X86MemOp form  the size/sign encoding descriptor
  * @param MReg regop  the register operand (load dst / store src)
@@ -476,6 +507,7 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem) -> []byte {
  */
 fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem) -> EncInstX86 {
     mut b: []byte = teko::list::empty()
+    if form.mandatory_prefix != X86_NO_PREFIX { b = push_byte_x86(b, form.mandatory_prefix) }
     if form.op66 { b = push_byte_x86(b, X86_OPERAND_SIZE_PREFIX) }
     let force = form.byte_reg && (regop.id >= X86_BYTE_REG_MIN_ID)
     let rr = reg_ext_x86(regop)
@@ -495,30 +527,35 @@ fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem) -> EncInstX86 {
  * `mov r8`/`mov r16` is REJECTED here — it leaves the destination's upper bits
  * stale, violating the zero-extend contract. Sign loads use `movsxd`(D,
  * `REX.W 63`) / `movsx`(W `REX.W 0F BF`, B `REX.W 0F BE`). The zero-extending
- * forms address memory (not an 8-bit register), so none sets `byte_reg`.
+ * forms address memory (not an 8-bit register), so none sets `byte_reg`. The
+ * float forms (`F32`/`F64`, `sign` ignored — a float access never sign-extends)
+ * are `MOVSS`/`MOVSD` (`0F 10`, mandatory-prefixed `F3`/`F2`, `B1-fp`).
  *
- * @param MMemSizeX86 size  the access width (byte/word/dword/qword)
- * @param bool sign  true for a sign-extending narrow load
+ * @param MMemSizeX86 size  the access width (byte/word/dword/qword/f32/f64)
+ * @param bool sign  true for a sign-extending narrow integer load (ignored
+ *                   for a float size)
  * @return X86MemOp  the load encoding descriptor
  */
 fn load_memop_x86(size: MMemSizeX86, sign: bool) -> X86MemOp {
     match size {
-        Q => X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
+        Q => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
         D => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOVSXD; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOVSXD; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
         }
         W => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM16; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM16; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM16; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM16; byte_reg = false }
         }
         B => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM8; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM8; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM8; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM8; byte_reg = false }
         }
+        F64 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F2; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_LOAD; byte_reg = false }
+        F32 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F3; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_LOAD; byte_reg = false }
     }
 }
 
@@ -526,17 +563,21 @@ fn load_memop_x86(size: MMemSizeX86, sign: bool) -> X86MemOp {
  * store_memop_x86 — the encoding descriptor for a store width: `mov`(Q/D), the
  * `0x66`-prefixed word store(W), and the byte store(B, whose register source is
  * 8-bit and so sets `byte_reg`). Stores never sign-extend, so there is no sign
- * parameter (mirroring `MStoreX86` carrying no `sign` field).
+ * parameter (mirroring `MStoreX86` carrying no `sign` field). The float forms
+ * (`F32`/`F64`) are `MOVSS`/`MOVSD` (`0F 11`, mandatory-prefixed `F3`/`F2`,
+ * `B1-fp`).
  *
- * @param MMemSizeX86 size  the access width (byte/word/dword/qword)
+ * @param MMemSizeX86 size  the access width (byte/word/dword/qword/f32/f64)
  * @return X86MemOp  the store encoding descriptor
  */
 fn store_memop_x86(size: MMemSizeX86) -> X86MemOp {
     match size {
-        Q => X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        D => X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        W => X86MemOp { op66 = true; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        B => X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM8_R8; byte_reg = true }
+        Q => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        D => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        W => X86MemOp { op66 = true; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        B => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM8_R8; byte_reg = true }
+        F64 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F2; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_STORE; byte_reg = false }
+        F32 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F3; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_STORE; byte_reg = false }
     }
 }
 
@@ -685,19 +726,23 @@ fn encode_cmp_x86(i: MCmpX86) -> EncInstX86 {
 }
 
 /**
- * encode_setcc_x86 — materialize a preceding compare as a 0/1 value: `setcc
- * dst8` (`0F 90+cc /0`) then `movzx dst32, dst8` (`0F B6 /r`). A byte register
- * SIL/DIL/BPL/SPL or R8..R15 (id >= 4) forces a REX prefix on both halves so
- * the low byte is addressable (§6.3).
+ * encode_setcc_raw_x86 — materialize a raw x86 condition-code field as a 0/1
+ * value: `setcc dst8` (`0F 90+cc /0`) then `movzx dst32, dst8` (`0F B6 /r`). A
+ * byte register SIL/DIL/BPL/SPL or R8..R15 (id >= 4) forces a REX prefix on
+ * both halves so the low byte is addressable (§6.3). Shared by
+ * `encode_setcc_x86` (whose `cc` comes from the shared `MCond` via
+ * `cond_cc_x86`) and `encode_setp_x86` (whose `cc` is the PARITY field
+ * directly, `X86_CC_P`/`NP` — a condition the shared `MCond` has no member
+ * for, `B1-fp`).
  *
- * @param MSetccX86 i  the conditional-set instruction (operand physical)
+ * @param MReg dst  the destination register
+ * @param u32 cc  the raw 4-bit x86 condition-code field
  * @return EncInstX86  the encoded instruction sequence
  */
-fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
-    let cc = cond_cc_x86(i.cond)
-    let force = i.dst.id >= X86_BYTE_REG_MIN_ID
-    let dst_ext = reg_ext_x86(i.dst)
-    let dst_low3 = reg_low3_x86(i.dst)
+fn encode_setcc_raw_x86(dst: MReg, cc: u32) -> EncInstX86 {
+    let force = dst.id >= X86_BYTE_REG_MIN_ID
+    let dst_ext = reg_ext_x86(dst)
+    let dst_low3 = reg_low3_x86(dst)
     mut b = if force { push_rex_forced_x86(teko::list::empty(), false, false, false, dst_ext) } else { teko::list::empty() }
     b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_SETCC_BASE + cc)
@@ -706,6 +751,111 @@ fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
     b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_MOVZX_R32_RM8)
     plain_inst_x86(push_byte_x86(b, modrm_x86(MODRM_MOD_REGISTER, dst_low3, dst_low3)))
+}
+
+/**
+ * encode_setcc_x86 — materialize a preceding compare as a 0/1 value through
+ * `encode_setcc_raw_x86`, over the shared `MCond`'s x86 condition field.
+ *
+ * @param MSetccX86 i  the conditional-set instruction (operand physical)
+ * @return EncInstX86  the encoded instruction sequence
+ */
+fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
+    encode_setcc_raw_x86(i.dst, cond_cc_x86(i.cond))
+}
+
+/**
+ * encode_setp_x86 — materialize a preceding `MFCmpX86`'s PARITY flag as a
+ * plain value through `encode_setcc_raw_x86`, over the raw `X86_CC_P`/`NP`
+ * condition field (`B1-fp` — the half of `select_fcmp_value_x86`'s ordered-
+ * equal / unordered-not-equal composite the shared `MCond` cannot express).
+ *
+ * @param MSetPX86 i  the parity-set instruction (operand physical)
+ * @return EncInstX86  the encoded instruction sequence
+ */
+fn encode_setp_x86(i: MSetPX86) -> EncInstX86 {
+    encode_setcc_raw_x86(i.dst, if i.is_np { X86_CC_NP } else { X86_CC_P })
+}
+
+/**
+ * encode_falu_x86 — a two-address scalar float ALU op (`ADDSD`/`SUBSD`/
+ * `MULSD`/`DIVSD` or the `SS` forms, `0F 58`/`5C`/`59`/`5E`, mandatory-
+ * prefixed `F2`/`F3`): the read-modify-write destination rides the ModRM.reg
+ * field, `src` the rm field — the SSE "xmm1, xmm2/m64" convention, where
+ * xmm1 is BOTH the destination and the reg-field operand (the same direction
+ * as `encode_imul_x86`'s `0F AF`, unlike the integer `OP r/m,r` ALU family).
+ * The preceding `MFMovX86` seeded `dst` with the left operand (§4.2).
+ *
+ * @param MFAluX86 i  the two-address float ALU instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_falu_x86(i: MFAluX86) -> EncInstX86 {
+    let prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
+    let opcode = match i.op { FAdd => X86_OP_SSE_ADD; FSub => X86_OP_SSE_SUB; FMul => X86_OP_SSE_MUL; FDiv => X86_OP_SSE_DIV }
+    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, opcode, i.dst, i.src))
+}
+
+/**
+ * encode_fmov_x86 — a register-register move whose operands' `reg_class`
+ * fields pick the concrete SSE form (`B1-fp`): FPR-to-FPR is `MOVSD`/`MOVSS`
+ * (`0F 10`, mandatory-prefixed `F2`/`F3`, reg field is the destination);
+ * GPR-to-FPR is `MOVQ`/`MOVD` LOAD (`66 [REX.W] 0F 6E`, reg field is the FPR
+ * destination); FPR-to-GPR is `MOVQ`/`MOVD` STORE (`66 [REX.W] 0F 7E`, reg
+ * field is the FPR SOURCE — the store-direction convention, opposite of the
+ * load form). GPR-to-GPR (unreached by any selector, which always routes a
+ * same-class copy through `MMovX86`) falls back to the plain integer `mov`.
+ *
+ * @param MFMovX86 i  the move instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fmov_x86(i: MFMovX86) -> EncInstX86 {
+    let dst_fpr = i.dst.reg_class == MRegClass::FPR
+    let src_fpr = i.src.reg_class == MRegClass::FPR
+    if dst_fpr && src_fpr {
+        let prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_SSE_MOV_LOAD, i.dst, i.src))
+    }
+    if dst_fpr && !src_fpr {
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_LOAD, i.dst, i.src))
+    }
+    if !dst_fpr && src_fpr {
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_STORE, i.src, i.dst))
+    }
+    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.dbl, false, X86_OP_MOV_RM_R, i.src, i.dst))
+}
+
+/**
+ * encode_fcmp_x86 — a scalar float compare (`UCOMISD`/`UCOMISS`, `0F 2E`) that
+ * sets the flags from `a <=> b`: `a` rides the ModRM.reg field, `b` the rm
+ * field. `UCOMISD` is mandatory-prefixed `66`; `UCOMISS` carries no mandatory
+ * prefix (`B1-fp`).
+ *
+ * @param MFCmpX86 i  the compare instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fcmp_x86(i: MFCmpX86) -> EncInstX86 {
+    let prefix = if i.dbl { X86_PREFIX_66 } else { X86_NO_PREFIX }
+    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_UCOMIS, i.a, i.b))
+}
+
+/**
+ * encode_cvt_x86 — an int/float conversion (`CVTSI2SD`/`CVTTSD2SI`/`CVTSD2SS`/
+ * `CVTSS2SD`, `0F 2A`/`2C`/`5A`): `Cvtsi2sd`/`Cvttsd2si` are mandatory-prefixed
+ * `F2` with `REX.W` (the GPR side is always the wide 64-bit form, `B1-fp`);
+ * `Cvtsd2ss` is mandatory-prefixed `F2` (narrowing FROM double), `Cvtss2sd`
+ * mandatory-prefixed `F3` (widening FROM single) — neither sets `REX.W`
+ * (both operands are FPR).
+ *
+ * @param MCvtX86 i  the conversion instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_cvt_x86(i: MCvtX86) -> EncInstX86 {
+    match i.op {
+        Cvtsi2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTSI2S, i.dst, i.src))
+        Cvttsd2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvtsd2ss => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, false, X86_OP_CVTS2S, i.dst, i.src))
+        Cvtss2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, false, X86_OP_CVTS2S, i.dst, i.src))
+    }
 }
 
 /**
@@ -729,29 +879,27 @@ fn encode_not_x86(i: MNotX86) -> EncInstX86 {
 }
 
 /**
- * encode_load_x86 — a memory load (`mov`/`movsx dst, [base+disp]`) per
- * `load_memop_x86`'s size/sign descriptor, addressing `mem` (SIB `0x24` when
- * the base is RSP/R12, forced disp8 when RBP/R13). An FPR-class destination is
- * an SSE move and honest-stops (`B1-fp`).
+ * encode_load_x86 — a memory load (`mov`/`movsx`/`movsd`/`movss dst,
+ * [base+disp]`) per `load_memop_x86`'s size/sign descriptor, addressing `mem`
+ * (SIB `0x24` when the base is RSP/R12, forced disp8 when RBP/R13). An
+ * FPR-class destination (`F32`/`F64` size) is a scalar SSE move (`B1-fp`).
  *
  * @param MLoadX86 i  the load instruction (operands physical)
- * @return EncInstX86 | error  the encoded instruction, or the `B1-fp` honest-stop
+ * @return EncInstX86  the encoded instruction
  */
-fn encode_load_x86(i: MLoadX86) -> EncInstX86 | error {
-    if i.dst.reg_class == MRegClass::FPR { return honest_fp_x86() }
+fn encode_load_x86(i: MLoadX86) -> EncInstX86 {
     emit_mem_op_x86(load_memop_x86(i.size, i.sign), i.dst, i.mem)
 }
 
 /**
- * encode_store_x86 — a memory store (`mov [base+disp], src`) per
- * `store_memop_x86`'s size descriptor, addressing `mem`. An FPR-class source is
- * an SSE move and honest-stops (`B1-fp`).
+ * encode_store_x86 — a memory store (`mov`/`movsd`/`movss [base+disp], src`)
+ * per `store_memop_x86`'s size descriptor, addressing `mem`. An FPR-class
+ * source (`F32`/`F64` size) is a scalar SSE move (`B1-fp`).
  *
  * @param MStoreX86 i  the store instruction (operands physical)
- * @return EncInstX86 | error  the encoded instruction, or the `B1-fp` honest-stop
+ * @return EncInstX86  the encoded instruction
  */
-fn encode_store_x86(i: MStoreX86) -> EncInstX86 | error {
-    if i.src.reg_class == MRegClass::FPR { return honest_fp_x86() }
+fn encode_store_x86(i: MStoreX86) -> EncInstX86 {
     emit_mem_op_x86(store_memop_x86(i.size), i.src, i.mem)
 }
 
@@ -858,18 +1006,20 @@ fn encode_ret_x86() -> EncInstX86 {
 
 /**
  * encode_inst_x86 — encode one fully-physical `MInstX86` to its `EncInstX86`, a
- * TOTAL per-case match over the 19-case variant mirroring `print_minst_x86`'s
+ * TOTAL per-case match over the 24-case variant mirroring `print_minst_x86`'s
  * dispatch and arm64's `encode_inst_word`. The position-independent integer/
- * memory subset encodes fully; `MJmpX86`/`MJccX86` and `MCallX86`/`MLeaRipX86`
- * return placeholder bytes flagged for the B1-6 rel32 patch / B1-7 relocation;
+ * memory/float subset encodes fully (the `B1-fp` SSE family closed
+ * 2026-07-29); `MJmpX86`/`MJccX86` and `MCallX86`/`MLeaRipX86` return
+ * placeholder bytes flagged for the B1-6 rel32 patch / B1-7 relocation;
  * `MFrameAddrX86` resolves through `layout` to the real `lea dst, [rsp+off]`
- * (SIB-forced). An FPR-operand load/store returns the named `B1-fp` honest-stop
- * (0.3.1); the x86 forms are natively wide (imm32 / movabs imm64 / disp32), so
- * `B1-bigimm`/`B1-memindex` are unreachable in this core.
+ * (SIB-forced). The x86 forms are natively wide (imm32 / movabs imm64 /
+ * disp32), so `B1-bigimm`/`B1-memindex` are unreachable in this core — the
+ * declared `| error` is for the shared union shape every caller propagates
+ * through (`emit_one_x86`), not a case this function itself still raises.
  *
  * @param FrameLayoutX86 layout  the enclosing function's resolved frame (for `MFrameAddrX86`)
  * @param MInstX86 inst  the instruction to encode (all operands physical)
- * @return EncInstX86 | error  the encoding, or the `B1-fp` honest-stop
+ * @return EncInstX86 | error  the encoding (never actually an error today)
  */
 pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | error {
     match inst {
@@ -892,6 +1042,11 @@ pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | e
         MCallX86 as x => encode_call_x86(x)
         MCallIndX86 as x => encode_call_ind_x86(x)
         MRetX86 => encode_ret_x86()
+        MFAluX86 as x => encode_falu_x86(x)
+        MFMovX86 as x => encode_fmov_x86(x)
+        MFCmpX86 as x => encode_fcmp_x86(x)
+        MSetPX86 as x => encode_setp_x86(x)
+        MCvtX86 as x => encode_cvt_x86(x)
     }
 }
 
