@@ -7351,20 +7351,49 @@ fn lower_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt) -> LowerBlock
 }
 
 /**
- * lower_tail_non_expr_fat — a FAT-value arm's non-expression-statement tail: valid only if it
- * terminates the arm (a `return`); anything else honest-stops (a checker invariant break — a
- * fat-typed if-expr arm whose tail neither returns nor yields a value). Mirrors
- * `lower_tail_non_expr`.
+ * diverging_tail_value_fat — `diverging_tail_value`'s FAT counterpart, one axis over
+ * (scalar -> fat): a FAT-value arm/function-body's tail already diverged at runtime (a breakless
+ * `loop` whose only exits are inner `return`s, a bare `if`/`match` STATEMENT every branch of
+ * which diverges, …), so materialize a defensive placeholder (ptr, len) pair — never observed,
+ * under the SAME checker trust `lower_tail_non_expr_fat`'s own doc names — instead of leaving
+ * either half unset. Kept as two plain zero constants rather than a real interned empty-string
+ * rodata entry: nothing downstream ever reads these values, so the cheapest dead-code shape wins,
+ * exactly like `diverging_tail_value`'s own single constant.
+ *
+ * @param ctx   the lowering context positioned right after the diverging tail
+ * @return      the (never-observed) placeholder fat value, NOT terminated
+ * @since 0.3.1.0 degrau 20 (native backend N1 fat-tail gap, sibling of degrau 13's scalar fix)
+ */
+fn diverging_tail_value_fat(ctx: LowerCtx) -> LowerBlockValueFat {
+    let p = ctx_alloc(ctx)
+    let with_ptr = ctx_append(p.ctx, const_int_inst(p.vreg, 0, 0, 0))
+    let l = ctx_alloc(with_ptr)
+    let with_len = ctx_append(l.ctx, const_int_inst(l.vreg, 0, 0, 0))
+    LowerBlockValueFat { ctx = with_len; terminated = false; ptr = p.vreg; len = l.vreg }
+}
+
+/**
+ * lower_tail_non_expr_fat — a FAT-value arm/function-body's non-expression-statement tail. A
+ * `return`/`break`/`continue` genuinely terminates (`lower_stmt`'s own `out.terminated`); anything
+ * else falls through this statement's OWN close WITHOUT ever having produced a (ptr, len) pair —
+ * exactly the shape `lower_tail_non_expr`'s own doc walks through in full (`check_trailing_value`,
+ * `typer.tks`, makes NO claim about a non-expression tail; the checker already trusts a breakless
+ * `loop`/diverging `if`/`match` to never actually fall through). This mirrors that SAME trust with
+ * `diverging_tail_value_fat`'s defensive placeholder rather than an honest-stop: a fat-typed tail
+ * of this shape is not a broken invariant, only a corner the scalar axis's degrau-13 fix never
+ * carried over to the fat one.
  *
  * @param ctx  the lowering context positioned at the tail statement
- * @param s    the tail statement
- * @return     the fat value outcome (`terminated=true` on a `return`)
- * @throws     when the tail neither returns nor yields a value
+ * @param s    the tail statement (not a `checker::TExprStmt` — `lower_tail_stmt_fat` already
+ *             routed that case to `lower_tail_expr_stmt_fat`)
+ * @return     the fat value outcome (`terminated=true` on a real `return`/`break`/`continue`, or
+ *             the diverging-tail placeholder with `terminated=false`)
+ * @throws     propagated from lowering the tail statement itself
  */
 fn lower_tail_non_expr_fat(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValueFat | error {
     let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
     if out.terminated { return LowerBlockValueFat { ctx = out.ctx; terminated = true; ptr = 0; len = 0 } }
-    error { message = "native backend N1: if-expression arm's tail statement does not yield a value (internal)" }
+    diverging_tail_value_fat(out.ctx)
 }
 
 /**
