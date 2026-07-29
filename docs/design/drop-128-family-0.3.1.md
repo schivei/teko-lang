@@ -622,7 +622,7 @@ carries exactly ONE re-baseline).
 | `` | exercise i128 + F16 plumbing | removed | **PRUNE** the 128/F16 cases |
 | `enum_member_shadows_primkind/src/kinds.tks` | user enum member `F16` | unaffected | **KEEP** (identifier, not the builtin) |
 
-**Rejection fixtures born (native exit codes; VM is retired — native-only, cf. `vm-retirement.md`):**
+**Rejection fixtures born (native exit codes — updated for native-only, cf. `vm-retirement.md`):**
 
 | New fixture | Input | Expected |
 |---|---|---|
@@ -765,11 +765,11 @@ R2; own==C without the 128 KNOWN-STOP = R2.
 - **Depends on / sequences after:** the null-union pivot (C6-C7), the corpus-wide `ref` adoption, and
   KP16 objfile — all in flight. This wave **engages after the ref lands** (it rewrites the corpus; every
   line:offset here shifts — re-grep the symbol). Cite offsets as *approximate*.
-- **Interaction with `vm-retirement.md` (#524):** that issue removes `src/vm/` but **NOT** `lir_interp`/
-  `minst_interp` (they live in `src/lir`/`src/backend`, not `src/vm`), so A4's interpreter detox is
-  **independent** of #524 and needed regardless. If #524 lands first, one fewer coverage/VM interaction
-  to reason about; no ordering hard-dependency either way. `checked.tks:26` references the *retired* VM's
-  `norm_int` — B3's prose cleanup should also drop the stale `src/vm/vm.tks` pointer if #524 already deleted it.
+- **Interaction with the interpreter detox:** the LIR interpreter (`lir_interp`) and machine-code
+  interpreter (`minst_interp`, in `src/lir`/`src/backend`) are orthogonal to the native backend (A4) and
+  needed regardless. If the VM retirement (#524) lands first, one fewer coverage interaction to reason about;
+  no ordering hard-dependency either way. `checked.tks:26` references the `norm_int` constant — B3's prose
+  cleanup should also review this reference to ensure it aligns with the current integer model.
 - **Interaction with KP16 (objfile) + the float-slice work:** R2's ABI edits (size-16/eightbyte-pair
   classification) touch the same `abi_*.tks` files the float-slice work touches — sequence R2 to NOT
   overlap a float-slice re-baseline (one re-baseline in flight). The float isel family (f32/f64) is
