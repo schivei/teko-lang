@@ -593,7 +593,25 @@ env var sem varrer os scripts que afirmavam sobre a mensagem antiga. Lead time d
 defeito de lead time potencial de dois segundos — **a varredura de consumidores de uma string que
 se está removendo faz parte da remoção**, não é zelo opcional.
 
-### O DRENO É UM MARCO SÓ — drenar tudo de uma vez (owner 2026-07-27)
+### Drenar tudo de uma vez — CONSELHO SITUACIONAL, não lei (escopo corrigido pelo dono, 2026-07-29)
+
+> **AVISO DE ESCOPO.** A citação abaixo é real, mas a LEI que a rodeava não era dele. O dono
+> corrigiu-o em 2026-07-29: *"Esse de mergear tudo e empurrar foi a sessão anterior quem escreveu,
+> não eu, apenas pedi uma vez pra fazer isso pq ela estava com acúmulo e conflitos."*
+>
+> Ou seja: pediu-o UMA VEZ, para um estado concreto de acumulação e conflito. Uma sessão anterior
+> generalizou-o em regra permanente e deu-lhe título de lei. **Vale como conselho quando há
+> acumulação; não vale como proibição de drenar um marco isolado.**
+>
+> E repara que a secção SEGUINTE deste mesmo ficheiro — a janela de um minuto, essa sim marcada
+> como corrigida pelo próprio dono — é mais permissiva: *"interromper um CI no início não é
+> problema"*. Quando as duas discordam, manda a janela: o critério é o TEMPO DECORRIDO da corrida,
+> não a contagem de cargas.
+>
+> O custo medido continua verdadeiro e continua a valer a pena evitar — mas é uma OBSERVAÇÃO de
+> quem mediu, não um ruling.
+
+### O texto original, tal como a sessão anterior o escreveu
 
 > *"quanto a ordem, deveria drenar tudo de uma vez"*
 
