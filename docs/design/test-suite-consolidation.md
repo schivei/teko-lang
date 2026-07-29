@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta a auditoria de testes de consolidação (v0.3.0.28-beta), já executada. Não descreve o estado atual do projeto.
+
 # Test-suite consolidation audit — teko-lang (v0.3.0.28-beta)
 
 **Status:** AUDIT (design-only, read-only). No branch, no PR, no code change. Owner ruling
