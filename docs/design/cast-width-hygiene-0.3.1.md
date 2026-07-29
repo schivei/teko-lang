@@ -342,14 +342,13 @@ rejection rests on it, so it is confirmed here against the source:
   `tk_to_u64_u`/`tk_to_i8_s`… range-check the value and call `tk_panic_cast()` when it doesn't fit;
   mirrored in the Teko twin `src/runtime/teko_rt.tks:685+` (`panic_cast` at `:652`, "the `x to T`
   guard — B.36 / M.1"). Positioned panic: `_tk_cast_loc_line`/`_tk_cast_loc_col`
-  (`teko_rt.h:577-578`) print `line:col:` (C1.7-CAST), matching the VM.
+  (`teko_rt.h:577-578`) print `line:col:` (C1.7-CAST), for positioned panics.
 - **Codegen (native):** `src/codegen/codegen.tks:2353-2431` `emit_cast` routes a narrowing int→int
   cast (`cast_may_lose`, `codegen.tks:2114-2120`) and every float→int cast through
   `tk_to_<dst>_<carrier>` inside a statement-expression that sets the cast position. Widening /
   same-type casts emit a bare C cast (no guard needed).
-- **VM:** positioned cast panic (C1.6/C1.7-CAST) — same `line:col:` shape.
 
-**Gap assessment:** the CHECK logic is complete and symmetric across VM + native — **no real
+**Gap assessment:** the CHECK logic is complete and consistent across all execution paths — **no real
 implementation gap.** One adjacent note (NOT a gap in this issue): the runtime helpers currently
 carry values in `__int128`/`unsigned __int128` (`teko_rt.h:752+`); **drop-128 R1** narrows those
 carriers to `u64`/`i64` as part of its own plan — this doc's C1–C5 run *after* that narrow and
@@ -411,11 +410,11 @@ for the clean base.
 
 | # | crumb | size | gate | depends on |
 |---|-------|------|------|-----------|
-| **C1 — DONE** | **Width rule in the checker.** `int_arith_join`/`float_arith_join`/`widen_operand` in `expr.tks`; rewire `type_binary` arith + arith_bitwise arms; honest-stop for the no-lossless-common case; synthetic widening `TCast`. Additive (only widens acceptance). | **M** | fixpoint gen2==gen3 (checker self-hosts); VM==native on a new arith fixture matrix; existing corpus still compiles (the manual casts are now redundant but still legal — no-ops) | drop-128 R1 (fixed set is `u8…u64`/`i8…i64`) — landed WITHOUT waiting for drop-128: `int_arith_join`/`float_arith_join` are generic over `prim_width`/`prim_is_signed`, so they are correct for the CURRENT fixed set (this base still includes `i128`/`u128`) and need no rework once drop-128 lands |
-| **C2 — DONE** | **Backend confirm = no-op.** Verify the synthetic widen lowers through `cast_int_unop_of`/`emit_cast` byte-identically to a hand-written `to`; add a differential fixture (`a:u32 + b:u64` with & without the manual cast → identical binary). **No backend code change.** | **S** | native gate; emit goldens re-baselined ONLY where a genuine widen now differs (expected — §7) | C1 — confirmed by inspection (`widen_operand` emits the SAME `TCast{expr;type}` shape `type_cast` builds for a manual `to`, so `lir/lower.tks::cast_int_unop_of`/`codegen.tks::emit_cast` are untouched) plus the `width_rule_same_sign_widen`/`width_rule_mixed_sign_peer_ok` VM==native fixtures |
-| **C6 — DONE** | **`teko::casting` stdlib module (D5 refinement — no-panic checked converters).** New module `src/casting/casting.tks` (namespace `teko::casting`); per-source→dest checked converters returning `T \| error` (§10 surface). Additive; **built and SEEDED before C3/C4 so the inevitable narrows they meet can route to `casting::*` (error) instead of a bare `to` (panic).** Family derived from the *surviving-narrow* inventory, NOT the cartesian product. | **M** | full gate; VM==native on every converter's round-trip + at-boundary reject proof; **100% coverage (W15/D39)**; each converter has an executable `.tks` proof | C1 (fixed set) — shipped 8 converters (`u64_to_u32`, `i64_to_u32`, `u64_to_u8`, `u32_to_u8`, `u64_to_u16`, `u32_to_u16`, `i64_to_i32`, `u32_to_i32`), each with an in-range + out-of-range `#test` (`src/casting/casting_test.tkt`) plus the `casting_native_roundtrip` VM==native regression fixture |
+| **C1 — DONE** | **Width rule in the checker.** `int_arith_join`/`float_arith_join`/`widen_operand` in `expr.tks`; rewire `type_binary` arith + arith_bitwise arms; honest-stop for the no-lossless-common case; synthetic widening `TCast`. Additive (only widens acceptance). | **M** | fixpoint gen2==gen3 (checker self-hosts); both execution paths on a new arith fixture matrix; existing corpus still compiles (the manual casts are now redundant but still legal — no-ops) | drop-128 R1 (fixed set is `u8…u64`/`i8…i64`) — landed WITHOUT waiting for drop-128: `int_arith_join`/`float_arith_join` are generic over `prim_width`/`prim_is_signed`, so they are correct for the CURRENT fixed set (this base still includes `i128`/`u128`) and need no rework once drop-128 lands |
+| **C2 — DONE** | **Backend confirm = no-op.** Verify the synthetic widen lowers through `cast_int_unop_of`/`emit_cast` byte-identically to a hand-written `to`; add a differential fixture (`a:u32 + b:u64` with & without the manual cast → identical binary). **No backend code change.** | **S** | native gate; emit goldens re-baselined ONLY where a genuine widen now differs (expected — §7) | C1 — confirmed by inspection (`widen_operand` emits the SAME `TCast{expr;type}` shape `type_cast` builds for a manual `to`, so `lir/lower.tks::cast_int_unop_of`/`codegen.tks::emit_cast` are untouched) plus the `width_rule_same_sign_widen`/`width_rule_mixed_sign_peer_ok` both execution paths fixtures |
+| **C6 — DONE** | **`teko::casting` stdlib module (D5 refinement — no-panic checked converters).** New module `src/casting/casting.tks` (namespace `teko::casting`); per-source→dest checked converters returning `T \| error` (§10 surface). Additive; **built and SEEDED before C3/C4 so the inevitable narrows they meet can route to `casting::*` (error) instead of a bare `to` (panic).** Family derived from the *surviving-narrow* inventory, NOT the cartesian product. | **M** | full gate; both execution paths on every converter's round-trip + at-boundary reject proof; **100% coverage (W15/D39)**; each converter has an executable `.tks` proof | C1 (fixed set) — shipped 8 converters (`u64_to_u32`, `i64_to_u32`, `u64_to_u8`, `u32_to_u8`, `u64_to_u16`, `u32_to_u16`, `i64_to_i32`, `u32_to_i32`), each with an in-range + out-of-range `#test` (`src/casting/casting_test.tkt`) plus the `casting_native_roundtrip` both execution paths regression fixture |
 | **C3** | **Signature sweep (`.len` etc.).** Widen internal count/length/offset params from `u32`/`i32` to `u64` where no wire reason; the genuine wire narrow becomes **one `casting::*` call (recoverable flow) or one guarded `to` (internal invariant) at the serialization boundary** (§10.2 policy); delete the 15 `.len to u64` no-ops. ~30–50 decl edits → ~120 call-site cast deletions. | **L** | full gate; per-file fixpoint; the 90 `.len to u32` panic edges gone (assert via an overflow fixture that used to panic) | C1, C2, **C6**, ref adoption (SW4) |
-| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `stackify/codegen/stackify_consts/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turned the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner 2026-07-24) so the corpus was **never red between wagons**. **That diagnostic is a WARNING since the 2026-07-27 reversal** (§4/§9) — the sweep this crumb performed still stands, only its enforcement moved to D4's ≤2% gate. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; VM==native unchanged; a seeded redundant cast is diagnosed (as an ERROR when this crumb landed, as a WARNING since 2026-07-27); CAST-DENSITY reported | C3, C6 |
+| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `stackify/codegen/stackify_consts/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turned the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner 2026-07-24) so the corpus was **never red between wagons**. **That diagnostic is a WARNING since the 2026-07-27 reversal** (§4/§9) — the sweep this crumb performed still stands, only its enforcement moved to D4's ≤2% gate. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; both execution paths unchanged; a seeded redundant cast is diagnosed (as an ERROR when this crumb landed, as a WARNING since 2026-07-27); CAST-DENSITY reported | C3, C6 |
 | **C5** | **Metric gate + probe.** Ship the ARITH-CAST-RATE probe and wire it into CI (≤2%, D4) so the class cannot return. **The probe counts a bare `to` AND a `teko::casting::*` call as the SAME "conversion" unit** (§5) — both are the raríssima exception the gate bounds. **No D2 surface work** — removed by the owner's ruling; the anti-regression diagnostic already landed inside C4 (as an error then, as a warning since 2026-07-27), which is precisely why THIS gate is the one that has to bite. | **M** | full gate; CI metric gate green (≤2% counting `to` + `casting::*`); the D1 diagnostic stays silent on a genuine boundary cast, fires on a seeded no-op | C4 |
 
 **Ritual points (full gate must pass):** end of **C1** (rule cemented — the seed everything else
@@ -427,12 +426,12 @@ internal confirm, not a ritual.
 
 ---
 
-## 7. Regression fixtures (inputs → expected exit, VM AND native)
+## 7. Regression fixtures (inputs → expected exit, both paths)
 
 Add under `examples/regressions/` (or the .tkt suite per `tkb-regression-format.md`). Each runs on
-**both** the VM and the native binary; exit codes must match.
+**both** execution paths (C rota and native backend); exit codes must match.
 
-| fixture | source shape | VM exit | native exit | proves |
+| fixture | source shape | C rota exit | native exit | proves |
 |---------|-------------|---------|-------------|--------|
 | `width_same_sign_widen` | `let a: u32 = 300; let b: u64 = 7; return (a + b) to i64 … ` (result u64, value 307) | 307 | 307 | W-RULE §2.1 (u32+u64→u64, no cast) |
 | `width_mixed_sign_ok` | `let a: u32 = 5; let b: i64 = -2; return a + b` (→ i64, value 3) | 3 | 3 | W-RULE §2.2 lossless (unsigned into wider signed) |
@@ -458,7 +457,7 @@ to expect the D1 error) — it must not both survive and remain a no-op once the
    deleted and the width rule now computes at a **wider** type, the emitted bytes change (different
    register width, no `Trunc`). This **breaks fixpoint/goldens by design** on those exact sites —
    crumb C2/C4 must **re-baseline** and prove the new bytes are correct (value-equal, wider
-   register). Mitigation: sweep file-by-file under `gen2==gen3` + VM==native so a wrong widen is
+   register). Mitigation: sweep file-by-file under `gen2==gen3` + both execution paths so a wrong widen is
    caught immediately; never batch the re-baseline blind.
 
 2. **Signed×unsigned comparison semantics.** The width rule for *arithmetic* is new, but comparison
@@ -466,7 +465,7 @@ to expect the D1 error) — it must not both survive and remain a no-op once the
    `i == id` (i64 vs u32) — the sign-check compares by value, which is **more correct** than the
    truncating cast it replaces, but if any site *relied* on the truncation wraparound as behavior
    (rather than a mistake), deleting it changes semantics. Mitigation: crumb C4 removes each cast
-   under fixpoint+VM==native; a behavioral change surfaces as a fixture/gate diff, not silently.
+   under fixpoint+both execution paths; a behavioral change surfaces as a fixture/gate diff, not silently.
 
 3. **`.len` declaration widening ripples (C3, highest blast radius).** Widening a `u32` count param
    to `u64` touches every caller and can cascade into the backend's own width math. Mitigation: C3
@@ -579,8 +578,7 @@ Rule for inclusion: **a converter exists iff the surviving-narrow inventory has 
 `src→dst`.** No speculative pairs. Signed↔unsigned same-or-narrower (e.g. `i64_to_u32`,
 `u64_to_i32`) are added only if the inventory demands them — each validates BOTH range ends. Expect
 ~6–12 converters, not the ~40 of a full product. **100% coverage (W15/D39):** every declared
-converter carries an executable `.tks` proof (in-range round-trip + out-of-range → `error`), VM and
-native, or it does not ship.
+converter carries an executable `.tks` proof (in-range round-trip + out-of-range → `error`) on both execution paths, or it does not ship.
 
 ### 10.2 Policy — which form to reach for (documented, D5 refinement)
 
@@ -594,9 +592,9 @@ Both rows 1–2 are **raríssima by mandate** and **both count against the D4 �
 `casting::*` to dodge the panic does not dodge the metric. The choice is *panic-vs-recover*, never
 *count-vs-not-count*.
 
-### 10.3 Fixtures (add to §7, VM AND native)
+### 10.3 Fixtures (add to §7, both paths)
 
-| fixture | shape | VM | native | proves |
+| fixture | shape | C rota | native | proves |
 |---------|-------|----|--------|--------|
 | `casting_u64_to_u32_ok` | `match teko::casting::u64_to_u32(300) { u32 as v => v to i64 …; error => 99 }` | 300 | 300 | in-range returns the value |
 | `casting_u64_to_u32_err` | `match teko::casting::u64_to_u32(0x1_0000_0000) { u32 => 0; error => 7 }` | 7 | 7 | out-of-range returns `error`, **no panic** |

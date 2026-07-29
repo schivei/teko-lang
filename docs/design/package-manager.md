@@ -710,9 +710,9 @@ ONE seam where the "integrity-now, authenticity-later" default is overridden.
 ## 6. The PK0–PK3 crumb sequence (the executable plan)
 
 Each crumb is the smallest independently gate-able step, with its key signatures (above, §3), its
-regression fixtures (inputs → exit code, VM and native), and its ritual point. Fixtures for pure
-logic run on the VM as `.tkt`; end-to-end build fixtures run NATIVE (per the native-test-gate
-ruling — `#test` is compiled native, never VM). New modules land as compilable skeletons with
+regression fixtures (inputs → exit code, both execution paths), and its ritual point. Fixtures for pure
+logic are `.tkt` tests; end-to-end build fixtures run native (per the native-test-gate
+ruling — `#test` is compiled native). New modules land as compilable skeletons with
 full doc-comments + honest-stops so the plan advances even before every dep closes (design-ahead).
 
 ### Crumb C1 — `version.tks`: the version model (PK1-a)
@@ -720,13 +720,13 @@ full doc-comments + honest-stops so the plan advances even before every dep clos
 New module `src/build/version.tks` (namespace `teko::build`): `Version`, `CmpOp`,
 `parse_version`, `compare_versions`. Pure functions, no compiler wiring yet.
 
-- **Fixtures (VM `.tkt`):**
+- **Fixtures (test (`.tkt`)):**
   - `V1a` `parse_version("1.2.3")` → `{1,2,3,0,""}`; `parse_version("0.2.0.2-beta")` →
     `{0,2,0,2,"beta"}`; exit 0.
   - `V1b` `parse_version("1.x")` / `""` → error path taken; exit 0 (the test asserts the error).
   - `V1c` `compare_versions(1.2.3, 1.2.4)` = -1; `compare_versions(1.0.0, 1.0.0-beta)` = 1
     (final > prerelease); `compare_versions(0.2.0.1, 0.2.0.2)` = -1 (build field); exit 0.
-- **Ritual:** none required (pure additive logic, no compiler behavior change); a VM + native
+- **Ritual:** none required (pure additive logic, no compiler behavior change); a both paths
   build of the new module must pass. Fixpoint is neutral (compiler does not yet use it).
 
 ### Crumb C2 — `version.tks`: requirements (PK1-b)
@@ -734,13 +734,13 @@ New module `src/build/version.tks` (namespace `teko::build`): `Version`, `CmpOp`
 Add `VersionBound`, `VersionReq`, `parse_version_req` (with `^`/`~` desugar + ranges),
 `version_satisfies` to `version.tks`.
 
-- **Fixtures (VM `.tkt`):**
+- **Fixtures (test (`.tkt`)):**
   - `V2a` `version_satisfies(1.5.0, ">=1.2 <2.0")` = true; `version_satisfies(2.0.0, ">=1.2 <2.0")`
     = false; exit 0.
   - `V2b` `^1.2.3` accepts 1.9.0, rejects 2.0.0; `^0.2.3` accepts 0.2.9, rejects 0.3.0; exit 0.
   - `V2c` `~1.2.3` accepts 1.2.9, rejects 1.3.0; `=1.2.3` accepts only 1.2.3; exit 0.
   - `V2d` `parse_version_req(">= bad")` → error; exit 0 (asserts error).
-- **Ritual:** none required (pure). VM + native build passes.
+- **Ritual:** none required (pure). both paths build passes.
 
 ### Crumb C3 — `manifest.tks`: `[dependencies]` with sources + constraints (PK0)
 
@@ -748,7 +748,7 @@ Extend `manifest.tks`: `RegistrySource`/`PathSource`/`GitSource`/`DepSource`/`De
 `mf_read_inline_table` helper; `Manifest.dep_specs: []DepSpec` (keep `deps: []str` derived).
 Parse `[tools]` into a parallel `tool_specs: []DepSpec`.
 
-- **Fixtures (VM `.tkt` for parse + native for round-trip through the driver):**
+- **Fixtures (test (`.tkt`) for parse + native for round-trip through the driver):**
   - `D1` `[dependencies]` with `"@acme/json" = ">=1.2 <2.0"` → `DepSpec` registry, 2 bounds; exit 0.
   - `D2` `bar = { path = "../bar" }` → `PathSource`; exit 0.
   - `D3` `baz = { git = "https://…", tag = "v1.0" }` → `GitSource{git_ref="v1.0"}`; exit 0.
@@ -764,9 +764,9 @@ read / collect it; bump the `.tkh` format version to 2 (the reader accepts 2); `
 accessor. This is the codec change that lets the resolver read dep edges from the `.tkh`.
 
 - **Fixtures:**
-  - `H1` (VM `.tkt`) round-trip: build a `Header` with a manifest block (name/version/2 deps) →
+  - `H1` (test (`.tkt`)) round-trip: build a `Header` with a manifest block (name/version/2 deps) →
     `emit_tkh` → `read_tkh` → identical; exit 0.
-  - `H2` (VM `.tkt`) byte-fidelity: emit → load → re-emit BYTE-IDENTICAL (the C7.16 acceptance
+  - `H2` (test (`.tkt`)) byte-fidelity: emit → load → re-emit BYTE-IDENTICAL (the C7.16 acceptance
     bar, now including the manifest block); exit 0.
   - `H3` (native) an emitted package's `.tkh` (version 2) is read back by the resolver's
     `header_manifest` and yields the declared deps; exit 0.
@@ -782,7 +782,7 @@ New module `src/build/resolve_deps.tks` (namespace `teko::build`): `ResolvedDep`
 fetch is PK4/deferred), `resolve_deps`, `align_versions`. Design-ahead: the `PackageStore` is a
 declared interface fed by an in-memory fixture today and by the real store when PK4 closes.
 
-- **Fixtures (VM `.tkt` over synthetic in-memory headers + store):**
+- **Fixtures (test (`.tkt`) over synthetic in-memory headers + store):**
   - `R1` diamond A→C(`>=1.0`), B→C(`>=1.1`); store C = {1.0, 1.1, 1.2} → aligns C to **1.2** (highest
     satisfying both), ONE `ResolvedDep` for C (no duplication); exit 0.
   - `R2` conflict A→C(`<1.5`), B→C(`>=1.5`) → BUILD ERROR naming both imposers; exit non-zero.
@@ -792,7 +792,7 @@ declared interface fed by an in-memory fixture today and by the real store when 
     C instance → one canonical stamped type (ties to #180 F1/F5 byte-identity); exit 0.
 - **Ritual:** FULL GATE after the resolver is wired into the build (compiler behavior change);
   both engines + byte-identity + fixpoint. (The resolver logic alone, tested over in-memory
-  stores, gates VM+native without the fixpoint dependency until it is wired.)
+  stores, gates both paths without the fixpoint dependency until it is wired.)
 
 ### Crumb C6 — `teko.lock` (PK3)
 
@@ -803,7 +803,7 @@ sha256_of; already exists in `src/crypto/hash.tks` #194-204). FNV is used ONLY f
 (non-security). Layer-1 integrity gates on sha256 being wired.
 
 - **Fixtures:**
-  - `L1` (VM `.tkt`) resolve → `write_lockfile` → `parse_lockfile` → `lockfile_matches` = true
+  - `L1` (test (`.tkt`)) resolve → `write_lockfile` → `parse_lockfile` → `lockfile_matches` = true
     (round-trip, deterministic name-sorted output); exit 0.
   - `L2` (native) a lock pins version+hash; a store `.tkl` whose hash differs from the pin →
     integrity error (tamper detected); exit non-zero.
@@ -850,7 +850,7 @@ build to a native exe now.
 
 The **full gate** (both engines · paranoid · diff_vm_native · parity · fixpoint gen1==gen2) is
 mandatory at crumbs **C3, C4, C5, C6, C7, C8** — every crumb that touches production compiler code
-or the serializer. C1/C2 are pure additive logic (VM+native build must pass; no fixpoint
+or the serializer. C1/C2 are pure additive logic (both paths build must pass; no fixpoint
 dependency). The serializer crumb (C4) and the cache-wire crumb (C7) are the two where
 byte-identity regressions are most likely — treat their fixpoint as the primary bar.
 
