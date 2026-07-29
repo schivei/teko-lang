@@ -2775,3 +2775,90 @@ fn lwt_slice_pattern_binds_both_halves_of_the_fat_member() {
     teko::assert::str_contains(text, "field_addr %0, 16")
     teko::assert::str_contains(text, "load.i64")
 }
+
+/**
+ * lwt_alias_decl — a `type <name> = <alias>` TypeDecl, wrapped as a `checker::TItem` — the
+ * AliasBody shape `typeexpr_is_fat`'s alias chain walks (`lwt_struct_decl`'s StructBody
+ * counterpart).
+ *
+ * @param name   the alias's own declared name
+ * @param alias  the alias's right-hand-side annotation
+ * @return       the alias type declaration, as a program item
+ */
+fn lwt_alias_decl(name: str, alias: parser::TypeExpr) -> checker::TItem {
+    parser::TypeDecl {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        body = parser::AliasBody { alias = alias }
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""
+        is_unsafe = false; must_free = false
+    }
+}
+
+/**
+ * lwt_fat_predicate_probe_table — the type table `lwt_fat_predicates_agree` resolves every probe
+ * annotation against: `AliasStr` (a single alias of `str`), `AliasStrTwice` (an alias OF an
+ * alias), `AliasSlice` (an alias of `[]i64`), and `Point` (a plain nominal struct — the "directo,
+ * not fat" nominal control the earlier R0 draft named).
+ *
+ * @return the program's type table over exactly these four declarations
+ */
+fn lwt_fat_predicate_probe_table() -> checker::TypeTable {
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, lwt_alias_decl("AliasStr", lwt_named_te("str")))
+    items = teko::list::push(items, lwt_alias_decl("AliasStrTwice", lwt_named_te("AliasStr")))
+    items = teko::list::push(items, lwt_alias_decl("AliasSlice", parser::SliceType { element = lwt_named_te("i64") }))
+    items = teko::list::push(items, lwt_struct_decl("Point", teko::list::push(teko::list::push(teko::list::empty(), lwt_field("x", "i32")), lwt_field("y", "i32"))))
+    checker::type_table_of(checker::TProgram { items = items })
+}
+
+/**
+ * lwt_assert_fat_predicate_agrees — one row of the R0 gate: `typeexpr_is_fat`, asked about the
+ * SYNTACTIC annotation `te`, must answer exactly what `is_fat_type` answers about the RESOLVED
+ * type `t` an annotation of that shape denotes.
+ *
+ * @param table  the probe's type table (`lwt_fat_predicate_probe_table`)
+ * @param te     the syntactic annotation under test
+ * @param t      the semantic type `te` is expected to resolve to
+ * @return       void — fails the enclosing `#test` when the two predicates disagree
+ */
+fn lwt_assert_fat_predicate_agrees(table: checker::TypeTable, te: parser::TypeExpr, t: checker::Type) {
+    teko::assert::is_true(typeexpr_is_fat(te, table) == is_fat_type(t))
+}
+
+/**
+ * lwt_fat_predicates_agree — the R0 gate (0.3.1.0 raiz A): `is_fat_type` (the SEMANTIC predicate,
+ * over a RESOLVED `checker::Type`) and `typeexpr_is_fat` (the SYNTACTIC predicate, over the
+ * WRITTEN annotation) must answer the SAME question the same way, for a direct type, a type
+ * ALIASED once, a type aliased TWICE, an aliased `[]T` slice, an OPTIONAL of an aliased type, and
+ * a handful of definitely-not-fat controls (a scalar, a nominal struct, `ptr<T>`).
+ *
+ * This is crumb R0's own portal, named in `docs/memory/raiz-comum-dos-degraus-0.3.1.0.md`: a
+ * layout built from one predicate and a store built from the other disagreeing on the SAME field
+ * is exactly the silent alias miscompilation measured there (§7-quater.3-bis) — `type S = str;
+ * struct H { s: S; n: i32 }` read `h.s.len` back as its sibling `n`'s own byte value on the
+ * native route, `5` on the C route, because `field_layout_size` asked the (then purely syntactic)
+ * `typeexpr_is_fat` and reserved 8 bytes for `s`, while `store_struct_field` asked the semantic
+ * `is_fat_type` on the field's resolved type and wrote the full 16-byte image there. Making the
+ * two predicates agree BY CONSTRUCTION (`typeexpr_is_fat` now walks the SAME alias chain a
+ * resolved `checker::Type` already collapsed through) is what makes this assertion pass;
+ * reintroducing a THIRD, independently-maintained fat-or-not rule anywhere in this file is what
+ * would make it fail again — the ONE thing this gate exists to catch.
+ *
+ * @return void
+ */
+#test
+fn lwt_fat_predicates_agree() {
+    let table = lwt_fat_predicate_probe_table()
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("str"), checker::Str { })
+    lwt_assert_fat_predicate_agrees(table, parser::SliceType { element = lwt_named_te("i64") }, checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStr"), checker::Str { })
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStrTwice"), checker::Str { })
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasSlice"), checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
+    lwt_assert_fat_predicate_agrees(table, parser::OptionalType { inner = lwt_named_te("AliasStr") }, checker::Optional { inner = checker::Str { } })
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("byte"), checker::Byte { })
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("i32"), lwt_prim(checker::PrimKind::I32))
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("bool"), lwt_prim(checker::PrimKind::Bool))
+    lwt_assert_fat_predicate_agrees(table, lwt_named_te("Point"), checker::Named { name = "Point" })
+    lwt_assert_fat_predicate_agrees(table, parser::NamedType { path = lwt_path1("ptr"); args = teko::list::push(teko::list::empty(), lwt_named_te("i32")) }, checker::Ptr { inner = lwt_prim(checker::PrimKind::I32) })
+}
