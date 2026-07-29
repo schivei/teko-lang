@@ -2009,7 +2009,11 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * (0.3.1.0 degrau 15). `teko::text::str_from_utf8` (`is_str_from_utf8_call`) is intercepted the
  * SAME way — its `str | error` result is a fat PAYLOAD wrapped in a variant, neither the bare
  * `is_fat_type` shape above nor `last_index_of`'s scalar payload, so it routes to its own
- * `lower_str_from_utf8_call` (0.3.1.0 degrau 21).
+ * `lower_str_from_utf8_call` (0.3.1.0 degrau 21). `teko::error::err_loc`/`err_typed`
+ * (`is_err_loc_call`/`is_err_typed_call`) are intercepted the SAME way too — the `tk_error_loc`/
+ * `tk_error_types` twins they mirror are `static inline` in `teko_rt.h` with no linkable symbol,
+ * so `native_builtin_symbol` has no entry to resolve either one; they route to
+ * `lower_err_loc_call`/`lower_err_typed_call` (0.3.1.0 degrau 22).
  *
  * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
  * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
@@ -2034,6 +2038,8 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
     if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_str_from_utf8_call(c.callee) { return lower_str_from_utf8_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_err_loc_call(c.callee) { return lower_err_loc_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_err_typed_call(c.callee) { return lower_err_typed_call(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
@@ -2337,6 +2343,8 @@ fn lower_last_index_of_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, value: u3
  * @return         the advanced context; `wrapper` is the arm's own result
  * @throws         propagated from `variant_payload_box_bytes` (never actually thrown for `error`
  *                 — its layout is always registered — kept honest rather than assumed)
+ * @since 0.3.1.0 degrau 15; degrau 22 grew the manual build to zero the five diagnostic fields
+ *        the grown `error_struct_layout` now reserves alongside `message`
  */
 fn lower_last_index_of_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, e: checker::TExpr) -> LowerCtx | error {
     let tagged = store_variant_tag(ctx, wrapper, index, e.line, e.col)
@@ -2349,8 +2357,9 @@ fn lower_last_index_of_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, e: che
     let with_zero_len = ctx_append(zero_len.ctx, const_int_inst(zero_len.vreg, 0, e.line, e.col))
     let empty_msg = LoweredFat { ctx = with_zero_len; ptr = zero_ptr.vreg; len = zero_len.vreg }
     let with_msg = store_fat_slot(empty_msg.ctx, base.vreg, empty_msg, e.line, e.col)
-    let box_bytes = match variant_payload_box_bytes(checker::Error { }, with_msg) { u32 as n => n; error as err => return err }
-    let owned = box_aggregate_value(Lowered { ctx = with_msg; vreg = base.vreg }, box_bytes, e)
+    let with_zeroed = zero_error_diagnostics(with_msg, base.vreg, layout, 1, e.line, e.col)
+    let box_bytes = match variant_payload_box_bytes(checker::Error { }, with_zeroed) { u32 as n => n; error as err => return err }
+    let owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = base.vreg }, box_bytes, e)
     let paddr = ctx_alloc(owned.ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, wrapper, variant_payload_offset(), e.line, e.col))
     ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, LType::Ptr, e.line, e.col))
@@ -2508,6 +2517,8 @@ fn lower_str_from_utf8_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, ptr: u32,
  * @return         the advanced context; `wrapper` is the arm's own result
  * @throws         propagated from `variant_payload_box_bytes` (never actually thrown for `error`
  *                 — its layout is always registered — kept honest rather than assumed)
+ * @since 0.3.1.0 degrau 21; degrau 22 grew the manual build to zero the five diagnostic fields
+ *        the grown `error_struct_layout` now reserves alongside `message`
  */
 fn lower_str_from_utf8_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, msg_ptr: u32, msg_len: u32, e: checker::TExpr) -> LowerCtx | error {
     let tagged = store_variant_tag(ctx, wrapper, index, e.line, e.col)
@@ -2516,8 +2527,9 @@ fn lower_str_from_utf8_error_arm(ctx: LowerCtx, wrapper: u32, index: i64, msg_pt
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
     let msg = LoweredFat { ctx = with_alloca; ptr = msg_ptr; len = msg_len }
     let with_msg = store_fat_slot(with_alloca, base.vreg, msg, e.line, e.col)
-    let box_bytes = match variant_payload_box_bytes(checker::Error { }, with_msg) { u32 as n => n; error as err => return err }
-    let owned = box_aggregate_value(Lowered { ctx = with_msg; vreg = base.vreg }, box_bytes, e)
+    let with_zeroed = zero_error_diagnostics(with_msg, base.vreg, layout, 1, e.line, e.col)
+    let box_bytes = match variant_payload_box_bytes(checker::Error { }, with_zeroed) { u32 as n => n; error as err => return err }
+    let owned = box_aggregate_value(Lowered { ctx = with_zeroed; vreg = base.vreg }, box_bytes, e)
     let paddr = ctx_alloc(owned.ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, wrapper, variant_payload_offset(), e.line, e.col))
     ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, LType::Ptr, e.line, e.col))
@@ -2579,6 +2591,134 @@ fn lower_str_from_utf8_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall)
     let else_built = match lower_str_from_utf8_error_arm(err_alloca, err_base.vreg, err_index to i64, else_loaded.ptr, else_loaded.len, e) { LowerCtx as x => x; error as err2 => return err2 }
     let else_func = close_arm_to(else_built, mergeb.block_id, teko::list::push(teko::list::empty(), err_base.vreg), e.line, e.col)
     Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
+}
+
+/**
+ * is_err_loc_call — recognizes `teko::error::err_loc`'s bare last segment: one of the two
+ * `error`-diagnostic-adornment builtins this N1 subset lowers directly (0.3.1.0 degrau 22).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `err_loc`
+ */
+fn is_err_loc_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "err_loc"
+}
+
+/**
+ * is_err_typed_call — recognizes `teko::error::err_typed`'s bare last segment: `err_loc`'s
+ * fat-field twin (0.3.1.0 degrau 22).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `err_typed`
+ */
+fn is_err_typed_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "err_typed"
+}
+
+/**
+ * store_error_scalar_field — overwrite ONE already-registered scalar `error` field (`line`/`col`)
+ * at `base` with an already-lowered value — the shared write `lower_err_loc_call`'s two
+ * overwrites both use.
+ *
+ * @param base    the destination `error` slot's base-address VReg
+ * @param layout  the registered `error` layout
+ * @param field   the field's name (`"line"` or `"col"`)
+ * @param value   the already-lowered new value (its own `ctx` is the base to append onto)
+ * @param line    the source line to stamp the emitted instructions with
+ * @param col     the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ * @throws  when `field` is not registered on `layout` (an internal invariant break)
+ */
+fn store_error_scalar_field(base: u32, layout: LStructLayout, field: str, value: Lowered, line: u32, col: u32) -> LowerCtx | error {
+    let off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
+    let ty = match field_type_of(layout, field) { LType as t => t; error as err => return err }
+    let addr = ctx_alloc(value.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+    ctx_append(with_addr, store_inst(addr.vreg, value.vreg, ty, line, col))
+}
+
+/**
+ * store_error_fat_field — overwrite ONE already-registered FAT `error` field (`expected`/
+ * `actual`) at `base` with an already-lowered `(ptr, len)` pair — the shared write
+ * `lower_err_typed_call`'s two overwrites both use.
+ *
+ * @param base    the destination `error` slot's base-address VReg
+ * @param layout  the registered `error` layout
+ * @param field   the field's name (`"expected"` or `"actual"`)
+ * @param fo      the already-lowered new `(ptr, len)` pair (its own `ctx` is the base to append
+ *                onto)
+ * @param line    the source line to stamp the emitted instructions with
+ * @param col     the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ * @throws  when `field` is not registered on `layout` (an internal invariant break)
+ */
+fn store_error_fat_field(base: u32, layout: LStructLayout, field: str, fo: LoweredFat, line: u32, col: u32) -> LowerCtx | error {
+    let off = match field_offset_of(layout, field) { u32 as o => o; error as err => return err }
+    let addr = ctx_alloc(fo.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+    store_fat_slot(with_addr, addr.vreg, fo, line, col)
+}
+
+/**
+ * lower_err_loc_call — `teko::error::err_loc(e, line, col)` (E2): a copy of `e` with `line` and
+ * `col` overwritten.
+ *
+ * PORQUE BAIXADO E NÃO RESOLVIDO POR SÍMBOLO. `tk_error_loc` is `static inline` in `teko_rt.h`
+ * with no linkable symbol in `teko_rt.c`, so `native_builtin_symbol` has no entry to resolve it;
+ * and a runtime twin would return 72 bytes by value, which this backend's `LCall` — reading ONE
+ * result register — cannot capture. Intercepted in `lower_call`, the SAME molde
+ * `lower_last_index_of_call` (degrau 15) and `lower_str_from_utf8_call` (degrau 21) already use.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `error`, its source position stamps the emitted
+ *             instructions)
+ * @param c    the call node (three arguments: the error, the new line, the new column)
+ * @return Lowered | error  the advanced context plus the adorned copy's base-address VReg
+ * @throws  propagated from lowering an argument, or when the call's own arity is not 3 (an
+ *          invariant break — `checker::scope.tks`'s `err_loc` signature already fixed it)
+ */
+fn lower_err_loc_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 3 {
+        return error { message = "native backend N1: `err_loc` expects exactly three arguments (internal)" }
+    }
+    let src = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let layout = error_struct_layout()
+    let dst = copy_error_value(src.ctx, src.vreg, layout, e)
+    let lo = match lower_expr(dst.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    let with_line = match store_error_scalar_field(dst.vreg, layout, "line", lo, e.line, e.col) { LowerCtx as x => x; error as err => return err }
+    let co = match lower_expr(with_line, c.args[2]) { Lowered as x => x; error as err => return err }
+    let with_col = match store_error_scalar_field(dst.vreg, layout, "col", co, e.line, e.col) { LowerCtx as x => x; error as err => return err }
+    Lowered { ctx = with_col; vreg = dst.vreg }
+}
+
+/**
+ * lower_err_typed_call — `teko::error::err_typed(e, expected, actual)` (E2): a copy of `e` with
+ * `expected` and `actual` overwritten — `err_loc`'s fat-field twin (two `str` fields instead of
+ * two scalars), reusing `copy_error_value` exactly the same way.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `error`, its source position stamps the emitted
+ *             instructions)
+ * @param c    the call node (three arguments: the error, the expected type text, the actual type
+ *             text)
+ * @return Lowered | error  the advanced context plus the adorned copy's base-address VReg
+ * @throws  propagated from lowering an argument, or when the call's own arity is not 3 (an
+ *          invariant break — `checker::scope.tks`'s `err_typed` signature already fixed it)
+ */
+fn lower_err_typed_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 3 {
+        return error { message = "native backend N1: `err_typed` expects exactly three arguments (internal)" }
+    }
+    let src = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let layout = error_struct_layout()
+    let dst = copy_error_value(src.ctx, src.vreg, layout, e)
+    let expected = match lower_fat_expr(dst.ctx, c.args[1]) { LoweredFat as x => x; error as err => return err }
+    let with_expected = match store_error_fat_field(dst.vreg, layout, "expected", expected, e.line, e.col) { LowerCtx as x => x; error as err => return err }
+    let actual = match lower_fat_expr(with_expected, c.args[2]) { LoweredFat as x => x; error as err => return err }
+    let with_actual = match store_error_fat_field(dst.vreg, layout, "actual", actual, e.line, e.col) { LowerCtx as x => x; error as err => return err }
+    Lowered { ctx = with_actual; vreg = dst.vreg }
 }
 
 /**
@@ -8847,24 +8987,248 @@ fn named_type_name(t: checker::Type) -> str | error {
 fn error_struct_name() -> str { "error" }
 
 /**
- * error_struct_layout — the built-in `error` type's synthetic `LStructLayout`: ONE field,
- * `message: str` (fat, 16 bytes — `layout_of_sized`'s packer sizes/aligns it like any other
- * FAT struct field). `error`'s only constructible shape is `error { message = <str> }` (the
- * checker's `type_struct_lit` Error-branch), so a single `message` field is the COMPLETE
- * representation this subset ever needs to build — the diagnostic fields (`file`/`line`/`col`/
- * `expected`/`actual`) a checker-internal `tk_error` carries have no Teko-surface constructor
- * and stay out of scope, unchanged from the pre-existing `lower_field_access` exclusion note
- * (#382, degrau N2).
+ * error_field_names — the built-in `error` type's six field names, in the SAME declared order
+ * the C route's `tk_error` (`src/runtime/teko_rt.h`) carries them: `message`, `file`, `line`,
+ * `col`, `expected`, `actual` (0.3.1.0 degrau 22).
+ *
+ * @return []str  the field names, in layout order
+ */
+fn error_field_names() -> []str {
+    mut names: []str = teko::list::push(teko::list::empty(), "message")
+    names = teko::list::push(names, "file")
+    names = teko::list::push(names, "line")
+    names = teko::list::push(names, "col")
+    names = teko::list::push(names, "expected")
+    names = teko::list::push(names, "actual")
+    names
+}
+
+/**
+ * error_field_types — the built-in `error` type's six field machine classes, parallel to
+ * `error_field_names()`: `Ptr` for a FAT `str` field (`message`/`file`/`expected`/`actual` —
+ * `layout_of_sized`'s packer overrides its size to 16 via `error_field_sizes`), `I32` for the
+ * two scalar `u32` diagnostic fields (`line`/`col`) (0.3.1.0 degrau 22).
+ *
+ * @return []LType  the field machine classes, parallel to `error_field_names()`
+ */
+fn error_field_types() -> []LType {
+    mut types: []LType = teko::list::push(teko::list::empty(), LType::Ptr)
+    types = teko::list::push(types, LType::Ptr)
+    types = teko::list::push(types, LType::I32)
+    types = teko::list::push(types, LType::I32)
+    types = teko::list::push(types, LType::Ptr)
+    types = teko::list::push(types, LType::Ptr)
+    types
+}
+
+/**
+ * error_field_sizes — the built-in `error` type's six field byte sizes, parallel to
+ * `error_field_types()`: a FAT `Ptr` field (a `str`) is 16 bytes (`{ptr, len}`, the SAME
+ * override `error_struct_layout`'s pre-degrau-22 single-field version already applied to
+ * `message`); every other field's size is its own `ltype_size`.
+ *
+ * @param []LType types  the field machine classes (`error_field_types()`)
+ * @return []u32  the field byte sizes, parallel to `types`
+ */
+fn error_field_sizes(types: []LType) -> []u32 {
+    mut sizes: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        sizes = teko::list::push(sizes, error_field_size_of(types[i]))
+        i++
+    }
+    sizes
+}
+
+/**
+ * error_field_size_of — one `error` field's byte size: 16 for the FAT `str` fields (`Ptr`'s own
+ * class doubled — the pointer half plus the inline length half), else the class's plain
+ * `ltype_size` (`line`/`col`, `I32`, 4 bytes each).
+ *
+ * @param LType t  the field's machine class
+ * @return u32  its byte size within the `error` layout
+ */
+fn error_field_size_of(t: LType) -> u32 {
+    match t {
+        Ptr => ltype_size(LType::Ptr) * (2 to u32)
+        _ => ltype_size(t)
+    }
+}
+
+/**
+ * error_field_aligns — the built-in `error` type's six field alignments, parallel to
+ * `error_field_types()`: each field's own `ltype_align` (8 for a FAT `str`'s `Ptr` class, 4 for
+ * an `I32` scalar) — the same natural alignment `layout_of`'s scalar mapping would derive,
+ * `error_struct_layout` only needs it spelled out explicitly because it supplies EXPLICIT sizes
+ * too (`layout_of_sized`'s contract).
+ *
+ * @param []LType types  the field machine classes (`error_field_types()`)
+ * @return []u32  the field byte alignments, parallel to `types`
+ */
+fn error_field_aligns(types: []LType) -> []u32 {
+    mut aligns: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        aligns = teko::list::push(aligns, ltype_align(types[i]))
+        i++
+    }
+    aligns
+}
+
+/**
+ * error_struct_layout — the built-in `error` type's synthetic `LStructLayout`: the SIX fields the
+ * C route's `tk_error` already carries (`src/runtime/teko_rt.h:77-101`), in the SAME order, with
+ * the SAME classes and widths — `message`@0, `file`@16, `line`@32, `col`@36, `expected`@40,
+ * `actual`@56; 72 bytes total, alignment 8.
+ *
+ * PORQUE SEIS E NÃO UM (0.3.1.0 degrau 22). The checker permits constructing exactly ONE field
+ * (`type_struct_lit`, `typer.tks:2513`, only `error { message = <str> }`) but permits READING all
+ * six (`type_field_access`, `typer.tks:2110-2128`), and the compiler itself exercises that
+ * asymmetry in seven lines across three files (`collect.tks:56`, `typer.tks:3253/6130/6131/6134`,
+ * `diagnostics.tks:38/39`). A one-field layout made those reads an honest compile-time stop
+ * (`` unknown field `line` on struct `error` ``); this layout closes that stop by matching the C
+ * route's oracle field-for-field, so both backends agree on the SAME `error` shape.
+ *
+ * THE FIVE NON-CONSTRUCTIBLE FIELDS STILL NEED ZEROING AT EVERY CONSTRUCTION SITE — this
+ * function only registers the SHAPE; `zero_error_diagnostics` is the half of this crumb that
+ * keeps the shape from leaking uninitialized `alloca` bytes.
  *
  * @return LStructLayout  the registered `error` layout
- * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ * @since 0.3.1 (own-backend `error` construction, degrau N2 — the `message` field only);
+ *        0.3.1.0 degrau 22 (the five diagnostic fields)
  */
 fn error_struct_layout() -> LStructLayout {
-    let field_names = teko::list::push(teko::list::empty(), "message")
-    let field_types = teko::list::push(teko::list::empty(), LType::Ptr)
-    let field_sizes = teko::list::push(teko::list::empty(), ltype_size(LType::Ptr) * (2 to u32))
-    let field_aligns = teko::list::push(teko::list::empty(), ltype_align(LType::Ptr))
-    layout_of_sized(error_struct_name(), field_names, field_types, field_sizes, field_aligns)
+    let names = error_field_names()
+    let types = error_field_types()
+    layout_of_sized(error_struct_name(), names, types, error_field_sizes(types), error_field_aligns(types))
+}
+
+/**
+ * zero_error_diagnostics — write zero into every `error` field the construction site did NOT
+ * itself write, starting at `from_index` (0.3.1.0 degrau 22): `error { message = … }` is the
+ * ONLY constructible shape (`typer.tks:2513`), so `store_struct_fields` writes 16 of the 72
+ * bytes a grown `error` slot now reserves and leaves the other 56 untouched. An `alloca` is not
+ * zeroed by this backend (`store_struct_field`'s own doc names this exact class of defect,
+ * already caught once on a fat field's length half) — without this pass, `const_type_located`
+ * (and any other reader of `.line`/`.col`/`.file`/`.expected`/`.actual`) would read whatever
+ * garbage bytes the fresh frame slot happened to hold. The C route guarantees the same zeroing
+ * through `tk_error_make`.
+ *
+ * A FAT field (`str`, `Ptr`-classed here) needs BOTH its pointer and length halves zeroed; a
+ * scalar field (`line`/`col`, `I32`) needs only its own word.
+ *
+ * @param ctx         the lowering context
+ * @param base        the `error` slot's base-address VReg
+ * @param layout      the registered `error` layout (`error_struct_layout()`)
+ * @param from_index  the index of the first field to zero (1 — right after `message`)
+ * @param line        the source line to stamp the emitted instructions with
+ * @param col         the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ */
+fn zero_error_diagnostics(ctx: LowerCtx, base: u32, layout: LStructLayout, from_index: u64, line: u32, col: u32) -> LowerCtx {
+    mut cur = ctx
+    mut i = from_index
+    loop {
+        if i >= layout.field_types.len { break }
+        cur = zero_error_field(cur, base, layout, i, line, col)
+        i++
+    }
+    cur
+}
+
+/**
+ * zero_error_field — zero the ONE `error` field at `layout`'s index `i`: a FAT field
+ * (`zero_fat_field_at`) or a plain scalar (`zero_scalar_field_at`), split on the field's own
+ * registered machine class — a `zero_error_diagnostics` helper.
+ *
+ * @param ctx     the lowering context
+ * @param base    the `error` slot's base-address VReg
+ * @param layout  the registered `error` layout
+ * @param i       the field's index within `layout`
+ * @param line    the source line to stamp the emitted instructions with
+ * @param col     the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ */
+fn zero_error_field(ctx: LowerCtx, base: u32, layout: LStructLayout, i: u64, line: u32, col: u32) -> LowerCtx {
+    let off = layout.field_offsets[i]
+    match layout.field_types[i] {
+        Ptr => zero_fat_field_at(ctx, base, off, line, col)
+        _ => zero_scalar_field_at(ctx, base, off, layout.field_types[i], line, col)
+    }
+}
+
+/**
+ * zero_fat_field_at — write a zero `{ptr, len}` pair at `base + offset` (a FAT `str` field's
+ * complete zero value — the same `(NULL, 0)` pair the C route's `tk_error_make` assigns via
+ * `(tk_str){0}`), through the SAME `store_fat_slot` shape `store_struct_field`'s own fat branch
+ * writes a real value with.
+ *
+ * @param ctx     the lowering context
+ * @param base    the `error` slot's base-address VReg
+ * @param offset  the field's byte offset within the slot
+ * @param line    the source line to stamp the emitted instructions with
+ * @param col     the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ */
+fn zero_fat_field_at(ctx: LowerCtx, base: u32, offset: u32, line: u32, col: u32) -> LowerCtx {
+    let zp = ctx_alloc(ctx)
+    let with_zp = ctx_append(zp.ctx, const_int_inst(zp.vreg, 0, line, col))
+    let zl = ctx_alloc(with_zp)
+    let with_zl = ctx_append(zl.ctx, const_int_inst(zl.vreg, 0, line, col))
+    let addr = ctx_alloc(with_zl)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    store_fat_slot(with_addr, addr.vreg, LoweredFat { ctx = with_addr; ptr = zp.vreg; len = zl.vreg }, line, col)
+}
+
+/**
+ * zero_scalar_field_at — write a zero machine word of class `ty` at `base + offset` (a scalar
+ * diagnostic field's zero value — `line`/`col` read back as `0`, matching the C route's
+ * `tk_error_make` zero-initialization).
+ *
+ * @param ctx     the lowering context
+ * @param base    the `error` slot's base-address VReg
+ * @param offset  the field's byte offset within the slot
+ * @param ty      the field's registered machine class
+ * @param line    the source line to stamp the emitted instructions with
+ * @param col     the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ */
+fn zero_scalar_field_at(ctx: LowerCtx, base: u32, offset: u32, ty: LType, line: u32, col: u32) -> LowerCtx {
+    let z = ctx_alloc(ctx)
+    let with_z = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
+    let addr = ctx_alloc(with_z)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+    ctx_append(with_addr, store_inst(addr.vreg, z.vreg, ty, line, col))
+}
+
+/**
+ * copy_error_value — reserve a fresh `error` slot (sized/aligned per the registered layout) and
+ * copy `src`'s own six fields into it byte for byte, through the runtime `tk_mem_copy` this
+ * backend's aggregate-reference assignment already uses (`store_assign_aggregate_ref`, degrau
+ * 18) — no LIR memcpy op exists, so this is the SAME one-line runtime touch, not a new one.
+ *
+ * PORQUE UMA CÓPIA E NÃO UMA MUTAÇÃO. `tk_error_loc`/`tk_error_types` (`teko_rt.h`) receive the
+ * `error` BY VALUE and return a modified COPY: `let b = err_loc(a, 7, 3)` leaves `a.line` at `0`
+ * on the C route. In this backend an `error` value IS the address of its slot
+ * (§ NATIVE-AGG-SLICE-BY-ADDRESS), so adorning it in place would mutate the caller's `a` and the
+ * two routes would diverge silently, with no stop at all.
+ *
+ * @param ctx     the lowering context
+ * @param src     the source `error`'s base-address VReg
+ * @param layout  the registered `error` layout (its `size` is the copy width)
+ * @param e       the call expression (source position only)
+ * @return Lowered  the advanced context plus the new slot's base-address VReg
+ */
+fn copy_error_value(ctx: LowerCtx, src: u32, layout: LStructLayout, e: checker::TExpr) -> Lowered {
+    let dst = ctx_alloc(ctx)
+    let with_alloca = ctx_append(dst.ctx, alloca_inst(dst.vreg, layout.size, layout.align, e.line, e.col))
+    let width = ctx_alloc(with_alloca)
+    let with_width = ctx_append(width.ctx, const_int_inst(width.vreg, layout.size to i64, e.line, e.col))
+    let args = teko::list::push(two_args(dst.vreg, src), width.vreg)
+    let with_copy = ctx_append(with_width, void_call_inst("tk_mem_copy", args, false, e.line, e.col))
+    Lowered { ctx = with_copy; vreg = dst.vreg }
 }
 
 /** find_struct_layout — the registered LStructLayout named `name`, or a NAMED internal
@@ -8915,18 +9279,34 @@ fn field_type_of(layout: LStructLayout, field: str) -> LType | error {
     error { message = teko::str::concat("native backend N1: unknown field `", field, "` on struct `", layout.name, "` (internal)") }
 }
 
-/** lower_struct_init — `Name { f = v, … }`: alloca a slot sized/aligned per the struct's
-    registered layout, then store each field's lowered value at its offset (declared
-    order). The struct's "value" is its alloca'd BASE ADDRESS (a Ptr VReg) — the memory
-    model every aggregate in the A1-3 subset shares (§5.1: the interp is an exit-code
-    oracle, not a byte-accurate simulator; A2+ isel reads the real byte layout off
-    LStructLayout, not off this VReg's class). */
+/**
+ * lower_struct_init — `Name { f = v, … }`: alloca a slot sized/aligned per the struct's
+ * registered layout, then store each field's lowered value at its offset (declared order). The
+ * struct's "value" is its alloca'd BASE ADDRESS (a Ptr VReg) — the memory model every aggregate
+ * in the A1-3 subset shares (§5.1: the interp is an exit-code oracle, not a byte-accurate
+ * simulator; A2+ isel reads the real byte layout off LStructLayout, not off this VReg's class).
+ *
+ * The `error` branch (0.3.1.0 degrau 22) additionally zeros every field the literal itself did
+ * NOT write (`zero_error_diagnostics`): `error { message = … }` is the only constructible shape,
+ * so the other five of the SIX registered fields would otherwise leak whatever garbage the fresh
+ * `alloca` held.
+ *
+ * @param ctx  the lowering context
+ * @param e    the struct-literal expression (its resolved type names the layout)
+ * @param si   the struct-init node (the field names/values actually written)
+ * @return Lowered  the advanced context plus the new slot's base-address VReg
+ * @throws  propagated from resolving the struct's name/layout, or from storing a field's value
+ */
 fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit) -> Lowered | error {
     let name = match named_type_name(e.type) { str as s => s; error as err => return err }
     let layout = match find_struct_layout(ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
-    store_struct_fields(with_alloca, base.vreg, layout, si.field_names, si.field_vals, e.line, e.col)
+    let stored = match store_struct_fields(with_alloca, base.vreg, layout, si.field_names, si.field_vals, e.line, e.col) { Lowered as l => l; error as err => return err }
+    match e.type {
+        checker::Error => Lowered { ctx = zero_error_diagnostics(stored.ctx, base.vreg, layout, si.field_names.len, e.line, e.col); vreg = base.vreg }
+        _ => stored
+    }
 }
 
 /** store_struct_fields — lower each field value in turn, storing it at its layout offset
