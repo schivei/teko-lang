@@ -646,6 +646,15 @@ void tk_free_block(void *p, uint64_t bytes);
 // elements must be boxed in the SAME region, not here.
 void *tk_slice_elem_box(const void *elem, uint64_t esz);
 
+// (0.3.1.0 degrau 18 — reference deref-assignment) tk_mem_copy — copy `n` bytes from `src` into
+// `dst`. The plain byte-copy the LIR has no instruction for: `r.value = <aggregate>` through a
+// `Ref<T>` handle writes the new value's bytes DIRECTLY into the handle's pointee storage — unlike
+// a container field's BOXED pointer slot (this backend's uniform "a struct value is its address"
+// model), `Ref<T>` names `T`'s memory directly (the C route's bare `<T> *`), so storing the new
+// value's address there would overwrite the pointee's own first bytes with a pointer instead of
+// its data. Same "the LIR has no allocation/copy op" reasoning `tk_slice_elem_box` already used.
+void tk_mem_copy(void *dst, const void *src, uint64_t n);
+
 // --- arithmetic FFI over the i128 carrier (sign-aware) + float bit-patterns ---
 // div/rem: truncated division/remainder; sgn selects signed vs unsigned interpretation.
 __int128 tk_div(__int128 a, __int128 b, bool sgn);

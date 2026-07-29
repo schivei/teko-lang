@@ -2527,6 +2527,12 @@ void *tk_slice_elem_box(const void *elem, uint64_t esz) {
     return p;
 }
 
+// (0.3.1.0 degrau 18) tk_mem_copy — see teko_rt.h for why the native lowering needs this at all
+// (a reference deref-assignment's aggregate arm, `store_assign_aggregate_ref`).
+void tk_mem_copy(void *dst, const void *src, uint64_t n) {
+    if (n != 0) memcpy(dst, src, (size_t)n);
+}
+
 // (#148 S2 Level-2) tk_slice_push_fo — FREE-OLD-on-grow, for a self-append whose chain the checker
 // PROVED linear (born from list::empty(), self-append-only writes, no capture before the fn's final
 // statement — see escape.tks::assign_frees_old). On a copy-grow the OLD buffer is dead by that proof,
