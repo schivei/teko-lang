@@ -2870,35 +2870,131 @@ fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
     TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-// `[ e0, e1, … ]` (Increment B+): type every element, UNIFY to a common element type T (widening —
-// a case joins into its variant; sibling cases → their union), result `[]T`. An empty `[]` yields
-// the SENTINEL `[]Void` — exactly like `teko::list::empty()` — so a binding annotation (`: []T`)
-// adopts it and a bare unannotated `[]` is rejected by type_binding (collections #4). Spread
-// elements (`..xs`) must type as `[]T`; their element type T is widened into the unified element.
-// C twin: type_array_lit in expr.c.
+/**
+ * array_elem_contrib_type — the type an array element CONTRIBUTES to the literal join: a spread
+ * element (`..xs`) contributes its slice's own element type (never itself, since the whole
+ * point of a spread is that `[]T` flattens into the unified `T`); any other element contributes
+ * its own type directly.
+ *
+ * @param ae  the typed array element
+ * @return    the type this element joins into the array's unified element type
+ */
+fn array_elem_contrib_type(ae: TArrayElem) -> Type {
+    if ae.is_spread {
+        match ae.expr.type { Slice as s => s.element; _ => ae.expr.type }
+    } else {
+        ae.expr.type
+    }
+}
+
+/**
+ * array_elem_bare_literal — a non-spread element's trailing bare numeric-literal leaf, or `null`
+ * when the element is a spread (never a literal candidate — its contribution is already a
+ * concrete, previously-typed `T`) or its own expression is not a bare number. The array-literal
+ * counterpart of `type_match`'s `match_arm_literal_leaf`: it gates which element is a LITERAL
+ * cross-adoption candidate rather than a genuinely concrete (pinned) type.
+ *
+ * @param ae  the typed array element
+ * @return    the element's `TNumber` leaf, or `null`
+ */
+fn array_elem_bare_literal(ae: TArrayElem) -> TExpr | null {
+    if ae.is_spread { return null }
+    match ae.expr.kind { TNumber => ae.expr; _ => null }
+}
+
+/**
+ * array_join_anchor — the first element's CONTRIBUTED type that is NOT a bare numeric literal, or
+ * `null` when every element is a bare literal (so there is no concrete type to adopt into). The
+ * array-literal counterpart of `type_match`'s `match_join_anchor`: scans every element up front,
+ * so a later concrete element still anchors an EARLIER literal one regardless of source order.
+ *
+ * @param elems  the typed array elements
+ * @return       the anchor type sibling literal elements should adopt, or `null`
+ */
+fn array_join_anchor(elems: []TArrayElem) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        match array_elem_bare_literal(elems[i]) {
+            TExpr => { }
+            null => return array_elem_contrib_type(elems[i])
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * adopt_array_elem_literals — rebuild every element whose value is a bare numeric literal that
+ * FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare default
+ * (`retype_literal`) — the array-literal counterpart of `type_match`'s `adopt_match_arm_literals`,
+ * so `[some_i32, 0]` joins to `[]i32`, not the accidental `[]<i32 | i64>` a bare-defaulted literal
+ * would otherwise force into the union. An element whose literal does not fit `anchor`, is a
+ * spread, or is not a bare literal at all, passes through unchanged.
+ *
+ * @param elems   the typed array elements
+ * @param anchor  the type sibling literal elements adopt into
+ * @return        the elements, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_array_elem_literals(elems: []TArrayElem, anchor: Type) -> []TArrayElem {
+    mut out: []TArrayElem = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        let ae = elems[i]
+        let next = match array_elem_bare_literal(ae) {
+            TExpr as t => if literal_adopts(t, anchor) { TArrayElem { is_spread = false; expr = retype_literal(t, anchor) } } else { ae }
+            null => ae
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
+
+/**
+ * type_array_lit — `[ e0, e1, … ]` (Increment B+): types every element, cross-adopts a bare
+ * numeric-literal element into a sibling's CONCRETE (non-literal) type (`array_join_anchor` +
+ * `adopt_array_elem_literals`, mirroring `type_match`'s own literal cross-adoption) and then
+ * UNIFIES every element into a common element type T (widening — a case joins into its variant;
+ * sibling cases → their union), result `[]T`. An empty `[]` yields the SENTINEL `[]Void` —
+ * exactly like `teko::list::empty()` — so a binding annotation (`: []T`) adopts it and a bare
+ * unannotated `[]` is rejected by type_binding (collections #4). A spread element (`..xs`) must
+ * type as `[]T`; its own element type T contributes to (and widens into) the unified element,
+ * and is never itself a literal-adoption candidate. C twin: type_array_lit in expr.c.
+ *
+ * @param a      the parsed array literal
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed array literal, or an error
+ */
 fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | error {
-    mut elems: []TArrayElem = teko::list::empty()
-    mut et: Type = Void { }   // sentinel for an empty `[]` (no inferable element)
+    mut typed: []TArrayElem = teko::list::empty()
     mut i = 0
     loop {
         if i >= a.elements.len { break }
         let ae = a.elements[i]
         let el = match type_expr(ae.expr, env, table) { TExpr as te => te; error as e => return e }
         if ae.is_spread {
-            // spread element: expr must be a `[]T` slice; contribute T as the element type
             let spread_elem = match el.type {
                 Slice as s => s.element
                 _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
             }
             if type_is_void(spread_elem) { return error { message = "a spread element cannot be an untyped empty slice" } }
-            if type_is_void(et) { et = spread_elem } else { et = type_join(et, spread_elem, table) }
         } else {
-            // plain element: original logic
             if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
-            if type_is_void(et) { et = el.type } else { et = type_join(et, el.type, table) }
         }
-        elems = teko::list::push(elems, TArrayElem { is_spread = ae.is_spread; expr = el })
+        typed = teko::list::push(typed, TArrayElem { is_spread = ae.is_spread; expr = el })
         i++
+    }
+    let elems = match array_join_anchor(typed) { Type as anchor => adopt_array_elem_literals(typed, anchor); null => typed }
+    mut et: Type = Void { }
+    mut i2 = 0
+    loop {
+        if i2 >= elems.len { break }
+        let contrib = array_elem_contrib_type(elems[i2])
+        if type_is_void(et) { et = contrib } else { et = type_join(et, contrib, table) }
+        i2++
     }
     // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
     // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred

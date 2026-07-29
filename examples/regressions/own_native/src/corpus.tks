@@ -2576,3 +2576,33 @@ fn f_match_value_literal_join() -> i64 {
     if uval != 999 { return 4 }
     0
 }
+
+/**
+ * f_array_lit_literal_join — an ARRAY LITERAL whose elements mix a typed concrete leaf with a
+ * bare numeric-literal leaf: `type_array_lit`'s literal cross-adoption (the exact twin of
+ * `type_match`'s, `src/checker/typer.tks`) must retype the literal leaf at the concrete sibling's
+ * type instead of defaulting it to `i64`, so the array joins to ONE element type rather than an
+ * accidental `i32 | i64` union no int-position accepts. Covers the reported shape (`[n, 0]`) and
+ * the order REVERSED (`[0, n]`).
+ *
+ * A literal that does NOT fit the anchor (e.g. `[u8_val, 999]`) is deliberately NOT exercised
+ * here: the resulting `[]<u8 | i64>` needs a slice whose ELEMENT is a general (non-null) variant,
+ * which neither backend can build today — the C route honest-stops at codegen
+ * ("optional/slice inner type not yet supported") on `[a, b]` for ANY two concretely-typed
+ * siblings, with no literal involved at all, so a misfit-literal case here would fail the whole
+ * corpus for a reason that has nothing to do with this fix. Confirmed by an out-of-tree probe
+ * instead: the checker still builds the genuine `u8 | i64` union (unchanged from before this
+ * fix) rather than silently collapsing it into `u8`.
+ *
+ * @return i64  0 on success, a distinct non-zero code per failing check
+ */
+fn f_array_lit_literal_join() -> i64 {
+    let n: i32 = 7
+    let xs = [n, 0]
+    if xs[0] != 7 { return 1 }
+    if xs[1] != 0 { return 2 }
+    let ys = [0, n]
+    if ys[0] != 0 { return 3 }
+    if ys[1] != 7 { return 4 }
+    0
+}
