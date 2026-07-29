@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta a re-verificação de crumbs de implementação da Onda-3, já completada. Não descreve o estado atual do projeto.
+
 # Drain — Onda-3 sub-cluster A (re-verified implementation crumbs)
 
 **Status:** DESIGN-AHEAD (architect). No product code changed. Re-verified at file:line against the current tree.
