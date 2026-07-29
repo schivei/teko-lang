@@ -429,26 +429,37 @@ fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
 /**
  * tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch — the `host-os-arch` token means "an
  * EXPLICITLY spelled target, and let it be the one this host natively builds" (owner ruling
- * 2026-07-27). Three properties, every one of which a hardcoded `x86_64-linux` fails off x86_64:
+ * 2026-07-27). On a host `host_default_target` names a real target for, three properties hold,
+ * every one of which a hardcoded `x86_64-linux` fails off x86_64:
  *
  *   1. the lowered row's target IS this host's own os-arch name — never the token, never a fixed one;
  *   2. it is spelled EXPLICITLY, so the row exports `TEKO_TARGET=<that name>` where the plain `host`
  *      sentinel exports nothing at all — the two exercise different build paths on purpose;
  *   3. it is never CROSS on the host that resolved it, so the row runs instead of honest-skipping.
  *
+ * On a host with NO own-backend target at all (`host_default_target`'s own R2 error — an aarch64
+ * linux host, an x86_64 macOS host), there is no real name left to spell explicitly, so the row
+ * degrades to the plain `host` sentinel's own shape instead (`HOST_TARGET`, no exported
+ * `TEKO_TARGET`) — the capability probe then honestly skips it downstream, rather than exporting a
+ * target this host cannot actually build.
+ *
  * @return void
  */
 fn tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch() {
     let src = "Feature: f\n  Scenario: s\n    Given target = \"host-os-arch\"\n    When built and run\n    Then exit = 0\n"
-    let want = target_name(host_default_target())
-    match tkr_first_lowered(src) {
-        Tkr as t => {
+    let t = match tkr_first_lowered(src) { Tkr as x => x; error => { teko::assert::is_true(false); return } }
+    match host_default_target() {
+        NativeTarget as h => {
+            let want = target_name(h)
             teko::assert::is_true(t.target == want)
             teko::assert::is_true(t.env.len == 1)
             teko::assert::is_true(t.env[0] == teko::str::concat("TEKO_TARGET=", want))
             teko::assert::is_true(!cross_note_for_name(t.target).is_cross)
         }
-        error => teko::assert::is_true(false)
+        error => {
+            teko::assert::is_true(t.target == HOST_TARGET)
+            teko::assert::is_true(t.env.len == 0)
+        }
     }
 }
 

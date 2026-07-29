@@ -733,9 +733,11 @@ fn host_cc_arch_is_canonical_or_unknown() {
  * `host_cc_cannot_link_cross_reason`'s question, and answering it twice would double-report), and a
  * host row is judged only against the arch this host's `cc` actually targets, and only where an arch
  * mismatch is actually fatal (ELF — the Mach-O and PE/COFF linkers are cross-arch by design). The
- * last assertion is an EQUIVALENCE so it holds on every lane: where the arches agree — x86_64-linux,
- * macos-arm64, windows-x86_64 — the reason is empty and nothing changes; where they cannot, it names
- * both.
+ * last assertion is an EQUIVALENCE so it holds on every lane: on a host `host_default_target` names
+ * a real target for, where the arches agree — x86_64-linux, macos-arm64, windows-x86_64 — the reason
+ * is empty and nothing changes; where they cannot, it names both. On a host with NO own-backend
+ * target at all (an aarch64 linux host, an x86_64 macOS host), the reason is the DIFFERENT, honest
+ * `host_default_unsupported_skip_reason` line, which the row's own R2 error already names.
  *
  * @return void
  */
@@ -749,19 +751,28 @@ fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
         return
     }
     let reason = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
-    let arch = host_cc_arch()
-    let want = target_arch_name(host_default_target())
-    if target_objfmt(host_default_target()) != OBJFMT_ELF {
-        teko::assert::is_true(reason == "")
-        return
+    match host_default_target() {
+        error as e => {
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, e.message)
+            return
+        }
+        NativeTarget as h => {
+            let arch = host_cc_arch()
+            let want = target_arch_name(h)
+            if target_objfmt(h) != OBJFMT_ELF {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            if arch.len == 0 || arch == want {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, target_name(h))
+            teko::assert::str_contains(reason, arch)
+        }
     }
-    if arch.len == 0 || arch == want {
-        teko::assert::is_true(reason == "")
-        return
-    }
-    teko::assert::is_true(reason.len > 0)
-    teko::assert::str_contains(reason, target_name(host_default_target()))
-    teko::assert::str_contains(reason, arch)
 }
 
 #test

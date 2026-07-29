@@ -1222,7 +1222,13 @@ const HOST_OS_ARCH_TARGET: str = "host-os-arch"
 
 /**
  * tkr_resolve_target_name — the DECLARED target name a `Given target` value stands for, with
- * `HOST_OS_ARCH_TARGET` resolved to this host's own os-arch (`x86_64-linux`, `arm64-macos`, …).
+ * `HOST_OS_ARCH_TARGET` resolved to this host's own os-arch (`x86_64-linux`, `arm64-macos`, …), or
+ * to the plain `HOST_TARGET` sentinel when this host's (os, arch) pair names no own-backend target
+ * at all (`host_default_target`'s own honest R2 error): there is no real name to spell out
+ * explicitly on such a host, so the row degrades to the EXACT same "declare no target" path the
+ * plain `host` sentinel already takes — which the row's own capability probe
+ * (`host_cc_cannot_link_host_default_reason`) then honestly skips, instead of exporting a
+ * `TEKO_TARGET` this host cannot actually build.
  *
  * Resolved at LOWERING time, on purpose: every consumer downstream (the run-wrapper resolution, the
  * cross classification, the toolchain probe, the artifact extension, the object-format check) reads
@@ -1231,12 +1237,13 @@ const HOST_OS_ARCH_TARGET: str = "host-os-arch"
  * one site knows the token exists.
  *
  * @param value  the surface `Given target` value
- * @return       the same value, or this host's os-arch name when it is `HOST_OS_ARCH_TARGET`
+ * @return       the same value, this host's os-arch name when it is `HOST_OS_ARCH_TARGET` and the
+ *               host has one, or `HOST_TARGET` when it does not
  * @since 0.3.1
  */
 fn tkr_resolve_target_name(value: str) -> str {
     if value != HOST_OS_ARCH_TARGET { return value }
-    target_name(host_default_target())
+    match host_default_target() { NativeTarget as t => target_name(t); error => HOST_TARGET }
 }
 
 /**
