@@ -431,6 +431,13 @@ tk_ffi_ures tk_rt_setenv(tk_str name, tk_str value);
 tk_ffi_slres tk_rt_list_dir(tk_str path);
 // teko::str::last_index_of(hay, needle) — byte index of the LAST occurrence, or not-found.
 tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle);
+// tk_rt_last_index_of_ok — the SAME search, in the single-register-return + out-parameter shape
+// the native (non-C) backend's own `LCall` can capture (it reads exactly one result register,
+// never the true 2-eightbyte SysV/AAPCS64 struct pair `tk_ffi_u64res` returns by value): the
+// found/not-found flag rides the ordinary `bool` return, the found index rides `*out_index`
+// (untouched when not found). A thin wrapper over `tk_rt_last_index_of` — no scan logic is
+// duplicated (0.3.1.0 degrau 15).
+bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index);
 // TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
 // child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
 // signalled one, so <= 191), which makes a negative provably outside that space and therefore
