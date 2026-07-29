@@ -4573,21 +4573,33 @@ fn run_regression_tier(dir: str, exe: str, fe: Frontend) -> i32 {
 /**
  * The `teko test <dir>` entry (D2, post-VM): assemble WITH the `.tkt` tests, then run every
  * `#test` NATIVELY via the #265 native gate (emit a test-profile C TU, compile with `run_cc`,
- * run the child fail-fast — a failed assert panics with a non-zero exit, M.1). When the manifest
- * declares `[tests] regression` files (`test_regression_files` — an explicit, ordered list of
- * `.tkr` paths, 0.3.1 C0), the regression tier (`run_regression_tier`) runs NEXT, folding its
- * coverage feed into `fe.prog` (C-cov, D9) — BEFORE `--coverage`/the floor policy read it, so
- * neither ever undercounts what the regressives exercised. Then the D4 coverage-floor policy
- * applies (`--cov-validation` enforces; otherwise warns — owner ruling 0.3.0.29). Unlike
- * `teko build`, it emits NO release binary. `--coverage` writes a Cobertura report to
- * `<cwd>/cobertura.xml` (the project root — `teko test` has no `-o`). `--per-test-cov` additionally
- * emits the dev-time per-test attribution report (`run_per_test_cov`) AFTER the floor policy.
- * `--per-commit-test <base>` runs the delta-coverage enforcer (`run_per_commit_test`) AFTER the floor
- * policy — measuring coverage attributed to the lines changed since `<base>` and (under
- * `--cov-validation`) failing when that delta is below floor; absent, it is a zero-cost no-op. The
- * regression tier's OWN verdict gates last (after the floor + delta policies), matching the
- * pre-C-cov ordering; with no regression files the whole tier is a zero-cost no-op (the 0.3.0.29
- * inert base).
+ * run the child fail-fast — a failed assert panics with a non-zero exit, M.1). The regression tier
+ * (`run_regression_tier`) runs NEXT REGARDLESS of the gate's own verdict — never skipped just
+ * because the gate failed. Before this, a single crashed `#test` returned the gate's status
+ * immediately and the regression tier NEVER RAN, so a lane whose unit gate happened to fail
+ * reported nothing at all about its regression corpus — the exact hidden-failure shape M.1 exists
+ * to forbid, just one phase up from where M.1 itself already guards. The gate's own failure is
+ * still the highest-precedence verdict (a `trc != 0` still fails the whole command, unchanged),
+ * only DEFERRED past the regression tier's run so its report — pass or fail — is never swallowed.
+ * With no `[tests] regression` files declared (`test_regression_files` empty, 0.3.1 C0) the tier
+ * is a zero-cost no-op either way (the 0.3.0.29 inert base).
+ *
+ * When the gate passes, its coverage feed folds into `fe.prog` (C-cov, D9) BEFORE
+ * `--coverage`/the floor policy read it, so neither ever undercounts what the regressives
+ * exercised, and the D4 coverage-floor policy applies next (`--cov-validation` enforces;
+ * otherwise warns — owner ruling 0.3.0.29). Unlike `teko build`, it emits NO release binary.
+ * `--coverage` writes a Cobertura report to `<cwd>/cobertura.xml` (the project root — `teko test`
+ * has no `-o`). `--per-test-cov` additionally emits the dev-time per-test attribution report
+ * (`run_per_test_cov`) AFTER the floor policy. `--per-commit-test <base>` runs the delta-coverage
+ * enforcer (`run_per_commit_test`) AFTER the floor policy — measuring coverage attributed to the
+ * lines changed since `<base>` and (under `--cov-validation`) failing when that delta is below
+ * floor; absent, it is a zero-cost no-op. The regression tier's OWN verdict gates last among the
+ * pass-path policies (after the floor + delta policies), matching the pre-C-cov ordering.
+ *
+ * The D4 arith-cast-rate NUMBER is reported here, unconditionally, before the gate even runs —
+ * see `report_arith_cast_rate` — because it is a property of the TYPED SOURCE alone, so it prints
+ * even on a tree whose suite fails; only its PASS/FAIL verdict (`arith_cast_gate`) waits until the
+ * end, alongside every other gate.
  *
  * @param dir              the project directory (already the cwd; the front-end chdir'd in)
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
@@ -4597,18 +4609,15 @@ fn run_regression_tier(dir: str, exe: str, fe: Frontend) -> i32 {
  * @param analyzer         `--analyzer` — after the gate + floors, run the dev-time stale/redundant analyzer
  * @param arith_cast_gate  `--arith-cast-gate` — after the gate + floors, enforce the D4
  *                         ARITH-CAST-RATE ceiling (≤2%, `cast-width-hygiene-0.3.1.md` §5, C5)
- * @return                 0 when every test passes and the floor + delta + regression + arith-cast-rate
- *                         policies hold, else the failing status
+ * @return                 0 when every test passes and the gate + floor + delta + regression +
+ *                         arith-cast-rate policies hold, else the highest-precedence failing status
  */
 fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
     ensure_rt_dir_abs()
     let exe = self_exe_path()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
-    // Reported HERE, verdict at the END — see `report_arith_cast_rate` for why the two are split.
-    // The number is a property of the typed source, so it prints even on a tree whose suite fails.
     let acr = report_arith_cast_rate(fe)
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
-    if trc != 0 { return trc }
     let pre_regr_cob = coverage::cov_cobertura(fe.prog)
     let has_regr = fe.manifest.test_regression_files.len > 0
     let regr_rc = if has_regr { run_regression_tier(dir, exe, fe) } else { 0 }
@@ -4617,18 +4626,43 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
         teko::io::println("teko: wrote coverage report cobertura.xml")
     }
-    let floor_rc = enforce_coverage_floors(dir, fe, cov_validation)
-    if floor_rc != 0 { return floor_rc }
-    if per_commit_base.len > 0 {
-        let pc = run_per_commit_test(dir, fe, per_commit_base, cov_validation, pre_regr_cob)
-        if pc != 0 { return pc }
+    let floor_rc = if trc == 0 { enforce_coverage_floors(dir, fe, cov_validation) } else { 0 }
+    mut per_commit_rc: i32 = 0
+    if trc == 0 && floor_rc == 0 && per_commit_base.len > 0 {
+        per_commit_rc = run_per_commit_test(dir, fe, per_commit_base, cov_validation, pre_regr_cob)
     }
-    if has_regr && regr_rc != 0 { return regr_rc }
+    let gate_rc = test_gate_precedence(trc, floor_rc, per_commit_rc, has_regr, regr_rc)
+    if gate_rc != 0 { return gate_rc }
     if arith_cast_gate {
         let acrc = arith_cast_verdict(acr)
         if acrc != 0 { return acrc }
     }
     if per_test_cov { return run_per_test_cov(dir, fe) }
     if analyzer { return run_analyzer(dir, fe) }
+    0
+}
+
+/**
+ * test_gate_precedence — `test_project`'s combined failing status, in PRECEDENCE order, extracted
+ * to a pure function so the invariant this fixes (owner-observed run `30400712261`: a crashed unit
+ * gate used to return IMMEDIATELY, skipping the regression tier's run entirely — the tier's own
+ * report went missing, not merely failed) is provable without a real build. The gate's own status
+ * (`trc`) is still the highest-precedence failure, UNCHANGED; only the caller's control flow moved,
+ * computing `floor_rc`/`per_commit_rc`/`regr_rc` before ever consulting `trc`, so their reports are
+ * never swallowed by an earlier return.
+ *
+ * @param trc            the unit-test gate's own exit status (0 = every `#test` passed)
+ * @param floor_rc       the D4 coverage-floor policy's status (0 when it was never consulted)
+ * @param per_commit_rc  the delta-coverage enforcer's status (0 when `--per-commit-test` was absent)
+ * @param has_regr       whether the manifest declares `[tests] regression` files at all
+ * @param regr_rc        the regression tier's own exit status (ignored when `has_regr` is false)
+ * @return                the highest-precedence non-zero status among the four, else 0
+ * @since 0.3.1
+ */
+fn test_gate_precedence(trc: i32, floor_rc: i32, per_commit_rc: i32, has_regr: bool, regr_rc: i32) -> i32 {
+    if trc != 0 { return trc }
+    if floor_rc != 0 { return floor_rc }
+    if per_commit_rc != 0 { return per_commit_rc }
+    if has_regr && regr_rc != 0 { return regr_rc }
     0
 }
