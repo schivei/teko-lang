@@ -55,10 +55,12 @@ pub type EncInstX86 = struct {
  * and the RSP-relative byte offset of every `MFuncX86.frame` slot. Purely a
  * side-table the encoder reads to resolve `MFrameAddrX86` to a concrete
  * `lea dst, [rsp+off]`; the block stream is never rewritten. A `size` of 0
- * marks a frameless function (no prologue/epilogue). B1-5 defines the type and
- * resolves `MFrameAddrX86` through it (the §6.1 signature); B1-6 fills it via
- * `compute_frame_layout_x86` and emits the matching prologue/epilogue. Mirrors
- * arm64's `FrameLayout`.
+ * marks a frameless function (no prologue/epilogue) UNLESS `call_align` is
+ * true, in which case a minimal alignment-only `push rbp`/`mov rbp,rsp` is
+ * still emitted (`frame_is_framed_x86`, 0.3.1.0 degrau 19). B1-5 defines the
+ * type and resolves `MFrameAddrX86` through it (the §6.1 signature); B1-6
+ * fills it via `compute_frame_layout_x86` and emits the matching
+ * prologue/epilogue. Mirrors arm64's `FrameLayout`.
  *
  * @since #386 B1-5
  */
@@ -83,6 +85,14 @@ pub type FrameLayoutX86 = struct {
      * `lea dst, [rsp+slot_offsets[slot]]`.
      */
     slot_offsets: []u32
+    /**
+     * call_align — true iff the function needs a minimal alignment-only
+     * prologue/epilogue purely to restore 16-byte alignment at the calls it
+     * itself issues (`needs_call_align_x86`), independent of `size`/the saved
+     * lists — a function otherwise entitled to be frameless (zero slots, zero
+     * callee-saved) is NOT frameless when this is true.
+     */
+    call_align: bool
 }
 
 /**
@@ -1062,6 +1072,88 @@ fn func_makes_call_x86(f: MFuncX86) -> bool {
 }
 
 /**
+ * block_any_ret_x86 — whether one block contains a return terminator
+ * (`MRetX86`), the block-level fold `func_any_ret_x86` walks over every block
+ * (the x86 mirror of arm64's `block_any_ret`).
+ *
+ * @param MBlockX86 b  the block to scan
+ * @return bool  true iff `b` contains an `MRetX86`
+ */
+fn block_any_ret_x86(b: MBlockX86) -> bool {
+    mut found = false
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        if is_ret_x86(b.insts[i]) { found = true; break }
+        i++
+    }
+    found
+}
+
+/**
+ * func_any_ret_x86 — whether the physical `MFuncX86` contains any `MRetX86`, so
+ * `needs_call_align_x86` can tell a function that CALLS AND RETURNS (whose own
+ * call sites need proper 16-byte alignment restored) from one that calls only
+ * as its own divergent tail (`ex_func_frameless_call_reloc`'s own `tk_exit`
+ * shape — a call with no `MRet` anywhere, whose alignment this backend has
+ * never needed to restore because nothing after it ever runs). The x86 mirror
+ * of arm64's `func_any_ret`.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return bool  true iff the function contains an `MRetX86`
+ */
+fn func_any_ret_x86(f: MFuncX86) -> bool {
+    mut found = false
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_ret_x86(f.blocks[i]) { found = true; break }
+        i++
+    }
+    found
+}
+
+/**
+ * needs_call_align_x86 — whether a function that would otherwise be frameless
+ * (zero local slots, zero callee-saved registers) still needs a minimal
+ * `push rbp`/`mov rbp,rsp` prologue for ONE reason alone: restoring the
+ * SysV 16-byte call-boundary alignment before the calls IT ITSELF issues.
+ *
+ * SysV guarantees `rsp+8` is a multiple of 16 at every function's OWN entry
+ * (the caller's `call` having just pushed an 8-byte return address) — so a
+ * function that does ZERO stack adjustment before issuing a `call` of its own
+ * hands that callee a stack off by 8 from the alignment the ABI promises it.
+ * A single `push rbp` (no `sub rsp` needed) restores the missing 8 bytes at
+ * no extra cost, exactly as it would for any other framed function.
+ *
+ * Scoped to a function that ALSO RETURNS (`func_any_ret_x86`), mirroring
+ * arm64's own `needs_lr_save` reasoning exactly (`func_any_call(f) &&
+ * func_any_ret(f)`): a function whose only calls are its own divergent tail
+ * (`ex_func_frameless_call_reloc`'s `tk_exit` case) never returns to
+ * observe — or make — a misaligned call after that point, so the existing
+ * frameless encoding for THAT shape is untouched, byte for byte.
+ *
+ * Found live (0.3.1.0 degrau 19): the native entry stub `wrap_native_entry`
+ * appends (`argc`/`argv` -> `tk_set_args` -> the renamed virtual-main -> its
+ * own `ret`) has no local slots and clobbers no callee-saved register, so it
+ * was the ONE function in a self-built compiler with zero slots/saves that
+ * still calls AND returns — every other function either needs a slot/save of
+ * its own or (like a bare `exit(n)` program body) never returns. The
+ * resulting off-by-8 stack silently reached every call this stub makes
+ * without symptom until a callee's OWN call chain used a strictly
+ * 16-byte-aligned store deep inside (glibc's `vsnprintf` internals, first
+ * exercised natively by this degrau's `tk_fmt_d_len`/`tk_fmt_n_i_len` twins) —
+ * a SIGSEGV inside `__printf_buffer_init`, several frames below the actual
+ * misalignment.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return bool  true iff a minimal alignment-only prologue/epilogue is needed
+ */
+fn needs_call_align_x86(f: MFuncX86) -> bool {
+    func_makes_call_x86(f) && func_any_ret_x86(f)
+}
+
+/**
  * shadow_bytes_x86 — the Win64 caller-reserved shadow-space contribution to a
  * function's frame: `abi.shadow_space` when the register file reserves shadow
  * space (Win64: 32) AND the function makes a call (a callee expects 32 bytes to
@@ -1111,22 +1203,25 @@ pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX
         saved_gpr = saved.gpr
         saved_fpr = saved.fpr
         slot_offsets = slot_offsets
+        call_align = needs_call_align_x86(f)
     }
 }
 
 /**
- * frame_is_framed_x86 — whether a resolved frame needs a prologue/epilogue: true
- * when the `sub rsp` region is non-empty OR any callee-saved register is pushed.
- * A framed function with an even callee-saved count and no slots has a zero `sub`
- * amount yet is still framed (the pushes carry it), so this is NOT simply
- * `size>0`.
+ * frame_is_framed_x86 — whether a resolved frame needs a prologue/epilogue:
+ * true when the `sub rsp` region is non-empty, OR any callee-saved register is
+ * pushed, OR the frame is otherwise empty but still needs the minimal
+ * alignment-only prologue `needs_call_align_x86` names (`layout.call_align`).
+ * A framed function with an even callee-saved count and no slots has a zero
+ * `sub` amount yet is still framed (the pushes carry it), so this is NOT
+ * simply `size>0`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
  * @return bool  true iff a prologue/epilogue must be emitted
  */
 fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
     let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
-    (layout.size > (0 to u32)) || (n_saved > (0 to u32))
+    (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
 }
 
 /**

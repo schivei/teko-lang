@@ -570,6 +570,76 @@ tk_str tk_fmt_dyn_u64(uint64_t val, tk_str spec) {
     }
 }
 
+// tk_fmt_*_len — out-parameter-length twins of the thirteen format-spec builders above (declared
+// in teko_rt.h; see that comment for WHY). Each is a thin wrapper: it calls its own `tk_str`-
+// returning twin, writes the length out, and returns the pointer half — the SAME shape
+// tk_str_concat_len/tk_i64_to_str_len/tk_u64_to_str_len already established (0.3.1.0 degrau 19).
+const tk_byte *tk_fmt_f_len(double val, int64_t prec, uint64_t *out_len) {
+    tk_str r = tk_fmt_f(val, (int)prec);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_d_len(int64_t val, int64_t width, uint64_t *out_len) {
+    tk_str r = tk_fmt_d(val, (int)width);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_x_upper_len(uint64_t val, uint64_t *out_len) {
+    tk_str r = tk_fmt_x_upper(val);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_x_lower_len(uint64_t val, uint64_t *out_len) {
+    tk_str r = tk_fmt_x_lower(val);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_e_len(double val, int64_t prec, uint64_t *out_len) {
+    tk_str r = tk_fmt_e(val, (int)prec);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_n_f_len(double val, int64_t prec, uint64_t *out_len) {
+    tk_str r = tk_fmt_n_f(val, (int)prec);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_n_i_len(int64_t val, uint64_t *out_len) {
+    tk_str r = tk_fmt_n_i(val);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_g_len(double val, int64_t prec, uint64_t *out_len) {
+    tk_str r = tk_fmt_g(val, (int)prec);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_b_len(uint64_t val, uint64_t *out_len) {
+    tk_str r = tk_fmt_b(val);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_p_len(double val, int64_t prec, uint64_t *out_len) {
+    tk_str r = tk_fmt_p(val, (int)prec);
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_dyn_f64_len(double val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len) {
+    tk_str r = tk_fmt_dyn_f64(val, (tk_str){ spec_ptr, spec_len });
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_dyn_i64_len(int64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len) {
+    tk_str r = tk_fmt_dyn_i64(val, (tk_str){ spec_ptr, spec_len });
+    *out_len = r.len;
+    return r.ptr;
+}
+const tk_byte *tk_fmt_dyn_u64_len(uint64_t val, const tk_byte *spec_ptr, uint64_t spec_len, uint64_t *out_len) {
+    tk_str r = tk_fmt_dyn_u64(val, (tk_str){ spec_ptr, spec_len });
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // --- Phase 3 str query/slice builtins (query helpers allocate nothing; slice helpers follow
 // tk_str_concat's ownership — a fresh malloc'd buffer the result OWNS, tk_panic on OOM) ---
 

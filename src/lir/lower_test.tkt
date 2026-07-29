@@ -1360,6 +1360,104 @@ fn lwt_lowers_interpolation_as_nested_str_concat_calls() {
     teko::assert::str_contains(text, "call @tk_str_concat_len(")
 }
 
+/** lwt_bare_pieces — the two-piece (empty, empty) list every one-hole `TInterp` fixture
+    below needs, since only the HOLE's own spec is under test, never the surrounding text
+    (0.3.1.0 degrau 19). */
+fn lwt_bare_pieces() -> []str {
+    teko::list::push(teko::list::push(teko::list::empty(), ""), "")
+}
+
+/** lwt_interp_static — a one-hole `$"…{hole:spec}…"` node whose spec is STATIC (0.3.1.0
+    degrau 19). */
+fn lwt_interp_static(hole: checker::TExpr, spec: str) -> checker::TExpr {
+    let specs = teko::list::push(teko::list::empty(), checker::TFSpec { kind = checker::TFSpecStatic { s = spec } })
+    let holes = teko::list::push(teko::list::empty(), hole)
+    checker::TExpr { kind = checker::TInterp { pieces = lwt_bare_pieces(); holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+}
+
+/** lwt_interp_dynamic — a one-hole `$"…{hole:[spec_arg]}…"` node whose spec is DYNAMIC, a
+    single runtime `str` argument (0.3.1.0 degrau 19). */
+fn lwt_interp_dynamic(hole: checker::TExpr, spec_arg: checker::TExpr) -> checker::TExpr {
+    let args = teko::list::push(teko::list::empty(), spec_arg)
+    let specs = teko::list::push(teko::list::empty(), checker::TFSpec { kind = checker::TFSpecDynamic { args = args } })
+    let holes = teko::list::push(teko::list::empty(), hole)
+    checker::TExpr { kind = checker::TInterp { pieces = lwt_bare_pieces(); holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+}
+
+#test
+fn lwt_lowers_static_hex_lower_spec_as_the_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "x"))
+    teko::assert::str_contains(text, "call @tk_fmt_x_lower_len(")
+}
+
+#test
+fn lwt_lowers_static_hex_upper_spec_by_its_own_leading_case() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "X"))
+    teko::assert::str_contains(text, "call @tk_fmt_x_upper_len(")
+}
+
+#test
+fn lwt_lowers_static_binary_spec_as_the_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "b"))
+    teko::assert::str_contains(text, "call @tk_fmt_b_len(")
+}
+
+#test
+fn lwt_lowers_static_decimal_spec_with_no_digits_as_the_default_width_one() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "D"))
+    teko::assert::str_contains(text, "call @tk_fmt_d_len(")
+    teko::assert::str_contains(text, "const 1")
+}
+
+#test
+fn lwt_lowers_static_decimal_spec_parses_its_own_trailing_digits_as_the_width() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "D5"))
+    teko::assert::str_contains(text, "const 5")
+}
+
+#test
+fn lwt_lowers_static_int_thousands_spec_as_the_len_out_call_with_no_precision_arg() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "N"))
+    teko::assert::str_contains(text, "call @tk_fmt_n_i_len(")
+}
+
+#test
+fn lwt_lowers_static_float_family_spec_as_the_len_out_call_with_its_parsed_precision() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_fnum(3.14159), "F2"))
+    teko::assert::str_contains(text, "call @tk_fmt_f_len(")
+    teko::assert::str_contains(text, "const 2")
+}
+
+#test
+fn lwt_lowers_static_float_thousands_spec_to_the_float_twin_not_the_int_one() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_fnum(3.14159), "N"))
+    teko::assert::str_contains(text, "call @tk_fmt_n_f_len(")
+}
+
+#test
+fn lwt_static_spec_with_an_unrecognized_leading_character_honest_stops() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "Q5"))
+    teko::assert::str_contains(text, "ERR: native backend N1: unrecognized format spec")
+}
+
+#test
+fn lwt_lowers_dynamic_spec_int_as_the_dyn_i64_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_dynamic(lwt_num_i64(6), lwt_strlit("X")))
+    teko::assert::str_contains(text, "call @tk_fmt_dyn_i64_len(")
+}
+
+#test
+fn lwt_lowers_dynamic_spec_unsigned_as_the_dyn_u64_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_dynamic(lwt_num(6, checker::PrimKind::U64), lwt_strlit("X")))
+    teko::assert::str_contains(text, "call @tk_fmt_dyn_u64_len(")
+}
+
+#test
+fn lwt_lowers_dynamic_spec_float_as_the_dyn_f64_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_dynamic(lwt_fnum(3.14159), lwt_strlit("F2")))
+    teko::assert::str_contains(text, "call @tk_fmt_dyn_f64_len(")
+}
+
 /** lwt_in_expr — `lhs in [elems]`, always bool-typed (A1-4, #382). */
 fn lwt_in_expr(lhs: checker::TExpr, elems: []checker::TExpr) -> checker::TExpr {
     checker::TExpr { kind = checker::TInExpr { lhs = lhs; elems = elems }; type = lwt_prim(checker::PrimKind::Bool); line = 0; col = 0 }

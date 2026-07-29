@@ -46,7 +46,7 @@ fn ex_mem(base: MReg, off: i32) -> MMem {
  */
 fn ex_layout() -> FrameLayoutX86 {
     let slots = teko::list::push(teko::list::push(teko::list::empty(), 16 to u32), 24 to u32)
-    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots }
+    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false }
 }
 
 /**
@@ -452,7 +452,7 @@ fn fx_none_u32() -> []u32 {
  * @return FrameLayoutX86  the fixture frame
  */
 fn fx_frame(size: u32, saved: []u32, slots: []u32) -> FrameLayoutX86 {
-    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots }
+    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false }
 }
 
 /**
@@ -613,7 +613,7 @@ fn ex_func_makes_call_x86_detects_indirect() {
  * @return void
  */
 fn ex_win64_callee_saved_xmm_honest_stops() {
-    let fl = FrameLayoutX86 { size = 16 to u32; saved_gpr = fx_none_u32(); saved_fpr = fx_u1(6 to u32); slot_offsets = fx_none_u32() }
+    let fl = FrameLayoutX86 { size = 16 to u32; saved_gpr = fx_none_u32(); saved_fpr = fx_u1(6 to u32); slot_offsets = fx_none_u32(); call_align = false }
     teko::assert::str_contains(fx_prologue_stop(fl), "B3-xmm-callee-saved")
 }
 
@@ -675,6 +675,45 @@ fn ex_func_frameless_call_reloc() {
     teko::assert::is_true(ef.relocs[0].sym == "tk_exit")
     teko::assert::is_true(fx_reloc_kind_name(ef.relocs[0].kind) == "plt32")
     teko::assert::is_true(ef.relocs[0].addend == ((0) - (4)))
+}
+
+#test
+/**
+ * ex_func_call_then_return_gets_a_minimal_align_only_frame — the sibling axis
+ * `ex_func_frameless_call_reloc` does NOT cover: a function with ZERO frame slots and ZERO
+ * callee-saved registers that calls `tk_something` AND THEN RETURNS (unlike that fixture's
+ * `tk_exit` call, which never returns) gets a minimal `push rbp`/`mov rbp,rsp` prologue
+ * (`554889e5`) and a bare `leave` epilogue (`c9`) ahead of its own `ret` (`c3`) —
+ * `needs_call_align_x86` restoring the SysV 16-byte call-boundary alignment a genuinely
+ * frameless encoding would leave off by 8 at the call this function itself issues (0.3.1.0
+ * degrau 19 — found live: the native entry stub `wrap_native_entry` appends is exactly this
+ * shape, and the missing 8 bytes went unnoticed until a callee's OWN call chain used a
+ * strictly-aligned SSE store several frames deep).
+ *
+ * @return void
+ */
+fn ex_func_call_then_return_gets_a_minimal_align_only_frame() {
+    let f = fx_1block_func("main", fx_i2(call_x86("tk_something", teko::list::empty(), ex_p(0), false, false), ret_x86()), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "554889e5e800000000c9c3")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (5 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "tk_something")
+}
+
+#test
+/**
+ * ex_func_call_with_no_return_stays_frameless_even_when_named_differently —
+ * `needs_call_align_x86` is NOT keyed on the symbol `"main"`: any function whose only call
+ * never returns stays byte-identical to the pre-degrau-19 frameless encoding, confirming the
+ * fix is scoped to the call-AND-return axis alone (0.3.1.0 degrau 19).
+ *
+ * @return void
+ */
+fn ex_func_call_with_no_return_stays_frameless_even_when_named_differently() {
+    let f = fx_1block_func("teko_main", fx_i1(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false)), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "e800000000")
 }
 
 #test

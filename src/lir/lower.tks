@@ -8020,6 +8020,13 @@ fn four_args(a_ptr: u32, a_len: u32, b_ptr: u32, b_len: u32) -> []u32 {
     teko::list::push(teko::list::push(two_args(a_ptr, a_len), b_ptr), b_len)
 }
 
+/** three_args — a three-element VReg argument list: a scalar value plus a `tk_str` argument's
+    own (ptr, len) pair — the shape a DYNAMIC format-spec call's runtime symbol takes (the hole's
+    value, then the spec string's two words) (0.3.1.0 degrau 19). */
+fn three_args(a: u32, b_ptr: u32, b_len: u32) -> []u32 {
+    teko::list::push(two_args(a, b_ptr), b_len)
+}
+
 /**
  * lower_len_out_call — call a runtime symbol whose fat (`str`) result travels back through an
  * OUT-PARAMETER length instead of a genuine 2-eightbyte struct return: the caller reserves an
@@ -8077,15 +8084,167 @@ fn lower_interp_hole_none_fat(ctx: LowerCtx, h: checker::TExpr) -> LoweredFat | 
     }
 }
 
+/**
+ * fmt_static_lead_low — a static format spec's normalized (lowercased) leading character:
+ * `spec[0]` when present, else `'f'` — mirrors `emit_interp`'s own default for an EMPTY static
+ * spec (`codegen.tks`), the oracle this whole family follows byte for byte.
+ *
+ * @param spec  the static format spec text (e.g. "F2", "x", "N")
+ * @return      the lowercased leading byte
+ */
+fn fmt_static_lead_low(spec: str) -> byte {
+    let fc0 = if spec.len > 0 { spec[0] } else { b'f' }
+    if fc0 >= b'A' && fc0 <= b'Z' { (fc0 to u64 + 32) to byte } else { fc0 }
+}
+
+/**
+ * fmt_static_prec — a static spec's trailing precision/width digits, or the family's own
+ * default (1 for `d`, 6 for every other family) when none are written — the SAME parse
+ * `emit_interp` runs (`codegen.tks`), so both routes render identical text for identical specs.
+ *
+ * @param spec    the static format spec text
+ * @param fc_low  the spec's own lowercased leading character (`fmt_static_lead_low`)
+ * @return        the parsed (or defaulted) precision/width
+ */
+fn fmt_static_prec(spec: str, fc_low: byte) -> i64 {
+    mut prec: i64 = 0
+    mut has_prec = false
+    mut si: u64 = 1
+    loop {
+        if si >= spec.len { break }
+        let ch = spec[si]
+        if ch >= b'0' && ch <= b'9' { prec = prec * 10 + (ch to i64 - 48); has_prec = true }
+        si++
+    }
+    if has_prec { return prec }
+    if fc_low == b'd' { 1 } else { 6 }
+}
+
+/**
+ * fmt_static_takes_prec — whether the runtime family named by `fc_low` accepts a precision/
+ * width SECOND argument — mirrors `emit_interp`'s own `fmt_family_takes_prec` (`codegen.tks`)
+ * exactly: the hex/binary/integer-thousands helpers take only the value; every other family
+ * takes value + precision.
+ *
+ * @param fc_low  the spec's own lowercased leading character
+ * @param is_flt  whether the hole's static type is a float (f32/f64)
+ * @return        true iff the resolved `tk_fmt_*_len` twin takes a precision/width argument
+ */
+fn fmt_static_takes_prec(fc_low: byte, is_flt: bool) -> bool {
+    if fc_low == b'x' { return false }
+    if fc_low == b'b' { return false }
+    if fc_low == b'n' && !is_flt { return false }
+    true
+}
+
+/**
+ * fmt_static_symbol — the runtime `_len` twin `emit_interp`'s own dispatch would call for this
+ * static spec (`codegen.tks`, the oracle). An unrecognized leading character is refused with the
+ * SAME honest stop codegen itself raises at compile time (`"codegen: unrecognized format
+ * spec"`) — a malformed spec that has never been validated earlier in the pipeline
+ * (`checker::type_interp` only checks the HOLE's type, never the spec text), so both routes
+ * reject it identically rather than one silently guessing.
+ *
+ * @param spec    the static format spec text (needed only to tell `X` from `x`)
+ * @param fc_low  the spec's own lowercased leading character
+ * @param is_flt  whether the hole's static type is a float (f32/f64)
+ * @return        the runtime symbol name, or an honest stop for an unrecognized leading character
+ */
+fn fmt_static_symbol(spec: str, fc_low: byte, is_flt: bool) -> str | error {
+    if fc_low == b'f' { return "tk_fmt_f_len" }
+    if fc_low == b'e' { return "tk_fmt_e_len" }
+    if fc_low == b'g' { return "tk_fmt_g_len" }
+    if fc_low == b'p' { return "tk_fmt_p_len" }
+    if fc_low == b'd' { return "tk_fmt_d_len" }
+    if fc_low == b'x' { return if spec.len > 0 && spec[0] == b'X' { "tk_fmt_x_upper_len" } else { "tk_fmt_x_lower_len" } }
+    if fc_low == b'b' { return "tk_fmt_b_len" }
+    if fc_low == b'n' { return if is_flt { "tk_fmt_n_f_len" } else { "tk_fmt_n_i_len" } }
+    error { message = "native backend N1: unrecognized format spec (internal)" }
+}
+
+/**
+ * hole_is_float — whether a typed interpolation hole's own resolved type is a float prim
+ * (f32/f64). Shared by the static and dynamic format-spec lowerings, both of which split their
+ * runtime symbol choice on this exact question.
+ *
+ * @param h  the hole expression
+ * @return   true iff `h`'s type is `f32`/`f64`
+ */
+fn hole_is_float(h: checker::TExpr) -> bool {
+    match h.type { checker::Prim as p => prim_is_float_kind(p.kind); _ => false }
+}
+
+/**
+ * lower_interp_hole_static_fat — a STATIC format-spec hole (`:F2`, `:x`, `:N`, …), as its
+ * (ptr, len) pair: the spec's leading character selects one of `emit_interp`'s own ten
+ * `tk_fmt_*` runtime families (`codegen.tks`, the oracle this mirrors byte for byte — the same
+ * leading-character table, the same default precision, the same uppercase/lowercase hex split),
+ * each reached through its `_len` out-parameter twin (`lower_len_out_call`'s convention: every
+ * one of these has the SAME 2-eightbyte-struct-return shape this backend's `LCall` cannot
+ * capture directly) (0.3.1.0 degrau 19).
+ *
+ * @param ctx  the lowering context
+ * @param h    the hole expression (its resolved type selects int vs float rendering)
+ * @param fs   the static format spec (`fs.s`, e.g. "F2")
+ * @return     the rendered text's (ptr, len) pair
+ * @throws     propagated from the hole's own lowering, or `fmt_static_symbol`'s honest stop for
+ *             a spec whose leading character none of the ten families recognizes
+ */
+fn lower_interp_hole_static_fat(ctx: LowerCtx, h: checker::TExpr, fs: checker::TFSpecStatic) -> LoweredFat | error {
+    let ho = match lower_expr(ctx, h) { Lowered as x => x; error as err => return err }
+    let is_flt = hole_is_float(h)
+    let fc_low = fmt_static_lead_low(fs.s)
+    let sym = match fmt_static_symbol(fs.s, fc_low, is_flt) { str as s => s; error as err => return err }
+    if !fmt_static_takes_prec(fc_low, is_flt) {
+        return lower_len_out_call(ho.ctx, sym, single_arg(ho.vreg), h)
+    }
+    let precr = ctx_alloc(ho.ctx)
+    let with_prec = ctx_append(precr.ctx, const_int_inst(precr.vreg, fmt_static_prec(fs.s, fc_low), h.line, h.col))
+    lower_len_out_call(with_prec, sym, two_args(ho.vreg, precr.vreg), h)
+}
+
+/**
+ * lower_interp_hole_dynamic_fat — a DYNAMIC format-spec hole (`:[spec_expr]`), as its (ptr, len)
+ * pair: the hole's own value plus the runtime-evaluated spec string are flattened through to one
+ * of the three `tk_fmt_dyn_*_len` twins, split only by the hole's own numeric family (float/
+ * signed/unsigned) — the SAME split `emit_interp`'s own dynamic arm makes (`codegen.tks`)
+ * (0.3.1.0 degrau 19).
+ *
+ * @param ctx  the lowering context
+ * @param h    the hole expression
+ * @param fd   the dynamic format spec (`fd.args[0]`, a runtime `str` expression)
+ * @return     the rendered text's (ptr, len) pair
+ * @throws     propagated from the hole's own lowering or the spec argument's own fat lowering
+ */
+fn lower_interp_hole_dynamic_fat(ctx: LowerCtx, h: checker::TExpr, fd: checker::TFSpecDynamic) -> LoweredFat | error {
+    let ho = match lower_expr(ctx, h) { Lowered as x => x; error as err => return err }
+    let spec = match lower_fat_expr(ho.ctx, fd.args[0]) { LoweredFat as x => x; error as err => return err }
+    let sym = dynamic_fmt_symbol(h)
+    lower_len_out_call(spec.ctx, sym, three_args(ho.vreg, spec.ptr, spec.len), h)
+}
+
+/**
+ * dynamic_fmt_symbol — the `tk_fmt_dyn_*_len` twin for a dynamic-spec hole's own numeric
+ * family: float, signed integer, or unsigned integer — mirrors `emit_interp`'s own dynamic
+ * dispatch (`codegen.tks`) exactly (a `bool`/`byte` hole, neither float nor signed, takes the
+ * unsigned family, the same choice codegen makes for it).
+ *
+ * @param h  the hole expression (`checker::type_interp` has already proven it numeric)
+ * @return   the runtime symbol name
+ */
+fn dynamic_fmt_symbol(h: checker::TExpr) -> str {
+    if hole_is_float(h) { return "tk_fmt_dyn_f64_len" }
+    let is_sint = match h.type { checker::Prim as p => prim_is_signed_int(p.kind); _ => false }
+    if is_sint { "tk_fmt_dyn_i64_len" } else { "tk_fmt_dyn_u64_len" }
+}
+
 /** lower_interp_hole_fat — one interpolation hole's (ptr, len) pair, per its format spec
-    (A1-4, #382, 0.3.1.0 degrau 9). Only `TFSpecNone` (no `:spec`) is closed; a static (`:F2`) or
-    dynamic (`:[…]`) spec is out of the A1-4 subset — a later closure over `emit_interp`'s full
-    `tk_fmt_*` family. */
+    (A1-4, #382, 0.3.1.0 degrau 9; the static and dynamic arms closed at degrau 19). */
 fn lower_interp_hole_fat(ctx: LowerCtx, h: checker::TExpr, spec: checker::TFSpec) -> LoweredFat | error {
     match spec.kind {
         checker::TFSpecNone => lower_interp_hole_none_fat(ctx, h)
-        checker::TFSpecStatic => error { message = "native backend N1: static interpolation format spec not yet lowered (N2)" }
-        checker::TFSpecDynamic => error { message = "native backend N1: dynamic interpolation format spec not yet lowered (N2)" }
+        checker::TFSpecStatic as fs => lower_interp_hole_static_fat(ctx, h, fs)
+        checker::TFSpecDynamic as fd => lower_interp_hole_dynamic_fat(ctx, h, fd)
     }
 }
 
