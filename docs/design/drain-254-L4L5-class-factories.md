@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o dreno #254 L4/L5 (genéricos), já executado. Não descreve o estado atual do projeto.
+
 # Drain — #254 L4/L5: generic CLASS factories + self-construct inside a generic template
 
 **Status:** DESIGN-AHEAD (architect). No product code changed. Verified at file:line against

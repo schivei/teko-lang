@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o crumb T-B1 da onda const (Tier-B), já executado. Não descreve o estado atual do projeto.
+
 # T-B1 — widen the reloc model for data→data relocations (#594 Tier-B)
 
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing

@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o crumb T-B2 da onda const (Tier-B), já executado. Não descreve o estado atual do projeto.
+
 # T-B2 — writer ELF emite `.rela.rodata` (#594 Tier-B)
 
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing
