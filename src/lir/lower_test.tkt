@@ -610,7 +610,7 @@ fn lwt_extern_call_u64_return_is_not_narrowed() {
 
 /**
  * An `extern fn` declared `-> void` returns no value at all: `lower_call_symbol`'s own void
- * path never allocates a result VReg, so there is nothing for `apply_extern_return_narrow` to
+ * path never allocates a result VReg, so there is nothing for `apply_native_c_return_narrow` to
  * narrow — asserting this holds is what keeps a future edit from dereferencing a void call's
  * dummy VReg as if it were a real result.
  *
@@ -2537,6 +2537,75 @@ fn lwt_call_symbol_resolves_the_assert_seed() {
     names = teko::list::push(names, "is_true")
     let no_ext: []LExternFn = teko::list::empty()
     teko::assert::is_true(match call_symbol(lwt_bare_call(names, ""), no_ext) { str as s => s == "teko__assert__is_true"; error => false })
+}
+
+/**
+ * Assert `call_symbol` resolves the two `str` PREDICATE builtins (`contains`/`ends_with`) to
+ * their plain runtime symbol (0.3.1.0 degrau 11): before this, either bare name fell through to
+ * `unresolved_builtin_stop` — first surfaced through `teko::assert::str_contains`'s own body,
+ * which every `.tkt` test file in this project calls via the injected assert seed.
+ */
+#test
+fn lwt_call_symbol_resolves_str_contains_and_ends_with() {
+    let contains = lwt_bare_call(teko::list::push(teko::list::empty(), "contains"), "")
+    let ends_with = lwt_bare_call(teko::list::push(teko::list::empty(), "ends_with"), "")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(contains, no_ext) { str as s => s == "tk_str_contains"; error => false })
+    teko::assert::is_true(match call_symbol(ends_with, no_ext) { str as s => s == "tk_str_ends_with"; error => false })
+}
+
+/**
+ * Assert `call_symbol` resolves the three `str`-returning SLICE builtins (`slice`/`slice_to`/
+ * `slice_from`) to their runtime OUT-PARAMETER-LENGTH twin, not the real two-eightbyte `tk_str`
+ * return `codegen.tks` targets (0.3.1.0 degrau 11) — `lower_call_fat`'s own generic tail
+ * (`lower_args` + `lower_len_out_call`) supplies the hidden length out-slot once the symbol
+ * resolves, mirroring `tk_str_concat_len`'s own shape (0.3.1.0 degrau 9).
+ */
+#test
+fn lwt_call_symbol_resolves_str_slice_family() {
+    let slice = lwt_bare_call(teko::list::push(teko::list::empty(), "slice"), "")
+    let slice_to = lwt_bare_call(teko::list::push(teko::list::empty(), "slice_to"), "")
+    let slice_from = lwt_bare_call(teko::list::push(teko::list::empty(), "slice_from"), "")
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(slice, no_ext) { str as s => s == "tk_str_slice_len"; error => false })
+    teko::assert::is_true(match call_symbol(slice_to, no_ext) { str as s => s == "tk_str_slice_to_len"; error => false })
+    teko::assert::is_true(match call_symbol(slice_from, no_ext) { str as s => s == "tk_str_slice_from_len"; error => false })
+}
+
+/**
+ * Assert a `teko::str::slice(s, start, end)` call actually LOWERS to the out-parameter-length
+ * twin, not merely that `call_symbol` names it — `lower_call_fat`'s generic tail (`lower_args` +
+ * `lower_len_out_call`) must also flatten the `str` receiver into its (ptr, len) pair and append
+ * the hidden length out-slot as the call's LAST argument (0.3.1.0 degrau 11).
+ */
+#test
+fn lwt_lowers_str_slice_as_the_out_parameter_length_twin() {
+    let args = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_strlit("hello world")), lwt_num(6, checker::PrimKind::U64)), lwt_num(11, checker::PrimKind::U64))
+    let call = lwt_call(lwt_path1("slice"), "", args, checker::Str { })
+    let text = lwt_lower_expr_text(call)
+    teko::assert::str_contains(text, "rodata .Lstr0:")
+    teko::assert::str_contains(text, "call @tk_str_slice_len(")
+}
+
+/**
+ * A native builtin call whose declared return type is `bool` (`teko::str::contains`) has its raw
+ * result narrowed the SAME way a DECLARED `extern fn`'s does: a shift-left by 56 then an
+ * UNSIGNED shift-right by 56 — the low-byte, zero-extending round trip `extern_return_narrow`
+ * gives every `bool` return since 0.3.1.0 degrau 11. Before this fix,
+ * `apply_native_c_return_narrow` (then `apply_extern_return_narrow`) narrowed only a DECLARED
+ * `extern`'s result: a runtime builtin's raw `bool` reached `LBranch` untouched, which a garbage
+ * upper byte can silently flip `false` into `true` — measured at
+ * `teko::str::ends_with("hello world", "worldx")`.
+ */
+#test
+fn lwt_native_builtin_bool_return_is_narrowed() {
+    let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_strlit("hello world")), lwt_strlit("lo"))
+    let call = lwt_call(lwt_path1("contains"), "", args, checker::Prim { kind = checker::PrimKind::Bool })
+    let text = lwt_lower_expr_text(call)
+    teko::assert::str_contains(text, "call @tk_str_contains(")
+    teko::assert::str_contains(text, "const 56")
+    teko::assert::str_contains(text, "= ishl ")
+    teko::assert::str_contains(text, "= ishru ")
 }
 
 /**
