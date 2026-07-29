@@ -1617,3 +1617,83 @@ fn d1_class1_same_type_cast_keeps_its_node() {
         _ => teko::assert::is_true(false)
     }
 }
+
+/**
+ * shadow_exit_func — a user-declared `pub fn exit(code: i32) -> str` signature — the exact shape
+ * D2's fixture shadows the injected `exit` builtin with (one required `i32` param, no defaults).
+ *
+ * @return  the `Func` type `type_call`'s in-scope lookup resolves for such a declaration
+ */
+fn shadow_exit_func() -> Type {
+    Func { params = teko::list::push(teko::list::empty(), i32t()); ret = strt(); variadic = false; param_names = teko::list::push(teko::list::empty(), "code"); n_required = 1; defaults = teko::list::empty() }
+}
+
+/**
+ * exit_call_expr — the untyped call node for `exit(3)`: an unqualified, single-segment callee —
+ * the exact shape the injected `panic`/`exit` builtins and a same-named user function share
+ * syntactically, and the shape `tcall_is_diverging_builtin` must tell apart by RESOLUTION.
+ *
+ * @return  the untyped `Call`
+ */
+fn exit_call_expr() -> parser::Call {
+    parser::Call { callee = path1("exit"); args = teko::list::push(teko::list::empty(), e_num(3)); arg_names = pos_names(1); type_args = teko::list::empty() }
+}
+
+/**
+ * D2 fixture (nf-n16, part 1) — a same-named user function IN SCOPE resolves over the injected
+ * `exit` builtin (`type_call`'s `in_scope` gate): the resulting call carries a real, non-empty
+ * `call_ns` and the user's OWN declared return type (`str`), never the builtin's `Void`, and
+ * `texpr_diverges`/`tcall_is_diverging_builtin` must recognize it as a NORMAL call — not a
+ * diverging one — precisely because the RESOLUTION says so, not because of its bare name.
+ */
+#test
+fn shadowed_exit_resolves_to_user_function_not_builtin() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.type { Str => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+    match te.kind {
+        TCall as c => {
+            teko::assert::is_true(c.call_ns == "mymod")
+            teko::assert::is_true(!tcall_is_diverging_builtin(c))
+        }
+        _ => teko::assert::is_true(false)
+    }
+    teko::assert::is_true(!texpr_diverges(te))
+}
+
+/**
+ * D2 fixture (nf-n16, part 2) — THE defect this closes: before the fix, `check_trailing_value`
+ * (the function-body trailing-expression check) skipped a shadowed `exit(...)` call entirely
+ * because `texpr_diverges` recognized it by BARE NAME alone, so a function declaring `-> i32`
+ * whose body trails a user `exit` that actually returns `str` type-checked — only `cc` caught the
+ * mismatch downstream, and the own-native backend has no `cc` at all (silent miscompilation). With
+ * the fix, `check_trailing_value` sees the call's TRUE type (`str`) and rejects it itself, exactly
+ * as it would any other trailing-value type mismatch.
+ */
+#test
+fn shadowed_exit_trailing_value_rejected_by_checker_not_cc() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        error => teko::assert::is_true(true)
+        null => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * D2 regression guard — an UNSHADOWED `exit(...)` (no user declaration in scope) must still
+ * resolve to the injected builtin and still diverge, so `check_trailing_value` still exempts it
+ * from the trailing-value type check exactly as before the fix. The fix narrows recognition to
+ * RESOLUTION, not name; it must never narrow which calls are STILL recognized as the true builtin.
+ */
+#test
+fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
+    let te = match type_call(exit_call_expr(), empty_env(), empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(texpr_diverges(te))
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        null => teko::assert::is_true(true)
+        error => teko::assert::is_true(false)
+    }
+}
