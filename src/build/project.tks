@@ -1636,49 +1636,98 @@ fn target_from_name(name: str) -> NativeTarget | error {
 }
 
 /**
- * host_target_for_os — the own-backend target the build HOST defaults to, for a
- * given `teko::os()` string (owner ruling 2026-07-24, R1: "TEKO_TARGET deve ser do
- * sistema... atuais quando não definido"). Phase 1 of the two-phase host default
- * (teko-target-crosslink-0.3.1.md §2.1): OS-only, since `teko::arch()` is not yet a
- * seed-recognized builtin (that lands in a later, seed-gated crumb) — `linux` picks
- * the x86-64/ELF pipeline, `windows` the x86-64/PE-COFF pipeline, and every other
- * value (`macos`, or the builtin's `unknown` fallback) keeps the pre-existing
- * `Arm64Macho` default, so a macOS host's FIXPOINT and arm64 differential stay
- * byte-preserved. Split out as a pure function of the OS string (rather than
- * reading `teko::os()` inline) so the OS×target mapping is independently testable
- * without depending on the real host.
+ * host_target_for_os_guess — the OS-ONLY, NEVER-FAILING host-default guess: the exact Phase-1
+ * heuristic (teko-target-crosslink-0.3.1.md §2.1) this vagão's precise `host_target_for_os`
+ * supersedes for every FALLIBLE consumer, kept here as the one ALWAYS-TOTAL fallback the
+ * handful of "never double-report, must answer" consumers still need (`resolved_target`'s own
+ * documented contract; `cross_note`'s bare-value comparison) — `linux`/`windows` pick their
+ * dominant x86-64 pipeline, every other OS string (`macos`, or the builtin's `unknown`
+ * fallback) keeps the pre-existing `Arm64Macho` default, so a macOS host's FIXPOINT and arm64
+ * differential stay byte-preserved even where the precise resolver below now honestly fails.
  *
  * @param os  a `teko::os()` value ("linux" | "macos" | "windows" | "unknown")
- * @return    the own-backend target that OS defaults to
+ * @return    the OS's dominant-arch own-backend target — always succeeds
  */
-fn host_target_for_os(os: str) -> NativeTarget {
+fn host_target_for_os_guess(os: str) -> NativeTarget {
     if os == "linux" { return NativeTarget::X8664Linux }
     if os == "windows" { return NativeTarget::X8664Windows }
     NativeTarget::Arm64Macho
 }
 
 /**
- * host_default_target — the own-backend target for THIS build host: `host_target_for_os`
- * applied to the live `teko::os()` reading. The bug this replaces (teko-target-crosslink
- * §1): an unset `TEKO_TARGET` used to fall back to a HARDCODED `Arm64Macho` regardless of
- * the real host, so a linux x86_64 host silently emitted an arm64 Mach-O object that `cc`/
- * `ld` then rejected with an opaque cross-format error.
+ * host_target_for_os — the own-backend target the build HOST defaults to, PRECISE in both
+ * `teko::os()` and `teko::arch()` (owner ruling 2026-07-24, R1: "TEKO_TARGET deve ser do
+ * sistema e arquitetura atuais quando não definido"). Phase 2 of the two-phase host default
+ * (teko-target-crosslink-0.3.1.md §2.1), now that `teko::arch()` is a seed-recognized builtin:
+ * `linux`+`x86_64` selects `X8664Linux`, `windows`+`x86_64` selects `X8664Windows`,
+ * `macos`+`arm64` selects `Arm64Macho` — the only three (os, arch) pairs this backend has a
+ * real codegen pipeline for. Every OTHER pair (an `arm64` linux host, an `x86_64` macOS host,
+ * an `arm64` windows host, or an `unknown` arch) is now an honest R2 error naming the
+ * unsupported os-arch, reusing `unsupported_target_error`'s own message (D39 single source) —
+ * REPLACES the old Phase-1 behavior of silently guessing the OS's dominant arch regardless of
+ * the host's REAL arch, which is exactly the bug class this whole design exists to close (a
+ * linux x86_64 host used to emit arm64 Mach-O before R1; an arm64 linux host would otherwise
+ * now silently emit x86_64 ELF instead — this closes THAT one too). Split out as a pure
+ * function of the os/arch strings (rather than reading `teko::os()`/`teko::arch()` inline) so
+ * the (os, arch) × target mapping is independently testable without depending on the real host.
  *
- * @return the resolved own-backend target for the current host OS
+ * @param os    a `teko::os()` value ("linux" | "macos" | "windows" | "unknown")
+ * @param arch  a `teko::arch()` value ("x86_64" | "arm64" | "unknown")
+ * @return      the own-backend target that (os, arch) pair defaults to
+ * @throws      when this backend has no own-backend target for the (os, arch) pair
  */
-fn host_default_target() -> NativeTarget { host_target_for_os(teko::os()) }
+fn host_target_for_os(os: str, arch: str) -> NativeTarget | error {
+    if os == "linux" && arch == "x86_64" { return NativeTarget::X8664Linux }
+    if os == "windows" && arch == "x86_64" { return NativeTarget::X8664Windows }
+    if os == "macos" && arch == "arm64" { return NativeTarget::Arm64Macho }
+    unsupported_target_error($"{arch}-{os}")
+}
+
+/**
+ * host_default_target — the own-backend target for THIS build host: `host_target_for_os`
+ * applied to the live `teko::os()`/`teko::arch()` reading. The bug this replaces
+ * (teko-target-crosslink §1): an unset `TEKO_TARGET` used to fall back to a HARDCODED
+ * `Arm64Macho` regardless of the real host, so a linux x86_64 host silently emitted an arm64
+ * Mach-O object that `cc`/`ld` then rejected with an opaque cross-format error; the OS-only
+ * Phase-1 fix left the SAME class of bug open one dimension over (an arm64 linux host silently
+ * emitting x86_64 ELF) — this now names that host honestly instead.
+ *
+ * @return the resolved own-backend target for the current host, or the honest R2 error when
+ *         this backend has no target for the host's (os, arch) pair
+ * @throws when the live host's (os, arch) pair names no own-backend target
+ */
+fn host_default_target() -> NativeTarget | error { host_target_for_os(teko::os(), teko::arch()) }
+
+/**
+ * host_default_target_guess — the ALWAYS-TOTAL sibling of `host_default_target`, for the
+ * handful of consumers that must never re-surface the R1 host-arch diagnostic a second time
+ * (`resolved_target`'s own "never double-report" contract, `cross_note`'s bare-value
+ * comparison): the precise reading when this host's (os, arch) pair has a real own-backend
+ * target, else the SAME Phase-1 OS-only guess `host_target_for_os_guess` always answers with.
+ * The one honest R2 stop for an unsupported host lives at `native_target`/`emit_native`
+ * (reached BEFORE any of these total consumers run in a real build) — this function exists so
+ * they still have SOMETHING to compare/report against once that stop has already fired.
+ *
+ * @return the precise host target, or the Phase-1 OS-only guess when the host has none
+ */
+fn host_default_target_guess() -> NativeTarget {
+    match host_default_target() { NativeTarget as t => t; error => host_target_for_os_guess(teko::os()) }
+}
 
 /**
  * native_target — which own-backend target the temporary `TEKO_TARGET` env seam
  * selects (D-D, #386 B1-8), consulted by `emit_native` after `native_backend_selected`
  * has already chosen the own backend. An unset/absent variable resolves to
- * `host_default_target()` (R1 — the current host's OS, not a hardcoded arm64), so the
- * default build on a supported host emits the RIGHT object format; a SET-but-unrecognized
- * value is the honest R2 error from `target_from_name`, never a silent mis-lower. D1/#390
- * supersedes this env read with the real `--target` manifest flag.
+ * `host_default_target()` (R1 — the current host's precise os+arch, not a hardcoded arm64
+ * nor an OS-only guess), so the default build on a supported host emits the RIGHT object
+ * format; a SET-but-unrecognized value, OR an unset value on a host whose (os, arch) pair
+ * this backend has no target for, is the honest R2 error (`target_from_name` /
+ * `host_target_for_os` respectively), never a silent mis-lower. D1/#390 supersedes this env
+ * read with the real `--target` manifest flag.
  *
  * @return the selected own-backend target, or the honest R2 error
- * @throws when the set `TEKO_TARGET` value is neither a canonical name nor a known alias
+ * @throws when the set `TEKO_TARGET` value is neither a canonical name nor a known alias, or
+ *         when unset and the host's own (os, arch) pair has no own-backend target
  */
 fn native_target() -> NativeTarget | error {
     match teko::env::var("TEKO_TARGET") { str as v => target_from_name(v); error => host_default_target() }
@@ -1686,18 +1735,19 @@ fn native_target() -> NativeTarget | error {
 
 /**
  * resolved_target — the own-backend target this build resolves to, with the R2 error arm folded
- * back onto the host default. The honest R2 stop for an unrecognized `TEKO_TARGET` belongs to
- * `emit_native` (which surfaces it as a build failure before anything is emitted); every OTHER
- * consumer of the resolved target — the cross-emit note (`cross_note`), the os-arch link-key
- * selection (`link_target_keys`) and the M.3 extern-lib validators — needs a TOTAL answer and
- * must not double-report that diagnostic, so a bad value reads here as the host default (which is
- * also exactly what the C backend, the only path that ignores `TEKO_TARGET`, links for).
+ * back onto the host default. The honest R2 stop for an unrecognized `TEKO_TARGET` (or an
+ * unsupported host os-arch pair) belongs to `emit_native` (which surfaces it as a build failure
+ * before anything is emitted); every OTHER consumer of the resolved target — the cross-emit note
+ * (`cross_note`), the os-arch link-key selection (`link_target_keys`) and the M.3 extern-lib
+ * validators — needs a TOTAL answer and must not double-report that diagnostic, so a bad value
+ * reads here as `host_default_target_guess()` (which is also exactly what the C backend, the only
+ * path that ignores `TEKO_TARGET`, links for).
  *
- * @return the resolved own-backend target, or the host default when the value is unrecognized
+ * @return the resolved own-backend target, or the host guess when the value is unrecognized
  * @since 0.3.1
  */
 fn resolved_target() -> NativeTarget {
-    match native_target() { NativeTarget as t => t; error => host_default_target() }
+    match native_target() { NativeTarget as t => t; error => host_default_target_guess() }
 }
 
 /**
@@ -1837,9 +1887,12 @@ type CrossNote = struct {
  * cross_note — classify the resolved target against the build host (R3): equal ⇒ not cross and an
  * empty note; different ⇒ cross, with the report line naming BOTH targets
  * (`cross: emitted for x86_64-windows on host x86_64-linux — not executed`). The host side is
- * `host_default_target()`, which is OS-only until the seed-gated `teko::arch()` crumb makes it
- * precise (§2.1): on a host whose arch is not its OS's dominant one (arm64-linux, x86_64-macos)
- * an explicit same-OS cross request therefore reads as NOT cross and is still executed — the
+ * `host_default_target_guess()`, precise now that `teko::arch()` is seed-recognized (§2.1) for
+ * every (os, arch) pair this backend has a target for: on THOSE hosts an explicit same-OS,
+ * different-arch request now correctly reads as cross. The one residual imprecision is a host
+ * whose OWN (os, arch) pair has no own-backend target at all (arm64-linux, x86_64-macos,
+ * arm64-windows) — there the guess falls back to the OS's dominant arch, so an explicit
+ * same-OS cross request reads as NOT cross and is still executed on that host: the
  * conservative direction (the host runs it and reports the real exit) rather than a fabricated
  * skip. It never mis-reports the reverse.
  *
@@ -1848,7 +1901,7 @@ type CrossNote = struct {
  * @since 0.3.1
  */
 fn cross_note(target: NativeTarget) -> CrossNote {
-    let host = host_default_target()
+    let host = host_default_target_guess()
     if target == host { return CrossNote { is_cross = false; note = "" } }
     CrossNote { is_cross = true; note = $"teko: cross: emitted for {target_name(target)} on host {target_name(host)} — not executed" }
 }

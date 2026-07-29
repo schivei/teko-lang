@@ -739,6 +739,27 @@ fn host_cc_arch() -> str {
 }
 
 /**
+ * host_default_unsupported_skip_reason — the honest SKIP reason for a HOST-DEFAULT row
+ * (`target.len == 0` or `HOST_TARGET`) whose own host (os, arch) pair names no own-backend
+ * target at all (`host_target_for_os`'s own R2 error, e.g. an aarch64 linux host or an x86_64
+ * macOS host) — a capability gap in THIS host, not something the row's author asked for, so it
+ * is a SKIP and never the build failure `native_target`/`emit_native` would otherwise surface.
+ * Scoped to host-default rows ONLY: an EXPLICIT, genuinely bad `TEKO_TARGET`-shaped name (the T4
+ * scenario) must still reach its own honest COMPILE FAIL via `target_from_name`, never be
+ * silently converted into a skip here.
+ *
+ * @param is_host_default_row  whether the row's declared target names the host default
+ * @param e                    the resolver's own R2 error (its message already names the
+ *                             unsupported os-arch and the supported set, D39 single source)
+ * @return                     "" when `e` is not this row's business, else the honest skip line
+ * @since 0.3.1
+ */
+fn host_default_unsupported_skip_reason(is_host_default_row: bool, e: error) -> str {
+    if !is_host_default_row { return "" }
+    $"this row needs the own backend's host-default target, but this host has none: {e.message}"
+}
+
+/**
  * host_cc_cannot_link_host_default_reason — the HOST-DEFAULT sibling of
  * `host_cc_cannot_link_cross_reason`, and the answer to the one case that one structurally cannot
  * see. That function only ever fires for a target the build classes as CROSS; a row that declares
@@ -746,14 +767,18 @@ fn host_cc_arch() -> str {
  * this host can link the object the host default would actually produce — and on one host shape it
  * cannot.
  *
- * THE HOST SHAPE. `host_target_for_os` is OS-ONLY (it maps `linux` → `x86_64-linux`
- * unconditionally), because the arch half needs `teko::arch()`, which is not yet a seed-recognized
- * builtin. On an aarch64 LINUX host that mapping is simply wrong: the own backend emits an
- * ELF x86-64 object, the host `cc` refuses to link it, and the row dies with `cc failed to link the
- * own-backend object` — a message a reader cannot tell apart from a real codegen regression. This
- * is the same defect the `host_default_target` doc-comment records for the old hardcoded
- * `Arm64Macho` default, mirrored: there, a linux host emitted arm64 Mach-O; here, an arm64 host
- * emits x86-64 ELF.
+ * THE HOST SHAPE, narrowed now that `host_target_for_os` is precise (§2.1 Phase 2): a host whose
+ * own (os, arch) pair has NO own-backend target (an aarch64 linux host, an x86_64 macOS host) now
+ * gets an honest R2 error straight from the resolver (`own_backend_target_of_row`), converted to a
+ * SKIP by `host_default_unsupported_skip_reason` below — no more silently emitting the wrong
+ * object format for the reader to mistake for a codegen regression, which is the exact defect the
+ * `host_default_target` doc-comment records for the old hardcoded `Arm64Macho` default (mirrored:
+ * there, a linux host emitted arm64 Mach-O; the OS-only Phase 1 fix left an arm64 host silently
+ * emitting x86-64 ELF, which this closes). The residual case THIS function's own arch-mismatch
+ * check below still exists for is narrower: a host whose `teko::arch()` and whose `cc`'s OWN
+ * target arch (`host_cc_arch`, `cc -dumpmachine`) disagree with EACH OTHER even though the host
+ * genuinely has a target (e.g. an x86_64 `cc` running under arm64 emulation) — the resolver
+ * succeeds (it trusts `teko::arch()`), but the LINKER it hands the object to is the wrong one.
  *
  * WHY IT MEASURES THE `cc` AND NOT THE KERNEL. The question is not "what CPU is this host" but "can
  * the linker that will run accept this object", so the reading comes from `cc -dumpmachine`
@@ -777,12 +802,6 @@ fn host_cc_arch() -> str {
  * break. This rule's two inputs are the host `cc` and a pure enum→string function, so no compiler
  * change can trigger it.
  *
- * WHY IT REMOVES ITSELF (R4). The skip is keyed on a MISMATCH between the host `cc`'s arch and the
- * arch of the target the host default resolves to. The day an `arm64-linux` target exists and
- * `host_target_for_os` becomes arch-aware, that mismatch stops occurring on an arm64 host and the
- * rule falls silent on its own — no edit here, and none needed. It stays correct meanwhile for any
- * OTHER host whose arch the own backend has no target for.
- *
  * @param target       the scenario's declared target ("" / `HOST_TARGET` → the host default; an
  *                     explicit cross belongs to `host_cc_cannot_link_cross_reason`)
  * @param own_backend  whether the row builds with the own backend (the only path that emits an
@@ -794,7 +813,11 @@ fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> st
     if !own_backend { return "" }
     if teko_cc_env().len > 0 { return "" }
     if cross_note_for_name(target).is_cross { return "" }
-    let sel = match own_backend_target_of_row(target) { NativeTarget as x => x; error => return "" }
+    let is_host_default_row = target.len == 0 || target == HOST_TARGET
+    let sel = match own_backend_target_of_row(target) {
+        NativeTarget as x => x
+        error as e => return host_default_unsupported_skip_reason(is_host_default_row, e)
+    }
     if !target_links_with_cc(sel) { return "" }
     if default_cc_for_target(sel) != HOST_CC_NAME { return "" }
     if target_objfmt(sel) != OBJFMT_ELF { return "" }
@@ -802,7 +825,7 @@ fn host_cc_cannot_link_host_default_reason(target: str, own_backend: bool) -> st
     if want.len == 0 { return "" }
     let have = host_cc_arch()
     if have.len == 0 || have == want { return "" }
-    $"this row emits for {target_name(sel)} ({want} ELF) but the host cc targets {have}, and the host cc cannot link a foreign-arch object — the own backend has no {have}-{target_os_name(sel)} target, because host_target_for_os is OS-only until teko::arch() is seed-recognized"
+    $"this row emits for {target_name(sel)} ({want} ELF) but the host cc targets {have}, and the host cc cannot link a foreign-arch object — its own `teko::arch()` reading and its `cc`'s target arch disagree"
 }
 
 /**
