@@ -686,3 +686,30 @@ seguinte.
 **Corolario operacional:** documentacao acumula e sai junto com o proximo dreno de produto. Um
 commit de doc nunca justifica cancelar uma corrida madura — ele nao tem pressa nenhuma e a corrida
 tem.
+
+## Faixas de códigos de saída, e porque a regra nasceu (2026-07-29)
+
+O corpus de `examples/regressions/own_native` identifica cada fixture por um código de saída único
+(`main.tks`, `bad = N`). Com vários agentes a acrescentar fixtures em paralelo, **dois pediram o
+mesmo 53** no mesmo dia — o degrau 20 e a lane das igualdades `char`/`[]T`. Só foi apanhado no
+dreno, e a resolução foi renumerar um deles à mão.
+
+**Falha de sequenciamento do integrador, não dos agentes**: cada um recebeu "usa o próximo livre" e
+ambos leram o mesmo estado da árvore, porque foram despachados sobre a mesma base.
+
+**A regra: quando houver mais de um agente vivo a poder tocar no corpus, atribuir FAIXAS disjuntas
+no briefing, não "o próximo livre".** Exemplo do dia em que a regra nasceu:
+
+| agente | faixa |
+|---|---|
+| degrau 22 | 57–59 |
+| dissolver `bulk` | 60–69 |
+| degrau 23 | 70 em diante |
+
+A faixa vai no briefing com a razão explícita ("a faixa X está reservada a outro agente que corre em
+paralelo"), para o agente não a alargar por iniciativa própria ao ver códigos livres.
+
+**Sintoma correlato da mesma causa**: a mesma sessão viu dois agentes generalizarem a MESMA função
+de dispatch de comparação sem se verem, produzindo conflito semântico no dreno. **Antes de despachar
+trabalho concorrente, verificar se os âmbitos partilham um ponto de dispatch ou um recurso numerado
+globalmente** — códigos de saída, faixas de teste, tabelas de registo de builtins.
