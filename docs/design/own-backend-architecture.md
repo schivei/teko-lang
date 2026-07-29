@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o planejamento arquitetônico do backend próprio (onda fase-4/onda-6), já executado. Não descreve o estado atual do projeto.
+
 # Own AOT backend + M-linker — architecture, requirements, and phasing (recon)
 
 **Status:** RECON (doc-only). Sub-PR of the 0.2 wave umbrella (#374, branch

@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o crumb T-B4 da onda const (Tier-B), já executado. Não descreve o estado atual do projeto.
+
 # T-B4 — wasm resolve ponteiros rodata-INTERNOS em emit-time (sem relocation) (#594 Tier-B)
 
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing
