@@ -271,3 +271,56 @@ Feature: R0 fat-predicate agreement — a type ALIAS of `str`/`[]T` sizes and st
     Given env = ["TEKO_BACKEND=c"]
     When built and run
     Then exit = 0
+
+Feature: teko::text byte-view escape hatches — `bytes_of_str`/`str_from_utf8` moved off `teko::str::` (0.3.1.0, owner ruling 2026-07-29)
+
+  # `bytes_of_str`/`str_from_utf8` are terms USED IN PRODUCT SOURCE — `src/numeric/bigint/bigint.tks`
+  # and `src/numeric/dec/dec.tks` call the QUALIFIED `teko::text::` spelling directly; `src/regex/
+  # regex.tks`, `src/io/stream.tks`, `src/encoding/csv/csv.tks`, `src/encoding/base64/base64.tks`,
+  # `src/encoding/url/url.tks`, `src/encoding/json/json.tks`, `src/iter/str_iter.tks` and
+  # `src/iter/byte_iter.tks` call the BARE spelling (20+ call sites) — so a regression of their
+  # dispatch lives HERE, at the project root, never in a channel (the SAME ruling the
+  # `builtin-qualifier validation` and `native process entry` Features above already cite).
+  #
+  # MEASURED, not assumed. A prior agent on this lane flagged a possible infinite recursion: a Teko
+  # WRAPPER named `teko::text::bytes_of_str` calling the bare builtin of the SAME name would recurse
+  # forever (same-name-same-namespace wins in `lookup_call`), so no such wrapper was written. That
+  # reasoning is REFUTED by measurement, not merely by reading: no such wrapper exists anywhere in
+  # this tree — `src/text/text.tks` documents `bytes_of_str` in a COMMENT only (its real definition
+  # is "Registered as a builtin … this comment is the canonical documentation") and never defines it
+  # as a Teko function — so the recursion could never have fired. `builtin_fn` (`scope.tks`) matches
+  # both names by LAST segment and `builtin_qualifier_ok` (`typer.tks`) accepts a callee literally
+  # rooted at `teko::` at ANY depth, so `teko::text::bytes_of_str(s)` / `teko::text::str_from_utf8
+  # (bytes)` resolve to the injected builtin TODAY, with NO wrapper, on the C route — confirmed by
+  # the emitted C calling `tk_bytes_of_str`/`tk_rt_str_from_utf8` directly. The doc-comment at
+  # `scope.tks:498-499` claiming this canonical spelling already needed no code change, only this
+  # proof.
+  Scenario: teko::text byte-view round-trip on a multi-byte string (C route)
+    Given source = "cases/text_byteview_roundtrip.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then exit = 0
+
+Feature: teko::text byte-view escape hatches — the OWN-BACKEND gap (KNOWN-STOP, unrelated to the naming/recursion question above)
+
+  # A feature is uniformly one kind (`tkr_feature_is_compile_fail`, `src/build/regression.tks`) — a
+  # RUN-and-check scenario and a COMPILE-fail scenario cannot share one Feature block, which is why
+  # this KNOWN-STOP is its own Feature rather than a second scenario paired with the C-route one
+  # above (measured the hard way: mixed into one Feature, this scenario's OWN "When compilation
+  # fails" was never read — the first scenario's kind decided the whole feature, and the build was
+  # judged against "must succeed" instead).
+  #
+  # `lir/lower.tks`'s `native_builtin_symbol` — the N1 subset's allowlist of directly-lowered
+  # builtin names — has no entry for either `bytes_of_str` or `str_from_utf8` (it lists io/cov/
+  # arena/str-query/str-slice/int-to-str/str_of_bytes/host-info/peak_rss/env::args — ten families;
+  # these two are not among them; already enumerated as an OPEN sibling with no narrow molde yet in
+  # `docs/memory/0.3.1.0-linux-native-first-stop.md`'s degrau-17 entry). The checker resolves the
+  # call IDENTICALLY on both backends (measured: `checker 2/2 items ✓` on this same source, own-
+  # native route, before the stop) — only the LIR LOWERING stage stops, honestly, with the SAME
+  # "not yet lowered (N2)" shape every other un-lowered builtin in this file already carries. This
+  # is UNRELATED to the naming/recursion question the sibling Feature above closes: promoting it
+  # needs a native lowering entry, a distinct increment, not done here.
+  Scenario: teko::text byte-view round-trip on a multi-byte string (own-native, KNOWN-STOP)
+    Given source = "cases/text_byteview_roundtrip.tks"
+    When compilation fails
+    Then diagnostic = "builtin `bytes_of_str` not yet lowered"
