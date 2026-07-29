@@ -449,6 +449,36 @@ int32_t tk_rt_run(const tk_str *argv, uint64_t n);
 // are redirected to the null device (issue #73: the cc flag-family probe uses this so a
 // deliberately-rejected compiler flag doesn't print to the user's build output).
 int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n);
+// (0.3.1.2 — process-half regression harness) teko::process::spawn_redirected(argv, dir, env,
+// in_path, out_path, err_path) — launch `argv` WITHOUT waiting for it, with its three standard
+// streams redirected to the given paths ("" inherits the parent's own descriptor) and its working
+// directory set to `dir` ("" or "." inherits the parent's). The returned handle is opaque (POSIX:
+// the pid; Windows: the process HANDLE cast to intptr_t) and negative (TK_RT_SPAWN_FAILED) only
+// when no child ever started — the same sentinel tk_rt_run uses, for the same reason (a real
+// handle can never be negative).
+//
+// ONE `str` PARAMETER, NOT SIX — measured (process.tks: TOKEN_SEP/spawn_payload): six `str`
+// parameters checked cleanly but the native x86-64 backend does not yet spill a call argument past
+// its six-register window (`isel x86-64: B1-args`), and each `str` is a two-word fat pointer — six
+// of them need twelve registers where the ABI offers six. `payload` is `spawn_payload`'s
+// self-describing flattening of all six logical arguments (a decimal element count precedes each
+// variable-length list): `<argc>` NUL `argv[0]` … `argv[argc-1]` NUL `<envc>` NUL `env[0]` …
+// `env[envc-1]` NUL `dir` NUL `in_path` NUL `out_path` NUL `err_path`. Safe because none of an argv
+// element, an environment token, or a path may itself carry a NUL byte — every OS API underneath
+// (execvp, CreateProcess, open) is NUL-terminated already. `env` tokens are "K=V" and are ADDED to
+// the child's inherited environment; the parent's own environment is never touched.
+//
+// EVERY REDIRECTION TARGET IS OPENED BY THE PARENT, BEFORE THE CHILD'S WORKING DIRECTORY CHANGES —
+// a relative in/out/err path is therefore resolved against the PARENT's cwd, never the child's
+// `dir`, matching the "the parent NAMES the descriptor, the argv's own cwd is the child's separate
+// concern" contract callers rely on.
+int64_t tk_rt_spawn_redirected(tk_str payload);
+// (0.3.1.2) teko::process::wait_one(raw) — block until the child `raw` (a `spawn_redirected`
+// handle) exits, and return its status: the same 0..255 / 128+signo reading `tk_rt_run` already
+// documents. TK_RT_SPAWN_FAILED when `raw` never identified a real child (it was already negative,
+// or the wait itself could not observe one). A handle may be waited on at most once — POSIX reaps
+// the pid and Windows closes the HANDLE, so a second wait on the same value is undefined on both.
+int32_t tk_rt_wait_one(int64_t raw);
 // teko::env::args() — the captured process argv as owned tk_str's; *n receives the count.
 // tk_set_args must run first (the generated `main` calls it before the virtual-main body).
 void    tk_set_args(int argc, char **argv);
