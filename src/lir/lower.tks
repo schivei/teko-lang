@@ -4541,18 +4541,27 @@ fn store_variant_payload(ctx: LowerCtx, base: u32, index: i64, pty: checker::Typ
 
 /**
  * variant_payload_box_bytes — how many bytes of an aggregate payload the wrapper must OWN, or 0
- * when the payload needs no copy (a register value, or an aggregate this backend pins no whole-type
- * width for — those keep the pre-degrau-8 behaviour of storing the producer's own address rather
- * than gaining a new stop the self-build never asked for).
+ * when the payload needs no copy (a register value: it is stored by VALUE, not by address, so no
+ * `alloca` can outlive it and there is nothing to box).
+ *
+ * A non-register payload whose whole-type width this backend does NOT pin (an interface, an
+ * optional, a closure) is the SAME question `push_box_bytes` already answers for a slice element,
+ * so it gets the SAME answer: an honest stop (`unsized_aggregate_push_stop`), never a silent 0. A
+ * silent 0 there would store the payload's raw `alloca` address unboxed — exactly the per-
+ * INSTRUCTION-frame-slot hazard `store_scalar_variant_payload` exists to close — which would trade a
+ * loud stop the self-build has never actually reached for a wrong answer nobody could see coming.
  *
  * @param pty  the payload's declared type
  * @param ctx  the lowering context (its registered layouts and declared-variant table)
  * @return     the payload's byte width, or 0 when no copy is made
+ * @throws     `unsized_aggregate_push_stop` for a non-register aggregate whose whole-type width is
+ *             not pinned
  */
-fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx) -> u32 {
+fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx) -> u32 | error {
+    if is_register_value_type(pty, ctx.enums) { return 0 to u32 }
     match aggregate_box_bytes(pty, ctx) {
         u32 as n => n
-        null => 0 to u32
+        null => unsized_aggregate_push_stop(aggregate_form_name(pty))
     }
 }
 
@@ -4574,12 +4583,14 @@ fn variant_payload_box_bytes(pty: checker::Type, ctx: LowerCtx) -> u32 {
  *                           class and the number of bytes the wrapper must own
  * @param checker::TExpr e  the payload value to lower and store
  * @return Lowered  the wrapper's base address
- * @throws  propagated from lowering `e`
+ * @throws  propagated from lowering `e`, or from `variant_payload_box_bytes` when `pty` is a
+ *          non-register aggregate whose whole-type width this backend does not pin
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 8 — the owned payload)
  */
 fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e: checker::TExpr) -> Lowered | error {
     let vo = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
-    let owned = box_aggregate_value(vo, variant_payload_box_bytes(pty, ctx), e)
+    let box_bytes = match variant_payload_box_bytes(pty, ctx) { u32 as n => n; error as err => return err }
+    let owned = box_aggregate_value(vo, box_bytes, e)
     let paddr = ctx_alloc(owned.ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), e.line, e.col))
     let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, ltype_of(pty, ctx.enums), e.line, e.col))
