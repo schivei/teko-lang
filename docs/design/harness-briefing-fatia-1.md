@@ -14,6 +14,12 @@ branch: cargo/0.3.1.0-harness-gerado
 > primeiro corrigir a emissão em C / até pq pode quebrar Windows, Mac e wasm), além de implementar em
 > Teko nativo."*
 
+> **RULING COMPLEMENTAR (R14, 2026-07-29):** *"1. Compilação"* — a marca "isto é um teste" é de
+> **tempo de COMPILAÇÃO**, não um argumento em tempo de execução. Consequência directa para este
+> briefing: o sinalizador que o **passo 3** introduz não é só "modo gate" — **é também o interruptor
+> da bifurcação de `panic`/`exit` que chega mais tarde.** Ver §A.4.1. A ordem dos cinco passos **não
+> muda**; muda o que o passo 3 tem de deixar bem nomeado.
+
 **O antecedente do "por isso", porque é ele que justifica a promoção:** mediu-se que o comportamento
 do `defer` sob `panic` **não é testável hoje, por construção** — não existe expect-panic no framework
 unitário e um panic mata o binário de testes inteiro; não pode ir para `regressor.tkr` porque
@@ -193,6 +199,42 @@ produção; a atribuição de cobertura de cada teste casa com o índice do item
 depois de o `main` sintetizado passar a existir — ele **não** é função de produção e tem de ser
 excluído do denominador por proveniência, como `strip_tests` já exclui os `#test`).
 
+#### A.4.1 O SINALIZADOR — nomeia-o bem, porque ele vale mais do que parece
+
+Os dois ajustes acima precisam de um modo que chegue do topo até ao lowering. **Esse modo é também a
+marca "isto é um teste" que R14 acaba de fixar**, e que mais tarde decide se `panic`/`exit` bifurcam
+para a captura. **É UM sinalizador, não dois.**
+
+O precedente exacto já está no ficheiro e deve ser copiado em vez de inventado — `flat_symbols`:
+
+```teko
+pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error
+```
+
+parâmetro de topo com omissão, carregado em `LowerCtx` (`flat_symbols: bool`) e reproduzido em cada
+construtor de contexto. A marca faz a mesma viagem:
+
+| camada | papel |
+|---|---|
+| `src/build/project.tks` | decide que ESTE build é o do gate e passa a marca |
+| `src/build/gate.tks` | sintetiza o `main`; a marca viaja AO LADO, não dentro do `GatePlan` — o `GatePlan` descreve a FORMA do `main`, não o modo do compilador |
+| `lower_program` | recebe-a como parâmetro de topo, à imagem de `flat_symbols` |
+| `LowerCtx` | carrega-a; cada construtor de contexto reproduz o campo |
+| `lower_item_function` / `lower_virtual_main` | consomem-na **neste passo** |
+| `call_symbol` | consome-a **mais tarde**, para decidir se bifurca `panic`/`exit` |
+
+> **INSTRUÇÃO EXPLÍCITA:** dá-lhe um nome de primeira classe e um doc-comment que diga que ele é
+> TAMBÉM o interruptor da bifurcação. **Não um `bool` anónimo chamado `is_gate` enfiado a meio da
+> lista de parâmetros.** Se este passo introduzir um sinalizador anónimo, a carga da bifurcação
+> inventa um segundo, e passam a existir duas respostas para "isto é um teste?" — que é a doença que
+> este repositório já pagou várias vezes.
+
+**Fixture que o fixa desde já:** `nontest_binary_is_byte_identical` — o mesmo projecto SEM `#test`,
+compilado antes e depois desta fatia, com os **binários** comparados byte a byte. Com a marca de
+compilação, um binário que não é de teste não leva nada de novo, logo a identidade não é uma promessa
+a cumprir: **é uma consequência de o código não existir.** Escreve-a agora, mesmo que hoje passe
+trivialmente — é ela que protege a garantia quando a bifurcação chegar.
+
 ### A.5 Passo 4 — a rota C consome o MESMO `main`
 
 `tk_emit_c_test(prog, cov)` deixa de ter `main` próprio:
@@ -303,6 +345,25 @@ máquina" e "as seis pernas concordam".
 
 **A ordem de execução importa:** `gate_backend_resolution_per_leg` é pré-voo e custa milissegundos —
 corre primeiro. Se ele falhar, P2 nas seis pernas não vale nada, porque estaria a medir a rota errada.
+
+### C.5 Nota de contexto — o `args()` nativo JÁ foi corrigido
+
+Quando o desenho foi escrito, um binário do backend nativo que lesse a linha de comando **nem
+linkava** (`undefined reference to 'teko_args'`). **Isso foi corrigido** — `cargo/0.3.1.0-args-native`
+aterrou no vagão principal: o `main` sintetizado recebe `argc`/`argv` e chama `tk_set_args`, e `args`
+foi resolvido no `call_symbol`.
+
+**Porque interessa a esta fatia, embora ela não use argv:** o `main` de gate desta fatia é sintetizado
+e **não lê argumentos** — nada aqui depende da correcção. O que a correcção muda é que **deixa de
+haver um impedimento** a duas alternativas que ficaram registadas como não escolhidas (a
+auto-reexecução por selector em `argv[1]`, e a marca por argumento em tempo de execução, que R14
+rejeitou a favor da marca de compilação). Nenhuma das duas volta à mesa nesta fatia; ficam aqui só
+para que ninguém as reabra a pensar que ainda estão bloqueadas — não estão, apenas não foram
+escolhidas.
+
+**Cuidado de colisão que daí resulta:** `cargo/0.3.1.0-args-native` tocou em `src/lir/lower.tks` e
+`src/build/project.tks`. Se já aterrou, esses dois ficheiros ficaram **mais livres** do que o mapa de
+§B indicava — confirma com o coordenador antes de assumir.
 
 ### C.4 A regra que resume
 
