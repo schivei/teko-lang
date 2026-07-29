@@ -505,3 +505,43 @@ Isto PRECISA duas leituras anteriores que estavam menos completas:
 Consequência já apurada num caso concreto: os 13.4 MB de blobs `.fixpoint/` no histórico são
 **permanentes** enquanto a protecção existir, porque nenhum squash remove um blob já ancestral e
 nenhuma reescrita é possível. Ver `expurgo-fixpoint-historico.md`.
+
+## A fábrica de `error` — desenho do dono, 2026-07-29
+
+O dono reabriu o desenho do `error` a partir da paragem do degrau 22 (`unknown field \`line\` on
+struct \`error\``): *"talvez tenhamos pintado ele errado e devesse ser algo mais como acontece em Go,
+onde para gerar um error, chamasse uma fábrica e não uma construção de struct literal."*
+
+| grau de liberdade | decisão |
+|---|---|
+| API | `error::new(msg: str)`, `error::new_pos(msg: str, line: u64, pos: u64, file: str)`, `error::join(left: error, right: error)` |
+| literal `error { message = ... }` | **FICA** — *"não precisa restringir o dev, mas o ideal (convenção) seria a fábrica"* |
+| `join` | **achata** — concatenação textual, sem cadeia, sem `unwrap` |
+| referência espelhada | **Go**, no eixo dos comportamentos (`errors.New`) |
+| conversão dos 2148 sítios existentes | **opcional**, arrumação gradual |
+
+### Porque isto ENCOLHE o degrau 22 em vez de o aumentar
+
+Hoje o backend nativo tem de conhecer o layout do struct `error` para lidar com `e.line`. Com
+fábrica, passa a ter de baixar **chamadas** — e baixar chamada de builtin é o molde já repetido dos
+degraus 9–17 e 21. O layout deixa de ser superfície e passa a detalhe de implementação.
+
+### Uma afirmação minha que a medição desmentiu
+
+Eu disse ao dono que manter o literal custaria "metade do benefício", por pinar o layout. **Falso.**
+`src/checker/typer.tks:2513` já restringe o literal a exactamente um campo chamado `message`:
+
+```teko
+if sl.field_names.len != 1 || sl.field_names[0] != "message" {
+```
+
+`line`/`col`/`file`/`expected`/`actual` nunca foram construíveis por literal — só legíveis
+(`typer.tks:2117` é acesso, não construção). Manter o literal pina apenas o `message`, que já estava
+pinado. **Todo o resto do layout continua livre por trás da fábrica**, e a decisão do dono não custa
+nada.
+
+### A cadeia adiada, e porque é de graça
+
+`join` achatado hoje não fecha a porta ao `errors.Join` verdadeiro do Go (com `Unwrap() []error`).
+Precisamente porque a fábrica esconde o layout, crescê-lo depois não toca em código de utilizador.
+Adiado, não descartado — e adiado sem juros.
