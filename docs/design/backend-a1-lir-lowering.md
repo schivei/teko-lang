@@ -384,7 +384,7 @@ New golden fixtures are needed for: the `if` merge-block shape (A1-1), the loop/
 the aggregate alloca/field layout (A1-3), the rodata + fat-pointer form (A1-4), the match test-chain
 (A1-5), the vtable-load + indirect-call sequence (A1-6), and the closure `{fn,env}` form (A1-7).
 
-The full ritual gate (VM gate · paranoid · differential · fixpoint) runs at each sub-sub-PR's merge —
+The full ritual gate (paranoid · differential · fixpoint) runs at each sub-sub-PR's merge —
 but note the differential leg here is **only** the LIR-interp-vs-VM leg; the C-native-vs-own-native
 differential is born later, at A4. Fixpoint must hold because the lowering is additive to `src/` and
 does not change any existing emitted artifact.
@@ -762,7 +762,7 @@ Golden LIR-dump fixtures in `src/lir/lower_test.tkt`:
 ### 6.2.7 Ritual points
 
 Doc-only design PR: no ritual gate beyond a clean build (it emits no code). The IMPLEMENTATION carries
-the gate. Split into two crumbs, each a ritual point (full gate — VM gate · paranoid · differential
+the gate. Split into two crumbs, each a ritual point (full gate — paranoid · differential
 (LIR-interp-vs-VM over the runnable subset AND own-vs-C binary for the new regressions) · fixpoint) at
 its merge into `fix/issue-389-c1-8-keystone`:
 

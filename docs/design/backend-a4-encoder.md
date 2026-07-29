@@ -640,7 +640,7 @@ the keystone corpus does not read argv; see §6 `A4-args`.)
 
 ### 5.3 The differential gate
 
-A new leg — `scripts/diff_c_own.sh` (or an own arm inside `diff_vm_native.sh`) — over an
+A new leg — `scripts/diff_c_own.sh` (or an own arm inside `diff_c_own.sh`) — over an
 **`exit(n)`-terminated** integer/control corpus (the subset the interp already runs, §1). Per fixture:
 
 1. **C-native** (trusted): `teko <fixture> -o <cbin>` (default path) → run → capture exit + stdout.
@@ -780,7 +780,7 @@ framed-`main` fixture once A3-loop or an equivalent unblocks one), not a new des
 
 All exit-code (no stdout) at first; a `print`-then-`exit` fixture is added once `MCall` to the string
 runtime is exercised (rides the same BL/reloc path). The VM + C-native legs are already covered by
-`diff_vm_native.sh`; A4-5 adds the own-native leg and asserts `own == C (== interp)`.
+`diff_c_own.sh`; A4-5 adds the own-native leg and asserts `own == C (== interp)`.
 
 ### 9.3 Ritual + coverage posture
 

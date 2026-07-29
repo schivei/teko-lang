@@ -23,7 +23,7 @@ This folds the five milestone readiness assessments + the three crumb-level drai
 1. **MAIN INTEGRITY ABSOLUTA** — merge to `main` ONLY when ALL checks green (no "non-blocking exception"). Serial, one PR at a time. `fix-infra-first`; undraft before merge.
 2. **RESOURCE LIMIT** — ONE heavy build at a time on the integrator's machine. Validation is OFFLOADED to CI (native.yml, ~6 m). The integrator does not run local full gates in parallel; agents draft, CI validates, integrator merges.
 3. **KEYSTONES FIRST** — a keystone that unblocks N downstream issues merges before those N. Two keystone clusters gate the bulk of the backlog: the **onda-3 monomorphization+128-bit cluster** and the **native-gate cluster (#265/#168)**. Plus two stdlib-root keystones (**#184** IO/iter, **#194**/#199/#205/#210 stdlib roots).
-4. **CLEAN-only** — `verify-both` (native #test gate + VM gate + fixpoint gen1==gen2 + diff_vm_native + paranoid) must be green in CI on the PR before merge.
+4. **CLEAN-only** — `verify-both` (native #test gate + fixpoint gen1==gen2 + diff_c_own + paranoid) must be green in CI on the PR before merge.
 
 ---
 
@@ -273,7 +273,7 @@ Issues never spawn issues; each delivers 100% of its proposal with no regression
 
 ## 6. Per-PR ritual (every merge)
 1. Agent drafts on `fix/issue-NN` (isolated worktree), base `main`.
-2. CI runs `verify-both`: native #test gate + VM gate + fixpoint gen1==gen2 byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit (W15). ~6 m.
+2. CI runs `verify-both`: native #test gate + fixpoint gen1==gen2 byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit (W15). ~6 m.
 3. Full gate at the END of every crumb that adds a new corpus `.tks` (self-build changes). Extern-touching crumbs = native-authoritative + VM honest-stop fixtures.
 4. Undraft only when ALL checks green. Integrator merges serially (CLEAN-only, no exceptions). Push after each green merge; keep the PR body's `Closes #NN` current.
 5. Bump the 4th version field in `teko.tkp` on each code merge (manual; triggers the alpha release/tag).
