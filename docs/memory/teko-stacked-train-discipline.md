@@ -713,3 +713,37 @@ paralelo"), para o agente não a alargar por iniciativa própria ao ver códigos
 de dispatch de comparação sem se verem, produzindo conflito semântico no dreno. **Antes de despachar
 trabalho concorrente, verificar se os âmbitos partilham um ponto de dispatch ou um recurso numerado
 globalmente** — códigos de saída, faixas de teste, tabelas de registo de builtins.
+
+## Autonomia do integrador — ruling do dono (2026-07-29)
+
+Literal: *"Se está pronto, não precisa me perguntar, despache, se está feito, drene."*
+
+**Não perguntar para despachar o degrau seguinte, nem para drenar trabalho concluído.** O dono decide
+desenho, quebra de superfície, tensão lei-contra-lei e promoção. A escada de degraus e o dreno são
+execução, e a execução é minha.
+
+O que CONTINUA a precisar dele, e não se dilui com esta autonomia:
+
+- **promover / fundir o PR** — nunca;
+- **tirar um vagão de draft** — nunca;
+- **quebra de superfície** ou semântica de linguagem (foi ele que cravou `.len`, a fábrica de
+  `error`, `join` achatado, o corte a fazer barulho);
+- **desligar ou abrandar uma medição que ele pediu** — a régua do `fixpoint_backend` é o caso vivo:
+  reduzi-la de quatro para duas pernas foi ordem dele, não iniciativa minha;
+- **alargar o âmbito de uma lane que está a fechar** — o `bulk` e o array-literal foram ambos
+  perguntados antes, e ambos aprovados; a pergunta era legítima porque era âmbito, não execução.
+
+### A correcção que a mesma sessão obrigou a fazer duas vezes
+
+**Uma faixa aberta não é uma faixa.** Atribuí "60 em diante" a um agente e "70 em diante" a outro; o
+segundo colidiu com o primeiro no código 70, e antes disso dois agentes tinham pedido o mesmo 53.
+**Faixas de códigos de saída do corpus atribuem-se FECHADAS nos dois lados** (`100 a 109`), com a
+instrução de pedir mais se não chegarem.
+
+### O contorno legítimo do force-push, para agentes presos
+
+As worktrees deste repositório partilham o object store (`/home/user/teko-lang/.git`). Um agente que
+rebaseie fica com a branch impublicável (force-push bloqueado para toda a gente, dono incluído) —
+mas **não precisa de publicar**: commita local, diz o SHA, e o integrador drena do objecto
+partilhado. Nenhuma lei é revogada e nada se perde. Aconteceu duas vezes nesta sessão, e nas duas o
+agente parou correctamente em vez de forçar.
