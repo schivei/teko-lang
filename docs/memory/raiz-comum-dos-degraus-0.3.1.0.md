@@ -13,6 +13,73 @@ que ele próprio não sabe fazer**.
 
 ---
 
+## 0-bis. RULING APROVADO — as strings multi-byte. A decisão inteira, num sítio só
+
+> **"Caso das strings multi-byte aceito e aprovado"** — dono, 2026-07-29
+
+O pacote foi aprovado. A decisão nasceu espalhada por várias trocas do mesmo dia; fica aqui
+consolidada para que ninguém tenha de a reconstruir. As medições que a sustentam estão em §7-bis,
+§7-ter e §7-quater; esta secção é só o que ficou DECIDIDO.
+
+### O que foi decidido
+
+| # | decisão | nota |
+|---|---|---|
+| 1 | **`str` leva os DOIS contadores** — caracteres e bytes | é o terceiro word |
+| 2 | **`str.len` conta CARACTERES**; o outro contador conta bytes | *"O usuário do sistema não sabe bytes e nem imagina que um caractere acentuado ocupa 2 bytes e um emoji ocupa 4"* |
+| 3 | **A iteração dá CHARS** | sai de graça — ver a armadilha abaixo |
+| 4 | **`char` continua AÇÚCAR**, em vagão próprio, e **`c'X'` baixa para `[]byte`** | *"char sendo açúcar, um c'X' deveria fazer lowering para []byte, e aqui está o seu char gordo em C"* |
+| 5 | **O acesso a bytes é EXPLÍCITO**, por funções em **`teko::text::`**, extensível a outros encodings | `text` não colide; `str` colidiria. `teko::text::` já existe com 4 usos (`valid_utf`, `str_from_utf`, `concat`) |
+| 6 | **A migração de `.len` faz-se com ERRO DURO por uma versão** (a opção D2 de §7-quater.4) | *"Bora fazer barulho"* |
+
+### As duas coisas que não se podem separar
+
+**(3) sai de graça, e a razão está medida.** O for-each é um desugar SINTÁCTICO no parser
+(`parse_loop_foreach_slice`, `src/parser/loop_head.tks:668`) para `0 .. _src.len` + `_src[_i]`. Não
+existe máquina de iteração. **Se `.len` e `[i]` passarem a chars, a iteração segue sozinha — zero
+linhas de parser.**
+
+**A ARMADILHA, medida, e é o outro lado da mesma moeda:** se só `.len` mudar, `"Aéz"` itera **3**
+vezes indexando **bytes** — visita `'A'`, `0xC3`, `0xA9`, e **`'z'` nunca é visitado**. `'é'` vem
+partido em duas metades sem sentido. **Os dois eixos movem-se juntos ou nenhum se move.**
+
+**(6) é o que torna (2) verificável pela máquina.** Os 25 sítios de aritmética de bytes sobre
+`str.len` (§7-quater.4) são todos mecânicos, e ambos os contadores são `u64` — trocar o significado
+de `.len` deixaria os 25 a compilar em silêncio, e em ASCII puro nenhum teste do projecto mudaria de
+cor. O erro duro converte **25 riscos silenciosos em ~394 erros que o compilador encontra sozinho**.
+Cobre `.len` E `[i]`, pela mesma razão da armadilha acima.
+
+**(4) é uma linha, e tem lugar fixo na fila.** `lower_char_lit_fat` delega em `lower_str_bytes_fat`
+(`src/lir/lower.tks:6622`), que já interna bytes UTF-8 em rodata e devolve o par. Sequenciado
+**LOGO A SEGUIR ao R0, nunca antes** — sem o R0 os dois predicados de "é gordo" discordam e o campo
+`char` fica com 8 bytes onde o store escreve 16 (§7-quater.3-bis).
+
+### A sequência aprovada
+
+| ordem | trabalho | lane |
+|---|---|---|
+| 1 | **R0-R7** (R0 = unificar os predicados; R5 = gémeos `_len`; R7-min = o `char`) | **esta** (0.3.1.0) |
+| 2 | migrar o compilador para `[]byte` | pode correr em paralelo com 1 |
+| 3 | **`.len` conta chars** + erro duro de transição | lane de LINGUAGEM, **com bump de versão e o seed a acompanhar** |
+| 4 | `get_bytes`/`from_bytes` em `teko::text::` + encodings | lane de STDLIB |
+
+**Por que (3) exige o bump e não cabe aqui:** o `fixpoint` compara gen2 com gen3, e um compilador
+com semântica de `.len` diferente da do seu seed não é comparável com o anterior. A mudança tem de
+atravessar uma versão com o seed a acompanhar.
+
+### O que a aprovação NÃO resolve — pendente, não fechado
+
+1. **O R0 está a ser implementado AGORA, noutro vagão** (`cargo/0.3.1.0-R0-predicados-gordos`; à
+   data desta escrita ainda não publicado no remoto). Nada aqui deve duplicá-lo.
+2. **A previsão P11 ainda NÃO voltou** (§7-quater.3-bis). Ela pergunta se o crumb R3, já aterrado,
+   passou a **ESCREVER por cima do campo vizinho** em vez de apenas ler lixo, no caso de um campo
+   gordo atrás de um alias de tipo. Verificação: compilar a sonda `aliasobs`
+   (`type S = str; struct H { s: S; n: i32 }` com `n = 41`) no vagão e afirmar `h.n`. **Se `h.n` já
+   não for 41, a previsão confirma-se e a urgência de tudo muda** — R0 deixa de ser o próximo crumb
+   e passa a ser correcção destrutiva a fechar primeiro. Enquanto não voltar, isto fica ABERTO.
+
+---
+
 ## 0. Método, e o compilador com que isto foi medido
 
 | etapa | comando | resultado |
