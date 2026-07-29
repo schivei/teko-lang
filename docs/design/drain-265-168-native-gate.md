@@ -1,5 +1,7 @@
 # Native test-gate keystone — #265 (line/branch cov) + #168 (compile-once partition)
 
+> **[HISTÓRICO]** — documenta o planejamento da drenagem de teste nativa (#265, #168), já executado. Não descreve o estado atual do projeto.
+
 Status: DESIGN (architect). Implementation crumbs. Companion to
 `teko-native-test-gate` (owner standing ruling 2026-07-06: the `#test` gate NEVER runs on
 the VM — it compiles to a NATIVE binary that knows the product-under-test + its access
