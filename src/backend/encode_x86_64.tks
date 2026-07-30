@@ -840,12 +840,13 @@ fn encode_fcmp_x86(i: MFCmpX86) -> EncInstX86 {
 }
 
 /**
- * encode_cvt_x86 — an int/float conversion (`CVTSI2SD`/`CVTTSD2SI`/`CVTSD2SS`/
- * `CVTSS2SD`, `0F 2A`/`2C`/`5A`): `Cvtsi2sd`/`Cvttsd2si` are mandatory-prefixed
- * `F2` with `REX.W` (the GPR side is always the wide 64-bit form, `B1-fp`);
+ * encode_cvt_x86 — an int/float conversion (`CVTSI2SD`/`CVTTSD2SI`/`CVTTSS2SI`/
+ * `CVTSD2SS`/`CVTSS2SD`, `0F 2A`/`2C`/`5A`): `Cvtsi2sd`/`Cvttsd2si` are
+ * mandatory-prefixed `F2` with `REX.W` (the GPR side is always the wide 64-bit
+ * form, `B1-fp`) and `Cvttss2si` is their `F3`-prefixed single-precision twin;
  * `Cvtsd2ss` is mandatory-prefixed `F2` (narrowing FROM double), `Cvtss2sd`
- * mandatory-prefixed `F3` (widening FROM single) — neither sets `REX.W`
- * (both operands are FPR).
+ * mandatory-prefixed `F3` (widening FROM single) — neither of those two sets
+ * `REX.W` (both their operands are FPR).
  *
  * @param MCvtX86 i  the conversion instruction (operands physical)
  * @return EncInstX86  the encoded instruction
@@ -854,6 +855,7 @@ fn encode_cvt_x86(i: MCvtX86) -> EncInstX86 {
     match i.op {
         Cvtsi2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTSI2S, i.dst, i.src))
         Cvttsd2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvttss2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, true, X86_OP_CVTTS2SI, i.dst, i.src))
         Cvtsd2ss => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, false, X86_OP_CVTS2S, i.dst, i.src))
         Cvtss2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, false, X86_OP_CVTS2S, i.dst, i.src))
     }
@@ -928,6 +930,23 @@ fn in_arg_base_x86(layout: FrameLayoutX86) -> u32 {
     if !frame_is_framed_x86(layout) { return X86_GPR_BYTES }
     let n_saved = layout.saved_gpr.len to u32
     (2 to u32) * X86_GPR_BYTES + (n_saved * X86_GPR_BYTES) + layout.size
+}
+
+/**
+ * encode_fspill_x86 — resolve `MFSpillX86{reg, slot, is_load}` to
+ * `movsd [rsp + slot_offsets[slot]], xmm` (or the load direction), the scalar SSE
+ * memory move at the 8-byte width, reusing `store_memop_x86`/`load_memop_x86`
+ * so an FPR spill is encoded by exactly the code every other float memory access
+ * goes through (`B1-fp`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MFSpillX86 i  the spill store or reload (operand physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fspill_x86(layout: FrameLayoutX86, i: MFSpillX86) -> EncInstX86 {
+    let mem = MMem { base = RSP_BASE_X86; offset = layout.slot_offsets[i.slot] to i32 }
+    let form = if i.is_load { load_memop_x86(MMemSizeX86::F64, false) } else { store_memop_x86(MMemSizeX86::F64) }
+    emit_mem_op_x86(form, i.reg, mem)
 }
 
 /**
@@ -1107,6 +1126,7 @@ pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | e
         MCvtX86 as x => encode_cvt_x86(x)
         MOutArgX86 as x => encode_out_arg_x86(layout, x)
         MInArgX86 as x => encode_in_arg_x86(layout, x)
+        MFSpillX86 as x => encode_fspill_x86(layout, x)
     }
 }
 

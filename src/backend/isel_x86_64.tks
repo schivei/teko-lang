@@ -192,13 +192,21 @@ fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) ->
  * select_const_float_x86 — the `LConstFloat` selection: materialize its IEEE
  * bit pattern into a scratch GPR (`movabs`, exactly `select_const_int_x86`'s
  * own materialization), then `MFMovX86` it across the GPR/FPR boundary into
- * the result (a `MOVQ xmm, r64` at encode, `B1-fp`, mirroring arm64's
- * `select_const_float`/`FMOV`). Always the f64/double form, the same
- * widest-default reasoning `select_const_int_x86` already documents:
- * `LConstFloat.bits` carries no per-value width, so the widest,
- * no-information-loss form is the honest default. `c.bits` is decoded through
- * `decode_signed64` FIRST (not widened directly) so the GPR staging value is
- * the exact signed two's-complement i64 reading of the IEEE bit pattern.
+ * an FPR (a `MOVQ xmm, r64` at encode, `B1-fp`, mirroring arm64's
+ * `select_const_float`/`FMOV`).
+ *
+ * `LConstFloat.bits` is always the f64 pattern, so an `f32`-declared literal
+ * (`!c.wide`) needs one more step: the f64 value is NARROWED by `CVTSD2SS`
+ * (`select_ftof_x86`'s own narrowing instruction) into the result, which is the
+ * same correctly-rounded conversion a C compiler performs on
+ * `float f = <double literal>;`. Skipping it is the bug that made
+ * `let f: f32 = 2.5` compare unequal to `2.5` on this backend while the C route
+ * said equal — the value was an f64 pattern in a register everything downstream
+ * then read at single width.
+ *
+ * `c.bits` is decoded through `decode_signed64` FIRST (not widened directly) so
+ * the GPR staging value is the exact signed two's-complement i64 reading of the
+ * IEEE bit pattern.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -206,10 +214,16 @@ fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) ->
  * @return SelCtxX86  the advanced context
  */
 fn select_const_float_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstFloat) -> SelCtxX86 {
-    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
     let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
     let ctx2 = selctx_x86_emit(scratch.ctx, movimm_x86(scratch.reg, decode_signed64(c.bits), true))
-    selctx_x86_emit(ctx2, fmov_x86(vreg(inst.result, MRegClass::FPR), scratch.reg, true))
+    if c.wide {
+        return selctx_x86_emit(ctx2, fmov_x86(dst, scratch.reg, true))
+    }
+    let staged = selctx_x86_scratch(ctx2, MRegClass::FPR)
+    let ctx3 = selctx_x86_emit(staged.ctx, fmov_x86(staged.reg, scratch.reg, true))
+    selctx_x86_emit(ctx3, cvt_x86(MCvtOpX86::Cvtsd2ss, dst, staged.reg))
 }
 
 /**
@@ -617,10 +631,11 @@ fn select_fneg_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, dbl: bool) -> SelC
 
 /**
  * select_itof_x86 — the `IToF` selection (`B1-fp`): one `CVTSI2SD` (signed
- * source — `LUnOp` declares no unsigned `IToF` variant, so signed is the
- * total, documented default; always the f64/wide result, the same
- * widest-default reasoning as `select_const_float_x86`, mirroring arm64's
- * `select_itof`).
+ * source — `LUnOp` declares no unsigned `IToF` variant, so signed is the total,
+ * documented default). Always the f64/wide result, and that is now exact rather
+ * than a default: an `int to f32` cast is decomposed by the lowering into this
+ * `IToF` followed by an `FToF` narrowing (`lower.tks`'s
+ * `int_to_narrow_float_cast`), so `IToF` alone never has to produce a single.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -634,25 +649,31 @@ fn select_itof_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
 }
 
 /**
- * select_ftoi_x86 — the `FToI` selection (`B1-fp`): one `CVTTSD2SI` (truncating,
- * signed destination, mirroring `select_itof_x86`'s default).
+ * select_ftoi_x86 — the `FToI` selection (`B1-fp`): one truncating, signed
+ * `CVTTSD2SI` or `CVTTSS2SI`, picked by the OPERAND's own recorded float width —
+ * reading an `f32` value with the double-precision form would decode its 32 live
+ * bits as the low half of a double and truncate to nonsense. The i64 destination
+ * is `select_itof_x86`'s documented widest default in the other direction.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded float width (true f64, false f32)
  * @return SelCtxX86  the advanced context
  */
-fn select_ftoi_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
+fn select_ftoi_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtxX86 {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    selctx_x86_emit(ctx1, cvt_x86(MCvtOpX86::Cvttsd2si, dst, vreg(a, MRegClass::FPR)))
+    let op = if a_wide { MCvtOpX86::Cvttsd2si } else { MCvtOpX86::Cvttss2si }
+    selctx_x86_emit(ctx1, cvt_x86(op, dst, vreg(a, MRegClass::FPR)))
 }
 
 /**
  * select_ftof_x86 — the `FToF` selection (`B1-fp`): one `CVTSD2SS`/`CVTSS2SD`,
- * the direction picked from the OPERAND's own recorded width (`a_wide`) — the
- * one point this x86 lowering reads more than arm64's `select_ftof` does (it
- * never inspects its operand's width at all); see `MCvtOpX86`'s doc.
+ * the direction picked from the OPERAND's own recorded width (`a_wide`). Sound
+ * because the lowering never emits an identity `FToF` (`lower.tks`'s
+ * `is_same_width_float_cast` returns the operand unchanged instead), so the two
+ * widths always differ and "not the operand's width" names exactly one target.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -689,7 +710,7 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
         lir::LUnOp::ZExt => select_identity_mov_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::SExt => select_identity_mov_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::IToF => select_itof_x86(ctx0, inst, u.a)
-        lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a)
+        lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::FToF => select_ftof_x86(ctx0, inst, u.a, a_info.wide)
     }
 }

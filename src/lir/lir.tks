@@ -47,9 +47,32 @@ pub type LUnOp = enum { INeg; INot; FNeg; ZExt; SExt; Trunc; IToF; FToI; FToF }
     language's post-drop range loses bits before machine lowering. */
 pub type LConstInt = struct { val: i64 }
 
-/** LConstFloat — materialize a float literal into a VReg. Carried as the IEEE bit
-    pattern (u64) so the printer/diff is bit-exact (no rounding drift). */
-pub type LConstFloat = struct { bits: u64 }
+/**
+ * LConstFloat — materialize a float literal into a VReg.
+ *
+ * `bits` is ALWAYS the f64 IEEE bit pattern of the literal, whatever `wide` says, so the
+ * printer/diff stays bit-exact with no rounding drift; a backend selecting the `f32` form
+ * narrows that exact pattern itself (the same correctly-rounded conversion C performs on a
+ * `float f = <double literal>;`).
+ *
+ * @since #386 B1-fp
+ */
+pub type LConstFloat = struct {
+    /**
+     * bits — the literal's exact f64 IEEE bit pattern.
+     */
+    bits: u64
+    /**
+     * wide — the literal's DECLARED machine width: true for `f64`, false for `f32`. Without it
+     * the whole float family loses the one fact it cannot re-derive: a backend that assumed
+     * every float literal was `f64` typed an `f32` value wide, and every later width-sensitive
+     * decision read from that value (`FToF`'s direction, a compare's scalar width, a stack
+     * argument's transfer size) then went the wrong way. Measured 2026-07-29 on x86-64:
+     * `let f: f32 = 2.5` followed by `(f to f64) != 2.5` computed TRUE on the own backend and
+     * FALSE down the C route, from exactly this loss.
+     */
+    wide: bool
+}
 
 /** LBin — `a op b`, a/b VRegs. */
 pub type LBin = struct { op: LBinOp; a: u32; b: u32 }
@@ -260,9 +283,18 @@ pub fn const_int_inst(result: u32, val: i64, line: u32, col: u32) -> LInst {
     LInst { result = result; has_result = true; op = LConstInt { val = val }; line = line; col = col }
 }
 
-/** const_float_inst — a `%r = const.<t> 0x<bits>` instruction. */
-pub fn const_float_inst(result: u32, bits: u64, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LConstFloat { bits = bits }; line = line; col = col }
+/**
+ * const_float_inst — a `%r = const.<t> 0x<bits>` instruction.
+ *
+ * @param result  the VReg the literal materializes into
+ * @param bits    the literal's exact f64 IEEE bit pattern
+ * @param wide    the literal's declared machine width (true `f64`, false `f32`)
+ * @param line    the source line, for diagnostics
+ * @param col     the source column, for diagnostics
+ * @return        the built instruction
+ */
+pub fn const_float_inst(result: u32, bits: u64, wide: bool, line: u32, col: u32) -> LInst {
+    LInst { result = result; has_result = true; op = LConstFloat { bits = bits; wide = wide }; line = line; col = col }
 }
 
 /** bin_inst — a `%r = <op> a, b` instruction. */

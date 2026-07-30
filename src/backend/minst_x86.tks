@@ -37,16 +37,16 @@ pub type MFAluOpX86 = enum { FAdd; FSub; FMul; FDiv }
 /**
  * MCvtOpX86 — the closed set of x86-64 int/float conversion mnemonics
  * `MCvtX86` selects: `Cvtsi2sd` (signed GPR -> f64, `LUnOp::IToF` — always the
- * wide/f64 default, mirroring `select_const_int_x86`'s untyped-literal default
- * and arm64's `select_itof`), `Cvttsd2si` (f64 -> signed GPR, truncating,
- * `LUnOp::FToI`), `Cvtsd2ss`/`Cvtss2sd` (the two directions of `LUnOp::FToF`,
- * picked by the OPERAND's own recorded width — unlike arm64's `select_ftof`,
- * which never reads it, this is the one place B1-fp's x86 lowering is MORE
- * precise than its arm64 twin; see the mirroring report).
+ * wide/f64 form, since the lowering decomposes an `int to f32` cast into
+ * `IToF`+`FToF` rather than asking for a narrow convert), `Cvttsd2si`/
+ * `Cvttss2si` (f64/f32 -> signed GPR, truncating, `LUnOp::FToI`, picked by the
+ * OPERAND's recorded width), and `Cvtsd2ss`/`Cvtss2sd` (the two directions of
+ * `LUnOp::FToF`, likewise picked by the operand's width — sound because the
+ * lowering never emits an identity `FToF`, so the two widths always differ).
  *
  * @since #386 B1-fp
  */
-pub type MCvtOpX86 = enum { Cvtsi2sd; Cvttsd2si; Cvtsd2ss; Cvtss2sd }
+pub type MCvtOpX86 = enum { Cvtsi2sd; Cvttsd2si; Cvttss2si; Cvtsd2ss; Cvtss2sd }
 
 /**
  * MMemSizeX86 — the access width an `MLoadX86`/`MStoreX86` transfers: the
@@ -380,6 +380,42 @@ pub type MStoreX86 = struct {
 }
 
 /**
+ * MFSpillX86 — spill an FPR value to, or reload it from, its frame slot in ONE
+ * instruction: `movsd [rsp + slot_offsets[slot]], xmm` and the load direction, the
+ * offset resolved once the frame layout is known.
+ *
+ * It exists because the GPR spill PAIR cannot be reused for a float. That pair is
+ * `lea addr, [frame slot]` + `mov value, [addr]`, and for a GPR the SAME scratch
+ * carries the address and then the value; a float needs an FPR for the value and a
+ * GPR for the address at the same time, and both x86-64 ABIs reserve exactly two
+ * GPR spill scratches — which one instruction with two spilled integer uses
+ * already consumes. Resolving the offset in the encoder, as `MFrameAddrX86`
+ * already does for the address form, removes the address register from the problem
+ * entirely (and emits one instruction where the GPR path emits two).
+ *
+ * Always the 8-byte `MOVSD` width, for `f32` and `f64` alike: the transfer is a
+ * BIT-PRESERVING save/restore of whatever the register holds, never an arithmetic
+ * conversion, and a spill slot is 8 bytes wide either way.
+ *
+ * @since #386 B1-fp
+ */
+pub type MFSpillX86 = struct {
+    /**
+     * reg — the FPR whose value is saved, or which the value is reloaded into.
+     */
+    reg: MReg
+    /**
+     * slot — the absolute frame-slot index of the spill slot.
+     */
+    slot: u64
+    /**
+     * is_load — true for the reload (memory -> register), false for the spill
+     * store (register -> memory).
+     */
+    is_load: bool
+}
+
+/**
  * MOutArgX86 — store one OUTGOING call argument into the caller-owned stack-arg
  * area (`mov [rsp + out_arg_base + 8*index], src`, resolved once the frame
  * layout is known), the selection of an argument past its class's
@@ -702,11 +738,12 @@ pub type MCvtX86 = struct {
  * `MCvtX86`) closed the `B1-fp` honest-stop (2026-07-29), mirroring arm64's
  * float cases over the parallel two-address x86 shape (§4.1/§4.2), and
  * `MOutArgX86`/`MInArgX86` closed `B1-args`, the stack half of both ABIs'
- * argument passing.
+ * argument passing, while `MFSpillX86` closed the inherited FPR-spill deferral
+ * the float family made reachable.
  *
  * @since #386 B1-2, B1-fp, B1-args
  */
-pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86 | MOutArgX86 | MInArgX86
+pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86 | MOutArgX86 | MInArgX86 | MFSpillX86
 
 /**
  * MBlockX86 — an x86-64 machine basic block: its id, its block-args (the
@@ -1004,6 +1041,18 @@ pub fn load_x86(size: MMemSizeX86, sign: bool, dst: MReg, mem: MMem) -> MInstX86
  */
 pub fn store_x86(size: MMemSizeX86, src: MReg, mem: MMem) -> MInstX86 {
     MStoreX86 { size = size; src = src; mem = mem }
+}
+
+/**
+ * fspill_x86 — an FPR spill store / reload instruction (MFSpillX86).
+ *
+ * @param MReg reg  the FPR saved or reloaded
+ * @param u64 slot  the absolute frame-slot index of the spill slot
+ * @param bool is_load  true for the reload, false for the spill store
+ * @return MInstX86  the built instruction
+ */
+pub fn fspill_x86(reg: MReg, slot: u64, is_load: bool) -> MInstX86 {
+    MFSpillX86 { reg = reg; slot = slot; is_load = is_load }
 }
 
 /**
@@ -1358,7 +1407,7 @@ fn falu_op_name_x86(op: MFAluOpX86) -> str {
  * @return str  its lowercase mnemonic
  */
 fn cvt_op_name_x86(op: MCvtOpX86) -> str {
-    match op { Cvtsi2sd => "cvtsi2sd"; Cvttsd2si => "cvttsd2si"; Cvtsd2ss => "cvtsd2ss"; Cvtss2sd => "cvtss2sd" }
+    match op { Cvtsi2sd => "cvtsi2sd"; Cvttsd2si => "cvttsd2si"; Cvttss2si => "cvttss2si"; Cvtsd2ss => "cvtsd2ss"; Cvtss2sd => "cvtss2sd" }
 }
 
 /**
@@ -1599,6 +1648,18 @@ fn print_store_x86(i: MStoreX86) -> str {
 }
 
 /**
+ * print_fspill_x86 — `movsd %fN, [spill #slot]` / `movsd [spill #slot], %fN`.
+ *
+ * @param MFSpillX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fspill_x86(i: MFSpillX86) -> str {
+    let slot = teko::str::concat("[spill #", teko::u64_to_str(i.slot), "]")
+    if i.is_load { return teko::str::concat("movsd ", reg_ref_x86(i.reg), ", ", slot) }
+    teko::str::concat("movsd ", slot, ", ", reg_ref_x86(i.reg))
+}
+
+/**
  * print_out_arg_x86 — `mov.<size> [outarg #index], src`.
  *
  * @param MOutArgX86 i  the instruction to render
@@ -1721,6 +1782,7 @@ fn print_minst_x86(i: MInstX86) -> str {
         MCvtX86 as x => print_cvt_x86(x)
         MOutArgX86 as x => print_out_arg_x86(x)
         MInArgX86 as x => print_in_arg_x86(x)
+        MFSpillX86 as x => print_fspill_x86(x)
     }
 }
 

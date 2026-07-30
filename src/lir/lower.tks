@@ -1025,12 +1025,32 @@ pub fn lower_expr(ctx: LowerCtx, e: checker::TExpr) -> Lowered | error {
     }
 }
 
+/**
+ * float_literal_is_wide — a float literal's declared machine width: false only when its own
+ * resolved type is `f32`, true otherwise.
+ *
+ * The `true` default is deliberate and load-bearing: a literal whose type has not resolved to a
+ * concrete float PrimKind keeps the widest, no-information-loss reading, which is exactly what
+ * every backend assumed UNCONDITIONALLY before `LConstFloat.wide` existed — so no `f64` program's
+ * lowering moves by a single instruction and the fixpoint is undisturbed.
+ *
+ * @param ctx  the lowering context (its declared-enum table, which `prim_kind_of` consults)
+ * @param e    the literal expression, carrying its own resolved type
+ * @return     true for `f64` (and for a type this backend cannot resolve), false for `f32`
+ */
+fn float_literal_is_wide(ctx: LowerCtx, e: checker::TExpr) -> bool {
+    match prim_kind_of(e.type, ctx.enums, "float literal") {
+        checker::PrimKind as p => p != checker::PrimKind::F32
+        error => true
+    }
+}
+
 /** lower_number — an integer literal -> LConstInt, a float literal -> LConstFloat (carried
-    as its exact IEEE bits). */
+    as its exact IEEE bits, plus the literal's own declared f32/f64 width). */
 fn lower_number(ctx: LowerCtx, e: checker::TExpr, n: checker::TNumber) -> Lowered | error {
     let r = ctx_alloc(ctx)
     if n.is_float {
-        let finst = const_float_inst(r.vreg, teko::f64_bits(n.fval), e.line, e.col)
+        let finst = const_float_inst(r.vreg, teko::f64_bits(n.fval), float_literal_is_wide(ctx, e), e.line, e.col)
         return Lowered { ctx = ctx_append(r.ctx, finst); vreg = r.vreg }
     }
     let inst = const_int_inst(r.vreg, parser::numint_to_i64(n.value), e.line, e.col)
@@ -1295,9 +1315,65 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | 
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
     let src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
     let dst = match prim_kind_of(e.type, ctx.enums, "cast target") { checker::PrimKind as p => p; error as err => return err }
+    if is_same_width_float_cast(src, dst) { return ao }
+    if is_int_to_narrow_float_cast(src, dst) { return lower_int_to_f32(ao, e) }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, cast_unop_of(src, dst), ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+/**
+ * is_int_to_narrow_float_cast — is this `to` cast an integer-to-`f32` cast?
+ *
+ * @param checker::PrimKind src  the cast operand's PrimKind
+ * @param checker::PrimKind dst  the cast target's PrimKind
+ * @return bool  true iff the source is an integer and the target is `f32`
+ */
+fn is_int_to_narrow_float_cast(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
+    !prim_is_float_kind(src) && dst == checker::PrimKind::F32
+}
+
+/**
+ * lower_int_to_f32 — an `int to f32` cast, as the PAIR `IToF` (int -> f64) then `FToF`
+ * (f64 -> f32).
+ *
+ * `LUnOp::IToF` names no destination width, and every backend reads it as the widest one
+ * (x86's `CVTSI2SD`, arm64's `SCVTF`, wasm's `f64.convert_i*`), so asking it for an `f32`
+ * directly would silently hand back a double that everything downstream then read at single
+ * width. Decomposing here keeps `IToF` honest about the ONE thing it means and reuses the
+ * `FToF` narrowing that already exists — and the two-step result is bit-identical to a direct
+ * single convert for every value, since IEEE double holds every i64 rounding decision an
+ * i64->f32 conversion needs.
+ *
+ * @param Lowered ao  the already-lowered integer operand
+ * @param checker::TExpr e  the cast expression (for its source position)
+ * @return Lowered  the narrowed `f32` value
+ */
+fn lower_int_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
+    let wide = ctx_alloc(ao.ctx)
+    let to_f64 = un_inst(wide.vreg, LUnOp::IToF, ao.vreg, e.line, e.col)
+    let narrow = ctx_alloc(ctx_append(wide.ctx, to_f64))
+    let to_f32 = un_inst(narrow.vreg, LUnOp::FToF, wide.vreg, e.line, e.col)
+    Lowered { ctx = ctx_append(narrow.ctx, to_f32); vreg = narrow.vreg }
+}
+
+/**
+ * is_same_width_float_cast — is this `to` cast a float-to-float cast between the SAME width
+ * (`f32 to f32`, `f64 to f64`)?
+ *
+ * Such a cast lowers to NO instruction at all: the value already is what the cast asks for, and
+ * emitting an `FToF` for it would be actively harmful, because `FToF` carries no direction of its
+ * own — a backend reads the direction off the OPERAND's width, so an identity `FToF` reads as
+ * "convert to the other width" and silently changes the value. This is the float twin of the
+ * int-to-int same-width case, which `cast_int_unop_of` sends to the harmless identity `Trunc`;
+ * there is no float identity `LUnOp` to send this one to, so the honest lowering is none.
+ *
+ * @param checker::PrimKind src  the cast operand's PrimKind
+ * @param checker::PrimKind dst  the cast target's PrimKind
+ * @return bool  true iff both sides are floats of the same width
+ */
+fn is_same_width_float_cast(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
+    prim_is_float_kind(src) && prim_is_float_kind(dst) && prim_width_of(src) == prim_width_of(dst)
 }
 
 /**
