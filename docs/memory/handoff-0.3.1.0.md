@@ -19,6 +19,36 @@ hipótese, está dito.
 
 
 
+## 0n. A PERNA WINDOWS DRENADA, e o agente REFUTOU a minha inferência (2026-07-30)
+
+`cargo/0.3.1.0-windows-leg-2` @ `0c81989` drenado. `drain_guard` OK. Conferências no merge: `fn` do `corpus.tks` **235 → 235** (a branch não tocou a fixture), zero chamadas do teste sem definição, e a **terceira direcção** medida — as quatro novas (`mingw_path_evidence`, `mingw_triple_evidence`, `MINGW_PATH_EVIDENCE_PHRASE`, `MINGW_TRIPLE_EVIDENCE_PHRASE`) são **privadas**, e o teste vive na mesma namespace, logo a visibilidade chega. Os **três** testes onde havia um estão verificados por nome (`..._convicted_by_its_path_without_any_probe`, `..._innocent_spelling_is_left_for_the_triple_to_judge`, `..._triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown`).
+
+### A asserção mingw: a cadeia completa, e a declaração que o meu grep não achou
+
+`const HOST_CC_NAME: str = "cc"` vive em **`src/build/regression.tks:645`**. A cadeia: `mingw_cc_evidence("cc")` → `linker_is_mingw("cc")` é falso (a grafia é inocente) → **executa** `cc_target_triple`, que faz `spawn_redirected(["cc","-dumpmachine"])` → no runner Windows o `cc` resolve para `/c/mingw64/bin/cc` e responde um triplo MinGW → evidência não vazia → `== ""` falso. A 1165 cairia a seguir pela mesma razão; a 1164 dispara primeiro, e é por isso que a mensagem dizia `is_true`.
+
+Ritual reportado: `native_dry_gate` **verde com paragem idêntica** (medida pelo agente na base, com gen1 própria); **fixpoint `gen2 == gen3` byte a byte E `gen2.c == gen3.c`**; unitários na gen2 **1142 iniciados, 0 falhas** — 1140 + 2, porque um teste virou três — e o agente confirma a armadilha: **1135 linhas terminam em `ok` e 7 empurram-no para a linha seguinte**. Semente: `bootstrap/teko.c` (o `fetch_teko.sh` dá 403 por token inválido), via degrau `1e441aa`.
+
+### A REFUTAÇÃO, e é minha
+
+Eu escrevi que a mesma assinatura `0xC0000005` em **duas fixturas independentes** *"promove a hipótese de causa única no arranque"* e mandei olhar primeiro para a entrada sintetizada e o alinhamento de pilha. **Errado nas duas metades, e o log desmente-me:**
+
+1. **Não são duas fixturas independentes — é UMA.** O `main.tks:43` do `own_native` chama `f_alias_fat_field()`, e `own_arith_exit` é a fila `[0]`: cai com o binário. Uma causa, dois sintomas na mesma cadeia.
+2. **`regressor.tkr (14 builds)` contra 16 filas no ficheiro: o regressor CORTA na primeira falha.** As quatro que nunca correram incluem **`alias_fat_field (C route)`**. Portanto **a rota C desta fixtura está POR MEDIR em Windows, não verde** — e eu invoquei a regra do oráculo (*"a divergência nativo × C é bug do nativo"*) **sem medição do lado C**. Invocar o oráculo sobre um lado que não correu não é aplicar a regra: é presumi-la. Contraprova do agente: em Linux dá **18 builds**, com as mesmas filas presentes.
+3. E `byte-view round-trip (own-native)` — a única outra fila que compara duas `str` — **não correu**, logo não era contra-exemplo de nada.
+
+### A CAUSA PROVADA: a ABI de Win64 contra o par gordo
+
+`tk_str` tem **16 bytes** (`teko_rt.h:45-48`). Em Win64 um agregado só viaja em registo com 1/2/4/8 bytes; **16 viajam por referência**. O LIR passa sempre um valor gordo como `(ptr, len)` — que é a ABI da **SysV**. A correcção que já existe, `str_pair_by_ref_x86` (`isel_x86_64.tks:1373`), está fechada a **sete símbolos** (`is_str_arg_builtin`, `lower.tks:3259`) **e a `args.len == 2`**: cobre a família de UM `tk_str` e é *estruturalmente* incapaz de cobrir a de DOIS. Sobram quatro entradas por valor que o nativo chama: **`tk_str_eq`, `tk_str_contains`, `tk_str_ends_with`, `tk_rt_last_index_of_ok`**. As outras foram achatadas de propósito, e em SysV as duas formas são a MESMA ABI — é por isso que isto é invisível em Linux e macOS.
+
+Explica os três observáveis sem sobras: *não escreveu nada* (estoura NA comparação, e a cadeia do `main.tks` são `if` silenciosos); *só em Windows* (é a única ABI da matriz com `max_reg_arg_bytes < 16`); *"duas" fixturas* (é uma). Bónus: as dez filas `defer_*` que PASSAM entram no runtime por `tk_panic_str`, que **está** na lista dos sete.
+
+**Excluído por medição:** arranque, entrada sintetizada, alinhamento de pilha (aritmética de `frame_sub_size_x86`/`compute_frame_layout_x86` verificada), secções/relocações PE, compilação (compilou 1301 s e correu; 13 filas own-native anteriores passaram com o mesmo emissor), e a família `executable_suffix`/`binary_output_path`/`sibling_object_path` — *"um binário obsoleto não escolheria justamente a fila que compara strings"*.
+
+**Não empurrado, e a recusa é correcta:** sem host Windows, mudar ABI por raciocínio numa perna já vermelha é o palpite que o brief proíbe. **E há prova host-independente disponível:** `isel_x86_64_test.tkt` já tem um descritor `WIN64` (linha 482) e pode afirmar a sequência emitida para `tk_str_eq` **sem runner**. O desenho: generalizar a materialização por referência para N pares gordos quando `max_reg_arg_bytes < 16`, com a aridade gorda por símbolo ao lado de `is_str_arg_builtin`; SysV intocado pela guarda, fixpoint imóvel.
+
+**Também por medir:** o arco C de `alias_fat_field` em Windows, e a fase de regressão completa em Linux até ao fim.
+
 ## 0m. AS PERNAS x86_64 ANDARAM DUAS FILAS — e a guarda diz o que falta a seguir (2026-07-30)
 
 Execução `30539595001` (`8d781ea`, o conserto das sete pernas). **Medido, e é progresso limpo:**
