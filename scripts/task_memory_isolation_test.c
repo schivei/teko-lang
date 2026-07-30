@@ -227,6 +227,34 @@ static void arm_program_region(void) {
 }
 
 /**
+ * arm_reuse_after_end — a task that is ENDED and then allocated from again holds no stale witness.
+ *
+ * tk_task_end frees the task's regions, so every parked free-list block, live-tail push-cache entry
+ * and arena mark it still held names reclaimed memory. A task struct that outlives its own end (the
+ * main task is never freed) would otherwise false-hit on a dead region. Ending the MAIN task and
+ * then allocating from it again is the shape that exposes that, so it is the shape tested.
+ */
+static void arm_reuse_after_end(void) {
+    lane_install(&tk_g_main_task);
+    unsigned char *before = (unsigned char *)tk_alloc(CANARY_BYTES);
+    memset(before, LANE_A_PATTERN, CANARY_BYTES);
+    tk_arena_push();
+
+    tk_task_end(&tk_g_main_task);
+
+    assert(tk_g_main_task.root == NULL);
+    assert(tk_g_main_task.regs == NULL);
+    assert(tk_g_main_task.arena_msp == 0);
+    assert(tk_g_main_task.free_large == NULL);
+    assert(tk_g_main_task.fn_stack == NULL);
+
+    unsigned char *after = (unsigned char *)tk_alloc(CANARY_BYTES);
+    memset(after, LANE_B_PATTERN, CANARY_BYTES);
+    assert(tk_g_main_task.root != NULL);   // a fresh root, built lazily on the first allocation
+    printf("reuse after end: no stale marks, parked blocks or tail witnesses\n");
+}
+
+/**
  * main — run the four arms in order, print the two numbers of the reversal, and assert them.
  *
  * @return  0 on success (every assertion held); a failed assert aborts non-zero.
@@ -253,6 +281,7 @@ int main(void) {
     free(lane_b);
 
     arm_program_region();
+    arm_reuse_after_end();
 
     printf("task memory isolation: OK\n");
     return 0;

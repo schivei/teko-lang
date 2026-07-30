@@ -1240,6 +1240,10 @@ tk_task *tk_task_current(void) {
 #define tk_fn_sp              (tk_task_current()->fn_sp)
 #define tk_fn_cap             (tk_task_current()->fn_cap)
 
+// tk_push_cache_purge — fwd; the cache lives beside tk_slice_push far below, but the task teardown
+// above it must be able to drop every live-tail witness before the memory they name is reclaimed.
+static void tk_push_cache_purge(void);
+
 // tk_g_region_gen — PROCESS-GLOBAL by necessity (see the ruling above). tk_region_gen_next hands
 // out the next stamp; it is the one counter that must never be per-task.
 static uint64_t tk_g_region_gen = 0;
@@ -1686,9 +1690,17 @@ tk_task *tk_task_begin(void) {
 // program region (tk_region_program). The main task is statically allocated, so it is never freed.
 void tk_task_end(tk_task *previous) {
     tk_task *ending = tk_task_current();
+    // Every witness the task holds names memory the registry free below is about to reclaim: parked
+    // free-list blocks and live-tail push-cache entries both live INSIDE those chunks, and the marks
+    // point at them. They are dropped FIRST, while `ending` is still the current task, so that a task
+    // which is reused rather than freed (the main task) cannot false-hit on a dead region afterwards.
+    tk_free_purge();
+    tk_push_cache_purge();
+    ending->arena_msp = 0;
     tk_registry_free(&ending->regs);
     ending->root = NULL;
     free(ending->fn_stack);
+    ending->fn_stack = NULL; ending->fn_sp = 0; ending->fn_cap = 0;
     tk_g_current_task = previous;
     if (ending != &tk_g_main_task) free(ending);
 }
@@ -1725,7 +1737,6 @@ void tk_arena_push(void) {
     }
     tk_arena_msp += 1;
 }
-static void tk_push_cache_purge(void);   // fwd — the cache lives beside tk_slice_push below
 
 void tk_arena_pop(void) {
     if (tk_arena_msp <= 0) return;
