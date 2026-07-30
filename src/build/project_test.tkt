@@ -112,19 +112,24 @@ fn host_target_is_unsupported(os: str, arch: str) -> bool {
  * this backend has a real codegen pipeline for, keyed on BOTH `os` AND `arch` — simulating
  * every supported host without depending on which one this test actually runs on.
  *
+ * `linux`+`arm64` is the FOURTH row, and it is the one that makes `linux` the first OS with
+ * two arches: refusing it (which this resolver honestly did, because `Arm64Linux` did not
+ * exist) is what left the arm64-Linux test leg green over rows it never ran.
+ *
  * @return void
  */
 fn host_target_for_os_is_precise_for_every_supported_pair() {
     teko::assert::is_true(host_target_matches("linux", "x86_64", NativeTarget::X8664Linux))
     teko::assert::is_true(host_target_matches("windows", "x86_64", NativeTarget::X8664Windows))
     teko::assert::is_true(host_target_matches("macos", "arm64", NativeTarget::Arm64Macho))
+    teko::assert::is_true(host_target_matches("linux", "arm64", NativeTarget::Arm64Linux))
 }
 
 #test
 /**
  * host_target_for_os_rejects_every_unsupported_pair — the R2 counterpart: teaching
  * `host_target_for_os` the architecture means an `(os, arch)` pair with no own-backend target
- * (an aarch64 linux host, an x86_64 macOS host, an arm64 windows host, or a wholly `unknown`
+ * (an x86_64 macOS host, an arm64 windows host, or a wholly `unknown`
  * arch) is now an honest COMPILE-time refusal naming BOTH the offending `os` and `arch` — never
  * the pre-0.3.1-teko-arch silent mis-lower to the OS's dominant arch regardless of the host's
  * REAL arch (the exact bug class R1 exists to close, one dimension over from the original
@@ -133,7 +138,6 @@ fn host_target_for_os_is_precise_for_every_supported_pair() {
  * @return void
  */
 fn host_target_for_os_rejects_every_unsupported_pair() {
-    teko::assert::is_true(host_target_is_unsupported("linux", "arm64"))
     teko::assert::is_true(host_target_is_unsupported("macos", "x86_64"))
     teko::assert::is_true(host_target_is_unsupported("windows", "arm64"))
     teko::assert::is_true(host_target_is_unsupported("linux", "unknown"))
@@ -190,19 +194,27 @@ fn host_default_target_matches_the_real_host() {
 #test
 /**
  * host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported —
- * `host_default_target_guess` is ALWAYS total, and this equivalence holds on EVERY host,
- * supported or not — the assertion never assumes which one it is running on. On a supported pair
- * `host_default_target()` succeeds with exactly the target `host_target_for_os_guess(teko::os())`
- * names for that OS (each of the three supported pairs IS its own OS's dominant arch, by
- * construction), so both sides read the identical value; on an UNSUPPORTED pair
- * `host_default_target_guess` falls through to that very same OS-only guess, by definition. Pinned
- * here against the Phase-1 guess so a future host whose precise pair the resolver refuses still
- * gets a total, host-OS-derived answer instead of a crash.
+ * `host_default_target_guess` is ALWAYS total, and it PREFERS the precise resolver: on any host
+ * whose (os, arch) pair has an own-backend target it answers exactly that target, and only on an
+ * unsupported pair does it fall through to the OS-only Phase-1 guess. The assertion is on the
+ * equivalence, in both arms, so it never assumes which host it is running on.
+ *
+ * WHY THIS CANNOT BE PINNED AGAINST `host_target_for_os_guess` ALONE ANYMORE: the previous body
+ * asserted `host_default_target_guess() == host_target_for_os_guess(teko::os())` unconditionally,
+ * on the stated assumption that "each of the three supported pairs IS its own OS's dominant arch,
+ * by construction". `Arm64Linux` breaks that assumption — `linux` is now the first OS with TWO
+ * supported arches — so on an arm64 Linux host the precise resolver answers `Arm64Linux` while
+ * the OS-only guess still answers `X8664Linux`, and the two legitimately differ. Asserting the
+ * PREFERENCE instead of the equality keeps the property that actually matters: this function
+ * never crashes and never contradicts the precise resolver.
  *
  * @return void
  */
 fn host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported() {
-    teko::assert::is_true(host_default_target_guess() == host_target_for_os_guess(teko::os()))
+    match host_default_target() {
+        NativeTarget as precise => teko::assert::is_true(host_default_target_guess() == precise)
+        error => teko::assert::is_true(host_default_target_guess() == host_target_for_os_guess(teko::os()))
+    }
 }
 
 #test
@@ -718,7 +730,8 @@ fn pt_error_text(v: null | error) -> str {
 
 /**
  * pt_cross_target — a target that is NEVER a host default (`host_target_for_os` only ever answers
- * x86_64-linux, x86_64-windows or arm64-macos, so a wasm target can never be one), so `cross_note`
+ * x86_64-linux, x86_64-windows, arm64-macos or arm64-linux, so a wasm target can never be one),
+ * so `cross_note`
  * classifies it as cross on EVERY CI host and the R4/R5 cross assertions below hold
  * platform-independently.
  *
@@ -748,6 +761,8 @@ fn pt_target_name_and_objfmt_are_one_source() {
     teko::assert::is_true(target_objfmt(NativeTarget::Arm64Macho) == OBJFMT_MACHO)
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Windows) == OBJFMT_COFF)
     teko::assert::is_true(target_objfmt(NativeTarget::Wasm64Wasi) == OBJFMT_WASM)
+    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
     teko::assert::is_true(target_links_with_cc(NativeTarget::X8664Linux))
     teko::assert::is_false(target_links_with_cc(NativeTarget::Wasm32Wasi))
     teko::assert::is_true(target_os_name(NativeTarget::X8664Windows) == "windows")
@@ -1152,4 +1167,65 @@ fn pt_the_closing_line_names_the_artifact_that_exists() {
  */
 fn pt_native_manifest() -> Manifest {
     with_backend(pt_empty_manifest(), Backend::Native)
+}
+
+#test
+/**
+ * arm64_linux_target_row_set — the WHOLE row `Arm64Linux` adds to the target table, asserted
+ * column by column rather than trusting that one arm implies the rest: the canonical name
+ * `arm64-linux` (OS-based, ruling #390), the `aarch64-linux` spelling alias that
+ * `cc -dumpmachine` reports, the ELF object format, the `linux` OS half and the `arm64` arch
+ * half of the one os-arch string space (D39), the round trip
+ * `target_from_name(target_name(t)) == t`, and the fact that it LINKS with `cc` on its own
+ * host (unlike a wasm target, which has no link step at all).
+ *
+ * A HALF-TAUGHT TARGET IS WORSE THAN NO TARGET: a variant that resolves but reports the wrong
+ * arch would make the regressor's own-backend capability probe compare `arm64` against the
+ * host `cc`'s `aarch64` and honest-skip the very rows this row exists to run.
+ *
+ * @return void
+ */
+fn arm64_linux_target_row_set() {
+    teko::assert::is_true(target_matches("arm64-linux", NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_matches("aarch64-linux", NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) == "linux")
+    teko::assert::is_true(target_arch_name(NativeTarget::Arm64Linux) == "arm64")
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Linux), NativeTarget::Arm64Linux))
+}
+
+#test
+/**
+ * arm64_linux_is_distinct_from_arm64_macos — the two arm64 targets share ISA, ABI, isel,
+ * regalloc and encoder, and differ in exactly ONE observable: the object container. Pinning
+ * the differences that MUST exist (name, object format) alongside the one that must NOT (the
+ * arch) is what stops a future refactor from folding them into one variant and silently
+ * emitting Mach-O on Linux — the original R1 bug, wearing the other arch's clothes.
+ *
+ * @return void
+ */
+fn arm64_linux_is_distinct_from_arm64_macos() {
+    teko::assert::is_true(NativeTarget::Arm64Linux != NativeTarget::Arm64Macho)
+    teko::assert::is_true(target_arch_name(NativeTarget::Arm64Linux) == target_arch_name(NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) != target_objfmt(NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) != target_os_name(NativeTarget::Arm64Macho))
+}
+
+#test
+/**
+ * unsupported_target_error_lists_arm64_linux — D39's single-source rule: the R2 diagnostic
+ * that lists every accepted target must list the new one too, or a user typing
+ * `TEKO_TARGET=arm64-linu` is told, with authority, that the target they want does not exist.
+ *
+ * @return void
+ */
+fn unsupported_target_error_lists_arm64_linux() {
+    match target_from_name("arm64-linu") {
+        NativeTarget => teko::assert::is_true(false)
+        error as e => {
+            teko::assert::is_true(teko::str::contains(e.message, "arm64-linux"))
+            teko::assert::is_true(teko::str::contains(e.message, "aarch64-linux"))
+        }
+    }
 }
