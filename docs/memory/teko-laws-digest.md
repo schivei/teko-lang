@@ -1326,3 +1326,47 @@ chamado no `main.tks` tem de resolver (é a conferência de DIRECÇÃO, e corre 
 função com `0 }` pode estar a inventar a cauda e a enfraquecer a fixture em silêncio. **Verifica-a
 contra o commit anterior ao dano** — foi o que fiz aqui (`e0a3491`/`0ddd4a6` terminavam em `0`, logo a
 reparação era fiel). Acreditar numa reparação é tão barato como acreditar num verde.
+
+## OS TESTES NÃO SE ENDEREÇAM PELA SAÍDA — ruling reiterado pelo dono (2026-07-30)
+
+Eu perguntei ao dono qual faixa usar para remapear os códigos 260–269 do `own_native` (que truncam:
+`exit(260)` → 4, `exit(256)` → 0). A resposta foi que a pergunta está errada:
+
+> *"Eu não entendo a pira de fazer exit, uma hora tu fica sem faixa mesmo, eu encontraria outra forma
+> sem exit, mas… já havia dito sobre paralelizar os testes e (para os que rodam em processo) passar um
+> canal próprio pra stdin, out e err. Mas já cansei de falar e nenhuma sessão ou agente construir.
+> Agora fica ai, falhando e voltando a mesma pergunta sempre pq quer endereçar testes por saída e não
+> pelo que deveriam fazer, aumentar a suíte de funções de asserções é outra."*
+
+**A lei, e é antiga — o que é novo é ela nunca ter sido construída:**
+
+1. **Um teste afirma o que deve FAZER, não o número com que sai.** Endereçar cenários por código de
+   saída esgota o espaço (255 valores), colide consigo mesmo, e trunca em silêncio. A faixa nunca é o
+   conserto: **o conserto é deixar de usar a saída como endereço.**
+2. **Os testes correm em PARALELO.**
+3. **Um teste que corre em processo recebe canal PRÓPRIO de `stdin`, `stdout` e `stderr`** — é isso que
+   torna o paralelismo legível e dispensa o código de saída como canal de informação.
+4. **A suíte de funções de asserção cresce** para que um cenário se afirme por asserção, não por
+   aritmética de saída.
+
+**E a nota de processo, que é a mais séria:** o dono diz *"já cansei de falar e nenhuma sessão ou agente
+construir"*. Isto não é um pedido novo que chegou hoje — é um ruling que sessões anteriores e esta
+receberam e não executaram, e o sintoma (a colisão de faixas) voltou a bater à porta pelo caminho
+previsto. **Um ruling que se repete e não se constrói é dívida, e a dívida cobra-se sempre no mesmo
+sítio.** Vai à frente da fila.
+
+**Consequência imediata, medida:** o mesmo trabalho responde ao tempo de compilação. O `own_native`
+compila em 620 s (musl), 815 s (arm64), 628 s (macOS) e **1301 s** (Windows), e o dono acrescenta que
+*"na org o mais lento tem sido Windows com 15-20 min"*. A resposta dele às duas perguntas foi a mesma:
+**paralelizar**. Não é uma optimização a caçar depois — é a mesma obra.
+
+## O VERIFICADOR DE OBJECTO QUER OS DOIS LADOS — ruling do dono (2026-07-30)
+
+Perguntei se a guarda do COFF devia ficar no `llvm-readobj` (oráculo externo, mas dependência) ou
+passar a um leitor nosso (sem dependência, mas o nosso leitor concordaria com o nosso emissor mesmo
+quando ambos estivessem errados). Ruling: **"Diria que precisa de ambos."**
+
+Portanto: o `llvm-readobj`/`llvm-objdump` **mantém-se** como oráculo externo — é uma ferramenta que não
+é nossa a dizer que o objecto está bem formado — e **ganhamos também um leitor nosso**, em Teko, que
+verifica o que sabemos verificar. Os dois correm; a divergência entre eles é sinal. Fica atrás do
+portão do 100% nativo, como o `tdb`.
