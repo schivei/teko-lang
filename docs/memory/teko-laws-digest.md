@@ -842,3 +842,65 @@ ativa** por cinco agentes (`typer.tks`, `project.tks`, `lower_const.tks`, `codeg
 agentes, `teko fmt` sobre os 16, e **confirmar que o ponto de fixo continua a fechar** — reformatar
 não deve mudar bytes emitidos, mas isso é afirmação a verificar, não a assumir. **Sem portão no
 fim.**
+
+## LEI — UM AGENTE QUE MEXE EM LOWERING TEM DE TENTAR A EMISSÃO NATIVA ANTES DE DIZER VERDE (dono, 2026-07-30)
+
+**A pergunta do dono, e ela é uma acusação justa:** *"Que testes que os agentes estão fazendo e
+reportando verde à ti sendo que quebra em seguida? Quem tratou de floats não fez o serviço certo."*
+
+E a ordem que se segue dela, verbatim: *"Os agentes precisam melhorar os testes, rodar a suíte de
+artifact como ocorre no CI, mesmo que só tenham Linux x64 glibc, se tivessem tentado emitir um teko
+native a partir de um gen1, teriam pego o erro sem precisar de nova rodada."*
+
+**O CASO CONCRETO, medido.** O agente do degrau 24 fechou `f64_bits`/`f64_from_bits` e reportou verde.
+O passo seguinte do self-host morreu em:
+
+```
+teko: .: native backend N1: builtin `ftoa` not yet lowered (N2) [in `teko::codegen::cb_f64_literal`]
+```
+
+Outro builtin de float, na mesma vizinhança do que ele acabara de baixar, **num sítio que uma única
+tentativa de emissão nativa teria exposto**. Custou uma rodada inteira de CI — seis pernas — para
+descobrir o degrau seguinte que estava a um comando de distância.
+
+**A LEI.** `teko test .` verde **não é prova suficiente** para uma mudança de lowering, isel, encode ou
+runtime. Antes de reportar verde, o agente TEM de tentar a emissão nativa do próprio compilador a
+partir do gen1:
+
+```
+TEKO_BACKEND=native <gen1> . -o /tmp/g2-nativo --no-verify --release
+```
+
+E tem de reportar, **textualmente**, a paragem que apareceu. O contrato é de três partes:
+
+1. uma paragem `native backend N1: ... not yet lowered` **é esperada hoje** — o self-host não fecha;
+2. o agente garante que **não é a dele**;
+3. o agente garante que **não é NOVA** — que a mudança não introduziu nem desbloqueou outra.
+
+**A VERSÃO COMPLETA, quando houver tempo**, é o que o job `artifact` faz, e corre num Linux x86-64
+glibc qualquer:
+
+```
+sh scripts/produce_assets.sh linux linux-x86_64-glibc linux-x86_64-glibc
+TEKO_FIXPOINT_BACKEND=native sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+```
+
+**PROPORCIONALIDADE, e é o integrador que a aplica no despacho.** A exigência escala com o que a
+mudança toca:
+
+| a mudança toca | o que se exige antes de "verde" |
+| --- | --- |
+| lowering / isel / encode / objfile / runtime | a emissão nativa acima, **obrigatória**, com a paragem citada |
+| fixtures, `.tkr`, corpus | idem — o degrau 28 nasceu de uma fixture drenada que nenhuma perna nativa compilou |
+| só ficheiros de teste `.tkt` | contagem exacta antes/depois + diff dos nomes; não é preciso a emissão nativa |
+| só docs, ou uma flag de CLI com guarda | nada disto; e **NÃO** mandar o agente correr a suíte completa — foi o que prendeu o agente do `fmt` numa tarefa de 5 minutos |
+
+**A ÚLTIMA LINHA DA TABELA É TÃO IMPORTANTE COMO A PRIMEIRA.** No mesmo dia em que esta lei nasceu, o
+agente do `fmt --apply` — um conserto de guarda que o dono orçou em *"menos de 5 min"* — ficou preso a
+correr a suíte completa e o ponto de fixo. O dono apanhou: *"O agente de fmt já está há muito tempo em
+execução em uma tarefa que não deveria passar de 5 min."* Exigir a prova pesada onde ela não se aplica
+**também** é defeito de despacho, e colide com a regra de que esperar não é estado permitido.
+
+**PORQUE ISTO É LEI E NÃO CONSELHO.** A escada de degraus é encontrada **um degrau por rodada de CI**
+se ninguém tentar localmente. Cada degrau assim custa seis pernas de runner e uma volta ao integrador.
+A emissão nativa local custa um comando e encontra o degrau seguinte **antes** de gastar a rodada.
