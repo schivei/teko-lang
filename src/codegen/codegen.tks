@@ -12035,8 +12035,7 @@ fn emit_test_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
         b = cb(b, "    tk_cov_branches_on(false); tk_cov_lines_on(false);\n")
         b = cb(b, "    { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n")
     }
-    b = cb(b, "    tk_test_summary();\n")
-    b = cb(b, "    return tk_test_any_failed() ? 1 : 0;\n")
+    b = emit_test_main_close(b)
     b = cb(b, "}\n")
     b
 }
@@ -12073,9 +12072,28 @@ fn emit_test_main_analyze(buf: []byte, prog: CgProg) -> []byte | error {
         }
         i++
     }
-    b = cb(b, "    return 0;\n")
+    b = emit_test_main_close(b)
     b = cb(b, "}\n")
     b
+}
+
+/**
+ * emit_test_main_close — the last two lines of EVERY test harness: the run's summary, then the
+ * status the tally earned.
+ *
+ * IT IS ONE FUNCTION BECAUSE THE ANALYZE HARNESS ALREADY DRIFTED ONCE, and the drift was silent.
+ * The capture (§14) makes a failing `#test` return instead of aborting, so a harness that still
+ * closed on a blind `return 0` reported a suite with failures as SUCCESS — and `run_analyzer`
+ * (`project.tks`) reads exactly that status (`if arc != 0 { return arc }`). The plain gate had been
+ * taught to count; the analyze gate had not, and nothing would have said so. Sharing the close is
+ * what makes "which harness reports the tally" un-askable.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @return     the buffer with the summary call and the tally-derived `return` appended
+ */
+fn emit_test_main_close(buf: []byte) -> []byte {
+    let b = cb(buf, "    tk_test_summary();\n")
+    cb(b, "    return tk_test_any_failed() ? 1 : 0;\n")
 }
 
 /**
