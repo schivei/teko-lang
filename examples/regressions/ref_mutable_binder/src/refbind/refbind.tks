@@ -146,15 +146,75 @@ fn annotated_ref_sees_source() -> Reading {
 }
 
 /**
- * ref_score — the whole regressor's bit-score: one bit per proven direction, `1 + 2 + 4 + 8 + 16`
- * = `31` when every direction of the identity axis holds.
+ * Named — a class, i.e. a REFERENCE type, whose single field is written by its OWN method. It is
+ * the `private set` half of the `let` law: a `let` handle forbids a DIRECT field write from
+ * outside, at every level, while the declaring type's own method may still write it.
+ */
+type Named = class {
+    /** the field the class's own method writes and the outside world may only read. */
+    pub name: str
+    /**
+     * of — build a named object.
+     *
+     * @param n  the initial name
+     * @return   the new object
+     */
+    pub fn of(n: str) -> Named {
+        Named { name = n }
+    }
+    /**
+     * rename — write the object's own field from INSIDE the declaring class, the one route a `let`
+     * handle still permits.
+     *
+     * @param n  the new name
+     */
+    pub fn rename(self, n: str) {
+        self.name = n
+    }
+}
+
+/**
+ * let_class_method_still_writes — direction 5, the owner's own reproduction: under a `let` handle a
+ * METHOD of the class writes the field and the change is visible through that same `let` handle.
+ * This is the direction that must NOT regress when `let` starts protecting classes — a fix that
+ * merely banned every class write would break it, so it is scored, not assumed.
  *
- * @return `31` when the law holds; a score missing the bit of whichever direction regressed
+ * @return the readings of the name's equality to "b" around the method call
+ */
+fn let_class_method_still_writes() -> Reading {
+    let a = Named::of("a")
+    let before = a.name == "b"
+    a.rename("b")
+    Reading { before = before; after = a.name == "b" }
+}
+
+/**
+ * mut_class_direct_write_still_allowed — direction 6, the INVERSION of the new `let` guard: the
+ * guard rejects a direct field write only because the handle is immutable, so the SAME write
+ * through a `mut` handle must still be admitted. Without this direction a guard that rejected
+ * every direct class-field write would look correct.
+ *
+ * @return the readings of the name's equality to "c" around the direct field write
+ */
+fn mut_class_direct_write_still_allowed() -> Reading {
+    mut a = Named::of("a")
+    let before = a.name == "c"
+    a.name = "c"
+    Reading { before = before; after = a.name == "c" }
+}
+
+/**
+ * ref_score — the whole regressor's bit-score: one bit per proven direction,
+ * `1 + 2 + 4 + 8 + 16 + 32 + 64` = `127` when every direction of the binding-mode model holds.
+ *
+ * @return `127` when the law holds; a score missing the bit of whichever direction regressed
  */
 pub fn ref_score() -> i64 {
     weigh(param_write_lands(), 1) +
     weigh(flipped(param_write_crosses()), 2) +
     weigh(flipped(inferred_ref_sees_source()), 4) +
     weigh(raised(source_sees_inferred_ref_write()), 8) +
-    weigh(flipped(annotated_ref_sees_source()), 16)
+    weigh(flipped(annotated_ref_sees_source()), 16) +
+    weigh(raised(let_class_method_still_writes()), 32) +
+    weigh(raised(mut_class_direct_write_still_allowed()), 64)
 }
