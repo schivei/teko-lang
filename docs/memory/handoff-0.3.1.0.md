@@ -369,6 +369,112 @@ que **essa 1 é o `own_native` e faz a perna cair**. Não é uma falha tolerada 
 Linux/macOS: é vermelho a sério, em todas as pernas, e é o item de maior valor da fila depois dos
 degraus. Fica corrigido aqui.
 
+## 0f. A `ACCESS_VIOLATION` de Windows TEM CAUSA PROVADA — e o meu "duas fixturas independentes" era uma leitura errada do log (2026-07-30, `cargo/0.3.1.0-windows-leg-2`)
+
+Medido no log integral do job **90829251715** (run `30528940780`, SHA `954b2c9`).
+
+**A minha inferência estava errada, e o próprio log a desmente.** Eu li duas fixturas a estourar com
+`0xC0000005` e concluí "causa única do lado de Windows, provavelmente no arranque do processo". A parte
+"causa única" está certa; a parte "arranque" está errada, e o que a decide é uma linha que eu não somei:
+`regressor.tkr (14 builds)`. **O ficheiro tem 16 filas de build e só 14 correram** — o regressor para o
+ficheiro na PRIMEIRA fila que falha. As 14 que correram são exactamente as filas ATÉ `alias_fat_field
+(own-native)` inclusive (argv + 2 qualifier + 10 defer + ela). As quatro que ficaram por correr são
+`alias_fat_field (C route)`, `variant_member_compare (C route)` e o par `byte-view round-trip`.
+
+Consequências imediatas, e as duas doem:
+
+1. **A rota C desta fixtura NUNCA correu em Windows.** A "regra do oráculo" que eu invoquei (a
+   divergência nativo-vs-C é bug do nativo) não tem medição nenhuma deste lado — o arco C está por
+   medir, não verde.
+2. **`byte-view round-trip (own-native)` também nunca correu**, e é a única outra fila own-native de
+   `regressor.tkr` que compara duas `str`. Não é contra-exemplo de nada.
+
+**A CAUSA, provada por leitura do código.** `tk_str` é `{ const tk_byte *ptr; size_t len; }` — 16
+bytes (`src/runtime/teko_rt.h:45-48`). Na ABI Microsoft x64 um agregado só viaja em registo com
+tamanho 1/2/4/8; **16 bytes viajam POR REFERÊNCIA** (o chamador copia para um temporário e passa o
+ENDEREÇO). Na SysV o mesmo agregado viaja em DOIS registos inteiros. O LIR achata sempre um valor gordo
+em `(ptr, len)`, o que É a ABI da SysV e NÃO é a de Win64 — e a correcção que existe para isso,
+`str_pair_by_ref_x86` (`src/backend/isel_x86_64.tks:1373`), está fechada a **sete símbolos** e a
+`args.len == 2`:
+
+```teko
+fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
+    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+}
+```
+
+`is_str_arg_builtin` (`src/lir/lower.tks:3259`) lista `tk_print`, `tk_println`, `tk_eprint`,
+`tk_eprintln`, `tk_write`, `tk_ewrite`, `tk_panic_str`. **Toda a família de UM `tk_str` está coberta;
+a de DOIS não está, e a guarda `args.len == 2` torna-a estruturalmente incobrível** — dois pares
+achatam para quatro operandos.
+
+Cruzando os protótipos de `teko_rt.h` com os símbolos que `lower.tks` emite, sobram **quatro** entradas
+que ainda recebem `tk_str` POR VALOR e não têm a correcção:
+
+| símbolo | assinatura em C | pares gordos |
+|---|---|---|
+| `tk_str_eq` | `bool tk_str_eq(tk_str a, tk_str b)` | 2 |
+| `tk_str_contains` | `bool tk_str_contains(tk_str s, tk_str needle)` | 2 |
+| `tk_str_ends_with` | `bool tk_str_ends_with(tk_str s, tk_str suffix)` | 2 |
+| `tk_rt_last_index_of_ok` | `bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index)` | 2 + 1 escalar |
+
+Todas as OUTRAS entradas do runtime que o backend nativo chama já foram reescritas ACHATADAS de
+propósito — `tk_str_concat_len(const tk_byte*, uint64_t, const tk_byte*, uint64_t, uint64_t*)`,
+`tk_str_slice_len`, `tk_str_of_bytes_len`, `tk_slice_str_eq(const tk_str*, uint64_t, …)`. Estas quatro
+ficaram com a assinatura de struct. **Em SysV as duas formas são a MESMA ABI, por isso são
+indistinguíveis em Linux e macOS**; em Win64 são ABIs diferentes e o achatamento é o errado.
+
+**O mecanismo exacto, e já está escrito no próprio código.** O doc-comment de
+`pin_str_pair_by_ref_x86` descreve o sintoma idêntico de quando isto foi apanhado para `tk_print`:
+*"emitting SysV's two-register form on Win64 makes the C-built callee … read the STRING'S OWN first 16
+bytes as `{ptr; len}` and `fwrite` through the resulting garbage pointer."* Para `h.s != "abcde"` o
+nativo pinha `RCX = a.ptr`, `RDX = a.len`, `R8 = b.ptr`, `R9 = b.len`; o `tk_str_eq` compilado por clang
+lê `RCX` como `tk_str*`, carrega os bytes de `"abcde"` como se fossem um ponteiro e faz `memcmp` nesse
+endereço → **`0xC0000005`**.
+
+**Isto explica os TRÊS observáveis, e nenhum sobra:**
+
+- *"não escreveu NADA"* — o estouro é NA comparação. `cases/alias_fat_field.tks` é
+  `exit(alias_field_probe())` e o probe não imprime; o `main.tks` do `own_native` é uma cadeia de `if`
+  silenciosos. Nenhum dos dois chega a escrever.
+- *"só em Windows"* — Win64 é a única ABI da matriz com `max_reg_arg_bytes < 16`. Em SysV/AAPCS64 o par
+  achatado é literalmente a convenção correcta.
+- *"duas fixturas"* — é UMA causa. `main.tks:43` do `own_native` chama `f_alias_fat_field()`, e a mesma
+  cadeia passa antes por `f_str_equality` (item 28) e por outros `==` de `str`; o `own_native.exe`
+  estoura no PRIMEIRO `tk_str_eq` que avalia, muito antes do item 44. `own_arith_exit` é a fila `[0]`
+  desse ficheiro e cai com o binário, não pela sua própria aritmética.
+- *bónus, e é a confirmação mais limpa*: as **dez** filas `defer_*` que PASSARAM em Windows entram no
+  runtime por `tk_panic_str` — que **está** na lista dos sete. As que passam são as cobertas; a que
+  falha é a primeira não coberta. `alias_fat_field (own-native)` é a primeira fila own-native de
+  `regressor.tkr` que compara duas `str`.
+
+**O que fica EXCLUÍDO por medição, e não é pouco:** não é o arranque do processo, não é a entrada
+sintetizada, não é o alinhamento de pilha do prólogo, não são secções/relocações do PE, e não é
+compilação — `own_native.exe` compilou 1301 s e correu, e as 13 filas own-native anteriores
+(argv, qualifier, defer) correram e passaram com o MESMO emissor, a MESMA entrada e o MESMO objecto
+COFF. Também não é a família `executable_suffix`/`binary_output_path`/`sibling_object_path` de
+`cff49b4`: um binário obsoleto não escolheria justamente a fila que compara strings.
+
+**A CORRECÇÃO, e porque NÃO a empurrei.** O desenho certo é generalizar a correcção em vez de a alargar
+por lista: em `isel_x86_64.tks`, quando `max_reg_arg_bytes < 16`, materializar CADA par gordo do
+argumento no seu próprio slot de 16 bytes e pinar só os endereços — o que cobre a forma de 1 par (o que
+já existe), a de 2 pares, e a de 2 pares + escalar do `tk_rt_last_index_of_ok`, com a lista de aridade
+gorda por símbolo em `lower.tks` ao lado de `is_str_arg_builtin` (fonte única, como hoje). O caminho
+SysV fica intocado pela guarda `max_reg_arg_bytes < 16`, logo o fixpoint não se move.
+
+Não a empurrei porque **não tenho host Windows para a validar**, e uma mudança de ABI por raciocínio
+numa perna já vermelha é exactamente o palpite empurrado que o brief proíbe. O que a decide numa
+corrida: implementar a generalização e ver `alias_fat_field (own-native)` passar em Windows **e** as
+quatro filas que hoje nunca correm (`alias_fat_field (C route)`, `variant_member_compare (C route)` e o
+par `byte-view round-trip`) passarem a correr. Prova host-independente disponível em Linux enquanto
+isso: `isel_x86_64_test.tkt` já tem um descritor `WIN64` (linha 482) e pode afirmar a sequência emitida
+para `tk_str_eq` sem runner nenhum.
+
+**E uma lição de instrumento, que é minha:** `(N builds)` no relatório do regressor é o número de filas
+que CORRERAM, não o número de filas do ficheiro. Comparar esse N com o `grep -c "When built and run"`
+do `.tkr` diz de graça quantas filas ficaram por correr — e foi só essa subtracção que separou "duas
+features estouram por acaso" de "uma causa, e a segunda fixtura nem chegou a ser medida".
+
 ## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
 
 Eu medi **dois** sítios que nomeavam o executável (`project.tks:1827` e `:2635`) e escrevi o brief sobre
