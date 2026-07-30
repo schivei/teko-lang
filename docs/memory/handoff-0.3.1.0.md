@@ -19,6 +19,27 @@ hipótese, está dito.
 
 
 
+## 0m. AS PERNAS x86_64 ANDARAM DUAS FILAS — e a guarda diz o que falta a seguir (2026-07-30)
+
+Execução `30539595001` (`8d781ea`, o conserto das sete pernas). **Medido, e é progresso limpo:**
+
+- **`check_coff: FAIL` desapareceu.** Zero ocorrências. A fila `own_cross_x86_64_windows_emits_coff` passa agora nas três pernas x86_64.
+- Elas avançaram para a fila **seguinte**: `own_cross_arm64_linux_emits_elf` (`test / linux-x86_64-musl`, `Memory paranoid (musl)`, `regressor wasm`).
+- `arm64-glibc`, `mem-paranoid arm64` e `macOS` continuam em `own_arith_exit` (A4-fp = degrau 29, em branch); Windows em `own_arith_exit` (`0xC0000005`).
+- Stop nativo, único: degrau 31. Zero `skipped`.
+
+### A GUARDA NOMEOU O CONSERTO SEGUINTE, seis vezes
+
+```
+check_elf: FAIL — no cross-capable LLVM disassembler/relinker for an arm64 object exists on
+Linux-x86_64 (looked for llvm-objdump / ld.lld) — install LLVM's lld+objdump on this host, or do
+not route a cross-ELF check here — a gate that passes with nothing to check is a hidden error
+```
+
+`llvm` deu o `llvm-readobj` que fechou o COFF; o ELF cruzado quer também o **`ld.lld`**, que vive no pacote **`lld`**, não no `llvm`. Aplicado nas oito instalações (as sete pernas da suíte + o `regressor-full`).
+
+**E é uma guarda bem escrita:** não disse só "falhei" — disse **o que procurou** (`llvm-objdump` / `ld.lld`), **o que instalar**, e a alternativa legítima (*"or do not route a cross-ELF check here"*). É o molde do que quero das asserções que o agente da suíte está a construir: uma falha que diz o que esperava, o que obteve, e o que fazer.
+
 ## 0l. O `llvm` FUNCIONOU ONDE CHEGOU — e dois dos meus três sítios eram a perna errada (2026-07-30)
 
 Execução `30535419502` (`5e14c6e`), log integral. **Progresso medido em duas frentes** e um erro meu, o mesmo de sempre.
