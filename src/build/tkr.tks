@@ -58,14 +58,14 @@ pub type TkrMatch = struct {
 
 /**
  * TkrExpect — a per-os-arch expectation override declared by a `Then on "<os-arch>"` step, for the
- * legitimate divergences a target introduces (e.g. a wasm trap exit differing from a native abort).
+ * legitimate divergences a target introduces (e.g. a Windows trap exit differing from a POSIX abort).
  * Each field overrides the top-level expectation ONLY for the named `osarch`; `has_exit`
  * distinguishes "override the exit code" from "leave it inherited".
  *
  * @since 0.3.0.29
  */
 pub type TkrExpect = struct {
-    /** the os-arch key this override applies to (e.g. "wasm", "x86_64-linux"). */
+    /** the os-arch key this override applies to (e.g. "x86_64-windows", "x86_64-linux"). */
     osarch: str
     /** true when this override supplies an `exit` code (else the top-level exit is inherited). */
     has_exit: bool
@@ -136,8 +136,6 @@ pub type Tkr = struct {
     dep_dir: str
     /** true for a `Then object well-formed` step (post-build host-toolchain cross-check of the emitted `.o`). @since 0.3.1 */
     check_wellformed: bool
-    /** true for a `Then module valid` step (post-build `wasm-validate` cross-check of the emitted `.wasm`). @since 0.3.1 */
-    check_module_valid: bool
 }
 
 /**
@@ -1158,8 +1156,6 @@ type TkrLower = struct {
     dep_dir: str
     /** true once a `Then object well-formed` step is seen. @since 0.3.1 */
     check_wellformed: bool
-    /** true once a `Then module valid` step is seen. @since 0.3.1 */
-    check_module_valid: bool
 }
 
 /**
@@ -1175,7 +1171,7 @@ fn tkr_lower_new() -> TkrLower {
         stdout = tkr_match_ignore(); stderr = tkr_match_ignore(); targets = teko::list::empty()
         diagnostic = ""; expect = teko::list::empty(); golden = teko::list::empty()
         source_inline = ""; source_file = ""; env = teko::list::empty(); target = ""
-        in_place = false; dep_dir = ""; check_wellformed = false; check_module_valid = false
+        in_place = false; dep_dir = ""; check_wellformed = false
     }
 }
 
@@ -1232,7 +1228,7 @@ fn tkr_target_env(value: str) -> []str {
  * had to hardcode one — `x86_64-linux` — which turns the row into a CROSS row on every other host and
  * earns it an honest skip there. Hardcoding an architecture where the subject is "an explicit
  * spelling" is what silently narrows the corpus to one machine. A row whose subject genuinely IS an
- * architecture (emitting COFF, emitting wasm) still names that architecture and still skips
+ * architecture (emitting COFF, emitting Mach-O) still names that architecture and still skips
  * honestly where the toolchain is absent — this token is for the other kind of row, and only that.
  */
 const HOST_OS_ARCH_TARGET: str = "host-os-arch"
@@ -1278,40 +1274,40 @@ fn tkr_resolve_target_name(value: str) -> str {
 fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     if noun == "source" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = q.text; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = q.text; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "source inline" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = value; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = value; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "env" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, xs); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, xs); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "target" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
         let name = tkr_resolve_target_name(q.text)
         let env2 = tkr_env_extend(b.env, tkr_target_env(name))
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = name; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = name; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "dependency" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = q.text; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = q.text; check_wellformed = b.check_wellformed }
     }
     if noun == "args" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
-        return TkrLower { args = xs; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = xs; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "targets" {
         let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = xs; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = xs; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "stdin" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = q.text; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = q.text; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "stdin bytes" {
         let d = match tkr_read_hex_docstring(value, 0) { str as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = d; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = d; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     error { message = teko::str::concat("tkr: unknown Given noun-phrase: ", noun) }
 }
@@ -1330,19 +1326,19 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
 fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     if noun == "exit" {
         let code = match tkr_read_i32(value, 0) { i32 as v => v; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = code; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = code; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if noun == "diagnostic" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = q.text; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = q.text; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if mf_starts_with(noun, "stdout") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = m; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = m; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if mf_starts_with(noun, "stderr") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = m; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = m; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     error { message = teko::str::concat("tkr: unknown Then noun-phrase: ", noun) }
 }
@@ -1362,23 +1358,23 @@ fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
 fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> TkrLower | error {
     if noun == "artifact sha256" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = tkr_put_golden(b.golden, osarch, q.text); source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = tkr_put_golden(b.golden, osarch, q.text); source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     let e = tkr_get_expect(b.expect, osarch)
     if noun == "exit" {
         let code = match tkr_read_i32(value, 0) { i32 as v => v; error as er => return er }
         let ne = TkrExpect { osarch = osarch; has_exit = true; exit = code; stdout = e.stdout; stderr = e.stderr }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if mf_starts_with(noun, "stdout") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as er => return er }
         let ne = TkrExpect { osarch = osarch; has_exit = e.has_exit; exit = e.exit; stdout = m; stderr = e.stderr }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if mf_starts_with(noun, "stderr") {
         let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as er => return er }
         let ne = TkrExpect { osarch = osarch; has_exit = e.has_exit; exit = e.exit; stdout = e.stdout; stderr = m }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     error { message = teko::str::concat("tkr: unknown routed Then noun-phrase: ", noun) }
 }
@@ -1386,7 +1382,7 @@ fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> Tkr
 /**
  * tkr_apply_step_lower — fold one step into the lowering: a When sets the kind (`built in place`
  * additionally marks `in_place`), a Given sets an opaque input, a Then sets a top-level or
- * `on`-routed expectation (or a verb-only leaf-tool flag: `object well-formed`/`module valid`).
+ * `on`-routed expectation (or the verb-only leaf-tool flag `object well-formed`).
  * M.3 on any malformed value.
  *
  * @param b     the lowering accumulator
@@ -1398,20 +1394,17 @@ fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> Tkr
 fn tkr_apply_step_lower(b: TkrLower, step: TkrStep) -> TkrLower | error {
     if step.phase == TkrPhase::When {
         if step.verb == "built in place" {
-            return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Print; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = true; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+            return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Print; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = true; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
         }
         let k = match tkr_kind_for_verb(step.verb) { TkrKind as x => x; error as e => return e }
-        return TkrLower { args = b.args; stdin = b.stdin; kind = k; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = k; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if step.phase == TkrPhase::Given { return tkr_apply_given(b, step.noun, step.value) }
     if step.verb == "it traps" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Trap; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = TkrKind::Trap; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
     }
     if step.verb == "object well-formed" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = true; check_module_valid = b.check_module_valid }
-    }
-    if step.verb == "module valid" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = true }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = true }
     }
     if step.osarch.len > 0 { return tkr_apply_then_osarch(b, step.osarch, step.noun, step.value) }
     tkr_apply_then_top(b, step.noun, step.value)
@@ -1436,7 +1429,7 @@ fn tkr_lower_to_tkr(steps: []TkrStep) -> Tkr | error {
     }
     Tkr {
         args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; expect = b.expect; golden = b.golden; diagnostic = b.diagnostic
-        source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid
+        source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed
     }
 }
 

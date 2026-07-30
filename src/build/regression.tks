@@ -90,7 +90,7 @@ fn regr_pass() -> RegrOutcome { RegrOutcome { ok = true; skipped = false; skips 
  * regr_skip — an honest-skipped `RegrOutcome` carrying `msg` (the reason). Not a failure: the runner
  * reports it and does not tally it against the gate, but it DOES tally into the summary's `skipped`
  * column (`skips = 1`) so the report never presents a skip as a check. Used for a missing host
- * toolchain / run-wrapper (0.3.1 C3) and for a declarative (verb-less) scenario (0.3.1 C1).
+ * toolchain (0.3.1 C3) and for a declarative (verb-less) scenario (0.3.1 C1).
  *
  * @param msg  the skip reason (shown after the report label)
  * @return     a skipped outcome carrying one skip
@@ -443,11 +443,11 @@ fn run_captured(argv: []str, stdin_data: str, prefix: str) -> CapResult {
  * tool_on_path — is `name` an executable reachable on the child shell's `PATH`? Shells `command -v
  * <name>` — POSIX-portable, unlike `which`, and the ONE surviving use of a shell in this file: it
  * probes a shell BUILTIN, which has no standalone executable for `spawn_redirected`/`run` to launch
- * directly. Reads its exit status; used to honest-skip a run-wrapper / leaf-tool step whose host
+ * directly. Reads its exit status; used to honest-skip a leaf-tool step whose host
  * toolchain is absent (0.3.1 C3), rather than fabricate a pass or crash on a missing binary.
  *
  * `name` IS NOT SHELL-QUOTED, and that is a scoped, checked safety argument rather than an
- * oversight: every caller passes either a literal ("wasmtime", "wasm-validate") or a cross/host `cc`
+ * oversight: every caller passes a cross/host `cc`
  * name this file itself resolved (`cross_cc_for_target`/`host_cc_arch`), never text that reaches
  * here from a `.tkr` scenario or any other untrusted source — none of those shapes can contain a
  * space or a shell metacharacter.
@@ -497,9 +497,9 @@ fn tool_query_line(argv: []str) -> str {
 
 /**
  * REGRESSION_REQUIRE_TOOLS_VAR — the environment-variable key of the fail-closed toggle: on a
- * provisioned CI lane, setting it to `"1"` turns an absent-toolchain honest-skip (`Given target`'s
- * run-wrapper, a leaf-tool `Then` step) into a hard FAILURE instead — a broken provisioning step
- * must not silently degrade to green (R2, mirroring the retired `REQUIRE_WASM_ENGINE`). A dev
+ * provisioned CI lane, setting it to `"1"` turns an absent-toolchain honest-skip (a `Given target`'s
+ * cross linker, a leaf-tool `Then` step) into a hard FAILURE instead — a broken provisioning step
+ * must not silently degrade to green (R2). A dev
  * laptop with the var unset keeps the honest-skip default.
  */
 const REGRESSION_REQUIRE_TOOLS_VAR: str = "REGRESSION_REQUIRE_TOOLS"
@@ -562,63 +562,6 @@ fn argv_with_args(binp: str, args: []str) -> []str {
         k = k + 1
     }
     out
-}
-
-/**
- * wrap_argv_with_wrapper — `argv` with `wrapper`'s tokens prepended (e.g. `["wasmtime", "run"]`), or
- * `argv` unchanged when `wrapper` is `[]` (a native host target — the common case).
- *
- * @param wrapper  the run-wrapper argv prefix (from `resolve_run_wrapper`)
- * @param argv     the binary + args argv (from `argv_with_args`)
- * @return         `wrapper ~ argv`, or `argv` unchanged when `wrapper` is empty
- * @since 0.3.1
- */
-fn wrap_argv_with_wrapper(wrapper: []str, argv: []str) -> []str {
-    if wrapper.len == 0 { return argv }
-    mut out: []str = teko::list::empty()
-    mut k: u64 = 0
-    loop {
-        if k >= wrapper.len { break }
-        out = teko::list::push(out, wrapper[k])
-        k = k + 1
-    }
-    mut j: u64 = 0
-    loop {
-        if j >= argv.len { break }
-        out = teko::list::push(out, argv[j])
-        j = j + 1
-    }
-    out
-}
-
-/**
- * resolve_run_wrapper — the executor prefix argv for `target`: `[]` for a native host target
- * (`""`/`"host"`), `["wasmtime", "run"]` (plus `"-W", "memory64=y"` for `wasm64-wasi`/`wasm64`) for
- * a wasm target. Returns an error carrying a
- * human-readable reason when the required CAPABILITY is not whole on this host; the caller
- * (`tkr_run_one_row`, via `tool_skip_or_fail`) turns that into an honest os-arch skip, unless the
- * `REGRESSION_REQUIRE_TOOLS` fail-closed flag is set (§7).
- *
- * @param target  the effective os-arch / wasm target ("" / "host" → no wrapper)
- * @return        the run-wrapper argv prefix, or an error naming the missing capability
- * @throws        when `wasmtime` is required by `target` and this host does not have it
- * @since 0.3.1
- */
-fn resolve_run_wrapper(target: str) -> []str | error {
-    let no_wrapper: []str = teko::list::empty()
-    if target.len == 0 || target == HOST_TARGET { return no_wrapper }
-    if target == "wasm32-wasi" || target == "wasm32" || target == "wasm" || target == "wasi" {
-        if !tool_on_path("wasmtime") { return error { message = teko::str::concat("wasmtime not found on PATH for target ", target) } }
-        return teko::list::push(teko::list::push(teko::list::empty(), "wasmtime"), "run")
-    }
-    if target == "wasm64-wasi" || target == "wasm64" {
-        if !tool_on_path("wasmtime") { return error { message = teko::str::concat("wasmtime not found on PATH for target ", target) } }
-        mut w: []str = teko::list::push(teko::list::empty(), "wasmtime")
-        w = teko::list::push(w, "run")
-        w = teko::list::push(w, "-W")
-        return teko::list::push(w, "memory64=y")
-    }
-    no_wrapper
 }
 
 /**
@@ -795,7 +738,7 @@ fn host_default_unsupported_skip_reason(is_host_default_row: bool, e: error) -> 
  * WHY IT MEASURES THE `cc` AND NOT THE KERNEL. The question is not "what CPU is this host" but "can
  * the linker that will run accept this object", so the reading comes from `cc -dumpmachine`
  * (`host_cc_arch`). Every unknown is fail-SAFE: an absent `cc`, a driver without `-dumpmachine`, a
- * triple this file cannot parse, or a wasm target with no arch at all all yield "" and NO skip, so a
+ * or a triple this file cannot parse all yield "" and NO skip, so a
  * host that cannot be measured behaves exactly as it did before this rule existed.
  *
  * WHY ONLY ELF. An arch mismatch is FATAL only where the system linker is arch-locked, and of the
@@ -878,16 +821,15 @@ fn own_backend_target_of_row(target: str) -> NativeTarget | error {
  * target_toolchain_skip_reason — "" when every tool a `Given target` scenario needs is on this
  * host's PATH, else the human-readable reason the scenario cannot honestly run here. Probed BEFORE
  * the artifact is built, because a missing CROSS-LINKER surfaces as a `cc` failure the runner cannot
- * distinguish from a real compiler regression — the run-wrapper check alone (`resolve_run_wrapper`,
- * consulted only after a successful build) would therefore turn "this host has no cross toolchain"
- * into a red gate on every host that legitimately has none. The same argument covers a cross target
- * with NO dedicated cross driver (`host_cc_cannot_link_cross_reason`), which would otherwise reach
- * the host `ld` and fail on the object format.
+ * distinguish from a real compiler regression, and probing it only after a successful build would
+ * turn "this host has no cross toolchain" into a red gate on every host that legitimately has none.
+ * The same argument covers a cross target with NO dedicated cross driver
+ * (`host_cc_cannot_link_cross_reason`), which would otherwise reach the host `ld` and fail on the
+ * object format.
  *
- * A capability is checked WHOLE or not at all: having a target's emulator on PATH is not the
- * capability by itself when the artifact also needs a cross-linker to exist at all. A half-probed
- * capability is worse than an unprobed one — it PASSES the gate and then dies past the build, which
- * is the very confusion this function exists to prevent.
+ * A capability is checked WHOLE or not at all: a half-probed capability is worse than an unprobed
+ * one — it PASSES the gate and then dies past the build, which is the very confusion this function
+ * exists to prevent.
  *
  * @param target  the scenario's declared target ("" / "host" → always runnable)
  * @return        "" when the target is runnable here, else the missing-capability reason
@@ -898,15 +840,13 @@ fn target_toolchain_skip_reason(target: str) -> str {
     if cc.len > 0 && !tool_on_path(cc) {
         return $"{cc} (the cross-linker for target {target}) not found on PATH"
     }
-    let host_cc = host_cc_cannot_link_cross_reason(target)
-    if host_cc.len > 0 { return host_cc }
-    match resolve_run_wrapper(target) { []str => ""; error as e => e.message }
+    host_cc_cannot_link_cross_reason(target)
 }
 
 /**
  * tkr_row_capability_skip_reason — "" when this host can honestly run `t`, else the ONE reason it
  * cannot. The row's whole pre-build capability question in one place: what its DECLARED target needs
- * (`target_toolchain_skip_reason` — a cross linker, an emulator and its sysroot, a wasm engine) and,
+ * (`target_toolchain_skip_reason` — a cross linker, and the host `cc`'s own reach) and,
  * for a row that declares no target at all, whether this host can link what the host default would
  * emit for it (`host_cc_cannot_link_host_default_reason`). The two are complementary by
  * construction: the first is silent for a host row, the second is silent for a cross one.
@@ -928,15 +868,13 @@ fn tkr_row_capability_skip_reason(t: Tkr) -> str {
 /**
  * wellformed_script_for — the surviving host-toolchain leaf script for `target`'s object format:
  * `scripts/check_coff.sh` for a windows target, `scripts/check_macho.sh` for macOS, else
- * `scripts/check_elf.sh` for linux. "" for a wasm target — a `.wasm` module is checked by `Then module
- * valid` (`check_module_valid`), never `Then object well-formed`.
+ * `scripts/check_elf.sh` for linux.
  *
  * @param target  the effective os-arch
- * @return        the leaf script path, or "" when `target` names a wasm target
+ * @return        the leaf script path for `target`'s object format
  * @since 0.3.1
  */
 fn wellformed_script_for(target: str) -> str {
-    if teko::str::contains(target, "wasm") { return "" }
     if teko::str::contains(target, "windows") { return "scripts/check_coff.sh" }
     if teko::str::contains(target, "macos") || teko::str::contains(target, "macho") || teko::str::contains(target, "darwin") { return "scripts/check_macho.sh" }
     "scripts/check_elf.sh"
@@ -974,30 +912,6 @@ fn check_object_wellformed(objp: str, target: str) -> RegrOutcome {
     let cap = run_captured(argv, "", objp ~ ".wellformed")
     if cap.exit != 0 {
         return regr_fail($"object well-formedness check failed{captured_output_block(cap)}")
-    }
-    regr_pass()
-}
-
-/**
- * check_module_valid — post-build cross-check the emitted `.wasm` module with the host
- * `wasm-validate` tool (a `Then module valid` scenario, the wasm sibling of `Then object
- * well-formed`). A rejected module is a FAIL; an absent `wasm-validate` is an honest SKIP — or a
- * hard FAILURE under `REGRESSION_REQUIRE_TOOLS=1` (`tool_skip_or_fail`), which is what that flag
- * documents itself as covering: on a lane that PROVISIONED the tool, its absence is a broken
- * provisioning step, and degrading that to green is the fail-open the flag exists to close.
- *
- * @param objp  the emitted `.wasm` module path (the wasm target's binary IS the module — no
- *              separate link step)
- * @return      the verdict (ok / FAIL / skip-when-wasm-validate-absent)
- * @since 0.3.1
- */
-fn check_module_valid(objp: str) -> RegrOutcome {
-    if !tool_on_path("wasm-validate") { return tool_skip_or_fail("wasm-validate not found on PATH") }
-    mut argv: []str = teko::list::push(teko::list::empty(), "wasm-validate")
-    argv = teko::list::push(argv, objp)
-    let cap = run_captured(argv, "", objp ~ ".wasmvalid")
-    if cap.exit != 0 {
-        return regr_fail($"wasm-validate rejected the module{captured_output_block(cap)}")
     }
     regr_pass()
 }
@@ -1452,13 +1366,12 @@ fn row_artifact_target(target: str) -> NativeTarget {
 /**
  * artifact_path_for_target — the ACTUAL on-disk artifact path for `target`, given the base binary
  * path `base_binp` a native build would produce: the target's own executable extension appended
- * (`executable_suffix`) — `.wasm` for a wasm target's self-contained module, `.exe` for a Windows
- * target's PE image, nothing for an ELF or Mach-O executable. Applied wherever a scenario resolves
- * its run/leaf-tool artifact, so `Given target = "wasm32-wasi"` finds the module
- * `wasmtime`/`wasm-validate` actually need and a Windows row finds the image Windows can launch.
+ * (`executable_suffix`) — `.exe` for a Windows target's PE image, nothing for an ELF or Mach-O
+ * executable. Applied wherever a scenario resolves its run/leaf-tool artifact, so a Windows row
+ * finds the image Windows can launch.
  *
- * IT DELEGATES TO THE COMPILER'S OWN RULE INSTEAD OF LISTING NAMES, and that is the whole point: the
- * previous body matched six wasm spellings by hand and therefore knew nothing about the Windows
+ * IT DELEGATES TO THE COMPILER'S OWN RULE INSTEAD OF LISTING NAMES, and that is the whole point: a
+ * body that spelled the per-target names by hand knew nothing about the Windows
  * suffix the build now writes — a harness that derives the artifact name independently of the build
  * is a second source of truth, and the second one is always the one that goes stale.
  *
@@ -2372,7 +2285,7 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
 
 /**
  * tkr_row_run_verdict — the RUN half of one row's verdict: execute the built binary under the
- * scenario's `env`/`stdin`/`args` (behind `wrap`, the run-wrapper prefix) and check it via
+ * scenario's `env`/`stdin`/`args` and check it via
  * `check_run` — UNLESS the row's target is a CROSS target this host cannot exec, in which case the
  * run is honestly SKIPPED carrying the build's own emitted-not-run note (`cross_note_for_name`,
  *
@@ -2386,46 +2299,48 @@ fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: Regr
  * the shell AFTER the `cd` (the same rule `compile_in_place` already documents). The leaf-tool
  * checks keep the runner-relative `binp` — they run in the runner's own process, not the child's.
  * project.tks — the single source of truth C5 gave the build; the runner does not keep a second
- * one). A wrapper-bearing target (wasm under `wasmtime`) is NOT skipped: the
- * emulator IS how this host executes it. Deliberately `regr_skip` and NOT `tool_skip_or_fail`:
+ * one). Deliberately `regr_skip` and NOT `tool_skip_or_fail`:
  * `REGRESSION_REQUIRE_TOOLS` is fail-closed for a capability a lane can PROVISION, and no
  * provisioning makes a host exec a foreign-format binary — this skip is a property of the target,
  * not a gap in the lane.
  *
  * @param t       the lowered scenario
  * @param binp    the built binary path
- * @param wrap    the resolved run-wrapper prefix ([] for a directly-executable target)
  * @param prefix  the scratch-file prefix for this run
  * @return        the run verdict, or the honest emitted-not-run skip
  * @since 0.3.1
  */
-fn tkr_row_run_verdict(t: Tkr, binp: str, wrap: []str, prefix: str) -> RowVerdict {
-    // `When built` — the row CLAIMS THE ARTEFACT, NOT THE RUN, so not running it leaves nothing
-    // unverified and the verdict is a PASS. Owner ruling 2026-07-28: *"vale incrementar o que o
-    // regressor faz (ensinar), é necessidade real."*
-    //
-    // NOT A SKIP, and the difference is the whole reason this branch exists. A skip says "nobody
-    // knows whether that construct works"; an `EmitOnly` row asserted the emitted object and had
-    // that assertion CHECKED (`Then object well-formed`, applied by the caller in the runner's own
-    // process). Reporting it as skipped told `no_skips_gate.sh` a claim was outstanding when none
-    // was — and the gate was right to fail on that, which is why the fix belongs HERE and not in
-    // the gate.
-    //
-    // It is checked BEFORE the cross branch on purpose: an `EmitOnly` row never runs, on any host,
-    // so whether the target happens to be cross is irrelevant to its verdict.
-    if t.kind == TkrKind::EmitOnly {
-        return RowVerdict { outcome = regr_pass(); harness_ns = 0; run_ns = 0 }
-    }
-    if wrap.len == 0 {
-        let cross = cross_note_for_name(t.target)
-        if cross.is_cross { return RowVerdict { outcome = regr_skip(cross.note); harness_ns = 0; run_ns = 0 } }
-    }
+fn tkr_row_run_verdict(t: Tkr, binp: str, prefix: str) -> RowVerdict {
+    if t.kind == TkrKind::EmitOnly { return emit_only_row_verdict() }
+    let cross = cross_note_for_name(t.target)
+    if cross.is_cross { return RowVerdict { outcome = regr_skip(cross.note); harness_ns = 0; run_ns = 0 } }
     let cwd = match teko::env::cwd() { str as c => c; error => "" }
     let rundir = prefix ~ ".cwd"
     match mkdir_p(teko::str::concat(rundir, "/")) { error => { }; null => { } }
-    let argv = wrap_argv_with_wrapper(wrap, argv_with_args(abs_path_of(binp, cwd), t.args))
+    let argv = argv_with_args(abs_path_of(binp, cwd), t.args)
     let run = run_captured_in_dir(argv, t.stdin, t.env, rundir, abs_path_of(prefix, cwd))
     RowVerdict { outcome = check_run(t, HOST_TARGET, run); harness_ns = run.harness_ns; run_ns = run.child_ns }
+}
+
+/**
+ * emit_only_row_verdict — the verdict of a `When built` row: the row CLAIMS THE ARTEFACT, NOT THE
+ * RUN, so not running it leaves nothing unverified and the verdict is a PASS. Owner ruling
+ * 2026-07-28: *"vale incrementar o que o regressor faz (ensinar), é necessidade real."*
+ *
+ * NOT A SKIP, and the difference is the whole reason this exists. A skip says "nobody knows whether
+ * that construct works"; an `EmitOnly` row asserted the emitted object and had that assertion
+ * CHECKED (`Then object well-formed`, applied by the caller in the runner's own process). Reporting
+ * it as skipped told `no_skips_gate.sh` a claim was outstanding when none was — and the gate was
+ * right to fail on that, which is why the fix belongs HERE and not in the gate.
+ *
+ * It is consulted BEFORE the cross branch on purpose: an `EmitOnly` row never runs, on any host, so
+ * whether the target happens to be cross is irrelevant to its verdict.
+ *
+ * @return the unconditional pass an emitted-only row earns
+ * @since 0.3.1
+ */
+fn emit_only_row_verdict() -> RowVerdict {
+    RowVerdict { outcome = regr_pass(); harness_ns = 0; run_ns = 0 }
 }
 
 /**
@@ -2446,10 +2361,9 @@ type RowVerdict = struct {
 
 /**
  * tkr_run_one_row — run and check ONE lowered scenario against its already-resolved binary `binp`:
- * resolve the `Given target` run-wrapper (honest-skip/fail-closed when its tool is absent), take the
- * run verdict (`tkr_row_run_verdict` — which honest-skips the run itself for a cross target), then
- * apply any declared leaf-tool checks (`Then object well-formed` / `Then module valid`) on top. The
- * leaf checks run even when the RUN was skipped: a cross row's whole point is that its EMITTED
+ * take the run verdict (`tkr_row_run_verdict` — which honest-skips the run itself for a cross
+ * target), then apply any declared leaf-tool check (`Then object well-formed`) on top. The
+ * leaf check runs even when the RUN was skipped: a cross row's whole point is that its EMITTED
  * object is well-formed for the target, which is checkable on this host even though the binary is not
  * runnable here.
  *
@@ -2461,19 +2375,13 @@ type RowVerdict = struct {
  * @since 0.3.1
  */
 fn tkr_run_one_row(t: Tkr, binp: str, prefix: str) -> RowVerdict {
-    let wrap = match resolve_run_wrapper(t.target) { []str as w => w; error as e => return RowVerdict { outcome = tool_skip_or_fail(e.message); harness_ns = 0; run_ns = 0 } }
-    let rv = tkr_row_run_verdict(t, binp, wrap, prefix)
+    let rv = tkr_row_run_verdict(t, binp, prefix)
     if !rv.outcome.ok { return rv }
     mut skips: u64 = 0
     if t.check_wellformed {
         let wf = check_object_wellformed(sibling_object_path(binp, row_artifact_target(t.target)), tkr_effective_target(t.target))
         if !wf.ok && !wf.skipped { return RowVerdict { outcome = wf; harness_ns = rv.harness_ns; run_ns = rv.run_ns } }
         skips = skips + wf.skips
-    }
-    if t.check_module_valid {
-        let mv = check_module_valid(binp)
-        if !mv.ok && !mv.skipped { return RowVerdict { outcome = mv; harness_ns = rv.harness_ns; run_ns = rv.run_ns } }
-        skips = skips + mv.skips
     }
     RowVerdict { outcome = regr_add_skips(rv.outcome, skips); harness_ns = rv.harness_ns; run_ns = rv.run_ns }
 }

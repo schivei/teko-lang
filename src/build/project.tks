@@ -737,9 +737,7 @@ fn teko_cc_env() -> str {
  * capability probe reads it (`cross_cc_for_target`, `host_cc_cannot_link_cross_reason`) to conclude
  * that a cross row needs NO cross toolchain on this host. Inlining the constant at those call sites
  * would scatter the answer; keeping it named keeps the day a legitimate (non-MinGW) cross driver
- * appears a one-arm change. The wasm arms never reach a `cc` invocation at all — `emit_native`
- * routes a wasm target to `emit_native_wasm`, which writes the finished, self-contained module
- * (`backend-wasm.md` §1.2) — and exist only so the match stays exhaustive.
+ * appears a one-arm change.
  *
  * @param t  the resolved own-backend target
  * @return   the compiler command for `t` — the host `cc` for every target
@@ -750,9 +748,6 @@ fn default_cc_for_target(t: NativeTarget) -> str {
         NativeTarget::X8664Linux => HOST_CC_NAME
         NativeTarget::Arm64Macho => HOST_CC_NAME
         NativeTarget::Arm64Linux => HOST_CC_NAME
-        NativeTarget::Wasm32Wasi => HOST_CC_NAME
-        NativeTarget::Wasm64Wasi => HOST_CC_NAME
-        NativeTarget::Wasm32Browser => HOST_CC_NAME
     }
 }
 
@@ -1180,9 +1175,8 @@ fn allow_undef_selected() -> bool { allow_undef_of(teko::env::args()) }
  * flag list binds — so the mechanically-required companion travels with it. `""` for
  * PE/COFF — a DLL cannot be referenced without an import library, so there is no host-linker flag
  * that would make the blind link work there (the honest stop is raised by
- * `validate_shared_libs_for_target`, not silently papered over with a flag that does nothing) —
- * and `""` for wasm, which has no link step at all. In E1 the own M-linker makes the capability
- * native and this translation retires.
+ * `validate_shared_libs_for_target`, not silently papered over with a flag that does nothing).
+ * In E1 the own M-linker makes the capability native and this translation retires.
  *
  * @param objfmt  the resolved target's object format (`target_objfmt`)
  * @return        the host-linker flag that enables the blind link, or "" when none exists
@@ -1452,7 +1446,7 @@ fn validate_extern_libs_for_target(m: Manifest) -> null | error {
  * @param binary  the output executable path (the plist lands at `<binary>.Info.plist`)
  * @param m       the manifest (project identity embedded in the plist)
  * @param tos     the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`); "macos" enables
- *                 the section, "" (wasm) and every other value leave `argv` untouched
+ *                 the section, every other value leaves `argv` untouched
  * @return        `argv` with the sectcreate flag appended on macOS, else unchanged
  */
 fn append_macos_plist_flag(argv: []str, binary: str, m: Manifest, tos: str) -> []str {
@@ -1945,22 +1939,15 @@ fn c_backend_selected() -> bool {
 
 /**
  * NativeTarget — which own-AOT-backend target the temporary `TEKO_TARGET` env
- * seam selects (D-D, #386 B1-8; #387 B2-8; #388 B3-4; the wasm variants at
- * #389 C1-5/C1-7): `Arm64Macho` (arm64 machine code in a Mach-O object — the
+ * seam selects (D-D, #386 B1-8; #387 B2-8; #388 B3-4): `Arm64Macho` (arm64
+ * machine code in a Mach-O object — the
  * A4 reference, and the macOS host default), `Arm64Linux` (the SAME arm64
  * machine code and the SAME AAPCS64 ABI as `Arm64Macho`, differing ONLY in the
  * object container — ELF instead of Mach-O — and the arm64-linux host default),
  * `X8664Linux` (x86-64 SysV machine
- * code in an ELF object — the linux host default), `X8664Windows` (x86-64 Win64
+ * code in an ELF object — the linux host default), or `X8664Windows` (x86-64 Win64
  * machine code — the SAME x86 ISA as `X8664Linux`, differing only in the ABI
- * register file and PE/COFF object format — the windows host default),
- * `Wasm32Wasi` (a WASI command module — the `exit(n)`/arithmetic/control-flow
- * corpus this slice targets, `backend-c1-wasm.md` §8), `Wasm64Wasi` (the SAME
- * WASI command module shape, but `memory64` + a uniform `i64` `Ptr` — the
- * wasm64 switch, §6, C1-7 — scoped to the alloca-free/rodata-free/`Ptr`-
- * signature-free subset today, `wasm_scope_stop_wasm64`), or `Wasm32Browser`
- * (the SAME emitted module, a JS-import runtime binding instead of WASI — its
- * full wiring is a later slice; reaching it here is a NAMED stop for now, §9).
+ * register file and PE/COFF object format — the windows host default).
  * Targets are named by OS, not by object format (ruling #390): the format
  * (ELF/Mach-O/COFF) is a consequence of the OS, so `x86_64-linux` and
  * `x86_64-windows` — not `x86_64-elf`/`x86_64-coff`/`x86_64-win`/`x86_64-pe` —
@@ -1968,7 +1955,7 @@ fn c_backend_selected() -> bool {
  * `TEKO_BACKEND` and is read only when the own backend is already active;
  * D1/#390 supersedes it with the real `--target` manifest flag.
  */
-type NativeTarget = enum { Arm64Macho; Arm64Linux; X8664Linux; X8664Windows; Wasm32Wasi; Wasm64Wasi; Wasm32Browser }
+type NativeTarget = enum { Arm64Macho; Arm64Linux; X8664Linux; X8664Windows }
 
 /**
  * unsupported_target_error — the honest R2 diagnostic (owner ruling 2026-07-24,
@@ -1987,9 +1974,7 @@ fn unsupported_target_error(name: str) -> error {
         "unsupported TEKO_TARGET \"", name,
         "\" — supported targets: x86_64-linux (alias x86_64-elf), ",
         "x86_64-windows (aliases x86_64-win, x86_64-pe, x86_64-coff), arm64-macos, ",
-        "arm64-linux (alias aarch64-linux), ",
-        "wasm32-wasi (aliases wasm32, wasm, wasi), wasm64-wasi (alias wasm64), ",
-        "wasm32-browser (aliases wasm-browser, browser)") }
+        "arm64-linux (alias aarch64-linux)") }
 }
 
 /**
@@ -2001,10 +1986,7 @@ fn unsupported_target_error(name: str) -> error {
  * per ruling #390; `x86_64-elf`/`x86_64-coff`/`x86_64-win`/
  * `x86_64-pe` are accepted as deprecated format-named aliases, and
  * `aarch64-linux` as the spelling alias `cc -dumpmachine` reports for the same
- * target — `arch_token_canonical` already folds `aarch64` onto `arm64`),
- * `wasm32-wasi`/`wasm32`/`wasm`/`wasi` select the WASI wasm32 target (#389
- * C1-5), `wasm64-wasi`/`wasm64` select the wasm64 target (#389 C1-7, §6), and
- * `wasm32-browser`/`wasm-browser`/`browser` select the Browser variant. Every
+ * target — `arch_token_canonical` already folds `aarch64` onto `arm64`). Every
  * other value — including an empty string or a typo — is now an honest R2
  * error (owner ruling 2026-07-24) naming the value and the supported set
  * (`unsupported_target_error`): an unrecognized target NEVER silently
@@ -2024,15 +2006,6 @@ fn target_from_name(name: str) -> NativeTarget | error {
     if name == "arm64-macos" { return NativeTarget::Arm64Macho }
     if name == "arm64-linux" { return NativeTarget::Arm64Linux }
     if name == "aarch64-linux" { return NativeTarget::Arm64Linux }
-    if name == "wasm32-wasi" { return NativeTarget::Wasm32Wasi }
-    if name == "wasm32" { return NativeTarget::Wasm32Wasi }
-    if name == "wasm" { return NativeTarget::Wasm32Wasi }
-    if name == "wasi" { return NativeTarget::Wasm32Wasi }
-    if name == "wasm64-wasi" { return NativeTarget::Wasm64Wasi }
-    if name == "wasm64" { return NativeTarget::Wasm64Wasi }
-    if name == "wasm32-browser" { return NativeTarget::Wasm32Browser }
-    if name == "wasm-browser" { return NativeTarget::Wasm32Browser }
-    if name == "browser" { return NativeTarget::Wasm32Browser }
     unsupported_target_error(name)
 }
 
@@ -2172,9 +2145,6 @@ fn target_name(t: NativeTarget) -> str {
         NativeTarget::Arm64Linux => "arm64-linux"
         NativeTarget::X8664Linux => "x86_64-linux"
         NativeTarget::X8664Windows => "x86_64-windows"
-        NativeTarget::Wasm32Wasi => "wasm32-wasi"
-        NativeTarget::Wasm64Wasi => "wasm64-wasi"
-        NativeTarget::Wasm32Browser => "wasm32-browser"
     }
 }
 
@@ -2187,10 +2157,6 @@ const OBJFMT_MACHO: str = "macho"
 /** OBJFMT_COFF — the object-format token of the PE/COFF target (x86_64-windows). */
 const OBJFMT_COFF: str = "coff"
 
-/** OBJFMT_WASM — the object-format token of the wasm targets: a self-contained module, not a
-    relocatable object, so there is no separate link step to give a linker flag to. */
-const OBJFMT_WASM: str = "wasm"
-
 /**
  * target_objfmt — the OBJECT FORMAT an own-backend target emits, as the token the
  * `--allow-undef` translation table (§5.2) and the COFF import-lib rule (R5) key on. Named by
@@ -2198,7 +2164,7 @@ const OBJFMT_WASM: str = "wasm"
  * actually depends on. C3 folds this into `TargetRow.objfmt`.
  *
  * @param t  the own-backend target
- * @return   `OBJFMT_ELF` / `OBJFMT_MACHO` / `OBJFMT_COFF` / `OBJFMT_WASM`
+ * @return   `OBJFMT_ELF` / `OBJFMT_MACHO` / `OBJFMT_COFF`
  * @since 0.3.1
  */
 fn target_objfmt(t: NativeTarget) -> str {
@@ -2207,9 +2173,6 @@ fn target_objfmt(t: NativeTarget) -> str {
         NativeTarget::Arm64Linux => OBJFMT_ELF
         NativeTarget::X8664Linux => OBJFMT_ELF
         NativeTarget::X8664Windows => OBJFMT_COFF
-        NativeTarget::Wasm32Wasi => OBJFMT_WASM
-        NativeTarget::Wasm64Wasi => OBJFMT_WASM
-        NativeTarget::Wasm32Browser => OBJFMT_WASM
     }
 }
 
@@ -2220,13 +2183,6 @@ fn target_objfmt(t: NativeTarget) -> str {
  * asset all look for `<stem>.exe` and find nothing.
  */
 const EXE_SUFFIX_PE: str = ".exe"
-
-/**
- * EXE_SUFFIX_WASM — the extension a wasm module carries. The wasm tail writes a finished,
- * self-contained module rather than linking one, and the runners that execute it (`wasmtime`) and
- * the validators that read it (`wasm-validate`) key on this name.
- */
-const EXE_SUFFIX_WASM: str = ".wasm"
 
 /**
  * EXE_SUFFIX_NONE — the EMPTY extension of an ELF or Mach-O executable. Linux and macOS launch a
@@ -2240,19 +2196,16 @@ const EXE_SUFFIX_NONE: str = ""
  * IMAGE FORMAT (`target_objfmt`) rather than on its OS.
  *
  * THE FORMAT IS THE REASON, WHICH IS WHY IT IS THE KEY: `.exe` is not a Windows habit, it is how a
- * PE image is named so the loader can find it, and `.wasm` is how a wasm module is named so a
- * runtime can. Keying on the format means the NEXT target that emits either container inherits the
- * right name without a second decision, and the whole rule stays in one place.
+ * PE image is named so the loader can find it. Keying on the format means the NEXT target that
+ * emits that container inherits the right name without a second decision, and the whole rule stays
+ * in one place.
  *
  * @param t  the own-backend target the build is emitting for
- * @return   `EXE_SUFFIX_PE` for a PE/COFF target, `EXE_SUFFIX_WASM` for a wasm target, else
- *           `EXE_SUFFIX_NONE`
+ * @return   `EXE_SUFFIX_PE` for a PE/COFF target, else `EXE_SUFFIX_NONE`
  * @since 0.3.1
  */
 fn executable_suffix(t: NativeTarget) -> str {
-    let fmt = target_objfmt(t)
-    if fmt == OBJFMT_COFF { return EXE_SUFFIX_PE }
-    if fmt == OBJFMT_WASM { return EXE_SUFFIX_WASM }
+    if target_objfmt(t) == OBJFMT_COFF { return EXE_SUFFIX_PE }
     EXE_SUFFIX_NONE
 }
 
@@ -2322,11 +2275,9 @@ fn sibling_object_path(binp: str, t: NativeTarget) -> str {
  * links_with_cc — the ONE rule for "will this build actually run a `cc`/`ld` LINK step?", given
  * whether a cross toolchain was explicitly pinned.
  *
- * TWO REASONS A BUILD NEVER REACHES A LINKER, and they are different in kind. The wasm targets have
- * no link step at all: their own-backend tail (`emit_native_wasm`) writes a finished, self-contained
- * module (`backend-wasm.md` §1.2). A CROSS target has one in principle, but this host has no honest
- * linker to run it with — so the build stops at the OBJECT, which is what the cross build's claim
- * was all along.
+ * WHY A BUILD MAY NEVER REACH A LINKER. A CROSS target has a link step in principle, but this host
+ * has no honest linker to run it with — so the build stops at the OBJECT, which is what the cross
+ * build's claim was all along.
  *
  * PINNING IS THE ESCAPE HATCH, and it is deliberate: somebody who names a cross compiler
  * (`[extern] cc`, `TEKO_CC`) is asserting they have one, and the build obeys them — subject to the
@@ -2337,10 +2288,7 @@ fn sibling_object_path(binp: str, t: NativeTarget) -> str {
  * @return        true iff a link step will run
  * @since 0.3.1
  */
-fn links_with_cc(t: NativeTarget, pinned: bool) -> bool {
-    if target_objfmt(t) == OBJFMT_WASM { return false }
-    !cross_note(t).is_cross || pinned
-}
+fn links_with_cc(t: NativeTarget, pinned: bool) -> bool { !cross_note(t).is_cross || pinned }
 
 /**
  * target_links_with_cc — `links_with_cc` for a build that pinned no compiler beyond the `TEKO_CC`
@@ -2375,11 +2323,11 @@ fn build_links_binary(t: NativeTarget, m: Manifest) -> bool {
 /**
  * target_os_name — the OS half of a target's canonical os-arch name (`"linux"` / `"macos"` /
  * `"windows"`), in the same vocabulary `teko::os()` and the bare-OS `[extern.libs.<os>]` section
- * key use; `""` for the wasm targets, which name no host OS. This is the OS a manifest's per-OS
- * section is matched against when the build resolves an explicit `TEKO_TARGET`.
+ * key use. This is the OS a manifest's per-OS section is matched against when the build resolves an
+ * explicit `TEKO_TARGET`.
  *
  * @param t  the own-backend target
- * @return   the target's OS name, or "" for a wasm target
+ * @return   the target's OS name
  * @since 0.3.1
  */
 fn target_os_name(t: NativeTarget) -> str {
@@ -2388,25 +2336,20 @@ fn target_os_name(t: NativeTarget) -> str {
         NativeTarget::Arm64Linux => "linux"
         NativeTarget::X8664Linux => "linux"
         NativeTarget::X8664Windows => "windows"
-        NativeTarget::Wasm32Wasi => ""
-        NativeTarget::Wasm64Wasi => ""
-        NativeTarget::Wasm32Browser => ""
     }
 }
 
 /**
  * target_arch_name — the ARCH half of a target's canonical os-arch name (`"x86_64"` /
  * `"arm64"`), the sibling of `target_os_name` over the same single os-arch string space (D39);
- * `""` for the wasm targets, whose canonical names (`wasm32-wasi`, `wasm64-wasi`, `wasm32-browser`)
- * name a MACHINE MODEL and a host environment, not a CPU that a system linker could be asked to
- * emit for. Split out because the regressor's own-backend capability rule needs the arch a build
+ * split out because the regressor's own-backend capability rule needs the arch a build
  * WOULD emit for, to compare against the arch the host `cc` actually targets
  * (`host_cc_cannot_link_host_default_reason`) — a comparison that must read the arch off the
  * NativeTarget enum rather than re-derive it from a string, so it can never drift from
  * `target_name`.
  *
  * @param t  the own-backend target
- * @return   the target's arch name, or "" for a wasm target
+ * @return   the target's arch name
  * @since 0.3.1
  */
 fn target_arch_name(t: NativeTarget) -> str {
@@ -2415,9 +2358,6 @@ fn target_arch_name(t: NativeTarget) -> str {
         NativeTarget::Arm64Linux => "arm64"
         NativeTarget::X8664Linux => "x86_64"
         NativeTarget::X8664Windows => "x86_64"
-        NativeTarget::Wasm32Wasi => ""
-        NativeTarget::Wasm64Wasi => ""
-        NativeTarget::Wasm32Browser => ""
     }
 }
 
@@ -2499,8 +2439,7 @@ type LinkTargetKeys = struct {
     build_os: str
     /**
      * The RESOLVED TARGET's own OS — what "any arch of that OS" (LEGISLATION:426) means for a CROSS
-     * build, where the build host's OS is not the OS being linked for. "" for a wasm target, which
-     * names no host OS (and has no link step).
+     * build, where the build host's OS is not the OS being linked for.
      */
     emit_os: str
     /** The resolved target's canonical os-arch name — the ratified §4.2 arch key. */
@@ -2625,9 +2564,6 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
         NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m)
         NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m)
         NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m)
-        NativeTarget::Wasm32Wasi => emit_native_wasm(dir, od, stem, lmod, prog, m, false, false)
-        NativeTarget::Wasm64Wasi => emit_native_wasm(dir, od, stem, lmod, prog, m, false, true)
-        NativeTarget::Wasm32Browser => emit_native_wasm(dir, od, stem, lmod, prog, m, true, false)
     }
 }
 
@@ -2816,9 +2752,7 @@ fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker
  * archives its whole-program object via the KP16 GNU-format writer
  * (`teko::backend::emit_static_archive`); `arm64-macos` via the BSD
  * `__.SYMDEF` writer (`emit_static_archive_macho`); `x86_64-windows` via the
- * MS two-linker-member `.lib` writer (`emit_static_archive_coff`); every wasm
- * target is a NAMED honest stop — a wasm module has no static-archive
- * convention to wrap into (M.3 — no fake artifact). Lowers with `flat_symbols
+ * MS two-linker-member `.lib` writer (`emit_static_archive_coff`). Lowers with `flat_symbols
  * = true` (`teko::lir::mangle_fn_symbol`'s carve-out): the archive itself IS
  * the published C contract — there is no separate wrapper the way the C
  * backend's `abi = "c"` reverse-FFI export has — so every function's LIR
@@ -2857,7 +2791,6 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
         NativeTarget::Arm64Macho => emit_static_lib_macho(dir, od, stem, lmod)
         NativeTarget::Arm64Linux => emit_static_lib_arm64_linux(dir, od, stem, lmod)
         NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod)
-        _ => fail(dir, "static library output has no wasm convention to wrap into (M.3)")
     }
 }
 
@@ -2927,9 +2860,8 @@ fn emit_static_lib_macho(dir: str, od: str, stem: str, lmod: teko::lir::LModule)
  * and encode exactly as `emit_native_arm64_linux` does, then hand the encoded module's ELF
  * object bytes AND its neutral symbol list to `finish_static_archive` under the GNU archive
  * format (the format an ELF platform's `ar`/`ld` expect, the same choice
- * `emit_static_lib_x86` makes). MANDATORY rather than optional: without this arm the
- * dispatch's `_` arm would answer an arm64-Linux `.a` request with the WASM diagnostic,
- * which is a fabricated explanation of a real capability.
+ * `emit_static_lib_x86` makes). MANDATORY rather than optional: `emit_static_lib`'s dispatch is
+ * EXHAUSTIVE over `NativeTarget`, so an arm64-Linux `.a` request has nowhere else to land.
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
@@ -3043,54 +2975,6 @@ fn finish_static_archive(dir: str, od: str, stem: str, obj: []byte, symbols: []t
     let archive = match wrap_archive_bytes(member_name, obj, symbols, format) { []byte as b => b; error as e => return fail(dir, e.message) }
     match teko::io::write_file_bytes(libp, archive) { error as e => return fail(dir, e.message); null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", libp, " (own backend, static archive)")))
-    0
-}
-
-/**
- * emit_native_wasm — the wasm own-backend tail (#389 C1-5, reworked to the
- * ratified `backend-wasm.md` §1.2 shape; the wasm64 switch at C1-7, §6):
- * assemble the lowered LIR module into a whole `WasmModule`
- * (`teko::backend::wasm_assemble_program` — stackify every function, wire
- * the WASI import set, synthesize + export `_start`, lay out linear memory;
- * propagates any pipeline honest-stop, e.g. `C1-globals`/`C1-i128`/
- * `C1-f16`/`C1-irreducible`/`C1-wasm64-scope`, unchanged as a `fail`, M.3),
- * then serialize it (`emit_wasm`) to a finished, SELF-CONTAINED `.wasm`
- * module and write it DIRECTLY to `<od>/<stem>.wasm`. §1.2 is law: the wasm
- * path emits ONE module that IMPORTS its runtime via WASI imports — there
- * is no relocatable-object + external-linker step (no `wasm-ld`, no
- * `zig`-compiled shim), so the emitted bytes ARE the runnable artifact (the
- * module already embeds its linear memory, the `_start` export, and its
- * active data). Writes the `.tsym` symbol map beside the module (best-
- * effort, mirrors `finish_native_object`) and prints the EXCLUSIVE `"(own
- * backend)"` success marker the differential harness keys on (F1(a)). The
- * `Wasm32Browser` variant's JS-import self-contained module + glue is a
- * LATER slice (N6b, §7) — reaching it here is a clean, NAMED stop, not a
- * silent Browser-as-WASI fallback.
- *
- * @param dir      the project directory (diagnostics)
- * @param od       the slash-stripped output directory (already created)
- * @param stem     the output artifact name
- * @param lmod     the lowered LIR module
- * @param prog     the checked program (`.tsym` emission)
- * @param m        the resolved manifest (unused today — no wasm-side
- *                 `[extern]`/`cc` override yet; kept for signature parity
- *                 with the register targets' own `emit_native_*` tails)
- * @param browser  `true` for the `Wasm32Browser` variant (JS-import + glue,
- *                 N6b territory — not yet wired)
- * @param ptr64    `true` for the `Wasm64Wasi` variant (the wasm64 switch,
- *                 #389 C1-7, §6 — scoped to `wasm_scope_stop_wasm64`'s own
- *                 supported subset today)
- * @return         0 on a successful build, else the failing status
- */
-fn emit_native_wasm(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, browser: bool, ptr64: bool) -> i32 {
-    if browser {
-        return fail(dir, "wasm32-browser: the JS-import Browser variant is not wired yet (N6b territory, backend-c1-wasm.md §9)")
-    }
-    let wmod = match teko::backend::wasm_assemble_program(lmod, ptr64) { teko::backend::WasmModule as x => x; error as e => return fail(dir, e.message) }
-    let binp = binary_output_path(od, stem, resolved_target())
-    match teko::io::write_file_bytes(binp, teko::backend::emit_wasm(wmod)) { error as e => return fail(dir, e.message); null => { } }
-    match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
-    teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
     0
 }
 
