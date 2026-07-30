@@ -3670,3 +3670,173 @@ e ninguem descodifica bits a mao.**
 
 **11 crumbs.** E o mais barato dos tres pedacos ja esta escrito: a descida por `if`/`match`/`loop`/
 `defer`/`adopt` existe e esta provada em producao.
+
+---
+
+## 28. Duas especies, nao tres — e a forma anterior fazia a cobertura EXPLODIR
+
+### 28.1 A sintaxe, confirmada na arvore antes de escrita
+
+**Uma `variant` em Teko e uniao de tipos NOMEADOS.** Nao ha forma anonima — varri `src/` e nao existe
+um unico `variant {`. O precedente e uniforme:
+
+```
+pub type Statement   = variant Binding | Assign | Return | LoopStmt | ... | AdoptStmt   (ast.tks:343)
+pub type BindTarget  = variant SimpleName | DestructurePattern                          (ast.tks:265)
+pub type Pattern     = variant LiteralPattern | RangePattern | ... | NullPattern        (pattern.tks:32)
+```
+
+### 28.2 O dimensionamento — o dono apanhou um desastre, e esta medido
+
+A forma anterior disparava **uma mensagem por evento**. Para a cobertura isso significa **um registo
+por LINHA EXECUTADA**: `emit_cov_line` emite `tk_cov_line_at(<fn_idx>, <line>)` em cada linha
+instrumentada (§5.2). **O meu proprio numero de §24.1 — ~2300 registos — e essa forma nao podiam
+coexistir**, e eu escrevi os dois sem os ligar. O dono ligou.
+
+**A regra dele e a que a arvore ja pratica:** acumular em tabelas e despejar **uma vez** — que e
+exactamente o que `tk_cov_dump` faz (`teko_rt.c:2698`) e o que a §5.2 mediu como **ja correcto**. A
+cobertura **nao vira trafego de canal**.
+
+### 28.3 A forma
+
+```teko
+/**
+ * Veredict — o veredicto de UM facto: de quem e, e como correu.
+ *
+ * NAO E UMA ESPECIE DE REGISTO — e um campo. Foi isto o "meio-pronto": o veredicto nasce COLADO ao
+ * facto que o produziu, no sitio onde os dados estao, em vez de viajar a parte e ter de ser
+ * reconciliado. A regra de §26.6 — "o sumarizador nao RE-DECIDE nada" — fica mais forte: ele nem
+ * sequer tem de emparelhar.
+ *
+ * @since 0.3.1
+ */
+pub type Veredict = struct {
+    /** o caso a que este facto pertence (indice na tabela de sujeitos que o codegen ja emite). */
+    subject: u32
+    /** como correu: 0 ok · 1 falhou · 2 saiu (`exit(n)`, §14) · 3 saltado · 4 nao-aplicavel (§21.3). */
+    how: u8
+}
+
+/**
+ * Assert — UMA assercao executada: onde, se passou, o esperado, o medido, e o seu veredicto.
+ *
+ * `site` E RESERVADO NO ZERO (§28.4): `site == 0` nao nomeia uma assercao, nomeia o SUJEITO — e o
+ * registo com que o arnes diz "este caso terminou, e foi assim". E a unica adicao minha a forma do
+ * dono, e existe porque um caso que saia por `exit(7)` nao tem assercao que carregue o seu desfecho.
+ *
+ * @since 0.3.1
+ */
+pub type Assert = struct {
+    /** o sitio de chamada (a tabela que o codegen emite, §26.5); 0 = o proprio sujeito. */
+    site: u32
+    /** passou ou nao. */
+    ok: bool
+    /** o esperado, opaco ao enquadramento (§26.4). */
+    expected: []byte
+    /** o medido. */
+    got: []byte
+    /** o veredicto deste facto. */
+    veredict: Veredict
+}
+
+/**
+ * Cov — o marcador de que o despejo de cobertura deste escritor esta COMPLETO.
+ *
+ * VAZIO, E O VAZIO E O PONTO. A cobertura nao viaja pelo canal: ela acumula nas tabelas e despeja
+ * uma vez, exactamente como ja faz. Este registo nao transporta identificadores — transporta o FACTO
+ * de o despejo existir, UM por escritor e nao um por linha.
+ *
+ * E TEM UM TRABALHO REAL: e ele que torna um despejo em falta detectavel. O defeito medido em §2.4 —
+ * uma shard que morre antes de despejar deixa no lugar o ficheiro da corrida ANTERIOR, e as fasquias
+ * sao calculadas sobre ele — fecha-se aqui: sem `Cov` de um escritor, o sumarizador sabe que aquele
+ * despejo nao e desta corrida.
+ *
+ * @since 0.3.1
+ */
+pub type Cov = struct { }
+
+/**
+ * RecBody — o corpo de um registo. DUAS especies, nao tres.
+ *
+ * @since 0.3.1
+ */
+pub type RecBody = variant Assert | Cov
+
+/**
+ * Rec — um registo do journal.
+ *
+ * @since 0.3.1
+ */
+pub type Rec = struct {
+    /** quem escreveu (indice, nao string — §26.2 dizia `str`; um `u32` e mais barato e o nome vive
+        no cabecalho do ficheiro, escrito uma vez). */
+    writer: u32
+    /** ordinal monotonico por escritor: ordem por origem (§16.5) e perda DETECTAVEL. */
+    seq: u64
+    /** o corpo. */
+    body: RecBody
+}
+```
+
+### 28.4 O buraco que a forma de duas especies abre, e o menor conserto
+
+**Com o veredicto dentro da assercao, um caso que NAO chega a nenhuma assercao nao emite registo
+nenhum** — e um `exit(7)` capturado pelo C0 (§14) e exactamente esse caso. Sem remedio, o desfecho
+mais interessante do C0 fica sem transporte.
+
+**O menor conserto, e e por isso que nao acrescento uma terceira especie: `site == 0` e RESERVADO
+para o sujeito.** Um registo com `site = 0` diz *"o caso `subject` terminou, e `how` diz como"*. Uma
+constante reservada, documentada, contra uma especie inteira — e a forma do dono fica intacta.
+
+**E o resto do desfecho e DERIVADO, nao transportado**, o que e melhor: pela §27, o arnes conhece o
+conjunto de `site_id` **obrigatorios** de cada caso; o sumarizador compara-o com os que chegaram.
+Passou = todos os obrigatorios chegaram e todos com `ok`. Falhou = algum com `ok = false`. **Nao
+executado = obrigatorio que nao chegou** — que e precisamente a distincao que faltou na
+`ref_mutable_binder` (§27.5).
+
+### 28.5 A conta refeita — e a decisao `bounded` fica mais forte
+
+| | antes (§24.1) | agora |
+|---|---:|---:|
+| registos de veredicto | ~2300 (um por caso) | **0** — o veredicto e campo |
+| registos de assercao | 0 | **~4173** (um por assercao EXECUTADA) |
+| registos de sujeito (`site = 0`) | — | ~2300 |
+| registos de cobertura | (indefinido — teria sido **por linha executada**) | **1 por escritor** (~8) |
+| **total** | ~2300 | **~6500** |
+
+Medi tambem o factor que quebra a previsibilidade, e **ele mudou de natureza**: uma assercao dentro de
+um `loop` executa N vezes. **Estimativa GROSSEIRA — e digo-o porque o meu varredor conta chaveta por
+indentacao e nao por sintaxe: ~29 dos 4173 sitios estao dentro de um `loop`.** Poucos, mas nao zero.
+
+**E isso torna o argumento de §24.1 melhor:** eu tinha justificado `bounded` dizendo que *"o volume
+previsto e uma propriedade do caminho feliz"* e ilustrado com um teste patologico a imprimir. **Ja nao
+preciso do patologico:** um teste **sadio** que afirme dentro de um ciclo de mil voltas emite mil
+registos, e nada nisso e defeito. **A imprevisibilidade e agora legitima, e `bounded` deixa de ser uma
+defesa contra o erro para passar a ser a forma correcta para o uso normal.** Decisao inalterada,
+argumento mais forte.
+
+### 28.6 A portabilidade — e uma simplificacao real
+
+**Confirmo, e e melhor do que eu tinha.** A §26.4.1 dizia que o `RecCov` **nao** atravessava versoes,
+porque um identificador de cobertura e um indice para um `TProgram` e dois compiladores tem `TProgram`
+diferentes. **Com o `Cov` vazio, o `.tkj` deixa de transportar um unico identificador de cobertura.**
+
+| ficheiro | portabilidade |
+|---|---|
+| **`.tkj`** | **INTEIRAMENTE portavel** — so `site`, `subject`, `ok`, `expected`, `got`, `how` |
+| `.tkcov` | herda a restricao, e **ja a tinha**: e o formato cujos ids sao indices de `TProgram` |
+
+Cai a regra composta que eu tinha desenhado (*"`toolchain` diferente ⇒ assercoes renderizam, cobertura
+e recusada"*). **Fica uma regra simples: `format` diferente ⇒ recusa com remedio, no estilo do `.tkb`
+(§26.1). `toolchain` diferente ⇒ le-se tudo.** O `site` e o `subject` sao indices para tabelas que o
+proprio `.tkj` carrega no cabecalho, nao para um `TProgram` externo — e e isso que os torna portaveis.
+
+**O cenario do dono — *"CI falhou, baixo o journal e inspecciono ca"* — passa a funcionar sem
+excepcoes.** A restricao nao desapareceu: **mudou para o ficheiro que sempre a teve.**
+
+### 28.7 O custo
+
+**Nenhum crumb novo. Nao toca F1–F6.** O saldo continua negativo: **sai** uma especie de registo
+(`RecVerdict`), **sai** o `writer: str` (passa a `u32` com a tabela no cabecalho), **sai** a regra
+composta de portabilidade, e **sai** — antes de ter chegado a existir — a cobertura como trafego de
+canal. **Entra** uma constante reservada (`site == 0`). **11 crumbs.**
