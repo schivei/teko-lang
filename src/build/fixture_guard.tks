@@ -1,0 +1,425 @@
+/**
+ * src/build/fixture_guard.tks   (namespace `teko::build`)
+ *
+ * THE GUARD THAT WOULD HAVE CAUGHT THE DAMAGE AT THE DRAIN INSTEAD OF IN SEVEN CI LEGS.
+ *
+ * Measured, 2026-07-30: two forward merges resolved a conflict on the boundary of their own hunks by
+ * dropping the four lines `    0` / `}` / blank / the next doc-comment's opening fence. Across seven
+ * splice points that cost SIX function bodies their closing brace and SEVEN doc-comments their fence
+ * in `examples/regressions/own_native/src/corpus.tks`, so the file stopped LEXING
+ * (`3710:18: unexpected character`) and contributed no declarations at all — and the channel then
+ * reported 119 consequent `unknown function: f_*` lines against `main.tks`. Three readers of that CI
+ * log in a row diagnosed something the build had never said, because nothing in the pipeline could
+ * say "this fixture file is structurally broken"; it could only say what broke downstream of it.
+ *
+ * A splice like that is invisible to review (both sides of the seam are legitimate lines) and
+ * invisible to the compiler until a channel runs, which is why the check belongs HERE, in the unit
+ * tier every lane pays for before it ever builds a fixture:
+ *
+ *   · every hand-written `.tks`/`.tkt` closes every block it opens (`source_structure_defect`);
+ *   · no top-level doc-comment opens inside an unclosed block (the exact fingerprint of the splice);
+ *   · a fixture's helper calls all resolve to a declaration (`undeclared_helper_calls`);
+ *   · a fixture's declaration count never DROPS (`count_declared_fns` against a pinned floor);
+ *   · a fixture's failure codes stay inside the POSIX byte (`oversized_register_codes`).
+ *
+ * The scanners are line-oriented and delegate the literal/comment bookkeeping to
+ * `snippet_brace_delta`, so a brace inside a string, a byte literal, a `//` line comment or a Javadoc
+ * block is never miscounted — which is the whole reason this can be a cheap textual pass instead of
+ * a second parser.
+ */
+
+/**
+ * SourceStructure — the structural verdict on ONE hand-written Teko source: what the brace depth was
+ * at end-of-file, and where the first orphan top-level doc-comment sits.
+ *
+ * @since 0.3.1
+ */
+type SourceStructure = struct {
+    /** the `{`/`}` nesting depth left at end-of-file — 0 for a well-formed source, positive when a block never closed, negative when one closed too often. */
+    depth: i64
+    /** the 1-based line of the FIRST column-0 doc-comment seen at non-zero depth (0 when there is none) — the fingerprint of a merge that spliced two hunks together. */
+    orphan_doc_line: u64
+}
+
+/**
+ * line_end_at — the index of the newline ending the line that starts at `from`, or `text.len` when
+ * that line is the last and unterminated.
+ *
+ * @param text  the whole source text
+ * @param from  the index of the line's first byte
+ * @return      the index one past the line's last byte
+ * @since 0.3.1
+ */
+fn line_end_at(text: str, from: u64) -> u64 {
+    mut k = from
+    loop {
+        if k >= text.len { break }
+        if text[k] == b'\n' { break }
+        k = k + 1
+    }
+    k
+}
+
+/**
+ * doc_fence_closes_on_line — does a doc-comment block that opens on `line` also close on it? A
+ * one-line doc-comment carries its own closing fence and needs no multi-line skip; anything else
+ * leaves the block open for the caller to carry into the next line.
+ *
+ * @param line  the line opening the block
+ * @return      true when the line carries its own closing fence
+ * @since 0.3.1
+ */
+fn doc_fence_closes_on_line(line: str) -> bool {
+    teko::str::contains(line, "*" ~ "/")
+}
+
+/**
+ * scan_source_structure — walk `text` line by line and report its structural verdict
+ * (`SourceStructure`). A doc-comment block is skipped whole (its prose may hold anything); every
+ * other line's braces are counted outside literals and comments by `snippet_brace_delta`, whose
+ * open-literal and open-block-comment state is threaded across lines.
+ *
+ * ONLY A COLUMN-0 DOC-COMMENT COUNTS AS ORPHAN, and that exclusion is load-bearing: a struct field's
+ * own Javadoc legitimately sits at depth 1, so keying the check on indentation is what tells a field
+ * doc apart from a top-level declaration doc that a splice left stranded inside a function body.
+ *
+ * @param text  the whole source text
+ * @return      the depth left at end-of-file and the first orphan doc-comment line
+ * @since 0.3.1
+ */
+fn scan_source_structure(text: str) -> SourceStructure {
+    mut depth: i64 = 0
+    mut orphan: u64 = 0
+    mut in_str = false
+    mut in_comment = false
+    mut cur: u64 = 0
+    mut lineno: u64 = 0
+    loop {
+        if cur >= text.len { break }
+        let eol = line_end_at(text, cur)
+        let line = teko::str::slice(text, cur, eol)
+        lineno = lineno + 1
+        cur = if eol < text.len { eol + 1 } else { eol }
+        if in_comment || in_str {
+            let carry = snippet_brace_delta(line, in_str, in_comment)
+            depth = depth + carry.delta
+            in_str = carry.in_str
+            in_comment = carry.in_comment
+            continue
+        }
+        if mf_starts_with(tkr_trim(line), "/**") {
+            if depth != 0 && orphan == 0 && mf_starts_with(line, "/**") { orphan = lineno }
+            in_comment = !doc_fence_closes_on_line(line)
+            continue
+        }
+        let scan = snippet_brace_delta(line, in_str, in_comment)
+        depth = depth + scan.delta
+        in_str = scan.in_str
+        in_comment = scan.in_comment
+    }
+    SourceStructure { depth = depth; orphan_doc_line = orphan }
+}
+
+/**
+ * source_structure_defect — the one-line complaint about `path`'s structure, or "" when it is sound.
+ * An unreadable file is reported too: a guard that silently passes over what it could not read is
+ * worth nothing.
+ *
+ * @param path  the `.tks`/`.tkt` file to inspect
+ * @return      the complaint naming the file and the offending line, or "" when sound
+ * @since 0.3.1
+ */
+fn source_structure_defect(path: str) -> str {
+    let text = match teko::io::read_file(path) { str as s => s; error as e => return $"{path}: unreadable ({e.message})" }
+    let st = scan_source_structure(text)
+    if st.orphan_doc_line > 0 { return $"{path}:{st.orphan_doc_line}: a top-level doc-comment opens inside an unclosed block — a merge spliced two hunks here" }
+    if st.depth != 0 { return $"{path}: brace depth {st.depth} at end-of-file — a block was never closed" }
+    ""
+}
+
+/**
+ * is_teko_source — does `name` end in one of the two hand-written Teko source extensions this guard
+ * inspects?
+ *
+ * @param name  a file name or path
+ * @return      true for a `.tks` or `.tkt` file
+ * @since 0.3.1
+ */
+fn is_teko_source(name: str) -> bool {
+    teko::str::ends_with(name, ".tks") || teko::str::ends_with(name, ".tkt")
+}
+
+/**
+ * collect_teko_sources — every `.tks`/`.tkt` file under `dir`, recursively. A directory that cannot
+ * be listed contributes nothing rather than aborting the walk (the same tolerance
+ * `collect_tkcov_files` uses, and for the same reason: a scratch tree may vanish mid-walk).
+ *
+ * @param dir  the directory to walk
+ * @return     the paths found, in the order the walk met them
+ * @since 0.3.1
+ */
+fn collect_teko_sources(dir: str) -> []str {
+    mut out: []str = teko::list::empty()
+    let entries = match teko::fs::list_dir(dir) { []str as e => e; error => return out }
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let full = dir ~ "/" ~ entries[i]
+        match teko::fs::list_dir(full) {
+            []str => {
+                let sub = collect_teko_sources(full)
+                mut si: u64 = 0
+                loop { if si >= sub.len { break }; out = teko::list::push(out, sub[si]); si = si + 1 }
+            }
+            error => { if is_teko_source(full) { out = teko::list::push(out, full) } }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * structural_defects_under — the complaints about every hand-written Teko source under `dir`
+ * (`source_structure_defect`), empty when the whole subtree is sound.
+ *
+ * @param dir  the directory to walk
+ * @return     one complaint per defective file
+ * @since 0.3.1
+ */
+fn structural_defects_under(dir: str) -> []str {
+    let files = collect_teko_sources(dir)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        let defect = source_structure_defect(files[i])
+        if defect.len > 0 { out = teko::list::push(out, defect) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * is_ident_byte — may `c` appear inside a Teko identifier?
+ *
+ * @param c  the byte to classify
+ * @return   true for a letter, a digit or an underscore
+ * @since 0.3.1
+ */
+fn is_ident_byte(c: byte) -> bool {
+    if c >= b'a' && c <= b'z' { return true }
+    if c >= b'A' && c <= b'Z' { return true }
+    if c >= b'0' && c <= b'9' { return true }
+    c == b'_'
+}
+
+/**
+ * ident_end_at — the index one past the identifier starting at `from` in `text` (`from` itself when
+ * no identifier byte is there).
+ *
+ * @param text  the text to read
+ * @param from  the index of the identifier's first byte
+ * @return      the index one past the identifier
+ * @since 0.3.1
+ */
+fn ident_end_at(text: str, from: u64) -> u64 {
+    mut k = from
+    loop {
+        if k >= text.len { break }
+        if !is_ident_byte(text[k]) { break }
+        k = k + 1
+    }
+    k
+}
+
+/**
+ * list_has_str — is `needle` already in `xs`?
+ *
+ * @param xs      the list to search
+ * @param needle  the string to look for
+ * @return        true when present
+ * @since 0.3.1
+ */
+fn list_has_str(xs: []str, needle: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == needle { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * called_names_with_prefix — every distinct identifier in `text` that starts with `prefix` and is
+ * immediately followed by `(`, i.e. every name the text CALLS. Purely textual on purpose: this guard
+ * runs before any parse and its job is to notice that a name has no declaration at all.
+ *
+ * @param text    the text to scan
+ * @param prefix  the family prefix a fixture's helpers share (e.g. `f_`)
+ * @return        the distinct called names, in first-seen order
+ * @since 0.3.1
+ */
+fn called_names_with_prefix(text: str, prefix: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= text.len { break }
+        if i > 0 && is_ident_byte(text[i - 1]) { i = i + 1; continue }
+        let end = ident_end_at(text, i)
+        if end == i { i = i + 1; continue }
+        let name = teko::str::slice(text, i, end)
+        let called = end < text.len && text[end] == b'('
+        if called && mf_starts_with(name, prefix) && !list_has_str(out, name) { out = teko::list::push(out, name) }
+        i = end
+    }
+    out
+}
+
+/**
+ * declared_fn_name_on_line — the name a top-level `fn`/`pub fn` declaration line declares, or "" when
+ * `line` is not one.
+ *
+ * @param line  one source line
+ * @return      the declared function's name, or ""
+ * @since 0.3.1
+ */
+fn declared_fn_name_on_line(line: str) -> str {
+    mut at: u64 = 0
+    if mf_starts_with(line, "fn ") { at = 3 }
+    if mf_starts_with(line, "pub fn ") { at = 7 }
+    if at == 0 { return "" }
+    let end = ident_end_at(line, at)
+    teko::str::slice(line, at, end)
+}
+
+/**
+ * declared_fn_names — every top-level function `text` declares, in declaration order. COLUMN 0 ONLY,
+ * and the rule matters because it is the rule a pinned count is compared against: a method inside a
+ * `class` body is not a free function and could never answer a bare call.
+ *
+ * @param text  the source text to scan
+ * @return      the declared names
+ * @since 0.3.1
+ */
+fn declared_fn_names(text: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut cur: u64 = 0
+    loop {
+        if cur >= text.len { break }
+        let eol = line_end_at(text, cur)
+        let name = declared_fn_name_on_line(teko::str::slice(text, cur, eol))
+        if name.len > 0 { out = teko::list::push(out, name) }
+        cur = if eol < text.len { eol + 1 } else { eol }
+    }
+    out
+}
+
+/**
+ * count_declared_fns — how many top-level functions `text` declares (`declared_fn_names`). The
+ * measure a fixture pins a FLOOR against, so a merge that eats declarations is caught by the count
+ * even when what it ate happened to leave the braces balanced.
+ *
+ * @param text  the source text to scan
+ * @return      the number of top-level function declarations
+ * @since 0.3.1
+ */
+fn count_declared_fns(text: str) -> u64 {
+    declared_fn_names(text).len
+}
+
+/**
+ * undeclared_helper_calls — every `prefix`-family name `caller_text` calls that `decl_text` does not
+ * declare. The DIRECT form of the question the 119-line cascade answered indirectly.
+ *
+ * @param caller_text  the text doing the calling (a fixture's `main.tks`)
+ * @param decl_text    the text expected to declare them (its corpus module)
+ * @param prefix       the family prefix (e.g. `f_`)
+ * @return             the unresolved names, in first-seen order
+ * @since 0.3.1
+ */
+fn undeclared_helper_calls(caller_text: str, decl_text: str, prefix: str) -> []str {
+    let called = called_names_with_prefix(caller_text, prefix)
+    let declared = declared_fn_names(decl_text)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= called.len { break }
+        if !list_has_str(declared, called[i]) { out = teko::list::push(out, called[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * POSIX_EXIT_MAX — the largest value a process exit status can carry through `wait`'s 8-bit field.
+ * A fixture that claims a code above it does not fail loudly: the kernel truncates modulo 256, so
+ * `exit(260)` is observed as 4 and `exit(256)` as 0 (both measured on this host, 2026-07-30). In a
+ * fixture whose failure codes double as scenario numbers that silently REATTRIBUTES a failure to
+ * another scenario, which is worse than a false green because the report is confident and wrong.
+ */
+const POSIX_EXIT_MAX: u64 = 255
+
+/**
+ * DecimalRead — one decimal literal read out of a text: its value and where it ended.
+ *
+ * @since 0.3.1
+ */
+type DecimalRead = struct {
+    /** the parsed value (0 when no digit was present). */
+    value: u64
+    /** the index one past the last digit — equal to the start index when nothing was read. */
+    end: u64
+}
+
+/**
+ * decimal_value_at — the decimal integer starting at `from` in `text`, and the index one past it. An
+ * `end` equal to `from` means there was no digit there.
+ *
+ * @param text  the text to read
+ * @param from  the index of the number's first byte
+ * @return      the parsed value and the index one past the digits
+ * @since 0.3.1
+ */
+fn decimal_value_at(text: str, from: u64) -> DecimalRead {
+    mut v: u64 = 0
+    mut k = from
+    loop {
+        if k >= text.len { break }
+        let c = text[k]
+        if c < b'0' || c > b'9' { break }
+        v = v * 10 + (c to u64) - (b'0' to u64)
+        k = k + 1
+    }
+    DecimalRead { value = v; end = k }
+}
+
+/**
+ * oversized_register_codes — every value assigned to the accumulator named `register` in `text` that
+ * exceeds `POSIX_EXIT_MAX`. A fixture reports WHICH check failed by leaving its number in one
+ * register and exiting with it, so the register's literals ARE the fixture's exit codes and this is
+ * where the 8-bit truncation has to be refused.
+ *
+ * @param text      the fixture's driver text (its `main.tks`)
+ * @param register  the accumulator's name (e.g. `bad`)
+ * @return          the offending values, in first-seen order
+ * @since 0.3.1
+ */
+fn oversized_register_codes(text: str, register: str) -> []u64 {
+    let needle = register ~ " = "
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= text.len { break }
+        if i > 0 && is_ident_byte(text[i - 1]) { i = i + 1; continue }
+        let end = ident_end_at(text, i)
+        if end == i { i = i + 1; continue }
+        if teko::str::slice(text, i, end) != register { i = end; continue }
+        if end + 3 > text.len { break }
+        if teko::str::slice(text, i, end + 3) != needle { i = end; continue }
+        let read = decimal_value_at(text, end + 3)
+        if read.end > end + 3 && read.value > POSIX_EXIT_MAX { out = teko::list::push(out, read.value) }
+        i = if read.end > end + 3 { read.end } else { end }
+    }
+    out
+}

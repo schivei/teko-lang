@@ -1,0 +1,231 @@
+/**
+ * src/build/fixture_guard_test.tkt   (unit tier for `src/build/fixture_guard.tks`)
+ *
+ * TWO HALVES, AND BOTH ARE THE POINT. The first half pins the scanners against SYNTHETIC text,
+ * including the exact splice shape two forward merges produced on 2026-07-30 — that is the proof by
+ * inversion, because the input the guard must reject is reproduced here byte for byte. The second
+ * half runs the guard over the REAL fixture tree, which is what turns it from a tested function into
+ * a gate: a merge that splices `examples/regressions/**` again fails in the unit tier of every lane,
+ * naming the file and the line, instead of surfacing as a 119-line cascade in one channel seven legs
+ * later.
+ */
+
+/**
+ * REGRESSION_FIXTURE_ROOT — the fixture tree the structural guard walks, relative to the project root
+ * the unit tier runs from.
+ */
+const REGRESSION_FIXTURE_ROOT: str = "examples/regressions"
+
+/**
+ * OWN_NATIVE_MAIN_PATH — the own-backend corpus channel's driver: the file that calls the whole `f_*`
+ * family and whose failure codes double as scenario numbers.
+ */
+const OWN_NATIVE_MAIN_PATH: str = "examples/regressions/own_native/main.tks"
+
+/**
+ * OWN_NATIVE_CORPUS_PATH — the module declaring that family, and the file the two forward merges of
+ * 2026-07-30 spliced.
+ */
+const OWN_NATIVE_CORPUS_PATH: str = "examples/regressions/own_native/src/corpus.tks"
+
+/**
+ * OWN_NATIVE_MIN_CORPUS_FNS — the pinned FLOOR for the own-backend corpus's declaration count, under
+ * the rule `count_declared_fns` applies (a `fn`/`pub fn` at COLUMN 0). Measured on the drained lane
+ * top: 229, up from 196 while the file was spliced. A count that DROPS is the signature of a merge
+ * that ate declarations, and nothing measured it; raise this floor when a degrau adds to the corpus,
+ * never lower it to make a red go away.
+ */
+const OWN_NATIVE_MIN_CORPUS_FNS: u64 = 229
+
+#test
+/**
+ * scan_source_structure_accepts_a_sound_source — a source that closes what it opens, holds a brace
+ * inside a literal, and documents a struct field at depth 1 leaves depth 0 and no orphan.
+ *
+ * @return void
+ */
+fn scan_source_structure_accepts_a_sound_source() {
+    let text = "fn a() -> i64 {\n    let brace = \"{\"\n    0\n}\n\ntype T = struct {\n    x: i64\n}\n"
+    let st = scan_source_structure(text)
+    teko::assert::is_true(st.depth == 0)
+    teko::assert::is_true(st.orphan_doc_line == 0)
+}
+
+#test
+/**
+ * scan_source_structure_names_the_splice — THE MEASURED DEFECT, reproduced and inverted. The merge
+ * dropped `    0` / `}` / blank / the fence between one function and the next declaration's
+ * doc-comment, so the first body never closes. The same text WITH those four lines restored must come
+ * back clean, which is what makes this a proof and not an assertion.
+ *
+ * @return void
+ */
+fn scan_source_structure_names_the_splice() {
+    let spliced = "fn a() -> i64 {\n    let n = 1\n    if n != 1 { return 1 }\n * b — the doc-comment whose opening fence the merge ate.\nfn b() -> i64 {\n    0\n}\n"
+    teko::assert::is_true(scan_source_structure(spliced).depth != 0)
+    let sound = "fn a() -> i64 {\n    let n = 1\n    if n != 1 { return 1 }\n    0\n}\n\nfn b() -> i64 {\n    0\n}\n"
+    let ok = scan_source_structure(sound)
+    teko::assert::is_true(ok.depth == 0)
+    teko::assert::is_true(ok.orphan_doc_line == 0)
+}
+
+#test
+/**
+ * scan_source_structure_names_the_orphan_doc_line — the other half of the same splice: a column-0
+ * doc-comment that opens inside a body. A field doc at depth 1 must not trip it, which is why the
+ * check is keyed on indentation.
+ *
+ * @return void
+ */
+fn scan_source_structure_names_the_orphan_doc_line() {
+    let stranded = "fn a() -> i64 {\n    let n = 1\n/**\n * b — stranded inside a's body.\n */\n    0\n}\n"
+    teko::assert::is_true(scan_source_structure(stranded).orphan_doc_line == 3)
+    let field_doc = "type T = struct {\n    /** x holds the count. */\n    x: i64\n}\n"
+    teko::assert::is_true(scan_source_structure(field_doc).orphan_doc_line == 0)
+    teko::assert::is_true(scan_source_structure(field_doc).depth == 0)
+}
+
+#test
+/**
+ * declared_fn_names_reads_only_top_level_declarations — a `fn` at column 0 (bare or `pub`) is a free
+ * function a bare call can reach; an indented method inside a class body is not. This is the rule the
+ * pinned floor is measured under, so it is pinned itself.
+ *
+ * @return void
+ */
+fn declared_fn_names_reads_only_top_level_declarations() {
+    let text = "fn f_one() -> i64 { 0 }\npub fn f_two(a: i64) -> i64 { a }\ntype C = class {\n    fn method() -> i64 { 0 }\n}\n"
+    let names = declared_fn_names(text)
+    teko::assert::is_true(names.len == 2)
+    teko::assert::is_true(names[0] == "f_one")
+    teko::assert::is_true(names[1] == "f_two")
+    teko::assert::is_true(count_declared_fns(text) == 2)
+}
+
+#test
+/**
+ * undeclared_helper_calls_finds_the_unresolved_family_member — the direct form of the question the
+ * 119-line `unknown function` cascade answered indirectly, and its negative: a family whose every
+ * call resolves reports nothing, and a declaration nobody calls is not a defect.
+ *
+ * @return void
+ */
+fn undeclared_helper_calls_finds_the_unresolved_family_member() {
+    let caller = "if f_one() != 0 { bad = 1 }\nif f_gone() != 0 { bad = 2 }\n"
+    let decls = "fn f_one() -> i64 { 0 }\nfn f_never_called() -> i64 { 0 }\n"
+    let missing = undeclared_helper_calls(caller, decls, "f_")
+    teko::assert::is_true(missing.len == 1)
+    teko::assert::is_true(missing[0] == "f_gone")
+    teko::assert::is_true(undeclared_helper_calls("if f_one() != 0 { bad = 1 }\n", decls, "f_").len == 0)
+}
+
+#test
+/**
+ * called_names_with_prefix_needs_the_call_parenthesis — a name mentioned without being called is not
+ * a call, and a name that merely CONTAINS the prefix mid-word is not a family member.
+ *
+ * @return void
+ */
+fn called_names_with_prefix_needs_the_call_parenthesis() {
+    let text = "let x = f_called()\nlet y = f_mentioned\nlet z = of_not_family()\n"
+    let names = called_names_with_prefix(text, "f_")
+    teko::assert::is_true(names.len == 1)
+    teko::assert::is_true(names[0] == "f_called")
+}
+
+#test
+/**
+ * oversized_register_codes_refuses_a_code_past_the_posix_byte — measured on this host: `exit(260)` is
+ * observed as 4 and `exit(256)` as 0, so a fixture whose failure codes double as scenario numbers
+ * would attribute a break at code 260 to the scenario that owns code 4. The guard names every code
+ * above 255 and stays silent on a fixture that is inside the byte.
+ *
+ * @return void
+ */
+fn oversized_register_codes_refuses_a_code_past_the_posix_byte() {
+    let over = "mut bad = 0\nif f_a() != 0 { if bad == 0 { bad = 4 } }\nif f_b() != 0 { if bad == 0 { bad = 260 } }\nif f_c() != 0 { if bad == 0 { bad = 256 } }\n"
+    let codes = oversized_register_codes(over, "bad")
+    teko::assert::is_true(codes.len == 2)
+    teko::assert::is_true(codes[0] == 260)
+    teko::assert::is_true(codes[1] == 256)
+    let inside = "mut bad = 0\nif f_a() != 0 { if bad == 0 { bad = 4 } }\nif f_b() != 0 { if bad == 0 { bad = 244 } }\n"
+    teko::assert::is_true(oversized_register_codes(inside, "bad").len == 0)
+}
+
+#test
+/**
+ * own_native_corpus_declaration_count_never_drops — the count half of the drain guard on the REAL
+ * tree. Braces can survive a splice that eats whole declarations, so the balance check alone is not
+ * enough.
+ *
+ * @return void
+ */
+fn own_native_corpus_declaration_count_never_drops() {
+    let text = match teko::io::read_file(OWN_NATIVE_CORPUS_PATH) { str as s => s; error => "" }
+    teko::assert::is_true(text.len > 0)
+    teko::assert::is_true(count_declared_fns(text) >= OWN_NATIVE_MIN_CORPUS_FNS)
+}
+
+#test
+/**
+ * own_native_main_calls_only_declared_helpers — the guard on the real tree: every `f_*` the corpus
+ * channel's `main.tks` calls resolves to a declaration in the corpus module. This is the assertion
+ * whose absence let a spliced corpus reach CI and report 119 consequences instead of one cause.
+ *
+ * @return void
+ */
+fn own_native_main_calls_only_declared_helpers() {
+    let main_text = match teko::io::read_file(OWN_NATIVE_MAIN_PATH) { str as s => s; error => "" }
+    let corpus_text = match teko::io::read_file(OWN_NATIVE_CORPUS_PATH) { str as s => s; error => "" }
+    teko::assert::is_true(main_text.len > 0)
+    teko::assert::is_true(corpus_text.len > 0)
+    let missing = undeclared_helper_calls(main_text, corpus_text, "f_")
+    mut i: u64 = 0
+    loop {
+        if i >= missing.len { break }
+        teko::io::println($"fixture_guard: own_native/main.tks calls undeclared {missing[i]}")
+        i = i + 1
+    }
+    teko::assert::is_true(missing.len == 0)
+}
+
+#test
+/**
+ * own_native_main_exit_codes_fit_the_posix_byte — the guard on the real tree for the truncation half:
+ * no failure code this fixture can exit with may exceed 255, or the report names the wrong scenario.
+ *
+ * @return void
+ */
+fn own_native_main_exit_codes_fit_the_posix_byte() {
+    let main_text = match teko::io::read_file(OWN_NATIVE_MAIN_PATH) { str as s => s; error => "" }
+    teko::assert::is_true(main_text.len > 0)
+    let over = oversized_register_codes(main_text, "bad")
+    mut i: u64 = 0
+    loop {
+        if i >= over.len { break }
+        teko::io::println($"fixture_guard: own_native/main.tks claims exit code {over[i]}, which POSIX truncates")
+        i = i + 1
+    }
+    teko::assert::is_true(over.len == 0)
+}
+
+#test
+/**
+ * regression_fixture_tree_is_structurally_sound — the guard on the real tree for the splice half:
+ * every hand-written `.tks`/`.tkt` under the fixture root closes what it opens and opens no top-level
+ * doc-comment inside a body. Scoped to the fixture tree because that is the surface no other pass
+ * reads until a channel runs — a spliced COMPILER source stops the self-host outright, loudly, at the
+ * file that broke.
+ *
+ * @return void
+ */
+fn regression_fixture_tree_is_structurally_sound() {
+    let defects = structural_defects_under(REGRESSION_FIXTURE_ROOT)
+    mut i: u64 = 0
+    loop {
+        if i >= defects.len { break }
+        teko::io::println($"fixture_guard: {defects[i]}")
+        i = i + 1
+    }
+    teko::assert::is_true(defects.len == 0)
+}
