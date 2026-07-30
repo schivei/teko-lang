@@ -16,6 +16,45 @@ hipótese, está dito.
 
 
 
+
+## 0c. DUAS CONFERÊNCIAS QUE FALTAVAM, e um perigo do trabalho paralelo (2026-07-30)
+
+### A minha lista de cinco conferências tinha um BURACO DE DIRECÇÃO
+
+Eu verificava *"`fn f_*` definidas e NÃO chamadas"* — e **nunca o inverso**. Um agente reportou
+`main.tks:NN: unknown function: f_*` em cascata, que é **exactamente a direcção que eu não media**: o
+`main` a chamar o que o corpus não define. Se uma união tivesse perdido definições, a minha lista teria
+dito "tudo bem".
+
+**Medido depois de o levantar: 119 chamadas, 120 definições, zero chamadas sem definição** (a sobra é
+`f_fat_field_len`, a excepção conhecida). A árvore está consistente — mas **a conferência entra na lista
+de qualquer forma**, porque a ausência dela era sorte, não método:
+
+```
+comm -23 <(grep -oh 'f_[a-z0-9_]*' main.tks | sort -u) \
+         <(grep -oh '^fn f_[a-z0-9_]*\|^pub fn f_[a-z0-9_]*' src/corpus.tks | sed 's/^pub //;s/^fn //' | sort -u)
+```
+
+**A regra geral, que vale para além deste ficheiro:** uma conferência de correspondência entre dois
+conjuntos tem de correr **nas duas direcções**. Verificar só um lado é meia medição, e a metade que falta
+é sempre a que morde.
+
+### E O QUE EXPLICOU O RELATO DELE — o perigo do scratchpad partilhado
+
+O mesmo agente reportou, como red-flag 1, que **outro agente vivo transformou o binário dele num
+directório** a meio da corrida: construiu com `-o <scratchpad>/gen2/teko` e o `gen2/teko` que era
+FICHEIRO passou a ser DIRECTÓRIO (`rc=126, Is a directory`). Ele reconstruiu num sítio privado.
+
+**O `unknown function` dele é quase certamente consequência disso**, e não da árvore: o CI, sobre o mesmo
+SHA, não mostra `unknown function` em sítio nenhum — mostra `A4-fp` (arm64) e
+`own_cross_x86_64_windows_emits_coff` (x86-64).
+
+**REGRA NOVA PARA TODO BRIEF:** o scratchpad da sessão é **partilhado** entre agentes vivos. Cada agente
+constrói num **subdirectório próprio e nomeado por si** (`<scratchpad>/<nome-do-agente>/…`), nunca num
+caminho genérico como `gen2/`. E **um relatório de agente que descreve corrupção de ambiente tem de ser
+lido à luz dela** — o que ele viu depois pode ser sintoma, não causa. Eu quase tratei a red-flag 2 dele
+como defeito da árvore.
+
 ## 0b. AS DUAS CONSEQUÊNCIAS DO DRENO SEM RELATÓRIOS — ambas previstas, ambas materializadas
 
 Eu drenei quatro branches sem relatório, **escrevi que o CI seria o árbitro**, e o CI cobrou as duas
