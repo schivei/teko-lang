@@ -1005,10 +1005,10 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = teko::list::push(argv, input)
     argv = teko::list::push(argv, teko::str::concat(rt, "/teko_rt.c"))
     argv = teko::list::push(argv, teko::str::concat(asrt, "/assert.c"))
-    if !m.freestanding { argv = teko::list::push(argv, "-lm") }
+    let keys = link_target_keys(m)
+    argv = append_libm_flag(argv, m, keys.emit_os)
     let reachable = reachable_libs(prog)
     argv = append_reachable_link_flags(argv, m, reachable)
-    let keys = link_target_keys(m)
     argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
     argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, keys.emit_os)
@@ -1018,10 +1018,44 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
 }
 
 /**
- * WINDOWS_NO_TIMESTAMP_FLAG — the GNU `ld` PE option that zeroes the COFF `TimeDateStamp` instead
- * of writing the wall clock into it. `-Wl,` because it reaches `ld` through the `cc` driver.
+ * LIBM_FLAG — the flag that links the C math library on the platforms that ship it separately.
  */
-const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,--no-insert-timestamp"
+const LIBM_FLAG: str = "-lm"
+
+/**
+ * append_libm_flag — link the math library, EXCEPT where the platform has none to link.
+ *
+ * WINDOWS HAS NO SEPARATE LIBM. Its math functions live in the CRT the linker already pulls in, and
+ * MSVC ships no `m.lib` at all — so `-lm` there is not a harmless extra, it is a link error
+ * (`could not open 'm.lib'`) once the compiler stops being MinGW (whose `libm.a` is what made the
+ * flag work until now). The Linux/macOS arms are untouched, which is what keeps their link line
+ * byte-identical.
+ *
+ * A FREESTANDING build links no libc at all (`-nostdlib`), so it never asks for libm either.
+ *
+ * @param argv     the link argument vector so far
+ * @param m        the resolved manifest (the freestanding switch)
+ * @param emit_os  the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`)
+ * @return         `argv` with `-lm` appended where the platform has one, else unchanged
+ * @since 0.3.1
+ */
+fn append_libm_flag(argv: []str, m: Manifest, emit_os: str) -> []str {
+    if m.freestanding { return argv }
+    if emit_os == WINDOWS_OS_NAME { return argv }
+    teko::list::push(argv, LIBM_FLAG)
+}
+
+/**
+ * WINDOWS_NO_TIMESTAMP_FLAG — the MSVC-linker option that makes the PE image REPRODUCIBLE instead of
+ * stamping the wall clock into its COFF `TimeDateStamp`. `-Wl,` because it reaches `lld-link` /
+ * `link.exe` through the `clang` driver.
+ *
+ * IT USED TO BE THE GNU SPELLING (`--no-insert-timestamp`), WHICH ONLY MinGW's `ld` UNDERSTANDS.
+ * With MinGW banned, the linker behind a Windows target is `lld-link`/`link.exe`, and the GNU
+ * spelling would abort the link as an unknown argument — so the flag had to move with the toolchain.
+ * `/Brepro` is the MSVC-family switch for exactly this, and both linkers accept it.
+ */
+const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,/Brepro"
 
 /**
  * append_windows_reproducible_flag — on a Windows/COFF target, stop the linker from stamping the
