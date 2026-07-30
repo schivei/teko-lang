@@ -2721,37 +2721,65 @@ de §21.2, §21.3 e §21.4 entram com ele.
 O que muda e a resposta a pergunta 3: **deixa de ser principio e passa a ser exemplo trabalhado**, e
 e o melhor que este documento vai ter — um **falso positivo perfeito**.
 
-### 22.1 O que era, medido
+### 22.1 O que era, medido — e uma tabela ANTERIOR desta seccao estava errada
 
-`xat_sysv_call_args_keep_independent_per_file_counting` parecia falhar em macOS-arm64, linux-arm64 e
-windows-x86_64 e passar em linux-x86_64. **Nada disso era sobre a plataforma:**
+> **CORRECCAO (2026-07-30).** Uma versao anterior desta seccao dizia que os dois testes falhavam em
+> tres pernas e passavam em linux-x86_64, e explicava a assimetria pelo `SIGABRT` a truncar shards
+> diferentes. **A assimetria NUNCA EXISTIU.** Fica registada, e nao apagada, porque um documento que
+> corrige em silencio e a mesma doenca que ele descreve.
+
+**O que se mede de facto:**
+
+| perna | `xat_` vermelhos | unitarios relatados |
+|---|---:|---:|
+| windows-x86_64, **pre**-C0 | **2** | 638 |
+| macos-arm64, **pre**-C0 | **2** | 638 |
+| linux-arm64-glibc, **pre**-C0 | **2** | 638 |
+| macos-arm64, **com** C0 | **2** | **1144** |
+| linux-arm64-glibc, **com** C0 | **2** | **1144** |
+
+**Os dois falharam sempre, em todas as pernas, antes e depois do C0.** Nao houve escalonamento a
+produzir contagens diferentes.
+
+**Porque o defeito era universal, e isto e o que ja estava certo:**
 
 * o texto esperado, `"fmov.d %pf0, %0"`, era uma **quimera** — mnemonica do ramo FPR com a grafia do
   ramo GPR. `reg_ref_x86` marca o ficheiro em **qualquer** operando FPR e `pin_reg_args_x86` constroi
   destino e origem da **mesma** decisao, logo **nenhuma seleccao pode emitir aquele texto**, em
   hospedeiro nenhum. O certo e `fmov.d %pf0, %f0` — e esta agora na arvore
   (`isel_x86_64_test.tkt:226,895,918`);
-* a primeira asserçao dos **dois** testes era byte-identica, logo um vermelho com o gemeo verde e
-  impossivel em qualquer hospedeiro;
-* eles caem em **shards diferentes** (3 e 4), e **pre-C0** o `SIGABRT` levava o resto do shard:
-  **quantos chegavam a ser IMPRESSOS era escalonamento** — macOS 2, arm64 e windows 1, linux-x86_64
-  **zero**;
-* com o C0 dentro, linux-x86_64 relata **1146 corridos, 1144 passados, os DOIS vermelhos**.
+* a primeira asserçao dos **dois** testes era byte-identica, logo um vermelho com o gemeo verde era
+  impossivel em qualquer hospedeiro. **Isto ja dizia que a assimetria era impossivel**, e eu escrevi-o
+  ao lado de uma tabela que a afirmava — devia ter parado ali.
 
-**A perna que eu li como verde relatava um facto sobre o RELATORIO, nunca sobre a semantica.**
+**De onde veio a assimetria imaginaria:** de uma expressao de busca. Contava-se
+`test teko::[a-z_:]+ \.\.\. FAILED`, e `xat_win64_call_args_number_both_files_by_shared_position`
+tem **digitos**. A classe `[a-z_:]` nunca o casa. **Medi a exposicao desse padrao na arvore: dos 52
+`xat_` de `isel_x86_64_test.tkt`, 13 tem digitos no nome — um quarto da familia, invisivel ao
+contador.**
 
-**E a conclusao que interessa: se o `#arch` existisse ontem, alguem o teria posto nestes dois, e o
-defeito ficava enterrado com ar de plataforma** — em tres plataformas, com selo de qualidade. O
-conserto foram **4 literais de string e zero linhas de `.tks`**, e a inversao da 2/1146 vermelhos → 0.
+**E o que aconteceu e pior do que o que eu tinha escrito, e serve melhor esta seccao:** o defeito nao
+estava no instrumento a truncar. Estava **na leitura**, com o padrao errado — e a diferenca inventada
+viajou como pista principal.
+
+**A conclusao que interessa fica INTACTA, e agora e mais afiada: um `#arch` admitido com base em
+"falha ali e aqui nao" teria sido admitido com base numa diferenca IMAGINARIA.** Nao e preciso que o
+relatorio esteja truncado para a evidencia ser falsa — basta que quem a le conte com o padrao errado.
+O conserto foram **4 literais de string e zero linhas de `.tks`**, e a inversao da 2 vermelhos → 0.
 
 ### 22.2 A pre-condicao, e ela e ordenacao e nao conselho
 
 > **`#arch` (e `#os`, e o `Given platforms` de §21.3) so sao admissiveis sobre uma suite que NAO
 > ABORTA.**
 
-Uma suite que aborta ao primeiro vermelho nao relata semantica: relata **ate onde chegou**. Um filtro
-por plataforma assente nesse relatorio esconde precisamente aquilo que nao se consegue medir — e este
-caso e a prova, porque a diferenca entre pernas era **escalonamento** e leu-se como plataforma.
+Uma suite que aborta ao primeiro vermelho nao relata semantica: relata **ate onde chegou**. Sem o C0
+esta suite parava nos **638** e ninguem podia sequer **contar** quantos vermelhos havia — logo nao
+havia base para admitir nem para recusar um `#arch`.
+
+**E o papel do C0 aqui e mais modesto e mais util do que eu lhe tinha atribuido: ele nao revelou uma
+assimetria — revelou que NAO HAVIA NENHUMA.** Com ele, os dois vermelhos aparecem em todas as pernas
+com a suite inteira (1144) por tras, e a hipotese de plataforma morre por falta de assimetria em vez
+de por argumento.
 
 **Correccao ao meu proprio §21.6, que dizia que isto nao tocava em crumb nenhum: toca. O crumb do
 `#arch` DEPENDE do C0**, e a dependencia e desta natureza — sem o C0, o instrumento que decidiria se
@@ -2762,10 +2790,23 @@ um `#arch` e justificado esta cego. Ordem: **C0 antes de `#arch`, sempre.**
 *"Falha noutro hospedeiro"* **nao chega**, e este caso e a razao: foi exactamente o que ele parecia.
 Um autor que queira `#arch` apresenta **as tres**, e a terceira e verificavel por maquina.
 
-**E1 — A falha sobrevive ao relatorio.** As duas suites correram **ate ao fim** (C0), e a diferenca
-persiste com contagens completas dos dois lados. Uma diferenca observada sobre uma suite que abortou e
-uma diferenca de **escalonamento**. *Este caso morre aqui:* com contagem completa, linux-x86_64 e
-vermelho como os outros.
+**E1 — A falha sobrevive ao relatorio, E A LEITURA NAO PERDE CASOS.** Duas metades, e a segunda foi
+comprada com sangue nesta seccao:
+
+*(a) a suite corre ate ao fim* (C0). Uma diferenca observada sobre uma suite que abortou e uma
+diferenca de escalonamento, nao de semantica.
+
+*(b) a contagem e feita com um padrao que nao perde casos.* O `#arch` deste documento quase foi
+justificado por uma assimetria que so existia porque o contador usava `[a-z_:]` e um quarto da familia
+tem digitos no nome (§22.1). **Quem apresenta E1 apresenta o padrao com que contou**, e ele tem de
+casar os nomes que existem — verificavel: o total contado tem de bater com o total declarado pela
+suite.
+
+*Este caso morre aqui, e nas duas metades:* com contagem completa e padrao correcto, os dois testes
+sao vermelhos em **todas** as pernas.
+
+**Um filtro de plataforma e tao bom quanto a leitura que o justifica — e a leitura falha por razoes
+que nao sao do relatorio.**
 
 **E2 — A expectativa e alcancavel.** O autor nomeia a **linha** que produz o valor esperado no
 hospedeiro onde passa. Nao uma crenca: um sitio. *Este caso morre aqui tambem:* nenhum caminho emite
@@ -2800,10 +2841,14 @@ mesma evidencia que um teste partido produz.** Por isso a admissao nao pode asse
 (*"falha ali"*) — tem de assentar em E2 (o caminho existe) e E3 (a leitura existe), que um teste
 partido **nao consegue apresentar**.
 
-E deixo o dado a descoberto, porque e ele que fecha o arco: **este defeito so foi diagnosticavel
-porque o C0 entrou.** O mecanismo que eu desenhei para nao perder o veredicto de uma corrida foi o que
-tornou visivel um defeito que tres pernas relatavam como plataforma. **A captura nao paga so a
-fiabilidade do relatorio — paga a capacidade de distinguir um defeito de um hospedeiro.**
+E deixo o dado a descoberto, porque e ele que fecha o arco — corrigido, e o corrigido diz mais: **o
+C0 nao tornou o defeito visivel; tornou-o CONTAVEL.** Sem ele a suite parava nos 638 e a pergunta
+"quantos vermelhos ha, e sao os mesmos em todas as pernas?" nao tinha resposta possivel. Com ele a
+resposta e imediata e mata a hipotese de plataforma: **2, e os mesmos, em todas.**
+
+**A captura nao paga so a fiabilidade do relatorio — paga a possibilidade de FAZER a pergunta que
+distingue um defeito de um hospedeiro.** E §22.1 acrescenta a outra metade, que nao e do C0 e e minha:
+**a pergunta so vale se quem a responde contar com o padrao certo.**
 
 ---
 
