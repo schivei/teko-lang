@@ -19,6 +19,67 @@ hipótese, está dito.
 
 
 
+## 0q. **50 DIVERGÊNCIAS SEM O CONSERTO, 0 COM ELE** — a resposta à pergunta do dono (2026-07-30)
+
+`cargo/0.3.1.0-degrau-31` @ `4264f7d` drenado. O dono perguntou: *"não seria mais produtivo validar tudo que deveria ser e não é? E corrigir de uma vez ao invés de ficar teste a teste?"* **A resposta tem um número:**
+
+| `teko::lir::fat_divergence_guard` sobre o fonte do compilador (143 ficheiros, 6049 itens) | divergências |
+|---|---|
+| **sem** o conserto | **50** |
+| **com** o conserto | **0** |
+
+As 50 são todas da mesma classe e **nenhuma era visível antes**: o self-build mostrava UMA de cada vez, e mostrava-a num módulo sem relação com a causa. Perseguir a paragem teria fechado 1 de 50, e a maior parte das outras **nem faz ruído** (ver abaixo).
+
+### A MINHA HIPÓTESE ERA MEIA-VERDADE, e ele provou a outra metade
+
+Eu disse que o predicado sintáctico *"está a responder a uma pergunta que o checker já respondeu"* e que o conserto era **perguntar ao checker**. Metade errada:
+
+- **Não há resposta gravada para ler.** `checker::TFunction.params` é `[]parser::Param`, *"carried from the parser unchanged"* (`src/checker/tast.tks:159`), e um `StructBody` carrega só `type_ann`. O checker resolve o tipo de **RETORNO** (`return_type: Type`) e **nunca** os de parâmetro nem de campo.
+- **A razão profunda é a FORMA DA TABELA — e ele achou-a por INVERSÃO À SUA PRÓPRIA GUARDA.** A primeira versão da guarda reportou **zero** sobre os 143 ficheiros **enquanto a mesma build continuava a parar no `vt_table`**. Não era tolerante: era **CEGA**. `type_table_of` chaveia canonicamente (`name = "teko::checker::TypeTable"`, `namespace = ""`), e o braço qualificado do `resolve_type` compara o `name` da entrada com o último segmento e o `namespace` com o qualificador — contra chaves canónicas **os dois testes falham para todo o tipo com namespace**, e a guarda leu *"não resolve"* como *"concordam"*. **O resolvedor do checker não consegue consultar a tabela que o backend recebe** — e é por isso que o backend cresceu uma resolução própria e mais fraca. Entrou `checker::type_table_rekeyed` (idempotente) só para o oráculo poder responder.
+
+> **`Uma guarda que não pode falhar é decoração.`** Terceira vez hoje que a inversão apanha o instrumento e não o produto (o `native_dry_gate` deu `COMPLETED` a um `/bin/true`; o `ci_full_log` chamava sucesso a um objecto ausente; agora a guarda dava zero a uma árvore que parava). **A inversão não é opcional.**
+
+### AS DUAS METADES FALHAM DIFERENTE, e só uma é ruidosa
+
+| colocação do alias qualificado | sintoma |
+|---|---|
+| **parâmetro** | paragem honesta — a que o self-host e as duas pernas de fixpoint mediam |
+| **campo** | **SILÊNCIO**: 8 bytes para uma escrita de 16, e o campo seguinte relido como comprimento |
+
+Medido na base: um campo aliased a `str` devolvia o **`43`** do vizinho onde a rota C devolvia **`5`**. Regra do oráculo aplicada com as duas rotas medidas: a rota C aceita as duas formas (usa sempre o último segmento) → o alvo era a nativa. **Quem persegue a paragem fecha a metade ruidosa e deixa a calada.** É exactamente a crítica do dono, medida.
+
+### A FAMÍLIA: 12 sítios em `src/lir/`, mais 3 iguais noutros ficheiros
+
+A raiz é `single_segment_name` (`lower.tks:12376`), que devolve `null` para caminho qualificado. Defeitos: `typeexpr_is_fat_named`, `typeexpr_is_fat_walk` (cujo doc dizia *"multi-segment path … is never fat"*). Consumidores que **param**: `bind_param`, `append_param_ltypes`. Consumidores que **miscompilam calados**: `field_layout_size`, `field_layout_align`.
+
+**E o achado que mudou o desenho:** `is_ref_param_ann` (`lower.tks:2473`) decide auto-`ref` pelo mesmo `named_type_name_of`. Alargar a raiz faria um tipo de utilizador chamado `ns::Ref` **passar a auto-ref em silêncio**. Por isso o caminho gordo ganhou o **seu próprio** `path_last_segment_name` e `single_segment_name` ficou intacto. **Um conserto largo teria trocado um defeito calado por outro.**
+
+### DEGRAU 32 — a paragem seguinte, e é de outra classe
+
+```
+base:  native backend N1: `vt_table` is not a fat-pointer local (internal) [in cg_pair_is_iface_vtable]
+depois: native backend N1: builtin `one_byte` not yet lowered (N2) [in `teko::encoding::json::parse_string`]
+```
+
+**A assinatura da base fica OBSOLETA para os agentes seguintes.** Ritual: fixpoint **`gen2 == gen3` byte a byte** (binário e `.c`, sha256 `a6d7ba2c…`); unitários **1140, 0 falhas, 0 skips reais** (as 17 linhas com "skip" são nomes de teste); fixture nas duas rotas **`exit 42` / `exit 42`**. Semente `bootstrap/teko.c` (`fetch_teko.sh` dá 403), medido com a **gen1**; a tentativa com a gen2 foi morta pelo **OOM killer** (`rc=137`) — limite do contentor, não paragem.
+
+### AS FIXTURES DELE JÁ USAM O MOLDE NOVO, e o contraste está no mesmo ficheiro
+
+Dez cenários em `d31_qualfat/`, cada claim por `teko::assert::is_true` — **não** por código de saída. Inclui uma **inversão**: dois namespaces a declarar `Same`, um alias de fatia e um struct escalar no mesmo programa, que **só passa se o qualificador for lido**. E ele registou a limitação da superfície: `teko::assert` só expõe `is_true`/`is_false`/`str_contains`, **não há `equals`** (precisa de genéricos), logo cada igualdade escreve-se `is_true(actual == esperado)` — é precisamente o que o agente da suíte de asserções vai fechar.
+
+**O `main.tks` passa a ter os DOIS moldes lado a lado:** nove filas do degrau 29 por `exit(bad)` e dez claims do degrau 31 por asserção. É o antes-e-depois da migração, visível num ficheiro.
+
+### O CONFLITO, resolvido POR INSPECÇÃO
+
+`main.tks` e `own_native.tkr` colidiram (previsto em §0o). Os dois lados eram **puramente aditivos** e **ambos ficaram**, degrau 29 primeiro. **Nenhum `--union`.** Conferido: zero marcadores, chaves equilibradas, uma só cauda `println`/`exit`, `fn` do `lower.tks` **549 → 559** (subiu), `corpus.tks` **246 → 246** (intocado de propósito, para reduzir colisão), 138 chamadas `f_*` e 10 claims `d31_*` todas definidas.
+
+### O QUE ELE NÃO COBRIU, e vai para a fila
+
+- **`cg_niche_is_fat` (`codegen.tks:2065`) não foi varrido** — é o **terceiro** decisor da mesma pergunta, sobre o tipo resolvido. A guarda cobre o par sintáctico×checker, não este.
+- **Divergência adjacente, medida e NÃO consertada (degrau próprio):** um campo de struct **por valor** de tipo nomeado **alia** a origem em vez de copiar, na rota nativa — e medido com nome **nu** e **qualificado**, logo **não é desta família**: `mut t = Trio{…}; let h = HB{p=t; n=44}; t.a = 99` → `h.p.a` dá **1** na rota C e **99** na nativa.
+- Alias para **primitivo** ou **enum** não é resolvido por `ltype_of_named_path`, nem nu nem qualificado.
+- Nada de arm64 nem Windows: só `linux-x86_64` local.
+
 ## 0p. A GUARDA DO DRENO EXISTE, o harness deixou de cegar — e a MINHA contagem estava mal rotulada (2026-07-30)
 
 `cargo/0.3.1-own-native-unknown-fn` @ `53cc553` drenado. Delta: **só quatro ficheiros do compilador**, zero fixtures — logo zero colisão com o degrau 29 e o 31. `drain_guard` OK.
