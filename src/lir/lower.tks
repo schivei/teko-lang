@@ -12379,6 +12379,47 @@ fn single_segment_name(p: parser::Path) -> str | null {
 }
 
 /**
+ * path_last_segment_name — `p`'s LAST segment name, or `null` for the degenerate zero-segment path.
+ *
+ * The deliberate sibling of `single_segment_name`, NOT a widening of it. The two answer different
+ * questions and their callers need opposite answers: `named_type_name_of` (hence
+ * `is_ref_param_ann`) must keep rejecting a qualified path, because the `Ref<T>` wrapper it probes
+ * for is compiler-SYNTHESIZED single-segment (`src/parser/parse_type.tks`) and a user type
+ * legitimately named `Ref` in some namespace must never be mistaken for it and silently auto-ref'd.
+ * The fat-pointer walk, by contrast, must accept a qualified path — see `typeexpr_is_fat_named`.
+ *
+ * @param parser::Path p  the path to inspect
+ * @return str?  `p`'s last segment's name, or `null` for a segment-less path
+ * @since 0.3.1.0 degrau 31
+ */
+fn path_last_segment_name(p: parser::Path) -> str | null {
+    if p.segments.len == 0 { return null }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * path_qualifier_of — `p`'s QUALIFIER: the segments BEFORE the last, joined with `::` (`checker::
+ * TypeTable` → `"checker"`, `teko::checker::TypeTable` → `"teko::checker"`). A bare or segment-less
+ * path has no qualifier and answers `""`, the value `checker::type_table_find_path` reads as "this
+ * probe is bare".
+ *
+ * @param parser::Path p  the path to inspect
+ * @return str  the qualifier, or `""` when `p` carries at most one segment
+ * @since 0.3.1.0 degrau 31
+ */
+fn path_qualifier_of(p: parser::Path) -> str {
+    if p.segments.len < 2 { return "" }
+    mut out = p.segments[0].name
+    mut i: u64 = 1
+    loop {
+        if i + 1 >= p.segments.len { break }
+        out = teko::str::concat(out, "::", p.segments[i].name)
+        i++
+    }
+    out
+}
+
+/**
  * find_known_struct_layout — the entry of `layouts` named `name`, or `null`
  * when none matches (a NULLABLE sibling of `find_struct_layout`: a
  * forward-referenced or non-struct field type is a routine "not (yet)
@@ -12464,7 +12505,19 @@ fn visited_name_has(visited: []str, name: str) -> bool {
  * variant/extern/interface) answers `false` too — those are sized by their OWN layout or a plain
  * scalar word, never the `{ptr, len}` image.
  *
- * @param nt       the single-segment named annotation
+ * A QUALIFIED annotation is resolved too, and that is the whole of 0.3.1.0 degrau 31. Until then
+ * this asked `single_segment_name` and gave up on any multi-segment path, so a parameter annotated
+ * with a qualified alias of a fat type — `vt_table: checker::TypeTable`, where `TypeTable` is
+ * `[]TypeReg` — was bound as a SCALAR while every caller passed the two-word `{ptr, len}` image and
+ * every later read asked the SEMANTIC `is_fat_type`. Measured on the base compiler, that split cost
+ * two distinct failures and only one of them was loud: a fat PARAMETER honest-stopped (`native
+ * backend N1: \`vt_table\` is not a fat-pointer local`, the self-host's own stop), while a fat FIELD
+ * silently reserved 8 bytes for a 16-byte store and read the following field's bytes back as a
+ * length — the same live miscompilation this predicate was introduced to close for BARE aliases,
+ * still open for qualified ones. The lookup is `checker::type_table_find_path`, which resolves the
+ * qualifier against BOTH `TypeTable` shapes and falls back to the namespace-blind `type_table_find`.
+ *
+ * @param nt       the named annotation (bare or QUALIFIED)
  * @param table    the program's type table
  * @param visited  the alias names already entered on this chain (`visited_name_has`'s recursion
  *                 guard — the checker already rejects a cyclic alias before lowering ever runs, so
@@ -12473,10 +12526,10 @@ fn visited_name_has(visited: []str, name: str) -> bool {
  * @return         whether `nt`, resolved through any alias, denotes `str` or `[]T`
  */
 fn typeexpr_is_fat_named(nt: parser::NamedType, table: checker::TypeTable, visited: []str) -> bool {
-    let name = match single_segment_name(nt.path) { str as s => s; null => return false }
+    let name = match path_last_segment_name(nt.path) { str as s => s; null => return false }
     if name == "str" { return true }
     if visited_name_has(visited, name) { return false }
-    match checker::type_table_find(table, name, "") {
+    match checker::type_table_find_path(table, path_qualifier_of(nt.path), name) {
         parser::TypeDecl as td => typeexpr_is_fat_decl_body(td.body, table, teko::list::push(visited, name))
         error => false
     }
@@ -12503,9 +12556,13 @@ fn typeexpr_is_fat_decl_body(body: parser::TypeBody, table: checker::TypeTable, 
 /**
  * typeexpr_is_fat_walk — the annotation-shape dispatch shared by `typeexpr_is_fat` (fresh chain)
  * and `typeexpr_is_fat_decl_body` (continuing an alias chain): a `[]T` slice is fat regardless of
- * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a single-
- * segment named annotation defers to `typeexpr_is_fat_named`; every other annotation shape
- * (optional, union, function type, multi-segment path, generic instantiation) is never fat.
+ * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a named
+ * annotation — BARE OR QUALIFIED — defers to `typeexpr_is_fat_named`; every other annotation shape
+ * (optional, union, function type, generic instantiation) is never fat.
+ *
+ * This doc-comment used to end that list with "multi-segment path", and that sentence WAS the bug of
+ * 0.3.1.0 degrau 31: a qualified alias of a fat type is fat, and saying otherwise made the syntactic
+ * predicate disagree with the semantic `is_fat_type` on the very same annotation.
  *
  * @param te       the syntactic type annotation
  * @param table    the program's type table

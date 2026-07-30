@@ -110,6 +110,59 @@ pub fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::Type
     error { message = "not a user type" }
 }
 
+/**
+ * type_table_find_path — find a user type's declaration from a WRITTEN reference path already split
+ * into its QUALIFIER (the segments before the last, joined with `::`; `""` for a bare reference) and
+ * its LAST segment. The qualifier-aware sibling of `type_table_find`, and the lookup a backend that
+ * holds a SYNTACTIC annotation — not a resolved `Named.name` — has to ask.
+ *
+ * WHY IT IS NOT `resolve_type_ref`, which is this compiler's namespace-aware source-reference
+ * resolver and would be the obvious choice. `resolve_type_ref` reads `TypeReg.name` as a BARE name
+ * and `TypeReg.namespace` as the real declaring namespace — true of the typing collect table, and
+ * false of `type_table_of`'s re-collection, which keys entries CANONICALLY (`"ns::Name"`) with an
+ * empty namespace. Against that second shape its qualified arm matches nothing and its bare arm
+ * (`resolve_bare_type_reg`, which demands `namespace == ref_ns`) matches nothing either. That is not
+ * a hypothesis: `typeexpr_is_fat`'s own doc-comment records a measured attempt to route through
+ * `resolve_type` failing on exactly that shape and falling back to a silently wrong answer.
+ *
+ * So this reads the DECLARING namespace through `reg_declaring_ns`, which reconciles both shapes,
+ * and matches the entry's own last segment — then falls back to `type_table_find` so a probe that
+ * the qualifier cannot place still gets the namespace-blind answer it gets today. A bare probe
+ * (`qual == ""`) is delegated to `type_table_find` unchanged.
+ *
+ * @param table  the folded type table to search
+ * @param qual   the reference's qualifier, or `""` for a bare reference
+ * @param last   the reference's last path segment (the type's bare name)
+ * @return       the matching declaration, or a named error when the path registers nothing
+ * @since 0.3.1.0 degrau 31 (the qualified-alias fat-pointer gap)
+ */
+pub fn type_table_find_path(table: TypeTable, qual: str, last: str) -> parser::TypeDecl | error {
+    if qual == "" { return type_table_find(table, last, "") }
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if name_last_segment(table[i].name) == last && qualifier_selects_ns(reg_declaring_ns(table[i]), qual) { return table[i].decl }
+        i++
+    }
+    type_table_find(table, last, "")
+}
+
+/**
+ * reg_declaring_ns — a registration's DECLARING namespace, tolerant of BOTH `TypeTable` shapes: the
+ * typing collect table carries it in `namespace` directly, while `type_table_of`'s re-collection
+ * leaves `namespace` empty and folds it into the CANONICAL `name` instead, where `name_qualifier`
+ * recovers it. A genuinely root-level type answers `""` under both shapes, which is correct — no
+ * qualifier selects the root scope.
+ *
+ * @param r  the registration to inspect
+ * @return   the namespace `r`'s declaration was collected under
+ * @since 0.3.1.0 degrau 31
+ */
+fn reg_declaring_ns(r: TypeReg) -> str {
+    if r.namespace != "" { return r.namespace }
+    name_qualifier(r.name)
+}
+
 // (#109 W2) does the qualifier `qual` (a path's segments BEFORE the last, joined with "::") select
 // namespace `ns`? A qualifier matches when `ns` equals it OR ends with `"::" ~ qual` — so the single
 // segment `emit` matches the canonical `teko::emit`, and the absolute `teko::emit` matches exactly
