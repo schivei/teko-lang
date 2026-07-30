@@ -1800,11 +1800,23 @@ static void (*tk_test_probe_body(int32_t which))(void) {
     return NULL;
 }
 
-tk_test_outcome tk_test_capture_probe(int32_t which) {
+// tk_test_probe_last_code — the `code` of the most recent probe. It is a SECOND READ rather than a
+// second field of a returned struct because a `from "teko_rt"` extern cannot return a user struct by
+// value on this tree: codegen emits no prototype for such an extern (it relies on teko_rt.h) and the
+// header's C struct is not the mangled Teko one, so the call site fails to compile. Measured, not
+// assumed — `tk_t_teko__test__TestOutcome e = tk_test_capture_probe(...)` is an `invalid initializer`.
+static int32_t tk_test_probe_last_code = 0;
+
+int32_t tk_test_capture_probe(int32_t which) {
     void (*body)(void) = tk_test_probe_body(which);
-    if (!body) { tk_test_outcome e; e.how = TK_TEST_PROBE_UNKNOWN; e.code = which; return e; }
-    return tk_test_run(body);
+    tk_test_probe_last_code = 0;
+    if (!body) return TK_TEST_PROBE_UNKNOWN;
+    tk_test_outcome e = tk_test_run(body);
+    tk_test_probe_last_code = e.code;
+    return e.how;
 }
+
+int32_t tk_test_capture_last_code(void) { return tk_test_probe_last_code; }
 
 // tk_test_report_exited — the EXITED verdict, which carries the value: `FAILED (exit <n>)`. A test
 // that leaves by exiting is not a pass, and naming the code is what makes the report actionable.

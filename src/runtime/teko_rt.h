@@ -326,8 +326,17 @@ bool tk_test_any_failed(void);
 // TK_TEST_PROBE_UNKNOWN — the `how` of a selector that names no body. Distinct from all three real
 // results so an out-of-range selector is a reported failure rather than a silent pass.
 #define TK_TEST_PROBE_UNKNOWN 3
-// tk_test_capture_probe — run the body `which` names under the capture and report how it ended.
-tk_test_outcome tk_test_capture_probe(int32_t which);
+// tk_test_capture_probe — run the body `which` names under the capture and answer HOW it ended (one
+// of the `TK_TEST_*` results, or TK_TEST_PROBE_UNKNOWN when `which` names no body).
+//
+// IT ANSWERS A SCALAR AND NOT THE `tk_test_outcome` PAIR, and that is measured rather than chosen: a
+// `from "teko_rt"` extern cannot return a user struct by value on this tree. The typer allows a
+// `Named` return for teko_rt externs, but codegen emits NO prototype for them — it relies on this
+// header — and the header's C struct type is not the mangled Teko one, so the generated call site is
+// an `invalid initializer`. The exit CODE is therefore a second read.
+int32_t tk_test_capture_probe(int32_t which);
+// tk_test_capture_last_code — the `code` recorded by the most recent tk_test_capture_probe.
+int32_t tk_test_capture_last_code(void);
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).

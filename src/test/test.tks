@@ -52,31 +52,11 @@ pub fn scope() -> str { scope_rt() }
  */
 pub fn scoped(base: str) -> str { teko::str::concat(base, scope()) }
 
-/**
- * TestOutcome — how one `#test` body ended, and with which value when it ended by exiting.
- *
- * THE VALUE LIVES HERE AND NOT IN THE PROCESS, and that is the whole difference (owner ruling
- * 2026-07-30). `exit(7)` inside a `#test` is a FACT ABOUT THE TEST that the harness reports and moves
- * past; `exit(7)` in a program is the program's contract with whoever invoked it, and that one still
- * leaves by the syscall.
- *
- * The field layout mirrors the runtime's `tk_test_outcome` exactly — two `i32`s in this order — which
- * is what lets the value cross the `teko_rt` boundary by value.
- *
- * @since 0.3.1
- */
-pub type TestOutcome = struct {
-    /** how the body ended: one of `HOW_OK`, `HOW_PANICKED`, `HOW_EXITED`. */
-    how: i32
-    /** the value of `exit(n)` when `how` is `HOW_EXITED`; 0 otherwise. */
-    code: i32
-}
-
 /** HOW_OK — the body returned normally. */
 pub const HOW_OK: i32 = 0
 /** HOW_PANICKED — the body panicked: an explicit `panic`, a failed assertion, or an implicit panic. */
 pub const HOW_PANICKED: i32 = 1
-/** HOW_EXITED — the body called `exit(n)`; `TestOutcome.code` carries the n. */
+/** HOW_EXITED — the body called `exit(n)`; `capture_probe_code` carries the n. */
 pub const HOW_EXITED: i32 = 2
 
 /** PROBE_RETURNS — the guard's body that returns normally. */
@@ -101,8 +81,22 @@ pub const PROBE_EXIT_CODE: i32 = 7
  * the language for nothing — but the GUARD needs a way in, and a guard that cannot fail is
  * decoration. When `cabi fn` lands, this is replaced by `run_capturing` and the bodies move here.
  *
+ * IT ANSWERS A SCALAR AND NOT A PAIR, and that too is measured: a `from "teko_rt"` extern cannot
+ * return a user struct by value on this tree. The typer accepts a `Named` return for a teko_rt
+ * extern, but codegen emits no prototype for one — it relies on `teko_rt.h` — and the header's C
+ * struct type is not the mangled Teko one, so the generated call site is an `invalid initializer`.
+ * The exit CODE is therefore a second read, `capture_probe_code`.
+ *
  * @param which  one of the `PROBE_*` selectors
- * @return       how that body ended, and with which value
+ * @return       one of the `HOW_*` values, or a value distinct from all of them for an unknown probe
  * @since 0.3.1
  */
-pub extern fn capture_probe(which: i32) -> TestOutcome = "tk_test_capture_probe" from "teko_rt"
+pub extern fn capture_probe(which: i32) -> i32 = "tk_test_capture_probe" from "teko_rt"
+
+/**
+ * capture_probe_code — the exit value recorded by the most recent `capture_probe`.
+ *
+ * @return  the `exit(n)` value when the last probe ended by exiting; 0 otherwise
+ * @since 0.3.1
+ */
+pub extern fn capture_probe_code() -> i32 = "tk_test_capture_last_code" from "teko_rt"
