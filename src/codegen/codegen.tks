@@ -2058,8 +2058,8 @@ type UnionRepr = enum { Niche; InlineTag; BoxInArena }
 /**
  * cg_type_min_bytes — a conservative compile-time LOWER BOUND on the C storage size (in bytes) of a
  * resolved value type, used only to classify a union member as saturating-large (≥ 16 bytes → box)
- * versus small (< 16 → inline-tag). A `Prim` is its bit-width in bytes (`u128`/`i128` → 16); `byte`/
- * `char` are one byte; the fat `str`/`error`/slice values are two words (16); a pointer/handle/closure
+ * versus small (< 16 → inline-tag). A `Prim` is its bit-width in bytes (at most 8 — 64 bits is the
+ * language's widest scalar); `byte`/`char` are one byte; the fat `str`/`error`/slice values are two words (16); a pointer/handle/closure
  * is one word (8); a by-value struct is the sum of its field lower bounds (the walk stops at a class
  * handle / slice / pointer, one word, so a recursive back-edge never diverges); an unknown shape
  * defaults to one word. Over/under-approximation only shifts a borderline member between two valid
@@ -2076,7 +2076,8 @@ fn cg_type_min_bytes(prog: CgProg, x: checker::Type) -> u64 {
 
 /**
  * cg_prim_min_bytes — the byte size of a scalar `Prim`: its bit width divided by 8, floored at one
- * byte so a sub-byte `bool` still occupies a whole byte. `u128`/`i128` yield 16 (the box threshold).
+ * byte so a sub-byte `bool` still occupies a whole byte. No prim reaches the 16-byte box threshold:
+ * `u64`/`i64`/`f64` are the widest at 8 bytes.
  *
  * @param k  the primitive kind
  * @return   the primitive's C storage size in bytes (≥ 1)
@@ -2150,7 +2151,8 @@ fn cg_named_min_bytes(prog: CgProg, name: str, depth: u64) -> u64 {
  * BOX-IN-ARENA class: `X` carries NO spare NULL niche (so `cg_union_niche_member` declined it) AND
  * EITHER it is SELF-RECURSIVE (`X` embeds this very union by value, so an inline layout has no finite
  * size and MUST box — the finitizing indirection a recursive value type demands) OR its saturating
- * payload is ≥ 16 bytes (`u128`/`i128`, a large by-value struct). Such an `X` is stored as an 8-byte
+ * payload is ≥ 16 bytes (a fat `str`/slice, a large by-value struct — no PRIM reaches 16 since 64
+ * bits is the language's widest scalar). Such an `X` is stored as an 8-byte
  * handle into the arena (`NULL` = `null` = zero heap; a `tk_region_alloc` cell on a non-null
  * construct); return `null` for any smaller, non-recursive, niche-able member (those stay niche or
  * inline-tag). Mirrors `cg_union_niche_member`'s two-member/one-null shape gate, and closes the
@@ -3419,12 +3421,34 @@ fn cg_cast_target_is_variant(prog: CgProg, t: checker::Type) -> bool {
     }
 }
 
-// emit_cast — a TCast. F3 (M.1): a narrowing `x to T` is range-checked at runtime via
-// tk_to_<dst>_<carrier> and PANICS if the value doesn't fit T. Widening / same-type
-// casts where no loss is possible emit the plain C cast (no needless guard). Single-eval:
-// the operand is emitted once. The carrier is picked by SOURCE signedness so it holds
-// the source losslessly: signed -> int64_t carrier ("_s"); unsigned -> uint64_t ("_u").
-// (C: TK_TEXPR_CAST branch.)
+/**
+ * emit_cast — a `TCast`. F3 (M.1): a narrowing `x to T` is range-checked at runtime via
+ * `tk_to_<dst>_<carrier>` and PANICS if the value does not fit `T`. Widening / same-type casts
+ * where no loss is possible emit the plain C cast (no needless guard). Single-eval: the operand is
+ * emitted once. Four routes, in order: a variant target defers to `emit_as`; a `char` source
+ * decodes through `tk_char_to_u32`; float->int is ALWAYS guarded (`tk_to_<dst>_from_<fsrc>`);
+ * int->int is guarded IFF `cast_may_lose`. Both guarded routes carry the (C1.7-CAST) positioned
+ * wrapper — a GNU statement-expression setting `_tk_cast_loc_line`/`_tk_cast_loc_col` so
+ * `tk_panic_cast` can print the source position — whenever the node has one.
+ *
+ * The int->int carrier is picked by SOURCE signedness so it holds the source losslessly: signed ->
+ * `int64_t` ("_s"), unsigned -> `uint64_t` ("_u"). Sixty-four bits suffice because that IS the
+ * language's widest integer (128-bit primitives, integer and float, are gone — owner ruling
+ * 2026-07-30; wider arithmetic is `teko::numeric::bigint`/`dec`).
+ *
+ * @param buf       the C output buffer to grow
+ * @param prog      the typed program (target-type and variant resolution)
+ * @param e         the cast expression node (its `.type` is the target; its line/col drive the
+ *                  positioned wrapper)
+ * @param c         the cast payload (its `expr` is the operand)
+ * @param escaping  the names whose values escape the current frame
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function's statements
+ * @param dctx      the pending-defer context
+ * @return          `buf` followed by the cast's C expression
+ * @throws          when the target is not an emittable cast destination (a non-integer guard
+ *                  target, a non-float source tag) or the operand fails to emit
+ */
 fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let inner = c.expr
     if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
@@ -3480,10 +3504,6 @@ fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, es
         out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
         return cb(out, ")")
     }
-    // int -> int: range-checked IFF it may narrow. The carrier is picked by SOURCE
-    // signedness so it holds the source losslessly: signed -> i128 carrier ("_s");
-    // unsigned -> u128 carrier ("_u"). Single-eval.
-    // (C1.7-CAST) Same positioned-wrapper pattern as float->int above.
     if prim_both && cg_prim_is_int(src) && cg_prim_is_int(dst) && cast_may_lose(src, dst) {
         let dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
         if e.line != 0 {
@@ -9568,9 +9588,90 @@ fn variant_member_name(m: parser::TypeExpr) -> str | error {
     }
 }
 
-// emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
-// empty (the typed item carries no provenance) so decl + ref mangle identically.
-// (C: `emit_type_decl`.)
+/**
+ * flags_carrier_ctype — the C unsigned integer type that carries a `flags` value, chosen by how
+ * many bits the declaration must hold: 1–8 members -> `uint8_t`, 9–16 -> `uint16_t`,
+ * 17–32 -> `uint32_t`, 33–64 -> `uint64_t`. There is no wider arm: `uint64_t` is the LAST carrier
+ * because 128-bit primitives are gone from the language (owner ruling 2026-07-30, integers AND
+ * floats), and the checker already caps a `flags` declaration at 64 members
+ * (`checker::check_flags_member_cap`), so a count above 64 never reaches codegen.
+ *
+ * @param n  the declared member count (already ≤ 64, enforced in the checker)
+ * @return   the C spelling of the carrier type
+ * @since    0.3.1 (128-bit removal)
+ */
+fn flags_carrier_ctype(n: u64) -> str {
+    if n <= 8 { return "uint8_t" }
+    if n <= 16 { return "uint16_t" }
+    if n <= 32 { return "uint32_t" }
+    "uint64_t"
+}
+
+/**
+ * emit_flags_member_const — emit ONE `flags` member's bit constant: `static const tk_t_<Name>
+ * tk_t_<Name>_<MEMBER> = (tk_t_<Name>)(((uint64_t)1) << <ordinal>);`. The shift is composed on a
+ * `uint64_t` one — the widest carrier a `flags` type can have — so the shifted bit is never
+ * truncated before the cast to the (possibly narrower) carrier.
+ *
+ * @param buf       the C output buffer to grow
+ * @param type_name the flags type's canonical name (mangled into its C typedef name)
+ * @param member    the member's declared name (upper-cased in the constant's name)
+ * @param ordinal   the member's declaration index, i.e. the bit it owns
+ * @return          `buf` followed by the member's `static const` line
+ * @since           0.3.1 (128-bit removal)
+ */
+fn emit_flags_member_const(buf: []byte, type_name: str, member: str, ordinal: u64) -> []byte {
+    mut out = cb(buf, "static const ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, "_")
+    out = cb_upper(out, member)
+    out = cb(out, " = (")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, ")(((uint64_t)1) << ")
+    out = cb_i64(out, ordinal to i64)
+    cb(out, ");\n")
+}
+
+/**
+ * emit_flags_typedef — (C8.4) emit a whole `flags Name { A; B; C; }` declaration: the carrier
+ * `typedef <uint_type> tk_t_<Name>;` followed by one `static const` bit constant per member, in
+ * declaration order (member `i` owns bit `i`).
+ *
+ * @param buf  the C output buffer to grow
+ * @param d    the type declaration (its `name` names the emitted typedef)
+ * @param fb   the flags body (its `members` are the declared names, in order)
+ * @return     `buf` followed by the typedef, every member constant, and a blank separator line
+ * @since      0.3.1 (128-bit removal — extracted while the `unsigned __int128` carrier arm died)
+ */
+fn emit_flags_typedef(buf: []byte, d: parser::TypeDecl, fb: parser::FlagsBody) -> []byte {
+    mut out = cb(buf, "typedef ")
+    out = cb(out, flags_carrier_ctype(fb.members.len))
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", d.name)
+    out = cb(out, ";\n")
+    mut mi: u64 = 0
+    loop {
+        if mi >= fb.members.len { break }
+        out = emit_flags_member_const(out, d.name, fb.members[mi], mi)
+        mi++
+    }
+    cb(out, "\n")
+}
+
+/**
+ * emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
+ * empty (the typed item carries no provenance) so decl + ref mangle identically.
+ *
+ * @param buf   the C output buffer to grow
+ * @param prog  the typed program (field/type resolution for the aggregate arms)
+ * @param d     the type declaration to emit
+ * @return      `buf` followed by `d`'s C declaration (empty for a compile-time-only body:
+ *              a transparent alias, an interface, a trait)
+ * @throws      when a body's shape is not emittable (a variant body that is not a union, a
+ *              member type codegen cannot name)
+ */
 fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | error {
     match d.body {
         parser::StructBody as sb => {
@@ -9708,38 +9809,7 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | er
             // type at the checker, and codegen emits that resolved type at every use site.
             buf
         }
-        parser::FlagsBody as fb => {
-            // (C8.4) A `flags Name { A; B; C; }` emits:
-            //   typedef <uint_type> tk_t_<Name>;
-            //   static const tk_t_<Name> tk_t_<Name>_<A> = (tk_t_<Name>)(((unsigned __int128)1) << 0);
-            //   …
-            // uint_type by member count: 1–8 → uint8_t, 9–16 → uint16_t,
-            //   17–32 → uint32_t, 33–64 → uint64_t, 65–128 → unsigned __int128.
-            let n = fb.members.len
-            let uint_type = if n <= 8 { "uint8_t" } else if n <= 16 { "uint16_t" } else if n <= 32 { "uint32_t" } else if n <= 64 { "uint64_t" } else { "unsigned __int128" }
-            mut out = cb(buf, "typedef ")
-            out = cb(out, uint_type)
-            out = cb(out, " ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, ";\n")
-            mut mi: u64 = 0
-            loop {
-                if mi >= n { break }
-                out = cb(out, "static const ")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, " ")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, "_")
-                out = cb_upper(out, fb.members[mi])
-                out = cb(out, " = (")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, ")(((unsigned __int128)1) << ")
-                out = cb_i64(out, mi to i64)
-                out = cb(out, ");\n")
-                mi++
-            }
-            cb(out, "\n")
-        }
+        parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
         parser::ExternBody => {
             // (C7.1a) an OPAQUE foreign handle → a C `void *` typedef, so the existing
             // Named → tk_t_<Name> mangle resolves to it (distinct in Teko, plain `void *` in C).

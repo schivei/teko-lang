@@ -5,7 +5,9 @@ perder o fio. **Este documento é a fonte única do estado.** Tudo aqui é medid
 hipótese, está dito.
 
 - **PR:** `schivei/teko-lang#99`
-- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`8f94c0b1`** (worktree `/home/user/wt-lin`)
+- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`b48227de`** (worktree `/home/user/wt-lin`)
+- **Como ler o CI sem cegueira:** `scripts/ci_full_log.sh` (§2c). Foi o instrumento que faltava todo o
+  dia, e a §2b existe porque eu não sabia que existia.
 - **Objetivo da lane:** as pernas Linux gerarem com o backend NATIVO (o `fixpoint_backend` por perna
   vive em `scripts/ci_producer_matrix.sh`)
 - **O repo é um FORK.** `schivei/teko-lang`; o upstream é `teko-org/teko-lang`. `release.yml` e
@@ -20,11 +22,29 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | --- | --- | --- |
 | 24 | `f64_bits`/`f64_from_bits` — alias do próprio VReg | **fechado**, confirmado no CI |
 | 25 | união-nula em colocações sem tipo declarado | **fechado**, confirmado no CI |
-| 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — aguarda confirmação de CI |
+| 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — confirmado: já não aparece |
+| **27** | **builtin `ftoa` sem lowering**, em `teko::codegen::cb_f64_literal` | **ABERTO — é a paragem viva do self-host**, idêntica em `artifact/linux-x86_64-glibc` e `artifact/linux-arm64-musl` |
+| **28** | **atribuição a elemento de slice (`s[i] = v`) sem lowering**, em `own_native::f_implicit_widen_targets` | **ABERTO, e é REGRESSÃO DO MEU DRENO** — parte a linha `own_arith_exit` em **todas** as pernas |
+
+Texto exacto das duas, do log completo (§2c):
+
+```
+teko: .: native backend N1: builtin `ftoa` not yet lowered (N2) [in `teko::codegen::cb_f64_literal`]
+teko: examples/regressions/own_native: native backend N1: slice element index-assignment not yet lowered (N2) [in `own_native::f_implicit_widen_targets`]
+```
+
+**O 28 é um caso de escola, e o erro é meu.** `f_implicit_widen_targets` é a fixture do alargamento
+implícito que veio do arco da **aridade numérica** — que eu drenei. Ela escreve num elemento de slice,
+e o backend nativo não sabe lá chegar. Ou seja: **a fixture que provava a aridade é ela própria fora
+do alcance do backend**, e eu drenei-a sem que nenhuma perna nativa a tivesse compilado. É a SEGUNDA
+VAGA a chegar exactamente onde estava avisado — e chegou por um dreno meu, não por descoberta do
+self-build. **Não a "conserte" mudando a fixture para evitar o slice:** isso troca uma paragem honesta
+por cobertura fingida. `s[i] = v` é linguagem corrente; o lowering é que falta.
 
 **A SEGUNDA VAGA, e não a esqueça:** os degraus são só o que o SELF-BUILD encontra. O corpus, as
 regressões e os `.tkt` **nunca** foram compilados pelo backend nativo em CI, porque o ponto de fixo
-falha antes do job `test`. **Não prometa "faltam N degraus".**
+falha antes do job `test`. **Não prometa "faltam N degraus".** O degrau 28 é a prova: apareceu sem
+que o self-build tenha avançado um passo.
 
 ## 2. AS CINCO BRANCHES — TODAS DRENADAS (2026-07-30, depois do segundo reinício)
 
@@ -103,15 +123,193 @@ primeiros; o quarto (aridade) deu quatro conflitos, todos resolvidos por composi
 gates estruturais (`objfile_gate_test.sh`, `wasm_known_stop_gate.sh`,
 `native_selfhost_known_stop_test.sh`, `ci_gate_coverage.sh`).
 
+**A LACUNA QUE ESTE DRENO EXPÔS, e o conserto — com uma correção do dono dentro.** Os gates acima
+conferem *que ficheiros* entram e a *forma* do CI; **nenhum confere se a soma ainda funciona.** Cinco
+branches verdes em separado não fazem um vagão verde: o dreno acendeu quatro pernas por **um** teste,
+e o `src/lir/lower_test.tkt` foi **auto-fundido pelo git sem conflito** produzindo expectativas que não
+batem com o `lower_cast` fundido — o git junta duas edições de teste e o resultado corresponde a
+nenhuma das duas.
+
+Eu propus como conserto "construir gen1 e correr a suíte". **O dono corrigiu: os testes correm na
+gen2/gen3, não na gen1.** A gen1 é construída pelo compilador LANÇADO; a gen2 é a primeira construída
+pelo compilador novo a partir do fonte novo, e é nela que a suíte tem sentido. O ritual correto é
+`scripts/fixpoint_gate.sh` (que produz gen2 e gen3 e prova gen2 == gen3) **e a suíte sobre a gen2** —
+não a gen1. A minha corrida local com gen1 achou a falha por acaso, porque era de tipagem de teste;
+com outra classe de defeito teria mentido.
+
+## 2b. REGRESSÕES DO DRENO (2026-07-30) — duas, e uma NÃO está explicada
+
+O dreno das cinco branches ficou verde no ritual local mas **acendeu duas pernas que estavam verdes**.
+Ambas são minhas: eu drenei um arco que muda o Windows **sem a medição no Windows que eu próprio
+declarei necessária** no mesmo dia. A regra existia; não a apliquei ao meu dreno.
+
+### `artifact / windows-x86_64` — EXPLICADA, conserto a decidir por medição
+O link passou a ir por `link.exe` da MSVC (era o objetivo) e morre em **seis símbolos de inteiro de
+128 bits**:
+
+```
+__divti3 __udivti3 __modti3 __umodti3 __floattidf __floatuntidf   (LNK1120)
+```
+
+São helpers que o mingw trazia pela **libgcc**; a MSVC não tem libgcc e o **compiler-rt do clang não é
+ligado por omissão em alvo MSVC**.
+
+**Medido na árvore:** a linguagem **rejeita** `i128`/`u128` na superfície (fixtures de compile-fail
+`reject_i128`/`reject_u128`) e **nenhum `.tks` invoca** os helpers — mas `teko_rt.h` tem **56**
+ocorrências de `__int128`, e os braços i128 dentro de `tk_div`/`tk_rem`/`tk_int_to_float` é que puxam
+os builtins.
+
+**Dois consertos, e a sonda decide:** (a) ligar o compiler-rt do clang, se a lib existir na imagem;
+(b) excluir os braços i128 em alvo MSVC, que são inalcançáveis da superfície. A sonda
+(`theory/sonda-toolchain`) foi estendida para reproduzir o `LNK2019` e medir três candidatos: clang
+nu, `--rtlib=compiler-rt`, e a lib de builtins nomeada. **Uma vaga de agente está guardada para este
+conserto.**
+
+### `test / linux-arm64-glibc` e `Memory paranoid (linux-arm64-glibc)` — METADE explicada
+
+**Explicado: 21 skips.** As linhas que precisam do alvo próprio do host saltam porque **`arm64-linux`
+não existe em `NativeTarget`**:
+
+```
+unsupported TEKO_TARGET "arm64-linux" — supported: x86_64-linux, x86_64-windows, arm64-macos, wasm32-wasi, ...
+teko: regressions 10 run, 21 skipped, 1 failed (8 builds)
+```
+
+O corpus cresceu muito com os cinco drenos e **toda** linha own-native nova salta ali. Sob a lei do
+dono, skip é falha. **É exatamente o que o agente dos crumbs AArch64-ELF está a corrigir** (crumb 3
+cria `Arm64Linux`); quando aterrar, as 21 correm.
+
+**EXPLICADO em 2026-07-30 com o log completo (§2c).** O `1 failed` e o exit 134 são **duas coisas
+distintas**, e a minha leitura anterior confundia-as:
+
+- **exit 134 = SIGABRT do `teko-tktest`.** A fase de testes unitários **ABORTA na PRIMEIRA assertiva
+  que falha** e não continua. A fase de regressões corre depois e propaga o 134 no fim.
+- **`1 failed` é da fase de REGRESSÕES**, não dos unitários — é a linha `own_arith_exit`, e a causa é
+  o **degrau 28** (§1), que é uma regressão do MEU dreno.
+
+**A CORREÇÃO QUE ISTO IMPÕE AO MEU PRÓPRIO REGISTO.** Eu escrevi que falhava **"um teste em 849"**.
+Isso não é demonstrável a partir desta prova: como a fase unitária aborta no primeiro `assert` falhado,
+**o que está atrás do primeiro nunca correu**. E o primeiro falhado é **diferente por host**:
+
+| perna | primeiro `assert` a falhar | nota |
+| --- | --- | --- |
+| `linux-arm64-glibc`, `linux-x86_64-musl` | `str_contains` em `teko::lir::lwt_prim_kind_of_resolves_enum_to_int_cast_widens` | expectativa desatualizada, já na fila |
+| `macos-arm64` | `is_true` em `teko::build::pt_target_name_and_objfmt_are_one_source` | **NOVO, não estava registado em sítio nenhum** |
+
+Logo há **pelo menos DOIS** testes unitários a falhar, não um, e quantos estão atrás de cada abort é
+**desconhecido**. Consertar o do cast não garante verde — garante ver o próximo.
+
+**O de macOS é um GÉMEO QUE DIVERGIU, e é o achado mais interessante do dia.** O corpo de
+`pt_target_name_and_objfmt_are_one_source` (`src/build/project_test.tkt:738`) é **inteiramente
+independente do host**: as 14 assertivas comparam `target_name`/`target_objfmt`/`target_os_name` de
+variantes **literais** de `NativeTarget` com literais de string. Nenhuma toca `host_target_for_os`.
+Um teste sem dependência do host que falha **num** host não pode ser expectativa errada — é
+**divergência de geração/runtime no arm64-macho**. Medido também que **não é novo**: falha igual na
+execução 30508737150 (SHA `8f94c0b1`), portanto é a "1 falha" de macOS que eu tinha atribuído
+inteiramente à regressão do own_native — eram **duas**, e eu contei uma.
+
+**Recomendação anterior REVOGADA.** Eu tinha registado "não escavar antes do crumb 3, porque o log não
+cabe na cauda". A premissa era falsa: o log completo sempre foi obtível (§2c). A escavação custou
+quatro chamadas.
+
+## 2c. O INSTRUMENTO QUE FALTAVA — log INTEGRAL de CI, e uma correção a mim mesmo
+
+O dono, 2026-07-30: *"Quanto aos logs, que só consegue a cauda, pode instruir o CI a guardar o log
+completo como artefato quando uma falha ocorrer, assim consegue baixar o artefato para analisar. Use
+theory para isso."* **Ele tinha razão sobre o problema e eu estava errado sobre a causa.** O problema
+era real — eu lia CI por `get_job_logs`, que devolve uma **cauda** (`tail_lines`, 500 por omissão), e
+diagnosticava pernas com 180 KB de log por 500 linhas do fim. O que estava errado era supor que fazia
+falta **mudar o CI**.
+
+**MEDIDO (execuções 30509216571 e 30508737150 da PR #99):**
+
+| pergunta | resposta medida |
+| --- | --- |
+| `get_workflow_run_logs_url` + `curl` dá o log completo? | **sim** — 660 KB comprimidos, **225 ficheiros**, 2.5 MB de texto, **21 jobs**, um ficheiro por PASSO, nada truncado |
+| funciona em execuções que já passaram? | **sim**, retroativamente |
+| funciona numa execução **em curso**? | **não** — 404, e o 404 vem já no pedido do URL (medido na 30509727122) |
+| e artefactos normais, dá para os descarregar? | **sim** — `download_workflow_run_artifact` devolve URL assinado, e o `curl` do sandbox traz o ZIP (provado com `teko-c-macos-arm64`, 1.2 MB → `teko.c` de 10.6 MB) |
+
+**Fixado em `scripts/ci_full_log.sh`** (guardas provadas por inversão), com o comando que interessa:
+
+```
+grep -rn 'assertion failed\|native backend N1\|Process completed with exit code [^0]' <dest> | cut -c1-220
+```
+
+**RECOMENDAÇÃO, e é NÃO mexer em `pr.yml`.** O artefacto-em-falha resolveria uma cegueira que já não
+existe, ao preço de `upload-artifact` em 27 jobs — churn de CI na lane, contra a barra do tronco. Fica
+**uma** fronteira registada e não implementada, porque mexe em `pr.yml` e precisa da palavra do dono:
+**enquanto a execução corre, o log completo não existe**; para espiar uma perna vermelha antes do fim,
+só a cauda por job serve.
+
+**O QUE NENHUM DOWNLOAD DESFAZ, e é um achado à parte:** quando uma linha de regressão falha, o
+**nosso** harness imprime `captured output tail:` e **corta**. Esse truncamento é do produto, não do
+GitHub. Não custou nada hoje (a cauda continha o diagnóstico), mas custará no dia em que o erro
+estiver no meio.
+
 ## 3. FILA — não despachado
+
+**Vagas: 4 de 4 OCUPADAS** (teto 4). A correr: **AArch64-ELF crumbs 2–5**, **`MRelocKind::None`**,
+**`fmt --apply`**, **remoção dos 128 bits** (que é o conserto do Windows). **Nada sai daqui até uma
+vaga abrir** — ruling do dono: *"Se já tem 4 agentes, segura sua onda, enfileire."*
+
+**Ordem recomendada quando abrir vaga:** (1) degrau 28, porque é regressão de dreno e parte TODAS as
+pernas; (2) o teste do cast, que destranca quatro; (3) o gémeo de macOS; (4) degrau 27.
 
 | item | porquê | nota |
 | --- | --- | --- |
+| **Degrau 28 — lowering de `s[i] = v`** | **regressão do meu dreno**, e parte a linha `own_arith_exit` em **todas** as pernas (macOS, x86_64-musl, arm64-glibc, regressor). Prioridade 1 | `native backend N1: slice element index-assignment not yet lowered (N2) [in own_native::f_implicit_widen_targets]`. **Não mudar a fixture para evitar o slice** — trocaria paragem honesta por cobertura fingida |
+| **Consertar `lwt_prim_kind_of_resolves_enum_to_int_cast_widens`** | é o **primeiro** `assert` a falhar em `linux-arm64-glibc` e `linux-x86_64-musl`, e a fase unitária **aborta** ali (SIGABRT/134) — logo destranca a visão do resto, não necessariamente o verde | expectativa desatualizada, não defeito: afirma `%1 = sext %0`, e a aridade decidiu que um alargamento sem perda **não emite conversão nem guarda** (`lower_cast_fit_guard` começa por `if cast_is_lossless_widen { return ctx }`). **Não apagar** — tem de passar a afirmar a AUSÊNCIA da conversão. O sinal negativo já está provado por VALOR em `f_cast_widen_keeps_value` (`-5 to i64`) e no alargamento implícito (`-2147483648`), nas duas rotas |
+| **Gémeo divergido de macOS: `pt_target_name_and_objfmt_are_one_source`** | teste **sem dependência do host** que falha **só** em `macos-arm64` (`assertion failed: is_true`) → divergência de geração/runtime no arm64-macho, não expectativa errada. Não é novo (falha já em `8f94c0b1`) | mandato: **primeiro dividir o teste** para saber QUAL das 14 assertivas cai (o rasto só dá `+636` no símbolo), depois caçar a divergência de lowering. Instrumento certo: `agent-fast-lane.yml` com `runner: macos-latest`, que É despachável. Sob a regra do oráculo, divergência é bug do nativo até prova em contrário |
+| **SEGUNDA PASSAGEM DO DEBUGGER — brief pronto, ver §3b** | o dono leu o orçamento e reprovou: *"o trabalho do arquiteto foi pessimo, nao tem um exemplo de prova de conceito, de como seria a superficie para isso ou como utilizar em cada tipo de debugger mencionado"* | **a falha é do MEU brief**, não do arquiteto: pedi orçamento e não pedi PoC, superfície, nem contra-medida. Entra na próxima vaga |
+| **O Windows não põe `.exe` no executável** | **ACHADO NOVO, 2026-07-30, e é DEFEITO DE PRODUTO.** Descoberto porque o dreno dos 128 bits destrancou o `artifact / windows-x86_64`: ele passou a publicar, e a perna `test / windows-x86_64` — **que nunca tinha corrido em toda a lane** — falhou logo com `ERROR: the producer's upload has no dl/windows-x86_64/teko.exe`, tendo publicado `teko` | **medido: `src/build/` não acrescenta `.exe` em host nenhum.** O ficheiro É um PE válido (`assert_asset_arch` passou), mas o Windows resolve um nome sem extensão **acrescentando** `.exe`, logo `teko` não é lançável por nome. **O CI está correcto nos dois lados** — `produce_assets.sh` já trata `*.exe` e o consumidor espera `teko.exe`; é o produto que erra. Conserto: o nome do executável ganha `.exe` quando o alvo é Windows. Segunda vaga outra vez: consertar uma perna acendeu outra que nunca tinha corrido |
+| **Degrau 27 — builtin `ftoa`** | é a paragem VIVA do self-host nas duas pernas nativas; a escada não avança sem ela | `native backend N1: builtin 'ftoa' not yet lowered (N2) [in teko::codegen::cb_f64_literal]`. O pin `scripts/native_selfhost_known_stop.sh` já a aceita como paragem honesta (deixou de nomear o degrau, de propósito) |
 | **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr, e eu não o repeti (chamada recusada trata-se como decisão). **Precisa da palavra do dono para andar.** Contrato pinado em `scripts/fmt_cli_test.sh` |
 | **Híbrido do `main`** | desenho **fechado** no digesto de leis | precisa do arquiteto para ordenar crumbs |
 | **AArch64-ELF crumbs 2–5** | crumb 1 (relocação) fechado e provado em hardware | crumb 3 cria `Arm64Linux` em `NativeTarget` e destranca a perna arm64-Linux |
 | **`MRelocKind::None`** | `plain_word`/`branch_word` (`encode_arm64.tks:117,139`) põem `Call` como default inerte — o valor "branch" como default de um campo que toda instrução carrega. Foi a semente do bug de relocação | mata a classe na raiz |
 | **Debugger, Camada 1** | orçamento entregue e drenado (`docs/design/debugger-orcamento-0.3.1.md`) | 6 crumbs; recomendação é parar ali |
+
+
+## 3b. BRIEF PRONTO — segunda passagem do debugger (o dono reprovou a primeira)
+
+**A crítica do dono, 2026-07-30, verbatim:** *"eu li o doc do debugger e o trabalho do arquiteto foi
+pessimo, nao tem um exemplo de prova de conceito, de como seria a superficie para isso ou como
+utilizar em cada tipo de debugger mencionado. Embora eu nao tenha pedido um debugger proprio, ja que
+ele levou mais de uma hora pra produzir isso, poderia ter orcado o restante dos pontos e tambem a
+contra-medida (debugger proprio)."*
+
+**A CULPA É DO BRIEF, E O BRIEF É MEU.** Eu pedi *"orçar a implementação de um debugger"* e o
+arquiteto orçou exactamente isso, com quatro experimentos medidos e sete correções ao esboço do dono
+— trabalho sólido no que foi pedido. O que **eu** não pedi, e o dono queria: prova de conceito, a
+superfície de utilização, o uso por debugger, o orçamento das camadas restantes, e a contra-medida.
+Um arquiteto que corre mais de uma hora tinha orçamento de sobra para as cinco. **Lição: quando o
+pedido é "orça X", perguntar antes se o dono quer também o custo de NÃO fazer X.**
+
+**O QUE A SEGUNDA PASSAGEM TEM DE ENTREGAR — cinco peças, nenhuma opcional:**
+
+1. **PROVA DE CONCEITO REAL.** O Experimento D já produziu um objeto que gdb *e* lldb aceitaram. Isso
+   tem de virar artefacto reproduzível e versionado, não prosa: o `.tks` de referência, os bytes das
+   três seções, e o comando que qualquer pessoa corre para ver o breakpoint parar. Sem isto o
+   orçamento é uma promessa.
+2. **A SUPERFÍCIE, concreta.** Qual é a flag? `teko build . -g`? Um perfil no `teko.tkp`? O que sai no
+   `--help`? Onde ficam os bytes de depuração num `.tkl`? Isto está no orçamento como uma linha
+   ("o interruptor de perfil") e tem de ser um desenho.
+3. **USO EM CADA DEBUGGER MENCIONADO**, com o texto que o dono escreve/cola: gdb no terminal, lldb no
+   terminal, VSCode via `cppdbg`, VSCode via CodeLLDB. Um `launch.json` completo por cada, não uma
+   referência a "um exemplo em docs/".
+4. **AS CAMADAS RESTANTES ORÇADAS**, não "o penhasco": Camada 2 (com a sondagem dos nomes através do
+   regalloc identificada como crumb próprio e o resto orçado *condicionalmente* a ela), Camada 3, e
+   Windows/CodeView com número. "5+ crumbs, um deles perigoso" não é orçamento.
+5. **A CONTRA-MEDIDA: DEBUGGER PRÓPRIO, ORÇADO.** O dono não pediu um, e a recomendação de não fazer
+   pode manter-se — mas uma recomendação de não fazer **sem o custo do que se recusa** não é
+   decidível. Orçar: ptrace/`mach_vm`, breakpoints por `int3`/`brk`, leitura da nossa própria tabela
+   de linha (que a Camada 1 cria de qualquer forma), e um adaptador DAP. E dizer o que um debugger
+   nosso daria que gdb/lldb **não** dão — se a resposta for "nada", isso é a prova da recomendação, em
+   vez de a asserção que está lá hoje.
+
+**RESTRIÇÕES:** o arquiteto **não implementa produto**; escreve em `docs/design/`. Não abre PR. Empurra
+para a branch em que trabalha assim que escreve. Nunca toca `.github/workflows/**`.
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
@@ -221,24 +419,38 @@ monta a perna nativa. Mas deixou de ser vermelho **vazio** — os dois oráculos
 
 Registados porque cada um custou tempo e alguns quase custaram correção errada:
 
-1. **Aceitei "não pude verificar" como resposta** do agente da relocação, em vez de o mandar provar em
+0. **DECLAREI-ME CEGO SEM PROCURAR O INSTRUMENTO, e depois desenhei CI para uma cegueira inventada.**
+   Passei o dia a diagnosticar CI pela **cauda** de `get_job_logs`, escrevi no handoff que a mensagem
+   do pânico estava "fora de alcance", e **recomendei não escavar** com base nisso. O log integral
+   sempre esteve a uma chamada de distância (§2c). Pior: quando o dono propôs guardar o log como
+   artefacto, o meu instinto foi **implementar em `pr.yml`** em vez de medir primeiro se fazia falta —
+   teria posto `upload-artifact` em 27 jobs para resolver um problema meu. **Antes de mudar o sistema,
+   medir se o instrumento já existe.**
+1. **Contei UMA falha onde havia DUAS, por não saber que o harness aborta.** Escrevi "único teste a
+   falhar em 849". A fase unitária faz **SIGABRT no primeiro `assert` falhado** — o que está atrás
+   nunca corre. E o primeiro falhado **difere por host**: em macOS é outro teste, que assim ficou
+   invisível no meu registo. *"Primeiro falhado" nunca é "único falhado" num harness que aborta.*
+2. **Drenei a fixture da aridade sem que perna nativa nenhuma a tivesse compilado** — e ela usa
+   `s[i] = v`, que o backend nativo não sabe baixar (degrau 28). É a terceira vez neste dia que drenei
+   algo cuja medição eu próprio tinha declarado necessária.
+3. **Aceitei "não pude verificar" como resposta** do agente da relocação, em vez de o mandar provar em
    `theory/**`. O dono corrigiu: *"É pra isso que DEVE usar uma theory/**"*.
-2. **Recomendei NÃO travar a fast-lane em `theory/**`.** Errado — é a exclusividade que a torna campo
+4. **Recomendei NÃO travar a fast-lane em `theory/**`.** Errado — é a exclusividade que a torna campo
    de provas previsível.
-3. **Propus `-> void` invocando o C#**, quando `void` e sobrecarga são banidos aqui. Invocar a
+5. **Propus `-> void` invocando o C#**, quando `void` e sobrecarga são banidos aqui. Invocar a
    referência sem medir a nossa superfície.
-4. **Concluí que a ausência de portão de `fmt` era buraco**, esticando "sem erros escondidos" até
+6. **Concluí que a ausência de portão de `fmt` era buraco**, esticando "sem erros escondidos" até
    cobrir estilo. Não cobre.
-5. **Disse que `MRelocKind` precisava de variantes GOT.** Refutado por medição: zero relocações contra
+7. **Disse que `MRelocKind` precisava de variantes GOT.** Refutado por medição: zero relocações contra
    símbolo indefinido.
-6. **Disse que a Camada 1 do debugger era `.debug_line` só.** Refutado: sem `.debug_info` +
+8. **Disse que a Camada 1 do debugger era `.debug_line` só.** Refutado: sem `.debug_info` +
    `.debug_abbrev` o gdb não põe o primeiro breakpoint.
-7. **`rc=$?` depois de um `| head`** dá o estado do `head`. Li rc=0 e quase concluí que o
+9. **`rc=$?` depois de um `| head`** dá o estado do `head`. Li rc=0 e quase concluí que o
    `fmt --check` não falhava.
-8. **Escrevi `set -u` sem `set +e`** ao extrair um gate, reintroduzindo no mesmo ficheiro o defeito que
+10. **Escrevi `set -u` sem `set +e`** ao extrair um gate, reintroduzindo no mesmo ficheiro o defeito que
    tinha corrigido horas antes. **Todo passo que captura `$?` sem limpar o `-e` é este bug.**
-9. **Atribuí o `exit 127` do Windows ao `sed -E`.** Era o `set +e` ausente; o gate nunca corria.
-10. **Deixei um comentário mentir** no cabeçalho da minha própria sonda ("ONE host") depois de a
+11. **Atribuí o `exit 127` do Windows ao `sed -E`.** Era o `set +e` ausente; o gate nunca corria.
+12. **Deixei um comentário mentir** no cabeçalho da minha própria sonda ("ONE host") depois de a
     converter para matriz.
 
 **O padrão:** invocar uma lei ou referência sem medir se ela se aplica, e medir a coisa errada com

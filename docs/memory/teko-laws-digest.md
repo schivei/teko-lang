@@ -842,3 +842,258 @@ ativa** por cinco agentes (`typer.tks`, `project.tks`, `lower_const.tks`, `codeg
 agentes, `teko fmt` sobre os 16, e **confirmar que o ponto de fixo continua a fechar** — reformatar
 não deve mudar bytes emitidos, mas isso é afirmação a verificar, não a assumir. **Sem portão no
 fim.**
+
+## LEI — UM AGENTE QUE MEXE EM LOWERING TEM DE TENTAR A EMISSÃO NATIVA ANTES DE DIZER VERDE (dono, 2026-07-30)
+
+**A pergunta do dono, e ela é uma acusação justa:** *"Que testes que os agentes estão fazendo e
+reportando verde à ti sendo que quebra em seguida? Quem tratou de floats não fez o serviço certo."*
+
+E a ordem que se segue dela, verbatim: *"Os agentes precisam melhorar os testes, rodar a suíte de
+artifact como ocorre no CI, mesmo que só tenham Linux x64 glibc, se tivessem tentado emitir um teko
+native a partir de um gen1, teriam pego o erro sem precisar de nova rodada."*
+
+**O CASO CONCRETO, medido.** O agente do degrau 24 fechou `f64_bits`/`f64_from_bits` e reportou verde.
+O passo seguinte do self-host morreu em:
+
+```
+teko: .: native backend N1: builtin `ftoa` not yet lowered (N2) [in `teko::codegen::cb_f64_literal`]
+```
+
+Outro builtin de float, na mesma vizinhança do que ele acabara de baixar, **num sítio que uma única
+tentativa de emissão nativa teria exposto**. Custou uma rodada inteira de CI — seis pernas — para
+descobrir o degrau seguinte que estava a um comando de distância.
+
+**A LEI.** `teko test .` verde **não é prova suficiente** para uma mudança de lowering, isel, encode ou
+runtime. Antes de reportar verde, o agente TEM de tentar a emissão nativa do próprio compilador a
+partir do gen1:
+
+```
+TEKO_BACKEND=native <gen1> . -o /tmp/g2-nativo --no-verify --release
+```
+
+E tem de reportar, **textualmente**, a paragem que apareceu. O contrato é de três partes:
+
+1. uma paragem `native backend N1: ... not yet lowered` **é esperada hoje** — o self-host não fecha;
+2. o agente garante que **não é a dele**;
+3. o agente garante que **não é NOVA** — que a mudança não introduziu nem desbloqueou outra.
+
+**A VERSÃO COMPLETA, quando houver tempo**, é o que o job `artifact` faz, e corre num Linux x86-64
+glibc qualquer:
+
+```
+sh scripts/produce_assets.sh linux linux-x86_64-glibc linux-x86_64-glibc
+TEKO_FIXPOINT_BACKEND=native sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+```
+
+**PROPORCIONALIDADE, e é o integrador que a aplica no despacho.** A exigência escala com o que a
+mudança toca:
+
+| a mudança toca | o que se exige antes de "verde" |
+| --- | --- |
+| lowering / isel / encode / objfile / runtime | a emissão nativa acima, **obrigatória**, com a paragem citada |
+| fixtures, `.tkr`, corpus | idem — o degrau 28 nasceu de uma fixture drenada que nenhuma perna nativa compilou |
+| só ficheiros de teste `.tkt` | contagem exacta antes/depois + diff dos nomes; não é preciso a emissão nativa |
+| só docs, ou uma flag de CLI com guarda | nada disto; e **NÃO** mandar o agente correr a suíte completa — foi o que prendeu o agente do `fmt` numa tarefa de 5 minutos |
+
+**A ÚLTIMA LINHA DA TABELA É TÃO IMPORTANTE COMO A PRIMEIRA.** No mesmo dia em que esta lei nasceu, o
+agente do `fmt --apply` — um conserto de guarda que o dono orçou em *"menos de 5 min"* — ficou preso a
+correr a suíte completa e o ponto de fixo. O dono apanhou: *"O agente de fmt já está há muito tempo em
+execução em uma tarefa que não deveria passar de 5 min."* Exigir a prova pesada onde ela não se aplica
+**também** é defeito de despacho, e colide com a regra de que esperar não é estado permitido.
+
+**PORQUE ISTO É LEI E NÃO CONSELHO.** A escada de degraus é encontrada **um degrau por rodada de CI**
+se ninguém tentar localmente. Cada degrau assim custa seis pernas de runner e uma volta ao integrador.
+A emissão nativa local custa um comando e encontra o degrau seguinte **antes** de gastar a rodada.
+
+### CORREÇÃO À LEI ACIMA, no mesmo dia, medida por um agente que a cumpriu
+
+Um agente cumpriu a lei e devolveu o facto que ela não previa: *"o pedido do dono de 'emitir um teko
+native a partir de um gen1' **não é satisfazível** nesta árvore até o degrau 27 cair — e isso é um
+facto medido, não uma desculpa."*
+
+**Ele está certo, e a lei precisa de ser lida com precisão.** O que se exige **não** é uma gen2 nativa
+com sucesso — isso é impossível hoje, e continuará impossível até o `ftoa` cair. O que se exige é:
+
+1. **a TENTATIVA**, e
+2. **a CITAÇÃO TEXTUAL da paragem que apareceu**, com a garantia de que não é a do agente e não é nova.
+
+**E a limitação honesta, que eu não disse quando escrevi a lei:** a paragem do `ftoa` acontece
+**cedo** — em `teko::codegen::cb_f64_literal`, durante a geração do próprio compilador. **Tudo o que
+um agente parta DEPOIS desse ponto é invisível a esta prova.** Portanto a lei apanha menos do que eu
+afirmei: apanha regressões que impedem chegar ao `ftoa`, não as que vivem além dele.
+
+**Consequência de prioridade, e é o argumento mais forte a favor do degrau 27:** enquanto o `ftoa` não
+cair, esta lei é uma rede de malha larga. Fechá-lo não destranca só o ponto de fixo — **torna a lei
+efectiva**.
+
+### O NÚMERO QUE MEDE A OUTRA CEGUEIRA, e é grande
+
+A fase de testes unitários faz **SIGABRT no primeiro `assert` falhado**. Medido em 2026-07-30: com o
+abort em `lwt_prim_kind_of_resolves_int_to_enum_cast_narrows`, **269 dos 1117 testes declarados nunca
+arrancam** — `lower_test.tkt` (83), `math/checked_test.tkt` (40), `parser_test.tkt` (38),
+`regex_test.tkt` (16), `time_test.tkt` (14), `math_test.tkt` (14), `sort/cmp_test.tkt` (11) e mais 12
+ficheiros.
+
+**A regra que sai daqui:** um agente que conserta o primeiro falhado tem de **medir e reportar quantos
+testes ficam cegos atrás do NOVO abort**. É esse número, e não a sensação de progresso, que diz ao
+integrador se vale despachar outro imediatamente.
+
+## DECISÃO — DEBUGGER PRÓPRIO (`tdb`), EM TEKO, COMPILADO NATIVO, FORA DE `src/` (dono, 2026-07-30)
+
+Verbatim: *"assim como uma LSP, precisaremos de um debugger próprio, mas o escreveria em native e não
+agora em C. O caso é, gastar energia marcando #line em C é desnecessário. E não colocaria o código
+dentro do src do teko, começaria por um diretório `/tdb` e dentro dele: `tdb.tkp` `main.tks` e
+`/tdb/src`, mas aqui entra o pulo do gato, pois embora executável, ele deveria ser um pacote de
+tooling, mas de início começaríamos como um projeto novo, depois poderia migrar para um repo próprio
+com um nome descente e apropriado."*
+
+**O QUE ISTO FECHA:**
+
+| ponto | estado |
+| --- | --- |
+| debugger próprio | **VAI SER FEITO.** Deixou de ser "orçar para decidir" |
+| `#line` na rota C (a Camada 0 do orçamento) | **MORTO.** *"desnecessário"* — não orçar, não discutir como opcional |
+| linguagem e backend | **Teko, compilado NATIVO.** Não em C |
+| quando | **"não agora"** — depois de a escada de degraus fechar |
+| onde | projeto próprio: `tdb.tkp`, `main.tks`, `tdb/src`. **Fora de `src/`** |
+| natureza | executável **e** pacote de tooling; projeto novo na árvore, **migra depois para repo próprio** |
+
+**A CONSEQUÊNCIA QUE REORDENA O ARCO TODO, e é a razão de esta decisão valer mais que o orçamento:**
+se `tdb` lê as NOSSAS tabelas, **o DWARF deixa de ser pré-requisito e passa a ser INTEROP**. Um
+debugger nosso não precisa de `.debug_info`/`.debug_abbrev`/`.debug_line` nem de CFI — precisa da
+tabela endereço→linha interna e do `.tsym`, que **já existe e já é emitido**. O DWARF passa a servir só
+quem não é nosso: gdb, lldb, `cppdbg`, CodeLLDB. E o item mais caro do orçamento anterior — CodeView no
+Windows — pode apagar-se por completo, porque `tdb` lê tabelas nossas em qualquer contentor.
+
+**O "PULO DO GATO" DELE JÁ EXISTE NA ÁRVORE, medido 2026-07-30.** `tooling/` já tem CINCO projetos
+irmãos, cada um com o seu `.tkp`, e a forma é literalmente "executável que é pacote de tooling":
+
+```
+name = "teko_grammar_gen_vscode"
+source = "src"
+
+[artifact]
+kind = "binary"
+```
+
+**E o achado que decide o desenho:** esses projetos **não dependem uns dos outros pelo sistema de
+pacotes**. `tooling/vscode` lê o **ficheiro JSON** que `tooling/shared` emite — acoplamento por
+**FORMATO DE FICHEIRO**, não por dependência de código, e nenhum deles alcança `../src`. É exactamente
+isso que torna barata a migração para repo próprio que o dono quer.
+
+**REGRA QUE SAI DAQUI:** `tdb` acopla-se ao compilador **por formato** (o `.tsym`, ou o que o suceda) e
+**nunca importando `src/`**. Um `tdb` que importa o checker nunca sai deste repo.
+
+**A GALINHA E O OVO, nomeada e não resolvida:** `tdb` é compilado pelo backend nativo e serve para
+depurar o próprio compilador. Se o nativo estiver quebrado, `tdb` está quebrado. E atenção: *"não
+escrever em C"* e *"não compilar pela rota C"* são coisas **diferentes** — a primeira é ordem do dono,
+a segunda não foi dita. Se a rota C for a rede de segurança do arranque, é decisão dele.
+
+### A CORREÇÃO DO DONO À LEI, e é a que importa mais: A SUÍTE NÃO É A ASSERÇÃO PRINCIPAL
+
+Verbatim, 2026-07-30: *"este é o ponto de falha dos agentes, estão testando `teko test .` mas a
+principal asserção que é o build nativo seco de gen2 não o fazem, aí normalmente vai passar verde
+mesmo."*
+
+**Ele está certo, e o defeito era do meu enunciado.** Eu escrevi a emissão nativa como um
+**complemento** ao `teko test .`. É o contrário:
+
+| | |
+| --- | --- |
+| **asserção PRINCIPAL** | a **build nativa SECA da gen2** (`TEKO_BACKEND=native <gen1> . -o … --no-verify --release`) |
+| asserção secundária | `teko test .` |
+
+**E a razão pela qual passar só a suíte dá verde por construção:** a suíte corre por uma gen2
+construída pela **ROTA C**. Uma mudança de lowering/isel/encode **não atravessa** esse caminho.
+Portanto o agente mede exactamente o único caminho que a sua mudança não afecta, e o verde é
+verdadeiro e inútil ao mesmo tempo.
+
+### O INSTRUMENTO, porque a frase já foi dita e não pegou: `scripts/native_dry_gate.sh`
+
+Duas vezes num dia um agente reportou verde e a paragem seguinte apareceu no CI. Uma regra que depende
+de o agente se lembrar de um comando falha em silêncio. **O gate devolve uma ASSINATURA comparável:**
+
+```
+bash scripts/native_dry_gate.sh <gen1> --save   .native-base.sig   # na BASE, antes de tocar em nada
+bash scripts/native_dry_gate.sh <gen1> --expect .native-base.sig   # na branch, com a gen1 RECONSTRUÍDA
+```
+
+**E resolve o problema que a minha lei não resolvia** — que a build nativa não pode ter sucesso hoje, e
+que um agente cumpridor perguntou, com razão, de que serve correr algo que sempre falha. A saída não é
+esperar pelo degrau 27: é **comparar**. A paragem é um observável estável.
+
+- assinatura **IGUAL** → a mudança não introduziu nem desbloqueou paragem. Verde honesto.
+- assinatura **DIFERENTE** → notícia nos dois sentidos, e o relatório diz qual: **progresso** (o degrau
+  caiu — actualizar a escada e a assinatura de base para todos os agentes seguintes) ou **regressão**.
+- e o caso mais grave, que a assinatura nomeia à parte: **`FAILED WITHOUT A NAMED N1 STOP`**. Uma
+  falha nativa sem paragem nomeada **não é a escada, é defeito** — e é precisamente o que a suíte verde
+  esconde.
+
+**A GEN1 TEM DE VIR DA ÁRVORE QUE SE MEDE.** Para uma mudança no gerador, a pergunta é o que o
+COMPILADOR passou a emitir, logo a gen1 do `--expect` é construída da branch. Usar a gen1 da base nos
+dois lados mede o efeito da mudança na FONTE, não no gerador — medição legítima, mas outra.
+
+**NÃO PINA NENHUM DEGRAU POR NOME, de propósito.** Um gate que nomeasse `ftoa` teria de ser editado a
+cada degrau, e um gate que se edita a cada degrau é um gate que se ignora. Compara com o que o agente
+mediu na base, portanto sobrevive à escada inteira sem toque.
+
+**UM DEFEITO MEU NESTE GATE, apanhado por inversão contra ele próprio e registado porque é a classe que
+mais volta:** com `/bin/true` como gen1, dava `rc=0`, log vazio, e a assinatura dizia **COMPLETED**. Um
+"compilador" que não faz nada e sai 0 lido como sucesso é literalmente o *"AN ABSENT OBJECT WAS A
+PASS"* do cabeçalho de `scripts/check_elf.sh`. **Um sucesso tem de ser corroborado por um ARTEFACTO,
+nunca por um código de saída sozinho** — o gate exige agora o executável em `out/`.
+
+### PRECISADO PELO DONO — `/tdb` na RAIZ, e `kind = "tool"` é um TIPO NOVO no `.tkp` (2026-07-30)
+
+Verbatim: *"`/tdb` e por um motivo obvio, o que tem em /tooling nao e escrito em teko, e ainda precisam
+ser reescritos, do zero. Ja o tdb e da familia teko, e quando digo tooling de pacote, e um tkp que emite
+um tkl de um executavel sob um novo tipo no tkp `kind=tool`, agregando na familia como um executavel
+empacotavel que sera compilado na maquina do dev como um executavel normal mas sem adicionar como
+dependencia de projeto (nao entra nas dependencias do tkp)."*
+
+**A DECISÃO: `/tdb` na raiz.** A minha recomendação de `tooling/tdb/` cai. **E cai por uma razão melhor
+do que a que eu media:** `tooling/*` são **geradores de integração de editor** (gramáticas para vim,
+nano, emacs, vscode) — utilitários de uma vez. `tdb` é **componente da cadeia de ferramentas**. São
+famílias diferentes, e a distinção não é de linguagem, é de papel.
+
+**Uma correcção factual ao que ele disse, para o registo não ficar torto:** os cinco projetos em
+`tooling/` **são** escritos em Teko — medido, **6 `.tks` cada**. O que não é Teko é o que eles
+**produzem** (ficheiros de gramática). A decisão dele fica de pé pelo eixo do papel, não pelo da
+linguagem.
+
+### O QUE `kind = "tool"` É, e é uma FEATURE de manifesto, não um directório
+
+| propriedade | valor |
+| --- | --- |
+| declara-se em | `[artifact] kind = "tool"` no `.tkp` |
+| emite | um **`.tkl`** que contém um **executável** |
+| agrega | na família Teko, como executável **empacotável** |
+| na máquina do dev | compila como executável **normal** |
+| dependências | **NÃO entra em `[deps]`** de nenhum projeto — usar uma ferramenta não a torna dependência |
+
+**A REFERÊNCIA É C#, e é a que o dono atribuiu para addins:** `dotnet tool` é exactamente isto — um
+pacote NuGet com `PackageType=DotnetTool`, instalável global ou localmente, que **nunca** vira
+`PackageReference`. `cargo install` e `go install` fazem o mesmo efeito mas **sem um tipo de pacote
+próprio**: instalam um crate/módulo que por acaso tem binário. O C# é o único dos quatro com um TIPO
+declarado, que é precisamente o que o dono pediu. Referência nomeada e aplicável.
+
+### O DEFEITO QUE BLOQUEIA A FEATURE, medido em `src/build/manifest.tks:558-566`
+
+```teko
+if q.text == "static" { artifact = Artifact::Static }
+else if q.text == "shared" { artifact = Artifact::Shared }
+else if q.text == "package" { artifact = Artifact::Package }
+else { artifact = Artifact::Binary }
+```
+
+**Um `kind` desconhecido torna-se `Binary` EM SILÊNCIO** — e o doc-comment por cima até o admite
+(*"unknown → Binary"*). Consequências, e ambas são da classe que esta lane já pagou várias vezes:
+
+1. **`kind = "tool"` escrito hoje é silenciosamente um binário comum.** Alguém pode adoptar a grafia
+   antes de a feature existir e ter um verde que não significa nada.
+2. **`kind = "binari"` também é um binário.** Um erro de escrita no manifesto não tem diagnóstico.
+
+**Portanto o crumb 1 da feature não é acrescentar `Tool` ao enum — é FECHAR O SILÊNCIO:** um `kind`
+desconhecido tem de ser **erro duro** com a lista dos aceites. Só depois `Tool` entra, e entra num sítio
+onde a grafia errada grita. É o padrão *"tornar o estado errado inexpressável"* que fechou o degrau da
+relocação, aplicado ao manifesto.

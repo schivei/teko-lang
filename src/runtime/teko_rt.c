@@ -1054,19 +1054,21 @@ tk_char tk_to_upper(tk_char c) {
 // ── Arena allocation (S1) — bump allocator over a chunk-list. See teko_rt.h. ──
 // Each chunk is one aligned-malloc'd block: a header + payload, bump-filled by `used`.
 // The payload must satisfy the STRONGEST alignment any Teko value needs, which is NOT
-// _Alignof(max_align_t) on every target: on arm64 that is 8, but ExprKind/TExprKind carry
-// an `__int128` needing 16, so allocations rounded only to 8 would land 8-byte-aligned and
-// dereferences would be UB (UBSan-flagged). TK_ARENA_ALIGN is therefore the MAX of
-// max_align_t's alignment and __int128's — 16 on arm64, still 16 on x86_64 — and it drives
-// BOTH the payload-base over-alignment (`_Alignas` on `data`) and the `used`/size rounding
-// in tk_region_alloc. Chunks come from tk_chunk_alloc (a portable aligned allocator) and are
-// released through tk_chunk_free, so tk_region_drop's release on each is heap-correct (no
+// _Alignof(max_align_t) on every target: on arm64 that is 8, while a 16-byte-aligned node would
+// then land 8-byte-aligned and its dereferences would be UB (UBSan-flagged). TK_ARENA_ALIGN is
+// therefore max_align_t's alignment FLOORED AT 16 — 16 on arm64, still 16 on x86_64, the same
+// value the old `_Alignof(__int128)` form produced on every supported target, now spelled without
+// naming a 128-bit type (128-bit primitives are gone from the language, owner ruling 2026-07-30) —
+// and it drives BOTH the payload-base over-alignment (`_Alignas` on `data`) and the `used`/size
+// rounding in tk_region_alloc. Chunks come from tk_chunk_alloc (a portable aligned allocator) and
+// are released through tk_chunk_free, so tk_region_drop's release on each is heap-correct (no
 // arena interior pointer is ever passed to the deallocator). NOTE: the seed is single-
 // threaded; the lazy root init (tk_g_root) is not synchronized — revisit at S8 (concurrency).
+#define TK_ARENA_ALIGN_FLOOR 16
 #define TK_ARENA_ALIGN                                                          \
-    (_Alignof(max_align_t) > _Alignof(__int128)                                 \
+    (_Alignof(max_align_t) > TK_ARENA_ALIGN_FLOOR                               \
          ? _Alignof(max_align_t)                                                \
-         : _Alignof(__int128))
+         : (size_t)TK_ARENA_ALIGN_FLOOR)
 struct tk_chunk { struct tk_chunk *next; size_t cap; size_t used; _Alignas(TK_ARENA_ALIGN) unsigned char data[]; };
 // (W9.3b) `reg_next` is an INTRUSIVE link into the GLOBAL live-region registry (tk_g_regs) — no extra
 // allocation. tk_region_new prepends; tk_region_drop unlinks; tk_regions_free_all walks + frees all.
@@ -2786,22 +2788,11 @@ void tk_free_block(void *p, uint64_t bytes) {
     tk_free_parked_bytes += usable;
 }
 
-// --- arithmetic FFI over the i128 carrier (sign-aware) + float bit patterns ---
-__int128 tk_div(__int128 a, __int128 b, bool sgn) {
-    if (b == 0) tk_panic_div0();
-    if (sgn) return a / b;
-    return (__int128)((unsigned __int128)a / (unsigned __int128)b);
-}
-__int128 tk_rem(__int128 a, __int128 b, bool sgn) {
-    if (b == 0) tk_panic_div0();
-    if (sgn) return a % b;
-    return (__int128)((unsigned __int128)a % (unsigned __int128)b);
-}
+// --- checked float division + float bit patterns ---
+// The sign-aware `tk_div`/`tk_rem`/`tk_int_to_float` trio that used to live here rode a 128-bit
+// carrier and is REMOVED (128-bit primitives, integer and float, are gone from the language —
+// owner ruling 2026-07-30). See teko_rt.h's declaration block for why nothing called them.
 double tk_fdiv(double a, double b) { if (b == 0.0) tk_panic_div0(); return a / b; }
-double tk_int_to_float(__int128 v, bool sgn) {
-    if (sgn) return (double)v;
-    return (double)(unsigned __int128)v;
-}
 uint64_t tk_f64_bits(double x)      { uint64_t b; memcpy(&b, &x, sizeof b); return b; }
 double   tk_f64_from_bits(uint64_t bits) { double x; memcpy(&x, &bits, sizeof x); return x; }
 
