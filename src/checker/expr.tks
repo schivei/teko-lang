@@ -166,6 +166,43 @@ fn widen_operand(operand: TExpr, target: PrimKind) -> TExpr {
 }
 
 /**
+ * numeric_widens_implicitly — is `from` → `to` an IMPLICIT numeric widening, i.e. a conversion the
+ * language performs with no `to` written and with no possibility of a runtime panic?
+ *
+ * THE RULE (owner ruling 2026-07-29, verbatim): *"Tamanhos menores devem caber em tamanhos maiores e
+ * de mesma aridade [...] o mesmo vale para floats e para bigint e decimal. Fazendo pânico somente se
+ * ocorrer (em runtime) overflow."* Widening cannot overflow, so this direction never panics; the
+ * NARROWING direction has no implicit form at all and must be written as a `to`, which then carries
+ * the fail-loud runtime fit guard (`lower_cast_fit_guard`).
+ *
+ * WHICH LANGUAGE THIS MIRRORS, AND THE DIVERGENCE IT MAKES ON PURPOSE. This is the **C#** shape:
+ * implicit widening numeric conversions, plus a checked narrowing that raises on overflow. It is a
+ * DELIBERATE DIVERGENCE from Teko's surface reference, **Rust**, which has no implicit numeric
+ * widening at all and demands `as` on every width change. The divergence is the owner's call and is
+ * named here rather than hidden: nothing in this file claims parity with Rust on numeric conversion.
+ *
+ * THE ADMITTED SET is exactly the W-RULE's own lossless join (`cast_is_lossless_widen` for the
+ * integer pair, the wider IEEE width for the float pair) — deliberately the SAME predicate the
+ * ARITHMETIC regime already uses, so an expression and an assignment can never disagree about which
+ * widths mix. Before this, `b + a` over `b: i64`/`a: i32` compiled while `b = a` did not, which is
+ * the same asymmetry between comparison and arithmetic that the W-RULE was written to end, one
+ * regime further along. Mixed int/float stays out (B.38 — an explicit `to` either way).
+ *
+ * @param from  the value's own type
+ * @param to    the target (annotation, parameter, field, or assignment slot) type
+ * @return      true iff a value of `from` may become a value of `to` with no cast and no panic
+ * @see         cast_is_lossless_widen — the integer half's single source of truth
+ * @see         int_arith_join — the arithmetic sibling this keeps in step
+ * @since       0.3.1
+ */
+pub fn numeric_widens_implicitly(from: Type, to: Type) -> bool {
+    if type_eq(from, to) { return false }
+    if is_integer(from) && is_integer(to) { return cast_is_lossless_widen(prim_kind_of(from), prim_kind_of(to)) }
+    if is_float(from) && is_float(to) { return prim_width(prim_kind_of(to)) > prim_width(prim_kind_of(from)) }
+    false
+}
+
+/**
  * cast_widen_is_redundant — class-3 of the D1 `redundant cast` diagnostic
  * (`cast-width-hygiene-0.3.1.md` §4/§9): true iff DELETING the explicit `x to T`
  * that `term` is would leave the enclosing binary op with the SAME result type.

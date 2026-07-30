@@ -1,3 +1,5 @@
+use teko::casting
+
 /**
  * TkrKind — the comparison policy a regressor's built artifact is checked under: `Exit` compares
  * the exact exit code (the robust default oracle); `Print` compares exit AND stdout; `Trap` asserts
@@ -147,14 +149,29 @@ pub type Tkr = struct {
 fn tkr_match_ignore() -> TkrMatch { TkrMatch { mode = TkrMatchMode::Ignore; text = "" } }
 
 /**
- * tkr_read_i32 — read an unquoted non-negative integer (an exit code) at `p` and narrow it to i32.
+ * tkr_read_i32 — read an unquoted non-negative integer (an expected exit code) at `p` and narrow it
+ * to the `i32` a process status is.
+ *
+ * Routed through `teko::casting::u64_to_i32` (returns `i32 | error`, never panics) rather than a bare
+ * `to i32` (panics). The value comes from a `.tkr` FILE, which a human writes: `Then it exits with
+ * 99999999999` is a typo in a spec, and a typo in a spec must become a diagnostic naming the file,
+ * not an aborted compiler with "impossible conversion" and no filename. That is the recoverable row
+ * of `docs/design/cast-width-hygiene-0.3.1.md` §10.2 — the caller can and does recover, because both
+ * of this function's callers already return `TkrLower | error`.
  *
  * @param s  the line being read
  * @param p  the cursor at the value
  * @return   the parsed value as i32
+ * @throws   error  when the number does not fit an `i32` (a malformed spec, named as such)
+ * @see      teko::casting::u64_to_i32 — the checked no-panic converter this delegates to
  * @since 0.3.0.29
  */
-fn tkr_read_i32(s: str, p: u64) -> i32 { mf_read_int(s, p) to i32 }
+fn tkr_read_i32(s: str, p: u64) -> i32 | error {
+    match casting::u64_to_i32(mf_read_int(s, p)) {
+        i32 as v => v
+        error => error { message = teko::str::concat("tkr: expected exit code is not a process status (out of i32 range): ", s) }
+    }
+}
 
 /**
  * tkr_expect_for — the per-os-arch override matching `osarch`, or `null` when the lowered `Tkr`
@@ -1312,7 +1329,8 @@ fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
  */
 fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
     if noun == "exit" {
-        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = tkr_read_i32(value, 0); stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
+        let code = match tkr_read_i32(value, 0) { i32 as v => v; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = code; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if noun == "diagnostic" {
         let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
@@ -1348,7 +1366,8 @@ fn tkr_apply_then_osarch(b: TkrLower, osarch: str, noun: str, value: str) -> Tkr
     }
     let e = tkr_get_expect(b.expect, osarch)
     if noun == "exit" {
-        let ne = TkrExpect { osarch = osarch; has_exit = true; exit = tkr_read_i32(value, 0); stdout = e.stdout; stderr = e.stderr }
+        let code = match tkr_read_i32(value, 0) { i32 as v => v; error as er => return er }
+        let ne = TkrExpect { osarch = osarch; has_exit = true; exit = code; stdout = e.stdout; stderr = e.stderr }
         return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = tkr_put_expect(b.expect, ne); golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed; check_module_valid = b.check_module_valid }
     }
     if mf_starts_with(noun, "stdout") {
