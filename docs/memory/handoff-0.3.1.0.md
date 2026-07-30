@@ -261,12 +261,54 @@ pernas; (2) o teste do cast, que destranca quatro; (3) o gémeo de macOS; (4) de
 | **Degrau 28 — lowering de `s[i] = v`** | **regressão do meu dreno**, e parte a linha `own_arith_exit` em **todas** as pernas (macOS, x86_64-musl, arm64-glibc, regressor). Prioridade 1 | `native backend N1: slice element index-assignment not yet lowered (N2) [in own_native::f_implicit_widen_targets]`. **Não mudar a fixture para evitar o slice** — trocaria paragem honesta por cobertura fingida |
 | **Consertar `lwt_prim_kind_of_resolves_enum_to_int_cast_widens`** | é o **primeiro** `assert` a falhar em `linux-arm64-glibc` e `linux-x86_64-musl`, e a fase unitária **aborta** ali (SIGABRT/134) — logo destranca a visão do resto, não necessariamente o verde | expectativa desatualizada, não defeito: afirma `%1 = sext %0`, e a aridade decidiu que um alargamento sem perda **não emite conversão nem guarda** (`lower_cast_fit_guard` começa por `if cast_is_lossless_widen { return ctx }`). **Não apagar** — tem de passar a afirmar a AUSÊNCIA da conversão. O sinal negativo já está provado por VALOR em `f_cast_widen_keeps_value` (`-5 to i64`) e no alargamento implícito (`-2147483648`), nas duas rotas |
 | **Gémeo divergido de macOS: `pt_target_name_and_objfmt_are_one_source`** | teste **sem dependência do host** que falha **só** em `macos-arm64` (`assertion failed: is_true`) → divergência de geração/runtime no arm64-macho, não expectativa errada. Não é novo (falha já em `8f94c0b1`) | mandato: **primeiro dividir o teste** para saber QUAL das 14 assertivas cai (o rasto só dá `+636` no símbolo), depois caçar a divergência de lowering. Instrumento certo: `agent-fast-lane.yml` com `runner: macos-latest`, que É despachável. Sob a regra do oráculo, divergência é bug do nativo até prova em contrário |
+| **SEGUNDA PASSAGEM DO DEBUGGER — brief pronto, ver §3b** | o dono leu o orçamento e reprovou: *"o trabalho do arquiteto foi pessimo, nao tem um exemplo de prova de conceito, de como seria a superficie para isso ou como utilizar em cada tipo de debugger mencionado"* | **a falha é do MEU brief**, não do arquiteto: pedi orçamento e não pedi PoC, superfície, nem contra-medida. Entra na próxima vaga |
 | **Degrau 27 — builtin `ftoa`** | é a paragem VIVA do self-host nas duas pernas nativas; a escada não avança sem ela | `native backend N1: builtin 'ftoa' not yet lowered (N2) [in teko::codegen::cb_f64_literal]`. O pin `scripts/native_selfhost_known_stop.sh` já a aceita como paragem honesta (deixou de nomear o degrau, de propósito) |
 | **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr, e eu não o repeti (chamada recusada trata-se como decisão). **Precisa da palavra do dono para andar.** Contrato pinado em `scripts/fmt_cli_test.sh` |
 | **Híbrido do `main`** | desenho **fechado** no digesto de leis | precisa do arquiteto para ordenar crumbs |
 | **AArch64-ELF crumbs 2–5** | crumb 1 (relocação) fechado e provado em hardware | crumb 3 cria `Arm64Linux` em `NativeTarget` e destranca a perna arm64-Linux |
 | **`MRelocKind::None`** | `plain_word`/`branch_word` (`encode_arm64.tks:117,139`) põem `Call` como default inerte — o valor "branch" como default de um campo que toda instrução carrega. Foi a semente do bug de relocação | mata a classe na raiz |
 | **Debugger, Camada 1** | orçamento entregue e drenado (`docs/design/debugger-orcamento-0.3.1.md`) | 6 crumbs; recomendação é parar ali |
+
+
+## 3b. BRIEF PRONTO — segunda passagem do debugger (o dono reprovou a primeira)
+
+**A crítica do dono, 2026-07-30, verbatim:** *"eu li o doc do debugger e o trabalho do arquiteto foi
+pessimo, nao tem um exemplo de prova de conceito, de como seria a superficie para isso ou como
+utilizar em cada tipo de debugger mencionado. Embora eu nao tenha pedido um debugger proprio, ja que
+ele levou mais de uma hora pra produzir isso, poderia ter orcado o restante dos pontos e tambem a
+contra-medida (debugger proprio)."*
+
+**A CULPA É DO BRIEF, E O BRIEF É MEU.** Eu pedi *"orçar a implementação de um debugger"* e o
+arquiteto orçou exactamente isso, com quatro experimentos medidos e sete correções ao esboço do dono
+— trabalho sólido no que foi pedido. O que **eu** não pedi, e o dono queria: prova de conceito, a
+superfície de utilização, o uso por debugger, o orçamento das camadas restantes, e a contra-medida.
+Um arquiteto que corre mais de uma hora tinha orçamento de sobra para as cinco. **Lição: quando o
+pedido é "orça X", perguntar antes se o dono quer também o custo de NÃO fazer X.**
+
+**O QUE A SEGUNDA PASSAGEM TEM DE ENTREGAR — cinco peças, nenhuma opcional:**
+
+1. **PROVA DE CONCEITO REAL.** O Experimento D já produziu um objeto que gdb *e* lldb aceitaram. Isso
+   tem de virar artefacto reproduzível e versionado, não prosa: o `.tks` de referência, os bytes das
+   três seções, e o comando que qualquer pessoa corre para ver o breakpoint parar. Sem isto o
+   orçamento é uma promessa.
+2. **A SUPERFÍCIE, concreta.** Qual é a flag? `teko build . -g`? Um perfil no `teko.tkp`? O que sai no
+   `--help`? Onde ficam os bytes de depuração num `.tkl`? Isto está no orçamento como uma linha
+   ("o interruptor de perfil") e tem de ser um desenho.
+3. **USO EM CADA DEBUGGER MENCIONADO**, com o texto que o dono escreve/cola: gdb no terminal, lldb no
+   terminal, VSCode via `cppdbg`, VSCode via CodeLLDB. Um `launch.json` completo por cada, não uma
+   referência a "um exemplo em docs/".
+4. **AS CAMADAS RESTANTES ORÇADAS**, não "o penhasco": Camada 2 (com a sondagem dos nomes através do
+   regalloc identificada como crumb próprio e o resto orçado *condicionalmente* a ela), Camada 3, e
+   Windows/CodeView com número. "5+ crumbs, um deles perigoso" não é orçamento.
+5. **A CONTRA-MEDIDA: DEBUGGER PRÓPRIO, ORÇADO.** O dono não pediu um, e a recomendação de não fazer
+   pode manter-se — mas uma recomendação de não fazer **sem o custo do que se recusa** não é
+   decidível. Orçar: ptrace/`mach_vm`, breakpoints por `int3`/`brk`, leitura da nossa própria tabela
+   de linha (que a Camada 1 cria de qualquer forma), e um adaptador DAP. E dizer o que um debugger
+   nosso daria que gdb/lldb **não** dão — se a resposta for "nada", isso é a prova da recomendação, em
+   vez de a asserção que está lá hoje.
+
+**RESTRIÇÕES:** o arquiteto **não implementa produto**; escreve em `docs/design/`. Não abre PR. Empurra
+para a branch em que trabalha assim que escreve. Nunca toca `.github/workflows/**`.
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
